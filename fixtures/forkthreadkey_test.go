@@ -42,7 +42,7 @@ func TestFork_SubgraphChildGetsThreadTokenAndStepID(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("A", "fktk/a")
@@ -50,20 +50,20 @@ func TestFork_SubgraphChildGetsThreadTokenAndStepID(t *testing.T) {
 	parent.SetURL("Z", "fktk/z")
 	parent.AddTransitionChain("A", "RunInner", "Z", workflow.End)
 	assert.NoError(parent.Validate())
-	proxy.HandleGraph("fktk/parent", parent)
+	mux.HandleGraph("fktk/parent", parent)
 
 	inner := workflow.NewGraph("Inner")
 	inner.SetURL("X", "fktk/x")
 	inner.AddTransitionChain("X", workflow.End)
 	assert.NoError(inner.Validate())
-	proxy.HandleGraph("fktk/inner", inner)
+	mux.HandleGraph("fktk/inner", inner)
 
-	proxy.HandleTask("fktk/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("fktk/x", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fktk/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("fktk/x", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("innerResult", "X!")
 		return nil
 	})
-	proxy.HandleTask("fktk/run-inner", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fktk/run-inner", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		yield, err := f.Subgraph("fktk/inner", nil, &out)
 		if yield || err != nil {
@@ -71,14 +71,14 @@ func TestFork_SubgraphChildGetsThreadTokenAndStepID(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("fktk/z", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fktk/z", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("done", true)
 		return nil
 	})
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	originKey, outcome, err := eng.Run(ctx, "fktk/parent", nil, nil)

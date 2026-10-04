@@ -30,10 +30,10 @@ func TestInterruptflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("Interrupt")
@@ -41,12 +41,12 @@ func TestInterruptflow(t *testing.T) {
 	graph.SetURL("AwaitInput", "interruptflow.verify:428/await-input")
 	graph.SetURL("Compose", "interruptflow.verify:428/compose")
 	graph.AddTransitionChain("TaskA", "AwaitInput", "Compose", workflow.End)
-	proxy.HandleGraph("interruptflow.verify:428/interrupt", graph)
+	mux.HandleGraph("interruptflow.verify:428/interrupt", graph)
 
-	proxy.HandleTask("interruptflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("interruptflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("interruptflow.verify:428/await-input", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("interruptflow.verify:428/await-input", func(ctx context.Context, f *workflow.Flow) error {
 		var resumeData map[string]any
 		yield, err := f.Interrupt(map[string]any{"requestedInput": "userInput"}, &resumeData)
 		if yield || err != nil {
@@ -57,7 +57,7 @@ func TestInterruptflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("interruptflow.verify:428/compose", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("interruptflow.verify:428/compose", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("result", f.GetString("prompt")+", "+f.GetString("userInput"))
 		return nil
 	})

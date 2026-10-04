@@ -45,7 +45,7 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	release := make(chan struct{})
 	var once sync.Once
 	releaseGC := func() { once.Do(func() { close(release) }) }
@@ -60,7 +60,7 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 	parent := workflow.NewGraph("S2Parent")
 	parent.SetURL("Call", "s2cohort.verify:0/call")
 	parent.AddTransition("Call", workflow.End)
-	proxy.HandleGraph(parentURL, parent)
+	mux.HandleGraph(parentURL, parent)
 
 	// Child: Split fans out to {Boom, Slow}, both converging at the Join fan-in. Boom fails; Slow parks on a
 	// grandchild subgraph that blocks, so Boom's failure lands while Slow is still live.
@@ -75,34 +75,34 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 	child.AddTransition("Boom", "Join")
 	child.AddTransition("Slow", "Join")
 	child.AddTransition("Join", workflow.End)
-	proxy.HandleGraph(childURL, child)
+	mux.HandleGraph(childURL, child)
 
 	// Grandchild: a single task that blocks until released.
 	gc := workflow.NewGraph("S2Grandchild")
 	gc.SetURL("Wait", "s2cohort.verify:0/wait")
 	gc.AddTransition("Wait", workflow.End)
-	proxy.HandleGraph(gcURL, gc)
+	mux.HandleGraph(gcURL, gc)
 
-	proxy.HandleTask("s2cohort.verify:0/call", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("s2cohort.verify:0/call", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph(childURL, nil, nil)
 		if yield {
 			return nil
 		}
 		return err
 	})
-	proxy.HandleTask("s2cohort.verify:0/split", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("s2cohort.verify:0/boom", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("s2cohort.verify:0/split", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("s2cohort.verify:0/boom", func(ctx context.Context, f *workflow.Flow) error {
 		return errors.New("boom-branch-failed", http.StatusInternalServerError)
 	})
-	proxy.HandleTask("s2cohort.verify:0/slow", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("s2cohort.verify:0/slow", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph(gcURL, nil, nil)
 		if yield {
 			return nil
 		}
 		return err
 	})
-	proxy.HandleTask("s2cohort.verify:0/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("s2cohort.verify:0/wait", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("s2cohort.verify:0/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("s2cohort.verify:0/wait", func(ctx context.Context, f *workflow.Flow) error {
 		select {
 		case <-release:
 		case <-ctx.Done():
@@ -115,7 +115,7 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 	// Released here, after the Shutdown defer, so it unwinds FIRST: Shutdown drains the workers, and
 	// one still holding this would never return.
 	defer releaseGC()
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	flowKey, err := e.Create(ctx, parentURL, nil, nil)

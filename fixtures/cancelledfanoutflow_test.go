@@ -35,7 +35,7 @@ func TestCancelledfanoutflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	graph := workflow.NewGraph("CancelledFanOut")
 	graph.SetURL("Source", "cancelledfanoutflow.verify:428/source")
@@ -51,7 +51,7 @@ func TestCancelledfanoutflow(t *testing.T) {
 	graph.AddTransition("A", "J")
 	graph.AddTransition("B", "J")
 	graph.AddTransitionChain("C", "J", workflow.End)
-	proxy.HandleGraph("cancelledfanoutflow.verify:428/cancelled-fan-out", graph)
+	mux.HandleGraph("cancelledfanoutflow.verify:428/cancelled-fan-out", graph)
 
 	var executed atomic.Int32
 
@@ -79,13 +79,13 @@ func TestCancelledfanoutflow(t *testing.T) {
 		return nil
 	}
 
-	proxy.HandleTask("cancelledfanoutflow.verify:428/source", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("cancelledfanoutflow.verify:428/source", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("cancelledfanoutflow.verify:428/a", branch)
-	proxy.HandleTask("cancelledfanoutflow.verify:428/b", branch)
-	proxy.HandleTask("cancelledfanoutflow.verify:428/c", branch)
-	proxy.HandleTask("cancelledfanoutflow.verify:428/j", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("cancelledfanoutflow.verify:428/a", branch)
+	mux.HandleTask("cancelledfanoutflow.verify:428/b", branch)
+	mux.HandleTask("cancelledfanoutflow.verify:428/c", branch)
+	mux.HandleTask("cancelledfanoutflow.verify:428/j", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 
@@ -94,7 +94,7 @@ func TestCancelledfanoutflow(t *testing.T) {
 	// Released here, after the Shutdown defer, so it unwinds FIRST: Shutdown drains the workers, and
 	// one still holding this would never return.
 	defer close(release)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	eng.SetWorkers(1)
 	assert.NoError(eng.Startup(t.Context()))
 

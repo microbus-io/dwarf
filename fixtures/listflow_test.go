@@ -35,21 +35,21 @@ func TestListflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	graph := workflow.NewGraph("List")
 	graph.SetURL("Only", "listflow.verify:428/only")
 	graph.AddTransition("Only", workflow.End)
-	proxy.HandleGraph("listflow.verify:428/list", graph)
+	mux.HandleGraph("listflow.verify:428/list", graph)
 
-	proxy.HandleTask("listflow.verify:428/only", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("listflow.verify:428/only", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("done", "yes")
 		return nil
 	})
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	const total = 5

@@ -26,19 +26,19 @@ g.SetURL("Hello", "http://example/hello") // node "Hello" dispatches to this URL
 g.AddTransition("Hello", workflow.End)
 
 // Wire URLs to what serves them. The engine knows graphs and tasks only by URL: the graph's URL
-// resolves to the graph, and each task's URL to the handler that runs it. TestProxy is an in-process
+// resolves to the graph, and each task's URL to the handler that runs it. HostMux is an in-process
 // router; a production host maps the same URLs onto its own registry or transport.
-proxy := engine.NewTestProxy()
-proxy.HandleGraph("http://example/greet", g)
-proxy.HandleTask("http://example/hello", func(ctx context.Context, f *workflow.Flow) error {
+mux := engine.NewHostMux()
+mux.HandleGraph("http://example/greet", g)
+mux.HandleTask("http://example/hello", func(ctx context.Context, f *workflow.Flow) error {
     f.SetString("greeting", "hello "+f.GetString("name"))
     return nil
 })
 
-// Start an engine that reaches graphs and tasks through the proxy.
+// Start an engine that reaches graphs and tasks through the mux.
 eng := dwarf.NewEngineUnderTest(t.Name()) // SQLite in-memory, auto-dropped
 defer eng.Shutdown(ctx)
-eng.SetHost(proxy) // TestProxy implements the Host interface
+eng.SetHost(mux) // HostMux implements the Host interface
 eng.Startup(ctx)
 
 // Run a flow of the graph by its URL, with initial state, and wait for its outcome.
@@ -166,7 +166,7 @@ Full guides live in [`docs/`](docs/), split by who they are written for — star
 - [Detecting completion](docs/detecting-completion.md) — `Await` vs. orchestration, and how to deliver reliably
 - [Fan-out & subgraphs](docs/fan-out-and-subgraphs.md) — parallelism, dynamic `forEach`, calling sub-workflows
 - [Scheduling & reliability](docs/scheduling-and-reliability.md) — priority, fairness, retries, recovery
-- [Testing](docs/testing.md) — `NewEngineUnderTest` and `TestProxy`
+- [Testing](docs/testing.md) — `NewEngineUnderTest` and `HostMux`
 
 **Running it in production:**
 

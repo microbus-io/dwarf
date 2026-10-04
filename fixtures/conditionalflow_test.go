@@ -30,10 +30,10 @@ func TestConditionalflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("Conditional")
@@ -46,20 +46,20 @@ func TestConditionalflow(t *testing.T) {
 	graph.AddTransitionWhen("TaskA", "TaskLow", "score < 50")
 	graph.AddTransition("TaskHigh", "TaskC")
 	graph.AddTransitionChain("TaskLow", "TaskC", workflow.End)
-	proxy.HandleGraph("conditionalflow.verify:428/conditional", graph)
+	mux.HandleGraph("conditionalflow.verify:428/conditional", graph)
 
-	proxy.HandleTask("conditionalflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("conditionalflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("conditionalflow.verify:428/task-high", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("conditionalflow.verify:428/task-high", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("branch", "high")
 		return nil
 	})
-	proxy.HandleTask("conditionalflow.verify:428/task-low", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("conditionalflow.verify:428/task-low", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("branch", "low")
 		return nil
 	})
-	proxy.HandleTask("conditionalflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("conditionalflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 
@@ -101,10 +101,10 @@ func TestConditionalflow_ExactIntegerComparison(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	const id = 1234567890123456789
@@ -121,20 +121,20 @@ func TestConditionalflow_ExactIntegerComparison(t *testing.T) {
 	graph.AddTransition("TaskMatch", "TaskDone")
 	graph.AddTransition("TaskNoMatch", "TaskDone")
 	graph.AddTransition("TaskDone", workflow.End)
-	proxy.HandleGraph("conditionalflow.verify:428/conditional-exact-id", graph)
+	mux.HandleGraph("conditionalflow.verify:428/conditional-exact-id", graph)
 
-	proxy.HandleTask("conditionalflow.verify:428/exact-task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("conditionalflow.verify:428/exact-task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("conditionalflow.verify:428/exact-task-match", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("conditionalflow.verify:428/exact-task-match", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("branch", "match")
 		return nil
 	})
-	proxy.HandleTask("conditionalflow.verify:428/exact-task-nomatch", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("conditionalflow.verify:428/exact-task-nomatch", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("branch", "no-match")
 		return nil
 	})
-	proxy.HandleTask("conditionalflow.verify:428/exact-task-done", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("conditionalflow.verify:428/exact-task-done", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 

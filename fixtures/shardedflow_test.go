@@ -36,12 +36,12 @@ func TestShardedflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	graph := workflow.NewGraph("Sharded")
 	graph.SetURL("Record", "shardedflow.verify:428/record")
 	graph.AddTransition("Record", workflow.End)
-	proxy.HandleGraph("shardedflow.verify:428/sharded", graph)
+	mux.HandleGraph("shardedflow.verify:428/sharded", graph)
 
 	var mu sync.Mutex
 	var order []string
@@ -54,7 +54,7 @@ func TestShardedflow(t *testing.T) {
 	holderRunning := make(chan struct{})
 	releaseHolder := make(chan struct{})
 
-	proxy.HandleTask("shardedflow.verify:428/record", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("shardedflow.verify:428/record", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetBool("hold") {
 			holdOnce.Do(func() { close(holderRunning) })
 			<-releaseHolder
@@ -71,7 +71,7 @@ func TestShardedflow(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	eng.SetWorkers(1)
 	for i := 1; i <= 8; i++ {
 		eng.SetShard(engine.ShardSpec{Index: i})

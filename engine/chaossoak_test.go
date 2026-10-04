@@ -60,13 +60,13 @@ func TestChaosSoak(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
-	proxy := NewTestProxy()
-	registerChaosGraphs(t, proxy)
+	mux := NewHostMux()
+	registerChaosGraphs(t, mux)
 
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(8))
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	eng.SetMeterProvider(mp)
 	assert.NoError(eng.Startup(t.Context()))
 
@@ -232,8 +232,8 @@ func chaosEnqueue(ctx context.Context, eng *Engine, flowKey string) {
 	eng.enqueueStep(ctx, shardNum, stepID)
 }
 
-// registerChaosGraphs registers the three workload shapes and their tasks on the proxy.
-func registerChaosGraphs(t *testing.T, proxy *TestProxy) {
+// registerChaosGraphs registers the three workload shapes and their tasks on the mux.
+func registerChaosGraphs(t *testing.T, mux *HostMux) {
 	t.Helper()
 	assert := testarossa.For(t)
 
@@ -244,9 +244,9 @@ func registerChaosGraphs(t *testing.T, proxy *TestProxy) {
 	}
 	lin.AddTransitionChain("A", "B", "C", "D", workflow.End)
 	assert.NoError(lin.Validate())
-	proxy.HandleGraph("chaossoak.verify:428/linear", lin)
+	mux.HandleGraph("chaossoak.verify:428/linear", lin)
 	for _, n := range []string{"A", "B", "C", "D"} {
-		proxy.HandleTask("chaossoak.verify:428/lin-"+n, func(ctx context.Context, f *workflow.Flow) error { return nil })
+		mux.HandleTask("chaossoak.verify:428/lin-"+n, func(ctx context.Context, f *workflow.Flow) error { return nil })
 	}
 
 	// (b) fan-out 3 branches -> fan-in J with an append reducer.
@@ -266,24 +266,24 @@ func registerChaosGraphs(t *testing.T, proxy *TestProxy) {
 	fan.AddTransition("R", "J")
 	fan.AddTransition("J", workflow.End)
 	assert.NoError(fan.Validate())
-	proxy.HandleGraph("chaossoak.verify:428/fanout", fan)
-	proxy.HandleTask("chaossoak.verify:428/fan-s", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("chaossoak.verify:428/fanout", fan)
+	mux.HandleTask("chaossoak.verify:428/fan-s", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	for _, n := range []string{"P", "Q", "R"} {
 		branch := n
-		proxy.HandleTask("chaossoak.verify:428/fan-"+n, func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("chaossoak.verify:428/fan-"+n, func(ctx context.Context, f *workflow.Flow) error {
 			f.SetStrings("log", []string{branch})
 			return nil
 		})
 	}
-	proxy.HandleTask("chaossoak.verify:428/fan-j", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("chaossoak.verify:428/fan-j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	// (c) parent + subgraph child; the child's middle task interrupts (mode 0) or retries once (mode 1).
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("P0", "chaossoak.verify:428/parent-p0")
 	parent.AddTransition("P0", workflow.End)
 	assert.NoError(parent.Validate())
-	proxy.HandleGraph("chaossoak.verify:428/parent", parent)
-	proxy.HandleTask("chaossoak.verify:428/parent-p0", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("chaossoak.verify:428/parent", parent)
+	mux.HandleTask("chaossoak.verify:428/parent-p0", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph("chaossoak.verify:428/child", map[string]any{"mode": f.GetInt("mode")}, nil)
 		if yield || err != nil {
 			return err
@@ -297,9 +297,9 @@ func registerChaosGraphs(t *testing.T, proxy *TestProxy) {
 	child.SetURL("CC", "chaossoak.verify:428/child-cc")
 	child.AddTransitionChain("CA", "CB", "CC", workflow.End)
 	assert.NoError(child.Validate())
-	proxy.HandleGraph("chaossoak.verify:428/child", child)
-	proxy.HandleTask("chaossoak.verify:428/child-ca", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("chaossoak.verify:428/child-cb", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("chaossoak.verify:428/child", child)
+	mux.HandleTask("chaossoak.verify:428/child-ca", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("chaossoak.verify:428/child-cb", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetInt("mode") == 0 {
 			yield, err := f.Interrupt(nil, nil) // mode 0: park for external input
 			if yield || err != nil {
@@ -313,7 +313,7 @@ func registerChaosGraphs(t *testing.T, proxy *TestProxy) {
 		}
 		return nil
 	})
-	proxy.HandleTask("chaossoak.verify:428/child-cc", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("chaossoak.verify:428/child-cc", func(ctx context.Context, f *workflow.Flow) error { return nil })
 }
 
 // TestChaosSoak_Faults layers random test-only fault injection over the chaos soak: alongside the
@@ -349,13 +349,13 @@ func TestChaosSoak_Faults(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
-	proxy := NewTestProxy()
-	registerChaosGraphs(t, proxy)
+	mux := NewHostMux()
+	registerChaosGraphs(t, mux)
 
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(8))
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	eng.SetMeterProvider(mp)
 	assert.NoError(eng.Startup(t.Context()))
 

@@ -33,7 +33,7 @@ func TestSoakflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	soakGraph := workflow.NewGraph("Soak")
 	soakGraph.SetURL("Seed", "soakflow.verify:428/seed")
@@ -63,14 +63,14 @@ func TestSoakflow(t *testing.T) {
 	soakGraph.AddTransition("BoomR", "Join")
 	soakGraph.AddTransition("Recover", "Join")
 	soakGraph.AddTransitionChain("BoomF", "Join", workflow.End)
-	proxy.HandleGraph("soakflow.verify:428/soak", soakGraph)
+	mux.HandleGraph("soakflow.verify:428/soak", soakGraph)
 
 	innerGraph := workflow.NewGraph("Inner")
 	innerGraph.SetURL("InnerEntry", "soakflow.verify:428/inner-entry")
 	innerGraph.AddTransition("InnerEntry", workflow.End)
-	proxy.HandleGraph("soakflow.verify:428/inner", innerGraph)
+	mux.HandleGraph("soakflow.verify:428/inner", innerGraph)
 
-	proxy.HandleTask("soakflow.verify:428/seed", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("soakflow.verify:428/seed", func(ctx context.Context, f *workflow.Flow) error {
 		branch := f.GetInt("branch") % 5
 		f.SetInt("branch", branch)
 		fanWidth := min(max(f.GetInt("fanWidth"), 1), 6)
@@ -83,17 +83,17 @@ func TestSoakflow(t *testing.T) {
 		f.SetInt("loopsLeft", loops)
 		return nil
 	})
-	proxy.HandleTask("soakflow.verify:428/fan-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("soakflow.verify:428/fan-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("soakflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("soakflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("work", 1)
 		return nil
 	})
-	proxy.HandleTask("soakflow.verify:428/collect", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("soakflow.verify:428/collect", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("soakflow.verify:428/loop", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("soakflow.verify:428/loop", func(ctx context.Context, f *workflow.Flow) error {
 		left := f.GetInt("loopsLeft") - 1
 		f.SetInt("loopsLeft", left)
 		if left > 0 {
@@ -101,32 +101,32 @@ func TestSoakflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("soakflow.verify:428/sub", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("soakflow.verify:428/sub", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph("soakflow.verify:428/inner", nil, nil)
 		if yield || err != nil {
 			return err
 		}
 		return nil
 	})
-	proxy.HandleTask("soakflow.verify:428/boom-r", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("soakflow.verify:428/boom-r", func(ctx context.Context, f *workflow.Flow) error {
 		return errors.New("soak boom (recoverable)")
 	})
-	proxy.HandleTask("soakflow.verify:428/recover", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("soakflow.verify:428/recover", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("soakflow.verify:428/boom-f", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("soakflow.verify:428/boom-f", func(ctx context.Context, f *workflow.Flow) error {
 		return errors.New("soak boom (fatal)")
 	})
-	proxy.HandleTask("soakflow.verify:428/join", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("soakflow.verify:428/join", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("soakflow.verify:428/inner-entry", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("soakflow.verify:428/inner-entry", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	eng.SetShard(engine.ShardSpec{Index: 1})
 	eng.SetShard(engine.ShardSpec{Index: 2})
 	eng.SetWorkers(4)

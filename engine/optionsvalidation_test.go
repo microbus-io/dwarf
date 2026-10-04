@@ -35,16 +35,16 @@ func TestCreate_RejectsNegativeOptions(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "fopt/a")
 	g.AddTransition("A", workflow.End)
-	proxy.HandleGraph("fopt/g", g)
-	proxy.HandleTask("fopt/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("fopt/g", g)
+	mux.HandleTask("fopt/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	// Negative priority -> 400, no flow created.

@@ -71,19 +71,19 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	release := make(chan struct{})
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("P", "wedgesub.verify:0/p")
 	parent.AddTransition("P", workflow.End)
-	proxy.HandleGraph("wedgesub.verify:0/parent", parent)
+	mux.HandleGraph("wedgesub.verify:0/parent", parent)
 	child := workflow.NewGraph("Child")
 	child.SetURL("K", "wedgesub.verify:0/k")
 	child.AddTransition("K", workflow.End)
-	proxy.HandleGraph("wedgesub.verify:0/child", child)
+	mux.HandleGraph("wedgesub.verify:0/child", child)
 
-	proxy.HandleTask("wedgesub.verify:0/p", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("wedgesub.verify:0/p", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		yield, err := f.Subgraph("wedgesub.verify:0/child", nil, &out)
 		if yield || err != nil {
@@ -94,14 +94,14 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 		return nil
 	})
 	// The child blocks so it stays running and the caller stays parked while we forge the wedge.
-	proxy.HandleTask("wedgesub.verify:0/k", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("wedgesub.verify:0/k", func(ctx context.Context, f *workflow.Flow) error {
 		<-release
 		return nil
 	})
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 	defer close(release)
 
@@ -174,19 +174,19 @@ func TestWedgeSweep_SubgraphCallerWithNoChildFails(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	release := make(chan struct{})
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("P", "wedgenochild.verify:0/p")
 	parent.AddTransition("P", workflow.End)
-	proxy.HandleGraph("wedgenochild.verify:0/parent", parent)
+	mux.HandleGraph("wedgenochild.verify:0/parent", parent)
 	child := workflow.NewGraph("Child")
 	child.SetURL("K", "wedgenochild.verify:0/k")
 	child.AddTransition("K", workflow.End)
-	proxy.HandleGraph("wedgenochild.verify:0/child", child)
+	mux.HandleGraph("wedgenochild.verify:0/child", child)
 
-	proxy.HandleTask("wedgenochild.verify:0/p", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("wedgenochild.verify:0/p", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		yield, err := f.Subgraph("wedgenochild.verify:0/child", nil, &out)
 		if yield || err != nil {
@@ -194,14 +194,14 @@ func TestWedgeSweep_SubgraphCallerWithNoChildFails(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("wedgenochild.verify:0/k", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("wedgenochild.verify:0/k", func(ctx context.Context, f *workflow.Flow) error {
 		<-release // hold the child running so the caller stays parked while we forge the wedge
 		return nil
 	})
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 	defer close(release)
 
@@ -264,24 +264,24 @@ func TestWedgeSweep_OrphanedSubgraphChildTerminated(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	release := make(chan struct{})
 
 	// Orphan scenario: parent spawns a child whose entry task interrupts, so the child rests interrupted.
 	parent := workflow.NewGraph("OrphanParent")
 	parent.SetURL("P", "orphanchild.verify:0/p")
 	parent.AddTransition("P", workflow.End)
-	proxy.HandleGraph("orphanchild.verify:0/parent", parent)
+	mux.HandleGraph("orphanchild.verify:0/parent", parent)
 	ichild := workflow.NewGraph("OrphanChild")
 	ichild.SetURL("K", "orphanchild.verify:0/k")
 	ichild.AddTransition("K", workflow.End)
-	proxy.HandleGraph("orphanchild.verify:0/child", ichild)
-	proxy.HandleTask("orphanchild.verify:0/p", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("orphanchild.verify:0/child", ichild)
+	mux.HandleTask("orphanchild.verify:0/p", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		_, err := f.Subgraph("orphanchild.verify:0/child", nil, &out)
 		return err
 	})
-	proxy.HandleTask("orphanchild.verify:0/k", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("orphanchild.verify:0/k", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Interrupt(map[string]any{"awaiting": true}, nil)
 		if yield || err != nil {
 			return err
@@ -293,24 +293,24 @@ func TestWedgeSweep_OrphanedSubgraphChildTerminated(t *testing.T) {
 	hparent := workflow.NewGraph("HealthyParent")
 	hparent.SetURL("P", "orphanchild.verify:0/hp")
 	hparent.AddTransition("P", workflow.End)
-	proxy.HandleGraph("orphanchild.verify:0/healthyparent", hparent)
+	mux.HandleGraph("orphanchild.verify:0/healthyparent", hparent)
 	hchild := workflow.NewGraph("HealthyChild")
 	hchild.SetURL("K", "orphanchild.verify:0/hk")
 	hchild.AddTransition("K", workflow.End)
-	proxy.HandleGraph("orphanchild.verify:0/healthychild", hchild)
-	proxy.HandleTask("orphanchild.verify:0/hp", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("orphanchild.verify:0/healthychild", hchild)
+	mux.HandleTask("orphanchild.verify:0/hp", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		_, err := f.Subgraph("orphanchild.verify:0/healthychild", nil, &out)
 		return err
 	})
-	proxy.HandleTask("orphanchild.verify:0/hk", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("orphanchild.verify:0/hk", func(ctx context.Context, f *workflow.Flow) error {
 		<-release
 		return nil
 	})
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 	defer close(release)
 
@@ -404,28 +404,28 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 	assert := testarossa.For(t)
 
 	capture := &orphanLogCapture{}
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	release := make(chan struct{})
 
 	solo := workflow.NewGraph("Solo")
 	solo.SetURL("A", "orphan.verify:0/a")
 	solo.AddTransition("A", workflow.End)
-	proxy.HandleGraph("orphan.verify:0/solo", solo)
-	proxy.HandleTask("orphan.verify:0/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("orphan.verify:0/solo", solo)
+	mux.HandleTask("orphan.verify:0/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	// A separate graph whose task blocks, so its flow stays running with a live step - the healthy control.
 	blocked := workflow.NewGraph("Blocked")
 	blocked.SetURL("B", "orphan.verify:0/b")
 	blocked.AddTransition("B", workflow.End)
-	proxy.HandleGraph("orphan.verify:0/blocked", blocked)
-	proxy.HandleTask("orphan.verify:0/b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("orphan.verify:0/blocked", blocked)
+	mux.HandleTask("orphan.verify:0/b", func(ctx context.Context, f *workflow.Flow) error {
 		<-release
 		return nil
 	})
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.SetLogger(slog.New(capture)))
 	assert.NoError(e.Startup(t.Context()))
 	defer close(release)
@@ -508,17 +508,17 @@ func TestOrphanDetection_IgnoresCompletedSuccessorWindow(t *testing.T) {
 	assert := testarossa.For(t)
 
 	capture := &orphanLogCapture{}
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 
 	solo := workflow.NewGraph("Solo")
 	solo.SetURL("A", "orphanwin.verify:0/a")
 	solo.AddTransition("A", workflow.End)
-	proxy.HandleGraph("orphanwin.verify:0/solo", solo)
-	proxy.HandleTask("orphanwin.verify:0/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("orphanwin.verify:0/solo", solo)
+	mux.HandleTask("orphanwin.verify:0/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.SetLogger(slog.New(capture)))
 	assert.NoError(e.Startup(t.Context()))
 

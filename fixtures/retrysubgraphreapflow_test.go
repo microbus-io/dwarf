@@ -57,10 +57,10 @@ func TestRetrySubgraphReapflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	captured := &childCapture{}
@@ -71,31 +71,31 @@ func TestRetrySubgraphReapflow(t *testing.T) {
 	parent.SetURL("RunInner", "retrysubgraphreapflow.verify:428/run-inner")
 	parent.SetURL("TaskZ", "retrysubgraphreapflow.verify:428/task-z")
 	parent.AddTransitionChain("TaskA", "RunInner", "TaskZ", workflow.End)
-	proxy.HandleGraph("retrysubgraphreapflow.verify:428/parent", parent)
+	mux.HandleGraph("retrysubgraphreapflow.verify:428/parent", parent)
 
 	// Inner graph: TaskX -> TaskY
 	inner := workflow.NewGraph("Inner")
 	inner.SetURL("TaskX", "retrysubgraphreapflow.verify:428/task-x")
 	inner.SetURL("TaskY", "retrysubgraphreapflow.verify:428/task-y")
 	inner.AddTransitionChain("TaskX", "TaskY", workflow.End)
-	proxy.HandleGraph("retrysubgraphreapflow.verify:428/inner", inner)
+	mux.HandleGraph("retrysubgraphreapflow.verify:428/inner", inner)
 
-	proxy.HandleTask("retrysubgraphreapflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("retrysubgraphreapflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 	// The inner entry task records the child's own step key off the carrier each time a child spawns.
-	proxy.HandleTask("retrysubgraphreapflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("retrysubgraphreapflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
 		captured.record(f.StepKey())
 		f.SetString("innerResult", "X")
 		return nil
 	})
-	proxy.HandleTask("retrysubgraphreapflow.verify:428/task-y", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("retrysubgraphreapflow.verify:428/task-y", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("innerResult", "Y("+f.GetString("innerResult")+")")
 		return nil
 	})
 	// RunInner launches the subgraph, then retries exactly once (Attempt() 0 retries, Attempt() 1 does
 	// not), re-spawning a fresh child on the retry.
-	proxy.HandleTask("retrysubgraphreapflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("retrysubgraphreapflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		yield, err := f.Subgraph("retrysubgraphreapflow.verify:428/inner", map[string]any{"seed": f.GetString("seed")}, &out)
 		if yield || err != nil {
@@ -109,7 +109,7 @@ func TestRetrySubgraphReapflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("retrysubgraphreapflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("retrysubgraphreapflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("result", "Z("+f.GetString("innerResult")+")")
 		return nil
 	})

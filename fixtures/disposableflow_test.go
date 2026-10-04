@@ -42,23 +42,23 @@ func TestDisposableflow(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("RunSub", "disposable.verify:428/run-sub")
 	parent.AddTransition("RunSub", workflow.End)
-	proxy.HandleGraph("disposable.verify:428/parent", parent)
+	mux.HandleGraph("disposable.verify:428/parent", parent)
 
 	child := workflow.NewGraph("Child")
 	child.SetURL("Work", "disposable.verify:428/work")
 	child.AddTransition("Work", workflow.End)
-	proxy.HandleGraph("disposable.verify:428/child", child)
+	mux.HandleGraph("disposable.verify:428/child", child)
 
-	proxy.HandleTask("disposable.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("disposable.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("childOut", "hello")
 		return nil
 	})
-	proxy.HandleTask("disposable.verify:428/run-sub", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("disposable.verify:428/run-sub", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		yield, err := f.Subgraph("disposable.verify:428/child", map[string]any{}, &out)
 		if yield || err != nil {
@@ -72,7 +72,7 @@ func TestDisposableflow(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// Run a disposable flow. Its outcome is observable during the grace window - Run returns the completed

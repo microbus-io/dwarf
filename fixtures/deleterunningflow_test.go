@@ -35,10 +35,10 @@ func TestDeleteRunningflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	started := make(chan struct{}, 1)
@@ -47,9 +47,9 @@ func TestDeleteRunningflow(t *testing.T) {
 	graph := workflow.NewGraph("DeleteRunning")
 	graph.SetURL("Block", "deleterunningflow.verify:428/block")
 	graph.AddTransitionChain("Block", workflow.End)
-	proxy.HandleGraph("deleterunningflow.verify:428/delete-running", graph)
+	mux.HandleGraph("deleterunningflow.verify:428/delete-running", graph)
 
-	proxy.HandleTask("deleterunningflow.verify:428/block", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("deleterunningflow.verify:428/block", func(ctx context.Context, f *workflow.Flow) error {
 		started <- struct{}{}
 		<-release // hold the step (and thus the flow) in `running` until the test releases it
 		return nil

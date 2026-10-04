@@ -37,18 +37,18 @@ func TestLargeFinalStateflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	g := workflow.NewGraph("LargeState")
 	g.SetURL("Carry", "largestateflow.verify:428/carry")
 	g.AddTransition("Carry", workflow.End)
-	proxy.HandleGraph("largestateflow.verify:428/g", g)
+	mux.HandleGraph("largestateflow.verify:428/g", g)
 	// No-op task: the initial-state payload rides through unchanged into final_state at completion.
-	proxy.HandleTask("largestateflow.verify:428/carry", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("largestateflow.verify:428/carry", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 

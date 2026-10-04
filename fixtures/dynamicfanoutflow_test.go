@@ -30,10 +30,10 @@ func TestDynamicfanoutflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("DynamicFanOut")
@@ -46,12 +46,12 @@ func TestDynamicfanoutflow(t *testing.T) {
 	graph.SetReducer("seenCounts", workflow.ReducerUnion)
 	graph.AddTransitionForEach("TaskA", "TaskB", "items", "item")
 	graph.AddTransitionChain("TaskB", "TaskC", workflow.End)
-	proxy.HandleGraph("dynamicfanoutflow.verify:428/dynamic-fan-out", graph)
+	mux.HandleGraph("dynamicfanoutflow.verify:428/dynamic-fan-out", graph)
 
-	proxy.HandleTask("dynamicfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("dynamicfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("dynamicfanoutflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("dynamicfanoutflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetString("item") == "" {
 			return nil
 		}
@@ -60,7 +60,7 @@ func TestDynamicfanoutflow(t *testing.T) {
 		f.Set("seenCounts", []int{f.GetInt("itemCount")})
 		return nil
 	})
-	proxy.HandleTask("dynamicfanoutflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("dynamicfanoutflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("processedCount", f.GetInt("processed"))
 		return nil
 	})

@@ -43,10 +43,10 @@ func TestCohortDeadEndFlow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// A sibling that runs to completion while the dead-end branch is being disposed of. If the old bug were
@@ -65,12 +65,12 @@ func TestCohortDeadEndFlow(t *testing.T) {
 	graph.AddTransitionWhen("Work", "Join", "ok == true")
 	graph.AddTransitionChain("Join", workflow.End)
 	assert.NoError(graph.Validate())
-	proxy.HandleGraph("cohortdeadendflow.verify:664/cohort-dead-end", graph)
+	mux.HandleGraph("cohortdeadendflow.verify:664/cohort-dead-end", graph)
 
-	proxy.HandleTask("cohortdeadendflow.verify:664/spawn", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("cohortdeadendflow.verify:664/spawn", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("cohortdeadendflow.verify:664/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("cohortdeadendflow.verify:664/work", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetInt("item") == 0 {
 			// Dead end: no transition matches, so this branch never reaches Join.
 			f.SetBool("ok", false)
@@ -83,7 +83,7 @@ func TestCohortDeadEndFlow(t *testing.T) {
 		f.SetBool("ok", true)
 		return nil
 	})
-	proxy.HandleTask("cohortdeadendflow.verify:664/join", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("cohortdeadendflow.verify:664/join", func(ctx context.Context, f *workflow.Flow) error {
 		atomic.StoreInt32(&joinRan, 1)
 		return nil
 	})
@@ -113,10 +113,10 @@ func TestCohortDeadEndFlow_TrunkStillCompletes(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("CohortConverges")
@@ -128,16 +128,16 @@ func TestCohortDeadEndFlow_TrunkStillCompletes(t *testing.T) {
 	graph.AddTransitionForEach("Spawn", "Work", "items", "item")
 	graph.AddTransitionChain("Work", "Join", workflow.End)
 	assert.NoError(graph.Validate())
-	proxy.HandleGraph("cohortdeadendflow.verify:664/cohort-converges", graph)
+	mux.HandleGraph("cohortdeadendflow.verify:664/cohort-converges", graph)
 
-	proxy.HandleTask("cohortdeadendflow.verify:664/c-spawn", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("cohortdeadendflow.verify:664/c-spawn", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("cohortdeadendflow.verify:664/c-work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("cohortdeadendflow.verify:664/c-work", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("done", 1)
 		return nil
 	})
-	proxy.HandleTask("cohortdeadendflow.verify:664/c-join", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("cohortdeadendflow.verify:664/c-join", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 

@@ -42,18 +42,18 @@ func TestTaskdeadlineflow(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	graph := workflow.NewGraph("Flow")
 	graph.SetURL("Work", "taskdeadlineflow.verify:428/work")
 	graph.AddTransition("Work", workflow.End)
-	proxy.HandleGraph("taskdeadlineflow.verify:428/flow", graph)
+	mux.HandleGraph("taskdeadlineflow.verify:428/flow", graph)
 
 	const budget = 300 * time.Millisecond
 	const safety = 3 * time.Second
 
 	var deadlineObserved atomic.Bool
-	proxy.HandleTask("taskdeadlineflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("taskdeadlineflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		// No self-installed timeout: rely solely on the engine-provided budget deadline.
 		select {
 		case <-ctx.Done():
@@ -68,7 +68,7 @@ func TestTaskdeadlineflow(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	eng.SetTimeBudget(budget)
 	assert.NoError(eng.Startup(t.Context()))
 

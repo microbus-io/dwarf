@@ -46,14 +46,14 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Gate")
 	g.SetURL("Gate", "rld/gate")
 	g.AddTransition("Gate", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("rld/g", g)
+	mux.HandleGraph("rld/g", g)
 	// Gate interrupts on its first dispatch (yield=true) and rests the flow interrupted.
-	proxy.HandleTask("rld/gate", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("rld/gate", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Interrupt(nil, nil)
 		if yield || err != nil {
 			return err
@@ -63,7 +63,7 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	// Create and wait for it to rest interrupted.
@@ -139,17 +139,17 @@ func TestReaperDeletesRunningDescendant(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("Call", "rdd/call")
 	parent.AddTransition("Call", workflow.End)
-	proxy.HandleGraph("rdd/parent", parent)
+	mux.HandleGraph("rdd/parent", parent)
 	child := workflow.NewGraph("Child")
 	child.SetURL("X", "rdd/x")
 	child.AddTransition("X", workflow.End)
-	proxy.HandleGraph("rdd/child", child)
-	proxy.HandleTask("rdd/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("rdd/call", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("rdd/child", child)
+	mux.HandleTask("rdd/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("rdd/call", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph("rdd/child", nil, nil)
 		if yield || err != nil {
 			return err
@@ -159,7 +159,7 @@ func TestReaperDeletesRunningDescendant(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	// Run parent to completion; the subgraph child completes too, giving a two-flow tree (root + child).
@@ -208,20 +208,20 @@ func TestTerminateVsTransition_Deterministic(t *testing.T) {
 	ctx := context.Background()
 
 	var bRan int
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Lin")
 	g.SetURL("A", "cvt/a")
 	g.SetURL("B", "cvt/b")
 	g.AddTransition("A", "B")
 	g.AddTransition("B", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("cvt/g", g)
-	proxy.HandleTask("cvt/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("cvt/b", func(ctx context.Context, f *workflow.Flow) error { bRan++; return nil })
+	mux.HandleGraph("cvt/g", g)
+	mux.HandleTask("cvt/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("cvt/b", func(ctx context.Context, f *workflow.Flow) error { bRan++; return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	// Freeze A after it is marked completed, before it inserts B.
@@ -259,18 +259,18 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 	ctx := context.Background()
 
 	xRelease := make(chan struct{})
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("Call", "cvs/call")
 	parent.AddTransition("Call", workflow.End)
 	assert.NoError(parent.Validate())
-	proxy.HandleGraph("cvs/parent", parent)
+	mux.HandleGraph("cvs/parent", parent)
 	child := workflow.NewGraph("Child")
 	child.SetURL("X", "cvs/x")
 	child.AddTransition("X", workflow.End)
 	assert.NoError(child.Validate())
-	proxy.HandleGraph("cvs/child", child)
-	proxy.HandleTask("cvs/call", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("cvs/child", child)
+	mux.HandleTask("cvs/call", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph("cvs/child", nil, nil)
 		if yield || err != nil {
 			return err
@@ -278,14 +278,14 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		return nil
 	})
 	// X blocks so the orphaned child stays non-terminal (running) when the sweep runs; released at cleanup.
-	proxy.HandleTask("cvs/x", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("cvs/x", func(ctx context.Context, f *workflow.Flow) error {
 		<-xRelease
 		return nil
 	})
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 	// Release X here, AFTER the Shutdown defer, so it unwinds FIRST (defers are LIFO): Shutdown drains
 	// workers, so a worker still blocked in X must be unblocked first or the drain deadlocks.
@@ -348,13 +348,13 @@ func TestRetryRewindVsTerminate_Deterministic(t *testing.T) {
 	ctx := context.Background()
 
 	var aRuns int
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "rrc/a")
 	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("rrc/g", g)
-	proxy.HandleTask("rrc/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("rrc/g", g)
+	mux.HandleTask("rrc/a", func(ctx context.Context, f *workflow.Flow) error {
 		aRuns++
 		f.Retry(0, 1.0, 0, time.Hour) // arm a retry so processStep reaches the rewind
 		return nil
@@ -362,7 +362,7 @@ func TestRetryRewindVsTerminate_Deterministic(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	// Freeze A before its retry rewind.

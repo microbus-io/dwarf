@@ -44,28 +44,28 @@ func TestDeleteResumeRace(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	g := workflow.NewGraph("DRR")
 	g.SetURL("Gate", "drr/gate")
 	g.SetURL("Done", "drr/done")
 	g.AddTransition("Gate", "Done")
 	g.AddTransition("Done", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("drr/g", g)
+	mux.HandleGraph("drr/g", g)
 	// Gate interrupts on its first dispatch (yield=true); a Resume re-dispatches it (yield=false) and it
 	// proceeds to Done -> END.
-	proxy.HandleTask("drr/gate", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("drr/gate", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Interrupt(nil, nil)
 		if yield || err != nil {
 			return err
 		}
 		return nil
 	})
-	proxy.HandleTask("drr/done", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("drr/done", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	// assertNoOrphan proves the forbidden state is absent for one flow: if the flow row still exists and is

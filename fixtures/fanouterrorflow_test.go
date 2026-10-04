@@ -31,10 +31,10 @@ func TestFanouterrorflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("FanOutError")
@@ -53,27 +53,27 @@ func TestFanouterrorflow(t *testing.T) {
 	graph.AddTransition("TaskC", "TaskE")
 	graph.AddTransition("TaskD", "TaskE")
 	graph.AddTransitionChain("Handler", "TaskE", workflow.End)
-	proxy.HandleGraph("fanouterrorflow.verify:428/fan-out-error", graph)
+	mux.HandleGraph("fanouterrorflow.verify:428/fan-out-error", graph)
 
-	proxy.HandleTask("fanouterrorflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fanouterrorflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("fanouterrorflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fanouterrorflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		return errors.New("triggered failure in TaskB")
 	})
-	proxy.HandleTask("fanouterrorflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fanouterrorflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("markC", true)
 		return nil
 	})
-	proxy.HandleTask("fanouterrorflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fanouterrorflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("markD", true)
 		return nil
 	})
-	proxy.HandleTask("fanouterrorflow.verify:428/handler", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fanouterrorflow.verify:428/handler", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("handled", true)
 		return nil
 	})
-	proxy.HandleTask("fanouterrorflow.verify:428/task-e", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fanouterrorflow.verify:428/task-e", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("recovered", f.GetBool("handled") && !f.GetBool("markB"))
 		return nil
 	})

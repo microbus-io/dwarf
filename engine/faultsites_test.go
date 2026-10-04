@@ -54,20 +54,20 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Pair")
 	g.SetURL("A", "ftbreset/a")
 	g.SetURL("B", "ftbreset/b")
 	g.AddTransition("A", "B")
 	g.AddTransition("B", workflow.End)
-	proxy.HandleGraph("ftbreset/g", g)
+	mux.HandleGraph("ftbreset/g", g)
 	var runsA, runsB atomic.Int32
-	proxy.HandleTask("ftbreset/a", func(ctx context.Context, f *workflow.Flow) error { runsA.Add(1); return nil })
-	proxy.HandleTask("ftbreset/b", func(ctx context.Context, f *workflow.Flow) error { runsB.Add(1); return nil })
+	mux.HandleTask("ftbreset/a", func(ctx context.Context, f *workflow.Flow) error { runsA.Add(1); return nil })
+	mux.HandleTask("ftbreset/b", func(ctx context.Context, f *workflow.Flow) error { runsB.Add(1); return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 	awaitStartupRecoverySweep(t, e) // it reads orphanFlowThreshold, which is written below
 
@@ -116,21 +116,21 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 func TestFaultSite_SubgraphSpawnErr(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("Call", "ftbspawn/call")
 	parent.AddTransition("Call", workflow.End)
-	proxy.HandleGraph("ftbspawn/parent", parent)
+	mux.HandleGraph("ftbspawn/parent", parent)
 	child := workflow.NewGraph("Child")
 	child.SetURL("X", "ftbspawn/x")
 	child.AddTransition("X", workflow.End)
-	proxy.HandleGraph("ftbspawn/child", child)
-	proxy.HandleTask("ftbspawn/call", subgraphTask("ftbspawn/child"))
-	proxy.HandleTask("ftbspawn/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("ftbspawn/child", child)
+	mux.HandleTask("ftbspawn/call", subgraphTask("ftbspawn/child"))
+	mux.HandleTask("ftbspawn/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	reader := withManualReader(e)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -165,12 +165,12 @@ func createInterruptedFlow(t *testing.T, e *Engine, url string) string {
 
 // registerGate registers a one-node graph whose entry task interrupts on first dispatch and completes on
 // resume, so a test has a stable `interrupted` flow to Cancel/Resume.
-func registerGate(proxy *TestProxy, prefix string) {
+func registerGate(mux *HostMux, prefix string) {
 	g := workflow.NewGraph("Gate")
 	g.SetURL("Gate", prefix+"/gate")
 	g.AddTransition("Gate", workflow.End)
-	proxy.HandleGraph(prefix+"/g", g)
-	proxy.HandleTask(prefix+"/gate", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph(prefix+"/g", g)
+	mux.HandleTask(prefix+"/gate", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Interrupt(nil, nil)
 		if yield || err != nil {
 			return err
@@ -185,12 +185,12 @@ func TestFaultSite_TerminateCommit(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	proxy := NewTestProxy()
-	registerGate(proxy, "ftbcancel")
+	mux := NewHostMux()
+	registerGate(mux, "ftbcancel")
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	reader := withManualReader(e)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -216,12 +216,12 @@ func TestFaultSite_ResumeCommit(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	proxy := NewTestProxy()
-	registerGate(proxy, "ftbresume")
+	mux := NewHostMux()
+	registerGate(mux, "ftbresume")
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	reader := withManualReader(e)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -294,24 +294,24 @@ func TestFaultSite_DeliverFailureErr(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("Call", "ftbdeliver/call")
 	parent.AddTransition("Call", workflow.End)
-	proxy.HandleGraph("ftbdeliver/parent", parent)
+	mux.HandleGraph("ftbdeliver/parent", parent)
 	child := workflow.NewGraph("Child")
 	child.SetURL("X", "ftbdeliver/x")
 	child.AddTransition("X", workflow.End)
-	proxy.HandleGraph("ftbdeliver/child", child)
-	proxy.HandleTask("ftbdeliver/call", subgraphTask("ftbdeliver/child"))
+	mux.HandleGraph("ftbdeliver/child", child)
+	mux.HandleTask("ftbdeliver/call", subgraphTask("ftbdeliver/child"))
 	// The child task fails with no onError, so the child flow fails and delivers to the parent.
-	proxy.HandleTask("ftbdeliver/x", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("ftbdeliver/x", func(ctx context.Context, f *workflow.Flow) error {
 		return errors.New("child boom")
 	})
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	reader := withManualReader(e)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -366,30 +366,30 @@ func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	root := workflow.NewGraph("Root")
 	root.SetURL("Call1", "ftbdeep/call1")
 	root.AddTransition("Call1", workflow.End)
-	proxy.HandleGraph("ftbdeep/root", root)
+	mux.HandleGraph("ftbdeep/root", root)
 	mid := workflow.NewGraph("Mid")
 	mid.SetURL("Call2", "ftbdeep/call2")
 	mid.AddTransition("Call2", workflow.End)
-	proxy.HandleGraph("ftbdeep/mid", mid)
+	mux.HandleGraph("ftbdeep/mid", mid)
 	leaf := workflow.NewGraph("Leaf")
 	leaf.SetURL("X", "ftbdeep/x")
 	leaf.AddTransition("X", workflow.End)
-	proxy.HandleGraph("ftbdeep/leaf", leaf)
-	proxy.HandleTask("ftbdeep/call1", subgraphTask("ftbdeep/mid"))
-	proxy.HandleTask("ftbdeep/call2", subgraphTask("ftbdeep/leaf"))
+	mux.HandleGraph("ftbdeep/leaf", leaf)
+	mux.HandleTask("ftbdeep/call1", subgraphTask("ftbdeep/mid"))
+	mux.HandleTask("ftbdeep/call2", subgraphTask("ftbdeep/leaf"))
 	// The leaf task fails with no onError, so the leaf child flow fails and delivers up the chain.
-	proxy.HandleTask("ftbdeep/x", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("ftbdeep/x", func(ctx context.Context, f *workflow.Flow) error {
 		return errors.New("leaf boom")
 	})
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	assert.NoError(e.SetWorkers(4))
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	reader := withManualReader(e)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -439,16 +439,16 @@ func TestFaultSite_ReapSelectErr(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "ftbreapsel/a")
 	g.AddTransition("A", workflow.End)
-	proxy.HandleGraph("ftbreapsel/g", g)
-	proxy.HandleTask("ftbreapsel/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("ftbreapsel/g", g)
+	mux.HandleTask("ftbreapsel/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	shortenDeletion(e, time.Millisecond, time.Hour) // due immediately; the test drives reaps
 	assert.NoError(e.Startup(t.Context()))
 

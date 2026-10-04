@@ -33,26 +33,26 @@ func TestDeletetombstoneflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("DeleteTombstone")
 	graph.SetURL("TaskA", "deletetombstoneflow.verify:428/task-a")
 	graph.SetURL("TaskB", "deletetombstoneflow.verify:428/task-b")
 	graph.AddTransitionChain("TaskA", "TaskB", workflow.End)
-	proxy.HandleGraph("deletetombstoneflow.verify:428/delete-tombstone", graph)
+	mux.HandleGraph("deletetombstoneflow.verify:428/delete-tombstone", graph)
 
 	// TaskA deletes "drop" (present in initial state) and keeps "keep".
-	proxy.HandleTask("deletetombstoneflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("deletetombstoneflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		f.Del("drop")
 		return nil
 	})
 	// TaskB does nothing - it just carries state to the terminal step so the delete must have survived
 	// the state materialization across a step boundary, not merely within TaskA's own changes.
-	proxy.HandleTask("deletetombstoneflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("deletetombstoneflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 

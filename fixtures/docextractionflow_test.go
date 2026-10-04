@@ -34,7 +34,7 @@ func TestDocextractionflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	graph := workflow.NewGraph("DocExtraction")
 	graph.SetURL("ScanPDF", "docextractionflow.verify:428/scan-pdf")
@@ -49,11 +49,11 @@ func TestDocextractionflow(t *testing.T) {
 	graph.AddTransitionForEach("ScanPDF", "IdentifyChunks", "pageImages", "page")
 	graph.AddTransitionForEach("IdentifyChunks", "TranscribeChunk", "chunks", "chunk")
 	graph.AddTransitionChain("TranscribeChunk", "JoinPageTranscriptions", "JoinDocTranscriptions", workflow.End)
-	proxy.HandleGraph("docextractionflow.verify:428/doc-extraction", graph)
+	mux.HandleGraph("docextractionflow.verify:428/doc-extraction", graph)
 
 	words := []string{"the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog", "a", "and"}
 
-	proxy.HandleTask("docextractionflow.verify:428/scan-pdf", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("docextractionflow.verify:428/scan-pdf", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("pdf", nil)
 		time.Sleep(50 * time.Millisecond)
 		pageCount := 5 + rand.IntN(18)
@@ -65,7 +65,7 @@ func TestDocextractionflow(t *testing.T) {
 		f.SetInt("pageCount", pageCount)
 		return nil
 	})
-	proxy.HandleTask("docextractionflow.verify:428/identify-chunks", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("docextractionflow.verify:428/identify-chunks", func(ctx context.Context, f *workflow.Flow) error {
 		chunkCount := 2 + rand.IntN(4)
 		chunks := make([]string, chunkCount)
 		for i := range chunks {
@@ -74,7 +74,7 @@ func TestDocextractionflow(t *testing.T) {
 		f.Set("chunks", chunks)
 		return nil
 	})
-	proxy.HandleTask("docextractionflow.verify:428/transcribe-chunk", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("docextractionflow.verify:428/transcribe-chunk", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("page", nil)
 		time.Sleep(time.Duration(50+rand.IntN(100)) * time.Millisecond)
 		if rand.Float64() < 0.05 {
@@ -89,13 +89,13 @@ func TestDocextractionflow(t *testing.T) {
 		f.Set("transcriptions", []string{strings.Join(sentence, " ")})
 		return nil
 	})
-	proxy.HandleTask("docextractionflow.verify:428/join-page-transcriptions", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("docextractionflow.verify:428/join-page-transcriptions", func(ctx context.Context, f *workflow.Flow) error {
 		var transcriptions []string
 		f.Get("transcriptions", &transcriptions)
 		f.Set("pageTexts", []string{strings.Join(transcriptions, " ")})
 		return nil
 	})
-	proxy.HandleTask("docextractionflow.verify:428/join-doc-transcriptions", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("docextractionflow.verify:428/join-doc-transcriptions", func(ctx context.Context, f *workflow.Flow) error {
 		var pageTexts []string
 		f.Get("pageTexts", &pageTexts)
 		f.SetString("docTranscription", strings.Join(pageTexts, "\n"))
@@ -104,7 +104,7 @@ func TestDocextractionflow(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	eng.SetWorkers(4)
 	assert.NoError(eng.Startup(t.Context()))
 

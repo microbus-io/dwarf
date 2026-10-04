@@ -41,10 +41,10 @@ func TestFanOutOrdinalFlow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("FanOutOrdinal")
@@ -57,14 +57,14 @@ func TestFanOutOrdinalFlow(t *testing.T) {
 	graph.AddTransitionForEach("Split", "Work", "items", "item")
 	graph.AddTransitionChain("Work", "Post", "Join", workflow.End)
 	assert.NoError(graph.Validate())
-	proxy.HandleGraph("fanoutordinalflow.verify:828/fan-out-ordinal", graph)
+	mux.HandleGraph("fanoutordinalflow.verify:828/fan-out-ordinal", graph)
 
-	proxy.HandleTask("fanoutordinalflow.verify:828/split", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fanoutordinalflow.verify:828/split", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 	// The first step of the branch sleeps LONGEST for the earliest element, so branch 0 finishes last: the
 	// Post steps are created (and thus ordered by step_id) in reverse input order.
-	proxy.HandleTask("fanoutordinalflow.verify:828/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fanoutordinalflow.verify:828/work", func(ctx context.Context, f *workflow.Flow) error {
 		idx := f.GetInt("itemIndex")
 		cnt := f.GetInt("itemCount")
 		time.Sleep(time.Duration(cnt-idx) * 50 * time.Millisecond)
@@ -72,11 +72,11 @@ func TestFanOutOrdinalFlow(t *testing.T) {
 	})
 	// The SECOND step of the branch writes the reducer field. Its fan_out_ordinal must be inherited from Work,
 	// or every Post lands in the ordinal-0 bucket and folds by step_id = completion order.
-	proxy.HandleTask("fanoutordinalflow.verify:828/post", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fanoutordinalflow.verify:828/post", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("results", []string{f.GetString("item")})
 		return nil
 	})
-	proxy.HandleTask("fanoutordinalflow.verify:828/join", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fanoutordinalflow.verify:828/join", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 
@@ -98,10 +98,10 @@ func TestFanOutOrdinalFlow_Nested(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("NestedOrdinal")
@@ -118,18 +118,18 @@ func TestFanOutOrdinalFlow_Nested(t *testing.T) {
 	graph.AddTransitionChain("Chunk", "JoinChunk")
 	graph.AddTransitionChain("JoinChunk", "JoinCell", workflow.End)
 	assert.NoError(graph.Validate())
-	proxy.HandleGraph("fanoutordinalflow.verify:828/nested-ordinal", graph)
+	mux.HandleGraph("fanoutordinalflow.verify:828/nested-ordinal", graph)
 
-	proxy.HandleTask("fanoutordinalflow.verify:828/n-seed", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fanoutordinalflow.verify:828/n-seed", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 	// Each cell fans out over a single chunk.
-	proxy.HandleTask("fanoutordinalflow.verify:828/n-cell", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fanoutordinalflow.verify:828/n-cell", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("chunks", []string{f.GetString("cell") + "-0"})
 		return nil
 	})
 	// The chunk sleeps longest for the earliest cell, so the inner cohorts converge in reverse cell order.
-	proxy.HandleTask("fanoutordinalflow.verify:828/n-chunk", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fanoutordinalflow.verify:828/n-chunk", func(ctx context.Context, f *workflow.Flow) error {
 		idx := f.GetInt("cellIndex")
 		cnt := f.GetInt("cellCount")
 		time.Sleep(time.Duration(cnt-idx) * 50 * time.Millisecond)
@@ -137,11 +137,11 @@ func TestFanOutOrdinalFlow_Nested(t *testing.T) {
 	})
 	// The INNER fan-in records its cell. It is an outer-cohort member; its ordinal must be the cell's, or the
 	// outer fan-in folds these by completion (reverse) order.
-	proxy.HandleTask("fanoutordinalflow.verify:828/n-joinchunk", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fanoutordinalflow.verify:828/n-joinchunk", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("order", []string{f.GetString("cell")})
 		return nil
 	})
-	proxy.HandleTask("fanoutordinalflow.verify:828/n-joincell", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fanoutordinalflow.verify:828/n-joincell", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 

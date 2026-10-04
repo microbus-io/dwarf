@@ -38,23 +38,23 @@ func TestInterruptpersistflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("InterruptPersist")
 	graph.SetURL("ParkAfterWrite", "interruptpersistflow.verify:428/park-after-write")
 	graph.SetURL("Verify", "interruptpersistflow.verify:428/verify")
 	graph.AddTransitionChain("ParkAfterWrite", "Verify", workflow.End)
-	proxy.HandleGraph("interruptpersistflow.verify:428/interrupt-persist", graph)
+	mux.HandleGraph("interruptpersistflow.verify:428/interrupt-persist", graph)
 
 	// creations counts how many times the task "created" the external resource. It must stay 1
 	// across the park-and-resume cycle: the body replays on re-entry, but the guard reads the
 	// ticketID written before the park and skips creation.
 	creations := 0
-	proxy.HandleTask("interruptpersistflow.verify:428/park-after-write", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("interruptpersistflow.verify:428/park-after-write", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetString("ticketID") == "" {
 			// Simulate creating an external resource and recording its id, then parking - all in the
 			// dispatch that yields. The write must survive the park.
@@ -67,7 +67,7 @@ func TestInterruptpersistflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("interruptpersistflow.verify:428/verify", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("interruptpersistflow.verify:428/verify", func(ctx context.Context, f *workflow.Flow) error {
 		// Prove the pre-park write also flows downstream past the parked step.
 		f.SetString("seenTicketID", f.GetString("ticketID"))
 		return nil

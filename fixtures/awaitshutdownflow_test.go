@@ -40,26 +40,26 @@ func TestAwaitShutdownflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("AwaitShutdown")
 	graph.SetURL("Gate", "awaitshutdownflow.verify:428/gate")
 	graph.SetURL("After", "awaitshutdownflow.verify:428/after")
 	graph.AddTransitionChain("Gate", "After", workflow.End)
-	proxy.HandleGraph("awaitshutdownflow.verify:428/await-shutdown", graph)
+	mux.HandleGraph("awaitshutdownflow.verify:428/await-shutdown", graph)
 
 	// Gate arms a long sleep, deferring its successor's not_before ~1h out. The flow therefore rests
 	// `running` indefinitely (never reaching a stopped status) without occupying a worker, so Shutdown drains
 	// cleanly and the only thing that can release a blocked Await is the shutdown sentinel.
-	proxy.HandleTask("awaitshutdownflow.verify:428/gate", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("awaitshutdownflow.verify:428/gate", func(ctx context.Context, f *workflow.Flow) error {
 		f.Sleep(time.Hour)
 		return nil
 	})
-	proxy.HandleTask("awaitshutdownflow.verify:428/after", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("awaitshutdownflow.verify:428/after", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 

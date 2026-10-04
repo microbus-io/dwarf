@@ -42,10 +42,10 @@ func TestStaterefsflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// Big enough to be worth an anchor at any fan-out width, and distinctive enough that a truncated or
@@ -62,12 +62,12 @@ func TestStaterefsflow(t *testing.T) {
 	graph.AddTransitionForEach("Split", "Page", "pages", "page")
 	graph.AddTransitionChain("Page", "Collect", workflow.End)
 	assert.NoError(graph.Validate())
-	proxy.HandleGraph("staterefsflow.verify:429/doc-refs", graph)
+	mux.HandleGraph("staterefsflow.verify:429/doc-refs", graph)
 
 	// The entry task adds nothing to the payload; it exists so the fan-out has a spawn. The document arrives
 	// as INITIAL STATE, so its bytes live in the entry step's `state` column - an anchor no task ever wrote,
 	// and the case a changes-only resolver would miss entirely.
-	proxy.HandleTask("staterefsflow.verify:429/split", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("staterefsflow.verify:429/split", func(ctx context.Context, f *workflow.Flow) error {
 		if len(f.GetString("pdf")) != docLen {
 			return errors.New("the spawn cannot see the initial document")
 		}
@@ -75,7 +75,7 @@ func TestStaterefsflow(t *testing.T) {
 	})
 	// Every branch must see the WHOLE document (carried by reference), its own element, and the source array
 	// its element came from - the branch's state is not a lie.
-	proxy.HandleTask("staterefsflow.verify:429/page", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("staterefsflow.verify:429/page", func(ctx context.Context, f *workflow.Flow) error {
 		if got := len(f.GetString("pdf")); got != docLen {
 			return errors.New("branch sees a %d-byte document, want %d", got, docLen)
 		}
@@ -89,7 +89,7 @@ func TestStaterefsflow(t *testing.T) {
 	})
 	// The fan-in folds the append reducer (so its operands are materialized) while the document is merely
 	// carried across the cohort and must NOT be re-copied to get there.
-	proxy.HandleTask("staterefsflow.verify:429/collect", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("staterefsflow.verify:429/collect", func(ctx context.Context, f *workflow.Flow) error {
 		if len(f.GetString("pdf")) != docLen {
 			return errors.New("the fan-in cannot see the carried document")
 		}
@@ -209,29 +209,29 @@ func TestStaterefsflow(t *testing.T) {
 		g.AddTransitionChain("Page", "Collect")
 		g.AddTransitionChain("Collect", "After", workflow.End)
 		assert.NoError(g.Validate())
-		proxy.HandleGraph("staterefsflow.verify:429/doc-refs-mutate", g)
+		mux.HandleGraph("staterefsflow.verify:429/doc-refs-mutate", g)
 
 		replacement := strings.Repeat("R", docLen)
-		proxy.HandleTask("staterefsflow.verify:429/m-split", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("staterefsflow.verify:429/m-split", func(ctx context.Context, f *workflow.Flow) error {
 			// Overwrite the inherited document: the new bytes are in THIS step's changes, so the successors'
 			// refs must re-anchor here rather than keep pointing at the entry step's stale copy.
 			f.SetString("pdf", replacement)
 			return nil
 		})
-		proxy.HandleTask("staterefsflow.verify:429/m-page", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("staterefsflow.verify:429/m-page", func(ctx context.Context, f *workflow.Flow) error {
 			if got := f.GetString("pdf"); got != replacement {
 				return errors.New("branch sees the STALE document, not the rewritten one")
 			}
 			return nil
 		})
-		proxy.HandleTask("staterefsflow.verify:429/m-collect", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("staterefsflow.verify:429/m-collect", func(ctx context.Context, f *workflow.Flow) error {
 			if f.GetString("pdf") != replacement {
 				return errors.New("the fan-in sees the stale document")
 			}
 			f.Del("pdf") // a tombstone must invalidate the ref, not just the inline copy
 			return nil
 		})
-		proxy.HandleTask("staterefsflow.verify:429/m-after", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("staterefsflow.verify:429/m-after", func(ctx context.Context, f *workflow.Flow) error {
 			f.SetBool("pdfPresent", f.Has("pdf"))
 			f.SetInt("pdfLen", len(f.GetString("pdf")))
 			return nil
@@ -260,10 +260,10 @@ func TestStaterefs_SingleFieldEntirelyByReference(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	const docLen = 40000
@@ -275,11 +275,11 @@ func TestStaterefs_SingleFieldEntirelyByReference(t *testing.T) {
 	graph.SetURL("C", "staterefsflow.verify:429/sole-c")
 	graph.AddTransitionChain("A", "B", "C", workflow.End)
 	assert.NoError(graph.Validate())
-	proxy.HandleGraph("staterefsflow.verify:429/sole", graph)
+	mux.HandleGraph("staterefsflow.verify:429/sole", graph)
 
 	// The entry task adds nothing: the document arrives as initial state and is the flow's ONLY field, so the
 	// successor's minted state is entirely by reference (state="{}", state_refs={"pdf": entryStep}).
-	proxy.HandleTask("staterefsflow.verify:429/sole-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("staterefsflow.verify:429/sole-a", func(ctx context.Context, f *workflow.Flow) error {
 		if got := len(f.GetString("pdf")); got != docLen {
 			return errors.New("A sees a %d-byte document, want %d", got, docLen)
 		}
@@ -287,13 +287,13 @@ func TestStaterefs_SingleFieldEntirelyByReference(t *testing.T) {
 	})
 	// B is dispatched from a "{}" state column - the exact site the bug drops the ref. It too writes nothing,
 	// so the ref must ride one-hop through to C, still anchored at the entry step.
-	proxy.HandleTask("staterefsflow.verify:429/sole-b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("staterefsflow.verify:429/sole-b", func(ctx context.Context, f *workflow.Flow) error {
 		if got := len(f.GetString("pdf")); got != docLen {
 			return errors.New("B sees a %d-byte document, want %d (ref dropped at dispatch)", got, docLen)
 		}
 		return nil
 	})
-	proxy.HandleTask("staterefsflow.verify:429/sole-c", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("staterefsflow.verify:429/sole-c", func(ctx context.Context, f *workflow.Flow) error {
 		if got := len(f.GetString("pdf")); got != docLen {
 			return errors.New("C sees a %d-byte document, want %d", got, docLen)
 		}

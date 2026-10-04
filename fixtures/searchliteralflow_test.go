@@ -36,7 +36,7 @@ func TestSearchLiteralflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	// Three flows whose workflow URLs contain LIKE metacharacters or their literal look-alikes. The graph
 	// display name and task URL are neutral (no search-term substrings) so only the workflow_url matches.
@@ -45,15 +45,15 @@ func TestSearchLiteralflow(t *testing.T) {
 		g := workflow.NewGraph("SearchWF")
 		g.SetURL("Only", "searchliteral.verify:428/only")
 		g.AddTransition("Only", workflow.End)
-		proxy.HandleGraph(u, g)
+		mux.HandleGraph(u, g)
 	}
-	proxy.HandleTask("searchliteral.verify:428/only", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("searchliteral.verify:428/only", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	byURL := map[string]string{} // workflow_url -> flowKey

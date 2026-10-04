@@ -47,15 +47,15 @@ func TestCompleteFlowVsTerminate_BothOrders(t *testing.T) {
 	t.Parallel()
 	newEngine := func(t *testing.T, prefix string) (*engine.Engine, string) {
 		assert := testarossa.For(t)
-		proxy := engine.NewTestProxy()
+		mux := engine.NewHostMux()
 		g := workflow.NewGraph("Solo")
 		g.SetURL("A", prefix+"/a")
 		g.AddTransition("A", workflow.End)
 		assert.NoError(g.Validate())
-		proxy.HandleGraph(prefix+"/g", g)
-		proxy.HandleTask(prefix+"/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+		mux.HandleGraph(prefix+"/g", g)
+		mux.HandleTask(prefix+"/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 		e := engine.NewEngineUnderTest(t.Name())
-		e.SetHost(proxy)
+		e.SetHost(mux)
 		assert.NoError(e.Startup(t.Context()))
 		return e, prefix + "/g"
 	}
@@ -117,13 +117,13 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 	newGate := func(t *testing.T, prefix string) (*engine.Engine, chan struct{}) {
 		assert := testarossa.For(t)
 		gateBlock := make(chan struct{})
-		proxy := engine.NewTestProxy()
+		mux := engine.NewHostMux()
 		g := workflow.NewGraph("Gate")
 		g.SetURL("Gate", prefix+"/gate")
 		g.AddTransition("Gate", workflow.End)
 		assert.NoError(g.Validate())
-		proxy.HandleGraph(prefix+"/g", g)
-		proxy.HandleTask(prefix+"/gate", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleGraph(prefix+"/g", g)
+		mux.HandleTask(prefix+"/gate", func(ctx context.Context, f *workflow.Flow) error {
 			yield, err := f.Interrupt(nil, nil)
 			if yield || err != nil {
 				return err
@@ -132,7 +132,7 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 			return nil
 		})
 		e := engine.NewEngineUnderTest(t.Name())
-		e.SetHost(proxy)
+		e.SetHost(mux)
 		assert.NoError(e.Startup(t.Context()))
 		return e, gateBlock
 	}
@@ -239,13 +239,13 @@ func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(yGate) }) }
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	// Parent: one subgraph caller. Its Call step is the shared ancestor both child branches interrupt up to.
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("Call", "cip/call")
 	parent.AddTransition("Call", workflow.End)
 	assert.NoError(parent.Validate())
-	proxy.HandleGraph("cip/parent", parent)
+	mux.HandleGraph("cip/parent", parent)
 	// Child: fan-out Split -> {IX, IY} -> J. Both branches interrupt with distinct payloads.
 	child := workflow.NewGraph("Child")
 	child.SetURL("Split", "cip/split")
@@ -259,35 +259,35 @@ func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 	child.AddTransition("IY", "J")
 	child.AddTransition("J", workflow.End)
 	assert.NoError(child.Validate())
-	proxy.HandleGraph("cip/child", child)
+	mux.HandleGraph("cip/child", child)
 
-	proxy.HandleTask("cip/call", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("cip/call", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph("cip/child", nil, nil)
 		if yield || err != nil {
 			return err
 		}
 		return nil
 	})
-	proxy.HandleTask("cip/split", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("cip/split", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	// IX interrupts immediately - the first writer.
-	proxy.HandleTask("cip/ix", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("cip/ix", func(ctx context.Context, f *workflow.Flow) error {
 		_, err := f.Interrupt(map[string]any{"branch": "X"}, nil)
 		return err
 	})
 	// IY interrupts only after the test releases it (once IX has committed) - the guarded no-op writer.
-	proxy.HandleTask("cip/iy", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("cip/iy", func(ctx context.Context, f *workflow.Flow) error {
 		<-yGate
 		_, err := f.Interrupt(map[string]any{"branch": "Y"}, nil)
 		return err
 	})
-	proxy.HandleTask("cip/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("cip/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	// Release IY here, AFTER the Shutdown defer, so it unwinds FIRST: Shutdown drains the workers, and one
 	// still parked on yGate would never return.
 	defer release()
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	fk, err := e.Create(ctx, "cip/parent", nil, nil)

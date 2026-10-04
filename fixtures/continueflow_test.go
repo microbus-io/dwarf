@@ -30,21 +30,21 @@ func TestContinueflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	graph := workflow.NewGraph("Counting")
 	graph.SetURL("Increment", "continueflow.verify:428/increment")
 	graph.AddTransition("Increment", workflow.End)
-	proxy.HandleGraph("continueflow.verify:428/counting", graph)
+	mux.HandleGraph("continueflow.verify:428/counting", graph)
 
-	proxy.HandleTask("continueflow.verify:428/increment", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("continueflow.verify:428/increment", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("counter", f.GetInt("counter")+1)
 		return nil
 	})
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	t.Run("counter_persists_across_continue_turns", func(t *testing.T) {
@@ -83,16 +83,16 @@ func TestContinueInheritsThreadPolicy(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	g := workflow.NewGraph("Policy")
 	g.SetURL("T", "continuepolicy.verify:428/t")
 	g.AddTransition("T", workflow.End)
-	proxy.HandleGraph("continuepolicy.verify:428/g", g)
-	proxy.HandleTask("continuepolicy.verify:428/t", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("continuepolicy.verify:428/g", g)
+	mux.HandleTask("continuepolicy.verify:428/t", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// Turn 1 with a distinctive priority (7, not the engine default of 100).
@@ -128,16 +128,16 @@ func TestCreateWithThreadKeyJoinsThread(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	g := workflow.NewGraph("Join")
 	g.SetURL("T", "threadjoin.verify:428/t")
 	g.AddTransition("T", workflow.End)
-	proxy.HandleGraph("threadjoin.verify:428/g", g)
-	proxy.HandleTask("threadjoin.verify:428/t", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("threadjoin.verify:428/g", g)
+	mux.HandleTask("threadjoin.verify:428/t", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// Flow A starts its own thread.

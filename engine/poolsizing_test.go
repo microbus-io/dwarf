@@ -374,15 +374,15 @@ func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	release := make(chan struct{})
 	var running atomic.Int32
 	g := workflow.NewGraph("Grow")
 	g.SetURL("Slow", "grow/slow")
 	g.AddTransition("Slow", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("grow/g", g)
-	proxy.HandleTask("grow/slow", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("grow/g", g)
+	mux.HandleTask("grow/slow", func(ctx context.Context, f *workflow.Flow) error {
 		running.Add(1)
 		<-release // park: hold the worker exactly as a minutes-long LLM call would
 		return nil
@@ -390,7 +390,7 @@ func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	assert.NoError(e.SetHost(proxy))
+	assert.NoError(e.SetHost(mux))
 	assert.NoError(e.Startup(t.Context()))
 	resident := int32(e.crew.Resident())
 	assert.Equal(int32(max(64, workersPerConnBudget*shardBudget(defaultVirtualCPUs, probedRTT(e, 1)))), resident,
@@ -460,19 +460,19 @@ func TestPoolSizing_SaturationDoesNotGrowThePool(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Sat")
 	g.SetURL("A", "sat/a")
 	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("sat/g", g)
-	proxy.HandleTask("sat/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("sat/g", g)
+	mux.HandleTask("sat/a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil // instant: the task never parks, so the pool has no reason to grow
 	})
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	assert.NoError(e.SetHost(proxy))
+	assert.NoError(e.SetHost(mux))
 	// A deliberately tiny pool makes the connection the binding resource: workers WILL queue on it.
 	assert.NoError(e.SetMaxOpenConns(2))
 	assert.NoError(e.Startup(t.Context()))
@@ -664,7 +664,7 @@ func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
 	// (1) Never started. No SetShard either, so this is the default-shard path - the one that indexed the
 	// empty slice.
 	e := NewEngine()
-	e.SetHost(NewTestProxy())
+	e.SetHost(NewHostMux())
 	_, err := e.pickShard()
 	if assert.Error(err) {
 		assert.Equal(http.StatusServiceUnavailable, errors.StatusCode(err))
@@ -673,16 +673,16 @@ func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
 	assert.Error(err)
 
 	// (2) Started, then shut down - the shutdown race, reached through the public API.
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "shutdownrace/a")
 	g.AddTransition("A", workflow.End)
-	proxy.HandleGraph("shutdownrace/g", g)
-	proxy.HandleTask("shutdownrace/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("shutdownrace/g", g)
+	mux.HandleTask("shutdownrace/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e2 := NewEngineUnderTest(t.Name())
 	defer e2.Shutdown(ctx)
-	e2.SetHost(proxy)
+	e2.SetHost(mux)
 	// Startup registers a t.Cleanup Shutdown; shutting down early here is idempotent.
 	assert.NoError(e2.Startup(t.Context()))
 	flowKey, err := e2.Create(ctx, "shutdownrace/g", nil, nil)

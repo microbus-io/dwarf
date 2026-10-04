@@ -53,7 +53,7 @@ func TestFanInNoCohort_FailsInsteadOfHotLooping(t *testing.T) {
 	release := make(chan struct{})
 	var workRuns atomic.Int32
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	g := workflow.NewGraph("NoCohort")
 	g.SetURL("Spawn", "nocohort/spawn")
 	g.SetURL("Work", "nocohort/work")
@@ -63,10 +63,10 @@ func TestFanInNoCohort_FailsInsteadOfHotLooping(t *testing.T) {
 	g.AddTransition("Work", "Join")
 	g.AddTransition("Join", workflow.End)
 	assert.NoError(g.Validate()) // a legitimate graph: the wedge is forged in the DB below
-	proxy.HandleGraph("nocohort/g", g)
+	mux.HandleGraph("nocohort/g", g)
 
-	proxy.HandleTask("nocohort/spawn", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("nocohort/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("nocohort/spawn", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("nocohort/work", func(ctx context.Context, f *workflow.Flow) error {
 		if workRuns.Add(1) == 1 {
 			started <- struct{}{}
 			<-release // hold the branch running while the test clears its lineage in the DB
@@ -78,11 +78,11 @@ func TestFanInNoCohort_FailsInsteadOfHotLooping(t *testing.T) {
 		}
 		return nil // second attempt: transitions to the fan-in with lineage_id=0 - no cohort to arrive at
 	})
-	proxy.HandleTask("nocohort/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("nocohort/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	flowKey, err := e.Create(ctx, "nocohort/g", map[string]any{"items": []int{1}}, nil)

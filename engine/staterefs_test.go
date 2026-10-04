@@ -83,8 +83,8 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	proxy := NewTestProxy()
-	e.SetHost(proxy)
+	mux := NewHostMux()
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	db, err := e.db.Shard(1)
@@ -137,8 +137,8 @@ func TestStateRefs_CarryAcrossFanOut(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	proxy := NewTestProxy()
-	e.SetHost(proxy)
+	mux := NewHostMux()
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	const doc = 20000
@@ -151,20 +151,20 @@ func TestStateRefs_CarryAcrossFanOut(t *testing.T) {
 	g.AddTransitionForEach("Seed", "Work", "pages", "page")
 	g.AddTransitionChain("Work", "Join", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("refs/wf", g)
+	mux.HandleGraph("refs/wf", g)
 
-	proxy.HandleTask("refs/seed", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("refs/seed", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 	// Every branch must SEE the whole document, even though its own row does not store it.
-	proxy.HandleTask("refs/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("refs/work", func(ctx context.Context, f *workflow.Flow) error {
 		if len(f.GetString("pdf")) != doc {
 			return errors.New("branch cannot see the carried document")
 		}
 		f.SetInt("processed", 1)
 		return nil
 	})
-	proxy.HandleTask("refs/join", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("refs/join", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("total", f.GetInt("processed"))
 		f.SetInt("pdfLen", len(f.GetString("pdf")))
 		return nil
@@ -220,8 +220,8 @@ func TestStateRefs_ReducedFieldIsResolvedAndReanchored(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	proxy := NewTestProxy()
-	e.SetHost(proxy)
+	mux := NewHostMux()
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	g := workflow.NewGraph("Reduced")
@@ -233,14 +233,14 @@ func TestStateRefs_ReducedFieldIsResolvedAndReanchored(t *testing.T) {
 	g.AddTransitionForEach("Seed", "Work", "pages", "page")
 	g.AddTransitionChain("Work", "Join", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("red/wf", g)
+	mux.HandleGraph("red/wf", g)
 
-	proxy.HandleTask("red/seed", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("red/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("red/seed", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("red/work", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("log", []string{"entry"})
 		return nil
 	})
-	proxy.HandleTask("red/join", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("red/join", func(ctx context.Context, f *workflow.Flow) error {
 		var log []string
 		_, err := f.Get("log", &log)
 		assert.NoError(err)
@@ -282,8 +282,8 @@ func TestStateRefs_SpawnCombinedFieldIsNotAnchored(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	proxy := NewTestProxy()
-	e.SetHost(proxy)
+	mux := NewHostMux()
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	g := workflow.NewGraph("SpawnCombined")
@@ -295,17 +295,17 @@ func TestStateRefs_SpawnCombinedFieldIsNotAnchored(t *testing.T) {
 	g.AddTransitionForEach("Seed", "Work", "pages", "page")
 	g.AddTransitionChain("Work", "Join", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("sc/wf", g)
+	mux.HandleGraph("sc/wf", g)
 
 	// The SPAWN (fan-out source) appends to log; its merged value (base + delta) clears the ref threshold. The
 	// branches deliberately never touch log, so it is NOT a member write - the spawn's combine is the only reason
 	// it must not be anchored.
-	proxy.HandleTask("sc/seed", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("sc/seed", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("log", []string{"spawn-delta"})
 		return nil
 	})
-	proxy.HandleTask("sc/work", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("sc/join", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("sc/work", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("sc/join", func(ctx context.Context, f *workflow.Flow) error {
 		var log []string
 		_, err := f.Get("log", &log)
 		assert.NoError(err)

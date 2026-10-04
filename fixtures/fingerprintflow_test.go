@@ -36,10 +36,10 @@ func TestFingerprintflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("Fingerprint")
@@ -47,19 +47,19 @@ func TestFingerprintflow(t *testing.T) {
 	graph.SetURL("Pause", "fingerprintflow.verify:428/pause")
 	graph.SetURL("Done", "fingerprintflow.verify:428/done")
 	graph.AddTransitionChain("TaskA", "Pause", "Done", workflow.End)
-	proxy.HandleGraph("fingerprintflow.verify:428/fingerprint", graph)
+	mux.HandleGraph("fingerprintflow.verify:428/fingerprint", graph)
 
-	proxy.HandleTask("fingerprintflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fingerprintflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("fingerprintflow.verify:428/pause", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fingerprintflow.verify:428/pause", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Interrupt(map[string]any{"need": "input"}, nil)
 		if yield || err != nil {
 			return err
 		}
 		return nil
 	})
-	proxy.HandleTask("fingerprintflow.verify:428/done", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fingerprintflow.verify:428/done", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("result", "finished")
 		return nil
 	})

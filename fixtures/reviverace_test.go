@@ -40,18 +40,18 @@ func TestReviveVsTerminate_Deterministic(t *testing.T) {
 	ctx := context.Background()
 
 	var callRuns int
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("Call", "rvc/call")
 	parent.AddTransition("Call", workflow.End)
 	assert.NoError(parent.Validate())
-	proxy.HandleGraph("rvc/parent", parent)
+	mux.HandleGraph("rvc/parent", parent)
 	child := workflow.NewGraph("Child")
 	child.SetURL("X", "rvc/x")
 	child.AddTransition("X", workflow.End)
 	assert.NoError(child.Validate())
-	proxy.HandleGraph("rvc/child", child)
-	proxy.HandleTask("rvc/call", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("rvc/child", child)
+	mux.HandleTask("rvc/call", func(ctx context.Context, f *workflow.Flow) error {
 		callRuns++
 		yield, err := f.Subgraph("rvc/child", nil, nil)
 		if yield || err != nil {
@@ -59,11 +59,11 @@ func TestReviveVsTerminate_Deterministic(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("rvc/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("rvc/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	// Freeze the worker at the caller revive, after the child completed (its completion transaction committed).

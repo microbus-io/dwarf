@@ -37,17 +37,17 @@ func TestRetryHorizonflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("RetryHorizon")
 	graph.SetURL("Flaky", "retryhorizonflow.verify:428/flaky")
 	graph.SetURL("Done", "retryhorizonflow.verify:428/done")
 	graph.AddTransitionChain("Flaky", "Done", workflow.End)
-	proxy.HandleGraph("retryhorizonflow.verify:428/retry-horizon", graph)
+	mux.HandleGraph("retryhorizonflow.verify:428/retry-horizon", graph)
 
 	// Flaky reads its own policy from state: succeed once Attempt() reaches successAt (0 = never); otherwise
 	// retry against a giveUpAfter horizon read from giveUpMs.
@@ -59,7 +59,7 @@ func TestRetryHorizonflow(t *testing.T) {
 	// claim latency, which is unbounded under load: a 250ms horizon with a 20ms initial delay left only 230ms
 	// of headroom, and against a loaded SQL Server the first dispatch outran it, giving up at attempt 0 and
 	// failing the "the horizon is not first-try" assertion below.
-	proxy.HandleTask("retryhorizonflow.verify:428/flaky", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("retryhorizonflow.verify:428/flaky", func(ctx context.Context, f *workflow.Flow) error {
 		successAt := f.GetInt("successAt")
 		if successAt > 0 && f.Attempt() >= successAt {
 			return nil
@@ -70,7 +70,7 @@ func TestRetryHorizonflow(t *testing.T) {
 		}
 		return errors.New("flaky exhausted its retry horizon")
 	})
-	proxy.HandleTask("retryhorizonflow.verify:428/done", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("retryhorizonflow.verify:428/done", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("reachedDone", true)
 		return nil
 	})

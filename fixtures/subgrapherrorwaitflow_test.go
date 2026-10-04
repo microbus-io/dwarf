@@ -41,27 +41,27 @@ func TestSubgraphErrorWaitflow(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("RunInner", "subgrapherrwait.verify:0/run-inner")
 	parent.AddTransition("RunInner", workflow.End)
-	proxy.HandleGraph("subgrapherrwait.verify:0/parent", parent)
+	mux.HandleGraph("subgrapherrwait.verify:0/parent", parent)
 
 	inner := workflow.NewGraph("Inner")
 	inner.SetURL("Boom", "subgrapherrwait.verify:0/boom")
 	inner.AddTransition("Boom", workflow.End)
-	proxy.HandleGraph("subgrapherrwait.verify:0/inner", inner)
+	mux.HandleGraph("subgrapherrwait.verify:0/inner", inner)
 
 	var mu sync.Mutex
 	var childKey string
 	captured := make(chan struct{})
 	release := make(chan struct{})
-	proxy.HandleTask("subgrapherrwait.verify:0/boom", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subgrapherrwait.verify:0/boom", func(ctx context.Context, f *workflow.Flow) error {
 		mu.Lock()
 		childKey = f.FlowKey() // a subgraph child sees its own (child) flow key
 		mu.Unlock()
@@ -69,7 +69,7 @@ func TestSubgraphErrorWaitflow(t *testing.T) {
 		<-release // stay running until the test has an Await registered on the child key
 		return errors.New("child boom", http.StatusInternalServerError)
 	})
-	proxy.HandleTask("subgrapherrwait.verify:0/run-inner", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subgrapherrwait.verify:0/run-inner", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		yield, err := f.Subgraph("subgrapherrwait.verify:0/inner", map[string]any{}, &out)
 		if yield || err != nil {

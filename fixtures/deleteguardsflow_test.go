@@ -42,22 +42,22 @@ func TestDeleteguardsflow_ForkRejectsADoomedFlow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("ForkGuard")
 	graph.SetURL("A", "deleteguardsflow.verify:428/a")
 	graph.SetURL("B", "deleteguardsflow.verify:428/b")
 	graph.AddTransitionChain("A", "B", workflow.End)
-	proxy.HandleGraph("deleteguardsflow.verify:428/g", graph)
+	mux.HandleGraph("deleteguardsflow.verify:428/g", graph)
 	// B reports its own step key, which is the only way to obtain one for a DeleteOnCompletion flow: such a
 	// flow is logically gone the moment it completes, so History 404s and cannot hand one out.
 	var bStepKey string
-	proxy.HandleTask("deleteguardsflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("deleteguardsflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("deleteguardsflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("deleteguardsflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
 		bStepKey = f.StepKey()
 		f.SetString("done", "yes")
 		return nil
@@ -141,18 +141,18 @@ func TestDeleteguardsflow_ContinueSkipsADeletedTurn(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("ContinueGuard")
 	graph.SetURL("Turn", "deleteguardsflow2.verify:428/turn")
 	graph.AddTransitionChain("Turn", workflow.End)
-	proxy.HandleGraph("deleteguardsflow2.verify:428/g", graph)
+	mux.HandleGraph("deleteguardsflow2.verify:428/g", graph)
 	// Each turn stamps which base it was built from, so the surviving base is identifiable in the outcome.
-	proxy.HandleTask("deleteguardsflow2.verify:428/turn", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("deleteguardsflow2.verify:428/turn", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("builtOn", f.GetString("marker"))
 		f.SetString("marker", f.GetString("next"))
 		return nil

@@ -36,14 +36,14 @@ func TestShardinfoflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	graph := workflow.NewGraph("Flow")
 	graph.SetURL("Only", "shardinfoflow.verify:428/only")
 	graph.AddTransition("Only", workflow.End)
-	proxy.HandleGraph("shardinfoflow.verify:428/flow", graph)
+	mux.HandleGraph("shardinfoflow.verify:428/flow", graph)
 
-	proxy.HandleTask("shardinfoflow.verify:428/only", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("shardinfoflow.verify:428/only", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("done", "yes")
 		return nil
 	})
@@ -51,7 +51,7 @@ func TestShardinfoflow(t *testing.T) {
 	const numShards = 3
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	for i := 1; i <= numShards; i++ {
 		eng.SetShard(engine.ShardSpec{Index: i})
 	}

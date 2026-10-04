@@ -83,19 +83,19 @@ func TestDeleteOnCompletion_ReaperDeletesOnSuccess(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "doc/a")
 	g.AddTransition("A", workflow.End)
-	proxy.HandleGraph("doc/solo", g)
-	proxy.HandleTask("doc/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("doc/solo", g)
+	mux.HandleTask("doc/a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("done", true)
 		return nil
 	})
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	shortenDeletion(e, time.Millisecond, 20*time.Millisecond)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -113,19 +113,19 @@ func TestDeleteOnCompletion_OutcomeObservableThenReaped(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "doc/aw-a")
 	g.AddTransition("A", workflow.End)
-	proxy.HandleGraph("doc/await", g)
-	proxy.HandleTask("doc/aw-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("doc/await", g)
+	mux.HandleTask("doc/aw-a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("done", true)
 		return nil
 	})
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	shortenDeletion(e, time.Millisecond, time.Hour) // due ~immediately, but only the manual reap fires
 	assert.NoError(e.Startup(t.Context()))
 
@@ -157,19 +157,19 @@ func TestDeleteOnCompletion_RunReturnsOutcome(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "doc/run-a")
 	g.AddTransition("A", workflow.End)
-	proxy.HandleGraph("doc/run", g)
-	proxy.HandleTask("doc/run-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("doc/run", g)
+	mux.HandleTask("doc/run-a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("done", true)
 		return nil
 	})
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	shortenDeletion(e, time.Millisecond, time.Hour)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -189,17 +189,17 @@ func TestPurge_ReaperRemovesTree(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("Run", "pr/run")
 	parent.AddTransition("Run", workflow.End)
-	proxy.HandleGraph("pr/parent", parent)
+	mux.HandleGraph("pr/parent", parent)
 	inner := workflow.NewGraph("Inner")
 	inner.SetURL("X", "pr/x")
 	inner.AddTransition("X", workflow.End)
-	proxy.HandleGraph("pr/inner", inner)
-	proxy.HandleTask("pr/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("pr/run", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("pr/inner", inner)
+	mux.HandleTask("pr/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("pr/run", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		yield, err := f.Subgraph("pr/inner", map[string]any{}, &out)
 		if yield || err != nil {
@@ -210,7 +210,7 @@ func TestPurge_ReaperRemovesTree(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	shortenDeletion(e, time.Millisecond, time.Hour)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -236,18 +236,18 @@ func TestDeleteOnCompletion_KeepsFailedFlow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Failing")
 	g.SetURL("A", "doc/fail-a")
 	g.AddTransition("A", workflow.End)
-	proxy.HandleGraph("doc/failing", g)
-	proxy.HandleTask("doc/fail-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("doc/failing", g)
+	mux.HandleTask("doc/fail-a", func(ctx context.Context, f *workflow.Flow) error {
 		return errors.New("boom")
 	})
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	fk, err := e.Create(ctx, "doc/failing", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
@@ -271,21 +271,21 @@ func TestDeleteOnCompletion_ReaperCascadesSubgraph(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("A", "doc/sg-a")
 	parent.SetURL("RunInner", "doc/sg-run-inner")
 	parent.AddTransitionChain("A", "RunInner", workflow.End)
-	proxy.HandleGraph("doc/sg-parent", parent)
+	mux.HandleGraph("doc/sg-parent", parent)
 
 	inner := workflow.NewGraph("Inner")
 	inner.SetURL("X", "doc/sg-x")
 	inner.AddTransition("X", workflow.End)
-	proxy.HandleGraph("doc/sg-inner", inner)
+	mux.HandleGraph("doc/sg-inner", inner)
 
-	proxy.HandleTask("doc/sg-a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("doc/sg-x", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("doc/sg-run-inner", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("doc/sg-a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("doc/sg-x", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("doc/sg-run-inner", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		yield, err := f.Subgraph("doc/sg-inner", map[string]any{}, &out)
 		if yield || err != nil {
@@ -296,7 +296,7 @@ func TestDeleteOnCompletion_ReaperCascadesSubgraph(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	shortenDeletion(e, time.Millisecond, 20*time.Millisecond)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -325,19 +325,19 @@ func TestDeleteOnCompletion_OutcomeObservableUnderConcurrency(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "doc/conc-a")
 	g.AddTransition("A", workflow.End)
-	proxy.HandleGraph("doc/conc", g)
-	proxy.HandleTask("doc/conc-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("doc/conc", g)
+	mux.HandleTask("doc/conc-a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("done", true)
 		return nil
 	})
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	e.SetWorkers(8)
 	// Keep grace at the production default and the reaper effectively off, so no flow is removed mid-test
 	// and a missing/errored outcome would signal a real defect.

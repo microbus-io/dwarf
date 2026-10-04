@@ -44,34 +44,34 @@ func TestCompletionRaceflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	// Parent graph: a single subgraph-caller task, then END.
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("Caller", "completionrace.verify:428/caller")
 	parent.AddTransition("Caller", workflow.End)
-	proxy.HandleGraph("completionrace.verify:428/parent", parent)
+	mux.HandleGraph("completionrace.verify:428/parent", parent)
 
 	// Inner graph: a single no-op task, then END - completes as fast as possible to race the caller's park.
 	inner := workflow.NewGraph("Inner")
 	inner.SetURL("InnerEntry", "completionrace.verify:428/inner-entry")
 	inner.AddTransition("InnerEntry", workflow.End)
-	proxy.HandleGraph("completionrace.verify:428/inner", inner)
+	mux.HandleGraph("completionrace.verify:428/inner", inner)
 
-	proxy.HandleTask("completionrace.verify:428/caller", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("completionrace.verify:428/caller", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph("completionrace.verify:428/inner", nil, nil)
 		if yield || err != nil {
 			return err
 		}
 		return nil
 	})
-	proxy.HandleTask("completionrace.verify:428/inner-entry", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("completionrace.verify:428/inner-entry", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	eng.SetShard(engine.ShardSpec{Index: 1})
 	eng.SetShard(engine.ShardSpec{Index: 2})
 	eng.SetWorkers(4)

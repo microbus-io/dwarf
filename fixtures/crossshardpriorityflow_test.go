@@ -52,17 +52,17 @@ func TestCrossShardPriorityflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	graph := workflow.NewGraph("CrossShardPriority")
 	graph.SetURL("Record", "crossshardpriority.verify:428/record")
 	graph.AddTransition("Record", workflow.End)
-	proxy.HandleGraph("crossshardpriority.verify:428/priority", graph)
+	mux.HandleGraph("crossshardpriority.verify:428/priority", graph)
 
 	var mu sync.Mutex
 	var order []string
 
-	proxy.HandleTask("crossshardpriority.verify:428/record", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("crossshardpriority.verify:428/record", func(ctx context.Context, f *workflow.Flow) error {
 		if d := f.GetInt("delayMs"); d > 0 {
 			time.Sleep(time.Duration(d) * time.Millisecond)
 		}
@@ -75,7 +75,7 @@ func TestCrossShardPriorityflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	assertSetup := testarossa.For(t)
-	assertSetup.NoError(eng.SetHost(proxy))
+	assertSetup.NoError(eng.SetHost(mux))
 	// Three shards, so placement spreads the flows and the global band must be merged from three
 	// independently-scanned census entries rather than read in one pass.
 	assertSetup.NoError(eng.SetShard(engine.ShardSpec{Index: 1}))

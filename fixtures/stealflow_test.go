@@ -63,8 +63,8 @@ func stealFleet(t *testing.T, name string, crippledWorkers int, crippledDelay ti
 	assert := testarossa.For(t)
 	ran = map[string]*atomic.Int64{"creator": {}, "healthy": {}, "crippled": {}}
 
-	build := func(replica string) *engine.TestProxy {
-		p := engine.NewTestProxy()
+	build := func(replica string) *engine.HostMux {
+		p := engine.NewHostMux()
 		g := workflow.NewGraph("Chain")
 		g.SetURL("A", name+"/a")
 		g.SetURL("B", name+"/b")
@@ -274,8 +274,8 @@ func TestStealTwoBadApplesflow(t *testing.T) {
 	// two, which would leave one of the three a reader - and when that one is the healthy replica, the two
 	// crippled ones carry the whole load and there is nothing for it to steal.
 	ran := map[string]*atomic.Int64{"creator": {}, "healthy": {}, "bad1": {}, "bad2": {}}
-	build := func(replica string, delay time.Duration) *engine.TestProxy {
-		p := engine.NewTestProxy()
+	build := func(replica string, delay time.Duration) *engine.HostMux {
+		p := engine.NewHostMux()
 		g := workflow.NewGraph("Chain")
 		g.SetURL("A", name+"/a")
 		g.SetURL("B", name+"/b")

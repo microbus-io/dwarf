@@ -37,17 +37,17 @@ func TestPanicflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// Graph 1: a bare panicking task with no onError -> the flow fails.
 	bare := workflow.NewGraph("Bare")
 	bare.SetURL("Boom", "panicflow.verify:0/boom")
 	bare.AddTransition("Boom", workflow.End)
-	proxy.HandleGraph("panicflow.verify:0/bare", bare)
+	mux.HandleGraph("panicflow.verify:0/bare", bare)
 
 	// Graph 2: a panicking task with an onError handler -> the flow recovers via the handler.
 	handled := workflow.NewGraph("Handled")
@@ -56,7 +56,7 @@ func TestPanicflow(t *testing.T) {
 	handled.AddTransition("Boom", workflow.End)
 	handled.AddTransitionOnError("Boom", "Rescue")
 	handled.AddTransition("Rescue", workflow.End)
-	proxy.HandleGraph("panicflow.verify:0/handled", handled)
+	mux.HandleGraph("panicflow.verify:0/handled", handled)
 
 	// Graph 3: a task reading a mistyped state field with a typed getter. The getters panic rather than
 	// hand back a zero value the task never wrote, and this is what makes that safe: the panic is caught at
@@ -67,16 +67,16 @@ func TestPanicflow(t *testing.T) {
 	mistyped.AddTransition("Read", workflow.End)
 	mistyped.AddTransitionOnError("Read", "Rescue")
 	mistyped.AddTransition("Rescue", workflow.End)
-	proxy.HandleGraph("panicflow.verify:0/mistyped", mistyped)
+	mux.HandleGraph("panicflow.verify:0/mistyped", mistyped)
 
-	proxy.HandleTask("panicflow.verify:0/boom", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("panicflow.verify:0/boom", func(ctx context.Context, f *workflow.Flow) error {
 		panic("boom")
 	})
-	proxy.HandleTask("panicflow.verify:0/read", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("panicflow.verify:0/read", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("delay", f.GetInt("retryAfter")) // retryAfter is 1.5 - a mistyped read, never a silent 0
 		return nil
 	})
-	proxy.HandleTask("panicflow.verify:0/rescue", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("panicflow.verify:0/rescue", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("recovered", "yes")
 		return nil
 	})

@@ -32,10 +32,10 @@ func TestSubgraphInterruptFailflow(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// Inner child: fan out over items; "wait" interrupts, "bad" fails, others complete.
@@ -46,9 +46,9 @@ func TestSubgraphInterruptFailflow(t *testing.T) {
 	inner.SetFanIn("Join")
 	inner.AddTransitionForEach("Seed", "Work", "items", "item")
 	inner.AddTransitionChain("Work", "Join", workflow.End)
-	proxy.HandleGraph("sgif.verify:900/inner", inner)
-	proxy.HandleTask("sgif.verify:900/seed", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("sgif.verify:900/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("sgif.verify:900/inner", inner)
+	mux.HandleTask("sgif.verify:900/seed", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("sgif.verify:900/work", func(ctx context.Context, f *workflow.Flow) error {
 		switch f.GetString("item") {
 		case "wait":
 			if y, _ := f.Interrupt(map[string]any{"need": "approval"}, nil); y {
@@ -61,14 +61,14 @@ func TestSubgraphInterruptFailflow(t *testing.T) {
 			return nil
 		}
 	})
-	proxy.HandleTask("sgif.verify:900/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("sgif.verify:900/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	// Parent: RunInner, no onError -> the delivered child failure fails the parent.
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("RunInner", "sgif.verify:900/run-inner")
 	parent.AddTransitionChain("RunInner", workflow.End)
-	proxy.HandleGraph("sgif.verify:900/parent", parent)
-	proxy.HandleTask("sgif.verify:900/run-inner", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("sgif.verify:900/parent", parent)
+	mux.HandleTask("sgif.verify:900/run-inner", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph("sgif.verify:900/inner", map[string]any{"items": []string{"ok", "wait", "bad"}}, nil)
 		if yield {
 			return nil

@@ -26,7 +26,7 @@ import (
 	"github.com/microbus-io/errors"
 )
 
-// benchHost is the proxy host the bench engine runs against: an in-memory graph registry and a local task
+// benchHost is the host the bench engine runs against: an in-memory graph registry and a local task
 // dispatch table, with no transport or framework dependency. Deliberately minimal so the measurements
 // isolate the engine+database cost. In a multi-replica run every replica's host shares the same graph/task
 // registry and byte counter, and its own view of the fleet (peers) for signal relay.

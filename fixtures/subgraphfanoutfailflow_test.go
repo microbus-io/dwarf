@@ -30,21 +30,21 @@ func TestSubgraphFanOutFailflow(t *testing.T) {
 	ctx := context.Background()
 
 	// Inner child: succeeds for most items, fails for the poisoned one.
-	newEngine := func(t *testing.T) (*engine.Engine, *engine.TestProxy) {
+	newEngine := func(t *testing.T) (*engine.Engine, *engine.HostMux) {
 		assert := testarossa.For(t)
-		proxy := engine.NewTestProxy()
+		mux := engine.NewHostMux()
 		eng := engine.NewEngineUnderTest(t.Name())
-		eng.SetHost(proxy)
+		eng.SetHost(mux)
 		assert.NoError(eng.Startup(t.Context()))
-		return eng, proxy
+		return eng, mux
 	}
 
-	buildInner := func(proxy *engine.TestProxy) {
+	buildInner := func(mux *engine.HostMux) {
 		inner := workflow.NewGraph("Inner")
 		inner.SetURL("Do", "sgfof.verify:900/do")
 		inner.AddTransitionChain("Do", workflow.End)
-		proxy.HandleGraph("sgfof.verify:900/inner", inner)
-		proxy.HandleTask("sgfof.verify:900/do", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleGraph("sgfof.verify:900/inner", inner)
+		mux.HandleTask("sgfof.verify:900/do", func(ctx context.Context, f *workflow.Flow) error {
 			if f.GetString("item") == "bad" {
 				return errors.New("child exploded for %s", f.GetString("item"), http.StatusInternalServerError)
 			}
@@ -55,9 +55,9 @@ func TestSubgraphFanOutFailflow(t *testing.T) {
 
 	t.Run("branch_propagates_child_error_cohort_fails_flow", func(t *testing.T) {
 		assert := testarossa.For(t)
-		eng, proxy := newEngine(t)
+		eng, mux := newEngine(t)
 		defer eng.Shutdown(ctx)
-		buildInner(proxy)
+		buildInner(mux)
 
 		g := workflow.NewGraph("Outer")
 		g.SetURL("Split", "sgfof.verify:900/split")
@@ -67,9 +67,9 @@ func TestSubgraphFanOutFailflow(t *testing.T) {
 		g.SetReducer("outs", workflow.ReducerAppend)
 		g.AddTransitionForEach("Split", "Branch", "items", "item")
 		g.AddTransitionChain("Branch", "Join", workflow.End)
-		proxy.HandleGraph("sgfof.verify:900/outer", g)
-		proxy.HandleTask("sgfof.verify:900/split", func(ctx context.Context, f *workflow.Flow) error { return nil })
-		proxy.HandleTask("sgfof.verify:900/branch-prop", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleGraph("sgfof.verify:900/outer", g)
+		mux.HandleTask("sgfof.verify:900/split", func(ctx context.Context, f *workflow.Flow) error { return nil })
+		mux.HandleTask("sgfof.verify:900/branch-prop", func(ctx context.Context, f *workflow.Flow) error {
 			var out map[string]any
 			yield, err := f.Subgraph("sgfof.verify:900/inner", map[string]any{"item": f.GetString("item")}, &out)
 			if yield {
@@ -81,7 +81,7 @@ func TestSubgraphFanOutFailflow(t *testing.T) {
 			f.Set("outs", []string{out["out"].(string)})
 			return nil
 		})
-		proxy.HandleTask("sgfof.verify:900/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
+		mux.HandleTask("sgfof.verify:900/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 		_, outcome, err := eng.Run(ctx, "sgfof.verify:900/outer",
 			map[string]any{"items": []string{"a", "bad", "c"}}, nil)
@@ -92,9 +92,9 @@ func TestSubgraphFanOutFailflow(t *testing.T) {
 
 	t.Run("branch_recovers_child_error_flow_completes", func(t *testing.T) {
 		assert := testarossa.For(t)
-		eng, proxy := newEngine(t)
+		eng, mux := newEngine(t)
 		defer eng.Shutdown(ctx)
-		buildInner(proxy)
+		buildInner(mux)
 
 		g := workflow.NewGraph("Outer2")
 		g.SetURL("Split", "sgfof.verify:900/split2")
@@ -104,9 +104,9 @@ func TestSubgraphFanOutFailflow(t *testing.T) {
 		g.SetReducer("outs", workflow.ReducerAppend)
 		g.AddTransitionForEach("Split", "Branch", "items", "item")
 		g.AddTransitionChain("Branch", "Join", workflow.End)
-		proxy.HandleGraph("sgfof.verify:900/outer2", g)
-		proxy.HandleTask("sgfof.verify:900/split2", func(ctx context.Context, f *workflow.Flow) error { return nil })
-		proxy.HandleTask("sgfof.verify:900/branch-recover", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleGraph("sgfof.verify:900/outer2", g)
+		mux.HandleTask("sgfof.verify:900/split2", func(ctx context.Context, f *workflow.Flow) error { return nil })
+		mux.HandleTask("sgfof.verify:900/branch-recover", func(ctx context.Context, f *workflow.Flow) error {
 			var out map[string]any
 			yield, err := f.Subgraph("sgfof.verify:900/inner", map[string]any{"item": f.GetString("item")}, &out)
 			if yield {
@@ -120,7 +120,7 @@ func TestSubgraphFanOutFailflow(t *testing.T) {
 			f.Set("outs", []string{out["out"].(string)})
 			return nil
 		})
-		proxy.HandleTask("sgfof.verify:900/join2", func(ctx context.Context, f *workflow.Flow) error { return nil })
+		mux.HandleTask("sgfof.verify:900/join2", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 		_, outcome, err := eng.Run(ctx, "sgfof.verify:900/outer2",
 			map[string]any{"items": []string{"a", "bad", "c"}}, nil)

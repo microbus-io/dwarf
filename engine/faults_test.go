@@ -36,16 +36,16 @@ import (
 // boundedRun is Create+Await with a ceiling, so a wedge fails the test instead of hanging.
 // linear2 registers a two-node graph A->B->END whose tasks succeed, so a fault on A's transition (which
 // inserts B) can be exercised. okTasks records how many times each node ran.
-func linear2(proxy *TestProxy, prefix string, calls map[string]*int) {
+func linear2(mux *HostMux, prefix string, calls map[string]*int) {
 	g := workflow.NewGraph("Lin")
 	g.SetURL("A", prefix+"/a")
 	g.SetURL("B", prefix+"/b")
 	g.AddTransition("A", "B")
 	g.AddTransition("B", workflow.End)
-	proxy.HandleGraph(prefix+"/g", g)
+	mux.HandleGraph(prefix+"/g", g)
 	for _, node := range []string{"a", "b"} {
 		n := node
-		proxy.HandleTask(prefix+"/"+n, func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask(prefix+"/"+n, func(ctx context.Context, f *workflow.Flow) error {
 			if c := calls[n]; c != nil {
 				*c++
 			}
@@ -116,27 +116,27 @@ func driveLeaseRecovery(t *testing.T, e *Engine, retryDuration time.Duration, la
 func TestFault_ExecuteTask(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	proxy := NewTestProxy()
-	proxy.HandleTask("fexec/work", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("fexec/rescue", func(ctx context.Context, f *workflow.Flow) error {
+	mux := NewHostMux()
+	mux.HandleTask("fexec/work", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("fexec/rescue", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("rescued", "yes")
 		return nil
 	})
 	bare := workflow.NewGraph("Bare")
 	bare.SetURL("Work", "fexec/work")
 	bare.AddTransition("Work", workflow.End)
-	proxy.HandleGraph("fexec/bare", bare)
+	mux.HandleGraph("fexec/bare", bare)
 	handled := workflow.NewGraph("Handled")
 	handled.SetURL("Work", "fexec/work")
 	handled.SetURL("Rescue", "fexec/rescue")
 	handled.AddTransition("Work", workflow.End)
 	handled.AddTransitionOnError("Work", "Rescue")
 	handled.AddTransition("Rescue", workflow.End)
-	proxy.HandleGraph("fexec/handled", handled)
+	mux.HandleGraph("fexec/handled", handled)
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	// No onError -> the injected failure fails the flow.
@@ -159,16 +159,16 @@ func TestFault_ExecuteTask(t *testing.T) {
 func TestFault_PanicExecuteTask(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	proxy := NewTestProxy()
-	proxy.HandleTask("fpanic/boom", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux := NewHostMux()
+	mux.HandleTask("fpanic/boom", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	g := workflow.NewGraph("Boom")
 	g.SetURL("Boom", "fpanic/boom")
 	g.AddTransition("Boom", workflow.End)
-	proxy.HandleGraph("fpanic/g", g)
+	mux.HandleGraph("fpanic/g", g)
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	// A panic in the host call is caught at the boundary and fails the step (no wedge/crash-loop).
@@ -185,16 +185,16 @@ func TestFault_LoadGraph(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("G")
 	g.SetURL("A", "floadg/a")
 	g.AddTransition("A", workflow.End)
-	proxy.HandleGraph("floadg/g", g)
-	proxy.HandleTask("floadg/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("floadg/g", g)
+	mux.HandleTask("floadg/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	// Armed: Create fails (the graph "cannot be loaded"). Disarmed: it creates and completes.
@@ -213,13 +213,13 @@ func TestFault_LoadGraph(t *testing.T) {
 func TestFault_TransitionCommit(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	calls := map[string]*int{"a": new(int), "b": new(int)}
-	linear2(proxy, "ftrans", calls)
+	linear2(mux, "ftrans", calls)
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	// A's transition transaction fails once with a non-contention error, after A was marked completed. It is
@@ -239,13 +239,13 @@ func TestFault_TransitionCommit(t *testing.T) {
 func TestFault_Contention(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	calls := map[string]*int{"a": new(int), "b": new(int)}
-	linear2(proxy, "fcont", calls)
+	linear2(mux, "fcont", calls)
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	// A's transition transaction returns a lock-contention error once: Transact retries the closure to a
@@ -261,17 +261,17 @@ func TestFault_Contention(t *testing.T) {
 func TestFault_CompleteFlowCommit(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "fcfc/a")
 	g.AddTransition("A", workflow.End)
-	proxy.HandleGraph("fcfc/g", g)
+	mux.HandleGraph("fcfc/g", g)
 	var runs int
-	proxy.HandleTask("fcfc/a", func(ctx context.Context, f *workflow.Flow) error { runs++; return nil })
+	mux.HandleTask("fcfc/a", func(ctx context.Context, f *workflow.Flow) error { runs++; return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	// The flow-completion transaction fails once after the terminal step was marked completed with a
@@ -290,18 +290,18 @@ func TestFault_LeaseStaleWrite(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "flease/a")
 	g.AddTransition("A", workflow.End)
-	proxy.HandleGraph("flease/g", g)
+	mux.HandleGraph("flease/g", g)
 	// Atomic: the worker goroutine writes it while the test goroutine waits on it below.
 	var runs atomic.Int32
-	proxy.HandleTask("flease/a", func(ctx context.Context, f *workflow.Flow) error { runs.Add(1); return nil })
+	mux.HandleTask("flease/a", func(ctx context.Context, f *workflow.Flow) error { runs.Add(1); return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	e.SetTimeBudget(200 * time.Millisecond)
 	e.leaseMargin = 100 * time.Millisecond // lease = budget+margin = 300ms, so it expires quickly
 	assert.NoError(e.Startup(t.Context()))
@@ -328,16 +328,16 @@ func TestFault_LeaseStaleWrite(t *testing.T) {
 func TestFault_DropSignalStop(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "fsig/a")
 	g.AddTransition("A", workflow.End)
-	proxy.HandleGraph("fsig/g", g)
-	proxy.HandleTask("fsig/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("fsig/g", g)
+	mux.HandleTask("fsig/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	// The terminal wake is dropped, so Await cannot rely on the signal; it must return via the latch
@@ -352,16 +352,16 @@ func TestFault_DropDoorbell(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "fdoor/a")
 	g.AddTransition("A", workflow.End)
-	proxy.HandleGraph("fdoor/g", g)
-	proxy.HandleTask("fdoor/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("fdoor/g", g)
+	mux.HandleTask("fdoor/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	// The create-time doorbell is dropped, so nothing hands the entry step to a worker directly. It is
@@ -380,17 +380,17 @@ func TestFault_SubgraphReviveLost(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("Call", "fsub/call")
 	parent.AddTransition("Call", workflow.End)
-	proxy.HandleGraph("fsub/parent", parent)
+	mux.HandleGraph("fsub/parent", parent)
 	child := workflow.NewGraph("Child")
 	child.SetURL("X", "fsub/x")
 	child.AddTransition("X", workflow.End)
-	proxy.HandleGraph("fsub/child", child)
-	proxy.HandleTask("fsub/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("fsub/call", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("fsub/child", child)
+	mux.HandleTask("fsub/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("fsub/call", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph("fsub/child", nil, nil)
 		if yield || err != nil {
 			return err
@@ -400,7 +400,7 @@ func TestFault_SubgraphReviveLost(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	// The child's revive of the parked caller is lost: the caller wedges running+parkedSubgraph with a
@@ -437,16 +437,16 @@ func TestFault_ReapMidTree(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "freap/a")
 	g.AddTransition("A", workflow.End)
-	proxy.HandleGraph("freap/g", g)
-	proxy.HandleTask("freap/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("freap/g", g)
+	mux.HandleTask("freap/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	shortenDeletion(e, time.Millisecond, time.Hour) // due immediately; the test drives reaps
 	assert.NoError(e.Startup(t.Context()))
 
@@ -473,16 +473,16 @@ func TestFault_ReapMidTree(t *testing.T) {
 func TestFault_RefillScanErr(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "frefill/a")
 	g.AddTransition("A", workflow.End)
-	proxy.HandleGraph("frefill/g", g)
-	proxy.HandleTask("frefill/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("frefill/g", g)
+	mux.HandleTask("frefill/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	// The refiller's band scan errors once. Instead of refilling empty and idling every worker forever, it
@@ -506,7 +506,7 @@ func TestFault_RefillScanErrPreservesCache(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(NewTestProxy())
+	e.SetHost(NewHostMux())
 	assert.NoError(e.SetWorkers(0)) // no workers, so nothing drains the cache underneath the assertion
 	assert.NoError(e.Startup(t.Context()))
 

@@ -39,23 +39,23 @@ func TestInterruptpayloadflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("Interrupt")
 	graph.SetURL("Setup", "interruptpayloadflow.verify:428/setup")
 	graph.SetURL("Ask", "interruptpayloadflow.verify:428/ask")
 	graph.AddTransitionChain("Setup", "Ask", workflow.End)
-	proxy.HandleGraph("interruptpayloadflow.verify:428/interrupt", graph)
+	mux.HandleGraph("interruptpayloadflow.verify:428/interrupt", graph)
 
-	proxy.HandleTask("interruptpayloadflow.verify:428/setup", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("interruptpayloadflow.verify:428/setup", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("prompt", "choose")
 		return nil
 	})
-	proxy.HandleTask("interruptpayloadflow.verify:428/ask", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("interruptpayloadflow.verify:428/ask", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Interrupt(map[string]any{
 			"question": "pick one",
 			"options":  []string{"a", "b"},

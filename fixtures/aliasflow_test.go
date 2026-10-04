@@ -30,10 +30,10 @@ func TestAliasflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("Alias")
@@ -47,27 +47,27 @@ func TestAliasflow(t *testing.T) {
 	graph.AddTransitionGoto("S", "BPrime")
 	graph.AddTransitionChain("A", "B", "C", workflow.End)
 	graph.AddTransitionChain("BPrime", "D", workflow.End)
-	proxy.HandleGraph("aliasflow.verify:428/alias", graph)
+	mux.HandleGraph("aliasflow.verify:428/alias", graph)
 
-	proxy.HandleTask("aliasflow.verify:428/task-s", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("aliasflow.verify:428/task-s", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetString("branch") == "alt" {
 			f.Goto("BPrime")
 		}
 		return nil
 	})
-	proxy.HandleTask("aliasflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("aliasflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("path", f.GetString("path")+"A")
 		return nil
 	})
-	proxy.HandleTask("aliasflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("aliasflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("path", f.GetString("path")+"B")
 		return nil
 	})
-	proxy.HandleTask("aliasflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("aliasflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("path", f.GetString("path")+"C")
 		return nil
 	})
-	proxy.HandleTask("aliasflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("aliasflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("path", f.GetString("path")+"D")
 		return nil
 	})

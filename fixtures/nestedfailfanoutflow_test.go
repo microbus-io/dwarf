@@ -33,7 +33,7 @@ func TestNestedfailfanoutflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	// 3x3 nested forEach: taskA -> forEach(outers) -> taskO -> forEach(inners) -> taskI -> joinI -> joinO -> END
 	graph := workflow.NewGraph("Nested")
@@ -47,23 +47,23 @@ func TestNestedfailfanoutflow(t *testing.T) {
 	graph.AddTransitionForEach("TaskA", "TaskO", "outers", "outerItem")
 	graph.AddTransitionForEach("TaskO", "TaskI", "inners", "innerItem")
 	graph.AddTransitionChain("TaskI", "JoinI", "JoinO", workflow.End)
-	proxy.HandleGraph("nestedfailfanoutflow.verify:428/nested", graph)
+	mux.HandleGraph("nestedfailfanoutflow.verify:428/nested", graph)
 
 	// Shared test state
 	var mu sync.Mutex
 	var innerStarts, innerCompleted, joinIRuns, joinORuns int
 	gate := make(chan struct{})
 
-	proxy.HandleTask("nestedfailfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("nestedfailfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("outers", []int{0, 1, 2})
 		return nil
 	})
-	proxy.HandleTask("nestedfailfanoutflow.verify:428/task-o", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("nestedfailfanoutflow.verify:428/task-o", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("inners", []int{0, 1, 2})
 		f.SetInt("currentOuter", f.GetInt("outerItem"))
 		return nil
 	})
-	proxy.HandleTask("nestedfailfanoutflow.verify:428/task-i", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("nestedfailfanoutflow.verify:428/task-i", func(ctx context.Context, f *workflow.Flow) error {
 		mu.Lock()
 		innerStarts++
 		mu.Unlock()
@@ -83,13 +83,13 @@ func TestNestedfailfanoutflow(t *testing.T) {
 		mu.Unlock()
 		return nil
 	})
-	proxy.HandleTask("nestedfailfanoutflow.verify:428/join-i", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("nestedfailfanoutflow.verify:428/join-i", func(ctx context.Context, f *workflow.Flow) error {
 		mu.Lock()
 		joinIRuns++
 		mu.Unlock()
 		return nil
 	})
-	proxy.HandleTask("nestedfailfanoutflow.verify:428/join-o", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("nestedfailfanoutflow.verify:428/join-o", func(ctx context.Context, f *workflow.Flow) error {
 		mu.Lock()
 		joinORuns++
 		mu.Unlock()
@@ -98,7 +98,7 @@ func TestNestedfailfanoutflow(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	flowKey, err := eng.Create(ctx, "nestedfailfanoutflow.verify:428/nested", nil, nil)

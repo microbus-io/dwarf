@@ -38,10 +38,10 @@ func TestForkInterruptedCohortFlow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("ForkInterruptedCohort")
@@ -54,22 +54,22 @@ func TestForkInterruptedCohortFlow(t *testing.T) {
 	graph.AddTransition("Src", "B")
 	graph.AddTransition("A", "J")
 	graph.AddTransitionChain("B", "J", workflow.End)
-	proxy.HandleGraph("forkinterruptedcohortflow.verify:428/fork-interrupted-cohort", graph)
+	mux.HandleGraph("forkinterruptedcohortflow.verify:428/fork-interrupted-cohort", graph)
 
-	proxy.HandleTask("forkinterruptedcohortflow.verify:428/src", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forkinterruptedcohortflow.verify:428/src", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("forkinterruptedcohortflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forkinterruptedcohortflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
 		return errors.New("branch A failed")
 	})
-	proxy.HandleTask("forkinterruptedcohortflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forkinterruptedcohortflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Interrupt(map[string]any{"branch": "B"}, nil)
 		if yield || err != nil {
 			return err
 		}
 		return nil
 	})
-	proxy.HandleTask("forkinterruptedcohortflow.verify:428/j", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forkinterruptedcohortflow.verify:428/j", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 

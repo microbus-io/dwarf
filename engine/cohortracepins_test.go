@@ -60,7 +60,7 @@ func newCohortRaceRig(t *testing.T, prefix string) *cohortRaceRig {
 		jRuns:    &atomic.Int32{},
 	}
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("CohortRace")
 	g.SetURL("A", prefix+"/a")
 	g.SetURL("X", prefix+"/x")
@@ -73,8 +73,8 @@ func newCohortRaceRig(t *testing.T, prefix string) *cohortRaceRig {
 	g.AddTransition("Y", "J")
 	g.AddTransition("J", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph(prefix+"/g", g)
-	proxy.HandleTask(prefix+"/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph(prefix+"/g", g)
+	mux.HandleTask(prefix+"/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	hold := func(started chan<- struct{}, gate <-chan struct{}) func(context.Context, *workflow.Flow) error {
 		return func(ctx context.Context, f *workflow.Flow) error {
 			started <- struct{}{}
@@ -82,13 +82,13 @@ func newCohortRaceRig(t *testing.T, prefix string) *cohortRaceRig {
 			return nil
 		}
 	}
-	proxy.HandleTask(prefix+"/x", hold(xStarted, xGate))
-	proxy.HandleTask(prefix+"/y", hold(yStarted, yGate))
-	proxy.HandleTask(prefix+"/j", func(ctx context.Context, f *workflow.Flow) error { r.jRuns.Add(1); return nil })
+	mux.HandleTask(prefix+"/x", hold(xStarted, xGate))
+	mux.HandleTask(prefix+"/y", hold(yStarted, yGate))
+	mux.HandleTask(prefix+"/j", func(ctx context.Context, f *workflow.Flow) error { r.jRuns.Add(1); return nil })
 
 	r.e = NewEngineUnderTest(t.Name())
 	assert.NoError(r.e.SetWorkers(4)) // both branches must be in their tasks at once
-	r.e.SetHost(proxy)
+	r.e.SetHost(mux)
 	assert.NoError(r.e.Startup(t.Context()))
 	// Cleanups run LIFO: the gates open first, so no worker is left blocked in a task when Shutdown drains.
 	t.Cleanup(func() { r.e.Shutdown(context.Background()) })

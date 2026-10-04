@@ -45,18 +45,18 @@ func TestFault_InterruptStaleWriteRollback(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("Call", "fisw/call")
 	parent.AddTransition("Call", workflow.End)
-	proxy.HandleGraph("fisw/parent", parent)
+	mux.HandleGraph("fisw/parent", parent)
 	child := workflow.NewGraph("Child")
 	child.SetURL("X", "fisw/x")
 	child.AddTransition("X", workflow.End)
-	proxy.HandleGraph("fisw/child", child)
+	mux.HandleGraph("fisw/child", child)
 
-	proxy.HandleTask("fisw/call", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fisw/call", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph("fisw/child", nil, nil)
 		if yield || err != nil {
 			return err
@@ -65,7 +65,7 @@ func TestFault_InterruptStaleWriteRollback(t *testing.T) {
 	})
 	// Atomic: the worker goroutine writes it while the test goroutine waits on it below.
 	var xCalls atomic.Int32
-	proxy.HandleTask("fisw/x", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fisw/x", func(ctx context.Context, f *workflow.Flow) error {
 		xCalls.Add(1)
 		yield, err := f.Interrupt(map[string]any{"ask": "approve?"}, nil)
 		if yield || err != nil {
@@ -76,7 +76,7 @@ func TestFault_InterruptStaleWriteRollback(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	e.SetTimeBudget(200 * time.Millisecond)
 	e.leaseMargin = 100 * time.Millisecond // lease = budget+margin = 300ms, so lease recovery re-dispatches fast
 	assert.NoError(e.Startup(t.Context()))
@@ -127,7 +127,7 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 	setup := func(t *testing.T, leafStatus string) (*Engine, *sequel.DB) {
 		assert := testarossa.For(t)
 		e := NewEngineUnderTest(t.Name())
-		e.SetHost(NewTestProxy())
+		e.SetHost(NewHostMux())
 		assert.NoError(e.Startup(t.Context()))
 		db, err := e.db.Shard(1)
 		assert.NoError(err)

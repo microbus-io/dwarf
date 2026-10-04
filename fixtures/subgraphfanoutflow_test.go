@@ -31,10 +31,10 @@ func TestSubgraphfanoutflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// Outer graph: A -> {NormalB, RunSub, NormalD} -> E
@@ -51,27 +51,27 @@ func TestSubgraphfanoutflow(t *testing.T) {
 	outer.AddTransition("NormalB", "TaskE")
 	outer.AddTransition("RunSub", "TaskE")
 	outer.AddTransitionChain("NormalD", "TaskE", workflow.End)
-	proxy.HandleGraph("subgraphfanoutflow.verify:428/sub-fan-out", outer)
+	mux.HandleGraph("subgraphfanoutflow.verify:428/sub-fan-out", outer)
 
 	// Sub graph: X -> Y
 	sub := workflow.NewGraph("Sub")
 	sub.SetURL("TaskX", "subgraphfanoutflow.verify:428/task-x")
 	sub.SetURL("TaskY", "subgraphfanoutflow.verify:428/task-y")
 	sub.AddTransitionChain("TaskX", "TaskY", workflow.End)
-	proxy.HandleGraph("subgraphfanoutflow.verify:428/sub", sub)
+	mux.HandleGraph("subgraphfanoutflow.verify:428/sub", sub)
 
-	proxy.HandleTask("subgraphfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subgraphfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("subgraphfanoutflow.verify:428/normal-b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subgraphfanoutflow.verify:428/normal-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("bResult", "b")
 		return nil
 	})
-	proxy.HandleTask("subgraphfanoutflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subgraphfanoutflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("xPassed", true)
 		return nil
 	})
-	proxy.HandleTask("subgraphfanoutflow.verify:428/task-y", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subgraphfanoutflow.verify:428/task-y", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetBool("xPassed") {
 			f.SetString("subResult", "sub")
 		} else {
@@ -79,7 +79,7 @@ func TestSubgraphfanoutflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("subgraphfanoutflow.verify:428/run-sub", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subgraphfanoutflow.verify:428/run-sub", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		yield, err := f.Subgraph("subgraphfanoutflow.verify:428/sub", nil, &out)
 		if yield || err != nil {
@@ -90,11 +90,11 @@ func TestSubgraphfanoutflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("subgraphfanoutflow.verify:428/normal-d", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subgraphfanoutflow.verify:428/normal-d", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("dResult", "d")
 		return nil
 	})
-	proxy.HandleTask("subgraphfanoutflow.verify:428/task-e", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subgraphfanoutflow.verify:428/task-e", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("result", fmt.Sprintf("%s/%s/%s", f.GetString("bResult"), f.GetString("subResult"), f.GetString("dResult")))
 		return nil
 	})

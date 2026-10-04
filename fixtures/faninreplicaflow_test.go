@@ -16,7 +16,7 @@ limitations under the License.
 
 /*
 Fan-in across replicas. Two engines share one database (a shared in-memory SQLite DSN), each with its
-own TestProxy and workers, wired as peers both ways. Every flow fans out A -> {B, C, D} and converges
+own HostMux and workers, wired as peers both ways. Every flow fans out A -> {B, C, D} and converges
 on a reducer'd fan-in E, so the fan-out siblings are claimed by whichever replica wins each step and the
 merge runs on whichever replica completes the cohort last. This pins that the reducer merge and exit-step
 scan are correct when a cohort's branches execute on different replicas. Distribution is asserted
@@ -42,10 +42,10 @@ func TestFanInReplicaflow(t *testing.T) {
 
 	const base = "faninreplica.verify:428"
 
-	// buildProxy registers the same fan-out/fan-in graph and handlers on a proxy, so either replica
+	// buildMux registers the same fan-out/fan-in graph and handlers on a mux, so either replica
 	// executes any step identically. Each branch writes only its delta; the reducers fold at fan-in.
-	buildProxy := func() *engine.TestProxy {
-		p := engine.NewTestProxy()
+	buildMux := func() *engine.HostMux {
+		p := engine.NewHostMux()
 		g := workflow.NewGraph("FanInReplica")
 		g.SetURL("A", base+"/a")
 		g.SetURL("B", base+"/b")
@@ -93,8 +93,8 @@ func TestFanInReplicaflow(t *testing.T) {
 		return p
 	}
 
-	proxy1 := buildProxy()
-	proxy2 := buildProxy()
+	mux1 := buildMux()
+	mux2 := buildMux()
 
 	// Both engines share one isolated database via a common test-DB key (each built with
 	// NewEngineUnderTest(t), which keys by t.Name()), so pointing SEQUEL_TESTING_DSN at a real server
@@ -102,11 +102,11 @@ func TestFanInReplicaflow(t *testing.T) {
 	// shared in-memory SQLite database.
 	eng1 := engine.NewEngineUnderTest(t.Name())
 	defer eng1.Shutdown(ctx)
-	eng1.SetHost(proxy1)
+	eng1.SetHost(mux1)
 	assert.NoError(eng1.SetWorkers(4))
 	eng2 := engine.NewEngineUnderTest(t.Name())
 	defer eng2.Shutdown(ctx)
-	eng2.SetHost(proxy2)
+	eng2.SetHost(mux2)
 	assert.NoError(eng2.SetWorkers(4))
 	assert.NoError(eng1.Startup(ctx))
 	t.Cleanup(func() { eng1.Shutdown(ctx) })

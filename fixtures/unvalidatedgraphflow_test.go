@@ -38,9 +38,9 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// nilGraphHost wraps a TestProxy but returns (nil, nil) from LoadGraph - a host that neither finds nor
+// nilGraphHost wraps a HostMux but returns (nil, nil) from LoadGraph - a host that neither finds nor
 // errors on a graph. Create must treat that as a 404, never dereference the nil graph.
-type nilGraphHost struct{ *engine.TestProxy }
+type nilGraphHost struct{ *engine.HostMux }
 
 func (nilGraphHost) LoadGraph(ctx context.Context, url string) (*workflow.Graph, error) {
 	return nil, nil
@@ -54,7 +54,7 @@ func TestUnvalidatedGraphflow(t *testing.T) {
 	// empty forEach fires the fan-in and runs the downstream task rather than silently completing early.
 	t.Run("engine_validates_so_empty_foreach_fires_fanin", func(t *testing.T) {
 		assert := testarossa.For(t)
-		proxy := engine.NewTestProxy()
+		mux := engine.NewHostMux()
 
 		var workRuns, joinRuns, afterRuns atomic.Int64
 		g := workflow.NewGraph("Unvalidated")
@@ -69,15 +69,15 @@ func TestUnvalidatedGraphflow(t *testing.T) {
 		g.AddTransition("After", workflow.End)
 		// DELIBERATELY do not call g.Validate() here - the engine validates at Create, and the fan-in
 		// routing is derived from the graph structure at dispatch regardless.
-		proxy.HandleGraph("unvalidated.verify:428/g", g)
-		proxy.HandleTask("unvalidated.verify:428/spawn", func(ctx context.Context, f *workflow.Flow) error { return nil })
-		proxy.HandleTask("unvalidated.verify:428/work", func(ctx context.Context, f *workflow.Flow) error { workRuns.Add(1); return nil })
-		proxy.HandleTask("unvalidated.verify:428/join", func(ctx context.Context, f *workflow.Flow) error { joinRuns.Add(1); return nil })
-		proxy.HandleTask("unvalidated.verify:428/after", func(ctx context.Context, f *workflow.Flow) error { afterRuns.Add(1); return nil })
+		mux.HandleGraph("unvalidated.verify:428/g", g)
+		mux.HandleTask("unvalidated.verify:428/spawn", func(ctx context.Context, f *workflow.Flow) error { return nil })
+		mux.HandleTask("unvalidated.verify:428/work", func(ctx context.Context, f *workflow.Flow) error { workRuns.Add(1); return nil })
+		mux.HandleTask("unvalidated.verify:428/join", func(ctx context.Context, f *workflow.Flow) error { joinRuns.Add(1); return nil })
+		mux.HandleTask("unvalidated.verify:428/after", func(ctx context.Context, f *workflow.Flow) error { afterRuns.Add(1); return nil })
 
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
-		eng.SetHost(proxy)
+		eng.SetHost(mux)
 		assert.NoError(eng.Startup(t.Context()))
 
 		_, outcome, err := eng.Run(ctx, "unvalidated.verify:428/g", map[string]any{"items": []int{}}, nil)
@@ -95,7 +95,7 @@ func TestUnvalidatedGraphflow(t *testing.T) {
 		assert := testarossa.For(t)
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
-		eng.SetHost(nilGraphHost{engine.NewTestProxy()})
+		eng.SetHost(nilGraphHost{engine.NewHostMux()})
 		assert.NoError(eng.Startup(t.Context()))
 
 		_, err := eng.Create(ctx, "anything", nil, nil)
@@ -108,18 +108,18 @@ func TestUnvalidatedGraphflow(t *testing.T) {
 	// A structurally invalid graph (a node unreachable from the entry point) is rejected at Create.
 	t.Run("structurally_invalid_graph_rejected_at_create", func(t *testing.T) {
 		assert := testarossa.For(t)
-		proxy := engine.NewTestProxy()
+		mux := engine.NewHostMux()
 		g := workflow.NewGraph("Invalid")
 		g.SetURL("Entry", "invalid.verify:428/entry")
 		g.SetURL("Orphan", "invalid.verify:428/orphan") // has a URL but nothing transitions to it
 		g.AddTransition("Entry", workflow.End)
-		proxy.HandleGraph("invalid.verify:428/g", g)
-		proxy.HandleTask("invalid.verify:428/entry", func(ctx context.Context, f *workflow.Flow) error { return nil })
-		proxy.HandleTask("invalid.verify:428/orphan", func(ctx context.Context, f *workflow.Flow) error { return nil })
+		mux.HandleGraph("invalid.verify:428/g", g)
+		mux.HandleTask("invalid.verify:428/entry", func(ctx context.Context, f *workflow.Flow) error { return nil })
+		mux.HandleTask("invalid.verify:428/orphan", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
-		eng.SetHost(proxy)
+		eng.SetHost(mux)
 		assert.NoError(eng.Startup(t.Context()))
 
 		_, err := eng.Create(ctx, "invalid.verify:428/g", nil, nil)

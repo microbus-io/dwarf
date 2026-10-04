@@ -30,10 +30,10 @@ func TestInterruptedfanoutflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("InterruptedFanOut")
@@ -50,16 +50,16 @@ func TestInterruptedfanoutflow(t *testing.T) {
 	graph.AddTransition("A", "J")
 	graph.AddTransition("B", "J")
 	graph.AddTransitionChain("C", "J", workflow.End)
-	proxy.HandleGraph("interruptedfanoutflow.verify:428/interrupted-fan-out", graph)
+	mux.HandleGraph("interruptedfanoutflow.verify:428/interrupted-fan-out", graph)
 
-	proxy.HandleTask("interruptedfanoutflow.verify:428/src", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("interruptedfanoutflow.verify:428/src", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("interruptedfanoutflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("interruptedfanoutflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("executed", 1)
 		return nil
 	})
-	proxy.HandleTask("interruptedfanoutflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("interruptedfanoutflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Interrupt(map[string]any{"branch": "B"}, nil)
 		if yield || err != nil {
 			return err
@@ -67,11 +67,11 @@ func TestInterruptedfanoutflow(t *testing.T) {
 		f.SetInt("executed", 1)
 		return nil
 	})
-	proxy.HandleTask("interruptedfanoutflow.verify:428/c", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("interruptedfanoutflow.verify:428/c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("executed", 1)
 		return nil
 	})
-	proxy.HandleTask("interruptedfanoutflow.verify:428/j", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("interruptedfanoutflow.verify:428/j", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("totalExecuted", f.GetInt("executed"))
 		return nil
 	})

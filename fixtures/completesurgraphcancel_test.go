@@ -53,21 +53,21 @@ func TestCompleteSurgraph_vs_TerminateRoot_BothOrders(t *testing.T) {
 		assert := testarossa.For(t)
 		callResumed = make(chan struct{}, 1)
 		callBlock = make(chan struct{})
-		proxy := engine.NewTestProxy()
+		mux := engine.NewHostMux()
 
 		parent := workflow.NewGraph("Parent")
 		parent.SetURL("Call", prefix+"/call")
 		parent.AddTransition("Call", workflow.End)
 		assert.NoError(parent.Validate())
-		proxy.HandleGraph(prefix+"/parent", parent)
+		mux.HandleGraph(prefix+"/parent", parent)
 
 		child := workflow.NewGraph("Child")
 		child.SetURL("X", prefix+"/x")
 		child.AddTransition("X", workflow.End)
 		assert.NoError(child.Validate())
-		proxy.HandleGraph(prefix+"/child", child)
+		mux.HandleGraph(prefix+"/child", child)
 
-		proxy.HandleTask(prefix+"/call", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask(prefix+"/call", func(ctx context.Context, f *workflow.Flow) error {
 			yield, err := f.Subgraph(prefix+"/child", nil, nil)
 			if yield || err != nil {
 				return err
@@ -81,10 +81,10 @@ func TestCompleteSurgraph_vs_TerminateRoot_BothOrders(t *testing.T) {
 			<-callBlock
 			return nil
 		})
-		proxy.HandleTask(prefix+"/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
+		mux.HandleTask(prefix+"/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 		e = engine.NewEngineUnderTest(t.Name())
-		e.SetHost(proxy)
+		e.SetHost(mux)
 		assert.NoError(e.Startup(t.Context()))
 		return e, prefix + "/parent", callResumed, callBlock
 	}

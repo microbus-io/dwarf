@@ -31,10 +31,10 @@ func TestRetryloopflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("RetryLoop")
@@ -47,22 +47,22 @@ func TestRetryloopflow(t *testing.T) {
 	graph.AddTransition("TaskB", "TaskC")
 	graph.AddTransition("Handler", "TaskB")
 	graph.AddTransition("TaskC", workflow.End)
-	proxy.HandleGraph("retryloopflow.verify:428/retry-loop", graph)
+	mux.HandleGraph("retryloopflow.verify:428/retry-loop", graph)
 
-	proxy.HandleTask("retryloopflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("retryloopflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("retryloopflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("retryloopflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetInt("attempts") >= f.GetInt("target") {
 			return nil
 		}
 		return errors.New("not yet")
 	})
-	proxy.HandleTask("retryloopflow.verify:428/handler", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("retryloopflow.verify:428/handler", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("attempts", f.GetInt("attempts")+1)
 		return nil
 	})
-	proxy.HandleTask("retryloopflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("retryloopflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("finalAttempts", f.GetInt("attempts"))
 		return nil
 	})

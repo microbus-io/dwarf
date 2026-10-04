@@ -42,24 +42,24 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("RunInner", "scss/run-inner")
 	parent.AddTransition("RunInner", workflow.End)
 	assert.NoError(parent.Validate())
-	proxy.HandleGraph("scss/parent", parent)
+	mux.HandleGraph("scss/parent", parent)
 
 	inner := workflow.NewGraph("Inner")
 	inner.SetURL("Boom", "scss/boom")
 	inner.AddTransition("Boom", workflow.End)
 	assert.NoError(inner.Validate())
-	proxy.HandleGraph("scss/inner", inner)
+	mux.HandleGraph("scss/inner", inner)
 
 	var mu sync.Mutex
 	var childKey string
 	captured := make(chan struct{})
 	release := make(chan struct{})
-	proxy.HandleTask("scss/boom", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("scss/boom", func(ctx context.Context, f *workflow.Flow) error {
 		mu.Lock()
 		childKey = f.FlowKey() // a subgraph child sees its own (child) flow key
 		mu.Unlock()
@@ -67,7 +67,7 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 		<-release // stay running until the test has an Await registered on the child key
 		return errors.New("child boom", http.StatusInternalServerError)
 	})
-	proxy.HandleTask("scss/run-inner", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("scss/run-inner", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph("scss/inner", map[string]any{}, nil)
 		if yield || err != nil {
 			return err
@@ -77,7 +77,7 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	// Run the parent (root) in the background; Run blocks until the root flow stops.

@@ -41,8 +41,8 @@ func TestForEachStrip_ScopedToItsOwnCohort(t *testing.T) {
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	proxy := engine.NewTestProxy()
-	e.SetHost(proxy)
+	mux := engine.NewHostMux()
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	g := workflow.NewGraph("Collide")
@@ -54,17 +54,17 @@ func TestForEachStrip_ScopedToItsOwnCohort(t *testing.T) {
 	g.AddTransitionForEach("Split", "Page", "pages", "page")
 	g.AddTransitionChain("Page", "Join", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("c/wf", g)
+	mux.HandleGraph("c/wf", g)
 
-	proxy.HandleTask("c/split", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("c/page", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("c/split", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("c/page", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("done", 1)
 		return nil
 	})
 	// The fan-in task writes fields whose names collide EXACTLY with the bookkeeping the forEach injects
 	// (as="page" reserves page / pageIndex / pageCount). It runs at the convergence - outside the cohort - so
 	// they are its own output and must survive to final_state.
-	proxy.HandleTask("c/join", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("c/join", func(ctx context.Context, f *workflow.Flow) error {
 		// The cohort IS behind us here, so the branch's own bookkeeping is correctly gone from the input.
 		if f.Has("page") || f.Has("pageIndex") || f.Has("pageCount") {
 			return errors.New("the closing cohort's bookkeeping must not survive its own fan-in")
@@ -94,8 +94,8 @@ func TestForEachStrip_NestedOuterSurvivesInnerFanIn(t *testing.T) {
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	proxy := engine.NewTestProxy()
-	e.SetHost(proxy)
+	mux := engine.NewHostMux()
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	// Split -forEach(pages, as=page)-> Page -forEach(chunks, as=chunk)-> Chunk -> JoinChunk -> JoinPage
@@ -111,14 +111,14 @@ func TestForEachStrip_NestedOuterSurvivesInnerFanIn(t *testing.T) {
 	g.AddTransitionChain("Chunk", "JoinChunk")
 	g.AddTransitionChain("JoinChunk", "JoinPage", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("n/wf", g)
+	mux.HandleGraph("n/wf", g)
 
-	proxy.HandleTask("n/Split", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("n/Page", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("n/Split", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("n/Page", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("chunks", []string{"c1", "c2"})
 		return nil
 	})
-	proxy.HandleTask("n/Chunk", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("n/Chunk", func(ctx context.Context, f *workflow.Flow) error {
 		// A branch of the inner cohort sees BOTH levels' bookkeeping.
 		if f.GetString("page") == "" || f.GetString("chunk") == "" {
 			return errors.New("an inner branch must see both its own element and its outer one")
@@ -126,7 +126,7 @@ func TestForEachStrip_NestedOuterSurvivesInnerFanIn(t *testing.T) {
 		return nil
 	})
 	// The inner fan-in. Its own cohort (chunks) is behind it, but it is STILL inside a page branch.
-	proxy.HandleTask("n/JoinChunk", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("n/JoinChunk", func(ctx context.Context, f *workflow.Flow) error {
 		if f.Has("chunk") || f.Has("chunkIndex") || f.Has("chunkCount") {
 			return errors.New("the inner cohort's own bookkeeping must not survive its fan-in")
 		}
@@ -140,7 +140,7 @@ func TestForEachStrip_NestedOuterSurvivesInnerFanIn(t *testing.T) {
 		f.Set("seen", []string{page})
 		return nil
 	})
-	proxy.HandleTask("n/JoinPage", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("n/JoinPage", func(ctx context.Context, f *workflow.Flow) error {
 		if f.Has("page") || f.Has("pageIndex") || f.Has("pageCount") {
 			return errors.New("the outer cohort's bookkeeping must be gone once ITS fan-in closes")
 		}
@@ -169,8 +169,8 @@ func TestForEachStrip_FailedFanOutStillStrips(t *testing.T) {
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	proxy := engine.NewTestProxy()
-	e.SetHost(proxy)
+	mux := engine.NewHostMux()
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	g := workflow.NewGraph("FailFan")
@@ -181,16 +181,16 @@ func TestForEachStrip_FailedFanOutStillStrips(t *testing.T) {
 	g.AddTransitionForEach("Split", "Page", "pages", "page")
 	g.AddTransitionChain("Page", "Join", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("ff/wf", g)
+	mux.HandleGraph("ff/wf", g)
 
-	proxy.HandleTask("ff/split", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("ff/page", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("ff/split", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("ff/page", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetString("page") == "bad" {
 			return errors.New("branch failed")
 		}
 		return nil
 	})
-	proxy.HandleTask("ff/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("ff/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	_, outcome, err := e.Run(ctx, "ff/wf", map[string]any{"pages": []string{"ok1", "bad", "ok2"}}, nil)
 	assert.NoError(err)
@@ -221,8 +221,8 @@ func TestFailedFanOut_KeepsEveryBranchesIntermediateOutput(t *testing.T) {
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	proxy := engine.NewTestProxy()
-	e.SetHost(proxy)
+	mux := engine.NewHostMux()
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	// Two-STEP branches: Cell writes, then Enrich writes. Cell's output survives only in Enrich's `state`.
@@ -236,23 +236,23 @@ func TestFailedFanOut_KeepsEveryBranchesIntermediateOutput(t *testing.T) {
 	g.AddTransitionForEach("Seed", "Cell", "items", "item")
 	g.AddTransitionChain("Cell", "Enrich", "Join", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("ms/wf", g)
+	mux.HandleGraph("ms/wf", g)
 
-	proxy.HandleTask("ms/Seed", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("ms/Seed", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	// The FIRST step of each branch. Its output must reach final_state for every branch, not just branch 0.
-	proxy.HandleTask("ms/Cell", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("ms/Cell", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("cells", []string{"cell:" + f.GetString("item")})
 		return nil
 	})
 	// The SECOND step. One branch fails here, so the cohort resolves with failures and never reaches the fan-in.
-	proxy.HandleTask("ms/Enrich", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("ms/Enrich", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetString("item") == "b" {
 			return errors.New("branch b failed at Enrich")
 		}
 		f.Set("enriched", []string{"enriched:" + f.GetString("item")})
 		return nil
 	})
-	proxy.HandleTask("ms/Join", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("ms/Join", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	_, outcome, err := e.Run(ctx, "ms/wf", map[string]any{"items": []string{"a", "b", "c"}}, nil)
 	assert.NoError(err)

@@ -50,30 +50,30 @@ func TestRootFlowID_CreateAndSubgraph(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("P", "rootid.verify:0/p")
 	parent.AddTransition("P", workflow.End)
-	proxy.HandleGraph("rootid.verify:0/parent", parent)
+	mux.HandleGraph("rootid.verify:0/parent", parent)
 	child := workflow.NewGraph("Child")
 	child.SetURL("K", "rootid.verify:0/k")
 	child.AddTransition("K", workflow.End)
-	proxy.HandleGraph("rootid.verify:0/child", child)
+	mux.HandleGraph("rootid.verify:0/child", child)
 
-	proxy.HandleTask("rootid.verify:0/p", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("rootid.verify:0/p", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph("rootid.verify:0/child", nil, nil)
 		if yield || err != nil {
 			return err
 		}
 		return nil
 	})
-	proxy.HandleTask("rootid.verify:0/k", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("rootid.verify:0/k", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	flowKey, out, err := e.Run(ctx, "rootid.verify:0/parent", nil, nil)
@@ -110,19 +110,19 @@ func TestRootFlowID_ForkIsItsOwnRoot(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	g := workflow.NewGraph("Lin")
 	g.SetURL("A", "rootidfork.verify:0/a")
 	g.SetURL("B", "rootidfork.verify:0/b")
 	g.AddTransition("A", "B")
 	g.AddTransition("B", workflow.End)
-	proxy.HandleGraph("rootidfork.verify:0/lin", g)
-	proxy.HandleTask("rootidfork.verify:0/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("rootidfork.verify:0/b", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("rootidfork.verify:0/lin", g)
+	mux.HandleTask("rootidfork.verify:0/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("rootidfork.verify:0/b", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	flowKey, out, err := e.Run(ctx, "rootidfork.verify:0/lin", nil, nil)
@@ -162,16 +162,16 @@ func TestRootFlowID_ContinueStartsFreshRoot(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	g := workflow.NewGraph("Turn")
 	g.SetURL("T", "rootidcont.verify:0/t")
 	g.AddTransition("T", workflow.End)
-	proxy.HandleGraph("rootidcont.verify:0/turn", g)
-	proxy.HandleTask("rootidcont.verify:0/t", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("rootidcont.verify:0/turn", g)
+	mux.HandleTask("rootidcont.verify:0/t", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	firstKey, out, err := e.Run(ctx, "rootidcont.verify:0/turn", nil, nil)

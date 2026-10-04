@@ -43,7 +43,7 @@ Then dip into the topic guides as you need them:
   orchestration) and how to make follow-up delivery reliable.
 - **[Fan-out & subgraphs](fan-out-and-subgraphs.md)** — running work in parallel and calling
   sub-workflows.
-- **[Testing](testing.md)** — `NewEngineUnderTest` and `TestProxy` patterns.
+- **[Testing](testing.md)** — `NewEngineUnderTest` and `HostMux` patterns.
 
 ## For operators
 

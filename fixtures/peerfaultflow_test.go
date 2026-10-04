@@ -40,8 +40,8 @@ func peerFleet(t *testing.T, name string) (creator, eng1, eng2 *engine.Engine, r
 	assert := testarossa.For(t)
 	ran = map[string]*atomic.Int64{"0": {}, "1": {}, "2": {}}
 
-	buildProxy := func(replica string) *engine.TestProxy {
-		p := engine.NewTestProxy()
+	buildMux := func(replica string) *engine.HostMux {
+		p := engine.NewHostMux()
 		g := workflow.NewGraph("Pair")
 		g.SetURL("A", name+"/a")
 		g.SetURL("B", name+"/b")
@@ -59,15 +59,15 @@ func peerFleet(t *testing.T, name string) (creator, eng1, eng2 *engine.Engine, r
 	}
 
 	eng1 = engine.NewEngineUnderTest(t.Name())
-	eng1.SetHost(buildProxy("1"))
+	eng1.SetHost(buildMux("1"))
 	assert.NoError(eng1.SetWorkers(4))
 	eng2 = engine.NewEngineUnderTest(t.Name())
-	eng2.SetHost(buildProxy("2"))
+	eng2.SetHost(buildMux("2"))
 	assert.NoError(eng2.SetWorkers(4))
 	// Await-only: it holds connections and counts toward the pool divisor, but claims no work, so it never
 	// earns a residue class. Its creations are therefore the fleet's only scan-discovered work.
 	creator = engine.NewEngineUnderTest(t.Name())
-	creator.SetHost(buildProxy("0"))
+	creator.SetHost(buildMux("0"))
 	assert.NoError(creator.SetWorkers(0))
 
 	ctx := context.Background()

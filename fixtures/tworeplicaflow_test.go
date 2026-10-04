@@ -16,7 +16,7 @@ limitations under the License.
 
 /*
 Two-replica contention. Two engines share one database (a shared in-memory
-SQLite DSN), each with its own TestProxy and workers, wired as peers both ways. This pins the
+SQLite DSN), each with its own HostMux and workers, wired as peers both ways. This pins the
 claim-CAS exactly-once guarantee under real cross-replica contention: every step of every flow runs
 exactly once no matter which replica claims it. A second subtest proves the cross-replica Await wake is
 prompt - within the latch detector's cadence - rather than dragging out to the caller's own deadline.
@@ -45,10 +45,10 @@ func TestTwoReplicaflow(t *testing.T) {
 		"A": {}, "B": {}, "C": {},
 	}
 
-	// buildProxy registers the same 3-step graph and handlers (closing over the shared counters) on a
-	// proxy, so either replica executes identically.
-	buildProxy := func() *engine.TestProxy {
-		p := engine.NewTestProxy()
+	// buildMux registers the same 3-step graph and handlers (closing over the shared counters) on a
+	// mux, so either replica executes identically.
+	buildMux := func() *engine.HostMux {
+		p := engine.NewHostMux()
 		g := workflow.NewGraph("Chain")
 		g.SetURL("A", "tworeplica.verify:428/a")
 		g.SetURL("B", "tworeplica.verify:428/b")
@@ -67,19 +67,19 @@ func TestTwoReplicaflow(t *testing.T) {
 		return p
 	}
 
-	proxy1 := buildProxy()
-	proxy2 := buildProxy()
+	mux1 := buildMux()
+	mux2 := buildMux()
 
 	// Both replicas share one isolated database via a common test-DB key (each built with
 	// NewEngineUnderTest(t), which keys by t.Name()), so the suite runs this contention on whatever
 	// dialect SEQUEL_TESTING_DSN names (in-memory SQLite by default).
 	eng1 := engine.NewEngineUnderTest(t.Name())
 	defer eng1.Shutdown(ctx)
-	eng1.SetHost(proxy1)
+	eng1.SetHost(mux1)
 	assert.NoError(eng1.SetWorkers(4))
 	eng2 := engine.NewEngineUnderTest(t.Name())
 	defer eng2.Shutdown(ctx)
-	eng2.SetHost(proxy2)
+	eng2.SetHost(mux2)
 	assert.NoError(eng2.SetWorkers(4))
 	assert.NoError(eng1.Startup(ctx))
 	t.Cleanup(func() { eng1.Shutdown(ctx) })
@@ -129,8 +129,8 @@ func TestTwoReplicaflow(t *testing.T) {
 		// `awaiter` can only learn of the stop by reading the flow row - and the detector is the only thing
 		// that reads it on the awaiter's behalf, so a sub-2s return is a direct measurement of the detector
 		// working. Nothing else could return this Await short of its own 30s deadline.
-		pa := engine.NewTestProxy() // pure awaiter
-		pb := engine.NewTestProxy() // executor
+		pa := engine.NewHostMux() // pure awaiter
+		pb := engine.NewHostMux() // executor
 		wg := workflow.NewGraph("Wake")
 		wg.SetURL("W", "tworeplicawake.verify:428/w")
 		wg.AddTransition("W", workflow.End)

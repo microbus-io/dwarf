@@ -38,10 +38,10 @@ func TestFanIn_GotoLoopBranchKeepsInteriorDAGEdges(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("GotoLoopDAG")
@@ -54,10 +54,10 @@ func TestFanIn_GotoLoopBranchKeepsInteriorDAGEdges(t *testing.T) {
 	graph.AddTransitionGoto("Work", "Work")
 	graph.AddTransitionChain("Work", "Join", workflow.End)
 	assert.NoError(graph.Validate())
-	proxy.HandleGraph("gotoloopdag.verify:900/loop", graph)
+	mux.HandleGraph("gotoloopdag.verify:900/loop", graph)
 
-	proxy.HandleTask("gotoloopdag.verify:900/split", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("gotoloopdag.verify:900/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("gotoloopdag.verify:900/split", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("gotoloopdag.verify:900/work", func(ctx context.Context, f *workflow.Flow) error {
 		n := f.GetInt("iter")
 		limit := 0
 		if f.GetString("item") == "b" {
@@ -71,7 +71,7 @@ func TestFanIn_GotoLoopBranchKeepsInteriorDAGEdges(t *testing.T) {
 		f.Set("done", []string{f.GetString("item")})
 		return nil
 	})
-	proxy.HandleTask("gotoloopdag.verify:900/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("gotoloopdag.verify:900/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	flowKey, outcome, err := eng.Run(ctx, "gotoloopdag.verify:900/loop", map[string]any{"items": []string{"a", "b"}}, nil)
 	assert.NoError(err)

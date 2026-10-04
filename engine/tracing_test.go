@@ -58,7 +58,7 @@ func TestTracing_SpansEmittedOnRun(t *testing.T) {
 	sr := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("taskA", "tracingflow.verify:428/task-a")
@@ -67,17 +67,17 @@ func TestTracing_SpansEmittedOnRun(t *testing.T) {
 	parent.AddTransition("taskA", "runInner")
 	parent.AddTransition("runInner", "done")
 	parent.AddTransition("done", workflow.End)
-	proxy.HandleGraph("tracingflow.verify:428/parent", parent)
+	mux.HandleGraph("tracingflow.verify:428/parent", parent)
 
 	inner := workflow.NewGraph("Inner")
 	inner.SetURL("taskX", "tracingflow.verify:428/task-x")
 	inner.AddTransition("taskX", workflow.End)
-	proxy.HandleGraph("tracingflow.verify:428/inner", inner)
+	mux.HandleGraph("tracingflow.verify:428/inner", inner)
 
-	proxy.HandleTask("tracingflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("tracingflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("tracingflow.verify:428/done", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("tracingflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("tracingflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("tracingflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("tracingflow.verify:428/done", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("tracingflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph("tracingflow.verify:428/inner", nil, nil)
 		if yield || err != nil {
 			return err
@@ -87,7 +87,7 @@ func TestTracing_SpansEmittedOnRun(t *testing.T) {
 
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	eng.SetTracerProvider(tp)
 	assert.NoError(eng.Startup(t.Context()))
 

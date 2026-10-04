@@ -38,19 +38,19 @@ func TestForkStraggler_NormalizedToTerminated(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	g := workflow.NewGraph("SL")
 	g.SetURL("A", "sl/a")
 	g.AddTransition("A", workflow.End)
-	proxy.HandleGraph("sl/g", g)
-	proxy.HandleTask("sl/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("sl/g", g)
+	mux.HandleTask("sl/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	// B is only ever the injected straggler; it must never be dispatched (the fix terminates its clone). Register
 	// a no-op so an accidental dispatch would not fail the fork step instead of surfacing the real defect.
-	proxy.HandleTask("sl/b", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("sl/b", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	fk, _, err := e.Run(ctx, "sl/g", nil, nil)

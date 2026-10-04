@@ -36,10 +36,10 @@ func TestEmptyforeachreducerflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("EmptyForEachReducer")
@@ -55,20 +55,20 @@ func TestEmptyforeachreducerflow(t *testing.T) {
 	// route to the fan-in (fireFanInDirect) rather than fall into its complete-at-the-source fallback. (The
 	// routing map itself is derived engine-side at dispatch, not stored on the graph by Validate.)
 	assert.NoError(graph.Validate())
-	proxy.HandleGraph("emptyforeachreducerflow.verify:428/empty-for-each-reducer", graph)
+	mux.HandleGraph("emptyforeachreducerflow.verify:428/empty-for-each-reducer", graph)
 
 	// The spawn (fan-out source) writes a delta to the reducer-managed "sum" field, then fans out.
-	proxy.HandleTask("emptyforeachreducerflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("emptyforeachreducerflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("sum", 5)
 		return nil
 	})
 	// A branch contributes only to "processed", never to "sum", so the fan-in's "sum" is the spawn base+delta
 	// alone - identical regardless of how many branches ran.
-	proxy.HandleTask("emptyforeachreducerflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("emptyforeachreducerflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("processed", 1)
 		return nil
 	})
-	proxy.HandleTask("emptyforeachreducerflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("emptyforeachreducerflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("sumOut", f.GetInt("sum"))
 		f.SetInt("processedCount", f.GetInt("processed"))
 		return nil

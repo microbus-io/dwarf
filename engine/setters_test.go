@@ -136,17 +136,17 @@ func TestSetDefaultPriority_RejectsNonPositive(t *testing.T) {
 	assert.NoError(e.SetDefaultPriority(100))
 
 	// The guard rejects rather than clamps: the accepted value is the one the engine dispatches with.
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Prio")
 	g.SetURL("A", "prio/a")
 	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("prio/g", g)
-	proxy.HandleTask("prio/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("prio/g", g)
+	mux.HandleTask("prio/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e2 := NewEngineUnderTest(t.Name())
 	defer e2.Shutdown(t.Context())
-	assert.NoError(e2.SetHost(proxy))
+	assert.NoError(e2.SetHost(mux))
 	assert.NoError(e2.SetDefaultPriority(7))
 	assert.NoError(e2.Startup(t.Context()))
 

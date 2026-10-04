@@ -32,10 +32,10 @@ func TestErrorflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("Error")
@@ -47,19 +47,19 @@ func TestErrorflow(t *testing.T) {
 	graph.AddTransitionOnError("TaskB", "Handler")
 	graph.AddTransition("TaskB", "TaskC")
 	graph.AddTransitionChain("Handler", "TaskC", workflow.End)
-	proxy.HandleGraph("errorflow.verify:428/error", graph)
+	mux.HandleGraph("errorflow.verify:428/error", graph)
 
-	proxy.HandleTask("errorflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("errorflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("errorflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("errorflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetString("trigger") == "fail" {
 			return errors.New("triggered failure")
 		}
 		f.SetString("result", "normal")
 		return nil
 	})
-	proxy.HandleTask("errorflow.verify:428/handler", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("errorflow.verify:428/handler", func(ctx context.Context, f *workflow.Flow) error {
 		var onErr errors.TracedError
 		_, err := f.Get("onErr", &onErr)
 		if err != nil || onErr.Error() == "" {
@@ -69,7 +69,7 @@ func TestErrorflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("errorflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("errorflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("finalResult", "final:"+f.GetString("result"))
 		return nil
 	})

@@ -79,11 +79,11 @@ func TestGracefulCancelFlow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	// holder is a one-node flow whose task holds the engine's only worker until released, so a second flow's
 	// entry step is guaranteed to still be pending - not yet claimed - when Cancel lands on it.
-	proxy.HandleGraph("gracefulcancelflow.verify:428/holder", func() *workflow.Graph {
+	mux.HandleGraph("gracefulcancelflow.verify:428/holder", func() *workflow.Graph {
 		g := workflow.NewGraph("Holder")
 		g.SetURL("Hold", "gracefulcancelflow.verify:428/hold")
 		g.AddTransition("Hold", workflow.End)
@@ -95,7 +95,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		once    sync.Once
 	}
 	holders := sync.Map{} // test name -> *holder
-	proxy.HandleTask("gracefulcancelflow.verify:428/hold", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("gracefulcancelflow.verify:428/hold", func(ctx context.Context, f *workflow.Flow) error {
 		h, _ := holders.Load(f.GetString("holder"))
 		close(h.(*holder).running)
 		<-h.(*holder).release
@@ -119,16 +119,16 @@ func TestGracefulCancelFlow(t *testing.T) {
 		graph := workflow.NewGraph("PreemptNoOnError")
 		graph.SetURL("B", "gracefulcancelflow.verify:428/pno-b")
 		graph.AddTransition("B", workflow.End)
-		proxy.HandleGraph("gracefulcancelflow.verify:428/preempt-no-onerror", graph)
+		mux.HandleGraph("gracefulcancelflow.verify:428/preempt-no-onerror", graph)
 		var bRan atomic.Bool
-		proxy.HandleTask("gracefulcancelflow.verify:428/pno-b", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("gracefulcancelflow.verify:428/pno-b", func(ctx context.Context, f *workflow.Flow) error {
 			bRan.Store(true)
 			return nil
 		})
 
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
-		eng.SetHost(proxy)
+		eng.SetHost(mux)
 		eng.SetWorkers(1)
 		assert.NoError(eng.Startup(t.Context()))
 		release := holdWorker(t, eng)
@@ -162,17 +162,17 @@ func TestGracefulCancelFlow(t *testing.T) {
 		graph.AddTransition("B", workflow.End)
 		graph.AddTransitionOnError("B", "Handler")
 		graph.AddTransition("Handler", workflow.End)
-		proxy.HandleGraph("gracefulcancelflow.verify:428/preempt-with-onerror", graph)
+		mux.HandleGraph("gracefulcancelflow.verify:428/preempt-with-onerror", graph)
 		var bRan atomic.Bool
-		proxy.HandleTask("gracefulcancelflow.verify:428/pw-b", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("gracefulcancelflow.verify:428/pw-b", func(ctx context.Context, f *workflow.Flow) error {
 			bRan.Store(true)
 			return nil
 		})
-		proxy.HandleTask("gracefulcancelflow.verify:428/pw-handler", recordCancellation)
+		mux.HandleTask("gracefulcancelflow.verify:428/pw-handler", recordCancellation)
 
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
-		eng.SetHost(proxy)
+		eng.SetHost(mux)
 		eng.SetWorkers(1)
 		assert.NoError(eng.Startup(t.Context()))
 		release := holdWorker(t, eng)
@@ -202,18 +202,18 @@ func TestGracefulCancelFlow(t *testing.T) {
 		graph.SetURL("C", "gracefulcancelflow.verify:428/rcn-c")
 		graph.SetURL("D", "gracefulcancelflow.verify:428/rcn-d")
 		graph.AddTransitionChain("C", "D", workflow.End)
-		proxy.HandleGraph("gracefulcancelflow.verify:428/ran-covered-no-onerror", graph)
+		mux.HandleGraph("gracefulcancelflow.verify:428/ran-covered-no-onerror", graph)
 		running := make(chan struct{})
 		release := make(chan struct{})
 		var releaseOnce sync.Once
 		var dRan atomic.Bool
-		proxy.HandleTask("gracefulcancelflow.verify:428/rcn-c", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("gracefulcancelflow.verify:428/rcn-c", func(ctx context.Context, f *workflow.Flow) error {
 			close(running)
 			<-release
 			f.SetBool("cWorked", true)
 			return nil
 		})
-		proxy.HandleTask("gracefulcancelflow.verify:428/rcn-d", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("gracefulcancelflow.verify:428/rcn-d", func(ctx context.Context, f *workflow.Flow) error {
 			dRan.Store(true)
 			return nil
 		})
@@ -221,7 +221,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
 		defer releaseOnce.Do(func() { close(release) })
-		eng.SetHost(proxy)
+		eng.SetHost(mux)
 		assert.NoError(eng.Startup(t.Context()))
 
 		flowKey, err := eng.Create(ctx, "gracefulcancelflow.verify:428/ran-covered-no-onerror", nil, nil)
@@ -257,26 +257,26 @@ func TestGracefulCancelFlow(t *testing.T) {
 		graph.AddTransitionChain("C", "D", workflow.End)
 		graph.AddTransitionOnError("C", "Handler")
 		graph.AddTransitionChain("Handler", "Tail", workflow.End)
-		proxy.HandleGraph("gracefulcancelflow.verify:428/ran-covered-with-onerror", graph)
+		mux.HandleGraph("gracefulcancelflow.verify:428/ran-covered-with-onerror", graph)
 		running := make(chan struct{})
 		release := make(chan struct{})
 		var releaseOnce sync.Once
 		var dRan atomic.Bool
-		proxy.HandleTask("gracefulcancelflow.verify:428/rcw-c", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("gracefulcancelflow.verify:428/rcw-c", func(ctx context.Context, f *workflow.Flow) error {
 			close(running)
 			<-release
 			f.SetBool("cWorked", true)
 			return nil
 		})
-		proxy.HandleTask("gracefulcancelflow.verify:428/rcw-d", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("gracefulcancelflow.verify:428/rcw-d", func(ctx context.Context, f *workflow.Flow) error {
 			dRan.Store(true)
 			return nil
 		})
-		proxy.HandleTask("gracefulcancelflow.verify:428/rcw-handler", recordCancellation)
+		mux.HandleTask("gracefulcancelflow.verify:428/rcw-handler", recordCancellation)
 		// The handler's successor started after the Cancel, so it must not inherit the cancellation: a flow
 		// that caught it carries on.
 		var tailRan atomic.Bool
-		proxy.HandleTask("gracefulcancelflow.verify:428/rcw-tail", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("gracefulcancelflow.verify:428/rcw-tail", func(ctx context.Context, f *workflow.Flow) error {
 			tailRan.Store(true)
 			return nil
 		})
@@ -284,7 +284,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
 		defer releaseOnce.Do(func() { close(release) })
-		eng.SetHost(proxy)
+		eng.SetHost(mux)
 		assert.NoError(eng.Startup(t.Context()))
 
 		flowKey, err := eng.Create(ctx, "gracefulcancelflow.verify:428/ran-covered-with-onerror", nil, nil)
@@ -321,12 +321,12 @@ func TestGracefulCancelFlow(t *testing.T) {
 		graph.AddTransition("G", workflow.End)
 		graph.AddTransitionOnError("G", "Handler")
 		graph.AddTransition("Handler", workflow.End)
-		proxy.HandleGraph("gracefulcancelflow.verify:428/retry-then-preempted", graph)
+		mux.HandleGraph("gracefulcancelflow.verify:428/retry-then-preempted", graph)
 		running := make(chan struct{})
 		release := make(chan struct{})
 		var releaseOnce sync.Once
 		var attempts atomic.Int32
-		proxy.HandleTask("gracefulcancelflow.verify:428/rtp-g", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("gracefulcancelflow.verify:428/rtp-g", func(ctx context.Context, f *workflow.Flow) error {
 			if n := attempts.Add(1); n > 1 {
 				return errors.New("re-ran after cancel") // a regression fails fast rather than retrying forever
 			}
@@ -336,12 +336,12 @@ func TestGracefulCancelFlow(t *testing.T) {
 			f.Retry(10*time.Millisecond, 1.0, 0, 0)
 			return nil
 		})
-		proxy.HandleTask("gracefulcancelflow.verify:428/rtp-handler", recordCancellation)
+		mux.HandleTask("gracefulcancelflow.verify:428/rtp-handler", recordCancellation)
 
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
 		defer releaseOnce.Do(func() { close(release) })
-		eng.SetHost(proxy)
+		eng.SetHost(mux)
 		assert.NoError(eng.Startup(t.Context()))
 
 		flowKey, err := eng.Create(ctx, "gracefulcancelflow.verify:428/retry-then-preempted", nil, nil)
@@ -374,18 +374,18 @@ func TestGracefulCancelFlow(t *testing.T) {
 		graph.AddTransitionChain("E", "F", workflow.End)
 		graph.AddTransitionOnError("E", "Handler")
 		graph.AddTransition("Handler", workflow.End)
-		proxy.HandleGraph("gracefulcancelflow.verify:428/subgraph-caller-sees-child-result", graph)
+		mux.HandleGraph("gracefulcancelflow.verify:428/subgraph-caller-sees-child-result", graph)
 		child := workflow.NewGraph("SubgraphChild")
 		child.SetURL("K", "gracefulcancelflow.verify:428/scr-k")
 		child.AddTransition("K", workflow.End)
-		proxy.HandleGraph("gracefulcancelflow.verify:428/scr-child", child)
+		mux.HandleGraph("gracefulcancelflow.verify:428/scr-child", child)
 
 		running := make(chan struct{})
 		release := make(chan struct{})
 		var releaseOnce sync.Once
 		var eRuns atomic.Int32
 		var fRan atomic.Bool
-		proxy.HandleTask("gracefulcancelflow.verify:428/scr-e", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("gracefulcancelflow.verify:428/scr-e", func(ctx context.Context, f *workflow.Flow) error {
 			if eRuns.Add(1) == 1 {
 				close(running)
 				<-release
@@ -398,20 +398,20 @@ func TestGracefulCancelFlow(t *testing.T) {
 			f.SetInt("fromChild", out.GetInt("childOut"))
 			return nil
 		})
-		proxy.HandleTask("gracefulcancelflow.verify:428/scr-k", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("gracefulcancelflow.verify:428/scr-k", func(ctx context.Context, f *workflow.Flow) error {
 			f.SetInt("childOut", 7)
 			return nil
 		})
-		proxy.HandleTask("gracefulcancelflow.verify:428/scr-f", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("gracefulcancelflow.verify:428/scr-f", func(ctx context.Context, f *workflow.Flow) error {
 			fRan.Store(true)
 			return nil
 		})
-		proxy.HandleTask("gracefulcancelflow.verify:428/scr-handler", recordCancellation)
+		mux.HandleTask("gracefulcancelflow.verify:428/scr-handler", recordCancellation)
 
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
 		defer releaseOnce.Do(func() { close(release) })
-		eng.SetHost(proxy)
+		eng.SetHost(mux)
 		assert.NoError(eng.Startup(t.Context()))
 
 		flowKey, err := eng.Create(ctx, "gracefulcancelflow.verify:428/subgraph-caller-sees-child-result", nil, nil)
@@ -445,18 +445,18 @@ func TestGracefulCancelFlow(t *testing.T) {
 		graph.AddTransitionChain("E", "F", workflow.End)
 		graph.AddTransitionOnError("E", "Handler")
 		graph.AddTransition("Handler", workflow.End)
-		proxy.HandleGraph("gracefulcancelflow.verify:428/subgraph-cancelled-while-child-runs", graph)
+		mux.HandleGraph("gracefulcancelflow.verify:428/subgraph-cancelled-while-child-runs", graph)
 		child := workflow.NewGraph("SubgraphChildHeld")
 		child.SetURL("K", "gracefulcancelflow.verify:428/scw-k")
 		child.AddTransition("K", workflow.End)
-		proxy.HandleGraph("gracefulcancelflow.verify:428/scw-child", child)
+		mux.HandleGraph("gracefulcancelflow.verify:428/scw-child", child)
 
 		running := make(chan struct{})
 		release := make(chan struct{})
 		var releaseOnce sync.Once
 		var eRuns atomic.Int32
 		var fRan atomic.Bool
-		proxy.HandleTask("gracefulcancelflow.verify:428/scw-e", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("gracefulcancelflow.verify:428/scw-e", func(ctx context.Context, f *workflow.Flow) error {
 			eRuns.Add(1)
 			yield, err := f.Subgraph("gracefulcancelflow.verify:428/scw-child", nil, nil)
 			if yield {
@@ -468,21 +468,21 @@ func TestGracefulCancelFlow(t *testing.T) {
 			}
 			return nil
 		})
-		proxy.HandleTask("gracefulcancelflow.verify:428/scw-k", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("gracefulcancelflow.verify:428/scw-k", func(ctx context.Context, f *workflow.Flow) error {
 			close(running)
 			<-release
 			return nil
 		})
-		proxy.HandleTask("gracefulcancelflow.verify:428/scw-f", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("gracefulcancelflow.verify:428/scw-f", func(ctx context.Context, f *workflow.Flow) error {
 			fRan.Store(true)
 			return nil
 		})
-		proxy.HandleTask("gracefulcancelflow.verify:428/scw-handler", recordCancellation)
+		mux.HandleTask("gracefulcancelflow.verify:428/scw-handler", recordCancellation)
 
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
 		defer releaseOnce.Do(func() { close(release) })
-		eng.SetHost(proxy)
+		eng.SetHost(mux)
 		assert.NoError(eng.Startup(t.Context()))
 
 		flowKey, err := eng.Create(ctx, "gracefulcancelflow.verify:428/subgraph-cancelled-while-child-runs", nil, nil)
@@ -515,10 +515,10 @@ func TestGracefulCancelFlow(t *testing.T) {
 		graph.AddTransition("I", workflow.End)
 		graph.AddTransitionOnError("I", "Handler")
 		graph.AddTransition("Handler", workflow.End)
-		proxy.HandleGraph("gracefulcancelflow.verify:428/interrupt-resumed-is-preempted", graph)
+		mux.HandleGraph("gracefulcancelflow.verify:428/interrupt-resumed-is-preempted", graph)
 		var iRuns atomic.Int32
 		var sawResume atomic.Bool
-		proxy.HandleTask("gracefulcancelflow.verify:428/irp-i", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("gracefulcancelflow.verify:428/irp-i", func(ctx context.Context, f *workflow.Flow) error {
 			iRuns.Add(1)
 			var resume map[string]any
 			yield, err := f.Interrupt(map[string]any{"ask": "approve?"}, &resume)
@@ -528,11 +528,11 @@ func TestGracefulCancelFlow(t *testing.T) {
 			sawResume.Store(true)
 			return nil
 		})
-		proxy.HandleTask("gracefulcancelflow.verify:428/irp-handler", recordCancellation)
+		mux.HandleTask("gracefulcancelflow.verify:428/irp-handler", recordCancellation)
 
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
-		eng.SetHost(proxy)
+		eng.SetHost(mux)
 		assert.NoError(eng.Startup(t.Context()))
 
 		flowKey, err := eng.Create(ctx, "gracefulcancelflow.verify:428/interrupt-resumed-is-preempted", nil, nil)
@@ -567,13 +567,13 @@ func TestGracefulCancelFlow(t *testing.T) {
 		g.AddTransition("W", "Join")
 		g.SetFanIn("Join")
 		g.AddTransition("Join", workflow.End)
-		proxy.HandleGraph(url, g)
-		proxy.HandleTask(url+"-src", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleGraph(url, g)
+		mux.HandleTask(url+"-src", func(ctx context.Context, f *workflow.Flow) error {
 			f.Set("items", []string{"a", "b"})
 			return nil
 		})
-		proxy.HandleTask(url+"-w", w)
-		proxy.HandleTask(url+"-join", func(ctx context.Context, f *workflow.Flow) error { return nil })
+		mux.HandleTask(url+"-w", w)
+		mux.HandleTask(url+"-join", func(ctx context.Context, f *workflow.Flow) error { return nil })
 		return url
 	}
 	// holdBranches makes W report which branch it is on its FIRST run, then hold until released; a later run
@@ -613,7 +613,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
 		defer releaseOnce.Do(func() { close(release) })
-		eng.SetHost(proxy)
+		eng.SetHost(mux)
 		assert.NoError(eng.Startup(t.Context()))
 
 		flowKey, err := eng.Create(ctx, url, nil, nil)
@@ -657,7 +657,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
 		defer releaseOnce.Do(func() { close(release) })
-		eng.SetHost(proxy)
+		eng.SetHost(mux)
 		assert.NoError(eng.Startup(t.Context()))
 
 		flowKey, err := eng.Create(ctx, url, nil, nil)
@@ -713,23 +713,23 @@ func TestGracefulCancelFlow(t *testing.T) {
 		graph := workflow.NewGraph("SubgraphChildCancellationPropagates")
 		graph.SetURL("E", "gracefulcancelflow.verify:428/sccp-e")
 		graph.AddTransition("E", workflow.End)
-		proxy.HandleGraph("gracefulcancelflow.verify:428/subgraph-child-cancellation-propagates", graph)
+		mux.HandleGraph("gracefulcancelflow.verify:428/subgraph-child-cancellation-propagates", graph)
 		child := workflow.NewGraph("SubgraphChildCancellationPropagatesChild")
 		child.SetURL("K", "gracefulcancelflow.verify:428/sccp-k")
 		child.AddTransition("K", workflow.End)
-		proxy.HandleGraph("gracefulcancelflow.verify:428/sccp-child", child)
+		mux.HandleGraph("gracefulcancelflow.verify:428/sccp-child", child)
 
 		running := make(chan struct{})
 		release := make(chan struct{})
 		var releaseOnce sync.Once
-		proxy.HandleTask("gracefulcancelflow.verify:428/sccp-e", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("gracefulcancelflow.verify:428/sccp-e", func(ctx context.Context, f *workflow.Flow) error {
 			yield, err := f.Subgraph("gracefulcancelflow.verify:428/sccp-child", nil, nil)
 			if yield {
 				return nil
 			}
 			return err
 		})
-		proxy.HandleTask("gracefulcancelflow.verify:428/sccp-k", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("gracefulcancelflow.verify:428/sccp-k", func(ctx context.Context, f *workflow.Flow) error {
 			close(running)
 			<-release
 			return nil
@@ -738,7 +738,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
 		defer releaseOnce.Do(func() { close(release) })
-		eng.SetHost(proxy)
+		eng.SetHost(mux)
 		assert.NoError(eng.Startup(t.Context()))
 
 		flowKey, err := eng.Create(ctx, "gracefulcancelflow.verify:428/subgraph-child-cancellation-propagates", nil, nil)
@@ -764,12 +764,12 @@ func TestGracefulCancelFlow(t *testing.T) {
 		graph := workflow.NewGraph("SubgraphErrorKeepsStatusCode")
 		graph.SetURL("E", "gracefulcancelflow.verify:428/sesc-e")
 		graph.AddTransition("E", workflow.End)
-		proxy.HandleGraph("gracefulcancelflow.verify:428/subgraph-error-keeps-status-code", graph)
+		mux.HandleGraph("gracefulcancelflow.verify:428/subgraph-error-keeps-status-code", graph)
 		child := workflow.NewGraph("SubgraphErrorKeepsStatusCodeChild")
 		child.SetURL("K", "gracefulcancelflow.verify:428/sesc-k")
 		child.AddTransition("K", workflow.End)
-		proxy.HandleGraph("gracefulcancelflow.verify:428/sesc-child", child)
-		proxy.HandleTask("gracefulcancelflow.verify:428/sesc-e", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleGraph("gracefulcancelflow.verify:428/sesc-child", child)
+		mux.HandleTask("gracefulcancelflow.verify:428/sesc-e", func(ctx context.Context, f *workflow.Flow) error {
 			yield, err := f.Subgraph("gracefulcancelflow.verify:428/sesc-child", nil, nil)
 			if yield {
 				return nil
@@ -779,13 +779,13 @@ func TestGracefulCancelFlow(t *testing.T) {
 			f.SetBool("cancelled", workflow.IsCancelled(err))
 			return nil
 		})
-		proxy.HandleTask("gracefulcancelflow.verify:428/sesc-k", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("gracefulcancelflow.verify:428/sesc-k", func(ctx context.Context, f *workflow.Flow) error {
 			return errors.New("nope: %s", "50% off", http.StatusNotFound)
 		})
 
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
-		eng.SetHost(proxy)
+		eng.SetHost(mux)
 		assert.NoError(eng.Startup(t.Context()))
 
 		_, outcome, err := eng.Run(ctx, "gracefulcancelflow.verify:428/subgraph-error-keeps-status-code", nil, nil)
@@ -805,27 +805,27 @@ func TestGracefulCancelFlow(t *testing.T) {
 		graph := workflow.NewGraph("Guards")
 		graph.SetURL("P", "gracefulcancelflow.verify:428/g-p")
 		graph.AddTransition("P", workflow.End)
-		proxy.HandleGraph("gracefulcancelflow.verify:428/guards", graph)
+		mux.HandleGraph("gracefulcancelflow.verify:428/guards", graph)
 		child := workflow.NewGraph("GuardsChild")
 		child.SetURL("Q", "gracefulcancelflow.verify:428/g-q")
 		child.AddTransition("Q", workflow.End)
-		proxy.HandleGraph("gracefulcancelflow.verify:428/guards-child", child)
+		mux.HandleGraph("gracefulcancelflow.verify:428/guards-child", child)
 		var childKey atomic.Value
-		proxy.HandleTask("gracefulcancelflow.verify:428/g-p", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("gracefulcancelflow.verify:428/g-p", func(ctx context.Context, f *workflow.Flow) error {
 			yield, err := f.Subgraph("gracefulcancelflow.verify:428/guards-child", nil, nil)
 			if yield || err != nil {
 				return err
 			}
 			return nil
 		})
-		proxy.HandleTask("gracefulcancelflow.verify:428/g-q", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("gracefulcancelflow.verify:428/g-q", func(ctx context.Context, f *workflow.Flow) error {
 			childKey.Store(f.FlowKey())
 			return nil
 		})
 
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
-		eng.SetHost(proxy)
+		eng.SetHost(mux)
 		assert.NoError(eng.Startup(t.Context()))
 
 		flowKey, outcome, err := eng.Run(ctx, "gracefulcancelflow.verify:428/guards", nil, nil)

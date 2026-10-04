@@ -57,17 +57,17 @@ func TestCrossShardReplicaAwait(t *testing.T) {
 	graph.AddTransition("Work", workflow.End)
 
 	// eng1: pure awaiter, zero workers. Its handler must never run.
-	proxy1 := engine.NewTestProxy()
-	proxy1.HandleGraph("crossshardawait.verify:428/flow", graph)
-	proxy1.HandleTask("crossshardawait.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux1 := engine.NewHostMux()
+	mux1.HandleGraph("crossshardawait.verify:428/flow", graph)
+	mux1.HandleTask("crossshardawait.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		t.Error("eng1 has zero workers and must never execute the task")
 		return nil
 	})
 
 	// eng2: the executor, stamping which flow it ran so the outcome cannot come from anywhere else.
-	proxy2 := engine.NewTestProxy()
-	proxy2.HandleGraph("crossshardawait.verify:428/flow", graph)
-	proxy2.HandleTask("crossshardawait.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux2 := engine.NewHostMux()
+	mux2.HandleGraph("crossshardawait.verify:428/flow", graph)
+	mux2.HandleTask("crossshardawait.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("ranOn", "eng2")
 		return nil
 	})
@@ -76,11 +76,11 @@ func TestCrossShardReplicaAwait(t *testing.T) {
 	// per shard - which is what makes them peers rather than two independent engines.
 	eng1 := engine.NewEngineUnderTest(t.Name())
 	defer eng1.Shutdown(ctx)
-	assert.NoError(eng1.SetHost(proxy1))
+	assert.NoError(eng1.SetHost(mux1))
 	assert.NoError(eng1.SetWorkers(0))
 	eng2 := engine.NewEngineUnderTest(t.Name())
 	defer eng2.Shutdown(ctx)
-	assert.NoError(eng2.SetHost(proxy2))
+	assert.NoError(eng2.SetHost(mux2))
 	assert.NoError(eng2.SetWorkers(4))
 	for shard := 1; shard <= shards; shard++ {
 		assert.NoError(eng1.SetShard(engine.ShardSpec{Index: shard}))

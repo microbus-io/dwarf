@@ -30,7 +30,7 @@ func TestGotoflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	graph := workflow.NewGraph("Goto")
 	graph.SetURL("TaskA", "gotoflow.verify:428/task-a")
@@ -39,27 +39,27 @@ func TestGotoflow(t *testing.T) {
 	graph.AddTransition("TaskA", "TaskB")
 	graph.AddTransitionGoto("TaskB", "TaskA")
 	graph.AddTransitionChain("TaskB", "TaskC", workflow.End)
-	proxy.HandleGraph("gotoflow.verify:428/goto", graph)
+	mux.HandleGraph("gotoflow.verify:428/goto", graph)
 
-	proxy.HandleTask("gotoflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("gotoflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("loops", f.GetInt("loops")+1)
 		return nil
 	})
-	proxy.HandleTask("gotoflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("gotoflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetInt("loops") < f.GetInt("target") {
 			f.Goto("TaskA")
 		}
 		f.SetBool("visited", true)
 		return nil
 	})
-	proxy.HandleTask("gotoflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("gotoflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("finalLoops", f.GetInt("loops"))
 		return nil
 	})
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	t.Run("loops_one_then_falls_through", func(t *testing.T) {
@@ -88,14 +88,14 @@ func TestGotoflow_BadGoto(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	graph := workflow.NewGraph("BadGoto")
 	graph.SetURL("BadGotoer", "gotoflow.verify:428/bad-gotoer")
 	graph.AddTransition("BadGotoer", workflow.End)
-	proxy.HandleGraph("gotoflow.verify:428/bad-goto", graph)
+	mux.HandleGraph("gotoflow.verify:428/bad-goto", graph)
 
-	proxy.HandleTask("gotoflow.verify:428/bad-gotoer", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("gotoflow.verify:428/bad-gotoer", func(ctx context.Context, f *workflow.Flow) error {
 		f.Goto("NoSuchTask")
 		f.SetBool("stamp", true)
 		return nil
@@ -103,7 +103,7 @@ func TestGotoflow_BadGoto(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	t.Run("goto_to_unregistered_target_fails_flow", func(t *testing.T) {

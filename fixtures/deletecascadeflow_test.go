@@ -37,10 +37,10 @@ func TestDeletecascadeflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	var mu sync.Mutex
@@ -58,46 +58,46 @@ func TestDeletecascadeflow(t *testing.T) {
 	root.SetURL("RunChild", "deletecascadeflow.verify:428/run-child")
 	root.SetURL("TaskZ", "deletecascadeflow.verify:428/task-z")
 	root.AddTransitionChain("TaskA", "RunChild", "TaskZ", workflow.End)
-	proxy.HandleGraph("deletecascadeflow.verify:428/root", root)
+	mux.HandleGraph("deletecascadeflow.verify:428/root", root)
 
 	// Child: ChildWork -> RunGrandchild
 	child := workflow.NewGraph("Child")
 	child.SetURL("ChildWork", "deletecascadeflow.verify:428/child-work")
 	child.SetURL("RunGrandchild", "deletecascadeflow.verify:428/run-grandchild")
 	child.AddTransitionChain("ChildWork", "RunGrandchild", workflow.End)
-	proxy.HandleGraph("deletecascadeflow.verify:428/child", child)
+	mux.HandleGraph("deletecascadeflow.verify:428/child", child)
 
 	// Grandchild: GrandchildWork
 	grandchild := workflow.NewGraph("Grandchild")
 	grandchild.SetURL("GrandchildWork", "deletecascadeflow.verify:428/grandchild-work")
 	grandchild.AddTransition("GrandchildWork", workflow.End)
-	proxy.HandleGraph("deletecascadeflow.verify:428/grandchild", grandchild)
+	mux.HandleGraph("deletecascadeflow.verify:428/grandchild", grandchild)
 
-	proxy.HandleTask("deletecascadeflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("deletecascadeflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("deletecascadeflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("deletecascadeflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("deletecascadeflow.verify:428/run-child", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("deletecascadeflow.verify:428/run-child", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph("deletecascadeflow.verify:428/child", nil, nil)
 		if yield || err != nil {
 			return err
 		}
 		return nil
 	})
-	proxy.HandleTask("deletecascadeflow.verify:428/child-work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("deletecascadeflow.verify:428/child-work", func(ctx context.Context, f *workflow.Flow) error {
 		record("ChildWork", f)
 		return nil
 	})
-	proxy.HandleTask("deletecascadeflow.verify:428/run-grandchild", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("deletecascadeflow.verify:428/run-grandchild", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph("deletecascadeflow.verify:428/grandchild", nil, nil)
 		if yield || err != nil {
 			return err
 		}
 		return nil
 	})
-	proxy.HandleTask("deletecascadeflow.verify:428/grandchild-work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("deletecascadeflow.verify:428/grandchild-work", func(ctx context.Context, f *workflow.Flow) error {
 		record("GrandchildWork", f)
 		return nil
 	})

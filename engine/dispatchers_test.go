@@ -110,18 +110,18 @@ func TestDispatchers_ReaderReplicaHoldsTheReaderPoolAndRunsNothing(t *testing.T)
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Reader")
 	g.SetURL("A", "reader/a")
 	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("reader/g", g)
-	proxy.HandleTask("reader/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("reader/g", g)
+	mux.HandleTask("reader/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.testConnCap = 0 // assert the real derived pool sizes, not the test-mode connection cap
-	assert.NoError(e.SetHost(proxy))
+	assert.NoError(e.SetHost(mux))
 	assert.NoError(e.SetEngineID(readerID))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 2}))
 	assert.NoError(e.Startup(t.Context()))
@@ -169,13 +169,13 @@ func TestDispatchers_DemotedReplicaHoldsItsPoolUntilInFlightStepsFinish(t *testi
 	const flows = 5
 	release := make(chan struct{})
 	var runs atomic.Int32
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Demote")
 	g.SetURL("Slow", "demote/slow")
 	g.AddTransition("Slow", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("demote/g", g)
-	proxy.HandleTask("demote/slow", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("demote/g", g)
+	mux.HandleTask("demote/slow", func(ctx context.Context, f *workflow.Flow) error {
 		runs.Add(1)
 		<-release
 		return nil
@@ -184,7 +184,7 @@ func TestDispatchers_DemotedReplicaHoldsItsPoolUntilInFlightStepsFinish(t *testi
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.testConnCap = 0 // assert the real derived pool sizes, not the test-mode connection cap
-	assert.NoError(e.SetHost(proxy))
+	assert.NoError(e.SetHost(mux))
 	assert.NoError(e.SetEngineID(readerID))
 	spec := ShardSpec{Index: 1, VirtualCPUs: 4} // two dispatcher slots, and a budget whose 3-way share beats the reader pool
 	assert.NoError(e.SetShard(spec))
@@ -257,13 +257,13 @@ func TestDispatchers_PromotionWhileHeldClearsTheHold(t *testing.T) {
 
 	release := make(chan struct{})
 	started := make(chan struct{})
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Repromote")
 	g.SetURL("Slow", "repromote/slow")
 	g.AddTransition("Slow", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("repromote/g", g)
-	proxy.HandleTask("repromote/slow", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("repromote/g", g)
+	mux.HandleTask("repromote/slow", func(ctx context.Context, f *workflow.Flow) error {
 		close(started)
 		<-release
 		return nil
@@ -272,7 +272,7 @@ func TestDispatchers_PromotionWhileHeldClearsTheHold(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.testConnCap = 0
-	assert.NoError(e.SetHost(proxy))
+	assert.NoError(e.SetHost(mux))
 	assert.NoError(e.SetEngineID(readerID))
 	spec := ShardSpec{Index: 1, VirtualCPUs: 4} // two dispatcher slots, and a budget whose 3-way share beats the reader pool
 	assert.NoError(e.SetShard(spec))
@@ -319,13 +319,13 @@ func TestDispatchers_OverrideReleasesAHold(t *testing.T) {
 
 	release := make(chan struct{})
 	started := make(chan struct{})
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("OverrideHold")
 	g.SetURL("Slow", "overridehold/slow")
 	g.AddTransition("Slow", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("overridehold/g", g)
-	proxy.HandleTask("overridehold/slow", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("overridehold/g", g)
+	mux.HandleTask("overridehold/slow", func(ctx context.Context, f *workflow.Flow) error {
 		close(started)
 		<-release
 		return nil
@@ -335,7 +335,7 @@ func TestDispatchers_OverrideReleasesAHold(t *testing.T) {
 	defer e.Shutdown(ctx)
 	defer close(release) // below the Shutdown defer, so it unwinds first and frees the drain
 	e.testConnCap = 0
-	assert.NoError(e.SetHost(proxy))
+	assert.NoError(e.SetHost(mux))
 	assert.NoError(e.SetEngineID(readerID))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 4}))
 	assert.NoError(e.Startup(t.Context()))
@@ -602,16 +602,16 @@ func TestDispatchers_SweepsSkipShardsThisReplicaOnlyReads(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Sweep")
 	g.SetURL("A", "sweep/a")
 	g.AddTransition("A", workflow.End)
-	proxy.HandleGraph("sweep/g", g)
-	proxy.HandleTask("sweep/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("sweep/g", g)
+	mux.HandleTask("sweep/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	shortenDeletion(e, time.Millisecond, time.Hour) // due immediately; the test drives reaps
 	assert.NoError(e.Startup(t.Context()))
 
@@ -644,19 +644,19 @@ func TestDispatchers_DrainGivesUpTheSlotBeforeWaiting(t *testing.T) {
 
 	started := make(chan struct{})
 	release := make(chan struct{})
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Drain")
 	g.SetURL("A", "drain/a")
 	g.AddTransition("A", workflow.End)
-	proxy.HandleGraph("drain/g", g)
-	proxy.HandleTask("drain/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("drain/g", g)
+	mux.HandleTask("drain/a", func(ctx context.Context, f *workflow.Flow) error {
 		close(started)
 		<-release
 		return nil
 	})
 
 	e := NewEngineUnderTest(t.Name())
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
@@ -781,8 +781,8 @@ func TestDispatchers_ResumeOnAReaderRunsOnADispatcher(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	var dispRan, readRan atomic.Int32
-	build := func(ran *atomic.Int32) *TestProxy {
-		p := NewTestProxy()
+	build := func(ran *atomic.Int32) *HostMux {
+		p := NewHostMux()
 		g := workflow.NewGraph("ResumeOnReader")
 		g.SetURL("Gate", "ronr/gate")
 		g.SetURL("B", "ronr/b")
@@ -824,8 +824,8 @@ func TestDispatchers_DrainingDispatcherHandsItsSlotToAPeer(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	started, release := make(chan struct{}), make(chan struct{})
-	build := func() *TestProxy {
-		p := NewTestProxy()
+	build := func() *HostMux {
+		p := NewHostMux()
 		g := workflow.NewGraph("Drain")
 		g.SetURL("A", "dslot/a")
 		g.AddTransition("A", workflow.End)
@@ -868,12 +868,12 @@ func TestDispatchers_RecoverySweepSkipsShardsThisReplicaOnlyReads(t *testing.T) 
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	started, release := make(chan struct{}), make(chan struct{})
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Lease")
 	g.SetURL("A", "rsweep/a")
 	g.AddTransition("A", workflow.End)
-	proxy.HandleGraph("rsweep/g", g)
-	proxy.HandleTask("rsweep/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("rsweep/g", g)
+	mux.HandleTask("rsweep/a", func(ctx context.Context, f *workflow.Flow) error {
 		close(started)
 		<-release
 		return nil
@@ -882,7 +882,7 @@ func TestDispatchers_RecoverySweepSkipsShardsThisReplicaOnlyReads(t *testing.T) 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	defer close(release) // below the Shutdown defer, so it unwinds first and frees the drain
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 	_, err := e.Create(ctx, "rsweep/g", nil, nil)
 	assert.NoError(err)

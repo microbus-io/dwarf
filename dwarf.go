@@ -33,19 +33,19 @@ limitations under the License.
 //
 // A 30-second taste, using the in-process test harness:
 //
-//	proxy := engine.NewTestProxy()
+//	mux := engine.NewHostMux()
 //	g := workflow.NewGraph("Greet")
 //	g.SetURL("Hello", "http://example/hello") // node "Hello" dispatches to this URL
 //	g.AddTransition("Hello", workflow.End)
-//	proxy.HandleGraph("http://example/greet", g)
-//	proxy.HandleTask("http://example/hello", func(ctx context.Context, f *workflow.Flow) error {
+//	mux.HandleGraph("http://example/greet", g)
+//	mux.HandleTask("http://example/hello", func(ctx context.Context, f *workflow.Flow) error {
 //		f.SetString("greeting", "hello "+f.GetString("name"))
 //		return nil
 //	})
 //
 //	eng := dwarf.NewEngineUnderTest(t.Name()) // SQLite in-memory, auto-dropped at test end
 //	defer eng.Shutdown(ctx)
-//	eng.SetHost(proxy)
+//	eng.SetHost(mux)
 //	eng.Startup(ctx)
 //
 //	_, out, _ := eng.Run(ctx, "http://example/greet", map[string]any{"name": "ada"}, nil)

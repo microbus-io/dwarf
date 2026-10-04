@@ -31,23 +31,23 @@ func TestTimebudgetflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("TimeBudget")
 	graph.SetURL("TaskA", "timebudgetflow.verify:428/task-a")
 	graph.SetURL("Slow", "timebudgetflow.verify:428/slow")
 	graph.AddTransitionChain("TaskA", "Slow", workflow.End)
-	proxy.HandleGraph("timebudgetflow.verify:428/time-budget", graph)
+	mux.HandleGraph("timebudgetflow.verify:428/time-budget", graph)
 
-	proxy.HandleTask("timebudgetflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("timebudgetflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 	// A host's transport may enforce a per-call time budget; here the task handler enforces its own timeout.
-	proxy.HandleTask("timebudgetflow.verify:428/slow", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("timebudgetflow.verify:428/slow", func(ctx context.Context, f *workflow.Flow) error {
 		ctx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
 		defer cancel()
 		select {

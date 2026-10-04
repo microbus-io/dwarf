@@ -38,10 +38,10 @@ func TestRetryCancelRaceflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	started := make(chan struct{}, 1)
@@ -51,9 +51,9 @@ func TestRetryCancelRaceflow(t *testing.T) {
 	graph := workflow.NewGraph("RetryCancelRace")
 	graph.SetURL("Work", "retrycancelraceflow.verify:428/work")
 	graph.AddTransitionChain("Work", workflow.End)
-	proxy.HandleGraph("retrycancelraceflow.verify:428/retry-cancel-race", graph)
+	mux.HandleGraph("retrycancelraceflow.verify:428/retry-cancel-race", graph)
 
-	proxy.HandleTask("retrycancelraceflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("retrycancelraceflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		if invocations.Add(1) != 1 {
 			// A revived zombie dispatch would land here; the guard means it never does.
 			return nil

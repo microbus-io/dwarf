@@ -42,19 +42,19 @@ func TestListCursorflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	graph := workflow.NewGraph("ListCursor")
 	graph.SetURL("Only", "listcursorflow.verify:428/only")
 	graph.AddTransition("Only", workflow.End)
-	proxy.HandleGraph("listcursorflow.verify:428/list", graph)
-	proxy.HandleTask("listcursorflow.verify:428/only", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("listcursorflow.verify:428/list", graph)
+	mux.HandleTask("listcursorflow.verify:428/only", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	for i := 1; i <= 3; i++ {
 		eng.SetShard(engine.ShardSpec{Index: i}) // test mode gives each shard its own in-memory database
 	}

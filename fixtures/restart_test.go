@@ -47,10 +47,10 @@ func TestRestartSurvival(t *testing.T) {
 	// mkEngine builds an engine bound to a file DSN under dir (so two engines resolve to the same on-disk DB)
 	// with its own worker count. Not test mode: SetShard uses the DSN directly and migrations run at Startup
 	// (idempotent, so engine 2 re-opening the migrated DB is a no-op).
-	mkEngine := func(t *testing.T, proxy *engine.TestProxy, dir string, workers int) *engine.Engine {
+	mkEngine := func(t *testing.T, mux *engine.HostMux, dir string, workers int) *engine.Engine {
 		assert := testarossa.For(t)
 		e := engine.NewEngine()
-		e.SetHost(proxy)
+		e.SetHost(mux)
 		assert.NoError(e.SetShard(engine.ShardSpec{Index: 1, DSN: fmt.Sprintf("file:%s/db%%d.sqlite?_pragma=busy_timeout(5000)", dir)}))
 		assert.NoError(e.SetWorkers(workers))
 		return e
@@ -80,17 +80,17 @@ func TestRestartSurvival(t *testing.T) {
 		dir := t.TempDir()
 		var aCalls atomic.Int64
 
-		proxy := engine.NewTestProxy()
+		mux := engine.NewHostMux()
 		g := workflow.NewGraph("R1")
 		g.SetURL("A", "r1/a")
 		g.AddTransition("A", workflow.End)
 		assert.NoError(g.Validate())
-		proxy.HandleGraph("r1/g", g)
-		proxy.HandleTask("r1/a", func(ctx context.Context, f *workflow.Flow) error { aCalls.Add(1); return nil })
+		mux.HandleGraph("r1/g", g)
+		mux.HandleTask("r1/a", func(ctx context.Context, f *workflow.Flow) error { aCalls.Add(1); return nil })
 
 		// Engine 1 has ZERO workers: Create inserts a pending entry step and rings a doorbell nobody consumes,
 		// then dies. The step must be recovered by engine 2's poll with no doorbell of its own.
-		e1 := mkEngine(t, proxy, dir, 0)
+		e1 := mkEngine(t, mux, dir, 0)
 		assert.NoError(e1.Startup(ctx))
 		flowKey, err := e1.Create(ctx, "r1/g", nil, nil)
 		if !assert.NoError(err) {
@@ -99,7 +99,7 @@ func TestRestartSurvival(t *testing.T) {
 		assert.NoError(e1.Shutdown(ctx))
 		assert.Equal(int64(0), aCalls.Load()) // engine 1 never ran it (no workers)
 
-		e2 := mkEngine(t, proxy, dir, 2)
+		e2 := mkEngine(t, mux, dir, 2)
 		assert.NoError(e2.Startup(ctx))
 		defer func() { assert.NoError(e2.Shutdown(ctx)) }()
 
@@ -113,24 +113,24 @@ func TestRestartSurvival(t *testing.T) {
 		dir := t.TempDir()
 		var aCalls, bCalls atomic.Int64
 
-		proxy := engine.NewTestProxy()
+		mux := engine.NewHostMux()
 		g := workflow.NewGraph("R2")
 		g.SetURL("A", "r2/a")
 		g.SetURL("B", "r2/b")
 		g.AddTransition("A", "B")
 		g.AddTransition("B", workflow.End)
 		assert.NoError(g.Validate())
-		proxy.HandleGraph("r2/g", g)
+		mux.HandleGraph("r2/g", g)
 		// A sleeps before the transition, so successor B is inserted pending with a future not_before - a
 		// durable timer that must fire on engine 2 after the restart.
-		proxy.HandleTask("r2/a", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("r2/a", func(ctx context.Context, f *workflow.Flow) error {
 			aCalls.Add(1)
 			f.Sleep(1500 * time.Millisecond)
 			return nil
 		})
-		proxy.HandleTask("r2/b", func(ctx context.Context, f *workflow.Flow) error { bCalls.Add(1); return nil })
+		mux.HandleTask("r2/b", func(ctx context.Context, f *workflow.Flow) error { bCalls.Add(1); return nil })
 
-		e1 := mkEngine(t, proxy, dir, 2)
+		e1 := mkEngine(t, mux, dir, 2)
 		assert.NoError(e1.Startup(ctx))
 		flowKey, err := e1.Create(ctx, "r2/g", nil, nil)
 		if !assert.NoError(err) {
@@ -146,7 +146,7 @@ func TestRestartSurvival(t *testing.T) {
 		}
 		assert.NoError(e1.Shutdown(ctx))
 
-		e2 := mkEngine(t, proxy, dir, 2)
+		e2 := mkEngine(t, mux, dir, 2)
 		assert.NoError(e2.Startup(ctx))
 		defer func() { assert.NoError(e2.Shutdown(ctx)) }()
 
@@ -161,13 +161,13 @@ func TestRestartSurvival(t *testing.T) {
 		dir := t.TempDir()
 		var caCalls, cbCalls, parentDone atomic.Int64
 
-		proxy := engine.NewTestProxy()
+		mux := engine.NewHostMux()
 		parent := workflow.NewGraph("R3P")
 		parent.SetURL("P0", "r3/p0")
 		parent.AddTransition("P0", workflow.End)
 		assert.NoError(parent.Validate())
-		proxy.HandleGraph("r3/parent", parent)
-		proxy.HandleTask("r3/p0", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleGraph("r3/parent", parent)
+		mux.HandleTask("r3/p0", func(ctx context.Context, f *workflow.Flow) error {
 			yield, err := f.Subgraph("r3/child", nil, nil)
 			if yield || err != nil {
 				return err
@@ -182,17 +182,17 @@ func TestRestartSurvival(t *testing.T) {
 		child.AddTransition("CA", "CB")
 		child.AddTransition("CB", workflow.End)
 		assert.NoError(child.Validate())
-		proxy.HandleGraph("r3/child", child)
+		mux.HandleGraph("r3/child", child)
 		// CA sleeps before transitioning, so the child rests with CB pending (future not_before) and the parent
 		// stays parked - a clean rest state to restart through.
-		proxy.HandleTask("r3/ca", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("r3/ca", func(ctx context.Context, f *workflow.Flow) error {
 			caCalls.Add(1)
 			f.Sleep(1500 * time.Millisecond)
 			return nil
 		})
-		proxy.HandleTask("r3/cb", func(ctx context.Context, f *workflow.Flow) error { cbCalls.Add(1); return nil })
+		mux.HandleTask("r3/cb", func(ctx context.Context, f *workflow.Flow) error { cbCalls.Add(1); return nil })
 
-		e1 := mkEngine(t, proxy, dir, 2)
+		e1 := mkEngine(t, mux, dir, 2)
 		assert.NoError(e1.Startup(ctx))
 		flowKey, err := e1.Create(ctx, "r3/parent", nil, nil)
 		if !assert.NoError(err) {
@@ -204,7 +204,7 @@ func TestRestartSurvival(t *testing.T) {
 		}
 		assert.NoError(e1.Shutdown(ctx))
 
-		e2 := mkEngine(t, proxy, dir, 2)
+		e2 := mkEngine(t, mux, dir, 2)
 		assert.NoError(e2.Startup(ctx))
 		defer func() { assert.NoError(e2.Shutdown(ctx)) }()
 
@@ -220,15 +220,15 @@ func TestRestartSurvival(t *testing.T) {
 		dir := t.TempDir()
 		var gateCalls, doneCalls atomic.Int64
 
-		proxy := engine.NewTestProxy()
+		mux := engine.NewHostMux()
 		g := workflow.NewGraph("R4")
 		g.SetURL("Gate", "r4/gate")
 		g.SetURL("Done", "r4/done")
 		g.AddTransition("Gate", "Done")
 		g.AddTransition("Done", workflow.End)
 		assert.NoError(g.Validate())
-		proxy.HandleGraph("r4/g", g)
-		proxy.HandleTask("r4/gate", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleGraph("r4/g", g)
+		mux.HandleTask("r4/gate", func(ctx context.Context, f *workflow.Flow) error {
 			gateCalls.Add(1)
 			var out map[string]any
 			yield, err := f.Interrupt(nil, &out)
@@ -238,9 +238,9 @@ func TestRestartSurvival(t *testing.T) {
 			f.SetString("resumed", "yes")
 			return nil
 		})
-		proxy.HandleTask("r4/done", func(ctx context.Context, f *workflow.Flow) error { doneCalls.Add(1); return nil })
+		mux.HandleTask("r4/done", func(ctx context.Context, f *workflow.Flow) error { doneCalls.Add(1); return nil })
 
-		e1 := mkEngine(t, proxy, dir, 2)
+		e1 := mkEngine(t, mux, dir, 2)
 		assert.NoError(e1.Startup(ctx))
 		flowKey, err := e1.Create(ctx, "r4/g", nil, nil)
 		if !assert.NoError(err) {
@@ -253,7 +253,7 @@ func TestRestartSurvival(t *testing.T) {
 		assert.Equal(workflow.StatusInterrupted, out.Status)
 		assert.NoError(e1.Shutdown(ctx))
 
-		e2 := mkEngine(t, proxy, dir, 2)
+		e2 := mkEngine(t, mux, dir, 2)
 		assert.NoError(e2.Startup(ctx))
 		defer func() { assert.NoError(e2.Shutdown(ctx)) }()
 

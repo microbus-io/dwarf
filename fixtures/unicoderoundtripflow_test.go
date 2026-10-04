@@ -54,10 +54,10 @@ func TestUnicoderoundtripflow(t *testing.T) {
 	// Quotes and backslashes ride along so JSON escaping stays honest through the round trip.
 	const uniEscaped = `quote " backslash \ slash / ünïcödé`
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("Ünicödé 日本語 Graph") // the graph itself is a stored payload (the `graph` column)
@@ -65,10 +65,10 @@ func TestUnicoderoundtripflow(t *testing.T) {
 	graph.SetURL("Ask", "unicoderoundtripflow.verify:428/ask")
 	graph.AddTransitionChain("Write", "Ask", workflow.End)
 	assert.NoError(graph.Validate())
-	proxy.HandleGraph("unicoderoundtripflow.verify:428/wf", graph)
+	mux.HandleGraph("unicoderoundtripflow.verify:428/wf", graph)
 
 	// Writes into `changes`, which folds into the successor's `state` and then `final_state`.
-	proxy.HandleTask("unicoderoundtripflow.verify:428/write", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("unicoderoundtripflow.verify:428/write", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("cjk", uniCJK)
 		f.SetString("rtl", uniRTL)
 		f.SetString("astral", uniAstral)
@@ -77,7 +77,7 @@ func TestUnicoderoundtripflow(t *testing.T) {
 	})
 	// Interrupts with a non-ASCII payload (`interrupt_payload`) and reads back the resume data
 	// (`resume_data`), so both human-in-the-loop columns are covered too.
-	proxy.HandleTask("unicoderoundtripflow.verify:428/ask", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("unicoderoundtripflow.verify:428/ask", func(ctx context.Context, f *workflow.Flow) error {
 		// Resume data is deliberately NOT merged into state - it comes back through `out`, so the
 		// round trip being asserted is Resume -> the resume_data column -> this task's own read.
 		var resumed struct {

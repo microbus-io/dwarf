@@ -45,8 +45,8 @@ func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
 	ctx := context.Background()
 
 	// A one-step graph. The awaiter (0 workers) must never execute it; the worker does.
-	buildProxy := func(onRun func()) *TestProxy {
-		p := NewTestProxy()
+	buildMux := func(onRun func()) *HostMux {
+		p := NewHostMux()
 		g := workflow.NewGraph("Wake")
 		g.SetURL("W", "xrwake/w")
 		g.AddTransition("W", workflow.End)
@@ -60,17 +60,17 @@ func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
 	}
 
 	dsn := "file:xrwake%d?mode=memory&cache=shared"
-	proxyAwaiter := buildProxy(func() { t.Error("the 0-worker awaiter must never execute the task") })
+	muxAwaiter := buildMux(func() { t.Error("the 0-worker awaiter must never execute the task") })
 	var workerRuns atomic.Int64
-	proxyWorker := buildProxy(func() { workerRuns.Add(1) })
+	muxWorker := buildMux(func() { workerRuns.Add(1) })
 
 	awaiter := NewEngine()
-	awaiter.SetHost(proxyAwaiter)
+	awaiter.SetHost(muxAwaiter)
 	assert.NoError(awaiter.SetShard(ShardSpec{Index: 1, DSN: dsn}))
 	assert.NoError(awaiter.SetWorkers(0))
 
 	worker := NewEngine()
-	worker.SetHost(proxyWorker)
+	worker.SetHost(muxWorker)
 	assert.NoError(worker.SetShard(ShardSpec{Index: 1, DSN: dsn}))
 	assert.NoError(worker.SetWorkers(2))
 
@@ -110,8 +110,8 @@ func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
 	dir := t.TempDir() // a file DB so the flow survives replica A's shutdown
 
 	var runs atomic.Int64
-	buildProxy := func() *TestProxy {
-		p := NewTestProxy()
+	buildMux := func() *HostMux {
+		p := NewHostMux()
 		g := workflow.NewGraph("XRRec")
 		g.SetURL("A", "xrrec/a")
 		g.AddTransition("A", workflow.End)
@@ -130,7 +130,7 @@ func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
 	// Replica A: claims and executes the step, but its completion write is fenced (stale lease_seq), so the
 	// step stays `running`. A short budget makes the lease expire quickly for B to recover.
 	repA := NewEngine()
-	repA.SetHost(buildProxy())
+	repA.SetHost(buildMux())
 	assert.NoError(repA.SetShard(ShardSpec{Index: 1, DSN: dsn}))
 	assert.NoError(repA.SetWorkers(2))
 	assert.NoError(repA.SetTimeBudget(300 * time.Millisecond))
@@ -155,7 +155,7 @@ func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
 
 	// Replica B joins on the same DB. Its lease recovery is what will re-drive the step.
 	repB := NewEngine()
-	repB.SetHost(buildProxy())
+	repB.SetHost(buildMux())
 	assert.NoError(repB.SetShard(ShardSpec{Index: 1, DSN: dsn}))
 	assert.NoError(repB.SetWorkers(2))
 	assert.NoError(repB.Startup(ctx))

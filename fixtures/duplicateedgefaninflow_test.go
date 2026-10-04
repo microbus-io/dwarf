@@ -53,10 +53,10 @@ func TestDuplicateEdge_WhenFanOutWidthTracksMatchingClauses(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	var workRuns atomic.Int32
@@ -74,17 +74,17 @@ func TestDuplicateEdge_WhenFanOutWidthTracksMatchingClauses(t *testing.T) {
 	// Validate has no duplicate-transition check, and it should not: two `when` edges to one target under
 	// DIFFERENT guards is a legitimate conditional fan-out, not an error.
 	assert.NoError(graph.Validate())
-	proxy.HandleGraph("duplicateedgefaninflow.verify:701/when-fan-out", graph)
+	mux.HandleGraph("duplicateedgefaninflow.verify:701/when-fan-out", graph)
 
-	proxy.HandleTask("duplicateedgefaninflow.verify:701/split", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("duplicateedgefaninflow.verify:701/split", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("duplicateedgefaninflow.verify:701/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("duplicateedgefaninflow.verify:701/work", func(ctx context.Context, f *workflow.Flow) error {
 		workRuns.Add(1)
 		f.SetInt("total", 1) // reducer delta: one per branch
 		return nil
 	})
-	proxy.HandleTask("duplicateedgefaninflow.verify:701/join", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("duplicateedgefaninflow.verify:701/join", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 
@@ -187,10 +187,10 @@ func TestDuplicateEdge_TrunkSourceIntoFanInIsDegenerate(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	var joinRuns atomic.Int32
@@ -206,13 +206,13 @@ func TestDuplicateEdge_TrunkSourceIntoFanInIsDegenerate(t *testing.T) {
 	graph.AddTransitionChain("Join", workflow.End)
 
 	assert.NoError(graph.Validate(), "a trunk fan-out source converging directly on its fan-in validates")
-	proxy.HandleGraph("duplicateedgefaninflow.verify:701/dup-trunk", graph)
+	mux.HandleGraph("duplicateedgefaninflow.verify:701/dup-trunk", graph)
 
-	proxy.HandleTask("duplicateedgefaninflow.verify:701/t-work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("duplicateedgefaninflow.verify:701/t-work", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("total", 5) // a would-be reducer delta from the source itself
 		return nil
 	})
-	proxy.HandleTask("duplicateedgefaninflow.verify:701/t-join", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("duplicateedgefaninflow.verify:701/t-join", func(ctx context.Context, f *workflow.Flow) error {
 		joinRuns.Add(1)
 		return nil
 	})

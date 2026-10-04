@@ -65,7 +65,7 @@ func TestFaultComposition_FanOutBranch(t *testing.T) {
 	assert := testarossa.For(t)
 	var aCalls, xCalls, yCalls, jCalls atomic.Int64
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("FC-Fan")
 	g.SetURL("A", "fcfan/a")
 	g.SetURL("X", "fcfan/x")
@@ -78,24 +78,24 @@ func TestFaultComposition_FanOutBranch(t *testing.T) {
 	g.AddTransition("Y", "J")
 	g.AddTransition("J", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("fcfan/g", g)
-	proxy.HandleTask("fcfan/a", func(ctx context.Context, f *workflow.Flow) error { aCalls.Add(1); return nil })
-	proxy.HandleTask("fcfan/x", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("fcfan/g", g)
+	mux.HandleTask("fcfan/a", func(ctx context.Context, f *workflow.Flow) error { aCalls.Add(1); return nil })
+	mux.HandleTask("fcfan/x", func(ctx context.Context, f *workflow.Flow) error {
 		xCalls.Add(1)
 		f.SetString("x", "ran") // idempotent constant - a re-dispatch yields byte-identical state
 		return nil
 	})
-	proxy.HandleTask("fcfan/y", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fcfan/y", func(ctx context.Context, f *workflow.Flow) error {
 		yCalls.Add(1)
 		f.SetString("y", "ran")
 		return nil
 	})
-	proxy.HandleTask("fcfan/j", func(ctx context.Context, f *workflow.Flow) error { jCalls.Add(1); return nil })
+	mux.HandleTask("fcfan/j", func(ctx context.Context, f *workflow.Flow) error { jCalls.Add(1); return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetWorkers(4))
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	reader := withManualReader(e)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -138,24 +138,24 @@ func TestFaultComposition_SubgraphChild(t *testing.T) {
 	assert := testarossa.For(t)
 	var xCalls, yCalls atomic.Int64
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	parent := workflow.NewGraph("FC-Parent")
 	parent.SetURL("Call", "fcsub/call")
 	parent.AddTransition("Call", workflow.End)
-	proxy.HandleGraph("fcsub/parent", parent)
+	mux.HandleGraph("fcsub/parent", parent)
 	child := workflow.NewGraph("FC-Child")
 	child.SetURL("X", "fcsub/x")
 	child.SetURL("Y", "fcsub/y")
 	child.AddTransition("X", "Y")
 	child.AddTransition("Y", workflow.End)
-	proxy.HandleGraph("fcsub/child", child)
-	proxy.HandleTask("fcsub/call", subgraphTask("fcsub/child"))
-	proxy.HandleTask("fcsub/x", func(ctx context.Context, f *workflow.Flow) error { xCalls.Add(1); return nil })
-	proxy.HandleTask("fcsub/y", func(ctx context.Context, f *workflow.Flow) error { yCalls.Add(1); return nil })
+	mux.HandleGraph("fcsub/child", child)
+	mux.HandleTask("fcsub/call", subgraphTask("fcsub/child"))
+	mux.HandleTask("fcsub/x", func(ctx context.Context, f *workflow.Flow) error { xCalls.Add(1); return nil })
+	mux.HandleTask("fcsub/y", func(ctx context.Context, f *workflow.Flow) error { yCalls.Add(1); return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	reader := withManualReader(e)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -212,16 +212,16 @@ func TestFaultComposition_CompoundWakeLoss(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("FC-Wake")
 	g.SetURL("A", "fcwake/a")
 	g.AddTransition("A", workflow.End)
-	proxy.HandleGraph("fcwake/g", g)
-	proxy.HandleTask("fcwake/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("fcwake/g", g)
+	mux.HandleTask("fcwake/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	reader := withManualReader(e)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -265,12 +265,12 @@ func TestFaultComposition_DeepSubgraphReviveLoss(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 
 	root := workflow.NewGraph("FC-Root")
 	root.SetURL("Call", "fcdeep/root-call")
 	root.AddTransition("Call", workflow.End)
-	proxy.HandleGraph("fcdeep/root", root)
+	mux.HandleGraph("fcdeep/root", root)
 	for _, lvl := range []struct{ url, task, child string }{
 		{"fcdeep/l1", "fcdeep/l1-call", "fcdeep/l2"},
 		{"fcdeep/l2", "fcdeep/l2-call", "fcdeep/l3"},
@@ -278,20 +278,20 @@ func TestFaultComposition_DeepSubgraphReviveLoss(t *testing.T) {
 		g := workflow.NewGraph("FC-" + lvl.url)
 		g.SetURL("Call", lvl.task)
 		g.AddTransition("Call", workflow.End)
-		proxy.HandleGraph(lvl.url, g)
-		proxy.HandleTask(lvl.task, subgraphTask(lvl.child))
+		mux.HandleGraph(lvl.url, g)
+		mux.HandleTask(lvl.task, subgraphTask(lvl.child))
 	}
 	// l3 is the leaf child - a plain one-node flow, no further nesting.
 	l3 := workflow.NewGraph("FC-L3")
 	l3.SetURL("Leaf", "fcdeep/l3-leaf")
 	l3.AddTransition("Leaf", workflow.End)
-	proxy.HandleGraph("fcdeep/l3", l3)
-	proxy.HandleTask("fcdeep/l3-leaf", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("fcdeep/root-call", subgraphTask("fcdeep/l1"))
+	mux.HandleGraph("fcdeep/l3", l3)
+	mux.HandleTask("fcdeep/l3-leaf", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("fcdeep/root-call", subgraphTask("fcdeep/l1"))
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	reader := withManualReader(e)
 	assert.NoError(e.Startup(t.Context()))
 

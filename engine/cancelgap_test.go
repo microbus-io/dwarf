@@ -38,20 +38,20 @@ func TestCancelInTransitionGap(t *testing.T) {
 	ctx := context.Background()
 
 	var bRan atomic.Int32
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("CancelGap")
 	g.SetURL("A", "cgap/a")
 	g.SetURL("B", "cgap/b")
 	g.AddTransition("A", "B")
 	g.AddTransition("B", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("cgap/g", g)
-	proxy.HandleTask("cgap/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("cgap/b", func(ctx context.Context, f *workflow.Flow) error { bRan.Add(1); return nil })
+	mux.HandleGraph("cgap/g", g)
+	mux.HandleTask("cgap/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("cgap/b", func(ctx context.Context, f *workflow.Flow) error { bRan.Add(1); return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	// Freeze A after its completion write, before the transition inserts B.
@@ -86,7 +86,7 @@ func TestCancelMarkSparesAHandlerInsertedAfterTheWatermark(t *testing.T) {
 	aStarted, aGo := make(chan struct{}), make(chan struct{})
 	hStarted, hGo := make(chan struct{}), make(chan struct{})
 	var bRan atomic.Int32
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("CancelMarkWindow")
 	g.SetURL("A", "cmark/a")
 	g.SetURL("B", "cmark/b")
@@ -96,14 +96,14 @@ func TestCancelMarkSparesAHandlerInsertedAfterTheWatermark(t *testing.T) {
 	g.AddTransitionOnError("B", "H")
 	g.AddTransition("H", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("cmark/g", g)
-	proxy.HandleTask("cmark/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("cmark/g", g)
+	mux.HandleTask("cmark/a", func(ctx context.Context, f *workflow.Flow) error {
 		close(aStarted)
 		<-aGo
 		return nil
 	})
-	proxy.HandleTask("cmark/b", func(ctx context.Context, f *workflow.Flow) error { bRan.Add(1); return nil })
-	proxy.HandleTask("cmark/h", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("cmark/b", func(ctx context.Context, f *workflow.Flow) error { bRan.Add(1); return nil })
+	mux.HandleTask("cmark/h", func(ctx context.Context, f *workflow.Flow) error {
 		close(hStarted)
 		<-hGo
 		f.SetBool("recovered", true)
@@ -112,7 +112,7 @@ func TestCancelMarkSparesAHandlerInsertedAfterTheWatermark(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	fk, err := e.Create(ctx, "cmark/g", nil, nil)
@@ -159,7 +159,7 @@ func TestCancelOncePerFlow(t *testing.T) {
 
 	aStarted, aGo := make(chan struct{}), make(chan struct{})
 	cStarted, cGo := make(chan struct{}), make(chan struct{})
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("CancelOnce")
 	g.SetURL("A", "conce/a")
 	g.SetURL("H", "conce/h")
@@ -169,14 +169,14 @@ func TestCancelOncePerFlow(t *testing.T) {
 	g.AddTransition("H", "C")
 	g.AddTransition("C", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("conce/g", g)
-	proxy.HandleTask("conce/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("conce/g", g)
+	mux.HandleTask("conce/a", func(ctx context.Context, f *workflow.Flow) error {
 		close(aStarted)
 		<-aGo
 		return nil
 	})
-	proxy.HandleTask("conce/h", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("conce/c", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("conce/h", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("conce/c", func(ctx context.Context, f *workflow.Flow) error {
 		close(cStarted)
 		<-cGo
 		f.SetBool("carriedOn", true)
@@ -185,7 +185,7 @@ func TestCancelOncePerFlow(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	fk, err := e.Create(ctx, "conce/g", nil, nil)

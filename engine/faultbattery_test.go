@@ -41,21 +41,21 @@ import (
 // constant, not an increment), so a task that runs twice under recovery still yields a byte-identical
 // final_state. calls counts how many times each node ran, so a test can distinguish a re-dispatch (task ran
 // twice) from a transparent in-tx retry (task ran once).
-func stateLinear(proxy *TestProxy, prefix string, calls map[string]*int) {
+func stateLinear(mux *HostMux, prefix string, calls map[string]*int) {
 	g := workflow.NewGraph("Lin")
 	g.SetURL("A", prefix+"/a")
 	g.SetURL("B", prefix+"/b")
 	g.AddTransition("A", "B")
 	g.AddTransition("B", workflow.End)
-	proxy.HandleGraph(prefix+"/g", g)
-	proxy.HandleTask(prefix+"/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph(prefix+"/g", g)
+	mux.HandleTask(prefix+"/a", func(ctx context.Context, f *workflow.Flow) error {
 		if c := calls["a"]; c != nil {
 			*c++
 		}
 		f.SetString("a", "ran")
 		return nil
 	})
-	proxy.HandleTask(prefix+"/b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask(prefix+"/b", func(ctx context.Context, f *workflow.Flow) error {
 		if c := calls["b"]; c != nil {
 			*c++
 		}
@@ -102,11 +102,11 @@ func newFaultBatteryEngine(t *testing.T, prefix string, cfg func(*Engine)) (*Eng
 	assert := testarossa.For(t)
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	calls := map[string]*int{"a": new(int), "b": new(int)}
-	stateLinear(proxy, prefix, calls)
+	stateLinear(mux, prefix, calls)
 	e := NewEngineUnderTest(t.Name())
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	e.SetMeterProvider(mp)
 	if cfg != nil {
 		cfg(e)

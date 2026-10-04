@@ -31,10 +31,10 @@ func TestFailedfanoutflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("FailedFanOut")
@@ -51,23 +51,23 @@ func TestFailedfanoutflow(t *testing.T) {
 	graph.AddTransition("A", "J")
 	graph.AddTransition("B", "J")
 	graph.AddTransitionChain("C", "J", workflow.End)
-	proxy.HandleGraph("failedfanoutflow.verify:428/failed-fan-out", graph)
+	mux.HandleGraph("failedfanoutflow.verify:428/failed-fan-out", graph)
 
-	proxy.HandleTask("failedfanoutflow.verify:428/src", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("failedfanoutflow.verify:428/src", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("failedfanoutflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("failedfanoutflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("executed", 1)
 		return nil
 	})
-	proxy.HandleTask("failedfanoutflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("failedfanoutflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
 		return errors.New("triggered failure in B")
 	})
-	proxy.HandleTask("failedfanoutflow.verify:428/c", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("failedfanoutflow.verify:428/c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("executed", 1)
 		return nil
 	})
-	proxy.HandleTask("failedfanoutflow.verify:428/j", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("failedfanoutflow.verify:428/j", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 

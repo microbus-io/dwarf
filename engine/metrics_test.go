@@ -132,19 +132,19 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("G")
 	g.SetURL("taskA", "metricsflow.verify:428/a")
 	g.SetURL("taskB", "metricsflow.verify:428/b")
 	g.AddTransition("taskA", "taskB")
 	g.AddTransition("taskB", workflow.End)
-	proxy.HandleGraph("metricsflow.verify:428/g", g)
-	proxy.HandleTask("metricsflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("metricsflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("metricsflow.verify:428/g", g)
+	mux.HandleTask("metricsflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("metricsflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	eng.SetMeterProvider(mp)
 	assert.NoError(eng.Startup(t.Context()))
 
@@ -214,17 +214,17 @@ func TestMetrics_RefillInstrumented(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("R")
 	g.SetURL("A", "refillmetrics/a")
 	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("refillmetrics/g", g)
-	proxy.HandleTask("refillmetrics/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("refillmetrics/g", g)
+	mux.HandleTask("refillmetrics/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	assert.NoError(e.SetHost(proxy))
+	assert.NoError(e.SetHost(mux))
 	assert.NoError(e.SetMeterProvider(mp))
 	assert.NoError(e.SetWorkers(0)) // nothing dispatches: the backlog stays put
 	assert.NoError(e.Startup(t.Context()))
@@ -293,17 +293,17 @@ func TestMetrics_ForkCountsAsStarted(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Forked")
 	g.SetURL("A", "forkmetric.verify:428/a")
 	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("forkmetric.verify:428/g", g)
-	proxy.HandleTask("forkmetric.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("forkmetric.verify:428/g", g)
+	mux.HandleTask("forkmetric.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	eng.SetMeterProvider(mp)
 	assert.NoError(eng.Startup(t.Context()))
 
@@ -357,16 +357,16 @@ func TestOrphanDetection_EmitsMetric(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Orphan")
 	g.SetURL("A", "orphanmetric.verify:428/a")
 	g.AddTransition("A", workflow.End)
-	proxy.HandleGraph("orphanmetric.verify:428/g", g)
-	proxy.HandleTask("orphanmetric.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("orphanmetric.verify:428/g", g)
+	mux.HandleTask("orphanmetric.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	eng.SetMeterProvider(mp)
 	assert.NoError(eng.Startup(t.Context()))
 
@@ -435,13 +435,13 @@ func TestMetrics_InFlightStateGauges(t *testing.T) {
 
 	started := make(chan struct{})
 	release := make(chan struct{})
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("H")
 	g.SetURL("A", "inflightstate.verify:428/a")
 	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("inflightstate.verify:428/g", g)
-	proxy.HandleTask("inflightstate.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("inflightstate.verify:428/g", g)
+	mux.HandleTask("inflightstate.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
 		close(started)
 		<-release
 		return nil
@@ -449,7 +449,7 @@ func TestMetrics_InFlightStateGauges(t *testing.T) {
 
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	eng.SetMeterProvider(mp)
 	assert.NoError(eng.Startup(t.Context()))
 
@@ -525,14 +525,14 @@ func TestMetrics_EndedCountsEveryTerminalStatus(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 
 	// A graph whose only task fails, with no onError, so the flow fails.
 	failing := workflow.NewGraph("Failing")
 	failing.SetURL("boom", "termmetrics.verify:429/boom")
 	failing.AddTransition("boom", workflow.End)
-	proxy.HandleGraph("termmetrics.verify:429/failing", failing)
-	proxy.HandleTask("termmetrics.verify:429/boom", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("termmetrics.verify:429/failing", failing)
+	mux.HandleTask("termmetrics.verify:429/boom", func(ctx context.Context, f *workflow.Flow) error {
 		return errors.New("intentional failure")
 	})
 
@@ -540,15 +540,15 @@ func TestMetrics_EndedCountsEveryTerminalStatus(t *testing.T) {
 	parking := workflow.NewGraph("Parking")
 	parking.SetURL("wait", "termmetrics.verify:429/wait")
 	parking.AddTransition("wait", workflow.End)
-	proxy.HandleGraph("termmetrics.verify:429/parking", parking)
-	proxy.HandleTask("termmetrics.verify:429/wait", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("termmetrics.verify:429/parking", parking)
+	mux.HandleTask("termmetrics.verify:429/wait", func(ctx context.Context, f *workflow.Flow) error {
 		_, _ = f.Interrupt(nil, nil)
 		return nil
 	})
 
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	eng.SetMeterProvider(mp)
 	assert.NoError(eng.Startup(t.Context()))
 

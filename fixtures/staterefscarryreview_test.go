@@ -52,18 +52,18 @@ func TestStaterefs_CarriedRefAcrossFanInWhenSpawnOnlyCarries(t *testing.T) {
 		}
 	}
 
-	newEngine := func(t *testing.T) (*engine.Engine, *engine.TestProxy) {
+	newEngine := func(t *testing.T) (*engine.Engine, *engine.HostMux) {
 		assert := testarossa.For(t)
-		proxy := engine.NewTestProxy()
+		mux := engine.NewHostMux()
 		eng := engine.NewEngineUnderTest(t.Name())
-		eng.SetHost(proxy)
+		eng.SetHost(mux)
 		assert.NoError(eng.Startup(t.Context()))
-		return eng, proxy
+		return eng, mux
 	}
 
 	t.Run("populated_cohort", func(t *testing.T) {
 		assert := testarossa.For(t)
-		eng, proxy := newEngine(t)
+		eng, mux := newEngine(t)
 		defer eng.Shutdown(ctx)
 
 		graph := workflow.NewGraph("CarryRef")
@@ -76,11 +76,11 @@ func TestStaterefs_CarriedRefAcrossFanInWhenSpawnOnlyCarries(t *testing.T) {
 		graph.AddTransitionForEach("Split", "Page", "pages", "page")
 		graph.AddTransitionChain("Page", "Collect", workflow.End)
 		assert.NoError(graph.Validate())
-		proxy.HandleGraph("carryref.verify:429/carry", graph)
-		proxy.HandleTask("carryref.verify:429/anchor", checkTask("Anchor"))
-		proxy.HandleTask("carryref.verify:429/split", checkTask("Split"))
-		proxy.HandleTask("carryref.verify:429/page", checkTask("Page"))
-		proxy.HandleTask("carryref.verify:429/collect", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleGraph("carryref.verify:429/carry", graph)
+		mux.HandleTask("carryref.verify:429/anchor", checkTask("Anchor"))
+		mux.HandleTask("carryref.verify:429/split", checkTask("Split"))
+		mux.HandleTask("carryref.verify:429/page", checkTask("Page"))
+		mux.HandleTask("carryref.verify:429/collect", func(ctx context.Context, f *workflow.Flow) error {
 			if err := checkTask("Collect")(ctx, f); err != nil {
 				return err
 			}
@@ -125,7 +125,7 @@ func TestStaterefs_CarriedRefAcrossFanInWhenSpawnOnlyCarries(t *testing.T) {
 
 	t.Run("empty_cohort_fires_fan_in_direct", func(t *testing.T) {
 		assert := testarossa.For(t)
-		eng, proxy := newEngine(t)
+		eng, mux := newEngine(t)
 		defer eng.Shutdown(ctx)
 
 		// An empty forEach routes straight to the fan-in via fireFanInDirect - the other mint site with the same
@@ -140,11 +140,11 @@ func TestStaterefs_CarriedRefAcrossFanInWhenSpawnOnlyCarries(t *testing.T) {
 		graph.AddTransitionForEach("Split", "Page", "pages", "page")
 		graph.AddTransitionChain("Page", "Collect", workflow.End)
 		assert.NoError(graph.Validate())
-		proxy.HandleGraph("carryrefe.verify:429/carry", graph)
-		proxy.HandleTask("carryrefe.verify:429/anchor", checkTask("Anchor"))
-		proxy.HandleTask("carryrefe.verify:429/split", checkTask("Split"))
-		proxy.HandleTask("carryrefe.verify:429/page", checkTask("Page"))
-		proxy.HandleTask("carryrefe.verify:429/collect", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleGraph("carryrefe.verify:429/carry", graph)
+		mux.HandleTask("carryrefe.verify:429/anchor", checkTask("Anchor"))
+		mux.HandleTask("carryrefe.verify:429/split", checkTask("Split"))
+		mux.HandleTask("carryrefe.verify:429/page", checkTask("Page"))
+		mux.HandleTask("carryrefe.verify:429/collect", func(ctx context.Context, f *workflow.Flow) error {
 			if err := checkTask("Collect")(ctx, f); err != nil {
 				return err
 			}
@@ -163,7 +163,7 @@ func TestStaterefs_CarriedRefAcrossFanInWhenSpawnOnlyCarries(t *testing.T) {
 
 	t.Run("nested_fanout_carries_through_both_fan_ins", func(t *testing.T) {
 		assert := testarossa.For(t)
-		eng, proxy := newEngine(t)
+		eng, mux := newEngine(t)
 		defer eng.Shutdown(ctx)
 
 		// Seed -forEach-> Cell -forEach-> Chunk -> JoinChunk -> JoinCell. The document is carried from the entry
@@ -182,12 +182,12 @@ func TestStaterefs_CarriedRefAcrossFanInWhenSpawnOnlyCarries(t *testing.T) {
 		graph.AddTransitionChain("Chunk", "JoinChunk")
 		graph.AddTransitionChain("JoinChunk", "JoinCell", workflow.End)
 		assert.NoError(graph.Validate())
-		proxy.HandleGraph("carryrefn.verify:429/carry", graph)
-		proxy.HandleTask("carryrefn.verify:429/seed", checkTask("Seed"))
-		proxy.HandleTask("carryrefn.verify:429/cell", checkTask("Cell"))
-		proxy.HandleTask("carryrefn.verify:429/chunk", checkTask("Chunk"))
-		proxy.HandleTask("carryrefn.verify:429/joinchunk", checkTask("JoinChunk"))
-		proxy.HandleTask("carryrefn.verify:429/joincell", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleGraph("carryrefn.verify:429/carry", graph)
+		mux.HandleTask("carryrefn.verify:429/seed", checkTask("Seed"))
+		mux.HandleTask("carryrefn.verify:429/cell", checkTask("Cell"))
+		mux.HandleTask("carryrefn.verify:429/chunk", checkTask("Chunk"))
+		mux.HandleTask("carryrefn.verify:429/joinchunk", checkTask("JoinChunk"))
+		mux.HandleTask("carryrefn.verify:429/joincell", func(ctx context.Context, f *workflow.Flow) error {
 			if err := checkTask("JoinCell")(ctx, f); err != nil {
 				return err
 			}

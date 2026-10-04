@@ -36,21 +36,21 @@ func TestQuery_WorkflowName(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	alpha := workflow.NewGraph("AlphaFlow")
 	alpha.SetURL("A", "q.verify:0/a")
 	alpha.AddTransition("A", workflow.End)
-	proxy.HandleGraph("q.verify:0/alpha", alpha)
+	mux.HandleGraph("q.verify:0/alpha", alpha)
 	beta := workflow.NewGraph("BetaFlow")
 	beta.SetURL("B", "q.verify:0/b")
 	beta.AddTransition("B", workflow.End)
-	proxy.HandleGraph("q.verify:0/beta", beta)
-	proxy.HandleTask("q.verify:0/a", func(context.Context, *workflow.Flow) error { return nil })
-	proxy.HandleTask("q.verify:0/b", func(context.Context, *workflow.Flow) error { return nil })
+	mux.HandleGraph("q.verify:0/beta", beta)
+	mux.HandleTask("q.verify:0/a", func(context.Context, *workflow.Flow) error { return nil })
+	mux.HandleTask("q.verify:0/b", func(context.Context, *workflow.Flow) error { return nil })
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(ctx))
 
 	const alphas, betas = 3, 2
@@ -108,16 +108,16 @@ func TestQuery_StatusFilter(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	g := workflow.NewGraph("StatusFlow")
 	g.SetURL("A", "qs.verify:0/a")
 	g.AddTransition("A", workflow.End)
-	proxy.HandleGraph("qs.verify:0/g", g)
-	proxy.HandleTask("qs.verify:0/a", func(context.Context, *workflow.Flow) error { return nil })
+	mux.HandleGraph("qs.verify:0/g", g)
+	mux.HandleTask("qs.verify:0/a", func(context.Context, *workflow.Flow) error { return nil })
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(ctx))
 
 	const n = 3
@@ -156,23 +156,23 @@ func TestQuery_SearchEscapesWildcards(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	// Display names: only "Under_Score" contains a LIKE metacharacter. URLs and task names carry none, and
 	// flow tokens are hex, so the underscore appears in exactly one searched column across all flows.
 	plain := workflow.NewGraph("PlainName")
 	plain.SetURL("A", "q.esc:0/a")
 	plain.AddTransition("A", workflow.End)
-	proxy.HandleGraph("q.esc:0/plain", plain)
+	mux.HandleGraph("q.esc:0/plain", plain)
 	under := workflow.NewGraph("Under_Score")
 	under.SetURL("B", "q.esc:0/b")
 	under.AddTransition("B", workflow.End)
-	proxy.HandleGraph("q.esc:0/under", under)
-	proxy.HandleTask("q.esc:0/a", func(context.Context, *workflow.Flow) error { return nil })
-	proxy.HandleTask("q.esc:0/b", func(context.Context, *workflow.Flow) error { return nil })
+	mux.HandleGraph("q.esc:0/under", under)
+	mux.HandleTask("q.esc:0/a", func(context.Context, *workflow.Flow) error { return nil })
+	mux.HandleTask("q.esc:0/b", func(context.Context, *workflow.Flow) error { return nil })
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(ctx))
 
 	var keys []string

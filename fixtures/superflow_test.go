@@ -46,11 +46,11 @@ func (v *visitCounter) get(name string) int {
 	return v.m[name]
 }
 
-func superflowSetup(t *testing.T, numShards int) (*engine.Engine, *engine.TestProxy, *visitCounter) {
+func superflowSetup(t *testing.T, numShards int) (*engine.Engine, *engine.HostMux, *visitCounter) {
 	t.Helper()
 	assert := testarossa.For(t)
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	// Main graph: A -> B -> forEach(items) -> C -> {onError -> ErrorHandler} -> D -> {when} -> superSubCall or E -> {goto} -> Z
 	superGraph := workflow.NewGraph("Super")
@@ -75,14 +75,14 @@ func superflowSetup(t *testing.T, numShards int) (*engine.Engine, *engine.TestPr
 	superGraph.AddTransitionGoto("TaskE", "TaskZ")
 	superGraph.AddTransition("TaskE", workflow.End)
 	superGraph.AddTransition("TaskZ", workflow.End)
-	proxy.HandleGraph("superflow.verify:428/super", superGraph)
+	mux.HandleGraph("superflow.verify:428/super", superGraph)
 
 	// Sub graph: SubTaskA -> SubTaskB -> END
 	subGraph := workflow.NewGraph("SuperSub")
 	subGraph.SetURL("SubTaskA", "superflow.verify:428/sub-task-a")
 	subGraph.SetURL("SubTaskB", "superflow.verify:428/sub-task-b")
 	subGraph.AddTransitionChain("SubTaskA", "SubTaskB", workflow.End)
-	proxy.HandleGraph("superflow.verify:428/super-sub", subGraph)
+	mux.HandleGraph("superflow.verify:428/super-sub", subGraph)
 
 	// Per-task visit counters. Fan-out branches (e.g. taskC over a forEach) run concurrently across
 	// workers and shards, so the counter must be safe for concurrent increment.
@@ -112,11 +112,11 @@ func superflowSetup(t *testing.T, numShards int) (*engine.Engine, *engine.TestPr
 
 	for _, name := range []string{"TaskA", "TaskB", "TaskC", "TaskD", "TaskE", "TaskZ", "ErrorHandler", "SubTaskA", "SubTaskB"} {
 		taskName := name
-		proxy.HandleTask("superflow.verify:428/"+kebab(taskName), func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("superflow.verify:428/"+kebab(taskName), func(ctx context.Context, f *workflow.Flow) error {
 			return step(ctx, f, taskName)
 		})
 	}
-	proxy.HandleTask("superflow.verify:428/super-sub-call", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("superflow.verify:428/super-sub-call", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph("superflow.verify:428/super-sub", nil, nil)
 		if yield || err != nil {
 			return err
@@ -125,13 +125,13 @@ func superflowSetup(t *testing.T, numShards int) (*engine.Engine, *engine.TestPr
 	})
 
 	eng := engine.NewEngineUnderTest(t.Name())
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	for i := 1; i <= numShards; i++ {
 		eng.SetShard(engine.ShardSpec{Index: i})
 	}
 	assert.NoError(eng.Startup(t.Context()))
 
-	return eng, proxy, visits
+	return eng, mux, visits
 }
 
 func kebab(camel string) string {

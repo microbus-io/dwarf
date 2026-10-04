@@ -25,20 +25,21 @@ import (
 	"github.com/microbus-io/errors"
 )
 
-// TestProxy routes graph fetches and task dispatches to registered handlers. It implements the Host
-// interface for use with Engine.SetHost.
+// HostMux is a Host that routes graph fetches and task dispatches, by URL, to graphs and Go functions
+// registered on it. It suits tests, and an application whose tasks run in-process, with no transport
+// between the engine and its tasks. Pass it to Engine.SetHost.
 //
 // A multi-replica test needs nothing else from it: replicas coordinate through the database they share,
 // so several engines pointed at one test database ARE a fleet, with no relay between them to stand up.
-type TestProxy struct {
+type HostMux struct {
 	mu     sync.RWMutex
 	graphs map[string]*workflow.Graph
 	tasks  map[string]func(ctx context.Context, flow *workflow.Flow) error
 }
 
-// NewTestProxy creates a new test proxy with empty handler registries.
-func NewTestProxy() *TestProxy {
-	return &TestProxy{
+// NewHostMux creates a HostMux with no graphs or tasks registered.
+func NewHostMux() *HostMux {
+	return &HostMux{
 		graphs: make(map[string]*workflow.Graph),
 		tasks:  make(map[string]func(ctx context.Context, flow *workflow.Flow) error),
 	}
@@ -46,7 +47,7 @@ func NewTestProxy() *TestProxy {
 
 // HandleGraph registers a workflow graph under the given name.
 // The name should match the workflow URL passed to Engine.Create or Engine.Run.
-func (p *TestProxy) HandleGraph(name string, graph *workflow.Graph) {
+func (p *HostMux) HandleGraph(name string, graph *workflow.Graph) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.graphs[name] = graph
@@ -55,14 +56,14 @@ func (p *TestProxy) HandleGraph(name string, graph *workflow.Graph) {
 // HandleTask registers a task handler under the given name.
 // The name should match the task URL registered via graph.SetURL. The handler reads the flow's baggage,
 // if any, with workflow.BaggageFrom(ctx).
-func (p *TestProxy) HandleTask(name string, handler func(ctx context.Context, flow *workflow.Flow) error) {
+func (p *HostMux) HandleTask(name string, handler func(ctx context.Context, flow *workflow.Flow) error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.tasks[name] = handler
 }
 
 // LoadGraph implements Host.
-func (p *TestProxy) LoadGraph(ctx context.Context, workflowURL string) (*workflow.Graph, error) {
+func (p *HostMux) LoadGraph(ctx context.Context, workflowURL string) (*workflow.Graph, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	g, ok := p.graphs[workflowURL]
@@ -73,7 +74,7 @@ func (p *TestProxy) LoadGraph(ctx context.Context, workflowURL string) (*workflo
 }
 
 // ExecuteTask implements Host.
-func (p *TestProxy) ExecuteTask(ctx context.Context, taskURL string, flow *workflow.Flow) error {
+func (p *HostMux) ExecuteTask(ctx context.Context, taskURL string, flow *workflow.Flow) error {
 	p.mu.RLock()
 	h, ok := p.tasks[taskURL]
 	p.mu.RUnlock()

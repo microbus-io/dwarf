@@ -41,10 +41,10 @@ func TestSubgraphfailflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// Inner: X -> boom (fails)
@@ -52,12 +52,12 @@ func TestSubgraphfailflow(t *testing.T) {
 	inner.SetURL("TaskX", "subgraphfailflow.verify:428/task-x")
 	inner.SetURL("Boom", "subgraphfailflow.verify:428/boom")
 	inner.AddTransitionChain("TaskX", "Boom", workflow.End)
-	proxy.HandleGraph("subgraphfailflow.verify:428/inner", inner)
+	mux.HandleGraph("subgraphfailflow.verify:428/inner", inner)
 
-	proxy.HandleTask("subgraphfailflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subgraphfailflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("subgraphfailflow.verify:428/boom", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subgraphfailflow.verify:428/boom", func(ctx context.Context, f *workflow.Flow) error {
 		return errors.New("inner exploded", http.StatusInternalServerError)
 	})
 
@@ -73,12 +73,12 @@ func TestSubgraphfailflow(t *testing.T) {
 		parent.AddTransitionChain("TaskA", "RunInner", "TaskZ", workflow.End)
 		parent.AddTransitionOnError("RunInner", "Recover")
 		parent.AddTransition("Recover", workflow.End)
-		proxy.HandleGraph("subgraphfailflow.verify:428/recoverparent", parent)
+		mux.HandleGraph("subgraphfailflow.verify:428/recoverparent", parent)
 
-		proxy.HandleTask("subgraphfailflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("subgraphfailflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 			return nil
 		})
-		proxy.HandleTask("subgraphfailflow.verify:428/run-inner-recover", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("subgraphfailflow.verify:428/run-inner-recover", func(ctx context.Context, f *workflow.Flow) error {
 			var out map[string]any
 			yield, err := f.Subgraph("subgraphfailflow.verify:428/inner", nil, &out)
 			if yield {
@@ -92,11 +92,11 @@ func TestSubgraphfailflow(t *testing.T) {
 			_ = out
 			return nil
 		})
-		proxy.HandleTask("subgraphfailflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("subgraphfailflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow) error {
 			f.SetString("result", "Z-should-not-run")
 			return nil
 		})
-		proxy.HandleTask("subgraphfailflow.verify:428/recover", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("subgraphfailflow.verify:428/recover", func(ctx context.Context, f *workflow.Flow) error {
 			var onErr errors.TracedError
 			_, _ = f.Get("onErr", &onErr)
 			f.SetString("result", "recovered: "+onErr.Error())
@@ -126,19 +126,19 @@ func TestSubgraphfailflow(t *testing.T) {
 		parent.SetURL("RunInner", "subgraphfailflow.verify:428/run-inner-fail")
 		parent.SetURL("TaskZ", "subgraphfailflow.verify:428/task-z2")
 		parent.AddTransitionChain("TaskA", "RunInner", "TaskZ", workflow.End)
-		proxy.HandleGraph("subgraphfailflow.verify:428/failparent", parent)
+		mux.HandleGraph("subgraphfailflow.verify:428/failparent", parent)
 
-		proxy.HandleTask("subgraphfailflow.verify:428/task-a2", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("subgraphfailflow.verify:428/task-a2", func(ctx context.Context, f *workflow.Flow) error {
 			return nil
 		})
-		proxy.HandleTask("subgraphfailflow.verify:428/run-inner-fail", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("subgraphfailflow.verify:428/run-inner-fail", func(ctx context.Context, f *workflow.Flow) error {
 			yield, err := f.Subgraph("subgraphfailflow.verify:428/inner", nil, nil)
 			if yield {
 				return nil
 			}
 			return err
 		})
-		proxy.HandleTask("subgraphfailflow.verify:428/task-z2", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("subgraphfailflow.verify:428/task-z2", func(ctx context.Context, f *workflow.Flow) error {
 			return nil
 		})
 

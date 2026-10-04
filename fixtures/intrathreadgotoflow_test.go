@@ -31,10 +31,10 @@ func TestIntrathreadgotoflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("IntraThreadGoto")
@@ -48,12 +48,12 @@ func TestIntrathreadgotoflow(t *testing.T) {
 	graph.AddTransitionGoto("LoopTask", "LoopTask")
 	graph.AddTransition("LoopTask", "TaskD")
 	graph.AddTransitionChain("NormalC", "TaskD", workflow.End)
-	proxy.HandleGraph("intrathreadgotoflow.verify:428/intra-thread-goto", graph)
+	mux.HandleGraph("intrathreadgotoflow.verify:428/intra-thread-goto", graph)
 
-	proxy.HandleTask("intrathreadgotoflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("intrathreadgotoflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("intrathreadgotoflow.verify:428/loop-task", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("intrathreadgotoflow.verify:428/loop-task", func(ctx context.Context, f *workflow.Flow) error {
 		loops := f.GetInt("loops") + 1
 		f.SetInt("loops", loops)
 		if loops < f.GetInt("target") {
@@ -61,11 +61,11 @@ func TestIntrathreadgotoflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("intrathreadgotoflow.verify:428/normal-c", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("intrathreadgotoflow.verify:428/normal-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("stamp", "stamped")
 		return nil
 	})
-	proxy.HandleTask("intrathreadgotoflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("intrathreadgotoflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("result", fmt.Sprintf("%s/%d", f.GetString("stamp"), f.GetInt("loops")))
 		return nil
 	})

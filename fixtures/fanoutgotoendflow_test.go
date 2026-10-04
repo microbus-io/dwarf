@@ -36,10 +36,10 @@ func TestFanoutgotoendflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("FanOutGotoEnd")
@@ -54,14 +54,14 @@ func TestFanoutgotoendflow(t *testing.T) {
 	graph.AddTransition("Work", "Join")
 	graph.AddTransition("Join", "Decide")
 	assert.NoError(graph.Validate())
-	proxy.HandleGraph("fanoutgotoendflow.verify:428/fan-out-goto-end", graph)
+	mux.HandleGraph("fanoutgotoendflow.verify:428/fan-out-goto-end", graph)
 
-	proxy.HandleTask("fanoutgotoendflow.verify:428/init", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fanoutgotoendflow.verify:428/init", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("pending", []string{"a", "b"})
 		return nil
 	})
 	// Round 0 fans out over pending; round 1 ends the flow.
-	proxy.HandleTask("fanoutgotoendflow.verify:428/decide", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fanoutgotoendflow.verify:428/decide", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetInt("rounds") > 0 {
 			f.Goto(workflow.End)
 			return nil
@@ -69,10 +69,10 @@ func TestFanoutgotoendflow(t *testing.T) {
 		f.SetInt("rounds", f.GetInt("rounds")+1)
 		return nil
 	})
-	proxy.HandleTask("fanoutgotoendflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fanoutgotoendflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("fanoutgotoendflow.verify:428/join", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fanoutgotoendflow.verify:428/join", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("pending", nil)
 		return nil
 	})

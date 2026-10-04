@@ -65,8 +65,8 @@ func TestFanInFlowLock_NonFinalArrivalTakesNoFlowRowWrite(t *testing.T) {
 
 		e := engine.NewEngineUnderTest(t.Name())
 		defer e.Shutdown(ctx)
-		proxy := engine.NewTestProxy()
-		e.SetHost(proxy)
+		mux := engine.NewHostMux()
+		e.SetHost(mux)
 		e.SetWorkers(1) // determinism: one worker, so no sibling races and no contention retries
 		assert.NoError(e.Startup(t.Context()))
 
@@ -79,14 +79,14 @@ func TestFanInFlowLock_NonFinalArrivalTakesNoFlowRowWrite(t *testing.T) {
 		g.AddTransitionForEach("Split", "Leg", "items", "item")
 		g.AddTransitionChain("Leg", "Join", workflow.End)
 		assert.NoError(g.Validate())
-		proxy.HandleGraph("fl/wf", g)
+		mux.HandleGraph("fl/wf", g)
 
-		proxy.HandleTask("fl/split", func(ctx context.Context, f *workflow.Flow) error { return nil })
-		proxy.HandleTask("fl/leg", func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask("fl/split", func(ctx context.Context, f *workflow.Flow) error { return nil })
+		mux.HandleTask("fl/leg", func(ctx context.Context, f *workflow.Flow) error {
 			f.SetInt("legs", 1)
 			return nil
 		})
-		proxy.HandleTask("fl/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
+		mux.HandleTask("fl/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 		items := make([]int, width)
 		for i := range items {

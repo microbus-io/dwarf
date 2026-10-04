@@ -54,34 +54,34 @@ func TestStepDepth_SubgraphContinuesFromCaller(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	parent := workflow.NewGraph("DepthParent")
 	parent.SetURL("A", "depthsub.verify:428/a")
 	parent.SetURL("Call", "depthsub.verify:428/call")
 	parent.AddTransitionChain("A", "Call", workflow.End)
-	proxy.HandleGraph("depthsub.verify:428/parent", parent)
+	mux.HandleGraph("depthsub.verify:428/parent", parent)
 
 	child := workflow.NewGraph("DepthChild")
 	child.SetURL("Inner", "depthsub.verify:428/inner")
 	child.SetURL("Inner2", "depthsub.verify:428/inner2")
 	child.AddTransitionChain("Inner", "Inner2", workflow.End)
-	proxy.HandleGraph("depthsub.verify:428/child", child)
+	mux.HandleGraph("depthsub.verify:428/child", child)
 
-	proxy.HandleTask("depthsub.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("depthsub.verify:428/call", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("depthsub.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("depthsub.verify:428/call", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph("depthsub.verify:428/child", map[string]any{}, nil)
 		if yield || err != nil {
 			return err
 		}
 		return nil
 	})
-	proxy.HandleTask("depthsub.verify:428/inner", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("depthsub.verify:428/inner2", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("depthsub.verify:428/inner", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("depthsub.verify:428/inner2", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	flowKey, _, err := eng.Run(ctx, "depthsub.verify:428/parent", map[string]any{}, nil)
@@ -113,7 +113,7 @@ func TestStepDepth_FanInIsMaxCohortDepthPlus1(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	g := workflow.NewGraph("DepthFanIn")
 	g.SetURL("Seed", "depthfanin.verify:428/seed")
@@ -126,17 +126,17 @@ func TestStepDepth_FanInIsMaxCohortDepthPlus1(t *testing.T) {
 	g.AddTransitionGoto("Work", "Deep") // goto: extend this branch one level deeper
 	g.AddTransition("Deep", "J")
 	g.AddTransition("J", workflow.End)
-	proxy.HandleGraph("depthfanin.verify:428/g", g)
+	mux.HandleGraph("depthfanin.verify:428/g", g)
 
 	// gate1 holds element 1's shallow branch (Work -> J, depth 2) until the deep branch (Work -> Deep -> J,
 	// depth 3) has already arrived at the fan-in. That makes the SHALLOW step the last arrival, so a
 	// last-completer+1 fan-in depth would compute 3 while the correct max-cohort+1 is 4.
 	gate1 := make(chan struct{})
-	proxy.HandleTask("depthfanin.verify:428/seed", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("depthfanin.verify:428/seed", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("items", []int{1, 2})
 		return nil
 	})
-	proxy.HandleTask("depthfanin.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("depthfanin.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetInt("n") == 2 {
 			f.Goto("Deep") // deep branch runs immediately
 			return nil
@@ -148,13 +148,13 @@ func TestStepDepth_FanInIsMaxCohortDepthPlus1(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("depthfanin.verify:428/deep", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("depthfanin.verify:428/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("depthfanin.verify:428/deep", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("depthfanin.verify:428/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(4)) // so the gated shallow branch doesn't starve the deep one
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	flowKey, err := eng.Create(ctx, "depthfanin.verify:428/g", map[string]any{}, nil)

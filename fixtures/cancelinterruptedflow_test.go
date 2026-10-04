@@ -36,10 +36,10 @@ func TestCancelinterruptedflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("Flow")
@@ -47,19 +47,19 @@ func TestCancelinterruptedflow(t *testing.T) {
 	graph.SetURL("Pause", "cancelinterruptedflow.verify:428/pause")
 	graph.SetURL("TaskB", "cancelinterruptedflow.verify:428/task-b")
 	graph.AddTransitionChain("TaskA", "Pause", "TaskB", workflow.End)
-	proxy.HandleGraph("cancelinterruptedflow.verify:428/flow", graph)
+	mux.HandleGraph("cancelinterruptedflow.verify:428/flow", graph)
 
-	proxy.HandleTask("cancelinterruptedflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("cancelinterruptedflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("cancelinterruptedflow.verify:428/pause", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("cancelinterruptedflow.verify:428/pause", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Interrupt(map[string]any{"need": "input"}, nil)
 		if yield || err != nil {
 			return err
 		}
 		return nil
 	})
-	proxy.HandleTask("cancelinterruptedflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("cancelinterruptedflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("result", "reached B")
 		return nil
 	})

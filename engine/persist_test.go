@@ -49,13 +49,13 @@ func TestPersist_TransientWriteErrorIsAbsorbedWithoutReExecution(t *testing.T) {
 	// A one-task flow whose task counts its executions - the number the whole design turns on, since an
 	// execution is where side effects fire.
 	var runs atomic.Int32
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Persist")
 	g.SetURL("A", "p/transient/a")
 	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("p/transient/wf", g)
-	proxy.HandleTask("p/transient/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("p/transient/wf", g)
+	mux.HandleTask("p/transient/a", func(ctx context.Context, f *workflow.Flow) error {
 		runs.Add(1)
 		f.SetString("out", "done")
 		return nil
@@ -63,7 +63,7 @@ func TestPersist_TransientWriteErrorIsAbsorbedWithoutReExecution(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	e.persistBackoff = shortPersistBackoff
 	assert.NoError(e.Startup(t.Context()))
 	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistErr, "A"), 1) // ONE failing attempt, then the database is fine again
@@ -92,13 +92,13 @@ func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testi
 	assert := testarossa.For(t)
 
 	var runs atomic.Int32
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Persist")
 	g.SetURL("A", "p/permanent/a")
 	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("p/permanent/wf", g)
-	proxy.HandleTask("p/permanent/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("p/permanent/wf", g)
+	mux.HandleTask("p/permanent/a", func(ctx context.Context, f *workflow.Flow) error {
 		runs.Add(1)
 		f.SetString("out", "done")
 		return nil
@@ -106,7 +106,7 @@ func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testi
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	e.persistBackoff = shortPersistBackoff
 	assert.NoError(e.Startup(t.Context()))
 	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistErr, "A"), 1000) // every attempt fails: the payload, not the database
@@ -155,7 +155,7 @@ func TestPersist_LeaseExtensionStatusGuard(t *testing.T) {
 	setup := func(t *testing.T, status string) (*Engine, *sequel.DB) {
 		assert := testarossa.For(t)
 		e := NewEngineUnderTest(t.Name())
-		e.SetHost(NewTestProxy())
+		e.SetHost(NewHostMux())
 		e.persistBackoff = shortPersistBackoff
 		assert.NoError(e.Startup(t.Context()))
 		db, err := e.db.Shard(1)
@@ -247,20 +247,20 @@ func TestPersist_DrainReleasesTheLeaseInsteadOfSleepingItOut(t *testing.T) {
 	assert := testarossa.For(t)
 
 	var runs atomic.Int32
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Drain")
 	g.SetURL("A", "p/drain/a")
 	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("p/drain/wf", g)
-	proxy.HandleTask("p/drain/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("p/drain/wf", g)
+	mux.HandleTask("p/drain/a", func(ctx context.Context, f *workflow.Flow) error {
 		runs.Add(1)
 		return nil
 	})
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	// A long backoff, so the worker is provably ASLEEP in the retry loop when the drain lands. If it did not
 	// select on drainStop, Shutdown would block for this long.
 	e.persistBackoff = []time.Duration{30 * time.Second}

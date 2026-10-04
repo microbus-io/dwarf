@@ -34,22 +34,22 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// baggageRecordingHost wraps a TestProxy and records the baggage seen on ctx at each LoadGraph and
-// ExecuteTask call, then delegates to the proxy.
+// baggageRecordingHost wraps a HostMux and records the baggage seen on ctx at each LoadGraph and
+// ExecuteTask call, then delegates to the mux.
 type baggageRecordingHost struct {
-	*engine.TestProxy
+	*engine.HostMux
 	onLoad func(ctx context.Context, name string)
 	onTask func(ctx context.Context, taskName string)
 }
 
 func (h *baggageRecordingHost) LoadGraph(ctx context.Context, name string) (*workflow.Graph, error) {
 	h.onLoad(ctx, name)
-	return h.TestProxy.LoadGraph(ctx, name)
+	return h.HostMux.LoadGraph(ctx, name)
 }
 
 func (h *baggageRecordingHost) ExecuteTask(ctx context.Context, taskName string, f *workflow.Flow) error {
 	h.onTask(ctx, taskName)
-	return h.TestProxy.ExecuteTask(ctx, taskName, f)
+	return h.HostMux.ExecuteTask(ctx, taskName, f)
 }
 
 func TestBaggageflow(t *testing.T) {
@@ -57,27 +57,27 @@ func TestBaggageflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	// Parent: A -> runInner -> END; Inner: X -> END.
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("TaskA", "baggageflow.verify:428/task-a")
 	parent.SetURL("RunInner", "baggageflow.verify:428/run-inner")
 	parent.AddTransitionChain("TaskA", "RunInner", workflow.End)
-	proxy.HandleGraph("baggageflow.verify:428/parent", parent)
+	mux.HandleGraph("baggageflow.verify:428/parent", parent)
 
 	inner := workflow.NewGraph("Inner")
 	inner.SetURL("TaskX", "baggageflow.verify:428/task-x")
 	inner.AddTransition("TaskX", workflow.End)
-	proxy.HandleGraph("baggageflow.verify:428/inner", inner)
+	mux.HandleGraph("baggageflow.verify:428/inner", inner)
 
-	proxy.HandleTask("baggageflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("baggageflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("baggageflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("baggageflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("baggageflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("baggageflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph("baggageflow.verify:428/inner", nil, nil)
 		if yield || err != nil {
 			return err
@@ -97,7 +97,7 @@ func TestBaggageflow(t *testing.T) {
 		return m
 	}
 	host := &baggageRecordingHost{
-		TestProxy: proxy,
+		HostMux: mux,
 		onLoad: func(ctx context.Context, name string) {
 			mu.Lock()
 			seenLoad[name] = bagOf(ctx)

@@ -30,7 +30,7 @@ func TestSwitchflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	graph := workflow.NewGraph("Switch")
 	graph.SetURL("Router", "switchflow.verify:428/router")
@@ -43,7 +43,7 @@ func TestSwitchflow(t *testing.T) {
 	graph.AddTransition("HandleHigh", workflow.End)
 	graph.AddTransition("HandleMid", workflow.End)
 	graph.AddTransition("HandleLow", workflow.End)
-	proxy.HandleGraph("switchflow.verify:428/switch", graph)
+	mux.HandleGraph("switchflow.verify:428/switch", graph)
 
 	// No-match graph: same router but no default arm.
 	noMatchGraph := workflow.NewGraph("SwitchNoMatch")
@@ -54,27 +54,27 @@ func TestSwitchflow(t *testing.T) {
 	noMatchGraph.AddTransitionSwitch("Router", "HandleMid", "amount >= 1000")
 	noMatchGraph.AddTransition("HandleHigh", workflow.End)
 	noMatchGraph.AddTransition("HandleMid", workflow.End)
-	proxy.HandleGraph("switchflow.verify:428/switch-no-match", noMatchGraph)
+	mux.HandleGraph("switchflow.verify:428/switch-no-match", noMatchGraph)
 
-	proxy.HandleTask("switchflow.verify:428/router", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("switchflow.verify:428/router", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("switchflow.verify:428/handle-high", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("switchflow.verify:428/handle-high", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("branch", "high")
 		return nil
 	})
-	proxy.HandleTask("switchflow.verify:428/handle-mid", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("switchflow.verify:428/handle-mid", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("branch", "mid")
 		return nil
 	})
-	proxy.HandleTask("switchflow.verify:428/handle-low", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("switchflow.verify:428/handle-low", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("branch", "low")
 		return nil
 	})
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	t.Run("amount_above_high_threshold_takes_high_branch", func(t *testing.T) {
@@ -128,7 +128,7 @@ func TestSwitchflow_NoMatch(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	graph := workflow.NewGraph("SwitchNoMatch")
 	graph.SetURL("Router", "switchflow.verify:428/router")
@@ -138,23 +138,23 @@ func TestSwitchflow_NoMatch(t *testing.T) {
 	graph.AddTransitionSwitch("Router", "HandleMid", "amount >= 1000")
 	graph.AddTransition("HandleHigh", workflow.End)
 	graph.AddTransition("HandleMid", workflow.End)
-	proxy.HandleGraph("switchflow.verify:428/switch-no-match", graph)
+	mux.HandleGraph("switchflow.verify:428/switch-no-match", graph)
 
-	proxy.HandleTask("switchflow.verify:428/router", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("switchflow.verify:428/router", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("switchflow.verify:428/handle-high", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("switchflow.verify:428/handle-high", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("branch", "high")
 		return nil
 	})
-	proxy.HandleTask("switchflow.verify:428/handle-mid", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("switchflow.verify:428/handle-mid", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("branch", "mid")
 		return nil
 	})
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	t.Run("no_match_completes_flow_without_branching", func(t *testing.T) {

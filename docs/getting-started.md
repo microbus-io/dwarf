@@ -27,7 +27,7 @@ That's the whole contract. The engine never learns *how* a task is reached — w
 
 ## Your first flow (test harness)
 
-The fastest way to see dwarf run is the in-process test harness. `engine.TestProxy` implements the `Host`
+The fastest way to see dwarf run is the in-process test harness. `engine.HostMux` implements the `Host`
 interface against in-memory registries, and `engine.NewEngineUnderTest(name)` builds an engine against an
 isolated, auto-dropped SQLite database.
 
@@ -47,7 +47,7 @@ import (
 
 func TestGreeting(t *testing.T) {
 	ctx := context.Background()
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	// 1. Define a two-task graph: Greet -> Shout -> END.
 	g := workflow.NewGraph("Welcome")
@@ -55,14 +55,14 @@ func TestGreeting(t *testing.T) {
 	g.SetURL("Shout", "shout")
 	g.AddTransition("Greet", "Shout")
 	g.AddTransition("Shout", workflow.End)
-	proxy.HandleGraph("welcome", g)
+	mux.HandleGraph("welcome", g)
 
 	// 2. Register the tasks.
-	proxy.HandleTask("greet", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("greet", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("message", "hello "+f.GetString("name"))
 		return nil
 	})
-	proxy.HandleTask("shout", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("shout", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("message", strings.ToUpper(f.GetString("message")))
 		return nil
 	})
@@ -70,7 +70,7 @@ func TestGreeting(t *testing.T) {
 	// 3. Wire and start the engine.
 	eng := dwarf.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	eng.Startup(ctx)
 
 	// 4. Run a flow to completion.
@@ -86,8 +86,9 @@ func TestGreeting(t *testing.T) {
 
 ## Wiring a real engine
 
-In production you replace `TestProxy` with your own `Host`, point the engine at a real
-database with `SetShard`, and manage its lifecycle explicitly. A standalone host need only implement the
+In production you point the engine at a real database with `SetShard` and manage its lifecycle explicitly.
+If your tasks are Go functions in the same process, `HostMux` can stay as the host; if they run elsewhere,
+behind HTTP, a message bus or an RPC framework, replace it with your own `Host`, which need only implement the
 two required methods:
 
 ```go

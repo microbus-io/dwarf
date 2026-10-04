@@ -43,10 +43,10 @@ func TestFailedforeachstateflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("FailedForEachState")
@@ -57,12 +57,12 @@ func TestFailedforeachstateflow(t *testing.T) {
 	graph.SetReducer("seen", workflow.ReducerAppend)
 	graph.AddTransitionForEach("Seed", "Cell", "items", "item")
 	graph.AddTransitionChain("Cell", "Join", workflow.End)
-	proxy.HandleGraph("failedforeachstateflow.verify:428/g", graph)
+	mux.HandleGraph("failedforeachstateflow.verify:428/g", graph)
 
-	proxy.HandleTask("failedforeachstateflow.verify:428/seed", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("failedforeachstateflow.verify:428/seed", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("failedforeachstateflow.verify:428/cell", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("failedforeachstateflow.verify:428/cell", func(ctx context.Context, f *workflow.Flow) error {
 		// A branch can see the array its own element came from - the engine no longer strips it.
 		if len(f.GetStrings("items")) != 3 {
 			return errors.New("branch cannot see its forEach source array")
@@ -73,7 +73,7 @@ func TestFailedforeachstateflow(t *testing.T) {
 		f.Set("seen", []any{f.GetString("item")})
 		return nil
 	})
-	proxy.HandleTask("failedforeachstateflow.verify:428/join", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("failedforeachstateflow.verify:428/join", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 

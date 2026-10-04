@@ -31,10 +31,10 @@ func TestNestedfanoutflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// Outer graph: A -> {NormalB, RunInner} -> J
@@ -48,7 +48,7 @@ func TestNestedfanoutflow(t *testing.T) {
 	outer.AddTransition("TaskA", "RunInner")
 	outer.AddTransition("NormalB", "TaskJ")
 	outer.AddTransitionChain("RunInner", "TaskJ", workflow.End)
-	proxy.HandleGraph("nestedfanoutflow.verify:428/nested", outer)
+	mux.HandleGraph("nestedfanoutflow.verify:428/nested", outer)
 
 	// Inner subgraph: X -> {Y, Z} -> W with ReducerAdd on "inner"
 	inner := workflow.NewGraph("Inner")
@@ -62,31 +62,31 @@ func TestNestedfanoutflow(t *testing.T) {
 	inner.AddTransition("TaskX", "TaskZ")
 	inner.AddTransition("TaskY", "TaskW")
 	inner.AddTransitionChain("TaskZ", "TaskW", workflow.End)
-	proxy.HandleGraph("nestedfanoutflow.verify:428/inner", inner)
+	mux.HandleGraph("nestedfanoutflow.verify:428/inner", inner)
 
-	proxy.HandleTask("nestedfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("nestedfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("nestedfanoutflow.verify:428/normal-b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("nestedfanoutflow.verify:428/normal-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("normalResult", "normal")
 		return nil
 	})
-	proxy.HandleTask("nestedfanoutflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("nestedfanoutflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("nestedfanoutflow.verify:428/task-y", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("nestedfanoutflow.verify:428/task-y", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("inner", 10)
 		return nil
 	})
-	proxy.HandleTask("nestedfanoutflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("nestedfanoutflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("inner", 20)
 		return nil
 	})
-	proxy.HandleTask("nestedfanoutflow.verify:428/task-w", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("nestedfanoutflow.verify:428/task-w", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("innerResult", f.GetInt("inner"))
 		return nil
 	})
-	proxy.HandleTask("nestedfanoutflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("nestedfanoutflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		yield, err := f.Subgraph("nestedfanoutflow.verify:428/inner", nil, &out)
 		if yield || err != nil {
@@ -97,7 +97,7 @@ func TestNestedfanoutflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("nestedfanoutflow.verify:428/task-j", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("nestedfanoutflow.verify:428/task-j", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("result", fmt.Sprintf("%s/%d", f.GetString("normalResult"), f.GetInt("innerResult")))
 		return nil
 	})

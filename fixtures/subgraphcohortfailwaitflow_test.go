@@ -40,16 +40,16 @@ func TestSubgraphCohortFailWaitflow(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("RunInner", "subgraphcohortfailwait.verify:0/run-inner")
 	parent.AddTransition("RunInner", workflow.End)
-	proxy.HandleGraph("subgraphcohortfailwait.verify:0/parent", parent)
+	mux.HandleGraph("subgraphcohortfailwait.verify:0/parent", parent)
 
 	// Inner: Split fans out to {Boom, Slow}, both converging on Join. Boom fails immediately (no onError);
 	// Slow blocks until released, so its completion is the last arrival that resolves the failed cohort.
@@ -64,28 +64,28 @@ func TestSubgraphCohortFailWaitflow(t *testing.T) {
 	inner.AddTransition("Slow", "Join")
 	inner.AddTransition("Join", workflow.End)
 	inner.SetFanIn("Join")
-	proxy.HandleGraph("subgraphcohortfailwait.verify:0/inner", inner)
+	mux.HandleGraph("subgraphcohortfailwait.verify:0/inner", inner)
 
 	var mu sync.Mutex
 	var childKey string
 	release := make(chan struct{})
-	proxy.HandleTask("subgraphcohortfailwait.verify:0/split", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subgraphcohortfailwait.verify:0/split", func(ctx context.Context, f *workflow.Flow) error {
 		mu.Lock()
 		childKey = f.FlowKey() // a subgraph child sees its own (child) flow key
 		mu.Unlock()
 		return nil
 	})
-	proxy.HandleTask("subgraphcohortfailwait.verify:0/boom", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subgraphcohortfailwait.verify:0/boom", func(ctx context.Context, f *workflow.Flow) error {
 		return errors.New("branch boom", http.StatusInternalServerError)
 	})
-	proxy.HandleTask("subgraphcohortfailwait.verify:0/slow", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subgraphcohortfailwait.verify:0/slow", func(ctx context.Context, f *workflow.Flow) error {
 		<-release // completes last, resolving the cohort with cohort_failures>0 (the transition path)
 		return nil
 	})
-	proxy.HandleTask("subgraphcohortfailwait.verify:0/join", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subgraphcohortfailwait.verify:0/join", func(ctx context.Context, f *workflow.Flow) error {
 		return nil // never reached: the cohort fails
 	})
-	proxy.HandleTask("subgraphcohortfailwait.verify:0/run-inner", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subgraphcohortfailwait.verify:0/run-inner", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		yield, err := f.Subgraph("subgraphcohortfailwait.verify:0/inner", map[string]any{}, &out)
 		if yield || err != nil {

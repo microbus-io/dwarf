@@ -31,26 +31,26 @@ func TestDynamicsubgraphflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// Parent graph: single task
 	parent := workflow.NewGraph("DynamicSubgraph")
 	parent.SetURL("Parent", "dynamicsubgraphflow.verify:428/parent")
 	parent.AddTransition("Parent", workflow.End)
-	proxy.HandleGraph("dynamicsubgraphflow.verify:428/dynamic-subgraph", parent)
+	mux.HandleGraph("dynamicsubgraphflow.verify:428/dynamic-subgraph", parent)
 
 	// Inner graph: InnerA -> InnerB
 	inner := workflow.NewGraph("Inner")
 	inner.SetURL("InnerA", "dynamicsubgraphflow.verify:428/inner-a")
 	inner.SetURL("InnerB", "dynamicsubgraphflow.verify:428/inner-b")
 	inner.AddTransitionChain("InnerA", "InnerB", workflow.End)
-	proxy.HandleGraph("dynamicsubgraphflow.verify:428/inner", inner)
+	mux.HandleGraph("dynamicsubgraphflow.verify:428/inner", inner)
 
-	proxy.HandleTask("dynamicsubgraphflow.verify:428/parent", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("dynamicsubgraphflow.verify:428/parent", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		yield, err := f.Subgraph("dynamicsubgraphflow.verify:428/inner", map[string]any{"value": f.GetInt("value")}, &out)
 		if yield || err != nil {
@@ -59,11 +59,11 @@ func TestDynamicsubgraphflow(t *testing.T) {
 		f.SetString("result", fmt.Sprintf("parent:%v", out["innerResult"]))
 		return nil
 	})
-	proxy.HandleTask("dynamicsubgraphflow.verify:428/inner-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("dynamicsubgraphflow.verify:428/inner-a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("innerStage", f.GetInt("value")*2)
 		return nil
 	})
-	proxy.HandleTask("dynamicsubgraphflow.verify:428/inner-b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("dynamicsubgraphflow.verify:428/inner-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("innerResult", f.GetInt("innerStage")+3)
 		return nil
 	})

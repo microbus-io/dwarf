@@ -36,10 +36,10 @@ func TestSubflowGuardflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// Parent: A -> RunInner. Inner: X (captures its own - the child's - flow key).
@@ -47,26 +47,26 @@ func TestSubflowGuardflow(t *testing.T) {
 	parent.SetURL("TaskA", "subflowguard.verify:428/task-a")
 	parent.SetURL("RunInner", "subflowguard.verify:428/run-inner")
 	parent.AddTransitionChain("TaskA", "RunInner", workflow.End)
-	proxy.HandleGraph("subflowguard.verify:428/parent", parent)
+	mux.HandleGraph("subflowguard.verify:428/parent", parent)
 
 	inner := workflow.NewGraph("Inner")
 	inner.SetURL("TaskX", "subflowguard.verify:428/task-x")
 	inner.AddTransitionChain("TaskX", workflow.End)
-	proxy.HandleGraph("subflowguard.verify:428/inner", inner)
+	mux.HandleGraph("subflowguard.verify:428/inner", inner)
 
 	var mu sync.Mutex
 	var childKey string
-	proxy.HandleTask("subflowguard.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subflowguard.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("subflowguard.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subflowguard.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
 		mu.Lock()
 		childKey = f.FlowKey() // a subgraph child sees its own (child) flow key
 		mu.Unlock()
 		f.SetString("inner", "done")
 		return nil
 	})
-	proxy.HandleTask("subflowguard.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subflowguard.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		yield, err := f.Subgraph("subflowguard.verify:428/inner", map[string]any{}, &out)
 		if yield || err != nil {

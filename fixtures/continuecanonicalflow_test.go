@@ -45,23 +45,23 @@ func TestContinuecanonicalflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	graph := workflow.NewGraph("Tagging")
 	graph.SetURL("Tag", "continuecanonical.verify:428/tag")
 	graph.AddTransition("Tag", workflow.End)
 	graph.SetReducer("tags", workflow.ReducerUnion)
-	proxy.HandleGraph("continuecanonical.verify:428/g", graph)
+	mux.HandleGraph("continuecanonical.verify:428/g", graph)
 
 	// The task is a pass-through: the interesting merge is Continue's, between the thread's accumulated
 	// state and the caller's additionalState.
-	proxy.HandleTask("continuecanonical.verify:428/tag", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("continuecanonical.verify:428/tag", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// Turn 1 establishes the element in state, via the ordinary (decoded) path.

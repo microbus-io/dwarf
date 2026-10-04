@@ -40,10 +40,10 @@ func TestSleepRetryComposeflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	const sleep = 200 * time.Millisecond
@@ -53,9 +53,9 @@ func TestSleepRetryComposeflow(t *testing.T) {
 	graph := workflow.NewGraph("SleepRetryCompose")
 	graph.SetURL("Flaky", "sleepretrycomposeflow.verify:428/flaky")
 	graph.AddTransitionChain("Flaky", workflow.End)
-	proxy.HandleGraph("sleepretrycomposeflow.verify:428/compose", graph)
+	mux.HandleGraph("sleepretrycomposeflow.verify:428/compose", graph)
 
-	proxy.HandleTask("sleepretrycomposeflow.verify:428/flaky", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("sleepretrycomposeflow.verify:428/flaky", func(ctx context.Context, f *workflow.Flow) error {
 		n := f.GetInt("attempts") + 1
 		f.SetInt("attempts", n)
 		f.SetFloat(fmt.Sprintf("t%d", n), float64(time.Now().UnixMilli()))

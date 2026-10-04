@@ -17,34 +17,33 @@ interrupts, retries — with no database to set up and no transport to stand up.
   them. It logs to stderr at Error for CI clues (`DWARF_TEST_LOG_LEVEL` overrides — `info`/`debug` for the
   flow-status play-by-play, `silent`/`off` to quiet it); a benchmark or fuzz target silences it outright with
   `SetLogger(slog.New(slog.DiscardHandler))`, since per-iteration logging would swamp the measurement.
-- **`engine.TestProxy`** is an in-memory implementation of the `Host` interface. Register graphs and task
-  functions on it, then register it with `SetHost(proxy)` — its `LoadGraph`/`ExecuteTask` back the
-  required methods, and its peer methods are no-ops.
+- **`engine.HostMux`** is an in-memory implementation of the `Host` interface. Register graphs and task
+  functions on it, then register it with `SetHost(mux)` — its `LoadGraph`/`ExecuteTask` look them up by URL.
 
 ```go
 func TestCheckout(t *testing.T) {
     ctx := context.Background()
-    proxy := engine.NewTestProxy()
+    mux := engine.NewHostMux()
 
     g := workflow.NewGraph("Checkout")
     g.SetURL("Reserve", "inventory.reserve")
     g.SetURL("Charge", "billing.charge")
     g.AddTransition("Reserve", "Charge")
     g.AddTransition("Charge", workflow.End)
-    proxy.HandleGraph("checkout", g)
+    mux.HandleGraph("checkout", g)
 
-    proxy.HandleTask("inventory.reserve", func(ctx context.Context, f *workflow.Flow) error {
+    mux.HandleTask("inventory.reserve", func(ctx context.Context, f *workflow.Flow) error {
         f.SetBool("reserved", true)
         return nil
     })
-    proxy.HandleTask("billing.charge", func(ctx context.Context, f *workflow.Flow) error {
+    mux.HandleTask("billing.charge", func(ctx context.Context, f *workflow.Flow) error {
         f.SetString("receipt", "r-123")
         return nil
     })
 
     eng := dwarf.NewEngineUnderTest(t.Name())
     defer eng.Shutdown(ctx)
-    eng.SetHost(proxy)
+    eng.SetHost(mux)
     eng.Startup(ctx)
 
     _, out, err := eng.Run(ctx, "checkout", map[string]any{"sku": "ABC"}, nil)
@@ -54,7 +53,7 @@ func TestCheckout(t *testing.T) {
 }
 ```
 
-`TestProxy.HandleGraph(name, graph)` registers a graph; `HandleTask(url, handler)` registers a task by its
+`HostMux.HandleGraph(name, graph)` registers a graph; `HandleTask(url, handler)` registers a task by its
 URL (the address bound with `SetURL`). The handler signature is the same `func(ctx, *workflow.Flow) error`
 you write in production.
 
@@ -66,7 +65,7 @@ priority:
 ```go
 eng := dwarf.NewEngineUnderTest(t.Name())
 defer eng.Shutdown(ctx)
-eng.SetHost(proxy)
+eng.SetHost(mux)
 eng.SetWorkers(1) // serialize dispatch to assert ordering
 for i := 1; i <= 4; i++ {
 	eng.SetShard(engine.ShardSpec{Index: i, DSN: ""}) // each shard gets its own in-memory database
@@ -98,7 +97,7 @@ testarossa.Equal(t, workflow.StatusCompleted, out.Status)
 the eventual outcome once the task stops failing:
 
 ```go
-proxy.HandleTask("flaky", func(ctx context.Context, f *workflow.Flow) error {
+mux.HandleTask("flaky", func(ctx context.Context, f *workflow.Flow) error {
     if firstFewCalls() {
         if f.Retry(time.Millisecond, 2.0, 10*time.Millisecond, time.Minute) {
             return nil
@@ -108,7 +107,7 @@ proxy.HandleTask("flaky", func(ctx context.Context, f *workflow.Flow) error {
 })
 ```
 
-Because `TestProxy` returns synchronously, it produces a far tighter, more adversarial timing environment
+Because `HostMux` returns synchronously, it produces a far tighter, more adversarial timing environment
 than a real network — which makes it excellent at surfacing concurrency bugs in retries, fan-in, and
 crash recovery.
 
@@ -122,14 +121,14 @@ To test cross-replica behavior, stand up two engines against the same test datab
 is — they coordinate through the database, so there is no relay to wire between them:
 
 ```go
-proxy1, proxy2 := engine.NewTestProxy(), engine.NewTestProxy()
+mux1, mux2 := engine.NewHostMux(), engine.NewHostMux()
 // register the same graphs/tasks on both...
 eng1 := engine.NewEngineUnderTest(t.Name()) // one name → one shared isolated database
 defer eng1.Shutdown(ctx)
-eng1.SetHost(proxy1)
+eng1.SetHost(mux1)
 eng2 := engine.NewEngineUnderTest(t.Name())
 defer eng2.Shutdown(ctx)
-eng2.SetHost(proxy2)
+eng2.SetHost(mux2)
 eng1.Startup(ctx)
 eng2.Startup(ctx)
 ```

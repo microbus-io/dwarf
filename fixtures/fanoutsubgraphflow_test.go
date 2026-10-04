@@ -34,7 +34,7 @@ import (
 // steps are excluded from lease recovery), so if the child completes and runs that revive before a later
 // park lands, the caller is stranded permanently and its fan-in never fires. This is a functional check that
 // the fan-out-sibling subgraph path completes; note it does NOT deterministically reproduce the strand
-// in-process (the TestProxy dispatch is too synchronous for the child to win the race) - the deterministic
+// in-process (the HostMux dispatch is too synchronous for the child to win the race) - the deterministic
 // repro is transport-timing-specific (observed over a real bus transport), tracked separately. The bounded
 // per-flow rendezvous below makes a stranded flow fail, named, rather than hang.
 func TestFanoutSubgraphflow(t *testing.T) {
@@ -42,7 +42,7 @@ func TestFanoutSubgraphflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	// Parent: Entry fans out to {A, B, Sub}, all converging at the Join fan-in, then END.
 	parent := workflow.NewGraph("Parent")
@@ -58,21 +58,21 @@ func TestFanoutSubgraphflow(t *testing.T) {
 	parent.AddTransition("A", "Join")
 	parent.AddTransition("B", "Join")
 	parent.AddTransitionChain("Sub", "Join", workflow.End)
-	proxy.HandleGraph("fanoutsub.verify:428/parent", parent)
+	mux.HandleGraph("fanoutsub.verify:428/parent", parent)
 
 	// Inner: a single trivial task, so the child completes as fast as possible to race the caller's park.
 	inner := workflow.NewGraph("Inner")
 	inner.SetURL("InnerEntry", "fanoutsub.verify:428/inner-entry")
 	inner.AddTransition("InnerEntry", workflow.End)
-	proxy.HandleGraph("fanoutsub.verify:428/inner", inner)
+	mux.HandleGraph("fanoutsub.verify:428/inner", inner)
 
 	noop := func(ctx context.Context, f *workflow.Flow) error { return nil }
-	proxy.HandleTask("fanoutsub.verify:428/entry", noop)
-	proxy.HandleTask("fanoutsub.verify:428/a", noop)
-	proxy.HandleTask("fanoutsub.verify:428/b", noop)
-	proxy.HandleTask("fanoutsub.verify:428/join", noop)
-	proxy.HandleTask("fanoutsub.verify:428/inner-entry", noop)
-	proxy.HandleTask("fanoutsub.verify:428/sub", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fanoutsub.verify:428/entry", noop)
+	mux.HandleTask("fanoutsub.verify:428/a", noop)
+	mux.HandleTask("fanoutsub.verify:428/b", noop)
+	mux.HandleTask("fanoutsub.verify:428/join", noop)
+	mux.HandleTask("fanoutsub.verify:428/inner-entry", noop)
+	mux.HandleTask("fanoutsub.verify:428/sub", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph("fanoutsub.verify:428/inner", nil, nil)
 		if yield || err != nil {
 			return err
@@ -82,7 +82,7 @@ func TestFanoutSubgraphflow(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	eng.SetWorkers(4)
 	assert.NoError(eng.Startup(t.Context()))
 

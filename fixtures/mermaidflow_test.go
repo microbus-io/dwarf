@@ -36,10 +36,10 @@ func TestMermaidflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// Parent: Start -> (forEach items -> Work) -> Collect (fan-in) -> CallSub (subgraph) -> Finish -> END
@@ -53,29 +53,29 @@ func TestMermaidflow(t *testing.T) {
 	parent.SetReducer("processed", workflow.ReducerAdd)
 	parent.AddTransitionForEach("Start", "Work", "items", "item")
 	parent.AddTransitionChain("Work", "Collect", "CallSub", "Finish", workflow.End)
-	proxy.HandleGraph("mermaidflow.verify:428/parent", parent)
+	mux.HandleGraph("mermaidflow.verify:428/parent", parent)
 
 	// Inner subgraph: InnerA -> InnerB -> END
 	inner := workflow.NewGraph("MermaidInner")
 	inner.SetURL("InnerA", "mermaidflow.verify:428/inner-a")
 	inner.SetURL("InnerB", "mermaidflow.verify:428/inner-b")
 	inner.AddTransitionChain("InnerA", "InnerB", workflow.End)
-	proxy.HandleGraph("mermaidflow.verify:428/inner", inner)
+	mux.HandleGraph("mermaidflow.verify:428/inner", inner)
 
-	proxy.HandleTask("mermaidflow.verify:428/start", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("mermaidflow.verify:428/start", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("mermaidflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("mermaidflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetString("item") != "" {
 			f.SetInt("processed", 1)
 		}
 		return nil
 	})
-	proxy.HandleTask("mermaidflow.verify:428/collect", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("mermaidflow.verify:428/collect", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("processedCount", f.GetInt("processed"))
 		return nil
 	})
-	proxy.HandleTask("mermaidflow.verify:428/call-sub", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("mermaidflow.verify:428/call-sub", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		yield, err := f.Subgraph("mermaidflow.verify:428/inner", map[string]any{"seed": "s"}, &out)
 		if yield || err != nil {
@@ -83,15 +83,15 @@ func TestMermaidflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("mermaidflow.verify:428/finish", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("mermaidflow.verify:428/finish", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("done", true)
 		return nil
 	})
-	proxy.HandleTask("mermaidflow.verify:428/inner-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("mermaidflow.verify:428/inner-a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("innerResult", "A")
 		return nil
 	})
-	proxy.HandleTask("mermaidflow.verify:428/inner-b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("mermaidflow.verify:428/inner-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("innerResult", "B")
 		return nil
 	})

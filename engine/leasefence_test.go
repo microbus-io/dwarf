@@ -75,7 +75,7 @@ func TestLeaseFence_FailStep(t *testing.T) {
 		assert := testarossa.For(t)
 		e := NewEngineUnderTest(t.Name())
 		defer e.Shutdown(ctx)
-		e.SetHost(NewTestProxy())
+		e.SetHost(NewHostMux())
 		assert.NoError(e.Startup(t.Context()))
 		setup(t, e, 5) // the owner holds generation 5
 
@@ -93,7 +93,7 @@ func TestLeaseFence_FailStep(t *testing.T) {
 		assert := testarossa.For(t)
 		e := NewEngineUnderTest(t.Name())
 		defer e.Shutdown(ctx)
-		e.SetHost(NewTestProxy())
+		e.SetHost(NewHostMux())
 		assert.NoError(e.Startup(t.Context()))
 		setup(t, e, 5)
 
@@ -170,22 +170,22 @@ func TestLeaseFence_CompletionNoDuplicateSuccessor(t *testing.T) {
 	aStarted := make(chan struct{}, 1)
 	aRelease := make(chan struct{})
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("LF-B")
 	g.SetURL("A", "lfb/a")
 	g.SetURL("B", "lfb/b")
 	g.AddTransition("A", "B")
 	g.AddTransition("B", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("lfb/g", g)
-	proxy.HandleTask("lfb/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("lfb/g", g)
+	mux.HandleTask("lfb/a", func(ctx context.Context, f *workflow.Flow) error {
 		if aCalls.Add(1) == 1 {
 			aStarted <- struct{}{}
 			<-aRelease // the first (zombie) dispatch blocks until the peer has finished the flow
 		}
 		return nil
 	})
-	proxy.HandleTask("lfb/b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("lfb/b", func(ctx context.Context, f *workflow.Flow) error {
 		bCalls.Add(1)
 		return nil
 	})
@@ -193,7 +193,7 @@ func TestLeaseFence_CompletionNoDuplicateSuccessor(t *testing.T) {
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(3))
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	flowKey, outcome := zombieDispatch(t, eng, "lfb/g", "A", &aCalls, aStarted, aRelease)
@@ -236,7 +236,7 @@ func TestLeaseFence_CohortNoDoubleArrival(t *testing.T) {
 	xStarted := make(chan struct{}, 1)
 	xRelease := make(chan struct{})
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("LF-C")
 	g.SetURL("A", "lfc/a")
 	g.SetURL("X", "lfc/x")
@@ -249,17 +249,17 @@ func TestLeaseFence_CohortNoDoubleArrival(t *testing.T) {
 	g.AddTransition("Y", "J")
 	g.AddTransition("J", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("lfc/g", g)
-	proxy.HandleTask("lfc/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("lfc/x", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("lfc/g", g)
+	mux.HandleTask("lfc/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("lfc/x", func(ctx context.Context, f *workflow.Flow) error {
 		if xCalls.Add(1) == 1 {
 			xStarted <- struct{}{}
 			<-xRelease // the first (zombie) X dispatch blocks until the peer has resolved the cohort
 		}
 		return nil
 	})
-	proxy.HandleTask("lfc/y", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("lfc/j", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("lfc/y", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("lfc/j", func(ctx context.Context, f *workflow.Flow) error {
 		jCalls.Add(1)
 		return nil
 	})
@@ -267,7 +267,7 @@ func TestLeaseFence_CohortNoDoubleArrival(t *testing.T) {
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(4))
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	flowKey, outcome := zombieDispatch(t, eng, "lfc/g", "X", &xCalls, xStarted, xRelease)
@@ -317,21 +317,21 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 
 	var aCalls atomic.Int64
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("LF-RR")
 	g.SetURL("A", "lfrr/a")
 	g.SetURL("B", "lfrr/b")
 	g.AddTransition("A", "B")
 	g.AddTransition("B", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("lfrr/g", g)
-	proxy.HandleTask("lfrr/a", func(ctx context.Context, f *workflow.Flow) error { aCalls.Add(1); return nil })
-	proxy.HandleTask("lfrr/b", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("lfrr/g", g)
+	mux.HandleTask("lfrr/a", func(ctx context.Context, f *workflow.Flow) error { aCalls.Add(1); return nil })
+	mux.HandleTask("lfrr/b", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(3))
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// The first (zombie) dispatch of A completes, its transition tx fails, and the recovery defer freezes at the
@@ -420,13 +420,13 @@ func TestLeaseFence_RetryRewindFenced(t *testing.T) {
 	aStarted := make(chan struct{}, 1)
 	aRelease := make(chan struct{})
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("LF-Retry")
 	g.SetURL("A", "lfr/a")
 	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("lfr/g", g)
-	proxy.HandleTask("lfr/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("lfr/g", g)
+	mux.HandleTask("lfr/a", func(ctx context.Context, f *workflow.Flow) error {
 		switch aCalls.Add(1) {
 		case 1:
 			// The first (zombie) dispatch blocks until the peer has finished the flow, then arms a retry whose
@@ -447,7 +447,7 @@ func TestLeaseFence_RetryRewindFenced(t *testing.T) {
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(3))
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	flowKey, outcome := zombieDispatch(t, eng, "lfr/g", "A", &aCalls, aStarted, aRelease)
@@ -492,18 +492,18 @@ func TestLeaseFence_SubgraphParkFenced(t *testing.T) {
 	aStarted := make(chan struct{}, 1)
 	aRelease := make(chan struct{})
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	parent := workflow.NewGraph("LF-SubPark")
 	parent.SetURL("A", "lfs/a")
 	parent.AddTransition("A", workflow.End)
 	assert.NoError(parent.Validate())
-	proxy.HandleGraph("lfs/g", parent)
+	mux.HandleGraph("lfs/g", parent)
 	child := workflow.NewGraph("LF-SubParkChild")
 	child.SetURL("C", "lfs/c")
 	child.AddTransition("C", workflow.End)
 	assert.NoError(child.Validate())
-	proxy.HandleGraph("lfs/child", child)
-	proxy.HandleTask("lfs/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("lfs/child", child)
+	mux.HandleTask("lfs/a", func(ctx context.Context, f *workflow.Flow) error {
 		if aCalls.Add(1) == 1 {
 			// The first (zombie) dispatch blocks until the peer has finished the flow, then arms a subgraph whose
 			// park must be fenced by the stale lease_seq (so it spawns no second child).
@@ -519,7 +519,7 @@ func TestLeaseFence_SubgraphParkFenced(t *testing.T) {
 		}
 		return nil // re-entry after the child completed
 	})
-	proxy.HandleTask("lfs/c", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("lfs/c", func(ctx context.Context, f *workflow.Flow) error {
 		cCalls.Add(1)
 		return nil
 	})
@@ -527,7 +527,7 @@ func TestLeaseFence_SubgraphParkFenced(t *testing.T) {
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(3))
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	flowKey, outcome := zombieDispatch(t, eng, "lfs/g", "A", &aCalls, aStarted, aRelease)
@@ -577,13 +577,13 @@ func TestLeaseRecovery_EndToEnd(t *testing.T) {
 	aStarted := make(chan struct{}, 1)
 	aRelease := make(chan struct{})
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("LR")
 	g.SetURL("A", "lr/a")
 	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("lr/g", g)
-	proxy.HandleTask("lr/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("lr/g", g)
+	mux.HandleTask("lr/a", func(ctx context.Context, f *workflow.Flow) error {
 		if aCalls.Add(1) == 1 {
 			aStarted <- struct{}{}
 			<-aRelease // the crashed worker: its first execution is leaked, released only at teardown
@@ -595,7 +595,7 @@ func TestLeaseRecovery_EndToEnd(t *testing.T) {
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(3))
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	eng.SetMeterProvider(mp)
 	assert.NoError(eng.Startup(t.Context()))
 	// Release the leaked "crashed" execution at teardown, BEFORE the Shutdown defer drains workers (defers
@@ -654,7 +654,7 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 	setup := func(t *testing.T, flowStatus, stepStatus string) (*Engine, *sequel.DB) {
 		assert := testarossa.For(t)
 		e := NewEngineUnderTest(t.Name())
-		e.SetHost(NewTestProxy())
+		e.SetHost(NewHostMux())
 		assert.NoError(e.Startup(t.Context()))
 		db, err := e.db.Shard(1)
 		assert.NoError(err)

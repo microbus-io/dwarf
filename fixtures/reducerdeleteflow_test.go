@@ -48,19 +48,19 @@ func TestReducerDeleteflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	// Two branch tasks: one clears the field, one appends its delta.
-	proxy.HandleTask("reducerdelete.verify:428/spawn", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("reducerdelete.verify:428/deleter", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("reducerdelete.verify:428/spawn", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("reducerdelete.verify:428/deleter", func(ctx context.Context, f *workflow.Flow) error {
 		f.Del("log")
 		return nil
 	})
-	proxy.HandleTask("reducerdelete.verify:428/appender", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("reducerdelete.verify:428/appender", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetStrings("log", []string{"b2"}) // append reducer: write only the delta
 		return nil
 	})
-	proxy.HandleTask("reducerdelete.verify:428/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("reducerdelete.verify:428/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	// buildGraph wires Spawn -> {Deleter, Appender} -> Join(fan-in) -> END, declaring the two fan-out
 	// transitions in the requested order so the fan_out_ordinal is deterministic.
@@ -86,12 +86,12 @@ func TestReducerDeleteflow(t *testing.T) {
 		return g
 	}
 
-	proxy.HandleGraph("reducerdelete.verify:428/delete-first", buildGraph("DeleteFirst", true))
-	proxy.HandleGraph("reducerdelete.verify:428/append-first", buildGraph("AppendFirst", false))
+	mux.HandleGraph("reducerdelete.verify:428/delete-first", buildGraph("DeleteFirst", true))
+	mux.HandleGraph("reducerdelete.verify:428/append-first", buildGraph("AppendFirst", false))
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// stringsOf extracts a []string from a JSON-round-tripped []any, or reports absence.

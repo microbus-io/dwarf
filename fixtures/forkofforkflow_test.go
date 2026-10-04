@@ -46,7 +46,7 @@ func TestForkOfForkflow(t *testing.T) {
 	setPass := func(k string) { mu.Lock(); pass[k] = true; mu.Unlock() }
 	getPass := func(k string) bool { mu.Lock(); defer mu.Unlock(); return pass[k] }
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	g := workflow.NewGraph("ForkOfFork")
 	g.SetURL("A", "forkoffork.verify:428/a")
 	g.SetURL("X", "forkoffork.verify:428/x")
@@ -59,28 +59,28 @@ func TestForkOfForkflow(t *testing.T) {
 	g.AddTransition("Y", "J")
 	g.AddTransition("J", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("forkoffork.verify:428/g", g)
+	mux.HandleGraph("forkoffork.verify:428/g", g)
 
-	proxy.HandleTask("forkoffork.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("forkoffork.verify:428/x", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forkoffork.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("forkoffork.verify:428/x", func(ctx context.Context, f *workflow.Flow) error {
 		if !getPass("X") {
 			return errors.New("X not fixed yet")
 		}
 		f.SetString("xOut", "x-done")
 		return nil
 	})
-	proxy.HandleTask("forkoffork.verify:428/y", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forkoffork.verify:428/y", func(ctx context.Context, f *workflow.Flow) error {
 		if !getPass("Y") {
 			return errors.New("Y not fixed yet")
 		}
 		f.SetString("yOut", "y-done")
 		return nil
 	})
-	proxy.HandleTask("forkoffork.verify:428/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("forkoffork.verify:428/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// Initial run: both branches fail -> the flow fails.

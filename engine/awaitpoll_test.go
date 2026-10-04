@@ -44,7 +44,7 @@ func TestAwait_WakesWhenNoSignalIsDelivered(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	release := make(chan struct{})
 	var once sync.Once
 	rel := func() { once.Do(func() { close(release) }) }
@@ -53,8 +53,8 @@ func TestAwait_WakesWhenNoSignalIsDelivered(t *testing.T) {
 	g := workflow.NewGraph("AwaitPoll")
 	g.SetURL("Block", "awaitpoll.verify:0/block")
 	g.AddTransition("Block", workflow.End)
-	proxy.HandleGraph("awaitpoll.verify:0/g", g)
-	proxy.HandleTask("awaitpoll.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("awaitpoll.verify:0/g", g)
+	mux.HandleTask("awaitpoll.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {
 		select {
 		case <-release:
 		case <-ctx.Done():
@@ -64,7 +64,7 @@ func TestAwait_WakesWhenNoSignalIsDelivered(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	flowKey, err := e.Create(ctx, "awaitpoll.verify:0/g", nil, nil)
@@ -135,14 +135,14 @@ func TestAwait_DefaultBudgetIsADeadlineError(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	release := make(chan struct{})
 
 	g := workflow.NewGraph("AwaitPoll")
 	g.SetURL("Block", "awaitpoll.verify:0/block")
 	g.AddTransition("Block", workflow.End)
-	proxy.HandleGraph("awaitpoll.verify:0/g", g)
-	proxy.HandleTask("awaitpoll.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("awaitpoll.verify:0/g", g)
+	mux.HandleTask("awaitpoll.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {
 		select {
 		case <-release:
 		case <-ctx.Done():
@@ -153,7 +153,7 @@ func TestAwait_DefaultBudgetIsADeadlineError(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	defer close(release) // before Shutdown, which waits for the blocked task
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	e.awaitDefaultBudget = 200 * time.Millisecond
 	assert.NoError(e.Startup(t.Context()))
 
@@ -181,7 +181,7 @@ func TestPoll_RunningThenStopped(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	release := make(chan struct{})
 	var once sync.Once
 	rel := func() { once.Do(func() { close(release) }) }
@@ -190,8 +190,8 @@ func TestPoll_RunningThenStopped(t *testing.T) {
 	g := workflow.NewGraph("PollTest")
 	g.SetURL("Block", "polltest.verify:0/block")
 	g.AddTransition("Block", workflow.End)
-	proxy.HandleGraph("polltest.verify:0/g", g)
-	proxy.HandleTask("polltest.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("polltest.verify:0/g", g)
+	mux.HandleTask("polltest.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {
 		select {
 		case <-release:
 		case <-ctx.Done():
@@ -201,7 +201,7 @@ func TestPoll_RunningThenStopped(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	flowKey, err := e.Create(ctx, "polltest.verify:0/g", nil, nil)
@@ -246,7 +246,7 @@ func TestAwait_IgnoresANonSettledWake(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	release := make(chan struct{})
 	var once sync.Once
 	rel := func() { once.Do(func() { close(release) }) }
@@ -255,8 +255,8 @@ func TestAwait_IgnoresANonSettledWake(t *testing.T) {
 	g := workflow.NewGraph("NonSettled")
 	g.SetURL("Block", "nonsettled.verify:0/block")
 	g.AddTransition("Block", workflow.End)
-	proxy.HandleGraph("nonsettled.verify:0/g", g)
-	proxy.HandleTask("nonsettled.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("nonsettled.verify:0/g", g)
+	mux.HandleTask("nonsettled.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {
 		select {
 		case <-release:
 		case <-ctx.Done():
@@ -266,7 +266,7 @@ func TestAwait_IgnoresANonSettledWake(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	flowKey, err := e.Create(ctx, "nonsettled.verify:0/g", nil, nil)

@@ -34,17 +34,17 @@ func TestPurgerunningflow(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	graph := workflow.NewGraph("Flow")
 	graph.SetURL("Work", "purgerunningflow.verify:428/work")
 	graph.AddTransition("Work", workflow.End)
-	proxy.HandleGraph("purgerunningflow.verify:428/flow", graph)
+	mux.HandleGraph("purgerunningflow.verify:428/flow", graph)
 
 	// The task blocks until the test releases it, so the flow stays running across the Purge call.
 	release := make(chan struct{})
 	running := make(chan struct{}, 1)
-	proxy.HandleTask("purgerunningflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("purgerunningflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		select {
 		case running <- struct{}{}:
 		default:
@@ -55,7 +55,7 @@ func TestPurgerunningflow(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	eng.SetWorkers(2)
 	assert.NoError(eng.Startup(t.Context()))
 

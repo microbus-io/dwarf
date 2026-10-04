@@ -80,7 +80,7 @@ func TestForkflow_LinearWithOverride(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	var bRuns atomic.Int32
 
 	g := workflow.NewGraph("Linear")
@@ -88,24 +88,24 @@ func TestForkflow_LinearWithOverride(t *testing.T) {
 	g.SetURL("B", "forkflow.verify:428/b")
 	g.SetURL("C", "forkflow.verify:428/c")
 	g.AddTransitionChain("A", "B", "C", workflow.End)
-	proxy.HandleGraph("forkflow.verify:428/linear", g)
+	mux.HandleGraph("forkflow.verify:428/linear", g)
 
-	proxy.HandleTask("forkflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forkflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("forkflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forkflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
 		bRuns.Add(1)
 		f.SetString("bSaw", f.GetString("seed"))
 		return nil
 	})
-	proxy.HandleTask("forkflow.verify:428/c", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forkflow.verify:428/c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("done", true)
 		return nil
 	})
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	originKey, outcome, err := eng.Run(ctx, "forkflow.verify:428/linear", map[string]any{"seed": "orig"}, nil)
@@ -143,31 +143,31 @@ func TestForkflow_RecoverFailedStep(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	g := workflow.NewGraph("Recoverable")
 	g.SetURL("A", "forkflow2.verify:428/a")
 	g.SetURL("B", "forkflow2.verify:428/b")
 	g.SetURL("C", "forkflow2.verify:428/c")
 	g.AddTransitionChain("A", "B", "C", workflow.End)
-	proxy.HandleGraph("forkflow2.verify:428/g", g)
+	mux.HandleGraph("forkflow2.verify:428/g", g)
 
-	proxy.HandleTask("forkflow2.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("forkflow2.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forkflow2.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("forkflow2.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
 		if !f.GetBool("ok") {
 			return errors.New("B needs ok=true")
 		}
 		f.SetString("b", "ran")
 		return nil
 	})
-	proxy.HandleTask("forkflow2.verify:428/c", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forkflow2.verify:428/c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("done", true)
 		return nil
 	})
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	originKey, outcome, err := eng.Run(ctx, "forkflow2.verify:428/g", map[string]any{}, nil)
@@ -198,23 +198,23 @@ func TestForkflow_ContinueExcludesFork(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	g := workflow.NewGraph("Threaded")
 	g.SetURL("A", "forkflow3.verify:428/a")
 	g.SetURL("B", "forkflow3.verify:428/b")
 	g.AddTransitionChain("A", "B", workflow.End)
-	proxy.HandleGraph("forkflow3.verify:428/g", g)
+	mux.HandleGraph("forkflow3.verify:428/g", g)
 
-	proxy.HandleTask("forkflow3.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("forkflow3.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forkflow3.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("forkflow3.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("tag", f.GetString("seed"))
 		return nil
 	})
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	originKey, outcome, err := eng.Run(ctx, "forkflow3.verify:428/g", map[string]any{"seed": "origin"}, nil)
@@ -249,7 +249,7 @@ func TestForkflow_FanoutForkOfFork(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	var mu sync.Mutex
 	overrides := map[int]bool{} // indices forced to succeed via override carry "fix<idx>"=true
 
@@ -260,13 +260,13 @@ func TestForkflow_FanoutForkOfFork(t *testing.T) {
 	g.SetFanIn("Join")
 	g.AddTransitionForEach("Seed", "Cell", "items", "item")
 	g.AddTransitionChain("Cell", "Join", workflow.End)
-	proxy.HandleGraph("forkflow4.verify:428/g", g)
+	mux.HandleGraph("forkflow4.verify:428/g", g)
 
-	proxy.HandleTask("forkflow4.verify:428/seed", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forkflow4.verify:428/seed", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("items", []int{0, 1, 2})
 		return nil
 	})
-	proxy.HandleTask("forkflow4.verify:428/cell", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forkflow4.verify:428/cell", func(ctx context.Context, f *workflow.Flow) error {
 		idx := f.GetInt("itemIndex")
 		f.SetInt("cellIndex", idx)
 		// Branches 0 and 2 fail unless this branch was given a fix override.
@@ -278,14 +278,14 @@ func TestForkflow_FanoutForkOfFork(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("forkflow4.verify:428/join", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forkflow4.verify:428/join", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("joined", true)
 		return nil
 	})
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	originKey, outcome, err := eng.Run(ctx, "forkflow4.verify:428/g", map[string]any{}, nil)
@@ -313,35 +313,35 @@ func TestForkflow_FanoutForkOfFork(t *testing.T) {
 	assert.Equal(true, stateVal(fork2Outcome.State, "joined"))
 }
 
-// subgraphForkProxy builds a parent (A -> RunSub -> C) that calls a child subgraph (X -> Y), counting
+// subgraphForkMux builds a parent (A -> RunSub -> C) that calls a child subgraph (X -> Y), counting
 // child executions so a re-run is observable.
-func subgraphForkProxy(childRuns *int32) *engine.TestProxy {
-	proxy := engine.NewTestProxy()
+func subgraphForkMux(childRuns *int32) *engine.HostMux {
+	mux := engine.NewHostMux()
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("A", "forksub.verify:428/a")
 	parent.SetURL("RunSub", "forksub.verify:428/run-sub")
 	parent.SetURL("C", "forksub.verify:428/c")
 	parent.AddTransitionChain("A", "RunSub", "C", workflow.End)
-	proxy.HandleGraph("forksub.verify:428/parent", parent)
+	mux.HandleGraph("forksub.verify:428/parent", parent)
 
 	child := workflow.NewGraph("Child")
 	child.SetURL("X", "forksub.verify:428/x")
 	child.SetURL("Y", "forksub.verify:428/y")
 	child.AddTransitionChain("X", "Y", workflow.End)
-	proxy.HandleGraph("forksub.verify:428/child", child)
+	mux.HandleGraph("forksub.verify:428/child", child)
 
-	proxy.HandleTask("forksub.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("forksub.verify:428/x", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forksub.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("forksub.verify:428/x", func(ctx context.Context, f *workflow.Flow) error {
 		atomic.AddInt32(childRuns, 1)
 		f.SetString("xr", f.GetString("seed"))
 		return nil
 	})
-	proxy.HandleTask("forksub.verify:428/y", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forksub.verify:428/y", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("childOut", "Y("+f.GetString("xr")+")")
 		return nil
 	})
-	proxy.HandleTask("forksub.verify:428/run-sub", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forksub.verify:428/run-sub", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		yield, err := f.Subgraph("forksub.verify:428/child", map[string]any{"seed": f.GetString("seed")}, &out)
 		if yield || err != nil {
@@ -352,11 +352,11 @@ func subgraphForkProxy(childRuns *int32) *engine.TestProxy {
 		}
 		return nil
 	})
-	proxy.HandleTask("forksub.verify:428/c", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forksub.verify:428/c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("done", true)
 		return nil
 	})
-	return proxy
+	return mux
 }
 
 // TestForkflow_AtSubgraphCaller forks a completed flow at the step that launched a subgraph. The reset
@@ -368,10 +368,10 @@ func TestForkflow_AtSubgraphCaller(t *testing.T) {
 	ctx := context.Background()
 
 	var childRuns int32
-	proxy := subgraphForkProxy(&childRuns)
+	mux := subgraphForkMux(&childRuns)
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	originKey, outcome, err := eng.Run(ctx, "forksub.verify:428/parent", map[string]any{"seed": "orig"}, nil)
@@ -419,10 +419,10 @@ func TestForkflow_InsideSubgraph(t *testing.T) {
 	ctx := context.Background()
 
 	var childRuns int32
-	proxy := subgraphForkProxy(&childRuns)
+	mux := subgraphForkMux(&childRuns)
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	originKey, outcome, err := eng.Run(ctx, "forksub.verify:428/parent", map[string]any{"seed": "orig"}, nil)
@@ -510,36 +510,36 @@ func findStepKeyDeep(steps []workflow.FlowStep, task string) string {
 	return ""
 }
 
-// nestedSubgraphProxy builds a 3-level nested tree: Outer(A -> CallL1 -> Z), CallL1 -> Middle(B -> CallL2
+// nestedSubgraphMux builds a 3-level nested tree: Outer(A -> CallL1 -> Z), CallL1 -> Middle(B -> CallL2
 // -> Y), CallL2 -> Inner(C). Every task records its observed remaining time budget so a Fork's resolved
 // FlowOptions can be checked at every nesting level.
-func nestedSubgraphProxy(rec *budgetRec) *engine.TestProxy {
-	proxy := engine.NewTestProxy()
+func nestedSubgraphMux(rec *budgetRec) *engine.HostMux {
+	mux := engine.NewHostMux()
 
 	l0 := workflow.NewGraph("Outer")
 	l0.SetURL("A", "forknest.verify:428/a")
 	l0.SetURL("CallL1", "forknest.verify:428/call-l1")
 	l0.SetURL("Z", "forknest.verify:428/z")
 	l0.AddTransitionChain("A", "CallL1", "Z", workflow.End)
-	proxy.HandleGraph("forknest.verify:428/outer", l0)
+	mux.HandleGraph("forknest.verify:428/outer", l0)
 
 	l1 := workflow.NewGraph("Middle")
 	l1.SetURL("B", "forknest.verify:428/b")
 	l1.SetURL("CallL2", "forknest.verify:428/call-l2")
 	l1.SetURL("Y", "forknest.verify:428/y")
 	l1.AddTransitionChain("B", "CallL2", "Y", workflow.End)
-	proxy.HandleGraph("forknest.verify:428/middle", l1)
+	mux.HandleGraph("forknest.verify:428/middle", l1)
 
 	l2 := workflow.NewGraph("Inner")
 	l2.SetURL("C", "forknest.verify:428/c")
 	l2.AddTransitionChain("C", workflow.End)
-	proxy.HandleGraph("forknest.verify:428/inner", l2)
+	mux.HandleGraph("forknest.verify:428/inner", l2)
 
-	proxy.HandleTask("forknest.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forknest.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
 		rec.record("A", ctx)
 		return nil
 	})
-	proxy.HandleTask("forknest.verify:428/call-l1", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forknest.verify:428/call-l1", func(ctx context.Context, f *workflow.Flow) error {
 		rec.record("CallL1", ctx)
 		var out map[string]any
 		yield, err := f.Subgraph("forknest.verify:428/middle", map[string]any{"seed": f.GetString("seed")}, &out)
@@ -551,16 +551,16 @@ func nestedSubgraphProxy(rec *budgetRec) *engine.TestProxy {
 		}
 		return nil
 	})
-	proxy.HandleTask("forknest.verify:428/z", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forknest.verify:428/z", func(ctx context.Context, f *workflow.Flow) error {
 		rec.record("Z", ctx)
 		f.SetBool("done", true)
 		return nil
 	})
-	proxy.HandleTask("forknest.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forknest.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
 		rec.record("B", ctx)
 		return nil
 	})
-	proxy.HandleTask("forknest.verify:428/call-l2", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forknest.verify:428/call-l2", func(ctx context.Context, f *workflow.Flow) error {
 		rec.record("CallL2", ctx)
 		var out map[string]any
 		yield, err := f.Subgraph("forknest.verify:428/inner", map[string]any{"seed": f.GetString("seed")}, &out)
@@ -572,16 +572,16 @@ func nestedSubgraphProxy(rec *budgetRec) *engine.TestProxy {
 		}
 		return nil
 	})
-	proxy.HandleTask("forknest.verify:428/y", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forknest.verify:428/y", func(ctx context.Context, f *workflow.Flow) error {
 		rec.record("Y", ctx)
 		return nil
 	})
-	proxy.HandleTask("forknest.verify:428/c", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("forknest.verify:428/c", func(ctx context.Context, f *workflow.Flow) error {
 		rec.record("C", ctx)
 		f.SetString("deep", f.GetString("seed"))
 		return nil
 	})
-	return proxy
+	return mux
 }
 
 // TestForkflow_NestedSubgraphBudgetInherited forks at the deepest step (C, inside Inner inside Middle).
@@ -596,10 +596,10 @@ func TestForkflow_NestedSubgraphBudgetInherited(t *testing.T) {
 	reRun := []string{"C", "CallL2", "Y", "CallL1", "Z"}
 
 	rec := newBudgetRec()
-	proxy := nestedSubgraphProxy(rec)
+	mux := nestedSubgraphMux(rec)
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// Original runs with a distinctive 75s budget (inherited by every nested subgraph).

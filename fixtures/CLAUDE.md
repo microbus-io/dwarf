@@ -75,7 +75,7 @@ claim path, and Postgres's real MVCC lock ordering. Expect the run to be slower 
 #### Per-test engine + parallel execution (connection-budget control)
 
 **The suite runs `t.Parallel()`.** Each fixture stands up its own engine (`engine.NewEngineUnderTest(t.Name())`
-+ `defer eng.Shutdown(ctx)` + `SetHost(proxy)` + `Startup`, a fresh `proxy := engine.NewTestProxy()` per test)
++ `defer eng.Shutdown(ctx)` + `SetHost(mux)` + `Startup`, a fresh `mux := engine.NewHostMux()` per test)
 against its own isolated database (keyed by that `t.Name()`) - so nothing is shared across tests and the
 config that mattered (the timing knobs, the peer registry key) is per-engine. There is **no** shared/`TestMain`-built
 engine. The suite parallelizes cleanly because the isolation is per-test, not because the tests were written to
@@ -175,15 +175,15 @@ the two lines by the channel, since the waiter is already registered. Reversing 
 exactly the race the split-arm `Waiter` exists to remove. `Waiter` is one-shot, so waiting for N occurrences
 loops over (arm, check, block) - a rendezvous per occurrence, not a spin on an observation.
 
-Each fixture owns its own engine *and* its own `TestProxy`, so there is no cross-test sharing to coordinate. `TestProxy`
+Each fixture owns its own engine *and* its own `HostMux`, so there is no cross-test sharing to coordinate. `HostMux`
 still guards its handler maps with a `RWMutex` because the engine's own worker goroutines dispatch concurrently while
 the test registers handlers; fixture task/graph URLs are namespaced per file (`<fixture>.verify:428/<task>`) by
 convention. A fixture asserting over the **full** flow set (`List`/`Purge`/`ShardInfo`) gets a clean database for free
 - its engine sees only its own flows.
 
 A fixture needing a **non-default topology** (multiple `SetShard`s, `SetTimeBudget`, a specific `SetWorkers` count) or
-**host singletons** (a custom host wrapping `TestProxy`) configures
-them on its own engine/proxy between `NewEngineUnderTest` and `Startup` - the same per-test ownership, just with
+**host singletons** (a custom host wrapping `HostMux`) configures
+them on its own engine/mux between `NewEngineUnderTest` and `Startup` - the same per-test ownership, just with
 non-default knobs.
 
 #### What a sleep is standing in for, and what to use instead

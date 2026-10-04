@@ -65,20 +65,20 @@ func TestLatchResolve_ReportsStoppedFlowsOnly(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	release := make(chan struct{})
 
 	done := workflow.NewGraph("Done")
 	done.SetURL("Done", "latchresolve.verify:0/done")
 	done.AddTransition("Done", workflow.End)
-	proxy.HandleGraph("latchresolve.verify:0/done", done)
-	proxy.HandleTask("latchresolve.verify:0/done", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("latchresolve.verify:0/done", done)
+	mux.HandleTask("latchresolve.verify:0/done", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	blocked := workflow.NewGraph("Blocked")
 	blocked.SetURL("Block", "latchresolve.verify:0/block")
 	blocked.AddTransition("Block", workflow.End)
-	proxy.HandleGraph("latchresolve.verify:0/blocked", blocked)
-	proxy.HandleTask("latchresolve.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("latchresolve.verify:0/blocked", blocked)
+	mux.HandleTask("latchresolve.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {
 		select {
 		case <-release:
 		case <-ctx.Done():
@@ -91,7 +91,7 @@ func TestLatchResolve_ReportsStoppedFlowsOnly(t *testing.T) {
 	// Released here, after the Shutdown defer, so it unwinds FIRST: Shutdown drains the workers, and
 	// one still holding this would never return.
 	defer close(release)
-	assert.NoError(e.SetHost(proxy))
+	assert.NoError(e.SetHost(mux))
 	// Two shards, so the resolver's per-shard grouping is exercised rather than assumed.
 	assert.NoError(e.SetShard(ShardSpec{Index: 1}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 2}))
@@ -132,16 +132,16 @@ func TestLatchResolve_ChunksWithoutDroppingKeys(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Done")
 	g.SetURL("Done", "latchchunk.verify:0/done")
 	g.AddTransition("Done", workflow.End)
-	proxy.HandleGraph("latchchunk.verify:0/done", g)
-	proxy.HandleTask("latchchunk.verify:0/done", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("latchchunk.verify:0/done", g)
+	mux.HandleTask("latchchunk.verify:0/done", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	assert.NoError(e.SetHost(proxy))
+	assert.NoError(e.SetHost(mux))
 	assert.NoError(e.Startup(t.Context()))
 
 	stoppedKey, _, err := e.Run(ctx, "latchchunk.verify:0/done", nil, nil)
@@ -188,16 +188,16 @@ func TestLatchResolve_RecentStopScanIsOnlyAnOptimization(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Done")
 	g.SetURL("Done", "latchrecent.verify:0/done")
 	g.AddTransition("Done", workflow.End)
-	proxy.HandleGraph("latchrecent.verify:0/done", g)
-	proxy.HandleTask("latchrecent.verify:0/done", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("latchrecent.verify:0/done", g)
+	mux.HandleTask("latchrecent.verify:0/done", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	assert.NoError(e.SetHost(proxy))
+	assert.NoError(e.SetHost(mux))
 	assert.NoError(e.Startup(t.Context()))
 
 	freshKey, _, err := e.Run(ctx, "latchrecent.verify:0/done", nil, nil)

@@ -42,10 +42,10 @@ func TestDeepsubgraphflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	const depth = 4 // intermediate levels g0..g3; g4 is the interrupting leaf
@@ -58,11 +58,11 @@ func TestDeepsubgraphflow(t *testing.T) {
 		g := workflow.NewGraph("G" + strconv.Itoa(i))
 		g.SetURL("Call", taskURL)
 		g.AddTransition("Call", workflow.End)
-		proxy.HandleGraph(gURL, g)
+		mux.HandleGraph(gURL, g)
 
 		level := i
 		nextURL := "deepnest.verify:0/g" + strconv.Itoa(i+1)
-		proxy.HandleTask(taskURL, func(ctx context.Context, f *workflow.Flow) error {
+		mux.HandleTask(taskURL, func(ctx context.Context, f *workflow.Flow) error {
 			var out map[string]any
 			yield, err := f.Subgraph(nextURL, nil, &out)
 			if yield || err != nil {
@@ -78,8 +78,8 @@ func TestDeepsubgraphflow(t *testing.T) {
 	leafG := workflow.NewGraph("Leaf")
 	leafG.SetURL("Leaf", "deepnest.verify:0/leaf")
 	leafG.AddTransition("Leaf", workflow.End)
-	proxy.HandleGraph("deepnest.verify:0/g"+strconv.Itoa(depth), leafG)
-	proxy.HandleTask("deepnest.verify:0/leaf", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("deepnest.verify:0/g"+strconv.Itoa(depth), leafG)
+	mux.HandleTask("deepnest.verify:0/leaf", func(ctx context.Context, f *workflow.Flow) error {
 		var rd map[string]any
 		yield, err := f.Interrupt(map[string]any{"depth": depth}, &rd)
 		if yield || err != nil {

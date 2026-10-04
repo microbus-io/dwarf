@@ -44,18 +44,18 @@ func TestCrossReplicaAwait(t *testing.T) {
 	graph.AddTransition("Work", workflow.End)
 
 	// eng1: pure awaiter. Its task handler must never run (zero workers).
-	proxy1 := engine.NewTestProxy()
-	proxy1.HandleGraph("crossreplica.verify:428/flow", graph)
-	proxy1.HandleTask("crossreplica.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux1 := engine.NewHostMux()
+	mux1.HandleGraph("crossreplica.verify:428/flow", graph)
+	mux1.HandleTask("crossreplica.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		t.Error("eng1 has zero workers and must never execute the task")
 		return nil
 	})
 
 	// eng2: the executor. Records that it ran the step and writes the result.
 	var ranOnEng2 atomic.Bool
-	proxy2 := engine.NewTestProxy()
-	proxy2.HandleGraph("crossreplica.verify:428/flow", graph)
-	proxy2.HandleTask("crossreplica.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux2 := engine.NewHostMux()
+	mux2.HandleGraph("crossreplica.verify:428/flow", graph)
+	mux2.HandleTask("crossreplica.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		ranOnEng2.Store(true)
 		f.SetString("result", "done-by-eng2")
 		return nil
@@ -66,11 +66,11 @@ func TestCrossReplicaAwait(t *testing.T) {
 	// whatever dialect SEQUEL_TESTING_DSN names (in-memory SQLite by default), not SQLite only.
 	eng1 := engine.NewEngineUnderTest(t.Name())
 	defer eng1.Shutdown(ctx)
-	eng1.SetHost(proxy1)
+	eng1.SetHost(mux1)
 	eng1.SetWorkers(0)
 	eng2 := engine.NewEngineUnderTest(t.Name())
 	defer eng2.Shutdown(ctx)
-	eng2.SetHost(proxy2)
+	eng2.SetHost(mux2)
 	eng2.SetWorkers(2)
 	err := eng1.Startup(ctx)
 	assert.NoError(err)

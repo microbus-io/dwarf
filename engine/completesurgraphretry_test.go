@@ -43,20 +43,20 @@ func TestCompleteFlow_TransientReviveErrorIsRetriedNotLost(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("Call", "csr/call")
 	parent.AddTransition("Call", workflow.End)
 	assert.NoError(parent.Validate())
-	proxy.HandleGraph("csr/parent", parent)
+	mux.HandleGraph("csr/parent", parent)
 	child := workflow.NewGraph("Child")
 	child.SetURL("X", "csr/x")
 	child.AddTransition("X", workflow.End)
 	assert.NoError(child.Validate())
-	proxy.HandleGraph("csr/child", child)
+	mux.HandleGraph("csr/child", child)
 
 	var callRuns, xRuns atomic.Int32
-	proxy.HandleTask("csr/call", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("csr/call", func(ctx context.Context, f *workflow.Flow) error {
 		callRuns.Add(1)
 		yield, err := f.Subgraph("csr/child", nil, nil)
 		if yield || err != nil {
@@ -64,14 +64,14 @@ func TestCompleteFlow_TransientReviveErrorIsRetriedNotLost(t *testing.T) {
 		}
 		return nil // re-entry after the child completed and the caller was revived
 	})
-	proxy.HandleTask("csr/x", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("csr/x", func(ctx context.Context, f *workflow.Flow) error {
 		xRuns.Add(1)
 		return nil
 	})
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	e.persistBackoff = shortPersistBackoff
 	assert.NoError(e.Startup(t.Context()))
 

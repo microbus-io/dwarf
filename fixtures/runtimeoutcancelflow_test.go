@@ -38,10 +38,10 @@ func TestRuntimeoutcancelflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// A blocked task holds the flow running past the end of Run's ctx. Released at test teardown before the
@@ -60,9 +60,9 @@ func TestRuntimeoutcancelflow(t *testing.T) {
 	graph := workflow.NewGraph("RunTimeoutCancel")
 	graph.SetURL("Block", "runtimeoutcancelflow.verify:428/block")
 	graph.AddTransitionChain("Block", workflow.End)
-	proxy.HandleGraph("runtimeoutcancelflow.verify:428/run-timeout-cancel", graph)
+	mux.HandleGraph("runtimeoutcancelflow.verify:428/run-timeout-cancel", graph)
 
-	proxy.HandleTask("runtimeoutcancelflow.verify:428/block", func(taskCtx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("runtimeoutcancelflow.verify:428/block", func(taskCtx context.Context, f *workflow.Flow) error {
 		cancel() // the caller stops waiting; the task (and so the flow) keeps running
 		select {
 		case <-block:

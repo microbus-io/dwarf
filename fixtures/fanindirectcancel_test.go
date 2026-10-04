@@ -48,7 +48,7 @@ func TestFanInDirectTerminate_NoExtendTerminatedFlow(t *testing.T) {
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	g := workflow.NewGraph("FIDC")
 	g.SetURL("Spawn", "fidc/spawn")
 	g.SetURL("Work", "fidc/work")
@@ -60,19 +60,19 @@ func TestFanInDirectTerminate_NoExtendTerminatedFlow(t *testing.T) {
 	// The engine derives the fan-in routing at dispatch so an empty forEach routes to Join (fireFanInDirect)
 	// rather than completing at the source. Validate here just asserts the graph is well-formed.
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("fidc/g", g)
+	mux.HandleGraph("fidc/g", g)
 
-	proxy.HandleTask("fidc/spawn", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fidc/spawn", func(ctx context.Context, f *workflow.Flow) error {
 		started <- struct{}{}
 		<-release // hold the spawn step `running` until the test has terminated the flow
 		return nil
 	})
-	proxy.HandleTask("fidc/work", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("fidc/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("fidc/work", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("fidc/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	// Empty forEach source: the spawn produces no branches, so processStep reaches the empty-cohort fan-in.

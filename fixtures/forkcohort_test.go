@@ -43,7 +43,7 @@ func TestForkCohort_MultiStepBranchCountsBranchesNotMembers(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	g := workflow.NewGraph("ForkCohort")
 	g.SetURL("Seed", "fkc/seed")
 	g.SetURL("Cell", "fkc/cell")
@@ -54,24 +54,24 @@ func TestForkCohort_MultiStepBranchCountsBranchesNotMembers(t *testing.T) {
 	g.AddTransitionForEach("Seed", "Cell", "cells", "cell")
 	g.AddTransitionChain("Cell", "Enrich", "J", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("fkc/g", g)
+	mux.HandleGraph("fkc/g", g)
 
-	proxy.HandleTask("fkc/seed", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("fkc/cell", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fkc/seed", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("fkc/cell", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetString("cell") == "b" && !f.GetBool("fixed") {
 			return errors.New("cell b is broken")
 		}
 		return nil
 	})
-	proxy.HandleTask("fkc/enrich", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fkc/enrich", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("enriched", []any{f.GetString("cell") + "!"})
 		return nil
 	})
-	proxy.HandleTask("fkc/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("fkc/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	originKey, outcome, err := eng.Run(ctx, "fkc/g", map[string]any{"cells": []any{"a", "b", "c"}}, nil)
@@ -142,7 +142,7 @@ func TestForkCohort_RewindMidBranchExcludesWholeBranch(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	g := workflow.NewGraph("ForkCohortMid")
 	g.SetURL("Seed", "fkm/seed")
 	g.SetURL("Cell", "fkm/cell")
@@ -153,19 +153,19 @@ func TestForkCohort_RewindMidBranchExcludesWholeBranch(t *testing.T) {
 	g.AddTransitionForEach("Seed", "Cell", "cells", "cell")
 	g.AddTransitionChain("Cell", "Enrich", "J", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("fkm/g", g)
+	mux.HandleGraph("fkm/g", g)
 
-	proxy.HandleTask("fkm/seed", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("fkm/cell", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("fkm/enrich", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fkm/seed", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("fkm/cell", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("fkm/enrich", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("enriched", []any{f.GetString("cell") + f.GetString("suffix")})
 		return nil
 	})
-	proxy.HandleTask("fkm/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("fkm/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	originKey, outcome, err := eng.Run(ctx, "fkm/g",
@@ -225,7 +225,7 @@ func TestForkCohort_RewindMidBranchExcludesWholeBranch(t *testing.T) {
 // is reachable only THROUGH those Chunks (its predecessor is the inner cohort's last completer). A recompute
 // that filtered children on `lineage_id == spawn` therefore dead-ended the outer walk at the inner spawn and
 // never saw the rest of the branch.
-func nestedForkGraph(t *testing.T, proxy *engine.TestProxy, brokenChunk string) *workflow.Graph {
+func nestedForkGraph(t *testing.T, mux *engine.HostMux, brokenChunk string) *workflow.Graph {
 	t.Helper()
 	assert := testarossa.For(t)
 	g := workflow.NewGraph("NestedFork")
@@ -240,22 +240,22 @@ func nestedForkGraph(t *testing.T, proxy *engine.TestProxy, brokenChunk string) 
 	g.AddTransitionChain("Chunk", "JoinChunk")
 	g.AddTransitionChain("JoinChunk", "JoinCell", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("nfk/g", g)
+	mux.HandleGraph("nfk/g", g)
 
-	proxy.HandleTask("nfk/Seed", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("nfk/Cell", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("nfk/Seed", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("nfk/Cell", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("chunks", []any{f.GetString("cell") + "1", f.GetString("cell") + "2"})
 		return nil
 	})
-	proxy.HandleTask("nfk/Chunk", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("nfk/Chunk", func(ctx context.Context, f *workflow.Flow) error {
 		if brokenChunk != "" && f.GetString("chunk") == brokenChunk && !f.GetBool("fixed") {
 			return errors.New("chunk %s is broken", brokenChunk)
 		}
 		f.Set("done", []any{f.GetString("chunk")})
 		return nil
 	})
-	proxy.HandleTask("nfk/JoinChunk", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("nfk/JoinCell", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("nfk/JoinChunk", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("nfk/JoinCell", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	return g
 }
 
@@ -269,12 +269,12 @@ func TestForkCohort_NestedRewindExcludesTheWholeOuterBranch(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
-	nestedForkGraph(t, proxy, "")
+	mux := engine.NewHostMux()
+	nestedForkGraph(t, mux, "")
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	originKey, outcome, err := eng.Run(ctx, "nfk/g", map[string]any{"cells": []any{"a", "b", "c"}}, nil)
@@ -322,12 +322,12 @@ func TestForkCohort_NestedFailureInAKeptBranchStillFailsTheFork(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
-	nestedForkGraph(t, proxy, "b1") // a chunk of the "b" cell fails, with no onError
+	mux := engine.NewHostMux()
+	nestedForkGraph(t, mux, "b1") // a chunk of the "b" cell fails, with no onError
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	originKey, outcome, err := eng.Run(ctx, "nfk/g", map[string]any{"cells": []any{"a", "b", "c"}}, nil)

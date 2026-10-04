@@ -85,7 +85,7 @@ func TestInterruptSnapshotMatchesResume(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	g := workflow.NewGraph("SnapResume")
 	g.SetURL("Src", "snapresume.verify:428/src")
 	g.SetURL("A", "snapresume.verify:428/a")
@@ -97,11 +97,11 @@ func TestInterruptSnapshotMatchesResume(t *testing.T) {
 	g.AddTransition("A", "J")
 	g.AddTransition("B", "J")
 	g.AddTransition("J", workflow.End)
-	proxy.HandleGraph("snapresume.verify:428/g", g)
+	mux.HandleGraph("snapresume.verify:428/g", g)
 
 	gateB := make(chan struct{})
-	proxy.HandleTask("snapresume.verify:428/src", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("snapresume.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("snapresume.verify:428/src", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("snapresume.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Interrupt(map[string]any{"branch": "A"}, nil)
 		if yield || err != nil {
 			return err
@@ -109,7 +109,7 @@ func TestInterruptSnapshotMatchesResume(t *testing.T) {
 		f.SetBool("aDone", true)
 		return nil
 	})
-	proxy.HandleTask("snapresume.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("snapresume.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
 		// Block until A has interrupted (the test closes the gate), so A's interrupt has the earlier
 		// updated_at and is the unambiguous "earliest" pick.
 		select {
@@ -124,13 +124,13 @@ func TestInterruptSnapshotMatchesResume(t *testing.T) {
 		f.SetBool("bDone", true)
 		return nil
 	})
-	proxy.HandleTask("snapresume.verify:428/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("snapresume.verify:428/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	// Several workers so B's gate-block doesn't starve A on a single worker.
 	assert.NoError(eng.SetWorkers(4))
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	flowKey, err := eng.Create(ctx, "snapresume.verify:428/g", nil, nil)
@@ -177,7 +177,7 @@ func TestInterruptParallelSubgraphResume(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	parent := workflow.NewGraph("PSParent")
 	parent.SetURL("Seed", "psub.verify:428/seed")
@@ -187,18 +187,18 @@ func TestInterruptParallelSubgraphResume(t *testing.T) {
 	parent.SetReducer("results", workflow.ReducerAppend)
 	parent.AddTransitionForEach("Seed", "Call", "items", "n")
 	parent.AddTransitionChain("Call", "Join", workflow.End)
-	proxy.HandleGraph("psub.verify:428/parent", parent)
+	mux.HandleGraph("psub.verify:428/parent", parent)
 
 	child := workflow.NewGraph("PSChild")
 	child.SetURL("Inner", "psub.verify:428/inner")
 	child.AddTransitionChain("Inner", workflow.End)
-	proxy.HandleGraph("psub.verify:428/child", child)
+	mux.HandleGraph("psub.verify:428/child", child)
 
-	proxy.HandleTask("psub.verify:428/seed", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("psub.verify:428/seed", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("items", []int{1, 2})
 		return nil
 	})
-	proxy.HandleTask("psub.verify:428/inner", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("psub.verify:428/inner", func(ctx context.Context, f *workflow.Flow) error {
 		var resume map[string]any
 		yield, err := f.Interrupt(map[string]any{"n": f.GetInt("n")}, &resume)
 		if yield || err != nil {
@@ -209,7 +209,7 @@ func TestInterruptParallelSubgraphResume(t *testing.T) {
 		f.SetString("childResult", fmt.Sprintf("n%d-%v", f.GetInt("n"), resume["token"]))
 		return nil
 	})
-	proxy.HandleTask("psub.verify:428/call", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("psub.verify:428/call", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		yield, err := f.Subgraph("psub.verify:428/child", map[string]any{"n": f.GetInt("n")}, &out)
 		if yield || err != nil {
@@ -218,7 +218,7 @@ func TestInterruptParallelSubgraphResume(t *testing.T) {
 		f.Set("results", []string{fmt.Sprint(out["childResult"])}) // append reducer: delta only
 		return nil
 	})
-	proxy.HandleTask("psub.verify:428/join", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("psub.verify:428/join", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("joined", true)
 		return nil
 	})
@@ -226,7 +226,7 @@ func TestInterruptParallelSubgraphResume(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(4))
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	flowKey, err := eng.Create(ctx, "psub.verify:428/parent", nil, nil)

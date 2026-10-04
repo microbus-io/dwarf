@@ -161,7 +161,7 @@ func TestCohortStripe_QueuedArrivalsKeepTheirLeases(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Queue")
 	g.SetURL("A", "queue/a")
 	g.SetURL("B1", "queue/b1")
@@ -172,18 +172,18 @@ func TestCohortStripe_QueuedArrivalsKeepTheirLeases(t *testing.T) {
 	g.AddTransition("B2", "J")
 	g.SetFanIn("J")
 	g.AddTransition("J", workflow.End)
-	proxy.HandleGraph("queue/g", g)
+	mux.HandleGraph("queue/g", g)
 	release := make(chan struct{})
 	var started, runsB, runsJ atomic.Int32
 	branch := func(ctx context.Context, f *workflow.Flow) error { started.Add(1); <-release; runsB.Add(1); return nil }
-	proxy.HandleTask("queue/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("queue/b1", branch)
-	proxy.HandleTask("queue/b2", branch)
-	proxy.HandleTask("queue/j", func(ctx context.Context, f *workflow.Flow) error { runsJ.Add(1); return nil })
+	mux.HandleTask("queue/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("queue/b1", branch)
+	mux.HandleTask("queue/b2", branch)
+	mux.HandleTask("queue/j", func(ctx context.Context, f *workflow.Flow) error { runsJ.Add(1); return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	e.leaseMargin = 200 * time.Millisecond // waiters tick every 100ms
 	assert.NoError(e.Startup(t.Context()))
 	awaitStartupRecoverySweep(t, e) // it reads orphanFlowThreshold, which is written below

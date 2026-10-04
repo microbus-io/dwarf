@@ -50,27 +50,27 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Strand")
 	g.SetURL("A", "strand/a")
 	g.SetURL("B", "strand/b")
 	g.AddTransition("A", "B")
 	g.AddTransition("B", workflow.End)
-	proxy.HandleGraph("strand/g", g)
+	mux.HandleGraph("strand/g", g)
 	var runsA, runsB atomic.Int32
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
-	proxy.HandleTask("strand/a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("strand/a", func(ctx context.Context, f *workflow.Flow) error {
 		if runsA.Add(1) == 1 {
 			started <- struct{}{}
 			<-release
 		}
 		return nil
 	})
-	proxy.HandleTask("strand/b", func(ctx context.Context, f *workflow.Flow) error { runsB.Add(1); return nil })
+	mux.HandleTask("strand/b", func(ctx context.Context, f *workflow.Flow) error { runsB.Add(1); return nil })
 
 	e := NewEngineUnderTest(t.Name())
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	fk, err := e.Create(ctx, "strand/g", nil, nil)
@@ -103,7 +103,7 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 
 	e2 := NewEngineUnderTest(t.Name())
 	defer e2.Shutdown(ctx)
-	e2.SetHost(proxy)
+	e2.SetHost(mux)
 	assert.NoError(e2.Startup(t.Context()))
 	assert.NoError(e.Shutdown(ctx))
 	awaitStartupRecoverySweep(t, e2)
@@ -143,14 +143,14 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 // the stall is held, the worker that replays A may reach the same checkpoint and stall too; the release frees both,
 // and whichever commits first, the stalled worker's transition is fenced. It returns the engine (shut down by the
 // test's cleanup), the flow, and when the sweep ran.
-func slowWorkerReplay(t *testing.T, proxy *TestProxy, flowURL string, initial any, beforeSweep func(db *sequel.DB, flowID int)) (e *Engine, shard, flowID int, swept time.Time) {
+func slowWorkerReplay(t *testing.T, mux *HostMux, flowURL string, initial any, beforeSweep func(db *sequel.DB, flowID int)) (e *Engine, shard, flowID int, swept time.Time) {
 	t.Helper()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	e = NewEngineUnderTest(strings.ReplaceAll(t.Name(), "/", "_")) // the name keys the test database
 	t.Cleanup(func() { e.Shutdown(ctx) })
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 	awaitStartupRecoverySweep(t, e)
 
@@ -214,7 +214,7 @@ func TestOrphanSweep_ReplaysSlowWorkersStep(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			assert := testarossa.For(t)
 
-			proxy := NewTestProxy()
+			mux := NewHostMux()
 			g := workflow.NewGraph("Slow")
 			for _, n := range []string{"A", "B", "C", "D"} {
 				g.SetURL(n, "slowstrand/"+strings.ToLower(n))
@@ -225,13 +225,13 @@ func TestOrphanSweep_ReplaysSlowWorkersStep(t *testing.T) {
 			g.AddTransition("B", workflow.End)
 			g.AddTransition("C", workflow.End)
 			g.AddTransition("D", workflow.End)
-			proxy.HandleGraph("slowstrand/g", g)
+			mux.HandleGraph("slowstrand/g", g)
 			runs := map[string]*atomic.Int32{"A": {}, "B": {}, "C": {}, "D": {}}
 			var dSawErr atomic.Bool
-			proxy.HandleTask("slowstrand/a", func(ctx context.Context, f *workflow.Flow) error { runs["A"].Add(1); return tc.taskA(f) })
-			proxy.HandleTask("slowstrand/b", func(ctx context.Context, f *workflow.Flow) error { runs["B"].Add(1); return nil })
-			proxy.HandleTask("slowstrand/c", func(ctx context.Context, f *workflow.Flow) error { runs["C"].Add(1); return nil })
-			proxy.HandleTask("slowstrand/d", func(ctx context.Context, f *workflow.Flow) error {
+			mux.HandleTask("slowstrand/a", func(ctx context.Context, f *workflow.Flow) error { runs["A"].Add(1); return tc.taskA(f) })
+			mux.HandleTask("slowstrand/b", func(ctx context.Context, f *workflow.Flow) error { runs["B"].Add(1); return nil })
+			mux.HandleTask("slowstrand/c", func(ctx context.Context, f *workflow.Flow) error { runs["C"].Add(1); return nil })
+			mux.HandleTask("slowstrand/d", func(ctx context.Context, f *workflow.Flow) error {
 				runs["D"].Add(1)
 				dSawErr.Store(f.Has("onErr"))
 				return nil
@@ -245,7 +245,7 @@ func TestOrphanSweep_ReplaysSlowWorkersStep(t *testing.T) {
 					assert.NoError(err)
 				}
 			}
-			e, shard, flowID, swept := slowWorkerReplay(t, proxy, "slowstrand/g", nil, beforeSweep)
+			e, shard, flowID, swept := slowWorkerReplay(t, mux, "slowstrand/g", nil, beforeSweep)
 			if tc.name == "sleep" {
 				// The 200ms settle inside slowWorkerReplay is part of the elapsed time.
 				waited := time.Since(swept)
@@ -276,7 +276,7 @@ func TestOrphanSweep_ReplaysSlowWorkersStep(t *testing.T) {
 func TestOrphanSweep_ReplaysSlowWorkersStep_OtherTransitions(t *testing.T) {
 	t.Run("fan_in_direct", func(t *testing.T) {
 		assert := testarossa.For(t)
-		proxy := NewTestProxy()
+		mux := NewHostMux()
 		g := workflow.NewGraph("SlowFanIn")
 		g.SetURL("A", "slowfanin/a")
 		g.SetURL("B", "slowfanin/b")
@@ -285,13 +285,13 @@ func TestOrphanSweep_ReplaysSlowWorkersStep_OtherTransitions(t *testing.T) {
 		g.AddTransition("B", "J")
 		g.SetFanIn("J")
 		g.AddTransition("J", workflow.End)
-		proxy.HandleGraph("slowfanin/g", g)
+		mux.HandleGraph("slowfanin/g", g)
 		var runsA, runsB, runsJ atomic.Int32
-		proxy.HandleTask("slowfanin/a", func(ctx context.Context, f *workflow.Flow) error { runsA.Add(1); return nil })
-		proxy.HandleTask("slowfanin/b", func(ctx context.Context, f *workflow.Flow) error { runsB.Add(1); return nil })
-		proxy.HandleTask("slowfanin/j", func(ctx context.Context, f *workflow.Flow) error { runsJ.Add(1); return nil })
+		mux.HandleTask("slowfanin/a", func(ctx context.Context, f *workflow.Flow) error { runsA.Add(1); return nil })
+		mux.HandleTask("slowfanin/b", func(ctx context.Context, f *workflow.Flow) error { runsB.Add(1); return nil })
+		mux.HandleTask("slowfanin/j", func(ctx context.Context, f *workflow.Flow) error { runsJ.Add(1); return nil })
 
-		e, shard, flowID, _ := slowWorkerReplay(t, proxy, "slowfanin/g", map[string]any{"items": []any{}}, nil)
+		e, shard, flowID, _ := slowWorkerReplay(t, mux, "slowfanin/g", map[string]any{"items": []any{}}, nil)
 		assert.Equal(int32(1), runsA.Load(), "A ran again instead of being replayed")
 		assert.Equal(int32(0), runsB.Load())
 		assert.Equal(int32(1), runsJ.Load(), "the fan-in ran other than once")
@@ -300,15 +300,15 @@ func TestOrphanSweep_ReplaysSlowWorkersStep_OtherTransitions(t *testing.T) {
 	})
 	t.Run("flow_completion", func(t *testing.T) {
 		assert := testarossa.For(t)
-		proxy := NewTestProxy()
+		mux := NewHostMux()
 		g := workflow.NewGraph("SlowEnd")
 		g.SetURL("A", "slowend/a")
 		g.AddTransition("A", workflow.End)
-		proxy.HandleGraph("slowend/g", g)
+		mux.HandleGraph("slowend/g", g)
 		var runsA atomic.Int32
-		proxy.HandleTask("slowend/a", func(ctx context.Context, f *workflow.Flow) error { runsA.Add(1); f.Set("done", true); return nil })
+		mux.HandleTask("slowend/a", func(ctx context.Context, f *workflow.Flow) error { runsA.Add(1); f.Set("done", true); return nil })
 
-		e, shard, flowID, _ := slowWorkerReplay(t, proxy, "slowend/g", nil, nil)
+		e, shard, flowID, _ := slowWorkerReplay(t, mux, "slowend/g", nil, nil)
 		assert.Equal(int32(1), runsA.Load(), "A ran again instead of being replayed")
 		assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=?", flowID))
 		// The stalled worker's completion, unfenced, may win and complete the flow while A sits rewound: A is then
@@ -329,7 +329,7 @@ func TestBumpCohortArrivals_Fence(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Bump")
 	g.SetURL("A", "bump/a")
 	g.SetURL("B1", "bump/b1")
@@ -340,18 +340,18 @@ func TestBumpCohortArrivals_Fence(t *testing.T) {
 	g.AddTransition("B2", "J")
 	g.SetFanIn("J")
 	g.AddTransition("J", workflow.End)
-	proxy.HandleGraph("bump/g", g)
+	mux.HandleGraph("bump/g", g)
 	release := make(chan struct{})
 	var started atomic.Int32
 	branch := func(ctx context.Context, f *workflow.Flow) error { started.Add(1); <-release; return nil }
-	proxy.HandleTask("bump/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("bump/b1", branch)
-	proxy.HandleTask("bump/b2", branch)
-	proxy.HandleTask("bump/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("bump/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("bump/b1", branch)
+	mux.HandleTask("bump/b2", branch)
+	mux.HandleTask("bump/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
 	fk, err := e.Create(ctx, "bump/g", nil, nil)

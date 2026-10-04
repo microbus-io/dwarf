@@ -36,33 +36,33 @@ func TestPurgeSubgraphflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("TaskA", "purgesub.verify:428/task-a")
 	parent.SetURL("RunInner", "purgesub.verify:428/run-inner")
 	parent.AddTransitionChain("TaskA", "RunInner", workflow.End)
-	proxy.HandleGraph("purgesub.verify:428/parent", parent)
+	mux.HandleGraph("purgesub.verify:428/parent", parent)
 
 	inner := workflow.NewGraph("Inner")
 	inner.SetURL("TaskX", "purgesub.verify:428/task-x")
 	inner.AddTransitionChain("TaskX", workflow.End)
-	proxy.HandleGraph("purgesub.verify:428/inner", inner)
+	mux.HandleGraph("purgesub.verify:428/inner", inner)
 
 	var mu sync.Mutex
 	var childKey string
-	proxy.HandleTask("purgesub.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("purgesub.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("purgesub.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("purgesub.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
 		mu.Lock()
 		childKey = f.FlowKey()
 		mu.Unlock()
 		return nil
 	})
-	proxy.HandleTask("purgesub.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("purgesub.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		yield, err := f.Subgraph("purgesub.verify:428/inner", map[string]any{}, &out)
 		if yield || err != nil {

@@ -33,12 +33,12 @@ func TestFairnessflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	graph := workflow.NewGraph("Fairness")
 	graph.SetURL("Tally", "fairnessflow.verify:428/tally")
 	graph.AddTransition("Tally", workflow.End)
-	proxy.HandleGraph("fairnessflow.verify:428/fairness", graph)
+	mux.HandleGraph("fairnessflow.verify:428/fairness", graph)
 
 	var mu sync.Mutex
 	var order []string
@@ -52,7 +52,7 @@ func TestFairnessflow(t *testing.T) {
 	releaseHolder := make(chan struct{})
 	release := func() { releaseOnce.Do(func() { close(releaseHolder) }) }
 
-	proxy.HandleTask("fairnessflow.verify:428/tally", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("fairnessflow.verify:428/tally", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetBool("hold") {
 			holdOnce.Do(func() { close(holderRunning) })
 			<-releaseHolder
@@ -72,7 +72,7 @@ func TestFairnessflow(t *testing.T) {
 	// Released here, after the Shutdown defer, so it unwinds FIRST: Shutdown drains the workers, and
 	// one still holding this would never return.
 	defer release()
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	eng.SetWorkers(1)
 	assert.NoError(eng.Startup(t.Context()))
 

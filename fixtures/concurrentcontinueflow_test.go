@@ -48,7 +48,7 @@ func TestConcurrentContinueflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	// block gates the Increment task: armed only after turn 1 completes, so the single winning
 	// continuation turn parks `running` until the test releases it - keeping it non-completable during the
@@ -61,8 +61,8 @@ func TestConcurrentContinueflow(t *testing.T) {
 	graph := workflow.NewGraph("Counting")
 	graph.SetURL("Increment", "concurrentcontinue.verify:428/increment")
 	graph.AddTransition("Increment", workflow.End)
-	proxy.HandleGraph("concurrentcontinue.verify:428/counting", graph)
-	proxy.HandleTask("concurrentcontinue.verify:428/increment", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("concurrentcontinue.verify:428/counting", graph)
+	mux.HandleTask("concurrentcontinue.verify:428/increment", func(ctx context.Context, f *workflow.Flow) error {
 		if armed.Load() {
 			select {
 			case <-release:
@@ -78,7 +78,7 @@ func TestConcurrentContinueflow(t *testing.T) {
 	// Released here, after the Shutdown defer, so it unwinds FIRST: Shutdown drains the workers, and
 	// one still holding this would never return.
 	defer releaseTask()
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// Turn 1: run to completion (task not armed). counter 0 -> 1.

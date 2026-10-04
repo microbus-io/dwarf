@@ -31,10 +31,10 @@ func TestSleepflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("Delay")
@@ -42,17 +42,17 @@ func TestSleepflow(t *testing.T) {
 	graph.SetURL("TaskB", "sleepflow.verify:428/task-b")
 	graph.SetURL("TaskC", "sleepflow.verify:428/task-c")
 	graph.AddTransitionChain("TaskA", "TaskB", "TaskC", workflow.End)
-	proxy.HandleGraph("sleepflow.verify:428/delay", graph)
+	mux.HandleGraph("sleepflow.verify:428/delay", graph)
 
-	proxy.HandleTask("sleepflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("sleepflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("sleepflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("sleepflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.Sleep(f.GetDuration("sleepFor"))
 		f.SetBool("marked", true)
 		return nil
 	})
-	proxy.HandleTask("sleepflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("sleepflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 

@@ -35,10 +35,10 @@ func TestReducerflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("Reducer")
@@ -57,30 +57,30 @@ func TestReducerflow(t *testing.T) {
 	graph.AddTransition("TaskB", "TaskE")
 	graph.AddTransition("TaskC", "TaskE")
 	graph.AddTransitionChain("TaskD", "TaskE", workflow.End)
-	proxy.HandleGraph("reducerflow.verify:428/reducer", graph)
+	mux.HandleGraph("reducerflow.verify:428/reducer", graph)
 
-	proxy.HandleTask("reducerflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("reducerflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("reducerflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("reducerflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("total", 10)
 		f.SetStrings("tags", []string{"b"})
 		f.SetStrings("seen", []string{"x"})
 		return nil
 	})
-	proxy.HandleTask("reducerflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("reducerflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("total", 20)
 		f.SetStrings("tags", []string{"c"})
 		f.SetStrings("seen", []string{"y", "x"})
 		return nil
 	})
-	proxy.HandleTask("reducerflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("reducerflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("total", 30)
 		f.SetStrings("tags", []string{"d"})
 		f.SetStrings("seen", []string{"z"})
 		return nil
 	})
-	proxy.HandleTask("reducerflow.verify:428/task-e", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("reducerflow.verify:428/task-e", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("finalSum", f.GetInt("total"))
 		f.SetStrings("finalList", f.GetStrings("tags"))
 		f.SetStrings("finalSet", f.GetStrings("seen"))

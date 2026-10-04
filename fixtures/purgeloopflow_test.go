@@ -42,35 +42,35 @@ func TestPurgeLoopflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	// A trivial one-task graph used for the plain completed flows.
 	tiny := workflow.NewGraph("Tiny")
 	tiny.SetURL("Only", "purgeloop.verify:428/only")
 	tiny.AddTransition("Only", workflow.End)
-	proxy.HandleGraph("purgeloop.verify:428/tiny", tiny)
-	proxy.HandleTask("purgeloop.verify:428/only", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("purgeloop.verify:428/tiny", tiny)
+	mux.HandleTask("purgeloop.verify:428/only", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	// A parent graph that runs one subgraph child, so one purged root owns a subtree.
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("RunInner", "purgeloop.verify:428/run-inner")
 	parent.AddTransition("RunInner", workflow.End)
-	proxy.HandleGraph("purgeloop.verify:428/parent", parent)
+	mux.HandleGraph("purgeloop.verify:428/parent", parent)
 
 	inner := workflow.NewGraph("Inner")
 	inner.SetURL("TaskX", "purgeloop.verify:428/task-x")
 	inner.AddTransition("TaskX", workflow.End)
-	proxy.HandleGraph("purgeloop.verify:428/inner", inner)
+	mux.HandleGraph("purgeloop.verify:428/inner", inner)
 
 	var mu sync.Mutex
 	var childKey string
-	proxy.HandleTask("purgeloop.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("purgeloop.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
 		mu.Lock()
 		childKey = f.FlowKey()
 		mu.Unlock()
 		return nil
 	})
-	proxy.HandleTask("purgeloop.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("purgeloop.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		yield, err := f.Subgraph("purgeloop.verify:428/inner", map[string]any{}, &out)
 		if yield || err != nil {
@@ -83,13 +83,13 @@ func TestPurgeLoopflow(t *testing.T) {
 	block := workflow.NewGraph("Block")
 	block.SetURL("Wait", "purgeloop.verify:428/wait")
 	block.AddTransition("Wait", workflow.End)
-	proxy.HandleGraph("purgeloop.verify:428/block", block)
+	mux.HandleGraph("purgeloop.verify:428/block", block)
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	releaseTask := func() { releaseOnce.Do(func() { close(release) }) }
 	running := make(chan struct{})
 	var runningOnce sync.Once
-	proxy.HandleTask("purgeloop.verify:428/wait", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("purgeloop.verify:428/wait", func(ctx context.Context, f *workflow.Flow) error {
 		runningOnce.Do(func() { close(running) })
 		select {
 		case <-release:
@@ -100,7 +100,7 @@ func TestPurgeLoopflow(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// 6 plain completed flows + 1 parent-with-subgraph = 7 completed roots.

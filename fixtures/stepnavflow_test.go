@@ -33,10 +33,10 @@ func TestStepnavflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("Flow")
@@ -44,11 +44,11 @@ func TestStepnavflow(t *testing.T) {
 	graph.SetURL("TaskB", "stepnavflow.verify:428/task-b")
 	graph.SetURL("TaskC", "stepnavflow.verify:428/task-c")
 	graph.AddTransitionChain("TaskA", "TaskB", "TaskC", workflow.End)
-	proxy.HandleGraph("stepnavflow.verify:428/flow", graph)
+	mux.HandleGraph("stepnavflow.verify:428/flow", graph)
 	noop := func(ctx context.Context, f *workflow.Flow) error { return nil }
-	proxy.HandleTask("stepnavflow.verify:428/task-a", noop)
-	proxy.HandleTask("stepnavflow.verify:428/task-b", noop)
-	proxy.HandleTask("stepnavflow.verify:428/task-c", noop)
+	mux.HandleTask("stepnavflow.verify:428/task-a", noop)
+	mux.HandleTask("stepnavflow.verify:428/task-b", noop)
+	mux.HandleTask("stepnavflow.verify:428/task-c", noop)
 
 	flowKey, outcome, err := eng.Run(ctx, "stepnavflow.verify:428/flow", nil, nil)
 	if !assert.NoError(err) {

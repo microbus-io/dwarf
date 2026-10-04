@@ -31,10 +31,10 @@ func TestSubgraphflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// Parent graph: A -> RunInner -> Z
@@ -43,27 +43,27 @@ func TestSubgraphflow(t *testing.T) {
 	parent.SetURL("RunInner", "subgraphflow.verify:428/run-inner")
 	parent.SetURL("TaskZ", "subgraphflow.verify:428/task-z")
 	parent.AddTransitionChain("TaskA", "RunInner", "TaskZ", workflow.End)
-	proxy.HandleGraph("subgraphflow.verify:428/parent", parent)
+	mux.HandleGraph("subgraphflow.verify:428/parent", parent)
 
 	// Inner graph: X -> Y
 	inner := workflow.NewGraph("Inner")
 	inner.SetURL("TaskX", "subgraphflow.verify:428/task-x")
 	inner.SetURL("TaskY", "subgraphflow.verify:428/task-y")
 	inner.AddTransitionChain("TaskX", "TaskY", workflow.End)
-	proxy.HandleGraph("subgraphflow.verify:428/inner", inner)
+	mux.HandleGraph("subgraphflow.verify:428/inner", inner)
 
-	proxy.HandleTask("subgraphflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subgraphflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("subgraphflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subgraphflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("innerResult", fmt.Sprintf("X(%s)", f.GetString("seed")))
 		return nil
 	})
-	proxy.HandleTask("subgraphflow.verify:428/task-y", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subgraphflow.verify:428/task-y", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("innerResult", fmt.Sprintf("Y(%s)", f.GetString("innerResult")))
 		return nil
 	})
-	proxy.HandleTask("subgraphflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subgraphflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		yield, err := f.Subgraph("subgraphflow.verify:428/inner", map[string]any{"seed": f.GetString("seed")}, &out)
 		if yield || err != nil {
@@ -74,7 +74,7 @@ func TestSubgraphflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("subgraphflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("subgraphflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("result", fmt.Sprintf("Z(%s)", f.GetString("innerResult")))
 		return nil
 	})

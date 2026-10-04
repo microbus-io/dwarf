@@ -39,10 +39,10 @@ func TestGotoFanInFlow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("GotoFanIn")
@@ -56,9 +56,9 @@ func TestGotoFanInFlow(t *testing.T) {
 	graph.AddTransitionGoto("Split", "Join")
 	graph.AddTransitionChain("Work", "Join", workflow.End)
 	assert.NoError(graph.Validate())
-	proxy.HandleGraph("gotofaninflow.verify:645/goto-fan-in", graph)
+	mux.HandleGraph("gotofaninflow.verify:645/goto-fan-in", graph)
 
-	proxy.HandleTask("gotofaninflow.verify:645/split", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("gotofaninflow.verify:645/split", func(ctx context.Context, f *workflow.Flow) error {
 		if len(f.GetStrings("items")) == 0 {
 			f.SetString("route", "direct")
 			f.Goto("Join") // no branches to spawn: converge on the fan-in directly
@@ -67,11 +67,11 @@ func TestGotoFanInFlow(t *testing.T) {
 		f.SetString("route", "fanout")
 		return nil
 	})
-	proxy.HandleTask("gotofaninflow.verify:645/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("gotofaninflow.verify:645/work", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("processed", []string{f.GetString("item")})
 		return nil
 	})
-	proxy.HandleTask("gotofaninflow.verify:645/join", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("gotofaninflow.verify:645/join", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("joined", true)
 		return nil
 	})
@@ -111,10 +111,10 @@ func TestGotoFanInFlow_NestedStaysInOuterCohort(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("NestedGotoFanIn")
@@ -133,27 +133,27 @@ func TestGotoFanInFlow_NestedStaysInOuterCohort(t *testing.T) {
 	graph.AddTransitionChain("Chunk", "JoinChunk")
 	graph.AddTransitionChain("JoinChunk", "JoinCell", workflow.End)
 	assert.NoError(graph.Validate())
-	proxy.HandleGraph("gotofaninflow.verify:645/nested-goto-fan-in", graph)
+	mux.HandleGraph("gotofaninflow.verify:645/nested-goto-fan-in", graph)
 
-	proxy.HandleTask("gotofaninflow.verify:645/n-seed", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("gotofaninflow.verify:645/n-seed", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 	// Every cell has no chunks, so every (nested) Cell source Goto's its inner fan-in - each must still arrive
 	// at the OUTER fan-in as a member of Seed's cohort.
-	proxy.HandleTask("gotofaninflow.verify:645/n-cell", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("gotofaninflow.verify:645/n-cell", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("chunks", []string{})
 		f.Goto("JoinChunk")
 		return nil
 	})
-	proxy.HandleTask("gotofaninflow.verify:645/n-chunk", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("gotofaninflow.verify:645/n-chunk", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 	// The inner fan-in records which cell converged; the outer fan-in unions them.
-	proxy.HandleTask("gotofaninflow.verify:645/n-joinchunk", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("gotofaninflow.verify:645/n-joinchunk", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("cellsSeen", []string{f.GetString("cell")})
 		return nil
 	})
-	proxy.HandleTask("gotofaninflow.verify:645/n-joincell", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("gotofaninflow.verify:645/n-joincell", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 

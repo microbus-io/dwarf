@@ -65,16 +65,16 @@ func TestTimeBudget_FrozenAtCreate(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("Task", "timebudget/task")
 	g.AddTransition("Task", workflow.End)
-	proxy.HandleGraph("timebudget/graph", g)
-	proxy.HandleTask("timebudget/task", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("timebudget/graph", g)
+	mux.HandleTask("timebudget/task", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 	assert.NoError(e.SetTimeBudget(30 * time.Second))
 
@@ -106,12 +106,12 @@ func TestTimeBudget_LeaseSizedFromRow(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	g := workflow.NewGraph("Blocker")
 	g.SetURL("Task", "timebudget/blocker")
 	g.AddTransition("Task", workflow.End)
-	proxy.HandleGraph("timebudget/blockergraph", g)
-	proxy.HandleTask("timebudget/blocker", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleGraph("timebudget/blockergraph", g)
+	mux.HandleTask("timebudget/blocker", func(ctx context.Context, f *workflow.Flow) error {
 		once.Do(func() { close(started) })
 		select {
 		case <-release:
@@ -123,7 +123,7 @@ func TestTimeBudget_LeaseSizedFromRow(t *testing.T) {
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 	assert.NoError(e.SetTimeBudget(1 * time.Second)) // tiny default
 
@@ -161,19 +161,19 @@ func TestTimeBudget_InheritedBySubgraph(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("RunInner", "timebudget/run-inner")
 	parent.AddTransition("RunInner", workflow.End)
-	proxy.HandleGraph("timebudget/parent", parent)
+	mux.HandleGraph("timebudget/parent", parent)
 
 	inner := workflow.NewGraph("Inner")
 	inner.SetURL("TaskX", "timebudget/task-x")
 	inner.AddTransition("TaskX", workflow.End)
-	proxy.HandleGraph("timebudget/inner", inner)
+	mux.HandleGraph("timebudget/inner", inner)
 
-	proxy.HandleTask("timebudget/task-x", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	proxy.HandleTask("timebudget/run-inner", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("timebudget/task-x", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("timebudget/run-inner", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		yield, err := f.Subgraph("timebudget/inner", map[string]any{}, &out)
 		if yield || err != nil {
@@ -184,7 +184,7 @@ func TestTimeBudget_InheritedBySubgraph(t *testing.T) {
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 	assert.NoError(e.SetTimeBudget(30 * time.Second))
 

@@ -41,17 +41,17 @@ func TestRefillDecoupled_MultiShardDrains(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Chain")
 	g.SetURL("A", "msd/nop")
 	g.SetURL("B", "msd/nop")
 	g.AddTransitionChain("A", "B", workflow.End)
-	proxy.HandleGraph("msd/g", g)
-	proxy.HandleTask("msd/nop", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("msd/g", g)
+	mux.HandleTask("msd/nop", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	assert.NoError(e.SetHost(proxy))
+	assert.NoError(e.SetHost(mux))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 2}))
 	assert.NoError(e.Startup(t.Context()))
@@ -85,16 +85,16 @@ func TestRefillInterval_OneCyclePerPistonNoTrigger(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("One")
 	g.SetURL("Do", "notrigger/nop")
 	g.AddTransition("Do", workflow.End)
-	proxy.HandleGraph("notrigger/g", g)
-	proxy.HandleTask("notrigger/nop", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("notrigger/g", g)
+	mux.HandleTask("notrigger/nop", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	assert.NoError(e.SetHost(proxy))
+	assert.NoError(e.SetHost(mux))
 	assert.NoError(e.Startup(t.Context()))
 
 	// engineseams.FaultDropDoorbell removes the local Offer entirely, so nothing but a cycle can discover this step.
@@ -120,7 +120,7 @@ func TestRefillInterval_OverridePinsAndRestores(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
-	assert.NoError(e.SetHost(NewTestProxy()))
+	assert.NoError(e.SetHost(NewHostMux()))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(e.Startup(t.Context()))
 
@@ -291,16 +291,16 @@ func TestRefillInterval_DeepBacklogLiveness(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("One")
 	g.SetURL("Do", "refillfloorliveness.verify:428/nop")
 	g.AddTransition("Do", workflow.End)
-	proxy.HandleGraph("refillfloorliveness.verify:428/one", g)
-	proxy.HandleTask("refillfloorliveness.verify:428/nop", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("refillfloorliveness.verify:428/one", g)
+	mux.HandleTask("refillfloorliveness.verify:428/nop", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(proxy)
+	e.SetHost(mux)
 	e.SetWorkers(1)                                            // capacity 2, against a backlog of 10
 	assert.NoError(e.setRefillInterval(50 * time.Millisecond)) // the over-limiting regime; must still drain, just slower
 	assert.NoError(e.Startup(t.Context()))
@@ -331,19 +331,19 @@ func TestRefillScan_BoundedPerFairnessKey(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	mux := NewHostMux()
 	g := workflow.NewGraph("Scan")
 	g.SetURL("A", "scan/a")
 	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
-	proxy.HandleGraph("scan/g", g)
-	proxy.HandleTask("scan/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleGraph("scan/g", g)
+	mux.HandleTask("scan/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	// SetWorkers(0): nothing dispatches, so every created flow's entry step stays `pending` and the scan
 	// sees a real backlog. It also idles the pistons, so nothing races these hand-driven queries.
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	assert.NoError(e.SetHost(proxy))
+	assert.NoError(e.SetHost(mux))
 	assert.NoError(e.SetWorkers(0))
 	assert.NoError(e.Startup(t.Context()))
 

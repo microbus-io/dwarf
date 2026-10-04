@@ -44,10 +44,10 @@ func TestErrorchangesflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// Handled: Work errors after writing, and an onError handler runs next.
@@ -57,25 +57,25 @@ func TestErrorchangesflow(t *testing.T) {
 	handled.AddTransition("Work", workflow.End)
 	handled.AddTransitionOnError("Work", "Rescue")
 	handled.AddTransition("Rescue", workflow.End)
-	proxy.HandleGraph("errorchangesflow.verify:428/handled", handled)
+	mux.HandleGraph("errorchangesflow.verify:428/handled", handled)
 
 	// Unhandled: the same task with no onError, so the flow fails.
 	unhandled := workflow.NewGraph("UnhandledErrorChanges")
 	unhandled.SetURL("Work", "errorchangesflow.verify:428/work")
 	unhandled.AddTransition("Work", workflow.End)
-	proxy.HandleGraph("errorchangesflow.verify:428/unhandled", unhandled)
+	mux.HandleGraph("errorchangesflow.verify:428/unhandled", unhandled)
 
 	var handlerSawScratch bool
 	var handlerSawErr string
 
-	proxy.HandleTask("errorchangesflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("errorchangesflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("scratch", "half-written") // a write the task makes before it fails
 		if f.GetBool("ok") {
 			return nil
 		}
 		return errors.New("Work failed after writing scratch")
 	})
-	proxy.HandleTask("errorchangesflow.verify:428/rescue", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("errorchangesflow.verify:428/rescue", func(ctx context.Context, f *workflow.Flow) error {
 		handlerSawScratch = f.Has("scratch")
 		var onErr map[string]any
 		_, _ = f.Get("onErr", &onErr)

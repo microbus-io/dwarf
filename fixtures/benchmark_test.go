@@ -95,7 +95,7 @@ func setShards(eng *engine.Engine, numShards int) error {
 func benchEngine(b *testing.B, numShards int) (*engine.Engine, string) {
 	b.Helper()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	const prefix = "bench.verify:428"
 	g := workflow.NewGraph("Bench")
 	prev := ""
@@ -103,14 +103,14 @@ func benchEngine(b *testing.B, numShards int) (*engine.Engine, string) {
 		node := fmt.Sprintf("T%d", i)
 		url := fmt.Sprintf("%s/t%d", prefix, i)
 		g.SetURL(node, url)
-		proxy.HandleTask(url, func(ctx context.Context, f *workflow.Flow) error { return nil })
+		mux.HandleTask(url, func(ctx context.Context, f *workflow.Flow) error { return nil })
 		if prev != "" {
 			g.AddTransition(prev, node)
 		}
 		prev = node
 	}
 	g.AddTransition(prev, workflow.End)
-	proxy.HandleGraph(prefix+"/g", g)
+	mux.HandleGraph(prefix+"/g", g)
 
 	// A distinct test-DB key per invocation: the same b.Name() runs multiple passes (warmup + measure), so
 	// reusing b.Name() would collide with a prior (already-dropped) pass's DB. benchSeq gives each pass its
@@ -121,7 +121,7 @@ func benchEngine(b *testing.B, numShards int) (*engine.Engine, string) {
 	if err := eng.SetLogger(slog.New(slog.DiscardHandler)); err != nil {
 		b.Fatal(err)
 	}
-	if err := eng.SetHost(proxy); err != nil {
+	if err := eng.SetHost(mux); err != nil {
 		b.Fatal(err)
 	}
 	if err := eng.SetWorkers(benchWorkers); err != nil {

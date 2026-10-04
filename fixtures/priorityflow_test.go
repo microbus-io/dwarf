@@ -34,12 +34,12 @@ func TestPriorityflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 
 	graph := workflow.NewGraph("Priority")
 	graph.SetURL("Record", "priorityflow.verify:428/record")
 	graph.AddTransition("Record", workflow.End)
-	proxy.HandleGraph("priorityflow.verify:428/priority", graph)
+	mux.HandleGraph("priorityflow.verify:428/priority", graph)
 
 	var mu sync.Mutex
 	var order []string
@@ -53,7 +53,7 @@ func TestPriorityflow(t *testing.T) {
 	releaseHolder := make(chan struct{})
 	release := func() { releaseOnce.Do(func() { close(releaseHolder) }) }
 
-	proxy.HandleTask("priorityflow.verify:428/record", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("priorityflow.verify:428/record", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetBool("hold") {
 			holdOnce.Do(func() { close(holderRunning) })
 			<-releaseHolder
@@ -73,7 +73,7 @@ func TestPriorityflow(t *testing.T) {
 	// Released here, after the Shutdown defer, so it unwinds FIRST: Shutdown drains the workers, and
 	// one still holding this would never return.
 	defer release()
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	eng.SetWorkers(1)
 	assert.NoError(eng.Startup(t.Context()))
 

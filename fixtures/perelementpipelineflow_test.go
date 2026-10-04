@@ -31,10 +31,10 @@ func TestPerelementpipelineflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	mux := engine.NewHostMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
-	eng.SetHost(proxy)
+	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// S -> forEach(items) -> H -> {A, B} -> M -> L
@@ -53,28 +53,28 @@ func TestPerelementpipelineflow(t *testing.T) {
 	graph.AddTransition("TaskH", "TaskB")
 	graph.AddTransition("TaskA", "TaskM")
 	graph.AddTransitionChain("TaskB", "TaskM", "TaskL", workflow.End)
-	proxy.HandleGraph("perelementpipelineflow.verify:428/per-element-pipeline", graph)
+	mux.HandleGraph("perelementpipelineflow.verify:428/per-element-pipeline", graph)
 
-	proxy.HandleTask("perelementpipelineflow.verify:428/task-s", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("perelementpipelineflow.verify:428/task-s", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("perelementpipelineflow.verify:428/task-h", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("perelementpipelineflow.verify:428/task-h", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("item", strings.ToUpper(f.GetString("item")))
 		return nil
 	})
-	proxy.HandleTask("perelementpipelineflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("perelementpipelineflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("aResult", "a:"+f.GetString("item"))
 		return nil
 	})
-	proxy.HandleTask("perelementpipelineflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("perelementpipelineflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("bResult", "b:"+f.GetString("item"))
 		return nil
 	})
-	proxy.HandleTask("perelementpipelineflow.verify:428/task-m", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("perelementpipelineflow.verify:428/task-m", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("mergedItems", []string{f.GetString("aResult") + "+" + f.GetString("bResult")})
 		return nil
 	})
-	proxy.HandleTask("perelementpipelineflow.verify:428/task-l", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("perelementpipelineflow.verify:428/task-l", func(ctx context.Context, f *workflow.Flow) error {
 		var items []string
 		f.Get("mergedItems", &items)
 		f.SetInt("finalCount", len(items))
