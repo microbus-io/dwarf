@@ -65,6 +65,12 @@ sustained deadlock rate degrades throughput. To minimize it:
 - `innodb_autoinc_lock_mode = 2` with `binlog_format = ROW`
 - `innodb_lock_wait_timeout` 5–10s, `innodb_deadlock_detect = ON`
 
+Add `interpolateParams=true` to the DSN, e.g. `user:pass@tcp(host:3306)/dwarf_%d?interpolateParams=true`.
+Without it, the MySQL driver sends every statement that has arguments as a prepare and then an execute - two
+round trips where one would do - which roughly doubles the database round trips each step makes. With it, the
+driver substitutes the arguments client-side and escapes them itself. The driver rejects it together with the
+`big5`, `gbk`, `sjis` and `cp932` collations, so use a `utf8mb4` connection collation.
+
 MariaDB 10.5+ for `JSON`.
 
 ### SQLite — testing and single-instance dev only

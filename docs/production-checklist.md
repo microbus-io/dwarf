@@ -13,6 +13,8 @@
 - [ ] **MySQL/MariaDB only:** `transaction-isolation = READ-COMMITTED`, `innodb_autoinc_lock_mode = 2` with
   `binlog_format = ROW`. Without the first, concurrent flow creation deadlocks on gap locks.
   → [Runbook](runbook.md#deadlock-errors-on-mysql-or-sql-server)
+- [ ] **MySQL/MariaDB only:** `interpolateParams=true` in the DSN. Without it every statement with arguments
+  costs two round trips, roughly doubling each step's. → [Deployment](deployment.md#mysql--mariadb--supported-expect-tuning)
 - [ ] **SQL Server only:** `READ_COMMITTED_SNAPSHOT ON`.
 - [ ] **Disk IOPS sized to the write rate**, not just to capacity. Cloud providers often provision IOPS by
   disk size, and a throttled disk shows up as throughput collapse with everything apparently idle.
