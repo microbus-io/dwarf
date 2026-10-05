@@ -18,6 +18,8 @@ package engine
 
 import (
 	"context"
+	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/microbus-io/dwarf/workflow"
@@ -105,4 +107,85 @@ func TestSuccessorBatch_WideFanOutKeepsBranchOrder(t *testing.T) {
 	assert.NoError(db.QueryRowContext(ctx,
 		"SELECT step_id FROM dwarf_steps WHERE task_name='Work' AND fan_out_ordinal=0").Scan(&firstBranch))
 	assert.Equal(firstBranch, successorID)
+}
+
+// TestSuccessorBatch_LoneSuccessorLinks pins the single-successor transition, whose own-row write and flow advance
+// name the new step in SQL on PostgreSQL rather than by a bind. Linear flows run concurrently, so inserts from
+// different sessions interleave: an id that is not the session's own would link a step to another flow's row.
+// Every link must agree with its successor's predecessor_id and stay within the flow, and every flow must point
+// at its own last step.
+func TestSuccessorBatch_LoneSuccessorLinks(t *testing.T) {
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	mux := NewHostMux()
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+
+	const steps, flows = 6, 8
+	g := workflow.NewGraph("Chain")
+	for i := range steps {
+		task := "S" + strconv.Itoa(i)
+		g.SetURL(task, "lone/s")
+		if i+1 < steps {
+			g.AddTransition(task, "S"+strconv.Itoa(i+1))
+		} else {
+			g.AddTransition(task, workflow.End)
+		}
+	}
+	assert.NoError(g.Validate())
+	mux.HandleGraph("lone/wf", g)
+	mux.HandleTask("lone/s", func(ctx context.Context, f *workflow.Flow) error {
+		f.Set("hops", f.GetInt("hops")+1)
+		return nil
+	})
+
+	var wg sync.WaitGroup
+	for range flows {
+		wg.Go(func() {
+			_, outcome, err := e.Run(ctx, "lone/wf", nil, nil)
+			if assert.NoError(err) {
+				assert.Equal(workflow.StatusCompleted, outcome.Status)
+				assert.Equal(steps, outcome.State.GetInt("hops"))
+			}
+		})
+	}
+	wg.Wait()
+
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	rows, err := db.QueryContext(ctx,
+		"SELECT s.step_id, s.flow_id, s.task_name, s.successor_id, n.flow_id, n.predecessor_id, n.task_name"+
+			" FROM dwarf_steps s LEFT JOIN dwarf_steps n ON n.step_id=s.successor_id")
+	assert.NoError(err)
+	defer rows.Close()
+	links := 0
+	for rows.Next() {
+		var stepID, flowID, successorID int
+		var taskName string
+		var nextFlowID, nextPredecessor *int
+		var nextTask *string
+		assert.NoError(rows.Scan(&stepID, &flowID, &taskName, &successorID, &nextFlowID, &nextPredecessor, &nextTask))
+		if taskName == "S"+strconv.Itoa(steps-1) {
+			assert.Zero(successorID, "the last step has no successor")
+			continue
+		}
+		if assert.NotNil(nextFlowID, "step %d links to a step that exists", stepID) {
+			assert.Equal(flowID, *nextFlowID, "step %d links within its flow", stepID)
+			assert.Equal(stepID, *nextPredecessor, "step %d's successor names it as predecessor", stepID)
+			n, _ := strconv.Atoi(taskName[1:])
+			assert.Equal("S"+strconv.Itoa(n+1), *nextTask)
+		}
+		links++
+	}
+	assert.NoError(rows.Err())
+	assert.Equal(flows*(steps-1), links)
+
+	var strays int
+	assert.NoError(db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dwarf_flows f LEFT JOIN dwarf_steps s ON s.step_id=f.step_id"+
+			" WHERE s.flow_id IS NULL OR s.flow_id<>f.flow_id OR s.task_name<>?", "S"+strconv.Itoa(steps-1)).Scan(&strays))
+	assert.Zero(strays, "every flow advanced to its own last step")
 }

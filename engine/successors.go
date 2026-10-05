@@ -89,10 +89,7 @@ func returnsInsertedRows(driver string) bool {
 func (s *successorBatch) queue(b *sequel.Batch, driver string) func(res *sequel.BatchResults, ids *[]int) error {
 	if !returnsInsertedRows(driver) {
 		for _, r := range s.rows {
-			b.Queue(successorInsertSQL,
-				s.flowID, s.stepDepth, keys.RandomIdentifier(16), r.taskName, r.taskURL, r.stateJSON, r.refsJSON, workflow.StatusPending, parkedNone, s.timeBudgetMs, s.lineageID, r.ordinal, s.predecessorID, s.sleepMs, s.priority, s.fairnessKey, s.fairnessWeight, s.engineID,
-				s.inheritCancel, s.flowID, s.predecessorID,
-			)
+			b.Queue(successorInsertSQL, s.selfMarkingArgs(r)...)
 		}
 		n := len(s.rows)
 		return func(res *sequel.BatchResults, ids *[]int) error {
@@ -162,6 +159,41 @@ func (s *successorBatch) queue(b *sequel.Batch, driver string) func(res *sequel.
 		return nil
 	}
 }
+
+// selfMarkingArgs are successorInsertSQL's arguments for r.
+func (s *successorBatch) selfMarkingArgs(r successorRow) []any {
+	return []any{
+		s.flowID, s.stepDepth, keys.RandomIdentifier(16), r.taskName, r.taskURL, r.stateJSON, r.refsJSON, workflow.StatusPending, parkedNone, s.timeBudgetMs, s.lineageID, r.ordinal, s.predecessorID, s.sleepMs, s.priority, s.fairnessKey, s.fairnessWeight, s.engineID,
+		s.inheritCancel, s.flowID, s.predecessorID,
+	}
+}
+
+/*
+queueLone adds to b the INSERT of the batch's only row on PostgreSQL, and returns the function that reads the row's
+step id back once b is sent.
+
+The row goes in by successorInsertSQL, which decides its Cancel mark itself, so the transition needs no later
+statement for it. Statements queued after it in the same batch can name the new id in SQL as loneSuccessorID,
+which is what lets a single-successor transition be one batch.
+*/
+func (s *successorBatch) queueLone(b *sequel.Batch) func(res *sequel.BatchResults) (int, error) {
+	b.Queue(successorInsertSQL+" RETURNING step_id", s.selfMarkingArgs(s.rows[0])...)
+	return func(res *sequel.BatchResults) (int, error) {
+		var id int
+		err := res.QueryRow().Scan(&id)
+		return id, errors.Trace(err)
+	}
+}
+
+/*
+loneSuccessorID is PostgreSQL SQL for the id of the step the session inserted last, valid after queueLone's INSERT.
+
+It reads dwarf_steps' own sequence. Do not use lastval(), nor the other dialects' session last-id (@@IDENTITY on
+SQL Server): they report the last id generated in ANY table, so a trigger a deployment adds to dwarf_steps that
+inserts into a table with its own identity would silently become the step's successor_id and the flow's step_id.
+step_id is BIGSERIAL, so a role that can insert a step already holds the sequence privilege currval needs.
+*/
+const loneSuccessorID = "currval(pg_get_serial_sequence('dwarf_steps', 'step_id'))"
 
 // markCancelled queues onto b the Cancel mark of successors inserted unmarked, in power-of-two chunks of at most
 // 512 ids - under the tightest bind-parameter ceiling, and a fixed handful of statement texts. It is queued only

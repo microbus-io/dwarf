@@ -297,14 +297,14 @@ covered" exemption covers the handler's own insert, whose source existed before.
 `Cancel`, "at or below the watermark and not covered" is exactly "terminal when the mark ran", which is the gap.
 It is race-free and free of round trips because every insert of a flow's steps holds that flow row's lock and
 `cancel()` writes the watermark under it: either the insert sees the new watermark, or `cancel()` waits and its
-mark then finds the successors pending. A transition's successors (`successorBatch`) take the watermark from the
-transaction's flow-row lock grab (`RETURNING`/`OUTPUT`) - the row as locked, which on Postgres is the version
-re-read after any wait for the lock, not the statement's starting snapshot - and decide the flag in Go, once for
-all of them. The grab and the INSERTs go out in one statement batch, so the INSERTs are queued before the
-watermark is known: they insert unmarked, and when the flag is set (`markCancel`) the second batch marks them by
-id (`markCancelled`), still under the lock and before COMMIT, so no reader ever sees them unmarked. MySQL, and the
-two fan-in inserts, use the `INSERT...SELECT` form (`successorInsertSQL`), which reads the watermark in the same
-statement.
+mark then finds the successors pending. A transition with one successor - and MySQL, and the two fan-in inserts -
+uses the `INSERT...SELECT` form (`successorInsertSQL`), which reads the watermark in the same statement. A
+transition with several successors inserts them multi-row (`successorBatch`) in the same statement batch as the
+flow-row lock grab, so they are queued before the grab returns the watermark (`RETURNING`/`OUTPUT` - the row as
+locked, which on Postgres is the version re-read after any wait for the lock, not the statement's starting
+snapshot): they insert unmarked, and when the flag is set (`markCancel`, decided in Go once for all of them) the
+next batch marks them by id (`markCancelled`), still under the lock and before COMMIT, so no reader ever sees them
+unmarked.
 `cancel_watermark` defaults to 0 (never cancelled), and **Fork deliberately does not copy it**: a fork is not
 under cancellation. Pinned by `engine/cancelgap_test.go` and by `ran_covered_with_onerror`'s handler successor.
 
@@ -1149,22 +1149,35 @@ not parallelism:
   and are matched to rows by `step_token`, since neither promises VALUES order. MySQL inserts row by row: it has no
   `RETURNING`, and under the default `innodb_autoinc_lock_mode=2` a multi-row insert's ids are not guaranteed
   contiguous.
-- **The transition is statement batches** (`sequel.Tx.Batch`), each one round trip on Postgres: [flow-row lock
-  grab + the first 64 successors], one batch per further 64 successors, then [the fenced own-row write + the Cancel
-  mark when set + the flow's `step_id` advance]. The last batch is separate because the fence and the advance take
-  the new step ids, which only the INSERTs return. A linear step is BEGIN, two batches, COMMIT: k ~7 on Postgres
-  (`TestRoundTrips_LinearStep`, about +-0.3 run to run). Successors go 64 to a batch so that a wide fan-out holds
-  only one batch's branch states in memory, not all of them. Other drivers run the same batches statement by
-  statement. Consequences of batching the grab with INSERTs:
-  - The terminal-status guard is read after the INSERTs ran, so a terminal flow bails by **rolling back**
-    (`errTransitionFlowTerminal`, mapped to nil after `Transact`), and the bail shows in telemetry as a rolled-back
-    transaction, as a lease-fenced one does.
+- **The transition is statement batches** (`sequel.Tx.Batch`), each one round trip on Postgres. Other drivers run
+  the same batches statement by statement.
+  - **One successor on PostgreSQL** (every linear and goto step, and every step inside a forEach branch): ONE
+    batch - [lock grab, `successorInsertSQL`, fenced own-row write, flow advance]. The two writes after the INSERT
+    name the new step as the step sequence's current value (`loneSuccessorID`, `currval(pg_get_serial_sequence(
+    'dwarf_steps', 'step_id'))`), so nothing waits on a result. A linear step is BEGIN, one batch, COMMIT: k ~6
+    (`TestRoundTrips_LinearStep`, about +-0.5 run to run). **Do not use a session-wide last id** - `lastval()`, or
+    `@@IDENTITY` were this extended to SQL Server: it reports the last id generated in ANY table, so a trigger a
+    deployment adds to `dwarf_steps` would silently become the successor and the flow's step. **PostgreSQL only**
+    because only it pipelines: on another driver one batch costs the same round trips as two, so they take the
+    path below and its bound ids. Pinned by `TestSuccessorBatch_LoneSuccessorLinks` (concurrent flows, every link
+    checked against `predecessor_id`, every flow's `step_id` against its own last step).
+  - **Otherwise** (a fan-out source, or any transition off PostgreSQL): [lock grab + the first 64 successors], one
+    batch per further 64,
+    then [fenced own-row write + Cancel mark when set + flow advance]. The last batch must wait for the INSERTs'
+    ids: `successor_id` is the FIRST branch, which History's step navigation follows, and no dialect's last-id
+    names the first row of a multi-row INSERT (MySQL's reports the first, the others the last). Do not replace it
+    with a lookup by `step_token`: the column is in no index, so the lookup visits every step of the flow created
+    after the source - every concurrently committed step of a wide cohort - and run from every branch step it is
+    quadratic. Successors go 64 to a batch so that a wide fan-out holds only one batch's branch states in memory.
+  - The terminal-status guard is read after the statements batched with the grab ran, so a terminal flow bails by
+    **rolling back** (`errTransitionFlowTerminal`, mapped to nil after `Transact`), and the bail shows in telemetry
+    as a rolled-back transaction, as a lease-fenced one does.
   - Never close batch results with a `defer`: on a driver that does not pipeline, `Close` runs every statement not
     read yet - every successor INSERT of a bailed transition, under the flow-row lock - while the rollback after an
     early return abandons them unrun.
   - Nothing else may run on the transaction while a batch's results are open, so the fan-in arrival and
     cohort-failure branches run only after the batches are closed. When a fan-in arrival follows in the same
-    transaction, the flow advance is left out of the last batch and written at the end, because the arrival may
+    transaction, the flow advance is left out of the batches and written at the end, because the arrival may
     insert the step the flow advances to.
 - **`completeFlow`'s lock grab returns the row it locked** (`RETURNING`/`OUTPUT`), so the surgraph linkage, the
   disposable flag and the status cost no second statement. MySQL, lacking `RETURNING`, reads them with a
@@ -2950,9 +2963,12 @@ The worker count is split into two numbers, because they answer different questi
   The storm: every in-flight task blocks on one downstream (an LLM provider outage) and is released at
   once, so N completions contend for M connections, draining at `M/txTime`; a completion that out-waits
   its remaining margin is fenced after a peer re-claims - correct, but the task **re-executes**,
-  duplicating the most expensive work at the worst moment. `txTime = 7 x RTT + ~3ms` (the post-task phase
-  is 7 round trips: the standalone completed-UPDATE plus the transition tx's lock-grab, successor INSERT,
-  successor_id UPDATE, step_id UPDATE, COMMIT), `safety = 1/4` (claims compete with the drain, tx time
+  duplicating the most expensive work at the worst moment. `txTime = k x RTT + ~3ms`, where k is the
+  post-task phase's round trips per driver (`completionRoundTrips`): 4 on PostgreSQL, which pipelines the
+  transition (completion write, BEGIN, one batch, COMMIT); 7 on SQLite (completion write, BEGIN, lock grab,
+  successor INSERT, fenced own-row write, flow advance, COMMIT); 8 on SQL Server (plus sequel's per-transaction
+  `SET XACT_ABORT ON`) and on MySQL (its completion write is an UPDATE plus a SELECT). It is counted, not fitted -
+  recount it when the post-task phase changes. `safety = 1/4` (claims compete with the drain, tx time
   varies, a mature DB is ~20% slower, shards are unevenly loaded). The fleet takes the **worst shard's**
   number. **RTT is measured at Startup** (`probeRTT`: a few `SELECT 1`s per shard, MINIMUM of the samples,
   first discarded - it pays connection setup); a failed probe falls back to the measured same-zone

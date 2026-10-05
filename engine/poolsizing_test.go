@@ -760,23 +760,31 @@ func TestPoolSizing_LiveOverride(t *testing.T) {
 }
 
 // TestPoolSizing_WorkerCeiling pins the lease-margin ceiling: N_max = M x margin / txTime x safety,
-// with txTime = 7 x RTT + 3ms. Every input is engine-visible (the pool, the engine's own 30s margin,
-// and the RTT probed at Startup) - no task duration appears, which is the property that makes it a
-// derivable default rather than a guess.
+// with txTime = k x RTT + 3ms, where k is the driver's completion round trips (4 on PostgreSQL, 7 on SQLite, 8
+// on MySQL and SQL Server).
+// Every input is engine-visible (the pool, the engine's own 30s margin, the driver, and the RTT probed at
+// Startup) - no task duration appears, which is the property that makes it a derivable default rather than a
+// guess.
 func TestPoolSizing_WorkerCeiling(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
 	// Same-zone (RTT 0.3ms): txTime = 7*0.3 + 3 = 5.1ms. M=48 -> 48 * 30000/5.1 * 0.25 = 70,588.
-	assert.Equal(70588, workerCeiling(48, 0.3))
+	assert.Equal(70588, workerCeiling(48, 0.3, "sqlite"))
 	// The small-tier pool scales the ceiling down proportionally: M=6 -> 8,823.
-	assert.Equal(8823, workerCeiling(6, 0.3))
+	assert.Equal(8823, workerCeiling(6, 0.3, "sqlite"))
 	// Cross-zone (RTT 1.1ms): txTime = 10.7ms - roughly halves the ceiling at the same pool.
-	assert.Equal(33644, workerCeiling(48, 1.1))
+	assert.Equal(33644, workerCeiling(48, 1.1, "sqlite"))
 	// A high-latency link is dominated by the round trips: RTT 5ms -> txTime 38ms.
-	assert.Equal(9473, workerCeiling(48, 5))
+	assert.Equal(9473, workerCeiling(48, 5, "sqlite"))
+	// MySQL and SQL Server make one more: txTime = 8*0.3 + 3 = 5.4ms -> 66,666.
+	assert.Equal(66666, workerCeiling(48, 0.3, "mysql"))
+	assert.Equal(66666, workerCeiling(48, 0.3, "mssql"))
+	// PostgreSQL pipelines the transition: txTime = 4*0.3 + 3 = 4.2ms -> 85,714, and at RTT 5ms 23ms -> 15,652.
+	assert.Equal(85714, workerCeiling(48, 0.3, "pgx"))
+	assert.Equal(15652, workerCeiling(48, 5, "pgx"))
 	// Degenerate inputs never yield a zero-worker pool.
-	assert.True(workerCeiling(1, 0) >= 1)
+	assert.True(workerCeiling(1, 0, "pgx") >= 1)
 }
 
 // TestPoolSizing_DerivedWorkers pins the derived worker default (the lease-margin ceiling, so it holds
@@ -798,12 +806,12 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	assert.Equal(max(64, workersPerConnBudget*zeroConfig), e.workersDispatch, "resident/dispatch set stays connection-derived")
 	assert.Equal(2*max(64, workersPerConnBudget*zeroConfig), e.cache.Capacity(), "cache is 2x the dispatch count, never 2x the ceiling")
 	// The max is the ceiling DERIVED from this shard's own probed RTT, not a fixed large number. A constant
-	// floor here silently reads the probe: the ceiling is 90,000/(7 x RTTms + 3), so a `SELECT 1` measured at
+	// floor here silently reads the probe: the ceiling is 90,000/(k x RTTms + 3), so a `SELECT 1` measured at
 	// 12.4ms - which a loaded parallel -race suite can produce - brings it under a hardcoded 1,000 and fails
 	// a test about wiring on an environment measurement. The formula itself is pinned separately by
 	// TestPoolSizing_WorkerCeiling; what this pins is that the derived max follows it and is not the
 	// dispatch count.
-	assert.Equal(workerCeiling(zeroConfig, probedRTT(e, 1)), int(e.workers.Load()), "the worker max is the lease-margin ceiling")
+	assert.Equal(workerCeiling(zeroConfig, probedRTT(e, 1), e.shardDriver(1)), int(e.workers.Load()), "the worker max is the lease-margin ceiling")
 	assert.True(int(e.workers.Load()) > e.workersDispatch, "the max is the ceiling, not the dispatch count")
 	assert.Equal(int32(max(64, workersPerConnBudget*zeroConfig)), int32(e.crew.Resident()), "only the resident set is spawned eagerly")
 
@@ -816,7 +824,7 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	assert.NoError(e2.SetShard(ShardSpec{Index: 2, VirtualCPUs: 2}))
 	assert.NoError(e2.Startup(context.Background()))
 	assert.Equal(workersPerConnBudget*(budget8(e2, 1)+shardBudget(2, probedRTT(e2, 2))), e2.workersDispatch)
-	assert.True(int(e2.workers.Load()) < workerCeiling(budget8(e2, 1), probedRTT(e2, 1)),
+	assert.True(int(e2.workers.Load()) < workerCeiling(budget8(e2, 1), probedRTT(e2, 1), e2.shardDriver(1)),
 		"the smallest pool sets the ceiling")
 
 	// An explicit SetWorkers is spawned IN FULL, even above the connection-derived dispatch count: the

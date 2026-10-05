@@ -105,12 +105,6 @@ const (
 	priorityCommon = 10
 	priorityWorker = priorityCommon
 
-	// completionRoundTrips is the number of database round trips in a step's post-task phase: the
-	// standalone completed-UPDATE plus the transition transaction (lock-grab UPDATE, successor INSERT,
-	// successor_id UPDATE, flow step_id UPDATE, COMMIT). Multiplied by the measured RTT it gives the
-	// network half of the completion cost.
-	completionRoundTrips = 7
-
 	// completionServerMs is the server-side half of a completion: row work plus the group-committed
 	// WAL fsync, measured ~3ms (cross-checked by the whole-step fit db = 12.1 x RTT + 4.4ms).
 	completionServerMs = 3.0
@@ -146,6 +140,33 @@ const (
 	workerSafetyFactor = 0.25
 )
 
+/*
+completionRoundTrips is the number of database round trips in a linear step's post-task phase on a driver: the
+standalone completion write, then the transition transaction. Multiplied by the measured RTT it gives the network
+half of the completion cost.
+
+It is counted, not fitted, and it differs by driver:
+  - PostgreSQL 4: the completion write (RETURNING), BEGIN, the transition's one pipelined batch, COMMIT.
+  - SQLite 7: the completion write (RETURNING), BEGIN, lock grab, successor INSERT, fenced own-row write, flow
+    advance, COMMIT.
+  - SQL Server 8: as SQLite, plus the SET XACT_ABORT ON that sequel issues at the start of every transaction.
+  - MySQL 8: as SQLite, but the completion write is an UPDATE and a SELECT, for want of RETURNING. Each statement
+    counts once, as with interpolateParams=true in the DSN; without it the driver prepares every parameterized
+    statement in a round trip of its own.
+
+Recount whenever a statement moves into or out of the post-task phase. TestRoundTrips_LinearStep measures the
+whole step, which on every driver is this count plus the claim and the flow read (2 more on PostgreSQL).
+*/
+func completionRoundTrips(driver string) int {
+	switch driver {
+	case "pgx":
+		return 4
+	case "mysql", "mssql":
+		return 8
+	}
+	return 7
+}
+
 // workerCeiling is the largest worker count that keeps a synchronized completion storm inside the
 // crash-recovery lease margin, derived per shard and taken at its worst.
 //
@@ -156,13 +177,13 @@ const (
 // the most expensive work at the worst possible moment. Solving `N x txTime / M <= margin` for N:
 //
 //	N_max = M x margin / txTime x safety      per shard; the fleet takes the minimum
-//	txTime = completionRoundTrips x RTT + completionServerMs
+//	txTime = completionRoundTrips(driver) x RTT + completionServerMs
 //
 // Every input is engine-visible: M is the derived pool, the margin is the engine's own constant, and
 // RTT is measured at Startup (probeRTT). Nothing here needs the task duration T, which is exactly why
 // this - and not `M x T/db` - is the number the engine can derive for itself.
-func workerCeiling(open int, rttMs float64) int {
-	txTimeMs := completionRoundTrips*rttMs + completionServerMs
+func workerCeiling(open int, rttMs float64, driver string) int {
+	txTimeMs := float64(completionRoundTrips(driver))*rttMs + completionServerMs
 	if txTimeMs <= 0 {
 		txTimeMs = completionServerMs
 	}
@@ -824,6 +845,15 @@ func (e *Engine) recomputeWorkerCeiling(ctx context.Context) {
 	e.recomputeWorkerCeilingWith(ctx, specs, rtts, e.slotsByShard(specs))
 }
 
+// shardDriver is the driver name of a shard's connection, or empty when the shard is not open.
+func (e *Engine) shardDriver(idx int) string {
+	db, err := e.db.Shard(idx)
+	if err != nil {
+		return ""
+	}
+	return db.DriverName()
+}
+
 // recomputeWorkerCeilingWith is recomputeWorkerCeiling's core, taking the shard specs, RTTs and roles as
 // already-read snapshots rather than re-acquiring shardsLock or re-reading the roles to fetch them.
 func (e *Engine) recomputeWorkerCeilingWith(ctx context.Context, specs map[int]ShardSpec, rtts map[int]float64, slotsBy map[int]int) {
@@ -838,7 +868,7 @@ func (e *Engine) recomputeWorkerCeilingWith(ctx context.Context, specs map[int]S
 			continue
 		}
 		_, open := shardPool(specs[idx], override, slots, rttMs)
-		ceiling = min(ceiling, workerCeiling(open, rttMs))
+		ceiling = min(ceiling, workerCeiling(open, rttMs, e.shardDriver(idx)))
 	}
 	if ceiling == math.MaxInt {
 		ceiling = 64 // no shard was probed or dispatched (an unopened, test-mode or reader-only engine)

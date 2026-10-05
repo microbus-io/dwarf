@@ -68,16 +68,24 @@ func cohortLockStripe(shard, spawnStepID int) int {
 // leads to, stays unmarked, which is what lets a flow recover. The inserting transaction already holds the flow
 // row's lock and Cancel writes the watermark to that row, so the read cannot race it, and it costs no extra round
 // trip. Arguments: the eighteen step columns in order, then the inherit flag, the flow id and the source step id.
-// A transition's own successors use it only on MySQL; elsewhere successorBatch inserts them several to a statement.
+// A transition with one successor inserts it this way on PostgreSQL (successorBatch.queueLone); otherwise
+// successors go in several to a statement where the driver returns inserted rows, and by this statement each on
+// MySQL.
 //
 // Do not compare timestamps here (the flow's cancel time against the source's started_at). Three dialects store
 // milliseconds, and a source that starts in the same millisecond as the Cancel reads as not-before it, losing the
 // Cancel - measured at ~1 in 4 runs of TestCancelInTransitionGap on SQLite. Making it inclusive only moves the tie
 // to the handler, whose successors would then be cancelled too.
-const successorInsertSQL = "INSERT INTO dwarf_steps (" + successorCols + ")" +
-	" SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?," +
-	" CASE WHEN ?=1 AND s.step_id <= f.cancel_watermark THEN 1 ELSE 0 END" +
-	" FROM dwarf_flows f, dwarf_steps s WHERE f.flow_id=? AND s.step_id=?"
+const successorInsertSQL = successorInsertInto + successorInsertSelect
+
+// successorInsertInto and successorInsertSelect are successorInsertSQL's two halves, between which SQL Server
+// takes an OUTPUT clause.
+const (
+	successorInsertInto   = "INSERT INTO dwarf_steps (" + successorCols + ")"
+	successorInsertSelect = " SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?," +
+		" CASE WHEN ?=1 AND s.step_id <= f.cancel_watermark THEN 1 ELSE 0 END" +
+		" FROM dwarf_flows f, dwarf_steps s WHERE f.flow_id=? AND s.step_id=?"
+)
 
 // successorCols are the columns every successor insert writes, in bind order.
 const successorCols = "flow_id, step_depth, step_token, task_name, task_url, state, state_refs, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id, cancelling"
@@ -1265,15 +1273,108 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				predecessorID: stepID, sleepMs: sleepMs, priority: flowPriority, fairnessKey: flowFairnessKey,
 				fairnessWeight: flowFairnessWeight, engineID: e.engineID, inheritCancel: inheritCancel,
 			}
-			// The flow-row lock grab goes out in one batch with the first successor INSERTs - one round trip where the
-			// driver pipelines - and any further successors follow successorBatchMax rows to a batch, so a wide
-			// fan-out never holds every branch's state at once. The grab stays the transaction's first statement, so
-			// the write-first order holds. Its terminal-status guard is read only after the INSERTs batched with it
-			// have run, so a terminal flow is bailed by rolling back (errTransitionFlowTerminal), which leaves the
-			// transition a clean no-op exactly as a bail before any write would.
+			// The dispatched row's own write - its successor link, its cohort size, and the advancing clear - is ONE
+			// statement fenced on this dispatch's lease generation. The fence is what makes the orphan sweep's rewind
+			// safe: the rewind bumps lease_seq, so a worker that was merely slow (not dead) rolls this transaction
+			// back here instead of committing a second set of successors next to the re-dispatch's. Requiring
+			// advancing=1 fences one more case: persist re-running this transaction after a COMMIT that landed but
+			// reported an error finds the flag already cleared, and abandons rather than advancing the flow twice. A
+			// fan-in arrival clears the flag in its cohort bump below instead, so every transaction that commits while
+			// the flow stays live clears it.
+			//
+			// successor is the SQL of its successor_id value - a bind or loneSuccessorID - or empty for none.
+			queueFence := func(batch *sequel.Batch, successor string, successorArgs ...any) {
+				set, args := "", append([]any{}, successorArgs...)
+				if successor != "" {
+					set += "successor_id=" + successor + ", "
+				}
+				if isPushTransition {
+					set += "cohort_size=?, "
+					args = append(args, cohortSize)
+				}
+				args = append(args, stepID, leaseSeq)
+				batch.Queue("UPDATE dwarf_steps SET "+set+"advancing=0 WHERE step_id=? AND lease_seq=? AND advancing=1", args...)
+			}
+			readFence := func(res *sequel.BatchResults) error {
+				fenceRes, err := res.Exec()
+				if err != nil {
+					return errors.Trace(err)
+				}
+				if n, _ := fenceRes.RowsAffected(); n == 0 {
+					return errLeaseFenced
+				}
+				if isPushTransition {
+					e.logger.DebugContext(ctx, "Fan-out cohort spawned", "flow", keys.CorrelationID(shardNum, flowID), "spawnStep", stepID, "task", taskName, "cohortSize", cohortSize)
+				}
+				return nil
+			}
+			// The flow advance goes out with the fence unless a fan-in arrival follows, which may insert the step the
+			// flow advances to. target is as successor above.
+			advanceNow := fanInArrivals == 0
+			queueAdvance := func(batch *sequel.Batch, target string, targetArgs ...any) {
+				if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
+					e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
+				}
+				batch.Queue("UPDATE dwarf_flows SET step_id="+target+", touch=1-touch WHERE flow_id=?", append(append([]any{}, targetArgs...), flowID)...)
+			}
+
+			// The flow-row lock grab goes out in the same batch as the successor INSERTs - one round trip where the
+			// driver pipelines. The grab stays the transaction's first statement, so the write-first order holds. Its
+			// terminal-status guard is read only after the statements batched with it have run, so a terminal flow is
+			// bailed by rolling back (errTransitionFlowTerminal), which leaves the transition a clean no-op exactly as
+			// a bail before any write would.
 			//
 			// Batch results are closed explicitly, never by a defer: on a driver that does not pipeline, Close runs
 			// every statement not read yet, while the rollback that follows an early return abandons them unrun.
+			//
+			// On PostgreSQL, a transition with ONE successor - every linear and goto step, and every step inside a
+			// forEach branch - is a single batch: grab, INSERT, fence, advance. The writes after the INSERT name the
+			// new step by the step sequence's current value, and the INSERT decides its own Cancel mark, so no
+			// statement waits on a result. Only PostgreSQL pipelines a batch, so on every other driver one batch
+			// would cost the same round trips as two, and they take the path below.
+			single := len(normalNexts) == 1 && tx.DriverName() == "pgx"
+			sendLone := func() error {
+				batch := tx.Batch()
+				if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
+					e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
+				}
+				batch.Queue(lockFlowRowSQL(), flowID)
+				readID := succ.queueLone(batch)
+				queueFence(batch, loneSuccessorID)
+				if advanceNow {
+					queueAdvance(batch, loneSuccessorID)
+				}
+				res := batch.Send(ctx)
+				lockRes, err := res.Exec()
+				if err != nil {
+					return errors.Trace(err)
+				}
+				if n, _ := lockRes.RowsAffected(); n == 0 {
+					txBytes = stateByteCount{} // nothing this transaction wrote survives the rollback
+					return errTransitionFlowTerminal
+				}
+				flowRowLocked = true
+				id, err := readID(res)
+				if err != nil {
+					return errors.Trace(err)
+				}
+				newStepIDs = append(newStepIDs, id)
+				if err := readFence(res); err != nil {
+					return err
+				}
+				// The advance reports only a failure, which Close returns.
+				if err := res.Close(); err != nil {
+					return errors.Trace(err)
+				}
+				return nil
+			}
+			// Otherwise the successors take two steps. The grab goes with the first successorBatchMax of them and further
+			// ones follow that many to a batch, so a wide fan-out never holds every branch's state at once. Their ids
+			// come back by RETURNING/OUTPUT, and only then can the fence and the advance be queued: successor_id is
+			// the FIRST branch, which History's step navigation follows, and no dialect's last-inserted-id names the
+			// first row of a multi-row INSERT. The rows are inserted unmarked, because the INSERTs are queued before
+			// the grab returns the cancel watermark, and are marked by id with the fence when a Cancel reached this
+			// step.
 			markCancel := false
 			sendSuccessors := func() error {
 				driver := tx.DriverName()
@@ -1382,69 +1483,48 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 					}
 				}
 			}
-			if len(succ.rows) > 0 {
+			switch {
+			case single:
+				if err := sendLone(); err != nil {
+					return err
+				}
+			case len(succ.rows) > 0:
 				if err := sendSuccessors(); err != nil {
 					return err
 				}
 			}
 
-			// The dispatched row's own write - its successor link, its cohort size, and the advancing clear - is ONE
-			// statement fenced on this dispatch's lease generation. The fence is what makes the orphan sweep's rewind
-			// safe: the rewind bumps lease_seq, so a worker that was merely slow (not dead) rolls this transaction
-			// back here instead of committing a second set of successors next to the re-dispatch's. Requiring
-			// advancing=1 fences one more case: persist re-running this transaction after a COMMIT that landed but
-			// reported an error finds the flag already cleared, and abandons rather than advancing the flow twice. A
-			// fan-in arrival clears the flag in its cohort bump below instead, so every transaction that commits while
-			// the flow stays live clears it.
-			//
-			// It goes out as one batch with the successors' Cancel mark, when a Cancel reached this step, and with the
-			// flow advance, when no fan-in arrival follows to change what the flow advances to.
-			fence := len(newStepIDs) > 0 || isPushTransition
-			advanceNow := fanInArrivals == 0 && flowRowLocked
-			batch := tx.Batch()
-			if fence {
-				set, args := "", []any{}
-				if len(newStepIDs) > 0 {
-					set += "successor_id=?, "
-					args = append(args, newStepIDs[0])
+			if !single {
+				fence := len(newStepIDs) > 0 || isPushTransition
+				batch := tx.Batch()
+				switch {
+				case len(newStepIDs) > 0:
+					queueFence(batch, "?", newStepIDs[0])
+				case fence:
+					queueFence(batch, "")
 				}
-				if isPushTransition {
-					set += "cohort_size=?, "
-					args = append(args, cohortSize)
+				if markCancel {
+					markCancelled(batch, newStepIDs)
 				}
-				args = append(args, stepID, leaseSeq)
-				batch.Queue("UPDATE dwarf_steps SET "+set+"advancing=0 WHERE step_id=? AND lease_seq=? AND advancing=1", args...)
-			}
-			if markCancel {
-				markCancelled(batch, newStepIDs)
-			}
-			if advanceNow {
-				if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
-					e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
+				if advanceNow {
+					// The flow's next step is its only successor; with several, or none, no one step is.
+					advanceTo := 0
+					if len(newStepIDs) == 1 {
+						advanceTo = newStepIDs[0]
+					}
+					queueAdvance(batch, "?", advanceTo)
 				}
-				advanceTo := 0
-				if len(newStepIDs) == 1 {
-					advanceTo = newStepIDs[0]
-				}
-				batch.Queue("UPDATE dwarf_flows SET step_id=?, touch=1-touch WHERE flow_id=?", advanceTo, flowID)
-			}
-			if batch.Len() > 0 {
-				res := batch.Send(ctx)
-				if fence {
-					fenceRes, err := res.Exec()
-					if err != nil {
+				if batch.Len() > 0 {
+					res := batch.Send(ctx)
+					if fence {
+						if err := readFence(res); err != nil {
+							return err
+						}
+					}
+					// The mark and the advance report only failures, which Close returns.
+					if err := res.Close(); err != nil {
 						return errors.Trace(err)
 					}
-					if n, _ := fenceRes.RowsAffected(); n == 0 {
-						return errLeaseFenced
-					}
-				}
-				// The mark and the advance report only failures, which Close returns.
-				if err := res.Close(); err != nil {
-					return errors.Trace(err)
-				}
-				if isPushTransition {
-					e.logger.DebugContext(ctx, "Fan-out cohort spawned", "flow", keys.CorrelationID(shardNum, flowID), "spawnStep", stepID, "task", taskName, "cohortSize", cohortSize)
 				}
 			}
 
