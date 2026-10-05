@@ -64,8 +64,8 @@ const (
 	// CATASTROPHIC: measured at 600 flows/s on a local Postgres, 281 steps/s against the 1,687 the previous
 	// gate managed on the same rig, a 6x collapse. With exactly as many turns as connections there are
 	// exactly as many candidates for a connection, so every gap between a turn-holder finishing and the next
-	// waiter being woken, scheduled and asking the pool is IDLE CONNECTION TIME - on the critical path of all
-	// ~9.6 round trips a step makes. The queue this was "fixing" is the same margin workersPerConnBudget
+	// waiter being woken, scheduled and asking the pool is IDLE CONNECTION TIME - on the critical path of every
+	// round trip a step makes. The queue this was "fixing" is the same margin workersPerConnBudget
 	// deliberately keeps, and for the same reason: a resource with nobody queued for it runs below capacity.
 	//
 	// So the turnstile does not remove the wait for a connection and does not empty the pool's queue - a

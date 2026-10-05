@@ -273,9 +273,9 @@ column off a write they make anyway, so an uncancelled flow pays no extra round 
 write on MySQL**, which lacks `RETURNING`/`OUTPUT` and reads the mark with a follow-up `SELECT`: +1 round trip per
 completed step (+1 to `k` in the ceiling equation), accepted like the claim's own follow-up read. Returning it
 through `LAST_INSERT_ID(expr)` in the UPDATE would avoid that; it was declined as a one-off idiom for a dialect
-that is not the recommended one. The successor's mark adds no round trip: the transition's flow-row lock grab
-returns the watermark (MySQL's per-row `INSERT...SELECT` reads it with two indexed lookups per insert); neither
-cost has been measured on the cloud rig yet.
+that is not the recommended one. The successor's mark adds no round trip: each successor row reads the watermark
+in its own INSERT, one primary-key lookup on the flow row the transaction already holds; neither cost has been
+measured on the cloud rig yet.
 
 - **The claim.** The claim CAS returns `cancelling`; a marked step is preempted - `ExecuteTask` is skipped and
   `cancelmarker.New(reason)` takes the path a task error would (`onError`, else `failStep`). Retry-rewound,
@@ -297,14 +297,10 @@ covered" exemption covers the handler's own insert, whose source existed before.
 `Cancel`, "at or below the watermark and not covered" is exactly "terminal when the mark ran", which is the gap.
 It is race-free and free of round trips because every insert of a flow's steps holds that flow row's lock and
 `cancel()` writes the watermark under it: either the insert sees the new watermark, or `cancel()` waits and its
-mark then finds the successors pending. A transition with one successor - and MySQL, and the two fan-in inserts -
-uses the `INSERT...SELECT` form (`successorInsertSQL`), which reads the watermark in the same statement. A
-transition with several successors inserts them multi-row (`successorBatch`) in the same statement batch as the
-flow-row lock grab, so they are queued before the grab returns the watermark (`RETURNING`/`OUTPUT` - the row as
-locked, which on Postgres is the version re-read after any wait for the lock, not the statement's starting
-snapshot): they insert unmarked, and when the flag is set (`markCancel`, decided in Go once for all of them) the
-next batch marks them by id (`markCancelled`), still under the lock and before COMMIT, so no reader ever sees them
-unmarked.
+mark then finds the successors pending. Every successor row decides its own mark: its `cancelling` value is a scalar
+subquery on the flow's `cancel_watermark` (`successorRowSQL`), evaluated by the INSERT itself, after the
+transaction already holds the flow-row lock - so a transition's inserts can be batched with the lock grab without
+waiting for anything the grab returns.
 `cancel_watermark` defaults to 0 (never cancelled), and **Fork deliberately does not copy it**: a fork is not
 under cancellation. Pinned by `engine/cancelgap_test.go` and by `ran_covered_with_onerror`'s handler successor.
 
@@ -1145,40 +1141,41 @@ not parallelism:
   caller on a replica that dispatched the flow pays no graph round trip. Every field of `cachedGraph` must
   stay frozen for the flow's life - nothing invalidates an entry.
 - **A transition's successors go in as multi-row INSERTs** (`successorBatch`), in power-of-two chunks of at
-  most 64 rows (19 binds each, under SQL Server's 2,100-parameter ceiling). The ids come back by `RETURNING`/`OUTPUT`
+  most 64 rows (21 binds each, under SQL Server's 2,100-parameter ceiling). The ids come back by `RETURNING`/`OUTPUT`
   and are matched to rows by `step_token`, since neither promises VALUES order. MySQL inserts row by row: it has no
   `RETURNING`, and under the default `innodb_autoinc_lock_mode=2` a multi-row insert's ids are not guaranteed
   contiguous.
-- **The transition is statement batches** (`sequel.Tx.Batch`), each one round trip on Postgres. Other drivers run
-  the same batches statement by statement.
-  - **One successor on PostgreSQL** (every linear and goto step, and every step inside a forEach branch): ONE
-    batch - [lock grab, `successorInsertSQL`, fenced own-row write, flow advance]. The two writes after the INSERT
-    name the new step as the step sequence's current value (`loneSuccessorID`, `currval(pg_get_serial_sequence(
-    'dwarf_steps', 'step_id'))`), so nothing waits on a result. A linear step is BEGIN, one batch, COMMIT: k ~6
-    (`TestRoundTrips_LinearStep`, about +-0.5 run to run). **Do not use a session-wide last id** - `lastval()`, or
-    `@@IDENTITY` were this extended to SQL Server: it reports the last id generated in ANY table, so a trigger a
-    deployment adds to `dwarf_steps` would silently become the successor and the flow's step. **PostgreSQL only**
-    because only it pipelines: on another driver one batch costs the same round trips as two, so they take the
-    path below and its bound ids. Pinned by `TestSuccessorBatch_LoneSuccessorLinks` (concurrent flows, every link
-    checked against `predecessor_id`, every flow's `step_id` against its own last step).
-  - **Otherwise** (a fan-out source, or any transition off PostgreSQL): [lock grab + the first 64 successors], one
-    batch per further 64,
-    then [fenced own-row write + Cancel mark when set + flow advance]. The last batch must wait for the INSERTs'
-    ids: `successor_id` is the FIRST branch, which History's step navigation follows, and no dialect's last-id
-    names the first row of a multi-row INSERT (MySQL's reports the first, the others the last). Do not replace it
-    with a lookup by `step_token`: the column is in no index, so the lookup visits every step of the flow created
-    after the source - every concurrently committed step of a wide cohort - and run from every branch step it is
-    quadratic. Successors go 64 to a batch so that a wide fan-out holds only one batch's branch states in memory.
+- **The transition is statement batches** (`sequel.Tx.Batch`, one round trip each on PostgreSQL; other drivers run
+  them statement by statement). One `queue`/`flush` pair carries every statement: the lock grab, the successor
+  INSERTs (flushed every 64 rows, so a wide fan-out holds only one batch's branch states in memory), the fenced
+  own-row write and the flow advance. The only flush in between is forced by data: the own-row write
+  (`successor_id`) and the advance take the new step's id.
+  - **One successor on PostgreSQL** (every linear and goto step, every step inside a forEach branch) needs no
+    flush: the two writes name the new step as the step sequence's current value (`loneSuccessorID`). A linear
+    step is BEGIN, one batch, COMMIT - k ~6 (`TestRoundTrips_LinearStep`, about +-0.5 run to run). **Do not use a
+    session-wide last id** (`lastval()`, SQL Server's `@@IDENTITY`): it reports the last id generated in ANY
+    table, so a trigger a deployment adds to `dwarf_steps` would silently become the successor and the flow's
+    step. PostgreSQL only because only it pipelines - elsewhere the extra flush costs nothing. Pinned by
+    `TestSuccessorBatch_LoneSuccessorLinks` (concurrent flows, every link checked against `predecessor_id`, every
+    flow's `step_id` against its own last step).
+  - **Otherwise** (a fan-out source, or any driver but PostgreSQL) the INSERTs are flushed and their ids read
+    first. `successor_id` is the FIRST branch, which History's step navigation follows, and no dialect's last-id
+    names the first row of a multi-row INSERT (MySQL's reports the first, the others the last). Do not replace the
+    read with a lookup by `step_token`: the column is in no index, so the lookup visits every step of the flow
+    created after the source - every concurrently committed step of a wide cohort - and run from every branch step
+    it is quadratic.
   - The terminal-status guard is read after the statements batched with the grab ran, so a terminal flow bails by
     **rolling back** (`errTransitionFlowTerminal`, mapped to nil after `Transact`), and the bail shows in telemetry
-    as a rolled-back transaction, as a lease-fenced one does.
+    as a rolled-back transaction, as a lease-fenced one does. The DEFERRED grab of a resolving fan-in arrival is
+    the exception: it stays a plain statement whose bail returns nil, because that transaction's cohort bump must
+    commit (`TestTerminateVsLastCohortArrival_Deterministic` pins arrivals == size).
   - Never close batch results with a `defer`: on a driver that does not pipeline, `Close` runs every statement not
     read yet - every successor INSERT of a bailed transition, under the flow-row lock - while the rollback after an
     early return abandons them unrun.
   - Nothing else may run on the transaction while a batch's results are open, so the fan-in arrival and
-    cohort-failure branches run only after the batches are closed. When a fan-in arrival follows in the same
-    transaction, the flow advance is left out of the batches and written at the end, because the arrival may
-    insert the step the flow advances to.
+    cohort-failure branches run only after the last flush. When a fan-in arrival follows in the same transaction,
+    the flow advance is left out and written at the end, because the arrival may insert the step the flow
+    advances to.
 - **`completeFlow`'s lock grab returns the row it locked** (`RETURNING`/`OUTPUT`), so the surgraph linkage, the
   disposable flag and the status cost no second statement. MySQL, lacking `RETURNING`, reads them with a
   follow-up `SELECT`.
@@ -2378,7 +2375,8 @@ engine policy — below.
 
 **THE CEILING EQUATION, AND WHY THE POOL IS ONLY HALF OF IT.** A saturated shard serves
 `M / (k·RTT + s)` steps/s: `M` connections divided by how long one step OCCUPIES one. `k` is the round
-trips a step makes (**~9-12**, a code-path property), `s` is the per-step time that is not a round trip
+trips a step makes (a code-path property, counted per driver: a linear step is ~6 on PostgreSQL, which pipelines
+the transition, and 9-11 elsewhere), `s` is the per-step time that is not a round trip
 (server execution, WAL, queueing at the pool). Three consequences that govern engine changes:
 
 - **Workers are NOT a term.** A worker inside `ExecuteTask` holds no connection, so adding workers cannot
@@ -3056,8 +3054,8 @@ of anything being wrong.
 **Sizing turns to the connection count was measured at a 6x collapse** — 281 steps/s against 1,687 for the
 gate it replaced, at 600 flows/s on a local Postgres. With exactly as many turns as connections there are
 exactly as many candidates for one, so every gap between a turn-holder finishing and the next waiter being
-woken, scheduled and asking the pool is idle connection time, on the critical path of all ~9.6 round trips a
-step makes. **The pool queue is not waste; it is what keeps connections busy** — the same margin
+woken, scheduled and asking the pool is idle connection time, on the critical path of every round trip a step
+makes. **The pool queue is not waste; it is what keeps connections busy** — the same margin
 `workersPerConnBudget` deliberately keeps, reached through a different door.
 
 Above 8 the returns are small and unsettled: 10x and 12x measured 1,688 and 1,734 against 8x's 1,559, with

@@ -27,11 +27,30 @@ import (
 
 // successorBatchMax is the largest number of successor rows one INSERT carries. Chunks are powers of two up to
 // it, so the statement texts a transition can produce are a fixed handful rather than one per fan-out width.
-// At 19 binds per row, 64 rows stay under SQL Server's 2,100-parameter ceiling, the tightest of the dialects.
+// At 21 binds per row, 64 rows stay under SQL Server's 2,100-parameter ceiling, the tightest of the dialects.
 const successorBatchMax = 64
 
-// successorBatchRow is one row's placeholders, in successorCols order.
-const successorBatchRow = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?, ?)"
+/*
+successorRowSQL is one successor row's VALUES, in successorCols order. Its last column, the Cancel mark, is decided
+by the row itself: the successor is marked when its source step already existed when the flow was cancelled (its
+id is at or below the flow's cancel_watermark) and the source was not itself covered (the inherit argument, 1 or
+0). That reaches the one step Cancel's own mark cannot - a source whose completion write landed before Cancel,
+with its successors still to be inserted - while the successor of a step inserted after the Cancel, such as a
+handler that caught the cancellation and everything it leads to, stays unmarked, which is what lets a flow
+recover. Every insert of a step holds the flow row's lock, and Cancel writes the watermark only under it, so the
+read cannot race it. Arguments: the eighteen step columns in order, then the inherit flag, the source step id and
+the flow id.
+
+Do not compare timestamps here (the flow's cancel time against the source's started_at). Three dialects store
+milliseconds, and a source that starts in the same millisecond as the Cancel reads as not-before it, losing the
+Cancel - measured at ~1 in 4 runs of TestCancelInTransitionGap on SQLite. Making it inclusive only moves the tie to
+the handler, whose successors would then be cancelled too.
+*/
+const successorRowSQL = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?," +
+	" (SELECT CASE WHEN ?=1 AND ? <= cancel_watermark THEN 1 ELSE 0 END FROM dwarf_flows WHERE flow_id=?))"
+
+// successorInsertSQL inserts one successor row (successorRowSQL).
+const successorInsertSQL = "INSERT INTO dwarf_steps (" + successorCols + ") VALUES " + successorRowSQL
 
 // successorRow is what differs between the successors one transition inserts.
 type successorRow struct {
@@ -48,11 +67,9 @@ their INSERTs onto the transition's statement batch.
 
 Where the driver returns inserted rows (RETURNING on PostgreSQL and SQLite, OUTPUT on SQL Server) the rows go in
 multi-row INSERTs, so a fan-out of N costs about N/64 statements plus one per set bit of the remainder, rather than
-N, and their ids are matched back by step_token, because neither RETURNING nor OUTPUT promises VALUES order. They
-are inserted unmarked: their Cancel mark depends on the cancel_watermark the flow-row lock returns in the same
-batch, so it is applied afterwards (markCancelled), and only when a Cancel reached the source. MySQL has no
-RETURNING, and its multi-row insert ids are not guaranteed contiguous under the default innodb_autoinc_lock_mode=2,
-so it inserts row by row with successorInsertSQL, which decides the mark itself and whose id is LastInsertId.
+N, and their ids are matched back by step_token, because neither RETURNING nor OUTPUT promises VALUES order. MySQL
+has no RETURNING, and its multi-row insert ids are not guaranteed contiguous under the default
+innodb_autoinc_lock_mode=2, so it inserts row by row and reads each id as LastInsertId.
 
 Within a chunk, step ids follow VALUES order on every supported dialect in practice, but none promises it. So
 nothing that must be deterministic may order siblings by step_id: the fan-in merge and the failed-cohort merge order
@@ -73,9 +90,7 @@ type successorBatch struct {
 	rows           []successorRow
 }
 
-// returnsInsertedRows reports whether the driver can return the rows an INSERT created, and the row a flow-row lock
-// grab updated, which is what lets successors go in several to a statement and their Cancel mark be decided from
-// the lock's cancel_watermark.
+// returnsInsertedRows reports whether the driver can return the rows an INSERT created.
 func returnsInsertedRows(driver string) bool {
 	switch driver {
 	case "pgx", "sqlite", "mssql":
@@ -84,16 +99,16 @@ func returnsInsertedRows(driver string) bool {
 	return false
 }
 
-// queue adds the INSERTs of every row to b, and returns the function that reads their step ids back from b's
-// results, in row order, once b is sent.
-func (s *successorBatch) queue(b *sequel.Batch, driver string) func(res *sequel.BatchResults, ids *[]int) error {
+// queueFunc queues a statement onto a batch together with the function that reads its result once sent.
+type queueFunc func(read func(res *sequel.BatchResults) error, query string, args ...any)
+
+// queue queues the INSERTs of the pending rows, whose readers append the new step ids to ids in row order, and
+// empties the pending rows.
+func (s *successorBatch) queue(queue queueFunc, driver string, ids *[]int) {
+	defer func() { s.rows = s.rows[:0] }()
 	if !returnsInsertedRows(driver) {
 		for _, r := range s.rows {
-			b.Queue(successorInsertSQL, s.selfMarkingArgs(r)...)
-		}
-		n := len(s.rows)
-		return func(res *sequel.BatchResults, ids *[]int) error {
-			for range n {
+			queue(func(res *sequel.BatchResults) error {
 				result, err := res.Exec()
 				if err != nil {
 					return errors.Trace(err)
@@ -103,35 +118,28 @@ func (s *successorBatch) queue(b *sequel.Batch, driver string) func(res *sequel.
 					return errors.Trace(err)
 				}
 				*ids = append(*ids, int(id))
-			}
-			return nil
+				return nil
+			}, successorInsertSQL, s.rowArgs(r, keys.RandomIdentifier(16))...)
 		}
+		return
 	}
-	var chunks [][]string // the tokens of each queued INSERT, in row order
 	for rest := s.rows; len(rest) > 0; {
 		n := successorBatchMax
 		for n > len(rest) {
 			n /= 2
 		}
 		tokens := make([]string, n)
-		args := make([]any, 0, n*19)
+		args := make([]any, 0, n*21)
 		for i, r := range rest[:n] {
 			tokens[i] = keys.RandomIdentifier(16)
-			args = append(args,
-				s.flowID, s.stepDepth, tokens[i], r.taskName, r.taskURL, r.stateJSON, r.refsJSON, workflow.StatusPending, parkedNone, s.timeBudgetMs, s.lineageID, r.ordinal, s.predecessorID, s.sleepMs, s.priority, s.fairnessKey, s.fairnessWeight, s.engineID, 0,
-			)
+			args = append(args, s.rowArgs(r, tokens[i])...)
 		}
-		values := strings.Repeat(successorBatchRow+",", n-1) + successorBatchRow
+		values := strings.Repeat(successorRowSQL+",", n-1) + successorRowSQL
+		stmt := "INSERT INTO dwarf_steps (" + successorCols + ") VALUES " + values + " RETURNING step_id, step_token"
 		if driver == "mssql" {
-			b.Queue("INSERT INTO dwarf_steps ("+successorCols+") OUTPUT INSERTED.step_id, INSERTED.step_token VALUES "+values, args...)
-		} else {
-			b.Queue("INSERT INTO dwarf_steps ("+successorCols+") VALUES "+values+" RETURNING step_id, step_token", args...)
+			stmt = "INSERT INTO dwarf_steps (" + successorCols + ") OUTPUT INSERTED.step_id, INSERTED.step_token VALUES " + values
 		}
-		chunks = append(chunks, tokens)
-		rest = rest[n:]
-	}
-	return func(res *sequel.BatchResults, ids *[]int) error {
-		for _, tokens := range chunks {
+		queue(func(res *sequel.BatchResults) error {
 			rows, err := res.Query()
 			if err != nil {
 				return errors.Trace(err)
@@ -155,60 +163,27 @@ func (s *successorBatch) queue(b *sequel.Batch, driver string) func(res *sequel.
 				}
 				*ids = append(*ids, id)
 			}
-		}
-		return nil
+			return nil
+		}, stmt, args...)
+		rest = rest[n:]
 	}
 }
 
-// selfMarkingArgs are successorInsertSQL's arguments for r.
-func (s *successorBatch) selfMarkingArgs(r successorRow) []any {
+// rowArgs are successorRowSQL's arguments for r.
+func (s *successorBatch) rowArgs(r successorRow, token string) []any {
 	return []any{
-		s.flowID, s.stepDepth, keys.RandomIdentifier(16), r.taskName, r.taskURL, r.stateJSON, r.refsJSON, workflow.StatusPending, parkedNone, s.timeBudgetMs, s.lineageID, r.ordinal, s.predecessorID, s.sleepMs, s.priority, s.fairnessKey, s.fairnessWeight, s.engineID,
-		s.inheritCancel, s.flowID, s.predecessorID,
+		s.flowID, s.stepDepth, token, r.taskName, r.taskURL, r.stateJSON, r.refsJSON, workflow.StatusPending, parkedNone, s.timeBudgetMs, s.lineageID, r.ordinal, s.predecessorID, s.sleepMs, s.priority, s.fairnessKey, s.fairnessWeight, s.engineID,
+		s.inheritCancel, s.predecessorID, s.flowID,
 	}
 }
 
 /*
-queueLone adds to b the INSERT of the batch's only row on PostgreSQL, and returns the function that reads the row's
-step id back once b is sent.
+loneSuccessorID is PostgreSQL SQL for the id of the step the session inserted last. It lets the statements queued
+after a single-row successor INSERT name the new step without waiting for the INSERT's result.
 
-The row goes in by successorInsertSQL, which decides its Cancel mark itself, so the transition needs no later
-statement for it. Statements queued after it in the same batch can name the new id in SQL as loneSuccessorID,
-which is what lets a single-successor transition be one batch.
-*/
-func (s *successorBatch) queueLone(b *sequel.Batch) func(res *sequel.BatchResults) (int, error) {
-	b.Queue(successorInsertSQL+" RETURNING step_id", s.selfMarkingArgs(s.rows[0])...)
-	return func(res *sequel.BatchResults) (int, error) {
-		var id int
-		err := res.QueryRow().Scan(&id)
-		return id, errors.Trace(err)
-	}
-}
-
-/*
-loneSuccessorID is PostgreSQL SQL for the id of the step the session inserted last, valid after queueLone's INSERT.
-
-It reads dwarf_steps' own sequence. Do not use lastval(), nor the other dialects' session last-id (@@IDENTITY on
-SQL Server): they report the last id generated in ANY table, so a trigger a deployment adds to dwarf_steps that
-inserts into a table with its own identity would silently become the step's successor_id and the flow's step_id.
-step_id is BIGSERIAL, so a role that can insert a step already holds the sequence privilege currval needs.
+It reads dwarf_steps' own sequence. Do not use lastval(), nor another dialect's session last-id (@@IDENTITY on SQL
+Server): they report the last id generated in ANY table, so a trigger a deployment adds to dwarf_steps that inserts
+into a table with its own identity would silently become the step's successor_id and the flow's step_id. step_id
+is BIGSERIAL, so a role that can insert a step already holds the sequence privilege currval needs.
 */
 const loneSuccessorID = "currval(pg_get_serial_sequence('dwarf_steps', 'step_id'))"
-
-// markCancelled queues onto b the Cancel mark of successors inserted unmarked, in power-of-two chunks of at most
-// 512 ids - under the tightest bind-parameter ceiling, and a fixed handful of statement texts. It is queued only
-// when a Cancel reached the source, so a transition normally pays nothing for it.
-func markCancelled(b *sequel.Batch, ids []int) {
-	for len(ids) > 0 {
-		n := 512
-		for n > len(ids) {
-			n /= 2
-		}
-		args := make([]any, n)
-		for i, id := range ids[:n] {
-			args[i] = id
-		}
-		b.Queue("UPDATE dwarf_steps SET cancelling=1 WHERE step_id IN ("+strings.Repeat("?,", n-1)+"?)", args...)
-		ids = ids[n:]
-	}
-}

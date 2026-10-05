@@ -1094,10 +1094,7 @@ func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, childFl
 			// be the read-first half of a SHARED-lock upgrade deadlock on SQLite. The status guard means a
 			// zero-row match is the ordinary case here - the wedge sweep calls this precisely to deliver an
 			// already-terminal child's error - and then there is nothing to terminalize.
-			res, err := tx.ExecContext(ctx,
-				"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
-				childFlowID,
-			)
+			res, err := tx.ExecContext(ctx, lockFlowRowSQL(), childFlowID)
 			if err != nil {
 				return errors.Trace(err)
 			}

@@ -59,35 +59,6 @@ func cohortLockStripe(shard, spawnStepID int) int {
 	return int(h >> (64 - cohortLockStripesLog2))
 }
 
-// successorInsertSQL inserts a pending step created by a transition out of a source step. It is an INSERT...SELECT
-// so the successor's Cancel mark is decided by the same statement: the successor is marked when the source step
-// already existed when the flow was cancelled (its id is at or below the flow's cancel_watermark) and the source
-// was not itself covered (the inherit argument, 1 or 0). That reaches the one step Cancel's own mark cannot - a
-// source whose completion write landed before Cancel, with its successors still to be inserted - while the
-// successor of a step inserted after the Cancel, such as a handler that caught the cancellation and everything it
-// leads to, stays unmarked, which is what lets a flow recover. The inserting transaction already holds the flow
-// row's lock and Cancel writes the watermark to that row, so the read cannot race it, and it costs no extra round
-// trip. Arguments: the eighteen step columns in order, then the inherit flag, the flow id and the source step id.
-// A transition with one successor inserts it this way on PostgreSQL (successorBatch.queueLone); otherwise
-// successors go in several to a statement where the driver returns inserted rows, and by this statement each on
-// MySQL.
-//
-// Do not compare timestamps here (the flow's cancel time against the source's started_at). Three dialects store
-// milliseconds, and a source that starts in the same millisecond as the Cancel reads as not-before it, losing the
-// Cancel - measured at ~1 in 4 runs of TestCancelInTransitionGap on SQLite. Making it inclusive only moves the tie
-// to the handler, whose successors would then be cancelled too.
-const successorInsertSQL = successorInsertInto + successorInsertSelect
-
-// successorInsertInto and successorInsertSelect are successorInsertSQL's two halves, between which SQL Server
-// takes an OUTPUT clause.
-const (
-	successorInsertInto   = "INSERT INTO dwarf_steps (" + successorCols + ")"
-	successorInsertSelect = " SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?," +
-		" CASE WHEN ?=1 AND s.step_id <= f.cancel_watermark THEN 1 ELSE 0 END" +
-		" FROM dwarf_flows f, dwarf_steps s WHERE f.flow_id=? AND s.step_id=?"
-)
-
-// successorCols are the columns every successor insert writes, in bind order.
 const successorCols = "flow_id, step_depth, step_token, task_name, task_url, state, state_refs, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id, cancelling"
 
 // processStep acquires a step, executes its task, and enqueues the next step if applicable.
@@ -970,7 +941,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	}
 	// A successor inherits a Cancel mark only from a source that was not itself covered: a covered source has
 	// already had its cancellation delivered (or overridden by its own error), and what it routes to next is
-	// the author's recovery. See successorInsertSQL.
+	// the author's recovery. See successorRowSQL.
 	inheritCancel := 1
 	if stepCancelling || completedCancelling {
 		inheritCancel = 0
@@ -1258,177 +1229,56 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			// isPushTransition is excluded because a fan-out SOURCE writes cohort_size to its own step row and
 			// may carry successors, so it is not a pure arrival.
 			pureArrival := fanInArrivals > 0 && len(normalNexts) == 0 && !isPushTransition
-			if !pureArrival && len(normalNexts) == 0 {
-				ok, err := lockFlowRow()
-				if err != nil {
-					return err
-				}
-				if !ok {
+
+			// The transition's statements go out as statement batches - one round trip each where the driver
+			// pipelines. queue adds a statement with the function that reads its result; flush sends the batch and
+			// reads every result in order. Results are closed explicitly, never by a defer: on a driver that does
+			// not pipeline, Close runs every statement not read yet, while the rollback that follows an early
+			// return abandons them unrun.
+			batch := tx.Batch()
+			var reads []func(*sequel.BatchResults) error
+			queue := func(read func(*sequel.BatchResults) error, query string, args ...any) {
+				batch.Queue(query, args...)
+				reads = append(reads, read)
+			}
+			flush := func() error {
+				if batch.Len() == 0 {
 					return nil
 				}
+				res := batch.Send(ctx)
+				for _, read := range reads {
+					if err := read(res); err != nil {
+						return err
+					}
+				}
+				batch, reads = tx.Batch(), nil
+				return errors.Trace(res.Close())
+			}
+
+			// The grab is batched with what follows it, so its terminal-status guard is read only after those
+			// statements ran: a terminal flow is bailed by rolling back (errTransitionFlowTerminal), which leaves the
+			// transition the same clean no-op as a bail before any write.
+			if !pureArrival {
+				if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
+					e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
+				}
+				queue(func(res *sequel.BatchResults) error {
+					grab, err := res.Exec()
+					if err != nil {
+						return errors.Trace(err)
+					}
+					if n, _ := grab.RowsAffected(); n == 0 {
+						return errTransitionFlowTerminal
+					}
+					flowRowLocked = true
+					return nil
+				}, lockFlowRowSQL(), flowID)
 			}
 
 			succ := successorBatch{
 				flowID: flowID, stepDepth: nextStepDepth, timeBudgetMs: flowTimeBudgetMs, lineageID: childLineageID,
 				predecessorID: stepID, sleepMs: sleepMs, priority: flowPriority, fairnessKey: flowFairnessKey,
 				fairnessWeight: flowFairnessWeight, engineID: e.engineID, inheritCancel: inheritCancel,
-			}
-			// The dispatched row's own write - its successor link, its cohort size, and the advancing clear - is ONE
-			// statement fenced on this dispatch's lease generation. The fence is what makes the orphan sweep's rewind
-			// safe: the rewind bumps lease_seq, so a worker that was merely slow (not dead) rolls this transaction
-			// back here instead of committing a second set of successors next to the re-dispatch's. Requiring
-			// advancing=1 fences one more case: persist re-running this transaction after a COMMIT that landed but
-			// reported an error finds the flag already cleared, and abandons rather than advancing the flow twice. A
-			// fan-in arrival clears the flag in its cohort bump below instead, so every transaction that commits while
-			// the flow stays live clears it.
-			//
-			// successor is the SQL of its successor_id value - a bind or loneSuccessorID - or empty for none.
-			queueFence := func(batch *sequel.Batch, successor string, successorArgs ...any) {
-				set, args := "", append([]any{}, successorArgs...)
-				if successor != "" {
-					set += "successor_id=" + successor + ", "
-				}
-				if isPushTransition {
-					set += "cohort_size=?, "
-					args = append(args, cohortSize)
-				}
-				args = append(args, stepID, leaseSeq)
-				batch.Queue("UPDATE dwarf_steps SET "+set+"advancing=0 WHERE step_id=? AND lease_seq=? AND advancing=1", args...)
-			}
-			readFence := func(res *sequel.BatchResults) error {
-				fenceRes, err := res.Exec()
-				if err != nil {
-					return errors.Trace(err)
-				}
-				if n, _ := fenceRes.RowsAffected(); n == 0 {
-					return errLeaseFenced
-				}
-				if isPushTransition {
-					e.logger.DebugContext(ctx, "Fan-out cohort spawned", "flow", keys.CorrelationID(shardNum, flowID), "spawnStep", stepID, "task", taskName, "cohortSize", cohortSize)
-				}
-				return nil
-			}
-			// The flow advance goes out with the fence unless a fan-in arrival follows, which may insert the step the
-			// flow advances to. target is as successor above.
-			advanceNow := fanInArrivals == 0
-			queueAdvance := func(batch *sequel.Batch, target string, targetArgs ...any) {
-				if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
-					e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
-				}
-				batch.Queue("UPDATE dwarf_flows SET step_id="+target+", touch=1-touch WHERE flow_id=?", append(append([]any{}, targetArgs...), flowID)...)
-			}
-
-			// The flow-row lock grab goes out in the same batch as the successor INSERTs - one round trip where the
-			// driver pipelines. The grab stays the transaction's first statement, so the write-first order holds. Its
-			// terminal-status guard is read only after the statements batched with it have run, so a terminal flow is
-			// bailed by rolling back (errTransitionFlowTerminal), which leaves the transition a clean no-op exactly as
-			// a bail before any write would.
-			//
-			// Batch results are closed explicitly, never by a defer: on a driver that does not pipeline, Close runs
-			// every statement not read yet, while the rollback that follows an early return abandons them unrun.
-			//
-			// On PostgreSQL, a transition with ONE successor - every linear and goto step, and every step inside a
-			// forEach branch - is a single batch: grab, INSERT, fence, advance. The writes after the INSERT name the
-			// new step by the step sequence's current value, and the INSERT decides its own Cancel mark, so no
-			// statement waits on a result. Only PostgreSQL pipelines a batch, so on every other driver one batch
-			// would cost the same round trips as two, and they take the path below.
-			single := len(normalNexts) == 1 && tx.DriverName() == "pgx"
-			sendLone := func() error {
-				batch := tx.Batch()
-				if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
-					e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
-				}
-				batch.Queue(lockFlowRowSQL(), flowID)
-				readID := succ.queueLone(batch)
-				queueFence(batch, loneSuccessorID)
-				if advanceNow {
-					queueAdvance(batch, loneSuccessorID)
-				}
-				res := batch.Send(ctx)
-				lockRes, err := res.Exec()
-				if err != nil {
-					return errors.Trace(err)
-				}
-				if n, _ := lockRes.RowsAffected(); n == 0 {
-					txBytes = stateByteCount{} // nothing this transaction wrote survives the rollback
-					return errTransitionFlowTerminal
-				}
-				flowRowLocked = true
-				id, err := readID(res)
-				if err != nil {
-					return errors.Trace(err)
-				}
-				newStepIDs = append(newStepIDs, id)
-				if err := readFence(res); err != nil {
-					return err
-				}
-				// The advance reports only a failure, which Close returns.
-				if err := res.Close(); err != nil {
-					return errors.Trace(err)
-				}
-				return nil
-			}
-			// Otherwise the successors take two steps. The grab goes with the first successorBatchMax of them and further
-			// ones follow that many to a batch, so a wide fan-out never holds every branch's state at once. Their ids
-			// come back by RETURNING/OUTPUT, and only then can the fence and the advance be queued: successor_id is
-			// the FIRST branch, which History's step navigation follows, and no dialect's last-inserted-id names the
-			// first row of a multi-row INSERT. The rows are inserted unmarked, because the INSERTs are queued before
-			// the grab returns the cancel watermark, and are marked by id with the fence when a Cancel reached this
-			// step.
-			markCancel := false
-			sendSuccessors := func() error {
-				driver := tx.DriverName()
-				batch := tx.Batch()
-				grab := !flowRowLocked
-				if grab {
-					if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
-						e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
-					}
-					switch {
-					case !returnsInsertedRows(driver):
-						batch.Queue(lockFlowRowSQL(), flowID)
-					case driver == "mssql":
-						batch.Queue("UPDATE dwarf_flows SET touch=1-touch OUTPUT INSERTED.cancel_watermark"+lockFlowRowWhere(), flowID)
-					default:
-						batch.Queue(lockFlowRowSQL()+" RETURNING cancel_watermark", flowID)
-					}
-				}
-				readIDs := succ.queue(batch, driver)
-				succ.rows = succ.rows[:0]
-				res := batch.Send(ctx)
-				if grab {
-					locked := false
-					if returnsInsertedRows(driver) {
-						var watermark int
-						err := res.QueryRow().Scan(&watermark)
-						if err != nil && err != sql.ErrNoRows {
-							return errors.Trace(err)
-						}
-						// The watermark is the row as locked - on Postgres the version re-read after any wait for
-						// the lock - and Cancel writes it only under this lock, so it holds for the whole transaction.
-						locked = err == nil
-						markCancel = locked && inheritCancel == 1 && stepID <= watermark
-					} else {
-						lockRes, err := res.Exec()
-						if err != nil {
-							return errors.Trace(err)
-						}
-						n, _ := lockRes.RowsAffected()
-						locked = n > 0
-					}
-					if !locked {
-						txBytes = stateByteCount{} // nothing this transaction wrote survives the rollback
-						return errTransitionFlowTerminal
-					}
-					flowRowLocked = true
-				}
-				if err := readIDs(res, &newStepIDs); err != nil {
-					return errors.Trace(err)
-				}
-				if err := res.Close(); err != nil {
-					return errors.Trace(err)
-				}
-				return nil
 			}
 			for i, next := range normalNexts {
 				// fan_out_ordinal identifies the BRANCH within a cohort so the fan-in folds order-sensitive
@@ -1478,54 +1328,81 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				})
 				txBytes.stateWritten += len(stepStateJSON)
 				if len(succ.rows) == successorBatchMax {
-					if err := sendSuccessors(); err != nil {
+					// A wide fan-out goes successorBatchMax rows to a batch, so it never holds every branch's
+					// state at once.
+					succ.queue(queue, tx.DriverName(), &newStepIDs)
+					if err := flush(); err != nil {
 						return err
 					}
 				}
 			}
+			succ.queue(queue, tx.DriverName(), &newStepIDs)
+
+			// The own-row write and the flow advance below take the new step's id. On PostgreSQL a lone successor's
+			// is named in SQL, so they join the INSERT's batch; otherwise the ids are read first. successor_id is
+			// the FIRST successor, which History's step navigation follows, and no last-id function names the
+			// first row of a multi-row INSERT.
+			successor, successorArgs := "", []any(nil)
 			switch {
-			case single:
-				if err := sendLone(); err != nil {
+			case len(normalNexts) == 1 && tx.DriverName() == "pgx":
+				successor = loneSuccessorID
+			case len(normalNexts) > 0:
+				if err := flush(); err != nil {
 					return err
 				}
-			case len(succ.rows) > 0:
-				if err := sendSuccessors(); err != nil {
-					return err
-				}
+				successor, successorArgs = "?", []any{newStepIDs[0]}
 			}
 
-			if !single {
-				fence := len(newStepIDs) > 0 || isPushTransition
-				batch := tx.Batch()
-				switch {
-				case len(newStepIDs) > 0:
-					queueFence(batch, "?", newStepIDs[0])
-				case fence:
-					queueFence(batch, "")
+			// The dispatched row's own write - its successor link, its cohort size, and the advancing clear - is ONE
+			// statement fenced on this dispatch's lease generation. The fence is what makes the orphan sweep's rewind
+			// safe: the rewind bumps lease_seq, so a worker that was merely slow (not dead) rolls this transaction
+			// back here instead of committing a second set of successors next to the re-dispatch's. Requiring
+			// advancing=1 fences one more case: persist re-running this transaction after a COMMIT that landed but
+			// reported an error finds the flag already cleared, and abandons rather than advancing the flow twice. A
+			// fan-in arrival clears the flag in its cohort bump below instead, so every transaction that commits while
+			// the flow stays live clears it.
+			if len(normalNexts) > 0 || isPushTransition {
+				set, args := "", append([]any{}, successorArgs...)
+				if successor != "" {
+					set += "successor_id=" + successor + ", "
 				}
-				if markCancel {
-					markCancelled(batch, newStepIDs)
+				if isPushTransition {
+					set += "cohort_size=?, "
+					args = append(args, cohortSize)
 				}
-				if advanceNow {
-					// The flow's next step is its only successor; with several, or none, no one step is.
-					advanceTo := 0
-					if len(newStepIDs) == 1 {
-						advanceTo = newStepIDs[0]
-					}
-					queueAdvance(batch, "?", advanceTo)
-				}
-				if batch.Len() > 0 {
-					res := batch.Send(ctx)
-					if fence {
-						if err := readFence(res); err != nil {
-							return err
-						}
-					}
-					// The mark and the advance report only failures, which Close returns.
-					if err := res.Close(); err != nil {
+				args = append(args, stepID, leaseSeq)
+				queue(func(res *sequel.BatchResults) error {
+					fence, err := res.Exec()
+					if err != nil {
 						return errors.Trace(err)
 					}
+					if n, _ := fence.RowsAffected(); n == 0 {
+						return errLeaseFenced
+					}
+					if isPushTransition {
+						e.logger.DebugContext(ctx, "Fan-out cohort spawned", "flow", keys.CorrelationID(shardNum, flowID), "spawnStep", stepID, "task", taskName, "cohortSize", cohortSize)
+					}
+					return nil
+				}, "UPDATE dwarf_steps SET "+set+"advancing=0 WHERE step_id=? AND lease_seq=? AND advancing=1", args...)
+			}
+			// The flow advances here unless a fan-in arrival follows, which may insert the step it advances to. Its
+			// next step is its only successor; with several, or none, no one step is.
+			advanceNow := fanInArrivals == 0
+			if advanceNow {
+				if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
+					e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
 				}
+				target, targetArgs := "0", []any(nil)
+				if len(normalNexts) == 1 {
+					target, targetArgs = successor, successorArgs
+				}
+				queue(func(res *sequel.BatchResults) error {
+					_, err := res.Exec()
+					return errors.Trace(err)
+				}, "UPDATE dwarf_flows SET step_id="+target+", touch=1-touch WHERE flow_id=?", append(append([]any{}, targetArgs...), flowID)...)
+			}
+			if err := flush(); err != nil {
+				return err
 			}
 
 			if fanInArrivals > 0 {
@@ -1638,6 +1515,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			return nil
 		})
 		if errors.Is(err, errTransitionFlowTerminal) {
+			txBytes = stateByteCount{} // nothing the transaction wrote survived the rollback
 			return nil
 		}
 		return err
@@ -1706,15 +1584,10 @@ var errLeaseFenced = errors.New("dispatch lease fenced")
 // the same clean no-op as a bail before any write, so the transaction's caller maps it to nil.
 var errTransitionFlowTerminal = errors.New("flow terminal at transition")
 
-// lockFlowRowWhere guards the flow-row lock grab on the flow being non-terminal.
-func lockFlowRowWhere() string {
-	return " WHERE flow_id=? AND status NOT IN (" + terminalStatusesSQL + ")"
-}
-
 // lockFlowRowSQL takes the flow row's lock, flipping the non-indexed touch column, and affects no row when the
 // flow is terminal.
 func lockFlowRowSQL() string {
-	return "UPDATE dwarf_flows SET touch=1-touch" + lockFlowRowWhere()
+	return "UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status NOT IN (" + terminalStatusesSQL + ")"
 }
 
 // maxGotoTargetLen is the width of dwarf_steps.advance_goto, which matches task_name's.
@@ -1941,10 +1814,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		// clean no-op; without it we would insert a pending fan-in step and overwrite step_id on a terminal
 		// flow (orphan work reaped only later by the claim-time terminal-flow guard). `touch` always changes
 		// value, so RowsAffected reflects the WHERE match on every driver.
-		flowRes, flowErr := tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
-			flowID,
-		)
+		flowRes, flowErr := tx.ExecContext(ctx, lockFlowRowSQL(), flowID)
 		if flowErr != nil {
 			return errors.Trace(flowErr)
 		}
@@ -1988,7 +1858,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		var err error
 		fanInStepID, err = tx.InsertReturnID(ctx, "step_id", successorInsertSQL,
 			flowID, nextStepDepth, keys.RandomIdentifier(16), fanInTarget, fanInURL, mergedJSON, refsJSON, workflow.StatusPending, parkedNone, timeBudgetMs, lineageID, fanOutOrdinal, stepID, sleepMs, priority, fairnessKey, fairnessWeight, e.engineID,
-			inheritCancel, flowID, stepID,
+			inheritCancel, stepID, flowID,
 		)
 		if err != nil {
 			return errors.Trace(err)
@@ -2170,7 +2040,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 	fanInURL := dispatchURLOf(graph, fanInTaskName)
 	fanInStepID, err := tx.InsertReturnID(ctx, "step_id", successorInsertSQL,
 		flowID, fanInDepth, keys.RandomIdentifier(16), fanInTaskName, fanInURL, mergedJSON, refsJSON, workflow.StatusPending, parkedNone, timeBudgetMs, spawnLineageID, spawnFanOutOrdinal, predecessorStepID, sleepMs, priority, fairnessKey, fairnessWeight, e.engineID,
-		inheritCancel, flowID, predecessorStepID,
+		inheritCancel, predecessorStepID, flowID,
 	)
 	if err != nil {
 		return 0, stateByteCount{}, errors.Trace(err)
