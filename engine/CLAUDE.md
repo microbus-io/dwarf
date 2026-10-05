@@ -300,8 +300,11 @@ It is race-free and free of round trips because every insert of a flow's steps h
 mark then finds the successors pending. A transition's successors (`successorBatch`) take the watermark from the
 transaction's flow-row lock grab (`RETURNING`/`OUTPUT`) - the row as locked, which on Postgres is the version
 re-read after any wait for the lock, not the statement's starting snapshot - and decide the flag in Go, once for
-all of them. MySQL, and the two fan-in inserts, use the `INSERT...SELECT` form (`successorInsertSQL`), which
-reads the watermark in the same statement.
+all of them. The grab and the INSERTs go out in one statement batch, so the INSERTs are queued before the
+watermark is known: they insert unmarked, and when the flag is set (`markCancel`) the second batch marks them by
+id (`markCancelled`), still under the lock and before COMMIT, so no reader ever sees them unmarked. MySQL, and the
+two fan-in inserts, use the `INSERT...SELECT` form (`successorInsertSQL`), which reads the watermark in the same
+statement.
 `cancel_watermark` defaults to 0 (never cancelled), and **Fork deliberately does not copy it**: a fork is not
 under cancellation. Pinned by `engine/cancelgap_test.go` and by `ran_covered_with_onerror`'s handler successor.
 
@@ -1142,10 +1145,27 @@ not parallelism:
   caller on a replica that dispatched the flow pays no graph round trip. Every field of `cachedGraph` must
   stay frozen for the flow's life - nothing invalidates an entry.
 - **A transition's successors go in as multi-row INSERTs** (`successorBatch`), in power-of-two chunks of at
-  most 64 rows (19 binds each, under SQL Server's 2,100-parameter ceiling), so a fan-out of N costs a handful of
-  round trips rather than N - and the transaction its branches wait on grows with N far more slowly. The ids come back by `RETURNING`/`OUTPUT` and are matched to rows by `step_token`, since neither promises
-  VALUES order. MySQL inserts row by row: it has no `RETURNING`, and under the default
-  `innodb_autoinc_lock_mode=2` a multi-row insert's ids are not guaranteed contiguous.
+  most 64 rows (19 binds each, under SQL Server's 2,100-parameter ceiling). The ids come back by `RETURNING`/`OUTPUT`
+  and are matched to rows by `step_token`, since neither promises VALUES order. MySQL inserts row by row: it has no
+  `RETURNING`, and under the default `innodb_autoinc_lock_mode=2` a multi-row insert's ids are not guaranteed
+  contiguous.
+- **The transition is statement batches** (`sequel.Tx.Batch`), each one round trip on Postgres: [flow-row lock
+  grab + the first 64 successors], one batch per further 64 successors, then [the fenced own-row write + the Cancel
+  mark when set + the flow's `step_id` advance]. The last batch is separate because the fence and the advance take
+  the new step ids, which only the INSERTs return. A linear step is BEGIN, two batches, COMMIT: k ~7 on Postgres
+  (`TestRoundTrips_LinearStep`, about +-0.3 run to run). Successors go 64 to a batch so that a wide fan-out holds
+  only one batch's branch states in memory, not all of them. Other drivers run the same batches statement by
+  statement. Consequences of batching the grab with INSERTs:
+  - The terminal-status guard is read after the INSERTs ran, so a terminal flow bails by **rolling back**
+    (`errTransitionFlowTerminal`, mapped to nil after `Transact`), and the bail shows in telemetry as a rolled-back
+    transaction, as a lease-fenced one does.
+  - Never close batch results with a `defer`: on a driver that does not pipeline, `Close` runs every statement not
+    read yet - every successor INSERT of a bailed transition, under the flow-row lock - while the rollback after an
+    early return abandons them unrun.
+  - Nothing else may run on the transaction while a batch's results are open, so the fan-in arrival and
+    cohort-failure branches run only after the batches are closed. When a fan-in arrival follows in the same
+    transaction, the flow advance is left out of the last batch and written at the end, because the arrival may
+    insert the step the flow advances to.
 - **`completeFlow`'s lock grab returns the row it locked** (`RETURNING`/`OUTPUT`), so the surgraph linkage, the
   disposable flag and the status cost no second statement. MySQL, lacking `RETURNING`, reads them with a
   follow-up `SELECT`.

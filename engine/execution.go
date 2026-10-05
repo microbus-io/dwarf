@@ -1183,7 +1183,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		}()
 	}
 	err = e.persistYielding(ctx, db, shardNum, stepID, leaseSeq, &persistPass, func() error {
-		return db.Transact(ctx, func(tx *sequel.Tx) error {
+		err := db.Transact(ctx, func(tx *sequel.Tx) error {
 			newStepIDs = newStepIDs[:0]
 			flowFailed, flowFailedStatus = false, workflow.StatusFailed
 			txBytes = stateByteCount{}
@@ -1213,43 +1213,18 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			// RowsAffected still reflects the WHERE match (the terminal guard below) on every driver.
 			//
 			// Reports whether the flow is still non-terminal; a false return means the caller must bail (nil).
-			//
-			// Where the driver can return the row it locked, the grab also reads the flow's cancel_watermark, which
-			// the successor inserts need for their Cancel mark (see successorBatch). It is the row as locked - on
-			// Postgres the version re-read after any wait for the lock, not the statement's starting snapshot - and
-			// Cancel writes it only under this lock, so it holds for the rest of the transaction.
 			flowRowLocked := false
-			cancelWatermark, cancelWatermarkRead := 0, false
 			lockFlowRow := func() (bool, error) {
 				if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
 					e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
 				}
-				const grab = "UPDATE dwarf_flows SET touch=1-touch"
-				where := " WHERE flow_id=? AND status NOT IN (" + terminalStatusesSQL + ")"
-				var flowErr error
-				switch driver := tx.DriverName(); {
-				case !batchesSuccessors(driver):
-					flowRes, xerr := tx.ExecContext(ctx, grab+where, flowID)
-					if xerr != nil {
-						return false, errors.Trace(xerr)
-					}
-					n, _ := flowRes.RowsAffected()
-					flowRowLocked = n > 0
-					return flowRowLocked, nil
-				case driver == "mssql":
-					flowErr = tx.QueryRowContext(ctx, grab+" OUTPUT INSERTED.cancel_watermark"+where, flowID).Scan(&cancelWatermark)
-				default:
-					flowErr = tx.QueryRowContext(ctx, grab+where+" RETURNING cancel_watermark", flowID).Scan(&cancelWatermark)
-				}
-				if flowErr == sql.ErrNoRows {
-					flowRowLocked = false
-					return false, nil
-				}
+				flowRes, flowErr := tx.ExecContext(ctx, lockFlowRowSQL(), flowID)
 				if flowErr != nil {
 					return false, errors.Trace(flowErr)
 				}
-				flowRowLocked, cancelWatermarkRead = true, true
-				return true, nil
+				n, _ := flowRes.RowsAffected()
+				flowRowLocked = n > 0
+				return flowRowLocked, nil
 			}
 
 			// A NON-FINAL cohort arrival is the one disposition that neither extends nor terminalizes the flow:
@@ -1275,7 +1250,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			// isPushTransition is excluded because a fan-out SOURCE writes cohort_size to its own step row and
 			// may carry successors, so it is not a pure arrival.
 			pureArrival := fanInArrivals > 0 && len(normalNexts) == 0 && !isPushTransition
-			if !pureArrival {
+			if !pureArrival && len(normalNexts) == 0 {
 				ok, err := lockFlowRow()
 				if err != nil {
 					return err
@@ -1285,11 +1260,74 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				}
 			}
 
-			batch := successorBatch{
+			succ := successorBatch{
 				flowID: flowID, stepDepth: nextStepDepth, timeBudgetMs: flowTimeBudgetMs, lineageID: childLineageID,
 				predecessorID: stepID, sleepMs: sleepMs, priority: flowPriority, fairnessKey: flowFairnessKey,
 				fairnessWeight: flowFairnessWeight, engineID: e.engineID, inheritCancel: inheritCancel,
-				cancelWatermark: cancelWatermark, watermarkRead: cancelWatermarkRead,
+			}
+			// The flow-row lock grab goes out in one batch with the first successor INSERTs - one round trip where the
+			// driver pipelines - and any further successors follow successorBatchMax rows to a batch, so a wide
+			// fan-out never holds every branch's state at once. The grab stays the transaction's first statement, so
+			// the write-first order holds. Its terminal-status guard is read only after the INSERTs batched with it
+			// have run, so a terminal flow is bailed by rolling back (errTransitionFlowTerminal), which leaves the
+			// transition a clean no-op exactly as a bail before any write would.
+			//
+			// Batch results are closed explicitly, never by a defer: on a driver that does not pipeline, Close runs
+			// every statement not read yet, while the rollback that follows an early return abandons them unrun.
+			markCancel := false
+			sendSuccessors := func() error {
+				driver := tx.DriverName()
+				batch := tx.Batch()
+				grab := !flowRowLocked
+				if grab {
+					if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
+						e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
+					}
+					switch {
+					case !returnsInsertedRows(driver):
+						batch.Queue(lockFlowRowSQL(), flowID)
+					case driver == "mssql":
+						batch.Queue("UPDATE dwarf_flows SET touch=1-touch OUTPUT INSERTED.cancel_watermark"+lockFlowRowWhere(), flowID)
+					default:
+						batch.Queue(lockFlowRowSQL()+" RETURNING cancel_watermark", flowID)
+					}
+				}
+				readIDs := succ.queue(batch, driver)
+				succ.rows = succ.rows[:0]
+				res := batch.Send(ctx)
+				if grab {
+					locked := false
+					if returnsInsertedRows(driver) {
+						var watermark int
+						err := res.QueryRow().Scan(&watermark)
+						if err != nil && err != sql.ErrNoRows {
+							return errors.Trace(err)
+						}
+						// The watermark is the row as locked - on Postgres the version re-read after any wait for
+						// the lock - and Cancel writes it only under this lock, so it holds for the whole transaction.
+						locked = err == nil
+						markCancel = locked && inheritCancel == 1 && stepID <= watermark
+					} else {
+						lockRes, err := res.Exec()
+						if err != nil {
+							return errors.Trace(err)
+						}
+						n, _ := lockRes.RowsAffected()
+						locked = n > 0
+					}
+					if !locked {
+						txBytes = stateByteCount{} // nothing this transaction wrote survives the rollback
+						return errTransitionFlowTerminal
+					}
+					flowRowLocked = true
+				}
+				if err := readIDs(res, &newStepIDs); err != nil {
+					return errors.Trace(err)
+				}
+				if err := res.Close(); err != nil {
+					return errors.Trace(err)
+				}
+				return nil
 			}
 			for i, next := range normalNexts {
 				// fan_out_ordinal identifies the BRANCH within a cohort so the fan-in folds order-sensitive
@@ -1333,19 +1371,21 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 						return errors.Trace(mintErr)
 					}
 				}
-				batch.rows = append(batch.rows, successorRow{
+				succ.rows = append(succ.rows, successorRow{
 					taskName: next.taskName, taskURL: dispatchURLOf(graph, next.taskName),
 					stateJSON: stepStateJSON, refsJSON: stepRefsJSON, ordinal: successorOrdinal,
 				})
 				txBytes.stateWritten += len(stepStateJSON)
-				if len(batch.rows) == successorBatchMax {
-					if err := batch.flush(ctx, tx, &newStepIDs); err != nil {
-						return errors.Trace(err)
+				if len(succ.rows) == successorBatchMax {
+					if err := sendSuccessors(); err != nil {
+						return err
 					}
 				}
 			}
-			if err := batch.flush(ctx, tx, &newStepIDs); err != nil {
-				return errors.Trace(err)
+			if len(succ.rows) > 0 {
+				if err := sendSuccessors(); err != nil {
+					return err
+				}
 			}
 
 			// The dispatched row's own write - its successor link, its cohort size, and the advancing clear - is ONE
@@ -1356,7 +1396,13 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			// reported an error finds the flag already cleared, and abandons rather than advancing the flow twice. A
 			// fan-in arrival clears the flag in its cohort bump below instead, so every transaction that commits while
 			// the flow stays live clears it.
-			if len(newStepIDs) > 0 || isPushTransition {
+			//
+			// It goes out as one batch with the successors' Cancel mark, when a Cancel reached this step, and with the
+			// flow advance, when no fan-in arrival follows to change what the flow advances to.
+			fence := len(newStepIDs) > 0 || isPushTransition
+			advanceNow := fanInArrivals == 0 && flowRowLocked
+			batch := tx.Batch()
+			if fence {
 				set, args := "", []any{}
 				if len(newStepIDs) > 0 {
 					set += "successor_id=?, "
@@ -1367,12 +1413,35 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 					args = append(args, cohortSize)
 				}
 				args = append(args, stepID, leaseSeq)
-				res, err := tx.ExecContext(ctx, "UPDATE dwarf_steps SET "+set+"advancing=0 WHERE step_id=? AND lease_seq=? AND advancing=1", args...)
-				if err != nil {
-					return errors.Trace(err)
+				batch.Queue("UPDATE dwarf_steps SET "+set+"advancing=0 WHERE step_id=? AND lease_seq=? AND advancing=1", args...)
+			}
+			if markCancel {
+				markCancelled(batch, newStepIDs)
+			}
+			if advanceNow {
+				if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
+					e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
 				}
-				if n, _ := res.RowsAffected(); n == 0 {
-					return errLeaseFenced
+				advanceTo := 0
+				if len(newStepIDs) == 1 {
+					advanceTo = newStepIDs[0]
+				}
+				batch.Queue("UPDATE dwarf_flows SET step_id=?, touch=1-touch WHERE flow_id=?", advanceTo, flowID)
+			}
+			if batch.Len() > 0 {
+				res := batch.Send(ctx)
+				if fence {
+					fenceRes, err := res.Exec()
+					if err != nil {
+						return errors.Trace(err)
+					}
+					if n, _ := fenceRes.RowsAffected(); n == 0 {
+						return errLeaseFenced
+					}
+				}
+				// The mark and the advance report only failures, which Close returns.
+				if err := res.Close(); err != nil {
+					return errors.Trace(err)
 				}
 				if isPushTransition {
 					e.logger.DebugContext(ctx, "Fan-out cohort spawned", "flow", keys.CorrelationID(shardNum, flowID), "spawnStep", stepID, "task", taskName, "cohortSize", cohortSize)
@@ -1480,7 +1549,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			// would have been step_id=0 over the 0 a fan-out already carries - pure WAL amplification on the
 			// flow's hottest row (two extra tuple versions per sibling; 126 per 64-wide cohort) plus the lock
 			// hold that serializes the cohort. Every path that DOES advance the flow holds the row by here.
-			if !flowFailed && flowRowLocked {
+			if !advanceNow && !flowFailed && flowRowLocked {
 				if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
 					e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
 				}
@@ -1488,6 +1557,10 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			}
 			return nil
 		})
+		if errors.Is(err, errTransitionFlowTerminal) {
+			return nil
+		}
+		return err
 	})
 	if cohortMu != nil {
 		// Release before the post-commit switch: a non-contention error routes to failOnPersistError ->
@@ -1547,6 +1620,22 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 // never surfaced - callers detect it via a captured `fenced` bool, or persist maps it to errPersistFenced,
 // and return nil. See "Lease fencing".
 var errLeaseFenced = errors.New("dispatch lease fenced")
+
+// errTransitionFlowTerminal is an in-transaction sentinel: the transition's flow-row lock grab found the flow
+// already terminal, after the successor INSERTs batched with it had run. Rolling them back leaves the transition
+// the same clean no-op as a bail before any write, so the transaction's caller maps it to nil.
+var errTransitionFlowTerminal = errors.New("flow terminal at transition")
+
+// lockFlowRowWhere guards the flow-row lock grab on the flow being non-terminal.
+func lockFlowRowWhere() string {
+	return " WHERE flow_id=? AND status NOT IN (" + terminalStatusesSQL + ")"
+}
+
+// lockFlowRowSQL takes the flow row's lock, flipping the non-indexed touch column, and affects no row when the
+// flow is terminal.
+func lockFlowRowSQL() string {
+	return "UPDATE dwarf_flows SET touch=1-touch" + lockFlowRowWhere()
+}
 
 // maxGotoTargetLen is the width of dwarf_steps.advance_goto, which matches task_name's.
 const maxGotoTargetLen = 512

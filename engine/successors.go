@@ -17,7 +17,6 @@ limitations under the License.
 package engine
 
 import (
-	"context"
 	"strings"
 
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -43,38 +42,41 @@ type successorRow struct {
 	ordinal   int
 }
 
-// successorBatch inserts the successors of one transition, which share everything but the per-row fields.
-//
-// Rows are inserted by multi-row INSERTs, so a fan-out of N costs about N/64 statements plus one per set bit of the
-// remainder, rather than N. The Cancel mark is decided in Go from the cancel_watermark the transaction's flow-row
-// lock grab returned (watermarkRead): the flag is the same for every successor of one source, and the watermark
-// cannot move while the lock is held. Only the drivers whose lock grab can return that row batch; any other -
-// MySQL, which has no RETURNING and whose multi-row insert ids are not guaranteed contiguous under the default
-// innodb_autoinc_lock_mode=2 - inserts row by row with successorInsertSQL, which reads the watermark itself.
-//
-// Within a chunk, step ids follow VALUES order on every supported dialect in practice, but none promises it. So
-// nothing that must be deterministic may order siblings by step_id: the fan-in merge and the failed-cohort merge
-// order them by fan_out_ordinal.
+/*
+successorBatch holds the successors of one transition, which share everything but the per-row fields, and queues
+their INSERTs onto the transition's statement batch.
+
+Where the driver returns inserted rows (RETURNING on PostgreSQL and SQLite, OUTPUT on SQL Server) the rows go in
+multi-row INSERTs, so a fan-out of N costs about N/64 statements plus one per set bit of the remainder, rather than
+N, and their ids are matched back by step_token, because neither RETURNING nor OUTPUT promises VALUES order. They
+are inserted unmarked: their Cancel mark depends on the cancel_watermark the flow-row lock returns in the same
+batch, so it is applied afterwards (markCancelled), and only when a Cancel reached the source. MySQL has no
+RETURNING, and its multi-row insert ids are not guaranteed contiguous under the default innodb_autoinc_lock_mode=2,
+so it inserts row by row with successorInsertSQL, which decides the mark itself and whose id is LastInsertId.
+
+Within a chunk, step ids follow VALUES order on every supported dialect in practice, but none promises it. So
+nothing that must be deterministic may order siblings by step_id: the fan-in merge and the failed-cohort merge order
+them by fan_out_ordinal.
+*/
 type successorBatch struct {
-	flowID          int
-	stepDepth       int
-	timeBudgetMs    int
-	lineageID       int
-	predecessorID   int
-	sleepMs         int64
-	priority        int
-	fairnessKey     string
-	fairnessWeight  float64
-	engineID        int64
-	inheritCancel   int
-	cancelWatermark int
-	watermarkRead   bool
-	rows            []successorRow
+	flowID         int
+	stepDepth      int
+	timeBudgetMs   int
+	lineageID      int
+	predecessorID  int
+	sleepMs        int64
+	priority       int
+	fairnessKey    string
+	fairnessWeight float64
+	engineID       int64
+	inheritCancel  int
+	rows           []successorRow
 }
 
-// batchesSuccessors reports whether the driver's flow-row lock grab returns the cancel watermark, which is what
-// lets successorBatch insert several rows to a statement. It must agree with the lock grab in processStep.
-func batchesSuccessors(driver string) bool {
+// returnsInsertedRows reports whether the driver can return the rows an INSERT created, and the row a flow-row lock
+// grab updated, which is what lets successors go in several to a statement and their Cancel mark be decided from
+// the lock's cancel_watermark.
+func returnsInsertedRows(driver string) bool {
 	switch driver {
 	case "pgx", "sqlite", "mssql":
 		return true
@@ -82,87 +84,99 @@ func batchesSuccessors(driver string) bool {
 	return false
 }
 
-// flush inserts the pending rows and appends their step ids to ids in row order.
-func (b *successorBatch) flush(ctx context.Context, tx *sequel.Tx, ids *[]int) error {
-	defer func() { b.rows = b.rows[:0] }()
-	if len(b.rows) == 0 {
-		return nil
-	}
-	if !batchesSuccessors(tx.DriverName()) {
-		for _, r := range b.rows {
-			id, err := tx.InsertReturnID(ctx, "step_id", successorInsertSQL,
-				b.flowID, b.stepDepth, keys.RandomIdentifier(16), r.taskName, r.taskURL, r.stateJSON, r.refsJSON, workflow.StatusPending, parkedNone, b.timeBudgetMs, b.lineageID, r.ordinal, b.predecessorID, b.sleepMs, b.priority, b.fairnessKey, b.fairnessWeight, b.engineID,
-				b.inheritCancel, b.flowID, b.predecessorID,
+// queue adds the INSERTs of every row to b, and returns the function that reads their step ids back from b's
+// results, in row order, once b is sent.
+func (s *successorBatch) queue(b *sequel.Batch, driver string) func(res *sequel.BatchResults, ids *[]int) error {
+	if !returnsInsertedRows(driver) {
+		for _, r := range s.rows {
+			b.Queue(successorInsertSQL,
+				s.flowID, s.stepDepth, keys.RandomIdentifier(16), r.taskName, r.taskURL, r.stateJSON, r.refsJSON, workflow.StatusPending, parkedNone, s.timeBudgetMs, s.lineageID, r.ordinal, s.predecessorID, s.sleepMs, s.priority, s.fairnessKey, s.fairnessWeight, s.engineID,
+				s.inheritCancel, s.flowID, s.predecessorID,
 			)
-			if err != nil {
-				return errors.Trace(err)
-			}
-			*ids = append(*ids, int(id))
 		}
-		return nil
+		n := len(s.rows)
+		return func(res *sequel.BatchResults, ids *[]int) error {
+			for range n {
+				result, err := res.Exec()
+				if err != nil {
+					return errors.Trace(err)
+				}
+				id, err := result.LastInsertId()
+				if err != nil {
+					return errors.Trace(err)
+				}
+				*ids = append(*ids, int(id))
+			}
+			return nil
+		}
 	}
-	if !b.watermarkRead {
-		// Inserting without the watermark would silently drop the Cancel mark of every row.
-		return errors.New("successors inserted before the flow-row lock grab read the cancel watermark")
-	}
-	cancelling := 0
-	if b.inheritCancel == 1 && b.predecessorID <= b.cancelWatermark {
-		cancelling = 1
-	}
-	for rest := b.rows; len(rest) > 0; {
+	var chunks [][]string // the tokens of each queued INSERT, in row order
+	for rest := s.rows; len(rest) > 0; {
 		n := successorBatchMax
 		for n > len(rest) {
 			n /= 2
 		}
-		if err := b.insertChunk(ctx, tx, rest[:n], cancelling, ids); err != nil {
-			return errors.Trace(err)
+		tokens := make([]string, n)
+		args := make([]any, 0, n*19)
+		for i, r := range rest[:n] {
+			tokens[i] = keys.RandomIdentifier(16)
+			args = append(args,
+				s.flowID, s.stepDepth, tokens[i], r.taskName, r.taskURL, r.stateJSON, r.refsJSON, workflow.StatusPending, parkedNone, s.timeBudgetMs, s.lineageID, r.ordinal, s.predecessorID, s.sleepMs, s.priority, s.fairnessKey, s.fairnessWeight, s.engineID, 0,
+			)
 		}
+		values := strings.Repeat(successorBatchRow+",", n-1) + successorBatchRow
+		if driver == "mssql" {
+			b.Queue("INSERT INTO dwarf_steps ("+successorCols+") OUTPUT INSERTED.step_id, INSERTED.step_token VALUES "+values, args...)
+		} else {
+			b.Queue("INSERT INTO dwarf_steps ("+successorCols+") VALUES "+values+" RETURNING step_id, step_token", args...)
+		}
+		chunks = append(chunks, tokens)
 		rest = rest[n:]
 	}
-	return nil
+	return func(res *sequel.BatchResults, ids *[]int) error {
+		for _, tokens := range chunks {
+			rows, err := res.Query()
+			if err != nil {
+				return errors.Trace(err)
+			}
+			idByToken := make(map[string]int, len(tokens))
+			for rows.Next() {
+				var id int
+				var token string
+				if err := rows.Scan(&id, &token); err != nil {
+					return errors.Trace(err)
+				}
+				idByToken[token] = id
+			}
+			if err := rows.Err(); err != nil {
+				return errors.Trace(err)
+			}
+			for _, token := range tokens {
+				id, ok := idByToken[token]
+				if !ok {
+					return errors.New("successor insert returned %d of %d rows", len(idByToken), len(tokens))
+				}
+				*ids = append(*ids, id)
+			}
+		}
+		return nil
+	}
 }
 
-// insertChunk inserts rows with one statement. The returned ids are matched to rows by step_token rather than by
-// position, because neither RETURNING nor OUTPUT promises to report rows in VALUES order.
-func (b *successorBatch) insertChunk(ctx context.Context, tx *sequel.Tx, rows []successorRow, cancelling int, ids *[]int) error {
-	tokens := make([]string, len(rows))
-	args := make([]any, 0, len(rows)*19)
-	for i, r := range rows {
-		tokens[i] = keys.RandomIdentifier(16)
-		args = append(args,
-			b.flowID, b.stepDepth, tokens[i], r.taskName, r.taskURL, r.stateJSON, r.refsJSON, workflow.StatusPending, parkedNone, b.timeBudgetMs, b.lineageID, r.ordinal, b.predecessorID, b.sleepMs, b.priority, b.fairnessKey, b.fairnessWeight, b.engineID, cancelling,
-		)
-	}
-	values := strings.Repeat(successorBatchRow+",", len(rows)-1) + successorBatchRow
-	var stmt string
-	if tx.DriverName() == "mssql" {
-		stmt = "INSERT INTO dwarf_steps (" + successorCols + ") OUTPUT INSERTED.step_id, INSERTED.step_token VALUES " + values
-	} else {
-		stmt = "INSERT INTO dwarf_steps (" + successorCols + ") VALUES " + values + " RETURNING step_id, step_token"
-	}
-	result, err := tx.QueryContext(ctx, stmt, args...)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	defer result.Close()
-	idByToken := make(map[string]int, len(rows))
-	for result.Next() {
-		var id int
-		var token string
-		if err := result.Scan(&id, &token); err != nil {
-			return errors.Trace(err)
+// markCancelled queues onto b the Cancel mark of successors inserted unmarked, in power-of-two chunks of at most
+// 512 ids - under the tightest bind-parameter ceiling, and a fixed handful of statement texts. It is queued only
+// when a Cancel reached the source, so a transition normally pays nothing for it.
+func markCancelled(b *sequel.Batch, ids []int) {
+	for len(ids) > 0 {
+		n := 512
+		for n > len(ids) {
+			n /= 2
 		}
-		idByToken[token] = id
-	}
-	if err := result.Err(); err != nil {
-		return errors.Trace(err)
-	}
-	for _, token := range tokens {
-		id, ok := idByToken[token]
-		if !ok {
-			return errors.New("successor insert returned %d of %d rows", len(idByToken), len(rows))
+		args := make([]any, n)
+		for i, id := range ids[:n] {
+			args[i] = id
 		}
-		*ids = append(*ids, id)
+		b.Queue("UPDATE dwarf_steps SET cancelling=1 WHERE step_id IN ("+strings.Repeat("?,", n-1)+"?)", args...)
+		ids = ids[n:]
 	}
-	return nil
 }
