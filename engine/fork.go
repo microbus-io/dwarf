@@ -341,7 +341,12 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		if pruned[s.oldID] {
 			continue
 		}
-		s.refs = staterefs.Parse(refsJSON)
+		var perr error
+		s.refs, perr = staterefs.Parse(refsJSON)
+		if perr != nil {
+			mrows.Close()
+			return 0, nil, errors.Trace(perr)
+		}
 		keep = append(keep, s)
 	}
 	mrows.Close()

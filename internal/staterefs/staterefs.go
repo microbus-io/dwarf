@@ -529,26 +529,23 @@ func inlineExcessAnchors(raw map[string]json.RawMessage, refs Refs, merged workf
 // Parse decodes a refs column. An empty or absent value yields no refs and allocates nothing, which is the
 // overwhelmingly common case.
 //
-// A MALFORMED value also yields no refs rather than an error, and that is a decision rather than convenience.
-// The column is engine-written, so malformed means a bug-state row - but the alternative is worse: every read
-// of that row (Snapshot, Step, History assembly, the fan-in merge, Fork) would fail permanently, bricking a
-// flow that is otherwise intact. Degrading instead loses the ref'd fields, which is the same visible symptom
-// the row already has, and leaves every other operation on the flow working. The loud checks are kept for the
-// cases where the engine still has something to act on: a ref into a missing step, a violated one-hop, and
-// Fork's missing clone mapping all error rather than degrade.
-func Parse(refsJSON []byte) Refs {
+// A value it cannot decode is an error, never "no refs": the step's state is then missing every field the
+// column points at, and running on without them loses them silently - for good, once the next mint writes a
+// successor without them. Such a value is either a bug-state row or one written by a newer version in a
+// format this one does not know.
+func Parse(refsJSON []byte) (Refs, error) {
 	refsJSON = bytes.TrimSpace(refsJSON)
 	if len(refsJSON) == 0 || bytes.Equal(refsJSON, []byte("{}")) {
-		return nil
+		return nil, nil
 	}
 	var refs Refs
 	if err := json.Unmarshal(refsJSON, &refs); err != nil {
-		return nil
+		return nil, errors.New("unreadable state refs (written in a format this version does not know?): %v", err)
 	}
 	if len(refs) == 0 {
-		return nil
+		return nil, nil
 	}
-	return refs
+	return refs, nil
 }
 
 // Resolve materializes ref'd fields into state, in place, and reports how many bytes of field value it

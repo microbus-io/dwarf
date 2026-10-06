@@ -118,7 +118,11 @@ func (t *terminalTails) scan(row interface{ Scan(dest ...any) error }) error {
 		if err != nil {
 			return errors.Trace(err)
 		}
-		t.baseState, t.baseRefs, t.baseLineage = baseState, staterefs.Parse(refsJSON), lineageID
+		baseRefs, err := staterefs.Parse(refsJSON)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		t.baseState, t.baseRefs, t.baseLineage = baseState, baseRefs, lineageID
 	}
 	changes, err := workflow.NewState(changesJSON)
 	if err != nil {
@@ -313,7 +317,10 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 	spawnChanges, _ := workflow.NewState(spawnChangesJSON)
 	// FLATTEN: final_state is a flow-boundary value, so everything the spawn carried by reference is materialized
 	// here - unlike the fan-in, which may pass a carried ref through. resolveStateRefs mutates the map in place.
-	_, err = e.resolveStateRefs(ctx, db, shardNum, spawnState, staterefs.Parse(spawnRefsJSON), nil, workflowURL)
+	spawnRefs, err := staterefs.Parse(spawnRefsJSON)
+	if err == nil {
+		_, err = e.resolveStateRefs(ctx, db, shardNum, spawnState, spawnRefs, nil, workflowURL)
+	}
 	if err != nil {
 		return workflow.State{}, errors.Trace(err)
 	}

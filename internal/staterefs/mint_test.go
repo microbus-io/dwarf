@@ -34,6 +34,15 @@ func mustState(m map[string]any) workflow.State {
 	return s
 }
 
+// mustParse decodes a refs column a test just minted, which must always be readable.
+func mustParse(refsJSON []byte) Refs {
+	refs, err := Parse(refsJSON)
+	if err != nil {
+		panic(err)
+	}
+	return refs
+}
+
 func blob(n int) string {
 	return strings.Repeat("x", n)
 }
@@ -113,7 +122,7 @@ func TestLinker_MintTiers(t *testing.T) {
 		assert.NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)
-		return stored, Parse(refsJSON)
+		return stored, mustParse(refsJSON)
 	}
 
 	t.Run("linear_below_threshold_is_inlined", func(t *testing.T) {
@@ -220,7 +229,7 @@ func TestLinker_MintTiers(t *testing.T) {
 		assert.NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)
-		refs := Parse(refsJSON)
+		refs := mustParse(refsJSON)
 		assert.NotContains(refs, "item", "an inline-only field is never ref'd, however large")
 		assert.True(stored.Has("item"))
 		assert.Equal(anchor, refs["doc"].Anchor, "its neighbours still ref normally")
@@ -246,7 +255,7 @@ func TestLinker_MintTiers(t *testing.T) {
 		assert.NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)
-		refs := Parse(refsJSON)
+		refs := mustParse(refsJSON)
 		assert.Equal(anchor, refs["items"].Anchor, "the forEach source array must be ref'd at width 64")
 		assert.False(stored.Has("items"), "one stored copy on the spawn row, not one per branch")
 		// The synthesized per-branch bookkeeping is still never ref'd - its bytes are in no step row.

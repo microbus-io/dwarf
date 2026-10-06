@@ -335,16 +335,22 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// exist. The refs the step inherited are kept, because minting the successors' state needs to know which
 	// fields arrived as refs (and so must be carried, never re-anchored against this step). resolveStateRefs
 	// mutates the state map in place, so it gets the live backing map.
-	inheritedRefs := staterefs.Parse(stateRefsJSON)
-	// A turn of its own, and only when this step actually carries a ref: resolving reads anchor rows, but
-	// with nothing to resolve it touches no connection, so a step with no refs must not queue for a turn it
-	// would not use. Most steps carry none.
-	var refsPass turnstile.Pass
-	if len(inheritedRefs) > 0 {
-		refsPass = turnstile.WaitTurn(ctx)
+	//
+	// Refs this replica cannot read fail the step, like a ref it cannot resolve: running the task without the
+	// fields they point at would lose them silently.
+	inheritedRefs, err := staterefs.Parse(stateRefsJSON)
+	var refBytes int
+	if err == nil {
+		// A turn of its own, and only when this step actually carries a ref: resolving reads anchor rows, but
+		// with nothing to resolve it touches no connection, so a step with no refs must not queue for a turn it
+		// would not use. Most steps carry none.
+		var refsPass turnstile.Pass
+		if len(inheritedRefs) > 0 {
+			refsPass = turnstile.WaitTurn(ctx)
+		}
+		refBytes, err = e.resolveStateRefs(ctx, db, shardNum, state, inheritedRefs, nil, workflowURL)
+		refsPass.Return()
 	}
-	refBytes, err := e.resolveStateRefs(ctx, db, shardNum, state, inheritedRefs, nil, workflowURL)
-	refsPass.Return()
 	if err != nil {
 		// Its own turn, for the reason above: still the entry phase, so nothing covers this transaction.
 		fctx, doneTurn := e.dbTurn(ctx, shardNum)
@@ -1806,8 +1812,11 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		// Resolve only what the reducers actually fold; a merely-carried ref rides through the (empty) cohort
 		// untouched, still pointing at its original anchor - see resolveReducedRefs. resolveReducedRefs mutates
 		// the state map in place, so it gets the live map.
-		ourRefs := staterefs.Parse(ourRefsJSON)
-		rerr := e.resolveReducedRefs(ctx, tx, shardNum, ourState, ourRefs, graph.Reducers(), workflowURL)
+		ourRefs, rerr := staterefs.Parse(ourRefsJSON)
+		if rerr != nil {
+			return errors.Trace(rerr)
+		}
+		rerr = e.resolveReducedRefs(ctx, tx, shardNum, ourState, ourRefs, graph.Reducers(), workflowURL)
 		if rerr != nil {
 			return errors.Trace(rerr)
 		}
@@ -1951,7 +1960,10 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 	// original anchor: resolving it here would materialize the payload and re-anchor it at EVERY fan-in,
 	// giving back the win in exactly the fan-out graphs this design exists for. resolveReducedRefs mutates
 	// the state map in place, so it gets the live map.
-	spawnRefs := staterefs.Parse(c.spawnRefsJSON)
+	spawnRefs, err := staterefs.Parse(c.spawnRefsJSON)
+	if err != nil {
+		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(err)
+	}
 	err = e.resolveReducedRefs(ctx, tx, shardNum, spawnState, spawnRefs, graph.Reducers(), workflowURL)
 	if err != nil {
 		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(err)

@@ -88,7 +88,11 @@ func anchorLoader(db sequel.Executor, readBytes *int) staterefs.Loader {
 				return nil, errors.Trace(err)
 			}
 			*readBytes += len(stateJSON) + len(changesJSON)
-			anchor := staterefs.Anchor{Refs: staterefs.Parse(refsJSON)}
+			refs, err := staterefs.Parse(refsJSON)
+			if err != nil {
+				return nil, errors.Trace(err)
+			}
+			anchor := staterefs.Anchor{Refs: refs}
 			json.Unmarshal(stateJSON, &anchor.State)
 			json.Unmarshal(changesJSON, &anchor.Changes)
 			fetched[anchorID] = anchor
@@ -131,8 +135,12 @@ func (e *Engine) resolveReducedRefs(ctx context.Context, tx sequel.Executor, sha
 // the flatten used where a state snapshot must stand on its own, detached from the anchors that backed it
 // (Fork's leaf step, whose anchor ids are about to be remapped into a different flow).
 func (e *Engine) resolvedStepState(ctx context.Context, db sequel.Executor, shardNum int, stateJSON, refsJSON []byte, workflowURL string) ([]byte, error) {
+	refs, err := staterefs.Parse(refsJSON)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
 	var readBytes int
-	resolved, err := e.linkerFor(shardNum).Flatten(ctx, stateJSON, staterefs.Parse(refsJSON), anchorLoader(db, &readBytes))
+	resolved, err := e.linkerFor(shardNum).Flatten(ctx, stateJSON, refs, anchorLoader(db, &readBytes))
 	if readBytes > 0 {
 		e.metricStateReadBytes(ctx, workflowURL, "state_ref", readBytes)
 	}

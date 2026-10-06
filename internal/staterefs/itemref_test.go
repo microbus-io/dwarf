@@ -38,8 +38,8 @@ func TestRef_WireFormat(t *testing.T) {
 	assert.Equal(`{"item":"1234 theArray[5]","theArray":1234}`, string(data))
 
 	// Both spellings read back, and a column written with plain refs only parses unchanged.
-	assert.Equal(Refs{"theArray": {Anchor: 1234}, "item": {Anchor: 1234, Field: "theArray", Path: []int{5}}}, Parse(data))
-	assert.Equal(Refs{"doc": {Anchor: 7}}, Parse([]byte(`{"doc":7}`)))
+	assert.Equal(Refs{"theArray": {Anchor: 1234}, "item": {Anchor: 1234, Field: "theArray", Path: []int{5}}}, mustParse(data))
+	assert.Equal(Refs{"doc": {Anchor: 7}}, mustParse([]byte(`{"doc":7}`)))
 
 	// The format holds any depth of index path, so a deeper ref never needs a new spelling.
 	var deep Ref
@@ -48,6 +48,17 @@ func TestRef_WireFormat(t *testing.T) {
 	again, err := json.Marshal(deep)
 	assert.NoError(err)
 	assert.Equal(`"9 data[3][0][12]"`, string(again))
+
+	// A column this version cannot read is an error, never "no refs": the fields it points at would be lost.
+	for _, col := range []string{`{"item":"x"}`, `{"doc":true}`, `[1]`, `{`} {
+		_, err := Parse([]byte(col))
+		assert.Error(err, col)
+	}
+	for _, empty := range []string{``, ` `, `{}`} {
+		refs, err := Parse([]byte(empty))
+		assert.NoError(err)
+		assert.Nil(refs)
+	}
 
 	for _, bad := range []string{`""`, `"data[1]"`, `"x data[1]"`, `"0 data[1]"`, `"9 [1]"`, `"9 data[1"`, `"9 data[-1]"`, `"9 data[1]x"`, `"9 data[]"`, `true`} {
 		var r Ref
@@ -78,7 +89,7 @@ func TestLinker_MintItem(t *testing.T) {
 		testarossa.For(t).NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)
-		return stored, Parse(refsJSON)
+		return stored, mustParse(refsJSON)
 	}
 
 	t.Run("array_anchored_here", func(t *testing.T) {
@@ -118,7 +129,7 @@ func TestLinker_MintItem(t *testing.T) {
 		merged := mustState(map[string]any{"items": few, "item": few[1]})
 		stateJSON, refsJSON, err := New("sqlite").Mint(merged, mustState(map[string]any{}), nil, anchor, 2, nil, &Item{Key: "item", Source: "items", Index: 1})
 		assert.NoError(err)
-		refs := Parse(refsJSON)
+		refs := mustParse(refsJSON)
 		assert.NotContains(refs, "items")
 		assert.NotContains(refs, "item")
 		var stored workflow.State

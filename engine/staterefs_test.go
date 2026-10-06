@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -46,7 +47,9 @@ func stepRefsOf(t *testing.T, e *Engine, stepID int) (state workflow.State, refs
 	).Scan(&stateJSON, &refsJSON)
 	assert.NoError(err)
 	state, _ = workflow.NewState(stateJSON)
-	return state, staterefs.Parse(refsJSON), len(stateJSON)
+	refs, err = staterefs.Parse(refsJSON)
+	assert.NoError(err)
+	return state, refs, len(stateJSON)
 }
 
 // stepIDsByTask maps each task name to its step ids, in step order.
@@ -338,4 +341,34 @@ func TestStateRefs_SpawnCombinedFieldIsNotAnchored(t *testing.T) {
 func newState() workflow.State {
 	s, _ := workflow.NewState()
 	return s
+}
+
+// TestStateRefs_UnreadableRefsFailTheStep pins the reader's posture toward a refs column it cannot decode - a
+// bug-state row, or one a newer version wrote in a format this one does not know. The step fails with an
+// error naming the cause; running it without the fields the column points at would lose them silently.
+func TestStateRefs_UnreadableRefsFailTheStep(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	mux := NewHostMux()
+	registerGate(mux, "badrefs")
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+
+	fk := createInterruptedFlow(t, e, "badrefs/g")
+	shard, flowID, _, err := keys.ParseFlowKey(fk)
+	assert.NoError(err)
+	db, err := e.db.Shard(shard)
+	assert.NoError(err)
+	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET state_refs=? WHERE flow_id=?", []byte(`{"doc":{"v":9}}`), flowID)
+	assert.NoError(err)
+
+	assert.NoError(e.Resume(ctx, fk, nil))
+	out, err := e.Await(ctx, fk)
+	assert.NoError(err)
+	assert.Equal(workflow.StatusFailed, out.Status)
+	assert.Contains(out.Error, "unreadable state refs")
 }

@@ -29,12 +29,13 @@ input for large elements, `D/(1+D)` for mid-size ones. Task outputs (`changes`) 
   column with no item refs is readable by a reader that knows only plain refs. The string form holds an index
   path of any depth (`"9 data[3][0]"`). Field names cannot hold `[` (`Graph.Validate`'s `isFieldName`), which is
   what makes the front-to-back parse unambiguous.
-- **A reader that does not know a refs spelling loses the WHOLE column, silently.** `Parse` degrades a column it
-  cannot decode to *no refs*, so a replica that predates item refs, meeting one string value, drops every ref on
-  that step - the array included - and runs the task with those fields missing; its next mint makes the loss
-  permanent. Any change to what the refs column can hold therefore needs every replica upgraded together (a
-  maintenance window, said so in the release notes) until readers refuse an unknown spelling instead of
-  degrading.
+- **A refs column the reader cannot decode is an error, never "no refs".** `Parse` returns one, and dispatch
+  fails the step with it (the same path as a ref it cannot resolve). Degrading to no refs instead runs the task
+  with every field the column points at missing, and the next mint makes that loss permanent - silent data loss.
+  That is exactly what a replica predating item refs does on meeting one (its `Parse` degraded), so a release
+  that changes what the refs column can hold needs every replica upgraded together - a maintenance window, said
+  so in the release notes. From this version on, a mixed fleet fails steps loudly rather than losing fields.
+  Pinned by `TestStateRefs_UnreadableRefsFailTheStep`.
 - **The item ref is minted INSIDE `Mint`** (`mintItem`), after the array's own fate is decided, because it
   points at whichever anchor holds the array's bytes - carried from an earlier step, or opened here. Pointing at
   a step that merely carries a ref to the array would dangle (the one-hop rule). If the array stays inline, so
@@ -42,6 +43,10 @@ input for large elements, `D/(1+D)` for mid-size ones. Task outputs (`changes`) 
   item ref `"A data[x]"` (an inner forEach over the outer element) gives `"A data[x][y]"` - so every level of a
   nested array fanned out level by level points into the one anchor holding the whole thing. The new path is a
   clone: appending onto the source ref's slice could write into another ref's backing array.
+- **An item ref names its own anchor; do not derive it from the array's ref.** Looking `A` up from the
+  sibling `"pages": A` entry at resolve time would save a few bytes and make the item dangle the moment that
+  entry goes away - a later step rewrites or deletes `pages`, or the cap inlines it - while the element's
+  bytes are still sitting at `A`. The redundancy is what keeps each item ref a self-contained one-hop pointer.
 - **The size bar is flat (`minItem`), not width-scaled.** Each element appears in exactly one branch, so there
   is nothing to amortize over N; the array as a whole already got the `budget/N` treatment.
 - **It is free on the read side.** The anchor is the one the branch already fetches for the array, so it adds

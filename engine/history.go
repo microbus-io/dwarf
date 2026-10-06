@@ -235,7 +235,11 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	// Materialize the step's carried-by-reference fields: the ref encoding is internal storage, never an
 	// API-visible one, so Step reports the input the task actually saw (the ref encoding is internal storage, never API-visible). resolveStateRefs
 	// mutates the state map in place.
-	if _, err = e.resolveStateRefs(ctx, db, shardNum, fs.State, staterefs.Parse(stateRefsJSON), nil, ""); err != nil {
+	refs, err := staterefs.Parse(stateRefsJSON)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	if _, err = e.resolveStateRefs(ctx, db, shardNum, fs.State, refs, nil, ""); err != nil {
 		return nil, errors.Trace(err)
 	}
 	fs.Changes, err = workflow.NewState(changesJSON)
