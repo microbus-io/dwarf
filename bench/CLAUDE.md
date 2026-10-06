@@ -321,6 +321,13 @@ heap** and the crew is mostly stacks.
 
 ## Reading an artifact
 
+- **`results[].db` is what the database stored and logged over the window** - table + index + TOAST growth
+  and `pg_stat_wal` bytes (PostgreSQL 14+, cluster-wide, so only meaningful on an instance nothing else
+  writes to). Divided by the task-declared bytes behind MB/s it is the amplification. Expect `final_state`
+  to hold a second copy of any large field that survives to the end of the flow: a flow-boundary value is
+  always flattened.
+- **Open-loop latency is sampled across all creators**, ~16 flows/s at a commanded rate. A per-creator
+  sample count recorded nothing at all on slow (payload-heavy) arms with many creators.
 - **Counters carry attributes** as `name|k=v` alongside the bare-name total. Both are emitted: the total is
   what a throughput number reads off, the split is the only thing that shows one shard falling behind.
 - **Gauges every replica reports identically are MAXed, not summed** (`agreementGauges`) — cluster-wide
@@ -344,7 +351,11 @@ heap** and the crew is mostly stacks.
 
 ## Flags worth knowing
 
-`-open-loop -arrival-rate N -max-outstanding M` (commanded rate + backpressure bound), `-replica-workers`
+`-payload P` (fresh incompressible bytes per `linear`/`fanout` task, the element size of `scatter`; 0 = none
+for those three, 64 KB for `state`/`carry`), `-workload scatter -branch-depth D` (the doc -> pages shape that
+item refs change; each branch checks its element arrived whole), `-volume-probe D` (a saturated and a 2/3
+window at each `-volume` checkpoint, the backlog drained between them), `-print-pool RTT` (the pool the engine
+derives for `-vcpus` at that RTT, for a script to pin), `-open-loop -arrival-rate N -max-outstanding M` (commanded rate + backpressure bound), `-replica-workers`
 (per-replica worker counts; `0` = await-only, `1` = capacity-crippled and grow-on-demand disabled),
 `-linear-steps` (chain depth — under partitioning, depth changes the share of FLOWS a slow replica blocks
 without changing the share of STEPS), `-refill-interval-ms` (pin the cycle period; **mandatory** in any
@@ -352,6 +363,11 @@ ladder that varies replica count, since the derived interval is a function of R 
 masquerade as a partitioning cost), `-fairness-keys`, `-vcpus`, `-max-open-conns`, `-task-burst`/`-task-quiet` (alternate the exec term within a
 run — the only way to see the crew shrink), `-stats-interval` (periodic readout), `-pprof` (CPU + heap
 profiles).
+
+`bench/gcp/cell.sh` drives one cell of a tier x RTT grid end to end - peak at the derived pool, a pool sweep
+at 2/3 of it, a confirming peak when the sweep moves the pool - and writes `cell.json` beside the artifacts;
+`bench/charts_redo.py` charts a tree of cells and `-volume` artifacts. Run `dbcpu.sh` with `WRITE=1` first so
+the artifacts carry database CPU.
 
 Test-only knobs the bench CANNOT reach: the engine's seams are enabled only under `testing.Testing()`, so
 arming one from `internal/engineseams` in a bench binary does nothing, and fault injection and `sequel`'s

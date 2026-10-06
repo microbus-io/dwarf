@@ -76,8 +76,8 @@ func main() {
 func run() error {
 	var (
 		dsns         shardFlags
-		workloadName = flag.String("workload", "linear", "workload: linear, fanout, state, carry, carryfanout, llm, mixed")
-		payload      = flag.Int("payload", 64*1024, "payload size in bytes - rewritten every step by `state`, written once and then carried by `carry`/`carryfanout`")
+		workloadName = flag.String("workload", "linear", "workload: linear, fanout, scatter, state, carry, carryfanout, llm, mixed")
+		payload      = flag.Int("payload", 0, "payload size in bytes: fresh bytes written by every `linear`/`fanout` task, the size of each `scatter` element, rewritten every step by `state`, written once and then carried by `carry`/`carryfanout`. 0 = no payload for linear/fanout/scatter, 64KB for state/carry")
 		taskDelay    = flag.Duration("task-delay", 0, "per-task sleep simulating remote executor latency (the exec term)")
 		taskBurst    = flag.Duration("task-burst", 0, "bursty profile: apply -task-delay for this long, then drop it to zero for -task-quiet, repeating. 0 (with -task-quiet) keeps -task-delay constant for the whole run. A constant delay cannot see a crew that only shrinks once load FALLS - see taskProfile")
 		taskQuiet    = flag.Duration("task-quiet", 0, "bursty profile: the quiet half of the cycle, during which tasks do not sleep. Flows keep arriving at the same rate, so only the exec term moves")
@@ -111,13 +111,24 @@ func run() error {
 		replicaWorkers  = flag.String("replica-workers", "", "comma-separated per-replica worker counts overriding -workers (e.g. '0,4' = replica 1 awaits only)")
 		volume          = flag.Int("volume", 0, "volume mode: fill to this many dwarf_steps rows with NO deletion, probing the read paths at checkpoints, then measure Purge/reaper throughput (0 = disabled)")
 		volumeCheckpt   = flag.Int("volume-checkpoint", 0, "probe every this many step rows during -volume (0 = one fifth of the target)")
+		printPool       = flag.Float64("print-pool", 0, "print the pool the engine derives for one shard of -vcpus at this round-trip time in ms, and exit - what a driver script pins with -max-open-conns, so every arm runs the pool that ships")
+		volumeProbe     = flag.Duration("volume-probe", 0, "-volume only: at each checkpoint (and on the empty database first), pause the fill for an open-loop saturated window of this length and then one at 2/3 of its flows/s, at the pinned pool (0 = no throughput probe)")
 		fairnessKeys    = flag.Int("fairness-keys", 1, "spread flows across this many distinct fairness keys (1 = all on the single default key, the degenerate case for the refiller's per-key scan bound)")
 		linearStepsFlag = flag.Int("linear-steps", linearSteps, "linear workload chain length; sweeping it separates a slow replica's share of STEPS from its share of FLOWS (see workloads.go)")
-		fanOutWidth     = flag.Int("fanout-width", 16, "forEach branch count for the fanout and carryfanout workloads - the knob that decouples pending-step backlog from submitter concurrency (backlog ~= concurrency x width)")
+		fanOutWidth     = flag.Int("fanout-width", 16, "forEach branch count for the fanout, scatter and carryfanout workloads - the knob that decouples pending-step backlog from submitter concurrency (backlog ~= concurrency x width)")
+		branchDepth     = flag.Int("branch-depth", 1, "scatter workload: steps per branch (1 or 2 in the cloud plan); at depth > 1 an element below the linear ref bar used to be copied at every branch step")
 		carryRead       = flag.Bool("carry-read", false, "carry workloads: make every task READ the carried document instead of only passing it along. Storage is identical either way, so this is the arm switch for how carried state is HELD, not how much is stored")
 	)
 	flag.Var(&dsns, "dsn", "shard DSN, repeatable; 'N=dsn' sets shard N, a bare dsn sets shard 1 (default: throwaway local SQLite)")
 	flag.Parse()
+	if *printPool > 0 {
+		v := *vcpus
+		if v <= 0 {
+			return fmt.Errorf("-print-pool needs -vcpus")
+		}
+		fmt.Println(engineseams.ShardBudget(v, *printPool))
+		return nil
+	}
 
 	// The CPU profile spans the WHOLE run, so an attribution run passes one -concurrency value; see
 	// startProfiling. Started before anything else so engine startup and migrations are in it too - they
@@ -182,7 +193,7 @@ func run() error {
 		taskJitter:   *taskJitter,
 		bytesWritten: sharedBytes,
 	}
-	workloads := registerWorkloads(regHost, *payload, *fanOutWidth, *linearStepsFlag, *carryRead)
+	workloads := registerWorkloads(regHost, *payload, *fanOutWidth, *linearStepsFlag, *branchDepth, *carryRead)
 	pick, err := chooseWorkload(workloads, *workloadName)
 	if err != nil {
 		return err
@@ -286,6 +297,7 @@ func run() error {
 			// The workload's own shape knobs. Without them a -fanout-width or -linear-steps sweep produces
 			// artifacts that are byte-identical in configuration and wildly different in what they measured.
 			"fanOutWidth":    *fanOutWidth,
+			"branchDepth":    *branchDepth,
 			"linearSteps":    *linearStepsFlag,
 			"carryRead":      *carryRead,
 			"workers":        *workers,
@@ -310,7 +322,14 @@ func run() error {
 		art.Config["volumeCheckpointRows"] = every
 		fmt.Printf("volume: filling to %d step rows at concurrency %d across %d replica(s), probing every %d rows\n",
 			*volume, ks[0], *replicas, every)
-		report := runVolume(ctx, engines, dbs, pick, ks[0], *volume, every)
+		var probe func(rate int) stepResult
+		if *volumeProbe > 0 {
+			art.Config["volumeProbeSec"] = volumeProbe.Seconds()
+			probe = func(rate int) stepResult {
+				return runStepOpenLoop(ctx, engines, readers, pgss, waits, dbs, sharedBytes, pick, ks[0], *fairnessKeys, *maxOutstanding, rate, *warmup, *volumeProbe, 0)
+			}
+		}
+		report := runVolume(ctx, engines, dbs, pick, ks[0], *volume, every, probe)
 		art.Volume = report
 		if report.Errors != 0 {
 			art.Valid = false
@@ -339,9 +358,9 @@ func run() error {
 		for _, k := range ks {
 			var res stepResult
 			if *openLoop {
-				res = runStepOpenLoop(ctx, engines, readers, pgss, waits, sharedBytes, pick, k, *fairnessKeys, *maxOutstanding, *arrivalRate, *warmup, *window, *arrivalStop)
+				res = runStepOpenLoop(ctx, engines, readers, pgss, waits, dbs, sharedBytes, pick, k, *fairnessKeys, *maxOutstanding, *arrivalRate, *warmup, *window, *arrivalStop)
 			} else {
-				res = runStep(ctx, engines, readers, pgss, waits, sharedBytes, pick, k, *fairnessKeys, *warmup, *window)
+				res = runStep(ctx, engines, readers, pgss, waits, dbs, sharedBytes, pick, k, *fairnessKeys, *warmup, *window)
 			}
 			art.Results = append(art.Results, res)
 			fmt.Printf("%-6d %10.1f %10.1f %10.2f %8.1f %8.1f %8.1f %7.2f %7.1f %9.0f %8.1f %8.1f %7d\n",

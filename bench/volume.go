@@ -40,6 +40,11 @@ import (
 //   - List first/deep     - keyset (cursor) pagination. First-page ~= deep-page is the proof it is a
 //     seek per page, not a growing scan; a rising deep-page cost would mean OFFSET-like behavior.
 //   - disk MB             - the "append-only terminal sections" fragmentation claim against a real B-tree.
+//   - throughput (with -volume-probe) - the fill pauses at each checkpoint, including the empty database at
+//     the start, for an open-loop SATURATED window and then one at 2/3 of the flows/s it measured, both at
+//     the pinned pool. That is the question an operator asks of a mature database - what does it serve now,
+//     and how does latency look at a normal operating point - which the fill rate alone cannot answer: a
+//     closed-loop fill measures its own concurrency, not the database's ceiling.
 //
 // The finish measures retention at size: how fast Purge MARKS roots, and then how fast the reaper
 // actually DELETES the rows it marked (the two are separate - Purge stamps delete_after_ms, the reaper
@@ -57,6 +62,9 @@ type volumeCheckpoint struct {
 	ListPagesWalked int     `json:"listPagesWalked"`
 	StepsDiskMB     float64 `json:"stepsDiskMB"`
 	FlowsDiskMB     float64 `json:"flowsDiskMB"`
+	// Saturated and TwoThirds are the -volume-probe windows taken at this checkpoint, nil without it.
+	Saturated *stepResult `json:"saturated,omitempty"`
+	TwoThirds *stepResult `json:"twoThirds,omitempty"`
 }
 
 // volumeReport is the volume run's artifact section.
@@ -75,8 +83,12 @@ type volumeReport struct {
 }
 
 // runVolume fills to targetSteps rows, probing every checkpointEvery rows, then measures retention.
+//
+// probe, when non-nil, runs one open-loop measurement window at a commanded flow rate (0 = flat out); the
+// fill is paused around it, so the probe measures the database at its current size and not a fill and a
+// probe competing for it.
 func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSampler, pick func() *workload,
-	k, targetSteps, checkpointEvery int) *volumeReport {
+	k, targetSteps, checkpointEvery int, probe func(rate int) stepResult) *volumeReport {
 
 	var (
 		stop       atomic.Bool
@@ -87,27 +99,69 @@ func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSample
 	)
 	recentKey.Store("")
 
-	for i := range k {
-		eng := engines[i%len(engines)]
-		submitters.Go(func() {
-			for !stop.Load() {
-				w := pick()
-				// No FlowOptions: nothing is marked for deletion, so rows accumulate - that is the point.
-				key, out, err := eng.Run(ctx, w.graphURL, w.initialState(), nil)
-				if err != nil || out.Status != workflow.StatusCompleted {
-					errCount.Add(1)
-					continue
+	fill := func() {
+		stop.Store(false)
+		for i := range k {
+			eng := engines[i%len(engines)]
+			submitters.Go(func() {
+				for !stop.Load() {
+					w := pick()
+					// No FlowOptions: nothing is marked for deletion, so rows accumulate - that is the point.
+					key, out, err := eng.Run(ctx, w.graphURL, w.initialState(), nil)
+					if err != nil || out.Status != workflow.StatusCompleted {
+						errCount.Add(1)
+						continue
+					}
+					flows.Add(1)
+					if flows.Load()%64 == 0 {
+						recentKey.Store(key)
+					}
 				}
-				flows.Add(1)
-				if flows.Load()%64 == 0 {
-					recentKey.Store(key)
-				}
-			}
-		})
+			})
+		}
+	}
+	pause := func() {
+		stop.Store(true)
+		submitters.Wait()
+	}
+	// probeThroughput takes the saturated window, then the 2/3 one at the rate the first measured.
+	probeThroughput := func(cp *volumeCheckpoint) {
+		if probe == nil {
+			return
+		}
+		sat := probe(0)
+		cp.Saturated = &sat
+		// A saturated window ends with a backlog of created-but-unfinished flows, which would otherwise drain
+		// into the next window and be counted as its throughput. The fill resumes on a drained database for
+		// the same reason.
+		drainRunning(ctx, engines[0])
+		rate := int(sat.FlowsPerSec * 2 / 3)
+		if rate > 0 {
+			twoThirds := probe(rate)
+			cp.TwoThirds = &twoThirds
+			drainRunning(ctx, engines[0])
+		}
+		errCount.Add(int64(cp.Saturated.Errors))
+		if cp.TwoThirds != nil {
+			errCount.Add(int64(cp.TwoThirds.Errors))
+		}
+		fmt.Printf("probe at %d step rows: saturated %.0f steps/s (p99 %.0fms)", cp.StepRows, sat.StepsPerSec, sat.P99ms)
+		if cp.TwoThirds != nil {
+			fmt.Printf(", 2/3 %.0f steps/s (p50 %.0fms, p99 %.0fms)", cp.TwoThirds.StepsPerSec, cp.TwoThirds.P50ms, cp.TwoThirds.P99ms)
+		}
+		fmt.Println()
 	}
 
 	report := &volumeReport{TargetStepRows: targetSteps, Concurrency: k}
 	start := time.Now()
+	if probe != nil {
+		// The empty-database baseline every later checkpoint is read against.
+		steps, flowRows := rowCounts(ctx, engines[0])
+		cp := volumeCheckpoint{StepRows: steps, FlowRows: flowRows}
+		probeThroughput(&cp)
+		report.Checkpoints = append(report.Checkpoints, cp)
+	}
+	fill()
 	fmt.Printf("%-7s %11s %10s %12s %10s %10s %10s %9s %9s\n",
 		"t(s)", "stepRows", "flowRows", "fillSteps/s", "histMs", "listMs", "listDeepMs", "stepsMB", "flowsMB")
 
@@ -132,10 +186,21 @@ func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSample
 		st := dbs.sample(ctx)
 		cp.StepsDiskMB = float64(st.StepsBytes) / (1 << 20)
 		cp.FlowsDiskMB = float64(st.FlowsBytes) / (1 << 20)
-		report.Checkpoints = append(report.Checkpoints, cp)
 		fmt.Printf("%-7.0f %11d %10d %12.0f %10.1f %10.1f %10.1f %9.1f %9.1f\n",
 			cp.TSec, cp.StepRows, cp.FlowRows, cp.FillStepsPerSec,
 			cp.HistoryMs, cp.ListFirstMs, cp.ListDeepMs, cp.StepsDiskMB, cp.FlowsDiskMB)
+		if probe != nil {
+			pause()
+			probeThroughput(&cp)
+			if steps < targetSteps {
+				fill()
+			}
+			// The probe windows add rows too (they count toward the fill, as the plan expects), but the fill
+			// rate to the NEXT checkpoint must not be charged with the probe's time or rows.
+			steps, _ = rowCounts(ctx, engines[0])
+			now = time.Now()
+		}
+		report.Checkpoints = append(report.Checkpoints, cp)
 
 		lastRows, lastT = steps, now
 		for next <= steps {
@@ -146,8 +211,7 @@ func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSample
 		}
 	}
 
-	stop.Store(true)
-	submitters.Wait()
+	pause()
 	report.DurationSec = time.Since(start).Seconds()
 	report.FlowsSubmitted = flows.Load()
 	report.Errors = errCount.Load()
@@ -192,6 +256,23 @@ func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSample
 	fmt.Printf("reaper: deleted %d rows in %.0fs (%.0f rows/s)\n",
 		report.ReapedRows, report.ReapSec, report.ReapRowsPerSec)
 	return report
+}
+
+// drainRunning waits until no flow is running, polling List, so a window opens on a database with no
+// backlog left over from the one before. It gives up after ten minutes rather than hang a campaign; a
+// backlog that does not drain in that time is itself the finding, and the next window's numbers show it.
+func drainRunning(ctx context.Context, eng *engine.Engine) {
+	deadline := time.Now().Add(10 * time.Minute)
+	for time.Now().Before(deadline) {
+		lctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		running, _, err := eng.List(lctx, workflow.Query{Status: workflow.StatusRunning, Limit: 1})
+		cancel()
+		if err == nil && len(running) == 0 {
+			return
+		}
+		time.Sleep(time.Second)
+	}
+	fmt.Println("drain: flows still running after 10m; the next window opens on a backlog")
 }
 
 // rowCounts sums live step/flow rows across shards via ShardInfo (dialect-agnostic, unlike the catalog

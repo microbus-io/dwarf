@@ -17,7 +17,8 @@
 #   ./dbcpu.sh artifact.json [artifact.json ...]
 #   ./dbcpu.sh -w 2026-07-31T12:00:00Z 2026-07-31T12:05:00Z
 # Knobs (env): PROJECT, DB_INSTANCE, VCPUS (for the cores conversion, default 16),
-#   PAD_SECONDS (widen each side of the window, default 60)
+#   PAD_SECONDS (widen each side of the window, default 60), WRITE (1 = also store the reading in each
+#   artifact as dbCpu {meanPct, peakPct, points}, which bench/charts_redo.py reads)
 set -euo pipefail
 
 PROJECT="${PROJECT:-dwarf-bench-mbus}"
@@ -27,7 +28,7 @@ PAD_SECONDS="${PAD_SECONDS:-60}"
 
 command -v python3 >/dev/null 2>&1 || { echo "ABORT: python3 required" >&2; exit 1; }
 
-fetch() { # $1=start $2=end $3=label
+fetch() { # $1=start $2=end $3=label [$4=artifact to store the reading in, when WRITE=1]
   local token filter
   token="$(gcloud auth print-access-token 2>/dev/null)" || {
     echo "ABORT: not authenticated (gcloud auth login)" >&2; exit 1; }
@@ -37,7 +38,7 @@ fetch() { # $1=start $2=end $3=label
     --data-urlencode "filter=${filter}" \
     --data-urlencode "interval.startTime=$1" \
     --data-urlencode "interval.endTime=$2" |
-  VCPUS="$VCPUS" LABEL="$3" python3 -c '
+  VCPUS="$VCPUS" LABEL="$3" ARTIFACT="${4:-}" WRITE="${WRITE:-}" python3 -c '
 import json,os,sys
 d=json.load(sys.stdin)
 label=os.environ["LABEL"]; v=float(os.environ["VCPUS"])
@@ -50,6 +51,11 @@ if not ts:
 p=[x["value"]["doubleValue"] for x in ts[0]["points"]]
 print(f"{label:28} n={len(p):>3}  mean {100*sum(p)/len(p):>5.1f}%  max {100*max(p):>5.1f}%   "
       f"({v*sum(p)/len(p):>5.2f} / {v*max(p):>5.2f} of {v:.0f} cores)")
+if os.environ.get("WRITE") == "1" and os.environ.get("ARTIFACT"):
+    path = os.environ["ARTIFACT"]
+    j = json.load(open(path))
+    j["dbCpu"] = {"meanPct": 100*sum(p)/len(p), "peakPct": 100*max(p), "points": len(p)}
+    json.dump(j, open(path, "w"), indent=2)
 '
 }
 
@@ -70,5 +76,5 @@ def shift(t,secs):
     return d.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 print(shift(j["startedAt"],-pad), shift(j["endedAt"],pad))
 ' "$f")
-  fetch "$start" "$end" "$(basename "$f" .json)"
+  fetch "$start" "$end" "$(basename "$f" .json)" "$f"
 done

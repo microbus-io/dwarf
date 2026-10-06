@@ -97,6 +97,9 @@ type stepResult struct {
 	// present only on Postgres with the extension preloaded. Server-side clocks: excludes pool wait,
 	// wire time and client scheduling - the other half of the attribution above.
 	PgStatements []pgssRow `json:"pgStatements,omitempty"`
+	// DB is what the database stored (table + index + TOAST growth) and logged (WAL) over the window, the
+	// numerator of the amplification against the task-declared bytes behind MBPerSec. PostgreSQL only.
+	DB *dbDelta `json:"db,omitempty"`
 	// WaitProfile is where the database's active backends spent the window, as a share of observations.
 	// It is what makes a throughput plateau interpretable: PgStatements says which statement was slow,
 	// this says what it was stopped on, and only the second distinguishes a pool short of its knee from
@@ -112,7 +115,7 @@ type stepResult struct {
 // claimed cluster-wide by whichever replica wins the CAS, so execution distributes regardless of which
 // replica a flow was submitted to. The warmup segment is discarded; only flows completing inside the
 // measurement window count. Returns the measured result.
-func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric.ManualReader, pgss *pgssSampler, wait *waitSampler,
+func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric.ManualReader, pgss *pgssSampler, wait *waitSampler, dbs *dbStatsSampler,
 	bytesWritten *atomic.Int64, pick func() *workload, k, fairnessKeys int, warmup, window time.Duration) stepResult {
 
 	// The refiller bounds its scan PER fairness key (ROW_NUMBER partitioned by it). With every flow on
@@ -165,6 +168,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 	gaugesBefore := collectAllGauges(readers)
 	gaugeS := startGaugeSamplerTracing(readers, tracing.every, statsTrace())
 	pgssBefore := pgss.snapshot(ctx)
+	dbBefore := dbs.sample(ctx)
 	waitBefore := wait.snapshot()
 	bytesBefore := bytesWritten.Load()
 	hostBefore := sampleHost()
@@ -179,6 +183,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 	histAfter := collectAllHistograms(readers)
 	gaugesAfter := collectAllGauges(readers)
 	pgssAfter := pgss.snapshot(ctx)
+	dbAfter := dbs.sample(ctx)
 	waitAfter := wait.snapshot()
 	bytesAfter := bytesWritten.Load()
 	stop.Store(true)
@@ -208,6 +213,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 		Gauges:         gauges,
 		GaugesAfter:    gaugesAfter,
 		PgStatements:   pgssDelta(pgssBefore, pgssAfter),
+		DB:             dbs.windowDelta(dbBefore, dbAfter),
 		WaitProfile:    waitDelta(waitBefore, waitAfter),
 		Host:           host,
 	}
@@ -227,7 +233,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 // by a small bounded pool of
 // Await goroutines, not one per flow. arrivalPerSec>0 rate-limits creation (fixed offered load); 0 runs
 // flat-out to saturation (find max throughput vs the scan interval).
-func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric.ManualReader, pgss *pgssSampler, wait *waitSampler,
+func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric.ManualReader, pgss *pgssSampler, wait *waitSampler, dbs *dbStatsSampler,
 	bytesWritten *atomic.Int64, pick func() *workload, creators, fairnessKeys, maxOutstanding, arrivalPerSec int,
 	warmup, window, arrivalStop time.Duration) stepResult {
 
@@ -271,11 +277,19 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 	outstanding := func() int64 { return created.Load() - (ended() - baseEnded) }
 
 	// Sampled completion latency: a bounded pool, cancelled at stop so a still-pending sample never
-	// blocks the drain. One in `sampleEvery` created flows is measured.
+	// blocks the drain. One in `sampleEvery` created flows is measured, counted across ALL creators - a
+	// per-creator count samples nothing at all when each creator makes fewer than sampleEvery flows in the
+	// window, which is exactly the slow, payload-heavy arm whose latency is the point. At a commanded rate
+	// the stride targets ~16 samples/s, so a 10-minute window holds thousands at any rate; flat out keeps 1
+	// in 64. The pool bound is what keeps sampling from storming the database either way.
 	awaitCtx, cancelAwaits := context.WithCancel(ctx)
 	defer cancelAwaits()
 	sampleSem := make(chan struct{}, 256)
-	const sampleEvery = 64
+	sampleEvery := int64(64)
+	if arrivalPerSec > 0 {
+		sampleEvery = max(1, int64(arrivalPerSec)/16)
+	}
+	var sampled atomic.Int64
 
 	var arrival <-chan time.Time
 	if arrivalPerSec > 0 {
@@ -287,7 +301,6 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 	for i := range creators {
 		eng := engines[i%len(engines)]
 		creatorsWG.Go(func() {
-			var n int64
 			for !stop.Load() && !halted.Load() {
 				if outstanding() >= int64(maxOutstanding) {
 					time.Sleep(time.Millisecond) // backpressure: let completions drain the backlog
@@ -327,8 +340,7 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 					latMu.Unlock()
 				}
 				// Sample end-to-end latency on 1-in-sampleEvery, bounded so it cannot storm the DB.
-				n++
-				if n%sampleEvery == 0 {
+				if sampled.Add(1)%sampleEvery == 0 {
 					select {
 					case sampleSem <- struct{}{}:
 						awaitWG.Go(func() {
@@ -353,6 +365,7 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 	gaugesBefore := collectAllGauges(readers)
 	gaugeS := startGaugeSamplerTracing(readers, tracing.every, statsTrace())
 	pgssBefore := pgss.snapshot(ctx)
+	dbBefore := dbs.sample(ctx)
 	waitBefore := wait.snapshot()
 	bytesBefore := bytesWritten.Load()
 	hostBefore := sampleHost()
@@ -373,6 +386,7 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 	histAfter := collectAllHistograms(readers)
 	gaugesAfter := collectAllGauges(readers)
 	pgssAfter := pgss.snapshot(ctx)
+	dbAfter := dbs.sample(ctx)
 	waitAfter := wait.snapshot()
 	bytesAfter := bytesWritten.Load()
 	stop.Store(true)
@@ -408,6 +422,7 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 		Gauges:         gauges,
 		GaugesAfter:    gaugesAfter,
 		PgStatements:   pgssDelta(pgssBefore, pgssAfter),
+		DB:             dbs.windowDelta(dbBefore, dbAfter),
 		WaitProfile:    waitDelta(waitBefore, waitAfter),
 		Host:           host,
 	}

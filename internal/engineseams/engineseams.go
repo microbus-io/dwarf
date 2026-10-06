@@ -18,7 +18,7 @@ limitations under the License.
 // engine: the names of the engine's fault-injection, checkpoint and recorded-variable seams, Join for their
 // targeted forms, DB and Seams, which reach a running engine's shard set and seam registry, and
 // SetMaxOpenConns and SetRefillInterval, the test and benchmark overrides of the pool size and the refill
-// cycle period.
+// cycle period, and ShardBudget, the pool the engine derives for a shard.
 //
 // The engine fires these seams from its own production code and consults one seamster.Seamster per engine,
 // enabled only under testing.Testing(); the mechanism (arming, scoping, Wait/Break/Resume) is the seamster
@@ -54,6 +54,11 @@ var SetMaxOpenConns func(eng any, n int) error
 // SetRefillInterval pins every shard's refill cycle period to d on a running or configured engine, for a
 // benchmark sweep to hold the period at fixed values; d <= 0 restores the derived period.
 var SetRefillInterval func(eng any, d time.Duration) error
+
+// ShardBudget is the connection budget the engine derives for one shard of vcpus virtual CPUs at rttMs of
+// round-trip time - the pool a lone replica opens. A benchmark computes it ahead of a run to pin exactly the
+// pool that ships, since the engine's own Startup probe can land either side of an RTT bucket edge.
+var ShardBudget func(vcpus int, rttMs float64) int
 
 // Join builds the targeted form of a seam name: the base name, then the entity it targets, joined with ":".
 // A consult site and the test that arms it both call it, so neither can spell the join the other does not -

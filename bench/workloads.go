@@ -41,12 +41,47 @@ const (
 	// D=10. A replica that is slow rather than dead therefore blocks a share of FLOWS that rises with
 	// depth, while blocking a share of STEPS that does not. Sweeping this is how the two are told apart.
 	linearSteps = 10
+	// defaultStatePayload is what `state` and `carry` write when -payload is 0. Those two exist to move a
+	// payload, so 0 cannot mean "none" for them the way it does for linear, fanout and scatter.
+	defaultStatePayload = 64 * 1024
 )
+
+// freshBytes hands out payloads of a fixed size cut from one pre-generated random buffer at a random offset,
+// so every write is new data without generating it per task - at several thousand steps/s, generating each
+// payload would load the engine host the run is measuring. The buffer is incompressible alphanumerics, as
+// `state`'s payload is, so TOAST compression cannot hide the cost; alphanumerics also need no JSON escaping,
+// so the bytes written are the bytes declared.
+type freshBytes struct {
+	buf  string
+	size int
+}
+
+func newFreshBytes(size int) *freshBytes {
+	const alnum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, max(2*size, 64*1024))
+	for i := range b {
+		b[i] = alnum[rand.IntN(len(alnum))]
+	}
+	return &freshBytes{buf: string(b), size: size}
+}
+
+// next returns a payload of the configured size. Substrings share the buffer, so handing one out allocates
+// nothing; the copy happens where the task's write serializes it.
+func (f *freshBytes) next() string {
+	off := rand.IntN(len(f.buf) - f.size + 1)
+	return f.buf[off : off+f.size]
+}
 
 // registerWorkloads builds every benchmark graph and task into the host and returns the workloads by name.
 //
-//   - linear: a 10-step chain of no-op tasks - the steps/s floor (pure dispatch + transaction cost).
-//   - fanout: forEach over 16 elements converging on a fan-in - cohort accounting + flow-row contention.
+//   - linear: a 10-step chain - the steps/s floor (pure dispatch + transaction cost). With -payload, every
+//     task writes fresh bytes of that size to `data`.
+//   - fanout: forEach over -fanout-width elements converging on a fan-in - cohort accounting + flow-row
+//     contention. With -payload, Split, every branch and Join each write fresh bytes to `data`, the same
+//     per-step write as linear, so at equal steps per flow the only difference between the two is the shape.
+//   - scatter: Split writes `items`, -fanout-width elements of -payload bytes; each branch, -branch-depth
+//     steps deep, reads its element and writes nothing; Join is a no-op. The doc -> pages shape, and the one
+//     forEach item refs change.
 //   - state:  a 5-step chain where every task rewrites a payload of -payload bytes - MB/s throughput.
 //   - carry:  the same payload written ONCE and then only carried - the state-ref shape (see below).
 //   - carryfanout: that payload carried across a fan-out's branches - the N x D case.
@@ -63,19 +98,32 @@ const (
 // reads a field is the case an engine can decline to materialize, and a task that reads every field is the
 // case where it cannot. Both arms store identically, so a storage measurement should not vary with it - if
 // one does, the workload is not carrying what it thinks it is.
-func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, carryReadsDoc bool) map[string]*workload {
+func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, branchDepth int, carryReadsDoc bool) map[string]*workload {
 	if chainSteps < 1 {
 		chainSteps = linearSteps
 	}
+	if branchDepth < 1 {
+		branchDepth = 1
+	}
 	nop := func(ctx context.Context, f *workflow.Flow) error { return nil }
 	h.tasks["bench/nop"] = nop
+
+	// write: the linear and fanout task. -payload 0 makes it a no-op, the dispatch-cost floor.
+	fresh := newFreshBytes(payloadBytes)
+	h.tasks["bench/write"] = func(ctx context.Context, f *workflow.Flow) error {
+		if payloadBytes > 0 {
+			f.SetString("data", fresh.next())
+			h.bytesWritten.Add(int64(payloadBytes))
+		}
+		return nil
+	}
 
 	// linear
 	linear := workflow.NewGraph("Linear")
 	names := make([]string, 0, chainSteps+1)
 	for i := range chainSteps {
 		n := fmt.Sprintf("T%d", i)
-		linear.SetURL(n, "bench/nop")
+		linear.SetURL(n, "bench/write")
 		names = append(names, n)
 	}
 	names = append(names, workflow.End)
@@ -84,9 +132,9 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, 
 
 	// fanout
 	fanout := workflow.NewGraph("FanOut")
-	fanout.SetURL("Split", "bench/nop")
-	fanout.SetURL("Work", "bench/nop")
-	fanout.SetURL("Join", "bench/nop")
+	fanout.SetURL("Split", "bench/write")
+	fanout.SetURL("Work", "bench/write")
+	fanout.SetURL("Join", "bench/write")
 	fanout.SetFanIn("Join")
 	fanout.AddTransitionForEach("Split", "Work", "items", "item")
 	fanout.AddTransitionChain("Work", "Join", workflow.End)
@@ -96,12 +144,48 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, 
 		fanoutItems[i] = i
 	}
 
+	// scatter: Split writes the array the branches fan out over, fresh per flow; each branch step reads its
+	// element and checks it arrived whole. The check is what makes a storage number trustworthy here, as in
+	// carry: an element that went missing would otherwise read as an excellent byte saving.
+	h.tasks["bench/scatter-split"] = func(ctx context.Context, f *workflow.Flow) error {
+		items := make([]string, fanOutWidth)
+		for i := range items {
+			items[i] = fresh.next()
+		}
+		f.Set("items", items)
+		h.bytesWritten.Add(int64(fanOutWidth * payloadBytes))
+		return nil
+	}
+	h.tasks["bench/scatter-read"] = func(ctx context.Context, f *workflow.Flow) error {
+		if got := len(f.GetString("item")); got != payloadBytes {
+			return fmt.Errorf("scatter: %s sees a %d-byte element, want %d", f.StepKey(), got, payloadBytes)
+		}
+		return nil
+	}
+	scatter := workflow.NewGraph("Scatter")
+	scatter.SetURL("Split", "bench/scatter-split")
+	scatter.SetURL("Join", "bench/nop")
+	scatter.SetFanIn("Join")
+	branch := make([]string, 0, branchDepth+2)
+	for i := range branchDepth {
+		n := fmt.Sprintf("B%d", i)
+		scatter.SetURL(n, "bench/scatter-read")
+		branch = append(branch, n)
+	}
+	scatter.AddTransitionForEach("Split", branch[0], "items", "item")
+	scatter.AddTransitionChain(append(branch, "Join", workflow.End)...)
+	h.graphs["bench/scatter"] = scatter
+
 	// state: every step rewrites the payload so each step row carries the full write. The payload must be
 	// incompressible: a repeated-character payload TOAST-compresses to ~nothing on the Postgres side, so
 	// MB/s would measure serialization+network while the storage/WAL path idles - random alphanumerics
 	// keep the on-disk and on-wire byte counts honest (alnum only, so JSON escaping doesn't inflate it).
+	statePayload := payloadBytes
+	if statePayload == 0 {
+		statePayload = defaultStatePayload
+	}
 	const alnum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	payloadB := make([]byte, payloadBytes)
+	payloadB := make([]byte, statePayload)
 	for i := range payloadB {
 		payloadB[i] = alnum[rand.IntN(len(alnum))]
 	}
@@ -130,8 +214,8 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, 
 	// a 64KB string expands ~1x, while 800 small records (50KB of JSON) expand to 341KB in Go - 6.8x, since
 	// every element costs an interface, a boxed float64 and a map entry. Real carried documents - pages,
 	// rows, chunks - are the second shape. Element count, not byte count, is what drives it.
-	records := make([]map[string]any, 0, 1+payloadBytes/80)
-	for i := 0; len(records)*80 < payloadBytes; i++ {
+	records := make([]map[string]any, 0, 1+statePayload/80)
+	for i := 0; len(records)*80 < statePayload; i++ {
 		records = append(records, map[string]any{
 			"id":    i,
 			"name":  payload[(i*37)%max(1, len(payload)-24):][:24],
@@ -241,6 +325,10 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, 
 			graphURL:     "bench/fanout",
 			initialState: func() map[string]any { return map[string]any{"items": fanoutItems} },
 		},
+		"scatter": {
+			graphURL:     "bench/scatter",
+			initialState: func() map[string]any { return nil },
+		},
 		"state": {
 			graphURL:     "bench/state",
 			initialState: func() map[string]any { return nil },
@@ -280,7 +368,7 @@ func chooseWorkload(workloads map[string]*workload, name string) (func() *worklo
 	}
 	w := workloads[name]
 	if w == nil {
-		return nil, fmt.Errorf("unknown workload %q (linear, fanout, state, carry, carryfanout, llm, mixed)", name)
+		return nil, fmt.Errorf("unknown workload %q (linear, fanout, scatter, state, carry, carryfanout, llm, mixed)", name)
 	}
 	return func() *workload { return w }, nil
 }

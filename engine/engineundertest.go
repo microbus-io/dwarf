@@ -86,4 +86,5 @@ func init() {
 	engineseams.Seams = func(eng any) *seamster.Seamster { return eng.(*Engine).seams }
 	engineseams.SetMaxOpenConns = func(eng any, n int) error { return eng.(*Engine).setMaxOpenConns(n) }
 	engineseams.SetRefillInterval = func(eng any, d time.Duration) error { return eng.(*Engine).setRefillInterval(d) }
+	engineseams.ShardBudget = shardBudget
 }

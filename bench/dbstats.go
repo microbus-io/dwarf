@@ -39,10 +39,34 @@ type dbStatsSampler struct {
 
 // dbStats is one database-side reading. Connections counts every backend on the database - including
 // this sampler's own and the RTT sampler's, a small constant that cancels in any drift/step comparison.
+// WALBytes is the server's cumulative WAL volume (pg_stat_wal, PostgreSQL 14+). It is cluster-wide, so a
+// window delta is this run's WAL only on an instance nothing else writes to - the bench rig's shape.
 type dbStats struct {
 	Connections int   `json:"connections"`
 	StepsBytes  int64 `json:"stepsBytes"`
 	FlowsBytes  int64 `json:"flowsBytes"`
+	WALBytes    int64 `json:"walBytes"`
+}
+
+// dbDelta is what the database stored and logged over one measurement window: the growth of the two dwarf
+// tables (with their indexes and TOAST) and the WAL written. Against the bytes the tasks declared, these are
+// the amplification - stored and logged bytes per task byte.
+type dbDelta struct {
+	StepsBytes int64 `json:"stepsBytes"`
+	FlowsBytes int64 `json:"flowsBytes"`
+	WALBytes   int64 `json:"walBytes"`
+}
+
+// windowDelta is the change between two readings, or nil when there is no sampler (a non-Postgres DSN).
+func (s *dbStatsSampler) windowDelta(before, after dbStats) *dbDelta {
+	if s == nil {
+		return nil
+	}
+	return &dbDelta{
+		StepsBytes: after.StepsBytes - before.StepsBytes,
+		FlowsBytes: after.FlowsBytes - before.FlowsBytes,
+		WALBytes:   after.WALBytes - before.WALBytes,
+	}
 }
 
 // startDBStatsSampler opens the sampler for a Postgres DSN, or returns nil (no error) for any other
@@ -75,6 +99,7 @@ func (s *dbStatsSampler) sample(ctx context.Context) dbStats {
 	_ = s.db.QueryRowContext(sctx,
 		"SELECT COALESCE(pg_total_relation_size('dwarf_steps'), 0), COALESCE(pg_total_relation_size('dwarf_flows'), 0)",
 	).Scan(&out.StepsBytes, &out.FlowsBytes)
+	_ = s.db.QueryRowContext(sctx, "SELECT wal_bytes::bigint FROM pg_stat_wal").Scan(&out.WALBytes)
 	return out
 }
 
