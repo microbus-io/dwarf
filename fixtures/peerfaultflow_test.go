@@ -24,6 +24,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -180,7 +181,26 @@ func TestPeerStalledDispatcherflow(t *testing.T) {
 
 	// eng2's supply cycle fails from here on. It goes on beating - so it stays in the POOL divisor, which is
 	// correct, it still holds connections - but publishes no dispatch evidence.
+	//
+	// Armed with eng2's PIPELINE quiesced, or eng2 can still reach a few of the flows below, through either
+	// loop - and the hints it pushes survive every later scan failure, since a failed scan spares the cache:
+	//
+	//   - The tally loop consults the fault before its scan waits for a turn and a connection, so a scan that
+	//     passed the consult just before the arming can run its SQL after the flows commit. Freezing the loop
+	//     just after a completed scan means the next scan consults the armed fault, and the frozen tally was
+	//     read after the warmup drained, so it holds nothing.
+	//   - The supply loop fetches CURRENT rows for whatever its plan named, so a cycle that planned from a
+	//     tally taken while the warmup was still pending, then waited for a turn, fetches the new flows'
+	//     steps. Two pushes while the tally is frozen empty retire any such cycle and leave the partition
+	//     empty: the first may be the in-flight one, the second planned from the empty tally.
+	//
+	// Shard 1 is the fleet's only shard.
+	tallied := engineseams.Join(engineseams.CheckpointRefillTallyDone, "1")
+	engineseams.Seams(eng2).Break(tallied)
+	<-engineseams.Seams(eng2).Waiter(tallied)
+	enginetest.AwaitVisits(t, engineseams.Seams(eng2), 2, 30*time.Second, engineseams.Join(engineseams.CheckpointRefillCycleDone, "1"))
 	engineseams.Seams(eng2).InjectN(engineseams.FaultRefillScanErr, 1<<20)
+	engineseams.Seams(eng2).Resume(tallied)
 
 	// Arm BEFORE the work exists, then check Visits after: a steal landing between the two lines is caught by
 	// the channel, one before them by the count. The reverse order reintroduces the race the split-arm Waiter
