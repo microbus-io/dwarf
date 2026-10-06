@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"strings"
 
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -74,3 +75,46 @@ func execOnly(res *sequel.BatchResults) error {
 	_, err := res.Exec()
 	return errors.Trace(err)
 }
+
+// queueInsertID queues an INSERT ... VALUES and reads the id it generates in column into id: by RETURNING on
+// PostgreSQL and SQLite, OUTPUT on SQL Server, and LastInsertId on MySQL. query must spell its VALUES keyword as
+// " VALUES ", once: that is where SQL Server's OUTPUT clause goes.
+func queueInsertID(queue queueFunc, driver, column string, id *int64, query string, args ...any) {
+	switch {
+	case driver == "mssql":
+		query = strings.Replace(query, " VALUES ", " OUTPUT INSERTED."+column+" VALUES ", 1)
+	case returnsInsertedRows(driver):
+		query += " RETURNING " + column
+	default:
+		queue(func(res *sequel.BatchResults) error {
+			result, err := res.Exec()
+			if err != nil {
+				return errors.Trace(err)
+			}
+			*id, err = result.LastInsertId()
+			return errors.Trace(err)
+		}, query, args...)
+		return
+	}
+	queue(func(res *sequel.BatchResults) error {
+		return errors.Trace(res.QueryRow().Scan(id))
+	}, query, args...)
+}
+
+/*
+lastFlowIDSQL and lastStepIDSQL are PostgreSQL SQL for the id of the flow, or of the step, the session inserted
+last. They let the statements queued after an INSERT name the new row without waiting for the INSERT's result,
+which is what lets a chain of dependent writes be one batch.
+
+They read each table's own sequence. Do not use lastval(), nor another dialect's session last-id (@@IDENTITY on SQL
+Server): they report the last id generated in ANY table, so a trigger a deployment adds that inserts into a table
+with its own identity would silently become the id written. Both ids are BIGSERIAL, so a role that can insert a row
+already holds the sequence privilege currval needs.
+
+currval is volatile, so a WHERE clause must compare with it as a scalar subquery - `flow_id=(SELECT ...)` - which
+PostgreSQL evaluates once; compared directly, it cannot be an index key and the statement scans the table.
+*/
+const (
+	lastFlowIDSQL = "currval(pg_get_serial_sequence('dwarf_flows', 'flow_id'))"
+	lastStepIDSQL = "currval(pg_get_serial_sequence('dwarf_steps', 'step_id'))"
+)

@@ -1315,7 +1315,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			successor, successorArgs := "", []any(nil)
 			switch {
 			case len(normalNexts) == 1 && tx.DriverName() == "pgx":
-				successor = loneSuccessorID
+				successor = lastStepIDSQL
 			case len(normalNexts) > 0:
 				if err := flush(); err != nil {
 					return err
@@ -1440,7 +1440,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 					fanIn.queue(queue, tx.DriverName(), &newStepIDs)
 					// The cohort-exit -> fan-in edges and the flow advance below name the new step as the INSERT's
 					// own id where PostgreSQL can, so all three go out in one batch; otherwise the id is read first.
-					fanInID, fanInArgs = loneSuccessorID, nil
+					fanInID, fanInArgs = lastStepIDSQL, nil
 					if tx.DriverName() != "pgx" {
 						if err := flush(); err != nil {
 							return err

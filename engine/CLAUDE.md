@@ -1151,7 +1151,7 @@ not parallelism:
   own-row write and the flow advance - and the fan-in arrival's two batches below. The only flush in between is
   forced by data: the own-row write (`successor_id`) and the advance take the new step's id.
   - **One successor on PostgreSQL** (every linear and goto step, every step inside a forEach branch) needs no
-    flush: the two writes name the new step as the step sequence's current value (`loneSuccessorID`). A linear
+    flush: the two writes name the new step as the step sequence's current value (`lastStepIDSQL`). A linear
     step is BEGIN, one batch, COMMIT - k ~6 (`TestRoundTrips_LinearStep`, about +-0.5 run to run). **Do not use a
     session-wide last id** (`lastval()`, SQL Server's `@@IDENTITY`): it reports the last id generated in ANY
     table, so a trigger a deployment adds to `dwarf_steps` would silently become the successor and the flow's
@@ -1178,7 +1178,7 @@ not parallelism:
 - **The arrival that resolves a cohort is two batches after its bump** (the same `queue`/`flush`): [the deferred
   flow-row grab + the spawn read + the cohort-members read (`queueCohortRead`)], then, after the Go merge
   (`fanInRow`), [the fan-in INSERT + the cohort-exit `successor_id` write + the flow advance]. On PostgreSQL the
-  second batch names the fan-in step as `loneSuccessorID`; elsewhere the INSERT is flushed and its id read first.
+  second batch names the fan-in step as `lastStepIDSQL`; elsewhere the INSERT is flushed and its id read first.
   A pure resolving arrival is BEGIN, bump, two batches, COMMIT: 5 round trips on PostgreSQL (a fan-out cycle of
   two branches measured ~28 -> ~22 by `TestRoundTrips_FanInCycle`). The cohort's members are read whole before the
   fold - on PostgreSQL the pipelined batch buffers them - so their changes are decoded as each row is read, and
@@ -1194,6 +1194,15 @@ not parallelism:
   (measured ~14.6 -> ~13.9 round trips per one-step flow on PostgreSQL, `TestRoundTrips_OneStepFlow`). The
   final-state UPDATE depends on the Go merge, so it cannot join the batch; the fallback read of any tails, and
   a ref resolution, follow only when needed.
+- **Creating a flow is one batch on PostgreSQL** (`insertFlowTx`, shared by `Create`, `Continue` and a subgraph
+  spawn): [flow INSERT, entry-step INSERT naming the flow as `lastFlowIDSQL`, the flow's thread/step/root fix-up
+  naming both ids] - BEGIN, one batch, COMMIT (measured ~14.0 -> ~11.6 round trips per one-step flow,
+  `TestRoundTrips_OneStepFlow`). On other drivers the batch is flushed after each INSERT so that its id
+  (`queueInsertID`) is bound into the statement that takes it. Pinned by `TestInsertFlowTx_ConcurrentCreates`
+  (every new flow's thread, root and step ids point at its own rows). **A `WHERE` clause compares with
+  `currval` as a scalar subquery** - `flow_id=(SELECT currval(...))` - which PostgreSQL evaluates once as an
+  InitPlan. Compared directly, the volatile function cannot be an index key: measured on a 100k-row table, a
+  sequential scan against an index scan on the primary key. `SET` and `VALUES` take it bare.
 - **A batch reader scans with the PostgreSQL driver's own type conversions** when the batch is pipelined, and
   they are stricter than `database/sql`'s: **scan a column into the Go type it is stored as.** A `SMALLINT` flag
   (`delete_on_completion`, `cancelling`, `advancing`, ...) does not scan into a `bool` - it scans into an `int`.

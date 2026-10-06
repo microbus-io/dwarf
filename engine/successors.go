@@ -173,14 +173,3 @@ func (s *successorBatch) rowArgs(r successorRow, token string) []any {
 		s.inheritCancel, s.predecessorID, s.flowID,
 	}
 }
-
-/*
-loneSuccessorID is PostgreSQL SQL for the id of the step the session inserted last. It lets the statements queued
-after a single-row successor INSERT name the new step without waiting for the INSERT's result.
-
-It reads dwarf_steps' own sequence. Do not use lastval(), nor another dialect's session last-id (@@IDENTITY on SQL
-Server): they report the last id generated in ANY table, so a trigger a deployment adds to dwarf_steps that inserts
-into a table with its own identity would silently become the step's successor_id and the flow's step_id. step_id
-is BIGSERIAL, so a role that can insert a step already holds the sequence privilege currval needs.
-*/
-const loneSuccessorID = "currval(pg_get_serial_sequence('dwarf_steps', 'step_id'))"

@@ -200,48 +200,67 @@ type flowSeed struct {
 // bare transaction; continueFlow wraps it in a transaction that first locks the thread and re-checks the
 // latest turn, so both share exactly one copy of the insert SQL.
 func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, newStepID int64, err error) {
-	newFlowID, err = tx.InsertReturnID(ctx, "flow_id",
+	// The three writes form a chain - the step takes the flow's id, the fix-up both ids - which is one statement
+	// batch on PostgreSQL, where each id is named as its sequence's current value. Elsewhere each id is read
+	// before the statement that takes it; those drivers do not pipeline, so that costs nothing.
+	driver := tx.DriverName()
+	batch := newTxBatch(ctx, tx)
+	queueInsertID(batch.queue, driver, "flow_id", &newFlowID,
 		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, trace_parent, status, surgraph_flow_id, surgraph_step_id, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, started_at)"+
 			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC())",
 		s.flowToken, s.workflowURL, s.workflowName, s.graphJSON, s.baggageJSON, s.traceParent, workflow.StatusRunning, s.surgraphFlowID, s.surgraphStepID, s.deleteOnCompletion, s.priority, s.fairnessKey, s.fairnessWeight, s.timeBudgetMs, s.engineID,
 	)
-	if err != nil {
-		return 0, 0, errors.Trace(err)
+	flowID, flowArgs := lastFlowIDSQL, []any(nil)
+	if driver != "pgx" {
+		if err := batch.flush(); err != nil {
+			return 0, 0, err
+		}
+		flowID, flowArgs = "?", []any{newFlowID}
 	}
 
 	// Entry step is pending and immediately claimable (not_before=NOW, lease_expires=NOW). Its depth
 	// continues from the caller: callerStepDepth+1 (1 for a top-level flow, where callerStepDepth is 0).
 	// A flow that should wait before running uses an entry gate task with flow.Sleep, not a creation-time
 	// delay.
-	newStepID, err = tx.InsertReturnID(ctx, "step_id",
+	queueInsertID(batch.queue, driver, "step_id", &newStepID,
 		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, time_budget_ms, not_before, lease_expires, priority, fairness_key, fairness_weight, engine_id)"+
-			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC(), NOW_UTC(), ?, ?, ?, ?)",
-		newFlowID, s.callerStepDepth+1, s.stepToken, s.entryPoint, s.entryURL, s.stateJSON, workflow.StatusPending, s.timeBudgetMs, s.priority, s.fairnessKey, s.fairnessWeight, s.engineID,
+			" VALUES ("+flowID+", ?, ?, ?, ?, ?, ?, ?, NOW_UTC(), NOW_UTC(), ?, ?, ?, ?)",
+		append(append([]any{}, flowArgs...), s.callerStepDepth+1, s.stepToken, s.entryPoint, s.entryURL, s.stateJSON, workflow.StatusPending, s.timeBudgetMs, s.priority, s.fairnessKey, s.fairnessWeight, s.engineID)...,
 	)
-	if err != nil {
-		return 0, 0, errors.Trace(err)
+	stepID, stepArgs := lastStepIDSQL, []any(nil)
+	if driver != "pgx" {
+		if err := batch.flush(); err != nil {
+			return 0, 0, err
+		}
+		stepID, stepArgs = "?", []any{newStepID}
 	}
 
-	// Derive the thread from the new flow inside the closure so a retry (with a new flow_id) recomputes
-	// it rather than reusing the prior attempt's id.
-	tid, ttok := s.threadID, s.threadToken
-	if tid == 0 {
-		tid = int(newFlowID)
-		ttok = s.flowToken
+	// A top-level flow starts its own thread; a Continue joins the thread it continues. root_flow_id is the
+	// denormalized tree-membership index: a top-level flow is its own root; a subgraph child inherits the
+	// parent's root. Written once here, immutable thereafter, so a whole tree is reachable by
+	// `WHERE root_flow_id=?` without a recursive surgraph walk. Both derive from the new flow inside the
+	// closure, so a retry (with a new flow_id) recomputes them rather than reusing the prior attempt's id.
+	threadID, threadArgs, threadToken := "?", []any{s.threadID}, s.threadToken
+	if s.threadID == 0 {
+		threadID, threadArgs, threadToken = flowID, flowArgs, s.flowToken
 	}
-	// root_flow_id is the denormalized tree-membership index: a top-level flow (rootFlowID==0) is its
-	// own root; a subgraph child inherits the parent's root. Written once here, immutable thereafter, so
-	// a whole tree is reachable by `WHERE root_flow_id=?` without a recursive surgraph walk.
-	rfid := s.rootFlowID
-	if rfid == 0 {
-		rfid = int(newFlowID)
+	rootID, rootArgs := "?", []any{s.rootFlowID}
+	if s.rootFlowID == 0 {
+		rootID, rootArgs = flowID, flowArgs
 	}
-	_, err = tx.ExecContext(ctx,
-		"UPDATE dwarf_flows SET thread_id=?, thread_token=?, step_id=?, root_flow_id=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=?",
-		tid, ttok, newStepID, rfid, newFlowID,
+	args := append(append([]any{}, threadArgs...), threadToken)
+	args = append(append(args, stepArgs...), rootArgs...)
+	args = append(args, flowArgs...)
+	flowKey := flowID
+	if driver == "pgx" {
+		flowKey = "(SELECT " + flowID + ")" // currval, evaluated once so the primary key is used
+	}
+	batch.queue(execOnly,
+		"UPDATE dwarf_flows SET thread_id="+threadID+", thread_token=?, step_id="+stepID+", root_flow_id="+rootID+", updated_at=NOW_UTC(), touch=1-touch WHERE flow_id="+flowKey,
+		args...,
 	)
-	if err != nil {
-		return 0, 0, errors.Trace(err)
+	if err := batch.flush(); err != nil {
+		return 0, 0, err
 	}
 	return newFlowID, newStepID, nil
 }
