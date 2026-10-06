@@ -109,7 +109,7 @@ func TestLinker_MintTiers(t *testing.T) {
 	mint := func(t *testing.T, state workflow.State, changes workflow.State, inherited Refs, successors int) (workflow.State, Refs) {
 		t.Helper()
 		assert := testarossa.For(t)
-		stateJSON, refsJSON, err := New("sqlite").Mint(state, changes, inherited, anchor, successors, nil)
+		stateJSON, refsJSON, err := New("sqlite").Mint(state, changes, inherited, anchor, successors, nil, nil)
 		assert.NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)
@@ -130,7 +130,7 @@ func TestLinker_MintTiers(t *testing.T) {
 		assert := testarossa.For(t)
 		state := mustState(map[string]any{"doc": blob(8192), "small": "s"})
 		stored, refs := mint(t, state, state, nil, 1)
-		assert.Equal(anchor, refs["doc"])
+		assert.Equal(anchor, refs["doc"].Anchor)
 		assert.False(stored.Has("doc"), "a ref'd field is OMITTED from state - that is the entire saving")
 		assert.True(stored.Has("small"), "a field below the floor stays inline")
 	})
@@ -142,7 +142,7 @@ func TestLinker_MintTiers(t *testing.T) {
 		// paid 16 times. This is the case the whole design exists for.
 		state := mustState(map[string]any{"doc": blob(2048)})
 		stored, refs := mint(t, state, state, nil, 16)
-		assert.Equal(anchor, refs["doc"], "a wide fan-out must ref a field a linear successor would inline")
+		assert.Equal(anchor, refs["doc"].Anchor, "a wide fan-out must ref a field a linear successor would inline")
 		assert.False(stored.Has("doc"))
 	})
 
@@ -157,8 +157,8 @@ func TestLinker_MintTiers(t *testing.T) {
 			"tiny":   blob(50),   // < floor: not worth its own bookkeeping
 		})
 		stored, refs := mint(t, state, state, nil, 1)
-		assert.Equal(anchor, refs["doc"])
-		assert.Equal(anchor, refs["medium"], "a co-located field above the floor is free to ref")
+		assert.Equal(anchor, refs["doc"].Anchor)
+		assert.Equal(anchor, refs["medium"].Anchor, "a co-located field above the floor is free to ref")
 		assert.NotContains(refs, "tiny")
 		assert.True(stored.Has("tiny"))
 	})
@@ -195,8 +195,8 @@ func TestLinker_MintTiers(t *testing.T) {
 		// successor keeps pointing at 7 - NOT at this step, whose row does not hold the bytes. Re-minting here
 		// would build a chain, which is the rejected delta design wearing a hat.
 		state := mustState(map[string]any{"doc": blob(8192)}) // materialized at dispatch
-		stored, refs := mint(t, state, mustState(map[string]any{}), Refs{"doc": 7}, 1)
-		assert.Equal(7, refs["doc"], "a carried ref keeps its original anchor")
+		stored, refs := mint(t, state, mustState(map[string]any{}), Refs{"doc": {Anchor: 7}}, 1)
+		assert.Equal(7, refs["doc"].Anchor, "a carried ref keeps its original anchor")
 		assert.False(stored.Has("doc"))
 	})
 
@@ -206,8 +206,8 @@ func TestLinker_MintTiers(t *testing.T) {
 		// stale. The ref must move to this step.
 		state := mustState(map[string]any{"doc": blob(8192)})
 		changes := mustState(map[string]any{"doc": blob(8192)})
-		_, refs := mint(t, state, changes, Refs{"doc": 7}, 1)
-		assert.Equal(anchor, refs["doc"], "a rewritten field re-anchors at the step that wrote it")
+		_, refs := mint(t, state, changes, Refs{"doc": {Anchor: 7}}, 1)
+		assert.Equal(anchor, refs["doc"].Anchor, "a rewritten field re-anchors at the step that wrote it")
 	})
 
 	t.Run("inline_only_fields_are_never_refd", func(t *testing.T) {
@@ -216,14 +216,14 @@ func TestLinker_MintTiers(t *testing.T) {
 		// dangle. Even a huge element stays inline. (The same inlineOnly set carries a cohort member's contribution
 		// past the fan-in's mint, whose bytes are likewise not in the anchor's row.)
 		state := mustState(map[string]any{"item": blob(50000), "doc": blob(50000)})
-		stateJSON, refsJSON, err := New("sqlite").Mint(state, mustState(map[string]any{}), nil, anchor, 32, map[string]bool{"item": true})
+		stateJSON, refsJSON, err := New("sqlite").Mint(state, mustState(map[string]any{}), nil, anchor, 32, map[string]bool{"item": true}, nil)
 		assert.NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)
 		refs := Parse(refsJSON)
 		assert.NotContains(refs, "item", "an inline-only field is never ref'd, however large")
 		assert.True(stored.Has("item"))
-		assert.Equal(anchor, refs["doc"], "its neighbours still ref normally")
+		assert.Equal(anchor, refs["doc"].Anchor, "its neighbours still ref normally")
 		assert.False(stored.Has("doc"))
 	})
 
@@ -242,12 +242,12 @@ func TestLinker_MintTiers(t *testing.T) {
 
 		// PostgreSQL: jsonb stores this array ~4.7x larger than its text length, which the dialect factor
 		// corrects for, so the array refs.
-		stateJSON, refsJSON, err := New("pgx").Mint(state, mustState(map[string]any{}), nil, anchor, 64, noRef)
+		stateJSON, refsJSON, err := New("pgx").Mint(state, mustState(map[string]any{}), nil, anchor, 64, noRef, nil)
 		assert.NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)
 		refs := Parse(refsJSON)
-		assert.Equal(anchor, refs["items"], "the forEach source array must be ref'd at width 64")
+		assert.Equal(anchor, refs["items"].Anchor, "the forEach source array must be ref'd at width 64")
 		assert.False(stored.Has("items"), "one stored copy on the spawn row, not one per branch")
 		// The synthesized per-branch bookkeeping is still never ref'd - its bytes are in no step row.
 		for _, k := range []string{"item", "itemIndex", "itemCount"} {
@@ -283,7 +283,7 @@ func TestLinker_MintTiers(t *testing.T) {
 		for i := range maxAnchors + 2 {
 			field := "f" + string(rune('0'+i))
 			_ = state.Set(field, blob(2000+i*1000)) // f0 smallest ... f5 largest
-			inherited[field] = 100 + i
+			inherited[field] = Ref{Anchor: 100 + i}
 		}
 		stored, refs := mint(t, state, mustState(map[string]any{}), inherited, 1)
 		assert.Equal(maxAnchors, len(refs), "the pointer fan is capped")
@@ -291,7 +291,7 @@ func TestLinker_MintTiers(t *testing.T) {
 		assert.True(stored.Has("f0"))
 		assert.True(stored.Has("f1"))
 		assert.False(stored.Has("f5"))
-		assert.Equal(105, refs["f5"])
+		assert.Equal(105, refs["f5"].Anchor)
 	})
 
 	t.Run("carried_ref_absent_from_merged_is_re_emitted", func(t *testing.T) {
@@ -301,8 +301,8 @@ func TestLinker_MintTiers(t *testing.T) {
 		// still be re-emitted, or the carried field is silently dropped from the fan-in step onward. This is the
 		// shape a spawn that only carries the ref (an anchoring step precedes the fan-out source) produces.
 		merged := mustState(map[string]any{"local": "s"}) // `pdf` deliberately absent - carried, not materialized
-		stored, refs := mint(t, merged, mustState(map[string]any{}), Refs{"pdf": 7}, 1)
-		assert.Equal(7, refs["pdf"], "a carried ref whose payload is not in merged must still be re-emitted")
+		stored, refs := mint(t, merged, mustState(map[string]any{}), Refs{"pdf": {Anchor: 7}}, 1)
+		assert.Equal(7, refs["pdf"].Anchor, "a carried ref whose payload is not in merged must still be re-emitted")
 		assert.False(stored.Has("pdf"))
 		assert.True(stored.Has("local"))
 	})
@@ -311,7 +311,7 @@ func TestLinker_MintTiers(t *testing.T) {
 		assert := testarossa.For(t)
 		// A tombstone (member/spawn deleted the carried field) leaves the key in `changes` and out of `merged`.
 		// The stale carried ref must NOT be resurrected - the field is genuinely gone.
-		_, refs := mint(t, mustState(map[string]any{}), mustState(map[string]any{"pdf": nil}), Refs{"pdf": 7}, 1)
+		_, refs := mint(t, mustState(map[string]any{}), mustState(map[string]any{"pdf": nil}), Refs{"pdf": {Anchor: 7}}, 1)
 		assert.NotContains(refs, "pdf", "a tombstoned carried field must not be re-emitted through its stale ref")
 	})
 
@@ -325,11 +325,11 @@ func TestLinker_MintTiers(t *testing.T) {
 		for i := range maxAnchors + 1 {
 			field := "f" + string(rune('0'+i))
 			_ = merged.Set(field, blob(2000+i*1000)) // inlineable: present in merged
-			inherited[field] = 100 + i
+			inherited[field] = Ref{Anchor: 100 + i}
 		}
-		inherited["carried"] = 999 // absent from merged: un-inlineable, must be pinned
+		inherited["carried"] = Ref{Anchor: 999} // absent from merged: un-inlineable, must be pinned
 		stored, refs := mint(t, merged, mustState(map[string]any{}), inherited, 1)
-		assert.Equal(999, refs["carried"], "an un-inlineable carried anchor must survive the cap")
+		assert.Equal(999, refs["carried"].Anchor, "an un-inlineable carried anchor must survive the cap")
 		assert.False(stored.Has("carried"))
 	})
 }

@@ -1103,7 +1103,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	//
 	// The linear/static-fan-out successors all share this one snapshot, so it is minted once; a forEach
 	// branch re-mints because its state carries the injected element (below).
-	linearStateJSON, linearRefsJSON, err := e.linkerFor(shardNum).Mint(childInputState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), nil)
+	linearStateJSON, linearRefsJSON, err := e.linkerFor(shardNum).Mint(childInputState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), nil, nil)
 	if err != nil {
 		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
 		return errors.Trace(err)
@@ -1267,20 +1267,16 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 					// the array is REF'd, so the branches share one copy of it and each still sees it whole.
 					perStepState := childInputState.Clone()
 					_ = perStepState.Set(next.itemKey, next.item)
-					if next.forEachKey != "" {
-						_ = perStepState.Set(next.itemKey+"Index", next.cohortIndex)
-						_ = perStepState.Set(next.itemKey+"Count", next.cohortCount)
-					}
-					// The injected element and its ordinal context are SYNTHESIZED per branch - their bytes are
-					// in no step row at all - so they can never be ref'd; a ref to them would dangle. Everything
-					// else in the branch's state comes from this step and re-mints exactly as the linear case.
-					noRef := map[string]bool{next.itemKey: true}
-					if next.forEachKey != "" {
-						noRef[next.itemKey+"Index"] = true
-						noRef[next.itemKey+"Count"] = true
-					}
+					_ = perStepState.Set(next.itemKey+"Index", next.cohortIndex)
+					_ = perStepState.Set(next.itemKey+"Count", next.cohortCount)
+					// The ordinal context is SYNTHESIZED per branch - its bytes are in no step row at all - so it
+					// can never be ref'd; a ref to it would dangle. The element is one element of the source
+					// array, so Mint may point it into whichever anchor holds the array. Everything else in the
+					// branch's state comes from this step and re-mints exactly as the linear case.
+					noRef := map[string]bool{next.itemKey + "Index": true, next.itemKey + "Count": true}
+					item := &staterefs.Item{Key: next.itemKey, Source: next.forEachKey, Index: next.cohortIndex}
 					var mintErr error
-					stepStateJSON, stepRefsJSON, mintErr = e.linkerFor(shardNum).Mint(perStepState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), noRef)
+					stepStateJSON, stepRefsJSON, mintErr = e.linkerFor(shardNum).Mint(perStepState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), noRef, item)
 					if mintErr != nil {
 						return errors.Trace(mintErr)
 					}
@@ -1826,7 +1822,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		// through a COMBINING reducer still has a merged value (reduce(ourState[k], ourChanges[k])) that exists
 		// in no row, so it must be inlined rather than anchored - the same exclusion fanInRow applies.
 		inlineOnly := staterefs.CombinedReducerFields(ourState, ourChanges, graph.Reducers())
-		mergedJSON, refsJSON, merr := e.linkerFor(shardNum).Mint(mergedState, ourChanges, ourRefs, stepID, staterefs.Linear, inlineOnly)
+		mergedJSON, refsJSON, merr := e.linkerFor(shardNum).Mint(mergedState, ourChanges, ourRefs, stepID, staterefs.Linear, inlineOnly, nil)
 		if merr != nil {
 			return errors.Trace(merr)
 		}
@@ -2026,7 +2022,13 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 	// cohort is still inside the outer branch and must still see which element that branch is working on. The
 	// same scoped strip runs in computeFinalState for a fan-out that FAILED (and so never reached this
 	// convergence), so the two paths agree on what a fan-out's state means once its cohort is behind it.
-	stripForEachBookkeeping(merged, graph, strings.TrimSpace(c.spawnTaskName))
+	//
+	// A stripped name must also leave the spawn's refs, or the mint carries it forward from there: in a nested
+	// fan-out whose levels share an `as`, the spawn of the inner cohort holds the OUTER element as an item ref,
+	// and re-emitting it would bring that element back past the inner fan-in.
+	for _, k := range stripForEachBookkeeping(merged, graph, strings.TrimSpace(c.spawnTaskName)) {
+		delete(spawnRefs, k)
+	}
 
 	// A field the SPAWN itself wrote through a COMBINING reducer (reduce(spawnState[k], spawnChanges[k])) is the
 	// other value that exists in no row - the spawn's `changes` holds only its delta - so it too must be inlined,
@@ -2042,7 +2044,7 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 	// `changes` if the spawn's task wrote it), so the spawn is a legitimate anchor and the fan-in must not
 	// re-copy the payload into its own row. A field that arrived at the spawn as a ref keeps that ref, so the
 	// chain stays one hop. Member-contributed and reduced fields are excluded and therefore inline (above).
-	mergedJSON, refsJSON, err := e.linkerFor(shardNum).Mint(merged, spawnChanges, spawnRefs, cohortSpawnID, staterefs.Linear, memberWrites)
+	mergedJSON, refsJSON, err := e.linkerFor(shardNum).Mint(merged, spawnChanges, spawnRefs, cohortSpawnID, staterefs.Linear, memberWrites, nil)
 	if err != nil {
 		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(err)
 	}

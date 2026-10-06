@@ -23,7 +23,7 @@ limitations under the License.
 //
 // A Linker holds the size policy and the resolution cache for ONE shard, and has two operations:
 //
-//	stateJSON, refsJSON, err := linker.Mint(merged, changes, inherited, anchorID, successors, inlineOnly)
+//	stateJSON, refsJSON, err := linker.Mint(merged, changes, inherited, anchorID, successors, inlineOnly, item)
 //	materialized, err := linker.Resolve(ctx, state, refs, nil, load)
 //
 // Mint is the write side and performs no I/O: the caller's state is already materialized, so omitting a
@@ -39,6 +39,8 @@ import (
 	"context"
 	"encoding/json"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/lru"
@@ -46,8 +48,96 @@ import (
 	"github.com/microbus-io/errors"
 )
 
-// Refs maps a state field name to the step that physically holds its bytes.
-type Refs map[string]int
+// Refs maps a state field name to where its bytes physically live.
+type Refs map[string]Ref
+
+// Ref locates one field's bytes. A plain ref is the field of the same name at Anchor. An item ref is one
+// element of an array held at Anchor: Field names the array there, and Path indexes into it.
+type Ref struct {
+	Anchor int    // the step whose row holds the bytes
+	Field  string // the field name at the anchor; empty means the refs key itself
+	Path   []int  // indices into that field; empty means the whole field
+}
+
+// field is the name the ref's bytes have at the anchor, given the refs key it is stored under.
+func (r Ref) field(key string) string {
+	if r.Field != "" {
+		return r.Field
+	}
+	return key
+}
+
+// MarshalJSON writes a plain ref as a bare number and any other as a string "<anchor> <field>[i][j]...".
+// The number form is the only one a plain ref ever takes, so a refs column holding no item refs is readable
+// by a reader that knows nothing else.
+func (r Ref) MarshalJSON() ([]byte, error) {
+	if r.Field == "" && len(r.Path) == 0 {
+		return strconv.AppendInt(nil, int64(r.Anchor), 10), nil
+	}
+	b := strconv.AppendInt(nil, int64(r.Anchor), 10)
+	b = append(b, ' ')
+	b = append(b, r.Field...)
+	for _, i := range r.Path {
+		b = append(b, '[')
+		b = strconv.AppendInt(b, int64(i), 10)
+		b = append(b, ']')
+	}
+	return json.Marshal(string(b))
+}
+
+// UnmarshalJSON reads either form MarshalJSON writes. The string form is parsed front to back: the anchor
+// runs to the first space, the field name to the first '[', and each "[N]" after it is one index. A field
+// name cannot hold a '[' (Mint never emits one that does), so the split is unambiguous.
+func (r *Ref) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || data[0] != '"' {
+		var anchor int
+		if err := json.Unmarshal(data, &anchor); err != nil {
+			return errors.Trace(err)
+		}
+		*r = Ref{Anchor: anchor}
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return errors.Trace(err)
+	}
+	anchorText, rest, ok := strings.Cut(s, " ")
+	anchor, err := strconv.Atoi(anchorText)
+	if !ok || err != nil || anchor <= 0 {
+		return errors.New("malformed state ref %q", s)
+	}
+	field, indices, hasPath := strings.Cut(rest, "[")
+	if field == "" {
+		return errors.New("malformed state ref %q", s)
+	}
+	var path []int
+	for hasPath {
+		var num string
+		num, indices, ok = strings.Cut(indices, "]")
+		i, err := strconv.Atoi(num)
+		if !ok || err != nil || i < 0 {
+			return errors.New("malformed state ref %q", s)
+		}
+		path = append(path, i)
+		if indices == "" {
+			break
+		}
+		if indices[0] != '[' {
+			return errors.New("malformed state ref %q", s)
+		}
+		indices = indices[1:]
+	}
+	*r = Ref{Anchor: anchor, Field: field, Path: path}
+	return nil
+}
+
+// Item names a forEach branch's injected element for Mint: it is stored under Key, and it is element Index
+// of the array held in field Source.
+type Item struct {
+	Key    string
+	Source string
+	Index  int
+}
 
 // Linear is the successor count of a step with one successor, for callers that would otherwise pass a
 // bare 1 to Mint.
@@ -102,6 +192,10 @@ const (
 	// so a 5x error moves nothing across it. That is also why it applies ONLY at n>1 - the linear bar of
 	// 4096 is where estimate accuracy would genuinely decide cases.
 	postgresInflation = 5
+	// minItem is the bar for storing a forEach element as an item ref: about three times the item ref's own
+	// stored entry, which is a little larger than a plain ref's (the array's field name and the index ride
+	// in it). Below it the element is cheaper inline.
+	minItem = 96
 	// maxAnchors bounds the resolve IN-list. It is the SAME knob as the threshold seen from the other end
 	// (the cost model prices anchor ROWS), and the scheme is correct at any value.
 	maxAnchors = 4
@@ -126,6 +220,10 @@ type cacheKey struct {
 type Linker struct {
 	driver string
 	cache  *lru.Cache[cacheKey, json.RawMessage]
+	// splits holds an item-ref'd array's elements, keyed like cache. Without it every branch of a fan-out
+	// would scan the whole array to find its one element - O(N) per branch, O(N^2) per cohort - a cost a
+	// plain ref, spliced without decoding, never pays.
+	splits *lru.Cache[cacheKey, []json.RawMessage]
 }
 
 // New creates a Linker for a shard with the given SQL driver name. The driver only corrects the size
@@ -135,6 +233,7 @@ func New(driver string) *Linker {
 	return &Linker{
 		driver: driver,
 		cache:  lru.New[cacheKey, json.RawMessage](cacheEntries, cacheTTL),
+		splits: lru.New[cacheKey, []json.RawMessage](cacheEntries, cacheTTL),
 	}
 }
 
@@ -219,14 +318,22 @@ func mentions(s workflow.State, field string) bool {
 // swing in the bar between a linear hop and a wide fan-out. Pass Linear for one.
 //
 // inlineOnly names fields that must be stored as literals whatever their size, because their bytes are in
-// NO step row: a synthesized fan-out element, or a value only this merge produced. Ref'ing one would
-// dangle. It is a distinct signal from a field appearing in changes (which only means the ref must not be
-// CARRIED, and leaves the field free to anchor here).
+// NO step row: a fan-out's synthesized ordinal context, or a value only this merge produced. Ref'ing one
+// would dangle. It is a distinct signal from a field appearing in changes (which only means the ref must
+// not be CARRIED, and leaves the field free to anchor here).
+//
+// item, when non-nil, is a forEach branch's injected element. Its bytes are in no row as a field of their
+// own, but they are one element of the source array, so when that array is stored by a plain ref the
+// element is stored as an item ref into the same anchor - one copy of the array serves every branch's
+// element, and resolving it costs no anchor the branch was not already reading. Otherwise it is inline.
 //
 // Minting needs no database read: merged was resolved at dispatch, so every literal is already in hand and
 // "inlining" is simply declining to omit a field.
-func (l *Linker) Mint(merged workflow.State, changes workflow.State, inherited Refs, anchorID int, successors int, inlineOnly map[string]bool) ([]byte, []byte, error) {
+func (l *Linker) Mint(merged workflow.State, changes workflow.State, inherited Refs, anchorID int, successors int, inlineOnly map[string]bool, item *Item) ([]byte, []byte, error) {
 	refs := Refs{}
+	literal := func(k string) bool {
+		return inlineOnly[k] || (item != nil && k == item.Key)
+	}
 	type candidate struct {
 		key  string
 		size int
@@ -238,7 +345,7 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.State, inherited R
 	// marshalled here.
 	raw := make(map[string]json.RawMessage, merged.Len())
 	for k := range merged.Names() {
-		if !inlineOnly[k] {
+		if !literal(k) {
 			// A field the task did not rewrite, and which arrived as a ref, KEEPS that ref - it is never
 			// re-minted against this step, whose row does not hold the bytes. This is the one-hop guard, and it
 			// is unconditional precisely because the fan-out policy below is not size-based.
@@ -253,7 +360,7 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.State, inherited R
 		// nothing and a carried payload is never expanded merely to be measured.
 		data := merged.GetJSON(k)
 		raw[k] = data
-		if !inlineOnly[k] && len(data) >= candidateFloor(successors) {
+		if !literal(k) && len(data) >= candidateFloor(successors) {
 			candidates = append(candidates, candidate{k, len(data)})
 		}
 	}
@@ -268,7 +375,7 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.State, inherited R
 	}
 	if sum >= openThreshold(successors, l.inflation(successors)) {
 		for _, c := range candidates {
-			refs[c.key] = anchorID
+			refs[c.key] = Ref{Anchor: anchorID}
 			delete(raw, c.key)
 		}
 	}
@@ -285,13 +392,17 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.State, inherited R
 		if mentions(merged, k) {
 			continue
 		}
-		if inlineOnly[k] {
+		if literal(k) {
 			continue
 		}
 		if mentions(changes, k) {
 			continue
 		}
 		refs[k] = anchor
+	}
+
+	if item != nil {
+		mintItem(raw, refs, *item)
 	}
 
 	inlineExcessAnchors(raw, refs, merged)
@@ -305,6 +416,28 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.State, inherited R
 		return nil, nil, errors.Trace(err)
 	}
 	return stateJSON, refsJSON, nil
+}
+
+// mintItem replaces a forEach element's literal with an item ref into its source array, when the array is
+// stored by a plain ref and the element outweighs the ref. It runs after the array's fate is decided -
+// carried, newly anchored here, or inline - because the item ref points at whichever anchor holds the
+// array's bytes, never at the step merely carrying a ref to them, which would break the one-hop rule.
+//
+// The bar is flat, not scaled by the fan-out width: the array as a whole already got the width-scaled
+// treatment, and each element appears in exactly one branch, so there is nothing to amortize over N.
+func mintItem(raw map[string]json.RawMessage, refs Refs, item Item) {
+	// A source that is itself an item ref - an inner forEach over an outer element - keeps its elements
+	// inline: an item ref is one level deep. forEach(items) as items leaves no array to point into.
+	src, ok := refs[item.Source]
+	if !ok || len(src.Path) > 0 || item.Key == item.Source {
+		return
+	}
+	field := src.field(item.Source)
+	if strings.Contains(field, "[") || len(raw[item.Key]) < minItem {
+		return
+	}
+	refs[item.Key] = Ref{Anchor: src.Anchor, Field: field, Path: []int{item.Index}}
+	delete(raw, item.Key)
 }
 
 // CombinedReducerFields names the keys whose merged fan-in value came from a COMBINING (non-replace)
@@ -342,10 +475,10 @@ func inlineExcessAnchors(raw map[string]json.RawMessage, refs Refs, merged workf
 	// Such a ref must survive the cap even if that means a wider IN-list (correctness over the perf bound).
 	// Detecting it needs only a presence check, no marshal.
 	pinned := map[int]bool{}
-	for k, anchor := range refs {
-		byAnchor[anchor] = append(byAnchor[anchor], k)
+	for k, ref := range refs {
+		byAnchor[ref.Anchor] = append(byAnchor[ref.Anchor], k)
 		if !mentions(merged, k) {
-			pinned[anchor] = true
+			pinned[ref.Anchor] = true
 		}
 	}
 	if len(byAnchor) <= maxAnchors {
@@ -459,19 +592,24 @@ func (l *Linker) Resolve(ctx context.Context, state workflow.State, refs Refs, w
 // into a state document without decoding at all.
 func (l *Linker) fetch(ctx context.Context, refs Refs, want map[string]bool, load Loader) (map[string]json.RawMessage, error) {
 	values := make(map[string]json.RawMessage, len(refs))
-	// Serve what the cache can, and collect the anchors still needed.
-	pending := map[string]int{}
+	// Serve what the cache can, and collect the anchors still needed. The cache holds whole fields; an item
+	// ref is served from its array's entry, so a cohort's branches share one entry for the array.
+	pending := map[string]Ref{}
 	anchorSet := map[int]bool{}
-	for field, anchor := range refs {
-		if want != nil && !want[field] {
+	for key, ref := range refs {
+		if want != nil && !want[key] {
 			continue
 		}
-		if cached, ok := l.cache.Load(cacheKey{anchor, field}); ok {
-			values[field] = cached
+		if cached, ok := l.cache.Load(cacheKey{ref.Anchor, ref.field(key)}); ok {
+			value, err := l.element(key, ref, cached)
+			if err != nil {
+				return nil, errors.Trace(err)
+			}
+			values[key] = value
 			continue
 		}
-		pending[field] = anchor
-		anchorSet[anchor] = true
+		pending[key] = ref
+		anchorSet[ref.Anchor] = true
 	}
 	if len(pending) == 0 {
 		return values, nil
@@ -486,30 +624,142 @@ func (l *Linker) fetch(ctx context.Context, refs Refs, want map[string]bool, loa
 		return nil, errors.Trace(err)
 	}
 
-	for field, anchor := range pending {
-		row, ok := fetched[anchor]
+	for key, ref := range pending {
+		row, ok := fetched[ref.Anchor]
 		if !ok {
-			return nil, errors.New("state ref %q points at missing step %d", field, anchor)
+			return nil, errors.New("state ref %q points at missing step %d", key, ref.Anchor)
 		}
 		// changes shadows state: the anchor's changes hold the value its task PRODUCED, while its state holds
 		// a value it merely received (the flow's initial input at the entry step, or a fan-in's reduced
 		// output). Both are legitimate anchor locations; changes is the newer of the two.
+		field := ref.field(key)
 		value, found := row.Changes[field]
 		if !found {
 			value, found = row.State[field]
 		}
 		if !found {
 			if _, isRef := row.Refs[field]; isRef {
-				return nil, errors.New("state ref %q resolves to step %d, which itself refs it - one-hop violated", field, anchor)
+				return nil, errors.New("state ref %q resolves to step %d, which itself refs %q - one-hop violated", key, ref.Anchor, field)
 			}
-			return nil, errors.New("state ref %q not found in step %d", field, anchor)
+			return nil, errors.New("state ref %q not found in step %d", key, ref.Anchor)
 		}
 		// Cache the immutable BYTES, never a decoded value: a decoded one would alias the same map/slice
 		// across the fan-out branch goroutines about to hand it to concurrent tasks.
-		l.cache.Store(cacheKey{anchor, field}, value)
-		values[field] = value
+		l.cache.Store(cacheKey{ref.Anchor, field}, value)
+		value, err = l.element(key, ref, value)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		values[key] = value
 	}
 	return values, nil
+}
+
+// element returns the bytes a ref resolves to, given its whole field's bytes: the field itself for a plain
+// ref, one element of it for an item ref. The element is a sub-slice of the field's bytes, which is safe to
+// share for the same reason the field's bytes are - they are immutable.
+func (l *Linker) element(key string, ref Ref, fieldBytes json.RawMessage) (json.RawMessage, error) {
+	switch len(ref.Path) {
+	case 0:
+		return fieldBytes, nil
+	case 1:
+	default:
+		return nil, errors.New("state ref %q indexes %d levels deep; only one is supported", key, len(ref.Path))
+	}
+	field := ref.field(key)
+	k := cacheKey{ref.Anchor, field}
+	elems, ok := l.splits.Load(k)
+	if !ok {
+		var err error
+		elems, err = splitArray(fieldBytes)
+		if err != nil {
+			return nil, errors.New("state ref %q: field %q in step %d: %v", key, field, ref.Anchor, err)
+		}
+		l.splits.Store(k, elems)
+	}
+	i := ref.Path[0]
+	if i >= len(elems) {
+		return nil, errors.New("state ref %q: index %d out of range of field %q in step %d (length %d)", key, i, field, ref.Anchor, len(elems))
+	}
+	return elems[i], nil
+}
+
+// splitArray returns a JSON array's elements as sub-slices of data, without copying them, so an array split
+// for its item refs is not held in memory twice. Each sub-slice is capped at its own length, so an append to
+// one can never write over the next element of the shared bytes. data is expected to be valid JSON, which a
+// payload column read back from the database is; anything else is an error, never a panic.
+func splitArray(data []byte) ([]json.RawMessage, error) {
+	i := skipSpace(data, 0)
+	if i == len(data) || data[i] != '[' {
+		return nil, errors.New("not an array")
+	}
+	elems := []json.RawMessage{}
+	i = skipSpace(data, i+1)
+	if i < len(data) && data[i] == ']' {
+		return elems, nil
+	}
+	for i < len(data) {
+		start := i
+		i = valueEnd(data, i)
+		elems = append(elems, json.RawMessage(data[start:i:i]))
+		i = skipSpace(data, i)
+		if i == len(data) {
+			break
+		}
+		switch data[i] {
+		case ',':
+			i = skipSpace(data, i+1)
+		case ']':
+			return elems, nil
+		default:
+			return nil, errors.New("malformed array")
+		}
+	}
+	return nil, errors.New("malformed array")
+}
+
+// valueEnd returns the index just past the JSON value that starts at data[i].
+func valueEnd(data []byte, i int) int {
+	depth := 0
+	for ; i < len(data); i++ {
+		switch data[i] {
+		case '"':
+			for i++; i < len(data) && data[i] != '"'; i++ {
+				if data[i] == '\\' {
+					i++
+				}
+			}
+			if i >= len(data) {
+				return len(data)
+			}
+			if depth == 0 {
+				return i + 1
+			}
+		case '[', '{':
+			depth++
+		case ']', '}':
+			if depth == 0 {
+				return i
+			}
+			depth--
+			if depth == 0 {
+				return i + 1
+			}
+		case ',', ' ', '\t', '\n', '\r':
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return i
+}
+
+// skipSpace returns the index of the first non-whitespace byte at or after i.
+func skipSpace(data []byte, i int) int {
+	for i < len(data) && (data[i] == ' ' || data[i] == '\t' || data[i] == '\n' || data[i] == '\r') {
+		i++
+	}
+	return i
 }
 
 // ResolveReduced materializes only the ref'd fields a fan-in's reducers actually need, into state in place.

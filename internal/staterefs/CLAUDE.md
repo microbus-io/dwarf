@@ -16,6 +16,45 @@ caps near ~700-900 steps/s rewriting 64KB per step, bound by the instance's disk
 So a field above a size bar is not written into the successor's `state` at all: it is omitted, and the refs
 map records `{"<field>": <anchor step_id>}` — the step that physically holds the bytes.
 
+## Item refs: a forEach branch points at its element inside the array
+
+A forEach's source array is ref'd once and shared by every branch, but each branch's element (`<as>`) is one
+element of that same array. Stored inline it is a **second copy of the array's bytes**, spread across the
+branches, and an element below the linear bar (4096) is copied again at **every step of its branch** - `S + D·S`
+for a depth-D branch. An item ref stores the array once: `"<anchor> <field>[<index>]"`, e.g.
+`{"pages": 1234, "page": "1234 pages[5]"}`. The saving is arithmetic, not empirical: 50% of a fan-out's carried
+input for large elements, `D/(1+D)` for mid-size ones. Task outputs (`changes`) are irreducible.
+
+- **The wire format is owned by `Ref`'s JSON methods.** A plain ref is always a bare JSON number, so a refs
+  column with no item refs is readable by a reader that knows only plain refs. The string form holds any depth of index
+  path (`"9 data[3][0]"`), so a deeper ref never needs a new spelling, but `Mint` only emits one level and
+  `fetch` rejects a deeper path. Field names cannot hold `[` (`Graph.Validate`'s `isFieldName`), which is what
+  makes the front-to-back parse unambiguous.
+- **The item ref is minted INSIDE `Mint`** (`mintItem`), after the array's own fate is decided, because it
+  points at whichever anchor holds the array's bytes - carried from an earlier step, or opened here. Pointing at
+  a step that merely carries a ref to the array would dangle (the one-hop rule). If the array stays inline, so
+  does the element.
+- **The size bar is flat (`minItem`), not width-scaled.** Each element appears in exactly one branch, so there
+  is nothing to amortize over N; the array as a whole already got the `budget/N` treatment.
+- **It is free on the read side.** The anchor is the one the branch already fetches for the array, so it adds
+  no anchor to the IN-list and no round trip.
+- **The split cache (`Linker.splits`) is required, not an optimization.** A plain ref is spliced without being
+  decoded, so a branch never scans the array; extracting an element does. Without a cached split every branch
+  scans the whole array for its one element - O(N) per branch, **O(N²) per cohort**. The splitter returns
+  sub-slices of the cached bytes (no copy), safe to share for the same reason invariant 6 is. **Do not swap it
+  for `json.Unmarshal` into `[]json.RawMessage`:** that copies every element, so a cached array (a document's
+  page images, say) is held twice. The sub-slices are capped (`data[start:i:i]`), so an `append` onto one
+  cannot overwrite the next element in the shared bytes.
+- **`inlineExcessAnchors` groups an item ref under its array's anchor**, so dropping that anchor over the cap
+  inlines the array and the element together - both literals are in `merged`.
+- **An inner forEach over the OUTER element keeps its elements inline** - the source is itself an item ref, and
+  an item ref is one level deep. An inner forEach over a separately computed array (the doc -> pages -> chunks
+  shape) is an ordinary one-level item ref into the step that computed it, and the outer element rides into
+  the inner branches as the outer branch's item ref.
+- **Fidelity:** resolving from the array's stored bytes returns an integer beyond 2^53 exactly, where the inline
+  element (decoded to `any` in transition evaluation, re-encoded by `Set`) rounds it.
+  `TestLinker_ResolveItemIsExact` pins it.
+
 ## The shape: resolve once at dispatch, mint once at the successor write
 
 Everything in between works on literals — `when` evaluation, `forEach` expansion, the task carrier, the
@@ -61,7 +100,8 @@ both measure ~1x, so the ambiguity is moot and no server-version probe is needed
 1. **Refs live only in `state`, never in `changes`.** `changes` is always a task's literal output or a
    reducer's literal result. That is what makes one refs column sufficient and the changes-shadows-state rule
    safe — there is no case where both sides are indirections.
-2. **Refs are ONE HOP.** This mostly holds by construction (a ref is a few bytes, so it never trips the size
+2. **Refs are ONE HOP** - item refs included: an item ref points at literal array bytes at its anchor, never at
+   another ref. This mostly holds by construction (a ref is a few bytes, so it never trips the size
    bar and is never re-minted) — but that is a side effect of a SIZE comparison, and the fan-out policy is
    deliberately size-*independent*. So `Mint` carries an inherited ref forward unconditionally and never
    re-mints it, and `Resolve` **asserts** the invariant rather than walking a chain (walking would be the
@@ -104,10 +144,11 @@ The mint reads two independent signals about a field and needs both:
 - `inlineOnly[k]` ⇒ **the bytes are in no step row**, so never ref it — carried or new.
 
 A nil tombstone only delivers the first. The second is candidacy suppression, and it is the correctness half:
-a synthesized `forEach` element (`<as>`/`<as>Index`/`<as>Count`) or a member-contributed fan-in field would
-otherwise be ref'd against an anchor whose row does not hold it, and dangle. The two sets genuinely differ in
-both directions — a forEach element is `inlineOnly` and *not* in `changes`; an ordinary task write is in
-`changes` and *not* `inlineOnly`. There is a second reason at the forEach site: the engine's
+a forEach branch's synthesized ordinal context (`<as>Index`/`<as>Count`) or a member-contributed fan-in field
+would otherwise be ref'd against an anchor whose row does not hold it, and dangle. (The element `<as>` is not
+`inlineOnly`: it is `Mint`'s `item`, which `Mint` treats as inline-only unless it can point it into the array's
+anchor.) The two sets genuinely differ in both directions — the ordinal context is `inlineOnly` and *not* in
+`changes`; an ordinary task write is in `changes` and *not* `inlineOnly`. There is a second reason at the forEach site: the engine's
 `accumulatedChanges` map is shared across the linear mint and every branch mint, and a JSON null in a
 persisted `changes` column is a tombstone `DelNils` enacts as a delete — so synthesizing nils there would leak
 across branches and overload a value that already means something else.
@@ -199,7 +240,9 @@ the only dialect-dependent term in the policy.
   the CARRY multiplier; write volume for actually-new data is irreducible.
 - **Whether `maxAnchors` ever binds** is unmeasured (how many large fields are concurrently live in a
   realistic workflow). The engine's byte counters are the instrument.
-- **forEach item refs** — a branch pointing at its element inside the array's anchor instead of storing it
-  inline, which would take a fan-out from ~2x back to ~1x. Designed, not implemented; it retypes `Refs`'
-  value from `int` to an opaque form, so the three places that *inspect* an anchor id (the one-hop assertion,
-  `Mint`'s carry-forward, and `Fork`'s remap) are the ones that change.
+- **Item refs deeper than one level** (an inner forEach over the outer element, a genuine 2D array) - the wire
+  format already holds the path; `mintItem` would extend the source ref's path, and `element` would split level
+  by level from the cached parent.
+- **Whether the resolve cache keeps an item-ref'd array resident across a cohort** is unmeasured. Item refs add
+  no anchor, but a cohort leans on the array's anchor staying cached; check one miss per cohort on
+  `dwarf_state_read_bytes`, not one per branch.

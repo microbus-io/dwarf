@@ -1642,7 +1642,8 @@ Three things stay the engine's:
 A step's `state` is a full input snapshot, so a field that is *carried* but not *changed* is re-serialized into
 every row it survives into: D copies down a chain of depth D, and **N·D across a fan-out of N branches**. A field
 above a size bar is therefore not written into the successor's `state` at all: it is omitted, and the
-`dwarf_steps.state_refs` column records `{"<field>": <anchor step_id>}` — the step that physically holds the bytes.
+`dwarf_steps.state_refs` column records `{"<field>": <anchor step_id>}` — the step that physically holds the bytes
+(or, for a forEach element, `"<anchor> <array field>[<index>]"` — an item ref into the array's anchor).
 The doc-extraction shape (a document fanned out over pages, then chunks) measures **~29x** fewer stored state bytes.
 
 **The mechanism, the size policy, and the invariants that cost bugs to find live in `internal/staterefs/CLAUDE.md`
@@ -1704,14 +1705,17 @@ precisely the payloads this feature exists to stop hauling. An anchor is always 
 it, and pruning removes only descendants of the rewind step, so a kept step's anchors are always kept; a zero
 mapping is caught, not written as a dangling ref. The fork *leaf* gets materialized state and cleared refs.
 
-**The forEach element is never ref'd** (`<as>`/`<as>Index`/`<as>Count`) — the engine synthesizes it per branch, so
-its bytes are in no step row and a ref to it would dangle. The engine passes those names as the mint's
+**The forEach ordinal context is never ref'd** (`<as>Index`/`<as>Count`) — the engine synthesizes it per branch,
+so its bytes are in no step row and a ref to it would dangle. The engine passes those names as the mint's
 `inlineOnly` set, which is a distinct signal from a field appearing in `changes` (see the package doc — a nil
-tombstone cannot substitute for it).
+tombstone cannot substitute for it). **The element itself (`<as>`) is passed as the mint's `Item`** (its key, the
+`forEach` field, its index): its bytes are one element of the source array, so when the array is stored by a
+plain ref the element becomes an *item ref* into the same anchor rather than a second copy of the array's bytes
+spread across the branches. Each branch step carries it forward, so no step of the branch copies the element.
 
 Pinned by `internal/staterefs` (the tiers, both-column resolve, one-hop assert, the batched load, the
-bytes-not-values cache), `engine/staterefs_test.go` (the fan-out and fan-in storage assertions against a real
-database) and `fixtures/staterefsflow_test.go` (end-to-end: a carried document across fan-out/fan-in, `Continue`,
+bytes-not-values cache), `engine/staterefs_test.go` and `engine/itemref_test.go` (the fan-out, fan-in and item-ref
+storage assertions against a real database) and `fixtures/staterefsflow_test.go` (end-to-end: a carried document across fan-out/fan-in, `Continue`,
 `Fork`, overwrite and tombstone).
 
 **One open follow-up is the engine's rather than the package's:** a **large-state warning**.

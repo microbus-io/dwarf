@@ -285,9 +285,9 @@ func (g *Graph) AddTransitionGoto(from, to string) {
 // Both 'forEach' and 'as' must be plain identifiers - an ASCII letter or underscore, then ASCII letters,
 // digits, or underscores - or Validate rejects the graph.
 //
-// Every branch carries the source array (it is ordinary flow state), so an N-element fan-out over a chain
-// of depth D stores N*D copies of it. For a large array, a branch can drop it with f.Set(<forEach>, nil),
-// which removes it from the flow's state past the fan-in.
+// Every branch sees the source array (it is ordinary flow state). A large array, and a large element of
+// it, is stored once and shared by the branches rather than copied into each. A branch that wants the
+// array gone from the flow's state past the fan-in drops it with f.Set(<forEach>, nil).
 func (g *Graph) AddTransitionForEach(from, to string, forEach string, as string) {
 	g.autoRegister(from)
 	g.autoRegister(to)

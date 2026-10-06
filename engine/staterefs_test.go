@@ -104,7 +104,7 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 	assert.NoError(err)
 
 	state := newState()
-	refs := staterefs.Refs{"fromState": 1, "fromChanges": 1, "shadowed": 1}
+	refs := staterefs.Refs{"fromState": {Anchor: 1}, "fromChanges": {Anchor: 1}, "shadowed": {Anchor: 1}}
 	_, err = e.resolveStateRefs(ctx, db, 1, state, refs, nil, "u")
 	assert.NoError(err)
 
@@ -119,9 +119,9 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 	assert.Equal("new", shadowed, "changes shadows state - it is the newer value")
 
 	// A dangling ref is an invariant violation and must be loud, never a silently-absent field.
-	_, err = e.resolveStateRefs(ctx, db, 1, newState(), staterefs.Refs{"nope": 1}, nil, "u")
+	_, err = e.resolveStateRefs(ctx, db, 1, newState(), staterefs.Refs{"nope": {Anchor: 1}}, nil, "u")
 	assert.Error(err)
-	_, err = e.resolveStateRefs(ctx, db, 1, newState(), staterefs.Refs{"x": 999}, nil, "u")
+	_, err = e.resolveStateRefs(ctx, db, 1, newState(), staterefs.Refs{"x": {Anchor: 999}}, nil, "u")
 	assert.Error(err)
 }
 
@@ -194,9 +194,9 @@ func TestStateRefs_CarryAcrossFanOut(t *testing.T) {
 	assert.Equal(8, len(branches))
 	for _, id := range branches {
 		st, refs, size := stepRefsOf(t, e, id)
-		assert.Equal(entry, refs["pdf"], "a branch carries the document BY REFERENCE to the entry step")
+		assert.Equal(entry, refs["pdf"].Anchor, "a branch carries the document BY REFERENCE to the entry step")
 		assert.False(st.Has("pdf"), "the payload is not copied into the branch's row")
-		assert.True(st.Has("page"), "the injected element is synthesized per branch and can never be ref'd")
+		assert.True(st.Has("page"), "a one-byte element is cheaper inline than as an item ref")
 		assert.True(size < doc/2, "a branch's stored state must be a small fraction of the payload it carries")
 	}
 
@@ -204,7 +204,7 @@ func TestStateRefs_CarryAcrossFanOut(t *testing.T) {
 	// carried field at every fan-in would hand back the win in exactly these graphs.
 	join := stepIDsByTask(t, e, "Join")[0]
 	joinState, joinRefs, _ := stepRefsOf(t, e, join)
-	assert.Equal(entry, joinRefs["pdf"], "a carried ref crosses the fan-in still pointing at its original anchor")
+	assert.Equal(entry, joinRefs["pdf"].Anchor, "a carried ref crosses the fan-in still pointing at its original anchor")
 	assert.False(joinState.Has("pdf"))
 	assert.True(joinState.Has("processed"), "the REDUCED field is materialized into the fan-in step's own state")
 }

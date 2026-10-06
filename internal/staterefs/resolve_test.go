@@ -71,7 +71,7 @@ func TestLinker_ResolveReadsBothColumns(t *testing.T) {
 		},
 	}}
 	state := newState()
-	refs := Refs{"fromState": 7, "fromChanges": 7, "shadowed": 7}
+	refs := Refs{"fromState": {Anchor: 7}, "fromChanges": {Anchor: 7}, "shadowed": {Anchor: 7}}
 
 	_, err := New("sqlite").Resolve(ctx, state, refs, nil, anchors.load)
 	assert.NoError(err)
@@ -95,7 +95,7 @@ func TestLinker_ResolveOneRoundTripPerBatch(t *testing.T) {
 	}}
 	state := newState()
 
-	_, err := New("sqlite").Resolve(ctx, state, Refs{"a": 7, "b": 7, "c": 9}, nil, anchors.load)
+	_, err := New("sqlite").Resolve(ctx, state, Refs{"a": {Anchor: 7}, "b": {Anchor: 7}, "c": {Anchor: 9}}, nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal(1, len(anchors.calls), "three fields across two anchors must cost ONE load, not three")
 	assert.Equal(2, len(anchors.calls[0]), "the batch asks for each DISTINCT anchor once")
@@ -118,10 +118,10 @@ func TestLinker_ResolveCachesBytesNotValues(t *testing.T) {
 	linker := New("sqlite")
 
 	first := newState()
-	_, err := linker.Resolve(ctx, first, Refs{"doc": 7}, nil, anchors.load)
+	_, err := linker.Resolve(ctx, first, Refs{"doc": {Anchor: 7}}, nil, anchors.load)
 	assert.NoError(err)
 	second := newState()
-	_, err = linker.Resolve(ctx, second, Refs{"doc": 7}, nil, anchors.load)
+	_, err = linker.Resolve(ctx, second, Refs{"doc": {Anchor: 7}}, nil, anchors.load)
 	assert.NoError(err)
 
 	assert.Equal(1, len(anchors.calls), "the second resolve of a settled anchor must be served from cache")
@@ -143,15 +143,15 @@ func TestLinker_ResolveAssertsOneHop(t *testing.T) {
 	ctx := context.Background()
 
 	anchors := &fakeAnchors{rows: map[int]Anchor{
-		7: {Refs: Refs{"doc": 3}}, // holds no bytes for `doc` - it points onward
+		7: {Refs: Refs{"doc": {Anchor: 3}}}, // holds no bytes for `doc` - it points onward
 		3: {Changes: cols(map[string]any{"doc": "the payload"})},
 	}}
-	_, err := New("sqlite").Resolve(ctx, newState(), Refs{"doc": 7}, nil, anchors.load)
+	_, err := New("sqlite").Resolve(ctx, newState(), Refs{"doc": {Anchor: 7}}, nil, anchors.load)
 	assert.Error(err)
 	assert.Contains(err.Error(), "one-hop")
 
 	// A ref at an anchor that does not exist at all is likewise an error, never a silently absent field.
-	_, err = New("sqlite").Resolve(ctx, newState(), Refs{"doc": 404}, nil, anchors.load)
+	_, err = New("sqlite").Resolve(ctx, newState(), Refs{"doc": {Anchor: 404}}, nil, anchors.load)
 	assert.Error(err)
 }
 
@@ -168,7 +168,7 @@ func TestLinker_ResolveWantSelects(t *testing.T) {
 		7: {Changes: cols(map[string]any{"reduced": "R", "carried": "C"})},
 	}}
 	state := newState()
-	refs := Refs{"reduced": 7, "carried": 7}
+	refs := Refs{"reduced": {Anchor: 7}, "carried": {Anchor: 7}}
 
 	err := New("sqlite").ResolveReduced(ctx, state, refs, map[string]workflow.Reducer{"reduced": workflow.ReducerAppend}, anchors.load)
 	assert.NoError(err)
@@ -193,7 +193,7 @@ func TestLinker_FlattenSplicesWithoutDecoding(t *testing.T) {
 	anchors := &fakeAnchors{rows: map[int]Anchor{
 		7: {Changes: cols(map[string]any{"doc": []any{1, 2, 3}})},
 	}}
-	flat, err := New("sqlite").Flatten(ctx, []byte(`{"kept":"inline"}`), Refs{"doc": 7}, anchors.load)
+	flat, err := New("sqlite").Flatten(ctx, []byte(`{"kept":"inline"}`), Refs{"doc": {Anchor: 7}}, anchors.load)
 	assert.NoError(err)
 
 	var got map[string]any

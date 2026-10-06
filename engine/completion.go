@@ -591,16 +591,22 @@ func (e *Engine) cohortSpawnTasks(ctx context.Context, db sequel.Executor, linea
 //
 // Applied at both places a cohort's state leaves the cohort: fanInRow (the convergence) and
 // computeFinalState (a fan-out that never converged), so the two cannot drift on what a fan-out's state means.
-func stripForEachBookkeeping(state workflow.State, graph *workflow.Graph, spawnTask string) {
+//
+// It returns the names it deleted, so a caller minting the stripped state can keep them from being re-emitted
+// through a carried ref.
+func stripForEachBookkeeping(state workflow.State, graph *workflow.Graph, spawnTask string) []string {
 	if state.Len() == 0 || spawnTask == "" {
-		return
+		return nil
 	}
+	var names []string
 	for _, tr := range graph.Transitions() {
 		if tr.From != spawnTask || tr.ForEach == "" || tr.As == "" {
 			continue
 		}
-		state.Del(tr.As, tr.As+"Index", tr.As+"Count")
+		names = append(names, tr.As, tr.As+"Index", tr.As+"Count")
 	}
+	state.Del(names...)
+	return names
 }
 
 // completeFlow transitions a flow to completed and propagates to surgraph.
