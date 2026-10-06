@@ -1180,31 +1180,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				return errors.New("injected fault: " + engineseams.FaultTransitionCommit + " " + taskName)
 			}
 
-			// Write-first: take the flow row's lock before any step, guarded on non-terminal status. If a
-			// concurrent Terminate/failStep terminalized this flow after the step was marked completed but before
-			// this transition committed (the Terminate-vs-transition window, and the retry after a lock-contention
-			// rollback), the guard yields zero rows and the transition becomes a clean no-op. Without it, the tx
-			// would insert pending successors into an already-terminal flow — orphan work only reaped later by the
-			// claim-time terminal-flow guard. The completed step is left as a harmless tail on the final flow.
-			// The lock-grab flips the non-indexed `touch` column, not `updated_at`: a running flow's
-			// `updated_at` now moves only on a genuine status transition, so the running band of
-			// idx_dwarf_flows_status is not churned once per step. `touch` always changes value, so
-			// RowsAffected still reflects the WHERE match (the terminal guard below) on every driver.
-			//
-			// Reports whether the flow is still non-terminal; a false return means the caller must bail (nil).
 			flowRowLocked := false
-			lockFlowRow := func() (bool, error) {
-				if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
-					e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
-				}
-				flowRes, flowErr := tx.ExecContext(ctx, lockFlowRowSQL(), flowID)
-				if flowErr != nil {
-					return false, errors.Trace(flowErr)
-				}
-				n, _ := flowRes.RowsAffected()
-				flowRowLocked = n > 0
-				return flowRowLocked, nil
-			}
 
 			// A NON-FINAL cohort arrival is the one disposition that neither extends nor terminalizes the flow:
 			// it inserts no successor, advances no step_id, and its entire durable effect is the cohort_arrivals
@@ -1255,10 +1231,19 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				return errors.Trace(res.Close())
 			}
 
-			// The grab is batched with what follows it, so its terminal-status guard is read only after those
-			// statements ran: a terminal flow is bailed by rolling back (errTransitionFlowTerminal), which leaves the
-			// transition the same clean no-op as a bail before any write.
-			if !pureArrival {
+			// Write-first: queueGrab takes the flow row's lock before any step is written (except the deferred grab of
+			// a cohort arrival, below), guarded on non-terminal status. If a concurrent Terminate/failStep terminalized this flow after the step was marked completed
+			// but before this transition committed (the Terminate-vs-transition window, and the retry after a
+			// lock-contention rollback), the guard matches no row and the transition becomes a clean no-op. Without
+			// it, the tx would insert pending successors into an already-terminal flow - orphan work only reaped
+			// later by the claim-time terminal-flow guard. The completed step is left as a harmless tail on the final
+			// flow. The grab flips the non-indexed `touch` column, not `updated_at`, so the running band of
+			// idx_dwarf_flows_status is not churned once per step; `touch` always changes value, so RowsAffected
+			// reflects the WHERE match on every driver.
+			//
+			// The grab is batched with what follows it, so its guard is read only after those statements ran. A
+			// terminal flow matches no row: its reader returns bail and leaves flowRowLocked false.
+			queueGrab := func(bail error) {
 				if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
 					e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
 				}
@@ -1268,11 +1253,16 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 						return errors.Trace(err)
 					}
 					if n, _ := grab.RowsAffected(); n == 0 {
-						return errTransitionFlowTerminal
+						return bail
 					}
 					flowRowLocked = true
 					return nil
 				}, lockFlowRowSQL(), flowID)
+			}
+			// A transition on a terminal flow rolls back what was batched with the grab, which leaves it the same
+			// clean no-op as a bail before any write.
+			if !pureArrival {
+				queueGrab(errTransitionFlowTerminal)
 			}
 
 			succ := successorBatch{
@@ -1405,6 +1395,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				return err
 			}
 
+			fanInID, fanInArgs := "", []any(nil) // the fan-in step's id in SQL, when this arrival inserts one
 			if fanInArrivals > 0 {
 				// Bump the cohort counter and read the post-bump values in ONE round-trip where the driver
 				// supports it (the same RETURNING/OUTPUT split as the claim CAS above).
@@ -1437,24 +1428,61 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				// that landed while this step sat between its completion write and here marked nothing - every
 				// member is already completed - so it reaches the flow only through the mark the fan-in insert
 				// inherits (inheritCancel). Pinned by TestCancelVsLastCohortArrival_Deterministic.
-				if fullyResolved && !flowRowLocked {
-					ok, lerr := lockFlowRow()
-					if lerr != nil {
-						return lerr
+				//
+				// The cohort's reads go out in the same batch as the grab. They are reads, so a bail that commits the
+				// bump commits nothing else.
+				var cohort cohortRead
+				if fullyResolved {
+					if !flowRowLocked {
+						queueGrab(nil)
 					}
-					if !ok {
+					if failures == 0 {
+						queueCohortRead(queue, flowID, cohortSpawnID, &cohort)
+					}
+					if err := flush(); err != nil {
+						return err
+					}
+					if !flowRowLocked {
 						return nil
 					}
 				}
 				if fullyResolved && failures == 0 {
-					fanInStepID, fanInBytes, err := e.insertFanInStep(ctx, tx, shardNum, flowID, nextStepDepth, cohortSpawnID, stepID, fanInTaskName, graph, workflowURL, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs, inheritCancel)
+					row, depth, exits, fanInBytes, err := e.fanInRow(ctx, tx, shardNum, nextStepDepth, cohortSpawnID, &cohort, fanInTaskName, graph, workflowURL)
 					if err != nil {
 						return errors.Trace(err)
 					}
 					txBytes.stateWritten += fanInBytes.stateWritten
 					txBytes.stateRead += fanInBytes.stateRead
 					txBytes.changesRead += fanInBytes.changesRead
-					newStepIDs = append(newStepIDs, fanInStepID)
+					fanIn := successorBatch{
+						flowID: flowID, stepDepth: depth, timeBudgetMs: flowTimeBudgetMs, lineageID: spawnLineageID,
+						predecessorID: stepID, sleepMs: sleepMs, priority: flowPriority, fairnessKey: flowFairnessKey,
+						fairnessWeight: flowFairnessWeight, engineID: e.engineID, inheritCancel: inheritCancel,
+						rows: []successorRow{row},
+					}
+					fanIn.queue(queue, tx.DriverName(), &newStepIDs)
+					// The cohort-exit -> fan-in edges and the flow advance below name the new step as the INSERT's
+					// own id where PostgreSQL can, so all three go out in one batch; otherwise the id is read first.
+					fanInID, fanInArgs = loneSuccessorID, nil
+					if tx.DriverName() != "pgx" {
+						if err := flush(); err != nil {
+							return err
+						}
+						fanInID, fanInArgs = "?", []any{newStepIDs[len(newStepIDs)-1]}
+					}
+					// The exit steps are targeted by primary key, collected from the cohort read, so the write locks
+					// only those rows: a (flow_id, lineage_id, task_name IN ...) predicate has no supporting index
+					// and scan-locked dwarf_steps, deadlocking concurrent fan-ins on SQL Server.
+					if len(exits) > 0 {
+						args := append([]any{}, fanInArgs...)
+						for _, id := range exits {
+							args = append(args, id)
+						}
+						queue(func(res *sequel.BatchResults) error {
+							_, err := res.Exec()
+							return errors.Trace(err)
+						}, "UPDATE dwarf_steps SET successor_id="+fanInID+" WHERE step_id IN ("+strings.Repeat("?,", len(exits)-1)+"?)", args...)
+					}
 				} else if fullyResolved && failures > 0 {
 					// The cohort resolves as a loss, and is a cancellation only if every failure in it was one.
 					failFlow := spawnLineageID == 0
@@ -1498,21 +1526,29 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				}
 			}
 
-			nextFlowStepID := 0
-			if len(newStepIDs) == 1 {
-				nextFlowStepID = newStepIDs[0]
-			}
 			// Gated on holding the flow row: an unresolved pure arrival never took the grab, and its write here
 			// would have been step_id=0 over the 0 a fan-out already carries - pure WAL amplification on the
 			// flow's hottest row (two extra tuple versions per sibling; 126 per 64-wide cohort) plus the lock
-			// hold that serializes the cohort. Every path that DOES advance the flow holds the row by here.
+			// hold that serializes the cohort. Every path that DOES advance the flow holds the row by here. The flow's
+			// next step is its only new one - the fan-in step, or a successor whose id is already read; with several,
+			// or none, no one step is.
 			if !advanceNow && !flowFailed && flowRowLocked {
 				if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
 					e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
 				}
-				tx.ExecContext(ctx, "UPDATE dwarf_flows SET step_id=?, touch=1-touch WHERE flow_id=?", nextFlowStepID, flowID)
+				target, targetArgs := "0", []any(nil)
+				switch {
+				case fanInID != "" && len(normalNexts) == 0:
+					target, targetArgs = fanInID, fanInArgs
+				case fanInID == "" && len(newStepIDs) == 1:
+					target, targetArgs = "?", []any{newStepIDs[0]}
+				}
+				queue(func(res *sequel.BatchResults) error {
+					_, err := res.Exec()
+					return errors.Trace(err)
+				}, "UPDATE dwarf_flows SET step_id="+target+", touch=1-touch WHERE flow_id=?", append(append([]any{}, targetArgs...), flowID)...)
 			}
-			return nil
+			return flush()
 		})
 		if errors.Is(err, errTransitionFlowTerminal) {
 			txBytes = stateByteCount{} // nothing the transaction wrote survived the rollback
@@ -1838,14 +1874,14 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		}
 		// Fold our own delta via the reducers, then materialize: DelNils enacts replace-field deletes, and a
 		// cleared reduced field was ignored during the fold. An empty forEach spawns no members, so this is the
-		// whole merge - agreeing with insertFanInStep's populated path on the same primitive.
+		// whole merge - agreeing with fanInRow's populated path on the same primitive.
 		mergedState := ourState.Clone()
 		_ = mergedState.MergeReduce(ourChanges, graph.Reducers())
 		mergedState.DelNils()
 		// This step IS the cohort spawn (an empty forEach spawns no branches), so it anchors exactly as a
-		// populated cohort's spawn does in insertFanInStep. There are no members, but a field this step wrote
+		// populated cohort's spawn does in fanInRow. There are no members, but a field this step wrote
 		// through a COMBINING reducer still has a merged value (reduce(ourState[k], ourChanges[k])) that exists
-		// in no row, so it must be inlined rather than anchored - the same exclusion insertFanInStep applies.
+		// in no row, so it must be inlined rather than anchored - the same exclusion fanInRow applies.
 		inlineOnly := staterefs.CombinedReducerFields(ourState, ourChanges, graph.Reducers())
 		mergedJSON, refsJSON, merr := e.linkerFor(shardNum).Mint(mergedState, ourChanges, ourRefs, stepID, staterefs.Linear, inlineOnly)
 		if merr != nil {
@@ -1905,30 +1941,75 @@ type stateByteCount struct {
 	changesRead  int // "changes" column: deltas read (fan-in spawn + cohort members)
 }
 
-// insertFanInStep creates the fan-in step after the cohort completes. It also returns the state bytes it
-// moved (read: spawn snapshot + every cohort member's changes; written: the merged fan-in snapshot), which
-// the caller emits after its transaction commits.
-func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardNum, flowID, nextStepDepth, cohortSpawnID, predecessorStepID int, fanInTaskName string, graph *workflow.Graph, workflowURL string, sleepMs int64, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int, inheritCancel int) (int, stateByteCount, error) {
-	var spawnTaskName string
-	var spawnStateJSON, spawnChangesJSON, spawnRefsJSON []byte
-	var spawnLineageID, spawnFanOutOrdinal int
-	tx.QueryRowContext(ctx,
-		"SELECT state, changes, state_refs, lineage_id, task_name, fan_out_ordinal FROM dwarf_steps WHERE step_id=?",
-		cohortSpawnID,
-	).Scan(&spawnStateJSON, &spawnChangesJSON, &spawnRefsJSON, &spawnLineageID, &spawnTaskName, &spawnFanOutOrdinal)
-	bytes := stateByteCount{stateRead: len(spawnStateJSON), changesRead: len(spawnChangesJSON)}
-	spawnState, _ := workflow.NewState(spawnStateJSON)
-	spawnChanges, _ := workflow.NewState(spawnChangesJSON)
+// cohortRead is what a resolving arrival reads of its cohort: the spawn step's row and every member's.
+type cohortRead struct {
+	spawnTaskName      string
+	spawnStateJSON     []byte
+	spawnChangesJSON   []byte
+	spawnRefsJSON      []byte
+	spawnFanOutOrdinal int
+	members            []cohortMember
+	changesRead        int // bytes of the members' changes columns
+}
+
+// cohortMember is one row of a cohort, in fan_out_ordinal, step_depth, step_id order. changes is decoded as the
+// row is read, and only for a completed member - the only kind whose changes the fold takes - so that a wide
+// cohort is never held both as raw bytes and decoded.
+type cohortMember struct {
+	stepID      int
+	taskName    string
+	completed   bool
+	changes     workflow.State
+	depth       int
+	successorID int
+}
+
+// queueCohortRead queues the reads of a resolving arrival's cohort into c.
+func queueCohortRead(queue queueFunc, flowID, cohortSpawnID int, c *cohortRead) {
+	queue(func(res *sequel.BatchResults) error {
+		err := res.QueryRow().Scan(&c.spawnStateJSON, &c.spawnChangesJSON, &c.spawnRefsJSON, &c.spawnTaskName, &c.spawnFanOutOrdinal)
+		return errors.Trace(err)
+	}, "SELECT state, changes, state_refs, task_name, fan_out_ordinal FROM dwarf_steps WHERE step_id=?", cohortSpawnID)
+	queue(func(res *sequel.BatchResults) error {
+		rows, err := res.Query()
+		if err != nil {
+			return errors.Trace(err)
+		}
+		for rows.Next() {
+			var m cohortMember
+			var status string
+			var changesJSON []byte
+			if err := rows.Scan(&m.stepID, &m.taskName, &status, &changesJSON, &m.depth, &m.successorID); err != nil {
+				return errors.Trace(err)
+			}
+			c.changesRead += len(changesJSON)
+			if m.completed = status == workflow.StatusCompleted; m.completed {
+				m.changes, _ = workflow.NewState(changesJSON)
+			}
+			c.members = append(c.members, m)
+		}
+		return errors.Trace(rows.Err())
+	}, "SELECT step_id, task_name, status, changes, step_depth, successor_id FROM dwarf_steps WHERE flow_id=? AND lineage_id=? ORDER BY fan_out_ordinal, step_depth, step_id", flowID, cohortSpawnID)
+}
+
+// fanInRow folds a resolved cohort, as read by queueCohortRead, into its fan-in step's row. It returns the row,
+// the fan-in's step_depth, the cohort-exit steps whose successor_id must point at the fan-in step, and the state
+// bytes it moved (read: spawn snapshot + every cohort member's changes; written: the merged fan-in snapshot),
+// which the caller emits after its transaction commits.
+func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nextStepDepth, cohortSpawnID int, c *cohortRead, fanInTaskName string, graph *workflow.Graph, workflowURL string) (row successorRow, depth int, exitStepIDs []int, bytes stateByteCount, err error) {
+	bytes = stateByteCount{stateRead: len(c.spawnStateJSON), changesRead: len(c.spawnChangesJSON) + c.changesRead}
+	spawnState, _ := workflow.NewState(c.spawnStateJSON)
+	spawnChanges, _ := workflow.NewState(c.spawnChangesJSON)
 	// Materialize only the ref'd fields a reducer will FOLD - a combining reducer (append/add/union/...) needs
 	// its accumulated base, and folding a delta onto an absent base would silently lose everything so far. A
 	// merely-carried ref is left alone and re-emitted onto the fan-in step below, still pointing at its
 	// original anchor: resolving it here would materialize the payload and re-anchor it at EVERY fan-in,
 	// giving back the win in exactly the fan-out graphs this design exists for. resolveReducedRefs mutates
 	// the state map in place, so it gets the live map.
-	spawnRefs := staterefs.Parse(spawnRefsJSON)
-	err := e.resolveReducedRefs(ctx, tx, shardNum, spawnState, spawnRefs, graph.Reducers(), workflowURL)
+	spawnRefs := staterefs.Parse(c.spawnRefsJSON)
+	err = e.resolveReducedRefs(ctx, tx, shardNum, spawnState, spawnRefs, graph.Reducers(), workflowURL)
 	if err != nil {
-		return 0, stateByteCount{}, errors.Trace(err)
+		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(err)
 	}
 	// The fan-in accumulator's base: the spawn's state with its own delta folded in via the reducers. A
 	// cleared reduced field is ignored (reducer identity); a cleared replace field rides as a tombstone that
@@ -1942,10 +2023,8 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 	memberWrites := map[string]bool{}
 	var memberChanges []workflow.State
 
-	// The cohort-exit steps whose successor_id must point at the fan-in step. Collected from this same
-	// cohort scan so the successor_id write can target them by primary key (step_id IN ...) below,
-	// rather than re-scanning dwarf_steps by (flow_id, lineage_id, task_name) - that unindexed predicate
-	// took an Update lock across the whole table and deadlocked two concurrent fan-ins on SQL Server.
+	// The cohort-exit steps whose successor_id must point at the fan-in step, collected from the cohort read so
+	// the caller's write can target them by primary key.
 	//
 	// A member qualifies as an exit only if it BOTH bears a fan-in-predecessor task name AND has not already
 	// recorded a forward edge (successor_id=0). The task-name test alone is not enough: a branch that LOOPS
@@ -1959,43 +2038,25 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 	for _, t := range fanInPredecessorTasks(graph, fanInTaskName) {
 		exitTaskSet[t] = true
 	}
-	var exitStepIDs []int
-
-	rows, err := tx.QueryContext(ctx,
-		"SELECT step_id, task_name, status, changes, step_depth, successor_id FROM dwarf_steps WHERE flow_id=? AND lineage_id=? ORDER BY fan_out_ordinal, step_depth, step_id",
-		flowID, cohortSpawnID,
-	)
-	if err != nil {
-		return 0, stateByteCount{}, errors.Trace(err)
-	}
-	defer rows.Close()
 	maxCohortDepth := 0
-	for rows.Next() {
-		var memberStepID, memberSuccessorID int
-		var memberTaskName, status string
-		var changesJSON []byte
-		var depth int
-		rows.Scan(&memberStepID, &memberTaskName, &status, &changesJSON, &depth, &memberSuccessorID)
-		bytes.changesRead += len(changesJSON)
-		if depth > maxCohortDepth {
-			maxCohortDepth = depth
+	for _, m := range c.members {
+		if m.depth > maxCohortDepth {
+			maxCohortDepth = m.depth
 		}
 		// A cohort member with an exit task name that has not yet recorded a successor is one that transitioned
 		// into the fan-in (see above); a member with the same task name that already has a successor looped or
 		// continued elsewhere and must keep its own forward edge.
-		if exitTaskSet[strings.TrimSpace(memberTaskName)] && memberSuccessorID == 0 {
-			exitStepIDs = append(exitStepIDs, memberStepID)
+		if exitTaskSet[strings.TrimSpace(m.taskName)] && m.successorID == 0 {
+			exitStepIDs = append(exitStepIDs, m.stepID)
 		}
-		if status != workflow.StatusCompleted {
+		if !m.completed {
 			continue
 		}
-		changes, _ := workflow.NewState(changesJSON)
-		for k := range changes.Names() {
+		for k := range m.changes.Names() {
 			memberWrites[k] = true
 		}
-		memberChanges = append(memberChanges, changes)
+		memberChanges = append(memberChanges, m.changes)
 	}
-	rows.Close()
 	// One fold for the whole cohort, not one per member: a combining reducer decodes its accumulator and
 	// re-encodes the result, so folding per member re-encodes a value that grows as it goes - quadratic in
 	// the accumulated bytes across the cohort's width, and a fan-out is exactly where width is large.
@@ -2009,14 +2070,14 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 	// The fan-in sits one level below the DEEPEST cohort branch, not merely below the last sibling to
 	// complete - branch lengths can differ (loops, gotos, varying chains), so step_depth must reflect the
 	// deepest path the flow took. nextStepDepth (last-completer+1) is the floor for the defensive empty case.
-	fanInDepth := max(maxCohortDepth+1, nextStepDepth)
+	depth = max(maxCohortDepth+1, nextStepDepth)
 
 	// Drop the per-branch forEach bookkeeping of THIS cohort - the one spawnTaskName fanned out - and of no
 	// other. An outer cohort's bookkeeping must survive an inner fan-in: a step converging out of the inner
 	// cohort is still inside the outer branch and must still see which element that branch is working on. The
 	// same scoped strip runs in computeFinalState for a fan-out that FAILED (and so never reached this
 	// convergence), so the two paths agree on what a fan-out's state means once its cohort is behind it.
-	stripForEachBookkeeping(merged, graph, strings.TrimSpace(spawnTaskName))
+	stripForEachBookkeeping(merged, graph, strings.TrimSpace(c.spawnTaskName))
 
 	// A field the SPAWN itself wrote through a COMBINING reducer (reduce(spawnState[k], spawnChanges[k])) is the
 	// other value that exists in no row - the spawn's `changes` holds only its delta - so it too must be inlined,
@@ -2034,33 +2095,14 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 	// chain stays one hop. Member-contributed and reduced fields are excluded and therefore inline (above).
 	mergedJSON, refsJSON, err := e.linkerFor(shardNum).Mint(merged, spawnChanges, spawnRefs, cohortSpawnID, staterefs.Linear, memberWrites)
 	if err != nil {
-		return 0, stateByteCount{}, errors.Trace(err)
+		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(err)
 	}
 	bytes.stateWritten = len(mergedJSON)
-	fanInURL := dispatchURLOf(graph, fanInTaskName)
-	fanInStepID, err := tx.InsertReturnID(ctx, "step_id", successorInsertSQL,
-		flowID, fanInDepth, keys.RandomIdentifier(16), fanInTaskName, fanInURL, mergedJSON, refsJSON, workflow.StatusPending, parkedNone, timeBudgetMs, spawnLineageID, spawnFanOutOrdinal, predecessorStepID, sleepMs, priority, fairnessKey, fairnessWeight, e.engineID,
-		inheritCancel, predecessorStepID, flowID,
-	)
-	if err != nil {
-		return 0, stateByteCount{}, errors.Trace(err)
+	row = successorRow{
+		taskName: fanInTaskName, taskURL: dispatchURLOf(graph, fanInTaskName),
+		stateJSON: mergedJSON, refsJSON: refsJSON, ordinal: c.spawnFanOutOrdinal,
 	}
-
-	// Record the cohort-exit -> fan-in edges, targeting the exit steps by primary key (collected above)
-	// so the write locks only those rows. The previous (flow_id, lineage_id, task_name IN ...) predicate
-	// had no supporting index and scan-locked dwarf_steps, deadlocking concurrent fan-ins on SQL Server.
-	if len(exitStepIDs) > 0 {
-		placeholders := strings.Repeat("?,", len(exitStepIDs)-1) + "?"
-		args := []any{int(fanInStepID)}
-		for _, id := range exitStepIDs {
-			args = append(args, id)
-		}
-		tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET successor_id=? WHERE step_id IN ("+placeholders+")",
-			args...,
-		)
-	}
-	return int(fanInStepID), bytes, nil
+	return row, depth, exitStepIDs, bytes, nil
 }
 
 // errCallerGone rolls back a subgraph spawn whose caller step is no longer running under this worker's lease -

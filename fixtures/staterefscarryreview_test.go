@@ -31,7 +31,7 @@ import (
 // SPAWN step does not itself hold the payload bytes - it merely carries the field as a ref pointing at an
 // EARLIER anchor. The staterefsflow fixture never hits this: there the fan-out source IS the entry step, so the
 // fan-in re-anchors at the spawn, which holds the literal. Put an anchoring step BEFORE the fan-out source and
-// the spawn only carries the ref - and the fan-in mint (insertFanInStep / fireFanInDirect) must re-emit that
+// the spawn only carries the ref - and the fan-in mint (fanInRow / fireFanInDirect) must re-emit that
 // carried ref rather than drop the field. A dropped carry is silent, permanent data loss: the fan-in task and
 // every downstream step see the field as empty, and it vanishes from final_state.
 func TestStaterefs_CarriedRefAcrossFanInWhenSpawnOnlyCarries(t *testing.T) {

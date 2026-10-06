@@ -215,7 +215,7 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shar
 	// the intermediate output of every branch but one. In a multi-step branch (`forEach -> Cell -> Enrich -> J`),
 	// Cell's output lives in Enrich's `state`, not in its `changes`: only the first tail's state is consulted, so
 	// branch 0's Cell output rides in via the base while branches 1..N-1's is simply dropped. The converged path
-	// (insertFanInStep) has no such hole - it merges EVERY cohort member's `changes` - so the two paths disagreed
+	// (fanInRow) has no such hole - it merges EVERY cohort member's `changes` - so the two paths disagreed
 	// on what a fan-out's terminal state means, which is exactly the drift the shared strip below exists to stop.
 	//
 	// Every step of a per-element sub-pipeline inherits the spawn's lineage, so "every cohort member" is one
@@ -227,7 +227,7 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shar
 		}
 	}
 
-	// Drop per-branch forEach bookkeeping, exactly as insertFanInStep does when a cohort converges - and, like
+	// Drop per-branch forEach bookkeeping, exactly as fanInRow does when a cohort converges - and, like
 	// it, only for the cohorts the merge base is actually INSIDE.
 	//
 	// A FAILED fan-out is the case that needs it: the merge base is the first tail row, and a completed sibling
@@ -258,7 +258,7 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shar
 }
 
 // mergeCohortState rebuilds the state of a cohort that resolved with failures, and so never reached its fan-in.
-// It runs the SAME merge insertFanInStep runs at a successful convergence - the spawn step's `state + changes` as
+// It runs the SAME merge fanInRow runs at a successful convergence - the spawn step's `state + changes` as
 // the base, then every COMPLETED member's `changes` folded through the graph's reducers in `fan_out_ordinal,
 // step_depth, step_id` order - so a fan-out's terminal state means one thing whether it converged or failed.
 //
@@ -288,7 +288,7 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 	if err != nil {
 		return workflow.State{}, errors.Trace(err)
 	}
-	// The failed cohort's terminal state is built the SAME way convergence would (insertFanInStep): the spawn's
+	// The failed cohort's terminal state is built the SAME way convergence would (fanInRow): the spawn's
 	// state with its own delta folded via the reducers, as the base the completed members fold onto below.
 	merged := spawnState.Clone()
 	if err := merged.MergeReduce(spawnChanges, graph.Reducers()); err != nil {
@@ -312,7 +312,7 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 		if err := rows.Scan(&status, &changesJSON); err != nil {
 			return workflow.State{}, errors.Trace(err)
 		}
-		// Only completed members contribute, matching insertFanInStep: a failed, terminated, or cancelled
+		// Only completed members contribute, matching fanInRow: a failed, terminated, or cancelled
 		// branch's partial output is not a fact the flow can build on (an error voids the task's changes).
 		if status != workflow.StatusCompleted {
 			continue
@@ -560,7 +560,7 @@ func (e *Engine) cohortSpawnTasks(ctx context.Context, db sequel.Executor, linea
 // outer branch could no longer see which element it was working on. The names are reserved only WITHIN their own
 // cohort; a workflow wanting the element past that cohort's fan-in forwards it under a different key.
 //
-// Applied at both places a cohort's state leaves the cohort: insertFanInStep (the convergence) and
+// Applied at both places a cohort's state leaves the cohort: fanInRow (the convergence) and
 // computeFinalState (a fan-out that never converged), so the two cannot drift on what a fan-out's state means.
 func stripForEachBookkeeping(state workflow.State, graph *workflow.Graph, spawnTask string) {
 	if state.Len() == 0 || spawnTask == "" {

@@ -88,3 +88,65 @@ func TestRoundTrips_LinearStep(t *testing.T) {
 	t.Logf("driver=%s rtt=%v per-round-trip=%v short=%v long=%v k=%.2f round trips per linear step",
 		db.DriverName(), rtt, perRT, short, long, k)
 }
+
+// TestRoundTrips_FanInCycle measures the round trips of one fan-out cycle - a source fanning out over two
+// elements, the two branch steps (one a plain arrival, one the arrival that resolves the cohort) and the fan-in
+// step - the same way TestRoundTrips_LinearStep measures a linear step: chains of cycles of two lengths, the
+// difference divided by the extra cycles. Opt-in (DWARF_MEASURE_K=1).
+func TestRoundTrips_FanInCycle(t *testing.T) {
+	if os.Getenv("DWARF_MEASURE_K") == "" {
+		t.Skip("set DWARF_MEASURE_K=1 to measure")
+	}
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	const rtt = 20 * time.Millisecond
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	mux := NewHostMux()
+	e.SetHost(mux)
+	assert.NoError(e.SetWorkers(1))
+	assert.NoError(e.Startup(t.Context()))
+
+	// Cycle i: Src<i> -forEach-> Work<i> -> Join<i>, and Join<i> is Src<i+1>.
+	run := func(cycles int) time.Duration {
+		name := "rt/fanin" + strconv.Itoa(cycles)
+		g := workflow.NewGraph("FanIn" + strconv.Itoa(cycles))
+		for i := range cycles {
+			src, work, join := fmt.Sprintf("J%d", i), fmt.Sprintf("W%d", i), fmt.Sprintf("J%d", i+1)
+			g.SetURL(src, "rt/s")
+			g.SetURL(work, "rt/s")
+			g.SetFanIn(join)
+			g.AddTransitionForEach(src, work, "items", "n")
+			g.AddTransition(work, join)
+		}
+		g.SetURL(fmt.Sprintf("J%d", cycles), "rt/s")
+		g.AddTransition(fmt.Sprintf("J%d", cycles), workflow.End)
+		assert.NoError(g.Validate())
+		mux.HandleGraph(name, g)
+		start := time.Now()
+		_, outcome, err := e.Run(ctx, name, map[string]any{"items": []int{1, 2}}, nil)
+		assert.NoError(err)
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
+		return time.Since(start)
+	}
+	mux.HandleTask("rt/s", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	run(3) // warm the statement caches on the connections before timing
+	run(9)
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	db.SimulateRTT(rtt)
+	defer db.SimulateRTT(0)
+	const probes = 30
+	start := time.Now()
+	for range probes {
+		_, err := db.ExecContext(ctx, "SELECT 1")
+		assert.NoError(err)
+	}
+	perRT := time.Since(start) / probes
+	short, long := run(3), run(9)
+	k := float64(long-short) / float64(6*perRT)
+	t.Logf("driver=%s rtt=%v per-round-trip=%v short=%v long=%v k=%.2f round trips per fan-out cycle",
+		db.DriverName(), rtt, perRT, short, long, k)
+}

@@ -211,7 +211,7 @@ func TestForEachStrip_FailedFanOutStillStrips(t *testing.T) {
 // The hole this closes: a branch's intermediate output lives in the NEXT step's `state`, not in any tail's
 // `changes`. The terminal merge used to base on the FIRST tail's `state` and fold in only the tails' `changes`, so
 // in `forEach -> Cell -> Enrich -> Join` branch 0's Cell output rode in via the base while branches 1..N-1's was
-// silently dropped. The converged path (insertFanInStep) merges EVERY cohort member's changes and has no such
+// silently dropped. The converged path (fanInRow) merges EVERY cohort member's changes and has no such
 // hole, so the two paths disagreed on what a fan-out's terminal state means. The failed path now runs the same
 // merge: spawn base + every completed member's changes, in fan_out_ordinal order.
 func TestFailedFanOut_KeepsEveryBranchesIntermediateOutput(t *testing.T) {
