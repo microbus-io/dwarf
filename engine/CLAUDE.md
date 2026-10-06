@@ -1193,6 +1193,20 @@ not parallelism:
   the flush closes it, so a wide cohort is held raw and decoded at once. A reduced field that arrived as a ref is
   resolved between the two batches, by its own query, only when there is one. The ref resolution and the
   cohort-failure statements run between flushes, with no batch open.
+- **Do not return the spawn's payload from the cohort bump** to spare the resolving arrival its spawn read. The
+  bump runs on EVERY arrival and holds the spawn row's write lock until COMMIT - the queue every sibling of the
+  cohort waits in - so it would carry the spawn's `state` across the wire N times to save one round trip on the
+  last, and lengthen the hold that is kept short on purpose: at fan-out width 64 a follow-up read inside that hold
+  measured 10.1 ms for the cohort-row statement against 6.7 ms without it, and 11.3 ms against 7.9 ms for the
+  arrival transaction - 7-13% of fan-out throughput and twice the statement's p99. The spawn read belongs where it
+  is: in the resolving arrival's own batch, after the bump.
+- **Do not collapse the transition into one PostgreSQL data-modifying CTE** (`WITH lock AS (UPDATE dwarf_flows
+  ...), ins AS (INSERT INTO dwarf_steps ...) UPDATE ...`). Its sub-statements run against one snapshot with no
+  defined order between them, so it cannot express write-first - the flow row's lock taken before any step is
+  touched - which is what serializes concurrent workers on one flow. Statement batches already make the
+  transition one round trip on PostgreSQL without giving that up. Any shape that reorders the transition's locks
+  needs a concurrency test (`completionraceflow`, `soakflow` reproduce the wedge write-first prevents) and a
+  lock-order check, not reasoning.
 - **`completeFlow`'s lock grab returns the row it locked** (`RETURNING`/`OUTPUT`; MySQL reads it with a follow-up
   `SELECT`), and goes out in one batch with the read of the flow's completed tails (`queueCompletedTails`), which
   the final state is merged from: BEGIN, one batch, the final-state UPDATE, COMMIT. The UPDATE depends on the Go
