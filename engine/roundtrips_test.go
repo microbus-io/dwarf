@@ -150,3 +150,56 @@ func TestRoundTrips_FanInCycle(t *testing.T) {
 	t.Logf("driver=%s rtt=%v per-round-trip=%v short=%v long=%v k=%.2f round trips per fan-out cycle",
 		db.DriverName(), rtt, perRT, short, long, k)
 }
+
+// TestRoundTrips_OneStepFlow measures the round trips of a whole one-step flow - its creation, its one step, its
+// completion and the caller's await - by timing sequential runs under a simulated delay per round trip. Opt-in
+// (DWARF_MEASURE_K=1).
+func TestRoundTrips_OneStepFlow(t *testing.T) {
+	if os.Getenv("DWARF_MEASURE_K") == "" {
+		t.Skip("set DWARF_MEASURE_K=1 to measure")
+	}
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	const rtt = 20 * time.Millisecond
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	mux := NewHostMux()
+	e.SetHost(mux)
+	assert.NoError(e.SetWorkers(1))
+	assert.NoError(e.Startup(t.Context()))
+
+	g := workflow.NewGraph("One")
+	g.SetURL("S", "rt/s")
+	g.AddTransition("S", workflow.End)
+	assert.NoError(g.Validate())
+	mux.HandleGraph("rt/one", g)
+	mux.HandleTask("rt/s", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	run := func(flows int) time.Duration {
+		start := time.Now()
+		for range flows {
+			_, outcome, err := e.Run(ctx, "rt/one", nil, nil)
+			assert.NoError(err)
+			assert.Equal(workflow.StatusCompleted, outcome.Status)
+		}
+		return time.Since(start)
+	}
+
+	run(10) // warm the statement caches on the connections before timing
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	db.SimulateRTT(rtt)
+	defer db.SimulateRTT(0)
+	const probes = 30
+	start := time.Now()
+	for range probes {
+		_, err := db.ExecContext(ctx, "SELECT 1")
+		assert.NoError(err)
+	}
+	perRT := time.Since(start) / probes
+	const flows = 20
+	elapsed := run(flows)
+	k := float64(elapsed) / float64(flows*perRT)
+	t.Logf("driver=%s rtt=%v per-round-trip=%v elapsed=%v k=%.2f round trips per one-step flow",
+		db.DriverName(), rtt, perRT, elapsed, k)
+}

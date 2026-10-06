@@ -1207,29 +1207,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			pureArrival := fanInArrivals > 0 && len(normalNexts) == 0 && !isPushTransition
 
 			// The transition's statements go out as statement batches - one round trip each where the driver
-			// pipelines. queue adds a statement with the function that reads its result; flush sends the batch and
-			// reads every result in order. Results are closed explicitly, never by a defer: on a driver that does
-			// not pipeline, Close runs every statement not read yet, while the rollback that follows an early
-			// return abandons them unrun.
-			batch := tx.Batch()
-			var reads []func(*sequel.BatchResults) error
-			queue := func(read func(*sequel.BatchResults) error, query string, args ...any) {
-				batch.Queue(query, args...)
-				reads = append(reads, read)
-			}
-			flush := func() error {
-				if batch.Len() == 0 {
-					return nil
-				}
-				res := batch.Send(ctx)
-				for _, read := range reads {
-					if err := read(res); err != nil {
-						return err
-					}
-				}
-				batch, reads = tx.Batch(), nil
-				return errors.Trace(res.Close())
-			}
+			// pipelines.
+			batch := newTxBatch(ctx, tx)
+			queue, flush := batch.queue, batch.flush
 
 			// Write-first: queueGrab takes the flow row's lock before any step is written (except the deferred grab of
 			// a cohort arrival, below), guarded on non-terminal status. If a concurrent Terminate/failStep terminalized this flow after the step was marked completed
@@ -1386,10 +1366,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				if len(normalNexts) == 1 {
 					target, targetArgs = successor, successorArgs
 				}
-				queue(func(res *sequel.BatchResults) error {
-					_, err := res.Exec()
-					return errors.Trace(err)
-				}, "UPDATE dwarf_flows SET step_id="+target+", touch=1-touch WHERE flow_id=?", append(append([]any{}, targetArgs...), flowID)...)
+				queue(execOnly, "UPDATE dwarf_flows SET step_id="+target+", touch=1-touch WHERE flow_id=?", append(append([]any{}, targetArgs...), flowID)...)
 			}
 			if err := flush(); err != nil {
 				return err
@@ -1478,10 +1455,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 						for _, id := range exits {
 							args = append(args, id)
 						}
-						queue(func(res *sequel.BatchResults) error {
-							_, err := res.Exec()
-							return errors.Trace(err)
-						}, "UPDATE dwarf_steps SET successor_id="+fanInID+" WHERE step_id IN ("+strings.Repeat("?,", len(exits)-1)+"?)", args...)
+						queue(execOnly, "UPDATE dwarf_steps SET successor_id="+fanInID+" WHERE step_id IN ("+strings.Repeat("?,", len(exits)-1)+"?)", args...)
 					}
 				} else if fullyResolved && failures > 0 {
 					// The cohort resolves as a loss, and is a cancellation only if every failure in it was one.
@@ -1543,10 +1517,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				case fanInID == "" && len(newStepIDs) == 1:
 					target, targetArgs = "?", []any{newStepIDs[0]}
 				}
-				queue(func(res *sequel.BatchResults) error {
-					_, err := res.Exec()
-					return errors.Trace(err)
-				}, "UPDATE dwarf_flows SET step_id="+target+", touch=1-touch WHERE flow_id=?", append(append([]any{}, targetArgs...), flowID)...)
+				queue(execOnly, "UPDATE dwarf_flows SET step_id="+target+", touch=1-touch WHERE flow_id=?", append(append([]any{}, targetArgs...), flowID)...)
 			}
 			return flush()
 		})

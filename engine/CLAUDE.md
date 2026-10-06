@@ -1189,7 +1189,16 @@ not parallelism:
   query, only when there is one.
 - **`completeFlow`'s lock grab returns the row it locked** (`RETURNING`/`OUTPUT`), so the surgraph linkage, the
   disposable flag and the status cost no second statement. MySQL, lacking `RETURNING`, reads them with a
-  follow-up `SELECT`.
+  follow-up `SELECT`. The grab goes out in one `txBatch` with the read of the flow's completed tails
+  (`queueCompletedTails`), which the final state is merged from: BEGIN, one batch, the final-state UPDATE, COMMIT
+  (measured ~14.6 -> ~13.9 round trips per one-step flow on PostgreSQL, `TestRoundTrips_OneStepFlow`). The
+  final-state UPDATE depends on the Go merge, so it cannot join the batch; the fallback read of any tails, and
+  a ref resolution, follow only when needed.
+- **A batch reader scans with the PostgreSQL driver's own type conversions** when the batch is pipelined, and
+  they are stricter than `database/sql`'s: **scan a column into the Go type it is stored as.** A `SMALLINT` flag
+  (`delete_on_completion`, `cancelling`, `advancing`, ...) does not scan into a `bool` - it scans into an `int`.
+  A `bool` destination for a `SMALLINT` fails every such scan, so a batched `delete_on_completion` read into a
+  `bool` fails every flow completion - and only on PostgreSQL, so the default SQLite run never shows it.
 
 Fan-in accounting issues no sibling/subgraph COUNT queries at all - it reads the
 `cohort_arrivals`/`cohort_failures`/`cohort_size` counter columns.

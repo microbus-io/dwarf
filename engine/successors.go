@@ -99,9 +99,6 @@ func returnsInsertedRows(driver string) bool {
 	return false
 }
 
-// queueFunc queues a statement onto a batch together with the function that reads its result once sent.
-type queueFunc func(read func(res *sequel.BatchResults) error, query string, args ...any)
-
 // queue queues the INSERTs of the pending rows, whose readers append the new step ids to ids in row order, and
 // empties the pending rows.
 func (s *successorBatch) queue(queue queueFunc, driver string, ids *[]int) {

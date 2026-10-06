@@ -88,88 +88,114 @@ func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, flowI
 	return errors.Trace(err)
 }
 
-// mergeTerminalSteps computes a flow's terminal state from the execution-DAG tail.
+// completedTailsSQL selects a flow's completed tail steps (successor_id=0) for its final state; anyTailsSQL is the
+// fallback when it finds none.
+const (
+	completedTailsSQL = "SELECT state, changes, state_refs, lineage_id FROM dwarf_steps WHERE flow_id=? AND successor_id=0 AND status='" + workflow.StatusCompleted + "' ORDER BY step_id"
+	anyTailsSQL       = "SELECT state, changes, state_refs, lineage_id FROM dwarf_steps WHERE flow_id=? AND successor_id=0 ORDER BY step_id"
+)
+
+// terminalTails is a flow's tail steps as read for its final state: the first tail's state is the merge base,
+// and every tail's changes fold onto it. Rows are decoded as they are read.
+type terminalTails struct {
+	found       bool
+	baseState   workflow.State
+	baseRefs    staterefs.Refs
+	baseLineage int
+	changes     []workflow.State
+}
+
+// scan reads one tail row.
+func (t *terminalTails) scan(row interface{ Scan(dest ...any) error }) error {
+	var stateJSON, changesJSON, refsJSON []byte
+	var lineageID int
+	if err := row.Scan(&stateJSON, &changesJSON, &refsJSON, &lineageID); err != nil {
+		return errors.Trace(err)
+	}
+	if !t.found {
+		t.found = true
+		baseState, err := workflow.NewState(stateJSON)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		t.baseState, t.baseRefs, t.baseLineage = baseState, staterefs.Parse(refsJSON), lineageID
+	}
+	changes, err := workflow.NewState(changesJSON)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	t.changes = append(t.changes, changes)
+	return nil
+}
+
+// queueCompletedTails queues the read of a flow's completed tails into t. The rows are held until the batch is
+// read, which costs one tail's state for a flow that completes normally: a validated graph converges every fan-out
+// on its fan-in, so such a flow ends in a single tail.
+func queueCompletedTails(queue queueFunc, flowID int, t *terminalTails) {
+	queue(func(res *sequel.BatchResults) error {
+		rows, err := res.Query()
+		if err != nil {
+			return errors.Trace(err)
+		}
+		for rows.Next() {
+			if err := t.scan(rows); err != nil {
+				return err
+			}
+		}
+		return errors.Trace(rows.Err())
+	}, completedTailsSQL, flowID)
+}
+
+// readTerminalTails reads a flow's tails by query into t.
+func readTerminalTails(ctx context.Context, db sequel.Executor, query string, flowID int, t *terminalTails) error {
+	rows, err := db.QueryContext(ctx, query, flowID)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		if err := t.scan(rows); err != nil {
+			return err
+		}
+	}
+	return errors.Trace(rows.Err())
+}
+
+// mergeTerminalSteps computes a flow's terminal state from the execution-DAG tail. completed is the flow's
+// completed tails when the caller has already read them, nil to read them here.
 // It also returns the merge base tail's lineage_id, so the caller can strip exactly the forEach bookkeeping of
 // the cohorts that tail is inside - and nothing else.
-func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, shardNum, flowID int, reducers map[string]workflow.Reducer, workflowURL string) (workflow.State, int, error) {
-	merge := func(query string, args ...any) (workflow.State, int, bool, error) {
-		rows, err := db.QueryContext(ctx, query, args...)
-		if err != nil {
-			return workflow.State{}, 0, false, errors.Trace(err)
+func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, shardNum, flowID int, completed *terminalTails, reducers map[string]workflow.Reducer, workflowURL string) (workflow.State, int, error) {
+	t := completed
+	if t == nil {
+		t = &terminalTails{}
+		if err := readTerminalTails(ctx, db, completedTailsSQL, flowID, t); err != nil {
+			return workflow.State{}, 0, errors.Trace(err)
 		}
-		defer rows.Close()
-
-		var baseState workflow.State
-		var baseRefs staterefs.Refs
-		baseLineage := 0
-		var allChanges []workflow.State
-		found := false
-		for rows.Next() {
-			var stateJSON, changesJSON, refsJSON []byte
-			var lineageID int
-			if err := rows.Scan(&stateJSON, &changesJSON, &refsJSON, &lineageID); err != nil {
-				return workflow.State{}, 0, false, errors.Trace(err)
-			}
-			if !found {
-				found = true
-				baseState, err = workflow.NewState(stateJSON)
-				if err != nil {
-					return workflow.State{}, 0, false, errors.Trace(err)
-				}
-				baseRefs = staterefs.Parse(refsJSON)
-				baseLineage = lineageID
-			}
-			changes, err := workflow.NewState(changesJSON)
-			if err != nil {
-				return workflow.State{}, 0, false, errors.Trace(err)
-			}
-			allChanges = append(allChanges, changes)
-		}
-		if err := rows.Err(); err != nil {
-			return workflow.State{}, 0, false, errors.Trace(err)
-		}
-		if !found {
-			return workflow.State{}, 0, false, nil
-		}
-		// FLATTEN: final_state is a flow-boundary value (a dwarf_flows column that Continue feeds into the next
-		// turn, and that outlives this flow's steps - DeleteOnCompletion may reap them). A ref that escaped the
-		// flow would dangle, so the terminal merge always materializes, whatever it costs on this one row.
-		// It is not a regression either: a large field surviving to the end is copied into final_state today.
-		// resolveStateRefs mutates the state map in place, so it gets the live map.
-		if _, err := e.resolveStateRefs(ctx, db, shardNum, baseState, baseRefs, nil, workflowURL); err != nil {
-			return workflow.State{}, 0, false, errors.Trace(err)
-		}
-
-		merged := baseState
-		if err := merged.MergeReduceAll(allChanges, reducers); err != nil {
-			return workflow.State{}, 0, false, errors.Trace(err)
-		}
-		merged.DelNils()
-		return merged, baseLineage, true, nil
 	}
-
-	merged, lineage, found, err := merge(
-		"SELECT state, changes, state_refs, lineage_id FROM dwarf_steps WHERE flow_id=? AND successor_id=0 AND status='"+workflow.StatusCompleted+"' ORDER BY step_id",
-		flowID,
-	)
-	if err != nil {
+	if !t.found {
+		t = &terminalTails{}
+		if err := readTerminalTails(ctx, db, anyTailsSQL, flowID, t); err != nil {
+			return workflow.State{}, 0, errors.Trace(err)
+		}
+	}
+	if !t.found {
+		return workflow.State{}, 0, nil
+	}
+	// FLATTEN: final_state is a flow-boundary value (a dwarf_flows column that Continue feeds into the next
+	// turn, and that outlives this flow's steps - DeleteOnCompletion may reap them). A ref that escaped the
+	// flow would dangle, so the terminal merge always materializes, whatever it costs on this one row.
+	// It is not a regression either: a large field surviving to the end is copied into final_state today.
+	// resolveStateRefs mutates the state map in place, so it gets the live map.
+	if _, err := e.resolveStateRefs(ctx, db, shardNum, t.baseState, t.baseRefs, nil, workflowURL); err != nil {
 		return workflow.State{}, 0, errors.Trace(err)
 	}
-	if found {
-		return merged, lineage, nil
-	}
-
-	merged, lineage, found, err = merge(
-		"SELECT state, changes, state_refs, lineage_id FROM dwarf_steps WHERE flow_id=? AND successor_id=0 ORDER BY step_id",
-		flowID,
-	)
-	if err != nil {
+	merged := t.baseState
+	if err := merged.MergeReduceAll(t.changes, reducers); err != nil {
 		return workflow.State{}, 0, errors.Trace(err)
 	}
-	if found {
-		return merged, lineage, nil
-	}
-	return workflow.State{}, 0, nil
+	merged.DelNils()
+	return merged, t.baseLineage, nil
 }
 
 // flowGraph returns a flow's parsed graph and workflow URL, from the graph cache when the flow has been
@@ -198,12 +224,18 @@ func (e *Engine) flowGraph(ctx context.Context, db sequel.Executor, shardNum, fl
 
 // computeFinalState computes the merged state for a flow.
 func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shardNum, flowID int) ([]byte, string, error) {
+	return e.computeFinalStateFrom(ctx, db, shardNum, flowID, nil)
+}
+
+// computeFinalStateFrom is computeFinalState from the flow's completed tails, when the caller has already read
+// them (queueCompletedTails), or nil to read them here.
+func (e *Engine) computeFinalStateFrom(ctx context.Context, db sequel.Executor, shardNum, flowID int, completed *terminalTails) ([]byte, string, error) {
 	graph, workflowURL, err := e.flowGraph(ctx, db, shardNum, flowID)
 	if err != nil {
 		return nil, "", errors.Trace(err)
 	}
 
-	merged, baseLineageID, err := e.mergeTerminalSteps(ctx, db, shardNum, flowID, graph.Reducers(), workflowURL)
+	merged, baseLineageID, err := e.mergeTerminalSteps(ctx, db, shardNum, flowID, completed, graph.Reducers(), workflowURL)
 	if err != nil {
 		return nil, "", errors.Trace(err)
 	}
@@ -610,37 +642,36 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		// completion. `touch` always changes, so a later RowsAffected check stays meaningful.
 		//
 		// The lock grab also reads back the surgraph linkage and the disposable flag - needed for the post-tx
-		// surgraph revival and the atomic disposable delete below - in the same round trip. It stays unguarded on
+		// surgraph revival and the atomic disposable delete below - and it goes out in one statement batch with
+		// the read of the flow's completed tails, which the final state is merged from. It stays unguarded on
 		// status: the status gate is the later UPDATE, and the status read here drives the revive re-drive.
 		const lockGrab = "UPDATE dwarf_flows SET touch=1-touch"
 		const lockWhere = " WHERE flow_id=?"
-		var err error
-		switch tx.DriverName() {
-		case "pgx", "sqlite":
-			err = tx.QueryRowContext(ctx,
-				lockGrab+lockWhere+" RETURNING surgraph_flow_id, surgraph_step_id, delete_on_completion, status",
-				flowID,
-			).Scan(&surgraphFlowID, &surgraphStepID, &deleteOnCompletion, &currentStatus)
-		case "mssql":
-			err = tx.QueryRowContext(ctx,
-				lockGrab+" OUTPUT INSERTED.surgraph_flow_id, INSERTED.surgraph_step_id, INSERTED.delete_on_completion, INSERTED.status"+lockWhere,
-				flowID,
-			).Scan(&surgraphFlowID, &surgraphStepID, &deleteOnCompletion, &currentStatus)
-		default:
-			// MySQL lacks RETURNING: lock, then read the row this transaction now holds.
-			_, err = tx.ExecContext(ctx, lockGrab+lockWhere, flowID)
-			if err != nil {
-				return errors.Trace(err)
-			}
-			err = tx.QueryRowContext(ctx,
-				"SELECT surgraph_flow_id, surgraph_step_id, delete_on_completion, status FROM dwarf_flows WHERE flow_id=?",
-				flowID,
-			).Scan(&surgraphFlowID, &surgraphStepID, &deleteOnCompletion, &currentStatus)
-		}
-		if err != nil {
+		batch := newTxBatch(ctx, tx)
+		readLocked := func(res *sequel.BatchResults) error {
+			// A pipelined batch scans with the PostgreSQL driver's own conversions, which do not turn a SMALLINT
+			// into a bool, so the flag is scanned as the integer it is stored as.
+			var disposable int
+			err := res.QueryRow().Scan(&surgraphFlowID, &surgraphStepID, &disposable, &currentStatus)
+			deleteOnCompletion = disposable != 0
 			return errors.Trace(err)
 		}
-		fs, wf, err := e.computeFinalState(ctx, tx, shardNum, flowID)
+		switch tx.DriverName() {
+		case "pgx", "sqlite":
+			batch.queue(readLocked, lockGrab+lockWhere+" RETURNING surgraph_flow_id, surgraph_step_id, delete_on_completion, status", flowID)
+		case "mssql":
+			batch.queue(readLocked, lockGrab+" OUTPUT INSERTED.surgraph_flow_id, INSERTED.surgraph_step_id, INSERTED.delete_on_completion, INSERTED.status"+lockWhere, flowID)
+		default:
+			// MySQL lacks RETURNING: lock, then read the row this transaction now holds.
+			batch.queue(execOnly, lockGrab+lockWhere, flowID)
+			batch.queue(readLocked, "SELECT surgraph_flow_id, surgraph_step_id, delete_on_completion, status FROM dwarf_flows WHERE flow_id=?", flowID)
+		}
+		var tails terminalTails
+		queueCompletedTails(batch.queue, flowID, &tails)
+		if err := batch.flush(); err != nil {
+			return err
+		}
+		fs, wf, err := e.computeFinalStateFrom(ctx, tx, shardNum, flowID, &tails)
 		if err != nil {
 			return errors.Trace(err)
 		}
