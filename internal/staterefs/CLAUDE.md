@@ -265,5 +265,8 @@ the only dialect-dependent term in the policy.
   realistic workflow). The engine's byte counters are the instrument.
 - **Whether the resolve cache keeps an item-ref'd array resident across a cohort** is unmeasured. Item refs add
   no anchor, but a cohort leans on the array's anchor staying cached - and in a nested fan-out one root anchor
-  backs the whole tree of dispatches. Check one miss per cohort on `dwarf_state_read_bytes`, not one per branch,
-  with a forEach over a large array whose branches are 1-3 steps deep.
+  backs the whole tree of dispatches. A cohort's branches spread over the shard's dispatchers (`step_id % R`),
+  and the cache is per replica, so the healthy reading is about one miss **per replica** per cohort - min(R, N)
+  reads of the array, and up to R cached copies of it across the fleet - not one per branch. Check it on
+  `dwarf_state_read_bytes`, with engine memory alongside, using a forEach over a large array whose branches are
+  1-3 steps deep.
