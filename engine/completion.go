@@ -128,9 +128,9 @@ func (t *terminalTails) scan(row interface{ Scan(dest ...any) error }) error {
 	return nil
 }
 
-// queueCompletedTails queues the read of a flow's completed tails into t. On PostgreSQL the rows are held until
-// the flush closes the batch, which costs one tail's state for a flow that completes normally: a validated graph
-// converges every fan-out on its fan-in, so such a flow ends in a single tail.
+// queueCompletedTails queues the read of a flow's completed tails into t. On PostgreSQL every tail row is read when
+// the batch is sent, which costs one tail's state for a flow that completes normally: a validated graph converges
+// every fan-out on its fan-in, so such a flow ends in a single tail.
 func queueCompletedTails(b *txBatch, flowID int, t *terminalTails) {
 	b.queue(func(res *sequel.BatchResults) error {
 		rows, err := res.Query()

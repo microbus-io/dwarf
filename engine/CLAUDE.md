@@ -1189,8 +1189,9 @@ not parallelism:
   deferred grab's terminal bail **returns nil, committing the bump**, which is sound because everything batched
   with the grab is a read (`TestTerminateVsLastCohortArrival_Deterministic` pins arrivals == size); those reads
   still run before the bail, on every driver. The members' changes are decoded as each row is
-  read, and only a completed member's - but on PostgreSQL the pipelined batch keeps every row's raw bytes until
-  the flush closes it, so a wide cohort is held raw and decoded at once. A reduced field that arrived as a ref is
+  read, and only a completed member's. On PostgreSQL the pipelined batch reads every member's raw row when it is
+  sent, and releases each one as the reader moves past it (sequel v1.12.1+), so a wide cohort is held raw and
+  decoded only one row at a time - the peak is about the larger of the two, not their sum. A reduced field that arrived as a ref is
   resolved between the two batches, by its own query, only when there is one. The ref resolution and the
   cohort-failure statements run between flushes, with no batch open.
 - **Do not return the spawn's payload from the cohort bump** to spare the resolving arrival its spawn read. The
