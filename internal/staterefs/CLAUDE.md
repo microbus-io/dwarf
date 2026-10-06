@@ -192,7 +192,8 @@ flow and a flow never crosses a shard, which is what makes a same-connection rea
 It takes **every anchor at once** because the free tier is priced on exactly that: "an already-fetched row's
 other fields are free" is only true if k anchors cost one round trip rather than k. A per-id loader would make
 the per-anchor SUM test in `Mint` price something the reader does not do. Pinned by
-`TestLinker_ResolveOneRoundTripPerBatch`.
+`TestLinker_ResolveOneRoundTripPerBatch`. A `ResolveShared` that waited on another read makes no call when
+that read delivered, and a second call only when it failed.
 
 ## Two byte counts, and they are not interchangeable
 
@@ -211,6 +212,30 @@ is why: across a fan-out every branch resolves the same anchor set, so one miss 
 Loader's count reports a large carried document as **nothing on all but the first branch** - in precisely the
 measurement that exists to catch a large carried document. That asymmetry is the whole reason `Resolve`
 returns a count at all; every caller but the dispatch path discards it.
+
+## Concurrent misses on one field read it once - at dispatch
+
+**Do not remove the single-flight behind `ResolveShared` (`claim`/`release` in `fetch`).** A cohort's branches
+miss on the same anchor at the same moment: under a backlog they leave the refiller in one batch and are
+claimed together, so none has cached the row when the others look. Without it each reads the row itself -
+measured on local PostgreSQL, `scatter` W=8 with 4 KB elements, flat out: **~4.3 reads of the array per
+cohort**, against **1.0 and 0.94** in two runs with it (and ~1.0 closed-loop either way, where the doorbell
+runs the first branch ahead of its siblings and warms the cache). It is a cold-cache stampede, not eviction;
+a bigger cache would not have fixed it.
+
+The shape is load-bearing in four ways:
+- **Only the dispatch resolve waits** (`ResolveShared`, `engine/staterefs.go` `resolveDispatchRefs`). Every
+  other resolve - the fan-in paths, the terminal merge, `Fork` - may run inside a transaction holding a
+  connection and the flow row's lock, and must not wait on another goroutine: parked fan-ins could drain the
+  pool while the dispatch they wait on queues for a connection. `Resolve` and `Flatten` read for themselves.
+- **The claim is per field (`cacheKey`), and a read resolves every pending ref on the rows it fetched.** A
+  claim per anchor would wake a waiter that needed a different field of the row to a cache miss and a second,
+  serial read.
+- **A fetch reads the fields it claimed BEFORE waiting on the ones another fetch claimed.** Two fetches that
+  each claimed a field the other needs therefore both make progress; waiting first would deadlock them.
+- **`release` runs (deferred) whether the read succeeded or not**, and a waiter that then finds nothing cached
+  reads the row itself, unclaimed. A failed read errors only its own fetch. Pinned, with the read-once
+  property and `Resolve` never waiting, by `TestLinker_ConcurrentMissesReadOnce`.
 
 ## One Linker per shard
 
@@ -268,7 +293,8 @@ the only dialect-dependent term in the policy.
   the CARRY multiplier; write volume for actually-new data is irreducible.
 - **Whether `maxAnchors` ever binds** is unmeasured (how many large fields are concurrently live in a
   realistic workflow). The engine's byte counters are the instrument.
-- **Whether the resolve cache keeps an item-ref'd array resident across a cohort** is unmeasured. Item refs add
+- **Whether the resolve cache keeps an item-ref'd array resident across a cohort under real load** is
+  unmeasured (the concurrent-miss stampede at dispatch is handled; eviction is the remaining question). Item refs add
   no anchor, but a cohort leans on the array's anchor staying cached - and in a nested fan-out one root anchor
   backs the whole tree of dispatches. A cohort's branches spread over the shard's dispatchers (`step_id % R`),
   and the cache is per replica, so the healthy reading is about one miss **per replica** per cohort - min(R, N)

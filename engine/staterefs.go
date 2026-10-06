@@ -120,6 +120,18 @@ func (e *Engine) resolveStateRefs(ctx context.Context, db sequel.Executor, shard
 	return materialized, errors.Trace(err)
 }
 
+// resolveDispatchRefs is resolveStateRefs for a step about to be dispatched, which holds no transaction: a
+// field a concurrent dispatch on this shard is already reading is taken from that read rather than read
+// again (staterefs.ResolveShared). A fan-out's branches dispatch together and miss on the same anchor at once.
+func (e *Engine) resolveDispatchRefs(ctx context.Context, db sequel.Executor, shardNum int, state workflow.State, refs staterefs.Refs, workflowURL string) (int, error) {
+	var readBytes int
+	materialized, err := e.linkerFor(shardNum).ResolveShared(ctx, state, refs, anchorLoader(db, &readBytes))
+	if readBytes > 0 {
+		e.metricStateReadBytes(ctx, workflowURL, "state_ref", readBytes)
+	}
+	return materialized, errors.Trace(err)
+}
+
 // resolveReducedRefs materializes only the ref'd fields a fan-in's reducers actually need, into state in
 // place. A merely-carried ref is deliberately left un-materialized and re-emitted by the caller's mint.
 func (e *Engine) resolveReducedRefs(ctx context.Context, tx sequel.Executor, shardNum int, state workflow.State, refs staterefs.Refs, reducers map[string]workflow.Reducer, workflowURL string) error {

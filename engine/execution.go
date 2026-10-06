@@ -380,7 +380,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		if len(inheritedRefs) > 0 {
 			refsPass = turnstile.WaitTurn(ctx)
 		}
-		refBytes, err = e.resolveStateRefs(ctx, db, shardNum, state, inheritedRefs, nil, workflowURL)
+		refBytes, err = e.resolveDispatchRefs(ctx, db, shardNum, state, inheritedRefs, workflowURL)
 		refsPass.Return()
 	}
 	if err != nil {

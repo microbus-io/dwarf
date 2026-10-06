@@ -19,7 +19,10 @@ package staterefs
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -213,4 +216,81 @@ func TestLinker_FlattenSplicesWithoutDecoding(t *testing.T) {
 func newState() workflow.State {
 	s, _ := workflow.NewState()
 	return s
+}
+
+// TestLinker_ConcurrentMissesReadOnce pins ResolveShared's single-flight. A cohort's branches miss on the same
+// anchor at the same moment - under a backlog they leave the refiller together - so concurrent ResolveShared
+// calls missing one field must read it once between them, and a read that fails must leave the waiters to
+// read for themselves rather than fail with it. Resolve, the transaction-safe form, never waits.
+func TestLinker_ConcurrentMissesReadOnce(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	var mu sync.Mutex
+	reads, failFirst := 0, false
+	release := make(chan struct{})
+	slow := func(ctx context.Context, anchorIDs []int) (map[int]Anchor, error) {
+		mu.Lock()
+		reads++
+		fail := failFirst && reads == 1
+		mu.Unlock()
+		<-release // hold the read open until every fetch has missed
+		if fail {
+			return nil, errors.New("read failed")
+		}
+		return map[int]Anchor{7: {Changes: cols(map[string]any{"pages": []any{"a", "b", "c", "d"}})}}, nil
+	}
+
+	resolveAll := func(linker *Linker, n int, shared bool) []error {
+		errs := make([]error, n)
+		var wg sync.WaitGroup
+		for i := range n {
+			wg.Go(func() {
+				state := newState()
+				refs := Refs{"page": {Anchor: 7, Field: "pages", Path: []int{i % 4}}}
+				if shared {
+					_, errs[i] = linker.ResolveShared(ctx, state, refs, slow)
+				} else {
+					_, errs[i] = linker.Resolve(ctx, state, refs, nil, slow)
+				}
+				if errs[i] == nil && stateVal(state, "page") != []string{"a", "b", "c", "d"}[i%4] {
+					errs[i] = errors.New("wrong element")
+				}
+			})
+		}
+		// Let every fetch miss and start reading or waiting before the held-open read completes.
+		time.Sleep(50 * time.Millisecond)
+		close(release)
+		wg.Wait()
+		return errs
+	}
+
+	for _, err := range resolveAll(New("sqlite"), 8, true) {
+		assert.NoError(err)
+	}
+	assert.Equal(1, reads, "eight concurrent misses on one anchor read it once")
+
+	// Resolve reads for itself: a caller inside a transaction must not wait on another goroutine.
+	mu.Lock()
+	reads = 0
+	mu.Unlock()
+	release = make(chan struct{})
+	for _, err := range resolveAll(New("sqlite"), 8, false) {
+		assert.NoError(err)
+	}
+	assert.Equal(8, reads, "Resolve never waits on a concurrent read")
+
+	// A failed read errors its own fetch only; the waiters read the row themselves.
+	mu.Lock()
+	reads, failFirst = 0, true
+	mu.Unlock()
+	release = make(chan struct{})
+	failed := 0
+	for _, err := range resolveAll(New("sqlite"), 8, true) {
+		if err != nil {
+			failed++
+		}
+	}
+	assert.Equal(1, failed, "only the fetch whose read failed sees the error")
 }

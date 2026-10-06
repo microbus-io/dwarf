@@ -28,7 +28,9 @@ limitations under the License.
 //
 // Mint is the write side and performs no I/O: the caller's state is already materialized, so omitting a
 // field is all there is to do. Resolve is the read side and reaches the database only through the caller's
-// Loader, which is handed every anchor it needs at once. Both are safe for concurrent use.
+// Loader, which is handed every anchor it needs at once. Both are safe for concurrent use. A caller holding no
+// transaction resolves with ResolveShared instead, which takes a field another such call is already reading
+// from that read.
 //
 // The encoding never escapes: Mint takes materialized state and Resolve returns materialized state, so a
 // caller between the two - transition evaluation, a task carrier, an API response - only ever sees literals.
@@ -42,6 +44,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/lru"
@@ -226,6 +229,11 @@ type Linker struct {
 	// would scan the whole array to find its one element - O(N) per branch, O(N^2) per cohort - a cost a
 	// plain ref, spliced without decoding, never pays.
 	splits *lru.Cache[cacheKey, []json.RawMessage]
+
+	// loading holds the fields a ResolveShared is reading right now, each with a channel closed when the
+	// read is done. A concurrent one missing the same field waits on it rather than reading the row again.
+	mu      sync.Mutex
+	loading map[cacheKey]chan struct{}
 }
 
 // New creates a Linker for a shard with the given SQL driver name. The driver only corrects the size
@@ -233,9 +241,10 @@ type Linker struct {
 // rather than passed per call.
 func New(driver string) *Linker {
 	return &Linker{
-		driver: driver,
-		cache:  lru.New[cacheKey, json.RawMessage](cacheEntries, cacheTTL),
-		splits: lru.New[cacheKey, []json.RawMessage](cacheEntries, cacheTTL),
+		driver:  driver,
+		cache:   lru.New[cacheKey, json.RawMessage](cacheEntries, cacheTTL),
+		splits:  lru.New[cacheKey, []json.RawMessage](cacheEntries, cacheTTL),
+		loading: map[cacheKey]chan struct{}{},
 	}
 }
 
@@ -565,10 +574,22 @@ func Parse(refsJSON []byte) (Refs, error) {
 // That is what lets a fan-in reduce the fields it must while a large CARRIED field crosses the cohort as a
 // ref (see ResolveReduced).
 func (l *Linker) Resolve(ctx context.Context, state workflow.State, refs Refs, want map[string]bool, load Loader) (int, error) {
+	return l.resolve(ctx, state, refs, want, load, false)
+}
+
+// ResolveShared is Resolve of every ref, for a caller that holds no transaction: a field a concurrent
+// ResolveShared is already reading is taken from that read rather than read again. That is the dispatch of
+// a fan-out's branches, which miss on the same anchor at the same moment. A caller inside a transaction
+// must use Resolve, which never waits on another goroutine while holding its connection and locks.
+func (l *Linker) ResolveShared(ctx context.Context, state workflow.State, refs Refs, load Loader) (int, error) {
+	return l.resolve(ctx, state, refs, nil, load, true)
+}
+
+func (l *Linker) resolve(ctx context.Context, state workflow.State, refs Refs, want map[string]bool, load Loader, shared bool) (int, error) {
 	if state.IsZero() || len(refs) == 0 {
 		return 0, nil
 	}
-	values, err := l.fetch(ctx, refs, want, load)
+	values, err := l.fetch(ctx, refs, want, load, shared)
 	if err != nil {
 		return 0, errors.Trace(err)
 	}
@@ -590,47 +611,173 @@ func (l *Linker) Resolve(ctx context.Context, state workflow.State, refs Refs, w
 }
 
 // fetch returns the raw bytes of every selected ref'd field, serving what it can from the cache and asking
-// the Loader once for the anchors it still needs. It is the shared core of the two read paths, which differ
-// only in what they do with the bytes: Resolve decodes them into a live state map, Flatten splices them
-// into a state document without decoding at all.
-func (l *Linker) fetch(ctx context.Context, refs Refs, want map[string]bool, load Loader) (map[string]json.RawMessage, error) {
+// the Loader for the anchors it still needs - once, in one call, unless shared. It is the shared core of the
+// two read paths, which differ only in what they do with the bytes: Resolve decodes them into a live state
+// map, Flatten splices them into a state document without decoding at all.
+//
+// shared makes concurrent misses on one field read it once (see ResolveShared). Such a fetch reads the
+// fields no other fetch is reading, then waits for the rest and takes them from the cache; one whose wait
+// did not deliver - the other read failed - reads for itself. So it makes zero, one or two Loader calls.
+func (l *Linker) fetch(ctx context.Context, refs Refs, want map[string]bool, load Loader, shared bool) (map[string]json.RawMessage, error) {
 	values := make(map[string]json.RawMessage, len(refs))
-	// Serve what the cache can, and collect the anchors still needed. The cache holds whole fields; an item
-	// ref is served from its array's entry, so a cohort's branches share one entry for the array.
 	pending := map[string]Ref{}
-	anchorSet := map[int]bool{}
 	for key, ref := range refs {
-		if want != nil && !want[key] {
-			continue
+		if want == nil || want[key] {
+			pending[key] = ref
 		}
-		if cached, ok := l.cache.Load(cacheKey{ref.Anchor, ref.field(key)}); ok {
-			value, err := l.element(key, ref, cached)
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
-			values[key] = value
-			continue
-		}
-		pending[key] = ref
-		anchorSet[ref.Anchor] = true
+	}
+	if err := l.fromCache(pending, values); err != nil {
+		return nil, errors.Trace(err)
 	}
 	if len(pending) == 0 {
 		return values, nil
 	}
-
-	anchorIDs := make([]int, 0, len(anchorSet))
-	for a := range anchorSet {
-		anchorIDs = append(anchorIDs, a)
+	if !shared {
+		if err := l.loadInto(ctx, anchorsOf(pending), pending, values, load); err != nil {
+			return nil, errors.Trace(err)
+		}
+		return values, nil
 	}
-	fetched, err := load(ctx, anchorIDs)
-	if err != nil {
+
+	// Read the claimed fields' anchors, which resolves every pending ref on those rows - claimed or not - and
+	// only then wait. Reading before waiting is what keeps two fetches that each claimed a field the other
+	// needs from deadlocking.
+	mine, theirs := l.claim(pending)
+	if len(mine) > 0 {
+		err := func() error {
+			defer l.release(mine)
+			return l.loadInto(ctx, anchorsOfKeys(mine), pending, values, load)
+		}()
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+	}
+	for k, done := range theirs {
+		if !pendingAt(pending, k) {
+			continue
+		}
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return nil, errors.Trace(ctx.Err())
+		}
+	}
+	if err := l.fromCache(pending, values); err != nil {
 		return nil, errors.Trace(err)
 	}
+	if len(pending) == 0 {
+		return values, nil
+	}
+	// The read waited on failed, so this fetch reads for itself. Unclaimed: another round of waiting would
+	// buy nothing.
+	if err := l.loadInto(ctx, anchorsOf(pending), pending, values, load); err != nil {
+		return nil, errors.Trace(err)
+	}
+	return values, nil
+}
 
+// fromCache moves every pending ref the cache can serve into values. The cache holds whole fields; an item
+// ref is served from its array's entry, so a cohort's branches share one entry for the array.
+func (l *Linker) fromCache(pending map[string]Ref, values map[string]json.RawMessage) error {
 	for key, ref := range pending {
+		cached, ok := l.cache.Load(cacheKey{ref.Anchor, ref.field(key)})
+		if !ok {
+			continue
+		}
+		value, err := l.element(key, ref, cached)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		values[key] = value
+		delete(pending, key)
+	}
+	return nil
+}
+
+// claim splits the fields pending refs need into those this fetch will read and those another fetch is
+// already reading, returning the latter's completion channels.
+func (l *Linker) claim(pending map[string]Ref) (mine []cacheKey, theirs map[cacheKey]chan struct{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	theirs = map[cacheKey]chan struct{}{}
+	claimed := map[cacheKey]bool{}
+	for key, ref := range pending {
+		k := cacheKey{ref.Anchor, ref.field(key)}
+		if claimed[k] {
+			continue // two item refs into one array share the field
+		}
+		if done, busy := l.loading[k]; busy {
+			theirs[k] = done
+			continue
+		}
+		l.loading[k] = make(chan struct{})
+		claimed[k] = true
+		mine = append(mine, k)
+	}
+	return mine, theirs
+}
+
+// release marks the claimed fields read, waking every fetch waiting on them - whether the read succeeded or
+// not, since a waiter that finds nothing cached reads the row itself.
+func (l *Linker) release(keys []cacheKey) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, k := range keys {
+		close(l.loading[k])
+		delete(l.loading, k)
+	}
+}
+
+// pendingAt reports whether any pending ref still needs field k.
+func pendingAt(pending map[string]Ref, k cacheKey) bool {
+	for key, ref := range pending {
+		if ref.Anchor == k.anchor && ref.field(key) == k.field {
+			return true
+		}
+	}
+	return false
+}
+
+// anchorsOf is the distinct anchors pending refs point at.
+func anchorsOf(pending map[string]Ref) []int {
+	seen := map[int]bool{}
+	var out []int
+	for _, ref := range pending {
+		if !seen[ref.Anchor] {
+			seen[ref.Anchor] = true
+			out = append(out, ref.Anchor)
+		}
+	}
+	return out
+}
+
+// anchorsOfKeys is the distinct anchors of the given fields.
+func anchorsOfKeys(keys []cacheKey) []int {
+	seen := map[int]bool{}
+	var out []int
+	for _, k := range keys {
+		if !seen[k.anchor] {
+			seen[k.anchor] = true
+			out = append(out, k.anchor)
+		}
+	}
+	return out
+}
+
+// loadInto reads the given anchors in one Loader call and resolves every pending ref that points at one of
+// them, caching each field it reads and removing the ref from pending.
+func (l *Linker) loadInto(ctx context.Context, anchors []int, pending map[string]Ref, values map[string]json.RawMessage, load Loader) error {
+	fetched, err := load(ctx, anchors)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	for key, ref := range pending {
+		if !slices.Contains(anchors, ref.Anchor) {
+			continue
+		}
 		row, ok := fetched[ref.Anchor]
 		if !ok {
-			return nil, errors.New("state ref %q points at missing step %d", key, ref.Anchor)
+			return errors.New("state ref %q points at missing step %d", key, ref.Anchor)
 		}
 		// changes shadows state: the anchor's changes hold the value its task PRODUCED, while its state holds
 		// a value it merely received (the flow's initial input at the entry step, or a fan-in's reduced
@@ -642,20 +789,21 @@ func (l *Linker) fetch(ctx context.Context, refs Refs, want map[string]bool, loa
 		}
 		if !found {
 			if _, isRef := row.Refs[field]; isRef {
-				return nil, errors.New("state ref %q resolves to step %d, which itself refs %q - one-hop violated", key, ref.Anchor, field)
+				return errors.New("state ref %q resolves to step %d, which itself refs %q - one-hop violated", key, ref.Anchor, field)
 			}
-			return nil, errors.New("state ref %q not found in step %d", key, ref.Anchor)
+			return errors.New("state ref %q not found in step %d", key, ref.Anchor)
 		}
 		// Cache the immutable BYTES, never a decoded value: a decoded one would alias the same map/slice
 		// across the fan-out branch goroutines about to hand it to concurrent tasks.
 		l.cache.Store(cacheKey{ref.Anchor, field}, value)
 		value, err = l.element(key, ref, value)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return errors.Trace(err)
 		}
 		values[key] = value
+		delete(pending, key)
 	}
-	return values, nil
+	return nil
 }
 
 // element returns the bytes a ref resolves to, given its whole field's bytes: the field itself for a plain
@@ -819,7 +967,7 @@ func (l *Linker) Flatten(ctx context.Context, stateJSON []byte, refs Refs, load 
 	if raw == nil {
 		raw = map[string]json.RawMessage{}
 	}
-	values, err := l.fetch(ctx, refs, nil, load)
+	values, err := l.fetch(ctx, refs, nil, load, false)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
