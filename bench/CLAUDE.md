@@ -326,8 +326,14 @@ heap** and the crew is mostly stacks.
   writes to). Divided by the task-declared bytes behind MB/s it is the amplification. Expect `final_state`
   to hold a second copy of any large field that survives to the end of the flow: a flow-boundary value is
   always flattened.
-- **Open-loop latency is sampled across all creators**, ~16 flows/s at a commanded rate. A per-creator
-  sample count recorded nothing at all on slow (payload-heavy) arms with many creators.
+- **An open-loop window's `flowsPerSec` is the ADMISSION rate, not what was served.** Flat out, admission
+  runs ahead of completion by up to `-max-outstanding` flows: a SQLite smoke admitted ~160 flows/s while
+  executing 532 steps/s of a 10-step chain (~53 flows/s), so "2/3 of its flowsPerSec" commanded ~2x the
+  ceiling and the "operating point" window had a 2.5 s p99. Take a served rate from `stepsPerSec` divided by
+  the workload's steps per flow - as `cell.sh` and `-volume-probe` do.
+- **Open-loop latency is sampled across all creators**, ~16 flows/s at a commanded rate. Do not count samples
+  per creator: on a slow (payload-heavy) arm with many creators, each makes fewer flows than the stride and
+  nothing is sampled at all.
 - **Counters carry attributes** as `name|k=v` alongside the bare-name total. Both are emitted: the total is
   what a throughput number reads off, the split is the only thing that shows one shard falling behind.
 - **Gauges every replica reports identically are MAXed, not summed** (`agreementGauges`) — cluster-wide

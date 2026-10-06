@@ -80,15 +80,22 @@ type volumeReport struct {
 	ReapedRows       int                `json:"reapedRows"`
 	ReapSec          float64            `json:"reapSec"`
 	ReapRowsPerSec   float64            `json:"reapRowsPerSec"`
+	// Invalidity names the first probe window that was not a measurement (windowInvalidity), "" when every
+	// one was. A volume run carrying one is invalid, like a sweep with an invalid step.
+	Invalidity string `json:"invalidity,omitzero"`
 }
 
 // runVolume fills to targetSteps rows, probing every checkpointEvery rows, then measures retention.
 //
-// probe, when non-nil, runs one open-loop measurement window at a commanded flow rate (0 = flat out); the
-// fill is paused around it, so the probe measures the database at its current size and not a fill and a
-// probe competing for it.
+// probe, when non-nil, runs one open-loop measurement window at a commanded flow rate (0 = flat out) and
+// reports why it was not a measurement, if it was not; the fill is paused around it, so the probe measures
+// the database at its current size and not a fill and a probe competing for it.
+//
+// probeStepsPerFlow is the probe workload's steps per flow: the 2/3 window's commanded flow rate is 2/3 of the
+// saturated window's EXECUTED steps/s in flows, never of its flowsPerSec, which is the admission rate and runs
+// ahead of what was served.
 func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSampler, pick func() *workload,
-	k, targetSteps, checkpointEvery int, probe func(rate int) stepResult) *volumeReport {
+	k, targetSteps, checkpointEvery int, probe func(rate float64) (stepResult, string), probeStepsPerFlow int) *volumeReport {
 
 	var (
 		stop       atomic.Bool
@@ -124,26 +131,29 @@ func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSample
 		stop.Store(true)
 		submitters.Wait()
 	}
+	report := &volumeReport{TargetStepRows: targetSteps, Concurrency: k}
+	invalid := func(window string, why string) {
+		if why != "" && report.Invalidity == "" {
+			report.Invalidity = window + ": " + why
+		}
+	}
 	// probeThroughput takes the saturated window, then the 2/3 one at the rate the first measured.
 	probeThroughput := func(cp *volumeCheckpoint) {
 		if probe == nil {
 			return
 		}
-		sat := probe(0)
+		sat, why := probe(0)
+		invalid(fmt.Sprintf("saturated probe at %d step rows", cp.StepRows), why)
 		cp.Saturated = &sat
 		// A saturated window ends with a backlog of created-but-unfinished flows, which would otherwise drain
 		// into the next window and be counted as its throughput. The fill resumes on a drained database for
 		// the same reason.
 		drainRunning(ctx, engines[0])
-		rate := int(sat.FlowsPerSec * 2 / 3)
-		if rate > 0 {
-			twoThirds := probe(rate)
+		if rate := sat.StepsPerSec / float64(max(1, probeStepsPerFlow)) * 2 / 3; rate > 0 {
+			twoThirds, why := probe(rate)
+			invalid(fmt.Sprintf("2/3 probe at %d step rows", cp.StepRows), why)
 			cp.TwoThirds = &twoThirds
 			drainRunning(ctx, engines[0])
-		}
-		errCount.Add(int64(cp.Saturated.Errors))
-		if cp.TwoThirds != nil {
-			errCount.Add(int64(cp.TwoThirds.Errors))
 		}
 		fmt.Printf("probe at %d step rows: saturated %.0f steps/s (p99 %.0fms)", cp.StepRows, sat.StepsPerSec, sat.P99ms)
 		if cp.TwoThirds != nil {
@@ -152,20 +162,22 @@ func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSample
 		fmt.Println()
 	}
 
-	report := &volumeReport{TargetStepRows: targetSteps, Concurrency: k}
 	start := time.Now()
+	lastRows, lastT := 0, start
 	if probe != nil {
-		// The empty-database baseline every later checkpoint is read against.
+		// The empty-database baseline every later checkpoint is read against. The fill rate to the first
+		// checkpoint starts after it, so it is not charged with the probe's windows, drains or rows.
 		steps, flowRows := rowCounts(ctx, engines[0])
 		cp := volumeCheckpoint{StepRows: steps, FlowRows: flowRows}
 		probeThroughput(&cp)
 		report.Checkpoints = append(report.Checkpoints, cp)
+		lastRows, _ = rowCounts(ctx, engines[0])
+		lastT = time.Now()
 	}
 	fill()
 	fmt.Printf("%-7s %11s %10s %12s %10s %10s %10s %9s %9s\n",
 		"t(s)", "stepRows", "flowRows", "fillSteps/s", "histMs", "listMs", "listDeepMs", "stepsMB", "flowsMB")
 
-	lastRows, lastT := 0, start
 	next := checkpointEvery
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()

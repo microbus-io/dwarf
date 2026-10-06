@@ -95,7 +95,7 @@ func run() error {
 		refillIntervalMs = flag.Int("refill-interval-ms", 0, "pin each shard's refill cycle period in ms (0 = derived from capacity/vcpus/replicas); the scan-rate sweep knob")
 		openLoop         = flag.Bool("open-loop", false, "open-loop load: creators fire flows without awaiting completion, so the backlog grows past the goroutine count (closed-loop caps in-flight flows at -concurrency, keeping a linear backlog inside the cache and never stressing the refiller)")
 		maxOutstanding   = flag.Int("max-outstanding", 100000, "open-loop only: cap on in-flight (created minus ended) flows, the backpressure bound that keeps the backlog from OOMing the DB")
-		arrivalRate      = flag.Int("arrival-rate", 0, "open-loop only: cap flow creation at this many/sec (0 = flat-out to saturation)")
+		arrivalRate      = flag.Float64("arrival-rate", 0, "open-loop only: cap flow creation at this many/sec, fractional allowed (0 = flat-out to saturation)")
 		arrivalStop      = flag.Duration("arrival-stop", 0, "open-loop only: stop admitting flows this far into the measurement window while the engine keeps running, so the remainder measures a DRAIN under abated load (0 = keep offering for the whole window). The window mean spans both phases, so read the shape from -stats-interval, not the mean")
 		concurrency      = flag.String("concurrency", "8,16,32,64,128", "comma-separated closed-loop submitter counts to sweep")
 		window           = flag.Duration("window", 60*time.Second, "measurement window per concurrency step")
@@ -112,11 +112,12 @@ func run() error {
 		volume          = flag.Int("volume", 0, "volume mode: fill to this many dwarf_steps rows with NO deletion, probing the read paths at checkpoints, then measure Purge/reaper throughput (0 = disabled)")
 		volumeCheckpt   = flag.Int("volume-checkpoint", 0, "probe every this many step rows during -volume (0 = one fifth of the target)")
 		printPool       = flag.Float64("print-pool", 0, "print the pool the engine derives for one shard of -vcpus at this round-trip time in ms, and exit - what a driver script pins with -max-open-conns, so every arm runs the pool that ships")
+		volumeProbeWL   = flag.String("volume-probe-workload", "linear", "-volume-probe only: the workload the probe windows run, which need not be the fill's - a bytes-axis fill is `state` while its probes measure `linear`")
 		volumeProbe     = flag.Duration("volume-probe", 0, "-volume only: at each checkpoint (and on the empty database first), pause the fill for an open-loop saturated window of this length and then one at 2/3 of its flows/s, at the pinned pool (0 = no throughput probe)")
 		fairnessKeys    = flag.Int("fairness-keys", 1, "spread flows across this many distinct fairness keys (1 = all on the single default key, the degenerate case for the refiller's per-key scan bound)")
 		linearStepsFlag = flag.Int("linear-steps", linearSteps, "linear workload chain length; sweeping it separates a slow replica's share of STEPS from its share of FLOWS (see workloads.go)")
 		fanOutWidth     = flag.Int("fanout-width", 16, "forEach branch count for the fanout, scatter and carryfanout workloads - the knob that decouples pending-step backlog from submitter concurrency (backlog ~= concurrency x width)")
-		branchDepth     = flag.Int("branch-depth", 1, "scatter workload: steps per branch (1 or 2 in the cloud plan); at depth > 1 an element below the linear ref bar used to be copied at every branch step")
+		branchDepth     = flag.Int("branch-depth", 1, "scatter workload: steps per branch (1 or 2 in the cloud plan); depth > 1 is where an element stored inline would be copied at every branch step")
 		carryRead       = flag.Bool("carry-read", false, "carry workloads: make every task READ the carried document instead of only passing it along. Storage is identical either way, so this is the arm switch for how carried state is HELD, not how much is stored")
 	)
 	flag.Var(&dsns, "dsn", "shard DSN, repeatable; 'N=dsn' sets shard N, a bare dsn sets shard 1 (default: throwaway local SQLite)")
@@ -287,8 +288,10 @@ func run() error {
 		Label:     *label,
 		StartedAt: time.Now().UTC(),
 		Config: map[string]any{
-			"workload":     *workloadName,
-			"payloadBytes": *payload,
+			"workload": *workloadName,
+			// What the workload actually writes: -payload 0 means none for linear/fanout/scatter but the
+			// 64KB default for state/carry, and an artifact must not record 0 for a run that wrote 64KB.
+			"payloadBytes": effectivePayload(*workloadName, *payload),
 			"taskDelayMs":  taskDelay.Milliseconds(),
 			// Recorded even when zero: an artifact that does not say whether the exec term was constant
 			// cannot be compared with one where it alternated, and the two measure different things.
@@ -322,18 +325,30 @@ func run() error {
 		art.Config["volumeCheckpointRows"] = every
 		fmt.Printf("volume: filling to %d step rows at concurrency %d across %d replica(s), probing every %d rows\n",
 			*volume, ks[0], *replicas, every)
-		var probe func(rate int) stepResult
+		var probe func(rate float64) (stepResult, string)
+		probeSPF := 0
 		if *volumeProbe > 0 {
+			probeWL := workloads[*volumeProbeWL]
+			if probeWL == nil {
+				return fmt.Errorf("-volume-probe-workload %q: not a fixed workload", *volumeProbeWL)
+			}
+			probeSPF = probeWL.stepsPerFlow
+			probePick := func() *workload { return probeWL }
 			art.Config["volumeProbeSec"] = volumeProbe.Seconds()
-			probe = func(rate int) stepResult {
-				return runStepOpenLoop(ctx, engines, readers, pgss, waits, dbs, sharedBytes, pick, ks[0], *fairnessKeys, *maxOutstanding, rate, *warmup, *volumeProbe, 0)
+			art.Config["volumeProbeWorkload"] = *volumeProbeWL
+			probe = func(rate float64) (stepResult, string) {
+				res := runStepOpenLoop(ctx, engines, readers, pgss, waits, dbs, sharedBytes, probePick, ks[0], *fairnessKeys, *maxOutstanding, rate, *warmup, *volumeProbe, 0)
+				return res, windowInvalidity(res, rate, *maxOutstanding)
 			}
 		}
-		report := runVolume(ctx, engines, dbs, pick, ks[0], *volume, every, probe)
+		report := runVolume(ctx, engines, dbs, pick, ks[0], *volume, every, probe, probeSPF)
 		art.Volume = report
 		if report.Errors != 0 {
 			art.Valid = false
 			art.Invalidity = fmt.Sprintf("volume: %d submit errors", report.Errors)
+		} else if report.Invalidity != "" {
+			art.Valid = false
+			art.Invalidity = "volume: " + report.Invalidity
 		}
 	} else if *soak > 0 {
 		art.Config["soakSec"] = soak.Seconds()
@@ -367,38 +382,9 @@ func run() error {
 				k, res.FlowsPerSec, res.StepsPerSec, res.MBPerSec, res.P50ms, res.P95ms, res.P99ms,
 				res.Host.CPUCores, res.Host.CPUPct, res.Host.StepsPerCore,
 				res.Host.NetRxMBps, res.Host.NetTxMBps, res.Errors)
-			// A MISSING collection must invalidate the run, and this check has to come first. Every
-			// counter test below reads a map, and an EMPTY map answers 0 to all of them - so a window
-			// whose closing collection produced nothing passes every reliability check and is written
-			// out as `valid: true` with stepsPerSec = 0. That is worse than a loud failure: it is a
-			// plausible-looking measurement of zero throughput. Measured 2026-08-01, 2 of 9 arms of a
-			// GCP turnstile ladder, which then reported its BEST turn multiple as its worst purely by
-			// averaging those zeros in. Signature is gaugesBefore present with gaugesAfter absent -
-			// the opening snapshot succeeded and the closing one did not, which points at the collection
-			// racing engine teardown.
-			// len, not nil: the collectors always return a non-nil map, and `omitempty` is what turns an
-			// EMPTY one into `null` in the artifact - so nil-checking here would never fire.
-			if len(res.EngineCounters) == 0 || len(res.GaugesAfter) == 0 {
+			if why := windowInvalidity(res, *arrivalRate, *maxOutstanding); why != "" {
 				art.Valid = false
-				art.Invalidity = fmt.Sprintf("at concurrency %d: end-of-window metric collection failed "+
-					"(counters=%d gaugesAfter=%d) - every derived rate in this arm is meaningless",
-					k, len(res.EngineCounters), len(res.GaugesAfter))
-			} else if res.EngineCounters["dwarf_steps_recovered"] != 0 || res.EngineCounters["dwarf_steps_unwedged"] != 0 || res.Errors != 0 {
-				art.Valid = false
-				art.Invalidity = fmt.Sprintf("at concurrency %d: errors=%d recovered=%d unwedged=%d",
-					k, res.Errors, res.EngineCounters["dwarf_steps_recovered"], res.EngineCounters["dwarf_steps_unwedged"])
-			} else if *arrivalRate > 0 && res.ThrottledMs > 0 {
-				// The -max-outstanding fuse bound while a rate was COMMANDED, so this arm measured the
-				// cap and not the rate. It is the same failure class as the missing-collection check
-				// above - a plausible-looking number that is not the measurement anyone asked for - and
-				// it is worth marking loudly because nothing else in the artifact names the cause: the
-				// symptoms (depressed throughput, inflated RTT sampler, a CPU-burn wait profile) read
-				// exactly like an over-connection collapse. Raise -max-outstanding and re-run.
-				art.Valid = false
-				art.Invalidity = fmt.Sprintf("at concurrency %d: -max-outstanding=%d bound for %dms of the "+
-					"window against a commanded %d flows/s (admitted %.0f/s) - this arm measured the cap, "+
-					"not the commanded rate",
-					k, *maxOutstanding, res.ThrottledMs, *arrivalRate, res.FlowsPerSec)
+				art.Invalidity = fmt.Sprintf("at concurrency %d: %s", k, why)
 			}
 		}
 	}
@@ -427,6 +413,37 @@ func run() error {
 	}
 	fmt.Println("artifact:", path)
 	return nil
+}
+
+// windowInvalidity says why one measurement window is not a measurement, or "" when it is. Every window -
+// a sweep step or a volume probe - goes through it. rate is the commanded flows/s (0 = closed-loop or flat out).
+func windowInvalidity(res stepResult, rate float64, maxOutstanding int) string {
+	// A MISSING collection must invalidate the run, and this check has to come first. Every counter test
+	// below reads a map, and an EMPTY map answers 0 to all of them - so a window whose closing collection
+	// produced nothing passes every reliability check and is written out as `valid: true` with
+	// stepsPerSec = 0, a plausible-looking measurement of zero throughput. Measured on a GCP turnstile ladder,
+	// 2 of 9 arms, which then reported its BEST turn multiple as its worst purely by averaging those zeros in.
+	// The signature is gaugesBefore present with gaugesAfter absent: the closing collection raced engine
+	// teardown. len, not nil: the collectors always return a non-nil map, and `omitempty` is what turns an
+	// EMPTY one into `null` in the artifact - so nil-checking here would never fire.
+	if len(res.EngineCounters) == 0 || len(res.GaugesAfter) == 0 {
+		return fmt.Sprintf("end-of-window metric collection failed (counters=%d gaugesAfter=%d) - "+
+			"every derived rate in this window is meaningless", len(res.EngineCounters), len(res.GaugesAfter))
+	}
+	if res.EngineCounters["dwarf_steps_recovered"] != 0 || res.EngineCounters["dwarf_steps_unwedged"] != 0 || res.Errors != 0 {
+		return fmt.Sprintf("errors=%d recovered=%d unwedged=%d",
+			res.Errors, res.EngineCounters["dwarf_steps_recovered"], res.EngineCounters["dwarf_steps_unwedged"])
+	}
+	if rate > 0 && res.ThrottledMs > 0 {
+		// The -max-outstanding fuse bound while a rate was COMMANDED, so the window measured the cap and not
+		// the rate. Nothing else in the artifact names the cause: the symptoms (depressed throughput, inflated
+		// RTT sampler, a CPU-burn wait profile) read exactly like an over-connection collapse. Raise
+		// -max-outstanding and re-run.
+		return fmt.Sprintf("-max-outstanding=%d bound for %dms of the window against a commanded %.2f "+
+			"flows/s (admitted %.2f/s) - this window measured the cap, not the commanded rate",
+			maxOutstanding, res.ThrottledMs, rate, res.FlowsPerSec)
+	}
+	return ""
 }
 
 // environment records the host-side context a result depends on.

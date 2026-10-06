@@ -234,7 +234,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 // Await goroutines, not one per flow. arrivalPerSec>0 rate-limits creation (fixed offered load); 0 runs
 // flat-out to saturation (find max throughput vs the scan interval).
 func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric.ManualReader, pgss *pgssSampler, wait *waitSampler, dbs *dbStatsSampler,
-	bytesWritten *atomic.Int64, pick func() *workload, creators, fairnessKeys, maxOutstanding, arrivalPerSec int,
+	bytesWritten *atomic.Int64, pick func() *workload, creators, fairnessKeys, maxOutstanding int, arrivalPerSec float64,
 	warmup, window, arrivalStop time.Duration) stepResult {
 
 	flowOpts := func() *workflow.FlowOptions {
@@ -277,23 +277,23 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 	outstanding := func() int64 { return created.Load() - (ended() - baseEnded) }
 
 	// Sampled completion latency: a bounded pool, cancelled at stop so a still-pending sample never
-	// blocks the drain. One in `sampleEvery` created flows is measured, counted across ALL creators - a
-	// per-creator count samples nothing at all when each creator makes fewer than sampleEvery flows in the
-	// window, which is exactly the slow, payload-heavy arm whose latency is the point. At a commanded rate
-	// the stride targets ~16 samples/s, so a 10-minute window holds thousands at any rate; flat out keeps 1
-	// in 64. The pool bound is what keeps sampling from storming the database either way.
+	// blocks the drain. One in `sampleEvery` created flows is measured, counted across ALL creators. Do not
+	// count per creator: with each creator making fewer than sampleEvery flows in the window - a slow,
+	// payload-heavy arm, whose latency is the point - nothing is sampled at all. At a commanded rate the
+	// stride targets ~16 samples/s, so a 10-minute window holds thousands at any rate; flat out keeps 1 in
+	// 64. The pool bound is what keeps sampling from storming the database either way.
 	awaitCtx, cancelAwaits := context.WithCancel(ctx)
 	defer cancelAwaits()
 	sampleSem := make(chan struct{}, 256)
 	sampleEvery := int64(64)
 	if arrivalPerSec > 0 {
-		sampleEvery = max(1, int64(arrivalPerSec)/16)
+		sampleEvery = max(1, int64(arrivalPerSec/16))
 	}
 	var sampled atomic.Int64
 
 	var arrival <-chan time.Time
 	if arrivalPerSec > 0 {
-		tk := time.NewTicker(time.Second / time.Duration(arrivalPerSec))
+		tk := time.NewTicker(time.Duration(float64(time.Second) / arrivalPerSec))
 		defer tk.Stop()
 		arrival = tk.C
 	}

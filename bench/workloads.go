@@ -29,6 +29,10 @@ import (
 type workload struct {
 	graphURL     string
 	initialState func() map[string]any
+	// stepsPerFlow is the steps one flow of this workload executes - its graph's shape. It converts a
+	// throughput in steps/s into flows/s; an open-loop window's own flowsPerSec is the ADMISSION rate, which
+	// runs ahead of completion by up to -max-outstanding flows and is no measure of what was served.
+	stepsPerFlow int
 }
 
 const (
@@ -46,6 +50,17 @@ const (
 	defaultStatePayload = 64 * 1024
 )
 
+// effectivePayload is the payload size a workload writes for a -payload value.
+func effectivePayload(workload string, payloadBytes int) int {
+	switch workload {
+	case "state", "carry", "carryfanout":
+		if payloadBytes == 0 {
+			return defaultStatePayload
+		}
+	}
+	return payloadBytes
+}
+
 // freshBytes hands out payloads of a fixed size cut from one pre-generated random buffer at a random offset,
 // so every write is new data without generating it per task - at several thousand steps/s, generating each
 // payload would load the engine host the run is measuring. The buffer is incompressible alphanumerics, as
@@ -56,9 +71,11 @@ type freshBytes struct {
 	size int
 }
 
-func newFreshBytes(size int) *freshBytes {
+// newFreshBytes builds the buffer for payloads of size bytes, with room for perValue of them cut side by
+// side at a random offset.
+func newFreshBytes(size, perValue int) *freshBytes {
 	const alnum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, max(2*size, 64*1024))
+	b := make([]byte, max(2*perValue*size, 64*1024))
 	for i := range b {
 		b[i] = alnum[rand.IntN(len(alnum))]
 	}
@@ -68,8 +85,21 @@ func newFreshBytes(size int) *freshBytes {
 // next returns a payload of the configured size. Substrings share the buffer, so handing one out allocates
 // nothing; the copy happens where the task's write serializes it.
 func (f *freshBytes) next() string {
-	off := rand.IntN(len(f.buf) - f.size + 1)
-	return f.buf[off : off+f.size]
+	return f.nextN(1)[0]
+}
+
+// nextN returns n payloads that are consecutive, non-overlapping cuts of the buffer, for n values stored in
+// ONE column value - scatter's array. Overlapping cuts would repeat bytes inside that value, which is
+// exactly what TOAST compression finds and hides. Values in different rows may overlap: each is compressed
+// on its own. n must not exceed the perValue the buffer was built for; tasks call this concurrently, so the
+// buffer never changes after construction.
+func (f *freshBytes) nextN(n int) []string {
+	off := rand.IntN(len(f.buf) - n*f.size + 1)
+	out := make([]string, n)
+	for i := range out {
+		out[i] = f.buf[off+i*f.size : off+(i+1)*f.size]
+	}
+	return out
 }
 
 // registerWorkloads builds every benchmark graph and task into the host and returns the workloads by name.
@@ -80,8 +110,8 @@ func (f *freshBytes) next() string {
 //     contention. With -payload, Split, every branch and Join each write fresh bytes to `data`, the same
 //     per-step write as linear, so at equal steps per flow the only difference between the two is the shape.
 //   - scatter: Split writes `items`, -fanout-width elements of -payload bytes; each branch, -branch-depth
-//     steps deep, reads its element and writes nothing; Join is a no-op. The doc -> pages shape, and the one
-//     forEach item refs change.
+//     steps deep, reads its element and writes nothing; Join is a no-op. The doc -> pages shape, where each
+//     branch carries one element of an array.
 //   - state:  a 5-step chain where every task rewrites a payload of -payload bytes - MB/s throughput.
 //   - carry:  the same payload written ONCE and then only carried - the state-ref shape (see below).
 //   - carryfanout: that payload carried across a fan-out's branches - the N x D case.
@@ -109,7 +139,7 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 	h.tasks["bench/nop"] = nop
 
 	// write: the linear and fanout task. -payload 0 makes it a no-op, the dispatch-cost floor.
-	fresh := newFreshBytes(payloadBytes)
+	fresh := newFreshBytes(payloadBytes, max(1, fanOutWidth))
 	h.tasks["bench/write"] = func(ctx context.Context, f *workflow.Flow) error {
 		if payloadBytes > 0 {
 			f.SetString("data", fresh.next())
@@ -148,11 +178,7 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 	// element and checks it arrived whole. The check is what makes a storage number trustworthy here, as in
 	// carry: an element that went missing would otherwise read as an excellent byte saving.
 	h.tasks["bench/scatter-split"] = func(ctx context.Context, f *workflow.Flow) error {
-		items := make([]string, fanOutWidth)
-		for i := range items {
-			items[i] = fresh.next()
-		}
-		f.Set("items", items)
+		f.Set("items", fresh.nextN(fanOutWidth))
 		h.bytesWritten.Add(int64(fanOutWidth * payloadBytes))
 		return nil
 	}
@@ -316,22 +342,27 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 		"llm": {
 			graphURL:     "bench/llm",
 			initialState: func() map[string]any { return nil },
+			stepsPerFlow: 1,
 		},
 		"linear": {
 			graphURL:     "bench/linear",
 			initialState: func() map[string]any { return nil },
+			stepsPerFlow: chainSteps,
 		},
 		"fanout": {
 			graphURL:     "bench/fanout",
 			initialState: func() map[string]any { return map[string]any{"items": fanoutItems} },
+			stepsPerFlow: fanOutWidth + 2,
 		},
 		"scatter": {
 			graphURL:     "bench/scatter",
 			initialState: func() map[string]any { return nil },
+			stepsPerFlow: fanOutWidth*branchDepth + 2,
 		},
 		"state": {
 			graphURL:     "bench/state",
 			initialState: func() map[string]any { return nil },
+			stepsPerFlow: stateSteps,
 		},
 		// The document rides in as INITIAL STATE rather than being written by a first task, which is what
 		// makes the entry step its anchor - the case where a payload lives in a step's `state` column with
@@ -339,12 +370,14 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 		"carry": {
 			graphURL:     "bench/carry",
 			initialState: func() map[string]any { return map[string]any{"doc": records} },
+			stepsPerFlow: chainSteps,
 		},
 		"carryfanout": {
 			graphURL: "bench/carryfanout",
 			initialState: func() map[string]any {
 				return map[string]any{"doc": records, "items": fanoutItems}
 			},
+			stepsPerFlow: 2*fanOutWidth + 2,
 		},
 	}
 }

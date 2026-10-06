@@ -46,6 +46,9 @@ type dbStats struct {
 	StepsBytes  int64 `json:"stepsBytes"`
 	FlowsBytes  int64 `json:"flowsBytes"`
 	WALBytes    int64 `json:"walBytes"`
+	// ok is whether every query of this reading succeeded. A failed one reads as zero, and a delta taken
+	// against a zero would report cumulative WAL, or negative growth, as one window's.
+	ok bool
 }
 
 // dbDelta is what the database stored and logged over one measurement window: the growth of the two dwarf
@@ -57,9 +60,10 @@ type dbDelta struct {
 	WALBytes   int64 `json:"walBytes"`
 }
 
-// windowDelta is the change between two readings, or nil when there is no sampler (a non-Postgres DSN).
+// windowDelta is the change between two readings, or nil when there is no sampler (a non-Postgres DSN) or
+// either reading failed (including WAL on PostgreSQL before 14, which has no pg_stat_wal).
 func (s *dbStatsSampler) windowDelta(before, after dbStats) *dbDelta {
-	if s == nil {
+	if s == nil || !before.ok || !after.ok {
 		return nil
 	}
 	return &dbDelta{
@@ -93,13 +97,14 @@ func (s *dbStatsSampler) sample(ctx context.Context) dbStats {
 	sctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	var out dbStats
-	_ = s.db.QueryRowContext(sctx,
+	err1 := s.db.QueryRowContext(sctx,
 		"SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()",
 	).Scan(&out.Connections)
-	_ = s.db.QueryRowContext(sctx,
+	err2 := s.db.QueryRowContext(sctx,
 		"SELECT COALESCE(pg_total_relation_size('dwarf_steps'), 0), COALESCE(pg_total_relation_size('dwarf_flows'), 0)",
 	).Scan(&out.StepsBytes, &out.FlowsBytes)
-	_ = s.db.QueryRowContext(sctx, "SELECT wal_bytes::bigint FROM pg_stat_wal").Scan(&out.WALBytes)
+	err3 := s.db.QueryRowContext(sctx, "SELECT wal_bytes::bigint FROM pg_stat_wal").Scan(&out.WALBytes)
+	out.ok = err1 == nil && err2 == nil && err3 == nil
 	return out
 }
 

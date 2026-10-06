@@ -63,7 +63,12 @@ def load_cells(root):
             art = os.path.join(d, r["tag"] + ".json")
             r["artifact"] = json.load(open(art)) if os.path.exists(art) else {}
             runs.append(r)
-        cells.append(dict(doc["cell"], derived=doc["derivedPool"], optimum=doc.get("optimumPool"), runs=runs))
+        cell = dict(doc["cell"], derived=doc["derivedPool"], optimum=doc.get("optimumPool"), runs=runs)
+        if not peaks(cell)[0] and not peaks(cell)[1]:
+            # cell.sh writes cell.json before it aborts on a cell with no valid peak; there is nothing to plot.
+            print(f"skipping {d}: no valid peak run")
+            continue
+        cells.append(cell)
     return cells
 
 
@@ -114,9 +119,10 @@ def chart_r2_peak(cells, out):
         ax.plot(xs, ys, color=colour, lw=2, marker="o", ms=5.5, label=f"{rtt:g} ms")
         if rtt == min(RTT_COLOURS):
             # Replicate range at the nearest RTT, where the n=3 peaks are.
-            lo = [min(r["steps"] for r in peaks(c)[0]) for c in row]
-            hi = [max(r["steps"] for r in peaks(c)[0]) for c in row]
-            ax.vlines(xs, lo, hi, color=colour, lw=4, alpha=0.35)
+            ranged = [c for c in row if peaks(c)[0]]
+            ax.vlines([c["vcpus"] for c in ranged],
+                      [min(r["steps"] for r in peaks(c)[0]) for c in ranged],
+                      [max(r["steps"] for r in peaks(c)[0]) for c in ranged], color=colour, lw=4, alpha=0.35)
     ax.set_xscale("log", base=2)
     ax.set_yscale("log")
     vs = sorted({c["vcpus"] for c in cs})
@@ -195,10 +201,11 @@ def table_r2_dbcpu(cells):
 # ---- R3: payload and shape ----
 
 def r3_series(cells):
-    """(name, [(payload, cell)]) per workload shape, at the R3 coordinates."""
+    """(name, [(payload, cell)]) per workload shape, at the R3 coordinates. linear at 0 B is R2's 16 vCPU cell,
+    which is the series' baseline point."""
     out = {}
     for c in cells:
-        if c["targetRtt"] != R3_RTT or c["vcpus"] != R3_VCPUS or c["workload"] == "linear" and c["payload"] == 0:
+        if c["targetRtt"] != R3_RTT or c["vcpus"] != R3_VCPUS:
             continue
         if c["workload"] == "linear":
             name = "linear"
