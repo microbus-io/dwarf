@@ -1134,8 +1134,9 @@ not parallelism:
   an independent read snapshot can observe the pre-transition row and deliver an empty resume payload (the reason is
   spelled out at the claim site in `execution.go`). The lease size comes from the step row's own `time_budget_ms`
   (referenced self-referentially in the claim UPDATE), not a pre-SELECT.
-- **Flow data** - runs after the claim+read, since it needs the `flow_id`. On a `graphCache` hit it does not
-  select the `graph` column: the graph is frozen at `Create`, and its JSON is the largest payload on the row.
+- **Flow data** - on PostgreSQL it comes back with the claim (below); elsewhere it is read after the claim,
+  since it needs the `flow_id`. On a `graphCache` hit nothing selects the `graph` column: the graph is frozen at
+  `Create`, and its JSON is the largest payload on the row.
 - **The flow's graph is read once per replica, not once per completion.** `computeFinalState` takes the graph and
   workflow URL from `graphCache` (`flowGraph`) and reads the row only on a miss, so every `computeFinalState`
   caller on a replica that dispatched the flow pays no graph round trip. Every field of `cachedGraph` must
@@ -1150,8 +1151,18 @@ not parallelism:
   PostgreSQL, other drivers run the same statements one by one). A flush happens where something must be read
   before the next statement can be written - an id, or the cohort bump - where nothing else may run while results
   are open, and every 64 successor rows, to bound memory.
-  Measured on PostgreSQL (`TestRoundTrips_*`, simulated RTT, about +-0.5): a linear step ~6 round trips, a one-step
-  flow ~11.6, a fan-out cycle of two branches ~21.5.
+  Measured on PostgreSQL (`TestRoundTrips_*`, simulated RTT, about +-0.5): a linear step ~5 round trips, a one-step
+  flow ~11, a fan-out cycle of two branches ~20.5.
+- **On PostgreSQL the claim returns the flow row too** (`UPDATE dwarf_steps s ... FROM dwarf_flows f ...
+  RETURNING s.*, f.*`), so dispatch reads the flow row only for the graph on a `graphCache` miss. `Create` seeds
+  the cache (`parseCachedGraph`, from the stored JSON, after the commit) on a replica that dispatches the shard,
+  since its doorbell offers the entry step to its own cache. A miss is then a flow's first dispatch on a replica
+  that did not create it, or one after the entry aged out (the LRU's bound or TTL) or the replica restarted. The join reads the flow row without locking it: Postgres locks only an
+  UPDATE's target rows, so the claim cannot deadlock with Cancel/Terminate, which lock the flow row before its
+  steps. **Do not extend it to SQL Server** as things stand: there the join takes a shared lock on the flow row
+  while the claim holds the step row - the reverse of that order - unless the database runs
+  `READ_COMMITTED_SNAPSHOT` (recommended, not enforced). SQLite's `RETURNING` cannot reference a joined table,
+  and MySQL has no `RETURNING`; both keep the separate flow read.
 - **An id a later statement needs is named in SQL on PostgreSQL, read first elsewhere** (`txBatch.insertedID`):
   `lastStepIDSQL`/`lastFlowIDSQL`, the table's sequence's `currval`, so the dependent statement shares the INSERT's
   batch; elsewhere the batch is flushed and the id bound, which costs nothing on a driver that does not pipeline.

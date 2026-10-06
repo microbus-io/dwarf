@@ -27,7 +27,6 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/cancelmarker"
 	"github.com/microbus-io/dwarf/internal/engineseams"
-	"github.com/microbus-io/dwarf/internal/faninmap"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/internal/turnstile"
@@ -180,8 +179,42 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// keeps the original wake time instead of restarting the sleep. Fractional on SQLite; negative once it passed.
 	var replaySleepLeftMs float64
 
+	// The flow row's columns. On Postgres the claim returns them too, joined in: one round trip instead of
+	// two on every step. The other drivers read them after the claim (below).
+	var flowToken, flowStatus, workflowURL, traceParent string
+	var baggageJSON []byte
+	var flowCreatedAt, flowUpdatedAt time.Time
+	var flowPriority int
+	var flowFairnessKey string
+	var flowFairnessWeight float64
+	var flowTimeBudgetMs int
+	var flowCancelReason string
+	flowDest := []any{&flowToken, &flowStatus, &workflowURL, &baggageJSON, &traceParent, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight, &flowTimeBudgetMs, &flowCancelReason}
+	flowRead := true
+
 	switch db.DriverName() {
-	case "pgx", "sqlite":
+	case "pgx":
+		// The joined flow row is READ, not locked: Postgres locks only an UPDATE's target rows, so the claim
+		// takes no lock on dwarf_flows and cannot deadlock with a transaction that locks the flow row before
+		// its steps (Cancel, Terminate). Do not extend this to SQL Server without READ_COMMITTED_SNAPSHOT:
+		// there the join takes a shared lock on the flow row while holding the step row - the reverse order.
+		// Every claim-side column is qualified, because dwarf_flows shares several names with dwarf_steps
+		// (status, created_at, updated_at, time_budget_ms).
+		err = db.QueryRowContext(ctx,
+			"UPDATE dwarf_steps s SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), s.time_budget_ms + ?), lease_seq=s.lease_seq+1, engine_id=?, updated_at=NOW_UTC(),"+
+				" started_at=CASE WHEN s.attempt>0 OR s.subgraph_done=1 OR s.interrupt_done=1 OR s.advancing=1 THEN s.started_at ELSE NOW_UTC() END"+
+				" FROM dwarf_flows f"+
+				" WHERE s.step_id=? AND s.status='"+workflow.StatusPending+"' AND s.parked=? AND s.not_before<=NOW_UTC() AND s.lease_expires<=NOW_UTC() AND f.flow_id=s.flow_id"+
+				" RETURNING s.step_depth, s.task_name, s.step_token, s.state, s.changes, s.state_refs, s.attempt, s.lineage_id, s.flow_id, s.time_budget_ms, s.interrupt_done, s.resume_data, s.subgraph_done, s.subgraph_result, s.subgraph_error, s.created_at, s.lease_seq, s.fan_out_ordinal, s.cancelling, s.advancing, s.advance_goto, DATE_DIFF_MILLIS(s.advance_sleep_until, NOW_UTC()), s.advance_on_error,"+
+				" f.flow_token, f.status, f.workflow_url, f.baggage, f.trace_parent, f.created_at, f.updated_at, f.priority, f.fairness_key, f.fairness_weight, f.time_budget_ms, f.cancel_reason",
+			workflow.StatusRunning, leaseMarginMs, e.engineID, stepID, parkedNone,
+		).Scan(append([]any{&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq, &fanOutOrdinal, &stepCancelling, &replaying, &replayGoto, &replaySleepLeftMs, &replayOnError}, flowDest...)...)
+		if err == sql.ErrNoRows {
+			n, err = 0, nil
+		} else if err == nil {
+			n, flowRead = 1, false
+		}
+	case "sqlite":
 		err = db.QueryRowContext(ctx,
 			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, engine_id=?, updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 OR advancing=1 THEN started_at ELSE NOW_UTC() END"+
@@ -254,6 +287,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// Gated on n==0 ALONE, not on the flowID==0 arm below: on the MySQL path a successful claim (n==1)
 		// whose follow-up read finds no row leaves flowID at 0, and counting that as a lost claim would
 		// attribute a read miss to contention - in the one instrument whose whole purpose is attribution.
+		// On PostgreSQL the claim joins the flow row, so a step whose flow row is gone matches nothing and
+		// does count here; the reaper and Fork delete a flow's steps before the flow, so such a row should not
+		// exist.
 		e.metricStepClaimLost(ctx)
 		return nil
 	}
@@ -261,28 +297,27 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		return nil
 	}
 
-	// Read flow data
-	var flowToken, flowStatus, workflowURL, traceParent string
-	var graphJSON, baggageJSON []byte
-	var flowCreatedAt, flowUpdatedAt time.Time
-	var flowPriority int
-	var flowFairnessKey string
-	var flowFairnessWeight float64
-	var flowTimeBudgetMs int
-	var flowCancelReason string
-	// The graph is frozen at flow creation, so a cached parse makes its JSON - the largest payload on this
-	// row - dead weight; it is selected only on a miss.
+	// The graph is frozen at flow creation, so a cached parse makes its JSON - the largest payload on the flow
+	// row - dead weight; it is selected only on a miss, which is why the Postgres claim leaves it out.
 	graphKey := graphCacheKey{shard: shardNum, flowID: flowID} // scopes the cache by shard, since flow_id is only unique within a shard
 	cg, cached := e.graphCache.Load(graphKey)
-	flowCols := "flow_token, status, workflow_url, baggage, trace_parent, created_at, updated_at, priority, fairness_key, fairness_weight, time_budget_ms, cancel_reason"
-	flowDest := []any{&flowToken, &flowStatus, &workflowURL, &baggageJSON, &traceParent, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight, &flowTimeBudgetMs, &flowCancelReason}
-	if !cached {
-		flowCols += ", graph"
-		flowDest = append(flowDest, &graphJSON)
+	var graphJSON []byte
+	readFlow := func(cols string, dest ...any) error {
+		flowPass := turnstile.WaitTurn(ctx)
+		defer flowPass.Return()
+		return db.QueryRowContext(ctx, "SELECT "+cols+" FROM dwarf_flows WHERE flow_id=?", flowID).Scan(dest...)
 	}
-	flowPass := turnstile.WaitTurn(ctx)
-	err = db.QueryRowContext(ctx, "SELECT "+flowCols+" FROM dwarf_flows WHERE flow_id=?", flowID).Scan(flowDest...)
-	flowPass.Return()
+	switch {
+	case flowRead:
+		cols := "flow_token, status, workflow_url, baggage, trace_parent, created_at, updated_at, priority, fairness_key, fairness_weight, time_budget_ms, cancel_reason"
+		if !cached {
+			cols += ", graph"
+			flowDest = append(flowDest, &graphJSON)
+		}
+		err = readFlow(cols, flowDest...)
+	case !cached:
+		err = readFlow("graph", &graphJSON)
+	}
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -307,8 +342,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	}
 
 	if !cached {
-		parsed := &workflow.Graph{}
-		err = json.Unmarshal(graphJSON, parsed)
+		cg, err = parseCachedGraph(graphJSON, workflowURL)
 		if err != nil {
 			// Its own turn: this is the entry phase, so the persist turn that covers every LATER failStep
 			// does not exist yet, and failStep runs a whole transaction. Without it the two failure paths
@@ -318,8 +352,6 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			doneTurn()
 			return errors.Trace(err)
 		}
-		// Derive the fan-in routing map once per flow and cache it with the graph; it is not persisted.
-		cg = &cachedGraph{graph: parsed, fanIn: faninmap.New(parsed), workflowURL: workflowURL}
 		e.graphCache.Store(graphKey, cg)
 	}
 	graph := cg.graph
@@ -460,6 +492,16 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	if replaying {
 		// No host call.
 	} else if stepCancelling && !subgraphDone {
+		// Re-read the reason rather than trust the claim's: on PostgreSQL the claim returns the flow row as of
+		// the claim statement's snapshot, which can predate a Cancel whose reason commits before its mark
+		// reaches this step - the claim's re-check then sees the mark, but the reason it returned is empty.
+		// Cancel writes the reason before the mark, so a read after the claim finds it. A rare path.
+		reasonPass := turnstile.WaitTurn(ctx)
+		rerr := db.QueryRowContext(ctx, "SELECT cancel_reason FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&flowCancelReason)
+		reasonPass.Return()
+		if rerr != nil {
+			return errors.Trace(rerr)
+		}
 		execErr = cancelmarker.New(flowCancelReason)
 	} else {
 		// A panic in the in-process host is caught here so it flows through the normal error disposition

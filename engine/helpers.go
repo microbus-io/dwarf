@@ -17,8 +17,11 @@ limitations under the License.
 package engine
 
 import (
+	"encoding/json"
+
 	"github.com/microbus-io/dwarf/internal/faninmap"
 	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/errors"
 )
 
 // emptyJSON is the empty JSON object, as a BIND value rather than an inline SQL literal.
@@ -48,4 +51,16 @@ type cachedGraph struct {
 	graph       *workflow.Graph
 	fanIn       *faninmap.Map
 	workflowURL string
+}
+
+// parseCachedGraph parses a flow's stored graph JSON into a cache entry. Both the dispatch miss and Create's
+// seed go through it, so a seeded entry is exactly what a miss would have built - in particular, a parse of
+// the stored bytes and never a caller's live object, which could change under the concurrent dispatches
+// that share the entry.
+func parseCachedGraph(graphJSON []byte, workflowURL string) (*cachedGraph, error) {
+	parsed := &workflow.Graph{}
+	if err := json.Unmarshal(graphJSON, parsed); err != nil {
+		return nil, errors.Trace(err)
+	}
+	return &cachedGraph{graph: parsed, fanIn: faninmap.New(parsed), workflowURL: workflowURL}, nil
 }

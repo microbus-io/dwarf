@@ -358,6 +358,14 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	}
 
 	flowKey = keys.New(shardNum, int(newFlowID), flowToken)
+	// Seed the graph cache when this replica dispatches the shard: the doorbell below offers the entry step to
+	// its own candidate cache, so it is about to claim the step and would otherwise read back the graph it just
+	// wrote. After the commit, so a rolled-back flow id - which SQLite can hand out again - is never cached.
+	if e.dispatchesOn(shardNum) {
+		if cg, perr := parseCachedGraph(graphJSON, workflowURL); perr == nil {
+			e.graphCache.Store(graphCacheKey{shard: shardNum, flowID: int(newFlowID)}, cg)
+		}
+	}
 	e.logger.DebugContext(ctx, "Flow created and started", "workflow", workflowURL, "task", entryPoint)
 	e.metricFlowStarted(ctx, workflowURL, shardNum)
 	// The entry step's initial-state snapshot, written by insertFlowTx above.
