@@ -65,10 +65,10 @@ type successorRow struct {
 successorBatch holds the successors of one transition, which share everything but the per-row fields, and queues
 their INSERTs onto the transition's statement batch.
 
-Where the driver returns inserted rows (RETURNING on PostgreSQL and SQLite, OUTPUT on SQL Server) the rows go in
-multi-row INSERTs, so a fan-out of N costs about N/64 statements plus one per set bit of the remainder, rather than
-N, and their ids are matched back by step_token, because neither RETURNING nor OUTPUT promises VALUES order. MySQL
-has no RETURNING, and its multi-row insert ids are not guaranteed contiguous under the default
+Where the driver returns inserted rows (RETURNING on PostgreSQL and SQLite, OUTPUT on SQL Server) several rows go
+in multi-row INSERTs, so a fan-out of N costs about N/64 statements plus one per set bit of the remainder, rather
+than N, and their ids are matched back by step_token, because neither RETURNING nor OUTPUT promises VALUES order.
+MySQL has no RETURNING, and its multi-row insert ids are not guaranteed contiguous under the default
 innodb_autoinc_lock_mode=2, so it inserts row by row and reads each id as LastInsertId.
 
 Within a chunk, step ids follow VALUES order on every supported dialect in practice, but none promises it. So
@@ -99,31 +99,23 @@ func returnsInsertedRows(driver string) bool {
 	return false
 }
 
-// queue queues the INSERTs of the pending rows, whose readers append the new step ids to ids in row order, and
-// empties the pending rows.
-func (s *successorBatch) queue(queue queueFunc, driver string, ids *[]int) {
+// queue queues the INSERTs of the pending rows onto b, whose readers append the new step ids to ids in row order,
+// and empties the pending rows. A chunk of one row - every row on MySQL - goes in by a single-row INSERT.
+func (s *successorBatch) queue(b *txBatch, ids *[]int) {
 	defer func() { s.rows = s.rows[:0] }()
-	if !returnsInsertedRows(driver) {
-		for _, r := range s.rows {
-			queue(func(res *sequel.BatchResults) error {
-				result, err := res.Exec()
-				if err != nil {
-					return errors.Trace(err)
-				}
-				id, err := result.LastInsertId()
-				if err != nil {
-					return errors.Trace(err)
-				}
-				*ids = append(*ids, int(id))
-				return nil
-			}, successorInsertSQL, s.rowArgs(r, keys.RandomIdentifier(16))...)
-		}
-		return
-	}
+	appendID := func(id int64) { *ids = append(*ids, int(id)) }
 	for rest := s.rows; len(rest) > 0; {
-		n := successorBatchMax
-		for n > len(rest) {
-			n /= 2
+		n := 1
+		if returnsInsertedRows(b.tx.DriverName()) {
+			n = successorBatchMax
+			for n > len(rest) {
+				n /= 2
+			}
+		}
+		if n == 1 {
+			queueInsertID(b, "step_id", appendID, successorInsertSQL, s.rowArgs(rest[0], keys.RandomIdentifier(16))...)
+			rest = rest[1:]
+			continue
 		}
 		tokens := make([]string, n)
 		args := make([]any, 0, n*21)
@@ -133,10 +125,10 @@ func (s *successorBatch) queue(queue queueFunc, driver string, ids *[]int) {
 		}
 		values := strings.Repeat(successorRowSQL+",", n-1) + successorRowSQL
 		stmt := "INSERT INTO dwarf_steps (" + successorCols + ") VALUES " + values + " RETURNING step_id, step_token"
-		if driver == "mssql" {
+		if b.tx.DriverName() == "mssql" {
 			stmt = "INSERT INTO dwarf_steps (" + successorCols + ") OUTPUT INSERTED.step_id, INSERTED.step_token VALUES " + values
 		}
-		queue(func(res *sequel.BatchResults) error {
+		b.queue(func(res *sequel.BatchResults) error {
 			rows, err := res.Query()
 			if err != nil {
 				return errors.Trace(err)

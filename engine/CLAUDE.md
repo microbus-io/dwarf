@@ -1145,64 +1145,63 @@ not parallelism:
   and are matched to rows by `step_token`, since neither promises VALUES order. MySQL inserts row by row: it has no
   `RETURNING`, and under the default `innodb_autoinc_lock_mode=2` a multi-row insert's ids are not guaranteed
   contiguous.
-- **The transition is statement batches** (`sequel.Tx.Batch`, one round trip each on PostgreSQL; other drivers run
-  them statement by statement). One `queue`/`flush` pair carries every statement: the lock grab, the successor
-  INSERTs (flushed every 64 rows, so a wide fan-out holds only one batch's branch states in memory), the fenced
-  own-row write and the flow advance - and the fan-in arrival's two batches below. The only flush in between is
-  forced by data: the own-row write (`successor_id`) and the advance take the new step's id.
-  - **One successor on PostgreSQL** (every linear and goto step, every step inside a forEach branch) needs no
-    flush: the two writes name the new step as the step sequence's current value (`lastStepIDSQL`). A linear
-    step is BEGIN, one batch, COMMIT - k ~6 (`TestRoundTrips_LinearStep`, about +-0.5 run to run). **Do not use a
-    session-wide last id** (`lastval()`, SQL Server's `@@IDENTITY`): it reports the last id generated in ANY
-    table, so a trigger a deployment adds to `dwarf_steps` would silently become the successor and the flow's
-    step. PostgreSQL only because only it pipelines - elsewhere the extra flush costs nothing. Pinned by
+- **The transition, `completeFlow` and flow creation are statement batches** (`txBatch`: `queue` pairs a
+  statement with the function that reads its result, `flush` sends and reads in order; one round trip per flush on
+  PostgreSQL, other drivers run the same statements one by one). A flush happens where something must be read
+  before the next statement can be written - an id, or the cohort bump - where nothing else may run while results
+  are open, and every 64 successor rows, to bound memory.
+  Measured on PostgreSQL (`TestRoundTrips_*`, simulated RTT, about +-0.5): a linear step ~6 round trips, a one-step
+  flow ~11.6, a fan-out cycle of two branches ~21.5.
+- **An id a later statement needs is named in SQL on PostgreSQL, read first elsewhere** (`txBatch.insertedID`):
+  `lastStepIDSQL`/`lastFlowIDSQL`, the table's sequence's `currval`, so the dependent statement shares the INSERT's
+  batch; elsewhere the batch is flushed and the id bound, which costs nothing on a driver that does not pipeline.
+  **Do not use a session-wide last id** (`lastval()`, SQL Server's `@@IDENTITY`): it reports the last id generated
+  in ANY table, so a trigger a deployment adds would silently become the id written. Both ids are `BIGSERIAL`, so a
+  role that can insert a row already holds the sequence privilege `currval` needs. **A `WHERE` clause compares
+  with `currval` as a scalar subquery** - `flow_id=(SELECT currval(...))` - which PostgreSQL evaluates once as an
+  InitPlan; compared directly, the volatile function cannot be an index key (measured on a 100k-row table: a
+  sequential scan against a primary-key index scan). `SET` and `VALUES` take it bare.
+- **The transition** queues the lock grab, the successor INSERTs (flushed every 64 rows, so a wide fan-out holds
+  only one batch's branch states in memory), the fenced own-row write and, last, the flow advance.
+  - A **lone successor** (every linear and goto step, every step inside a forEach branch) is named by
+    `insertedID`, so on PostgreSQL the transition is BEGIN, one batch, COMMIT. Pinned by
     `TestSuccessorBatch_LoneSuccessorLinks` (concurrent flows, every link checked against `predecessor_id`, every
     flow's `step_id` against its own last step).
-  - **Otherwise** (a fan-out source, or any driver but PostgreSQL) the INSERTs are flushed and their ids read
-    first. `successor_id` is the FIRST branch, which History's step navigation follows, and no dialect's last-id
-    names the first row of a multi-row INSERT (MySQL's reports the first, the others the last). Do not replace the
-    read with a lookup by `step_token`: the column is in no index, so the lookup visits every step of the flow
-    created after the source - every concurrently committed step of a wide cohort - and run from every branch step
-    it is quadratic.
+  - **Several successors** are flushed and their ids read first: `successor_id` is the FIRST branch, which
+    History's step navigation follows, and no dialect's last-id names the first row of a multi-row INSERT (MySQL's
+    reports the first, the others the last). Do not replace the read with a lookup by `step_token`: the column is
+    in no index, so the lookup visits every step of the flow created after the source - every concurrently
+    committed step of a wide cohort - and run from every branch step it is quadratic.
   - The terminal-status guard is read after the statements batched with the grab ran, so a terminal flow bails by
-    **rolling back** (`errTransitionFlowTerminal`, mapped to nil after `Transact`), and the bail shows in telemetry
-    as a rolled-back transaction, as a lease-fenced one does. The DEFERRED grab of a resolving fan-in arrival is
-    the exception: its bail returns nil, because that transaction's cohort bump must commit (see below).
-  - Never close batch results with a `defer`: on a driver that does not pipeline, `Close` runs every statement not
-    read yet - every successor INSERT of a bailed transition, under the flow-row lock - while the rollback after an
-    early return abandons them unrun.
-  - Nothing else may run on the transaction while a batch's results are open, so the cohort bump, the fan-in's
-    ref resolution and the cohort-failure statements each run between flushes, with no batch open. When a fan-in arrival follows in the same transaction,
-    the flow advance is left out and written at the end, because the arrival may insert the step the flow
-    advances to.
-- **The arrival that resolves a cohort is two batches after its bump** (the same `queue`/`flush`): [the deferred
-  flow-row grab + the spawn read + the cohort-members read (`queueCohortRead`)], then, after the Go merge
-  (`fanInRow`), [the fan-in INSERT + the cohort-exit `successor_id` write + the flow advance]. On PostgreSQL the
-  second batch names the fan-in step as `lastStepIDSQL`; elsewhere the INSERT is flushed and its id read first.
-  A pure resolving arrival is BEGIN, bump, two batches, COMMIT: 5 round trips on PostgreSQL (a fan-out cycle of
-  two branches measured ~28 -> ~22 by `TestRoundTrips_FanInCycle`). The cohort's members are read whole before the
-  fold - on PostgreSQL the pipelined batch buffers them - so their changes are decoded as each row is read, and
-  only a completed member's, so the cohort is never held both raw and decoded. The bump stays alone - whether the cohort
-  resolved is decided from it. The deferred grab's terminal bail **returns nil, committing the bump**, which is
-  sound because everything batched with the grab is a read (`TestTerminateVsLastCohortArrival_Deterministic`
-  pins arrivals == size). A reduced field that arrived as a ref is resolved between the two batches, by its own
-  query, only when there is one.
-- **`completeFlow`'s lock grab returns the row it locked** (`RETURNING`/`OUTPUT`), so the surgraph linkage, the
-  disposable flag and the status cost no second statement. MySQL, lacking `RETURNING`, reads them with a
-  follow-up `SELECT`. The grab goes out in one `txBatch` with the read of the flow's completed tails
-  (`queueCompletedTails`), which the final state is merged from: BEGIN, one batch, the final-state UPDATE, COMMIT
-  (measured ~14.6 -> ~13.9 round trips per one-step flow on PostgreSQL, `TestRoundTrips_OneStepFlow`). The
-  final-state UPDATE depends on the Go merge, so it cannot join the batch; the fallback read of any tails, and
-  a ref resolution, follow only when needed.
-- **Creating a flow is one batch on PostgreSQL** (`insertFlowTx`, shared by `Create`, `Continue` and a subgraph
-  spawn): [flow INSERT, entry-step INSERT naming the flow as `lastFlowIDSQL`, the flow's thread/step/root fix-up
-  naming both ids] - BEGIN, one batch, COMMIT (measured ~14.0 -> ~11.6 round trips per one-step flow,
-  `TestRoundTrips_OneStepFlow`). On other drivers the batch is flushed after each INSERT so that its id
-  (`queueInsertID`) is bound into the statement that takes it. Pinned by `TestInsertFlowTx_ConcurrentCreates`
-  (every new flow's thread, root and step ids point at its own rows). **A `WHERE` clause compares with
-  `currval` as a scalar subquery** - `flow_id=(SELECT currval(...))` - which PostgreSQL evaluates once as an
-  InitPlan. Compared directly, the volatile function cannot be an index key: measured on a 100k-row table, a
-  sequential scan against an index scan on the primary key. `SET` and `VALUES` take it bare.
+    **rolling back** (`errTransitionFlowTerminal`, mapped to nil after `Transact`), and the bail shows in
+    telemetry as a rolled-back transaction, as a lease-fenced one does. The DEFERRED grab of a resolving fan-in
+    arrival is the exception: its bail returns nil, because that transaction's cohort bump must commit (below).
+  - Never close batch results with a `defer`: on a driver that does not pipeline, `Close` runs every statement
+    not read yet - every successor INSERT of a bailed transition, under the flow-row lock - while the rollback
+    after an early return abandons them unrun.
+  - The flow advance is written once, last, to the only new step - the fan-in step or a lone successor - or 0.
+    It waits for a fan-in arrival because the arrival may insert the step the flow advances to.
+- **A fan-in arrival flushes the transition first**: the cohort bump runs alone, on no open batch, because whether
+  the cohort resolved is decided from it. The ARRIVAL THAT RESOLVES the cohort then sends [the deferred flow-row
+  grab + the spawn read + the cohort-members read (`queueCohortRead`)], folds them in Go (`fanInRow`), and queues
+  [the fan-in INSERT + the cohort-exit `successor_id` write] ahead of the flow advance, naming the fan-in step by
+  `insertedID`. A pure resolving arrival is BEGIN, bump, two batches, COMMIT: 5 round trips on PostgreSQL. The
+  deferred grab's terminal bail **returns nil, committing the bump**, which is sound because everything batched
+  with the grab is a read (`TestTerminateVsLastCohortArrival_Deterministic` pins arrivals == size); those reads
+  still run before the bail, on every driver. The members' changes are decoded as each row is
+  read, and only a completed member's - but on PostgreSQL the pipelined batch keeps every row's raw bytes until
+  the flush closes it, so a wide cohort is held raw and decoded at once. A reduced field that arrived as a ref is
+  resolved between the two batches, by its own query, only when there is one. The ref resolution and the
+  cohort-failure statements run between flushes, with no batch open.
+- **`completeFlow`'s lock grab returns the row it locked** (`RETURNING`/`OUTPUT`; MySQL reads it with a follow-up
+  `SELECT`), and goes out in one batch with the read of the flow's completed tails (`queueCompletedTails`), which
+  the final state is merged from: BEGIN, one batch, the final-state UPDATE, COMMIT. The UPDATE depends on the Go
+  merge, so it cannot join the batch; the fallback read of any tails, and a ref resolution, follow only when
+  needed.
+- **Creating a flow** (`insertFlowTx`, shared by `Create`, `Continue` and a subgraph spawn) is [flow INSERT,
+  entry-step INSERT naming the flow by `insertedID`, the flow's thread/step/root fix-up naming both ids]: BEGIN,
+  one batch, COMMIT on PostgreSQL. Pinned by `TestInsertFlowTx_ConcurrentCreates` (every new flow's thread, root
+  and step ids point at its own rows).
 - **A batch reader scans with the PostgreSQL driver's own type conversions** when the batch is pipelined, and
   they are stricter than `database/sql`'s: **scan a column into the Go type it is stored as.** A `SMALLINT` flag
   (`delete_on_completion`, `cancelling`, `advancing`, ...) does not scan into a `bool` - it scans into an `int`.
@@ -1323,9 +1322,10 @@ so would race an in-flight `OnError` handler (an errored branch routes to its ha
 N+1 while the fan-in worker is still finishing depth N) and could incorrectly fail an otherwise-recoverable flow.
 
 **Fan-in merge order and contribution (lineage `SetFanIn` path).** `queueCohortRead` reads cohort members
-(`lineage_id = cohortSpawnID`) `ORDER BY fan_out_ordinal, step_depth, step_id` and `fanInRow` folds them in that order. `fan_out_ordinal` is stamped at fan-out from the
-branch's position in the spawn loop (the `forEach` array index or static declaration order), so `list`/`append`/
-`sum`/`set` reducers fold in input-array order rather than completion order; `step_id` breaks ties. The firing gate is
+(`lineage_id = cohortSpawnID`) `ORDER BY fan_out_ordinal, step_depth, step_id` and `fanInRow` folds them in that
+order. `fan_out_ordinal` is stamped at fan-out from the branch's position in the spawn loop (the `forEach` array
+index or static declaration order), so `list`/`append`/`sum`/`set` reducers fold in input-array order rather than
+completion order; `step_id` breaks ties. The firing gate is
 `cohort_arrivals >= cohort_size`, a counter on the spawn step independent of the merge query, so the merge's status
 filter cannot deadlock fan-in. Only `completed` members contribute `changes`; `failed`/`terminated`/`cancelled`/
 `pending`/`running` contribute nothing.
@@ -1728,7 +1728,7 @@ is *recorded*, not *reconstructed*. Every edge lands on at least one endpoint:
   successor. Without the conjunct, the task-name match alone overwrote those interior edges with the fan-in id,
   corrupting the recorded DAG (spurious `step -> fan-in` edges in `History` and its rendered diagram). Pinned by
   `TestFanIn_GotoLoopBranchKeepsInteriorDAGEdges`. The `successor_id` write targets the exit steps **by primary
-  key** (ids collected during `fanInRow`'s cohort-member merge scan), not by the
+  key** (ids collected from `queueCohortRead`'s cohort-member read), not by the
   `(flow_id, lineage_id, task_name)` predicate - which is unindexed and deadlocked concurrent fan-ins on SQL Server
   (the deadlock story is at that write in `execution.go`).
 - **flow.Retry**: rewinds the step in place (same row), so `predecessor_id` is preserved. (A `Fork` copies the
@@ -1743,7 +1743,7 @@ outgoing.
 When the merge base tail is a cohort member (`lineage_id != 0`), the cohort resolved with failures and never reached
 its fan-in, and `computeFinalState` switches to `mergeCohortState` - the *same* merge `fanInRow` runs: the
 **spawn** step's `state + changes` as the base, then every **completed member's** `changes` folded through the
-reducers in `fan_out_ordinal, step_id` order. Merging the tails instead loses data, because **a branch's
+reducers in `fan_out_ordinal, step_depth, step_id` order. Merging the tails instead loses data, because **a branch's
 intermediate output lives in the NEXT step's `state`, not in any tail's `changes`**: in
 `forEach -> Cell -> Enrich -> Join`, only the *first* tail's `state` is consulted, so branch 0's `Cell` output rides
 in via the base and branches 1..N-1's is silently dropped (measured: 1 of 3 branches surviving, and *which* one is

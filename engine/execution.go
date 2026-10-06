@@ -1209,25 +1209,18 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			// The transition's statements go out as statement batches - one round trip each where the driver
 			// pipelines.
 			batch := newTxBatch(ctx, tx)
-			queue, flush := batch.queue, batch.flush
 
-			// Write-first: queueGrab takes the flow row's lock before any step is written (except the deferred grab of
-			// a cohort arrival, below), guarded on non-terminal status. If a concurrent Terminate/failStep terminalized this flow after the step was marked completed
-			// but before this transition committed (the Terminate-vs-transition window, and the retry after a
-			// lock-contention rollback), the guard matches no row and the transition becomes a clean no-op. Without
-			// it, the tx would insert pending successors into an already-terminal flow - orphan work only reaped
-			// later by the claim-time terminal-flow guard. The completed step is left as a harmless tail on the final
-			// flow. The grab flips the non-indexed `touch` column, not `updated_at`, so the running band of
-			// idx_dwarf_flows_status is not churned once per step; `touch` always changes value, so RowsAffected
-			// reflects the WHERE match on every driver.
-			//
-			// The grab is batched with what follows it, so its guard is read only after those statements ran. A
-			// terminal flow matches no row: its reader returns bail and leaves flowRowLocked false.
+			// Write-first: queueGrab takes the flow row's lock before any step is written (except the deferred grab
+			// of a cohort arrival, below), guarded on non-terminal status, so a transition racing a Terminate or
+			// failStep inserts nothing into a terminal flow. The grab flips the non-indexed `touch` column, which
+			// always changes value, so RowsAffected reflects the WHERE match on every driver. It is batched with what
+			// follows it, so its guard is read only after those statements ran: a terminal flow matches no row, and
+			// its reader returns bail and leaves flowRowLocked false.
 			queueGrab := func(bail error) {
 				if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
 					e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
 				}
-				queue(func(res *sequel.BatchResults) error {
+				batch.queue(func(res *sequel.BatchResults) error {
 					grab, err := res.Exec()
 					if err != nil {
 						return errors.Trace(err)
@@ -1300,24 +1293,27 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				if len(succ.rows) == successorBatchMax {
 					// A wide fan-out goes successorBatchMax rows to a batch, so it never holds every branch's
 					// state at once.
-					succ.queue(queue, tx.DriverName(), &newStepIDs)
-					if err := flush(); err != nil {
+					succ.queue(batch, &newStepIDs)
+					if err := batch.flush(); err != nil {
 						return err
 					}
 				}
 			}
-			succ.queue(queue, tx.DriverName(), &newStepIDs)
+			succ.queue(batch, &newStepIDs)
 
-			// The own-row write and the flow advance below take the new step's id. On PostgreSQL a lone successor's
-			// is named in SQL, so they join the INSERT's batch; otherwise the ids are read first. successor_id is
-			// the FIRST successor, which History's step navigation follows, and no last-id function names the
-			// first row of a multi-row INSERT.
+			// The own-row write and the flow advance take the new step's id. successor_id is the FIRST successor,
+			// which History's step navigation follows, and no last-id function names the first row of a multi-row
+			// INSERT, so only a lone successor can be named in SQL.
 			successor, successorArgs := "", []any(nil)
 			switch {
-			case len(normalNexts) == 1 && tx.DriverName() == "pgx":
-				successor = lastStepIDSQL
-			case len(normalNexts) > 0:
-				if err := flush(); err != nil {
+			case len(normalNexts) == 1:
+				var err error
+				successor, successorArgs, err = batch.insertedID(lastStepIDSQL, func() any { return newStepIDs[0] })
+				if err != nil {
+					return err
+				}
+			case len(normalNexts) > 1:
+				if err := batch.flush(); err != nil {
 					return err
 				}
 				successor, successorArgs = "?", []any{newStepIDs[0]}
@@ -1341,7 +1337,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 					args = append(args, cohortSize)
 				}
 				args = append(args, stepID, leaseSeq)
-				queue(func(res *sequel.BatchResults) error {
+				batch.queue(func(res *sequel.BatchResults) error {
 					fence, err := res.Exec()
 					if err != nil {
 						return errors.Trace(err)
@@ -1355,25 +1351,12 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 					return nil
 				}, "UPDATE dwarf_steps SET "+set+"advancing=0 WHERE step_id=? AND lease_seq=? AND advancing=1", args...)
 			}
-			// The flow advances here unless a fan-in arrival follows, which may insert the step it advances to. Its
-			// next step is its only successor; with several, or none, no one step is.
-			advanceNow := fanInArrivals == 0
-			if advanceNow {
-				if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
-					e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
-				}
-				target, targetArgs := "0", []any(nil)
-				if len(normalNexts) == 1 {
-					target, targetArgs = successor, successorArgs
-				}
-				queue(execOnly, "UPDATE dwarf_flows SET step_id="+target+", touch=1-touch WHERE flow_id=?", append(append([]any{}, targetArgs...), flowID)...)
-			}
-			if err := flush(); err != nil {
-				return err
-			}
-
 			fanInID, fanInArgs := "", []any(nil) // the fan-in step's id in SQL, when this arrival inserts one
 			if fanInArrivals > 0 {
+				// The bump runs alone, on no open batch: whether the cohort resolved is decided from it.
+				if err := batch.flush(); err != nil {
+					return err
+				}
 				// Bump the cohort counter and read the post-bump values in ONE round-trip where the driver
 				// supports it (the same RETURNING/OUTPUT split as the claim CAS above).
 				//
@@ -1410,13 +1393,13 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				// bump commits nothing else.
 				var cohort cohortRead
 				if fullyResolved {
-					if !flowRowLocked {
+					if pureArrival {
 						queueGrab(nil)
 					}
 					if failures == 0 {
-						queueCohortRead(queue, flowID, cohortSpawnID, &cohort)
+						queueCohortRead(batch, flowID, cohortSpawnID, &cohort)
 					}
-					if err := flush(); err != nil {
+					if err := batch.flush(); err != nil {
 						return err
 					}
 					if !flowRowLocked {
@@ -1428,24 +1411,14 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 					if err != nil {
 						return errors.Trace(err)
 					}
-					txBytes.stateWritten += fanInBytes.stateWritten
-					txBytes.stateRead += fanInBytes.stateRead
-					txBytes.changesRead += fanInBytes.changesRead
-					fanIn := successorBatch{
-						flowID: flowID, stepDepth: depth, timeBudgetMs: flowTimeBudgetMs, lineageID: spawnLineageID,
-						predecessorID: stepID, sleepMs: sleepMs, priority: flowPriority, fairnessKey: flowFairnessKey,
-						fairnessWeight: flowFairnessWeight, engineID: e.engineID, inheritCancel: inheritCancel,
-						rows: []successorRow{row},
-					}
-					fanIn.queue(queue, tx.DriverName(), &newStepIDs)
-					// The cohort-exit -> fan-in edges and the flow advance below name the new step as the INSERT's
-					// own id where PostgreSQL can, so all three go out in one batch; otherwise the id is read first.
-					fanInID, fanInArgs = lastStepIDSQL, nil
-					if tx.DriverName() != "pgx" {
-						if err := flush(); err != nil {
-							return err
-						}
-						fanInID, fanInArgs = "?", []any{newStepIDs[len(newStepIDs)-1]}
+					txBytes.add(fanInBytes)
+					fanIn := succ
+					fanIn.stepDepth, fanIn.lineageID, fanIn.rows = depth, spawnLineageID, []successorRow{row}
+					fanIn.queue(batch, &newStepIDs)
+					// The cohort-exit -> fan-in edges and the flow advance below take the fan-in step's id.
+					fanInID, fanInArgs, err = batch.insertedID(lastStepIDSQL, func() any { return newStepIDs[len(newStepIDs)-1] })
+					if err != nil {
+						return err
 					}
 					// The exit steps are targeted by primary key, collected from the cohort read, so the write locks
 					// only those rows: a (flow_id, lineage_id, task_name IN ...) predicate has no supporting index
@@ -1455,7 +1428,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 						for _, id := range exits {
 							args = append(args, id)
 						}
-						queue(execOnly, "UPDATE dwarf_steps SET successor_id="+fanInID+" WHERE step_id IN ("+strings.Repeat("?,", len(exits)-1)+"?)", args...)
+						batch.queue(execOnly, "UPDATE dwarf_steps SET successor_id="+fanInID+" WHERE step_id IN ("+strings.Repeat("?,", len(exits)-1)+"?)", args...)
 					}
 				} else if fullyResolved && failures > 0 {
 					// The cohort resolves as a loss, and is a cancellation only if every failure in it was one.
@@ -1500,13 +1473,12 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				}
 			}
 
-			// Gated on holding the flow row: an unresolved pure arrival never took the grab, and its write here
-			// would have been step_id=0 over the 0 a fan-out already carries - pure WAL amplification on the
-			// flow's hottest row (two extra tuple versions per sibling; 126 per 64-wide cohort) plus the lock
-			// hold that serializes the cohort. Every path that DOES advance the flow holds the row by here. The flow's
-			// next step is its only new one - the fan-in step, or a successor whose id is already read; with several,
-			// or none, no one step is.
-			if !advanceNow && !flowFailed && flowRowLocked {
+			// The flow advances to its only new step - the fan-in step, or a lone successor; with several, or none, no
+			// one step is. Gated on holding the flow row (a queued grab either takes it or ends the transaction): an
+			// unresolved pure arrival never takes the grab, and its write here would be step_id=0 over the 0 a fan-out
+			// already carries - pure WAL amplification on the flow's hottest row (two extra tuple
+			// versions per sibling; 126 per 64-wide cohort) plus the lock hold that serializes the cohort.
+			if !flowFailed && (!pureArrival || flowRowLocked) {
 				if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
 					e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
 				}
@@ -1514,12 +1486,12 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				switch {
 				case fanInID != "" && len(normalNexts) == 0:
 					target, targetArgs = fanInID, fanInArgs
-				case fanInID == "" && len(newStepIDs) == 1:
-					target, targetArgs = "?", []any{newStepIDs[0]}
+				case fanInID == "" && len(normalNexts) == 1:
+					target, targetArgs = successor, successorArgs
 				}
-				queue(execOnly, "UPDATE dwarf_flows SET step_id="+target+", touch=1-touch WHERE flow_id=?", append(append([]any{}, targetArgs...), flowID)...)
+				batch.queue(execOnly, "UPDATE dwarf_flows SET step_id="+target+", touch=1-touch WHERE flow_id=?", append(append([]any{}, targetArgs...), flowID)...)
 			}
-			return flush()
+			return batch.flush()
 		})
 		if errors.Is(err, errTransitionFlowTerminal) {
 			txBytes = stateByteCount{} // nothing the transaction wrote survived the rollback
@@ -1912,6 +1884,13 @@ type stateByteCount struct {
 	changesRead  int // "changes" column: deltas read (fan-in spawn + cohort members)
 }
 
+// add adds o's counts to c.
+func (c *stateByteCount) add(o stateByteCount) {
+	c.stateWritten += o.stateWritten
+	c.stateRead += o.stateRead
+	c.changesRead += o.changesRead
+}
+
 // cohortRead is what a resolving arrival reads of its cohort: the spawn step's row and every member's.
 type cohortRead struct {
 	spawnTaskName      string
@@ -1924,8 +1903,7 @@ type cohortRead struct {
 }
 
 // cohortMember is one row of a cohort, in fan_out_ordinal, step_depth, step_id order. changes is decoded as the
-// row is read, and only for a completed member - the only kind whose changes the fold takes - so that a wide
-// cohort is never held both as raw bytes and decoded.
+// row is read, and only for a completed member - the only kind whose changes the fold takes.
 type cohortMember struct {
 	stepID      int
 	taskName    string
@@ -1936,12 +1914,12 @@ type cohortMember struct {
 }
 
 // queueCohortRead queues the reads of a resolving arrival's cohort into c.
-func queueCohortRead(queue queueFunc, flowID, cohortSpawnID int, c *cohortRead) {
-	queue(func(res *sequel.BatchResults) error {
+func queueCohortRead(b *txBatch, flowID, cohortSpawnID int, c *cohortRead) {
+	b.queue(func(res *sequel.BatchResults) error {
 		err := res.QueryRow().Scan(&c.spawnStateJSON, &c.spawnChangesJSON, &c.spawnRefsJSON, &c.spawnTaskName, &c.spawnFanOutOrdinal)
 		return errors.Trace(err)
 	}, "SELECT state, changes, state_refs, task_name, fan_out_ordinal FROM dwarf_steps WHERE step_id=?", cohortSpawnID)
-	queue(func(res *sequel.BatchResults) error {
+	b.queue(func(res *sequel.BatchResults) error {
 		rows, err := res.Query()
 		if err != nil {
 			return errors.Trace(err)

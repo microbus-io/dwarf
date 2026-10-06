@@ -29,10 +29,10 @@ import (
 
 // TestFanIn_GotoLoopBranchKeepsInteriorDAGEdges pins the execution DAG for a fan-out branch that LOOPS through
 // its exit task via flow.Goto before reaching the fan-in. The looping node shares its task name with the fan-in's
-// exit task, so fanInRow's exit scan (task_name IN fan-in-predecessors) must not tag the interior loop
-// iterations as exit steps and overwrite their successor_id with the fan-in id - only the iteration that actually
-// transitioned to the fan-in (successor_id still 0) is an exit. Branch lengths are asymmetric (one branch loops,
-// one does not), so the fan-in also exercises deterministic reducer folding across uneven branches.
+// exit task, so fanInRow's search for exits (an exit task name with no successor yet) must not tag the interior
+// loop iterations as exit steps and overwrite their successor_id with the fan-in id - only the iteration that
+// actually transitioned to the fan-in (successor_id still 0) is an exit. Branch lengths are asymmetric (one branch
+// loops, one does not), so the fan-in also exercises deterministic reducer folding across uneven branches.
 func TestFanIn_GotoLoopBranchKeepsInteriorDAGEdges(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

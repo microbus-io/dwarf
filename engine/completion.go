@@ -128,11 +128,11 @@ func (t *terminalTails) scan(row interface{ Scan(dest ...any) error }) error {
 	return nil
 }
 
-// queueCompletedTails queues the read of a flow's completed tails into t. The rows are held until the batch is
-// read, which costs one tail's state for a flow that completes normally: a validated graph converges every fan-out
-// on its fan-in, so such a flow ends in a single tail.
-func queueCompletedTails(queue queueFunc, flowID int, t *terminalTails) {
-	queue(func(res *sequel.BatchResults) error {
+// queueCompletedTails queues the read of a flow's completed tails into t. On PostgreSQL the rows are held until
+// the flush closes the batch, which costs one tail's state for a flow that completes normally: a validated graph
+// converges every fan-out on its fan-in, so such a flow ends in a single tail.
+func queueCompletedTails(b *txBatch, flowID int, t *terminalTails) {
+	b.queue(func(res *sequel.BatchResults) error {
 		rows, err := res.Query()
 		if err != nil {
 			return errors.Trace(err)
@@ -161,18 +161,12 @@ func readTerminalTails(ctx context.Context, db sequel.Executor, query string, fl
 	return errors.Trace(rows.Err())
 }
 
-// mergeTerminalSteps computes a flow's terminal state from the execution-DAG tail. completed is the flow's
-// completed tails when the caller has already read them, nil to read them here.
+// mergeTerminalSteps computes a flow's terminal state from the execution-DAG tail, given its completed tails; when
+// there are none, it reads and merges every tail instead.
 // It also returns the merge base tail's lineage_id, so the caller can strip exactly the forEach bookkeeping of
 // the cohorts that tail is inside - and nothing else.
 func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, shardNum, flowID int, completed *terminalTails, reducers map[string]workflow.Reducer, workflowURL string) (workflow.State, int, error) {
 	t := completed
-	if t == nil {
-		t = &terminalTails{}
-		if err := readTerminalTails(ctx, db, completedTailsSQL, flowID, t); err != nil {
-			return workflow.State{}, 0, errors.Trace(err)
-		}
-	}
 	if !t.found {
 		t = &terminalTails{}
 		if err := readTerminalTails(ctx, db, anyTailsSQL, flowID, t); err != nil {
@@ -224,11 +218,14 @@ func (e *Engine) flowGraph(ctx context.Context, db sequel.Executor, shardNum, fl
 
 // computeFinalState computes the merged state for a flow.
 func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shardNum, flowID int) ([]byte, string, error) {
-	return e.computeFinalStateFrom(ctx, db, shardNum, flowID, nil)
+	var completed terminalTails
+	if err := readTerminalTails(ctx, db, completedTailsSQL, flowID, &completed); err != nil {
+		return nil, "", errors.Trace(err)
+	}
+	return e.computeFinalStateFrom(ctx, db, shardNum, flowID, &completed)
 }
 
-// computeFinalStateFrom is computeFinalState from the flow's completed tails, when the caller has already read
-// them (queueCompletedTails), or nil to read them here.
+// computeFinalStateFrom is computeFinalState from the flow's completed tails, already read (queueCompletedTails).
 func (e *Engine) computeFinalStateFrom(ctx context.Context, db sequel.Executor, shardNum, flowID int, completed *terminalTails) ([]byte, string, error) {
 	graph, workflowURL, err := e.flowGraph(ctx, db, shardNum, flowID)
 	if err != nil {
@@ -667,7 +664,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 			batch.queue(readLocked, "SELECT surgraph_flow_id, surgraph_step_id, delete_on_completion, status FROM dwarf_flows WHERE flow_id=?", flowID)
 		}
 		var tails terminalTails
-		queueCompletedTails(batch.queue, flowID, &tails)
+		queueCompletedTails(batch, flowID, &tails)
 		if err := batch.flush(); err != nil {
 			return err
 		}

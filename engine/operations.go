@@ -200,39 +200,31 @@ type flowSeed struct {
 // bare transaction; continueFlow wraps it in a transaction that first locks the thread and re-checks the
 // latest turn, so both share exactly one copy of the insert SQL.
 func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, newStepID int64, err error) {
-	// The three writes form a chain - the step takes the flow's id, the fix-up both ids - which is one statement
-	// batch on PostgreSQL, where each id is named as its sequence's current value. Elsewhere each id is read
-	// before the statement that takes it; those drivers do not pipeline, so that costs nothing.
-	driver := tx.DriverName()
+	// The three writes form a chain - the step takes the flow's id, the fix-up both ids - which insertedID makes one
+	// statement batch on PostgreSQL.
 	batch := newTxBatch(ctx, tx)
-	queueInsertID(batch.queue, driver, "flow_id", &newFlowID,
+	queueInsertID(batch, "flow_id", func(id int64) { newFlowID = id },
 		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, trace_parent, status, surgraph_flow_id, surgraph_step_id, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, started_at)"+
 			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC())",
 		s.flowToken, s.workflowURL, s.workflowName, s.graphJSON, s.baggageJSON, s.traceParent, workflow.StatusRunning, s.surgraphFlowID, s.surgraphStepID, s.deleteOnCompletion, s.priority, s.fairnessKey, s.fairnessWeight, s.timeBudgetMs, s.engineID,
 	)
-	flowID, flowArgs := lastFlowIDSQL, []any(nil)
-	if driver != "pgx" {
-		if err := batch.flush(); err != nil {
-			return 0, 0, err
-		}
-		flowID, flowArgs = "?", []any{newFlowID}
+	flowID, flowArgs, err := batch.insertedID(lastFlowIDSQL, func() any { return newFlowID })
+	if err != nil {
+		return 0, 0, err
 	}
 
 	// Entry step is pending and immediately claimable (not_before=NOW, lease_expires=NOW). Its depth
 	// continues from the caller: callerStepDepth+1 (1 for a top-level flow, where callerStepDepth is 0).
 	// A flow that should wait before running uses an entry gate task with flow.Sleep, not a creation-time
 	// delay.
-	queueInsertID(batch.queue, driver, "step_id", &newStepID,
+	queueInsertID(batch, "step_id", func(id int64) { newStepID = id },
 		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, time_budget_ms, not_before, lease_expires, priority, fairness_key, fairness_weight, engine_id)"+
 			" VALUES ("+flowID+", ?, ?, ?, ?, ?, ?, ?, NOW_UTC(), NOW_UTC(), ?, ?, ?, ?)",
 		append(append([]any{}, flowArgs...), s.callerStepDepth+1, s.stepToken, s.entryPoint, s.entryURL, s.stateJSON, workflow.StatusPending, s.timeBudgetMs, s.priority, s.fairnessKey, s.fairnessWeight, s.engineID)...,
 	)
-	stepID, stepArgs := lastStepIDSQL, []any(nil)
-	if driver != "pgx" {
-		if err := batch.flush(); err != nil {
-			return 0, 0, err
-		}
-		stepID, stepArgs = "?", []any{newStepID}
+	stepID, stepArgs, err := batch.insertedID(lastStepIDSQL, func() any { return newStepID })
+	if err != nil {
+		return 0, 0, err
 	}
 
 	// A top-level flow starts its own thread; a Continue joins the thread it continues. root_flow_id is the
@@ -252,7 +244,7 @@ func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, ne
 	args = append(append(args, stepArgs...), rootArgs...)
 	args = append(args, flowArgs...)
 	flowKey := flowID
-	if driver == "pgx" {
+	if tx.DriverName() == "pgx" {
 		flowKey = "(SELECT " + flowID + ")" // currval, evaluated once so the primary key is used
 	}
 	batch.queue(execOnly,
