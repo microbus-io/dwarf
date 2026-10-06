@@ -38,6 +38,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -52,7 +53,8 @@ import (
 type Refs map[string]Ref
 
 // Ref locates one field's bytes. A plain ref is the field of the same name at Anchor. An item ref is one
-// element of an array held at Anchor: Field names the array there, and Path indexes into it.
+// element of an array held at Anchor: Field names the array there, and Path holds one index per nesting
+// level, outermost first.
 type Ref struct {
 	Anchor int    // the step whose row holds the bytes
 	Field  string // the field name at the anchor; empty means the refs key itself
@@ -323,8 +325,8 @@ func mentions(s workflow.State, field string) bool {
 // not be CARRIED, and leaves the field free to anchor here).
 //
 // item, when non-nil, is a forEach branch's injected element. Its bytes are in no row as a field of their
-// own, but they are one element of the source array, so when that array is stored by a plain ref the
-// element is stored as an item ref into the same anchor - one copy of the array serves every branch's
+// own, but they are one element of the source array, so when that array is stored by a ref the element
+// is stored as an item ref into the same anchor - one copy of the array serves every branch's
 // element, and resolving it costs no anchor the branch was not already reading. Otherwise it is inline.
 //
 // Minting needs no database read: merged was resolved at dispatch, so every literal is already in hand and
@@ -419,24 +421,28 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.State, inherited R
 }
 
 // mintItem replaces a forEach element's literal with an item ref into its source array, when the array is
-// stored by a plain ref and the element outweighs the ref. It runs after the array's fate is decided -
-// carried, newly anchored here, or inline - because the item ref points at whichever anchor holds the
-// array's bytes, never at the step merely carrying a ref to them, which would break the one-hop rule.
+// stored by a ref and the element outweighs the ref. It runs after the array's fate is decided - carried,
+// newly anchored here, or inline - because the item ref points at whichever anchor holds the array's bytes,
+// never at the step merely carrying a ref to them, which would break the one-hop rule.
+//
+// A source that is itself an item ref - an inner forEach over the outer element, a nested array fanned out
+// level by level - extends that ref's path, so every level points into the one anchor holding the whole
+// nested array.
 //
 // The bar is flat, not scaled by the fan-out width: the array as a whole already got the width-scaled
 // treatment, and each element appears in exactly one branch, so there is nothing to amortize over N.
 func mintItem(raw map[string]json.RawMessage, refs Refs, item Item) {
-	// A source that is itself an item ref - an inner forEach over an outer element - keeps its elements
-	// inline: an item ref is one level deep. forEach(items) as items leaves no array to point into.
+	// forEach(items) as items leaves no array to point into.
 	src, ok := refs[item.Source]
-	if !ok || len(src.Path) > 0 || item.Key == item.Source {
+	if !ok || item.Key == item.Source {
 		return
 	}
 	field := src.field(item.Source)
 	if strings.Contains(field, "[") || len(raw[item.Key]) < minItem {
 		return
 	}
-	refs[item.Key] = Ref{Anchor: src.Anchor, Field: field, Path: []int{item.Index}}
+	path := append(slices.Clone(src.Path), item.Index)
+	refs[item.Key] = Ref{Anchor: src.Anchor, Field: field, Path: path}
 	delete(raw, item.Key)
 }
 
@@ -656,32 +662,32 @@ func (l *Linker) fetch(ctx context.Context, refs Refs, want map[string]bool, loa
 }
 
 // element returns the bytes a ref resolves to, given its whole field's bytes: the field itself for a plain
-// ref, one element of it for an item ref. The element is a sub-slice of the field's bytes, which is safe to
-// share for the same reason the field's bytes are - they are immutable.
+// ref, the element its path selects for an item ref. Each level's split is cached under the path to it
+// ("data", then "data[3]"), so a nested cohort splits every inner array once. The element is a sub-slice of
+// the field's bytes, which is safe to share for the same reason the field's bytes are - they are immutable.
 func (l *Linker) element(key string, ref Ref, fieldBytes json.RawMessage) (json.RawMessage, error) {
-	switch len(ref.Path) {
-	case 0:
-		return fieldBytes, nil
-	case 1:
-	default:
-		return nil, errors.New("state ref %q indexes %d levels deep; only one is supported", key, len(ref.Path))
-	}
-	field := ref.field(key)
-	k := cacheKey{ref.Anchor, field}
-	elems, ok := l.splits.Load(k)
-	if !ok {
-		var err error
-		elems, err = splitArray(fieldBytes)
-		if err != nil {
-			return nil, errors.New("state ref %q: field %q in step %d: %v", key, field, ref.Anchor, err)
+	value := fieldBytes
+	at := ref.field(key)
+	for level, i := range ref.Path {
+		if level > 0 {
+			at += "[" + strconv.Itoa(ref.Path[level-1]) + "]"
 		}
-		l.splits.Store(k, elems)
+		k := cacheKey{ref.Anchor, at}
+		elems, ok := l.splits.Load(k)
+		if !ok {
+			var err error
+			elems, err = splitArray(value)
+			if err != nil {
+				return nil, errors.New("state ref %q: %s in step %d: %v", key, at, ref.Anchor, err)
+			}
+			l.splits.Store(k, elems)
+		}
+		if i >= len(elems) {
+			return nil, errors.New("state ref %q: index %d out of range of %s in step %d (length %d)", key, i, at, ref.Anchor, len(elems))
+		}
+		value = elems[i]
 	}
-	i := ref.Path[0]
-	if i >= len(elems) {
-		return nil, errors.New("state ref %q: index %d out of range of field %q in step %d (length %d)", key, i, field, ref.Anchor, len(elems))
-	}
-	return elems[i], nil
+	return value, nil
 }
 
 // splitArray returns a JSON array's elements as sub-slices of data, without copying them, so an array split

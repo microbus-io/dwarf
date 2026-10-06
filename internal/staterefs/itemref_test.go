@@ -56,8 +56,8 @@ func TestRef_WireFormat(t *testing.T) {
 }
 
 // TestLinker_MintItem pins when a forEach element becomes an item ref. It does exactly when its source
-// array is stored by a plain ref and the element outweighs the ref; the ref then points at whichever step
-// holds the array's bytes, never at a step merely carrying a ref to them.
+// array is stored by a ref and the element outweighs the ref; the ref then points at whichever step holds
+// the array's bytes, never at a step merely carrying a ref to them.
 func TestLinker_MintItem(t *testing.T) {
 	t.Parallel()
 	const anchor = 42
@@ -126,16 +126,23 @@ func TestLinker_MintItem(t *testing.T) {
 		assert.True(stored.Has("item"))
 	})
 
-	t.Run("element_of_an_element_stays_inline", func(t *testing.T) {
+	t.Run("element_of_an_element_extends_the_path", func(t *testing.T) {
 		assert := testarossa.For(t)
-		// An inner forEach over the outer element: the source is itself an item ref, and an item ref is one
-		// level deep, so the inner element is stored inline. The outer element is carried as it was.
+		// An inner forEach over the outer element: the source is itself an item ref, so the inner element's
+		// ref extends its path and points into the same anchor. The outer element is carried as it was.
 		outer := Ref{Anchor: 7, Field: "rows", Path: []int{2}}
 		merged := mustState(map[string]any{"row": elements, "cell": elements[3]})
 		stored, refs := mint(t, merged, Refs{"row": outer}, &Item{Key: "cell", Source: "row", Index: 3})
 		assert.Equal(outer, refs["row"], "the outer item ref is carried forward unchanged")
-		assert.NotContains(refs, "cell")
-		assert.True(stored.Has("cell"))
+		assert.Equal(Ref{Anchor: 7, Field: "rows", Path: []int{2, 3}}, refs["cell"])
+		assert.False(stored.Has("cell"))
+
+		// The inner ref's path is its own: extending it never writes into the outer ref's backing array.
+		roomy := Ref{Anchor: 7, Field: "rows", Path: append(make([]int, 0, 8), 2)}
+		_, a := mint(t, merged, Refs{"row": roomy}, &Item{Key: "cell", Source: "row", Index: 3})
+		_, b := mint(t, merged, Refs{"row": roomy}, &Item{Key: "cell", Source: "row", Index: 4})
+		assert.Equal([]int{2, 3}, a["cell"].Path)
+		assert.Equal([]int{2, 4}, b["cell"].Path)
 	})
 
 	t.Run("as_equals_foreach", func(t *testing.T) {
@@ -223,8 +230,8 @@ func TestLinker_ResolveItem(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(`{"page":{"n":2}}`, string(flat))
 
-	// An index past the end, a field that is not an array, and a path deeper than one level are errors,
-	// never a silently absent field.
+	// An index past the end, a field that is not an array, and a path deeper than the array nests are
+	// errors, never a silently absent field.
 	_, err = New("sqlite").Resolve(ctx, newState(), Refs{"page": {Anchor: 7, Field: "pages", Path: []int{3}}}, nil, anchors.load)
 	assert.Error(err)
 	anchors.rows[8] = Anchor{Changes: cols(map[string]any{"doc": "not an array"})}
@@ -232,6 +239,42 @@ func TestLinker_ResolveItem(t *testing.T) {
 	assert.Error(err)
 	_, err = New("sqlite").Resolve(ctx, newState(), Refs{"page": {Anchor: 7, Field: "pages", Path: []int{0, 0}}}, nil, anchors.load)
 	assert.Error(err)
+}
+
+// TestLinker_ResolveNestedItem pins a multi-index path: each level indexes into the element the previous
+// one selected, all inside the one anchor, and each inner array is split once for all the refs into it.
+func TestLinker_ResolveNestedItem(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	anchors := &fakeAnchors{rows: map[int]Anchor{
+		7: {Changes: map[string]json.RawMessage{"data": json.RawMessage(`[[1,2,3],[4,[5,{"six":6}]]]`)}},
+	}}
+	linker := New("sqlite")
+	cases := []struct {
+		path []int
+		want string
+	}{
+		{[]int{0, 2}, `3`},
+		{[]int{1, 0}, `4`},
+		{[]int{1, 1}, `[5,{"six":6}]`},
+		{[]int{1, 1, 1}, `{"six":6}`},
+		{[]int{0, 0}, `1`},
+	}
+	for _, c := range cases {
+		flat, err := linker.Flatten(ctx, []byte(`{}`), Refs{"x": {Anchor: 7, Field: "data", Path: c.path}}, anchors.load)
+		assert.NoError(err)
+		assert.Equal(`{"x":`+c.want+`}`, string(flat), c.path)
+	}
+	assert.Equal(1, len(anchors.calls))
+	_, ok := linker.splits.Load(cacheKey{7, "data[1][1]"})
+	assert.True(ok, "each level's split is cached under the path to it")
+
+	for _, bad := range [][]int{{2, 0}, {0, 3}, {0, 0, 0}} {
+		_, err := linker.Flatten(ctx, []byte(`{}`), Refs{"x": {Anchor: 7, Field: "data", Path: bad}}, anchors.load)
+		assert.Error(err, bad)
+	}
 }
 
 // TestLinker_ResolveItemIsExact pins a fidelity property of resolving from the array's stored bytes: an

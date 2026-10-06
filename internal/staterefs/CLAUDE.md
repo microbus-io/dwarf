@@ -26,14 +26,22 @@ for a depth-D branch. An item ref stores the array once: `"<anchor> <field>[<ind
 input for large elements, `D/(1+D)` for mid-size ones. Task outputs (`changes`) are irreducible.
 
 - **The wire format is owned by `Ref`'s JSON methods.** A plain ref is always a bare JSON number, so a refs
-  column with no item refs is readable by a reader that knows only plain refs. The string form holds any depth of index
-  path (`"9 data[3][0]"`), so a deeper ref never needs a new spelling, but `Mint` only emits one level and
-  `fetch` rejects a deeper path. Field names cannot hold `[` (`Graph.Validate`'s `isFieldName`), which is what
-  makes the front-to-back parse unambiguous.
+  column with no item refs is readable by a reader that knows only plain refs. The string form holds an index
+  path of any depth (`"9 data[3][0]"`). Field names cannot hold `[` (`Graph.Validate`'s `isFieldName`), which is
+  what makes the front-to-back parse unambiguous.
+- **A reader that does not know a refs spelling loses the WHOLE column, silently.** `Parse` degrades a column it
+  cannot decode to *no refs*, so a replica that predates item refs, meeting one string value, drops every ref on
+  that step - the array included - and runs the task with those fields missing; its next mint makes the loss
+  permanent. Any change to what the refs column can hold therefore needs every replica upgraded together (a
+  maintenance window, said so in the release notes) until readers refuse an unknown spelling instead of
+  degrading.
 - **The item ref is minted INSIDE `Mint`** (`mintItem`), after the array's own fate is decided, because it
   points at whichever anchor holds the array's bytes - carried from an earlier step, or opened here. Pointing at
   a step that merely carries a ref to the array would dangle (the one-hop rule). If the array stays inline, so
-  does the element.
+  does the element. **The path is derived from the source's ref**: a plain ref `A` gives `"A field[i]"`, and an
+  item ref `"A data[x]"` (an inner forEach over the outer element) gives `"A data[x][y]"` - so every level of a
+  nested array fanned out level by level points into the one anchor holding the whole thing. The new path is a
+  clone: appending onto the source ref's slice could write into another ref's backing array.
 - **The size bar is flat (`minItem`), not width-scaled.** Each element appears in exactly one branch, so there
   is nothing to amortize over N; the array as a whole already got the `budget/N` treatment.
 - **It is free on the read side.** The anchor is the one the branch already fetches for the array, so it adds
@@ -47,13 +55,28 @@ input for large elements, `D/(1+D)` for mid-size ones. Task outputs (`changes`) 
   cannot overwrite the next element in the shared bytes.
 - **`inlineExcessAnchors` groups an item ref under its array's anchor**, so dropping that anchor over the cap
   inlines the array and the element together - both literals are in `merged`.
-- **An inner forEach over the OUTER element keeps its elements inline** - the source is itself an item ref, and
-  an item ref is one level deep. An inner forEach over a separately computed array (the doc -> pages -> chunks
-  shape) is an ordinary one-level item ref into the step that computed it, and the outer element rides into
-  the inner branches as the outer branch's item ref.
-- **Fidelity:** resolving from the array's stored bytes returns an integer beyond 2^53 exactly, where the inline
-  element (decoded to `any` in transition evaluation, re-encoded by `Set`) rounds it.
-  `TestLinker_ResolveItemIsExact` pins it.
+- **A name the caller deletes from `merged` must also leave `inherited`, or the carry-forward re-emits it.**
+  `fanInRow` strips a cohort's `<as>`/`<as>Index`/`<as>Count` at its convergence. In a nested fan-out whose
+  levels share an `as` (the default `item` makes it easy), the inner spawn holds the OUTER element as an item
+  ref; stripping `item` from `merged` alone let `Mint`'s trailing loop (invariant 4) bring it back past the inner
+  fan-in. `fanInRow` deletes the stripped names from the spawn's refs too. Pinned by
+  `TestItemRefs_InnerFanInStripsASharedAs`.
+- **Nested fan-outs.** An inner forEach over a separately computed array (the doc -> pages -> chunks shape) is an
+  ordinary one-level item ref into the step that computed it, and the outer element rides into the inner
+  branches as the outer branch's item ref. An inner forEach over the outer element itself extends the path (above).
+  `element` walks the path level by level, caching each level's split under the path to it (`data`, then
+  `data[3]`), so each inner array is split once per cohort. A split can outlive the `cache` entry for its
+  array's bytes: after that entry is evicted and re-fetched, the old split still pins the previous copy until it
+  too ages out of the LRU. That costs memory, never correctness, and is accepted.
+- **Fidelity depends on how the element was stored.** Resolving from the array's stored bytes returns an integer
+  beyond 2^53 exactly; an element stored INLINE (below `minItem`, or from an inline array) was decoded to `any`
+  in transition evaluation and re-encoded by `Set`, so it still rounds. Nothing byte-compares elements, so the
+  difference is only visible to an untyped reader. **Do not make the inline path byte-identical by splitting the
+  array at the spawn:** that is one array scan per branch, O(N²) per cohort - the cost the split cache exists to
+  avoid. `TestLinker_ResolveItemIsExact` pins the exact case.
+- **Pinned by** `TestRef_WireFormat`, `TestLinker_MintItem`, `TestLinker_ResolveItem`,
+  `TestLinker_ResolveNestedItem`, `TestSplitArray`, and against a real database `engine/itemref_test.go`
+  (storage shape at every branch step, nested and 2D fan-outs, a failed fan-out, `Fork`, the shared-`as` strip).
 
 ## The shape: resolve once at dispatch, mint once at the successor write
 
@@ -240,9 +263,7 @@ the only dialect-dependent term in the policy.
   the CARRY multiplier; write volume for actually-new data is irreducible.
 - **Whether `maxAnchors` ever binds** is unmeasured (how many large fields are concurrently live in a
   realistic workflow). The engine's byte counters are the instrument.
-- **Item refs deeper than one level** (an inner forEach over the outer element, a genuine 2D array) - the wire
-  format already holds the path; `mintItem` would extend the source ref's path, and `element` would split level
-  by level from the cached parent.
 - **Whether the resolve cache keeps an item-ref'd array resident across a cohort** is unmeasured. Item refs add
-  no anchor, but a cohort leans on the array's anchor staying cached; check one miss per cohort on
-  `dwarf_state_read_bytes`, not one per branch.
+  no anchor, but a cohort leans on the array's anchor staying cached - and in a nested fan-out one root anchor
+  backs the whole tree of dispatches. Check one miss per cohort on `dwarf_state_read_bytes`, not one per branch,
+  with a forEach over a large array whose branches are 1-3 steps deep.

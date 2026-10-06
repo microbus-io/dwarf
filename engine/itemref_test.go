@@ -303,3 +303,96 @@ func TestItemRefs_InnerFanInStripsASharedAs(t *testing.T) {
 		assert.NotContains(refs, "item")
 	}
 }
+
+// TestItemRefs_TwoDimensionalArray pins a nested array fanned out level by level - forEach(data) as row, then
+// forEach(row) as cell. Every level points into the one anchor holding the whole array: a row is
+// "<anchor> data[x]" and a cell "<anchor> data[x][y]", so no step copies a row or a cell.
+func TestItemRefs_TwoDimensionalArray(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	mux := NewHostMux()
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+
+	const rows, cols, size = 3, 6, 400
+	data := make([]any, rows)
+	for x := range data {
+		row := make([]any, cols)
+		for y := range row {
+			row[y] = map[string]any{"x": x, "y": y, "text": blob(size)}
+		}
+		data[x] = row
+	}
+
+	g := workflow.NewGraph("TwoD")
+	for _, n := range []string{"Seed", "Row", "Cell", "Inner", "Outer"} {
+		g.SetURL(n, "twod/"+n)
+	}
+	g.SetFanIn("Inner")
+	g.SetFanIn("Outer")
+	g.SetReducer("cells", workflow.ReducerAppend)
+	g.AddTransitionForEach("Seed", "Row", "data", "row")
+	g.AddTransitionForEach("Row", "Cell", "row", "cell")
+	g.AddTransitionChain("Cell", "Inner", "Outer", workflow.End)
+	assert.NoError(g.Validate())
+	mux.HandleGraph("twod/wf", g)
+
+	mux.HandleTask("twod/Seed", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("twod/Row", func(ctx context.Context, f *workflow.Flow) error {
+		var row []any
+		if _, err := f.Get("row", &row); err != nil || len(row) != cols {
+			return errors.New("row %d has %d cells", f.GetInt("rowIndex"), len(row))
+		}
+		return nil
+	})
+	mux.HandleTask("twod/Cell", func(ctx context.Context, f *workflow.Flow) error {
+		var cell struct {
+			X, Y int
+			Text string
+		}
+		if _, err := f.Get("cell", &cell); err != nil {
+			return err
+		}
+		if cell.X != f.GetInt("rowIndex") || cell.Y != f.GetInt("cellIndex") || len(cell.Text) != size {
+			return errors.New("branch %d/%d sees cell %d/%d", f.GetInt("rowIndex"), f.GetInt("cellIndex"), cell.X, cell.Y)
+		}
+		f.Set("cells", []string{fmt.Sprintf("%d/%d", cell.X, cell.Y)})
+		return nil
+	})
+	mux.HandleTask("twod/Inner", func(ctx context.Context, f *workflow.Flow) error {
+		var cells []string
+		if _, err := f.Get("cells", &cells); err != nil {
+			return err
+		}
+		f.Set("cells", cells)
+		return nil
+	})
+	mux.HandleTask("twod/Outer", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	_, outcome, err := e.Run(ctx, "twod/wf", map[string]any{"data": data}, nil)
+	assert.NoError(err)
+	assert.Equal(workflow.StatusCompleted, outcome.Status, outcome.Error)
+	assert.Len(stateVal(outcome.State, "cells"), rows*cols)
+
+	entry := stepIDsByTask(t, e, "Seed")[0]
+	for _, id := range stepIDsByTask(t, e, "Row") {
+		st, refs, _ := stepRefsOf(t, e, id)
+		assert.Equal(staterefs.Ref{Anchor: entry, Field: "data", Path: []int{st.GetInt("rowIndex")}}, refs["row"])
+		assert.False(st.Has("row"))
+	}
+	cellSteps := stepIDsByTask(t, e, "Cell")
+	assert.Len(cellSteps, rows*cols)
+	for _, id := range cellSteps {
+		st, refs, stored := stepRefsOf(t, e, id)
+		x, y := st.GetInt("rowIndex"), st.GetInt("cellIndex")
+		assert.Equal(staterefs.Ref{Anchor: entry, Field: "data", Path: []int{x}}, refs["row"])
+		assert.Equal(staterefs.Ref{Anchor: entry, Field: "data", Path: []int{x, y}}, refs["cell"])
+		assert.False(st.Has("row"))
+		assert.False(st.Has("cell"))
+		assert.True(stored < size, "a cell step stores %d bytes of state for a %d-byte cell", stored, size)
+	}
+}

@@ -1643,7 +1643,8 @@ A step's `state` is a full input snapshot, so a field that is *carried* but not 
 every row it survives into: D copies down a chain of depth D, and **N·D across a fan-out of N branches**. A field
 above a size bar is therefore not written into the successor's `state` at all: it is omitted, and the
 `dwarf_steps.state_refs` column records `{"<field>": <anchor step_id>}` — the step that physically holds the bytes
-(or, for a forEach element, `"<anchor> <array field>[<index>]"` — an item ref into the array's anchor).
+(or, for a forEach element, `"<anchor> <array field>[<index>]"` — an item ref into the array's anchor, with one
+index per level when a nested array is fanned out level by level).
 The doc-extraction shape (a document fanned out over pages, then chunks) measures **~29x** fewer stored state bytes.
 
 **The mechanism, the size policy, and the invariants that cost bugs to find live in `internal/staterefs/CLAUDE.md`
