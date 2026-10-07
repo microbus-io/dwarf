@@ -18,7 +18,8 @@ limitations under the License.
 // engine: the names of the engine's fault-injection, checkpoint and recorded-variable seams, Join for their
 // targeted forms, DB and Seams, which reach a running engine's shard set and seam registry, and
 // SetMaxOpenConns and SetRefillInterval, the test and benchmark overrides of the pool size and the refill
-// cycle period, and ShardBudget, the pool the engine derives for a shard.
+// cycle period, SkipBacklogGauges, which turns off the backlog gauges' collection-time query, and ShardBudget,
+// the pool the engine derives for a shard.
 //
 // The engine fires these seams from its own production code and consults one seamster.Seamster per engine,
 // enabled only under testing.Testing(); the mechanism (arming, scoping, Wait/Break/Resume) is the seamster
@@ -54,6 +55,12 @@ var SetMaxOpenConns func(eng any, n int) error
 // SetRefillInterval pins every shard's refill cycle period to d on a running or configured engine, for a
 // benchmark sweep to hold the period at fixed values; d <= 0 restores the derived period.
 var SetRefillInterval func(eng any, d time.Duration) error
+
+// SkipBacklogGauges stops the engine's metrics collection from reporting dwarf_steps_pending and
+// dwarf_steps_oldest_pending_age_seconds, and so from issuing the one query a collection makes - an aggregate
+// over every due pending row, per shard. For a benchmark that collects far faster than a production reader
+// and has its own backlog count. Every other gauge is unaffected.
+var SkipBacklogGauges func(eng any, skip bool) error
 
 // ShardBudget is the connection budget the engine derives for one shard of vcpus virtual CPUs at rttMs of
 // round-trip time - the pool a lone replica opens. A benchmark computes it ahead of a run to pin exactly the

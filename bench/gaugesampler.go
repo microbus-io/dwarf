@@ -61,6 +61,7 @@ type gaugeSampler struct {
 	trace      func(elapsed time.Duration, gauges map[string]float64, heapMB float64, pt *seriesPoint)
 	traceEvery time.Duration
 	probe      *walProbe
+	backlog    func() int64
 	series     []seriesPoint
 
 	mu       sync.Mutex
@@ -75,13 +76,14 @@ type gaugeSampler struct {
 // is deliberate: the edge-snapshot hazard belongs to the instrument KIND, not to any one instrument, so a
 // subset would have to be extended by whoever next discovers their gauge reads zero.
 func startGaugeSampler(readers []*sdkmetric.ManualReader) *gaugeSampler {
-	return startGaugeSamplerTracing(readers, 0, nil, nil)
+	return startGaugeSamplerTracing(readers, 0, nil, nil, nil)
 }
 
 // startGaugeSamplerTracing is startGaugeSampler plus a periodic callback with the live reading. every<=0 or
 // a nil trace is the untraced sampler, so a caller that wants no line pays nothing for the option.
 func startGaugeSamplerTracing(readers []*sdkmetric.ManualReader, every time.Duration,
-	trace func(elapsed time.Duration, gauges map[string]float64, heapMB float64, pt *seriesPoint), probe *walProbe) *gaugeSampler {
+	trace func(elapsed time.Duration, gauges map[string]float64, heapMB float64, pt *seriesPoint), probe *walProbe,
+	backlog func() int64) *gaugeSampler {
 
 	s := &gaugeSampler{
 		stop:       make(chan struct{}),
@@ -91,6 +93,7 @@ func startGaugeSamplerTracing(readers []*sdkmetric.ManualReader, every time.Dura
 		trace:      trace,
 		traceEvery: every,
 		probe:      probe,
+		backlog:    backlog,
 	}
 	go s.run(readers)
 	return s
@@ -141,8 +144,10 @@ func (s *gaugeSampler) run(readers []*sdkmetric.ManualReader) {
 						steps := c["dwarf_steps_executed"]
 						if !prevAt.IsZero() {
 							pt = &seriesPoint{T: now.Sub(begun).Seconds(),
-								StepsPerSec: float64(steps-prevSteps) / now.Sub(prevAt).Seconds(),
-								Pending:     gaugeTotal(g, "dwarf_steps_pending")}
+								StepsPerSec: float64(steps-prevSteps) / now.Sub(prevAt).Seconds()}
+							if s.backlog != nil {
+								pt.Outstanding = s.backlog()
+							}
 						}
 						prevSteps, prevAt = steps, now
 					}
@@ -175,11 +180,13 @@ type gaugeWindow struct {
 }
 
 // seriesPoint is one -stats-interval reading: the steps/s executed since the previous one, the backlog, and
-// the database's WAL pressure over the same interval (absent off Postgres).
+// the database's WAL pressure over the same interval (absent off Postgres). The backlog is the load generator's
+// own count of flows created and not yet ended (open loop only), not the engine's dwarf_steps_pending gauge:
+// that gauge is an O(backlog) query the bench turns off (-backlog-gauges).
 type seriesPoint struct {
 	T           float64 `json:"t"`
 	StepsPerSec float64 `json:"stepsPerSec"`
-	Pending     float64 `json:"pending"`
+	Outstanding int64   `json:"outstanding,omitempty"`
 	walPoint
 }
 

@@ -40,7 +40,10 @@
 #   TARGET_RTT + RTT_SLACK_MS - the near cell, where topping a lower base up to the target is not wanted),
 #   PIN_POOL (empty = the derived pool; a number runs every run at that pool instead - the k/s fit at M=8),
 #   RATES (empty; fractions of the measured peak, e.g. "0.5 0.67 1.0", each run once at the pool between the
-#   peak and the sweep - the rate ladder that checks the saturated mean against the highest fully-served rate)
+#   peak and the sweep - the rate ladder that checks the saturated mean against the highest fully-served rate),
+#   STEP_RATES (empty; ABSOLUTE offered steps/s, e.g. "4500 5000 5300", each run once at the pool, shuffled -
+#   finding where a cell stops being sustainable without leaning on a noisy single peak; with PEAK_REPS=0,
+#   SWEEP="" and no RATES, nothing else runs)
 set -euo pipefail
 
 command -v psql >/dev/null 2>&1 || {
@@ -256,15 +259,26 @@ if sweep and optimum is None:
 PY
 }
 
+# Optional absolute-rate ladder, needing no peak, in an order shuffled per run id like the sweep.
+STEP_TAGS="$(python3 -c "
+import random
+r = random.Random('${RUN_ID}-steps')
+fs = '${STEP_RATES:-}'.split(); r.shuffle(fs); print(' '.join(fs))")"
+for sr in $STEP_TAGS; do
+  run_one "steps-${sr}" "$POOL" "$(python3 -c "print(round(${sr} / ${SPF}, 3))")"
+done
+
 # 1. Peak at the derived pool.
 for rep in $(seq 1 "$PEAK_REPS"); do
   run_one "peak-r${rep}" "$POOL" 0
 done
 summarize >/dev/null
-PEAK_FLOWS="$(python3 -c "import json; print(json.load(open('${OUT}/cell.json'))['peakFlowsPerSec'] or 0)")"
-RATE23="$(python3 -c "print(round(${PEAK_FLOWS} * 2 / 3, 3))")"
-python3 -c "import sys; sys.exit(0 if ${RATE23} > 0 else 1)" || { echo "ABORT: no valid peak run to take 2/3 of" >&2; summarize; exit 1; }
-echo "peak ${PEAK_FLOWS} flows/s -> 2/3 = ${RATE23} flows/s"
+if [[ -n "$SWEEP" || -n "${RATES:-}" ]]; then
+  PEAK_FLOWS="$(python3 -c "import json; print(json.load(open('${OUT}/cell.json'))['peakFlowsPerSec'] or 0)")"
+  RATE23="$(python3 -c "print(round(${PEAK_FLOWS} * 2 / 3, 3))")"
+  python3 -c "import sys; sys.exit(0 if ${RATE23} > 0 else 1)" || { echo "ABORT: no valid peak run to take 2/3 of" >&2; summarize; exit 1; }
+  echo "peak ${PEAK_FLOWS} flows/s -> 2/3 = ${RATE23} flows/s"
+fi
 
 # Optional rate ladder at the pool, in an order shuffled per run id like the sweep.
 RATE_TAGS="$(python3 -c "

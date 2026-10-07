@@ -319,7 +319,11 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 	o.ObserveFloat64(g.tallyAge, e.planner.TallyAge().Seconds())
 
 	// The ONLY query this callback makes: pending count + oldest age per priority band, one statement per
-	// shard. Everything above is an in-memory read, which is what keeps a scrape from being load.
+	// shard. Everything above is an in-memory read, which is what keeps a scrape from being load. A benchmark
+	// collecting every 50ms turns it off: an O(backlog) aggregate at 20 Hz loads the database it measures.
+	if e.skipBacklogGauges.Load() {
+		return nil
+	}
 	pending, oldest, err := e.observePendingByBand(ctx)
 	if err != nil {
 		return errors.Trace(err)

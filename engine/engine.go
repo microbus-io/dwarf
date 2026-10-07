@@ -109,6 +109,7 @@ type Engine struct {
 	defaultPriority        atomic.Int32
 	maxOpenConns           atomic.Int32 // test/bench override: exact per-shard pool size; 0 = derive from ShardSpec.VirtualCPUs
 	refillIntervalOverride atomic.Int64 // bench override (nanoseconds): pins every piston's cycle period; <=0 = derive
+	skipBacklogGauges      atomic.Bool  // bench override: metrics collection skips observePendingByBand
 
 	// engineID is a random positive identifier minted per engine instance (fresh on every restart). It is
 	// this replica's identity in the shared dwarf_peers registry - the primary key its Sonars own a row

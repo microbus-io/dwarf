@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -202,6 +203,48 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 
 	// The queue-depth observable gauge always emits a point at collection time.
 	assert.True(gaugePresent(rm, "dwarf_steps_queue_depth"), "dwarf_steps_queue_depth gauge should be present")
+}
+
+// TestMetrics_SkipBacklogGauges pins the benchmark override: with it set, the two backlog gauges (the only
+// instruments whose collection queries the database) stop reporting, and the in-memory gauges still do.
+func TestMetrics_SkipBacklogGauges(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	mux := NewHostMux()
+	g := workflow.NewGraph("B")
+	g.SetURL("A", "backloggauges/a")
+	g.AddTransition("A", workflow.End)
+	assert.NoError(g.Validate())
+	mux.HandleGraph("backloggauges/g", g)
+	mux.HandleTask("backloggauges/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	assert.NoError(e.SetHost(mux))
+	assert.NoError(e.SetMeterProvider(mp))
+	assert.NoError(e.SetWorkers(0)) // nothing dispatches: the backlog stays put
+	assert.NoError(e.Startup(t.Context()))
+	for range 3 {
+		_, err := e.Create(ctx, "backloggauges/g", nil, nil)
+		assert.NoError(err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	assert.NoError(reader.Collect(ctx, &rm))
+	pending, ok := gaugeValue(rm, "dwarf_steps_pending")
+	assert.True(ok, "dwarf_steps_pending should report the backlog")
+	assert.Equal(int64(3), pending)
+
+	assert.NoError(engineseams.SkipBacklogGauges(e, true))
+	assert.NoError(reader.Collect(ctx, &rm))
+	assert.False(gaugePresent(rm, "dwarf_steps_pending"), "skipped: no backlog gauge")
+	assert.False(gaugePresent(rm, "dwarf_steps_oldest_pending_age_seconds"), "skipped: no oldest-age gauge")
+	assert.True(gaugePresent(rm, "dwarf_steps_queue_depth"), "in-memory gauges still report")
 }
 
 // TestMetrics_RefillInstrumented pins the refiller's four instruments, which exist to answer a question no

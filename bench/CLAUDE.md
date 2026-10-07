@@ -298,7 +298,7 @@ the same readings. `delayMs` beside it says which half of the cycle a line belon
 `dwarf_workers_resident`, not `runtime.NumGoroutine` — the process also holds the load generator, which is a
 rounding error against 36,000 workers and most of the count against 800 (both columns are printed).
 `steps/s` is the executed-steps counter's delta since the previous line, and each line is also kept in the
-artifact as `results[].gauges.series` (`t`, `stepsPerSec`, `pending`) - the only record of a window's shape,
+artifact as `results[].gauges.series` (`t`, `stepsPerSec`, `outstanding`) - the only record of a window's shape,
 since `stepsPerSec` is its mean. `cell.sh` reports each run's slowest and fastest interval from it.
 On Postgres each point also carries the interval's WAL pressure - `walMBps`, `commitsPerSync`, `fpiPerSec`,
 `walBuffersFull`, `walWriteWaiters` and `activeBackends` (means per 50 ms wait poll) - and `results[].db` the
@@ -378,11 +378,18 @@ without changing the share of STEPS), `-refill-interval-ms` (pin the cycle perio
 ladder that varies replica count, since the derived interval is a function of R and would otherwise
 masquerade as a partitioning cost), `-fairness-keys`, `-vcpus`, `-max-open-conns`, `-task-burst`/`-task-quiet` (alternate the exec term within a
 run — the only way to see the crew shrink), `-stats-interval` (periodic readout), `-pprof` (CPU + heap
-profiles).
+profiles), `-backlog-gauges` (keep the engine's `dwarf_steps_pending`/oldest-age gauges).
+
+**The backlog gauges are OFF in every run unless `-backlog-gauges` is set.** Collecting them is the engine's one
+collection-time query, an O(backlog) aggregate per shard, and this harness collects every 50 ms - 20 aggregates a
+second against the database being measured, ~20k due rows per count in a capped saturated run and millions in an
+uncapped one. The series' backlog is the load generator's own `outstanding` (flows created, not yet ended; open
+loop only) instead.
 
 `bench/gcp/cell.sh` drives one cell of a tier x RTT grid end to end - peak at the derived pool, a pool sweep
 at 2/3 of it, a confirming peak when the sweep moves the pool - and writes `cell.json` beside the artifacts.
-`RATES` adds a rate ladder (fractions of the measured peak), `PIN_POOL` replaces the derived pool and `NEAR=1`
+`RATES` adds a rate ladder (fractions of the measured peak), `STEP_RATES` one in absolute offered steps/s that
+needs no peak, `PIN_POOL` replaces the derived pool and `NEAR=1`
 runs at the rig's own RTT without netem (with `RTT_SLACK_MS=0`, every run starts at or under the target), which
 together with `SWEEP=""` and `MAX_OUTSTANDING` cover the method pilot: backlog-cap independence, the rate
 ladder, and the k/s fit at a small fixed pool. Every artifact's `environment` carries `vcs.revision` and

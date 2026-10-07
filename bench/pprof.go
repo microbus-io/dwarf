@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"strconv"
 	"strings"
 	"time"
 
@@ -111,14 +112,15 @@ func profileName(label string) string {
 // submitters, which is a rounding error against 36,000 workers and most of the count against 800.
 func statsHeader() string {
 	return fmt.Sprintf("%-7s %8s %8s %7s %8s %8s %9s %9s %9s %8s %7s %7s %7s",
-		"t(s)", "steps/s", "delayMs", "crew", "gorout", "heapMB", "turnAvail", "inflMB", "pending",
+		"t(s)", "steps/s", "delayMs", "crew", "gorout", "heapMB", "turnAvail", "inflMB", "outstand",
 		"walMB/s", "c/sync", "walWait", "active")
 }
 
 func statsLine(elapsed time.Duration, p taskProfile, g map[string]float64, heapMB float64, pt *seriesPoint) string {
-	rate, wal, cps, wait, active := "-", "-", "-", "-", "-"
+	rate, out, wal, cps, wait, active := "-", "-", "-", "-", "-", "-"
 	if pt != nil {
 		rate = fmt.Sprintf("%.0f", pt.StepsPerSec)
+		out = strconv.FormatInt(pt.Outstanding, 10)
 		if pt.WALMBps > 0 || pt.ActiveBackends > 0 {
 			wal = fmt.Sprintf("%.1f", pt.WALMBps)
 			cps = fmt.Sprintf("%.1f", pt.CommitsPerSync)
@@ -126,12 +128,12 @@ func statsLine(elapsed time.Duration, p taskProfile, g map[string]float64, heapM
 			active = fmt.Sprintf("%.1f", pt.ActiveBackends)
 		}
 	}
-	return fmt.Sprintf("%-7.0f %8s %8d %7.0f %8d %8.0f %9.0f %9.1f %9.0f %8s %7s %7s %7s",
+	return fmt.Sprintf("%-7.0f %8s %8d %7.0f %8d %8.0f %9.0f %9.1f %9s %8s %7s %7s %7s",
 		elapsed.Seconds(), rate, p.delayAt(time.Now()).Milliseconds(),
 		gaugeTotal(g, "dwarf_workers_resident"), runtime.NumGoroutine(), heapMB,
 		gaugeTotal(g, "dwarf_turnstile_available"),
 		gaugeTotal(g, "dwarf_state_in_flight_bytes")/(1<<20),
-		gaugeTotal(g, "dwarf_steps_pending"), wal, cps, wait, active)
+		out, wal, cps, wait, active)
 }
 
 // gaugeTotal sums every attributed series of one instrument.
