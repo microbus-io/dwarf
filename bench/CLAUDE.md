@@ -371,7 +371,13 @@ run — the only way to see the crew shrink), `-stats-interval` (periodic readou
 profiles).
 
 `bench/gcp/cell.sh` drives one cell of a tier x RTT grid end to end - peak at the derived pool, a pool sweep
-at 2/3 of it, a confirming peak when the sweep moves the pool - and writes `cell.json` beside the artifacts;
+at 2/3 of it, a confirming peak when the sweep moves the pool - and writes `cell.json` beside the artifacts.
+`RATES` adds a rate ladder (fractions of the measured peak), `PIN_POOL` replaces the derived pool and `NEAR=1`
+runs at the rig's own RTT without netem (with `RTT_SLACK_MS=0`, every run starts at or under the target), which
+together with `SWEEP=""` and `MAX_OUTSTANDING` cover the method pilot: backlog-cap independence, the rate
+ladder, and the k/s fit at a small fixed pool. Every artifact's `environment` carries `vcs.revision` and
+`vcs.modified` when the binary came from `go build` in the work tree - build every run of a campaign from one
+clean commit;
 `bench/charts_redo.py` charts a tree of cells and `-volume` artifacts. Run `dbcpu.sh` with `WRITE=1` first so
 the artifacts carry database CPU.
 

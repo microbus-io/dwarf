@@ -35,7 +35,12 @@
 #   multiples of the derived pool), P99_SLACK (0.10), STALL_RATIO (3, max p99/p50 for a clean run - measured
 #   on linear: 1.2x healthy, 6.5x at a stall's onset; recheck it for heavy payloads), CONFIRM_DIFF (0.15),
 #   RTT_SLACK_MS (0.15),
-#   RTT_TRIES (10), COOLDOWN (30s), RESERVE (30), OUT, RUN_ID, EXTRA
+#   RTT_TRIES (10), COOLDOWN (30s), RESERVE (30), OUT, RUN_ID, EXTRA,
+#   NEAR (empty; 1 = run at the rig's own RTT with no netem, the gate holding the idle reading at or under
+#   TARGET_RTT + RTT_SLACK_MS - the near cell, where topping a lower base up to the target is not wanted),
+#   PIN_POOL (empty = the derived pool; a number runs every run at that pool instead - the k/s fit at M=8),
+#   RATES (empty; fractions of the measured peak, e.g. "0.5 0.67 1.0", each run once at the pool between the
+#   peak and the sweep - the rate ladder that checks the saturated mean against the highest fully-served rate)
 set -euo pipefail
 
 command -v psql >/dev/null 2>&1 || {
@@ -138,7 +143,7 @@ BASE_RTT="$(probe_rtt "$ADMIN")"
 [[ -n "$BASE_RTT" ]] || { echo "ABORT: could not measure the base RTT" >&2; exit 1; }
 KNOB="$(python3 -c "
 d = ${TARGET_RTT} - ${BASE_RTT}
-print('abort' if d < -0.05 else (f'{d:.3f}' if d > 0.02 else '0'))")"
+print('abort' if d < -0.05 else (f'{d:.3f}' if d > 0.02 and '${NEAR:-}' != '1' else '0'))")"
 if [[ "$KNOB" == "abort" ]]; then
   echo "ABORT: base RTT ${BASE_RTT} ms is above the ${TARGET_RTT} ms target; netem cannot remove delay." >&2
   echo "       Recreate the VM in the same zone and redraw." >&2
@@ -148,12 +153,12 @@ if [[ "$KNOB" != "0" ]]; then sudo "$TC" qdisc add dev "$DEV" root netem delay "
 
 MAXCONN="$(psq "$ADMIN" "SHOW max_connections")"
 BUDGET=$(( MAXCONN - RESERVE ))
-POOL="$("$BENCH" -vcpus "$VCPUS" -print-pool "$TARGET_RTT")"
+POOL="${PIN_POOL:-$("$BENCH" -vcpus "$VCPUS" -print-pool "$TARGET_RTT")}"
 (( POOL <= BUDGET )) || { echo "ABORT: derived pool ${POOL} exceeds max_connections ${MAXCONN} - ${RESERVE} reserved" >&2; exit 1; }
 
 echo "cell ${CELL}  run ${RUN_ID}  ${SPF} steps/flow"
 echo "base rtt ${BASE_RTT} ms, netem +${KNOB} ms on ${DEV} -> target ${TARGET_RTT} ms"
-echo "derived pool ${POOL} (${VCPUS} vCPU), max_connections ${MAXCONN}, window ${WINDOW} after ${WARMUP}"
+echo "$([[ -n "${PIN_POOL:-}" ]] && echo pinned || echo derived) pool ${POOL} (${VCPUS} vCPU), max_connections ${MAXCONN}, window ${WINDOW} after ${WARMUP}"
 echo
 
 # run_one TAG POOL RATE - one run on a fresh database. RATE 0 = flat out.
@@ -253,6 +258,15 @@ PEAK_FLOWS="$(python3 -c "import json; print(json.load(open('${OUT}/cell.json'))
 RATE23="$(python3 -c "print(round(${PEAK_FLOWS} * 2 / 3, 3))")"
 python3 -c "import sys; sys.exit(0 if ${RATE23} > 0 else 1)" || { echo "ABORT: no valid peak run to take 2/3 of" >&2; summarize; exit 1; }
 echo "peak ${PEAK_FLOWS} flows/s -> 2/3 = ${RATE23} flows/s"
+
+# Optional rate ladder at the pool, in an order shuffled per run id like the sweep.
+RATE_TAGS="$(python3 -c "
+import random
+r = random.Random('${RUN_ID}')
+fs = '${RATES:-}'.split(); r.shuffle(fs); print(' '.join(fs))")"
+for f in $RATE_TAGS; do
+  run_one "rate-${f}" "$POOL" "$(python3 -c "print(round(${PEAK_FLOWS} * ${f}, 3))")"
+done
 
 # 2. Pool sweep at 2/3, in an order shuffled per run id so no pool always runs on the freshest server.
 POOLS="$(python3 -c "

@@ -38,6 +38,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -449,13 +450,23 @@ func windowInvalidity(res stepResult, rate float64, maxOutstanding int) string {
 // environment records the host-side context a result depends on.
 func environment() map[string]any {
 	hostname, _ := os.Hostname()
-	return map[string]any{
+	env := map[string]any{
 		"hostname":  hostname,
 		"goVersion": runtime.Version(),
 		"goos":      runtime.GOOS,
 		"goarch":    runtime.GOARCH,
 		"numCPU":    runtime.NumCPU(),
 	}
+	// The commit the binary was built from, so every artifact names the build it measured. `go build` stamps
+	// it; `go run` and a build outside the work tree do not, and vcs.modified=true means a dirty tree.
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		for _, kv := range bi.Settings {
+			if kv.Key == "vcs.revision" || kv.Key == "vcs.modified" {
+				env[kv.Key] = kv.Value
+			}
+		}
+	}
+	return env
 }
 
 // shardFlags collects repeatable -dsn flags: "N=dsn" registers shard N, a bare DSN registers shard 1.
