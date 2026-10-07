@@ -57,8 +57,9 @@ type gaugeSampler struct {
 	// trace, when set, is called every traceEvery with the reading just taken. It rides the sampler that
 	// already exists rather than collecting on its own: an independent ticker would pay a second Collect
 	// per line, and worse, would report numbers the artifact's own means were not computed from.
-	trace      func(elapsed time.Duration, gauges map[string]float64, heapMB float64)
+	trace      func(elapsed time.Duration, gauges map[string]float64, heapMB, stepsPerSec float64)
 	traceEvery time.Duration
+	series     []seriesPoint
 
 	mu       sync.Mutex
 	sums     map[string]float64
@@ -78,7 +79,7 @@ func startGaugeSampler(readers []*sdkmetric.ManualReader) *gaugeSampler {
 // startGaugeSamplerTracing is startGaugeSampler plus a periodic callback with the live reading. every<=0 or
 // a nil trace is the untraced sampler, so a caller that wants no line pays nothing for the option.
 func startGaugeSamplerTracing(readers []*sdkmetric.ManualReader, every time.Duration,
-	trace func(elapsed time.Duration, gauges map[string]float64, heapMB float64)) *gaugeSampler {
+	trace func(elapsed time.Duration, gauges map[string]float64, heapMB, stepsPerSec float64)) *gaugeSampler {
 
 	s := &gaugeSampler{
 		stop:       make(chan struct{}),
@@ -98,6 +99,8 @@ func (s *gaugeSampler) run(readers []*sdkmetric.ManualReader) {
 	defer ticker.Stop()
 	begun := time.Now()
 	nextTrace := begun
+	var prevSteps int64
+	var prevAt time.Time
 	for {
 		select {
 		case <-s.stop:
@@ -125,10 +128,26 @@ func (s *gaugeSampler) run(readers []*sdkmetric.ManualReader) {
 			s.n++
 			s.mu.Unlock()
 
-			if s.trace != nil && s.traceEvery > 0 {
+			if s.traceEvery > 0 {
 				if now := time.Now(); !now.Before(nextTrace) {
 					nextTrace = now.Add(s.traceEvery)
-					s.trace(now.Sub(begun), g, heap)
+					// Throughput per interval, from the executed-steps counter. The window mean cannot show a
+					// stall or a sagging tail; this series can. -1 = no rate yet (first line) or a failed scrape.
+					rate := -1.0
+					if c := collectAllCounters(readers); c != nil {
+						steps := c["dwarf_steps_executed"]
+						if !prevAt.IsZero() {
+							rate = float64(steps-prevSteps) / now.Sub(prevAt).Seconds()
+							s.mu.Lock()
+							s.series = append(s.series, seriesPoint{T: now.Sub(begun).Seconds(), StepsPerSec: rate,
+								Pending: gaugeTotal(g, "dwarf_steps_pending")})
+							s.mu.Unlock()
+						}
+						prevSteps, prevAt = steps, now
+					}
+					if s.trace != nil {
+						s.trace(now.Sub(begun), g, heap, rate)
+					}
 				}
 			}
 		}
@@ -142,6 +161,14 @@ type gaugeWindow struct {
 	Samples    int                `json:"gaugeSamples,omitzero"`
 	HeapMeanMB float64            `json:"heapMeanMB,omitzero"`
 	HeapPeakMB float64            `json:"heapPeakMB,omitzero"`
+	Series     []seriesPoint      `json:"series,omitempty"` // one point per -stats-interval
+}
+
+// seriesPoint is one -stats-interval reading: the steps/s executed since the previous one, and the backlog.
+type seriesPoint struct {
+	T           float64 `json:"t"`
+	StepsPerSec float64 `json:"stepsPerSec"`
+	Pending     float64 `json:"pending"`
 }
 
 // close stops the sampler and returns the window's aggregates. A sampler that never ticked (a window
@@ -173,5 +200,6 @@ func (s *gaugeSampler) close() gaugeWindow {
 		Samples:    s.n,
 		HeapMeanMB: s.heapSum / float64(s.n),
 		HeapPeakMB: s.heapPeak,
+		Series:     s.series,
 	}
 }

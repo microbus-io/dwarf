@@ -297,6 +297,9 @@ that already ticks at 50 ms rather than collecting on its own, so the line and t
 the same readings. `delayMs` beside it says which half of the cycle a line belongs to. It reads
 `dwarf_workers_resident`, not `runtime.NumGoroutine` — the process also holds the load generator, which is a
 rounding error against 36,000 workers and most of the count against 800 (both columns are printed).
+`steps/s` is the executed-steps counter's delta since the previous line, and each line is also kept in the
+artifact as `results[].gauges.series` (`t`, `stepsPerSec`, `pending`) - the only record of a window's shape,
+since `stepsPerSec` is its mean. `cell.sh` reports each run's slowest and fastest interval from it.
 
 ⚠️ **GAUGES HAVE NO BARE-NAME TOTAL — sum across the attribute sets.** Counters emit `name` alongside
 `name|k=v`; gauges emit only the attributed series (`dwarf_turnstile_available|shard=1`,

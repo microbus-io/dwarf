@@ -200,7 +200,7 @@ for path in sorted(glob.glob(os.path.join(out, "*.json"))):
     except (ValueError, KeyError, IndexError, OSError) as e:
         # A run that died mid-write leaves a truncated or empty artifact; record it, never crash the cell.
         runs.append(dict(tag=tag, pool=None, rate=None, steps=0, flows=0, p50=0, p99=0, share=None, rtt=0,
-                         db=None, bad=[f"unreadable artifact: {e}"]))
+                         db=None, lo=None, hi=None, bad=[f"unreadable artifact: {e}"]))
         continue
     c = r.get("engineCounters") or {}
     bad = []
@@ -212,9 +212,12 @@ for path in sorted(glob.glob(os.path.join(out, "*.json"))):
         bad.append(f"peer churn ({c['dwarf_peer_changes']})")
     st, se = c.get("dwarf_flows_started"), c.get("dwarf_steps_executed")
     m = re.search(r"pool (\d+) rate ([0-9.]+)", doc.get("label", ""))
+    # The slowest and fastest -stats-interval readings: the mean hides a stall or a sagging tail.
+    ser = [p["stepsPerSec"] for p in ((r.get("gauges") or {}).get("series") or [])]
     runs.append(dict(tag=tag, pool=int(m.group(1)) if m else None, rate=float(m.group(2)) if m else None,
         steps=r["stepsPerSec"], flows=r["flowsPerSec"], p50=r["p50Ms"], p99=r["p99Ms"],
-        share=(se / (st * spf)) if st and se else None, rtt=doc["rtt"]["p50Ms"], db=r.get("db"), bad=bad))
+        share=(se / (st * spf)) if st and se else None, rtt=doc["rtt"]["p50Ms"], db=r.get("db"),
+        lo=min(ser) if ser else None, hi=max(ser) if ser else None, bad=bad))
 
 peaks = [x for x in runs if x["tag"].startswith("peak-") and not x["bad"]]
 # SERVED flows/s: executed steps over steps per flow. An open-loop window's flowsPerSec is the admission rate,
@@ -235,12 +238,14 @@ optimum = ok[0]["pool"] if ok else None
 json.dump(dict(cell=cell, derivedPool=derived, peakFlowsPerSec=peak_flows, optimumPool=optimum, runs=runs),
           open(os.path.join(out, "cell.json"), "w"), indent=2)
 
-print(f"{'run':>18} {'pool':>5} {'rate':>7} {'steps/s':>9} {'exec/gen':>9} {'p50ms':>7} {'p99ms':>8} {'p99/p50':>8} {'rtt':>6}  note")
+print(f"{'run':>18} {'pool':>5} {'rate':>7} {'steps/s':>9} {'min10s':>7} {'max10s':>7} {'exec/gen':>9} {'p50ms':>7} {'p99ms':>8} {'p99/p50':>8} {'rtt':>6}  note")
 for x in runs:
     note = "; ".join(x["bad"]) or ("clean" if x in ok else "")
     share = f"{x['share']*100:8.1f}%" if x["share"] is not None else "       ?"
     ratio = x["p99"] / x["p50"] if x["p50"] else 0
-    print(f"{x['tag']:>18} {x['pool'] or 0:>5} {x['rate'] or 0:>7.2f} {x['steps']:>9.0f} {share} "
+    lo = f"{x['lo']:7.0f}" if x.get("lo") is not None else "      -"
+    hi = f"{x['hi']:7.0f}" if x.get("hi") is not None else "      -"
+    print(f"{x['tag']:>18} {x['pool'] or 0:>5} {x['rate'] or 0:>7.2f} {x['steps']:>9.0f} {lo} {hi} {share} "
           f"{x['p50']:>7.0f} {x['p99']:>8.0f} {ratio:>8.1f} {x['rtt']:>6.2f}  {note}")
 print(f"\npeak {peak_flows and round(peak_flows, 2)} flows/s at the derived pool {derived}; optimum pool {optimum}")
 if sweep and optimum is None:
