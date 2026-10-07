@@ -32,7 +32,7 @@
 # Knobs (env): BENCH (./dwarf-bench), WORKLOAD (linear), PAYLOAD (0), WIDTH (8, fanout/scatter),
 #   DEPTH (1, scatter), LINEAR_STEPS (10), TARGET_RTT (ms, required), VCPUS (16), PEAK_REPS (3),
 #   WINDOW (10m), WARMUP (2m), CONC (256 creators), MAX_OUTSTANDING (20000), SWEEP ("0.5 0.75 1.0 1.25 1.5",
-#   multiples of the derived pool), P99_SLACK (0.10), STALL_RATIO (3, max p99/p50 for a clean run - measured
+#   multiples of the derived pool; "" = no sweep), P99_SLACK (0.10), STALL_RATIO (3, max p99/p50 for a clean run - measured
 #   on linear: 1.2x healthy, 6.5x at a stall's onset; recheck it for heavy payloads), CONFIRM_DIFF (0.15),
 #   RTT_SLACK_MS (0.15),
 #   RTT_TRIES (10), COOLDOWN (30s), RESERVE (30), OUT, RUN_ID, EXTRA,
@@ -64,7 +64,7 @@ WINDOW="${WINDOW:-10m}"
 WARMUP="${WARMUP:-2m}"
 CONC="${CONC:-256}"
 MAX_OUTSTANDING="${MAX_OUTSTANDING:-20000}"
-SWEEP="${SWEEP:-0.5 0.75 1.0 1.25 1.5}"
+SWEEP="${SWEEP-0.5 0.75 1.0 1.25 1.5}" # no colon: SWEEP="" means no sweep
 P99_SLACK="${P99_SLACK:-0.10}"
 STALL_RATIO="${STALL_RATIO:-3}"
 CONFIRM_DIFF="${CONFIRM_DIFF:-0.15}"
