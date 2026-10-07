@@ -300,6 +300,13 @@ rounding error against 36,000 workers and most of the count against 800 (both co
 `steps/s` is the executed-steps counter's delta since the previous line, and each line is also kept in the
 artifact as `results[].gauges.series` (`t`, `stepsPerSec`, `pending`) - the only record of a window's shape,
 since `stepsPerSec` is its mean. `cell.sh` reports each run's slowest and fastest interval from it.
+On Postgres each point also carries the interval's WAL pressure - `walMBps`, `commitsPerSync`, `fpiPerSec`,
+`walBuffersFull`, `walWriteWaiters` and `activeBackends` (means per 50 ms wait poll) - and `results[].db` the
+window totals (`walFpi`, `walBuffersFull`, `walSyncs`, `commits`). A single Postgres instance is WAL-write-bound
+at its ceiling, so these are where to look for the signal that a run is past its sustainable rate. The flush
+count is `pg_stat_wal.wal_sync` through PostgreSQL 17 and `pg_stat_io` (`object='wal'`) from 18; `-1` means the
+server exposes neither. Flush LATENCY (`wal_sync_time`) needs `track_wal_io_timing`, which Cloud SQL does not
+allow on PostgreSQL 16.
 
 ⚠️ **GAUGES HAVE NO BARE-NAME TOTAL — sum across the attribute sets.** Counters emit `name` alongside
 `name|k=v`; gauges emit only the attributed series (`dwarf_turnstile_available|shard=1`,

@@ -110,21 +110,28 @@ func profileName(label string) string {
 // dwarf_workers_resident rather than runtime.NumGoroutine: the process also holds the load generator's
 // submitters, which is a rounding error against 36,000 workers and most of the count against 800.
 func statsHeader() string {
-	return fmt.Sprintf("%-7s %8s %8s %7s %8s %8s %9s %9s %9s",
-		"t(s)", "steps/s", "delayMs", "crew", "gorout", "heapMB", "turnAvail", "inflMB", "pending")
+	return fmt.Sprintf("%-7s %8s %8s %7s %8s %8s %9s %9s %9s %8s %7s %7s %7s",
+		"t(s)", "steps/s", "delayMs", "crew", "gorout", "heapMB", "turnAvail", "inflMB", "pending",
+		"walMB/s", "c/sync", "walWait", "active")
 }
 
-func statsLine(elapsed time.Duration, p taskProfile, g map[string]float64, heapMB, stepsPerSec float64) string {
-	rate := "-"
-	if stepsPerSec >= 0 {
-		rate = fmt.Sprintf("%.0f", stepsPerSec)
+func statsLine(elapsed time.Duration, p taskProfile, g map[string]float64, heapMB float64, pt *seriesPoint) string {
+	rate, wal, cps, wait, active := "-", "-", "-", "-", "-"
+	if pt != nil {
+		rate = fmt.Sprintf("%.0f", pt.StepsPerSec)
+		if pt.WALMBps > 0 || pt.ActiveBackends > 0 {
+			wal = fmt.Sprintf("%.1f", pt.WALMBps)
+			cps = fmt.Sprintf("%.1f", pt.CommitsPerSync)
+			wait = fmt.Sprintf("%.1f", pt.WALWriteWaiters)
+			active = fmt.Sprintf("%.1f", pt.ActiveBackends)
+		}
 	}
-	return fmt.Sprintf("%-7.0f %8s %8d %7.0f %8d %8.0f %9.0f %9.1f %9.0f",
+	return fmt.Sprintf("%-7.0f %8s %8d %7.0f %8d %8.0f %9.0f %9.1f %9.0f %8s %7s %7s %7s",
 		elapsed.Seconds(), rate, p.delayAt(time.Now()).Milliseconds(),
 		gaugeTotal(g, "dwarf_workers_resident"), runtime.NumGoroutine(), heapMB,
 		gaugeTotal(g, "dwarf_turnstile_available"),
 		gaugeTotal(g, "dwarf_state_in_flight_bytes")/(1<<20),
-		gaugeTotal(g, "dwarf_steps_pending"))
+		gaugeTotal(g, "dwarf_steps_pending"), wal, cps, wait, active)
 }
 
 // gaugeTotal sums every attributed series of one instrument.
@@ -158,12 +165,12 @@ var tracing struct {
 
 // statsTrace is the gauge sampler's callback for the periodic line, or nil when the readout is off. It
 // prints the header as a side effect, so each window's lines carry their own.
-func statsTrace() func(time.Duration, map[string]float64, float64, float64) {
+func statsTrace() func(time.Duration, map[string]float64, float64, *seriesPoint) {
 	if tracing.every <= 0 {
 		return nil
 	}
 	fmt.Println(statsHeader())
-	return func(elapsed time.Duration, g map[string]float64, heapMB, stepsPerSec float64) {
-		fmt.Println(statsLine(elapsed, tracing.profile, g, heapMB, stepsPerSec))
+	return func(elapsed time.Duration, g map[string]float64, heapMB float64, pt *seriesPoint) {
+		fmt.Println(statsLine(elapsed, tracing.profile, g, heapMB, pt))
 	}
 }

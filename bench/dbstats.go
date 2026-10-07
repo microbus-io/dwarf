@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/microbus-io/errors"
@@ -35,6 +36,11 @@ import (
 // local-harness shape; a multi-shard cloud run samples per shard.
 type dbStatsSampler struct {
 	db *sequel.DB
+	// syncSQL is the WAL flush-count query that worked on this server, found on first use: the counter is
+	// pg_stat_wal.wal_sync through PostgreSQL 17 and pg_stat_io's fsyncs for object 'wal' from 18. "-" = neither.
+	// Guarded: the window's readings and the per-interval probe sample from different goroutines.
+	syncMu  sync.Mutex
+	syncSQL string
 }
 
 // dbStats is one database-side reading. Connections counts every backend on the database - including
@@ -46,6 +52,13 @@ type dbStats struct {
 	StepsBytes  int64 `json:"stepsBytes"`
 	FlowsBytes  int64 `json:"flowsBytes"`
 	WALBytes    int64 `json:"walBytes"`
+	// The WAL pressure counters beside it (pg_stat_wal, cluster-wide like WALBytes), and commits across every
+	// database so commits per WAL flush can be formed. The database is WAL-write-bound at its ceiling
+	// (LWLock:WALWrite dominates the waits), so these are the candidates for "past the sustainable rate".
+	WALFPI         int64 `json:"walFpi"`
+	WALBuffersFull int64 `json:"walBuffersFull"`
+	WALSyncs       int64 `json:"walSyncs"`
+	Commits        int64 `json:"commits"`
 	// ok is whether every query of this reading succeeded. A failed one reads as zero, and a delta taken
 	// against a zero would report cumulative WAL, or negative growth, as one window's.
 	ok bool
@@ -55,9 +68,13 @@ type dbStats struct {
 // tables (with their indexes and TOAST) and the WAL written. Against the bytes the tasks declared, these are
 // the amplification - stored and logged bytes per task byte.
 type dbDelta struct {
-	StepsBytes int64 `json:"stepsBytes"`
-	FlowsBytes int64 `json:"flowsBytes"`
-	WALBytes   int64 `json:"walBytes"`
+	StepsBytes     int64 `json:"stepsBytes"`
+	FlowsBytes     int64 `json:"flowsBytes"`
+	WALBytes       int64 `json:"walBytes"`
+	WALFPI         int64 `json:"walFpi"`
+	WALBuffersFull int64 `json:"walBuffersFull"`
+	WALSyncs       int64 `json:"walSyncs"`
+	Commits        int64 `json:"commits"`
 }
 
 // windowDelta is the change between two readings, or nil when there is no sampler (a non-Postgres DSN) or
@@ -67,9 +84,13 @@ func (s *dbStatsSampler) windowDelta(before, after dbStats) *dbDelta {
 		return nil
 	}
 	return &dbDelta{
-		StepsBytes: after.StepsBytes - before.StepsBytes,
-		FlowsBytes: after.FlowsBytes - before.FlowsBytes,
-		WALBytes:   after.WALBytes - before.WALBytes,
+		StepsBytes:     after.StepsBytes - before.StepsBytes,
+		FlowsBytes:     after.FlowsBytes - before.FlowsBytes,
+		WALBytes:       after.WALBytes - before.WALBytes,
+		WALFPI:         after.WALFPI - before.WALFPI,
+		WALBuffersFull: after.WALBuffersFull - before.WALBuffersFull,
+		WALSyncs:       syncDelta(before.WALSyncs, after.WALSyncs),
+		Commits:        after.Commits - before.Commits,
 	}
 }
 
@@ -103,9 +124,51 @@ func (s *dbStatsSampler) sample(ctx context.Context) dbStats {
 	err2 := s.db.QueryRowContext(sctx,
 		"SELECT COALESCE(pg_total_relation_size('dwarf_steps'), 0), COALESCE(pg_total_relation_size('dwarf_flows'), 0)",
 	).Scan(&out.StepsBytes, &out.FlowsBytes)
-	err3 := s.db.QueryRowContext(sctx, "SELECT wal_bytes::bigint FROM pg_stat_wal").Scan(&out.WALBytes)
-	out.ok = err1 == nil && err2 == nil && err3 == nil
+	err3 := s.db.QueryRowContext(sctx,
+		"SELECT wal_bytes::bigint, wal_fpi, wal_buffers_full FROM pg_stat_wal",
+	).Scan(&out.WALBytes, &out.WALFPI, &out.WALBuffersFull)
+	out.WALSyncs = s.walSyncs(sctx)
+	err4 := s.db.QueryRowContext(sctx,
+		"SELECT COALESCE(SUM(xact_commit), 0)::bigint FROM pg_stat_database",
+	).Scan(&out.Commits)
+	out.ok = err1 == nil && err2 == nil && err3 == nil && err4 == nil
 	return out
+}
+
+// syncDelta is the flush count over a window, or -1 when either reading had none.
+func syncDelta(before, after int64) int64 {
+	if before < 0 || after < 0 {
+		return -1
+	}
+	return after - before
+}
+
+// walSyncs reads the server's cumulative WAL flush count, or -1 when this server exposes none. Never fatal to
+// the reading: the flush count only feeds commits per flush.
+func (s *dbStatsSampler) walSyncs(ctx context.Context) int64 {
+	candidates := []string{
+		"SELECT wal_sync FROM pg_stat_wal",
+		"SELECT COALESCE(SUM(fsyncs), 0)::bigint FROM pg_stat_io WHERE object = 'wal'",
+	}
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
+	if s.syncSQL == "-" {
+		return -1
+	}
+	if s.syncSQL != "" {
+		candidates = []string{s.syncSQL}
+	}
+	for _, q := range candidates {
+		var n int64
+		if err := s.db.QueryRowContext(ctx, q).Scan(&n); err == nil {
+			s.syncSQL = q
+			return n
+		}
+	}
+	if s.syncSQL == "" {
+		s.syncSQL = "-"
+	}
+	return -1
 }
 
 func (s *dbStatsSampler) close() {

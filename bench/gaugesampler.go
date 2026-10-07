@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"runtime"
 	"sync"
 	"time"
@@ -57,8 +58,9 @@ type gaugeSampler struct {
 	// trace, when set, is called every traceEvery with the reading just taken. It rides the sampler that
 	// already exists rather than collecting on its own: an independent ticker would pay a second Collect
 	// per line, and worse, would report numbers the artifact's own means were not computed from.
-	trace      func(elapsed time.Duration, gauges map[string]float64, heapMB, stepsPerSec float64)
+	trace      func(elapsed time.Duration, gauges map[string]float64, heapMB float64, pt *seriesPoint)
 	traceEvery time.Duration
+	probe      *walProbe
 	series     []seriesPoint
 
 	mu       sync.Mutex
@@ -73,13 +75,13 @@ type gaugeSampler struct {
 // is deliberate: the edge-snapshot hazard belongs to the instrument KIND, not to any one instrument, so a
 // subset would have to be extended by whoever next discovers their gauge reads zero.
 func startGaugeSampler(readers []*sdkmetric.ManualReader) *gaugeSampler {
-	return startGaugeSamplerTracing(readers, 0, nil)
+	return startGaugeSamplerTracing(readers, 0, nil, nil)
 }
 
 // startGaugeSamplerTracing is startGaugeSampler plus a periodic callback with the live reading. every<=0 or
 // a nil trace is the untraced sampler, so a caller that wants no line pays nothing for the option.
 func startGaugeSamplerTracing(readers []*sdkmetric.ManualReader, every time.Duration,
-	trace func(elapsed time.Duration, gauges map[string]float64, heapMB, stepsPerSec float64)) *gaugeSampler {
+	trace func(elapsed time.Duration, gauges map[string]float64, heapMB float64, pt *seriesPoint), probe *walProbe) *gaugeSampler {
 
 	s := &gaugeSampler{
 		stop:       make(chan struct{}),
@@ -88,6 +90,7 @@ func startGaugeSamplerTracing(readers []*sdkmetric.ManualReader, every time.Dura
 		peaks:      map[string]float64{},
 		trace:      trace,
 		traceEvery: every,
+		probe:      probe,
 	}
 	go s.run(readers)
 	return s
@@ -132,21 +135,28 @@ func (s *gaugeSampler) run(readers []*sdkmetric.ManualReader) {
 				if now := time.Now(); !now.Before(nextTrace) {
 					nextTrace = now.Add(s.traceEvery)
 					// Throughput per interval, from the executed-steps counter. The window mean cannot show a
-					// stall or a sagging tail; this series can. -1 = no rate yet (first line) or a failed scrape.
-					rate := -1.0
+					// stall or a sagging tail; this series can. nil = no rate yet (first line) or a failed scrape.
+					var pt *seriesPoint
 					if c := collectAllCounters(readers); c != nil {
 						steps := c["dwarf_steps_executed"]
 						if !prevAt.IsZero() {
-							rate = float64(steps-prevSteps) / now.Sub(prevAt).Seconds()
-							s.mu.Lock()
-							s.series = append(s.series, seriesPoint{T: now.Sub(begun).Seconds(), StepsPerSec: rate,
-								Pending: gaugeTotal(g, "dwarf_steps_pending")})
-							s.mu.Unlock()
+							pt = &seriesPoint{T: now.Sub(begun).Seconds(),
+								StepsPerSec: float64(steps-prevSteps) / now.Sub(prevAt).Seconds(),
+								Pending:     gaugeTotal(g, "dwarf_steps_pending")}
 						}
 						prevSteps, prevAt = steps, now
 					}
+					// Read every tick, so the probe's baseline advances with the series even past a failed scrape.
+					if w := s.probe.read(); w != nil && pt != nil {
+						pt.walPoint = *w
+					}
+					if pt != nil {
+						s.mu.Lock()
+						s.series = append(s.series, *pt)
+						s.mu.Unlock()
+					}
 					if s.trace != nil {
-						s.trace(now.Sub(begun), g, heap, rate)
+						s.trace(now.Sub(begun), g, heap, pt)
 					}
 				}
 			}
@@ -164,11 +174,76 @@ type gaugeWindow struct {
 	Series     []seriesPoint      `json:"series,omitempty"` // one point per -stats-interval
 }
 
-// seriesPoint is one -stats-interval reading: the steps/s executed since the previous one, and the backlog.
+// seriesPoint is one -stats-interval reading: the steps/s executed since the previous one, the backlog, and
+// the database's WAL pressure over the same interval (absent off Postgres).
 type seriesPoint struct {
 	T           float64 `json:"t"`
 	StepsPerSec float64 `json:"stepsPerSec"`
 	Pending     float64 `json:"pending"`
+	walPoint
+}
+
+// walPoint is the WAL pressure over one interval. The database is WAL-write-bound at its ceiling, and these are
+// the candidates for a signal that the offered rate has passed what it can sustain: commits per WAL flush (group
+// commit grows as backends queue behind each flush), backends waiting on LWLock:WALWrite, WAL volume, full-page
+// images (a checkpoint makes the next write of every page log the whole page) and WAL buffer exhaustion.
+type walPoint struct {
+	WALMBps         float64 `json:"walMBps,omitempty"`
+	CommitsPerSync  float64 `json:"commitsPerSync,omitempty"`
+	FPIPerSec       float64 `json:"fpiPerSec,omitempty"`
+	WALBuffersFull  int64   `json:"walBuffersFull,omitempty"`
+	WALWriteWaiters float64 `json:"walWriteWaiters,omitempty"` // mean backends in LWLock:WALWrite per 50 ms poll
+	ActiveBackends  float64 `json:"activeBackends,omitempty"`  // mean active backends per poll
+}
+
+// walProbe turns the cumulative database counters and wait-poll tallies into per-interval readings. Owned by the
+// sampler goroutine; nil (off Postgres) reads as nothing.
+type walProbe struct {
+	dbs      *dbStatsSampler
+	wait     *waitSampler
+	prev     dbStats
+	prevWait map[string]int64
+	prevAt   time.Time
+}
+
+func newWALProbe(dbs *dbStatsSampler, wait *waitSampler) *walProbe {
+	if dbs == nil {
+		return nil
+	}
+	return &walProbe{dbs: dbs, wait: wait}
+}
+
+func (p *walProbe) read() *walPoint {
+	if p == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	st := p.dbs.sample(ctx)
+	if !st.ok {
+		return nil // keep the old baseline; the next reading spans both intervals
+	}
+	w := p.wait.snapshot()
+	now := time.Now()
+	prev, prevWait, prevAt := p.prev, p.prevWait, p.prevAt
+	p.prev, p.prevWait, p.prevAt = st, w, now
+	if prevAt.IsZero() {
+		return nil
+	}
+	dt := now.Sub(prevAt).Seconds()
+	out := &walPoint{
+		WALMBps:        float64(st.WALBytes-prev.WALBytes) / dt / (1 << 20),
+		FPIPerSec:      float64(st.WALFPI-prev.WALFPI) / dt,
+		WALBuffersFull: st.WALBuffersFull - prev.WALBuffersFull,
+	}
+	if syncs := st.WALSyncs - prev.WALSyncs; st.WALSyncs >= 0 && prev.WALSyncs >= 0 && syncs > 0 {
+		out.CommitsPerSync = float64(st.Commits-prev.Commits) / float64(syncs)
+	}
+	if polls := w[" polls"] - prevWait[" polls"]; polls > 0 {
+		out.WALWriteWaiters = float64(w["LWLock:WALWrite"]-prevWait["LWLock:WALWrite"]) / float64(polls)
+		out.ActiveBackends = float64(w[" active"]-prevWait[" active"]) / float64(polls)
+	}
+	return out
 }
 
 // close stops the sampler and returns the window's aggregates. A sampler that never ticked (a window
