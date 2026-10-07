@@ -32,8 +32,8 @@
 # Knobs (env): BENCH (./dwarf-bench), WORKLOAD (linear), PAYLOAD (0), WIDTH (8, fanout/scatter),
 #   DEPTH (1, scatter), LINEAR_STEPS (10), TARGET_RTT (ms, required), VCPUS (16), PEAK_REPS (3),
 #   WINDOW (10m), WARMUP (2m), CONC (256 creators), MAX_OUTSTANDING (20000), SWEEP ("0.5 0.75 1.0 1.25 1.5",
-#   multiples of the derived pool; "" = no sweep), P99_SLACK (0.10), STALL_RATIO (3, max p99/p50 for a clean run - measured
-#   on linear: 1.2x healthy, 6.5x at a stall's onset; recheck it for heavy payloads), CONFIRM_DIFF (0.15),
+#   multiples of the derived pool; "" = no sweep), P99_SLACK (0.10), STALL_FLOOR (0.8: a clean run never has a
+#   10 s interval below this share of the commanded step rate), CONFIRM_DIFF (0.15),
 #   RTT_SLACK_MS (0.15),
 #   RTT_TRIES (10), COOLDOWN (30s), RESERVE (30), OUT, RUN_ID, EXTRA,
 #   NEAR (empty; 1 = run at the rig's own RTT with no netem, the gate holding the idle reading at or under
@@ -66,7 +66,7 @@ CONC="${CONC:-256}"
 MAX_OUTSTANDING="${MAX_OUTSTANDING:-20000}"
 SWEEP="${SWEEP-0.5 0.75 1.0 1.25 1.5}" # no colon: SWEEP="" means no sweep
 P99_SLACK="${P99_SLACK:-0.10}"
-STALL_RATIO="${STALL_RATIO:-3}"
+STALL_FLOOR="${STALL_FLOOR:-0.8}"
 CONFIRM_DIFF="${CONFIRM_DIFF:-0.15}"
 RTT_SLACK_MS="${RTT_SLACK_MS:-0.15}"
 RTT_TRIES="${RTT_TRIES:-10}"
@@ -184,10 +184,10 @@ run_one() {
 
 # summarize - the JSON the later steps read, plus the table.
 summarize() {
-  python3 - "$OUT" "$SPF" "$POOL" "$P99_SLACK" "$WORKLOAD" "$PAYLOAD" "$WIDTH" "$DEPTH" "$TARGET_RTT" "$VCPUS" "$STALL_RATIO" <<'PY'
+  python3 - "$OUT" "$SPF" "$POOL" "$P99_SLACK" "$WORKLOAD" "$PAYLOAD" "$WIDTH" "$DEPTH" "$TARGET_RTT" "$VCPUS" "$STALL_FLOOR" <<'PY'
 import json, glob, os, re, statistics, sys
 out, spf, derived, slack = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4])
-stall = float(sys.argv[11])
+floor = float(sys.argv[11])
 cell = dict(workload=sys.argv[5], payload=int(sys.argv[6]), width=int(sys.argv[7]), depth=int(sys.argv[8]),
             targetRtt=float(sys.argv[9]), vcpus=int(sys.argv[10]), stepsPerFlow=spf)
 runs = []
@@ -227,9 +227,11 @@ sweep = [x for x in runs if x["tag"].startswith("sweep-") and not x["bad"]]
 def delivers(x):
     # Admitted the commanded rate AND executed what it admitted. The first half matters: a small pool that
     # slows creation along with dispatch admits less, runs lightly loaded and posts a low p99 - it must not
-    # win on that. A stall is p99 far above p50 (STALL_RATIO).
+    # win on that. A stall is a 10 s interval below STALL_FLOOR of the commanded step rate. Not p99/p50: at
+    # 2/3 load on linear, 4% dips that caught up within the next interval put p99/p50 at 9.4 with no stall,
+    # while a real stall at 87% fell to 9% of the commanded rate for 70-110 s.
     return (x["rate"] and x["flows"] >= 0.99 * x["rate"] and x["share"] is not None and x["share"] >= 0.99
-            and x["p50"] > 0 and x["p99"] / x["p50"] <= stall)
+            and x["lo"] is not None and x["lo"] >= floor * x["rate"] * spf)
 best_p99 = min((x["p99"] for x in sweep if delivers(x)), default=None)
 def clean(x):
     return delivers(x) and x["p99"] <= best_p99 * (1 + slack)
@@ -250,7 +252,7 @@ for x in runs:
 print(f"\npeak {peak_flows and round(peak_flows, 2)} flows/s at the derived pool {derived}; optimum pool {optimum}")
 if sweep and optimum is None:
     print("NO POOL QUALIFIED: no sweep run delivered the commanded rate cleanly, so there is no optimum and no "
-          "confirming peak. Read the table - if p99/p50 fails everywhere, STALL_RATIO may be wrong for this shape.")
+          "confirming peak. Read min10s against rate x steps/flow - if it fails everywhere, STALL_FLOOR may be wrong for this shape.")
 PY
 }
 
