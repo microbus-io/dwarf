@@ -204,7 +204,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			"UPDATE dwarf_steps s SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), s.time_budget_ms + ?), lease_seq=s.lease_seq+1, engine_id=?, updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN s.attempt>0 OR s.subgraph_done=1 OR s.interrupt_done=1 OR s.advancing=1 THEN s.started_at ELSE NOW_UTC() END"+
 				" FROM dwarf_flows f"+
-				" WHERE s.step_id=? AND s.status='"+workflow.StatusPending+"' AND s.parked=? AND s.not_before<=NOW_UTC() AND s.lease_expires<=NOW_UTC() AND f.flow_id=s.flow_id"+
+				" WHERE s.step_id=? AND "+claimEligible("s.")+" AND f.flow_id=s.flow_id"+
 				" RETURNING s.step_depth, s.task_name, s.step_token, s.state, s.changes, s.state_refs, s.attempt, s.lineage_id, s.flow_id, s.time_budget_ms, s.interrupt_done, s.resume_data, s.subgraph_done, s.subgraph_result, s.subgraph_error, s.created_at, s.lease_seq, s.fan_out_ordinal, s.cancelling, s.advancing, s.advance_goto, DATE_DIFF_MILLIS(s.advance_sleep_until, NOW_UTC()), s.advance_on_error,"+
 				" f.flow_token, f.status, f.workflow_url, f.baggage, f.trace_parent, f.created_at, f.updated_at, f.priority, f.fairness_key, f.fairness_weight, f.time_budget_ms, f.cancel_reason",
 			workflow.StatusRunning, leaseMarginMs, e.engineID, stepID, parkedNone,
@@ -218,7 +218,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		err = db.QueryRowContext(ctx,
 			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, engine_id=?, updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 OR advancing=1 THEN started_at ELSE NOW_UTC() END"+
-				" WHERE step_id=? AND status='"+workflow.StatusPending+"' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"+
+				" WHERE step_id=? AND "+claimEligible("")+
 				" RETURNING step_depth, task_name, step_token, state, changes, state_refs, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at, lease_seq, fan_out_ordinal, cancelling, advancing, advance_goto, DATE_DIFF_MILLIS(advance_sleep_until, NOW_UTC()), advance_on_error",
 			workflow.StatusRunning, leaseMarginMs, e.engineID, stepID, parkedNone,
 		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq, &fanOutOrdinal, &stepCancelling, &replaying, &replayGoto, &replaySleepLeftMs, &replayOnError)
@@ -232,7 +232,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, engine_id=?, updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 OR advancing=1 THEN started_at ELSE NOW_UTC() END"+
 				" OUTPUT INSERTED.step_depth, INSERTED.task_name, INSERTED.step_token, INSERTED.state, INSERTED.changes, INSERTED.state_refs, INSERTED.attempt, INSERTED.lineage_id, INSERTED.flow_id, INSERTED.time_budget_ms, INSERTED.interrupt_done, INSERTED.resume_data, INSERTED.subgraph_done, INSERTED.subgraph_result, INSERTED.subgraph_error, INSERTED.created_at, INSERTED.lease_seq, INSERTED.fan_out_ordinal, INSERTED.cancelling, INSERTED.advancing, INSERTED.advance_goto, DATE_DIFF_MILLIS(INSERTED.advance_sleep_until, NOW_UTC()), INSERTED.advance_on_error"+
-				" WHERE step_id=? AND status='"+workflow.StatusPending+"' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()",
+				" WHERE step_id=? AND "+claimEligible(""),
 			workflow.StatusRunning, leaseMarginMs, e.engineID, stepID, parkedNone,
 		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq, &fanOutOrdinal, &stepCancelling, &replaying, &replayGoto, &replaySleepLeftMs, &replayOnError)
 		if err == sql.ErrNoRows {
@@ -252,7 +252,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		res, claimErr := db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, engine_id=?, updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 OR advancing=1 THEN started_at ELSE NOW_UTC() END"+
-				" WHERE step_id=? AND status='"+workflow.StatusPending+"' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()",
+				" WHERE step_id=? AND "+claimEligible(""),
 			workflow.StatusRunning, leaseMarginMs, e.engineID, stepID, parkedNone,
 		)
 		if claimErr != nil {
@@ -2123,4 +2123,18 @@ func dispatchURLOf(graph *workflow.Graph, name string) string {
 		return u
 	}
 	return name
+}
+
+// claimEligible is the claim's test that the step is still claimable - pending, unparked, due, lease lapsed -
+// wrapped in CASE so that no index can serve it, leaving the primary key on step_id as the claim's only index
+// path. Written as plain conjuncts, the test implies status='pending', which makes every partial index on
+// pending rows (idx_dwarf_steps_due, _selection, _saturation, _status) a candidate, and a scan of one of them
+// filtered on step_id walks the whole backlog. Measured on Postgres: after an ANALYZE taken at a small backlog,
+// both the generic and the custom plan claimed through idx_dwarf_steps_saturation, every claim cost O(backlog),
+// and a 5,000 steps/s run fell to ~800 steps/s with its backlog at the cap until an ANALYZE taken at a large
+// backlog flipped the plan back. The status stays a literal (the inline-status rule); parked is the caller's
+// bind. alias is the table alias with its dot ("s.") or "".
+func claimEligible(alias string) string {
+	return "CASE WHEN " + alias + "status='" + workflow.StatusPending + "' AND " + alias + "parked=? AND " +
+		alias + "not_before<=NOW_UTC() AND " + alias + "lease_expires<=NOW_UTC() THEN 1 END=1"
 }
