@@ -2463,7 +2463,8 @@ successor and advance no `step_id`. Constants, their portability, and the normal
 **Connection pool sizing - fact-derived per shard (`poolsize.go`).** The operator provides facts on
 `ShardSpec` and the engine owns the measured constants (measured on managed cloud Postgres, `docs/benchmark-cloud.md`):
 
-- **Two declared facts and one probe drive each shard's pool**, `idle = open/2` (warm core).
+- **Two declared facts and one probe drive each shard's pool**, `idle = open` (an idle cap below the ceiling
+  churns connections; `ConnMaxIdleTime` sheds an unused pool).
   `ShardSpec.VirtualCPUs` and the shard's Startup-probed RTT index `poolRatio`, a tier x RTT-bucket table
   of connections per vCPU (`connsPerVCPUFor`); the resulting whole-database budget is split by that
   shard's replica count. The cell-by-cell derivation, and which cells rest on measurement, live in

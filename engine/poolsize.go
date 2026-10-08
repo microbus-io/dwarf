@@ -220,8 +220,10 @@ func probeRTT(ctx context.Context, db *sequel.DB) float64 {
 	return best
 }
 
-// shardPool returns the idle/open pool sizes for one shard, with a warm idle core of half the open
-// ceiling. VirtualCPUs (defaulted, see effectiveVirtualCPUs) and the shard's probed RTT pick the ratio, and
+// shardPool returns the idle/open pool sizes for one shard. Idle equals open: database/sql closes a returned
+// connection whenever the idle set is full, so an idle cap below the ceiling makes demand that swings between
+// the two close and reopen backends (a server process plus authentication each) for as long as the load
+// lasts. Shedding a pool that load has left is ConnMaxIdleTime's job, not the idle cap's. VirtualCPUs (defaulted, see effectiveVirtualCPUs) and the shard's probed RTT pick the ratio, and
 // the resulting per-DATABASE budget is split across the shard's DISPATCHERS - slots of them, this replica
 // among them. slots == 0 means this replica does not dispatch the shard and holds the small fixed pool its
 // reads and heartbeat need.
@@ -244,7 +246,7 @@ func shardPool(spec ShardSpec, override int, slots int, rttMs float64) (idle, op
 	}
 	vcpus := effectiveVirtualCPUs(spec.VirtualCPUs)
 	open = max(2, int(math.Round(float64(shardBudget(vcpus, rttMs))/float64(slots))))
-	return max(2, open/2), open
+	return open, open
 }
 
 // dispatcherSlots is how many replicas dispatch one shard: enough that each holds a pool worth running a

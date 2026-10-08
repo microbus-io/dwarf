@@ -184,45 +184,45 @@ func TestPoolSizing_ShardPool(t *testing.T) {
 		open     int
 	}{
 		// Every row from 1 to 64 vCPU is MEASURED (see connsPerVCPUFor / poolRatio).
-		{0, 0, 1, 0.25, 3, 7},   // undeclared: assume 2 vCPUs -> the 2-vCPU pool
-		{1, 0, 1, 0.25, 2, 3},   // MEASURED row: 3 sustained 390 st/s on a 1-vCPU shard
-		{2, 0, 1, 0.25, 3, 7},   // MEASURED row: 6 sustained 770 st/s
-		{4, 0, 1, 0.25, 7, 14},  // MEASURED row: 12 sustained 1,750 st/s
-		{8, 0, 1, 0.25, 24, 48}, // MEASURED row: 40 sustained 3,500 st/s, +20% margin
-		{8, 0, 1, 2.00, 52, 105},
-		{16, 0, 1, 0.25, 48, 96}, // MEASURED row: 82 sustained 7,000 st/s, +20% margin
-		{16, 0, 1, 1.00, 67, 134},
-		{16, 0, 1, 2.00, 86, 172},
-		{32, 0, 1, 0.25, 72, 144}, // MEASURED row: 120 sustained 14,000 st/s
+		{0, 0, 1, 0.25, 7, 7},   // undeclared: assume 2 vCPUs -> the 2-vCPU pool
+		{1, 0, 1, 0.25, 3, 3},   // MEASURED row: 3 sustained 390 st/s on a 1-vCPU shard
+		{2, 0, 1, 0.25, 7, 7},   // MEASURED row: 6 sustained 770 st/s
+		{4, 0, 1, 0.25, 14, 14}, // MEASURED row: 12 sustained 1,750 st/s
+		{8, 0, 1, 0.25, 48, 48}, // MEASURED row: 40 sustained 3,500 st/s, +20% margin
+		{8, 0, 1, 2.00, 105, 105},
+		{16, 0, 1, 0.25, 96, 96}, // MEASURED row: 82 sustained 7,000 st/s, +20% margin
+		{16, 0, 1, 1.00, 134, 134},
+		{16, 0, 1, 2.00, 172, 172},
+		{32, 0, 1, 0.25, 144, 144}, // MEASURED row: 120 sustained 14,000 st/s
 		// Past the last tabulated tier (64 vCPU) there is no second point to blend against, so it is
 		// taken flat - 128 and 256 land on the SAME ratio (2.25 * 1.2 margin = 2.7/vCPU) as 64 itself.
-		{128, 0, 1, 0.25, 172, 345},
-		{256, 0, 1, 0.25, 345, 691},
+		{128, 0, 1, 0.25, 345, 345},
+		{256, 0, 1, 0.25, 691, 691},
 		// Between two tabulated tiers the ratio is blended in LOG-LOG space (linear in log(ratio) vs
 		// log(vCPUs), since the underlying quantity is a power law) rather than rounding up to the
 		// larger row - 24 sits 58.5% of the way from 16 to 32 in log space, so its ratio (~4.23) lands
 		// between the two rows' 5.00 and 3.75, closer to 32's. 15 vCPU lands on 5.00 regardless of where
 		// it sits between 8 and 16, because those two rows share the SAME 0.25ms ratio - a coincidence of
 		// this RTT bucket, not a property of 15 vCPUs specifically.
-		{24, 0, 1, 0.25, 60, 121},
-		{15, 0, 1, 0.25, 45, 90},
+		{24, 0, 1, 0.25, 121, 121},
+		{15, 0, 1, 0.25, 90, 90},
 		// The RTT axis INTERPOLATES between buckets, and clamps at both ends.
-		{16, 0, 1, 0.50, 67, 134}, // on a bucket
-		{16, 0, 1, 0.90, 67, 134}, // between two buckets that are equal in the measured row
-		{4, 0, 1, 0.75, 14, 28},   // UNEVEN buckets: 0.75 is halfway between the 0.50 and 1.00 columns
-		{4, 0, 1, 1.25, 16, 33},   // and halfway between 1.00 and 1.50
-		{16, 0, 1, 5.00, 86, 172}, // beyond the last bucket: the 2.00 column
-		{16, 0, 1, 0.10, 48, 96},  // below the first bucket: no extrapolation past the shortest measured path
-		{16, 0, 1, 0, 48, 96},     // an unprobed shard lands uncompensated, never on an assumed distance
+		{16, 0, 1, 0.50, 134, 134}, // on a bucket
+		{16, 0, 1, 0.90, 134, 134}, // between two buckets that are equal in the measured row
+		{4, 0, 1, 0.75, 28, 28},    // UNEVEN buckets: 0.75 is halfway between the 0.50 and 1.00 columns
+		{4, 0, 1, 1.25, 33, 33},    // and halfway between 1.00 and 1.50
+		{16, 0, 1, 5.00, 172, 172}, // beyond the last bucket: the 2.00 column
+		{16, 0, 1, 0.10, 96, 96},   // below the first bucket: no extrapolation past the shortest measured path
+		{16, 0, 1, 0, 96, 96},      // an unprobed shard lands uncompensated, never on an assumed distance
 		// Overrides and the dispatcher split.
 		{8, 30, 1, 0.25, 30, 30},  // override wins over derived, pinned exactly
 		{0, 5, 1, 0.25, 5, 5},     // override beats the assumed default too
 		{16, 30, 1, 2.00, 30, 30}, // and bypasses the RTT term with it
-		{8, 0, 2, 0.25, 12, 24},   // dispatchers split the derived budget: each takes its 1/X share
-		{8, 0, 3, 0.25, 8, 16},
-		{16, 0, 4, 2.00, 21, 43},
+		{8, 0, 2, 0.25, 24, 24},   // dispatchers split the derived budget: each takes its 1/X share
+		{8, 0, 3, 0.25, 16, 16},
+		{16, 0, 4, 2.00, 43, 43},
 		{1, 0, 8, 0.25, 2, 2},    // floor: even many dispatchers keep a usable minimum pool
-		{0, 0, 2, 0.25, 2, 4},    // the split ROUNDS: 7/2 = 3.5 takes 4, not 3
+		{0, 0, 2, 0.25, 4, 4},    // the split ROUNDS: 7/2 = 3.5 takes 4, not 3
 		{8, 30, 4, 0.25, 30, 30}, // the override is per replica and is never divided
 		// A replica that does not dispatch the shard holds the reader pool, whatever the shard's size.
 		{8, 0, 0, 0.25, 1, 2},
@@ -279,8 +279,8 @@ func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
 // (DBStats.Idle counts connections currently idle - traffic, not configuration), so the derived idle core is
 // read back through the engineseams.VariablePoolIdle recording the sizing sites make.
 //
-// It is half the open size, floored at 2, and it must follow the open size down as the fleet grows: an idle
-// core left at the R=1 width would hold connections a departing replica's share no longer entitles it to.
+// It equals the open size, and it must follow the open size down as the fleet grows: an idle set left at the
+// R=1 width would hold connections a departing replica's share no longer entitles it to.
 func TestPoolSizing_IdleCoreTracksTheDerivedPool(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -304,11 +304,11 @@ func TestPoolSizing_IdleCoreTracksTheDerivedPool(t *testing.T) {
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
 	assert.Equal(budget8(e, 1), db.DB.Stats().MaxOpenConnections, "full budget while alone (R=1)")
-	assert.Equal(idle8(e, 1, 1), idle(), "idle core is half the open pool at R=1")
+	assert.Equal(idle8(e, 1, 1), idle(), "idle equals the open pool at R=1")
 
 	addPeerRow(t, e, 2001)
 	assert.Equal(open8(e, 1, 2), db.DB.Stats().MaxOpenConnections)
-	assert.Equal(idle8(e, 1, 2), idle(), "the idle core follows the pool down to the 1/2 share")
+	assert.Equal(idle8(e, 1, 2), idle(), "idle follows the pool down to the 1/2 share")
 
 	addPeerRow(t, e, 2002)
 	assert.Equal(open8(e, 1, 3), db.DB.Stats().MaxOpenConnections)
@@ -317,7 +317,7 @@ func TestPoolSizing_IdleCoreTracksTheDerivedPool(t *testing.T) {
 	delPeerRow(t, e, 2001)
 	delPeerRow(t, e, 2002)
 	assert.Equal(budget8(e, 1), db.DB.Stats().MaxOpenConnections, "departures restore the full budget")
-	assert.Equal(idle8(e, 1, 1), idle(), "and restore the idle core with it")
+	assert.Equal(idle8(e, 1, 1), idle(), "and restore idle with it")
 }
 
 // TestPoolSizing_PeerExpiry pins the crashed-peer path: a peer that stops heartbeating (its row goes stale,
