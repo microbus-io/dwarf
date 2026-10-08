@@ -31,7 +31,7 @@
 #   DSN=postgres://... TARGET_RTT=0.25 VCPUS=16 WORKLOAD=linear ./cell.sh
 # Knobs (env): BENCH (./dwarf-bench), WORKLOAD (linear), PAYLOAD (0), WIDTH (8, fanout/scatter),
 #   DEPTH (1, scatter), LINEAR_STEPS (10), TARGET_RTT (ms, required), VCPUS (16), PEAK_REPS (3),
-#   WINDOW (10m), WARMUP (2m), CONC (256 creators), MAX_OUTSTANDING (20000), SWEEP ("0.5 0.75 1.0 1.25 1.5",
+#   WINDOW (16m: two or three checkpoint cycles, and minute slots enough to read a trend), WARMUP (2m), CONC (256 creators), MAX_OUTSTANDING (20000), SWEEP ("0.5 0.75 1.0 1.25 1.5",
 #   multiples of the derived pool; "" = no sweep), P99_SLACK (0.10), STALL_FLOOR (0.8: a clean run never has a
 #   10 s interval below this share of the commanded step rate), CONFIRM_DIFF (0.15),
 #   RTT_SLACK_MS (0.15),
@@ -63,7 +63,7 @@ DEPTH="${DEPTH:-1}"
 LINEAR_STEPS="${LINEAR_STEPS:-10}"
 VCPUS="${VCPUS:-16}"
 PEAK_REPS="${PEAK_REPS:-3}"
-WINDOW="${WINDOW:-10m}"
+WINDOW="${WINDOW:-16m}"
 WARMUP="${WARMUP:-2m}"
 CONC="${CONC:-256}"
 MAX_OUTSTANDING="${MAX_OUTSTANDING:-20000}"
@@ -187,7 +187,7 @@ run_one() {
 
 # summarize - the JSON the later steps read, plus the table.
 summarize() {
-  python3 - "$OUT" "$SPF" "$POOL" "$P99_SLACK" "$WORKLOAD" "$PAYLOAD" "$WIDTH" "$DEPTH" "$TARGET_RTT" "$VCPUS" "$STALL_FLOOR" <<'PY'
+  python3 - "$OUT" "$SPF" "$POOL" "$P99_SLACK" "$WORKLOAD" "$PAYLOAD" "$WIDTH" "$DEPTH" "$TARGET_RTT" "$VCPUS" "$STALL_FLOOR" "$MAX_OUTSTANDING" <<'PY'
 import json, glob, os, re, statistics, sys
 out, spf, derived, slack = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4])
 floor = float(sys.argv[11])
@@ -240,6 +240,43 @@ def clean(x):
     return delivers(x) and x["p99"] <= best_p99 * (1 + slack)
 ok = sorted((x for x in sweep if clean(x)), key=lambda x: x["pool"])
 optimum = ok[0]["pool"] if ok else None
+# Minute slots: the 10 s series folded into whole minutes. Within one run they measure how steady it was and how
+# precise its mean is - not run-to-run variance (instance, placement, time of day), which only a repeat prices.
+# A minute is about one forced checkpoint cycle on a busy tier, so a burst minute tends to be followed by a
+# catch-up minute: a NEGATIVE lag-1 autocorrelation is noise, a POSITIVE one is a trend.
+# Verdict on the backlog: "at cap" (pinned at -max-outstanding, i.e. saturated), "drains" (each minute's floor
+# comes back down), or "accumulates" (the floor ratchets up - the offered rate is past what the database sustains).
+cap = int(sys.argv[12])
+def minutes(path):
+    try:
+        r = json.load(open(path))["results"][0]
+    except (ValueError, KeyError, IndexError, OSError):
+        return None
+    ser = (r.get("gauges") or {}).get("series") or []
+    rate = [p["stepsPerSec"] for p in ser]
+    out = [p.get("outstanding", p.get("pending", 0)) for p in ser]
+    n = len(rate) // 6
+    if n < 3:
+        return None
+    means = [statistics.mean(rate[i*6:(i+1)*6]) for i in range(n)]
+    floors = [min(out[i*6:(i+1)*6]) for i in range(n)]
+    peaks = [max(out[i*6:(i+1)*6]) for i in range(n)]
+    m = statistics.mean(means)
+    sd = statistics.stdev(means)
+    den = sum((x - m) ** 2 for x in means)
+    lag1 = sum((means[i] - m) * (means[i + 1] - m) for i in range(n - 1)) / den if den else 0.0
+    first, last = max(floors[:2]), max(floors[-2:])
+    if min(floors[-3:]) >= 0.9 * cap:
+        verdict = "at cap"
+    elif last <= max(1000, 5 * first):
+        verdict = "drains"
+    else:
+        verdict = "accumulates"
+    return dict(means=[round(x) for x in means], mean=round(m), sdPct=round(sd / m * 100, 2) if m else None,
+                sePct=round(sd / n ** 0.5 / m * 100, 2) if m else None, lag1=round(lag1, 2),
+                floors=floors, peaks=peaks, verdict=verdict)
+for x in runs:
+    x["minutes"] = minutes(os.path.join(out, x["tag"] + ".json"))
 json.dump(dict(cell=cell, derivedPool=derived, peakFlowsPerSec=peak_flows, optimumPool=optimum, runs=runs),
           open(os.path.join(out, "cell.json"), "w"), indent=2)
 
@@ -252,6 +289,14 @@ for x in runs:
     hi = f"{x['hi']:7.0f}" if x.get("hi") is not None else "      -"
     print(f"{x['tag']:>18} {x['pool'] or 0:>5} {x['rate'] or 0:>7.2f} {x['steps']:>9.0f} {lo} {hi} {share} "
           f"{x['p50']:>7.0f} {x['p99']:>8.0f} {ratio:>8.1f} {x['rtt']:>6.2f}  {note}")
+print(f"\n{'run':>18} {'1-min mean':>10} {'sd%':>6} {'se%':>6} {'lag1':>6}  {'backlog floor first->last':>25}  verdict   minute means")
+for x in runs:
+    mm = x.get("minutes")
+    if not mm:
+        continue
+    fl = f"{max(mm['floors'][:2])} -> {max(mm['floors'][-2:])}"
+    print(f"{x['tag']:>18} {mm['mean']:>10} {mm['sdPct']:>6} {mm['sePct']:>6} {mm['lag1']:>+6.2f}  {fl:>25}  {mm['verdict']:<9} "
+          + " ".join(str(v) for v in mm["means"]))
 print(f"\npeak {peak_flows and round(peak_flows, 2)} flows/s at the derived pool {derived}; optimum pool {optimum}")
 if sweep and optimum is None:
     print("NO POOL QUALIFIED: no sweep run delivered the commanded rate cleanly, so there is no optimum and no "
