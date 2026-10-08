@@ -201,12 +201,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// Every claim-side column is qualified, because dwarf_flows shares several names with dwarf_steps
 		// (status, created_at, updated_at, time_budget_ms).
 		err = db.QueryRowContext(ctx,
-			"UPDATE dwarf_steps s SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), s.time_budget_ms + ?), lease_seq=s.lease_seq+1, engine_id=?, updated_at=NOW_UTC(),"+
-				" started_at=CASE WHEN s.attempt>0 OR s.subgraph_done=1 OR s.interrupt_done=1 OR s.advancing=1 THEN s.started_at ELSE NOW_UTC() END"+
-				" FROM dwarf_flows f"+
-				" WHERE s.step_id=? AND "+claimEligible("s.")+" AND f.flow_id=s.flow_id"+
-				" RETURNING s.step_depth, s.task_name, s.step_token, s.state, s.changes, s.state_refs, s.attempt, s.lineage_id, s.flow_id, s.time_budget_ms, s.interrupt_done, s.resume_data, s.subgraph_done, s.subgraph_result, s.subgraph_error, s.created_at, s.lease_seq, s.fan_out_ordinal, s.cancelling, s.advancing, s.advance_goto, DATE_DIFF_MILLIS(s.advance_sleep_until, NOW_UTC()), s.advance_on_error,"+
-				" f.flow_token, f.status, f.workflow_url, f.baggage, f.trace_parent, f.created_at, f.updated_at, f.priority, f.fairness_key, f.fairness_weight, f.time_budget_ms, f.cancel_reason",
+			claimSQLPostgres(),
 			workflow.StatusRunning, leaseMarginMs, e.engineID, stepID, parkedNone,
 		).Scan(append([]any{&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq, &fanOutOrdinal, &stepCancelling, &replaying, &replayGoto, &replaySleepLeftMs, &replayOnError}, flowDest...)...)
 		if err == sql.ErrNoRows {
@@ -2137,4 +2132,15 @@ func dispatchURLOf(graph *workflow.Graph, name string) string {
 func claimEligible(alias string) string {
 	return "CASE WHEN " + alias + "status='" + workflow.StatusPending + "' AND " + alias + "parked=? AND " +
 		alias + "not_before<=NOW_UTC() AND " + alias + "lease_expires<=NOW_UTC() THEN 1 END=1"
+}
+
+// claimSQLPostgres is the Postgres claim: the CAS on the step row, its read, and the flow row joined in, in one
+// round trip. Binds: the running status, the lease margin in ms, the engine ID, the step ID, the unparked value.
+func claimSQLPostgres() string {
+	return "UPDATE dwarf_steps s SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), s.time_budget_ms + ?), lease_seq=s.lease_seq+1, engine_id=?, updated_at=NOW_UTC()," +
+		" started_at=CASE WHEN s.attempt>0 OR s.subgraph_done=1 OR s.interrupt_done=1 OR s.advancing=1 THEN s.started_at ELSE NOW_UTC() END" +
+		" FROM dwarf_flows f" +
+		" WHERE s.step_id=? AND " + claimEligible("s.") + " AND f.flow_id=s.flow_id" +
+		" RETURNING s.step_depth, s.task_name, s.step_token, s.state, s.changes, s.state_refs, s.attempt, s.lineage_id, s.flow_id, s.time_budget_ms, s.interrupt_done, s.resume_data, s.subgraph_done, s.subgraph_result, s.subgraph_error, s.created_at, s.lease_seq, s.fan_out_ordinal, s.cancelling, s.advancing, s.advance_goto, DATE_DIFF_MILLIS(s.advance_sleep_until, NOW_UTC()), s.advance_on_error," +
+		" f.flow_token, f.status, f.workflow_url, f.baggage, f.trace_parent, f.created_at, f.updated_at, f.priority, f.fairness_key, f.fairness_weight, f.time_budget_ms, f.cancel_reason"
 }
