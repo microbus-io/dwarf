@@ -191,7 +191,7 @@ func runFleetOutage(t *testing.T, outage time.Duration) (worstOpen, settledOpen,
 	base := os.Getenv("SEQUEL_TESTING_DSN")
 	const (
 		shard    = 1
-		vCPUs    = 8
+		budget   = 48
 		replicas = 4
 	)
 	proxy, proxied := newStallProxy(t, base)
@@ -208,16 +208,14 @@ func runFleetOutage(t *testing.T, outage time.Duration) (worstOpen, settledOpen,
 		e.testConnCap = 0 // assert the real derived sizes, not the test-mode cap
 		assert.NoError(e.SetHost(noopHost{}))
 		assert.NoError(e.SetWorkers(1))
-		assert.NoError(e.SetShard(ShardSpec{Index: shard, DSN: proxied, VirtualCPUs: vCPUs}))
+		assert.NoError(e.SetShard(ShardSpec{Index: shard, DSN: proxied, MaxConnections: budget}))
 		fleet.add(e)
 		assert.NoError(e.Startup(t.Context()))
 	}
-	awaitFleetSettled(t, fleet, shard, replicas, vCPUs)
+	awaitFleetSettled(t, fleet, shard, replicas, budget)
 
 	// The largest pool any replica holds once settled at the full fleet. The invariant is that the outage
-	// makes nothing GROW past this, so it is read from the fleet rather than restated as a constant - each
-	// replica sizes from the RTT it probed itself, and a literal would be wrong on any rig whose round trip
-	// differs from the one it was written on.
+	// makes nothing GROW past this, so it is read from the fleet rather than restated as a constant.
 	for _, e := range fleet.snapshot() {
 		if db, err := e.db.Shard(shard); err == nil {
 			settledOpen = max(settledOpen, db.DB.Stats().MaxOpenConnections)
@@ -266,7 +264,7 @@ func runFleetOutage(t *testing.T, outage time.Duration) (worstOpen, settledOpen,
 		}
 	}
 	proxy.resume()
-	awaitFleetSettled(t, fleet, shard, replicas, vCPUs)
+	awaitFleetSettled(t, fleet, shard, replicas, budget)
 	close(samplerStop)
 	sampler.Wait()
 

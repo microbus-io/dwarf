@@ -62,7 +62,7 @@ func TestPeerFault_BlindHoldsThePoolsAndFailsOpen(t *testing.T) {
 	defer e.Shutdown(t.Context())
 	e.testConnCap = 0 // assert the real derived sizes, not the test-mode cap
 	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.NoError(e.Startup(t.Context()))
 
 	db, err := e.db.Shard(1)
@@ -72,7 +72,7 @@ func TestPeerFault_BlindHoldsThePoolsAndFailsOpen(t *testing.T) {
 	addPeerRow(t, e, 5001)
 	addPeerRow(t, e, 5002)
 	assert.Equal(3, e.replicasOn(1))
-	assert.Equal(open8(e, 1, 3), awaitPoolSize(t, db, open8(e, 1, 3)), "1/3 share at three replicas")
+	assert.Equal(shareOf(3), awaitPoolSize(t, db, shareOf(3)), "1/3 share at three replicas")
 	awaitPartition(t, e, 1, 3, -1)
 
 	// The registry stops answering on this shard.
@@ -86,7 +86,7 @@ func TestPeerFault_BlindHoldsThePoolsAndFailsOpen(t *testing.T) {
 	}))
 	time.Sleep(10 * testPeerCadence)
 	assert.Equal(3, e.replicasOn(1), "a failed reading publishes nothing")
-	assert.Equal(open8(e, 1, 3), db.DB.Stats().MaxOpenConnections, "so the pools stay where the last good reading put them")
+	assert.Equal(shareOf(3), db.DB.Stats().MaxOpenConnections, "so the pools stay where the last good reading put them")
 
 	// The partition, by contrast, is off: the pair is stale and nothing justifies excluding rows on it.
 	_, _, ok := e.partitionOn(1)
@@ -96,7 +96,7 @@ func TestPeerFault_BlindHoldsThePoolsAndFailsOpen(t *testing.T) {
 	// where a database hiccup makes every row look stale at once and every replica would otherwise size for
 	// a fleet of one simultaneously. It settles on the reading after that.
 	e.seams.Withdraw(engineseams.FaultPeerReadErr)
-	assert.Equal(budget8(e, 1), awaitPoolSize(t, db, budget8(e, 1)), "the fleet really did shrink, so the budget comes back")
+	assert.Equal(declaredBudget, awaitPoolSize(t, db, declaredBudget), "the fleet really did shrink, so the budget comes back")
 	assert.Equal(1, e.replicasOn(1))
 }
 
@@ -111,8 +111,8 @@ func TestPeerFault_BlindnessIsPerShard(t *testing.T) {
 	defer e.Shutdown(t.Context())
 	e.testConnCap = 0
 	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
-	assert.NoError(e.SetShard(ShardSpec{Index: 2, VirtualCPUs: 8}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 2, MaxConnections: 48}))
 	assert.NoError(e.Startup(t.Context()))
 
 	db1, err := e.db.Shard(1)
@@ -124,8 +124,8 @@ func TestPeerFault_BlindnessIsPerShard(t *testing.T) {
 		return
 	}
 	addPeerRow(t, e, 6001) // lands on every shard
-	assert.Equal(open8(e, 1, 2), awaitPoolSize(t, db1, open8(e, 1, 2)))
-	assert.Equal(open8(e, 2, 2), awaitPoolSize(t, db2, open8(e, 2, 2)))
+	assert.Equal(shareOf(2), awaitPoolSize(t, db1, shareOf(2)))
+	assert.Equal(shareOf(2), awaitPoolSize(t, db2, shareOf(2)))
 
 	// Blind shard 1 only, then take the peer away everywhere.
 	e.seams.InjectN(engineseams.Join(engineseams.FaultPeerReadErr, "1"), 1<<20)
@@ -136,8 +136,8 @@ func TestPeerFault_BlindnessIsPerShard(t *testing.T) {
 
 	// Shard 2 sees it and regrows; shard 1 cannot, and holds. The two shards' pools are now legitimately
 	// different, derived from different readings of different tables.
-	assert.Equal(budget8(e, 2), awaitPoolSize(t, db2, budget8(e, 2)), "the shard that can read follows the fleet")
-	assert.Equal(open8(e, 1, 2), db1.DB.Stats().MaxOpenConnections, "the blind shard holds its last good reading")
+	assert.Equal(declaredBudget, awaitPoolSize(t, db2, declaredBudget), "the shard that can read follows the fleet")
+	assert.Equal(shareOf(2), db1.DB.Stats().MaxOpenConnections, "the blind shard holds its last good reading")
 	assert.Equal(2, e.replicasOn(1))
 	assert.Equal(1, e.replicasOn(2))
 }
@@ -159,13 +159,13 @@ func TestPeerFault_BeatFailureEvictsFromTheDispatchers(t *testing.T) {
 	worker := NewEngineUnderTest(t.Name())
 	defer worker.Shutdown(ctx)
 	assert.NoError(worker.SetHost(noopHost{}))
-	assert.NoError(worker.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
+	assert.NoError(worker.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.NoError(worker.Startup(t.Context()))
 
 	peer := NewEngineUnderTest(t.Name())
 	defer peer.Shutdown(ctx)
 	assert.NoError(peer.SetHost(noopHost{}))
-	assert.NoError(peer.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
+	assert.NoError(peer.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.NoError(peer.Startup(ctx))
 	t.Cleanup(func() { peer.Shutdown(ctx) })
 

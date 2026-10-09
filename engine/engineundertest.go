@@ -87,5 +87,5 @@ func init() {
 	engineseams.SetMaxOpenConns = func(eng any, n int) error { return eng.(*Engine).setMaxOpenConns(n) }
 	engineseams.SetRefillInterval = func(eng any, d time.Duration) error { return eng.(*Engine).setRefillInterval(d) }
 	engineseams.SkipBacklogGauges = func(eng any, skip bool) error { eng.(*Engine).skipBacklogGauges.Store(skip); return nil }
-	engineseams.ShardBudget = shardBudget
+	engineseams.ShardBudget = func(rttMs float64, serverMax int) int { return shardBudget(ShardSpec{}, rttMs, serverMax, "pgx") }
 }

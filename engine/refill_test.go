@@ -121,7 +121,7 @@ func TestRefillInterval_OverridePinsAndRestores(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(NewHostMux()))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.NoError(e.Startup(t.Context()))
 
 	derived, tallyGap := e.pistons[1].TallyCadence()
@@ -164,7 +164,7 @@ func TestRefillInterval_OverridePinsAndRestores(t *testing.T) {
 }
 
 // TestRefillInterval_DerivedFromStaticConfig pins the period's derivation. It is arithmetic over values
-// known at Startup - capacity, declared vCPUs, observed replicas - and reads NO observed rate, which is
+// known at Startup - capacity, the pool, observed replicas - and reads NO observed rate, which is
 // the distinction that matters: the version that set the interval from measured consumption oscillated
 // (same scan count and batch as a fixed period, ~1,000x the discard, 2.4x the p99) because consumption is
 // min(demand, supply). Static arithmetic cannot do that.
@@ -176,47 +176,29 @@ func TestRefillInterval_DerivedFromStaticConfig(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	// The DERIVED path: a shard's pool is connsPerVCPU*vCPUs/R, so the two drain channels agree and the
-	// min is a no-op. The measured rig: 8 vCPUs, R=1 -> a 48-conn pool and a 768-candidate partition
-	// share. The configuration terms cancel (bufferShare is 96*vCPUs/R and the sustained drain
-	// 720*vCPUs/R), so the derived period is 96/(2*720) ~= 67ms and is the SAME at any vCPU or replica
-	// count. 67ms sits inside the measured-good band (10-80ms on the 2026-07-22 rig M-sweep); the earlier
-	// 340 constant put it at 141ms, the worst point in that band.
-	rig := deriveRefillInterval(768, 8, 48, 1, max(1, 768/2))
+	// The DERIVED path: the cache is 2 x workersPerConnBudget x the pool, so the buffer share and the drain
+	// both scale with the pool and cancel - the period is 16/(2*120) ~= 67ms at any budget or replica count.
+	// 67ms sits inside the measured-good band (10-80ms on a 16-vCPU M-sweep).
+	rig := deriveRefillInterval(768, 48, max(1, 768/2))
 	assert.True(rig > 60*time.Millisecond && rig < 74*time.Millisecond,
 		"expected ~67ms at the measured configuration, got %v", rig)
-	// Doubling vCPUs doubles the buffer share, the pool, AND the drain, so the period is unchanged.
-	assert.Equal(rig, deriveRefillInterval(1536, 16, 96, 1, max(1, 1536/2)))
-	// Same for replicas: R halves the share, the pool, and the per-replica drain together.
-	assert.Equal(rig, deriveRefillInterval(384, 8, 24, 2, max(1, 384/2)))
+	// Doubling the pool doubles the buffer share and the drain, so the period is unchanged - at the derived
+	// 250-connection budget too.
+	assert.Equal(rig, deriveRefillInterval(1536, 96, max(1, 1536/2)))
+	assert.Equal(rig, deriveRefillInterval(4000, 250, max(1, 4000/2)))
+	// Same for replicas: R halves the share and the pool together.
+	assert.Equal(rig, deriveRefillInterval(384, 24, max(1, 384/2)))
 
-	// A bigger buffer covers a longer gap; a faster shard (bigger pool) needs more frequent scans.
-	assert.True(deriveRefillInterval(1536, 8, 48, 1, max(1, 1536/2)) > rig)
-	assert.True(deriveRefillInterval(768, 32, 192, 1, max(1, 768/2)) < rig)
-
-	// The FOOTGUN: a large pool pinned with setMaxOpenConns while VirtualCPUs is undeclared.
-	// The buffer is sized off the big pool; the drain must follow the SAME pool. Deriving it from the
-	// default 2 vCPUs instead (the old bug) overshot the period to the 1s cap and starved the refiller -
-	// the rig's 20-80s fan-out latency. With the pool driving the drain, the period stays at the optimum.
-	assert.True(deriveRefillInterval(3072, 0, 192, 1, max(1, 3072/2)) > 60*time.Millisecond && deriveRefillInterval(3072, 0, 192, 1, max(1, 3072/2)) < 74*time.Millisecond,
-		"a big pinned pool with undeclared vCPUs must derive drain from the pool, not clamp to the cap")
-	// The SAME buffer on a genuinely slow 2-vCPU shard (small pool to match) correctly caps - it really
-	// is that slow. The fix distinguishes "big pool, vCPUs just unset" from "actually a 2-vCPU shard".
-	assert.Equal(refillIntervalCap, deriveRefillInterval(3072, 2, 12, 1, max(1, 3072/2)))
-
-	// Both provided, connection-constrained (32-vCPU DB behind a 48-conn pooler): the drain follows the
-	// tighter CONNECTION channel, identical to leaving the vCPUs unset.
-	assert.Equal(deriveRefillInterval(768, 0, 48, 1, max(1, 768/2)), deriveRefillInterval(768, 32, 48, 1, max(1, 768/2)))
-	// Both provided, CPU-constrained (4-vCPU DB with an over-provisioned 192-conn pool): the drain
-	// follows the tighter CPU channel, so the extra connections do not shorten the period.
-	assert.Equal(deriveRefillInterval(768, 4, 24, 1, max(1, 768/2)), deriveRefillInterval(768, 4, 192, 1, max(1, 768/2)))
+	// A bigger buffer covers a longer gap; a bigger pool drains faster and needs more frequent scans.
+	assert.True(deriveRefillInterval(1536, 48, max(1, 1536/2)) > rig)
+	assert.True(deriveRefillInterval(768, 192, max(1, 768/2)) < rig)
 
 	// The cap governs where the cancellation breaks - workersDispatch's max(64, ...) floor at small or
 	// high-R configurations - and degenerate inputs fall back to it rather than to zero, which would
 	// restore the 100%-duty-cycle hot loop.
-	assert.Equal(refillIntervalCap, deriveRefillInterval(4096, 2, 2, 8, max(1, 4096/2)))
-	assert.Equal(refillIntervalCap, deriveRefillInterval(0, 8, 48, 1, max(1, 0)))
-	assert.Equal(refillIntervalCap, deriveRefillInterval(768, 0, 0, 1, max(1, 768/2)), "zero pool -> zero drain falls back to the cap, never a 0 divide")
+	assert.Equal(refillIntervalCap, deriveRefillInterval(4096, 2, max(1, 4096/2)))
+	assert.Equal(refillIntervalCap, deriveRefillInterval(0, 48, max(1, 0)))
+	assert.Equal(refillIntervalCap, deriveRefillInterval(768, 0, max(1, 768/2)), "zero pool -> zero drain falls back to the cap, never a 0 divide")
 
 	// There is still deliberately NO floor in the formula - what keeps a degenerate configuration from
 	// becoming a 100%-duty-cycle loop is the pipeline's MinGap, which bounds the quiet time BETWEEN cycles
@@ -224,8 +206,8 @@ func TestRefillInterval_DerivedFromStaticConfig(t *testing.T) {
 	// that outruns it, which is exactly the deep-backlog case the fuse is for). This case is what holds that
 	// comment honest: a period two orders of magnitude UNDER the gap is still derivable, so a period-side
 	// floor added here would be caught rather than passing silently.
-	assert.True(deriveRefillInterval(1, 0, 384, 1, 384) < pipeline.DefaultMinGap,
-		"the formula may derive a period far under the gap: got %v", deriveRefillInterval(1, 0, 384, 1, 384))
+	assert.True(deriveRefillInterval(1, 384, 384) < pipeline.DefaultMinGap,
+		"the formula may derive a period far under the gap: got %v", deriveRefillInterval(1, 384, 384))
 	//
 	// But the WORKER term now bounds it from below anyway, and that is the point of carrying it. A small
 	// buffer means few workers, which means a slow drain, so the two move together instead of the buffer
@@ -233,16 +215,16 @@ func TestRefillInterval_DerivedFromStaticConfig(t *testing.T) {
 	// channel the period settles at share/(2 * 120 * share/2) = 1/sustainedDrainPerConn ~= 8.3ms,
 	// independent of the buffer - where without the term SetWorkers(1) against a 30-connection pool derived
 	// 0.28ms, an order of magnitude under the gap, which then silently became the supply rate.
-	assert.Equal(deriveRefillInterval(2, 64, 384, 1, 1), deriveRefillInterval(8, 64, 384, 1, 4),
+	assert.Equal(deriveRefillInterval(2, 384, 1), deriveRefillInterval(8, 384, 4),
 		"once workers bind the drain, the period is independent of the buffer")
-	assert.True(deriveRefillInterval(2, 64, 384, 1, 1) > 8*time.Millisecond,
-		"and it cannot collapse under the gap: got %v", deriveRefillInterval(2, 64, 384, 1, 1))
+	assert.True(deriveRefillInterval(2, 384, 1) > 8*time.Millisecond,
+		"and it cannot collapse under the gap: got %v", deriveRefillInterval(2, 384, 1))
 }
 
 // TestRefillInterval_IndependentOfShardCount pins the per-shard scoping of the drain's worker term, which
 // the arithmetic tests above cannot reach: deriveRefillInterval is handed a dispatcher count, and it is
-// recomputeRefillIntervals that decides WHOSE. Every other term is per-shard - the pool is that shard's, the
-// vCPU ceiling is that shard's - so the crew must be too. Crediting the whole replica's crew to each shard
+// recomputeRefillIntervals that decides WHOSE. Every other term is per-shard - the pool is that shard's - so
+// the crew must be too. Crediting the whole replica's crew to each shard
 // over-states the drain by exactly N and divides the period by it, which lands right back in the over-supply
 // regime the worker term was added to close: an 8-shard engine at SetWorkers(8) derives 1.04ms rather than
 // 8.33ms, so eight supply loops plan+fetch+push at ~1ms against eight workers total.
@@ -260,7 +242,7 @@ func TestRefillInterval_IndependentOfShardCount(t *testing.T) {
 		assert.NoError(e.SetHost(noopHost{}))
 		assert.NoError(e.SetWorkers(8))
 		for idx := 1; idx <= shards; idx++ {
-			assert.NoError(e.SetShard(ShardSpec{Index: idx, VirtualCPUs: 8}))
+			assert.NoError(e.SetShard(ShardSpec{Index: idx, MaxConnections: 48}))
 		}
 		assert.NoError(e.Startup(t.Context()))
 	}

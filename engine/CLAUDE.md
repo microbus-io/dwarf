@@ -127,9 +127,9 @@ engine:
 
 - **Live** (take effect immediately, callable any time): `SetTimeBudget`, `SetDefaultPriority`, and the
   test/bench overrides reached through `internal/engineseams` - `setMaxOpenConns` (pins every shard's pool
-  exactly) and `setRefillInterval`. **There is no production way to pin the pool, by decision:** a pin cannot
-  follow the database's size or distance, and the one case it served - a database shared with other workloads -
-  is not supported. `SetTimeBudget`/`SetDefaultPriority` are read fresh at each `Create` (an
+  exactly, per replica) and `setRefillInterval`. The production lever is construction-time, not live:
+  `ShardSpec.MaxConnections` declares a shard's fleet-wide budget (see "Connection pool sizing").
+  `SetTimeBudget`/`SetDefaultPriority` are read fresh at each `Create` (an
   existing flow keeps the budget/priority frozen at its own `Create`). Which replicas dispatch a shard, and so how its
   derived budget divides, is NOT a setter - it is **read** live from the shared `dwarf_peers` registry (see "Peer
   discovery" and "Dispatchers" below), and `recomputePools` pushes each shard's recomputed size through the per-shard
@@ -866,19 +866,19 @@ ROW regardless of how many rows the pass then fetches**, which is why sizing the
 for scanning less often.
 
 *The number is DERIVED at Startup and re-derived in `recomputePools`*, per shard, from static configuration
-only - capacity, that shard's declared vCPUs, and the observed replica count. It reads **no observed rate**,
+only - capacity, that shard's pool, and the observed replica count. It reads **no observed rate**,
 and that is the whole distinction: an interval set from measured *consumption* oscillates (consumption is
 `min(demand, supply)`, so the actuation contaminates its own measurement) and was measured doing exactly
 that. Static arithmetic cannot. It lives on the same "every path that changes a pool must re-derive what
 depends on it" rule as the dispatch count and the cache, because it is measured against the cache's
-capacity. The arithmetic: workers drain a partition at `drain = sustainedDrainPerVCPU·vCPUs/R` candidates/s
-and a pass hands it at most `capacity/N = 96·vCPUs/R`, so `T = bufferShare/(headroom·drain)` — which is
+capacity. The arithmetic: workers drain a partition at `drain = sustainedDrainPerConn·pool` candidates/s
+and a pass hands it at most `capacity/N = 16·pool`, so `T = bufferShare/(headroom·drain)` — which is
 exactly **the time the workers take to drain ONE buffer's worth**, since `headroom = 2` and the buffer is
 `2 x` the drain. Read it that way and the whole formula is one sentence: *refill when half the partition
 has been consumed.*
 
 **THE WORKER COUNT BOUNDS THE DRAIN, and omitting it makes a pinned `SetWorkers` derive nonsense.** Workers
-are what consume candidates, so `drain = min(sustainedDrainPerConn·min(conns, dispatchers), CPU channel)`:
+are what consume candidates, so `drain = sustainedDrainPerConn·min(conns, dispatchers)`:
 one worker cannot drain a connection budget's worth however many connections exist. Without the term the
 buffer shrinks with the worker count (capacity is twice it) while the assumed drain does not, and the period
 collapses — measured at **0.28ms for `SetWorkers(1)` against a 30-connection pool**, an order of magnitude
@@ -896,15 +896,17 @@ and lets the divisor bite only below that, which is the whole point of carrying 
 is the coarsest divisor that stays clear of the period at the derived low end. The TALLY loop keeps the flat
 constant unclamped: it fills no buffer, so it has no drain
 to derive from, and its fuse is against a scan outrunning its own interval — a different quantity. Substituting
-the engine's own constants (`6·vCPUs/R` conns, `8x` dispatch workers, `2x` cache; `sustainedDrainPerVCPU` =
-**720**, the MEASURED sustained drain of ~120 steps/s/conn × the 6 conns/vCPU, not `capacityWeight`'s 450
-placement peak) gives `96/(2·720)` ≈ **67ms with vCPUs and R cancelling** - capacity and drain both scale in
-`vCPUs/R`, so their ratio is configuration-independent. That is *why* one constant works. `headroom` =
+the engine's own constants (`8x` dispatch workers, `2x` cache, `sustainedDrainPerConn` = **120**, the
+MEASURED sustained drain per connection) gives `16/(2·120)` ≈ **67ms with the pool cancelling** - capacity
+and drain both scale with it, so their ratio is configuration-independent. That is *why* one constant works,
+and why no measure of the database's size enters it. `headroom` =
 **2.0**, chosen for MAXIMUM THROUGHPUT (see the measured paragraph): a ~2x supply buffer absorbs the
 drain-rate jitter that briefly stalls workers at a tighter margin. Two caveats before treating the value as
-universal: `workersDispatch`'s `max(64, …)` floor breaks the cancellation on small deployments, and 720
-steps/s/vCPU is workload-shaped (a byte-heavy or fan-out shape drains slower, which makes the optimum
-interval **longer**).
+universal: `workersDispatch`'s `max(64, …)` floor breaks the cancellation on small deployments, and 120
+steps/s/conn is workload-shaped (a byte-heavy or fan-out shape drains slower, which makes the optimum
+interval **longer**) - and it was measured on pools of up to ~100. At the 250-connection budget a
+connection drains far less (16 vCPU: ~8,500 steps/s over 200), so the derived period over-supplies there;
+the expected cost is scans and discarded candidates rather than throughput, but it is unmeasured.
 
 **Do NOT re-derive `headroom` from "waste" (discarded/selected).** Waste looked like the tuning lever on an
 IOPS-throttled disk, where slow dispatch piled up a deep pending backlog and the refiller over-supplied it
@@ -937,10 +939,9 @@ engine (see the IOPS finding below), so the exact optimum was unresolvable. On a
 shard** (IOPS non-binding, spread collapsed to ~4%): throughput peaked at **110-150ms** and fell off ~15% by
 ~260ms. The constant encodes the drain per CONNECTION, measured directly by an M-sweep - sustained ~120
 steps/s/conn, roughly flat across connection counts, instance sizes, and backlog volumes - which gives
-`sustainedDrainPerVCPU` 720 and the reference floor **67ms**, inside a flat-good 10-80ms band at high
-connection counts. (The peaks above were taken on different rigs/loads; the connection rate held across the
-widest range, and a validation sweep measured 67ms beating 141ms - what a 340 steps/s/vCPU constant derives -
-by ~50% at M=8 and M=64.) headroom is **2.0**: the decline past the peak is drain-rate jitter stalling workers
+the reference floor **67ms**, inside a flat-good 10-80ms band at high connection counts. (The peaks above
+were taken on different rigs/loads; the connection rate held across the widest range, and a validation sweep
+measured 67ms beating 141ms by ~50% at M=8 and M=64.) headroom is **2.0**: the decline past the peak is drain-rate jitter stalling workers
 at a tight buffer, which a ~2x buffer absorbs.
 
 **Do not replace the static formula with an adaptive one - three were built, measured, and lost.**
@@ -1075,8 +1076,8 @@ runs only when a replica dies without draining - a graceful shutdown releases it
 rates: `recoverExpiredLeases` every tick (1m), the heavy detectors every `heavyRepairEvery`-th (5m), since they
 carry 5-minute age guards and running them more often finds nothing. The tick's cost is the lease reset's scan:
 it reads every `running` non-parked row (`lease_expires` is not a seekable key in the selection index), so it
-grows with the in-flight count, and every dispatcher of a shard runs it, up to ~16 at 64 vCPU - about one scan
-of the in-flight set every 4s per shard at the top end, against a piston scanning ~15 times a second. Making that
+grows with the in-flight count, and every dispatcher of a shard runs it, up to four - about one scan
+of the in-flight set every 15s per shard at the top end, against a piston scanning ~15 times a second. Making that
 scan O(expired) would need a `lease_expires` index on `running` rows, maintained on every claim and completion of
 the hottest table; not worth it at this rate. The orphan-flow repair (Background Recovery #3) keeps its
 5-minute floor through `orphanFlowThreshold`, so a crash between a step's completion and its transition still
@@ -2460,183 +2461,66 @@ per step is the wrong unit - it costs more per FLOW, while most of its STEPS are
 successor and advance no `step_id`. Constants, their portability, and the normalization formula are in
 `bench/CLAUDE.md`; the operator-facing version is in `docs/benchmark-cloud.md` and `docs/deployment.md`.
 
-**Connection pool sizing - fact-derived per shard (`poolsize.go`).** The operator provides facts on
-`ShardSpec` and the engine owns the measured constants (measured on managed cloud Postgres, `docs/benchmark-cloud.md`):
+**Connection pool sizing - a constant budget, ramped by distance, clamped by the server (`poolsize.go`).**
+Each shard has a fleet-wide BUDGET that its dispatching replicas divide (`shardBudget`, sized once per run at
+Startup into `shardSizing`):
 
-- **Two declared facts and one probe drive each shard's pool**, `idle = open` (an idle cap below the ceiling
-  churns connections; `ConnMaxIdleTime` sheds an unused pool).
-  `ShardSpec.VirtualCPUs` and the shard's Startup-probed RTT index `poolRatio`, a tier x RTT-bucket table
-  of connections per vCPU (`connsPerVCPUFor`); the resulting whole-database budget is split by that
-  shard's replica count. The cell-by-cell derivation, and which cells rest on measurement, live in
-  `poolsize.go` - what follows is the part that radiates.
+- **`ShardSpec.MaxConnections`, when set, is the budget exactly** - the operator's one lever, used as given
+  with no ramp and no clamp. Declared fleet-wide, like the shard set.
+- **Otherwise 250, ramping linearly to 500 between 0.25 and 1 ms of probed RTT, clamped to half the server's
+  `max_connections`, floored at 2. SQLite takes a fixed `sqliteBudget` (8)** - one writer at a time, so more
+  connections only queue on its write lock, and it reports no limit to clamp against. An unprobed shard takes
+  the near budget (a failed probe must not inflate a pool). `idle = open`; `ConnMaxIdleTime` sheds a pool load
+  has left (an idle cap below the ceiling churns connections).
 
-  **A vCPU-only ratio is indexed to the wrong variable.** A connection held while a packet is in flight
-  does the server no good, so the load a database sees is the duty cycle `M · s/(k·RTT+s)`, not `M`:
-  a 16-vCPU shard at 4.8 ms ran **33% DB CPU with its pool pinned 96/96**, two thirds of the instance
-  unreachable. Compensating held throughput at **93-100% of base across 0.14 -> 5.07 ms**. The ratio
-  therefore **rises with distance** - roughly 2x from the 0.25 ms column to the 2.00 ms one on every tier
-  measured.
+  **Do not size the pool per vCPU.** Measured saturated near (0.25 ms) on Cloud SQL 4/8/16/32/64 vCPU, 250
+  connections beat a 3-6-per-vCPU pool on every tier (+42/+7/+15/+10/+10%) and ran stable on 4 vCPU, where
+  125 and 250 performed alike. Do not reinstate a cap on the evidence of a collapse past the knee measured
+  before `claimEligible`: the claim's partial-index plan flip produced stalls of exactly that shape.
+  Throughput keeps rising slowly past 250: on 16 vCPU 59/73/88/192/384 connections gave
+  5,478/6,651/6,647/7,802/8,185 steps/s, the gain being group commit (commits per WAL flush 22 -> 70). So 250
+  sits on the shoulder, not at a knee; the 64-vCPU tier measured +14% at 500 and is what the lever is for.
 
-  ⚠️ **THE RATIO'S TREND ACROSS TIERS IS NOT ESTABLISHED, and a monotonic claim here was measured false.**
-  The measured base ratios run 3.0 / 3.0 / 3.0 / 5.0 / 5.0 / 3.75 / 2.25 at 1/2/4/8/16/32/64 vCPU - not
-  monotonic in either direction, with the LARGEST tier measured needing the least - and the arms were not
-  held at a matched fraction of each tier's own ceiling (~70% / ~71% / ~93% / ~66% / ~78% at 4/8/16/32/64).
-  Since `s` inflates as a tier approaches its ceiling, part of that spread measures how hard each was
-  pushed rather than the tier itself. Comparing rows needs arms at matched utilisation, which no campaign
-  has run.
+  **The constant is not a fraction of `max_connections`**, because that limit is not set sensibly everywhere
+  (MySQL 151, SQL Server 32,767, a pooler fronting anything); it enters only as the half clamp, which keeps a
+  small server's limit from being consumed (a 4-vCPU Cloud SQL instance, limit 500, at 1 ms) and makes a
+  server configured small (stock Postgres, 100) take 50.
 
-  ⚠️ **THE RTT SLOPE IS NOT UNIFORM ACROSS TIERS EITHER**, which the 64-vCPU sweep exposed: it rises 2.7x
-  from base to 2 ms (2.25 -> 6.00) against 1.8x at 16 and 2.3x at 32. So on that tier the model was wrong
-  in BOTH directions at once - over-provisioning 2.0x at base while under-compensating at distance - and
-  reading only the far column hides the first error behind the second. A row past 64 vCPU would need its
-  own sweep to know which direction it errs in; do not assume.
-
-  **BOTH AXES INTERPOLATE, BUT NOT THE SAME WAY.** `M*` is smooth in RTT, so a bucket edge is an artifact
-  of storing a curve as a table and a 0.9 ms path lands 80% of the way from the 0.50 column to the 1.00
-  one - a plain linear blend (`ratioAtRTT`). The tier axis is smooth in **log(vCPUs)**, not vCPUs - `B*` is
-  a power law and the rows are roughly an octave apart, uniformly spaced in log space - so a 24-vCPU shard
-  is blended between the 16- and 32-vCPU rows in **log-log** space (`tierBracket` + the `math.Log`/
-  `math.Exp` pair in `connsPerVCPUFor`): linear in log(ratio) against log(vCPUs), exact at every tabulated
-  tier (the interpolation fraction lands at exactly 0 or 1 there), and mathematically identical whether
-  the blend runs on the ratio or on the raw connection count (the vCPU term cancels - see the proof at the
-  function). A failed probe lands in the first RTT column rather than on an assumed distance - the same
-  posture `defaultRTTMs` takes for `workerCeiling`.
-
-  ⚠️ **THE TABLE STOPS AT 64 vCPU - EVERY ROW IN IT IS MEASURED, AND THERE IS NO MODELLED ROW PAST IT.**
-  Every cell is the smallest pool that sustained that distance's achievable throughput, with
-  `poolSafetyMargin` (1.2) applied on top by `connsPerVCPUFor` - so the table holds raw minima and the
-  slack stays one number in one place. A shard declared larger than 64 vCPU falls back to the 64-vCPU row
-  flat (no second point to interpolate against) - the safe direction, since 64 vCPU is the LOWEST ratio
-  measured and under-connecting costs throughput rather than collapsing the database. **The measured cells
-  sit well below every collapse observed**, which is the direction to keep them in: 8 vCPU derives 48 at
-  0.25 ms against the one 8-vCPU arm that ever collapsed, at **M=70** (bracketed by healthy arms at M=50
-  and M=90, n=1), and 1 vCPU derives 3 against a peak at **M=16** and a collapse from **M=32**. The
-  exposure a re-measurement should look for is therefore starvation at the top of a tier's range, not
-  collapse. Adding a row past 64 vCPU is gated on the load generator, not the database - size it before
-  booking a rig (`bench/CLAUDE.md`).
-
-  ⚠️ **A COLLAPSED ARM IS A TRANSIENT CAUGHT BY THE WINDOW, NOT A THRESHOLD - and every cell here was
-  measured on a 120s one.** The stall lasts ~30s and recurs; below the ceiling it clears itself with the
-  offered rate unchanged, so a 120s window aliases it and reports one of two answers depending where it
-  landed. Measured at one pool and one rate on the 64-vCPU sweep: **9,183 steps/s with a 75s p50 in one
-  window, 19,685 (98.4% of command) in another**. Three distance arms then showed a collapsed pool
-  bracketed by WORKING pools on both sides (256 between 224 and 320 at 0.5 ms; 320 between 256 and 384 at
-  1.5 ms), which no threshold can produce. Consequences: never place a stability boundary from a collapsed
-  arm, read every cell as "smallest pool that sustained in every arm it ran, with a tail comparable to
-  larger pools" rather than as an edge, and **state the window length beside any throughput number from
-  this system**. The cells are placed from where STARVATION ends, which is the reproducible half - at
-  0.5 ms on 64 vCPU the pool ladder 128/160/192/224 gave a clean monotonic 40/70/85/97% of command.
-
-  🔑 **SIZE A CELL BY COMMANDING ABOVE SATURATION AND READING THE 600s MEAN - do not go back to
-  "smallest pool that sustained rate R".** That older form has to CHOOSE R, and the choice decides the
-  answer (the existing arms landed anywhere from 66% to 93% of their own tier's ceiling, which is why the
-  rows are not comparable with each other); worse, "sustained it" is a BINARY that a short window decides
-  by where a stall happened to land. Commanding above saturation removes both: the machine's own maximum
-  needs no target, and the metric becomes a continuous mean that AVERAGES a transient instead of being
-  flipped by it. The answer is the pool at which the mean stops improving.
-  Measured this way on 8 vCPU at 0.15ms, 600s windows, 4,000 steps/s commanded against a ~3,100-3,260
-  sustained: **2,102 / 2,419 / 2,927 / 3,263 / 3,115 steps/s at M = 24 / 32 / 40 / 48 / 64** - a plateau
-  exactly at the shipped 6.0x, with 5.0x (the raw minimum) reaching only 89.7% of the machine. So
-  `poolSafetyMargin` is not only tail insurance on this tier; it is what closes the last 10% of
-  throughput.
-
-  **16 vCPU at 0.064ms agrees that 6.0x is the right operating point, by a different route:**
-  4,469 / 5,176 / 6,221 / 6,006 / 6,442 / 6,826 / 6,672 steps/s at M = 48 / 64 / 80 / 96 / 128 / 160 / 192
-  (3x to 12x per vCPU). The rise from 3x to ~5x is large and real (+39%); everything from 5x upward is
-  FLAT WITHIN NOISE. So 6.0x sits on the plateau rather than below it, and buying the last few percent
-  would cost roughly a doubling of connections - the same trade a separate measurement found from the
-  other direction ("6x captures 90-94% of peak at every tier; the last 6-10% costs roughly a doubling",
-  `bench/CLAUDE.md`). Tail moves the OTHER way past the plateau: p99 climbed 36.8s -> 90.5s -> 106.1s from
-  5x to 10x to 12x while p50 fell, which is the over-connection direction showing up as tail rather than
-  collapse.
-
-  🔑 **THE RUN-TO-RUN NOISE FLOOR IS TIER-DEPENDENT AND CAN BE ~10%, SO ESTABLISH IT BEFORE READING ANY
-  CURVE.** 8 vCPU measured ~5% on identical arms (3,105 vs 3,263). 16 vCPU measured **~10%**, caught only
-  because an arm with 0.1ms of ADDED netem delay beat its own base-distance twin by 10.1% (6,613 vs
-  6,006) - which no distance effect can produce, so it prices the noise directly. Reading the 16-vCPU
-  curve against the 8-vCPU floor produces two false findings: a "plateau at 10x" and an 80-vs-96 inversion,
-  both of which are scatter. **Budget a repeated arm per campaign to price the
-  floor**, and treat within-condition comparisons (same distance, same session, adjacent arms) as the only
-  ones resolving anything finer - at 0.169ms, 96 beat 80 by 11.3%, which is such a comparison and stands.
-  Two design rules for the next such sweep: pin the pool (an unpinned one moves with probe variance, see
-  below) and set `-max-outstanding` LOW so every arm is closed-loop at the SAME backlog depth - otherwise
-  the starved arms sit at a deeper backlog and pay an extra O(backlog) scan penalty the healthy ones do
-  not, biasing the comparison toward the larger pool.
+  **Distance is why the ramp exists.** A connection held while a packet is in flight does the server no good,
+  so the load a database sees is the duty cycle `M · s/(k·RTT+s)`, not `M`. At 1 ms, 400-500 connections
+  recovered what distance cost 200-250 (16 vCPU 8,373 vs 8,006; 64 vCPU 24,254 vs 19,567). Past ~1.5-2 ms a
+  large instance cannot be fully compensated at any pool (4 ms on 32 vCPU would need ~1,163), so the ramp
+  holds 500 beyond 1 ms and the answer at distance is co-location or more shards.
 
   ⚠️ **THE STARTUP RTT PROBE IS TAKEN IDLE AND IS ~HALF THE LOADED VALUE, AND ITS VARIANCE MOVES THE
-  POOL.** On one 8-vCPU rig: idle probe **0.157-0.182 ms**, RTT under load **p50 0.34-0.38 ms** across
-  every rate and pool tried (the median is remarkably invariant; only p95 moves, 0.56 -> 2.17 ms with
-  load). So the value indexing `poolRatio` is systematically about half what the engine then experiences.
-  It happens not to matter at 8 vCPU - both land in the first column - but a "fix" that probed under load
-  would interpolate to ~7.4x and inflate that pool ~25% for no measured gain. More immediately: **two runs
-  of the identical command line derived 48 and 64 connections** because one probe landed under 0.25 ms and
-  the other at ~0.39 ms, and the probe is taken ONCE and held for the process lifetime - so a replica that
-  starts during a latency blip is mis-sized for as long as it runs. Pin the pool in any sweep whose axis
-  is not RTT.
+  BUDGET.** On one 8-vCPU rig: idle probe **0.157-0.182 ms**, RTT under load **p50 0.34-0.38 ms**. Idle probes on
+  one same-zone rig drifted 0.13-0.21 ms across an evening, and same-zone placements span 0.05-0.96 ms, so a
+  shard near the ramp's start can land either side of it. The probe is taken ONCE and held, so a replica
+  that starts during a latency blip keeps that budget for its life. Do not "fix" it by probing under
+  load - that would move every near shard up the ramp for no measured gain. **Pin the pool in any sweep whose
+  axis is not RTT.**
 
-  ⚠️ **THE TIER AXIS INTERPOLATES RATHER THAN ROUNDS UP, BECAUSE THE TABLE IS NOT MONOTONIC.** Rounding a
-  declared size up to the first tabulated row >= it would derive FEWER connections for everything from 33
-  to ~63 vCPUs than a 32-vCPU shard gets, because `shardBudget` would then multiply a SMALLER ratio (64's)
-  by a LARGER vCPU count only past the 64 boundary, not before it: on a non-monotonic table, rounding
-  under-connects a whole band, not just nicks a boundary. Those are real classes (AWS sells 40- and
-  48-vCPU database instances; Cloud SQL custom types take any even count), and the direction is starvation
-  - the failure mode every measured tier exhibits, and which the saturation sweep priced at -10%
-  throughput for a pool 17% short and -36% for one 50% short. `tierBracket`'s log-log blend (above) avoids
-  this: 24 -> 121, 32 -> 144, 40 -> 152, 48 -> 160, 56 -> 166, 64 -> 172 - monotonically rising the whole
-  way, exact at every tabulated tier, no change to the table's cells. Do NOT round up instead of
-  interpolating, and do NOT "fix" a future non-monotonic measurement by editing cells back toward
-  monotonicity; sweep the tier that disagrees.
+  ⚠️ **COUNT BACKENDS, NOT CONNECTIONS, before calling a far-RTT budget an over-connection.** At 1 ms a
+  connection is inside the database well under half the time, so 500 connections are far fewer active
+  backends. 384 connections on 16 vCPU ran ~338 active and was the steadiest run of its campaign.
 
-  **`defaultVirtualCPUs` sits well inside the measured 1-vCPU range.** An undeclared shard assumes 2 vCPUs
-  and derives **7** at the reference distance, against a 1-vCPU tier measured to sustain its load on 3 and
-  to run clean at 14. The RDS floor argument also holds (every current-generation class starts at 2, so
-  the guess cannot undershoot there). What it cannot do is use a large database.
+  ⚠️ **COLLAPSE IS A TRANSIENT CAUGHT BY THE WINDOW, NOT A THRESHOLD.** A stall of ~30s recurs and clears
+  itself with the offered rate unchanged, so a short window reports one of two answers depending where it
+  landed (one pool and rate on 64 vCPU: 9,183 steps/s with a 75s p50 in one 120s window, 19,685 in another),
+  and a collapsed arm has been bracketed by working pools on both sides. Never place a stability boundary
+  from a collapsed arm, and **state the window length beside any throughput number from this system**.
 
-  ⚠️ **COUNT BACKENDS, NOT CONNECTIONS, before calling a large-RTT cell an over-connection.** The 2.00 ms
-  cell for 32 vCPU is 336 connections against an observed collapse at 430 - but at that distance only
-  ~41% are inside the database at once, so it is **~138 backends, fewer than the 183 the healthy knee
-  carried** and far from the collapsed arm's 414. Any cap belongs on backends or on the operator's
-  configured `max_connections`, never on a connection count read without its RTT. **There is no such cap
-  today** - a 128-vCPU shard at 2 ms derives ~921, which exceeds some defaults; the engine trusts
-  declared facts here exactly as it does for an over-declared `VirtualCPUs`.
+  🔑 **MEASURE A POOL BY COMMANDING ABOVE SATURATION AND READING THE MEAN** (a capped backlog, a 16-minute
+  window, minute slots), not by "the smallest pool that sustained rate R": that form has to choose R, and
+  the choice decides the answer, while a binary "sustained it" is flipped by where a stall landed.
 
-  ⚠️ **COLLAPSE IS AN EVENT, NOT A THRESHOLD, so no cell here is a safety boundary.** A 32-vCPU shard
-  collapsed at M=430 then ran **clean at M=550 and M=900**; the 8-vCPU collapse above sits below its own
-  knee. **Do not place a stability boundary from any count under ~15 arms per cell** - every cell behind
-  this table is n=1, so each derating is placed below a measured *throughput* knee, which is the only
-  thing the arms can support. The collapse is not a slowdown: active backends spike (177 vs a normal
-  140), `LWLock:BufferContent` triples-to-sevenfolds, `CPU:running` rises ~6% -> ~80%, and throughput
-  drops ~15x. The memory/swap explanation is **refuted** - neither `IO:DataFileRead` nor
-  `IO:BufFileRead` appears in any collapsed arm's top six.
+  🔑 **THE RUN-TO-RUN NOISE FLOOR IS ~5-12% AND RIG-DEPENDENT, SO ESTABLISH IT BEFORE READING ANY CURVE.**
+  Two same-spec 64-vCPU instances measured 25,366 and 28,491 at one pool; two 16-vCPU rigs 7,296 and 8,342 at
+  one pool. Only within-rig comparisons resolve anything finer.
 
-  ⚠️ **A DEGRADED ARM CAN RECOVER UNDER SUSTAINED LOAD, AND A 120s WINDOW IS TOO SHORT TO SEE IT.** On a
-  16-vCPU shard at 0.073ms RTT a stall lasting ~30s cleared itself with the offered rate unchanged, draining
-  a 25,459-step backlog; the same rate measured 3,835-7,001 steps/s across 120s windows and **6,837 at 98%
-  of command across a 300s one**. So the run-to-run spread that reads as bimodality is substantially a
-  WINDOW-LENGTH artifact - a transient either lands inside the window or does not. Always state the window
-  beside a throughput number, and do not read a single short degraded arm as a stable state.
-  Both entry paths - too few connections (starvation) and too many (contention) - deepen the backlog, and a
-  deep backlog is what carries the system into the stall (refill duty cycle measured 18% clean against
-  55-96% in every failing arm). **Size for headroom anyway**: recovery is not instant, the drop-the-rate arm
-  is still unrun, and at a sustained rate ABOVE the ceiling the backlog pins at the caller's outstanding
-  bound and does not drain at all (600s at 8,000 commanded held ~99,500 pending for its last 300s).
+  🔑 **NEVER FIT `k` FROM A LADDER THAT MOVES THE POOL WITH THE RTT.** `M` then becomes a linear function of
+  `(k·RTT+s)` and any growth of `s` with pool size is absorbed into the apparent slope. Fit at a fixed pool.
 
-  **`s` is the mechanism, and WAL is why the large tiers take the conservative branch.** A transaction
-  spans `BEGIN..COMMIT`, so distance lengthens how long it holds rows and locks: `s` rises **+1.45 ms per
-  ms of RTT at 16 vCPU, ~2.2 at 32**, and two arms at the same backend count but different distance
-  differ 27% in `s` and 22% in throughput. `LWLock:WALWrite` is **64-75% of all waits at every knee
-  measured** (75.1/64.4/68.5% at 8/16/32) and WAL is one serialized writer per instance, so `s` cannot
-  keep falling with cores; 64 vCPU and up hold the 32-vCPU curve rather than extrapolate it down.
-  **Full compensation has a ceiling** regardless: 4 ms on 32 vCPU would need ~1,163 connections, so past
-  ~1.5-2 ms a large instance cannot be compensated at all (which is why `poolRTTBuckets` stops at 2 ms and
-  every longer path clamps to that column) and the answer is more shards, not a bigger one. Same-zone RTT spans
-  **0.053-0.96 ms** and cross-AZ same-region is ~1.1 ms -
-  both inside the compensated range; cross-region (10-40 ms) is far outside it.
-
-  🔑 **NEVER FIT `k` FROM A LADDER THAT MOVES THE POOL WITH THE RTT.** `M` then becomes a linear function
-  of `(k·RTT+s)` and any growth of `s` with pool size is absorbed into the apparent slope - such a ladder
-  fits 11.40, which a lightly-loaded fixed-RTT arm refutes arithmetically (M=100 at 4.13 ms occupies
-  44.14 ms, so `k` < 10.70 or `s` is negative). **9.11** stands, fit at fixed pool.
 - **The fleet is known BEFORE any worker dispatches, so pools are sized right the first time - there is no
   async grace window.** Reading the registry needs open connections, so `Startup` opens the shards at a small
   **bootstrap** pool (`startupBootstrapConns`, 4 - enough to register the row, probe the RTT and read the fleet,
@@ -2802,33 +2686,38 @@ pinned 7 turning into 24).
 
 **Dispatchers: a shard's budget divides by a bounded count, not by the fleet (`poolsize.go`).** Dividing the
 budget across every registered replica has a floor, and the floor is what breaks: once `budget/R` drops below
-two, each further replica adds its minimum pool to a budget that does not grow - an 8-vCPU shard's 48 at
-`R=100` becomes 200, **4.2x over**, and over-connection is the collapse direction (the 1-vCPU tier lost 55%
-past its knee). The realistic fleet that reaches it is not a large dwarf deployment but a host scaled wide
+two, each further replica adds its minimum pool to a budget that does not grow - a budget of 48 at `R=100`
+becomes 200, **4.2x over** - and even a large budget split a hundred ways gives every replica a pool too
+small to dispatch from. The realistic fleet that reaches it is not a large dwarf deployment but a host scaled wide
 for its own traffic, every instance paying for connections to shards it barely uses. So each shard has
-`X = dispatcherSlots(spec, R)` **dispatchers** that split the budget, and every other replica holds a
+`X = dispatcherSlots(ref, R)` **dispatchers** that split the budget, and every other replica holds a
 **reader pool** (1 idle, 2 open) and runs no step there - except a demoted one still finishing the steps
 it claimed, which holds a share until they are done (below). Connections per shard become `budget + ~R` held,
 most of the `R` idle, instead of `max(budget, 2R)` active.
 
-- **Two budgets, and they must not be conflated.** The **knee** (`shardBudget`) bounds *active* connections
-  and is what dispatchers divide. **`max_connections`** bounds *held* connections, idle included, and is what
-  readers count against. Subtracting the readers from the knee (`(knee - 2(R-X))/X`) goes negative at 2 vCPU
-  and `R=10`, and shrinks the active pool to make room for connections that are not active.
-- **`X` MUST AGREE ACROSS THE FLEET, so it is derived at `defaultRTTMs`, never at the probed RTT.** Each
-  replica probes its own RTT, so replicas in different zones derive different knees. That is right for the
-  *pool* (a farther replica needs more connections to keep the same backends busy - Little's law - and the
-  server sees roughly the mean) but wrong for `X`, which is the rank cut: two replicas disagreeing on it both
-  claim, or both leave, one slot. `VirtualCPUs` is therefore a fleet-wide fact - a replica declaring a
-  different value for a shard derives a different `X` there.
-- **`X = clamp(round(budgetRef/minDispatcherPool), min(2,C), C)`, where `C` is the CANDIDATES** - the fresh
+- **Two budgets, and they must not be conflated.** The **budget** (`shardBudget`) bounds *active*
+  connections and is what dispatchers divide. **`max_connections`** bounds *held* connections, idle
+  included, and is what readers count against. Subtracting the readers from the budget
+  (`(budget - 2(R-X))/X`) goes negative on a small budget at `R=10`, and shrinks the active pool to make room
+  for connections that are not active.
+- **`X` MUST AGREE ACROSS THE FLEET, so it is derived from the NEAR-distance budget (`shardSizing.ref`),
+  never the probed one.** Each replica probes its own RTT, so replicas in different zones derive different
+  budgets. That is right for the *pool* (a farther replica needs more connections to keep the same backends
+  busy - Little's law - and the server sees roughly the mean) but wrong for `X`, which is the rank cut: two
+  replicas disagreeing on it both claim, or both leave, one slot. `ref` depends only on
+  `ShardSpec.MaxConnections`, declared fleet-wide, and the server's `max_connections`, read from the shared
+  database - so a replica declaring a different `MaxConnections` for a shard derives a different `X` there.
+- **`X = clamp(min(maxDispatchers, round(ref/minDispatcherPool)), min(2,C), C)`, where `C` is the CANDIDATES** - the fresh
   replicas registered `working`, from `Sonar.Rank`, not `Replicas`. Dividing by every registered replica
   would split the budget among dispatchers that do not exist: one worker beside await-only frontends would
   run on a fraction of its shard (pinned by `TestDispatchers_ZeroWorkersPeersDoNotDivideTheBudget`). The floor
   of two is availability, not throughput: one replica dying leaves the other dispatching while the slot
-  passes. `minDispatcherPool` (12) is the smallest slice of a budget worth dispatching from - a piston's
-  queries plus workers to use them - and is an estimate, not a measurement; it yields 2 dispatchers at 1-4
-  vCPU, 4 at 8, 9 at 16, 16 at 64. Lowering it spreads a shard over more replicas with smaller pools.
+  passes. `maxDispatchers` (4) is enough engine CPU for any one shard: a shard tops out near 21-28k steps/s
+  (32-64 vCPU) and one engine core drives ~4,200 linear steps/s, so four dispatchers need ~1.3-1.7 cores each;
+  more would only cut the budget into smaller pools. `minDispatcherPool` (12, an estimate) lowers `X` below
+  four only for a small budget (an operator's lever or SQLite's 8). `ref` - the budget `X` is derived from -
+  leaves out the server clamp as well as the RTT, so a replica whose read of `max_connections` failed still
+  agrees with its peers on `X`.
 - **Which replicas: the Sonar's rendezvous rank** (`internal/peers/CLAUDE.md`), ranks `0..X-1` dispatch.
   Per-shard scores spread the slots across the fleet; "oldest X" would hand every shard to the same few.
   A joining replica can displace a sitting dispatcher on a shard with probability ~`X/(R+1)`; `Join`'s
@@ -2850,7 +2739,7 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
   and due, so a dispatcher's scan takes it and the chain then stays on that dispatcher. The cost is one scan
   cycle once per `Create`/`Resume`/`Fork`/`Continue` issued on a replica that does not dispatch the shard, not
   once per hop. Pinned by `TestDispatchers_ReaderReplicaHoldsTheReaderPoolAndRunsNothing`.
-- **`pickShard` places among dispatched shards when there are any**, capacity-weighted, so a new flow's first
+- **`pickShard` places among dispatched shards when there are any**, by `Weight`, so a new flow's first
   step rings a bell that is answered. A replica dispatching nothing places across every non-cordoned shard.
 - **Only dispatched shards feed the workers.** `workersDispatch`, the cache resize, the worker ceiling (worst
   *dispatched* shard) and the refill share all skip reader shards: a reader pool runs no step, and a 2-connection
@@ -2964,18 +2853,10 @@ engines to assert their solo pool sizes. The latter (`TestPoolSizing_DerivedWork
 each engine `t.Name()+"#"+key`, so each reads R=1. The
 sizing tests drive fleet size by writing fake peer rows (`addPeerRow`/`delPeerRow`, which wait for the Sonars to
 observe the change) rather than through signals.
-- **`VirtualCPUs = 0` (undeclared) assumes `defaultVirtualCPUs = 2`** (pool 7 at the reference distance).
-  The vCPU count is a fact
-  off the spec sheet - something an operator KNOWS - so this covers the zero-config case, not a guess
-  anyone should rely on. It is bounded, not reckless: 2 is the FLOOR of every current-gen AWS RDS class,
-  and on the smaller machines that do exist (Cloud SQL's 1-vCPU `db-custom-1-*`) 7 sits under the measured
-  knee - that tier sustained its load on 3, peaked at M=16 and only collapsed from M=32 up. **Do NOT raise
-  the assumption to 4**: at 2 ms it would derive 48, past the 1-vCPU tier's collapse at M=32, and the guess
-  widens with distance while the machine does not grow. The asymmetry is the whole argument - under-connecting
-  costs throughput but stays healthy (excess load queues client-side, measured benign), over-connecting
-  collapses the database. Consequence to state plainly: an 8-vCPU database left undeclared runs at a
-  fraction of its capacity, and **nothing detects an over-declared `VirtualCPUs`** - the declared facts
-  are trusted, exactly like the shard set.
+- **Nothing detects a wrong `MaxConnections`** - a declared lever is trusted exactly like the shard set.
+  The asymmetry is what makes the derived default safe to leave alone: under-connecting costs throughput but
+  stays healthy (excess load queues client-side), while the half clamp keeps the default off the server's
+  limit.
 - **`setMaxOpenConns` is the test/bench override** (through `internal/engineseams`): pins every shard's pool
   to exactly n (idle = open = n), replacing derivation, for tests and pool-size sweeps.
 - Heterogeneous fleets get heterogeneous pools: sizing is per shard (`database.ShardConfig`), resolved at
@@ -3001,7 +2882,7 @@ The worker count is split into two numbers, because they answer different questi
     sized for the whole budget is handed ~6x more candidates than it can ever claim: stale hints whose claim CAS
     loses to a peer, and wasted round-trips, exactly when the fleet is busiest. It is the same "never size the
     cache from more than the replica can claim" rule that keeps it away from the worker *ceiling*, reached
-    through a different door. Pinned by `TestPoolSizing_CacheFollowsTheReplicaSplit` (768 -> 128 on an 8-vCPU
+    through a different door. Pinned by `TestPoolSizing_CacheFollowsTheReplicaSplit` (768 -> 128 on a 48-connection
     shard at R=8). `Cache.Resize` trims the tail; a trimmed candidate stays `pending` and is re-selected, exactly
     as one pushed past the bound by an `Offer` head-insert already is.
   - The **resident worker set is not re-derived, and it does not need to be** - the crew shrinks itself. Each
@@ -3224,21 +3105,20 @@ when T has both work and free turns. The cheap mitigation, if it ever binds, is 
 a re-peek for a shard with capacity; that variant does not exist today, and **do not add it speculatively —
 add it with the re-peek that uses it.**
 
-**New-flow placement is capacity-weighted (`pickShard`).** Placement is the engine's only load-balancing
-moment - flows are shard-pinned for life (subgraph affinity, thread continuations, forks) - so heterogeneous
-fleets must be loaded in capacity proportion or the smallest shard saturates first while larger ones idle.
-The weight is `capacityWeight(VirtualCPUs)`: proportional to the measured steps/s ceiling (~flat <= 2 vCPUs -
-the 1- and 2-vCPU tiers ceiling near the same throughput - then ~450/vCPU). Unknown-CPU shards get the
-smallest known weight (conservative); all-unknown degrades to uniform. `Cordoned` shards are excluded from
+**New-flow placement is weighted by `ShardSpec.Weight` (`pickShard`, default 1).** Placement is the engine's
+only load-balancing moment - flows are shard-pinned for life (subgraph affinity, thread continuations, forks)
+- so a heterogeneous fleet must be weighted or the smallest shard saturates first while larger ones idle. The
+weight is DECLARED, not inferred from the server's size: capacity is not proportional to vCPUs (16 -> 32 vCPU
+measured x2.46, 32 -> 64 x1.2), so a vCPU-derived weight would misplace exactly the mixed fleets that need
+one. `Cordoned` shards are excluded from
 placement entirely (everything resident proceeds - execution, subgraph children, `Continue`, `Fork`); all
 shards cordoned is a loud 503 at `Create`. Pinned by `engine/poolsizing_test.go`.
 
 **Do not add adaptive/AIMD budgeting.** Discovering each shard's knee online (TCP-style probe-up/back-off)
-would eliminate the last declared fact, `VirtualCPUs` - but that fact is trivial for an operator to supply,
-and a control loop in this engine has already failed on the wrong axis once (the per-task rate valve +
-breaker; see "Backpressure is the task's or host's job"). The remaining exposure is honest and documented: a *wrong*
-declared
-`VirtualCPUs`, or a deployment that isolates each replica's databases from the others (each then reads a
+would chase a curve that has no knee - throughput rises slowly past the budget (group commit) - and a control
+loop in this engine has already failed on the wrong axis once (the per-task rate valve + breaker; see
+"Backpressure is the task's or host's job"). The remaining exposure is honest and documented: a *wrong*
+`MaxConnections`, or a deployment that isolates each replica's databases from the others (each then reads a
 registry containing only itself, sees a fleet of one, and over-connects). Both are declared-fact failures,
 the same contract the shard set already carries. Do not add a controller without a much stronger reason
 than tidiness.
@@ -4161,7 +4041,7 @@ used by `Query.Shard`.
 
 **Shard affinity:** subgraph flows are created on the parent's shard (avoids cross-shard references during
 subgraph completion and history reconstruction). Only top-level flow creation picks a shard - a
-capacity-weighted random pick over non-cordoned shards (see "New-flow placement" above).
+weighted random pick over non-cordoned shards (see "New-flow placement" above).
 
 **`List` uses per-shard pagination, not cross-shard global order.** Each shard returns up to `ceil(limit/numShards)`
 rows by its own `flow_id DESC`; the aggregate is shard-grouped. Cross-shard ordering by `created_at` would compare

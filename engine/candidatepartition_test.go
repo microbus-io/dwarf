@@ -78,7 +78,7 @@ func TestPartition_AppliedFromRegistry(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.NoError(e.Startup(t.Context()))
 
 	// Solo: registered, but nothing to divide.
@@ -118,7 +118,7 @@ func TestPartition_AwaitOnlyPeerOwnsNoSlice(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.NoError(e.Startup(t.Context()))
 
 	// A peer that holds connections but dispatches nothing.

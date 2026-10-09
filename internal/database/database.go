@@ -85,7 +85,7 @@ type ShardSet struct {
 	mu      sync.RWMutex
 	dbs     map[int]*sequel.DB
 	indices []int // sorted ascending
-	// testConnCap (>0 only in test mode) caps every SetMaxOpenConns push so the engine's derived pool sizing
+	// testConnCap (>0 only in test mode) caps every pool push (SetMaxOpenConns, SetShardPool) so the engine's derived pool sizing
 	// can never grow a pool past what was reserved from the global budget at Open; releaseBudget frees that
 	// reservation, called exactly once at Close (or Open's failure path). See testbudget.go.
 	testConnCap   int
@@ -345,6 +345,23 @@ func (s *ShardSet) SetMaxOpenConns(n int) {
 		db.SetMaxOpenConns(n)
 	}
 	s.mu.RUnlock()
+}
+
+// SetShardPool applies idle and open pool sizes to one shard, clamped to the test-mode cap (see
+// SetMaxIdleConns). An unknown index is a no-op.
+func (s *ShardSet) SetShardPool(n, idle, open int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	db, ok := s.dbs[n]
+	if !ok {
+		return
+	}
+	if s.testConnCap > 0 {
+		idle = min(idle, s.testConnCap)
+		open = min(open, s.testConnCap)
+	}
+	db.SetMaxOpenConns(open)
+	db.SetMaxIdleConns(idle)
 }
 
 // Close closes all shard connections and empties the set.

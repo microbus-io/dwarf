@@ -35,16 +35,7 @@ const (
 	// Do NOT re-derive it from waste (discarded/selected). Waste runs ~2% and nearly flat across the whole
 	// good interval range, so it cannot distinguish the optimum; throughput can.
 	refillSupplyHeadroom = 2.0
-	// sustainedDrainPerVCPU is the measured sustained per-shard drain in steps/s/vCPU. NOT capacityWeight's
-	// 450, which is the PEAK placement ceiling - the period wants the SUSTAINED rate, and conflating the two
-	// undershoots the drain and overshoots the period into a starved regime.
-	sustainedDrainPerVCPU = 720
-	// sustainedDrainPerConn is the same measurement expressed per CONNECTION - the quantity the connection
-	// channel below actually wants, measured roughly flat across connection counts, instance sizes and
-	// backlog volumes. It is stated as its own constant rather than as sustainedDrainPerVCPU divided by a
-	// connection ratio, because that ratio varies with both instance size and distance (see
-	// connsPerVCPUFor), so dividing by it would silently mean a different thing per tier and per shard -
-	// and the per-connection drain does not vary with how many connections the pool was allotted.
+	// sustainedDrainPerConn is the measured sustained per-shard drain in steps/s per CONNECTION.
 	//
 	// It is flat across connection counts, instance sizes and backlog volumes on a disk with IOPS headroom,
 	// which is the deployment the operator guidance asks for - NOT across disks. A throttled disk drains
@@ -78,22 +69,16 @@ const (
 // deriveRefillInterval computes ONE shard's cycle period:
 //
 //	bufferShare = capacity/N        the most one cycle can hand this partition
-//	drain       = min(sustainedDrainPerConn * min(poolConns, dispatchers),
-//	                  sustainedDrainPerVCPU * vCPUs/R)
+//	drain       = sustainedDrainPerConn * min(poolConns, dispatchers)
 //	T           = bufferShare / (headroom * drain)
 //
-// The drain takes the TIGHTER of two channels, since sustained throughput cannot exceed either: this
-// replica's connection pool, or the shard's database CPU split across the fleet. They are equal by
-// construction in the derived path, so the min bites only when setMaxOpenConns pins a pool independently
-// of the declared vCPUs - without it, a large pinned pool with vCPUs undeclared derives its drain from the
-// default 2 and overshoots to the cap (a starved refiller), and a small pooler-capped pool over-scans on a
-// drain it cannot sustain. vCPUs <= 0 is undeclared: the CPU ceiling is unknown, so the drain falls to the
-// connection channel alone.
+// Capacity is 2 x workersPerConnBudget x the pool, so the pool cancels and T lands near 67ms whatever the
+// budget - which is why no measure of the database's own size enters it.
 //
 // It stays a formula rather than the ~67ms it evaluates to at the reference config, because bufferShare
 // tracks the cache-sizing constants: a change to worker or cache sizing rescales the period with it,
 // instead of leaving a pinned number that exceeds what the buffer can cover.
-func deriveRefillInterval(bufferShare, virtualCPUs, poolConns, replicas, dispatchers int) time.Duration {
+func deriveRefillInterval(bufferShare, poolConns, dispatchers int) time.Duration {
 	// WORKERS BOUND THE DRAIN, and leaving them out is what makes a pinned SetWorkers derive a nonsense
 	// period. They are what CONSUMES candidates: one worker cannot drain a connection budget's worth however
 	// many connections exist, and it holds no connection while its task runs. Without this term the buffer
@@ -102,9 +87,6 @@ func deriveRefillInterval(bufferShare, virtualCPUs, poolConns, replicas, dispatc
 	// which then silently becomes the supply rate instead of the fuse it is meant to be. A worker that never
 	// waits for a connection drains at the same per-connection rate, which is why one constant serves both.
 	drain := float64(sustainedDrainPerConn) * float64(min(poolConns, max(1, dispatchers)))
-	if virtualCPUs > 0 { // cap by the CPU ceiling, when it is known
-		drain = min(drain, float64(sustainedDrainPerVCPU)*float64(virtualCPUs)/float64(max(1, replicas)))
-	}
 	if bufferShare <= 0 || drain <= 0 {
 		return refillIntervalCap
 	}
@@ -122,18 +104,14 @@ func deriveRefillInterval(bufferShare, virtualCPUs, poolConns, replicas, dispatc
 // second lock/clone pass over the same maps.
 func (e *Engine) recomputeRefillIntervals() {
 	e.shardsLock.Lock()
-	specs := make(map[int]ShardSpec, len(e.shardSpecs))
-	for idx, spec := range e.shardSpecs {
-		specs[idx] = spec
-	}
-	rtts := maps.Clone(e.shardRTTMs)
+	sizing := maps.Clone(e.shardSizing)
 	e.shardsLock.Unlock()
-	e.recomputeRefillIntervalsWith(specs, rtts, e.slotsByShard(specs))
+	e.recomputeRefillIntervalsWith(sizing, e.slotsByShard(sizing))
 }
 
-// recomputeRefillIntervalsWith is recomputeRefillIntervals' core, taking the shard specs, RTTs and roles
-// as already-read snapshots rather than re-acquiring shardsLock or re-reading the roles to fetch them.
-func (e *Engine) recomputeRefillIntervalsWith(specs map[int]ShardSpec, rtts map[int]float64, slotsBy map[int]int) {
+// recomputeRefillIntervalsWith is recomputeRefillIntervals' core, taking the shard sizing and roles as
+// already-read snapshots rather than re-acquiring shardsLock or re-reading the roles to fetch them.
+func (e *Engine) recomputeRefillIntervalsWith(sizing map[int]shardSizing, slotsBy map[int]int) {
 	// The shards this replica dispatches, which are the only ones whose partitions the cache holds.
 	n := 0
 	for _, slots := range slotsBy {
@@ -149,7 +127,7 @@ func (e *Engine) recomputeRefillIntervalsWith(specs map[int]ShardSpec, rtts map[
 	share := max(1, capacity/n)
 	// The workers draining THIS shard's partition, which is share/2 because the cache is sized as twice the
 	// whole crew - read back off it rather than re-derived, so it cannot drift from what the buffer was built
-	// for. EVERY term here is per-shard (the pool is this shard's, the vCPU ceiling is this shard's), and the
+	// for. EVERY term here is per-shard (the pool is this shard's), and the
 	// drain must be too: one crew pops across all N partitions, so crediting the whole of it to each one
 	// over-states the drain by exactly N and collapses the period - 1.04ms on 8 shards, against the 8.33ms the
 	// worker term exists to hold, i.e. straight back into the over-supply regime it was added to close.
@@ -167,20 +145,16 @@ func (e *Engine) recomputeRefillIntervalsWith(specs map[int]ShardSpec, rtts map[
 			p.SetSupplyCadence(override, gap)
 			continue
 		}
-		// Pass the shard's ACTUAL pool (shardPool resolves the setMaxOpenConns pin) and its RAW declared
-		// vCPUs (0 = undeclared), so the drain is bounded by whichever channel is real - the pinned pool,
-		// not a defaulted vCPU count. An unconfigured shard's zero-value spec falls to the conn channel.
-		spec := specs[idx]
-		// This shard's own dispatcher count: the pool it drains through was divided by that one, and they are
-		// the replicas sharing the shard's CPU, so deriving the period from anything else would measure the
-		// buffer against the wrong drain rate. A shard this replica only reads has an idle piston, which
-		// reads no period, and recomputePools re-derives this on the promotion that wakes it.
+		// The shard's ACTUAL pool (shardPool resolves the setMaxOpenConns pin), divided by this shard's own
+		// dispatcher count, which is what the buffer drains through. A shard this replica only reads has an
+		// idle piston, which reads no period, and recomputePools re-derives this on the promotion that wakes
+		// it.
 		slots := slotsBy[idx]
 		if slots == 0 {
 			continue
 		}
-		_, pool := shardPool(spec, pinned, slots, rtts[idx])
-		derived := deriveRefillInterval(share, spec.VirtualCPUs, pool, slots, dispatchers)
+		_, pool := shardPool(sizing[idx].budget, pinned, slots)
+		derived := deriveRefillInterval(share, pool, dispatchers)
 		p.SetTallyCadence(derived, pipeline.DefaultMinGap)
 		p.SetSupplyCadence(derived, min(pipeline.DefaultMinGap, derived/supplyGapDivisor))
 	}

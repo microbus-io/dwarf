@@ -48,7 +48,7 @@ var DB func(eng any) *database.ShardSet
 var Seams func(eng any) *seamster.Seamster
 
 // SetMaxOpenConns pins every shard's connection pool to exactly n connections on a running or configured
-// engine, replacing the pool the engine derives from each shard's vCPUs and round-trip time, for a test or a
+// engine, replacing the pool the engine derives from each shard's budget, for a test or a
 // pool-size sweep. With it set, every replica dispatches every shard.
 var SetMaxOpenConns func(eng any, n int) error
 
@@ -62,10 +62,11 @@ var SetRefillInterval func(eng any, d time.Duration) error
 // and has its own backlog count. Every other gauge is unaffected.
 var SkipBacklogGauges func(eng any, skip bool) error
 
-// ShardBudget is the connection budget the engine derives for one shard of vcpus virtual CPUs at rttMs of
-// round-trip time - the pool a lone replica opens. A benchmark computes it ahead of a run to pin exactly the
-// pool that ships, since the engine's own Startup probe can land either side of an RTT bucket edge.
-var ShardBudget func(vcpus int, rttMs float64) int
+// ShardBudget is the connection budget the engine derives for one PostgreSQL shard with no MaxConnections
+// declared, at rttMs of round-trip time against a server whose max_connections is serverMax (0 = unknown) -
+// the pool a lone replica opens. A benchmark computes it ahead of a run to pin exactly the pool that ships,
+// since the engine's own Startup probe varies run to run.
+var ShardBudget func(rttMs float64, serverMax int) int
 
 // Join builds the targeted form of a seam name: the base name, then the entity it targets, joined with ":".
 // A consult site and the test that arms it both call it, so neither can spell the join the other does not -

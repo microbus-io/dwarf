@@ -78,26 +78,26 @@ func leaveFakeFleet(t *testing.T, e *Engine) {
 	e.recomputePools()
 }
 
-// TestDispatchers_Slots pins how many replicas dispatch a shard. The count comes from the shard's budget
-// at the REFERENCE distance, never the probed one, so every replica derives the same number; it never
-// exceeds the replicas there are, and it is at least two once there are two.
+// TestDispatchers_Slots pins how many replicas dispatch a shard: maxDispatchers, never more than the
+// replicas there are, at least two once there are two, and fewer than maxDispatchers only when the
+// fleet-agreed budget cannot give each minDispatcherPool connections.
 func TestDispatchers_Slots(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	cases := []struct {
-		vcpus, replicas, want int
+		ref, replicas, want int
 	}{
-		{2, 1, 1},   // a lone replica is its own dispatcher
-		{2, 2, 2},   // a small shard still takes two once there are two, so one death does not stop it
-		{2, 7, 2},   // ...and no more: the budget cannot feed a third
-		{0, 7, 2},   // undeclared vCPUs size as the default 2
-		{8, 2, 2},   // never more dispatchers than replicas
-		{8, 100, 4}, // an 8-vCPU budget of 53 at the reference distance, /12
-		{64, 100, 16},
-		{64, 3, 3},
+		{7, 1, 1},     // a lone replica is its own dispatcher
+		{7, 2, 2},     // a small budget still takes two once there are two, so one death does not stop it
+		{7, 7, 2},     // ...and no more: the budget cannot feed a third
+		{48, 2, 2},    // never more dispatchers than replicas
+		{36, 100, 3},  // a budget of 36 feeds three dispatchers of 12
+		{48, 100, 4},  // 48 feeds four
+		{250, 100, 4}, // the near budget is capped at maxDispatchers
+		{500, 3, 3},
 	}
 	for _, c := range cases {
-		assert.Equal(c.want, dispatcherSlots(ShardSpec{VirtualCPUs: c.vcpus}, c.replicas), "%+v", c)
+		assert.Equal(c.want, dispatcherSlots(c.ref, c.replicas), "%+v", c)
 	}
 }
 
@@ -123,7 +123,7 @@ func TestDispatchers_ReaderReplicaHoldsTheReaderPoolAndRunsNothing(t *testing.T)
 	e.testConnCap = 0 // assert the real derived pool sizes, not the test-mode connection cap
 	assert.NoError(e.SetHost(mux))
 	assert.NoError(e.SetEngineID(readerID))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 2}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 24}))
 	assert.NoError(e.Startup(t.Context()))
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
@@ -133,7 +133,7 @@ func TestDispatchers_ReaderReplicaHoldsTheReaderPoolAndRunsNothing(t *testing.T)
 	if rank, _ := e.sonarFor(1).Rank(); !assert.Equal(3, rank, "fixture: readerID must rank below a 2-slot cut") {
 		return
 	}
-	assert.Equal(0, e.slotsOn(1, ShardSpec{Index: 1, VirtualCPUs: 2}))
+	assert.Equal(0, e.slotsOn(1, sizeShard(ShardSpec{MaxConnections: 24}, 0, 0, "")))
 	assert.False(e.dispatchesOn(1))
 	assert.True(e.pistons[1].Idle(), "a reader's piston idles")
 	assert.Equal(readerOpenConns, db.DB.Stats().MaxOpenConnections, "a reader holds the reader pool")
@@ -186,14 +186,14 @@ func TestDispatchers_DemotedReplicaHoldsItsPoolUntilInFlightStepsFinish(t *testi
 	e.testConnCap = 0 // assert the real derived pool sizes, not the test-mode connection cap
 	assert.NoError(e.SetHost(mux))
 	assert.NoError(e.SetEngineID(readerID))
-	spec := ShardSpec{Index: 1, VirtualCPUs: 4} // two dispatcher slots, and a budget whose 3-way share beats the reader pool
+	spec := ShardSpec{Index: 1, MaxConnections: 24} // two dispatcher slots, and a budget whose 3-way share beats the reader pool
 	assert.NoError(e.SetShard(spec))
 	assert.NoError(e.Startup(t.Context()))
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
 	assert.True(e.dispatchesOn(1), "alone, the replica dispatches")
 	// Held, it drains alongside a 2-slot cut, so the budget divides three ways.
-	_, heldOpen := shardPool(spec, 0, 3, probedRTT(e, 1))
+	_, heldOpen := shardPool(spec.MaxConnections, 0, 3)
 	if !assert.True(heldOpen > readerOpenConns, "fixture: the held pool must exceed the reader pool") {
 		return
 	}
@@ -228,7 +228,7 @@ func TestDispatchers_DemotedReplicaHoldsItsPoolUntilInFlightStepsFinish(t *testi
 	// Another replica starts draining: the held share narrows with every other pool on the shard.
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_peers SET draining=1 WHERE engine_id=1006")
 	assert.NoError(err)
-	_, narrower := shardPool(spec, 0, 4, probedRTT(e, 1))
+	_, narrower := shardPool(spec.MaxConnections, 0, 4)
 	assert.Equal(narrower, awaitPoolSize(t, db, narrower), "a held pool follows the draining count")
 
 	close(release)
@@ -274,13 +274,13 @@ func TestDispatchers_PromotionWhileHeldClearsTheHold(t *testing.T) {
 	e.testConnCap = 0
 	assert.NoError(e.SetHost(mux))
 	assert.NoError(e.SetEngineID(readerID))
-	spec := ShardSpec{Index: 1, VirtualCPUs: 4} // two dispatcher slots, and a budget whose 3-way share beats the reader pool
+	spec := ShardSpec{Index: 1, MaxConnections: 24} // two dispatcher slots, and a budget whose 3-way share beats the reader pool
 	assert.NoError(e.SetShard(spec))
 	assert.NoError(e.Startup(t.Context()))
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
-	_, soloOpen := shardPool(spec, 0, 1, probedRTT(e, 1))
-	_, heldOpen := shardPool(spec, 0, 3, probedRTT(e, 1))
+	_, soloOpen := shardPool(spec.MaxConnections, 0, 1)
+	_, heldOpen := shardPool(spec.MaxConnections, 0, 3)
 
 	fk, err := e.Create(ctx, "repromote/g", nil, nil)
 	assert.NoError(err)
@@ -337,7 +337,7 @@ func TestDispatchers_OverrideReleasesAHold(t *testing.T) {
 	e.testConnCap = 0
 	assert.NoError(e.SetHost(mux))
 	assert.NoError(e.SetEngineID(readerID))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 4}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 24}))
 	assert.NoError(e.Startup(t.Context()))
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
@@ -388,18 +388,18 @@ func TestDispatchers_RankedReplicaSplitsTheBudget(t *testing.T) {
 	e.testConnCap = 0
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetEngineID(dispatcherID))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.NoError(e.Startup(t.Context()))
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
 
 	joinFakeFleet(t, e)
-	slots := dispatcherSlots(ShardSpec{VirtualCPUs: 8}, len(fakeFleet)+1)
+	slots := dispatcherSlots(48, len(fakeFleet)+1)
 	if rank, _ := e.sonarFor(1).Rank(); !assert.Equal(1, rank, "fixture: dispatcherID must rank inside a %d-slot cut", slots) {
 		return
 	}
 	assert.True(e.dispatchesOn(1))
-	_, open := shardPool(ShardSpec{VirtualCPUs: 8}, 0, slots, probedRTT(e, 1))
+	_, open := shardPool(48, 0, slots)
 	assert.Equal(open, db.DB.Stats().MaxOpenConnections, "the budget divides by %d dispatchers, not 7 replicas", slots)
 }
 
@@ -415,18 +415,18 @@ func TestDispatchers_DrainingReplicasDivideTheBudget(t *testing.T) {
 	e.testConnCap = 0
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetEngineID(dispatcherID))
-	spec := ShardSpec{Index: 1, VirtualCPUs: 8}
+	spec := ShardSpec{Index: 1, MaxConnections: 48}
 	assert.NoError(e.SetShard(spec))
 	assert.NoError(e.Startup(t.Context()))
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
 
 	joinFakeFleet(t, e)
-	slots := dispatcherSlots(spec, len(fakeFleet)+1)
+	slots := dispatcherSlots(spec.MaxConnections, len(fakeFleet)+1)
 	if !assert.True(e.dispatchesOn(1), "fixture: dispatcherID must rank inside the cut") {
 		return
 	}
-	_, split := shardPool(spec, 0, slots, probedRTT(e, 1))
+	_, split := shardPool(spec.MaxConnections, 0, slots)
 	assert.Equal(split, db.DB.Stats().MaxOpenConnections)
 
 	setDraining := func(flag int) {
@@ -434,7 +434,7 @@ func TestDispatchers_DrainingReplicasDivideTheBudget(t *testing.T) {
 		assert.NoError(err)
 	}
 	setDraining(1)
-	_, wide := shardPool(spec, 0, slots+2, probedRTT(e, 1))
+	_, wide := shardPool(spec.MaxConnections, 0, slots+2)
 	assert.Equal(wide, awaitPoolSize(t, db, wide), "two draining replicas divide the budget with the dispatchers")
 
 	setDraining(0)
@@ -452,7 +452,7 @@ func TestDispatchers_OverrideDispatchesEveryReplica(t *testing.T) {
 	e.testConnCap = 0
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetEngineID(readerID))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 2}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 24}))
 	assert.NoError(e.Startup(t.Context()))
 
 	joinFakeFleet(t, e)
@@ -503,7 +503,7 @@ func TestDispatchers_ZeroWorkersPeersDoNotDivideTheBudget(t *testing.T) {
 	defer e.Shutdown(t.Context())
 	e.testConnCap = 0
 	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.NoError(e.Startup(t.Context()))
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
@@ -518,7 +518,7 @@ func TestDispatchers_ZeroWorkersPeersDoNotDivideTheBudget(t *testing.T) {
 	_, candidates := e.sonarFor(1).Rank()
 	assert.Equal(1, candidates, "three await-only peers, one candidate")
 	assert.True(e.dispatchesOn(1))
-	assert.Equal(budget8(e, 1), db.DB.Stats().MaxOpenConnections, "the lone worker keeps the whole budget")
+	assert.Equal(declaredBudget, db.DB.Stats().MaxOpenConnections, "the lone worker keeps the whole budget")
 }
 
 // TestDispatchers_DoorbellRingsOnlyForDispatchedShards pins the gate at its source. The cache admits a
@@ -551,8 +551,8 @@ func TestDispatchers_PlacementPrefersDispatchedShards(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 2}))
-	assert.NoError(e.SetShard(ShardSpec{Index: 2, VirtualCPUs: 2}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 24}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 2, MaxConnections: 24}))
 	assert.NoError(e.Startup(t.Context()))
 
 	e.dispatchFlag(2).Store(false)
@@ -582,15 +582,15 @@ func TestDispatchers_FleetLimitWarnsOnTheEdge(t *testing.T) {
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.Startup(t.Context()))
-	spec := ShardSpec{Index: 1, VirtualCPUs: 8}
+	spec := ShardSpec{Index: 1, MaxConnections: 48}
 
 	e.poolsLock.Lock()
 	defer e.poolsLock.Unlock()
-	e.checkFleetFits(1, spec, defaultRTTMs, 0)
+	e.checkFleetFits(1, shardSizing{budget: spec.MaxConnections, ref: spec.MaxConnections, serverMax: 0})
 	assert.False(e.fleetOverLimit[1], "no known limit, no verdict")
-	e.checkFleetFits(1, spec, defaultRTTMs, 10)
-	assert.True(e.fleetOverLimit[1], "a budget of ~54 does not fit in 80% of 10")
-	e.checkFleetFits(1, spec, defaultRTTMs, 1000)
+	e.checkFleetFits(1, shardSizing{budget: spec.MaxConnections, ref: spec.MaxConnections, serverMax: 10})
+	assert.True(e.fleetOverLimit[1], "a budget of 48 does not fit in 80% of 10")
+	e.checkFleetFits(1, shardSizing{budget: spec.MaxConnections, ref: spec.MaxConnections, serverMax: 1000})
 	assert.False(e.fleetOverLimit[1], "and fits again under a larger limit")
 }
 
@@ -693,7 +693,7 @@ func TestDispatchers_RoleFlagsSurviveARestartUnderLoad(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 2}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 24}))
 	assert.NoError(e.Startup(t.Context()))
 
 	var stop atomic.Bool
@@ -723,7 +723,7 @@ func TestDispatchers_OverridePromotionResizesTheCache(t *testing.T) {
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetEngineID(readerID))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 2}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 24}))
 	assert.NoError(e.Startup(t.Context()))
 	joinFakeFleet(t, e)
 	assert.False(e.dispatchesOn(1))
@@ -738,7 +738,7 @@ func TestDispatchers_OverridePromotionResizesTheCache(t *testing.T) {
 	assert.Equal(want, e.cache.Capacity(), "the cache follows the pinned pool of the promoted shard")
 }
 
-// twoReplicaFleet stands up a dispatcher (dispatcherID) and a reader (readerID) on one 2-vCPU shard, beside
+// twoReplicaFleet stands up a dispatcher (dispatcherID) and a reader (readerID) on one two-dispatcher shard, beside
 // one fake working peer (1001) that dispatches nothing. Among the three candidates 1001 ranks first,
 // dispatcherID second and readerID third, so with two slots the dispatcher dispatches and the reader reads -
 // and once the dispatcher stops working, the reader moves inside the cut. Each engine runs on its own host,
@@ -751,7 +751,7 @@ func twoReplicaFleet(t *testing.T, dispHost, readHost Host) (disp, reader *Engin
 		e.testConnCap = 0
 		assert.NoError(e.SetHost(h))
 		assert.NoError(e.SetEngineID(id))
-		assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 2}))
+		assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 24}))
 		return e
 	}
 	disp = mk(dispatcherID, dispHost)

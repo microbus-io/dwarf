@@ -70,7 +70,9 @@ func TestSetShard_RejectsBadSpecs(t *testing.T) {
 
 	e := NewEngine()
 	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.SetShard(ShardSpec{Index: 0})))
-	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: -1})))
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.SetShard(ShardSpec{Index: 1, MaxConnections: -1})))
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.SetShard(ShardSpec{Index: 1, Weight: -1})))
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.SetShard(ShardSpec{Index: 1, Weight: math.NaN()})))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1}))
 	assert.Equal(http.StatusConflict, errors.StatusCode(e.SetShard(ShardSpec{Index: 1})))
 	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.Startup(t.Context()))) // no host

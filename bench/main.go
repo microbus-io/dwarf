@@ -87,13 +87,13 @@ func run() error {
 		taskJitter   = flag.Duration("task-jitter", 0, "additional uniform random [0,d) per-task sleep - de-synchronizes fan-out siblings so a cohort's branches do not all complete at once")
 		// 0 on either override means "let the engine derive it" - the self-tuned path a production host
 		// takes, and the only way to measure the derivation itself (workers from the lease margin, the
-		// pool from VirtualCPUs). A sweep pins them; a validation run must not.
-		workers = flag.Int("workers", 0, "engine worker goroutines (0 = derived from the lease-margin ceiling)")
-		vcpus   = flag.Int("vcpus", 0, "ShardSpec.VirtualCPUs for every shard (0 = undeclared; the engine assumes 2)")
+		// pool from the shard's budget). A sweep pins them; a validation run must not.
+		workers  = flag.Int("workers", 0, "engine worker goroutines (0 = derived from the lease-margin ceiling)")
+		maxConns = flag.Int("max-connections", 0, "ShardSpec.MaxConnections for every shard: the fleet-wide budget the dispatching replicas divide (0 = derived from the RTT and the server's max_connections)")
 		// engineseams.SetMaxOpenConns pins every shard's pool to exactly this size, which is what a
 		// pool-size sweep needs.
-		maxOpenConns     = flag.Int("max-open-conns", 0, "engine per-shard pool size (0 = derived from -vcpus; else pinned exactly)")
-		refillIntervalMs = flag.Int("refill-interval-ms", 0, "pin each shard's refill cycle period in ms (0 = derived from capacity/vcpus/replicas); the scan-rate sweep knob")
+		maxOpenConns     = flag.Int("max-open-conns", 0, "engine per-shard pool size, per replica and never divided (0 = derived; else pinned exactly)")
+		refillIntervalMs = flag.Int("refill-interval-ms", 0, "pin each shard's refill cycle period in ms (0 = derived from the pool); the scan-rate sweep knob")
 		openLoop         = flag.Bool("open-loop", false, "open-loop load: creators fire flows without awaiting completion, so the backlog grows past the goroutine count (closed-loop caps in-flight flows at -concurrency, keeping a linear backlog inside the cache and never stressing the refiller)")
 		maxOutstanding   = flag.Int("max-outstanding", 100000, "open-loop only: cap on in-flight (created minus ended) flows, the backpressure bound that keeps the backlog from OOMing the DB")
 		arrivalRate      = flag.Float64("arrival-rate", 0, "open-loop only: cap flow creation at this many/sec, fractional allowed (0 = flat-out to saturation)")
@@ -112,7 +112,8 @@ func run() error {
 		replicaWorkers  = flag.String("replica-workers", "", "comma-separated per-replica worker counts overriding -workers (e.g. '0,4' = replica 1 awaits only)")
 		volume          = flag.Int("volume", 0, "volume mode: fill to this many dwarf_steps rows with NO deletion, probing the read paths at checkpoints, then measure Purge/reaper throughput (0 = disabled)")
 		volumeCheckpt   = flag.Int("volume-checkpoint", 0, "probe every this many step rows during -volume (0 = one fifth of the target)")
-		printPool       = flag.Float64("print-pool", 0, "print the pool the engine derives for one shard of -vcpus at this round-trip time in ms, and exit - what a driver script pins with -max-open-conns, so every arm runs the pool that ships")
+		printPool       = flag.Float64("print-pool", 0, "print the budget the engine derives for one PostgreSQL shard at this round-trip time in ms against -server-max-connections, and exit - what a driver script pins with -max-open-conns, so every arm runs the pool that ships")
+		serverMaxConns  = flag.Int("server-max-connections", 0, "-print-pool only: the server's max_connections the budget is clamped to half of (0 = unknown, no clamp)")
 		volumeProbeWL   = flag.String("volume-probe-workload", "linear", "-volume-probe only: the workload the probe windows run, which need not be the fill's - a bytes-axis fill is `state` while its probes measure `linear`")
 		volumeProbe     = flag.Duration("volume-probe", 0, "-volume only: at each checkpoint (and on the empty database first), pause the fill for an open-loop saturated window of this length and then one at 2/3 of its flows/s, at the pinned pool (0 = no throughput probe)")
 		fairnessKeys    = flag.Int("fairness-keys", 1, "spread flows across this many distinct fairness keys (1 = all on the single default key, the degenerate case for the refiller's per-key scan bound)")
@@ -125,11 +126,7 @@ func run() error {
 	flag.Var(&dsns, "dsn", "shard DSN, repeatable; 'N=dsn' sets shard N, a bare dsn sets shard 1 (default: throwaway local SQLite)")
 	flag.Parse()
 	if *printPool > 0 {
-		v := *vcpus
-		if v <= 0 {
-			return fmt.Errorf("-print-pool needs -vcpus")
-		}
-		fmt.Println(engineseams.ShardBudget(v, *printPool))
+		fmt.Println(engineseams.ShardBudget(*printPool, *serverMaxConns))
 		return nil
 	}
 
@@ -225,7 +222,7 @@ func run() error {
 		hosts[i] = host
 		eng := engine.NewEngine()
 		for _, sh := range dsns {
-			err = eng.SetShard(engine.ShardSpec{Index: sh.index, DSN: sh.dsn, VirtualCPUs: *vcpus})
+			err = eng.SetShard(engine.ShardSpec{Index: sh.index, DSN: sh.dsn, MaxConnections: *maxConns})
 			if err != nil {
 				return err
 			}
@@ -309,7 +306,7 @@ func run() error {
 			"linearSteps":    *linearStepsFlag,
 			"carryRead":      *carryRead,
 			"workers":        *workers,
-			"virtualCPUs":    *vcpus,
+			"maxConnections": *maxConns,
 			"maxOpenConns":   *maxOpenConns,
 			"replicas":       *replicas,
 			"replicaWorkers": *replicaWorkers,

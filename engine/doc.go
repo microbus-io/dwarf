@@ -37,9 +37,10 @@ limitations under the License.
 //
 // Each Set* method returns an error. The live ones (SetTimeBudget, SetDefaultPriority) take effect immediately on a running engine; the
 // construction-time-only ones (SetShard, SetWorkers, SetHost, SetLogger, SetMeterProvider,
-// SetTracerProvider) return an error if called after Startup. Tuning derives from the facts the host
-// declares plus what the engine observes: ShardSpec.VirtualCPUs drives each shard's connection budget
-// and its placement weight; the budget is automatically split across the few engine replicas that
+// SetTracerProvider) return an error if called after Startup. Tuning derives from what the engine
+// observes plus two optional per-shard levers: each shard's connection budget follows the round-trip time
+// measured at Startup and the server's own connection limit unless ShardSpec.MaxConnections sets it, and
+// ShardSpec.Weight sets its share of new flows; the budget is automatically split across the few engine replicas that
 // dispatch each database, which the replicas agree on through a shared peer registry they heartbeat into,
 // while every other replica holds two connections there (no replica count is ever declared, and nothing
 // is sent between replicas to establish it); and the

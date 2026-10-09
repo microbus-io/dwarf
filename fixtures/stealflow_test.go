@@ -270,8 +270,8 @@ func TestStealTwoBadApplesflow(t *testing.T) {
 	// Four replicas: an await-only creator plus three dispatchers, two of them crippled. The creator's work
 	// is reachable only by scanning, which is what puts the residue class in the path.
 	//
-	// The shard is declared at 8 vCPUs so its budget feeds three dispatchers. The default 2-vCPU shard takes
-	// two, which would leave one of the three a reader - and when that one is the healthy replica, the two
+	// The shard declares a budget of 48 so it feeds three dispatchers. A small budget - SQLite's default -
+	// takes two, which would leave one of the three a reader - and when that one is the healthy replica, the two
 	// crippled ones carry the whole load and there is nothing for it to steal.
 	ran := map[string]*atomic.Int64{"creator": {}, "healthy": {}, "bad1": {}, "bad2": {}}
 	build := func(replica string, delay time.Duration) *engine.HostMux {
@@ -302,7 +302,7 @@ func TestStealTwoBadApplesflow(t *testing.T) {
 		defer e.Shutdown(ctx)
 		e.SetHost(build(replica, delay))
 		assert.NoError(e.SetWorkers(workers))
-		assert.NoError(e.SetShard(engine.ShardSpec{Index: 1, VirtualCPUs: 8}))
+		assert.NoError(e.SetShard(engine.ShardSpec{Index: 1, MaxConnections: 48}))
 		return e
 	}
 	healthy := mk("healthy", 4, 0)

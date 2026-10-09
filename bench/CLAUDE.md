@@ -72,7 +72,7 @@ is that it occupies connections, the bias runs the wrong way: the pool looks les
 
 **CONNECTIONS BUY BACK DISTANCE — partially, and with a hard ceiling.** Raising the pool as RTT grows
 held throughput at **93-100%** of base across 0.14 → 5.07 ms (16 vCPU), a **5.05x** recovery at 5 ms
-against what the shipped pool would have served. But that compares to base at the shipped 6x; knee to
+against what a fixed 96-connection pool would have served. But that compares to base at 96; knee to
 knee, a 4.3 ms path still delivers only **79%**. The useful invariant is `B = T·s/1000`, the backends
 actually inside Postgres (Little's law), which gives
 
@@ -85,11 +85,10 @@ disproportionately: they start from a smaller `s` (8.73 ms at 32 vCPU vs 12.73 a
 dominates sooner, *and* their `s` inflates faster with distance. **At distance, add shards rather than
 grow one** — full compensation at 4 ms would have needed ~1,163 connections on one instance.
 
-Two scaling results that contradict the shipped ratio's shape (all at short RTT, n=1):
-**`B* = 15.0·vCPU^0.72`** — sublinear, so per-vCPU sizing over-connects large instances — and the optimal
-multiplier therefore **FALLS** with instance size (**11.2x / 8.8x / 6.9x** at 8 / 16 / 32 vCPU) where the
-shipped rule rises. 6x nonetheless captures 90-94% of peak at every tier; the last 6-10% costs roughly a
-doubling of connections.
+Two scaling results against sizing the pool per vCPU (all at short RTT, n=1): **`B* = 15.0·vCPU^0.72`** —
+sublinear, so per-vCPU sizing over-connects large instances — and the optimal multiplier therefore **FALLS**
+with instance size (**11.2x / 8.8x / 6.9x** at 8 / 16 / 32 vCPU). A constant budget follows that shape
+better than any per-vCPU ratio (see `engine/CLAUDE.md`, "Connection pool sizing").
 
 **DB CPU at the knee is RTT-invariant but TIER-dependent**: 61.6 / 65.1 / 66.3% across 0.4 / 1.2 / 4.3 ms
 at 16 vCPU, against **76.9 / 66.3 / 51.6%** at 8 / 16 / 32 vCPU. One "size to N% CPU" target cannot serve
@@ -127,9 +126,9 @@ reduces to a binary that a short window decides by where a stall landed. Over-sa
 problems: the machine's maximum needs no target, and a mean absorbs transients rather than being flipped
 by them. Two rules for such a sweep, both learned by getting them wrong:
 
-- **Pin `-max-open-conns`.** The engine derives its pool from a Startup RTT probe, and two runs of an
-  identical command line derived 48 and 64 connections because the probe landed either side of a bucket
-  edge. An unpinned sweep confounds pool size with probe noise.
+- **Pin `-max-open-conns`.** The engine derives its pool from a Startup RTT probe, which varies run to run
+  (idle 0.157-0.182 ms on one rig) and moves the budget along its ramp. An unpinned sweep confounds pool size
+  with probe noise.
 - **Set `-max-outstanding` LOW, not high, so every arm is closed-loop at the SAME backlog depth.** With a
   high cap the starved arms pin at the cap while the healthy ones sit lower, and since the band scan is
   O(backlog) the starved arms pay a second penalty — biasing the result toward the larger pool. (`main.go`
@@ -370,13 +369,13 @@ heap** and the crew is mostly stacks.
 `-payload P` (fresh incompressible bytes per `linear`/`fanout` task, the element size of `scatter`; 0 = none
 for those three, 64 KB for `state`/`carry`), `-workload scatter -branch-depth D` (the doc -> pages shape that
 item refs change; each branch checks its element arrived whole), `-volume-probe D` (a saturated and a 2/3
-window at each `-volume` checkpoint, the backlog drained between them), `-print-pool RTT` (the pool the engine
-derives for `-vcpus` at that RTT, for a script to pin), `-open-loop -arrival-rate N -max-outstanding M` (commanded rate + backpressure bound), `-replica-workers`
+window at each `-volume` checkpoint, the backlog drained between them), `-print-pool RTT -server-max-connections N` (the
+budget the engine derives at that RTT against that server limit, for a script to pin), `-open-loop -arrival-rate N -max-outstanding M` (commanded rate + backpressure bound), `-replica-workers`
 (per-replica worker counts; `0` = await-only, `1` = capacity-crippled and grow-on-demand disabled),
 `-linear-steps` (chain depth — under partitioning, depth changes the share of FLOWS a slow replica blocks
 without changing the share of STEPS), `-refill-interval-ms` (pin the cycle period; **mandatory** in any
 ladder that varies replica count, since the derived interval is a function of R and would otherwise
-masquerade as a partitioning cost), `-fairness-keys`, `-vcpus`, `-max-open-conns`, `-task-burst`/`-task-quiet` (alternate the exec term within a
+masquerade as a partitioning cost), `-fairness-keys`, `-max-connections` (the `ShardSpec.MaxConnections` lever), `-max-open-conns`, `-task-burst`/`-task-quiet` (alternate the exec term within a
 run — the only way to see the crew shrink), `-stats-interval` (periodic readout), `-pprof` (CPU + heap
 profiles), `-backlog-gauges` (keep the engine's `dwarf_steps_pending`/oldest-age gauges).
 

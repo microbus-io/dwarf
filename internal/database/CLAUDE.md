@@ -20,8 +20,9 @@ differently under concurrent INSERT/UPDATE load. Pick by deployment shape.
 
 **PostgreSQL - recommended for production.** MVCC means concurrent INSERTs do not lock each other on secondary
 indexes; no gap locks at default `READ COMMITTED`; the fan-out/fan-in pattern runs deadlock-free at any worker
-concurrency. Use Postgres 13+ for `JSONB` and partial indexes. For throughput, raise `max_connections` to at least
-`(NumShards * MaxOpenConnsPerShard * replicas)` and `shared_buffers` to ~25% of host RAM.
+concurrency. Use Postgres 13+ for `JSONB` and partial indexes. For throughput, give each server a
+`max_connections` of at least twice the connection budget of the shards it hosts (the engine clamps a derived
+budget to half the limit) and `shared_buffers` to ~25% of host RAM.
 
 **MySQL / MariaDB - supported, expect tuning.** InnoDB at default `REPEATABLE READ` takes next-key (row + gap) locks
 on every secondary-index touch; two concurrent flow creations on a shard can deadlock on overlapping index ranges.
@@ -69,11 +70,12 @@ SetShard(1, "postgres://user:pass@127.0.0.1:5432/dwarf_1?sslmode=disable")
 SetShard(2, "postgres://user:pass@127.0.0.1:5432/dwarf_2?sslmode=disable")
 ```
 
-The connection budget is a **per-server** property. With distributed shards each server hosts one shard per replica,
-so it sees only `replicas × perShardPool` connections - **shard count never multiplies a server's load**, and the
-per-shard ceiling (`SetMaxOpenConns`) *is* the per-server budget. With co-located shards (all shards as databases on
-one server) the server sees `replicas × shards × perShardPool`, so the `× shards` multiplier can overrun the server's
-`max_connections` under parallel load - which is why co-located is for test/dev/single-instance only. Both forms are
+The connection budget is a **per-server** property. With distributed shards each server hosts one shard, so it
+sees only that shard's budget, divided among the replicas that dispatch it - **shard count never multiplies a
+server's load**. With co-located shards (all shards as databases on one server) the server sees every shard's
+budget at once, and each shard clamps its derived budget to half of the SAME `max_connections` without knowing
+about the others, so the `× shards` multiplier can overrun the server's limit - which is why co-located is for
+test/dev/single-instance only, with `ShardSpec.MaxConnections` declared to split the server between them. Both forms are
 transparent to the engine and sequel: each shard gets its own independent pool, so the topology is purely a
 deployment choice (zero code change). The engine migrates schema but does
 **not** `CREATE DATABASE` or provision servers - those must exist.

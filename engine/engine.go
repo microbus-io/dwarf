@@ -107,7 +107,7 @@ type Engine struct {
 	workersSet             atomic.Bool // SetWorkers was called: skip the derived default
 	timeBudgetMs           atomic.Int64
 	defaultPriority        atomic.Int32
-	maxOpenConns           atomic.Int32 // test/bench override: exact per-shard pool size; 0 = derive from ShardSpec.VirtualCPUs
+	maxOpenConns           atomic.Int32 // test/bench override: exact per-shard pool size; 0 = derive the shard's budget
 	refillIntervalOverride atomic.Int64 // bench override (nanoseconds): pins every piston's cycle period; <=0 = derive
 	skipBacklogGauges      atomic.Bool  // bench override: metrics collection skips observePendingByBand
 
@@ -184,10 +184,8 @@ type Engine struct {
 	// flight there, the divisor its held pool was last sized with: the pool and turnstile keep a share until
 	// those steps finish. Owned by poolsLock.
 	heldDivisors map[int]int
-	// shardMaxConns is each shard's server connection limit, read once at Startup (0 = unknown), and
-	// fleetOverLimit is whether checkFleetFits last found the fleet over it. The first is written in
-	// Startup before the reconcile loop starts; the second is owned by poolsLock.
-	shardMaxConns  map[int]int
+	// fleetOverLimit is whether checkFleetFits last found the fleet over a shard's server connection limit.
+	// Owned by poolsLock.
 	fleetOverLimit map[int]bool
 	// poolsLock serializes every APPLICATION of a pool size - the derived recompute (recomputePools) and
 	// the live override (setMaxOpenConns). Deduping the recompute on lastAppliedSlots is not enough: two peer
@@ -237,8 +235,12 @@ type Engine struct {
 	dbPhaseWorkers [2]atomic.Int64
 
 	// shardRTTMs is each shard's round-trip time, probed once at Startup and HELD, so the worker ceiling
-	// can be re-derived whenever a shard's pool changes - the ceiling is a function of the pool.
+	// can be re-derived whenever a shard's pool changes - the ceiling is a function of the pool. A failed
+	// probe is held as defaultRTTMs.
 	shardRTTMs map[int]float64
+	// shardSizing is each shard's connection budgets for the run, computed at Startup from its spec, its
+	// probed RTT and its server's max_connections. Published under shardsLock with shardRTTMs.
+	shardSizing map[int]shardSizing
 
 	// inFlightStateBytes / inFlightStateSteps are the state payload this replica is holding across host
 	// calls RIGHT NOW, and how many carriers hold it - the two halves of dwarf_state_in_flight_bytes and
@@ -384,19 +386,21 @@ type ShardSpec struct {
 	// template. An empty DSN is only valid in test mode, where the DSN IS a template (a "%d" is replaced
 	// with the shard index, which is what gives each shard its own isolated test database).
 	DSN string
-	// VirtualCPUs is the CPU count of the shard's database server - a fact off the instance's spec
-	// sheet. It drives the shard's connection budget (the pool is sized from a measured table of
-	// connections-per-vCPU, indexed by both this vCPU count and the round-trip time to the database -
-	// see the connection pool guidance in the deployment docs - beyond which connections only queue, and
-	// on smaller servers actively destabilize or collapse throughput) and its placement weight (new flows
-	// are distributed across shards in proportion to measured capacity). Left at 0, the engine assumes 2 -
-	// the smallest machine any major cloud sells as a current-generation instance, so the assumed pool
-	// stays safe even if the real machine is smaller. Declare it: a large database sized as if it were a
-	// 2-CPU one runs at a fraction of its capacity.
-	//
-	// It also decides how many replicas dispatch the shard, so declare the SAME value for a shard on every
-	// replica: replicas that disagree on it disagree on which of them dispatch.
-	VirtualCPUs int
+	// MaxConnections is the shard's connection budget: the connections the replicas that dispatch the
+	// shard (up to four of them) share. Every other replica holds a reader pool of its own there - one
+	// connection, two at most - outside the budget, and each dispatcher keeps at least two, so the shard's
+	// total can run a little past it. Left at 0, the engine
+	// derives it: 250, rising to 500 as the measured round-trip time to the database grows from 0.25 ms to
+	// 1 ms, and never more than half the server's own max_connections (on SQLite, a fixed 8). Set it to give
+	// a large database more (a 64-vCPU server gains throughput up to ~500 even when close), or a shared one
+	// less. Shards that are databases on ONE server each take their own budget from that server's limit, so
+	// set it explicitly when shards share a server. Declare the SAME value for a shard on every replica: it
+	// also decides how many replicas dispatch the shard, and replicas that disagree on it disagree on which
+	// of them dispatch.
+	MaxConnections int
+	// Weight is the shard's share of new-flow placement, relative to the other shards. Left at 0, it is 1,
+	// so flows are spread evenly. Give a larger database a larger weight in a mixed fleet.
+	Weight float64
 	// Cordoned excludes the shard from new-flow placement. Everything already resident proceeds
 	// normally: existing flows keep executing, and subgraph children, thread continuations (Continue),
 	// and forks - all shard-pinned - are still created on it. Use for retiring or overloaded shards.
@@ -418,8 +422,11 @@ func (e *Engine) SetShard(spec ShardSpec) error {
 	if spec.Index < 1 {
 		return errors.New("shard index must be at least 1", http.StatusBadRequest)
 	}
-	if spec.VirtualCPUs < 0 {
-		return errors.New("virtual CPUs must be >= 0", http.StatusBadRequest)
+	if spec.MaxConnections < 0 {
+		return errors.New("max connections must be >= 0", http.StatusBadRequest)
+	}
+	if spec.Weight < 0 || math.IsNaN(spec.Weight) || math.IsInf(spec.Weight, 0) {
+		return errors.New("weight must be a finite number >= 0", http.StatusBadRequest)
 	}
 	e.shardsLock.Lock()
 	defer e.shardsLock.Unlock()
@@ -524,7 +531,7 @@ func (e *Engine) SetDefaultPriority(p int) error {
 }
 
 // setMaxOpenConns is the test and benchmark override that pins every shard's connection pool to exactly n
-// open (and idle) connections, replacing the pool derived from each shard's vCPUs and RTT. Reached through
+// open (and idle) connections, replacing the pool derived from each shard's budget. Reached through
 // internal/engineseams, never by a host: a pinned pool cannot follow the database's size or distance, so the
 // engine offers no production way to set one. Live: pushes to every open shard immediately.
 //
@@ -560,7 +567,7 @@ func (e *Engine) setMaxOpenConns(n int) error {
 }
 
 // setRefillInterval is the benchmark override that PINS every piston's cycle period to d, replacing the
-// value the engine derives from capacity/vCPUs/R (deriveRefillInterval); d <= 0 restores derivation. Reached
+// value the engine derives from the cache capacity and the pool (deriveRefillInterval); d <= 0 restores derivation. Reached
 // from the bench through internal/engineseams, never by a host.
 //
 // The override exists for scan-rate sweeps: the period is measured, not tuned, so finding its optimum needs
@@ -669,7 +676,7 @@ func (e *Engine) Startup(ctx context.Context) error {
 		return errors.New("host is required", http.StatusBadRequest)
 	}
 	// Per-shard pool sizes: the setMaxOpenConns override pins every pool; otherwise each shard's budget
-	// derives from its own VirtualCPUs (heterogeneous fleets get heterogeneous pools), split across the
+	// derives from its own spec, distance and server limit (shardBudget), split across the
 	// replicas that DISPATCH that shard, while every other replica holds a small reader pool there. Which
 	// replicas dispatch comes from the shared dwarf_peers registry, which needs open connections to read -
 	// so the shards first open at a small BOOTSTRAP pool (enough to register + probe + read the fleet,
@@ -716,25 +723,38 @@ func (e *Engine) Startup(ctx context.Context) error {
 	// here. The map is published under shardsLock because its readers are the reconcile loop and the live
 	// setMaxOpenConns, and a Shutdown/Startup restart reassigns it - an unsynchronized map read/write is a
 	// fatal throw, not a recoverable panic.
+	//
+	// The budget takes the RAW probe (an unprobed shard takes the near budget), while the worker ceiling
+	// takes the same-zone fallback - each the safe direction for what it sizes.
 	rtts := make(map[int]float64, len(shards))
-	maxConns := make(map[int]int, len(shards))
+	sizing := make(map[int]shardSizing, len(shards))
+	e.shardsLock.Lock()
+	declared := maps.Clone(e.shardSpecs)
+	e.shardsLock.Unlock()
 	for idx := range shards {
 		db, dbErr := e.db.Shard(idx)
 		if dbErr != nil {
 			continue
 		}
 		rttMs := probeRTT(ctx, db)
+		serverMax := readMaxConnections(ctx, db)
+		if serverMax == 0 && db.DriverName() != "sqlite" {
+			// Fails open to the unclamped budget, which on a server configured small over-connects it.
+			e.logger.WarnContext(ctx, "Reading the server's connection limit failed; the shard's connection budget is not clamped to it",
+				"shard", idx)
+		}
+		sizing[idx] = sizeShard(declared[idx], rttMs, serverMax, db.DriverName()) // zero-value spec = the default shard's sizing
 		if rttMs <= 0 {
 			rttMs = defaultRTTMs // probe failed: fall back to the measured same-zone constant
 		}
 		rtts[idx] = rttMs
-		maxConns[idx] = readMaxConnections(ctx, db)
-		e.logger.DebugContext(ctx, "Shard RTT probed", "shard", idx, "rttMs", rttMs, "maxConnections", maxConns[idx])
+		e.logger.DebugContext(ctx, "Shard sized", "shard", idx, "rttMs", rttMs, "maxConnections", serverMax,
+			"budget", sizing[idx].budget)
 	}
 	e.shardsLock.Lock()
 	e.shardRTTMs = rtts
+	e.shardSizing = sizing
 	e.shardsLock.Unlock()
-	e.shardMaxConns = maxConns
 	// Forget the last run's verdicts, so a fleet still over the limit after a restart is warned about again
 	// rather than taken as already reported.
 	e.poolsLock.Lock()
@@ -760,25 +780,21 @@ func (e *Engine) Startup(ctx context.Context) error {
 	// shards join in parallel.
 	e.buildSonars()
 	e.joinFleet(ctx)
-	e.shardsLock.Lock()
-	specs := maps.Clone(e.shardSpecs)
-	e.shardsLock.Unlock()
 	// A fresh turnstile set per run, like the cache and the planner: counts left over from a previous
 	// Startup would bound this one against pools it no longer has.
 	e.turnstiles = turnstile.NewSet()
 	totalConns := 0
 	for _, idx := range e.db.Indices() {
-		db, dbErr := e.db.Shard(idx)
-		if dbErr != nil {
+		if _, dbErr := e.db.Shard(idx); dbErr != nil {
 			continue
 		}
 		// This replica's role on the shard, from the ranking Join just read. A shard it does not dispatch
 		// gets the reader pool and a piston that initRuntime starts idle.
-		slots := e.slotsOn(idx, specs[idx])
+		slots := e.slotsOn(idx, sizing[idx])
 		e.dispatchFlag(idx).Store(slots > 0)
-		idle, open := shardPool(specs[idx], override, slots, rtts[idx]) // zero-value spec = the default shard's sizing
-		db.SetMaxOpenConns(open)
-		db.SetMaxIdleConns(idle)
+		idle, open := shardPool(sizing[idx].budget, override, slots)
+		// Through the shard set, which applies the test-mode cap; a push onto the shard's own handle would not.
+		e.db.SetShardPool(idx, idle, open)
 		if e.seams.Enabled() { // Enabled gates the assembled name and the boxed value in production
 			e.seams.Variable(engineseams.Join(engineseams.VariablePoolIdle, strconv.Itoa(idx)), idle)
 		}

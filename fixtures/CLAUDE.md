@@ -85,10 +85,13 @@ cooperate.
 `N parallel engines × pool × shards` can never overrun a shared server's `max_connections`:
 
 - **A per-shard pool CAP.** In test mode each shard's pool is clamped to `defaultTestConnCap` (**4**, `engine.go`)
-  instead of the derived `connsPerVCPU (6) × defaultVirtualCPUs (2) = 12`. The engine still *derives* 12 and sizes
-  its worker ceiling / refill floor from that (those read the engine's notion, not the physical pool), but the
-  physical pool is clamped at open and on every `SetMaxOpenConns` push (`internal/database/database.go`). Four
-  connections is plenty for a fixture; the cap only bounds fan-out concurrency, which SQLite serializes anyway.
+  instead of the derived budget (8 on SQLite, 250 elsewhere). The engine still *derives* that budget and sizes
+  its worker ceiling / refill floor from it (those read the engine's notion, not the physical pool), but the
+  physical pool is clamped at open and on every push through the shard set (`ShardSet.SetMaxOpenConns`,
+  `SetShardPool`, in `internal/database/database.go`). **Push pool sizes through the shard set, never onto a
+  shard's own `*sequel.DB`**: a direct push bypasses the cap, and with a derived budget of 50-250 per shard per
+  engine that exhausts a test server's connections. Four connections is plenty for a fixture; the cap only
+  bounds fan-out concurrency, which SQLite serializes anyway.
 - **A per-driver global connection BUDGET** (`internal/database/testbudget.go`). Each `ShardSet.Open` reserves
   `cap × shards` from a process-wide weighted semaphore keyed on the driver (`db.DriverName()`), and releases at
   `Close`. The reservation is one atomic acquire per engine (never per connection or per shard - a per-connection
@@ -110,9 +113,9 @@ cooperate.
 **Two DISTINCT opt-outs, for two distinct reasons - do not conflate them:**
 
 - **A test that asserts the real DERIVED pool sizes sets `e.testConnCap = 0` before Startup** (uncaps its pools).
-  Only the pool-sizing tests need this (`TestPoolSizing_ObservedReplicasLive`,
-  `_ConcurrentRecomputeDoesNotClobberOverride`, `_LiveOverride` in `engine/poolsizing_test.go`) - they read
-  physical `db.DB.Stats().MaxOpenConnections` and a cap would make them read 4 instead of 48. They still run
+  Only the pool-sizing, dispatcher and peer-fleet tests need this (`engine/poolsizing_test.go`,
+  `dispatchers_test.go`, `peer*_test.go`) - they read physical `db.DB.Stats().MaxOpenConnections` and a cap
+  would make them read 4 instead of the 48 they declare. They still run
   parallel; they just use real pools (fine - the budget covers uncapped engines too, and on SQLite there is no cap
   to exceed).
 - **A test that asserts an upper-bound REACTION LATENCY omits `t.Parallel()`** so it runs in the serial phase with
