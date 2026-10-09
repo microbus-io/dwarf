@@ -115,8 +115,8 @@ Each `Set*` returns an `error`, so misconfiguration fails loudly at wiring time:
 
 ```go
 eng := dwarf.NewEngine()
-eng.SetShard(engine.ShardSpec{Index: 1, DSN: "postgres://user:pass@db-a.internal:5432/dwarf", VirtualCPUs: 8})
-eng.SetShard(engine.ShardSpec{Index: 2, DSN: "postgres://user:pass@db-b.internal:5432/dwarf", VirtualCPUs: 8})
+eng.SetShard(engine.ShardSpec{Index: 1, DSN: "postgres://user:pass@db-a.internal:5432/dwarf"})
+eng.SetShard(engine.ShardSpec{Index: 2, DSN: "postgres://user:pass@db-b.internal:5432/dwarf"})
 eng.SetWorkers(64)
 eng.SetHost(host)
 eng.SetLogger(slog.Default())

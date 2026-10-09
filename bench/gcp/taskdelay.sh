@@ -157,7 +157,7 @@ for rep in $(seq 1 "$REPS"); do
 
     # shellcheck disable=SC2206  # word splitting is the intended parse of EXTRA
     args=(-dsn "$(dsn_with_db "$DSN" "$db")"
-      -workload linear -vcpus "$VCPUS" -concurrency "$CONC"
+      -workload linear -concurrency "$CONC"
       -open-loop -arrival-rate "$RATE" -max-outstanding "$MAX_OUTSTANDING"
       -task-delay "$delay" -window "$WINDOW" -warmup "$warmup"
       ${EXTRA:-}

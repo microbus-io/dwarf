@@ -154,11 +154,11 @@ re-selected later — always safe, never lost work, but a high ratio means selec
 what the workers can consume and most of its database round-trips are being thrown away. A ratio near 0
 means the opposite: selection is the slower half.
 
-A **sustained high ratio is a cadence question, not a fault**: selection paces itself from your declared
-`VirtualCPUs` and connection budget, so a workload whose steps drain more slowly than that implies will be
-over-supplied. It costs database work rather than correctness — no step is lost — but if it is large and
-persistent, the selection interval is the knob, and a shard whose real throughput is far below its declared
-capacity is the usual cause.
+A **sustained high ratio is a cadence question, not a fault**: selection paces itself from the shard's
+connection budget, assuming each connection drains steps at a steady rate, so a workload whose steps drain
+more slowly than that will be over-supplied. It costs database work rather than correctness — no step is
+lost. A large budget on a database that is already saturated is the usual cause, since extra connections
+there add little throughput.
 
 ## Tracing
 

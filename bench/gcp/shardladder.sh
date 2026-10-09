@@ -28,7 +28,7 @@
 # Usage:
 #   DSN1=... DSN2=... DSN3=... ./shardladder.sh
 # Knobs (env): BENCH (binary, default ./dwarf-bench), OUT (default ./shardladder-results),
-#   REPS (default 3), CONC (default 4096), WINDOW/WARMUP, VCPUS (shard tier, default 8),
+#   REPS (default 3), CONC (default 4096), WINDOW/WARMUP,
 #   RTT_MAX_DELTA_MS (max slowest-minus-fastest, default 1.0), WORKLOAD (default linear),
 #   RUN_ID (database namespace; defaults to a timestamp), EXTRA (extra dwarf-bench flags,
 #   e.g. '-fairness-keys 256 -task-delay 5ms').
@@ -65,7 +65,6 @@ REPS="${REPS:-3}"
 CONC="${CONC:-4096}"
 WINDOW="${WINDOW:-60s}"
 WARMUP="${WARMUP:-15s}"
-VCPUS="${VCPUS:-8}"
 WORKLOAD="${WORKLOAD:-linear}"
 RTT_MAX_DELTA_MS="${RTT_MAX_DELTA_MS:-1.0}"
 
@@ -165,7 +164,7 @@ for rep in $(seq 1 "$REPS"); do
     tag="l${arm}shard-r${rep}"
     db="dwarf_lad_${RUN_ID}_${arm}s_r${rep}"
     # shellcheck disable=SC2206  # word splitting is the intended parse of EXTRA
-    args=(-workload "$WORKLOAD" -vcpus "$VCPUS" -concurrency "$CONC"
+    args=(-workload "$WORKLOAD" -concurrency "$CONC"
       -window "$WINDOW" -warmup "$WARMUP"
       ${EXTRA:-}
       -label "shard ladder ${arm}-shard rep ${rep}"

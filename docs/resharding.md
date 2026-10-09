@@ -35,29 +35,27 @@ restarts**. The trick is to make every replica able to *route* to the new shard 
 
 ```go
 eng.SetShard(engine.ShardSpec{
-    Index:       4,
-    DSN:         "...",
-    VirtualCPUs: 8,
-    Cordoned:    true,   // opened, migrated, routable — but takes no new flows
+    Index:    4,
+    DSN:      "...",
+    Cordoned: true,   // opened, migrated, routable — but takes no new flows
 })
 ```
 
 Roll the fleet. Each replica opens and migrates shard 4 at startup and can route flow keys to it, but the
-capacity-weighted placement skips it entirely, so nothing is created there yet. At the end of this phase the
+weighted placement skips it entirely, so nothing is created there yet. At the end of this phase the
 fleet is uniform and no flow exists that any replica cannot reach.
 
 **Phase 2 — activate it.** Flip `Cordoned` to `false` and roll again. New flows now distribute across all
-four shards in proportion to their declared `VirtualCPUs`.
+four shards in proportion to their `Weight` (evenly, unless you set one).
 
 **Do not collapse this into one step.** A single rolling restart leaves a window in which upgraded replicas
 place flows on shard 4 while replicas still on the old configuration cannot route to them. Work still
 executes — the replicas that know shard 4 dispatch it — but callers hitting an old replica get "not found"
 for flows that exist. That is precisely the failure the two-phase order avoids.
 
-**Declare `VirtualCPUs` honestly.** It drives both the shard's connection budget and its share of new
-placement. An undeclared shard is assumed to be a 2-vCPU machine, which means a large new server will be sent
-a trickle of work and run at a fraction of its capacity. Nothing detects an over-declared value either — the
-facts you declare are trusted.
+**Weight unequal shards.** New flows spread evenly by default, so a new server larger than the existing
+ones gets no more than its equal share unless you give it a larger `Weight`. Nothing measures a shard's
+capacity for you - the weights you declare are trusted.
 
 **Expect the new shard to fill slowly.** It only receives *new* flows. The existing imbalance persists until
 the old shards' flows complete and age out under your retention policy.
@@ -101,8 +99,8 @@ rather than an error explaining why. Retire the index only once you are content 
 lives: replace the connection string, keep the index, and do an ordinary database migration by whatever means
 your dialect supports. Restart the fleet to pick up the new connection string.
 
-This is the supported way to grow a shard's *capacity* — move it to a bigger server and update
-`VirtualCPUs` — as opposed to adding shards, which grows the *number* of servers. Vertical growth of one
+This is the supported way to grow a shard's *capacity* — move it to a bigger server, and adjust its
+`Weight` (and `MaxConnections`, if you set one) — as opposed to adding shards, which grows the *number* of servers. Vertical growth of one
 shard needs no coordination beyond the restart; horizontal growth needs the two-phase dance above.
 
 ## Changing the shard count is a capacity decision, not a scaling reflex

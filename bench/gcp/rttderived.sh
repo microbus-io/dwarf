@@ -2,11 +2,10 @@
 #
 # RTT ladder with the pool DERIVED BY THE ENGINE, not pinned by the harness. Runs ON the bench VM.
 #
-# WHY THIS SCRIPT EXISTS, AND HOW IT DIFFERS FROM rttpoolladder.sh. That script tests a PROPOSAL: it
-# computes each arm's pool from an occupancy fit and pins it with -max-open-conns, so the engine's own
-# sizing never runs. This one tests the SHIPPED PATH: it passes only -vcpus, so the engine probes the
-# (netem-padded) RTT at Startup and sizes its own pool from the tier/RTT table. What is under test is
-# therefore the code, not an equation - a wrong table, a wrong bucket, a probe that ran before netem was
+# WHY THIS SCRIPT EXISTS, AND HOW IT DIFFERS FROM cell.sh. cell.sh pins every arm's pool with
+# -max-open-conns, so the engine's own sizing never runs. This one tests the SHIPPED PATH: it pins nothing,
+# so the engine probes the (netem-padded) RTT at Startup and sizes its own pool from its budget rule. What
+# is under test is therefore the code, not an equation - a wrong ramp, a probe that ran before netem was
 # installed, and a pool that lands on a collapse all show up here and cannot show up there.
 #
 # THE ORDERING IS LOAD-BEARING. The engine probes RTT ONCE, at Startup, and holds it. netem must
@@ -56,7 +55,7 @@ RATE="${RATE:-400}"
 # admission below the commanded rate. The artifact then reports a lower flowsPerSec (it is the ADMISSION
 # rate, not the commanded one) and the arm is no longer a measurement of the rate it was asked for.
 # Measured: a 20,000 cap throttled a 700 flows/s arm to 552-590, so 7,000 steps/s was commanded and only
-# ~5,500 ever offered. 100,000 matches rateladder.sh and does not bind at any rate this rig can drive.
+# ~5,500 ever offered. 100,000 does not bind at any rate this rig can drive.
 MAX_OUTSTANDING="${MAX_OUTSTANDING:-100000}"
 # 120s, not 60s: Cloud Monitoring samples database CPU about once a minute, so a 60s window yields 3-4
 # points whose mean is sampling noise (measured: three arms with identical throughput reported 22%, 51%
@@ -70,59 +69,11 @@ RUN_ID="${RUN_ID:-$(date -u +%Y%m%d%H%M%S)}"
 OUT="${OUT:-./rttderived-results}"
 mkdir -p "$OUT"
 
-# A copy of engine/poolsize.go's poolRatio + poolSafetyMargin + the tierBracket/ratioAtRTT interpolation,
-# for the EXPECTED column only. It predicts what the engine should choose so a divergence is visible in
-# the log; nothing here is passed to the binary. The cells are RAW MINIMA and the margin rides on the
-# result, exactly as connsPerVCPUFor does - keep the two spellings identical or the EXPECTED column
-# silently stops being a check. The table stops at 64 vCPU (every row measured); past it there is no
-# second point to blend against, so the last row is taken flat, same as connsPerVCPUFor's clamp.
+# The pool the engine should choose at a measured RTT, for the EXPECTED column only: the bench's own
+# -print-pool, which calls the engine's budget rule, so the prediction cannot drift from the code. Nothing
+# here is passed to the binary. MAXCONN is read below, before the first arm.
 expected_pool() { # $1 = measured rtt ms
-python3 - "$VCPUS" "$1" <<'PY'
-import sys, math
-vcpus, rtt = int(sys.argv[1]), float(sys.argv[2])
-buckets = [0.25, 0.50, 1.00, 1.50, 2.00]
-margin = 1.2
-rows = [(1,[3.00,5.00,7.00,9.00,11.00]),
-        (2,[3.00,6.00,7.00,10.00,11.00]),
-        (4,[3.00,6.00,6.00,8.00,10.00]),
-        (8,[5.00,8.00,8.00,11.00,11.00]),
-        (16,[5.00,7.00,7.00,9.00,9.00]),
-        (32,[3.75,4.70,5.60,8.10,8.75]),
-        (64,[2.25,3.50,5.00,6.00,6.00])]
-
-def ratio_at_rtt(row_ratios):
-    if rtt <= buckets[0]:
-        return row_ratios[0]
-    if rtt >= buckets[-1]:
-        return row_ratios[-1]
-    i = next(i for i in range(1, len(buckets)) if rtt <= buckets[i])
-    f = (rtt - buckets[i-1]) / (buckets[i] - buckets[i-1])
-    return row_ratios[i-1] + f*(row_ratios[i] - row_ratios[i-1])
-
-# Tier axis: log-log blend between the two bracketing rows (linear in log(ratio) vs log(vCPUs)), clamped
-# flat below the first row or at/beyond the last - no second point to interpolate against there. A vcpus
-# that lands exactly on a tabulated tier skips the log/exp round-trip entirely (rather than relying on it
-# to land back on f==1.0 bit-exact), which a naive port does not: math.exp(math.log(x)) is NOT guaranteed
-# to reproduce x - measured one ULP low here (4.999999999999999 for a ratio of 5.00), enough for the
-# truncating int() below to under-report by a whole connection at every exact-tier RTT/vCPU pair.
-tiers = {v: r for v, r in rows}
-if vcpus in tiers:
-    ratio = ratio_at_rtt(tiers[vcpus])
-elif vcpus <= rows[0][0]:
-    ratio = ratio_at_rtt(rows[0][1])
-elif vcpus >= rows[-1][0]:
-    ratio = ratio_at_rtt(rows[-1][1])
-else:
-    lo = hi = rows[0]
-    for i in range(1, len(rows)):
-        if vcpus <= rows[i][0]:
-            lo, hi = rows[i-1], rows[i]
-            break
-    lo_ratio, hi_ratio = ratio_at_rtt(lo[1]), ratio_at_rtt(hi[1])
-    f = (math.log(vcpus) - math.log(lo[0])) / (math.log(hi[0]) - math.log(lo[0]))
-    ratio = math.exp(math.log(lo_ratio) + f*(math.log(hi_ratio) - math.log(lo_ratio)))
-print(max(2, int(ratio*margin*vcpus)))
-PY
+  "$BENCH" -print-pool "$1" -server-max-connections "$MAXCONN"
 }
 
 # The interface the DATABASE is reached over - never a hardcoded ens4, which is right on GCE today and
@@ -178,7 +129,7 @@ run_arm() { # $1=tag $2=netem knob ms (0 = none) $3=rep
   # No -max-open-conns: the engine derives it. That is the whole point of this script.
   # shellcheck disable=SC2206
   "$BENCH" -dsn "${DSN%/*}/${db}?sslmode=disable" \
-    -workload linear -vcpus "$VCPUS" -concurrency "$CONC" \
+    -workload linear -concurrency "$CONC" \
     -open-loop -arrival-rate "$RATE" -max-outstanding "$MAX_OUTSTANDING" \
     -warmup "$WARMUP" -window "$WINDOW" \
     -label "rttderived target ${tag} rtt ${rtt}ms expect ${want} rep ${rep}" \

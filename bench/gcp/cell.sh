@@ -14,9 +14,9 @@
 #      more at the optimum. That is the number to publish; if it drops, the 2/3-chosen pool caps the database
 #      below its peak - a finding to bring back, not to paper over.
 #
-# THE POOL IS PINNED in every run. The derived pool comes from the engine's own table for the TARGET rtt
-# (`-print-pool`), because the engine's Startup probe can land either side of a bucket edge and an unpinned
-# run would confound pool size with probe noise.
+# THE POOL IS PINNED in every run. The derived pool comes from the engine's own budget rule for the TARGET
+# rtt and this server's max_connections (`-print-pool`), because the engine's Startup probe varies run to run
+# and an unpinned run would confound pool size with probe noise.
 #
 # netem complements the rig's own distance to land the TARGET total RTT. It can add delay, never take it
 # away, so a rig whose base RTT is above the target aborts here: recreate the VM (same zone) and redraw. The
@@ -156,12 +156,12 @@ if [[ "$KNOB" != "0" ]]; then sudo "$TC" qdisc add dev "$DEV" root netem delay "
 
 MAXCONN="$(psq "$ADMIN" "SHOW max_connections")"
 BUDGET=$(( MAXCONN - RESERVE ))
-POOL="${PIN_POOL:-$("$BENCH" -vcpus "$VCPUS" -print-pool "$TARGET_RTT")}"
+POOL="${PIN_POOL:-$("$BENCH" -print-pool "$TARGET_RTT" -server-max-connections "$MAXCONN")}"
 (( POOL <= BUDGET )) || { echo "ABORT: derived pool ${POOL} exceeds max_connections ${MAXCONN} - ${RESERVE} reserved" >&2; exit 1; }
 
 echo "cell ${CELL}  run ${RUN_ID}  ${SPF} steps/flow"
 echo "base rtt ${BASE_RTT} ms, netem +${KNOB} ms on ${DEV} -> target ${TARGET_RTT} ms"
-echo "$([[ -n "${PIN_POOL:-}" ]] && echo pinned || echo derived) pool ${POOL} (${VCPUS} vCPU), max_connections ${MAXCONN}, window ${WINDOW} after ${WARMUP}"
+echo "$([[ -n "${PIN_POOL:-}" ]] && echo pinned || echo derived) pool ${POOL} (${VCPUS} vCPU label), max_connections ${MAXCONN}, window ${WINDOW} after ${WARMUP}"
 echo
 
 # run_one TAG POOL RATE - one run on a fresh database. RATE 0 = flat out.
@@ -174,7 +174,7 @@ run_one() {
   psq "$ADMIN" "CREATE DATABASE ${db}" >/dev/null
   # shellcheck disable=SC2086  # word splitting is the intended parse of EXTRA
   "$BENCH" -dsn "${DSN%/*}/${db}?sslmode=disable" "${WORKLOAD_ARGS[@]}" \
-    -vcpus "$VCPUS" -max-open-conns "$pool" -concurrency "$CONC" \
+    -max-open-conns "$pool" -concurrency "$CONC" \
     -open-loop -arrival-rate "$rate" -max-outstanding "$MAX_OUTSTANDING" \
     -warmup "$WARMUP" -window "$WINDOW" -stats-interval 10s \
     -label "cell ${CELL} ${tag} pool ${pool} rate ${rate} gate-rtt ${GATE_RTT}ms" \

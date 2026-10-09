@@ -180,7 +180,7 @@ for rep in $(seq 1 "$REPS"); do
 
     # shellcheck disable=SC2206  # word splitting is the intended parse of arm_args and EXTRA
     args=(-dsn "$(dsn_with_db "$DSN" "$db")"
-      -workload linear -vcpus "$VCPUS" -concurrency "$CONC"
+      -workload linear -concurrency "$CONC"
       -open-loop -arrival-rate "$RATE" -max-outstanding "$MAX_OUTSTANDING"
       $(arm_args "$arm")
       -window "$WINDOW" -warmup "$WARMUP" -stats-interval "$STATS"

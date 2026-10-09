@@ -43,7 +43,7 @@
 # Knobs (env): BENCH (binary, default ./dwarf-bench), OUT (default ./replicaladder-results),
 #   RLADDER (replica counts, default '1,2,4,8'), SHARDS (how many DSNs to use, default 1),
 #   REPS (default 3), CONC (default 4096), WINDOW (default 60s), WARMUP (default 30s, see control 4),
-#   VCPUS (shard tier, default 16), WORKLOAD (default linear), RTT_MAX_DELTA_MS (default 1.0),
+#   WORKLOAD (default linear), RTT_MAX_DELTA_MS (default 1.0),
 #   RUN_ID (database namespace; defaults to a timestamp), EXTRA (extra dwarf-bench flags,
 #   e.g. '-fairness-keys 256 -task-delay 5ms').
 set -euo pipefail
@@ -79,7 +79,6 @@ REPS="${REPS:-3}"
 CONC="${CONC:-4096}"
 WINDOW="${WINDOW:-60s}"
 WARMUP="${WARMUP:-30s}"
-VCPUS="${VCPUS:-16}"
 WORKLOAD="${WORKLOAD:-linear}"
 RTT_MAX_DELTA_MS="${RTT_MAX_DELTA_MS:-1.0}"
 
@@ -151,7 +150,7 @@ for rep in $(seq 1 "$REPS"); do
     tag="R${R}-r${rep}"
     db="dwarf_rep_${RUN_ID}_r${R}_r${rep}"
     # shellcheck disable=SC2206  # word splitting is the intended parse of EXTRA
-    args=(-workload "$WORKLOAD" -vcpus "$VCPUS" -replicas "$R" -concurrency "$CONC"
+    args=(-workload "$WORKLOAD" -replicas "$R" -concurrency "$CONC"
       -window "$WINDOW" -warmup "$WARMUP"
       ${EXTRA:-}
       -label "replica ladder R=${R} rep ${rep} (${SHARDS} shards)"

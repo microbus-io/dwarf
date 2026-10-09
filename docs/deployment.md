@@ -17,22 +17,17 @@ after `Startup`.
 
 | Method | Default | Purpose |
 |---|---|---|
-| `SetShard(spec)` | one default shard | Registers one shard: `ShardSpec{Index, DSN, VirtualCPUs, Cordoned}`; call once per shard |
+| `SetShard(spec)` | one default shard | Registers one shard: `ShardSpec{Index, DSN, MaxConnections, Weight, Cordoned}`; call once per shard |
 | `SetWorkers(n)` | derived | Expert override: pins the worker *maximum* (deterministic tests, benchmarks, memory-bounded hosts). Normally unset — derived from the crash-recovery lease margin and the round-trip time measured at startup, so it holds for any task duration; the pool grows into it only on demand |
 | `SetTimeBudget(d)` | 2m | Per-step `ExecuteTask` deadline |
 | `SetDefaultPriority(p)` | 100 | Priority for flows that don't set one |
 
-Provide `ShardSpec.VirtualCPUs` (the database server's CPU count - a fact off its spec sheet) and the
-engine derives the shard's connection budget (the measured knee, beyond which connections only queue, and
-on smaller servers actively destabilize or collapse throughput - sized from the CPU count together with
-the round-trip time measured at startup) and its new-flow placement weight
-(capacity-proportional across heterogeneous shards). Leave `VirtualCPUs` unset and the engine assumes 2
-— the floor of every current-generation RDS class, and small enough that the resulting pool is still
-safe on the 1-vCPU machines Cloud SQL offers. Declare it: it is a fact off the machine's spec sheet, and
-an 8-vCPU database sized as if it were a 2-vCPU one runs at a fraction of its capacity. `Cordoned: true` excludes a shard
-from new-flow placement (resident flows and their subgraph children/continuations/forks proceed) - for
-retiring or overloaded shards. The [cloud benchmarks](benchmark-cloud.md) document the measurements
-behind the constants.
+A shard needs only its `Index` and `DSN`. The engine sizes its connection pool on its own (see
+[Connection pool](#connection-pool)); `MaxConnections` overrides that size, and `Weight` sets the shard's
+share of new flows relative to the other shards (default 1). `Cordoned: true` excludes a shard from
+new-flow placement (resident flows and their subgraph children/continuations/forks proceed) - for retiring
+or overloaded shards. The [cloud benchmarks](benchmark-cloud.md) document the measurements behind the
+defaults.
 
 Dependency injection (set before `Startup`): `SetHost`, `SetLogger`, `SetMeterProvider`,
 `SetTracerProvider`.
@@ -137,9 +132,8 @@ That is a real trade, worth making only once you have measured that distance is 
 
 **How to tell that it is.** Compare your ceiling against database CPU. If throughput flattens while the
 connection pool sits fully in use and the database still has substantial idle CPU, the limit is
-distance, not size — the connections are spending their time on the wire, and **adding connections to
-chase a CPU target that path cannot reach is how you find the over-connection collapse.** A bigger
-instance does not fix a long wire; a closer one does.
+distance, not size — the connections are spending their time on the wire. Raising `MaxConnections` buys
+some of it back, but a bigger instance does not fix a long wire; a closer one does.
 
 ## Sharding
 
@@ -165,96 +159,71 @@ Rules:
 - The shard set is fixed for the engine's life: shards are opened and migrated at `Startup`, and
   `SetShard` is rejected after. Each flow key encodes its shard, so changing the set requires a
   coordinated restart of every replica (a maintenance window), not a live/piecemeal change.
-- New top-level flows are placed across shards in proportion to their measured capacity (roughly flat for
-  shards declared at 2 vCPUs or fewer, then scaling with `VirtualCPUs` above that), so a bigger database
-  receives proportionally more work; cordoned shards are skipped. Subgraph flows, thread continuations and
-  forks all stay on their originating shard.
+- New top-level flows are placed across shards in proportion to their `Weight` (default 1, so evenly).
+  In a fleet of unequal databases, give a larger one a larger weight; cordoned shards are skipped.
+  Subgraph flows, thread continuations and forks all stay on their originating shard.
 
 ```go
-eng.SetShard(engine.ShardSpec{Index: 1, DSN: "postgres://user:pass@db-a.internal:5432/dwarf?sslmode=disable", VirtualCPUs: 8})
-eng.SetShard(engine.ShardSpec{Index: 2, DSN: "postgres://user:pass@db-b.internal:5432/dwarf?sslmode=disable", VirtualCPUs: 8})
+eng.SetShard(engine.ShardSpec{Index: 1, DSN: "postgres://user:pass@db-a.internal:5432/dwarf?sslmode=disable"})
+eng.SetShard(engine.ShardSpec{Index: 2, DSN: "postgres://user:pass@db-b.internal:5432/dwarf?sslmode=disable"})
 ```
 
 ## Connection pool
 
-Each shard's pool derives from two things: its `ShardSpec.VirtualCPUs`, and the round-trip time the engine
-measures to that database at startup. The idle core is half the open ceiling.
+Each shard has a **connection budget**: the connections every replica dispatching that shard may hold
+there, together. By default the engine sets it from two things it measures at startup:
 
-The second axis is the less obvious one. **A connection held while a packet is in flight does the database
-no good**, so a pool sized from CPU count alone leaves a distant server idle — a 16-vCPU database 4.8 ms
-away ran at **33% CPU** with a CPU-derived pool, two thirds of it unreachable. Sizing for distance as well
-held throughput at **93–100% of the same-zone peak out to 5 ms**. So connections per vCPU **rise with
-distance**, roughly doubling from same-zone to 2 ms:
+- **The round-trip time to the database.** The budget is **250** connections up to 0.25 ms, rising evenly
+  to **500** at 1 ms and staying there beyond. A connection held while a packet is in flight does the
+  database no good, so a distant database needs more of them to stay as busy.
+- **The server's own `max_connections`.** The budget never exceeds **half** of it, leaving the rest for your
+  application, administration and the server's reserved slots. A server configured small takes a smaller
+  budget (a stock PostgreSQL limit of 100 gives 50); raise the server's limit and the engine follows.
 
-| database | 0.25 ms | 0.5 ms | 1 ms | 1.5 ms | 2 ms and beyond |
-|---|---|---|---|---|---|
-| 1 vCPU | 3.6× | 6.0× | 8.4× | 10.8× | 13.2× |
-| 2 vCPU | 3.6× | 7.2× | 8.4× | 12.0× | 13.2× |
-| 4 vCPU | 3.6× | 7.2× | 7.2× | 9.6× | 12.0× |
-| 8 vCPU | 6.0× | 9.6× | 9.6× | 13.2× | 13.2× |
-| 16 vCPU | 6.0× | 8.4× | 8.4× | 10.8× | 10.8× |
-| 32 vCPU | 4.5× | 5.6× | 6.7× | 9.7× | 10.5× |
-| 64 vCPU and beyond | 2.7× | 4.2× | 6.0× | 7.2× | 7.2× |
+On SQLite the budget is a fixed 8: SQLite writes one transaction at a time, so more connections only queue.
+Connections are opened only as work needs them, and close again after two minutes idle, so a lightly
+loaded shard holds far fewer than its budget.
 
-Round-trip times between two columns are interpolated, so a 0.9 ms path lands 80% of the way from the
-0.5 ms ratio to the 1 ms one — a plain linear blend. **Sizes between two rows are blended too, but not the
-same way**: the ratio is smooth in the *logarithm* of the CPU count, not in the raw count, so a 24-vCPU
-database is blended between the 16- and 32-vCPU rows in log-log space (linear in log(ratio) against
-log(vCPUs), exact at every row in the table above) rather than simply taking the larger server's ratio —
-that blend lands at 24 vCPUs' own ~5.1× at 0.25 ms, between 16's 6.0× and 32's 4.5×, closer to 32's. Each
-tabulated value is the smallest pool measured to sustain that distance's achievable throughput, plus 20%:
-at the bare minimum the tail degrades sharply (a 16-vCPU database 1 ms away measured a p99 of 1,344 ms at
-its minimum against 203 ms at 26% above it), while much beyond that the extra connections buy nothing and
-start costing. **Past 64 vCPU there is no second row to blend against**, so a larger database is sized as
-if it were 64 vCPU (the lowest ratio measured, and therefore the safe direction — under-sizing costs
-throughput rather than risking collapse) until that tier is itself measured.
+**Setting `ShardSpec.MaxConnections`** replaces the derived budget with exactly that number - no adjustment
+for distance and no cap. Declare the same value for a shard on every replica.
 
-**Do not read the ratios as a trend across database sizes.** They do not fall monotonically — 8 and 16 vCPU
-need proportionally *more* than 4 vCPU, and 64 vCPU needs the least of any size measured — and the arms
-behind each row were not held at a matched fraction of their own tier's ceiling, so part of that spread
-measures how hard each was pushed rather than the tier itself. What the measurements establish is the
-level, not the shape. The rate of rise with distance is not uniform either: it roughly doubles across the
-range on most sizes but rises 2.7× on 64 vCPU.
+Measured on Cloud SQL for PostgreSQL 16 (1 TB SSD, each database driven to saturation, one run per cell),
+the default sits at or near the best of the pools tried on every size:
 
-**Confidence is not uniform across that table.** Every row is measured (Cloud SQL for PostgreSQL, one arm
-per cell) — there is no projected or modelled row. A database larger than 64 vCPU has not been measured at
-all; the flat extrapolation above is a deliberate, safe placeholder until it is.
+| database | default `max_connections` | default budget near | best measured near | recommendation |
+|---|---|---|---|---|
+| 4 vCPU | 500 | 250 | 125-250 (alike, ~2,050 steps/s) | default |
+| 8 vCPU | 600 | 250 | 150-300 (~4,100-4,500 steps/s) | default |
+| 16 vCPU | 800 | 250 | 200 (~8,500 steps/s) | default |
+| 32 vCPU | 1,000 | 250 | 250 (~20,900 steps/s) | default |
+| 64 vCPU | 1,000 | 250 | 500 (~25,400-28,500 steps/s, +14% over 250) | `MaxConnections: 500` |
 
-**On how the numbers were obtained**, because it bounds how sharp they are. Each is the smallest pool that
-sustained the load across a 120-second window. This system exhibits a recurring stall of roughly 30
-seconds that clears itself while load continues, so a window of that length sometimes catches one and
-sometimes does not: the same pool at the same rate measured 46% and 98% of the offered rate in two
-windows. The values are therefore placed from where *starvation* ends — which is monotonic and
-reproducible — rather than from where a collapse begins. Treat them as well-sized, not as edges, and if
-you run a database near its limit, measure it over minutes rather than seconds.
+At 1 ms the default rises to 500 (or half the server's limit, if lower), which recovered most of what the
+distance cost where it was measured. Throughput keeps climbing slowly as connections are added - more
+transactions share each write to the log - so a pool past the budget is not a cliff, only diminishing
+returns. Under-sizing costs throughput; it does not destabilize the database.
 
-**Compensation stops at 2 ms**, and past roughly there the answer is more shards rather than a bigger one:
-reaching a 32-vCPU server's same-zone peak across a 4 ms path would take ~1,163 connections. For context,
-same-zone round trips run **0.05–0.96 ms** and cross-AZ same-region about **1.1 ms** — both inside the
-compensated range — while cross-region (10–40 ms) is far outside it.
+**Sizing beyond these defaults**, use `MaxConnections` when:
 
-An undeclared count assumes 2 vCPUs (a pool of 7 same-zone). That is the floor of every
-current-generation RDS class, so the guess cannot undershoot there, and it stays safe even on a genuinely
-1-vCPU machine (that tier sustained its load on 3 connections and ran clean at 14). What it cannot do is
-use a large database: **declare
-`VirtualCPUs`.** It is a fact off the server's spec sheet, and it is the single most valuable thing you
-can tell the engine. The pool is always derived; there is no setting that pins it. The measurements behind these
-constants are in the [cloud benchmarks](benchmark-cloud.md).
+- the database is larger than 32 vCPU (the default stops growing with the server there);
+- the database is shared with other heavy users and you want dwarf to take less of it;
+- a connection pooler sits in front of the database, so the server's reported limit is not the real one;
+- several shards are databases on one server: each takes its budget from that server's limit without
+  knowing about the others, so split the server between them explicitly.
 
-> **Declare it correctly.** `VirtualCPUs` is trusted, not verified — the engine has no way to check it
-> and does not try. Declaring *more* CPUs than the database has sizes the pool past that machine's knee,
-> and over-connection does not merely waste connections: it collapses throughput (a 1-vCPU instance fell
-> from 856 to 385 steps/s as its pool grew). Under-declaring is the safe direction — it costs throughput
-> while the system stays healthy.
+**Compensation for distance stops at 1 ms by design.** Past roughly 1.5-2 ms a large database cannot be kept
+busy at any reasonable pool, and the answer is to place the engine closer, or to add shards. For context,
+same-zone round trips run **0.05-0.96 ms** and cross-AZ same-region about **1.1 ms**; cross-region
+(10-40 ms) is far outside what any pool can compensate.
 
 > **Running more than one replica?** The derived budget is a property of the shard's *database*, not
 > of one replica: R replicas each holding the full derived pool would overshoot the knee R
-> times over, into the over-connection zone the cap exists to prevent. The engine handles this
+> times over. The engine handles this
 > automatically. Each replica records a periodic heartbeat in the shard databases it already shares with
 > the others, and from those rows the fleet agrees **per shard** on a small number of **dispatchers** that
-> split that shard's derived pool and run its steps. The count grows with the shard's size, not the fleet's:
-> two for a shard of up to 4 vCPUs, four at 8 vCPUs, sixteen at 64 — never more than there are replicas,
-> and at least two once there are two, so one replica failing does not stop a shard. Every other replica
+> split that shard's budget and run its steps: up to four per shard - enough for any one database - never
+> more than there are replicas, and at least two once there are two, so one replica failing does not stop a
+> shard. A small budget (one you set low, or SQLite's) takes fewer, so each dispatcher keeps a usable pool. Every other replica
 > holds just **two connections** to that shard, enough to create flows, answer reads and wait on outcomes,
 > and runs none of its steps. A replica that stops dispatching a shard — another replica took its place, or
 > it is shutting down — keeps a dispatcher-sized share until the steps it already started there finish, and
@@ -267,7 +236,7 @@ constants are in the [cloud benchmarks](benchmark-cloud.md).
 > room for it rather than briefly overshooting together. (Lowering a pool's limit closes nothing, so a
 > peer's surplus connections drain as they are returned rather than instantly.)
 >
-> Declare **the same `VirtualCPUs` for a shard on every replica**: it decides how many dispatchers that shard
+> Declare **the same `MaxConnections` for a shard on every replica**: it decides how many dispatchers that shard
 > has, and replicas that disagree on it disagree on which of them dispatch. A new flow is created on a shard
 > its replica dispatches when it has one, so its first step runs at once; a flow created, resumed, forked or
 > continued on a replica that does not dispatch its shard waits for the next scan (well under a second)

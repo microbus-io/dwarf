@@ -78,7 +78,7 @@ per-replica/cluster-wide split is tabulated in [Observability](observability.md)
 
 Sizing is measured rather than guessed, and the numbers live with the measurements:
 
-- **[Deployment](deployment.md)** — choosing a database, declaring shard facts, connection pools, workers,
+- **[Deployment](deployment.md)** — choosing a database, declaring shards, connection pools, workers,
   drain windows, the disk-throughput requirement, and
   [reference configurations](deployment.md#reference-configurations) with their measured throughput.
 - **[Cloud benchmarks](benchmark-cloud.md)** — the sizing formula and every constant behind it, measured

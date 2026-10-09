@@ -25,9 +25,10 @@
 
 ## Engine configuration
 
-- [ ] **`VirtualCPUs` declared on every shard.** Undeclared shards are assumed to be 2-vCPU machines, so a
-  large database will be sized for a trickle and run at a fraction of its capacity. Nothing detects an
-  over-declared value either. → [Deployment](deployment.md#sharding)
+- [ ] **Connection budgets suit each database.** The default (250, rising to 500 for a distant database,
+  never more than half its `max_connections`) suits databases of 4-32 vCPU. Set `MaxConnections` for a larger
+  one or one shared with other heavy users, and set `Weight` on shards of unequal size so new flows follow
+  capacity. → [Deployment](deployment.md#connection-pool)
 - [ ] **The shard index-to-DSN map is identical on every replica** and stable across restarts. A flow key
   encodes its shard, so a flow created on a shard a peer does not know about is unroutable there.
   → [Resharding](resharding.md)
