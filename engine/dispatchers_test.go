@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -29,24 +30,32 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// fakeFleet is six peer ids and the two engine ids whose rendezvous ranks against them on shard 1 are
-// known: three of the peers outrank readerID and one outranks dispatcherID. A test that needs this replica on one side of
+// fakeFleet is six peer ids, and readerID and dispatcherID are the two engine ids whose places against them in
+// the shared order are known: joinFakeFleet registers three of the peers as having joined before readerID and
+// one before dispatcherID, and the rest after. Any other engine id joined first and ranks first. A test that needs this replica on one side of
 // the dispatcher cut sets its id to one of them, and checks the rank before relying on it.
 var fakeFleet = []int64{1001, 1002, 1003, 1004, 1005, 1006}
 
 const (
-	readerID     = 7004
-	dispatcherID = 7006
+	readerID     = 7000
+	dispatcherID = 7669
 )
 
 // joinFakeFleet registers fakeFleet on every shard, waits for the engine to count all seven, and applies
 // the roles that count implies.
 func joinFakeFleet(t *testing.T, e *Engine) {
 	t.Helper()
+	ahead := map[int64]int{readerID: 3, dispatcherID: 1}[e.engineID]
 	err := e.db.OnEach(context.Background(), func(ctx context.Context, db *sequel.DB, shard int) error {
-		for _, id := range fakeFleet {
+		for i, id := range fakeFleet {
+			// The peers placed ahead joined an hour ago; the rest join now, after the engine under test.
+			joined := 0
+			if i < ahead {
+				joined = -3600000
+			}
 			_, err := db.ExecContext(ctx,
-				"INSERT INTO dwarf_peers (engine_id, seen_at, dispatched_at) VALUES (?, NOW_UTC(), NOW_UTC())", id)
+				"INSERT INTO dwarf_peers (engine_id, seen_at, dispatched_at, joined_at) VALUES (?, NOW_UTC(), NOW_UTC(), DATE_ADD_MILLIS(NOW_UTC(), ?))",
+				id, joined)
 			if err != nil {
 				return err
 			}
@@ -56,7 +65,9 @@ func joinFakeFleet(t *testing.T, e *Engine) {
 	if err != nil {
 		t.Fatalf("insert fake fleet: %v", err)
 	}
-	awaitPeerCount(t, e, 1, len(fakeFleet)+1)
+	for _, idx := range e.db.Indices() {
+		awaitPeerCount(t, e, idx, len(fakeFleet)+1)
+	}
 	e.recomputePools()
 }
 
@@ -76,6 +87,108 @@ func leaveFakeFleet(t *testing.T, e *Engine) {
 	}
 	awaitPeerCount(t, e, 1, 1)
 	e.recomputePools()
+}
+
+// TestDispatchers_WindowsBalanceTheRoles pins the staggered cut's arithmetic. The shard at place p takes the
+// slots positions starting at p*slots in the shared order, so (1) every shard has exactly slots distinct
+// dispatchers, and (2) every replica carries the floor or the ceiling of shards*slots/candidates roles - the
+// balance an independent per-shard draw does not give.
+func TestDispatchers_WindowsBalanceTheRoles(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	for shards := 1; shards <= 8; shards++ {
+		for candidates := 1; candidates <= 20; candidates++ {
+			slots := dispatcherSlots(candidates)
+			roles := make([]int, candidates)
+			for o := range shards {
+				n := 0
+				for rank := range candidates {
+					if inWindow(rank, candidates, o, slots) {
+						roles[rank]++
+						n++
+					}
+				}
+				assert.Equal(slots, n, "shards %d candidates %d: shard %d has %d dispatchers", shards, candidates, o, n)
+			}
+			lo, hi := shards*slots/candidates, (shards*slots+candidates-1)/candidates
+			for rank, r := range roles {
+				assert.True(r >= lo && r <= hi, "shards %d candidates %d: rank %d carries %d roles, want %d..%d",
+					shards, candidates, rank, r, lo, hi)
+			}
+		}
+	}
+}
+
+// TestDispatchers_WindowsMoveOneDispatcherPerShard pins the churn bound when the order has room for every
+// window (candidates >= shards*slots): a replica joining at any place shifts the later places by one, so a
+// shard's window slides by at most one replica - it swaps at most one of its dispatchers. With fewer
+// candidates the windows wrap and a join can move more; that is the small-fleet case, accepted.
+func TestDispatchers_WindowsMoveOneDispatcherPerShard(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	for shards := 1; shards <= 6; shards++ {
+		for candidates := shards * 2; candidates <= 16; candidates++ {
+			// Replicas are named by their place before the join; the joiner takes place p and is named -1.
+			for p := 0; p <= candidates; p++ {
+				for o := range shards {
+					before, after := map[int]bool{}, map[int]bool{}
+					for rank := range candidates {
+						if inWindow(rank, candidates, o, dispatcherSlots(candidates)) {
+							before[rank] = true
+						}
+					}
+					for rank := range candidates + 1 {
+						name := rank
+						if rank == p {
+							name = -1
+						} else if rank > p {
+							name = rank - 1
+						}
+						if inWindow(rank, candidates+1, o, dispatcherSlots(candidates+1)) {
+							after[name] = true
+						}
+					}
+					gone := 0
+					for name := range before {
+						if !after[name] {
+							gone++
+						}
+					}
+					assert.True(gone <= 1, "shards %d candidates %d join at %d: shard %d lost %d dispatchers",
+						shards, candidates, p, o, gone)
+				}
+			}
+		}
+	}
+}
+
+// TestDispatchers_ShardsStaggerTheirCuts pins the wiring end to end: on two shards sharing one fleet, each
+// shard's cut sits at its own place in the order - by the shard's place among the indices, not the index, so
+// the shards are 1 and 3. Among seven candidates, shard 1 takes ranks 0-1 and shard 3 takes ranks 2-3, so
+// readerID (rank 3) dispatches shard 3 alone and dispatcherID (rank 1) shard 1 alone - where one shared top-two
+// would have given both shards to the same replicas, and an index-anchored window would have put shard 3 at
+// ranks 4-5.
+func TestDispatchers_ShardsStaggerTheirCuts(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	for _, c := range []struct {
+		id       int64
+		on1, on3 bool
+	}{
+		{readerID, false, true},
+		{dispatcherID, true, false},
+	} {
+		e := NewEngineUnderTest(t.Name() + "#" + strconv.FormatInt(c.id, 10))
+		assert.NoError(e.SetHost(noopHost{}))
+		assert.NoError(e.SetEngineID(c.id))
+		assert.NoError(e.SetShard(ShardSpec{Index: 1}))
+		assert.NoError(e.SetShard(ShardSpec{Index: 3}))
+		assert.NoError(e.Startup(t.Context()))
+		joinFakeFleet(t, e)
+		assert.Equal(c.on1, e.dispatchesOn(1), "id %d on shard 1", c.id)
+		assert.Equal(c.on3, e.dispatchesOn(3), "id %d on shard 3", c.id)
+		e.Shutdown(t.Context())
+	}
 }
 
 // TestDispatchers_Slots pins how many replicas dispatch a shard: maxDispatchers, never more than the
@@ -734,7 +847,7 @@ func TestDispatchers_OverridePromotionResizesTheCache(t *testing.T) {
 }
 
 // twoReplicaFleet stands up a dispatcher (dispatcherID) and a reader (readerID) on one two-dispatcher shard, beside
-// one fake working peer (1001) that dispatches nothing. Among the three candidates 1001 ranks first,
+// one fake working peer (1002) that dispatches nothing. Among the three candidates 1002 ranks first,
 // dispatcherID second and readerID third, so with two slots the dispatcher dispatches and the reader reads -
 // and once the dispatcher stops working, the reader moves inside the cut. Each engine runs on its own host,
 // so a test can tell which replica ran a task.
@@ -753,7 +866,7 @@ func twoReplicaFleet(t *testing.T, dispHost, readHost Host) (disp, reader *Engin
 	assert.NoError(disp.Startup(t.Context()))
 	db, err := disp.db.Shard(1)
 	assert.NoError(err)
-	_, err = db.ExecContext(t.Context(), "INSERT INTO dwarf_peers (engine_id, seen_at) VALUES (1001, NOW_UTC())")
+	_, err = db.ExecContext(t.Context(), "INSERT INTO dwarf_peers (engine_id, seen_at, joined_at) VALUES (1002, NOW_UTC(), DATE_ADD_MILLIS(NOW_UTC(), -3600000))")
 	assert.NoError(err)
 	reader = mk(readerID, readHost)
 	assert.NoError(reader.Startup(t.Context()))
@@ -903,4 +1016,45 @@ func TestDispatchers_RecoverySweepSkipsShardsThisReplicaOnlyReads(t *testing.T) 
 	e.dispatchFlag(1).Store(true)
 	e.recoverExpiredLeases(ctx)
 	assert.Equal(0, expired(), "a dispatcher resets it")
+}
+
+// TestDispatchers_WeightsOverrideTheOwnShardPreference pins placement for a replica that dispatches a subset of
+// the shards. With every weight at 1 it places only on its own shards, so the first step rings its doorbell.
+// Any other weight drops that preference: placing only on its own shards would hand each shard its own
+// dispatchers' creates whatever the weights say, so it places by weight over every non-cordoned shard.
+func TestDispatchers_WeightsOverrideTheOwnShardPreference(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	for _, c := range []struct {
+		name     string
+		w1, w2   float64
+		wantOnly bool
+	}{
+		{"equal", 0, 0, true},
+		{"weighted", 1, 3, false},
+	} {
+		e := NewEngineUnderTest(t.Name() + "#" + c.name)
+		assert.NoError(e.SetHost(noopHost{}))
+		assert.NoError(e.SetEngineID(dispatcherID))
+		assert.NoError(e.SetShard(ShardSpec{Index: 1, Weight: c.w1}))
+		assert.NoError(e.SetShard(ShardSpec{Index: 2, Weight: c.w2}))
+		assert.NoError(e.Startup(t.Context()))
+		joinFakeFleet(t, e)
+		if !assert.True(e.dispatchesOn(1) && !e.dispatchesOn(2), "fixture: dispatcherID dispatches shard 1 alone") {
+			e.Shutdown(t.Context())
+			continue
+		}
+		counts := map[int]int{}
+		for range 4000 {
+			idx, err := e.pickShard()
+			assert.NoError(err)
+			counts[idx]++
+		}
+		if c.wantOnly {
+			assert.Equal(4000, counts[1], "%s: equal weights keep placement on the replica's own shard", c.name)
+		} else {
+			assert.True(counts[2] > 2*counts[1], "%s: a weight of 3 against 1 draws ~3x (got %d vs %d)", c.name, counts[2], counts[1])
+		}
+		e.Shutdown(t.Context())
+	}
 }

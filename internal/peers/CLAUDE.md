@@ -38,10 +38,12 @@ registration repair exists (below) and why it cannot be left to the beat.
 way out — its context is cancelled by then, so the DELETE would fail — and `Run` having returned is itself
 the guarantee that no beat follows.
 
-**The API is fifteen calls, and keeping it that small is a standing constraint.** Six inputs (`New`,
-`SetProfile`, `SetEvidence`, `SetTurnFunc`, `SetLogger`, `SetSeams`), four lifecycle calls (`Join`, `Run`,
-`Withdraw`, `Leave`), four
-published facts (`Replicas`, `Rank`, `Partition`, `BlindFor`), and one knob (`SetCadence`).
+**The API is nineteen calls, and keeping it that small is a standing constraint.** Seven inputs (`New`,
+`SetProfile`, `SetCut`, `SetEvidence`, `SetTurnFunc`, `SetLogger`, `SetSeams`), five lifecycle calls (`Join`,
+`Run`, `Withdraw`, `Leave`, `SetDraining`), six published facts (`Replicas`, `Rank`, `InCut`, `Draining`,
+`Partition`, `BlindFor`), and one knob (`SetCadence`). `SetCut` earns its place because the cut needs the
+shard's index and the slot rule, which are the owner's, while applying it has to happen here: the hold that
+makes entering the cut wait a reading needs the previous raw reading, which only the Sonar has.
 
 The windows and the beat are **constants with plain fields behind them**, not setters, because they are
 this package's policy — derived from which errors are safe in which direction rather than from anything an
@@ -101,7 +103,7 @@ deliberately:
 
 | | direction of error that hurts | posture |
 |---|---|---|
-| `Replicas` + `Rank` (who dispatches) | under-count / over-promote → over-size pools → collapse a database | **hold, and withhold a fall or a promotion across a gap** |
+| `Replicas` + `InCut` (who dispatches) | under-count / over-promote → over-size pools → collapse a database | **hold, and withhold a fall or an entry into the cut across a gap** |
 | `Partition` (work divisor) | over-count → a residue class nobody selects → stranded work | **fail open** |
 | prune (hygiene) | a wrong delete is the only irreversible act here | **wait 5 minutes** |
 
@@ -124,18 +126,21 @@ deliberately:
   shard that stops answering stops being partitioned within a round trip rather than within a cadence.
 - **The prune waits** (below).
 
-- **`Rank` obeys the same asymmetry as `Replicas`, for the same storm.** After a correlated stall every
-  row reads stale at once, so every replica would rank itself first; an owner that turns rank into "I
-  dispatch" would then grow every replica's pool to a dispatcher's share simultaneously. A demotion (a higher
-  rank) shrinks a pool and is believed at once; a promotion waits one reading. Pinned by
-  `TestPeers_RankPromotionIsWithheldAcrossAGap`.
+- **`InCut` obeys the same asymmetry as `Replicas`, for the same storm.** After a correlated stall every
+  row reads stale at once, so every replica would see a handful of candidates, land inside some shard's cut,
+  and grow its pool to a dispatcher's share simultaneously. Leaving the cut shrinks a pool and is believed at
+  once; entering it waits one reading - `InCut` is true only if the previous raw reading also put the replica
+  in the cut. That rule holds on every reading, not only after a gap, because it also orders an ordinary
+  handoff (see "Who dispatches"). The rank itself is published as read: a lower place in the order is not
+  "closer to dispatching" once the cut is a window, so holding the larger rank protects nothing. Pinned by
+  `TestPeers_CutEntryIsWithheldAcrossAGap` and `TestPeers_CutEntryTakesTwoReadings`.
 
-  **HOLD A GAPPED RANK AGAINST THE PREVIOUS RAW READING, NEVER AGAINST THE PUBLISHED VALUE.** The published
-  value is itself held, so holding against it ratchets: across consecutive gapped readings the rank can only
-  rise - and a slow enough pass makes every reading gapped (below). Unlike a frozen `Replicas`, which only
-  under-sizes pools, a frozen rank is not fail-safe: a reader whose dispatchers left is never promoted, and
-  the shard runs nothing. Against the raw reading, two consecutive readings that agree are believed whether
-  or not either was gapped. Pinned by `TestPeers_RankPromotesThroughSustainedGaps`.
+  **HOLD A GAPPED CUT AGAINST THE PREVIOUS RAW READING, NEVER AGAINST THE PUBLISHED VALUE.** The published
+  value is itself held, so holding against it ratchets: across consecutive gapped readings a replica could
+  only leave the cut - and a slow enough pass makes every reading gapped (below). Unlike a frozen `Replicas`,
+  which only under-sizes pools, a frozen cut is not fail-safe: a reader whose dispatchers left is never
+  promoted, and the shard runs nothing. Against the raw reading, two consecutive readings that agree are
+  believed whether or not either was gapped. Pinned by `TestPeers_CutEntryThroughSustainedGaps`.
 - **`Withdraw` takes a replica out of the ranking without taking it out of the fleet**: it sets the row's
   `working=0` and makes a later repair write the same value. An owner calls it when it stops taking on work
   but still holds connections - a drain long enough to be worth it - so another replica takes over its
@@ -157,12 +162,12 @@ deliberately:
   so a replica stuck stating it costs every pool on the shard one share of headroom - the safe direction -
   and strands nothing. It is a statement that MOVES during the life of the process, so the beat carries it
   (and a change is published by the next pass, like a change in dispatch evidence), and a registration
-  repair rewrites it. Its count is held across a gapped reading like the rank: a rise shrinks pools and is
+  repair rewrites it. Its count is held across a gapped reading like `Replicas`: a rise shrinks pools and is
   believed at once, a fall waits a reading. Pinned by `TestPeers_ClassifyCountsDraining`,
   `TestPeers_DrainingRidesTheReadCadenceWhenItFlips` and `TestPeers_DrainingFallIsWithheldAcrossAGap`.
 
   **The divisor is `dispatcher slots + draining`, and only replicas OUTSIDE the cut state anything.** The
-  rank already says who the dispatchers are, so a dispatcher states nothing, and the flag flips only when a
+  cut already says who the dispatchers are, so a dispatcher states nothing, and the flag flips only when a
   replica leaves the cut with work still in flight. With `B` the shard's budget, `X` its dispatcher slots and
   `D` the other replicas draining, everyone dividing by the same count keeps the shard on budget during a
   DEMOTION drain: two dispatchers and one draining replica each hold a third. A SHUTDOWN
@@ -250,7 +255,7 @@ verified sensitive: removing the gap's reset of the healthy run makes it delete 
 
 Both pinned by `TestPeers_ClassifySelfAbsenceCutsBothWays`.
 
-- **`Rank` follows `Replicas`, not the partition: self is ranked even when its row is missing.** The owner
+- **`Rank` follows `Replicas`, not the partition: self is ranked even when its row is missing.** The cut
   turns a rank into a dispatcher role, and there the dangerous error is the opposite of the partition's:
   over-claiming a slot over-connects by one share until the row is repaired, while a replica that ranked
   nowhere would leave a lone replica dispatching nothing at all. Pinned by
@@ -267,29 +272,90 @@ neither caller can hit the one tripping case — an existing row whose `seen_at`
 millisecond. At startup nothing has beaten yet; the repair path has just *observed* the row absent, and this
 replica is the only writer of its own row, so that observation cannot be raced.
 
-## `Rank` — a rendezvous score, fixed forever
+## Who dispatches: one shared order, a staggered cut per shard
 
-The rank is highest-random-weight hashing: each fresh row scores `rendezvousScore(engineID, shard)`, ties
-break on the lower id, and a replica's rank is how many counted rows outrank it. Rows with `working=0` (the
-owner's `Profile.Working` false) are counted in `Replicas` but neither rank nor count as candidates, and
-`Rank` returns the rank together with that candidate count as one published pair - an owner derives how many
-slots to fill from the candidates, and a rank only means anything against the count it came from. Pinned by
-`TestPeers_ClassifyNeverRanksAnIdlePeer`.
+A shard's dispatchers are chosen in two steps, and the split between this package and its owner is part of
+the design.
+
+**The order (here).** Every fresh row with `working=1` is a candidate; candidates are ordered by when they
+joined - the row's `joined_at`, oldest first, ties to the lower id - and `Rank` is how many candidates come
+ahead of this replica, published with the candidate count as one value - a rank only means anything against
+the count it came from.
+Rows with `working=0` (the owner's `Profile.Working` false) are counted in `Replicas` but take no place in the
+order. Pinned by `TestPeers_ClassifyNeverRanksAnIdlePeer` and `TestPeers_ClassifyRanksAgreeAcrossReplicas`.
+
+**Join time is the same on every shard, give or take a millisecond**, because every replica registers on every
+shard as it starts, so every shard's registry yields the same order. That sameness is what lets the owner
+stagger the cut. Two replicas joining within the same millisecond may order differently on two shards; that
+dents the tiling, never agreement, because each shard's cut is computed from that shard's rows alone.
+
+- `joined_at` is written when the row is INSERTed and never by the beat or the registration's UPDATE, so a
+  replica restarting under a pinned id while its old row still exists keeps its place. A row that is deleted
+  and re-created - a graceful leave, a registration repair - joins again, at the end.
+- Ages are computed by the shard's database within one statement, so they compare exactly within a reading,
+  and like every timestamp here are never compared across shards.
+- A replica that cannot see its own row places itself as the newest, behind every peer it can see.
+- **Why join time and not a hash of the id:** a newcomer always lands at the END of the order, so once there
+  are as many candidates as roles (`C >= S*X`) adding a replica, or removing the newest, moves no live
+  dispatcher at all - simulated at 4 shards and 8 replicas: 0 demotions per scale-up against 2.2 for a hash
+  order, 0 per newest-removed against 1.5. A leave from the middle and a rolling-restart step (oldest
+  replaced) cost the same either way. It is also the order that explains itself, and there is no hash
+  function that must stay frozen across releases.
+
+**The cut (the owner's, applied here).** The owner gives each Sonar a `CutFunc(rank, candidates) bool` with
+the shard's place and slot count baked in (`SetCut`); the Sonar applies it to every reading and publishes
+the answer as `InCut`. The engine's cut is a window: the shard at place `p` among the sorted shard indices
+takes the `X = min(2, C)` candidates at positions `[p*X, p*X+X) mod C` (`engine/poolsize.go`, `inWindow`).
+**Anchored on the place, not the index, because the steady state is what runs**: index-anchored windows
+collide when indices have gaps (1, 3, 4) and leave replicas idle. The cost is a transient - while a shard is
+added or retired below others, replicas briefly hold different shard sets and disagree on the windows of the
+shards above it (between none and twice the dispatchers there) until the roll completes; a shard added above
+every other moves nothing. The shards tile the order, so:
+
+- **Every replica carries the floor or the ceiling of `S*X/C` roles** whenever the shards' rosters agree,
+  which is the steady state. 4 shards x 8 replicas: one role each; 4 shards x 2 replicas: both dispatch
+  everything. Pinned by `TestDispatchers_WindowsBalanceTheRoles`.
+- **A join or leave moves at most one dispatcher per shard** when `C >= S*X` - it shifts later places by one,
+  so a window slides by one replica. Fewer candidates than slots make the windows wrap and a change in `C`
+  moves more. Pinned by `TestDispatchers_WindowsMoveOneDispatcherPerShard`.
+- **The price of the balance is churn, and it is accepted.** Unlike an independent draw, a fleet change moves
+  the cut for replicas other than the one that joined or left: a leave shifts later places down and demotes
+  live replicas, a join promotes former readers. Simulated at 4 shards: demotions per join 3.0 against 0.9 for
+  an independent draw at 8 replicas (5.5 against 1.6 at 4), live demotions per leave 2.5 against 0. Fleet
+  changes are deploys and scaling, and each move is made safe rather than avoided: **entering a cut always
+  takes two agreeing readings while leaving takes one**, so a handoff between two existing replicas goes
+  leave-then-enter and errs a dispatcher short for a cadence, and the demotion hold keeps a demoted replica's
+  in-flight steps on a share until they finish. The roles settle even again once the fleet does - pinned
+  across a rolling restart on two shards by `TestPeerRollingRestart_ShardsStayOnBudgetAndRebalance`, and the
+  handoff order by `TestPeers_CutEntryTakesTwoReadings`.
+- **Each shard still decides from its own registry.** A replica blind on shard 3 can only be wrong about
+  shard 3; the other shards' cuts never read its rows.
+
+**Two shapes that lose, for reasons that recur:**
+
+- **An independent draw per shard** (a per-shard rendezvous score, top `X` per shard). It agrees fleet-wide
+  and churns least, but it does not balance: at 8 replicas and 4 shards a replica misses a shard's top two
+  with probability 6/8 and all four with 0.75^4 ~ 0.32, so about a third of the fleet dispatched nothing while
+  others carried three shards - uneven engine CPU, and the multi-shard-process case where GC cost was
+  measured at ~28% of a replica's CPU.
+- **A fleet-wide assignment over every shard's roster** (bounded-load rendezvous: shards in order, each
+  taking its top replicas below a role cap). It balances and churns less than the window, but every shard's
+  cut then depends on every other shard's roster: one blind or lagging read moves dispatchers everywhere, and
+  divergent views need a reconciliation rule. The window keeps the per-shard isolation this package is built
+  around.
+
+**A replica that is not working is never in the cut**, whatever its rank, and **a missing own row still
+ranks** (self-absence follows `Replicas`, below).
+
+**The order, the window rule and its anchor are part of the wire.** Every process in a fleet must apply the
+same ones, and a fleet is upgraded one replica at a time: during a rolling upgrade that changed any of them,
+old and new replicas would cut the same rows differently, so a shard could be claimed by more dispatchers
+than its budget feeds, or by none.
 
 **A zero `Profile` states a replica that is NOT working.** `New` seeds `Working: true`, so a Sonar never given
 a profile ranks normally, but `SetProfile` replaces the whole value: an owner that sets only the RTT would
-take itself out of every ranking. Always set `Working` alongside it.
-
-The `Profile` is written at registration and at a repair, **never by the beat**: it is a fact about the
-process, not a liveness signal, and the beat stays one fixed statement shape. Every replica reading the
-same rows derives a distinct rank with no coordination, and the score is per shard, so the top ranks land on
-different replicas on different shards. Pinned by `TestPeers_ClassifyRanksAgreeAcrossReplicas`.
-
-**Do not change `rendezvousScore`, and do not seed it.** Its value must agree across every process in a
-fleet, and a fleet is upgraded one replica at a time: during a rolling upgrade that changed the function,
-old and new replicas would rank the same rows differently, so a shard could be claimed by more dispatchers
-than its budget feeds, or by none. A seeded or per-process hash has the same failure permanently. The
-function is a splitmix64 finalizer over `engineID ^ shard*φ`, and that spelling is part of the wire.
+take itself out of every cut. Always set `Working` alongside it. The `Profile` is written at registration and
+at a repair, **never by the beat**: it is a fact about the process, not a liveness signal.
 
 ## Two cadences, because only one of them is detection
 
@@ -335,8 +401,8 @@ thresholds. A **lone** slow pass among fast ones trips at `pass > scan`: the pre
 interval old when this one starts, so its age at publication is `scan + pass`. A **sustained** slow pass
 settles at `pass > 1.75 × scan`, because the floor takes over the pacing and the period becomes
 `pass + scan/4`. Both are a genuinely sick database at a 250ms interval, and all three consequences remain
-fail-safe. `Rank` stays live through it only because a gapped rank is held against the previous raw reading
-(see above); held against the published value it would freeze, and a frozen rank strands work.
+fail-safe. `InCut` stays live through it only because a gapped cut is held against the previous raw reading
+(see above); held against the published value it would freeze, and a frozen cut strands work.
 
 The beat rides the *read's* cadence when the evidence bit **flips**. A starting replica's first turn lands
 milliseconds after it starts, long before its next beat is due, and until it is published the replica is

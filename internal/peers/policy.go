@@ -28,6 +28,9 @@ type peer struct {
 	// dispatchAgeMs is how long ago the peer last proved it is actually serving this shard. A replica that
 	// has never dispatched carries the column's decades-stale default, so this reads as enormous.
 	dispatchAgeMs float64
+	// joinAgeMs is how long ago the peer's row was created: when it joined this shard's registry. It places
+	// the peer in the shared order, oldest first.
+	joinAgeMs float64
 	// working is the peer's own statement that it has workers and is taking on work. A peer that is not -
 	// configured to run no steps, or draining at shutdown - is kept out of the ranking and nothing else: it
 	// still counts in replicas, and the partition never reads it.
@@ -57,7 +60,7 @@ type view struct {
 	// ordinal is this replica's 0-based position among the dispatchers, or -1 when it is not among them.
 	ordinal int
 	// candidates is how many of the replicas counted in replicas may dispatch - every one not configured
-	// await-only - and rank is this replica's 0-based rendezvous place among them.
+	// await-only - and rank is this replica's 0-based place among them in the shared order.
 	candidates int
 	rank       int
 	// draining is how many OTHER fresh replicas state they are draining a dispatcher-sized share.
@@ -95,10 +98,16 @@ type view struct {
 // still counts and ranks itself among the peers it can see, unless selfWorking says it is not working.
 // Over-claiming a dispatcher slot over-connects by one share until the row is repaired; under-claiming one
 // leaves the shard short of a dispatcher, and at one replica leaves it with none.
-func classify(rows []peer, self int64, selfWorking bool, shard int, w windows) view {
+func classify(rows []peer, self int64, selfWorking bool, w windows) view {
 	v := view{ordinal: -1}
 	selfFresh := false
-	selfScore := rendezvousScore(self, shard)
+	// A replica that cannot see its own row places itself as the newest, behind every peer it can see.
+	selfJoinAge := -1.0
+	for _, p := range rows {
+		if p.engineID == self {
+			selfJoinAge = p.joinAgeMs
+		}
+	}
 	for _, p := range rows {
 		if p.engineID == self {
 			v.selfSeen = true
@@ -119,7 +128,7 @@ func classify(rows []peer, self int64, selfWorking bool, shard int, w windows) v
 		}
 		if p.working {
 			v.candidates++
-			if p.engineID != self && outranks(rendezvousScore(p.engineID, shard), p.engineID, selfScore, self) {
+			if p.engineID != self && joinedBefore(p.joinAgeMs, p.engineID, selfJoinAge, self) {
 				v.rank++
 			}
 		}
@@ -140,24 +149,11 @@ func classify(rows []peer, self int64, selfWorking bool, shard int, w windows) v
 	return v
 }
 
-// rendezvousScore is one replica's highest-random-weight score for one shard. Every replica computes the
-// same score for the same pair, so ranking a roster needs no coordination, and a replica's score on one
-// shard is independent of every other shard - which is what spreads the top ranks across the fleet rather
-// than handing every shard to the same few replicas.
-//
-// A splitmix64 finalizer over the pair: a fixed function, not a seeded hash, because the value has to agree
-// across processes and across releases.
-func rendezvousScore(engineID int64, shard int) uint64 {
-	z := uint64(engineID) ^ (uint64(shard) * 0x9e3779b97f4a7c15)
-	z += 0x9e3779b97f4a7c15
-	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
-	z = (z ^ (z >> 27)) * 0x94d049bb133111eb
-	return z ^ (z >> 31)
-}
-
-// outranks reports whether a replica with score a (and id aID) ranks ahead of one with score b (id bID). A
-// tie falls to the lower id, so the order is total and every replica agrees on it.
-func outranks(a uint64, aID int64, b uint64, bID int64) bool {
+// joinedBefore reports whether a replica that joined a (ms) ago, with id aID, comes ahead in the shared order of
+// one that joined b ago with id bID: the earlier join first, a tie to the lower id, so the order is total and
+// every replica reading the same rows agrees on it. Ages are computed by the shard's database in one
+// statement, so they compare exactly within a reading and are never compared across shards.
+func joinedBefore(a float64, aID int64, b float64, bID int64) bool {
 	if a != b {
 		return a > b
 	}

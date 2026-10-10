@@ -2703,7 +2703,7 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
   from `Sonar.Rank`, not `Replicas`. Dividing by every registered replica would split the budget among
   dispatchers that do not exist: one worker beside await-only frontends would run on a fraction of its shard
   (pinned by `TestDispatchers_ZeroWorkersPeersDoNotDivideTheBudget`). **`X` must agree across the fleet**
-  (it is the rank cut: two replicas disagreeing would both claim, or both leave, one slot), and it does
+  (it is the width of every shard's cut: two replicas disagreeing would both claim, or both leave, one slot), and it does
   because `C` is read from the one registry every replica reads. **Give it no input a replica derives for
   itself** - its probed RTT, its read of the server's limit - or replicas in different zones split the cut.
 - **`maxDispatchers` is 2: the availability floor, and the most a shard should pay for.** Two means one
@@ -2716,12 +2716,16 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
   TALLY loop is paced by the slot count for the same reason (`recomputeRefillIntervalsWith`), keeping the
   shard scanned as often as one dispatcher would; the supply loop is not, since a fetch walks rows in
   proportion to what it takes and a longer period does not shrink that.
-- **Which replicas: the Sonar's rendezvous rank** (`internal/peers/CLAUDE.md`), ranks `0..X-1` dispatch.
-  Per-shard scores spread the slots across the fleet; "oldest X" would hand every shard to the same few.
-  A joining replica can displace a sitting dispatcher on a shard with probability ~`X/(R+1)`; `Join`'s
-  announce-then-wait ordering already covers that handoff, since the joiner grows only after peers have read
-  its row. A promotion after the rank-improving reading that ended a blind spell is withheld by the Sonar -
-  the correlated stall that would otherwise make every replica rank itself first and grow at once.
+- **Which replicas: a window over one shared order** (`internal/peers/CLAUDE.md`, "Who dispatches"). Every
+  shard orders its candidates by join time (oldest first), the same on every shard, and the shard at place `p` among the sorted
+  indices takes the `X` at positions `[p*X, p*X+X) mod C` (`inWindow`, handed to each Sonar as its cut in
+  `buildSonars`). Anchored on the place rather than the index, so sparse indices still tile the order; the
+  cost is a disagreement on the shards above one being added or retired, for the length of that roll.
+  The shards tile the order, so every replica carries the floor or ceiling of `S*X/C` roles. A join
+  shifts later places by one, so a shard swaps at most one dispatcher when `C >= S*X`, and a leave demotes
+  live replicas; **entering a cut always takes two agreeing readings while leaving takes one**, so a handoff
+  between two existing replicas goes leave-then-enter and errs a dispatcher short. The joiner itself is
+  covered by `Join`'s announce-then-wait.
 - **The role flags are PUBLISHED, not assigned** (`dispatching` is an `atomic.Pointer` to a per-run map): a
   host still serving through a Shutdown/Startup restart reads them from `Create` while `Startup` builds the
   next run's set, and a map assigned in place under that read is a fatal throw. Pinned under `-race` by
@@ -2739,6 +2743,10 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
   once per hop. Pinned by `TestDispatchers_ReaderReplicaHoldsTheReaderPoolAndRunsNothing`.
 - **`pickShard` places among dispatched shards when there are any**, by `Weight`, so a new flow's first
   step rings a bell that is answered. A replica dispatching nothing places across every non-cordoned shard.
+  **Any declared weight other than 1 drops the preference** and places by weight over every non-cordoned
+  shard: when each replica dispatches a subset, preferring its own would hand each shard its dispatchers'
+  creates whatever the weights say. The cost is a scan's wait before the first step of a flow placed on a
+  shard this replica does not dispatch. Pinned by `TestDispatchers_WeightsOverrideTheOwnShardPreference`.
 - **Only dispatched shards feed the workers.** `workersDispatch`, the cache resize, the worker ceiling (worst
   *dispatched* shard) and the refill share all skip reader shards: a reader pool runs no step, and a 2-connection
   pool entering the ceiling's `min` would cap the whole crew.
@@ -2799,9 +2807,10 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
   and not yet entered the task. Pinned by `TestDispatchers_DrainGivesUpTheSlotBeforeWaiting` and
   `TestDispatchers_DrainingDispatcherHandsItsSlotToAPeer`.
 - **A DEMOTED dispatcher keeps a dispatcher's share until the steps it claimed have finished**
-  (`recomputePools`, `heldDivisors`). Demotion is routine: a graceful leave deletes the row and
-  passes the slot at once, and the replacement - or the same replica back under a pinned `SetEngineID` -
-  displaces whoever took it. Shrunk straight to the reader pool, the in-flight completions queue on two
+  (`recomputePools`, `heldDivisors`). Demotion is routine: every join or leave shifts the window of some
+  shards along the shared order, demoting live replicas there (about 2-3 per join at 4 shards and 8 replicas),
+  and the replacement - or the same replica back under a pinned `SetEngineID` - displaces whoever took its
+  place. Shrunk straight to the reader pool, the in-flight completions queue on two
   connections: about 12,000 of them at ~5 ms each fill the 30 s lease margin, stalling every flow behind
   them and letting leases lapse into re-execution if the recovery sweep lands in the window.
   - It stops claiming at once (`applyRole(false)`), but its pool and turnstile are sized at

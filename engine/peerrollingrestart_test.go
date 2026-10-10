@@ -262,3 +262,103 @@ func TestPeerRollingRestart_FleetNeverExceedsTheShardBudget(t *testing.T) {
 	assert.True(worstClaim <= worstBound,
 		"the fleet claimed %d connections against a bound of %d during the rollout", worstClaim, worstBound)
 }
+
+// TestPeerRollingRestart_ShardsStayOnBudgetAndRebalance rolls a fleet across two shards, where the cut is a
+// window over the shared order and a fleet change moves it for replicas other than the one that joined or
+// left: a leave shifts later places down and demotes live replicas, a join promotes ones that were readers.
+// Three replicas on two shards is the wrapping case (4 roles over 3 candidates), where a change moves the most.
+//
+// It pins two things. Every sample of every shard stays within the budget plus one dispatcher share plus the
+// reader pools outside it - the engine's guarantee during a join. And once the roll is over the roles are even
+// again: every replica carries one or two of the four. The handoff ORDER is not what this bound can see - an
+// enter-before-leave overlap fits inside the one-share slack - and is pinned by TestPeers_CutEntryTakesTwoReadings.
+func TestPeerRollingRestart_ShardsStayOnBudgetAndRebalance(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	const (
+		budget   = 48
+		replicas = 3
+	)
+	shards := []int{1, 2}
+	build := func() *Engine {
+		e := NewEngineUnderTest(t.Name())
+		e.testConnCap = 0
+		assert.NoError(e.SetHost(noopHost{}))
+		assert.NoError(e.SetWorkers(1))
+		for _, idx := range shards {
+			assert.NoError(e.SetShard(ShardSpec{Index: idx, MaxConnections: budget}))
+		}
+		return e
+	}
+	fleet := &restartFleet{}
+	var started []*Engine
+	defer func() {
+		for _, e := range started {
+			e.Shutdown(ctx)
+		}
+	}()
+	settle := func(want int) {
+		for _, idx := range shards {
+			awaitFleetSettled(t, fleet, idx, want, budget)
+		}
+	}
+	originals := make([]*Engine, 0, replicas)
+	for range replicas {
+		e := build()
+		fleet.add(e)
+		originals = append(originals, e)
+		started = append(started, e)
+		assert.NoError(e.Startup(ctx))
+	}
+	settle(replicas)
+
+	_, share := shardPool(budget, 0, dispatcherSlots(replicas))
+	worst := map[int][2]int{}
+	samplerStop := make(chan struct{})
+	var sampler sync.WaitGroup
+	sampler.Go(func() {
+		for {
+			select {
+			case <-samplerStop:
+				return
+			default:
+			}
+			live := len(fleet.snapshot())
+			for _, idx := range shards {
+				bound := budget + share + readerOpenConns*live
+				claim := fleet.ceiling(idx)
+				if w := worst[idx]; w[1] == 0 || claim-bound > w[0]-w[1] {
+					worst[idx] = [2]int{claim, bound}
+				}
+			}
+			time.Sleep(time.Millisecond)
+		}
+	})
+	for i, old := range originals {
+		assert.NoError(old.Shutdown(ctx))
+		fleet.remove(old)
+		settle(replicas - 1)
+		fresh := build()
+		fleet.add(fresh)
+		started = append(started, fresh)
+		assert.NoError(fresh.Startup(ctx), "replacement %d failed to start", i)
+		settle(replicas)
+	}
+	close(samplerStop)
+	sampler.Wait()
+	for _, idx := range shards {
+		w := worst[idx]
+		assert.True(w[0] <= w[1], "shard %d: the fleet claimed %d connections against a bound of %d", idx, w[0], w[1])
+	}
+
+	// Settled: four roles over three replicas, so each holds one or two.
+	for _, e := range fleet.snapshot() {
+		roles := 0
+		for _, idx := range shards {
+			if e.dispatchesOn(idx) {
+				roles++
+			}
+		}
+		assert.True(roles >= 1 && roles <= 2, "replica %d dispatches %d of 2 shards after the roll", e.engineID, roles)
+	}
+}

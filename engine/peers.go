@@ -19,6 +19,7 @@ package engine
 import (
 	"context"
 	"maps"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -35,8 +36,8 @@ import (
 //
 // What one reading yields:
 //
-//   - Replicas and Rank choose that shard's DISPATCHERS: the replicas ranked below dispatcherSlots(Replicas)
-//     split the shard's connection budget, because it belongs to the shard's database and N replicas each
+//   - Rank and InCut choose that shard's DISPATCHERS: the replicas inside the shard's cut - a window of
+//     dispatcherSlots places along the shared order, see inWindow - split the shard's connection budget, because it belongs to the shard's database and N replicas each
 //     holding the whole budget would overshoot it N times over. Everyone else holds a small reader pool
 //     there, so the budget divides by a count bounded by the shard's size rather than the fleet's.
 //   - Draining counts the replicas outside the cut still holding a dispatcher's share while they finish
@@ -131,7 +132,8 @@ func (e *Engine) buildSonars() {
 	e.shardsLock.Lock()
 	rtts := maps.Clone(e.shardRTTMs)
 	e.shardsLock.Unlock()
-	for _, idx := range e.db.Indices() {
+	indices := slices.Sorted(slices.Values(e.db.Indices()))
+	for place, idx := range indices {
 		db, err := e.db.Shard(idx)
 		if err != nil {
 			e.logger.Error("Resolving shard for its peer sonar", "shard", idx, "error", err)
@@ -145,6 +147,10 @@ func (e *Engine) buildSonars() {
 		s.SetProfile(peers.Profile{
 			RTT:     time.Duration(rtts[idx] * float64(time.Millisecond)),
 			Working: !e.zeroWorkers(),
+		})
+		// The shard's place among the sorted indices staggers its cut along the shared order - see inWindow.
+		s.SetCut(func(rank, candidates int) bool {
+			return inWindow(rank, candidates, place, dispatcherSlots(candidates))
 		})
 		s.SetLogger(e.logger)
 		s.SetSeams(e.seams)

@@ -16,6 +16,7 @@
 CREATE TABLE IF NOT EXISTS dwarf_peers (
     engine_id     BIGINT      NOT NULL,
     seen_at       DATETIME(3) NOT NULL DEFAULT NOW_UTC(),
+    joined_at     DATETIME(3) NOT NULL DEFAULT NOW_UTC(),
     dispatched_at DATETIME(3) NOT NULL DEFAULT '2000-01-01 00:00:00',
     working       SMALLINT    NOT NULL DEFAULT 1,
     draining      SMALLINT    NOT NULL DEFAULT 0,
@@ -27,6 +28,7 @@ CREATE TABLE IF NOT EXISTS dwarf_peers (
 CREATE TABLE IF NOT EXISTS dwarf_peers (
     engine_id     BIGINT      NOT NULL,
     seen_at       TIMESTAMPTZ NOT NULL DEFAULT NOW_UTC(),
+    joined_at     TIMESTAMPTZ NOT NULL DEFAULT NOW_UTC(),
     dispatched_at TIMESTAMPTZ NOT NULL DEFAULT '2000-01-01 00:00:00',
     working       SMALLINT    NOT NULL DEFAULT 1,
     draining      SMALLINT    NOT NULL DEFAULT 0,
@@ -38,6 +40,7 @@ CREATE TABLE IF NOT EXISTS dwarf_peers (
 CREATE TABLE dwarf_peers (
     engine_id     BIGINT       NOT NULL,
     seen_at       DATETIME2(3) NOT NULL DEFAULT NOW_UTC(),
+    joined_at     DATETIME2(3) NOT NULL DEFAULT NOW_UTC(),
     dispatched_at DATETIME2(3) NOT NULL DEFAULT '2000-01-01 00:00:00',
     working       SMALLINT     NOT NULL DEFAULT 1,
     draining      SMALLINT     NOT NULL DEFAULT 0,
@@ -49,6 +52,7 @@ CREATE TABLE dwarf_peers (
 CREATE TABLE IF NOT EXISTS dwarf_peers (
     engine_id     INTEGER  NOT NULL PRIMARY KEY,
     seen_at       DATETIME NOT NULL DEFAULT NOW_UTC(),
+    joined_at     DATETIME NOT NULL DEFAULT NOW_UTC(),
     dispatched_at DATETIME NOT NULL DEFAULT '2000-01-01 00:00:00',
     working       INTEGER  NOT NULL DEFAULT 1,
     draining      INTEGER  NOT NULL DEFAULT 0,

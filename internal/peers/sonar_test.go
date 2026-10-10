@@ -174,7 +174,7 @@ func TestPeers_ClassifyCountsAndOrdinal(t *testing.T) {
 		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: 30000, working: true},  // fresh, NOT dispatching (await-only/wedged)
 		{engineID: selfID, seenAgeMs: 50, dispatchAgeMs: 200, working: true}, // us, dispatching
 		{engineID: 90, seenAgeMs: 60000, dispatchAgeMs: 100, working: true},  // stale: counts for nothing
-	}, selfID, true, 1, testWindows)
+	}, selfID, true, testWindows)
 
 	assert.Equal(3, v.replicas, "three fresh rows hold connections")
 	assert.Equal(2, v.dispatchers, "only two of them proved they serve the shard")
@@ -186,7 +186,7 @@ func TestPeers_ClassifyCountsAndOrdinal(t *testing.T) {
 	v = classify([]peer{
 		{engineID: selfID, seenAgeMs: 50, dispatchAgeMs: 50, working: true},
 		{engineID: 90, seenAgeMs: 90000, dispatchAgeMs: 90000, working: true},
-	}, selfID, true, 1, testWindows)
+	}, selfID, true, testWindows)
 	assert.Equal([]int64{90}, v.dead)
 }
 
@@ -205,7 +205,7 @@ func TestPeers_ClassifyCountsDraining(t *testing.T) {
 		{engineID: 40, seenAgeMs: 100, dispatchAgeMs: 30000, working: true},                   // reader
 		{engineID: selfID, seenAgeMs: 50, dispatchAgeMs: 50, working: true, draining: true},   // us
 		{engineID: 90, seenAgeMs: 60000, dispatchAgeMs: 60000, working: true, draining: true}, // stale
-	}, selfID, true, 1, testWindows)
+	}, selfID, true, testWindows)
 	assert.Equal(2, v.draining, "two fresh peers drain a share; self and the stale row do not count")
 	assert.Equal(4, v.candidates, "a demoted replica draining its steps stays in the ranking")
 }
@@ -221,7 +221,7 @@ func TestPeers_ClassifySelfAbsenceCutsBothWays(t *testing.T) {
 	v := classify([]peer{
 		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
 		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
-	}, selfID, true, 1, testWindows)
+	}, selfID, true, testWindows)
 
 	assert.False(v.selfSeen)
 	assert.Equal(3, v.replicas, "two peers plus this process, which exists whether or not its row does")
@@ -234,7 +234,7 @@ func TestPeers_ClassifySelfAbsenceCutsBothWays(t *testing.T) {
 	v = classify([]peer{
 		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
 		{engineID: selfID, seenAgeMs: 60000, dispatchAgeMs: 60000, working: true},
-	}, selfID, true, 1, testWindows)
+	}, selfID, true, testWindows)
 	assert.True(v.selfSeen, "the row is there, so nothing needs re-registering")
 	assert.Equal(2, v.replicas, "but it is not fresh, so we still count ourselves")
 	assert.Equal(-1, v.ordinal)
@@ -250,7 +250,7 @@ func TestPeers_ClassifyNeverCondemnsSelf(t *testing.T) {
 	v := classify([]peer{
 		{engineID: selfID, seenAgeMs: 999999, dispatchAgeMs: 999999, working: true},
 		{engineID: 90, seenAgeMs: 999999, dispatchAgeMs: 999999, working: true},
-	}, selfID, true, 1, testWindows)
+	}, selfID, true, testWindows)
 
 	assert.Equal([]int64{90}, v.dead, "every row is abandoned except ours")
 	assert.Equal(1, v.replicas, "we still count ourselves")
@@ -298,7 +298,8 @@ func TestPeers_ReplicaFallIsWithheldAcrossAGap(t *testing.T) {
 
 // TestPeers_ClassifyRanksAgreeAcrossReplicas pins what makes the rank usable for choosing a shard's
 // dispatchers with no coordination: every replica reading the same rows derives a DISTINCT rank, the ranks
-// cover 0..n-1 exactly, and a stale row takes no rank at all.
+// cover 0..n-1 exactly, a stale row takes no rank at all, and the order is the same on every shard - which is
+// what lets an owner stagger each shard's cut along it.
 func TestPeers_ClassifyRanksAgreeAcrossReplicas(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -309,28 +310,14 @@ func TestPeers_ClassifyRanksAgreeAcrossReplicas(t *testing.T) {
 		{engineID: 40, seenAgeMs: 100, dispatchAgeMs: staleAge, working: true},
 		{engineID: 90, seenAgeMs: 60000, dispatchAgeMs: staleAge, working: true}, // stale: ranks nobody
 	}
-	for _, shard := range []int{1, 2, 7} {
-		seen := map[int]bool{}
-		for _, p := range fleet[:4] {
-			v := classify(fleet, p.engineID, true, shard, testWindows)
-			assert.Equal(4, v.replicas)
-			assert.True(v.rank >= 0 && v.rank < v.replicas, "shard %d: rank %d out of range", shard, v.rank)
-			assert.False(seen[v.rank], "shard %d: two replicas share rank %d", shard, v.rank)
-			seen[v.rank] = true
-		}
+	seen := map[int]bool{}
+	for _, p := range fleet[:4] {
+		v := classify(fleet, p.engineID, true, testWindows)
+		assert.Equal(4, v.replicas)
+		assert.True(v.rank >= 0 && v.rank < v.replicas, "rank %d out of range", v.rank)
+		assert.False(seen[v.rank], "two replicas share rank %d", v.rank)
+		seen[v.rank] = true
 	}
-
-	// The top of the ranking moves between shards, which is the whole point of a per-shard score: "the
-	// oldest k replicas" would hand every shard to the same few.
-	firsts := map[int64]bool{}
-	for shard := 1; shard <= 32; shard++ {
-		for _, p := range fleet[:4] {
-			if classify(fleet, p.engineID, true, shard, testWindows).rank == 0 {
-				firsts[p.engineID] = true
-			}
-		}
-	}
-	assert.True(len(firsts) > 1, "one replica ranked first on every one of 32 shards")
 }
 
 // TestPeers_ClassifyRanksAnAbsentSelf pins the rank's self-absence posture, which follows the pool divisor's
@@ -340,7 +327,7 @@ func TestPeers_ClassifyRanksAgreeAcrossReplicas(t *testing.T) {
 func TestPeers_ClassifyRanksAnAbsentSelf(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	v := classify(nil, selfID, true, 1, testWindows)
+	v := classify(nil, selfID, true, testWindows)
 	assert.Equal(1, v.replicas)
 	assert.Equal(0, v.rank, "alone and unseen, a replica still ranks first")
 
@@ -349,7 +336,7 @@ func TestPeers_ClassifyRanksAnAbsentSelf(t *testing.T) {
 		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: staleAge, working: true},
 	}
 	withSelf := append([]peer{{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge, working: true}}, fleet...)
-	assert.Equal(classify(withSelf, selfID, true, 1, testWindows).rank, classify(fleet, selfID, true, 1, testWindows).rank,
+	assert.Equal(classify(withSelf, selfID, true, testWindows).rank, classify(fleet, selfID, true, testWindows).rank,
 		"a missing own row ranks exactly as a present one does")
 }
 
@@ -365,12 +352,12 @@ func TestPeers_ClassifyNeverRanksAnIdlePeer(t *testing.T) {
 		fleet = append(fleet, peer{engineID: id, seenAgeMs: 100, dispatchAgeMs: staleAge})
 	}
 	fleet = append(fleet, peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge, working: true})
-	v := classify(fleet, selfID, true, 1, testWindows)
+	v := classify(fleet, selfID, true, testWindows)
 	assert.Equal(17, v.replicas, "await-only peers still hold connections")
 	assert.Equal(1, v.candidates, "but only this replica may dispatch")
 	assert.Equal(0, v.rank, "so it ranks first however the scores fall")
 
-	v = classify(fleet[:16], selfID, false, 1, testWindows)
+	v = classify(fleet[:16], selfID, false, testWindows)
 	assert.Equal(0, v.candidates, "a replica that is not working, with a missing row, does not count itself in either")
 }
 
@@ -393,35 +380,32 @@ func TestPeers_RegisterWritesTheProfile(t *testing.T) {
 	assert.False(r.row(t, selfID).working, "and the read returns it")
 }
 
-// TestPeers_RankPromotesThroughSustainedGaps pins that the withholding delays a promotion by one reading
+// TestPeers_CutEntryThroughSustainedGaps pins that the withholding delays a promotion by one reading
 // and no more, even when every reading is gapped - the regime a pass slower than 1.75x the scan interval
 // settles into. Held against the published value instead, the rank ratcheted: each gapped reading kept the
 // larger of the new rank and an already-held one, so a reader whose dispatchers left was never promoted.
-func TestPeers_RankPromotesThroughSustainedGaps(t *testing.T) {
+func TestPeers_CutEntryThroughSustainedGaps(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	r := newRig(t)
-	var fleet []peer
-	for id := int64(1); id <= 16; id++ {
-		fleet = append(fleet, peer{engineID: id, seenAgeMs: 100, dispatchAgeMs: staleAge, working: true})
-	}
-	fleet = append(fleet, peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge, working: true})
+	fleet := outrankedFleet()
 	alone := fleet[len(fleet)-1:]
 
 	r.s.observe(ctx, fleet, nil)
 	ranked, _ := r.s.Rank()
 	assert.True(ranked > 0)
+	assert.False(r.s.InCut(), "outside the default rank-0 cut")
 
 	// Every reading from here on ends a gap.
 	r.clk.advance(3 * r.s.scan)
 	r.s.observe(ctx, alone, nil)
-	rank, _ := r.s.Rank()
-	assert.Equal(ranked, rank, "the first reading after the fleet left is withheld")
+	assert.False(r.s.InCut(), "the first reading after the fleet left is withheld")
 	r.clk.advance(3 * r.s.scan)
 	r.s.observe(ctx, alone, nil)
 	rank, cands := r.s.Rank()
-	assert.Equal(0, rank, "the second agrees with it, so it is believed though it too is gapped")
+	assert.True(r.s.InCut(), "the second agrees with it, so it is believed though it too is gapped")
+	assert.Equal(0, rank)
 	assert.Equal(1, cands)
 }
 
@@ -573,21 +557,17 @@ func TestPeers_DrainingFallIsWithheldAcrossAGap(t *testing.T) {
 	assert.Equal(2, r.s.Draining(), "a rise is always safe to believe")
 }
 
-// TestPeers_RankPromotionIsWithheldAcrossAGap pins the rank's version of the correlated-stall guard. After a
-// stall every peer's row reads stale at once, so every replica would rank itself first and claim a dispatcher
-// slot - and with it a dispatcher's pool - simultaneously. A demotion shrinks the pool and is believed at
-// once; a promotion waits one reading.
-func TestPeers_RankPromotionIsWithheldAcrossAGap(t *testing.T) {
+// TestPeers_CutEntryIsWithheldAcrossAGap pins the cut's version of the correlated-stall guard. After a
+// stall every peer's row reads stale at once, so every replica would land in some shard's cut and claim a
+// dispatcher slot - and with it a dispatcher's pool - simultaneously. Leaving the cut shrinks the pool and is
+// believed at once; entering it waits one reading.
+func TestPeers_CutEntryIsWithheldAcrossAGap(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	r := newRig(t)
 	// Enough peers that self is certain to be outranked by at least one of them.
-	var fleet []peer
-	for id := int64(1); id <= 16; id++ {
-		fleet = append(fleet, peer{engineID: id, seenAgeMs: 100, dispatchAgeMs: staleAge, working: true})
-	}
-	fleet = append(fleet, peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge, working: true})
+	fleet := outrankedFleet()
 	alone := fleet[len(fleet)-1:]
 
 	r.s.observe(ctx, fleet, nil)
@@ -597,20 +577,20 @@ func TestPeers_RankPromotionIsWithheldAcrossAGap(t *testing.T) {
 
 	r.clk.advance(3 * r.s.scan)
 	r.s.observe(ctx, alone, nil)
-	rank, cands := r.s.Rank()
-	assert.Equal(ranked, rank, "the reading that ends a blind spell cannot promote")
+	_, cands := r.s.Rank()
+	assert.False(r.s.InCut(), "the reading that ends a blind spell cannot promote")
 	assert.Equal(17, cands, "nor shrink the count the slots are derived from")
 
 	r.clk.advance(r.s.scan)
 	r.s.observe(ctx, alone, nil)
-	rank, cands = r.s.Rank()
-	assert.Equal(0, rank, "confirmed on the next reading")
+	rank, cands := r.s.Rank()
+	assert.True(r.s.InCut(), "confirmed on the next reading")
+	assert.Equal(0, rank)
 	assert.Equal(1, cands)
 
 	r.clk.advance(3 * r.s.scan)
 	r.s.observe(ctx, fleet, nil)
-	rank, _ = r.s.Rank()
-	assert.Equal(ranked, rank, "a demotion is always safe to believe")
+	assert.False(r.s.InCut(), "leaving the cut is always safe to believe")
 }
 
 // TestPeers_FailedReadHoldsTheLastGoodFleet pins the rule the rest of the design rests on: a read that did
@@ -1341,4 +1321,63 @@ func TestPeers_LongTurnKeepsProvingService(t *testing.T) {
 	assert.True(r.row(t, selfID).dispatchAgeMs < backdateMs/2,
 		"so the row never ages toward a window, however long the turn runs (age %.0fms)",
 		r.row(t, selfID).dispatchAgeMs)
+}
+
+// outrankedFleet is sixteen working peers that joined before self, and self last, so self's place in the
+// order is guaranteed to be behind all of them.
+func outrankedFleet() []peer {
+	var fleet []peer
+	for id := int64(1); id <= 16; id++ {
+		fleet = append(fleet, peer{engineID: id, seenAgeMs: 100, dispatchAgeMs: staleAge, joinAgeMs: 60000, working: true})
+	}
+	return append(fleet, peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge, joinAgeMs: 1000, working: true})
+}
+
+// TestPeers_CutEntryTakesTwoReadings pins the handoff order, which holds with no gap at all. A fleet change
+// moves the cut for replicas other than the one that joined or left, so one replica may enter a shard's cut
+// while another leaves it, each on its own reading. Leaving is believed on the reading that shows it; entering
+// waits for a second agreeing one - so the leaver always goes first, and for a moment the shard is a
+// dispatcher short rather than a dispatcher over.
+func TestPeers_CutEntryTakesTwoReadings(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	fleet := outrankedFleet()
+	alone := fleet[len(fleet)-1:]
+
+	r.s.observe(ctx, fleet, nil)
+	r.clk.advance(r.s.scan)
+	r.s.observe(ctx, fleet, nil)
+	assert.False(r.s.InCut(), "outranked: outside the rank-0 cut")
+
+	r.clk.advance(r.s.scan)
+	r.s.observe(ctx, alone, nil)
+	assert.False(r.s.InCut(), "the first reading that puts it in the cut does not")
+	r.clk.advance(r.s.scan)
+	r.s.observe(ctx, alone, nil)
+	assert.True(r.s.InCut(), "the second agreeing reading does")
+
+	r.clk.advance(r.s.scan)
+	r.s.observe(ctx, fleet, nil)
+	assert.False(r.s.InCut(), "leaving is believed on the reading that shows it")
+}
+
+// TestPeers_ClassifyOrdersByJoinTime pins the shared order: earlier joins come first whatever their ids, a tie
+// goes to the lower id, and a replica that cannot see its own row places itself behind every peer it can see.
+// Ordering by join time is what makes scaling up cheap: a newcomer lands at the end, behind every window.
+func TestPeers_ClassifyOrdersByJoinTime(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	fleet := []peer{
+		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: staleAge, joinAgeMs: 1000, working: true},  // newest
+		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: staleAge, joinAgeMs: 90000, working: true}, // oldest
+		{engineID: 30, seenAgeMs: 100, dispatchAgeMs: staleAge, joinAgeMs: 5000, working: true},
+		{engineID: 40, seenAgeMs: 100, dispatchAgeMs: staleAge, joinAgeMs: 5000, working: true}, // ties 30
+	}
+	want := map[int64]int{20: 0, 30: 1, 40: 2, 10: 3}
+	for id, rank := range want {
+		assert.Equal(rank, classify(fleet, id, true, testWindows).rank, "engine %d", id)
+	}
+	assert.Equal(4, classify(fleet, selfID, true, testWindows).rank, "a replica with no row of its own goes last")
 }

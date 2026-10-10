@@ -48,8 +48,9 @@ limitations under the License.
 // # What it publishes
 //
 // Replicas is how many replicas are registered on this shard, and Rank is this replica's place among those
-// that may dispatch, on a per-shard score every replica computes the same way - so "the replicas ranked
-// below k" is a set the whole fleet agrees on with no coordination. Partition is the (replicas, ordinal) pair that splits candidate selection across the replicas that
+// that may dispatch, in an order every replica computes the same way and every shard shares. InCut is whether
+// the owner's cut for this shard (SetCut) puts this replica among its dispatchers - a decision the whole
+// fleet agrees on with no coordination, since every replica applies the same cut to the same order. Partition is the (replicas, ordinal) pair that splits candidate selection across the replicas that
 // actually serve this shard, in the shape a dispatcher consumes: ok=false means "select everything".
 // Draining is how many other replicas state that they hold a dispatcher-sized share of the shard's budget
 // from outside the cut, which an owner dividing that budget adds to its dispatcher count; SetDraining and
@@ -162,12 +163,18 @@ type partition struct {
 	ordinal int
 }
 
-// standing is the pair Rank reports. Immutable once published.
+// standing is what Rank, InCut and Draining report. Immutable once published.
 type standing struct {
 	rank       int
 	candidates int
 	draining   int
+	// inCut is whether the owner's cut puts this replica among the shard's dispatchers.
+	inCut bool
 }
+
+// CutFunc decides from a replica's rank and the candidate count whether that replica dispatches the shard.
+// It must be pure and the same on every replica, since every replica applies it to the same order.
+type CutFunc func(rank, candidates int) bool
 
 // Profile is what a replica states about itself in its registry row, written when the row is created or
 // repaired and never by the beat: facts that hold for the life of the process.
@@ -202,6 +209,8 @@ type Sonar struct {
 	pruneAfter time.Duration
 
 	evidence atomic.Pointer[EvidenceFunc]
+	// cut is the owner's rule for which ranks dispatch - see SetCut.
+	cut atomic.Pointer[CutFunc]
 	// passTurn admits each pass to the owner's database metering - see SetTurnFunc.
 	passTurn atomic.Pointer[TurnFunc]
 	logger   atomic.Pointer[slog.Logger]
@@ -287,8 +296,8 @@ func New(engineID int64, shard int, db *sequel.DB) (*Sonar, error) {
 	s.SetSeams(nil)
 	s.lastGood.Store(s.now().UnixNano())
 	s.replicas.Store(1)
-	s.standing.Store(&standing{rank: 0, candidates: 1})
-	s.lastRaw = standing{rank: 0, candidates: 1}
+	s.standing.Store(&standing{rank: 0, candidates: 1, inCut: true})
+	s.lastRaw = standing{rank: 0, candidates: 1, inCut: true}
 	s.profile.Store(&Profile{Working: true})
 	s.part.Store(&partition{ordinal: -1})
 	return s, nil
@@ -422,10 +431,10 @@ func (s *Sonar) SetLogger(l *slog.Logger) {
 // sizes anything per replica from it errs toward smaller shares.
 func (s *Sonar) Replicas() int { return max(1, int(s.replicas.Load())) }
 
-// Rank is this replica's 0-based rendezvous rank on this shard, and the number of candidates it ranks among:
+// Rank is this replica's 0-based place in the fleet's shared order on this shard, and the number of candidates
+// it ranks among:
 // the replicas counted by Replicas that are not await-only. Every replica computes both from the same rows
-// with no coordination, so the replicas holding ranks 0..k-1 are a set they all agree on - the owner's way
-// of choosing which k of them serve the shard.
+// with no coordination, so a cut applied to them (SetCut) yields a set of dispatchers they all agree on.
 //
 // Like Replicas, it counts this replica even when its own row is missing (unless its Profile says it is
 // await-only), and on the reading that ended a blind spell it holds each of the two at the larger of its
@@ -435,9 +444,32 @@ func (s *Sonar) Rank() (rank, candidates int) {
 	return st.rank, max(1, st.candidates)
 }
 
+// InCut reports whether the owner's cut (SetCut) puts this replica among the shard's dispatchers on the
+// latest reading. It is false for a replica that is not working, and true only if the previous reading also
+// put the replica in the cut: leaving is believed at once, entering waits a reading - so a handoff between two
+// replicas goes leave-then-enter, and no replica enters on the reading that ends a blind spell, which every
+// peer may have seen as a fleet of one.
+func (s *Sonar) InCut() bool {
+	return s.standing.Load().inCut
+}
+
+// SetCut sets the rule for which ranks dispatch this shard. Call it before Join; it is applied to every
+// reading from the next one on. Without one, only rank 0 dispatches.
+func (s *Sonar) SetCut(cut CutFunc) {
+	s.cut.Store(&cut)
+}
+
+// inCut applies the owner's cut, or the rank-0 default when none was set.
+func (s *Sonar) inCut(rank, candidates int) bool {
+	if f := s.cut.Load(); f != nil && *f != nil {
+		return (*f)(rank, candidates)
+	}
+	return rank == 0
+}
+
 // Draining is how many OTHER replicas state they are draining a dispatcher-sized share of this shard's
 // budget from outside the dispatcher cut - see SetDraining. An owner dividing the budget among dispatchers
-// adds it to the dispatcher count. Held across the reading that ended a blind spell like the rank, so a
+// adds it to the dispatcher count. Held across the reading that ended a blind spell like Replicas, so a
 // fall is believed a reading late and a rise at once.
 func (s *Sonar) Draining() int {
 	return s.standing.Load().draining
@@ -757,7 +789,8 @@ func (s *Sonar) read(ctx context.Context) ([]peer, error) {
 	}
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT engine_id, DATE_DIFF_MILLIS(NOW_UTC(), seen_at) AS seen_age_ms,"+
-			" DATE_DIFF_MILLIS(NOW_UTC(), dispatched_at) AS dispatch_age_ms, working, draining"+
+			" DATE_DIFF_MILLIS(NOW_UTC(), dispatched_at) AS dispatch_age_ms,"+
+			" DATE_DIFF_MILLIS(NOW_UTC(), joined_at) AS join_age_ms, working, draining"+
 			" FROM dwarf_peers ORDER BY engine_id")
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -767,7 +800,7 @@ func (s *Sonar) read(ctx context.Context) ([]peer, error) {
 	for rows.Next() {
 		var p peer
 		var working, draining int
-		if err := rows.Scan(&p.engineID, &p.seenAgeMs, &p.dispatchAgeMs, &working, &draining); err != nil {
+		if err := rows.Scan(&p.engineID, &p.seenAgeMs, &p.dispatchAgeMs, &p.joinAgeMs, &working, &draining); err != nil {
 			return nil, errors.Trace(err)
 		}
 		p.working = working != 0
@@ -808,7 +841,8 @@ func (s *Sonar) observe(ctx context.Context, rows []peer, err error) {
 		s.healthySince = now
 	}
 
-	v := classify(rows, s.engineID, s.profile.Load().Working, s.shard, s.windows())
+	working := s.profile.Load().Working
+	v := classify(rows, s.engineID, working, s.windows())
 	// The dispatch pair is published as observed, with no hysteresis: under-counting only makes replicas
 	// select overlapping candidates, so there is nothing here worth debouncing, and delaying a REMOVAL would
 	// keep a residue class assigned to a replica that has stopped serving it.
@@ -825,25 +859,30 @@ func (s *Sonar) observe(ctx context.Context, rows []peer, err error) {
 	if !gapped || v.replicas >= s.Replicas() {
 		s.replicas.Store(int32(max(1, v.replicas)))
 	}
-	// The rank obeys the same asymmetry, for the same storm. After a correlated stall every peer's row reads
-	// stale at once, so every replica would rank itself first, claim a dispatcher slot, and grow its pool to a
-	// dispatcher's share - a fleet of dispatchers against a database that is already sick. A demotion (a
-	// higher rank) shrinks the pool and is always believed; a promotion waits for the next reading.
+	// The cut obeys the same asymmetry, for the same storm. After a correlated stall every peer's row reads
+	// stale at once, so every replica would find itself among a handful of candidates, land inside some
+	// shard's cut, claim a dispatcher slot, and grow its pool to a dispatcher's share - a fleet of dispatchers
+	// against a database that is already sick. Leaving the cut shrinks the pool and is always believed;
+	// entering it waits for the next reading. The rank itself is published as read: a place in the order is
+	// not "closer to dispatching" the lower it is, so holding the larger one would protect nothing.
 	//
 	// HELD AGAINST THE PREVIOUS RAW READING, NOT THE PUBLISHED VALUE. Holding against what was published
-	// ratchets: every gapped reading re-publishes the larger of two values, the older of which was itself
-	// held, so the rank can only rise for as long as the readings stay gapped - and a slow enough pass makes
-	// every reading gapped. A reader on a sick database would then never be promoted, and a shard whose
-	// dispatchers left would run nothing. Against the raw reading, two consecutive readings that agree are
-	// believed whether or not either was gapped. Pinned by TestPeers_RankPromotesThroughSustainedGaps.
-	raw := standing{rank: v.rank, candidates: v.candidates, draining: v.draining}
+	// ratchets: every gapped reading would require the previous, itself held, value to agree, so a replica
+	// could only leave the cut for as long as the readings stay gapped - and a slow enough pass makes every
+	// reading gapped. A reader on a sick database would then never be promoted, and a shard whose dispatchers
+	// left would run nothing. Against the raw reading, two consecutive readings that agree are believed
+	// whether or not either was gapped. Pinned by TestPeers_CutEntryThroughSustainedGaps.
+	raw := standing{rank: v.rank, candidates: v.candidates, draining: v.draining, inCut: working && s.inCut(v.rank, v.candidates)}
 	next := raw
+	// ENTERING THE CUT ALWAYS TAKES TWO AGREEING READINGS, not only after a gap. A change in the fleet moves
+	// the cut for replicas other than the one that joined or left - a window over a shared order shifts every
+	// later place by one - so one replica may be entering a shard's cut while another is leaving it, each on
+	// its own reading. Leaving is believed at once and entering waits one reading, so the leaver always goes
+	// first: the handoff errs toward a dispatcher too few for a cadence rather than one too many.
+	next.inCut = raw.inCut && s.lastRaw.inCut
 	if gapped {
-		next = standing{
-			rank:       max(s.lastRaw.rank, raw.rank),
-			candidates: max(s.lastRaw.candidates, raw.candidates),
-			draining:   max(s.lastRaw.draining, raw.draining),
-		}
+		next.candidates = max(s.lastRaw.candidates, raw.candidates)
+		next.draining = max(s.lastRaw.draining, raw.draining)
 	}
 	s.lastRaw = raw
 	s.standing.Store(&next)

@@ -19,6 +19,7 @@ package engine
 import (
 	"context"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -126,11 +127,33 @@ func awaitPeerCount(t *testing.T, e *Engine, shard, want int) {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if e.replicasOn(shard) == want {
+			awaitCutSettled(t, e, shard)
 			return
 		}
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("shard %d settled at %d replicas, want %d", shard, e.replicasOn(shard), want)
+}
+
+// awaitCutSettled waits until a shard's published cut agrees with the reading it was taken from. Entering
+// the cut takes two agreeing readings, so a test that changed the fleet and saw the count move can still be
+// one reading short of a promotion.
+func awaitCutSettled(t *testing.T, e *Engine, shard int) {
+	t.Helper()
+	s := e.sonarFor(shard)
+	if s == nil || e.zeroWorkers() {
+		return
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		rank, candidates := s.Rank()
+		place := slices.Index(slices.Sorted(slices.Values(e.db.Indices())), shard)
+		if s.InCut() == inWindow(rank, candidates, place, dispatcherSlots(candidates)) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("shard %d: the cut never settled", shard)
 }
 
 // peerCounts is what every shard's Sonar currently reports.
@@ -160,6 +183,9 @@ func awaitPeerChange(t *testing.T, e *Engine, before map[int]int) {
 			}
 		}
 		if moved {
+			for idx := range before {
+				awaitCutSettled(t, e, idx)
+			}
 			e.recomputePools()
 			return
 		}

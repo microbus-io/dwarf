@@ -322,12 +322,34 @@ func shardPool(budget, override, slots int) (idle, open int) {
 }
 
 // dispatcherSlots is how many replicas dispatch one shard: maxDispatchers, never more than the replicas there
-// are. It must agree across the fleet - the replicas ranked below it are the shard's dispatchers, and two
-// replicas that disagreed would both claim, or both leave, one slot - and it does, because it depends on
+// are. It must agree across the fleet - it is the width of every shard's cut, and two replicas that disagreed
+// would both claim, or both leave, one slot - and it does, because it depends on
 // nothing but the candidate count every replica reads from the same registry. Keep it that way: an input a
 // replica derives for itself (its probed RTT, its read of the server's limit) would split the fleet.
 func dispatcherSlots(replicas int) int {
 	return min(maxDispatchers, max(1, replicas))
+}
+
+// inWindow reports whether the replica at rank in the fleet's shared order dispatches the shard at place in
+// the sorted shard indices: the shard at place p takes the slots positions starting at p*slots, wrapping
+// around the candidates. The shards tile the order whatever their indices, so every replica carries the floor
+// or the ceiling of shards*slots/candidates roles - a balance an independent draw per shard does not give (at
+// 8 replicas and 4 shards it leaves about a third of the replicas with no role and others with three). The
+// first shard's window is the top of the order, so a single shard is dispatched by the first slots replicas.
+// Pure, and the same on every replica that holds the same shard set. A rank outside the candidates is never in
+// the window.
+//
+// Anchored on the place among the indices rather than on the index, because the steady state is what runs:
+// sparse indices (1, 3, 4) would make index-anchored windows collide and leave replicas idle. The cost is
+// transient: while a shard is added or retired BELOW others, replicas briefly hold different shard sets and
+// disagree on the windows of the shards above it - between none and twice the dispatchers there - until the
+// roll completes. A shard added above every other moves nothing.
+func inWindow(rank, candidates, place, slots int) bool {
+	if rank < 0 || rank >= candidates {
+		return false
+	}
+	start := place * slots % candidates
+	return (rank-start+candidates)%candidates < slots
 }
 
 // slotsOn is this replica's role on one shard: how many dispatcher-sized shares its budget divides into
@@ -352,15 +374,14 @@ func (e *Engine) slotsOn(shard int) int {
 	if s == nil {
 		return 1
 	}
-	rank, candidates := s.Rank()
+	_, candidates := s.Rank()
 	if e.maxOpenConns.Load() != 0 {
 		return candidates
 	}
-	slots := dispatcherSlots(candidates)
-	if rank >= slots {
+	if !s.InCut() {
 		return 0
 	}
-	return slots + s.Draining()
+	return dispatcherSlots(candidates) + s.Draining()
 }
 
 // heldDivisor is what a replica holding a pool for in-flight steps on a shard it no longer dispatches
@@ -764,9 +785,10 @@ func placementWeight(spec ShardSpec) float64 {
 // server's size: capacity is not proportional to vCPUs (16 -> 32 vCPU measured x2.46, 32 -> 64 x1.2).
 //
 // The pick is among the shards this replica DISPATCHES when there are any, because the doorbell rings only
-// for those: a flow placed elsewhere waits for a dispatcher's scan before its first step runs. The ranking
-// spreads dispatch slots across the fleet, so placement stays roughly weight-proportional fleet-wide. A
-// replica that dispatches nothing picks among every non-cordoned shard.
+// for those: a flow placed elsewhere waits for a dispatcher's scan before its first step runs. A replica
+// that dispatches nothing picks among every non-cordoned shard. Any declared weight other than 1 drops the
+// preference and places over every non-cordoned shard: when each replica dispatches a subset of the shards,
+// preferring them would send each shard its own dispatchers' creates whatever its Weight.
 func (e *Engine) pickShard() (int, error) {
 	e.shardsLock.Lock()
 	specs := make([]ShardSpec, 0, len(e.shardSpecs))
@@ -788,9 +810,20 @@ func (e *Engine) pickShard() (int, error) {
 		}
 		return indices[rand.IntN(len(indices))], nil
 	}
+	// Declared weights win over the doorbell: a replica placing only on the shards it dispatches would send each
+	// shard its own dispatchers' creates whatever the weights say, so any weight other than 1 places over every
+	// non-cordoned shard. A flow placed on a shard this replica does not dispatch waits a dispatcher's scan
+	// before its first step.
+	passes := []bool{true, false}
+	for _, spec := range specs {
+		if !spec.Cordoned && placementWeight(spec) != 1 {
+			passes = []bool{false}
+			break
+		}
+	}
 	weights := make([]float64, len(specs))
 	total := 0.0
-	for _, dispatchedOnly := range []bool{true, false} {
+	for _, dispatchedOnly := range passes {
 		for i, spec := range specs {
 			weights[i] = 0
 			if spec.Cordoned || (dispatchedOnly && !e.dispatchesOn(spec.Index)) {

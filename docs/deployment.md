@@ -237,7 +237,8 @@ same-zone round trips run **0.05-0.96 ms** and cross-AZ same-region about **1.1 
 >
 > Declare **the same `MaxConnections` for a shard on every replica**, so every dispatcher takes the same share
 > of it. A new flow is created on a shard
-> its replica dispatches when it has one, so its first step runs at once; a flow created, resumed, forked or
+> its replica dispatches when it has one, so its first step runs at once - unless any shard declares a
+> `Weight` other than 1, in which case new flows are placed by weight across every shard. A flow created, resumed, forked or
 > continued on a replica that does not dispatch its shard waits for the next scan (well under a second)
 > before its first step runs, and then runs normally. The engine warns in the log when a fleet's
 > connections to a shard approach the server's `max_connections`; past that, put a connection pooler in
