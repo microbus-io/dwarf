@@ -152,7 +152,7 @@ func TestSetDefaultPriority_RejectsNonPositive(t *testing.T) {
 	assert.NoError(e2.SetDefaultPriority(7))
 	assert.NoError(e2.Startup(t.Context()))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute) // bounds only a hang
 	defer cancel()
 	_, out, err := e2.Run(ctx, "prio/g", nil, nil)
 	if !assert.NoError(err, "a flow at the default priority must dispatch") {

@@ -296,6 +296,8 @@ func TestFaultComposition_DeepSubgraphReviveLoss(t *testing.T) {
 	// The first completeSurgraphFlow to run is the deepest (l3 reviving l2's caller): drop that one revive so
 	// l2's caller wedges running+parkedSubgraph with a terminal child.
 	e.seams.Inject(engineseams.FaultSubgraphReviveLost)
+	// The leaf is the first flow of the tree to stop: every level above it waits on the revive that is lost.
+	stopped := e.seams.Waiter(engineseams.CheckpointFlowStopped)
 	fk, err := e.Create(ctx, "fcdeep/root", nil, nil)
 	assert.NoError(err)
 	shard, _, _, err := keys.ParseFlowKey(fk)
@@ -303,20 +305,18 @@ func TestFaultComposition_DeepSubgraphReviveLoss(t *testing.T) {
 	db, err := e.db.Shard(shard)
 	assert.NoError(err)
 
-	// Wait until the leaf child (l3) has gone terminal - at that point l2's caller is wedged.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		var n int
-		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE surgraph_flow_id<>0 AND status='"+workflow.StatusCompleted+"'").Scan(&n)
-		if n > 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	// Wait until the leaf child (l3) has gone terminal - at that point l2's caller is wedged. The stop fires
+	// after the leaf's completion commits; the minute bounds only a hang.
+	select {
+	case <-stopped:
+	case <-time.After(time.Minute):
+		t.Fatal("the leaf child never completed")
 	}
+	assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE surgraph_flow_id<>0 AND status='"+workflow.StatusCompleted+"'"))
 
 	// One sweep re-drives the wedged l2 caller; the normal completion cascade then carries l2 -> l1 -> root.
 	e.recoverWedgedSubgraphParks(ctx, db, shard, 0)
-	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
+	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
 
 	// The tree ends structurally clean. Unlike the other composition cases in this file, the wedge alarm is *expected* to have
 	// fired exactly once here - this test's whole point is that a genuinely-wedged caller was recovered by the
