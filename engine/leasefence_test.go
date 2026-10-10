@@ -49,8 +49,8 @@ func TestLeaseFence_FailStep(t *testing.T) {
 		assert.NoError(err)
 		// flow_id is auto-increment; the first insert on a fresh per-test DB is flow_id=1 on every driver.
 		_, err = db.ExecContext(ctx,
-			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, status, root_flow_id, thread_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-			"ftok", "u", "W", []byte("{}"), workflow.StatusRunning, 1, 1, 1000,
+			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, thread_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			"ftok", "u", "W", []byte("{}"), "", workflow.StatusRunning, 1, 1, 1000,
 		)
 		assert.NoError(err)
 		// lease_expires is set well into the future so the test engine's own lease-recovery poll does not
@@ -659,8 +659,8 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 		db, err := e.db.Shard(1)
 		assert.NoError(err)
 		_, err = db.ExecContext(ctx,
-			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, status, root_flow_id, thread_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-			"ftok", "u", "W", []byte("{}"), flowStatus, 1, 1, 1000,
+			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, thread_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			"ftok", "u", "W", []byte("{}"), "", flowStatus, 1, 1, 1000,
 		)
 		assert.NoError(err)
 		_, err = db.ExecContext(ctx,

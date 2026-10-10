@@ -173,6 +173,7 @@ type flowSeed struct {
 	workflowURL        string
 	workflowName       string
 	graphJSON          []byte
+	graphHash          string
 	baggageJSON        []byte
 	stateJSON          []byte
 	traceParent        string
@@ -204,9 +205,9 @@ func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, ne
 	// statement batch on PostgreSQL.
 	batch := newTxBatch(ctx, tx)
 	queueInsertID(batch, "flow_id", func(id int64) { newFlowID = id },
-		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, trace_parent, status, surgraph_flow_id, surgraph_step_id, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, started_at)"+
-			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC())",
-		s.flowToken, s.workflowURL, s.workflowName, s.graphJSON, s.baggageJSON, s.traceParent, workflow.StatusRunning, s.surgraphFlowID, s.surgraphStepID, s.deleteOnCompletion, s.priority, s.fairnessKey, s.fairnessWeight, s.timeBudgetMs, s.engineID,
+		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, baggage, trace_parent, status, surgraph_flow_id, surgraph_step_id, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, started_at)"+
+			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC())",
+		s.flowToken, s.workflowURL, s.workflowName, s.graphJSON, s.graphHash, s.baggageJSON, s.traceParent, workflow.StatusRunning, s.surgraphFlowID, s.surgraphStepID, s.deleteOnCompletion, s.priority, s.fairnessKey, s.fairnessWeight, s.timeBudgetMs, s.engineID,
 	)
 	flowID, flowArgs, err := batch.insertedID(lastFlowIDSQL, func() any { return newFlowID })
 	if err != nil {
@@ -320,6 +321,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 		workflowURL:        workflowURL,
 		workflowName:       graph.Name(),
 		graphJSON:          graphJSON,
+		graphHash:          graphHashOf(graphJSON),
 		baggageJSON:        baggageJSON,
 		stateJSON:          stateJSON,
 		traceParent:        traceParent,
@@ -362,7 +364,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	// its own candidate cache, so it is about to claim the step and would otherwise read back the graph it just
 	// wrote. After the commit, so a rolled-back flow id - which SQLite can hand out again - is never cached.
 	if e.dispatchesOn(shardNum) {
-		if cg, perr := e.internGraph(graphJSON, workflowURL); perr == nil {
+		if cg, perr := e.internGraph(graphJSON, workflowURL, seed.graphHash); perr == nil {
 			e.cacheFlowGraph(shardNum, int(newFlowID), cg)
 		}
 	}

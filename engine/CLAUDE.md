@@ -1124,9 +1124,17 @@ not parallelism:
   stay frozen for the flow's life - nothing invalidates an entry.
 - **The graph cache is two layers: the per-flow layer is sized for flows IN FLIGHT, the shared layer for memory.**
   `graphCache` maps `(shard, flow_id)` to a WEAK pointer into `sharedGraphs`, which owns the parses and is keyed
-  by the stored graph bytes, so the flows of one graph share one parse and a per-flow entry is ~150 bytes. A
-  per-flow miss is a `SELECT graph` with its own turn: at a 4,096-entry bound, one process holding ~8,200 flows
-  (4 shards x 2,000 in flight) paid 0.98 of them per executed step, against 0.38 at 2 shards.
+  by the flow row's `graph_hash`, so the flows of one graph share one parse and a per-flow entry is ~150 bytes.
+  A per-flow miss looks the hash up there before it reads anything, and reads the `graph` column (its own turn)
+  only for a graph this replica has never parsed. The per-flow layer alone thrashed at a 4,096-entry bound -
+  one process holding ~8,200 flows (4 shards x 2,000 in flight) paid 0.98 graph reads per executed step.
+  - **The hash is what makes a flow created ELSEWHERE cheap.** Create seeds the cache only on a replica that
+    dispatches the shard, so where frontends create and do not dispatch - an HA deployment - every flow's
+    first dispatch is a per-flow miss: without the hash, one `SELECT graph` per FLOW (1.0 per step for a
+    one-step flow), with it one per graph per replica. Pinned by `TestGraphCache_HashHitReadsNoGraph`.
+  - **`graph_hash` is SHA-256 of the bytes `Create` stored, carried verbatim by `Continue` and `Fork`** (which
+    copy the graph; on Postgres and MySQL they copy re-spelled bytes, whose hash would differ). Never key the
+    shared layer by a fast or truncated hash: a collision runs a flow on another flow's graph.
   - **Keep the per-flow pointer weak.** A strong one lets the per-flow layer pin a parse the shared layer evicted,
     so a workload whose flows rarely share graph bytes (per-actor graphs) holds up to 65,536 parses - measured
     2.4-14 KB each (5-50 tasks), ~0.5-0.9 GB. Weak, memory is bounded by the shared layer's 4,096 parses and
@@ -1134,8 +1142,6 @@ not parallelism:
   - **The shared layer has no TTL.** A graph's bytes never change, and expiring a hot graph would turn every one
     of its flows into a miss at once. Its recency is refreshed by each new flow of the graph (Create's seed, or a
     first dispatch), which is what keeps a graph in use from being evicted.
-  - **Key the shared layer by the exact bytes, never a hash alone** - a collision would run a flow on another
-    flow's graph.
 - **A transition's successors go in as multi-row INSERTs** (`successorBatch`), in power-of-two chunks of at
   most 64 rows (21 binds each, under SQL Server's 2,100-parameter ceiling). The ids come back by `RETURNING`/`OUTPUT`
   and are matched to rows by `step_token`, since neither promises VALUES order. MySQL inserts row by row: it has no
@@ -1149,10 +1155,10 @@ not parallelism:
   Measured on PostgreSQL (`TestRoundTrips_*`, simulated RTT, about +-0.5): a linear step ~5 round trips, a one-step
   flow ~11, a fan-out cycle of two branches ~20.5.
 - **On PostgreSQL the claim returns the flow row too** (`UPDATE dwarf_steps s ... FROM dwarf_flows f ...
-  RETURNING s.*, f.*`), so dispatch reads the flow row only for the graph on a `graphCache` miss. `Create` seeds
+  RETURNING s.*, f.*`), so dispatch reads the `graph` column only for a graph this replica has never parsed
+  (the claim returns `graph_hash`; see the graph-cache bullets above). `Create` seeds
   the cache (`internGraph`, from the stored JSON, after the commit) on a replica that dispatches the shard,
-  since its doorbell offers the entry step to its own cache. A miss is then a flow's first dispatch on a replica
-  that did not create it, or one after the entry aged out (the LRU's bound or TTL) or the replica restarted. The join reads the flow row without locking it: Postgres locks only an
+  since its doorbell offers the entry step to its own cache. The join reads the flow row without locking it: Postgres locks only an
   UPDATE's target rows, so the claim cannot deadlock with Cancel/Terminate, which lock the flow row before its
   steps. **Do not extend it to SQL Server** as things stand: there the join takes a shared lock on the flow row
   while the claim holds the step row - the reverse of that order - unless the database runs

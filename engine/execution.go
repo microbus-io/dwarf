@@ -189,8 +189,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	var flowFairnessKey string
 	var flowFairnessWeight float64
 	var flowTimeBudgetMs int
-	var flowCancelReason string
-	flowDest := []any{&flowToken, &flowStatus, &workflowURL, &baggageJSON, &traceParent, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight, &flowTimeBudgetMs, &flowCancelReason}
+	var flowCancelReason, graphHash string
+	flowDest := []any{&flowToken, &flowStatus, &workflowURL, &baggageJSON, &traceParent, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight, &flowTimeBudgetMs, &flowCancelReason, &graphHash}
 	flowRead := true
 	// The step columns every dialect's claim reads back, in claimCols order.
 	stepDest := []any{&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq, &fanOutOrdinal, &stepCancelling, &replaying, &replayGoto, &replaySleepLeftMs, &replayOnError}
@@ -293,28 +293,16 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		}()
 	}
 
-	// The graph is frozen at flow creation, so a cached parse makes its JSON - the largest payload on the flow
-	// row - dead weight; it is selected only on a miss, which is why the Postgres claim leaves it out.
-	cg, cached := e.cachedFlowGraph(shardNum, flowID)
-	var graphJSON []byte
 	readFlow := func(cols string, dest ...any) error {
 		flowPass := turnstile.WaitTurn(ctx)
 		defer flowPass.Return()
 		return db.QueryRowContext(ctx, "SELECT "+cols+" FROM dwarf_flows WHERE flow_id=?", flowID).Scan(dest...)
 	}
-	switch {
-	case flowRead:
-		cols := "flow_token, status, workflow_url, baggage, trace_parent, created_at, updated_at, priority, fairness_key, fairness_weight, time_budget_ms, cancel_reason"
-		if !cached {
-			cols += ", graph"
-			flowDest = append(flowDest, &graphJSON)
+	if flowRead {
+		err = readFlow("flow_token, status, workflow_url, baggage, trace_parent, created_at, updated_at, priority, fairness_key, fairness_weight, time_budget_ms, cancel_reason, graph_hash", flowDest...)
+		if err != nil {
+			return errors.Trace(err)
 		}
-		err = readFlow(cols, flowDest...)
-	case !cached:
-		err = readFlow("graph", &graphJSON)
-	}
-	if err != nil {
-		return errors.Trace(err)
 	}
 	// The flow's frozen budget seeds the steps this dispatch creates and bounds the subgraph LoadGraph. The
 	// fallback is pure defense; createWithGraphTx always stores a concrete value.
@@ -336,8 +324,21 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		return errors.Trace(err)
 	}
 
+	// The graph is frozen at flow creation, so a cached parse makes its JSON - the largest payload on the flow
+	// row - dead weight. A flow this replica has not dispatched finds its parse by the graph_hash the flow row
+	// carries, so the graph column is read only for a graph this replica has not parsed at all.
+	cg, perFlow := e.cachedFlowGraph(shardNum, flowID)
+	cached := perFlow
 	if !cached {
-		cg, err = e.internGraph(graphJSON, workflowURL)
+		cg, cached = e.sharedGraph(workflowURL, graphHash)
+	}
+	if !cached {
+		var graphJSON []byte
+		err = readFlow("graph", &graphJSON)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		cg, err = e.internGraph(graphJSON, workflowURL, graphHash)
 		if err != nil {
 			// Its own turn: this is the entry phase, so the persist turn that covers every LATER failStep
 			// does not exist yet, and failStep runs a whole transaction. Without it the two failure paths
@@ -347,6 +348,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			doneTurn()
 			return errors.Trace(err)
 		}
+	}
+	if !perFlow {
 		e.cacheFlowGraph(shardNum, flowID, cg)
 	}
 	graph := cg.graph
@@ -2121,5 +2124,5 @@ var (
 		" FROM dwarf_flows f" +
 		" WHERE s.step_id=? AND " + claimEligible("s.") + " AND f.flow_id=s.flow_id" +
 		" RETURNING " + claimCols("s.") + "," +
-		" f.flow_token, f.status, f.workflow_url, f.baggage, f.trace_parent, f.created_at, f.updated_at, f.priority, f.fairness_key, f.fairness_weight, f.time_budget_ms, f.cancel_reason"
+		" f.flow_token, f.status, f.workflow_url, f.baggage, f.trace_parent, f.created_at, f.updated_at, f.priority, f.fairness_key, f.fairness_weight, f.time_budget_ms, f.cancel_reason, f.graph_hash"
 )

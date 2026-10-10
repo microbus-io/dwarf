@@ -19,7 +19,10 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"runtime"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"weak"
 
@@ -78,8 +81,8 @@ func TestCreate_SeedsGraphCache(t *testing.T) {
 }
 
 // TestGraphCache_FlowsShareOneParse pins the shared layer: the flows of one graph point at one parsed entry,
-// whether seeded by Create or read back from the column, while different bytes or a different workflow URL
-// never share one.
+// whether seeded by Create or read back from the column under the flow's graph_hash, while a different graph or
+// a different workflow URL never shares one.
 func TestGraphCache_FlowsShareOneParse(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -102,24 +105,27 @@ func TestGraphCache_FlowsShareOneParse(t *testing.T) {
 		assert.True(ok)
 		entries = append(entries, cg)
 
-		// The column read path (a cold flow, or completion's flowGraph) interns the stored bytes the same way.
+		// The column read path (a cold flow, or completion's flowGraph) interns under the row's graph_hash, so it
+		// lands on Create's entry even where the dialect re-spells the stored bytes.
 		db, err := e.db.Shard(shard)
 		assert.NoError(err)
 		var graphJSON []byte
-		assert.NoError(db.QueryRowContext(ctx, "SELECT graph FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&graphJSON))
-		read1, err := e.internGraph(graphJSON, "sharecache/g")
+		var graphHash string
+		assert.NoError(db.QueryRowContext(ctx, "SELECT graph, graph_hash FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&graphJSON, &graphHash))
+		assert.Equal(graphHashOf(mustGraphJSON(t, cg.graph)), graphHash, "graph_hash is the hash of the bytes Create stored")
+		read, err := e.internGraph(graphJSON, "sharecache/g", graphHash)
 		assert.NoError(err)
-		read2, err := e.internGraph(graphJSON, "sharecache/g")
-		assert.NoError(err)
-		assert.True(read1 == read2, "one stored graph is parsed once")
+		assert.True(read == cg, "a column read finds Create's entry by its hash")
 	}
 	assert.True(entries[0] == entries[1], "two flows of one graph share one parsed entry")
 
-	cg, err := e.internGraph([]byte(`{"name":"other"}`), "sharecache/g")
+	other := []byte(`{"name":"other"}`)
+	cg, err := e.internGraph(other, "sharecache/g", graphHashOf(other))
 	if assert.NoError(err) {
-		assert.True(cg != entries[0], "different bytes are a different entry")
+		assert.True(cg != entries[0], "a different graph is a different entry")
 	}
-	sameBytesOtherURL, err := e.internGraph(mustGraphJSON(t, entries[0].graph), "sharecache/other")
+	sameJSON := mustGraphJSON(t, entries[0].graph)
+	sameBytesOtherURL, err := e.internGraph(sameJSON, "sharecache/other", graphHashOf(sameJSON))
 	if assert.NoError(err) {
 		assert.Equal("sharecache/other", sameBytesOtherURL.workflowURL, "the workflow URL is part of the key")
 	}
@@ -175,6 +181,58 @@ func TestGraphCache_DispatchMissInterns(t *testing.T) {
 	}
 }
 
+// graphReadCounter counts the dispatch path's graph-column reads in sequel's per-query Debug log.
+type graphReadCounter struct {
+	n atomic.Int32
+}
+
+func (c *graphReadCounter) Enabled(context.Context, slog.Level) bool { return true }
+func (c *graphReadCounter) WithAttrs([]slog.Attr) slog.Handler       { return c }
+func (c *graphReadCounter) WithGroup(string) slog.Handler            { return c }
+func (c *graphReadCounter) Handle(_ context.Context, r slog.Record) error {
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == "query" && strings.HasPrefix(a.Value.String(), "SELECT graph FROM dwarf_flows") {
+			c.n.Add(1)
+		}
+		return true
+	})
+	return nil
+}
+
+// TestGraphCache_HashHitReadsNoGraph pins what graph_hash is for: a replica that did not create a flow finds
+// the flow's parse by the hash its flow row carries, so of several flows of one graph created elsewhere -
+// the shape of an HA deployment whose frontends do not dispatch - only the first reads the graph column.
+func TestGraphCache_HashHitReadsNoGraph(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	mux := NewHostMux()
+	registerGate(mux, "hashcache")
+	creator := NewEngineUnderTest(t.Name())
+	defer creator.Shutdown(ctx)
+	creator.SetHost(mux)
+	assert.NoError(creator.SetWorkers(0))
+	assert.NoError(creator.Startup(t.Context()))
+	reads := &graphReadCounter{}
+	runner := NewEngineUnderTest(t.Name()) // same name, same database
+	defer runner.Shutdown(ctx)
+	runner.SetHost(mux)
+	assert.NoError(runner.SetLogger(slog.New(reads)))
+	assert.NoError(runner.Startup(t.Context()))
+
+	// One at a time, so no two first dispatches race to parse the graph.
+	for range 3 {
+		fk, err := creator.Create(ctx, "hashcache/g", nil, nil)
+		assert.NoError(err)
+		out, err := creator.Await(ctx, fk)
+		if assert.NoError(err) {
+			assert.Equal(workflow.StatusInterrupted, out.Status, "the runner dispatched the gate")
+		}
+	}
+	assert.Equal(int32(1), reads.n.Load(), "only the first flow of the graph reads the graph column")
+}
+
 // TestGraphCache_SharedEvictionReleasesTheParse pins the bound that makes the per-flow layer cheap: it holds
 // weak pointers, so a parse the shared layer evicts is released, and its flows read as a miss.
 func TestGraphCache_SharedEvictionReleasesTheParse(t *testing.T) {
@@ -192,14 +250,14 @@ func TestGraphCache_SharedEvictionReleasesTheParse(t *testing.T) {
 		return mustGraphJSON(t, g)
 	}
 	func() {
-		cg, err := e.internGraph(graphJSON("First"), "evict/g")
+		cg, err := e.internGraph(graphJSON("First"), "evict/g", "")
 		assert.NoError(err)
 		e.cacheFlowGraph(1, 1, cg)
 	}()
 	_, ok := e.cachedFlowGraph(1, 1)
 	assert.True(ok, "held while the shared layer holds it")
 
-	_, err := e.internGraph(graphJSON("Second"), "evict/g") // evicts the first parse from the one-entry layer
+	_, err := e.internGraph(graphJSON("Second"), "evict/g", "") // evicts the first parse from the one-entry layer
 	assert.NoError(err)
 	released := false
 	for range 10 {

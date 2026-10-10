@@ -976,16 +976,16 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 		// The new turn inherits the latest completed turn's full policy (scheduling, baggage).
 		// Exclude debug forks: a Fork shares the thread_id for List grouping but must never become a
 		// production Continue's base (forked_from_step<>0 marks a fork).
-		var flowStatus, workflowURL, fairnessKey string
+		var flowStatus, workflowURL, fairnessKey, graphHash string
 		var finalStateJSON, graphJSON, baggageJSON []byte
 		var priority, timeBudgetMs int
 		var fairnessWeight float64
 		err := tx.QueryRowContext(ctx,
 			// delete_after_ms=0 skips turns scheduled for deletion, so Continue builds on the latest UNDELETED
 			// turn even when the newest turn is on its way out (its state was copied here before the reap).
-			"SELECT status, final_state, graph, workflow_url, baggage, priority, fairness_key, fairness_weight, time_budget_ms FROM dwarf_flows WHERE thread_id=? AND forked_from_step=0 AND delete_after_ms=0 ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
+			"SELECT status, final_state, graph, graph_hash, workflow_url, baggage, priority, fairness_key, fairness_weight, time_budget_ms FROM dwarf_flows WHERE thread_id=? AND forked_from_step=0 AND delete_after_ms=0 ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
 			threadID,
-		).Scan(&flowStatus, &finalStateJSON, &graphJSON, &workflowURL, &baggageJSON, &priority, &fairnessKey, &fairnessWeight, &timeBudgetMs)
+		).Scan(&flowStatus, &finalStateJSON, &graphJSON, &graphHash, &workflowURL, &baggageJSON, &priority, &fairnessKey, &fairnessWeight, &timeBudgetMs)
 		if err == sql.ErrNoRows {
 			return errors.New("no flows found in thread", http.StatusNotFound)
 		}
@@ -1040,6 +1040,7 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 			workflowURL:    workflowURL,
 			workflowName:   graph.Name(),
 			graphJSON:      graphJSON,
+			graphHash:      graphHash,
 			baggageJSON:    baggageOut,
 			stateJSON:      mergedStateJSON,
 			traceParent:    e.mintWorkflowSpan(ctx, workflowURL, ""),

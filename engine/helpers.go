@@ -17,6 +17,8 @@ limitations under the License.
 package engine
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"weak"
 
@@ -71,22 +73,39 @@ func (e *Engine) cacheFlowGraph(shardNum, flowID int, cg *cachedGraph) {
 	e.graphCache.Store(graphCacheKey{shard: shardNum, flowID: flowID}, weak.Make(cg))
 }
 
-// sharedGraphKey names a parsed graph by its EXACT stored bytes, so the flows of one graph share one entry
-// and two different graphs can never collide. The workflow URL is in the key because the entry carries it.
-// Do not key by a hash alone: a collision would run a flow on another flow's graph. A dialect that re-spells
-// JSON on read (Postgres JSONB, MySQL JSON) gives Create's seed and a column read two entries for one graph,
-// which costs one extra parse.
+// sharedGraphKey names a parsed graph by the flow's graph_hash, so the flows of one graph share one entry and
+// a dispatch finds it without reading the graph column. The workflow URL is in the key because the entry
+// carries it. The hash is SHA-256 of the bytes Create stored, never a fast hash: a collision would run a flow
+// on another flow's graph.
 type sharedGraphKey struct {
 	workflowURL string
-	graphJSON   string
+	graphHash   string
+}
+
+// graphHashOf is the graph_hash of graph JSON about to be stored.
+func graphHashOf(graphJSON []byte) string {
+	sum := sha256.Sum256(graphJSON)
+	return hex.EncodeToString(sum[:])
+}
+
+// sharedGraph returns the shared entry for a flow's graph_hash, if this replica has parsed that graph.
+func (e *Engine) sharedGraph(workflowURL, graphHash string) (*cachedGraph, bool) {
+	if graphHash == "" {
+		return nil, false
+	}
+	return e.sharedGraphs.Load(sharedGraphKey{workflowURL: workflowURL, graphHash: graphHash})
 }
 
 // internGraph returns the shared cache entry for a flow's stored graph JSON, parsing it only the first time
-// these bytes are seen. Both the dispatch miss and Create's seed go through it, so a seeded entry is exactly
+// the graph is seen. Both the dispatch miss and Create's seed go through it, so a seeded entry is exactly
 // what a miss would have built - in particular, a parse of the stored bytes and never a caller's live
-// object, which could change under the concurrent dispatches that share the entry.
-func (e *Engine) internGraph(graphJSON []byte, workflowURL string) (*cachedGraph, error) {
-	key := sharedGraphKey{workflowURL: workflowURL, graphJSON: string(graphJSON)}
+// object, which could change under the concurrent dispatches that share the entry. An empty graphHash (a row
+// written without one) is taken from the bytes.
+func (e *Engine) internGraph(graphJSON []byte, workflowURL, graphHash string) (*cachedGraph, error) {
+	if graphHash == "" {
+		graphHash = graphHashOf(graphJSON)
+	}
+	key := sharedGraphKey{workflowURL: workflowURL, graphHash: graphHash}
 	if cg, ok := e.sharedGraphs.Load(key); ok {
 		return cg, nil
 	}

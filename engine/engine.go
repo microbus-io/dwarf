@@ -286,7 +286,7 @@ type Engine struct {
 	latchWorker sync.WaitGroup
 
 	// Parsed-graph caches, in two layers. graphCache maps a flow to its entry so a dispatch reads no graph
-	// column; sharedGraphs owns the entries, keyed by the stored bytes, so every flow of one graph points at
+	// column; sharedGraphs owns the entries, keyed by the flow's graph_hash, so every flow of one graph points at
 	// one parse. The graph JSON is frozen at flow creation, so neither ever goes stale.
 	graphCache   *lru.Cache[graphCacheKey, weak.Pointer[cachedGraph]]
 	sharedGraphs *lru.Cache[sharedGraphKey, *cachedGraph]

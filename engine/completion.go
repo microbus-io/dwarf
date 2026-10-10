@@ -210,16 +210,16 @@ func (e *Engine) flowGraph(ctx context.Context, db sequel.Executor, shardNum, fl
 	if cg, ok := e.cachedFlowGraph(shardNum, flowID); ok {
 		return cg.graph, cg.workflowURL, nil
 	}
-	var workflowURL string
+	var workflowURL, graphHash string
 	var graphJSON []byte
 	err := db.QueryRowContext(ctx,
-		"SELECT graph, workflow_url FROM dwarf_flows WHERE flow_id=?",
+		"SELECT graph, graph_hash, workflow_url FROM dwarf_flows WHERE flow_id=?",
 		flowID,
-	).Scan(&graphJSON, &workflowURL)
+	).Scan(&graphJSON, &graphHash, &workflowURL)
 	if err != nil {
 		return nil, "", errors.Trace(err)
 	}
-	cg, err := e.internGraph(graphJSON, workflowURL)
+	cg, err := e.internGraph(graphJSON, workflowURL, graphHash)
 	if err != nil {
 		return nil, "", errors.Trace(err)
 	}
