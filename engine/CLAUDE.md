@@ -3715,6 +3715,19 @@ operation
 has committed - in-flight writes are never interrupted by ctx cancellation. The only *cancellable*, time-bounded ctx
 is the `ExecuteTask` call: `executeTask` derives it from the lifetime ctx with the step's `time_budget_ms`.
 
+**The crew runs on `context.WithoutCancel(e.lifetimeCtx)`, and it must stay non-cancelable.** Since no worker
+can observe the lifetime ctx's cancellation, cancelability buys the crew nothing - and it costs per QUERY: pgx
+registers a `context.AfterFunc` watch on a cancelable ctx for every query, and `database/sql` gives every `Rows`
+its own `WithCancel` plus an `awaitDone` goroutine (a `Tx` gets both regardless). On one shared cancelable parent
+every one of those registrations, from every worker, takes that parent's mutex: a per-process serial point that
+gets SLOWER with more cores. Measured on that per-step pattern (6 queries, one Tx, one task timeout; M1 Pro, 10
+procs): a shared parent ran 80-92k steps/s, 2.3x slower than at 1 proc, with 44 allocs and 7 goroutines per
+step; a per-worker child parent 330-450k at the same allocations; non-cancelable 1.2-2.7M at 8 allocs and 1
+goroutine. On a c4a-48 at 4 shards this lock was ~10% of CPU and 74% of mutex time, at ~0.9M registrations/s
+against a ~1.5M/s ceiling - inside the connection hold, since pgx watches during the query. **Do not give the
+crew a cancelable ctx (per-worker children included) to "let shutdown reach the workers"**: the drain's stop
+signals are the cache, the gate and `drainStop`, and a per-step deadline belongs on a per-step ctx.
+
 ### Shutdown ordering: workers, then recovery/reaper/latch, then the pistons, then the Sonars
 
 There is no timer goroutine and no wake channel to close (see "There is no timer goroutine"), so no send can

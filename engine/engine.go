@@ -992,7 +992,10 @@ func (e *Engine) initRuntime() error {
 	// Start the resident set; the rest of the ceiling is spawned on demand whenever nobody is idle, work is
 	// waiting and a turn is free - the long-task case, where the resident set alone would cap throughput
 	// because nobody is left to dispatch.
-	e.crew.Start(e.lifetimeCtx, resident)
+	//
+	// NOT cancelable, deliberately: no worker can observe the lifetime ctx's cancellation (it lands after
+	// Drain), and a cancelable parent makes every query of every worker register on its one mutex.
+	e.crew.Start(context.WithoutCancel(e.lifetimeCtx), resident)
 	// The pistons run on a CHILD of the lifetime ctx, because they must stop before it does: the lifetime
 	// ctx is deliberately left live until every other goroutine has drained (so in-flight database work
 	// always commits), while piston.Run ends on ctx alone and has no second signal - both of its queries
