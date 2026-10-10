@@ -115,14 +115,18 @@ func newFaultBatteryEngine(t *testing.T, prefix string, cfg func(*Engine)) (*Eng
 	return e, reader, calls
 }
 
-// batteryRun is Create+Await with a ceiling, returning the flow key (for readFinalState) and outcome.
+// batteryRun is Create+Await with a ceiling, returning the flow key (for readFinalState) and outcome. The minute
+// bounds only a hang - a run on a loaded server is unbounded - and a run that returns no outcome stops the test
+// here: every caller reads the outcome, and a nil one would panic and take the whole test binary down with it.
 func batteryRun(t *testing.T, e *Engine, url string) (string, *workflow.FlowOutcome) {
 	t.Helper()
 	assert := testarossa.For(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	fk, out, err := e.Run(ctx, url, nil, nil)
-	assert.NoError(err)
+	if !assert.NoError(err) || !assert.NotNil(out) {
+		t.FailNow()
+	}
 	return fk, out
 }
 
