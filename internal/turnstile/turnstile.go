@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package turnstile bounds how many callers may hold a resource at once AND decides which waiter is
-// admitted next: the lowest priority band, and within a band the job that started earliest.
+// admitted next: the lowest priority band, and within a band the job that has been at the resource longest.
 //
 // A job declares itself once, and every call it goes on to make takes its turns from the context:
 //
@@ -23,6 +23,8 @@ limitations under the License.
 //	...
 //	pass := turnstile.WaitTurn(ctx)                     // at each call that holds the resource
 //	defer pass.Return()
+//	...
+//	ctx = turnstile.Away(ctx, d)                        // back from d spent waiting on something else
 //
 // Nothing is wrapped, so each call site chooses where its own pass begins and ends. That is deliberate:
 // only the call site knows when the resource is really released. A query hands back a cursor that keeps
@@ -36,12 +38,14 @@ limitations under the License.
 // the cycle. Where a unit is held across several operations, one pass wraps them all rather than one per
 // operation.
 //
-// THE CLAIM IS THE JOB'S, NOT THE CALL'S. Claim.Since is when the job began and Claim.Seq identifies it,
-// so both stay fixed for every turn it takes - which is what makes the ordering first-in-first-out over
-// JOBS rather than over calls: a caller coming back for its next turn keeps its original age and is served
-// ahead of work that started later, so a job in progress finishes before a new one begins. The claim is
-// trusted entirely, so it must not come from anywhere a caller could pick its own place in line - which is
-// why a context's claim can only be set through this package.
+// THE CLAIM IS THE JOB'S, NOT THE CALL'S, AND IT AGES ONLY AT THE RESOURCE. Claim.Since is when the job
+// arrived and Claim.Seq identifies it, and both stay fixed for every turn it takes - which is what makes the
+// ordering first-in-first-out over JOBS rather than over calls: a caller coming back for its next turn keeps
+// its place and is served ahead of work that arrived later, so a job in progress finishes before a new one
+// begins. Time the job spends away on something else does not count: Away moves Since forward by it, so a
+// job back from a long wait ranks by the time it has spent at the resource, not by how long it was gone. The
+// claim is trusted entirely, so it must not come from anywhere a caller could pick its own place in line -
+// which is why a context's claim can only be set through this package.
 //
 // Ordering is by priority band first, so a band is served to exhaustion before the next one is looked at.
 // A band therefore cannot be given to any caller that can arrive faster than it is served, or the bands
@@ -62,11 +66,12 @@ import (
 )
 
 // Claim is what a caller is asking with, and the whole of what orders it against the other waiters: the
-// band it sits in, when its WORK began, and a tiebreak for the two of those being equal.
+// band it sits in, when its work at the resource began, and a tiebreak for the two of those being equal.
 //
-// Since is the age of the JOB, not of the call. Seq identifies the job when two of them share a Since,
-// which a clock coarser than the arrival rate makes common; it must therefore be constant for every turn
-// one job takes, or two tied jobs interleave instead of one finishing first.
+// Since is the age of the JOB, not of the call, less any time the job spent away (Away). Seq identifies the
+// job when two of them share a Since, which a clock coarser than the arrival rate makes common; it must
+// therefore be constant for every turn one job takes, or two tied jobs interleave instead of one finishing
+// first.
 type Claim struct {
 	Priority int
 	Since    time.Time

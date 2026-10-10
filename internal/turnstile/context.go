@@ -98,7 +98,7 @@ func (s *Set) Turnstile(shard int) *Turnstile {
 // what a cross-shard operation does, re-pointing the same job at each shard in turn - keeps the original
 // age and job number and changes only the shard and the band. Re-stamping instead would make a job look
 // newly arrived at every hop, which is precisely the ordering this exists to provide: a job that has been
-// running for a while would keep losing to work that just started.
+// running for a while would keep losing to work that just started. Away is the one way to move it.
 //
 // A shard with no turnstile yields a context that WaitTurn passes straight through. That is the fail-open
 // direction and it is the right one here, because this orders access to a resource that already bounds
@@ -113,6 +113,21 @@ func (s *Set) ContextWithPriority(ctx context.Context, shard int, priority int) 
 		next.claim.Since = prev.claim.Since
 		next.claim.Seq = prev.claim.Seq
 	}
+	return context.WithValue(ctx, ctxKey{}, next)
+}
+
+// Away moves the claim on ctx forward by d, the time the job just spent away from the resource on something
+// else, keeping its shard, band and job number. Call it where a job comes back after such a wait, so that its
+// age counts only its time at the resource: a job that kept the age it started with would rank by how long
+// it was away, and after a long enough wait would outrank every caller that arrived meanwhile. A context
+// that was never prioritized is returned unchanged.
+func Away(ctx context.Context, d time.Duration) context.Context {
+	prev, ok := ctx.Value(ctxKey{}).(*stamp)
+	if !ok || d <= 0 {
+		return ctx
+	}
+	next := &stamp{ts: prev.ts, claim: prev.claim}
+	next.claim.Since = prev.claim.Since.Add(d)
 	return context.WithValue(ctx, ctxKey{}, next)
 }
 

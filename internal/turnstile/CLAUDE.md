@@ -107,7 +107,7 @@ load-bearing for a reason that has nothing to do with bounding anything:
   strands it inside one that cannot proceed with it.
 
 The turn it takes is the job's **first**, not a separate reservation: it covers that job's first call and
-is handed straight back, and the context it returns carries the claim every later turn is taken on. Holding
+is handed straight back, and the context it returns carries the claim the job's later turns are taken on. Holding
 it longer would meter *phases* rather than calls, which makes the count mean something different again — a
 reason to hand it back early, not a reason to size the count differently (the sizing argument is above and
 is independent of this).
@@ -124,46 +124,51 @@ has been running for a while look **newly arrived at every hop** — so it would
 had only just started, which is the exact inversion the age ordering exists to prevent. Pinned by
 `TestSet_ContextKeepsTheJobsAgeAcrossShards`.
 
-Preserving is the ONLY behaviour, and there is deliberately no way to force a fresh stamp. The argument for
-one - a caller whose work has "restarted" rather than continued, so the age it carries describes a wait
-that is over - applies to exactly one caller, the engine's exit side, and the next section is why that
-caller does not get it. Adding the API back means adopting that case with it.
+Re-pointing preserves, always. Moving the age is a separate call, `Away`, for the one case where part of
+the age a job carries is time it spent somewhere else (next section).
 
-## DO NOT give exiting callers their own band, and do not re-stamp their claims
+## Time away from the resource does not age a claim (`Away`)
 
-Both keep being proposed, together, and the case for them is genuine — which is why the reasoning against
-is written out rather than left as a preference.
+A job that leaves to wait on something else - the engine's host call - comes back with its stamp moved
+forward by the time it was gone. It then ranks by the time it has spent AT the resource: ahead of callers
+that arrived after its own work began, behind callers that have waited longer than it has worked. Pinned by
+`TestAway_CountsOnlyTimeAtTheResource`, which fails against both alternatives below.
 
-**The problem they would fix is real.** A claim is stamped when the caller picks its work up, so age at
-exit is a proxy for how long the caller's WORK took, which says nothing about the few round trips it now
-needs to record it. On a mixed-duration workload a caller leaving a 60s task carries a 60s-old claim and
-beats one leaving an 8s task that exited before it, systematically. Re-stamping at exit would order exits
-by when they exited; a band would keep them ahead of entering callers, which re-stamping alone destroys.
-Neither half works without the other: a fresh claim is the YOUNGEST in the system, so re-stamping without a
-band puts exits BEHIND entries — the "served evenly" arrangement measured at 286 completions waiting out a
-full second.
+**Not moving it turns age into a strict band.** A job still carrying the stamp it began with after a long
+call elsewhere is older than every caller that arrived while it was away. Once those calls outlast the
+queue that is *every* caller, so it wins every turn - and a band SERIALISES A PIPELINE: the returning callers
+take every pass while the arriving ones queue, the arriving ones rush in once that queue drains, and the two
+stages alternate instead of overlapping. Measured on the engine, where the returning caller is a step
+recording its outcome: traced at 50 ms on local Postgres (one shard, pool 8, 1 s tasks, 10-step linear flows
+at 60 flows/s), ~1 s exit bursts held every turn while ~1,300 callers queued and nothing was dispatched,
+~0.5 s entry bursts then started ~1,250 tasks at once, then ~0.4 s passed with turns free and the pool idle,
+the whole crew inside tasks of one length - which kept the bursts together into the next round. Flow p50
+ran 11-25 s for 10 s of tasks, and `Create` p99 1.2-2.7 s. On a 32 vCPU shard at 1,000 flows/s the same
+ordering cost `Create` a p99 of 485 ms at 1 s tasks and 2.9 s at 8 s, lost 11-27% of admissions, and added
+~0.35 s / ~2 s per hand-off.
 
-**They are not worth it, for three reasons in increasing order of force:**
+**Re-stamping it fresh fails the other way.** A fresh stamp is younger than every caller already queued,
+so a finished step waits out the whole queue behind work that has not started - under saturation the
+engine keeps starting tasks while the ones that finished wait to be recorded. Measured saturated on a
+pool of 16, exit wait against entry wait: fresh 334 against 345 ms (1 s tasks) and 8.3 against 8.4 ms (0 s
+tasks) - no preference left.
 
-1. **The harm they fix is bounded and rare.** A long exit jumping a short one costs the short one one
-   persist - a few round trips - not the length of the long task. And long tasks produce exits in inverse
-   proportion to their length: an 8s caller exits every 8s, a 60s caller every 60s, so the queue-jumpers
-   are the rarer population.
-2. **It buys nothing measurable.** On the mixed workload built for it (durations spread 8-60s, 600 flows/s,
-   16-vCPU shard), the exit band measured **2,837 steps/s against the control's 2,825** - 0.4%, inside the
-   noise of the rig it ran on.
-3. **A band is strictly ordered, so it SERIALISES A PIPELINE.** Exits block entries; the exit queue drains;
-   entries rush in; those become exits and refill it. The two stages alternate instead of overlapping, and a
-   pipeline needs both live at once to keep the resource busy. This is the same failure as "completions
-   given precedence", which collapsed short-task throughput 3x (4,416 against 7,964 steps/s) - and it is
-   worst exactly where the band looks safest to add, because the alternation is fastest when tasks are
-   short and exits arrive as fast as entries.
+**The moved stamp finishes work SOONER than the unmoved one, not later.** Saturated with 1 s tasks on a pool
+of 16, two interleaved pairs at matched RTT (0.47-0.56 ms): moved 2,298 / 2,303 steps/s against 1,501 /
+1,642 (+45%), exit wait 88 / 84 ms against 194 / 91 ms, entry wait 230 / 235 ms against 347 / 260 ms, and
+flow p50 13.9 s against 19.5-21.2 s. The pool sat at 4 or fewer of 16 connections in 3-4% of 50 ms samples
+against 24-29%. A demoted exit does not linger: it is the unmoved stamp's bursts that make exits queue behind
+each other. With 0 s tasks the moved stamp keeps the unmoved one's preference (exit 0.3-0.5 ms against entry
+13-22 ms, unmoved 0.8 against 34.5 ms).
 
-**What the pickup stamp gives instead is a GRADUATED preference, and that is the property to protect.** An
-exiting caller wins by however long its task ran, so the advantage is proportional to the work it
-represents and never becomes a rule: measured at 12.7x on wait under 8s tasks (159.1 ms entry against
-12.6 ms exit), decaying toward parity as tasks get shorter - which is precisely where a strict rule would
-do the most damage. It sits between the two measured failures rather than choosing one.
+**Nor give returning callers a band.** That is strict precedence chosen on purpose: completions given
+precedence collapsed short-task throughput 3x (4,416 against 7,964 steps/s), and an exit band measured
+2,837 against 2,825 steps/s on a mixed 8-60 s workload - nothing. Nor leave them UNORDERED: served with no
+ordering at all, completions lost at random and 286 of them waited out a full second.
+
+The preference this leaves is self-scaling and needs no knob: a returning job is credited with the time it
+spent queueing and working before it left, which under saturation is about one queue's worth - near the
+front, but never ahead of a caller that has waited longer than that.
 
 ## Fail OPEN, unlike a gate whose bound is the point
 
@@ -201,21 +206,13 @@ arbitrarily, making the order untestable and letting one of them be passed over 
 `TestTurnstile_EqualClaimsServedInArrivalOrder` and `TestSet_JobSeqOrdersClaimsTheClockCannotSeparate`,
 each of which fails with its own term removed.
 
-**`since` is the age of the JOB, not of the call, and that is what replaces the permits split.**
-A gate with no age ordering needs two separate reservations, because a caller finishing work must never
-queue behind callers starting it, and both single-pool answers were measured failing (served evenly, 286 completions
-waited a full second; completions given precedence, short-task throughput collapsed 3x to 4,416 from 7,964
-steps/s). Ordering by job age gets the same guarantee for free: a caller coming back for its next turn keeps
-its original timestamp, so it outranks everything that started later. Work in progress finishes before new
-work begins, with no precedence rule to starve either side, and no starvation either — every claim
-eventually becomes the oldest, so the order is first-in-first-out over jobs.
-
-**Measured, because the property is easy to assume and easy to get backwards.** On a 16-vCPU shard at 600
-flows/s with 8s tasks, the entry turn (taken before a candidate is picked up) waited a mean **159.1 ms**
-across 1,280,424 acquisitions, while the exit turn waited **12.6 ms** across 300,814. Exits win by ~12.7x
-without any rule saying so, purely because an exiting worker's claim is older by however long its task ran.
-The corollary is the cost: entry and `Create` are the ones queueing, and `Create`'s p99 tracked task
-duration (28 ms at 0s, 570 ms at 1s, 1,417 ms at 8s) for exactly that reason.
+**`since` is the age of the JOB at the resource, not of the call, and that is what replaces the permits
+split.** A gate with no age ordering needs two separate reservations, because a caller part-way through its
+work must not queue behind a flood of callers just starting theirs, and both single-pool answers were
+measured failing (served at random, 286 completions waited a full second; completions given precedence,
+short-task throughput collapsed 3x to 4,416 from 7,964 steps/s). Ordering by age gets the guarantee without a
+rule: a caller coming back for its next turn keeps its place, so it outranks everything that arrived after
+its work began, and nothing can starve, because every claim eventually becomes the oldest.
 
 **That property dies the moment a band is used for anything that can arrive faster than it is served.**
 Bands are strict: a band is exhausted before the next is looked at, so a flooding band starves everything

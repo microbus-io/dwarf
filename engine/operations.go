@@ -115,8 +115,8 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 	// admitting flows the replica has no capacity to execute.
 	//
 	// Its claim is stamped HERE, so its age is the moment this request arrived. That puts a create behind
-	// every step already under way and ahead of every one admitted after it, which is what keeps a burst of
-	// creation from overtaking the work it just created.
+	// every step whose work at the database began before it and ahead of every one that begins after it,
+	// which is what keeps a burst of creation from overtaking the work it just created.
 	//
 	// The turn wraps createWithGraph rather than living inside it, because that helper is shared with the
 	// subgraph-spawn path, which is already holding a turn when it calls in. A turn taken while holding one

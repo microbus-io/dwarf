@@ -31,8 +31,8 @@ import "context"
 //     strands it inside one that cannot proceed with it.
 //
 // The turn it takes is the job's first, not a separate reservation: the context it returns carries the
-// claim, stamped at the moment the job was picked up, so every later turn the job takes is ordered by that
-// same moment. The caller releases it when the work stops holding the resource - typically right after the
+// claim, stamped at the moment the job was picked up, so the job's later turns are ordered by that same
+// moment, less any time it spends Away. The caller releases it when the work stops holding the resource - typically right after the
 // first database call - and takes further turns on the returned context from there on.
 type Gate struct {
 	set      *Set
@@ -46,7 +46,7 @@ func (s *Set) Gate(priority int) *Gate {
 }
 
 // Acquire stamps a claim for a job about to be picked up on a shard and blocks until its turn comes,
-// returning the context every later turn of that job must be taken on.
+// returning the context the job's later turns must be taken on.
 //
 // ok is false only when the set has CLOSED, which is the caller's stop signal. It is checked on both sides
 // of the wait: before, so a drained set admits nobody, and after, because a close is what releases a

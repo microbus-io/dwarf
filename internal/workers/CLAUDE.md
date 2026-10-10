@@ -293,6 +293,6 @@ as well as rises: climbing under load and settling back is the shrink rule worki
 steady load is not.
 
 **The gate.** Sized, closed, and given meaning by the owner. The crew never asks what it bounds — in the
-engine it is a multiple of that shard's connection pool, ordered by band and then by how long the asking job has been running,
+engine it is a multiple of that shard's connection pool, ordered by band and then by how long the asking job has been at the database,
 and the release point is "as soon as the first database call is done". All of those are engine facts the crew would be
 wrong to encode, which is why `Gate` is one blocking method and no accessor.

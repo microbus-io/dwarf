@@ -124,7 +124,7 @@ func (e *Engine) initMetrics() error {
 	}
 	turnWait, err := meter.Float64Histogram("dwarf_turnstile_wait_seconds",
 		metric.WithUnit("s"),
-		metric.WithDescription("Time a worker spent waiting for the turn that RECORDS a finished step, per shard. A step that has run holds a claim stamped when it was picked up, so it is older than anything admitted while its task ran and is served ahead of it - which means a sustained wait here is not completions queueing behind dispatch but the shard's connections being saturated by other work at least as old. Observed on every completion, so count is completions and sum/count is the mean; near-zero throughout is the healthy state."),
+		metric.WithDescription("Time a worker spent waiting for the turn that RECORDS a finished step, per shard. A step that has run is ranked by its time at the database, its host call not counted, so it is served ahead of work that arrived after its own began - a sustained wait here means the shard's connections are saturated by work at least as old, not that completions are queued behind dispatch. Observed on every completion, so count is completions and sum/count is the mean; near-zero throughout is the healthy state."),
 		metric.WithExplicitBucketBoundaries(0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5))
 	if err != nil {
 		errs = append(errs, errors.Trace(err))

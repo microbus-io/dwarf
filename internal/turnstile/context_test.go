@@ -95,6 +95,57 @@ func TestSet_ContextKeepsTheJobsAgeAcrossShards(t *testing.T) {
 	s.Close()
 }
 
+// TestAway_CountsOnlyTimeAtTheResource pins what Away is for. A job back from a long wait elsewhere ranks by
+// the time it has spent at the resource: behind a caller that has been waiting longer than that, ahead of
+// one that has been waiting less. Keeping the age it started with would put it ahead of both - and with a
+// long enough wait, ahead of everyone, which is a strict band in all but name.
+func TestAway_CountsOnlyTimeAtTheResource(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	s := NewSet()
+	s.Resize(1, 1)
+
+	returning := s.ContextWithPriority(context.Background(), 1, 7)
+	before, _ := ClaimFrom(returning)
+	time.Sleep(5 * time.Millisecond)                            // the job's time at the resource
+	longer := s.ContextWithPriority(context.Background(), 1, 7) // arrived after the job began, waits longer than it worked
+	// The job is away. Crediting half of it leaves ~150ms of slack on each side, so a slow scheduler cannot
+	// reorder the three.
+	time.Sleep(300 * time.Millisecond)
+	away := 150 * time.Millisecond
+	shorter := s.ContextWithPriority(context.Background(), 1, 7) // arrived just now
+
+	held := WaitTurn(s.ContextWithPriority(context.Background(), 1, 7))
+	order := make(chan string, 3)
+	wait := func(name string, ctx context.Context, n int) {
+		go func() {
+			p := WaitTurn(ctx)
+			order <- name
+			p.Return()
+		}()
+		assert.True(queued(s.Turnstile(1), n), name+" is in line")
+	}
+	wait("shorter", shorter, 1)
+	wait("longer", longer, 2)
+
+	returning = Away(returning, away)
+	after, ok := ClaimFrom(returning)
+	assert.True(ok)
+	assert.True(after.Since.Equal(before.Since.Add(away)), "the time away is taken off the job's age")
+	assert.Equal(before.Seq, after.Seq, "it is the same job")
+	assert.Equal(7, after.Priority, "in the same band")
+	wait("returning", returning, 3)
+
+	held.Return()
+	assert.Equal("longer", <-order, "a caller that has waited longer than the job worked goes first")
+	assert.Equal("returning", <-order, "then the job, ahead of a caller that has waited less")
+	assert.Equal("shorter", <-order)
+
+	assert.Equal(context.Background(), Away(context.Background(), away), "an unprioritized context passes through")
+	s.Close()
+}
+
 // TestSet_JobSeqOrdersClaimsTheClockCannotSeparate pins what the job number is for. A clock coarser than
 // the arrival rate hands many jobs the same timestamp; without the tiebreak they order arbitrarily, so two
 // tied jobs interleave their turns instead of one finishing and leaving.

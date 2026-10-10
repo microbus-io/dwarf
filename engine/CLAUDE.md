@@ -2963,10 +2963,20 @@ the lease margin.
 ### Turn-taking on the database (`internal/turnstile`) — order the wait, do not remove it
 
 **Every database call a step makes takes a turn at its shard's turnstile, and turns are served by band and
-then by how long the JOB asking has been running.** The claim is stamped once, when the candidate is picked
-up, and rides the context (`turnstile.Set.ContextWithPriority`) so every later call of that step presents
-the same age. A step already under way is therefore older than anything admitted while its task ran, and is
-served ahead of it — work in progress finishes rather than queueing behind work just starting.
+then by how long the JOB asking has been at the database.** The claim is stamped once, when the candidate is
+picked up, and rides the context (`turnstile.Set.ContextWithPriority`) so every later call of that step
+presents the same age - except that the host call does not count: when it returns, the stamp is moved
+forward by its duration (`turnstile.Away`). A step already under way therefore outranks work that arrived
+after its own work began, and finishing work stays ahead of starting work under saturation.
+
+**The host call MUST be taken off the age, and the age must not be reset either.** Carried across the host
+call unmoved, the pickup stamp ages an exit by the whole task, so once tasks outlast the queue every exit
+outranks every entry and every `Create` - strict precedence, which serialises the pipeline into alternating
+exit and entry bursts with the pool idle in between, phase-locked by tasks of one length. That was the
+long-task regime's `Create` p99 (485 ms at 1 s tasks, 2.9 s at 8 s, on a 32 vCPU shard at 1,000 flows/s),
+its lost admissions, its slow hand-offs and its refill churn (the cache sat full of hints nobody could pop,
+so successors were declined). A FRESH stamp at exit fails the other way: the finished step waits out the
+whole queue behind work not yet started. The traces and numbers are in `internal/turnstile/CLAUDE.md`.
 
 ```
 park for work                       <- holding NOTHING
@@ -2977,7 +2987,8 @@ park for work                       <- holding NOTHING
   -> return the turn
   -> flow/graph load                 <- its own turn, on the same claim
   -> ExecuteTask                     <- unbounded, holds nothing, takes no turn
-  -> persist / transitions           <- its own turn, still on the pickup-time claim
+  -> Away(host call's duration)      <- the task's time does not age the claim
+  -> persist / transitions           <- its own turn, on the pickup claim moved forward
 ```
 
 **Sizing is `turnstilePassesPerConn = 2`, and ONE TURN PER CONNECTION IS THE TRAP.** The turnstile does not
@@ -3031,21 +3042,22 @@ state.** Age ordering cannot starve — every claim eventually becomes the oldes
 to any caller that can arrive faster than it is served starves the band below it. That is the shape of the
 measured 3x collapse under completions-first precedence (below), reached through a different door.
 
-**DO NOT split entering and completing work into two dedicated reservations — the age ordering is what makes
-one queue safe.** Counting them separately is the obvious defence, and it is only needed if the single queue
-has to choose who wins. **Both ways of choosing were measured failing**:
+**DO NOT split entering and completing work into two dedicated reservations, and do not give either a
+band — age at the database is what makes one queue safe.** Counting them separately is the obvious defence, and it
+is only needed if the single queue has to choose who wins. **Every way of choosing was measured failing**:
 
-- **Served evenly**, completions lost at random and queued behind admission: **286 of them waited a full
-  second**, with transactions inflating 3ms → 54ms.
+- **Served at random** (no ordering), completions lost at random and queued behind admission: **286 of
+  them waited a full second**, with transactions inflating 3ms → 54ms.
 - **Served with completions given precedence**, entry starved — and entry IS dispatch — so short-task
   throughput collapsed **3x (4,416 vs 7,964 steps/s)**, with creation itself throttled to 714 of 800
   commanded flows/s.
+- **Completions ranked by their pickup age** is the same precedence once tasks outlast the queue (above).
 
-Ordering by job age removes the choice rather than answering it: a completing step holds an older claim than
-anything admitted while its task ran, so it wins, and no population can starve because every claim
-eventually becomes the oldest. So if completions are measurably waiting, the reading is that the shard's
-connections are saturated by work at least as old — which no split can fix, because the two populations are
-not competing for different things.
+Ordering by time at the database removes the choice rather than answering it: a completing step outranks
+whatever arrived after its own work began and nothing else, and no population can starve because every
+claim eventually becomes the oldest. So if completions are measurably waiting, the reading is that the
+shard's connections are saturated by work at least as old — which no split can fix, because the two
+populations are not competing for different things.
 
 **THE GATE'S TURN IS THE CREW'S GROWTH BRAKE, and that is its real job.** `Crew.idle` counts goroutines not
 holding a candidate, and `considerGrowth` spawns only when a take left nobody idle. A worker blocked in

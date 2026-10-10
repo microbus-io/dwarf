@@ -116,7 +116,7 @@ const (
 
 	// The turnstile bands. Lower is served first, and STRICTLY: a band is exhausted before the next is
 	// looked at, so a band may only be given to a source that cannot flood it. Within a band, order is by
-	// how long the job asking has been running.
+	// how long the job asking has been at the database (time in the host call does not count).
 	//
 	// priorityRefill is the only band above the common one, and it is reserved for the piston because the
 	// piston is the one caller bounded by construction - it cycles on a derived period and takes two turns
@@ -128,8 +128,9 @@ const (
 	// unfinished: age ordering is starvation-free (every claim eventually becomes the oldest), while any
 	// second band handed to a caller that can arrive faster than it is served starves the band below it -
 	// which is the shape of the measured 3x short-task collapse of a single-permit pool. Do not add a band for
-	// EXITING (completing) work either: a completing step already holds an older claim than anything admitted
-	// while its task ran, so age ordering serves it first without one.
+	// EXITING (completing) work either: exits arrive as fast as steps finish, and precedence for them
+	// serialises dispatch behind them - the same failure as ranking an exit by its unmoved pickup age, which
+	// is why the host call's duration is taken off the exit's claim instead.
 	//
 	// The values are spaced, and are ordinals only: nothing reads the distance between them. A band can
 	// therefore be inserted between two in use without renumbering the callers of either.

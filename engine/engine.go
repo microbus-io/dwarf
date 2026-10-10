@@ -211,8 +211,8 @@ type Engine struct {
 	cache candidates.Cache
 	// crew runs processStep on the candidates it pops. The engine supplies both sizing numbers.
 	crew *workers.Crew
-	// turnstiles orders access to each shard's connections by band and then by how long the job asking
-	// has been running, so that work already under way finishes ahead of work just starting. Sized at
+	// turnstiles orders access to each shard's connections by band and then by how long the job asking has
+	// been at the database, so that work already under way finishes ahead of work arriving after it. Sized at
 	// turnstilePassesPerConn turns per connection, so every path that changes a pool must re-size it - the
 	// same rule the worker ceiling, the cache and the refill interval already obey.
 	turnstiles *turnstile.Set

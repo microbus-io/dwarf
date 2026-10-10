@@ -62,9 +62,9 @@ func cohortLockStripe(shard, spawnStepID int) int {
 // processStep acquires a step, executes its task, and enqueues the next step if applicable.
 //
 // THE CTX CARRIES THIS JOB'S PLACE IN LINE, stamped by the crew's gate at the moment the candidate was
-// picked up, and every database call below takes its turn on it (turnstile.WaitTurn). Because the stamp is
-// the pickup time and never moves, a step already under way outranks one just starting - which is what
-// makes a step that has begun finish rather than queue behind newly-admitted work.
+// picked up, and every database call below takes its turn on it (turnstile.WaitTurn). The host call's
+// duration is taken off it when the call returns (see there), so the step ranks by its time at the
+// database: ahead of work that arrived after its own began, and never ahead of everything.
 //
 // returnGateTurn hands back the turn the crew took on this worker's behalf. It is released as soon as the
 // claim CAS is done, because that is the only database work it was ever covering: the calls after it take
@@ -476,6 +476,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	heldBytes := int64(len(stateJSON) + len(priorChangesJSON) + refBytes)
 	e.inFlightStateBytes.Add(heldBytes)
 	e.inFlightStateSteps.Add(1)
+	hostCallStart := time.Now()
 	// A step marked by Cancel before it started is preempted: the task is not run, and the cancellation
 	// takes the path a task error would. The one exemption is a subgraph caller resuming after its child
 	// returned - it runs once more so the child's result reaches its code, and its own mark is then applied
@@ -515,21 +516,17 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	e.inFlightStateBytes.Add(-heldBytes)
 	e.inFlightStateSteps.Add(-1)
 	// The task has now RUN. Everything below records that fact, and it holds a connection to do so, so it
-	// takes a turn like every other database call - but on THIS job's claim, stamped when the candidate was
-	// picked up and unchanged since. That is what keeps a finishing step ahead of a starting one: this
-	// job is by now older than anything admitted while its task ran, so it outranks them without any rule
-	// saying so.
-	//
-	// Do not add a dedicated reservation for completions; the age ordering is why none is needed. A shared
-	// pool that must CHOOSE who wins fails both ways, measured: served evenly, completions lose at random and
-	// queue behind admission (286 of them waiting out a full 1s budget); served with completions preferred,
-	// dispatch starves and short-task throughput collapses 3x (4,416 vs 7,964 steps/s). Ordering by age
-	// answers it without a rule, and without either population being able to starve - every claim
-	// eventually becomes the oldest.
+	// takes a turn like every other database call - on this job's pickup claim, moved forward by the host
+	// call's duration. The job therefore ranks by the time it has spent at the database: ahead of entries that
+	// arrived after its own entry did, which keeps finishing work ahead of starting work under saturation,
+	// but never ahead of everything. Keeping the pickup stamp unmoved would age it by the whole task, so once
+	// tasks outlast the queue every exit would outrank every entry and every Create - a strict precedence that
+	// alternates exit and entry bursts with the pool idle in between.
 	//
 	// A turn is never refused, so a drain records the work anyway: the outcome exists nowhere but in this
 	// goroutine. The return is still mandatory - a lost one shrinks this shard's ceiling permanently - and
 	// has no crew-side backstop, the gate's turn having been handed back long ago.
+	ctx = turnstile.Away(ctx, time.Since(hostCallStart))
 	turnWaitStart := time.Now()
 	persistPass := turnstile.WaitTurn(ctx)
 	// Through a CLOSURE, not `defer persistPass.Return()`: the pass is handed back and re-taken around every
