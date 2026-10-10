@@ -86,7 +86,7 @@ func (e *Engine) initMetrics() error {
 	}
 	// Counter instrument names carry no _total suffix; the Prometheus exporter appends it at scrape time.
 	// Unit-denominated counters end with the unit (…_bytes), per the Prometheus naming convention.
-	m.flowsStarted = ctr("dwarf_flows_started", "Counts flows that have been started, by the shard they were placed on. The shard attribute measures PLACEMENT: pickShard is a random pick weighted by each shard's declared Weight, so a skew here means the fleet's work is not spread the way the weights intended, and one shard's steps carry more than their share. Against dwarf_flows_ended{shard} it is that shard's in-flight flow count. Note a closed-loop caller makes starts and terminations equal by construction - only an open-loop arrival rate lets a shortfall here indict the CALLER rather than the engine.")
+	m.flowsStarted = ctr("dwarf_flows_started", "Counts flows that have been started, by the shard they were placed on. The shard attribute measures PLACEMENT: a new flow's shard is a random pick weighted by each shard's declared Weight, so a skew here means the fleet's work is not spread the way the weights intended, and one shard's steps carry more than their share. Against dwarf_flows_ended{shard} it is that shard's in-flight flow count. Note a closed-loop caller makes starts and terminations equal by construction - only an open-loop arrival rate lets a shortfall here indict the CALLER rather than the engine.")
 	m.flowsEnded = ctr("dwarf_flows_ended", "Counts flows that have reached a terminal status, by the shard holding them and BY WHICH terminal status - completed, failed, terminated, or cancelled. All four are counted, which is what makes dwarf_flows_started minus this a stable in-flight count rather than one that drifts upward by every flow that did not finish cleanly. Subgraph children are counted here and as starts, so a tree nets to zero. Split by status for the failure/termination/cancellation rates; dwarf_steps_executed{status} is the step-level view of the same thing.")
 	m.stepsExecuted = ctr("dwarf_steps_executed", "Counts steps that have been executed, by the shard holding them. The shard attribute is what turns this into per-shard dispatch throughput - the quantity a per-shard piston, pool and partition all separately govern, and the one a fleet-wide total hides.")
 	m.stepsRecovered = ctr("dwarf_steps_recovered", "Counts steps reset to pending because their worker is gone - a running step whose lease expired (its task runs again), or a completed step whose transition never committed (it is replayed from its recorded completion; its task does not run again) - the crash-recovery path. A nonzero rate means workers are dying or overrunning their lease.")
@@ -172,9 +172,9 @@ func (e *Engine) initMetrics() error {
 	//
 	// These two are also the ONLY instruments that cost a query at collection time (one per shard, in
 	// observePendingByBand), so the cluster-wide set is kept to what genuinely cannot be answered any other
-	// way. Per-task running concurrency was here and was removed: it cost a second GROUP BY per shard per
-	// scrape on every replica to produce R copies of one number, carried the least bounded label in the set
-	// (task_url), and per-downstream concurrency belongs to the host, which owns the account and tenant
+	// way. Do not add per-task running concurrency: it costs a second GROUP BY per shard per scrape on every
+	// replica to produce R copies of one number, carries the least bounded label in the set (task_url), and
+	// per-downstream concurrency belongs to the host, which owns the account and tenant
 	// identity the engine cannot see - the same rule that keeps backpressure out of the engine.
 	queueDepth := gauge("dwarf_steps_queue_depth", "Per-replica: steps waiting in this replica's local worker cache. Sum across replicas.", "")
 	stepsPending := gauge("dwarf_steps_pending", "Cluster-wide: due pending steps in each priority band, read from the shared database. Every replica reports the same value - aggregate with max, not sum.", "")
@@ -185,10 +185,8 @@ func (e *Engine) initMetrics() error {
 	peerReplicas := gauge("dwarf_peer_replicas", "Per-replica, per-shard: how many replicas this one currently sees holding connections to that shard - the fleet that shard's dispatchers are picked from. Replicas should AGREE on it, so a spread across the fleet is itself the signal: one replica reading 3 while its peers read 4 is sizing its pool for a fleet that does not exist. It is deliberately slow to fall (a reading that did not happen is not evidence anybody left), so a drop lags a real departure by a reading or two.", "")
 	shardDispatching := gauge("dwarf_shard_dispatching", "Per-replica, per-shard: 1 when this replica is one of that shard's dispatchers - holding a share of its connection budget and running its steps - and 0 when it does not dispatch there - holding a two-connection reader pool, or a share of the budget only until steps it already claimed there finish. Summed across the fleet it is how many replicas dispatch each shard; a shard summing to zero is running nothing.", "")
 	tallyAge := gaugeF("dwarf_refill_tally_age_seconds", "Per-replica: how long ago the STALEST shard still in this replica's planner reported. Every shard plans from a merged view of every shard's LAST report, so a piston cycling slowly holds its peers' plans on a picture that old - the global priority band and the per-key slice rule are both computed from those mixed-freshness tallies. Expect roughly one cycle interval in a healthy fleet; sustained multiples name a shard whose piston has fallen behind its peers, which no throughput number can distinguish from a slow database. Single-shard deployments always read ~one interval and can ignore it.", "s")
-	// Per ROLE: entering and exiting work draw on separate reservations, and an operator reading one without
-	// the other cannot tell "dispatch is gated" from "completions are". Instantaneous, so a reservation that
-	// is saturated all window without being sampled empty looks idle - dwarf_turnstile_wait_seconds is the
-	// durable half of that pair.
+	// Instantaneous, so a turnstile saturated all window without being sampled empty looks idle -
+	// dwarf_turnstile_wait_seconds is the durable half of that pair.
 	turnstileAvail := gauge("dwarf_turnstile_available", "Per-replica, per-shard: turns currently free at the shard's turnstile. Turns are a fixed multiple of that shard's connection pool, so this is how much of the admission budget is unspoken for right now. It is deliberately LARGER than the pool: a turn admits a caller to compete for a connection rather than reserving one, and with only as many turns as connections the pool runs below capacity for want of anyone queued for it (measured: a 6x throughput collapse). Sustained zero means the shard's connections are the binding constraint; read the wait histograms for how long callers are actually queueing, since an instantaneous sample cannot tell a turnstile saturated all window from an idle one. A NEGATIVE value is only ever a live resize that shrank the ceiling below what is currently held; it self-corrects as those holders return.", "")
 	turnstileWaiting := gauge("dwarf_turnstile_waiting", "Per-replica, per-shard: callers queued at the shard's turnstile right now. Unlike the free-turn count this has no ceiling, so it is the one that shows how deep a queue has become rather than merely that it is non-empty - and because a caller queues once per database call rather than once per step, it counts calls in flight, not workers. Read with dwarf_turnstile_available: available at zero with this climbing is a shard falling behind, while both near zero is an idle one.", "")
 	// No high-water companion, deliberately: a peak held since process start is a constant within hours of
@@ -262,9 +260,9 @@ type observableGauges struct {
 	inFlightSteps metric.Int64ObservableGauge
 }
 
-// observeGauges is the observable-gauge callback. It reads in-memory engine state and queries the
-// shards for the current-state gauges at collection time. Per-replica: cluster-wide aggregates (e.g.
-// concurrency_running) are summed at the metrics backend across replicas.
+// observeGauges is the observable-gauge callback. It reads in-memory engine state and queries the shards
+// for the two cluster-wide backlog gauges at collection time. The per-replica gauges sum across replicas;
+// the cluster-wide ones report the same value on every replica and aggregate with max.
 func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observableGauges) error {
 	// Local in-memory gauges - no DB.
 	o.ObserveInt64(g.queueDepth, int64(e.cache.Len()))

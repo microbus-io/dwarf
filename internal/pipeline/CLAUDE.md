@@ -51,8 +51,9 @@ never throughput. `capacity / period` is the supply ceiling, full stop.
 it: `Tally` retains under the mutex, `Plan` snapshots under it and computes outside. Two loops meeting there
 introduce no new concurrency concept. **Do not add a second channel between them.** Anything one loop writes
 and the other reads is sampled at an arbitrary phase of the other's cadence — and the phases are not
-independent, since both start together and run at the same interval, so a mistake of that shape lands the
-same way every time rather than half the time.
+independent, since both start together and their owner derives the tally interval from the supply's (equal
+with one scanning piston, a fixed ratio otherwise), so a mistake of that shape lands the same way every time
+rather than half the time.
 
 **What goes stale is the FAIRNESS TALLY, and that is the cheap thing to be stale about.** Under
 a deep backlog the counts are pinned at `capacity` anyway, so they barely move; a key that drained but is

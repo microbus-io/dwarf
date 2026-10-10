@@ -22,6 +22,7 @@ package engine
 
 import (
 	"context"
+	"math"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -110,9 +111,10 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 	enginetest.AssertInvariants(t, e)
 }
 
-// TestFaultSite_SubgraphSpawnErr pins that a subgraph spawn that fails fails the caller cleanly rather than
-// leaving it parked, and leaves no child flow. The park and the child's insert share a transaction, so a failed
-// spawn never leaves a parked caller behind.
+// TestFaultSite_SubgraphSpawnErr pins the subgraph spawn's failure outcomes. A spawn that fails once is a
+// write persist retries in place: the child is created and the flow completes, with the caller's task run once.
+// A spawn that keeps failing fails the caller cleanly rather than leaving it parked, and leaves no child flow -
+// the park and the child's insert share a transaction, so a failed spawn never leaves a parked caller behind.
 func TestFaultSite_SubgraphSpawnErr(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -125,26 +127,89 @@ func TestFaultSite_SubgraphSpawnErr(t *testing.T) {
 	child.SetURL("X", "ftbspawn/x")
 	child.AddTransition("X", workflow.End)
 	mux.HandleGraph("ftbspawn/child", child)
-	mux.HandleTask("ftbspawn/call", subgraphTask("ftbspawn/child"))
-	mux.HandleTask("ftbspawn/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	var calls atomic.Int32
+	callChild := subgraphTask("ftbspawn/child")
+	mux.HandleTask("ftbspawn/call", func(ctx context.Context, f *workflow.Flow) error {
+		calls.Add(1)
+		return callChild(ctx, f)
+	})
+	// childGate, when set, holds the child's task until it is closed.
+	var childGate atomic.Pointer[chan struct{}]
+	mux.HandleTask("ftbspawn/x", func(ctx context.Context, f *workflow.Flow) error {
+		if gate := childGate.Load(); gate != nil {
+			select {
+			case <-*gate:
+			case <-time.After(10 * time.Second):
+			}
+		}
+		return nil
+	})
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	e.SetHost(mux)
+	e.persistBackoff = []time.Duration{time.Millisecond, time.Millisecond}
 	reader := withManualReader(e)
-	assert.NoError(e.Startup(t.Context()))
+	if !assert.NoError(e.Startup(t.Context())) {
+		return
+	}
+	spawnFault := engineseams.Join(engineseams.FaultSubgraphSpawnErr, "ftbspawn/child")
 
-	// createSubgraphFlow errors before its transaction (no park, no child): failAndReturn must fail the caller
-	// step and the flow.
-	e.seams.Inject(engineseams.Join(engineseams.FaultSubgraphSpawnErr, "ftbspawn/child"))
-	fk, out := batteryRun(t, e, "ftbspawn/parent")
-	assert.Equal(workflow.StatusFailed, out.Status)
+	t.Run("transient", func(t *testing.T) {
+		assert := testarossa.For(t)
+		calls.Store(0)
+		e.seams.Inject(spawnFault)
+		_, out := batteryRun(t, e, "ftbspawn/parent")
+		assert.Equal(workflow.StatusCompleted, out.Status)
+		// Once to spawn, once on the child's return. A third run is the task re-executed for a failed spawn.
+		assert.Equal(int32(2), calls.Load(), "the caller's task ran again instead of its spawn being retried")
+		assertFaultRecoveryClean(t, e, reader)
+	})
 
-	shard, _, _, err := keys.ParseFlowKey(fk)
-	assert.NoError(err)
-	// No child flow was created (the spawn failed before insert), so no orphan lingers.
-	assert.Equal(0, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE surgraph_flow_id<>0"))
-	assertFaultRecoveryClean(t, e, reader) // caller failed + un-parked; invariants clean
+	// The spawn's transaction commits but its acknowledgement is lost. The retry must find the caller already
+	// parked and stop there, rather than spawn a second child flow.
+	t.Run("commit_lost", func(t *testing.T) {
+		assert := testarossa.For(t)
+		calls.Store(0)
+		// The child is held until the caller's dispatch - the spawn and its retry - has returned, or a quick child
+		// would revive the caller first and the retry would find it gone, passing for the wrong reason.
+		gate := make(chan struct{})
+		childGate.Store(&gate)
+		defer childGate.Store(nil)
+		base := e.seams.Visits(engineseams.CheckpointClaimedDispatchDone)
+		go func() {
+			for {
+				reached := e.seams.Waiter(engineseams.CheckpointClaimedDispatchDone)
+				if e.seams.Visits(engineseams.CheckpointClaimedDispatchDone) > base {
+					close(gate)
+					return
+				}
+				<-reached
+			}
+		}()
+		e.seams.Inject(engineseams.Join(engineseams.FaultSubgraphSpawnCommitLost, "ftbspawn/child"))
+		fk, out := batteryRun(t, e, "ftbspawn/parent")
+		assert.Equal(workflow.StatusCompleted, out.Status)
+		assert.Equal(int32(2), calls.Load(), "the caller's task ran again instead of its spawn being recognized as landed")
+		shard, flowID, _, err := keys.ParseFlowKey(fk)
+		assert.NoError(err)
+		assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE surgraph_flow_id=?", flowID),
+			"a retried spawn created a second child")
+		assertFaultRecoveryClean(t, e, reader)
+	})
+
+	t.Run("persistent", func(t *testing.T) {
+		assert := testarossa.For(t)
+		e.seams.InjectN(spawnFault, math.MaxInt)
+		defer e.seams.Withdraw(spawnFault)
+		fk, out := batteryRun(t, e, "ftbspawn/parent")
+		assert.Equal(workflow.StatusFailed, out.Status)
+		shard, flowID, _, err := keys.ParseFlowKey(fk)
+		assert.NoError(err)
+		// No child flow was created (the spawn failed before insert), so no orphan lingers.
+		assert.Equal(0, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE surgraph_flow_id=?", flowID))
+		assertFaultRecoveryClean(t, e, reader) // caller failed + un-parked; invariants clean
+	})
 }
 
 // createInterruptedFlow creates a flow whose entry task interrupts, and blocks until it rests `interrupted`.
@@ -467,4 +532,183 @@ func TestFaultSite_ReapSelectErr(t *testing.T) {
 	// The next pass (fault consumed) reaps cleanly.
 	e.reapDueFlows(ctx)
 	assert.Equal(0, shardFlowCount(t, e, shard))
+}
+
+// TestFaultSite_RetryRewindErr pins that a flow.Retry rewind that fails once is retried in place by persist,
+// like any other write of a step's outcome, rather than failing the flow - and the task is not run again for it.
+func TestFaultSite_RetryRewindErr(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	mux := NewHostMux()
+	g := workflow.NewGraph("RetryRewind")
+	g.SetURL("Work", "ftbretry/work")
+	g.AddTransition("Work", workflow.End)
+	mux.HandleGraph("ftbretry/g", g)
+	var calls atomic.Int32
+	mux.HandleTask("ftbretry/work", func(ctx context.Context, f *workflow.Flow) error {
+		if calls.Add(1) == 1 && f.Retry(0, 1, 0, 0) {
+			return nil
+		}
+		return nil
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
+	e.SetHost(mux)
+	e.persistBackoff = []time.Duration{time.Millisecond}
+	reader := withManualReader(e)
+	assert.NoError(e.Startup(t.Context()))
+
+	e.seams.Inject(engineseams.Join(engineseams.FaultRetryRewindErr, "Work"))
+	_, out := batteryRun(t, e, "ftbretry/g")
+	assert.Equal(workflow.StatusCompleted, out.Status)
+	assert.Equal(int32(2), calls.Load(), "one attempt that retried, one that completed")
+	assertFaultRecoveryClean(t, e, reader)
+}
+
+// TestFaultSite_InterruptWriteRetried pins that an interrupt whose write fails once is retried in place by
+// persist: the flow rests interrupted promptly, with the task run once, rather than the step sitting `running`
+// until its lease lapses and the task runs again.
+func TestFaultSite_InterruptWriteRetried(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	mux := NewHostMux()
+	g := workflow.NewGraph("Gate")
+	g.SetURL("Gate", "ftbintr/gate")
+	g.AddTransition("Gate", workflow.End)
+	mux.HandleGraph("ftbintr/g", g)
+	var calls atomic.Int32
+	mux.HandleTask("ftbintr/gate", func(ctx context.Context, f *workflow.Flow) error {
+		calls.Add(1)
+		_, err := f.Interrupt(nil, nil)
+		return err
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
+	e.SetHost(mux)
+	e.persistBackoff = []time.Duration{time.Millisecond}
+	assert.NoError(e.Startup(t.Context()))
+
+	e.seams.Inject(engineseams.FaultInterruptChainWrite)
+	defer e.seams.Withdraw(engineseams.FaultInterruptChainWrite)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	fk, err := e.Create(ctx, "ftbintr/g", nil, nil)
+	assert.NoError(err)
+	out, err := e.Await(ctx, fk)
+	if assert.NoError(err) && assert.NotNil(out) {
+		assert.Equal(workflow.StatusInterrupted, out.Status)
+	}
+	assert.Equal(int32(1), calls.Load())
+	enginetest.AssertInvariants(t, e)
+}
+
+// TestFaultSite_InitRuntimeFailureLeavesTheFleet pins what a Startup that fails after joining the fleet undoes:
+// the replica's registry row, which peers would otherwise count for the fresh window, and the open shards. The
+// engine reports itself stopped, and a later Startup succeeds.
+func TestFaultSite_InitRuntimeFailureLeavesTheFleet(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	assert.NoError(e.SetHost(noopHost{}))
+	e.seams.Inject(engineseams.FaultInitRuntime)
+	assert.Error(e.Startup(ctx))
+	assert.False(e.started.Load())
+	assert.Equal(0, e.db.NumShards(), "the shards were left open")
+
+	// A peer sharing the test database sees the registry as the failed replica left it.
+	peer := NewEngineUnderTest(t.Name())
+	defer peer.Shutdown(ctx)
+	assert.NoError(peer.SetHost(noopHost{}))
+	assert.NoError(peer.Startup(ctx))
+	assert.Equal(0, enginetest.CountRows(t, peer, 1, "SELECT COUNT(*) FROM dwarf_peers WHERE engine_id=?", e.engineID),
+		"the failed replica is still registered")
+
+	assert.NoError(e.Startup(ctx))
+	assert.True(e.started.Load())
+}
+
+// TestFaultSite_FailFlowFinalStateErr pins the fuse in failing a flow: when its final state cannot be computed,
+// the flow still terminalizes as failed - with an empty final state - on both paths that fail a flow, a failing
+// trunk step and a cohort that resolves with a failed branch.
+func TestFaultSite_FailFlowFinalStateErr(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	mux := NewHostMux()
+	trunk := workflow.NewGraph("Trunk")
+	trunk.SetURL("Boom", "ftbfinal/boom")
+	trunk.AddTransition("Boom", workflow.End)
+	mux.HandleGraph("ftbfinal/trunk", trunk)
+	fan := workflow.NewGraph("Fan")
+	fan.SetURL("Split", "ftbfinal/split")
+	fan.SetURL("Work", "ftbfinal/work")
+	fan.SetURL("Join", "ftbfinal/join")
+	fan.SetFanIn("Join")
+	fan.AddTransitionForEach("Split", "Work", "items", "item")
+	fan.AddTransitionChain("Work", "Join", workflow.End)
+	mux.HandleGraph("ftbfinal/fan", fan)
+	mux.HandleTask("ftbfinal/boom", func(ctx context.Context, f *workflow.Flow) error { return errors.New("boom") })
+	mux.HandleTask("ftbfinal/split", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	// goodGate, when set, holds the "good" branch until it is closed, so the "bad" branch fails first and the
+	// good one's arrival is what resolves the cohort - the cohort-fail branch of processStep, not failStep.
+	var goodGate atomic.Pointer[chan struct{}]
+	mux.HandleTask("ftbfinal/work", func(ctx context.Context, f *workflow.Flow) error {
+		if f.GetString("item") == "bad" {
+			return errors.New("bad item")
+		}
+		if gate := goodGate.Load(); gate != nil {
+			select {
+			case <-*gate:
+			case <-time.After(10 * time.Second):
+			}
+		}
+		return nil
+	})
+	mux.HandleTask("ftbfinal/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
+	e.SetHost(mux)
+	reader := withManualReader(e)
+	if !assert.NoError(e.Startup(t.Context())) {
+		return
+	}
+
+	for _, tc := range []struct{ name, url string }{{"trunk", "ftbfinal/trunk"}, {"cohort", "ftbfinal/fan"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := testarossa.For(t)
+			e.seams.Inject(engineseams.FaultFailFlowFinalState)
+			defer e.seams.Withdraw(engineseams.FaultFailFlowFinalState)
+			if tc.name == "cohort" {
+				// Release "good" once two claimed dispatches have returned: Split's, then the failed "bad" branch's.
+				gate := make(chan struct{})
+				goodGate.Store(&gate)
+				defer goodGate.Store(nil)
+				base := e.seams.Visits(engineseams.CheckpointClaimedDispatchDone)
+				go func() {
+					for {
+						reached := e.seams.Waiter(engineseams.CheckpointClaimedDispatchDone)
+						if e.seams.Visits(engineseams.CheckpointClaimedDispatchDone) >= base+2 {
+							close(gate)
+							return
+						}
+						<-reached
+					}
+				}()
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			_, out, err := e.Run(ctx, tc.url, map[string]any{"carried": 1, "items": []string{"good", "bad"}}, nil)
+			if !assert.NoError(err) || !assert.NotNil(out) {
+				return
+			}
+			assert.Equal(workflow.StatusFailed, out.Status)
+			assert.False(out.State.Has("carried"), "the final state was computed despite the fault")
+			assertFaultRecoveryClean(t, e, reader)
+		})
+	}
 }

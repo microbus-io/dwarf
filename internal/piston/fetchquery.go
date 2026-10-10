@@ -110,7 +110,7 @@ func fetchQuery(driverName string, band int, keys []string, perKey int, part str
 		// utf8mb4_0900_ai_ci server against a utf8mb4_general_ci database. MariaDB cannot reproduce it (it
 		// has no utf8mb4_0900 family at all), so the fault passes every MariaDB run and fails on the engine
 		// CI uses. A bind parameter has no such problem: its collation is COERCIBLE, so the column's wins,
-		// which is why the IN-list is the safe shape here rather than merely the old one.
+		// which is why the IN-list is the safe shape here.
 		//
 		// One bind per key is sound on this dialect specifically. The ceiling is 65,535 placeholders, while
 		// the key count is bounded by the candidate cache's capacity - twice the worker count, a few

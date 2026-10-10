@@ -91,8 +91,9 @@ func (e *Engine) sonarFor(shard int) *peers.Sonar {
 	return e.sonars[shard]
 }
 
-// replicasOn is how many replicas are registered on one shard - the count dispatcherSlots divides into
-// dispatchers and readers, and what the fleet-limit check prices. One before the Sonars exist, which is
+// replicasOn is how many replicas are registered on one shard - what the fleet-limit check prices and the
+// peer gauge and change counter report. (The dispatcher slots are derived from the ranked candidates, not
+// from this.) One before the Sonars exist, which is
 // the solo sizing every derivation falls back to.
 func (e *Engine) replicasOn(shard int) int {
 	s := e.sonarFor(shard)
@@ -195,9 +196,10 @@ func (e *Engine) joinFleet(ctx context.Context) {
 	// that claims more. A peer's apply is local to its process, so no wait can prove it happened - which
 	// leaves one reachable worst case whatever the grace: every survivor still on the pre-join split (which
 	// sums to the whole budget) while this replica has grown into its post-join share. Measured over 25
-	// rollouts by TestPeerRollingRestart_FleetNeverExceedsTheShardBudget: peaks of 52 (joiner still on its
-	// bootstrap pool) and 60 = 48 + 12 (joiner grown, nobody shrunk), against a 48 budget. That is the
-	// engine's guarantee - budget plus one post-join share - and it is what that test asserts.
+	// four-replica rollouts with every replica dividing a 48-connection budget: peaks of 52 (joiner still on
+	// its bootstrap pool) and 60 = 48 + 12 (joiner grown, nobody shrunk). That is the engine's guarantee -
+	// budget plus one post-join share - and it is what TestPeerRollingRestart_FleetNeverExceedsTheShardBudget
+	// asserts.
 	//
 	// Without the grace the same rollout failed a budget+bootstrap bound 10 times out of 10 under -race.
 	//
@@ -266,10 +268,10 @@ func (e *Engine) leaveFleet(ctx context.Context) {
 // a pass (a peer's read may have begun just before the joiner's row landed), so everything the apply spends
 // comes out of the one remaining cadence.
 //
-// Half the cadence is NOT enough of a fraction, which was measured rather than reasoned:
-// TestPeerRollingRestart_FleetNeverExceedsTheShardBudget priced a four-replica rollout at 56 connections
-// against a 52 bound (two survivors still holding the pre-join 16 while the joiner had grown to 12) on a
-// loaded -race run. At an eighth the apply is a rounding error against the wait, so what remains is jitter
+// Half the cadence is NOT enough of a fraction, which was measured rather than reasoned: a four-replica
+// rolling restart over a 48-connection budget, with every replica dividing it, priced the fleet at 56
+// connections against a 52 bound (two survivors still holding the pre-join 16 while the joiner had grown to
+// 12) on a loaded -race run. At an eighth the apply is a rounding error against the wait, so what remains is jitter
 // in the peer's own read, which nothing on this side can shorten.
 //
 // The divisor is derived from the cadence the Sonars actually run at, not from the default, so the

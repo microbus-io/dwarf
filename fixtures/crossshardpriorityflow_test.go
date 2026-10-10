@@ -103,7 +103,7 @@ func TestCrossShardPriorityflow(t *testing.T) {
 	// these Creates committed may have scanned before they existed, so the second is the one whose scan is
 	// guaranteed to have seen them and whose push put them in the partition. A duration cannot state it,
 	// because each piston turns on its own cadence and one slow shard is precisely the case that breaks it.
-	enginetest.AwaitShardCycles(t, eng, 3, 2)
+	enginetest.AwaitShardCycles(t, eng, 2)
 
 	// The urgent burst. More than one, deliberately: Offer head-inserts at most ONE pioneer per
 	// band-opening per partition, so everything past the pioneers can only be served by a refill scan

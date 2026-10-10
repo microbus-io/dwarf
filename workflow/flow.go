@@ -338,8 +338,12 @@ func (f *Flow) Snapshot() State {
 // Changed fields are written to both the state and changes maps, so that subsequent reads
 // (including transition condition evaluation) see the updated values.
 //
-// It returns an error if a field holds an unstorable value (see the note above SetInt), and that field
-// is not recorded.
+// Fields are named as encoding/json names them - and so as Parse reads them: by the json tag when it has
+// a name, else by the Go field name, with an untagged embedded struct's fields promoted. A field tagged
+// "-" and an unexported field are skipped. Values are compared by meaning, not spelling, so a field read
+// back from the database in a different but equivalent JSON form is not recorded as a change.
+//
+// It returns an error if a field cannot be marshalled; fields visited before it are already recorded.
 func (f *Flow) SetChanges(source any, snap State) error {
 	if f.changes.IsZero() {
 		f.changes, _ = NewState()
@@ -372,8 +376,9 @@ immediately.
 On re-entry after Resume it unmarshals the resume data into out with yield=false and does not re-arm; the task
 proceeds. The payload is any JSON-marshalable value (a struct or a map[string]any); out is a pointer (a *struct or
 *map[string]any) the resume data is unmarshaled into by JSON tag, or nil to ignore it. The returned err is non-nil
-only if the payload cannot be marshalled (or out fails to unmarshal); interrupt itself has no failure
-mode, so err is otherwise always nil. A rejected payload does not arm the interrupt. The payload is copied, so
+if the payload cannot be marshalled, if out fails to unmarshal, or if this step already parked: a step parks at
+most once, so a second Interrupt in one dispatch, or an Interrupt after a Subgraph, is rejected. A rejected call
+does not arm the interrupt. The payload is copied, so
 mutating it after the call does not change what is persisted. Symmetric with Subgraph: any in, pointer out.
 
 	var resume ResumeData
@@ -427,7 +432,8 @@ On the first call (child not yet run) it arms the subgraph park with the child w
 yield=true; the task must return immediately.
 
 On re-entry after the child terminates it unmarshals the child's final_state into out, returns yield=false, and sets
-err if the child failed. Does not re-arm on re-entry.
+err if the child failed. Does not re-arm on re-entry. Like Interrupt, it returns an error without arming if in cannot
+be marshalled or this step already parked.
 
 	var out ChildOut
 	yield, err := flow.Subgraph(childURL, ChildIn{Value: value}, &out)
@@ -438,7 +444,7 @@ err if the child failed. Does not re-arm on re-entry.
 	    if flow.Retry(time.Second, 2.0, 30*time.Second, time.Hour) {
 	        return nil
 	    }
-	    return errors.Trace(err)
+	    return err
 	}
 	// read fields from out
 */
@@ -518,22 +524,10 @@ flow.Attempt() at the call site.
 func (f *Flow) Retry(initialDelay time.Duration, delayMultiplier float64, maxIntervalDelay time.Duration, giveUpAfter time.Duration) bool {
 	if giveUpAfter > 0 && !f.stepCreatedAt.IsZero() {
 		// Give up if we've crossed the horizon, or if the next attempt's delay alone would overshoot it -
-		// no point parking for a wait we already know lands past the deadline. nextDelay mirrors the delay
-		// the engine computes for this attempt (min(initialDelay * delayMultiplier^attempt, maxIntervalDelay)).
-		// Clamp in float space, and stop multiplying at the cap, so nextDelay never overflows int64 ns.
-		nextDelay := float64(initialDelay)
-		if delayMultiplier > 0 {
-			for range f.attempt {
-				if maxIntervalDelay > 0 && nextDelay >= float64(maxIntervalDelay) {
-					break
-				}
-				nextDelay *= delayMultiplier
-			}
-		}
-		if maxIntervalDelay > 0 && nextDelay > float64(maxIntervalDelay) {
-			nextDelay = float64(maxIntervalDelay)
-		}
-		if time.Since(f.stepCreatedAt)+time.Duration(nextDelay) >= giveUpAfter {
+		// no point parking for a wait we already know lands past the deadline. The delay is the one the
+		// engine will apply (see backoffDelay).
+		nextDelay := backoffDelay(initialDelay, delayMultiplier, maxIntervalDelay, f.attempt)
+		if time.Since(f.stepCreatedAt)+nextDelay >= giveUpAfter {
 			f.retry = false
 			return false
 		}
@@ -554,8 +548,19 @@ func (f *Flow) Sleep(duration time.Duration) {
 
 // --- Internal helpers ---
 
-// diffAndApply marshals each field of source, compares against the snapshot,
-// and writes changed fields to both state and changes.
+// isQuotableKind reports the kinds the ",string" option applies to.
+func isQuotableKind(k reflect.Kind) bool {
+	switch k {
+	case reflect.String, reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64:
+		return true
+	}
+	return false
+}
+
+// diffAndApply marshals each field of source that encoding/json would marshal, compares it against the
+// snapshot, and writes changed fields to both state and changes.
 func (f *Flow) diffAndApply(source any, snapshot State, state, changes map[string]json.RawMessage) error {
 	v := reflect.ValueOf(source)
 	if v.Kind() == reflect.Ptr {
@@ -564,27 +569,24 @@ func (f *Flow) diffAndApply(source any, snapshot State, state, changes map[strin
 	if v.Kind() != reflect.Struct {
 		return errors.New("source must be a struct or pointer to struct, got %s", v.Kind())
 	}
-	t := v.Type()
-	for i := range t.NumField() {
-		field := t.Field(i)
-		tag := jsonTagName(field)
-		if tag == "" || tag == "-" {
-			continue
-		}
-		data, err := json.Marshal(v.Field(i).Interface())
+	return eachJSONField(v, func(name string, fv reflect.Value, quoted bool) error {
+		data, err := json.Marshal(fv.Interface())
 		if err != nil {
 			return err
 		}
-		// Only record as change if different from snapshot
-		// The snapshot holds the field's JSON, and data is the field's JSON, so the unchanged test is a
-		// direct byte comparison with nothing to decode on either side.
-		if prev := snapshot.GetJSON(tag); prev != nil && string(prev) == string(data) {
-			continue
+		if quoted && isQuotableKind(fv.Kind()) {
+			data, err = json.Marshal(string(data))
+			if err != nil {
+				return err
+			}
 		}
-		state[tag] = data
-		changes[tag] = data
-	}
-	return nil
+		if prev := snapshot.GetJSON(name); prev != nil && jsonEqual(prev, data) {
+			return nil
+		}
+		state[name] = data
+		changes[name] = data
+		return nil
+	})
 }
 
 // --- JSON serialization ---
@@ -656,6 +658,13 @@ func (f *Flow) UnmarshalJSON(data []byte) error {
 	f.stepKey = wire.StepKey
 	f.state = wire.State
 	f.changes = wire.Changes
+	// Either may be absent from the wire; the setters write to both, so neither may stay nil.
+	if f.state.IsZero() {
+		f.state, _ = NewState()
+	}
+	if f.changes.IsZero() {
+		f.changes, _ = NewState()
+	}
 	f.gotoNext = wire.Goto
 	f.retry = wire.Retry
 	f.sleepDuration = wire.SleepDuration

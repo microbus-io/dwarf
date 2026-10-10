@@ -40,9 +40,8 @@ sequel reads, so one knob redirects the whole suite at a real server); else the 
 
 **Per-shard isolation comes from the DSN's `%d`, not from the testID.** The default DSN carries `%d`, so shard *i*
 opens base `file:dwarf_i?…` - a distinct base per shard, so `CreateTestingDatabase`'s key already differs per shard
-and a multi-shard engine never collapses onto one in-memory DB. (An earlier design used a no-`%d` default and folded
-the shard index into the testID to manufacture that difference; with a `%d`-bearing default that fold is redundant
-and was removed.) The consequence is a deliberately-honest sharp edge: a multi-shard run against a `SEQUEL_TESTING_DSN`
+and a multi-shard engine never collapses onto one in-memory DB. **Do not also fold the shard index into the
+testID**: with a `%d`-bearing default it is redundant. The consequence is a deliberately-honest sharp edge: a multi-shard run against a `SEQUEL_TESTING_DSN`
 that **lacks `%d`** collapses its shards onto one database - caught loudly at `Open`, which rejects two shards
 resolving to the same DSN rather than silently folding them.
 
@@ -85,12 +84,12 @@ cooperate.
 `N parallel engines × pool × shards` can never overrun a shared server's `max_connections`:
 
 - **A per-shard pool CAP.** In test mode each shard's pool is clamped to `defaultTestConnCap` (**4**, `engine.go`)
-  instead of the derived budget (8 on SQLite, 250 elsewhere). The engine still *derives* that budget and sizes
+  instead of the derived budget (8 on SQLite; elsewhere 250 ramping to 500 with RTT, clamped to half the server's `max_connections`). The engine still *derives* that budget and sizes
   its worker ceiling / refill floor from it (those read the engine's notion, not the physical pool), but the
   physical pool is clamped at open and on every push through the shard set (`ShardSet.SetMaxOpenConns`,
   `SetShardPool`, in `internal/database/database.go`). **Push pool sizes through the shard set, never onto a
-  shard's own `*sequel.DB`**: a direct push bypasses the cap, and with a derived budget of 50-250 per shard per
-  engine that exhausts a test server's connections. Four connections is plenty for a fixture; the cap only
+  shard's own `*sequel.DB`**: a direct push bypasses the cap, and with a derived budget of up to 500 per shard per
+  engine (half the server's `max_connections` on a small one) that exhausts a test server's connections. Four connections is plenty for a fixture; the cap only
   bounds fan-out concurrency, which SQLite serializes anyway.
 - **A per-driver global connection BUDGET** (`internal/database/testbudget.go`). Each `ShardSet.Open` reserves
   `cap × shards` from a process-wide weighted semaphore keyed on the driver (`db.DriverName()`), and releases at
@@ -208,12 +207,13 @@ what they stand in for is what decides whether one is a bug waiting to happen or
 For the last two, name the event instead:
 
 - **`enginetest.AwaitVisits(t, seams, n, timeout, checkpoint)`** - wait for N further arrivals at a
-  checkpoint (a targeted name comes from the package-local `seamsJoin`). seamster's `Waiter` is one-shot
+  checkpoint (a targeted name comes from `engineseams.Join`). seamster's `Waiter` is one-shot
   and `Visits` is monotonic, so N occurrences means re-arming per occurrence, arming BEFORE reading the
   count each time. Call it from the test goroutine: `t.Fatalf`
   inside a task handler kills the engine goroutine that would have driven the checkpoint, so the suite
-  wedges instead of reporting.
-- **`enginetest.AwaitShardCycles(t, e, shards, extra)`** - wait for each shard to SCAN and then PUSH. TWO of
+  wedges instead of reporting. `enginetest.AwaitVisitCount` is the same wait against an absolute count, for a test that
+  must read the base BEFORE triggering the events - because they can land before the wait begins.
+- **`enginetest.AwaitShardCycles(t, e, extra)`** - wait for each open shard to SCAN and then PUSH. TWO of
   each, not one: a cycle already in flight when the work committed may have started before it existed. **It
   waits on both of the piston's loops, in that order, and counting pushes alone is not enough** - the two
   run on independent cadences, so a push says only "the partition matches the plan", and the plan is built

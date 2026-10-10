@@ -864,12 +864,13 @@ func (p *Piston) ScanBand(ctx context.Context, shard int) (band int, tallies []p
 // plan replay reads. Rows are grouped by key rather than sorted across keys.
 //
 // perKey is a UNIFORM cap, the max per-key demand across this shard's slice rather than each key's exact
-// demand. The chosen keys travel as ONE parameter (a text[] on pgx, JSON elsewhere) and are joined back to rows in SQL, so the
-// bind count is FIXED at four or five however many keys the plan chose - see fetchQuery.
+// demand. On pgx, mssql and sqlite the chosen keys travel as ONE parameter (a text[] on pgx, JSON on the
+// others) and are joined back to rows in SQL, so the bind count does not grow with the number of keys; mysql
+// binds one IN-list parameter per key - see fetchQuery for why.
 //
-// Cost is O(len(keys) x perKey) rows examined on pgx/mysql/mssql, where the per-key cap is a LIMIT on an
-// ordered index scan and therefore stops it. SQLite has no lateral join, so it ranks every due row of every
-// chosen key and cuts afterwards - O(due rows at the band), the same shape ScanBand has everywhere.
+// Cost is O(len(keys) x perKey) rows examined on pgx and mssql, where the per-key cap is a LIMIT/TOP inside a
+// lateral join over an ordered index scan and therefore stops it. mysql and sqlite rank every due row of every
+// chosen key and cut afterwards - O(due rows at the band), the same shape ScanBand has everywhere.
 //
 // The band is bound (priority=?), not re-mined from a MIN subquery: the plan committed to this band, and
 // re-mining could pick a lower one that arrived between phases and mismatch the chosen keys. A bound

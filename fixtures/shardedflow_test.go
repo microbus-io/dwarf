@@ -117,7 +117,7 @@ func TestShardedflow(t *testing.T) {
 		// Two cycles per shard, not one: a cycle already in flight when these Creates committed may have
 		// scanned before they existed, so its push proves nothing about them. The second is the one whose
 		// scan is guaranteed to have seen them.
-		enginetest.AwaitShardCycles(t, eng, 8, 2)
+		enginetest.AwaitShardCycles(t, eng, 2)
 		close(releaseHolder)
 
 		eng.Await(ctx, holderKey)

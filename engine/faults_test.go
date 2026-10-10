@@ -60,8 +60,8 @@ func linear2(mux *HostMux, prefix string, calls map[string]*int) {
 // time awaitNextStop returns, so a stop firing in between is observed rather than lost. That closes both the
 // "a background poll drove it first" race and the "slow CI missed the window" flake a poll loop carries.
 //
-// It used to arm a Break and Resume it after the wait, purely to be race-free; a Waiter is race-free on its own
-// without freezing a worker at signalStop, so the breakpoint is gone.
+// A Waiter is race-free on its own, so no Break is armed: freezing a worker at signalStop would only perturb
+// the timing under test.
 //
 // Two constraints. It catches the FIRST stop of ANY flow, so use it only in single-flow-of-interest windows.
 // And chaining two of them - wait for stop A, then arm for stop B - is safe only where B genuinely cannot
@@ -225,9 +225,8 @@ func TestFault_TransitionCommit(t *testing.T) {
 	// A's transition transaction fails once with a non-contention error, after A was marked completed. It is
 	// retried IN PLACE (see persist), so it lands on the next attempt and the flow completes - and A runs ONCE.
 	//
-	// It used to run twice: the recovery defer rewound A and re-dispatched it, which RE-EXECUTED THE TASK to
-	// recover from a database blip the task had nothing to do with. Retrying the write instead of the task is
-	// the whole point - a task's side effects must not re-fire because a transaction lost a connection.
+	// Retrying the write instead of the task is the whole point - a task's side effects must not re-fire
+	// because a transaction lost a connection.
 	e.seams.Inject(engineseams.Join(engineseams.FaultTransitionCommit, "A"))
 	if out := enginetest.BoundedRun(t, e, "ftrans/g"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
@@ -276,9 +275,7 @@ func TestFault_CompleteFlowCommit(t *testing.T) {
 
 	// The flow-completion transaction fails once after the terminal step was marked completed with a
 	// non-contention error: persist retries the transaction in place, so the flow still completes (no `running`
-	// orphan with all steps terminal) and the task runs ONCE. It used to run twice - the recovery defer rewound
-	// the step and re-dispatched it, RE-EXECUTING the task to recover from a database blip the task had nothing
-	// to do with.
+	// orphan with all steps terminal) and the task runs ONCE.
 	e.seams.Inject(engineseams.FaultCompleteFlowCommit)
 	if out := enginetest.BoundedRun(t, e, "fcfc/g"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)

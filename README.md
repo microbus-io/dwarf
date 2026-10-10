@@ -58,7 +58,7 @@ fmt.Println(out.State.GetString("greeting")) // hello ada
   fairness within a band so one tenant can't starve another.
 - **Scales horizontally.** Run many replicas against sharded databases; they coordinate entirely through
   the databases they already share, with no message bus to run between them.
-- **OTEL-native observability.** Structured logs (`slog`), 33 `dwarf_*` instruments, and distributed tracing,
+- **OTEL-native observability.** Structured logs (`slog`), 34 `dwarf_*` instruments, and distributed tracing,
   all through standard providers you inject.
 - **Four SQL dialects.** PostgreSQL, MySQL/MariaDB, SQL Server, and SQLite (testing / single-instance).
 - **Free, and cheap at scale.** Apache 2.0 — no license tier, no vendor, no per-operation pricing. A single
@@ -66,7 +66,10 @@ fmt.Println(out.State.GetString("greeting")) // hello ada
   the whole deployment is your own replicas plus a few ordinary SQL instances. No broker, no control plane,
   nothing else to run or pay for, so the bill is a handful of cloud instances rather than a metered service.
 
-Dwarf depends only on [`sequel`](https://github.com/microbus-io/sequel) (SQL), plus the OpenTelemetry API.
+Dwarf depends on [`sequel`](https://github.com/microbus-io/sequel) (SQL), the OpenTelemetry API, and a few
+small libraries: [`boolexp`](https://github.com/microbus-io/boolexp) (`when` expressions),
+[`errors`](https://github.com/microbus-io/errors), [`seamster`](https://github.com/microbus-io/seamster), and
+`golang.org/x/sync`.
 
 ## Install
 
@@ -80,7 +83,7 @@ Requires Go 1.26+.
 
 | Import | Role | Who imports it |
 |---|---|---|
-| `github.com/microbus-io/dwarf` | Thin convenience: `NewEngine()` | The host process |
+| `github.com/microbus-io/dwarf` | Thin convenience: `NewEngine()`, `NewEngineUnderTest()` | The host process, and its tests |
 | `github.com/microbus-io/dwarf/engine` | The engine: lifecycle, operations, config, the `Host` interface | The host process only |
 | `github.com/microbus-io/dwarf/workflow` | Pure types: `Graph`, `Flow`, `FlowOptions`, reducers, error helpers | Any code that defines tasks or graphs |
 
@@ -96,8 +99,8 @@ nothing between replicas, so there is no transport for you to wire.
 
 ```go
 type Host interface {
-    // Required. Fetch a workflow graph by name (called at Create; the graph is then frozen on the flow,
-    // and on subgraph spawn).
+    // Required. Fetch a workflow graph by its workflow URL (called at Create and at subgraph spawn; the
+    // graph is then frozen on the flow).
     LoadGraph(ctx context.Context, workflowURL string) (*workflow.Graph, error)
 
     // Required. Execute one task. The Flow carrier arrives with its input state populated; write outputs.
@@ -117,7 +120,6 @@ Each `Set*` returns an `error`, so misconfiguration fails loudly at wiring time:
 eng := dwarf.NewEngine()
 eng.SetShard(engine.ShardSpec{Index: 1, DSN: "postgres://user:pass@db-a.internal:5432/dwarf"})
 eng.SetShard(engine.ShardSpec{Index: 2, DSN: "postgres://user:pass@db-b.internal:5432/dwarf"})
-eng.SetWorkers(64)
 eng.SetHost(host)
 eng.SetLogger(slog.Default())
 eng.SetMeterProvider(otel.GetMeterProvider())
@@ -146,7 +148,7 @@ may be called after `Startup` for hot reconfiguration; the rest are construction
 |---|---|---|
 | **PostgreSQL** 13+ | Recommended for production | MVCC, no gap locks; fan-out runs deadlock-free at any concurrency |
 | **SQL Server** | Production | Enable `READ_COMMITTED_SNAPSHOT` for non-blocking reads |
-| **MySQL / MariaDB** | Production, expect tuning | Prefer `READ-COMMITTED` isolation to drop gap locks |
+| **MySQL / MariaDB** | Production, expect tuning | Prefer `READ-COMMITTED` isolation to drop gap locks; add `interpolateParams=true` to the DSN |
 | **SQLite** | Testing & single-instance dev only | Used automatically by `NewEngineUnderTest`; do not run in production |
 
 See [docs/deployment.md](docs/deployment.md) for tuning, sharding, and connection-pool guidance.

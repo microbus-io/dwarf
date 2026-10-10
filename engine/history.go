@@ -90,8 +90,8 @@ type subgraphChild struct {
 // loadSubgraphChildren returns, for the whole subgraph tree flowID belongs to, a map from each surgraph
 // caller step's id to the latest child flow it launched. flow.Retry rewinds a caller in place and re-spawns
 // a fresh child each attempt, so several child flows can share one surgraph_step_id; ORDER BY flow_id ASC
-// means the last row written for a caller step wins, giving the highest flow_id - matching subgraphHistory's
-// former ORDER BY flow_id DESC LIMIT 1 (the child whose value the caller actually used).
+// means the last row written for a caller step wins, giving the highest flow_id (the child whose value the
+// caller actually used).
 func (e *Engine) loadSubgraphChildren(ctx context.Context, db *sequel.DB, flowID int) (map[int]subgraphChild, error) {
 	rows, err := db.QueryContext(ctx,
 		"SELECT flow_id, surgraph_step_id, workflow_url, workflow_name FROM dwarf_flows"+
@@ -254,7 +254,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	}
 	// Navigation skips the surgraph wrapper entirely: it's a routing/structural
 	// step (parked while the subgraph runs) and isn't on the execution timeline
-	// the user wants to walk. We resolve the effective neighbor in three steps:
+	// the user wants to walk. We resolve the effective neighbor in four steps:
 	//
 	//   1. Start with the intra-flow predecessor_id / successor_id.
 	//   2. If the current step is a subgraph entry/exit (predID/succID == 0),
@@ -540,13 +540,13 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 	perShard := make([][]listRow, len(indices))
 
 	err = e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
-		// This pass takes a turn on the shard it is about to read, so a background sweep queues for its
-		// connections like any other caller instead of taking them from work already under way.
-		ctx, doneTurn := e.dbTurn(ctx, shardIdx)
-		defer doneTurn()
 		if restrictShardNum != 0 && shardIdx != restrictShardNum {
 			return nil
 		}
+		// A turn on each shard it reads, so this queues for that shard's connections like any other caller
+		// instead of taking them from work already under way.
+		ctx, doneTurn := e.dbTurn(ctx, shardIdx)
+		defer doneTurn()
 		// Exclude flows scheduled for deletion (delete_after_ms>0): they are logically gone, awaiting the reaper.
 		conditions := []string{whereSQL, "f.delete_after_ms=0"}
 		args := append([]any(nil), baseArgs...)
@@ -676,7 +676,7 @@ func subgraphCondition(includeSubgraphs bool) string {
 }
 
 // queryClauses builds the shared WHERE/JOIN for list and purge. subgraphCond is the surgraph_flow_id
-// predicate the caller chose: list honors Query.Subgraph, purge always passes roots-only.
+// predicate the caller chose: list honors Query.IncludeSubgraphs, purge always passes roots-only.
 func (e *Engine) queryClauses(ctx context.Context, query workflow.Query, subgraphCond string) (string, string, []any, int, error) {
 	if query.Shard != 0 && !e.db.Has(query.Shard) {
 		return "", "", nil, 0, errors.New("invalid shard", http.StatusBadRequest)
@@ -806,13 +806,13 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 
 	perShardDeleted := make([]int, len(pos))
 	err = e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
-		// This pass takes a turn on the shard it is about to read, so a background sweep queues for its
-		// connections like any other caller instead of taking them from work already under way.
-		ctx, doneTurn := e.dbTurn(ctx, shardIdx)
-		defer doneTurn()
 		if restrictShardNum != 0 && shardIdx != restrictShardNum {
 			return nil
 		}
+		// A turn on each shard it reads, so this queues for that shard's connections like any other caller
+		// instead of taking them from work already under way.
+		ctx, doneTurn := e.dbTurn(ctx, shardIdx)
+		defer doneTurn()
 		where := whereSQL
 		args := append([]any(nil), baseArgs...)
 		if sc, scArgs := searchClause(db.DriverName(), shardIdx, query.Search); sc != "" {
@@ -820,26 +820,31 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 			args = append(args, scArgs...)
 		}
 		args = append(args, perShardLimit)
-		// Purge MARKS, it does not delete: select candidate roots (not running, not already scheduled), then
-		// stamp delete_after_ms=1 (due immediately) so the reaper removes each tree on its next pass. Deleting
-		// nothing inline is what closes the old strand race - and the stamp UPDATE re-guards status<>running
-		// under the row lock, so a Resume racing in after this SELECT either wins (row is running, excluded) or
-		// loses (we stamp, and its interrupted CAS then finds terminated). No lock-first re-selection needed.
-		selectIDs := "SELECT DISTINCT f.flow_id FROM dwarf_flows f" + joinSQL +
+		// Purge MARKS, it does not delete: select candidate roots (not running, not already scheduled), terminate
+		// any that are interrupted exactly as Delete does (terminateSubtree), then stamp delete_after_ms=1 (due
+		// immediately) on the terminal ones so the reaper removes each tree on its next pass.
+		selectIDs := "SELECT DISTINCT f.flow_id, f.flow_token, f.status FROM dwarf_flows f" + joinSQL +
 			" WHERE " + where + " AND f.status<>'" + workflow.StatusRunning + "' AND f.delete_after_ms=0 ORDER BY f.flow_id LIMIT_OFFSET(?, 0)"
 		rows, err := db.QueryContext(ctx, selectIDs, args...)
 		if err != nil {
 			return errors.Trace(err)
 		}
 		var flowIDs []int
+		var interruptedIDs []int
+		var interruptedTokens []string
 		for rows.Next() {
 			var fid int
-			err := rows.Scan(&fid)
+			var token, status string
+			err := rows.Scan(&fid, &token, &status)
 			if err != nil {
 				rows.Close()
 				return errors.Trace(err)
 			}
 			flowIDs = append(flowIDs, fid)
+			if status == workflow.StatusInterrupted {
+				interruptedIDs = append(interruptedIDs, fid)
+				interruptedTokens = append(interruptedTokens, token)
+			}
 		}
 		rows.Close()
 		err = rows.Err()
@@ -849,24 +854,27 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 		if len(flowIDs) == 0 {
 			return nil
 		}
-
-		// One set-based UPDATE per shard. The CASE terminalizes any interrupted root (interrupted -> terminated,
-		// a forceful operator action, same as Terminate) in the same write, preserving the Resume gate. ids are
-		// trusted integers embedded as literals to dodge the per-driver bind-param ceiling. The count returned
-		// is roots MARKED (reaped shortly after).
-		ids := intCSV(flowIDs)
-		return db.Transact(ctx, func(tx *sequel.Tx) error {
-			res, err := tx.ExecContext(ctx,
-				"UPDATE dwarf_flows SET delete_after_ms=1, status=CASE WHEN status='"+workflow.StatusInterrupted+"' THEN '"+workflow.StatusTerminated+"' ELSE status END"+
-					" WHERE flow_id IN ("+ids+") AND status<>'"+workflow.StatusRunning+"' AND delete_after_ms=0",
-			)
-			if err != nil {
+		for i, fid := range interruptedIDs {
+			// A root a Resume revived since the SELECT is left running, and the stamp below skips it.
+			err = e.terminateSubtree(ctx, shardIdx, fid, interruptedTokens[i], "purged", true, "")
+			if err != nil && !errors.Is(err, errRootNotInterrupted) {
 				return errors.Trace(err)
 			}
-			n, _ := res.RowsAffected()
-			perShardDeleted[pos[shardIdx]] = int(n)
-			return nil
-		})
+		}
+
+		// One set-based UPDATE per shard, stamping only terminal roots: a root a Resume revived since the SELECT
+		// is left alone. ids are trusted integers embedded as literals to dodge the per-driver bind-param
+		// ceiling. The count returned is roots MARKED (reaped shortly after).
+		res, err := db.ExecContext(ctx,
+			"UPDATE dwarf_flows SET delete_after_ms=1"+
+				" WHERE flow_id IN ("+intCSV(flowIDs)+") AND status IN ("+terminalStatusesSQL+") AND delete_after_ms=0",
+		)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		n, _ := res.RowsAffected()
+		perShardDeleted[pos[shardIdx]] = int(n)
+		return nil
 	})
 	if err != nil {
 		return 0, errors.Trace(err)
@@ -957,6 +965,7 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	newFlowToken := keys.RandomIdentifier(16)
 	newStepToken := keys.RandomIdentifier(16)
 	var newFlowID, newStepID int64
+	var newPriority int
 	var newWorkflowURL string
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		// Write-first: grab the thread anchor's row lock to serialize concurrent Continues on this thread.
@@ -1002,7 +1011,8 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 		// Merge the caller's additionalState onto the prior turn's final_state via the graph's reducers, then
 		// materialize (DelNils enacts a delete the caller passed on a replace-managed field).
 		if err := finalState.MergeReduce(additional, graph.Reducers()); err != nil {
-			return errors.Trace(err)
+			// A value that will not fold onto the thread's state is the caller's mistake, not a server fault.
+			return errors.Trace(err, http.StatusBadRequest)
 		}
 		finalState.DelNils()
 		mergedStateJSON, err := json.Marshal(finalState)
@@ -1046,6 +1056,7 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 			engineID:       e.engineID,
 		}
 		newFlowID, newStepID, err = insertFlowTx(ctx, tx, seed)
+		newPriority = priority
 		return err
 	})
 	if err != nil {
@@ -1055,7 +1066,8 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	flowKey := keys.New(shardNum, int(newFlowID), newFlowToken)
 	e.logger.DebugContext(ctx, "Flow continued and started", "workflow", newWorkflowURL)
 	e.metricFlowStarted(ctx, newWorkflowURL, shardNum)
-	// Ring the local doorbell so this replica claims the entry step without waiting for a refiller scan.
-	e.enqueueStep(ctx, shardNum, int(newStepID))
+	// Ring the local doorbell so this replica claims the entry step without waiting for a refiller scan. The
+	// entry step is due now and its priority is in hand, so no lookup is needed.
+	e.enqueueStepDue(ctx, shardNum, int(newStepID), newPriority)
 	return flowKey, nil
 }

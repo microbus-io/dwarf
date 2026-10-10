@@ -33,8 +33,8 @@ limitations under the License.
 // Transitions can be unconditional, conditional (AddTransitionWhen / AddTransitionSwitch), static
 // fan-out across named tasks (AddTransitionFanOut), dynamic fan-out over an array (AddTransitionForEach),
 // an error handler (AddTransitionOnError), or an explicit jump target (AddTransitionGoto). The linear
-// AddTransitionChain wires a run of tasks. When parallel branches converge at a fan-in, per-field
-// reducers (SetReducer, see the Reducer constants) merge their changes.
+// AddTransitionChain wires a run of tasks. Parallel branches converge at a task marked with SetFanIn,
+// where per-field reducers (SetReducer, see the Reducer constants) merge their changes.
 //
 // # Running a task
 //
@@ -64,6 +64,6 @@ limitations under the License.
 // takes the whole replica down with it. To parallelize across steps instead, fan out with a forEach
 // transition: each branch gets its own Flow.
 //
-// FlowOutcome, FlowStep, FlowSummary, and Query are the read-side result types returned by the engine's
-// inspection operations.
+// FlowOutcome, FlowStep and FlowSummary are the read-side result types returned by the engine's inspection
+// operations; Query is the filter List and Purge take.
 package workflow

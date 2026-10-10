@@ -49,8 +49,8 @@ import (
 // independent deployments. So a test standing up several INDEPENDENT engines gives each its own name
 // (t.Name()+"#"+suffix), and a benchmark reused across warmup/measure passes gives each pass a fresh one.
 //
-// Logging default: stderr at Error, so a CI failure surfaces the engine-level alarms (wedge sweeps / poll /
-// refill faults) without the Info-level play-by-play noise (stderr, not t.Log, because a `go test` timeout
+// Logging default: stderr at Error, so a CI failure surfaces the engine's error-level alarms without the
+// Info-level play-by-play noise (stderr, not t.Log, because a `go test` timeout
 // panic drops buffered t.Log output but not stderr). DWARF_TEST_LOG_LEVEL overrides the level (e.g. "info"
 // or "debug" for the flow-status play-by-play; "silent" or "off" for the discard logger). A benchmark or
 // fuzz target silences the engine itself with SetLogger, since per-iteration logging would dominate the

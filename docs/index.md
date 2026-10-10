@@ -14,7 +14,7 @@ A few pages serve both, and say so.
 ## The one-paragraph summary
 
 You build a `workflow.Graph` of tasks and transitions. You implement a `Host` whose **`LoadGraph`**
-returns a graph by name and whose **`ExecuteTask`** runs one task. The engine creates a **flow** (one
+returns a graph by workflow URL and whose **`ExecuteTask`** runs one task. The engine creates a **flow** (one
 execution of a graph), runs each task in turn, persists state to SQL between steps, follows transitions
 to decide what runs next, merges parallel branches, and recovers from crashes. You drive it with a handful
 of operations — `Create`, `Run`, `Await`, `Resume`, `Cancel`, `Terminate`, `Continue`, `Fork` — and observe it through logs,
@@ -60,7 +60,8 @@ what genuinely needs a human, and what belongs on a dashboard. Then:
   (they re-run, completed work rewinds, deleted flows come back).
 - **[Upgrading](upgrading.md)** — redeploying your app vs. upgrading dwarf itself (which is a maintenance
   window while dwarf is v0.x), plus the graph-evolution contract that outlives any single deploy.
-- **[Resharding](resharding.md)** — adding, retiring and moving shards, and what is not supported.
+- **[Resharding](resharding.md)** — adding, retiring and moving shards, and what a shard outage does to
+  cross-shard operations.
 - **[Data handling](data-handling.md)** — what the engine stores, what free-text search reaches, what
   telemetry carries, and how retention and deletion actually work.
 - **[Cloud benchmarks](benchmark-cloud.md)** — measured against managed cloud PostgreSQL across a real

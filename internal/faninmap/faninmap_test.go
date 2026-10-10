@@ -136,3 +136,25 @@ func TestFanInMap_RecomputesAfterJSONRoundTrip(t *testing.T) {
 
 	assert.Equal("join", New(&restored).For("s"))
 }
+
+func TestFanInMap_OverrideEdgeIsTheOnlyRouteToFanIn(t *testing.T) {
+	assert := testarossa.For(t)
+
+	// An edge of any kind into a fan-in is a cohort arrival, so a branch that reaches the fan-in only by a goto
+	// or onError edge still converges there - the map must agree with Validate, which accepts this shape.
+	for _, kind := range []string{workflow.TransitionGoto, workflow.TransitionError} {
+		g := workflow.NewGraph("OverrideOnly")
+		g.AddTransitionForEach("s", "work", "items", "item")
+		if kind == workflow.TransitionGoto {
+			g.AddTransitionGoto("work", "join")
+		} else {
+			g.AddTransitionOnError("work", "join")
+		}
+		g.AddTransitionGoto("work", "work")
+		g.AddTransition("join", workflow.End)
+		g.SetFanIn("join")
+		assert.NoError(g.Validate(), kind)
+
+		assert.Equal("join", New(g).For("s"), kind)
+	}
+}

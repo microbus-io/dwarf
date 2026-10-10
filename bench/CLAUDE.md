@@ -22,9 +22,12 @@ where `M` is the pool, `k` the round trips one step makes, and `s` everything pe
 round trip (server execution, WAL, queueing at the pool). Both terms are MEASURED, and the two behave
 completely differently:
 
-- **`k` is roughly portable** — a property of the code path. Measured **12.1** (netem sweep, M=8,
-  2026-07-11) and **9.11** (netem sweep, M=96, `linear`, 2026-08-01, R² high, residuals uncurved).
-  Quote it as **~9-12**, never a single digit.
+- **`k` is portable** — a property of the code path, and COUNTED rather than fitted: `completionRoundTrips`
+  (`engine/poolsize.go`) plus the claim and the flow read gives a linear step **5** on PostgreSQL (the claim
+  returns the flow row and the transition is one pipelined batch), **9** on SQLite, **10** on SQL Server
+  and **11** on MySQL (whose claim is two statements). The fits quoted in this file - **12.1** (netem sweep, M=8, 2026-07-11) and **9.11** (netem sweep,
+  M=96, `linear`, 2026-08-01, R² high, residuals uncurved) - were taken on PostgreSQL before the transition
+  was pipelined; they are not the current PostgreSQL `k`.
 - **`s` is NOT portable and is the bigger trap.** 4.4 ms at M=8 against **9.49 ms** at M=96 — it absorbs
   pool contention, so it grows with the pool. Carrying M=8 constants to an M=96 rig over-predicts
   throughput by **21-44%**. Re-derive `s` per configuration or do not use the model.
@@ -42,9 +45,10 @@ completely differently:
   `k < 10.70` or `s` is negative). Fit `k` at FIXED pool, or bound it from a low-M fixed-RTT arm.
 - **Workload shape was EXPECTED to move `k` and MEASURED NOT TO — do not re-assert it without new data.**
   The intuition is that a fan-out does more database work, so its `k` should be larger. Measured
-  (2026-08-01, same rig, same M=96): `linear` **9.11**, `fanout` width 16 **8.67** - slightly LOWER, and
-  the 5% gap sits well inside the fanout arms' own spread (up to 34% between reps, against 0.3-4% for
-  linear). **Treat `k ~= 9` as shape-independent until someone measures otherwise.**
+  (2026-08-01, same rig, same M=96, PostgreSQL before the transition was pipelined): `linear` **9.11**,
+  `fanout` width 16 **8.67** - slightly LOWER, and the 5% gap sits well inside the fanout arms' own spread
+  (up to 34% between reps, against 0.3-4% for linear). **Treat `k` as shape-independent until someone
+  measures otherwise.**
 
   The reason the intuition misleads is worth keeping: a fan-out does more work per FLOW but throughput is
   quoted per STEP, and most of its steps are *branches*. A branch inserts no successor, writes no
@@ -109,7 +113,17 @@ a 120s window that happens to land on a stall — both true, same run. Two conse
 **state the window length beside every throughput number**, and never read a single short arm as a
 property of the configuration. The stalls are invisible in throughput anyway (every arm of a six-rate
 sweep delivered ~100% of command, including one whose p99 was 62 SECONDS) — **watch p99/p50**, which ran
-1.2x when clean and 6.5x at the onset.
+1.2x when clean and 6.5x at the onset. The stall recurs and clears itself with the offered rate unchanged
+(one pool and rate on 64 vCPU: 9,183 steps/s with a 75s p50 in one 120s window, 19,685 in another), and a
+collapsed arm has been bracketed by working pools on both sides - **never place a stability boundary from a
+collapsed arm**.
+
+**The run-to-run noise floor is ~5-12% and rig-dependent - establish it before reading any curve.** Two
+same-spec 64-vCPU instances measured 25,366 and 28,491 steps/s at one pool; two 16-vCPU rigs 7,296 and 8,342.
+Only within-rig comparisons resolve anything finer.
+
+**Count backends, not connections, before calling a far-RTT budget an over-connection.** At 1 ms a
+connection is inside the database well under half the time: 384 connections on 16 vCPU ran ~338 active.
 
 **To reproduce a stall, command BELOW what the database can sustain, not above it.** Pushing harder looks
 in the wrong place. In a 3x3 Latin square (PostgreSQL 16, 16 vCPU, one shard, linear, open loop, 120s
@@ -206,7 +220,7 @@ generator *and* the engine in one process. That carried a 64-vCPU database (ceil
 it does not: ~35–40k steps/s would sit at 76–87%, and a 128-vCPU database's rate is simply out of reach.
 Two constraints make this awkward to solve by reflex. The generator must share the database's zone (a
 cross-zone hop adds ~1.1 ms and moves the very axis under test), and large instance types stock out
-per-zone — `c4a-standard-32` was unavailable in the zone this campaign needed. So check `steps/core`
+per-zone — `c4a-standard-32` has been unavailable in the zone a run needed. So check `steps/core`
 against the target tier's expected ceiling first, and if one VM cannot cover it, shard the generator
 rather than accepting the number.
 
@@ -347,15 +361,15 @@ heap** and the crew is mostly stacks.
   what a throughput number reads off, the split is the only thing that shows one shard falling behind.
 - **Gauges every replica reports identically are MAXed, not summed** (`agreementGauges`) — cluster-wide
   reads (`dwarf_steps_pending`, `oldest_pending_age`) and per-replica readings
-  of a shared fact (`dwarf_peer_replicas`, `dwarf_peer_blind_seconds`). Summing them multiplied by the
-  replica count; that bug inflated those in **every multi-replica artifact produced before it was
-  fixed**, so distrust older cloud numbers that lean on backlog depth or oldest-age.
+  of a shared fact (`dwarf_peer_replicas`, `dwarf_peer_blind_seconds`). Summing them multiplies by the
+  replica count, so before leaning on a multi-replica backlog-depth or oldest-age figure, check the artifact
+  MAXed it.
 - **`dwarf_refill_query_duration_seconds`'s COUNT is cycles per window — of WHICHEVER LOOP emits that
   phase, and there are two.** `band_keys` comes from the piston's Tallier, `planning`/`fetch_steps`/
   `pushing` from its Supplier, and the two are paced independently, so the counts are unrelated: measured
   76 against 8,215 in one 60s window, a 108x gap. **DO NOT SUM THE FOUR PHASES** — the total is two
   unrelated clocks added together and reconstructs no single object; there is no "a cycle" left to
-  reconstruct, and no end-to-end cycle histogram (`engine/CLAUDE.md` records why one was retired).
+  reconstruct, and no end-to-end cycle histogram (`engine/CLAUDE.md` records why there is none).
   Read `fetch_steps`' count as the SUPPLY rate (what reaches the workers) and `band_keys`' as how often
   the fairness tally refreshes.
 - **Per-shard cycle-duration spread is mostly POOL WAIT, not a slow shard.** Measured 28ms vs 125ms on

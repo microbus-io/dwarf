@@ -121,7 +121,7 @@ func TestPriorityflow(t *testing.T) {
 		// until a cycle has reconciled the partition against the plan the cache holds hints in creation
 		// order that no plan chose. A cycle already in flight when these Creates committed may have scanned
 		// before they existed, so the second is the one whose scan is guaranteed to have seen them.
-		enginetest.AwaitShardCycles(t, eng, 1, 2)
+		enginetest.AwaitShardCycles(t, eng, 2)
 		release()
 
 		// Wait for all to complete.

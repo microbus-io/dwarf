@@ -102,10 +102,11 @@ const (
 // DISPATCHERS hands a residue class of step ids to a replica that never selects them, and work in that
 // class is then run by nobody, so the dispatch window is tight. The two errors point in opposite
 // directions, so THE TWO WINDOWS MUST NOT BE DERIVED FROM ONE NUMBER.
+
 // Cadence is how often a Sonar reads the registry, and so how often every value it publishes can change.
 //
-// An owner that polls those values should tick at this rate: slower discards detection it has already paid
-// for, faster reads the same answer twice. It is also what Join blocks for, twice over.
+// An owner that polls those values should not tick slower than this, or it discards detection it has already
+// paid for. It is also what Join blocks for, twice over.
 const Cadence = 250 * time.Millisecond
 
 const (
@@ -168,6 +169,9 @@ type standing struct {
 	rank       int
 	candidates int
 	draining   int
+	// replicas is the reading's replica count. It is published through Replicas, not read from here; it is
+	// kept so a gapped reading can be held against the previous raw one, as the rest of the standing is.
+	replicas int
 	// inCut is whether the owner's cut puts this replica among the shard's dispatchers.
 	inCut bool
 }
@@ -296,32 +300,13 @@ func New(engineID int64, shard int, db *sequel.DB) (*Sonar, error) {
 	s.SetSeams(nil)
 	s.lastGood.Store(s.now().UnixNano())
 	s.replicas.Store(1)
-	s.standing.Store(&standing{rank: 0, candidates: 1, inCut: true})
-	s.lastRaw = standing{rank: 0, candidates: 1, inCut: true}
+	s.standing.Store(&standing{rank: 0, candidates: 1, replicas: 1, inCut: true})
+	s.lastRaw = standing{rank: 0, candidates: 1, replicas: 1, inCut: true}
 	s.profile.Store(&Profile{Working: true})
 	s.part.Store(&partition{ordinal: -1})
 	return s, nil
 }
 
-// SetEvidence supplies the one fact a Sonar cannot observe for itself: whether the owner's dispatcher for
-// this shard is turning. It decides whether a beat also stamps this replica as SERVING the shard, which is
-// what earns it a residue class of step ids.
-//
-// The three returns are read together and interpreted as: turns advanced since the last beat, or a turn has
-// been running long enough to count on its own, and the dispatcher is not idling. The second term is for a
-// scan that legitimately runs far longer than the dispatch window on a deep backlog - but it must mean a
-// LONG turn rather than merely one in flight, because a turn that fails instantly is briefly in flight too,
-// and a reader sampling on a cadence catches that often enough to keep a dispatcher that serves nothing
-// looking alive for good.
-//
-// It is a PURE READ and may be called any number of times - the "since the last beat" part is this
-// package's business, held against the turn count it last published. A consuming getter would make any
-// second caller (a metric, a test) silently clear the evidence and leave a healthy dispatcher looking
-// stalled.
-//
-// Without it a Sonar keeps its row alive and never claims to dispatch, which is exactly right for a replica
-// that holds connections but claims no work: it counts toward Replicas and toward nobody's partition.
-// Absence of evidence must never read as evidence.
 // TurnFunc admits a pass to whatever the owner meters its database with, returning the context the pass's
 // calls run on and the release to call when they are done - see SetTurnFunc.
 type TurnFunc func(context.Context) (context.Context, func())
@@ -350,6 +335,25 @@ func (s *Sonar) SetTurnFunc(fn TurnFunc) {
 	s.passTurn.Store(&fn)
 }
 
+// SetEvidence supplies the one fact a Sonar cannot observe for itself: whether the owner's dispatcher for
+// this shard is turning. It decides whether a beat also stamps this replica as SERVING the shard, which is
+// what earns it a residue class of step ids.
+//
+// The three returns are read together and interpreted as: turns advanced since the last beat, or a turn has
+// been running long enough to count on its own, and the dispatcher is not idling. The second term is for a
+// scan that legitimately runs far longer than the dispatch window on a deep backlog - but it must mean a
+// LONG turn rather than merely one in flight, because a turn that fails instantly is briefly in flight too,
+// and a reader sampling on a cadence catches that often enough to keep a dispatcher that serves nothing
+// looking alive for good.
+//
+// It is a PURE READ and may be called any number of times - the "since the last beat" part is this
+// package's business, held against the turn count it last published. A consuming getter would make any
+// second caller (a metric, a test) silently clear the evidence and leave a healthy dispatcher looking
+// stalled.
+//
+// Without it a Sonar keeps its row alive and never claims to dispatch, which is exactly right for a replica
+// that holds connections but claims no work: it counts toward Replicas and toward nobody's partition.
+// Absence of evidence must never read as evidence.
 func (s *Sonar) SetEvidence(fn EvidenceFunc) {
 	if fn == nil {
 		s.evidence.Store(nil)
@@ -437,11 +441,26 @@ func (s *Sonar) Replicas() int { return max(1, int(s.replicas.Load())) }
 // with no coordination, so a cut applied to them (SetCut) yields a set of dispatchers they all agree on.
 //
 // Like Replicas, it counts this replica even when its own row is missing (unless its Profile says it is
-// await-only), and on the reading that ended a blind spell it holds each of the two at the larger of its
-// old and new value: no promotion, and no fewer candidates to divide by.
+// await-only). On the reading that ended a blind spell the candidate count is held at the larger of its old and
+// new value, so there are no fewer candidates to divide by; the rank is published as read, and entering the cut
+// still takes two agreeing readings (see InCut).
 func (s *Sonar) Rank() (rank, candidates int) {
 	st := s.standing.Load()
 	return st.rank, max(1, st.candidates)
+}
+
+// Standing is one reading of this replica's place on the shard: its Rank among Candidates, InCut and Draining
+// as those methods report them, taken together. An owner deriving several quantities from them reads Standing once, so a reading published
+// between two getter calls cannot give those quantities different answers.
+type Standing struct {
+	Rank, Candidates, Draining int
+	InCut                      bool
+}
+
+// Standing returns Rank, InCut and Draining from the same reading.
+func (s *Sonar) Standing() Standing {
+	st := s.standing.Load()
+	return Standing{Rank: st.rank, Candidates: max(1, st.candidates), Draining: st.draining, InCut: st.inCut}
 }
 
 // InCut reports whether the owner's cut (SetCut) puts this replica among the shard's dispatchers on the
@@ -578,7 +597,7 @@ func (s *Sonar) Run(ctx context.Context) {
 // one or two round trips on the pool the owner's dispatcher is competing for, so under contention it can
 // approach the interval, and at that point EVERY reading looks like it ended a gap: the replica count can
 // never fall, the prune's healthy run never accumulates, and partitioning switches off. All three fail in
-// the safe direction, but all three fail silently and at once. A slow pass now pays for itself instead of
+// the safe direction, but all three fail silently and at once. So a slow pass pays for itself instead of
 // stacking on top of the interval.
 //
 // The floor keeps a pass slower than the whole interval from turning the loop into back-to-back readings
@@ -855,10 +874,14 @@ func (s *Sonar) observe(ctx context.Context, rows []peer, err error) {
 	// reading afterward shows a registry in which every row is stale, so every replica would compute a tiny
 	// count and grow to the full per-database budget simultaneously, against a database that is already sick.
 	// Skipping one reading is enough, because a beat is far shorter than the read cadence: by the next one
-	// every live peer has refreshed its row and the count is real again.
-	if !gapped || v.replicas >= s.Replicas() {
-		s.replicas.Store(int32(max(1, v.replicas)))
+	// every live peer has refreshed its row and the count is real again. Held against the previous raw
+	// reading, like the cut below and for the same reason; and published before the standing, so a reader
+	// that sees the pool divisor fall never sees a replica count from an older reading.
+	replicas := v.replicas
+	if gapped {
+		replicas = max(s.lastRaw.replicas, v.replicas)
 	}
+	s.replicas.Store(int32(max(1, replicas)))
 	// The cut obeys the same asymmetry, for the same storm. After a correlated stall every peer's row reads
 	// stale at once, so every replica would find itself among a handful of candidates, land inside some
 	// shard's cut, claim a dispatcher slot, and grow its pool to a dispatcher's share - a fleet of dispatchers
@@ -872,17 +895,20 @@ func (s *Sonar) observe(ctx context.Context, rows []peer, err error) {
 	// reading gapped. A reader on a sick database would then never be promoted, and a shard whose dispatchers
 	// left would run nothing. Against the raw reading, two consecutive readings that agree are believed
 	// whether or not either was gapped. Pinned by TestPeers_CutEntryThroughSustainedGaps.
-	raw := standing{rank: v.rank, candidates: v.candidates, draining: v.draining, inCut: working && s.inCut(v.rank, v.candidates)}
+	raw := standing{rank: v.rank, candidates: v.candidates, draining: v.draining, replicas: v.replicas, inCut: working && s.inCut(v.rank, v.candidates)}
 	next := raw
 	// ENTERING THE CUT ALWAYS TAKES TWO AGREEING READINGS, not only after a gap. A change in the fleet moves
 	// the cut for replicas other than the one that joined or left - a window over a shared order shifts every
 	// later place by one - so one replica may be entering a shard's cut while another is leaving it, each on
 	// its own reading. Leaving is believed at once and entering waits one reading, so the leaver always goes
-	// first: the handoff errs toward a dispatcher too few for a cadence rather than one too many.
+	// first: the handoff errs toward a dispatcher too few for a cadence rather than one too many. The one
+	// exception is a Sonar's FIRST reading, which enters on its own: New seeds lastRaw in the cut so a
+	// joining replica does not lose a cadence, and Join's announce-then-wait already orders that handoff.
 	next.inCut = raw.inCut && s.lastRaw.inCut
 	if gapped {
 		next.candidates = max(s.lastRaw.candidates, raw.candidates)
 		next.draining = max(s.lastRaw.draining, raw.draining)
+		next.replicas = replicas
 	}
 	s.lastRaw = raw
 	s.standing.Store(&next)

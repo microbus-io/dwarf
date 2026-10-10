@@ -166,7 +166,7 @@ func TestCompleteSurgraph_vs_TerminateRoot_BothOrders(t *testing.T) {
 		// orphan/wedge shape was created. Two pushing cycles close the window rather than a duration - a
 		// wrongly revived caller is a PENDING step, and a cycle is the dispatcher looking for exactly those,
 		// so a slow piston makes this wait longer rather than weaker.
-		enginetest.AwaitShardCycles(t, e, 1, 2)
+		enginetest.AwaitShardCycles(t, e, 2)
 		assert.Equal(workflow.StatusTerminated, enginetest.FlowStatus(t, e, fk))
 		assert.Equal(workflow.StatusTerminated, callStatus(t, e, fk))
 		enginetest.AssertInvariants(t, e)

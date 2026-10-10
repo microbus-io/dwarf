@@ -92,7 +92,7 @@ func TestCandidateFloor(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	// Linear reproduces the old flat floor exactly.
+	// Linear is the flat floor exactly.
 	assert.Equal(floor, candidateFloor(1))
 	assert.Equal(floor, candidateFloor(0))
 
@@ -241,7 +241,7 @@ func TestLinker_MintTiers(t *testing.T) {
 		// THE motivating case, and the one that regressed silently for as long as the open threshold clamped at
 		// floor. A forEach's branch count IS its source array's element count, so leaving the array
 		// inline costs N copies of an N-element array - quadratic, and worse under nesting. A 64-element int
-		// array marshals to ~183 bytes, which the old flat 1024 bar rejected outright.
+		// array marshals to ~183 bytes, which a flat 1024 bar would reject outright.
 		items := make([]any, 64)
 		for i := range items {
 			items[i] = i

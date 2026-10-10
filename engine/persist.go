@@ -28,9 +28,9 @@ import (
 )
 
 // Persisting a step's outcome is the one write the engine cannot simply give up on. The task has ALREADY RUN -
-// its side effects have fired - so the only record that it ran is the write we are holding. Before this existed,
-// a database error here left the step `running` with `error=”` and `attempt=0` (reading as perfectly healthy),
-// and lease recovery re-dispatched it every `budget + leaseMargin`, RE-EXECUTING THE TASK, forever. A silent,
+// its side effects have fired - so the only record that it ran is the write we are holding. Left unhandled, a
+// database error here leaves the step `running` with `error=”` and `attempt=0` (reading as perfectly healthy),
+// and lease recovery re-dispatches it every `budget + leaseMargin`, RE-EXECUTING THE TASK, forever. A silent,
 // eternal loop, invisible to recoverOrphanedFlows because a non-terminal step does exist.
 //
 // The fix is to retry the WRITE, never the task:
@@ -80,6 +80,9 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 		// The write's own lease fence rolled it back: we are a zombie, and a retry would be one too.
 		return errPersistFenced
 	}
+	if isPermanentError(err) {
+		return err // deterministic: a retry would compute the same failure
+	}
 	if sequel.IsLockContentionError(err) {
 		// Transact already retried this to exhaustion; a second loop here would only prolong a contention storm.
 		return errors.Trace(err)
@@ -89,10 +92,12 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 	// carries no payload, so it is not subject to whatever is killing the real one.
 	//
 	// The status guard is load-bearing, not decoration. It matches the two states a worker legitimately HOLDS a
-	// step in - `running` (the completion write has not landed) and `completed` (it landed, but the follow-up
-	// transition has not) - exactly as releaseLease does, because BOTH persist sites reach here: the completion
-	// write retries while the step is `running`, the transition write while it is `completed`. Restricting to
-	// `running` alone would wrongly fence the transition retry.
+	// step in - `running` (its outcome has not landed) and `completed` (it landed, but the follow-up transition
+	// has not) - exactly as releaseLease does, because persist sites of both kinds reach here: the completion
+	// write, a Retry rewind, a subgraph spawn and an interrupt retry while the step is `running`, the transition
+	// writes while it is `completed`. Restricting to `running` alone would wrongly fence the transition retry.
+	// A write that already landed moves the step out of both (a rewind to `pending`, an interrupt to
+	// `interrupted`, a spawn to parked), so a retry after an ambiguous commit finds the step not ours and stops.
 	//
 	// What the guard excludes is the case this closes: lease recovery resets an expired step to `pending` WITHOUT
 	// bumping `lease_seq` (see "Lease fencing"), so the generation fence alone still matches a step recovery has
@@ -156,7 +161,9 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 }
 
 // extendLease ensures a step's lease runs at least persistLeaseExtensionMs into the future, fenced on the lease
-// generation and on the two states a worker holds a step in (see persist for why the status guard is load-bearing).
+// generation and on the two states a worker holds a step in (see persist for why the status guard is load-bearing),
+// unparked: a parked caller waits on its child and belongs to no worker, so a persist that finds its own write
+// parked the step has landed it and must stop.
 // It never shortens a lease: a step claimed with a long budget keeps it. It reports whether the step is still this
 // worker's: false, with no error, means it was re-claimed, rewound or terminalized.
 //
@@ -164,10 +171,10 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 // RowsAffected is honest on MySQL. A zero-row match is therefore ambiguous - taken back, or already long enough -
 // and only then a read settles which.
 func (e *Engine) extendLease(ctx context.Context, db *sequel.DB, stepID, leaseSeq int) (bool, error) {
-	const owned = " WHERE step_id=? AND lease_seq=? AND status IN ('" + workflow.StatusRunning + "', '" + workflow.StatusCompleted + "')"
+	const owned = " WHERE step_id=? AND lease_seq=? AND parked=? AND status IN ('" + workflow.StatusRunning + "', '" + workflow.StatusCompleted + "')"
 	res, err := db.ExecContext(ctx,
 		"UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), ?)"+owned+" AND lease_expires < DATE_ADD_MILLIS(NOW_UTC(), ?)",
-		persistLeaseExtensionMs, stepID, leaseSeq, persistLeaseExtensionMs,
+		persistLeaseExtensionMs, stepID, leaseSeq, parkedNone, persistLeaseExtensionMs,
 	)
 	if err != nil {
 		return false, errors.Trace(err)
@@ -176,7 +183,7 @@ func (e *Engine) extendLease(ctx context.Context, db *sequel.DB, stepID, leaseSe
 		return true, nil
 	}
 	var held int
-	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps"+owned, stepID, leaseSeq).Scan(&held); err != nil {
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps"+owned, stepID, leaseSeq, parkedNone).Scan(&held); err != nil {
 		return false, errors.Trace(err)
 	}
 	return held > 0, nil
@@ -185,12 +192,13 @@ func (e *Engine) extendLease(ctx context.Context, db *sequel.DB, stepID, leaseSe
 // releaseLease hands a step back for immediate re-dispatch, fenced on our lease generation. It resets from
 // `running` (the task ran but its outcome never landed) or `completed` (the outcome landed but the transition
 // did not) - the two states a worker can be holding a step in. A terminal step (terminated by a racing
-// Terminate) is deliberately not matched: it is immutable.
+// Terminate) is deliberately not matched: it is immutable. Nor is a parked one, which waits on its child: reset to
+// pending while parked, nothing would select or recover it.
 func (e *Engine) releaseLease(ctx context.Context, db *sequel.DB, stepID, leaseSeq int) {
 	_, err := db.ExecContext(ctx,
 		"UPDATE dwarf_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC()"+
-			" WHERE step_id=? AND lease_seq=? AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusCompleted+"')",
-		workflow.StatusPending, stepID, leaseSeq,
+			" WHERE step_id=? AND lease_seq=? AND parked=? AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusCompleted+"')",
+		workflow.StatusPending, stepID, leaseSeq, parkedNone,
 	)
 	if err != nil {
 		// Best-effort: if we cannot even release it, the lease will lapse and recovery takes it. No worse than
@@ -257,16 +265,50 @@ func sanitizeErrorMessage(msg string) string {
 // benign no-op, lock contention goes to the recovery defer (never the classifier - terminalizing a flow because the
 // database was busy is exactly backwards), and anything else that would not land is classified.
 func (e *Engine) persistStep(ctx context.Context, db *sequel.DB, shardNum, stepID, leaseSeq, flowID int, flowToken, taskName string, write func() error, yield func(func())) error {
-	err := e.persist(ctx, db, shardNum, stepID, leaseSeq, write, yield)
+	_, err := e.settlePersist(ctx, e.persist(ctx, db, shardNum, stepID, leaseSeq, write, yield), shardNum, stepID, leaseSeq, flowID, flowToken, taskName)
+	return err
+}
+
+// permanentError marks a failure of the engine's own computation inside a persisted write - deterministic, so a
+// retry would compute it again, and not a storage fault. A reducer fold that fails on a value of the wrong type
+// under a combining reducer - at a fan-in, or in a flow's terminal merge - is one. persist does not retry it, and
+// settlePersist fails the step with it without counting a write that could not be stored. Wrap only a failure
+// that is a pure function of stored data: a database error from the same computation is transient, and wrapping
+// it would fail a live flow over a blip.
+//
+// It is a Go type rather than an error property (the marker workflow.IsCancelled reads) because it must NOT
+// survive serialization: it is raised inside the write and inspected by persist and settlePersist in the same
+// processStep call, and means nothing past it. A property would ride the failed flow's error into its caller's
+// subgraph_error and onErr, handing task code an engine-internal marker.
+type permanentError struct{ err error }
+
+func (p *permanentError) Error() string { return p.err.Error() }
+func (p *permanentError) Unwrap() error { return p.err }
+
+// isPermanentError reports whether err carries a permanentError.
+func isPermanentError(err error) bool {
+	var pe *permanentError
+	return errors.As(err, &pe)
+}
+
+// settlePersist applies persistStep's disposition to the error persist returned, and reports whether the write
+// landed - the only case in which the caller goes on. Contention is NOT a persistence failure and must never be
+// classified as one: terminalizing on it would kill live flows during a contention storm. Transact already
+// retried it to exhaustion, so it goes to the recovery defer, which rewinds the step and re-polls.
+func (e *Engine) settlePersist(ctx context.Context, err error, shardNum, stepID, leaseSeq, flowID int, flowToken, taskName string) (landed bool, _ error) {
 	switch {
 	case err == nil:
-		return nil
+		return true, nil
 	case errors.Is(err, errPersistFenced), errors.Is(err, errPersistDrained):
-		return nil // a peer owns the step now; abandon it silently
+		return false, nil // a peer owns the step now; abandon it silently
 	case sequel.IsLockContentionError(err):
-		return errors.Trace(err) // the recovery defer rewinds and re-polls
+		return false, errors.Trace(err)
+	case isPermanentError(err):
+		// Not a storage fault: the step fails with it, without the write alarm.
+		_, ferr := e.failStep(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
+		return false, errors.Trace(ferr)
 	default:
-		return errors.Trace(e.failOnPersistError(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName))
+		return false, errors.Trace(e.failOnPersistError(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName))
 	}
 }
 

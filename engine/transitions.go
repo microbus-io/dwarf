@@ -52,39 +52,36 @@ func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workfl
 	// Switch/When transitions share one boolexp.Normalize of the flow state instead of one per edge,
 	// computed lazily so a graph with no conditional edges never pays for it.
 	var normalized map[string]any
+	var normalizeErr error
 	haveNormalized := false
 	normalize := func() (map[string]any, error) {
 		if !haveNormalized {
-			var err error
-			normalized, err = boolexp.Normalize(flow.RawState())
+			normalized, normalizeErr = boolexp.Normalize(flow.RawState())
 			haveNormalized = true
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
 		}
-		return normalized, nil
+		return normalized, errors.Trace(normalizeErr)
 	}
 
-	for _, tr := range graph.Transitions() {
-		if tr.From != currentTask || tr.Kind != workflow.TransitionSwitch {
+	// A task with switch edges takes the first that matches, in declaration order, or none.
+	hasSwitch := false
+	for _, sw := range graph.Transitions() {
+		if sw.From != currentTask || sw.Kind != workflow.TransitionSwitch {
 			continue
 		}
-		for _, sw := range graph.Transitions() {
-			if sw.From != currentTask || sw.Kind != workflow.TransitionSwitch {
-				continue
-			}
-			symbols, err := normalize()
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
-			match, err := boolexp.Eval(sw.When, symbols)
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
-			if match {
-				return []nextStep{{taskName: sw.To}}, nil
-			}
+		hasSwitch = true
+		symbols, err := normalize()
+		if err != nil {
+			return nil, errors.Trace(err)
 		}
+		match, err := boolexp.Eval(sw.When, symbols)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		if match {
+			return []nextStep{{taskName: sw.To}}, nil
+		}
+	}
+	if hasSwitch {
 		return nil, nil
 	}
 
@@ -154,13 +151,14 @@ func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workfl
 	return candidates, nil
 }
 
-// fanInPredecessorTasks returns the distinct task node names that transition into
-// fanInTask via a normal (non-goto, non-error) transition.
+// fanInPredecessorTasks returns the distinct task names that transition into fanInTask, by an edge of any
+// kind. A goto or onError edge into a fan-in is a cohort arrival like any other, so a branch whose only route
+// to the fan-in is one of those must still be linked to the fan-in step as a cohort exit.
 func fanInPredecessorTasks(graph *workflow.Graph, fanInTask string) []string {
 	seen := map[string]bool{}
 	var names []string
 	for _, tr := range graph.Transitions() {
-		if tr.To == fanInTask && tr.Kind != workflow.TransitionGoto && tr.Kind != workflow.TransitionError && !seen[tr.From] {
+		if tr.To == fanInTask && !seen[tr.From] {
 			seen[tr.From] = true
 			names = append(names, tr.From)
 		}

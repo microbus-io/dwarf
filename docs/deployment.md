@@ -60,7 +60,7 @@ sustained deadlock rate degrades throughput. To minimize it:
 - `innodb_autoinc_lock_mode = 2` with `binlog_format = ROW`
 - `innodb_lock_wait_timeout` 5–10s, `innodb_deadlock_detect = ON`
 
-Add `interpolateParams=true` to the DSN, e.g. `user:pass@tcp(host:3306)/dwarf_%d?interpolateParams=true`.
+Add `interpolateParams=true` to the DSN, e.g. `user:pass@tcp(host:3306)/dwarf?interpolateParams=true`.
 Without it, the MySQL driver sends every statement that has arguments as a prepare and then an execute - two
 round trips where one would do - which roughly doubles the database round trips each step makes. With it, the
 driver substitutes the arguments client-side and escapes them itself. The driver rejects it together with the
@@ -104,9 +104,10 @@ serves roughly
 throughput  =  connections / (k × RTT + s)
 ```
 
-where `k` is the number of database round trips one step makes — measured at **~9–12** — and `s` is the
-per-step time that is not a round trip. Because `k` multiplies RTT, **every 0.1 ms of extra distance
-costs about a millisecond of connection time on every step in the system.**
+where `k` is the number of database round trips one step makes — about **5–6** on PostgreSQL, which sends
+a step's statements in batches, and **9–11** on the other dialects — and `s` is the per-step time that is
+not a round trip. Because `k` multiplies RTT, **every 0.1 ms of extra distance costs roughly half a
+millisecond to a millisecond of connection time on every step in the system.**
 
 This is not a rounding error. Two Cloud SQL instances of identical size, in the same region **and the
 same zone**, measured **0.32 ms and 0.82 ms** — and the second served **29% less throughput** on an
@@ -253,8 +254,8 @@ same-zone round trips run **0.05-0.96 ms** and cross-AZ same-region about **1.1 
 > *fresh* random id each time (a crashloop), those entries can pile up faster than they age out. To avoid this, call `SetEngineID(id)` before `Startup` with a value
 > that is **stable across that replica's restarts** and **unique across your live replicas** — for example
 > one derived from the deployment's own per-instance identity (a StatefulSet pod name/ordinal, or the
-> hostname). A restarting replica then reuses its one entry instead of leaving a ghost. Leave it unset
-> (random) if you don't have such a value — a stable id that collides between two live replicas counts
+> hostname). A restarting replica then reuses its one entry instead of leaving a stale one behind. Leave it
+> unset (random) if you don't have such a value — a stable id that collides between two live replicas counts
 > them as one and *over*-sizes pools, which is the harmful direction; random is the safe default.
 > Several engines in one process are fine on the default (each gets its own id and counts as a distinct
 > replica).
@@ -270,8 +271,9 @@ What bounds it is the crash-recovery lease. If every in-flight task is blocked o
 their completion transactions all queue for the shard's connections. A completion that waits longer than
 its remaining lease margin has its step re-claimed by a peer — correct, but the task runs a second time,
 which for a two-minute LLM call is real money. So the engine derives the largest pool that keeps such a
-storm inside the margin: `N_max = M × margin ÷ txTime × safety`, where `txTime ≈ 7·L + 3 ms` is the
-post-task database phase and `L` is the round-trip time it measures with a few `SELECT 1`s at startup.
+storm inside the margin: `N_max = M × margin ÷ txTime × safety`, where `txTime ≈ k·L + 3 ms` is the
+post-task database phase, `k` its round trips (4 on PostgreSQL, 7 on SQLite, 8 on MySQL and SQL Server),
+and `L` the round-trip time it measures with a few `SELECT 1`s at startup.
 The worst shard's number wins.
 
 The pool **grows into that ceiling on demand**: it starts at a resident set sized by the connection

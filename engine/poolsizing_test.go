@@ -910,15 +910,12 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 // when the fleet grows - the same "every path that changes a pool must re-derive what depends on it" rule the
 // worker ceiling obeys.
 //
-// Startup derives the dispatch count with R=1, because peer discovery has not run yet, so it is the FULL
-// per-database budget. When the replicas find each other, each shard's pool is correctly re-divided by R - but
-// the cache used to stay pinned at its R=1 size for the life of the process. A replica in a fleet of 8 then held
-// a cache sized for 8x the connections it could actually use, and the refiller (which scans up to the cache's
-// capacity per fairness key and wholesale-replaces it) handed it far more candidates than it could ever claim:
-// stale hints whose claim CAS loses to a peer, and wasted round-trips, exactly when the fleet is busiest.
-//
-// Severity is nil at R=1 - where the two numbers agree by construction - which is why this escaped every test and
-// every single-replica deployment.
+// A solo replica dispatches the shard with the whole budget. When peers join, the shard's budget is divided
+// among its dispatchers and the cache must come down with the pool: a cache sized for connections the replica
+// no longer holds makes the refiller (which scans up to the cache's capacity per fairness key and
+// wholesale-replaces it) hand it more candidates than it can claim - stale hints whose claim CAS loses to a
+// peer, and wasted round-trips, exactly when the fleet is busiest. The two numbers agree by construction for a
+// solo replica, so only a test with peers can catch the cache failing to follow.
 func TestPoolSizing_CacheFollowsTheReplicaSplit(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -933,7 +930,8 @@ func TestPoolSizing_CacheFollowsTheReplicaSplit(t *testing.T) {
 	solo := e.cache.Capacity()
 	assert.True(solo > 100, "a solo replica caches against the whole budget (got %d)", solo)
 
-	// Seven peers register: the pool is re-divided by 8, and the cache must come down with it.
+	// Seven peers register: the budget is divided among the shard's dispatchers, and the cache must come down
+	// with the pool.
 	for id := int64(3001); id <= 3007; id++ {
 		addPeerRow(t, e, id)
 	}

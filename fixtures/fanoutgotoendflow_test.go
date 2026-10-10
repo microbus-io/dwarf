@@ -26,7 +26,7 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// A node that is both a forEach fan-out source and a Goto(END) exit - the "fan out over the array each
+// A task that is both a forEach fan-out source and a Goto(workflow.End) exit - the "fan out over the array each
 // round, or end the flow when the task decides there is nothing left to do" loop. The Goto must terminate
 // the flow: routing it to the fan-in instead sends the flow back around the loop that reaches the source
 // again, writing a step per lap until something outside kills it, so the pin is the step COUNT as much as

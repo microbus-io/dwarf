@@ -128,8 +128,8 @@ func TestCompletionRaceflow(t *testing.T) {
 
 		// One authoritative re-read before reporting. The loop above can stop on its bound while the last
 		// few flows are mid-completion, and a flow that finished between its last poll and now is not
-		// stranded - reporting it as such is what made the old failures unreadable (every "stranded" flow
-		// in the dump read `completed`). A genuine strand is unaffected: it never completes, so it survives
+		// stranded - reporting it as such makes a failure unreadable (every "stranded" flow
+		// in the dump reads `completed`). A genuine strand is unaffected: it never completes, so it survives
 		// this pass exactly as it survived the loop.
 		var final []string
 		for _, k := range stuck {

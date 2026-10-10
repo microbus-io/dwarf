@@ -17,7 +17,8 @@ read outside a dispatched task.
 
 Each step has three JSON columns: `state` (input snapshot), `changes` (output delta), `interrupt_payload` (from
 `flow.Interrupt`). `state` is set at creation and normally immutable; `changes` is written after execution. The next
-step's `state` is `merge(currentState, changes)`. This immutability enables checkpointing, restart, and recovery.
+step's `state` is `merge(currentState, changes)`. This immutability enables checkpointing, `Fork`, `flow.Retry` and
+crash recovery.
 
 **A task's output is its `changes`, never the state map - the public API must not offer a raw-state write.**
 The engine reads back only `changes`, so a write into `state` alone (marshal a struct into it, tracking nothing)
@@ -27,6 +28,10 @@ the *prior* attempt's, so the write never reaches the next step's `state` nor `f
 `evaluateTransitions` routes off `RawState()`, which *does* contain it. The flow branches on a value it then
 throws away. The correct pairing, which `Parse`'s godoc shows, is `Snapshot` -> `Parse` -> mutate ->
 `SetChanges(source, snap)`. `RawFlow.SetRawState` is the engine's own seeding path, not task-facing.
+`SetChanges` names fields exactly as `encoding/json` (and so `Parse`) does - tag name, else Go name, untagged
+embedded fields promoted, `"-"` and unexported skipped - and compares each against the snapshot by meaning
+(`jsonEqual`, numbers as `json.Number`), not by bytes: a field read back from a JSONB/JSON column is re-spelled
+(whitespace, key order), and a byte compare would record every such field as a change.
 
 **State mutation on retry:** on `flow.Retry()`, the engine merges `state + changes` back into `state` so the task
 sees its own prior output next attempt; `changes` is preserved. `Resume` does **not** mutate `state`: it writes the
@@ -35,14 +40,16 @@ caller's data to `resume_data`, which `flow.Interrupt` returns on re-dispatch.
 **Reducer delta convention:** tasks writing to reducer-managed fields (append, add, union, merge) set only the
 **delta**, not the accumulated value. E.g. for a field wired to the append reducer via
 `graph.SetReducer("messages", workflow.ReducerAppend)`, set `flow.Set("messages", []string{newMessage})`, not the
-whole history. Violating this duplicates during fan-in merge.
+whole history. Violating this duplicates during fan-in merge. `Graph.Validate` rejects a reducer name that is not
+one of the `Reducer` constants, so a misspelled reducer fails at `Create` rather than at the first fan-in.
 
 **forEach element injection:** the current element is injected into `state` only (under `as`), not `changes`, so it is
 available to the task but does not participate in fan-in merge.
 
-**Delete is a cleared (JSON null) entry in `changes`, and the merge has two modes for it, split across two
-`State` methods.** `flow.Del` (and `Set(k, nil)`) writes JSON `null` into `changes` - `dwarf` conflates null
-and absent everywhere (`isCleared`), so there is no way to store a literal null value. `State.Merge`/`MergeReduce`
+**Delete is a cleared entry in `changes`, and the merge has two modes for it, split across two `State`
+methods.** `flow.Del` writes a Go-nil tombstone into `changes` and `Set(k, nil)` writes the bytes `null`; a
+delete read back from a column is `null` too. `isCleared` treats both spellings as cleared - `dwarf` conflates
+null and absent everywhere, so there is no way to store a literal null value. `State.Merge`/`MergeReduce`
 are the **accumulation** primitive: a cleared key is **preserved** (the replace path stores the tombstone; a
 reducer-managed field *ignores* the clear - see below), so a changes delta can be built up across attempts/members
 with the pending-delete marker intact. `State.DelNils` is the **materialization** step: it drops every cleared
@@ -86,20 +93,22 @@ only the RTT-matched reps leaves everything inside noise.
 
 ### Why the storage is UNIFORM rather than either-or
 
-An earlier cut let a value be *either* a decoded Go value or JSON, deciding per field. It worked and
-measured the same - the carried-payload win is already captured once carried fields are not decoded, and
-the A/B between the two representations came out neutral on every axis (RTT-matched: heap +3.9%, throughput
-+2.7%, both noise). Uniform storage was adopted for what it removes, not for what it adds:
+Every field is held as JSON; there is no per-field choice between a decoded Go value and JSON. **Do not add a
+decoded slot beside the JSON one.** A per-field either-or representation measures the same - the
+carried-payload win is captured once carried fields are not decoded, and an A/B between the two came out
+neutral on every axis (RTT-matched: heap +3.9%, throughput +2.7%, both noise) - so uniformity is chosen for
+what it removes:
 
-- **A tombstone has ONE spelling.** A delete is a JSON `null`; `encoding/json` marshals a nil
-  `json.RawMessage` as `null`, so nil and the literal bytes agree. In the either-or design a tombstone could
-  also be a Go nil, and a cleared-check that missed the JSON spelling made a delete read back from a
-  `changes` column silently stop taking effect - `DelNils` left it, `Has` reported the field present,
-  nothing logged.
-- **No branch to get wrong.** Every reader had to ask "is this one decoded or not"; there is no such
-  question now, so there is no path that answers it wrongly.
-- **Reads and writes both got cheaper.** `Get` used to marshal the stored value and unmarshal into the
-  target; now it only unmarshals. `Set` used to marshal and then decode; now it only marshals.
+- **Every extra tombstone spelling is one more for a cleared-check to miss.** A tombstone already has two: a
+  Go nil (`deleteOne` and `Flow.Clear` write `changes.d[k] = nil`) and the bytes `null` (`Set(k, nil)`, and
+  any delete read back from a column). `encoding/json` marshals a nil `json.RawMessage` as `null`, so both
+  persist as one value, and `isCleared` recognizes both. A decoded slot adds a third (a nil `any`). A
+  cleared-check that misses any spelling makes a delete read back from a `changes` column silently stop
+  taking effect - `DelNils` leaves it, `Has` reports the field present, nothing logs.
+- **No branch to get wrong.** With one representation no reader has to ask "is this one decoded or not",
+  so no path can answer it wrongly.
+- **Reads and writes each do one codec pass.** `Get` only unmarshals and `Set` only marshals; a decoded slot
+  makes `Get` marshal-then-unmarshal and `Set` marshal-then-decode.
 
 The price is stated plainly in the godoc because callers feel it: **the Go type is not preserved by a
 store.** JSON has one number type, so a value stored as an `int` and read into an `any` comes back a
@@ -109,24 +118,33 @@ is why some tests assert `float64` where a reader might expect `int`.
 
 ### The constraints that hold this up
 
-1. **`Set` normalizes the Go TYPE, and that is what it is for - not byte order.** `Set` marshals a value so
-   a struct is stored as its JSON rather than as a Go struct. That matters because `union` dedupes with
-   `reflect.DeepEqual`, and `DeepEqual` between a struct and its decoded twin is **false** - the actual
-   mechanism behind the `Continue`-`additionalState` bug. Key ORDER is not part of it: verified, a
+1. **JSON storage normalizes the Go TYPE - not byte order.** `Set` stores a value as its `json.Marshal`
+   output, so a struct contributed by a caller comes back from any untyped read (and from `decodeValue`,
+   which feeds the reducers) as `map[string]any`/`float64`, exactly as a column read does. That matters
+   because `union` dedupes with `reflect.DeepEqual`, and `DeepEqual` between a struct and its decoded twin is
+   **false** - the mechanism behind the `Continue`-`additionalState` bug. Key ORDER is not part of it: a
    deliberately unsorted spelling dedupes correctly against a sorted one. Pinned by
-   `TestState_SetNormalizesGoType`, which mutation-fails against a `Set` that skips the round trip.
-   `NewState`'s variadic pairs go through `Set` for the same reason.
+   `TestState_SetNormalizesGoType`. Any value path that hands a reducer a caller's Go value without going
+   through stored JSON reopens it. `NewState` holds every field as JSON too: its variadic pairs go through
+   `Set`, and a single map/struct argument is marshalled once and split shallowly into fields, each kept as
+   the encoder wrote it.
 2. **`[]byte` and `json.RawMessage` are distinguished by TYPE, not by method name.** `Set` stores a
    `[]byte` base64-encoded (right for binary) and a `json.RawMessage` as JSON. `SetJSON`/`GetJSON` are the
    explicit pair, typed on `json.RawMessage` so the compiler keeps a call site honest. `SetJSON` does not
    validate and returns nothing - a method with no error return cannot be reporting one; `Set` validates a
-   `RawMessage` and can tell you.
+   `RawMessage` and can tell you. **`Set` COPIES a `json.RawMessage` (`bytes.Clone`); `SetJSON` keeps the
+   caller's slice.** A stored value is shared by `Clone` and every fan-out branch on the strength of being
+   immutable, so a caller reusing its buffer after `Set` must not be able to rewrite it (pinned by
+   `TestState_SetCopiesRawMessage`); `SetJSON` is for bytes the caller hands over for good.
 3. **A combining reducer decodes and re-encodes, so a cohort folds in ONE pass.** `MergeReduceAll`, not
    `MergeReduce` per member: the accumulator grows as it folds, so re-encoding it per member is quadratic in
    accumulated bytes - roughly 500x the element encodes at width 1,000. The replace path (the default, and
-   the overwhelming majority of fields) moves bytes and pays none of this. Pinned by
+   the overwhelming majority of fields) moves bytes and pays none of this; `Merge` is a plain map copy.
+   `MergeReduce` is `MergeReduceAll` of one member, so there is one fold to keep correct. Pinned by
    `TestState_MergeReduceAllMatchesPerMember`, which asserts the one-pass and per-member results are
-   byte-identical, so the optimization can never quietly change a fan-in outcome.
+   byte-identical, so the optimization can never quietly change a fan-in outcome. **On a reducer error the
+   receiver is left partly merged and must be discarded** - every caller propagates the error and drops the
+   state, so nothing restores a consistent partial result.
 4. **Reads do not memoize.** Decoding on read and writing the result back would make a READ a map write, and
    a `State` is read concurrently in at least one place (baggage on a context), where that is an
    unrecoverable runtime **throw** `errors.CatchPanic` cannot contain. Two reads of a field therefore yield
@@ -136,8 +154,12 @@ is why some tests assert `float64` where a reader might expect `int`.
    the union of the two (`mentions` in `internal/staterefs`) - with `Has` alone it silently drops carried
    fields.
 
-**Keep written bytes canonical** even though nothing currently enforces it: a byte-comparing `union` is the
-standing plan and would need it. See the landmine in the root `CLAUDE.md`.
+**Stored bytes are NOT canonical, and nothing compares them.** `Set` keeps what `json.Marshal` writes (a
+map's keys sorted, a struct's in declaration order), a `json.RawMessage` and `SetJSON` keep the caller's
+bytes as given, and a column read keeps the database's spelling (JSONB/JSON re-space and reorder). Every
+comparison that exists decodes first - `union` over decoded values, `SetChanges` through `jsonEqual`. A
+byte-comparing `union` (the standing plan in the root `CLAUDE.md` landmine) therefore cannot assume canonical
+input: it must canonicalize what it compares, or every write path above must be made canonical first.
 
 **A blob payload cannot measure any of this.** A JSON string decodes to a Go string of about the same size,
 so an opaque payload expands ~1x and a measurement taken with one reads flat however state is represented.
@@ -147,21 +169,19 @@ it, not byte count. See `bench/CLAUDE.md`.
 
 ### Numbers are float64-domain; two unstorable values are a KNOWN, UNGUARDED punt
 
-**Invariant (still holds): every number the engine itself produces round-trips exactly through a `float64`.**
-State/baggage/payloads are carried as `map[string]any` across a JSON round trip through the database, and
-`encoding/json` decodes a JSON number into a **`float64`** whenever the target is an `any` - exact for integers
-only up to **2^53**. This is what lets every untyped reader of a state map - `Get`/`Value`/`All`/`Map`/`Parse`
-into a map - treat numbers as `float64` without qualification, and it holds by construction for every value
+**Invariant: every number the engine itself produces round-trips exactly through a `float64`.** State,
+baggage and payloads are `State` values held as JSON, and `encoding/json` decodes a JSON number into a
+**`float64`** whenever the target is an `any` - exact for integers only up to **2^53**. This is what lets every
+untyped reader - `Get` into an `any`, `Parse` into a map - treat numbers as `float64` without qualification, and it holds by construction for every value
 dwarf derives (a `ReducerAdd`/`min`/`max` sum stores and round-trips fine even past 2^53). Do **not** "fix"
 the read side with `UseNumber`: it changes the Go type every state-map reader sees
 (`outcome.State["x"].(float64)` stops matching for an integral value; JSON has one number type, so no scheme
 preserves the writer's Go type through the database), needs a reflect-walker for caller-supplied targets, and
 buys exactness for a value an author can carry losslessly as a string anyway.
 
-**Two *external/authored* values are unstorable and are currently NOT guarded - a deliberate, backlogged punt**
-(the former write-side storability guard, and its whole `internal/jsonx` package, were removed;
-`Flow.Set`/`set`/`SetChanges`/`Interrupt`/`Subgraph` and the engine's `Create`/`Continue`/`Fork`/`resume`
-ingress no longer check). Both fail *silently*, which is why they were guarded and why the punt is a real
+**Two *external/authored* values are unstorable and are NOT guarded - a deliberate, backlogged punt.**
+Nothing on the write side checks them: not `Flow.Set`/`set`/`SetChanges`/`Interrupt`/`Subgraph`, and not the
+engine's `Create`/`Continue`/`Fork`/`resume` ingress. Both fail *silently*, which is why the punt is a real
 exposure to revisit, not a non-issue:
 
 - **Integer beyond ±2^53.** A read into an `any` comes back **rounded** (`1234567890123456789` ->
@@ -170,28 +190,27 @@ exposure to revisit, not a non-issue:
   (`1e300` is fine). **Workaround: carry a large id as a string** (the `id_str` pattern 64-bit-id APIs
   already publish).
 
-  **What is STORED no longer rounds, and the exposure is correspondingly narrower than it was.** Raw field
-  storage means a carried field is never decoded, so it round-trips byte-exact into the next step's `state`,
-  `final_state`, a `Fork` and a `Continue`; and because a read does not memoize, even reading one leaves
-  storage exact. Verified: carried `{"id":1234567890123456789}` marshals back identically before and after a
-  read, where the old decode-at-dispatch path stored `...800` from the first hop onward. So the damage is
-  now confined to the Go value a reader receives, and does not propagate.
+  **What is STORED does not round.** Raw field storage means a carried field is never decoded, so it
+  round-trips byte-exact into the next step's `state`, `final_state`, a `Fork` and a `Continue`; and because
+  a read does not memoize, even reading one leaves storage exact. Verified: carried
+  `{"id":1234567890123456789}` marshals back identically before and after a read. **Do not decode carried
+  fields at dispatch:** that stores `...800` from the first hop onward. So the damage is confined to the Go
+  value a reader receives, and does not propagate.
 
-  Two consequences worth holding. **The remaining rounding is per-READER, not per-field**: a plain `Get`
-  into an `any` (and `Value`/`All`/`Map`/`Parse` into a map) rounds, while `GetInt` does not - it unmarshals
+  Two consequences worth holding. **The rounding is per-READER, not per-field**: a plain `Get` into an `any`
+  (and `Parse` into a map) rounds, while `GetInt` does not - it unmarshals
   straight into an `int`, which is exact at any int64 magnitude - and neither does a `when` expression: it
   compares a >2^53 id as an integer rather than through a float64 (`boolexp` v1.2+ normalizes a JSON
   integer literal to an exact `int64` instead of decoding it through `float64`).
 - **NUL (`U+0000`) in a string.** Valid UTF-8, legal JSON, but **PostgreSQL's `JSONB` rejects it**
   (`SQLSTATE 22P05`) while MySQL/SQLite/SQL Server accept it - so it passes the SQLite test suite and kills the
-  flow on the recommended production database, in the worst way: the write that carries it is the step's own
-  **completion UPDATE** (`execution.go`), so unguarded the step is left `running` with `error=""` and lease
-  recovery re-executes the task forever (reproduced against real Postgres). **Workaround: base64-encode binary
-  data.** (Invalid UTF-8 needs no guard - `encoding/json` coerces it to `U+FFFD` on marshal.) Note that
-  `persist.go`'s `sanitizeErrorMessage` still strips control bytes from the *error-text* write independently, and
-  its "ask the database" classifier turns a rejected payload write into a clean step failure rather than the old
-  eternal loop - so the NUL is degraded from "silent eternal loop" to "clean failure at write time on Postgres,
-  silently stored on the others," not fully benign.
+  flow on the recommended production database: the write that carries it is the step's own **completion
+  UPDATE** (`execution.go`), which, left to lease recovery, would leave the step `running` with `error=""`
+  and re-execute the task forever (reproduced against real Postgres). **Workaround: base64-encode binary
+  data.** (Invalid UTF-8 needs no guard - `encoding/json` coerces it to `U+FFFD` on marshal.) `persist.go`'s
+  "ask the database" classifier turns that rejected payload write into a clean step failure instead, and
+  `sanitizeErrorMessage` strips control bytes from the *error-text* write so the failure itself can land - so
+  a NUL is a clean failure at write time on Postgres and silently stored on the others: not benign.
 
 If a guard is ever reintroduced, it must run on the RAW marshaled bytes *before* the decode (the decode rounds
 a >2^53 integer to `float64`, so checking the decoded value is too late) and must NOT re-check the engine's own
@@ -201,11 +220,11 @@ derived sums (a legitimate `ReducerAdd` result past 2^53 marshals integer-shaped
 
 `GetString`/`GetInt`/`GetFloat`/`GetBool`/`GetDuration`/`GetStrings` **panic** when the key holds a value of the
 wrong type (the typed getters on `State` in `state.go` delegate to `Get` and `panic(errors.Trace(err))` on its
-error; `Flow`'s getters forward to them). They previously discarded that error and returned the
-zero value, which made *absent*, *cleared*, and *wrong-typed* indistinguishable - and the zero value is an
-actively dangerous answer: `GetInt("retryAfter")` over a `1.5` (a fractional number from an upstream task, a
-host's `initialState`, or `ReducerAdd`) read as `0`, and the task built a zero-delay retry loop against its
-downstream. `Has` returned `true`, so the usual guard did not help.
+error; `Flow`'s getters forward to them). **Do not discard that error and return the zero value:** it makes
+*absent*, *cleared*, and *wrong-typed* indistinguishable, and the zero value is an actively dangerous answer -
+`GetInt("retryAfter")` over a `1.5` (a fractional number from an upstream task, a host's `initialState`, or
+`ReducerAdd`) reads as `0`, and the task builds a zero-delay retry loop against its downstream. `Has` returns
+`true`, so the usual guard does not help.
 
 Panicking is the right disposition *because of the engine's panic isolation*, not despite it: `ExecuteTask` is
 wrapped in `errors.CatchPanic` at the call boundary, so the panic becomes the call's error and takes the normal
@@ -227,16 +246,17 @@ proven not to have proceeded past the read).
 
 ### The `Flow` carrier is single-owner and carries no lock
 
-A task owns its `Flow` exclusively for its execution; `Flow` is a bare struct over two `map[string]any`
-with no mutex, and **deliberately so** - a mutex would paper over a misuse pattern (concurrent writes with
+A task owns its `Flow` exclusively for its execution; `Flow` is a bare struct holding two `State` values
+(`state` and `changes`, each a reference to a map) with no mutex, and **deliberately so** - a mutex would paper over a misuse pattern (concurrent writes with
 no defined ordering) rather than prevent it, and the carrier is single-owner by design.
 
 The failure mode is why this is documented rather than merely implied: two goroutines writing a `Flow`
 trip the Go runtime's concurrent-map-write detector, which is a **`throw`, not a panic**. `errors.CatchPanic`
 around `ExecuteTask` (the host-call panic isolation) **cannot recover it**, so one task fanning out
 internally with an errgroup and writing results straight back to the `Flow` takes down the whole replica and
-every unrelated in-flight flow on it. The godoc on `Flow` (and the package doc) now says so, with the
-collect-then-write-from-one-goroutine pattern spelled out. Parallelizing across *steps* (a `forEach`
+every unrelated in-flight flow on it. The godoc on `Flow` (and the package doc) says so, with the
+collect-then-write-from-one-goroutine pattern spelled out. `Flow.UnmarshalJSON` initializes both `State`s even
+when the wire omits them, because the setters write to both and a nil map there panics. Parallelizing across *steps* (a `forEach`
 transition, one `Flow` per branch) is the first-class answer.
 
 ### Task-Initiated Control Signals
@@ -276,13 +296,16 @@ Tasks signal the engine via control methods on the `Flow` carrier (distinct from
   `errors.StatusCode(err) == http.StatusRequestTimeout`.
 - **No jitter on retry backoff:** the worker pool already throttles per-replica concurrency, so simultaneous retries
   queue in the pool rather than overwhelm downstream. Jitter would add latency for no throughput benefit.
-- **`flow.Sleep(duration)`** - delay the *next* step's execution by setting its `not_before`. The timer adapts to
-  wake when the sleep expires. In fan-out, only the last sibling's sleep affects the fan-in point.
+- **`flow.Sleep(duration)`** - delay the *next* step's execution by setting its `not_before`. There is no timer:
+  the step is invisible to selection until `not_before` passes, and the next scheduling cycle after that picks it
+  up. In fan-out, only the last sibling's sleep affects the fan-in point.
 - **`flow.Goto(target)`** - override transition routing: skip normal evaluation and follow the `goto` transition
   to `target`, if registered. Goto transitions are never taken during normal evaluation.
-- **`flow.Interrupt(payload)`** - pause and park the flow. The payload is stored in `interrupt_payload` and propagated
-  up the surgraph chain. The task should return normally after. The engine sets the flow `interrupted`; a caller
-  wanting to be told resumes via `Await` or an orchestrating workflow (the engine has no stop callback).
+- **`flow.Interrupt(payload, out) (yield bool, err error)`** - pause and park the flow, or return the resume data
+  once it has arrived. On the first call the payload is stored in `interrupt_payload` and propagated up the surgraph
+  chain, and `yield` is true: the task returns at once. On re-dispatch after `Resume` it unmarshals the resume data
+  into `out` with `yield` false and does not re-arm. The engine sets the flow `interrupted`; a caller wanting to be
+  told uses `Await` or an orchestrating workflow (the engine has no stop callback).
 
 **Single-park guard.** A step parks at most once - interrupt XOR subgraph, never both and never the other kind on
 re-entry. `processStep` enforces this after the task returns: a competing-signals check fails the step if more than
@@ -309,10 +332,12 @@ for text - the generated classDef omits `color:`, host CSS sets it, and Mermaid 
 
 | Pair | Statuses |
 |---|---|
-| primary | `completed`, `running` (running gets a dashed border) |
-| secondary | `pending` + chrome (`_start`, `_end`, fan-out cohort wrappers, subgraph block fills) |
-| error | `failed`, `cancelled` |
+| primary | `completed`, `running` (running gets a dashed border), every edge's stroke, and the subgraph block fill (at 6% opacity) |
+| secondary | `pending` (and a step with no status) + the `_start`/`_end` terminals |
+| error | `failed`, `terminated`, `cancelled` |
 | attention | `interrupted` (distinct from error - "needs human eyes," not hard failure) |
+
+Fan-out cohort wrappers take no color at all (`fill:none,stroke:none`); they are layout containers only.
 
 ### DAG-edge model
 
@@ -357,7 +382,7 @@ task nodes; nothing terminates at the cohort wrapper.
 
 ### Truncation in label formatting
 
-`formatDuration` uses integer-millisecond truncation for sub-second values (`%dms`). A diagram with N labeled edges
+`flowFormatDuration` uses integer-millisecond truncation for sub-second values (`%dms`). A diagram with N labeled edges
 accumulates up to ~N/2 ms of systematic underestimation in any path sum - diagnostically irrelevant (the goal is to
 spot where time went, not reconcile to the millisecond).
 

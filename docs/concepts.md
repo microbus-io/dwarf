@@ -10,7 +10,8 @@ A small vocabulary runs through all of dwarf. Learn these seven terms and the re
 A **graph** is the definition of a workflow: which tasks exist, how they connect, and how parallel
 branches merge. It's a directed graph of **tasks** (nodes) and **transitions** (edges), with an entry
 point and optional per-field reducers. You build one in code with `workflow.NewGraph` and the `Add*`
-methods, and it is identified by a name. Graphs are reusable templates — many flows run the same graph.
+methods; it carries a display name, and your host's `LoadGraph` resolves it by a workflow URL you choose.
+Graphs are reusable templates — many flows run the same graph.
 
 See [Building graphs](graphs.md).
 

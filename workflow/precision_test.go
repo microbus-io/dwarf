@@ -45,14 +45,14 @@ func TestFlow_SetAcceptsWhatFloat64CarriesExactly(t *testing.T) {
 	assert.NoError(f.Set("order", map[string]any{"total": 19.99, "lines": []int{1, 2, 3}}))
 }
 
-// toStateMap round-trips EVERY payload through JSON, including a map that could have been passed through
-// as-is. The short-circuit it replaced forfeited two things, and both are pinned here.
+// A control-signal payload is marshalled whatever its shape, a map included rather than passed through as-is.
+// Passing a map through would forfeit two things, and both are pinned here.
 func TestFlow_PayloadIsValidatedCopiedAndUniform(t *testing.T) {
 	t.Run("a map payload is validated, exactly like a struct one", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		// A NaN cannot be marshalled. Before, this was rejected from a struct but ACCEPTED from a map, and
-		// only surfaced later as an opaque step failure from inside the orchestrator.
+		// A NaN cannot be marshalled. Accepted from a map, it would surface only later, as an opaque step
+		// failure from inside the orchestrator.
 		rf := NewRawFlow()
 		f := &rf.Flow
 		yield, err := f.Interrupt(map[string]any{"score": math.NaN()}, nil)

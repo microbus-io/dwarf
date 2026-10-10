@@ -34,7 +34,8 @@ input for large elements, `D/(1+D)` for mid-size ones. Task outputs (`changes`) 
   with every field the column points at missing, and the next mint makes that loss permanent - silent data loss.
   That is exactly what a replica predating item refs does on meeting one (its `Parse` degraded), so a release
   that changes what the refs column can hold needs every replica upgraded together - a maintenance window, said
-  so in the release notes. From this version on, a mixed fleet fails steps loudly rather than losing fields.
+  so in the release notes. A mixed fleet whose replicas all hold this rule fails steps loudly rather than losing
+  fields.
   Pinned by `TestStateRefs_UnreadableRefsFailTheStep`.
 - **The item ref is minted INSIDE `Mint`** (`mintItem`), after the array's own fate is decided, because it
   points at whichever anchor holds the array's bytes - carried from an earlier step, or opened here. Pointing at
@@ -148,9 +149,9 @@ both measure ~1x, so the ambiguity is moot and no server-version probe is needed
 5. **`inlineExcessAnchors` must never drop an un-inlineable carried ref.** Its literal is not in `merged` to
    inline back, so dropping it would delete the field outright. Such an anchor is *pinned* past the
    `maxAnchors` cap — correctness over the perf bound.
-6. **The cache holds BYTES, never decoded values — and `Resolve` now splices those bytes STRAIGHT INTO
+6. **The cache holds BYTES, never decoded values — and `Resolve` splices those bytes STRAIGHT INTO
    state rather than decoding them.** `State` holds a field as raw JSON until something reads it
-   (`SetCanonicalJSON`), so resolving a ref costs the field's byte length instead of the several times that
+   (`SetJSON`), so resolving a ref costs the field's byte length instead of the several times that
    its decoded Go form occupies. This is where the two designs meet: refs already collapse N branches onto
    one cached copy of the bytes, and not decoding at the splice is what stops those N branches from
    re-inflating it N times anyway — the read multiplier the ref design deliberately left alone. Measured
@@ -160,9 +161,9 @@ both measure ~1x, so the ambiguity is moot and no server-version probe is needed
 
    Sharing one immutable byte slice across branches is safe in a way sharing a decoded value is not: bytes
    cannot be mutated in place by a task, and each branch's own read decodes into its own copy. So the
-   anti-aliasing guarantee is unchanged and now rests on immutability rather than on copying.
-   `TestLinker_ResolveCachesBytesNotValues` still pins it (two resolves must not share a mutable value) and
-   still mutation-fails against a decoded-value cache.
+   anti-aliasing guarantee rests on immutability, not on copying.
+   `TestLinker_ResolveCachesBytesNotValues` pins it (two resolves must not share a mutable value) and
+   mutation-fails against a decoded-value cache.
 
 ## `inlineOnly` is NOT "put a nil in changes"
 
@@ -183,9 +184,9 @@ across branches and overload a value that already means something else.
 
 ## The Loader is per call, and batched, on purpose
 
-`Resolve` takes a `Loader` rather than owning a connection because **two of the four resolve sites run inside
-an open transaction** (the fan-in paths in `engine/execution.go`), and their read must land on that
-transaction's connection. Binding a shard's `*sequel.DB` at construction would silently move those reads onto
+`Resolve` takes a `Loader` rather than owning a connection because **several resolve sites run inside an
+open transaction** (the fan-in paths in `engine/execution.go` and the final-state merge in
+`engine/completion.go`), and their read must land on that transaction's connection. Binding a shard's `*sequel.DB` at construction would silently move those reads onto
 a different connection, where they cannot see the transaction's own uncommitted writes. Anchors never cross a
 flow and a flow never crosses a shard, which is what makes a same-connection read always sufficient.
 
@@ -276,21 +277,24 @@ the only dialect-dependent term in the policy.
   `UNION ALL` or a `CASE`). **It is also coupled to the free tier**: tier 1 is free *because* resolution fetches
   whole columns, so adopting per-field extraction would require re-pricing it.
 
+## Measuring it: the `bench/` carry workloads
+
+`-workload carry` writes the payload once as the flow's initial state, then carries it through
+`-linear-steps` hops; `-workload carryfanout` is the N·D case: `-fanout-width` branches, two steps deep, all
+carrying one document anchored at the entry/spawn step. Local SQLite at 32KB: **1.01x payload stored per
+flow against a naive 6x** linear, **1.07x against 17x** at width 8. Read these off
+`dwarf_state_write_bytes{column=state}`; their tasks declare almost no write volume, so MB/s is meaningless
+for them by design.
+
+**The `state` workload does NOT fail to mint** — a claim worth killing before it spreads. A rewritten
+field is re-anchored at the step that wrote it (its `changes` holds the bytes) and the successor's `state`
+refs that, so measured on Postgres at 64K/6 steps its `state` column is **0.0 K/flow** against **322.5
+K/flow** of `changes`, versus `carry`'s 64.1 K/flow of `state` and 0.1 K/flow of `changes`. The 5x between
+them is that `state` genuinely produces five payloads and `carry` produces one. Refs remove the CARRY
+multiplier; write volume for actually-new data is irreducible.
+
 ## Open follow-ups
 
-- ~~A carry workload for `bench/`.~~ **Built** — `-workload carry` (writes the payload once as the flow's
-  initial state, then carries it through `-linear-steps` hops) and `-workload carryfanout` (the N·D case:
-  `-fanout-width` branches, two steps deep, all carrying one document anchored at the entry/spawn step).
-  Local SQLite at 32KB: **1.01x payload stored per flow against a naive 6x** linear, **1.07x against 17x** at
-  width 8. Read these off `dwarf_state_write_bytes{column=state}`; their tasks declare almost no write
-  volume, so MB/s is meaningless for them by design.
-
-  **The `state` workload does NOT fail to mint** — a claim worth killing before it spreads. A rewritten
-  field is re-anchored at the step that wrote it (its `changes` holds the bytes) and the successor's
-  `state` refs that, so measured on Postgres at 64K/6 steps its `state` column is **0.0 K/flow** against
-  **322.5 K/flow** of `changes`, versus `carry`'s 64.1 K/flow of `state` and 0.1 K/flow of `changes`. The
-  5x between them is that `state` genuinely produces five payloads and `carry` produces one. Refs remove
-  the CARRY multiplier; write volume for actually-new data is irreducible.
 - **Whether `maxAnchors` ever binds** is unmeasured (how many large fields are concurrently live in a
   realistic workflow). The engine's byte counters are the instrument.
 - **Whether the resolve cache keeps an item-ref'd array resident across a cohort under real load** is

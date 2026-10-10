@@ -8,7 +8,9 @@
 ## Dwarf is v0.x, and that is the headline
 
 **There is no backward-compatibility promise yet.** The API and the database schema are both still evolving,
-and a v0.x release may change either. Version skew between replicas is not tested and not supported.
+and a v0.x release may change either — including by editing a migration an earlier release already shipped,
+which a database created by that earlier release does not pick up. Version skew between replicas is not
+tested and not supported.
 
 So the practical rule while dwarf is pre-1.0:
 
@@ -55,13 +57,15 @@ exist.
 ## Upgrading dwarf (v0.x)
 
 1. **Read the [release notes](https://github.com/microbus-io/dwarf/releases)** for schema or API changes.
-   Assume both are possible.
+   Assume both are possible. If the notes say the release edits a migration that was already shipped, the
+   existing databases cannot be upgraded in place: the upgrade needs fresh databases, and flows in the old
+   ones do not carry over. The steps below are for a release that only adds migrations.
 2. **Take a database backup** of every shard, and know the restore consequences below before you need them.
 3. **Drain the fleet.** Stop every replica gracefully — see the drain window below. In-flight steps that are
    killed rather than drained will re-run after the upgrade, which is safe but wasteful.
 4. **Confirm nothing is executing.** No replica running means no step is being dispatched; flows simply wait.
    Durability is not at risk here — flows resume where they left off.
-5. **Start one replica.** It applies the migrations. Confirm it comes up clean before starting the rest.
+5. **Start one replica.** It applies the new migrations. Confirm it comes up clean before starting the rest.
 6. **Start the remainder**, one at a time, letting the fleet settle between each.
 
 Flows survive all of this untouched. A stopped fleet means work stops moving, not that anything is lost:
@@ -105,14 +109,17 @@ dispatching the graph it was created with a month from now, long after your code
 re-validates or re-loads it. This is true regardless of dwarf's own versioning, and it is entirely about
 *your* code.
 
-That makes task names a **long-lived compatibility surface**, longer-lived than any deploy:
+The frozen graph binds each task to its dispatch URL (`SetURL`), and the URL is what your host's
+`ExecuteTask` receives. That makes task URLs a **long-lived compatibility surface**, longer-lived than any
+deploy:
 
-- **A task name that any live flow's frozen graph can still reach must remain dispatchable.** If your host
-  can no longer route a task name, every flow whose frozen graph reaches it fails at that step — and it fails
-  when the flow gets there, which may be weeks after you removed the task.
-- **Renaming a task is a breaking change** for every in-flight flow. Add the new name and keep the old one
-  routable until no live flow can reach it.
-- **Changing what a task *does* is generally safe**, because the frozen graph pins the name and the routing,
+- **A URL that any live flow's frozen graph can still reach must remain dispatchable.** If your host can no
+  longer route a URL, every flow whose frozen graph reaches it fails at that step — and it fails when the
+  flow gets there, which may be weeks after you removed the task.
+- **Changing a task's URL is a breaking change** for every in-flight flow. Bind the new URL and keep the old
+  one routable until no live flow can reach it. Renaming a task within the graph does not affect routing, but
+  task code that calls `flow.Goto` by name must still find that name in the graphs live flows froze.
+- **Changing what a task *does* is generally safe**, because the frozen graph pins the URL and the routing,
   not the behaviour. Changing what a task *expects in state* is not: a flow that started under the old shape
   will arrive at the new code carrying the old state.
 
@@ -123,7 +130,7 @@ That makes task names a **long-lived compatibility surface**, longer-lived than 
    `Status: running` and on `Status: interrupted` shows what is still alive.
 3. Confirm nothing is left — including `interrupted` flows, which wait indefinitely and are the ones most
    likely to outlive your assumption.
-4. Remove the task.
+4. Stop routing its URL.
 
 **There is no way to move an existing flow onto a new graph, and that is permanent by design.** A flow's
 position is a set of steps in the graph it was created with; under a changed graph that step may no longer
@@ -137,7 +144,9 @@ are not ones:
   running the old graph.
 - **`Continue` does the same.** A new turn in a thread runs the same graph the thread was created with.
 
-**Only `Create` loads a graph**, so the only way to get a flow onto a new definition is to start a new flow.
+**A graph is loaded only when a flow is created** — by `Create`, or by a subgraph spawn, which loads the
+child workflow's current definition — so the only way to get a flow onto a new definition is to start a new
+flow.
 If you cannot wait out the existing ones, that means terminating them and creating replacements — carrying
 whatever state matters across yourself, by reading the old flow's outcome with `Snapshot` and passing it as
 the new flow's initial state. You lose the original's progress and history continuity; it is a migration,

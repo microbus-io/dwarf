@@ -28,8 +28,9 @@ import (
 //	ctx, done := e.dbTurn(ctx, shardNum)
 //	defer done()
 //
-// TAKE IT AT THE OUTERMOST DATABASE OPERATION OF A CALL PATH, NEVER INSIDE A SHARED HELPER. A turn taken
-// while one is already held is the nesting the enclosure rule forbids: holders waiting on a second turn
+// TAKE IT AT THE OUTERMOST DATABASE OPERATION OF A CALL PATH, NEVER INSIDE A SHARED HELPER - except a helper
+// that has first handed back the turn its caller held, as lockCohortStripe's lease tick does while it waits.
+// A turn taken while one is already held is the nesting the enclosure rule forbids: holders waiting on a second turn
 // deadlock against each other, and the helpers here are shared between paths that hold a turn (a worker
 // mid-step) and paths that do not (a sweep, an operation). The engine's rule is therefore positional -
 // operations take a turn at their entry point, background loops take one per shard per pass, and the
@@ -43,12 +44,12 @@ import (
 // board, a sleep. The turn is only for the stretch that holds or awaits a connection; everything else must
 // give it back first, or a caller parked on something unbounded bounds every other caller with it.
 //
-// NOTHING THAT TAKES A CONNECTION IS EXEMPT, and the two callers that look like they should be are the
-// reason to say so out loud. A mechanism that reports on saturation - the observable-gauge callback, the
-// peer Sonars - must not be throttled by it: a Sonar that cannot beat reads as BLIND, which makes its
-// replica stop partitioning, so throttling the registry would let load reshape the fleet.
+// NOTHING THAT TAKES A CONNECTION IS EXEMPT, and the caller that looks like it should be is the reason to
+// say so out loud. The peer Sonars must not be throttled by it: a Sonar that cannot beat reads as BLIND,
+// which makes its replica stop partitioning, so throttling the registry would let load reshape the fleet.
+// (The observable-gauge callback is ordered in the common band on purpose: a late gauge is still correct.)
 //
-// The answer is the REFILLER'S BAND (dbTurnAt with priorityRefill), not an exemption. Exempting a caller
+// The answer for the Sonars is the REFILLER'S BAND (dbTurnAt with priorityRefill), not an exemption. Exempting a caller
 // does not put it outside the contest, it ranks it ABOVE every band - a bypasser takes a connection
 // without queueing for one - and drops it from the population the turn count is there to bound. Band 0
 // gives the same precedence back while keeping both properties, and costs those callers nothing: strict

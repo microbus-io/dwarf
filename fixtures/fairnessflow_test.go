@@ -113,7 +113,7 @@ func TestFairnessflow(t *testing.T) {
 		// holder frees the lone worker, so the share below is decided by the weighted pick and not by which
 		// flows the doorbell happened to admit first. Two pushing cycles, not a duration - a cycle already
 		// in flight when these Creates committed may have scanned before they existed.
-		enginetest.AwaitShardCycles(t, eng, 1, 2)
+		enginetest.AwaitShardCycles(t, eng, 2)
 		release()
 
 		eng.Await(ctx, holderKey)

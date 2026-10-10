@@ -30,9 +30,9 @@ type FlowStep struct {
 	// work-distribution signal (which replica ran this step), not a stable address. Zero when unset.
 	EngineID int64 `json:"engineID,omitzero"`
 	// PredecessorKey and SuccessorKey are the keys of this step's neighbors in its flow's execution
-	// graph, empty where none is recorded. Not every edge is recorded on both ends: a fan-out step
-	// leaves SuccessorKey empty while each child names it as PredecessorKey, and each step joining a
-	// fan-in names the fan-in step as SuccessorKey. A flow's full edge set is the union of the pairs
+	// graph, empty where none is recorded. Not every edge is recorded on both ends: a fan-out step's
+	// SuccessorKey names only its first branch, while every branch names the fan-out step as
+	// PredecessorKey; and each step joining a fan-in names the fan-in step as SuccessorKey. A flow's full edge set is the union of the pairs
 	// of all its steps.
 	PredecessorKey string `json:"predecessorKey,omitzero"`
 	SuccessorKey   string `json:"successorKey,omitzero"`
@@ -61,8 +61,9 @@ type FlowStep struct {
 	UpdatedAt time.Time `json:"updatedAt,omitzero"`
 }
 
-// HasStarted reports whether StartedAt is a real dispatch timestamp rather than the INSERT-time
-// default. True for running and any terminal status; false for created/pending.
+// HasStarted reports whether StartedAt is a real dispatch timestamp rather than a placeholder recorded
+// when the step was created. True for running, interrupted and any terminal status; false for
+// created/pending.
 func (s FlowStep) HasStarted() bool {
 	switch s.Status {
 	case StatusRunning, StatusCompleted, StatusFailed, StatusTerminated, StatusCancelled, StatusInterrupted:

@@ -7,8 +7,9 @@
 
 **Before anything else: check whether it is already being handled.** Most faults are absorbed. A database
 outage shorter than a step's lease produces latency and no errors at all; a dead replica's work is
-re-dispatched within the flow's time budget plus about five and a half minutes. If the symptom is "things are
-slow" rather than "a counter fired," start at [Backlog is growing](#backlog-is-growing) and resist restarting
+re-dispatched within the flow's time budget plus about a minute and a half (a step it had finished but not
+yet advanced, within about ten minutes). If the symptom is "things are slow" rather than "a counter
+fired," start at [Backlog is growing](#backlog-is-growing) and resist restarting
 replicas — a restart discards in-flight work that was about to complete and adds a phantom replica to the
 registry.
 
@@ -199,8 +200,8 @@ shard means replicas cannot read its registry at all.
 
 **Understand the blast radius.** Dwarf is **not** shard-fault-tolerant: `List` and
 `Purge` fail as a whole if any shard errors. Flows resident on a healthy shard keep executing
-normally; flows on the failed shard are unreachable until it returns. Because selection queries every shard
-concurrently and waits for the last one, a slow shard also drags dispatch for the whole replica.
+normally; flows on the failed shard are unreachable until it returns. Each shard's selection runs on its own
+cycle, so a slow shard slows its own dispatch, not its peers'.
 
 **Respond.** Recover the database. There is no drain-and-migrate path that is faster than fixing the server,
 and flows cannot be moved between shards. If the shard is healthy but should stop taking *new* work — you are

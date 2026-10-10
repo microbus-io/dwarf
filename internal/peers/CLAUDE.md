@@ -47,8 +47,8 @@ makes entering the cut wait a reading needs the previous raw reading, which only
 
 The windows and the beat are **constants with plain fields behind them**, not setters, because they are
 this package's policy — derived from which errors are safe in which direction rather than from anything an
-owner knows better. An earlier cut exported a setter/getter pair for each, which doubled the surface for
-the benefit of tests that live *in this package* and can assign the fields directly.
+owner knows better. Do not export a setter/getter pair for them: it doubles the surface for the benefit of
+tests that live *in this package* and can assign the fields directly.
 
 **`SetCadence` is the one exception, and the test it passed is worth stating** because the next proposed
 setter will not pass it: the read cadence is the only number here that prices something **only the owner
@@ -114,6 +114,10 @@ deliberately:
   computes a tiny count, and everyone grows to the full per-database budget simultaneously against a
   database that is already sick. Skipping exactly one reading closes it, because the beat is far shorter
   than the read cadence — by the next reading every live peer has refreshed its row and the count is real.
+  The fall is held against the previous *raw* reading, as the cut and the candidate count are (below), and
+  `Replicas` is published before the standing, so the replica count and the pool divisor fall on the same
+  reading and no reader sees the divisor fall ahead of the count. Pinned by
+  `TestPeers_ReplicaFallThroughSustainedGaps`.
 
   **A general K-consecutive debounce was built here and removed.** It is the obvious next reach, and it
   buys nothing this does not: the only failure it additionally covers is a peer whose row *straddles* the
@@ -137,9 +141,8 @@ deliberately:
 
   **HOLD A GAPPED CUT AGAINST THE PREVIOUS RAW READING, NEVER AGAINST THE PUBLISHED VALUE.** The published
   value is itself held, so holding against it ratchets: across consecutive gapped readings a replica could
-  only leave the cut - and a slow enough pass makes every reading gapped (below). Unlike a frozen `Replicas`,
-  which only under-sizes pools, a frozen cut is not fail-safe: a reader whose dispatchers left is never
-  promoted, and the shard runs nothing. Against the raw reading, two consecutive readings that agree are
+  only leave the cut - and a slow enough pass makes every reading gapped (below). A frozen cut is not
+  fail-safe: a reader whose dispatchers left is never promoted, and the shard runs nothing. Against the raw reading, two consecutive readings that agree are
   believed whether or not either was gapped. Pinned by `TestPeers_CutEntryThroughSustainedGaps`.
 - **`Withdraw` takes a replica out of the ranking without taking it out of the fleet**: it sets the row's
   `working=0` and makes a later repair write the same value. An owner calls it when it stops taking on work
@@ -315,19 +318,26 @@ every other moves nothing. The shards tile the order, so:
 - **Every replica carries the floor or the ceiling of `S*X/C` roles** whenever the shards' rosters agree,
   which is the steady state. 4 shards x 8 replicas: one role each; 4 shards x 2 replicas: both dispatch
   everything. Pinned by `TestDispatchers_WindowsBalanceTheRoles`.
-- **A join or leave moves at most one dispatcher per shard** when `C >= S*X` - it shifts later places by one,
-  so a window slides by one replica. Fewer candidates than slots make the windows wrap and a change in `C`
-  moves more. Pinned by `TestDispatchers_WindowsMoveOneDispatcherPerShard`.
-- **The price of the balance is churn, and it is accepted.** Unlike an independent draw, a fleet change moves
-  the cut for replicas other than the one that joined or left: a leave shifts later places down and demotes
-  live replicas, a join promotes former readers. Simulated at 4 shards: demotions per join 3.0 against 0.9 for
-  an independent draw at 8 replicas (5.5 against 1.6 at 4), live demotions per leave 2.5 against 0. Fleet
-  changes are deploys and scaling, and each move is made safe rather than avoided: **entering a cut always
-  takes two agreeing readings while leaving takes one**, so a handoff between two existing replicas goes
-  leave-then-enter and errs a dispatcher short for a cadence, and the demotion hold keeps a demoted replica's
-  in-flight steps on a share until they finish. The roles settle even again once the fleet does - pinned
-  across a rolling restart on two shards by `TestPeerRollingRestart_ShardsStayOnBudgetAndRebalance`, and the
-  handoff order by `TestPeers_CutEntryTakesTwoReadings`.
+- **A join or leave moves at most one dispatcher per shard** when `C >= S*X`. A newcomer lands at the end of
+  the order, past every window, so a join moves nobody; a leave from the middle shifts every later place down
+  by one, so each shard whose window lies past the leaver swaps one dispatcher (one demotion, one promotion).
+  Fewer candidates than slots make the windows wrap and a change in `C` moves more.
+  `TestDispatchers_WindowsMoveOneDispatcherPerShard` pins the bound for a JOIN at every place in the order
+  (`C` from `2S` to 16, up to 6 shards); a leave is the same transition in reverse and is covered only by
+  that symmetry.
+- **The price of the balance is churn, and it is accepted.** Unlike an independent draw, a fleet change can
+  move the cut for replicas other than the one that joined or left - the mid-order leave above, or any change
+  while the windows wrap. Fleet changes are deploys and scaling, and each move is made safe rather than
+  avoided: **entering a cut takes two agreeing readings while leaving takes one**, so a handoff between two
+  existing replicas goes leave-then-enter and errs a dispatcher short for a cadence, and the demotion hold
+  keeps a demoted replica's in-flight steps on a share until they finish. **The one exception is a Sonar's
+  first reading:** `New` seeds both the published standing and `lastRaw` in the cut (rank 0 of 1, so a Sonar
+  dispatches before it has read anything), and a first reading that places it in the cut is therefore
+  believed at once. The roles settle even again once the fleet does - pinned by
+  `TestPeerRollingRestart_ShardsStayOnBudgetAndRebalance` (three replicas over two shards, the wrapping case:
+  every sample stays within the budget plus one dispatcher share plus the reader pools, and after the roll
+  every replica carries one or two of the four roles), and the handoff order by
+  `TestPeers_CutEntryTakesTwoReadings`.
 - **Each shard still decides from its own registry.** A replica blind on shard 3 can only be wrong about
   shard 3; the other shards' cuts never read its rows.
 

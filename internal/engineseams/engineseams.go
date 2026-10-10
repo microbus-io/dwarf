@@ -95,14 +95,14 @@ const (
 	FaultLeaseStaleWrite    = "leaseStaleWrite"    // the completion write carries a stale lease_seq (zombie)
 	FaultPersistErr         = "persistErr"         // the step-completion write returns a non-contention database error (consumed per attempt, so InjectN sets how many attempts fail)
 	FaultSubgraphSpawnErr   = "subgraphSpawnErr"   // the subgraph spawn errors before its transaction, with the caller step not yet parked
+	FaultRetryRewindErr     = "retryRewindErr"     // the flow.Retry rewind returns a non-contention database error (consumed per attempt)
 
 	// Scoped by workflow URL of the subgraph child:
-	FaultSubgraphReviveLost = "subgraphReviveLost" // the subgraph-completion path skips reviving the parked caller
+	FaultSubgraphSpawnCommitLost = "subgraphSpawnCommitLost" // the subgraph spawn commits but reports an error, as if its acknowledgement were lost
+	FaultSubgraphReviveLost      = "subgraphReviveLost"      // the subgraph-completion path skips reviving the parked caller
 
 	// Process-wide, consumed per attempt (InjectN sets how many attempts fail):
 	FaultCompleteSurgraphErr = "completeSurgraphErr" // the subgraph-completion write returns a non-contention database error
-
-	// Scoped by signal op:
 
 	// Process-wide (no scope):
 	FaultInterruptStaleWrite = "interruptStaleWrite" // the interrupt path's in-transaction lease-generation read is forced to mismatch (zombie)
@@ -115,11 +115,13 @@ const (
 	FaultRefillScanErr       = piston.FaultScanErr   // the piston's priority-band scan errors (its name, so there is one catalogue)
 	FaultPeerReadErr         = peers.FaultReadErr    // a shard's peer-registry reading fails: this replica goes BLIND on that shard (their names, so there is one catalogue)
 	FaultPeerBeatErr         = peers.FaultBeatErr    // a shard's peer-registry beat writes nothing: this replica stops proving its liveness THERE, while running on
-	FaultSlowPoolPush        = "slowPoolPush"        // recomputePools stalls between reading R and pushing the derived sizes
+	FaultSlowPoolPush        = "slowPoolPush"        // recomputePools stalls between reading the roles and pushing the derived sizes
 	FaultDeliverFailureErr   = "deliverFailureErr"   // deliverFlowFailureToParent drops the parked-caller re-dispatch (lost delivery); unscoped, or scoped by the parked caller's task name for per-level control
 	FaultTerminateCommit     = "terminateCommit"     // the Terminate transaction errors
 	FaultResumeCommit        = "resumeCommit"        // the Resume transaction errors
 	FaultForkCommit          = "forkCommit"          // the Fork clone transaction errors
+	FaultInitRuntime         = "initRuntime"         // Startup's runtime initialization fails, after the shards are open and the fleet joined
+	FaultFailFlowFinalState  = "failFlowFinalState"  // failing a flow cannot compute its final state, so it terminalizes with an empty one
 )
 
 // --- Execution checkpoints ---
@@ -138,6 +140,7 @@ const (
 	CheckpointBeforeDeleteWrite         = "beforeDeleteWrite"         // Delete, just before its transaction's delete-stamp/interrupted-CAS write
 	CheckpointBeforeReviveWrite         = "beforeReviveWrite"         // the subgraph-completion path, just before its transaction's caller-revive write
 	CheckpointBeforeRecoveryReset       = "beforeRecoveryReset"       // the post-execution recovery path, just before its fenced step-reset transaction
+	CheckpointClaimedDispatchDone       = "claimedDispatchDone"       // step execution returned after winning its claim; fired bare and targeted by (shard, step id)
 
 	// A COUNTING checkpoint (read with Visits, never a rendezvous), scoped by flow id so concurrent flows
 	// count independently. No test arms Wait/Break on it, so Checkpoint just increments and returns; both the
@@ -193,9 +196,11 @@ const (
 	// followed a Create+Await). Wait for this before forging; the wait is free once the sweep is behind (Visits).
 	CheckpointRecoverySweepDone = "recoverySweepDone" // runRecoverySweep(), one full recovery pass is over
 
-	// Fired per shard (scoped by the shard number, and once unscoped) when that shard's piston completes a
-	// cycle that PUSHED - i.e. its cache partition now reflects the plan. Its name is the piston's, so there
-	// is one catalogue, exactly like FaultRefillScanErr.
+	FaultRefillFetchErr = piston.FaultFetchErr // make a shard's FetchSteps fail without touching the database
+
+	// CheckpointRefillCycleDone is fired per shard (scoped by the shard number, and once unscoped) when that
+	// shard's piston completes a cycle that PUSHED - i.e. its cache partition now reflects the plan. Its name
+	// is the piston's, so there is one catalogue, exactly like FaultRefillScanErr.
 	//
 	// What it exists for: `Offer` admits a step into an EMPTY partition unconditionally and stamps that
 	// partition's band from the arrival, while `Cache.Pop` ranks partitions by that FROZEN band and never
@@ -204,9 +209,8 @@ const (
 	// cadence, so a test that needs the fleet's partitions to agree with the plan before it asserts dispatch
 	// ORDER must wait for a cycle per shard; no amount of elapsed time substitutes, because one starved
 	// piston is exactly the case that breaks it.
-	FaultRefillFetchErr       = piston.FaultFetchErr       // make a shard's FetchSteps fail without touching the database
-	CheckpointRefillTallyDone = piston.CheckpointTallyDone // a shard's piston published a tally from a real scan
 	CheckpointRefillCycleDone = piston.CheckpointCycleDone // a shard's piston reconciled its cache partition
+	CheckpointRefillTallyDone = piston.CheckpointTallyDone // a shard's piston published a tally from a real scan
 	CheckpointRefillStole     = piston.CheckpointStole     // a shard's piston selected steps from OUTSIDE its residue class
 )
 

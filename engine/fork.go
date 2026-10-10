@@ -139,6 +139,7 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	var newRootFlowID int
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		cc.newLeafStepID = 0
+		cc.startedURLs = cc.startedURLs[:0]
 		// engineseams.FaultForkCommit fails this transaction once, before the clone runs, so the test proves the whole
 		// clone rolls back atomically (origin byte-identical, zero partial clone rows) and a retry then
 		// forks cleanly - pinning Fork's "crash mid-clone rolls back, origin never mutated" claim.
@@ -163,11 +164,12 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 
 	newFlowKey := keys.New(shardNum, newRootFlowID, cc.rootFlowToken)
 	e.logger.InfoContext(ctx, "Flow forked", "fromRoot", rootFlowID, "forkStep", forkStepID, "to", newRootFlowID)
-	// A fork starts a new, self-contained root flow, and its completion runs through the same completeFlow
-	// that increments dwarf_flows_ended - so it MUST also be counted here, or the standard in-flight
-	// panel (started - ended) drifts negative by one per fork. Create and Continue count their starts
-	// at the same point; Fork's own INSERT...SELECT clone path simply never did.
-	e.metricFlowStarted(ctx, cc.rootWorkflowURL, shardNum)
+	// Every flow on the rewind chain - the new root and each subgraph flow between it and the fork step - is
+	// cloned running and ends through completeFlow, which counts it in dwarf_flows_ended. Each must be
+	// counted as started too, or the in-flight panel (started - ended) drifts by one per flow.
+	for _, workflowURL := range cc.startedURLs {
+		e.metricFlowStarted(ctx, workflowURL, shardNum)
+	}
 	e.enqueueStep(ctx, shardNum, cc.newLeafStepID)
 	return newFlowKey, nil
 }
@@ -187,8 +189,8 @@ type forkClone struct {
 	fairnessWeight  float64
 	timeBudgetMs    int
 	newLeafStepID   int
-	newRootFlowID   int    // the cloned root's flow_id; descendants inherit it as their root_flow_id
-	rootWorkflowURL string // the cloned root's workflow_url, for the flows_started metric after commit
+	newRootFlowID   int      // the cloned root's flow_id; descendants inherit it as their root_flow_id
+	startedURLs     []string // workflow_url of every flow cloned to run again, for flows_started after commit
 }
 
 // forkChild is a queued subgraph-caller child awaiting clone: its origin flow plus the new-surgraph context
@@ -208,7 +210,7 @@ type forkChild struct {
 // goroutine stack stays O(1) at any nesting depth. Depth-proportional recursion here would instead hold every
 // ancestor's clone state simultaneously and, at pathological depth, overflow the goroutine stack - which is
 // fatal (unrecoverable by errors.CatchPanic, unlike a host-call panic). Children are pushed in reverse so they
-// pop in discovery order (DFS preorder, matching the former recursion), keeping cloned-id assignment stable.
+// pop in discovery order (DFS preorder), keeping cloned-id assignment stable.
 func (e *Engine) cloneTree(ctx context.Context, tx *sequel.Tx, cc *forkClone, rootFlowID int) (int, error) {
 	stack := []forkChild{{originFlowID: rootFlowID, isRoot: true}}
 	var rootNewID int
@@ -261,6 +263,7 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	newStatus := status
 	if isRoot || rewind != 0 { // on the rewind chain
 		newStatus = workflow.StatusRunning
+		cc.startedURLs = append(cc.startedURLs, workflowURL)
 	}
 	// Scheduling (cc.*) is resolved once and applied uniformly to every cloned flow and step - the tree is
 	// uniform and a deep-subgraph fork's re-running leaf must carry the same overridden values.
@@ -270,7 +273,6 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		newStatus = workflow.StatusCreated // gate; flipped to running below once this flow is mapped
 		forkedFromStep, newTrace = cc.leafStepID, cc.rootTraceParent
 		deleteOnCompletion = 0
-		cc.rootWorkflowURL = workflowURL // for the flows_started metric, emitted after the tx commits
 	}
 
 	// Hoist the minted token: the root overwrites it with cc.rootFlowToken below, but a non-root subgraph

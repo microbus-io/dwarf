@@ -213,9 +213,7 @@ func TestChaosSoak(t *testing.T) {
 
 // chaosEnqueue rings a duplicate/possibly-stale LOCAL work doorbell for one of the flow's steps,
 // exercising the documented idempotency of a candidate hint: the cache holds hints, never ownership, so
-// re-offering a step that is already running, completed or gone must be absorbed by the claim CAS. It
-// used to drive this through a per-step peer broadcast, which no longer exists, so the chaos targets the
-// local primitive that broadcast used to feed.
+// re-offering a step that is already running, completed or gone must be absorbed by the claim CAS.
 func chaosEnqueue(ctx context.Context, eng *Engine, flowKey string) {
 	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if err != nil {

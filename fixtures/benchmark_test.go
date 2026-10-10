@@ -157,11 +157,11 @@ func BenchmarkFlowThroughput(b *testing.B) {
 }
 
 // BenchmarkStatePayload measures how state size affects throughput: a JSON string of the given size seeds the
-// flow's initial state and rides through every step's `state` column (each step persists merge(prevState,
-// changes), and no-op tasks carry state forward unchanged), so the engine serializes + writes + re-merges the
-// whole payload benchChainLen times per flow. Reports the usual flows/s + latency plus payloadMB/s = payload
-// size x steps/s: the rate at which caller state bytes move through durable storage (persisted bytes are ~this
-// x the chain length, since every step stores its own copy). Fixed at 1 shard to isolate the payload effect.
+// flow's initial state and is carried, unchanged, by no-op tasks through benchChainLen steps. A payload above the
+// state-ref size bar is stored once and referenced from every later step's state; a smaller one is copied into
+// each step's state. Reports the usual flows/s + latency plus payloadMB/s = payload size x steps/s, the rate at
+// which caller state moves through the flow - not the bytes written, which refs keep near one copy per flow.
+// Fixed at 1 shard to isolate the payload effect.
 func BenchmarkStatePayload(b *testing.B) {
 	for _, sz := range []struct {
 		name  string

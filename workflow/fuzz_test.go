@@ -238,6 +238,7 @@ func FuzzFlowJSON(f *testing.F) {
 	f.Add(seed)
 	f.Add([]byte(`{"state":{"a":null},"changes":{"a":null},"attempt":-1}`))
 	f.Add([]byte(`{}`))
+	f.Add([]byte(`{"state":{"a":1}}`))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var fl Flow
 		if err := json.Unmarshal(data, &fl); err != nil {
@@ -246,10 +247,19 @@ func FuzzFlowJSON(f *testing.F) {
 		if _, err := json.Marshal(&fl); err != nil {
 			t.Fatalf("re-marshal failed: %v", err)
 		}
-		// Exercise the accessors most tasks call, on adversarial state.
-		_ = fl.GetString("a")
-		_ = fl.GetInt("a")
+		// Exercise the accessors most tasks call, on adversarial state. The typed getters panic on a type
+		// mismatch by design, so a field is read through Get, which reports one as an error.
+		var str string
+		var n int
+		_, _ = fl.Get("a", &str)
+		_, _ = fl.Get("a", &n)
 		_ = fl.Has("a")
 		_ = fl.Snapshot()
+		// And the setters: a flow decoded without one of its maps must still take a write.
+		fl.SetString("b", "v")
+		if err := fl.Set("c", 1); err != nil {
+			t.Fatalf("set failed: %v", err)
+		}
+		fl.Del("a")
 	})
 }

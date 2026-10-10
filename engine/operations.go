@@ -510,7 +510,7 @@ func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 	//
 	// The SECOND read builds the outcome once the board says the flow has SETTLED. It is not a re-check:
 	// every release means the row reached a stop (or stopped resolving), never merely "look again", which
-	// is what removes the loop this used to need. Do not release on a non-settled status - a caller would
+	// is why there is no loop. Do not release on a non-settled status - a caller would
 	// take a running flow for a finished one. `signalStop` guards that.
 	//
 	// Registering AFTER the first read is safe for the same reason parking at all is: the board is POLLED,
@@ -586,18 +586,17 @@ func (e *Engine) signalStop(ctx context.Context, flowKey string, status string) 
 
 // The work doorbell is PURELY LOCAL - it reaches this replica's candidate cache and nothing else.
 //
-// It used to also broadcast to peers (op `enqueue`, one message per step per peer). That broadcast was
-// removed: under load every peer's piston is already cycling at its derived interval, so the doorbell
-// bought no dispatch latency the next cycle would not have covered, while costing R-1 messages per step
-// AND a PK lookup on every receiver (the inbound path had to resolve the announced step's priority and
-// due-ness against its own clock, which is exactly the round-trip enqueueStepDue exists to avoid
-// locally). It also head-inserted UNPARTITIONED on the receiver, so a peer could race the residue class's
-// owner to the claim CAS. What replaced it is that every piston cycles unconditionally: a peer discovers
-// work by scanning, on a bounded cadence, with no message at all.
+// Do not broadcast it to peers (one message per step per peer). Under load every peer's piston is already
+// cycling at its derived interval, so a broadcast buys no dispatch latency the next cycle would not cover,
+// while costing R-1 messages per step AND a PK lookup on every receiver (the inbound path must resolve the
+// announced step's priority and due-ness against its own clock, which is exactly the round-trip
+// enqueueStepDue exists to avoid locally). It would also offer the step UNPARTITIONED on the receiver, so a
+// peer could race the residue class's owner to the claim CAS. Every piston cycles unconditionally instead: a
+// peer discovers work by scanning, on a bounded cadence, with no message at all.
 //
-// The doorbell no longer rings a refiller either - there is no trigger to ring, because a piston's cycle
-// is not on-demand. What it still does, and what makes that affordable, is Offer: an empty partition
-// ADMITS the step, so a sequential chain's next hop dispatches immediately instead of waiting out a cycle.
+// The doorbell rings no refiller either - there is no trigger to ring, because a piston's cycle is not
+// on-demand. What it does is Offer: an empty partition ADMITS the step, so a sequential chain's next hop
+// dispatches immediately instead of waiting out a cycle.
 //
 // Consequence to keep in mind when reading the origination sites: a step created here is offered to THIS
 // replica's cache only. If this replica cannot serve it (the step falls in a peer's residue class), the
@@ -713,7 +712,7 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 
 	// The root has no ancestors by construction, so this walks DOWN only - see terminateSubtree, which the orphan
 	// sweep shares.
-	return errors.Trace(e.terminateSubtree(ctx, shardNum, flowID, flowToken, reason, engineseams.FaultTerminateCommit))
+	return errors.Trace(e.terminateSubtree(ctx, shardNum, flowID, flowToken, reason, false, engineseams.FaultTerminateCommit))
 }
 
 // cancel marks every pending, running or interrupted step in the tree with cancelling=1. Each marked step
@@ -756,10 +755,11 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	defer doneTurn()
 
 	var surgraphFlowID, watermark int
+	var status string
 	err = db.QueryRowContext(ctx,
-		"SELECT surgraph_flow_id, cancel_watermark FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
+		"SELECT surgraph_flow_id, cancel_watermark, status FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
 		flowID, flowToken,
-	).Scan(&surgraphFlowID, &watermark)
+	).Scan(&surgraphFlowID, &watermark, &status)
 	if err == sql.ErrNoRows {
 		return errors.New("flow not found", http.StatusNotFound)
 	}
@@ -769,8 +769,8 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	if surgraphFlowID != 0 {
 		return errors.New("cannot cancel a subgraph child; use the root flow key", http.StatusBadRequest)
 	}
-	if watermark != 0 {
-		return nil // already cancelled - see above
+	if watermark != 0 || workflow.IsTerminalStatus(status) {
+		return nil // already cancelled, or already ended - see above. The writes below re-guard both.
 	}
 
 	// Same tree-membership shape Terminate's descendant walk uses (root_flow_id scan, non-terminal nodes
@@ -824,10 +824,12 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 
 // deleteFlow schedules a flow (and its subgraph subtree) for deletion by the reaper - it does NOT delete rows
 // inline. It stamps delete_after_ms=1 (due immediately) on the root; the reaper removes the whole tree on its
-// next pass. An interrupted flow is terminalized (interrupted -> terminated, a forceful operator action, same
-// as Terminate) in the same UPDATE, which is mutually exclusive with a racing Resume (WHERE status<>'running',
-// re-checked under the row lock), so the old strand race (delete steps while Resume revives) is gone by
-// construction - no lock-first selection needed.
+// next pass. Only a terminal root is stamped, so a live delete_after_ms never coexists with a resumable flow.
+//
+// An interrupted flow is terminated first, exactly as Terminate would (terminateSubtree): its whole tree is
+// stopped, given a final state and counted in dwarf_flows_ended once. Deleting a pending approval is terminating
+// it. A racing Resume and Delete serialize on the root's row: whichever commits first wins, and a Delete that
+// loses is a 409, as for any running flow.
 func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
@@ -844,49 +846,51 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	ctx, doneTurn := e.dbTurn(ctx, shardNum)
 	defer doneTurn()
 
-	// Test checkpoint: a breakpoint here freezes Delete just before its transaction (holding no lock, so a
-	// racing Resume can commit), letting a test drive the Delete-vs-Resume race in either order. Placed before
-	// the transaction, not inside, for the same SQLite-deadlock reason as engineseams.CheckpointResumeBeforeFlowWrite.
+	// Test checkpoint: a breakpoint here freezes Delete just before it reads the flow's status (holding no lock,
+	// so a racing Resume can commit), letting a test drive the Delete-vs-Resume race in either order.
 	e.seams.Checkpoint(ctx, engineseams.CheckpointBeforeDeleteWrite)
-	return errors.Trace(db.Transact(ctx, func(tx *sequel.Tx) error {
-		var flowStatus string
-		var surgraphFlowID, deleteAfterMs int
-		err := tx.QueryRowContext(ctx,
-			"SELECT status, surgraph_flow_id, delete_after_ms FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
-			flowID, flowToken,
-		).Scan(&flowStatus, &surgraphFlowID, &deleteAfterMs)
-		if err == sql.ErrNoRows {
-			return errors.New("flow not found", http.StatusNotFound)
+	var flowStatus string
+	var surgraphFlowID, deleteAfterMs int
+	err = db.QueryRowContext(ctx,
+		"SELECT status, surgraph_flow_id, delete_after_ms FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
+		flowID, flowToken,
+	).Scan(&flowStatus, &surgraphFlowID, &deleteAfterMs)
+	if err == sql.ErrNoRows {
+		return errors.New("flow not found", http.StatusNotFound)
+	}
+	if err != nil {
+		return errors.Trace(err)
+	}
+	// A subgraph child cannot be deleted directly (its parent's surgraph step would dangle). Address the
+	// tree by the root key; the reaper removes descendants via root_flow_id. A child key is read-only.
+	if surgraphFlowID != 0 {
+		return errors.New("cannot delete a subgraph child; use the root flow key", http.StatusBadRequest)
+	}
+	// The 409 guards only the ROOT's status; a running subgraph descendant of a terminal root does not block the
+	// delete. The reaper later removes the whole root_flow_id tree regardless of descendant status - safe because
+	// the only running descendant a terminal-rooted tree can hold is a live orphan (which only a bug leaves) the
+	// wedge sweep would terminate anyway, and a worker mid-dispatch on it no-ops via the lease fence (see
+	// reapDueFlows).
+	if flowStatus == workflow.StatusRunning {
+		return errors.New("cannot delete a running flow; terminate it first", http.StatusConflict)
+	}
+	if deleteAfterMs > 0 {
+		return nil // already scheduled - idempotent
+	}
+	if flowStatus == workflow.StatusInterrupted {
+		err = e.terminateSubtree(ctx, shardNum, flowID, flowToken, "deleted", true, "")
+		if errors.Is(err, errRootNotInterrupted) {
+			return errors.New("cannot delete a running flow; terminate it first", http.StatusConflict)
 		}
 		if err != nil {
 			return errors.Trace(err)
 		}
-		// A subgraph child cannot be deleted directly (its parent's surgraph step would dangle). Address the
-		// tree by the root key; the reaper removes descendants via root_flow_id. A child key is read-only.
-		if surgraphFlowID != 0 {
-			return errors.New("cannot delete a subgraph child; use the root flow key", http.StatusBadRequest)
-		}
-		// The 409 guards only the ROOT's status; a running subgraph descendant does not block the delete. The
-		// reaper later removes the whole root_flow_id tree regardless of descendant status - safe because the
-		// only running descendant a terminal-rooted tree can hold is a live orphan (which only a bug leaves) the
-		// wedge sweep would terminate anyway, and a worker mid-dispatch on it no-ops via the lease fence (see
-		// reapDueFlows).
-		if flowStatus == workflow.StatusRunning {
-			return errors.New("cannot delete a running flow; terminate it first", http.StatusConflict)
-		}
-		if deleteAfterMs > 0 {
-			return nil // already scheduled - idempotent
-		}
-
-		// Stamp due-now; terminalize an interrupted flow in the same write (the Resume gate). status<>'running'
-		// re-guards a Resume that raced in after the SELECT: it either wins (row is running -> 0 rows here, a
-		// benign lost delete, flow stays alive) or loses (we stamp; its interrupted CAS then finds terminated).
-		tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET delete_after_ms=1, status=CASE WHEN status='"+workflow.StatusInterrupted+"' THEN '"+workflow.StatusTerminated+"' ELSE status END WHERE flow_id=? AND flow_token=? AND status<>'"+workflow.StatusRunning+"' AND delete_after_ms=0",
-			flowID, flowToken,
-		)
-		return nil
-	}))
+	}
+	_, err = db.ExecContext(ctx,
+		"UPDATE dwarf_flows SET delete_after_ms=1 WHERE flow_id=? AND flow_token=? AND status IN ("+terminalStatusesSQL+") AND delete_after_ms=0",
+		flowID, flowToken,
+	)
+	return errors.Trace(err)
 }
 
 // run creates, starts, and awaits a flow in one call.
@@ -895,18 +899,27 @@ func (e *Engine) run(ctx context.Context, workflowURL string, initialState any, 
 	if err != nil {
 		return "", nil, errors.Trace(err)
 	}
-	outcome, err = e.await(ctx, flowKey)
+	// A wait that runs out does NOT tear the flow down: it is durable and already running on the engine's own
+	// worker lifetime, independent of this call. Terminating here would destroy healthy, in-progress work (a
+	// durable retry-until-success job especially) just because the caller stopped waiting. The flowKey comes
+	// back with the timeout error, so the caller keeps a handle to re-Await/Snapshot/Terminate on its own terms.
+	outcome, err = e.awaitStopped(ctx, flowKey)
 	if err != nil {
 		return flowKey, nil, errors.Trace(err)
 	}
-	if !outcome.Stopped() {
-		// The wait ran out before the flow stopped: the caller's ctx, or await's default budget for a ctx with
-		// no deadline, which leaves ctx.Err() nil. The flow is durable and already running on the
-		// engine's own worker lifetime, independent of this call - so do NOT tear it down. Terminating here
-		// would destroy healthy, in-progress work (a durable retry-until-success job especially) just because
-		// the caller stopped waiting - an availability footgun. Return the flowKey with a timeout error
-		// instead, so the caller keeps a handle to re-Await/Snapshot/Terminate on its own terms.
-		return flowKey, nil, errors.New("timed out awaiting flow", cmp.Or(ctx.Err(), context.DeadlineExceeded), http.StatusRequestTimeout)
-	}
 	return flowKey, outcome, nil
+}
+
+// awaitStopped is await for a caller that wants a stopped flow or an error: a wait that runs out - the
+// caller's ctx, or await's default budget for a ctx with no deadline, which leaves ctx.Err() nil - is a 408 that
+// satisfies errors.Is(err, context.DeadlineExceeded).
+func (e *Engine) awaitStopped(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
+	outcome, err := e.await(ctx, flowKey)
+	if err != nil {
+		return nil, err
+	}
+	if !outcome.Stopped() {
+		return nil, errors.New("timed out awaiting flow", cmp.Or(ctx.Err(), context.DeadlineExceeded), http.StatusRequestTimeout)
+	}
+	return outcome, nil
 }

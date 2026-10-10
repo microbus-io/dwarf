@@ -61,13 +61,13 @@ func (f *RawFlow) SetAttempt(attempt int) {
 	f.attempt = attempt
 }
 
-// SetCreatedAt records the flow row's createdAt. Called by the orchestrator before dispatching a
+// SetCreatedAt records when the flow was created. Called by the orchestrator before dispatching a
 // task so the task can read it via Flow.CreatedAt().
 func (f *RawFlow) SetCreatedAt(createdAt time.Time) {
 	f.createdAt = createdAt
 }
 
-// SetUpdatedAt records the flow row's updatedAt. Called by the orchestrator before dispatching a
+// SetUpdatedAt records when the flow last changed status. Called by the orchestrator before dispatching a
 // task so the task can read it via Flow.UpdatedAt().
 func (f *RawFlow) SetUpdatedAt(updatedAt time.Time) {
 	f.updatedAt = updatedAt
@@ -126,10 +126,36 @@ func (f *RawFlow) RetryRequested() (initialDelay time.Duration, multiplier float
 	return f.backoffInitialDelay, f.backoffDelayMultiplier, f.backoffMaxDelay, true
 }
 
-// SleepRequested returns the duration set by Sleep, or zero if not set. The clamp is the trust boundary,
-// not a duplicate of Sleep's: this Flow may have been decoded off the wire from a remote task, so the field
-// is not necessarily a value Sleep ever vetted, and a negative duration would otherwise delay the next step
-// into the past.
+// RetryDelay returns the backoff before the next attempt of a step that called Retry on the given attempt
+// (0-based): min(initialDelay * multiplier^attempt, maxDelay), or zero if Retry was not called. It is the same
+// delay Retry's give-up decision assumes.
+func (f *RawFlow) RetryDelay(attempt int) time.Duration {
+	if !f.retry {
+		return 0
+	}
+	return backoffDelay(f.backoffInitialDelay, f.backoffDelayMultiplier, f.backoffMaxDelay, attempt)
+}
+
+// backoffDelay is min(initialDelay * multiplier^attempt, maxDelay); a non-positive multiplier or maxDelay
+// disables that term. It clamps in float space and stops multiplying at the cap, so it never overflows int64 ns.
+func backoffDelay(initialDelay time.Duration, multiplier float64, maxDelay time.Duration, attempt int) time.Duration {
+	delay := float64(initialDelay)
+	if multiplier > 0 {
+		for range attempt {
+			if maxDelay > 0 && delay >= float64(maxDelay) {
+				break
+			}
+			delay *= multiplier
+		}
+	}
+	if maxDelay > 0 && delay > float64(maxDelay) {
+		delay = float64(maxDelay)
+	}
+	return time.Duration(delay)
+}
+
+// SleepRequested returns the duration set by Sleep, or zero if none was set. A negative duration - which
+// Sleep accepts as a no-op, and which a Flow decoded off the wire from a remote task may carry - reads as zero.
 func (f *RawFlow) SleepRequested() time.Duration {
 	return max(f.sleepDuration, 0)
 }

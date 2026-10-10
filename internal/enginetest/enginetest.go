@@ -63,17 +63,17 @@ func AssertInvariants(t *testing.T, e Engine) {
 	terminal := "('" + workflow.StatusCompleted + "', '" + workflow.StatusFailed + "', '" + workflow.StatusTerminated + "', '" + workflow.StatusCancelled + "')"
 	nonTerminal := "('" + workflow.StatusCreated + "', '" + workflow.StatusPending + "', '" + workflow.StatusRunning + "', '" + workflow.StatusInterrupted + "')"
 
-	for shard := 1; shard <= engineseams.DB(e).NumShards(); shard++ {
+	for _, shard := range engineseams.DB(e).Indices() {
 		db, err := engineseams.DB(e).Shard(shard)
 		if !assert.NoError(err) {
 			continue
 		}
 
-		// Asserted ONCE, against the state as it stands. This used to retry for a few seconds first, on the
-		// theory that a violation might be work still in flight (a cohort mid-resolve briefly shows every step
-		// terminal while the flow is still running - the orphan shape, transient). That settle was removed
-		// deliberately: it could only ever HIDE a real violation, never surface one, and a check that waits for
-		// an invariant to come true is not asserting an invariant. The precondition is the caller's to meet -
+		// Asserted ONCE, against the state as it stands. Do not retry for a few seconds first on the theory that a
+		// violation might be work still in flight (a cohort mid-resolve briefly shows every step terminal while
+		// the flow is still running - the orphan shape, transient): a settle could only ever HIDE a real
+		// violation, never surface one, and a check that waits for an invariant to come true is not asserting an
+		// invariant. The precondition is the caller's to meet -
 		// call this only after the workload has quiesced (all Awaits returned).
 		check := func(label, query string) {
 			var n int
@@ -214,7 +214,14 @@ func TimeoutScale() time.Duration { return testTimeoutScale }
 // it kills is the one that would have driven the checkpoint, so the suite wedges instead of reporting.
 func AwaitVisits(t *testing.T, seams *seamster.Seamster, n int, timeout time.Duration, checkpointName string) {
 	t.Helper()
-	want := seams.Visits(checkpointName) + n
+	AwaitVisitCount(t, seams, seams.Visits(checkpointName)+n, timeout, checkpointName)
+}
+
+// AwaitVisitCount is AwaitVisits for a test that counts from an earlier moment: it blocks until the checkpoint
+// has been reached want times in all. Read the base with Visits before triggering the events, then wait for
+// base+n, so an arrival landing before the wait begins still counts.
+func AwaitVisitCount(t *testing.T, seams *seamster.Seamster, want int, timeout time.Duration, checkpointName string) {
+	t.Helper()
 	deadline := time.After(timeout * testTimeoutScale)
 	for {
 		reached := seams.Waiter(checkpointName) // arm FIRST...
@@ -231,7 +238,7 @@ func AwaitVisits(t *testing.T, seams *seamster.Seamster, n int, timeout time.Dur
 	}
 }
 
-// AwaitShardCycles blocks until every shard's piston has SCANNED and then PUSHED `extra` further times,
+// AwaitShardCycles blocks until every open shard's piston has SCANNED and then PUSHED `extra` further times,
 // counted from the moment of the call.
 //
 // A pushing cycle is the point at which that shard's cache partition has been reconciled against the plan,
@@ -248,14 +255,15 @@ func AwaitVisits(t *testing.T, seams *seamster.Seamster, n int, timeout time.Dur
 // built from whatever tally the planner already held, which may predate the work entirely. N pushes can
 // therefore all resolve a stale tally. Waiting for the SCANS first is what puts the work into the plan; the
 // pushes that follow are what put the plan into the partition.
-func AwaitShardCycles(t *testing.T, e Engine, shards, extra int) {
+func AwaitShardCycles(t *testing.T, e Engine, extra int) {
 	t.Helper()
+	shards := engineseams.DB(e).Indices()
 	// Every shard scans before any shard's pushes are awaited, so no shard can satisfy its push count
 	// against a plan built before a peer had reported.
-	for shard := 1; shard <= shards; shard++ {
+	for _, shard := range shards {
 		AwaitVisits(t, engineseams.Seams(e), extra, time.Minute, engineseams.Join(piston.CheckpointTallyDone, strconv.Itoa(shard)))
 	}
-	for shard := 1; shard <= shards; shard++ {
+	for _, shard := range shards {
 		AwaitVisits(t, engineseams.Seams(e), extra, time.Minute, engineseams.Join(piston.CheckpointCycleDone, strconv.Itoa(shard)))
 	}
 }

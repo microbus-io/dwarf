@@ -26,16 +26,15 @@ import (
 
 // exampleHost implements engine.Host. A real host loads graphs from a registry/file/database/RPC and
 // dispatches tasks over a local call, RPC, or message bus; here an in-memory registry and a local
-// function stand in. LoadGraph and ExecuteTask are required; the remaining Host methods (flow-stop
-// notification and the cross-replica signals) are left as no-ops.
+// function stand in. LoadGraph and ExecuteTask are the whole interface.
 type exampleHost struct {
 	graphs map[string]*workflow.Graph
 }
 
-func (h exampleHost) LoadGraph(ctx context.Context, name string) (*workflow.Graph, error) {
-	return h.graphs[name], nil
+func (h exampleHost) LoadGraph(ctx context.Context, workflowURL string) (*workflow.Graph, error) {
+	return h.graphs[workflowURL], nil
 }
-func (h exampleHost) ExecuteTask(ctx context.Context, taskName string, f *workflow.Flow) error {
+func (h exampleHost) ExecuteTask(ctx context.Context, taskURL string, f *workflow.Flow) error {
 	f.SetString("greeting", "hello "+f.GetString("name"))
 	return nil
 }
@@ -68,8 +67,8 @@ func Example() {
 	fmt.Println(out.State.GetString("greeting"))
 }
 
-// Create makes and runs a flow, and accepts FlowOptions for scheduling, notifications, thread membership,
-// and the opaque host baggage carried with the flow.
+// Create makes and runs a flow, and accepts FlowOptions for scheduling, thread membership, and the opaque
+// host baggage carried with the flow.
 func ExampleEngine_Create() {
 	var eng *engine.Engine // obtained from NewEngine().…Startup(ctx)
 	ctx := context.Background()

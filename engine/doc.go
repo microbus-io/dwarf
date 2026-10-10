@@ -18,8 +18,8 @@ limitations under the License.
 //
 // The engine executes workflow graphs against a SQL database, scheduling and dispatching one task at a
 // time per step, persisting state between steps, and driving fan-out/fan-in, retries, sleeps, subgraphs,
-// and interrupts. It owns no transport of its own; a host wires it to the outside world through injected
-// dependency interfaces and calls its operations.
+// and interrupts. It owns no transport of its own; a host wires it to the outside world through a single
+// injected Host interface, plus optional logging, metrics and tracing providers, and calls its operations.
 //
 // # Lifecycle
 //
@@ -29,32 +29,34 @@ limitations under the License.
 // just configures the engine, calls Startup, and defers Shutdown (see NewEngineUnderTest).
 //
 //	eng := engine.NewEngine()
-//	eng.SetShard(ShardSpec{Index: 1, DSN: "postgres://user:pass@host:5432/dwarf"})
+//	eng.SetShard(engine.ShardSpec{Index: 1, DSN: "postgres://user:pass@host:5432/dwarf"})
 //	eng.SetHost(host)
 //	err := eng.Startup(ctx)
 //	if err != nil { ... }
 //	defer eng.Shutdown(ctx)
 //
-// Each Set* method returns an error. The live ones (SetTimeBudget, SetDefaultPriority) take effect immediately on a running engine; the
-// construction-time-only ones (SetShard, SetWorkers, SetHost, SetLogger, SetMeterProvider,
-// SetTracerProvider) return an error if called after Startup. Tuning derives from what the engine
-// observes plus two optional per-shard levers: each shard's connection budget follows the round-trip time
-// measured at Startup and the server's own connection limit unless ShardSpec.MaxConnections sets it, and
-// ShardSpec.Weight sets its share of new flows; the budget is automatically split across the few engine replicas that
-// dispatch each database, which the replicas agree on through a shared peer registry they heartbeat into,
-// while every other replica holds two connections there (no replica count is ever declared, and nothing
-// is sent between replicas to establish it); and the
-// worker maximum is derived from the crash-recovery lease margin and the
-// round-trip time measured at Startup, so it holds for any task duration (the pool grows into it only
-// on demand, so short-task deployments never pay for the headroom). The SetWorkers override exists for
-// tests, benchmarks, and memory-bounded hosts.
+// Each Set* method returns an error. The live ones (SetTimeBudget, SetDefaultPriority) take effect
+// immediately on a running engine; the construction-time-only ones (SetShard, SetWorkers, SetHost,
+// SetEngineID, SetLogger, SetDebugLogger, SetMeterProvider, SetTracerProvider) return an error if called
+// after Startup.
+//
+// Tuning derives from what the engine observes, plus two optional per-shard levers. Each shard's connection
+// budget follows the round-trip time measured at Startup and the server's own connection limit, unless
+// ShardSpec.MaxConnections sets it; ShardSpec.Weight sets the shard's share of new flows. The budget is split
+// across the few engine replicas that dispatch each database, which the replicas agree on through a shared
+// peer registry they heartbeat into, while every other replica holds two connections there - no replica
+// count is ever declared, and nothing is sent between replicas to establish it. The worker maximum is derived
+// from the crash-recovery lease margin and the measured round-trip time, so it holds for any task duration;
+// the worker pool grows into it only on demand, so short-task deployments never pay for the headroom. The
+// SetWorkers override exists for tests, benchmarks, and memory-bounded hosts.
 //
 // # Host
 //
 // The engine reaches the outside world through a single injected Host interface (see SetHost):
 //
-//   - LoadGraph fetches a workflow graph by name (called at Create; the graph JSON is then frozen on the
-//     flow), and on subgraph spawn.
+//   - LoadGraph fetches a workflow graph by its workflow URL - the opaque key passed to Create or Run, or to
+//     a task's Subgraph call. It is called at Create and at each subgraph spawn; the graph is then frozen
+//     with the flow.
 //   - ExecuteTask executes one task, given the Flow carrier with its state pre-populated.
 //
 // That is the whole interface: the engine sends nothing between replicas, so a host wires no
@@ -65,17 +67,19 @@ limitations under the License.
 //
 // # Operations
 //
-// Create makes a flow and runs it; Await blocks until it stops; Run is Create+Await in one
-// call. Snapshot/History/Step/List inspect; Resume continues a paused flow; Terminate/Continue
-// manage lifecycle; Fork clones a terminal flow from a chosen step into a new flow for
-// non-destructive recovery; Delete/Purge retain. See the repository's docs/ directory for guides.
+// Create makes a flow and runs it; Await blocks until it stops, and Poll answers within the caller's
+// budget; Run is Create+Await in one call. Snapshot/History/Step/List/Fingerprint inspect; Resume continues
+// a paused flow; Cancel requests a graceful stop that tasks can catch, and Terminate a forceful one;
+// Continue starts the next turn of a thread; Fork clones a terminal flow from a chosen step into a new flow
+// for non-destructive recovery; Delete/Purge retain; ShardInfo summarizes each shard. See the repository's
+// docs/ directory for guides.
 //
 // # Security model
 //
 // Flow and step keys ("{shard}-{id}-{token}") are unguessable bearer capabilities, not authorization.
 // Holding a flow key is by itself sufficient to act on that one flow — Resume, Terminate, Fork, Continue,
 // Delete, and every introspection call — with no further check: the sole gate is the key (the numeric id
-// plus its random flow_token). The engine performs no authentication, authorization, or rate limiting and
+// plus its random token). The engine performs no authentication, authorization, or rate limiting and
 // has no notion of caller identity; its only vantage is the flow reference and the task URL, so ownership
 // and tenancy are invisible to it. Authorizing an operation is therefore the host's responsibility:
 // before calling the engine, verify the authenticated principal may act on the flow — typically from the

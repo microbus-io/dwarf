@@ -95,7 +95,7 @@ func TestReviveVsTerminate_Deterministic(t *testing.T) {
 	// exactly those. A sleep denies the same thing over an interval nobody sized against the dispatcher's
 	// own cadence, and gets weaker the busier the machine - here it gets STRONGER, since a slow piston makes
 	// the two cycles later rather than fewer.
-	enginetest.AwaitShardCycles(t, e, 1, 2)
+	enginetest.AwaitShardCycles(t, e, 2)
 	assert.Equal(1, callRuns)
 	enginetest.AssertInvariants(t, e)
 }

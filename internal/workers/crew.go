@@ -289,7 +289,7 @@ func (c *Crew) Drain() {
 // adds a peer if that take left nobody idle. The question it answers is "now that I am busy, is anyone left
 // to take the next one?", and the answer restores the reserve rather than sizing the crew.
 //
-// The single condition carries three properties that used to need three:
+// The single condition carries three properties:
 //
 //   - IT GROWS FOR LONG TASKS. A worker inside the handler still HOLDS its candidate, so it is not idle -
 //     so a crew entirely inside the handler, with work waiting, grows on every take.
@@ -304,9 +304,9 @@ func (c *Crew) Drain() {
 //     check declines. The overshoot is exactly one goroutine per saturation episode, and that one is first
 //     in line for the next permit. Pinned by TestCrew_SaturationDoesNotGrowThePool.
 //   - IT NEEDS NO "WORK IS WAITING" TEST. This runs only after a successful pop, so work demonstrably
-//     existed. Asking whether MORE remains is what used to let idle REST at zero when the last candidate
-//     was taken - leaving nobody to wake when the next arrived, which is precisely why a periodic check
-//     had to exist. Spawning anyway costs one parked worker and buys the reserve that replaced it.
+//     existed. Do not also ask whether MORE remains: that lets idle REST at zero when the last candidate is
+//     taken, leaving nobody to wake when the next arrives, which would need a periodic check. Spawning
+//     anyway costs one parked worker and buys the reserve.
 //
 // DO NOT add a rate damper here, and do not batch the spawn. Growth is edge-triggered, so a suppressed
 // spawn is not deferred, it is LOST - measured, a 1ms damper grew the crew by one past its resident set and

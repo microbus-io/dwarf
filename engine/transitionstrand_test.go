@@ -19,6 +19,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -89,6 +90,10 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 		"UPDATE dwarf_steps SET status='"+workflow.StatusCompleted+"', changes=?, advancing=1, lease_seq=lease_seq+1, updated_at=NOW_UTC()"+
 			" WHERE flow_id=? AND task_name='A'", []byte(`{"a":1}`), flowID)
 	assert.NoError(err)
+	var aStepID int
+	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStepID))
+	aDone := engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(aStepID))
+	aDoneBase := e.seams.Visits(aDone)
 	close(release)
 
 	stranded := func(e *Engine) bool {
@@ -98,7 +103,9 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 			enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+
 				workflow.StatusRunning+"'", flowID) == 1
 	}
-	time.Sleep(200 * time.Millisecond) // the fenced worker returns; several piston cycles pass
+	// The fenced worker's own writes are the only thing that could advance the flow; once its dispatch has
+	// returned, they have been attempted.
+	enginetest.AwaitVisitCount(t, e.seams, aDoneBase+1, 15*time.Second, aDone)
 	assert.True(stranded(e), "expected A completed with no successor on a running flow")
 
 	e2 := NewEngineUnderTest(t.Name())
@@ -178,6 +185,13 @@ func slowWorkerReplay(t *testing.T, mux *HostMux, flowURL string, initial any, b
 	assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND task_name='A' AND lease_seq>?", flowID, stalledSeq),
 		"the sweep did not take A back")
 
+	// Both of A's claimed dispatches - the stalled worker and the replay - are still to return: the stall holds the
+	// first, and the replay cannot get past the same checkpoint before the release.
+	var aStepID int
+	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStepID))
+	aDone := engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(aStepID))
+	aDoneBase := e.seams.Visits(aDone)
+
 	e.seams.Resume(engineseams.CheckpointBeforeTransitionTx)
 	awaitCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -185,7 +199,8 @@ func slowWorkerReplay(t *testing.T, mux *HostMux, flowURL string, initial any, b
 	if assert.NoError(err) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
-	time.Sleep(200 * time.Millisecond) // give a double-advance time to show
+	// The flow can complete before the stalled worker returns; a double advance would land by the time it does.
+	enginetest.AwaitVisitCount(t, e.seams, aDoneBase+2, 15*time.Second, aDone)
 	return e, shard, flowID, swept
 }
 

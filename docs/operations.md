@@ -20,7 +20,7 @@ schedule is what tells you whether to intervene or wait — and the answer is us
 | A replica dies after completing a step but before creating its successor | A sweep hands the step back and dispatch creates the successor from its recorded output — the task does **not** re-run | Once the flow has been idle 5 minutes and the step's lease has lapsed, within the following 5 minutes |
 | A database blip mid-write | The step's outcome write retries in place, holding its lease — the task does **not** re-run | 1s, 2s, 4s; longer outages fall through to lease recovery |
 | A replica joins or leaves | Every peer re-reads the shared registry and re-divides each database's connection budget | Registry read every 250ms; a dead replica stops counting after 40s |
-| A doorbell is missed between replicas | The owning replica's next selection cycle finds the work by scanning | Under a second at the derived cycle rate |
+| Work is created on a replica that does not dispatch its shard | A replica that does dispatch it finds the work on its next selection cycle | Under a second at the derived cycle rate |
 | A flow marked for deletion | A background reaper removes the flow and its whole subgraph tree | Within ~1 minute |
 | A subgraph park that never released | A sweep re-drives the release, or terminates an orphaned child | Detected after 5 minutes, swept every 5 minutes |
 
@@ -49,7 +49,9 @@ Four things, and everything else in this section of the docs is one of them.
 ## What to watch
 
 The full instrument catalogue is in [Observability](observability.md). For a dashboard, the split that
-matters is between counters that should **never** move and counters that are merely informative.
+matters is between counters that should **never** move and counters that are merely informative. Counters
+are named here as you query them in Prometheus, with the `_total` suffix its exporter appends; the
+instrument itself carries no suffix (`dwarf_steps_unwedged`).
 
 **Alarms — page on any non-zero rate:**
 

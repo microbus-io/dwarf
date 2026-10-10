@@ -36,10 +36,10 @@ type Query struct {
 	// Priority filters to flows at this scheduling priority band. Zero disables the filter
 	// (valid priorities are >= 1).
 	Priority int `json:"priority,omitzero"`
-	// OlderThan filters to flows whose updated_at is older than this duration relative to now.
+	// OlderThan filters to flows last updated longer ago than this duration.
 	// Zero disables the filter.
 	OlderThan time.Duration `json:"olderThan,omitzero"`
-	// NewerThan filters to flows whose updated_at is within this duration of now.
+	// NewerThan filters to flows last updated within this duration of now.
 	// Zero disables the filter. Composes with OlderThan to express "between X and Y ago."
 	NewerThan time.Duration `json:"newerThan,omitzero"`
 	// IncludeSubgraphs adds subgraph-child flows to the results alongside roots. They are excluded by default -
@@ -64,7 +64,7 @@ type Query struct {
 	// a single page can hold as many as shards*ceil(Limit/shards) summaries - e.g. Limit=10 on 4 shards
 	// returns up to 12, and Limit=1 returns up to 4. A single-shard engine (the default) returns at most
 	// Limit. This per-shard division is also why pagination is a cursor and not a global OFFSET: each shard
-	// advances its own newest-first position independently (the cursor encodes one flow_id per shard), so
+	// advances its own newest-first position independently (the cursor holds one position per shard), so
 	// no single offset could page the shard-grouped result without skipping rows. If you need a strict
 	// total, truncate the page yourself or query one shard at a time with Query.Shard. Results come back
 	// newest first per shard, not globally (see Engine.List). Purge divides Limit the same way.

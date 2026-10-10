@@ -226,15 +226,15 @@ func TestStealHoldsOffAHealthyFleetflow(t *testing.T) {
 	// Two cycles of settling before the window opens: a replica only reaches outside its class for slots its own class could not fill, and
 	// the cycle before this work landed saw an empty shard, so the first one after it is legitimately still
 	// armed.
-	enginetest.AwaitShardCycles(t, healthy, 1, 2)
-	enginetest.AwaitShardCycles(t, crippled, 1, 2)
+	enginetest.AwaitShardCycles(t, healthy, 2)
+	enginetest.AwaitShardCycles(t, crippled, 2)
 	stoleBefore := engineseams.Seams(healthy).Visits(engineseams.CheckpointRefillStole) +
 		engineseams.Seams(crippled).Visits(engineseams.CheckpointRefillStole)
 	cyclesBefore := engineseams.Seams(healthy).Visits(engineseams.CheckpointRefillCycleDone) +
 		engineseams.Seams(crippled).Visits(engineseams.CheckpointRefillCycleDone)
 
-	enginetest.AwaitShardCycles(t, healthy, 1, 10)
-	enginetest.AwaitShardCycles(t, crippled, 1, 10)
+	enginetest.AwaitShardCycles(t, healthy, 10)
+	enginetest.AwaitShardCycles(t, crippled, 10)
 	stole := engineseams.Seams(healthy).Visits(engineseams.CheckpointRefillStole) +
 		engineseams.Seams(crippled).Visits(engineseams.CheckpointRefillStole) - stoleBefore
 	cycles := engineseams.Seams(healthy).Visits(engineseams.CheckpointRefillCycleDone) +

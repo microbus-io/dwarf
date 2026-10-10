@@ -147,7 +147,7 @@ func awaitFleetSettled(t *testing.T, fleet *restartFleet, shard, wantR, budget i
 	}
 }
 
-// TestPeerRollingRestart_FleetNeverExceedsTheShardBudget rolls every replica of a four-replica fleet, one
+// TestPeerRollingRestart_FleetNeverExceedsTheShardBudget rolls every replica of a two-replica fleet, one
 // at a time, and pins the property the announce-before-consume ordering exists for: the fleet's aggregate
 // claim on one shard's server never exceeds that server's budget, at any instant of the rollout.
 //
@@ -157,8 +157,9 @@ func awaitFleetSettled(t *testing.T, fleet *restartFleet, shard, wantR, budget i
 // the fleet it is joining before its peer had read its row, the shard's server would see two replicas' worth
 // of a one-replica split - over budget by a full share, on every step of every deploy. The rollout runs at
 // two replicas because that is where the dispatcher count moves (1 <-> 2); past two it stays at two, so the
-// shares either side of a step are equal and the ordering this pins would be invisible. `Join` closes that by announcing, waiting two read cadences, and only then sizing, so a joining
-// replica's whole claim during the window is its tiny bootstrap pool.
+// shares either side of a step are equal and the ordering this pins would be invisible. `Join` closes that by
+// announcing, waiting two read cadences, and only then sizing, so a joining replica's whole claim during the
+// window is its tiny bootstrap pool.
 //
 // THE BOUND IS EVERY REPLICA ON ITS R-1 SHARE EXCEPT ONE ON ITS R SHARE - the budget plus one post-join
 // share, on a uniform fleet - and that is the engine's actual guarantee rather than a slackened one. Join

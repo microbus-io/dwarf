@@ -306,7 +306,7 @@ func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel
 // concurrently between the sweep's SELECT and this write is a no-op, the outcome the sweep wanted anyway.
 func (e *Engine) terminateOrphanedSubtree(ctx context.Context, shard int, childFlowID int, childFlowToken string) error {
 	const reason = "parent flow terminated (orphan recovery)"
-	return errors.Trace(e.terminateSubtree(ctx, shard, childFlowID, childFlowToken, reason, ""))
+	return errors.Trace(e.terminateSubtree(ctx, shard, childFlowID, childFlowToken, reason, false, ""))
 }
 
 // recoverOrphanedFlows repairs a `running` flow that is stranded - every step terminal AND no step touched for

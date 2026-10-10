@@ -60,18 +60,16 @@ type State struct {
 // A single argument is normalized into a state map. A []byte or json.RawMessage is treated as raw JSON and
 // must be an object (an empty/nil slice or a JSON "null" yields an empty State; any other non-object is an
 // error - see UnmarshalJSON) - this is the one-liner for reading a state column back from the database:
-// state, _ := NewState(stateJSON). A nil argument yields an empty State. A State is already normalized, so it
-// is shallow-copied. Any other value - a map, a struct, or any JSON-marshalable value - is round-tripped
-// through JSON into the map, so nested structs become canonical (sorted-key, float64-number) maps exactly as
-// if read from a column. That canonicalization is deliberate: it is what lets reducers compare marshalled
-// bytes, so a caller passing a map with a nested struct sees the same spelling as its decoded twin. This is
-// the normalizer for a caller-supplied value at an API boundary: wrap it in NewState. It does NOT validate
-// value ranges: an integer beyond ±2^53 round-trips inexact once decoded into an untyped value (carry it as
-// a string instead), and a NUL byte in a string is rejected by some SQL dialects' JSON storage
-// (base64-encode binary data instead).
+// state, _ := NewState(stateJSON). A nil argument, including a nil map, pointer or slice, yields an empty State. A
+// State is already normalized, so it is shallow-copied. Any other value - a map, a struct, or any
+// JSON-marshalable value - is marshalled once and split into its top-level fields, each held as JSON just as
+// Set would hold it; it must marshal to a JSON object. This is the normalizer for a caller-supplied value at
+// an API boundary: wrap it in NewState. It does NOT validate value ranges: an integer beyond ±2^53 reads back
+// inexact through an untyped reader (carry it as a string instead), and a NUL byte in a string is rejected by
+// some SQL dialects' JSON storage (base64-encode binary data instead).
 //
-// Two or more arguments are variadic name/value pairs, e.g. NewState("count", 3, "name", "abc"); the value
-// is stored as passed. An odd count, or a non-string in a name position, is an error.
+// Two or more arguments are variadic name/value pairs, e.g. NewState("count", 3, "name", "abc"); each value
+// is stored through Set. An odd count, or a non-string in a name position, is an error.
 func NewState(data ...any) (State, error) {
 	s := State{d: map[string]json.RawMessage{}}
 	// Single-argument normalize mode: a lone value is unmarshaled ([]byte), shallow-copied (an already-
@@ -104,6 +102,9 @@ func NewState(data ...any) (State, error) {
 			if err := json.Unmarshal(b, &s.d); err != nil {
 				return State{}, errors.Trace(err)
 			}
+			if s.d == nil { // a nil map or pointer marshals to null
+				s.d = map[string]json.RawMessage{}
+			}
 			return s, nil
 		}
 	}
@@ -115,9 +116,6 @@ func NewState(data ...any) (State, error) {
 		if !ok {
 			return State{}, errors.New("workflow: NewState name argument must be a string")
 		}
-		// Normalized through Set, not stored verbatim. Storing a caller's Go value as-is would put a struct
-		// in the map, and a struct does not compare equal to its own decoded twin under a reducer's
-		// reflect.DeepEqual - the same mismatch Set's round trip exists to prevent everywhere else.
 		if err := s.Set(name, data[i+1]); err != nil {
 			return State{}, errors.Trace(err)
 		}
@@ -125,12 +123,11 @@ func NewState(data ...any) (State, error) {
 	return s, nil
 }
 
-// Set stores value under name, normalized through JSON: the value is marshalled and decoded back into its
-// canonical JSON shape (numbers as float64, structs as sorted-key maps), exactly as if it had been read from
-// the database. So a task that stores an int reads it back as an int via GetInt, but a plain Get into an any
-// sees a float64 - state is float64-domain JSON, and the typed getters coerce. Storing a decoded copy also
-// means a later mutation of the caller's value cannot corrupt what was stored. Returns an error only if
-// value cannot be marshalled (a NaN, an +Inf, a channel).
+// Set stores value under name as its JSON encoding, exactly as it would be held after a read from the
+// database. So a task that stores an int reads it back as an int via GetInt, but a plain Get into an any
+// sees a float64 - JSON has one number type, and the typed getters coerce. The stored bytes are the State's
+// own, so a later mutation of the caller's value cannot change what was stored. Returns an error only if
+// value cannot be marshalled (a NaN, an +Inf, a channel) or is a json.RawMessage that is not valid JSON.
 func (s State) Set(name string, value any) error {
 	// A json.RawMessage is already JSON and is stored as-is, validated but not decoded. A []byte is NOT -
 	// it is binary data and marshals to a base64 string, which is what a caller storing a blob wants. The
@@ -139,7 +136,7 @@ func (s State) Set(name string, value any) error {
 		if !json.Valid(raw) {
 			return errors.New("workflow: state field %q: value is not valid JSON", name)
 		}
-		s.d[name] = raw
+		s.d[name] = bytes.Clone(raw)
 		return nil
 	}
 	b, err := json.Marshal(value)
@@ -254,7 +251,8 @@ func (s State) GetJSON(name string) json.RawMessage {
 // SetJSON stores a field's value as pre-encoded JSON. It is the unchecked twin of Set: the bytes must be a
 // single well-formed JSON value and are NOT validated, which is why it returns nothing - a method with no
 // error return cannot be reporting one. Use it for bytes you produced or read back from storage; pass
-// anything else through Set, which validates and can tell you.
+// anything else through Set, which validates and can tell you. The State keeps data itself rather than a
+// copy, so the caller must not modify it afterwards.
 //
 // json.RawMessage rather than []byte is deliberate and is the same distinction Set draws: a []byte is binary
 // data and belongs in a base64 string, a json.RawMessage is JSON. The type says which, so the compiler
@@ -374,7 +372,18 @@ func (s State) Parse(target any) error {
 	if s.d == nil {
 		return nil
 	}
-	data, err := json.Marshal(s)
+	// A cleared field is skipped rather than handed to the decoder as a null, which would reset a pointer,
+	// slice, map or interface field the caller had set.
+	live := s.d
+	for k, v := range s.d {
+		if isCleared(v) {
+			if len(live) == len(s.d) {
+				live = maps.Clone(s.d)
+			}
+			delete(live, k)
+		}
+	}
+	data, err := json.Marshal(live)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -403,55 +412,22 @@ func (s State) Clone() State {
 // tombstone) is preserved as-is, not dropped, so a delta can be built up across successive merges. To
 // materialize a snapshot - folding pending deletes into actual absences - call DelNils afterward.
 func (s State) Merge(incoming State) error {
-	return s.MergeReduce(incoming, nil)
+	maps.Copy(s.d, incoming.d)
+	return nil
 }
 
 // MergeReduce overlays the incoming State's fields onto this State, mutating the receiver, using the
 // per-field strategy in reducers (as produced by Graph.Reducers). Pass nil for plain last-write-wins on
-// every field. Fan-in folds one member at a time, so a single incoming is all that is needed.
+// every field. To fold several incoming States in order, use MergeReduceAll.
 //
 // A field mapped to ReducerReplace (or absent from reducers, or the empty Reducer) is overwritten,
 // tombstones included (see Merge - call DelNils to enact them). A field mapped to any other reducer is
-// combined via that reducer, whose base is this State's current value or nil if it holds none yet; the
-// reducer is handed the incoming as-is (possibly cleared) and decides how to fold it.
+// combined via that reducer, whose base is this State's current value or nil if it holds none yet. A
+// cleared incoming value on such a field is ignored: it is the reducer's identity, not a delete.
 //
-// The incoming State is left unmodified. MergeReduce returns the first reducer error, having applied every
-// field up to that point.
+// The incoming State is left unmodified. On a reducer error the receiver is left partly merged; discard it.
 func (s State) MergeReduce(incoming State, reducers map[string]Reducer) error {
-	for k, v := range incoming.d {
-		r := reducers[k]
-		if r == "" || r == ReducerReplace {
-			s.d[k] = v
-			continue
-		}
-		// A cleared incoming is the reducer's identity: ignored, leaving the accumulator untouched. So a
-		// branch that deletes a reduced field does not wipe the cohort's contributions to it. (Deleting a
-		// field is a REPLACE concern, handled above via the tombstone; reducers only ever combine values.)
-		if isCleared(v) {
-			continue
-		}
-		// A combining reducer works on Go values, so both operands are decoded here and the result is
-		// re-encoded. The REPLACE path above moves bytes and pays none of it, which is the overwhelming
-		// majority of fields. See the note on Fold for why a wide fan-in should not drive this per member.
-		base, err := decodeValue(s.d[k])
-		if err != nil {
-			return errors.New("reducer '%s' for field %q: %w", string(r), k, err)
-		}
-		inc, err := decodeValue(v)
-		if err != nil {
-			return errors.New("reducer '%s' for field %q: %w", string(r), k, err)
-		}
-		result, err := r.Reduce(base, inc)
-		if err != nil {
-			return errors.New("reducer '%s' for field %q: %w", string(r), k, err)
-		}
-		encoded, err := json.Marshal(result)
-		if err != nil {
-			return errors.New("reducer '%s' for field %q: %w", string(r), k, err)
-		}
-		s.d[k] = encoded
-	}
-	return nil
+	return s.MergeReduceAll([]State{incoming}, reducers)
 }
 
 // MergeReduceAll folds a whole cohort of incoming deltas in one pass, in order, and is what a fan-in should
@@ -465,17 +441,15 @@ func (s State) MergeReduce(incoming State, reducers map[string]Reducer) error {
 //
 // Replace-reducer fields (the default, and the overwhelming majority) never decode at all on either path -
 // they move bytes - so this only changes the cost of fields the graph actually registered a reducer for.
-// Semantics are identical to folding one at a time: same order, same tombstone accumulation, and the first
-// error stops the fold with everything before it applied.
+// Semantics are identical to folding one at a time: same order, same tombstone accumulation. The first error
+// stops the fold and leaves the receiver partly merged; discard it.
 func (s State) MergeReduceAll(incoming []State, reducers map[string]Reducer) error {
 	if len(incoming) == 0 {
 		return nil
 	}
 	if len(reducers) == 0 {
 		for _, in := range incoming {
-			if err := s.Merge(in); err != nil {
-				return errors.Trace(err)
-			}
+			maps.Copy(s.d, in.d)
 		}
 		return nil
 	}
@@ -489,8 +463,11 @@ func (s State) MergeReduceAll(incoming []State, reducers map[string]Reducer) err
 				s.d[k] = v
 				continue
 			}
+			// A cleared incoming is the reducer's identity: ignored, leaving the accumulator untouched. So a
+			// branch that deletes a reduced field does not wipe the cohort's contributions to it. (Deleting a
+			// field is a REPLACE concern, handled above via the tombstone; reducers only ever combine values.)
 			if isCleared(v) {
-				continue // the reducer's identity - see MergeReduce
+				continue
 			}
 			if !decoded[k] {
 				base, err := decodeValue(s.d[k])

@@ -1281,8 +1281,7 @@ func TestFlow_MermaidEscapesInjection(t *testing.T) {
 	assert.Contains(m, `#quot;`)
 }
 
-// stripProto is shared by the graph's error messages and the flow renderer's node labels (it replaced a
-// near-copy, flowStripProto, that differed on exactly this case). Both sinks are human-facing, so a URL
+// stripProto is shared by the graph's error messages and the flow renderer's node labels. Both sinks are human-facing, so a URL
 // with nothing after the scheme is returned WHOLE rather than as the empty string it strips down to - a
 // blank diagram label, or an error naming no task at all, is worse than a slightly ugly one.
 func TestStripProto(t *testing.T) {
@@ -1317,8 +1316,8 @@ func TestGraph_ValidatorAgreesWithIsFanOutSource(t *testing.T) {
 	assert.False(g.IsFanOutSource("r"), "switch branches are exclusive")
 }
 
-// TestRender_NilGraphAndEmptyHistory pins the two degenerate inputs, both of which used to be the only plausible
-// candidates for an error return. Rendering builds into a strings.Builder, whose writes cannot fail, so Render
+// TestRender_NilGraphAndEmptyHistory pins the two degenerate inputs, the only plausible candidates for an error
+// return. Rendering builds into a strings.Builder, whose writes cannot fail, so Render
 // returns no error at all.
 func TestRender_NilGraphAndEmptyHistory(t *testing.T) {
 	assert := testarossa.For(t)
@@ -1339,4 +1338,41 @@ func TestRender_NilGraphAndEmptyHistory(t *testing.T) {
 	mmd := NewGraphRenderer(g).Render()
 	assert.Contains(mmd, "A")
 	assert.Contains(mmd, "Undeclared")
+}
+
+func TestGraph_ValidateRejectsUnknownReducer(t *testing.T) {
+	assert := testarossa.For(t)
+
+	g := NewGraph("UnknownReducer")
+	g.AddTransition("a", End)
+	g.SetReducer("total", Reducer("sum"))
+	err := g.Validate()
+	assert.Error(err)
+	assert.Contains(err.Error(), "sum")
+
+	g.SetReducer("total", ReducerAdd)
+	assert.NoError(g.Validate())
+}
+
+// TestGraphRenderer_ConditionalForEachLabel pins that a forEach edge carrying a when expression shows the
+// condition, rather than drawing as an unconditional fan-out.
+func TestGraphRenderer_ConditionalForEachLabel(t *testing.T) {
+	assert := testarossa.For(t)
+
+	var g Graph
+	assert.NoError(json.Unmarshal([]byte(`{"name":"G","entryPoint":"S","tasks":[{"name":"S"},{"name":"W"},{"name":"J","fanIn":true}],`+
+		`"transitions":[{"from":"S","to":"W","forEach":"items","as":"item","when":"go == true"},{"from":"W","to":"J"},{"from":"J","to":"END"}]}`), &g))
+	out := NewGraphRenderer(&g).Render()
+	assert.Contains(out, "for each when go == true")
+}
+
+// TestStripHostPort_NeverBlank pins that a label stripped of its own host keeps something to show when the
+// URL has no path.
+func TestStripHostPort_NeverBlank(t *testing.T) {
+	assert := testarossa.For(t)
+
+	assert.Equal("task", stripHostPort("https://host/task", "host"))
+	assert.Equal("host", stripHostPort("https://host", "host"))
+	assert.Equal("other/task", stripHostPort("https://other/task", "host"))
+	assert.Equal("Plain", stripHostPort("Plain", "host"))
 }

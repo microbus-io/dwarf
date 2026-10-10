@@ -369,7 +369,7 @@ func TestCrew_StartSpawnsNoMoreThanMax(t *testing.T) {
 }
 
 // TestCrew_DrainRacesGrowthWithoutPanicking is the reason this package is separable at all: the shutdown
-// protocol is subtle and was previously untestable in isolation. A WaitGroup.Add concurrent with a Wait
+// protocol is subtle and is testable only in isolation. A WaitGroup.Add concurrent with a Wait
 // PANICS, and a worker can try to spawn a peer at any instant, including while Drain is waiting. The
 // spawnClosed flag, set under the same lock that guards the Add, is what makes it safe.
 func TestCrew_DrainRacesGrowthWithoutPanicking(t *testing.T) {
@@ -549,7 +549,7 @@ func TestCrew_WorkArrivingWhileFullyCommittedStillGrows(t *testing.T) {
 	crew.SetMax(16)
 
 	// Exactly as many candidates as residents, so the crew consumes the batch and is fully committed with
-	// the cache EMPTY - the resting state the old rule could reach with nobody parked.
+	// the cache EMPTY - a resting state that must still leave a worker parked.
 	fill(c, 2)
 	crew.Start(context.Background(), 2)
 	assert.True(eventually(func() bool { return inTask.Load() == 2 }), "both residents are in the long call")

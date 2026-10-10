@@ -17,7 +17,6 @@ limitations under the License.
 package engine
 
 import (
-	"cmp"
 	"context"
 	"maps"
 	"math"
@@ -76,13 +75,6 @@ const (
 var terminalStatusesSQL = "'" + strings.Join([]string{
 	workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusTerminated, workflow.StatusCancelled,
 }, "', '") + "'"
-
-// The recovery/await/reap timing knobs (leaseMargin, recoveryInterval, parkWedgeThreshold,
-// orphanFlowThreshold, deletionGrace, reapInterval, awaitDefaultBudget) are per-engine fields on Engine
-// (defaulted in NewEngine), not package globals. They are effectively constants in production - read-only
-// after NewEngine - but a white-box test in this package shortens one directly (e.g. e.reapInterval = 20ms,
-// before Startup for the two read once at Startup) to exercise a recovery/await/reap path without waiting
-// minutes. The rationale for what each bounds stays at its field declaration and consult site.
 
 // Engine is the standalone workflow orchestration engine.
 type Engine struct {
@@ -188,13 +180,14 @@ type Engine struct {
 	// Owned by poolsLock.
 	fleetOverLimit map[int]bool
 	// poolsLock serializes every APPLICATION of a pool size - the derived recompute (recomputePools) and
-	// the live override (setMaxOpenConns). Deduping the recompute on lastAppliedSlots is not enough: two peer
-	// signals microseconds apart during a rolling deploy each read a different R, and nothing orders their
-	// pushes, so the R=2 sizes can land AFTER the R=3 sizes and leave every replica over-connecting a fleet
-	// of 3 - sticky until the next fleet change. The override races the same way, and worse: recomputePools
+	// the live override (setMaxOpenConns). Deduping the recompute on lastAppliedSlots is not enough: two
+	// registry readings microseconds apart during a rolling deploy each derive a different split, and nothing
+	// orders their pushes, so the wider-share sizes can land AFTER the narrower ones and leave every replica
+	// over-connecting the shard - sticky until the next fleet change. The override races the same way, and worse: recomputePools
 	// reads maxOpenConns and then pushes, so a setMaxOpenConns landing in that window has its PINNED pools
-	// silently overwritten by derived ones. Holding this across read-of-R/override + push makes the last
-	// writer win with the value it actually read. Lock order: poolsLock -> peersLock -> shardsLock.
+	// silently overwritten by derived ones. Holding this across read-of-roles/override + push makes the last
+	// writer win with the value it actually read. Lock order: poolsLock -> shardsLock (the Sonars' readings
+	// are lock-free loads).
 	poolsLock sync.Mutex
 
 	// Database
@@ -257,9 +250,8 @@ type Engine struct {
 	inFlightStateSteps atomic.Int64
 
 	// Candidate supply: one piston per shard, each cycling its own database on its own clock with no
-	// barrier against its peers. They share the planner (which is what a cross-shard barrier used to be -
-	// each shard's tally retained, so every shard plans against the merged picture without waiting for
-	// the slowest) and the candidate cache. The maps are built in initRuntime before started flips true
+	// barrier against its peers. They share the planner (each shard's tally retained, so every shard plans
+	// against the merged picture without waiting for the slowest) and the candidate cache. The maps are built in initRuntime before started flips true
 	// and are read-only thereafter.
 	//
 	// pistonCancel stops them: piston.Run ends on ctx alone, and the lifetime ctx is deliberately not
@@ -513,13 +505,13 @@ func (e *Engine) SetTimeBudget(d time.Duration) error {
 // SetDefaultPriority sets the default priority for new flows: an integer >= 1, lower runs first. Live:
 // read fresh on each Create, so it takes effect on a running engine immediately.
 //
-// The lower bound is not cosmetic. The refiller selects the strict-minimum band with a `priority=(SELECT
-// MIN(priority) ...)` subquery, but a step is only a candidate at all through predicates the scan applies
-// to a positive band; a flow stamped with a non-positive priority would sit `pending` forever, invisible
-// to selection, while the doorbell re-rang it in a loop. The upper bound guards the column's int32 width -
-// an int that overflows it (3_000_000_000, say) would wrap NEGATIVE and produce exactly that hang.
-// `FlowOptions.Priority` is separately validated at Create, where 0 means "unset, take this default".
+// A value below 1, or one too large to store as a 32-bit integer, is rejected with an error: a flow given a
+// non-positive priority would never be scheduled. FlowOptions.Priority is validated separately at Create,
+// where 0 means "unset, take this default".
 func (e *Engine) SetDefaultPriority(p int) error {
+	// The pistons select a band only through predicates that assume it is positive, so a non-positive
+	// priority leaves the step pending forever, invisible to selection. An int beyond int32 would wrap
+	// negative in the column and hang the same way.
 	if p < 1 {
 		return errors.New("default priority must be >= 1", http.StatusBadRequest)
 	}
@@ -816,6 +808,11 @@ func (e *Engine) Startup(ctx context.Context) error {
 	e.recomputeWorkerCeiling(ctx)
 
 	if err := e.initRuntime(); err != nil {
+		// initRuntime fails only before it spawns anything, so what remains to undo is Startup's own work: the
+		// registry rows joinFleet wrote, which peers would otherwise count for the fresh window, and the open
+		// shards. Shutdown cannot do it - the engine never reported itself started.
+		e.leaveFleet(context.Background())
+		e.db.Close()
 		return errors.Trace(err)
 	}
 	return nil
@@ -895,6 +892,10 @@ func (e *Engine) initRuntime() error {
 	// shard of an await-only replica (SetWorkers(0)): it claims no work, and its idling reports as much,
 	// which is what keeps the replica out of that shard's candidate partition.
 	idle := int(e.workers.Load()) == 0
+	if e.seams.IsFault(engineseams.FaultInitRuntime) {
+		e.unwindRuntime()
+		return errors.New("injected fault: " + engineseams.FaultInitRuntime)
+	}
 	for _, idx := range e.db.Indices() {
 		// A shard without a piston has no supply cycle, so nothing on it is ever dispatched while the replica
 		// goes on advertising itself as alive there - a half-supplied engine reporting success. Startup
@@ -1067,8 +1068,8 @@ func (e *Engine) drainRuntime() {
 	// NOT UNCONDITIONALLY, and not on a count of tasks in flight. Withdrawing costs an overlap: the peers grow
 	// into the freed share while this replica still holds it, until the drain ends and its pool closes. A
 	// drain that ends at once pays that for nothing - leaveFleet hands the slot on just as fast - and in a
-	// rolling restart the overlap stacks with the replacement's bootstrap pool (measured 71 against a 67
-	// bound, TestPeerRollingRestart_FleetNeverExceedsTheShardBudget, on Postgres). A count read at this
+	// rolling restart the overlap stacks with the replacement's bootstrap pool (measured on Postgres with a
+	// four-replica rolling restart over a 48-connection budget: 71 connections against a 67 bound). A count read at this
 	// instant misses a worker that has claimed a step and not yet entered the task. So the withdrawal waits
 	// one registry read cadence, and fires only if the drain is still going by then.
 	drained := make(chan struct{})
@@ -1192,7 +1193,7 @@ func (e *Engine) resolveFlowOptions(opts *workflow.FlowOptions) *workflow.FlowOp
 //
 // The shutdown half is not API misuse: a host still serving while it tears the engine down, or a request in
 // flight when Shutdown lands, is an ordinary race. (pickShard keeps its own no-open-shards guard for exactly
-// that race - `started` can flip after this check - where indexing an empty index slice used to panic the
+// that race - `started` can flip after this check - where indexing an empty index slice would panic the
 // host's process.)
 func (e *Engine) ensureStarted() error {
 	if !e.started.Load() {
@@ -1319,9 +1320,10 @@ func (e *Engine) List(ctx context.Context, query workflow.Query) (summaries []wo
 
 // Delete marks a flow (and its subgraph subtree) for deletion; a background reaper removes it shortly
 // after. The flow is excluded from List/History immediately, though Snapshot/Await/Run still report its
-// outcome during the grace window. Returns 404 for an unknown key, 400 for a subgraph-child key (address
-// the root instead), and 409 for a flow that is still running. Calling it again on an already-marked flow
-// is idempotent success.
+// outcome until the reaper removes it. An interrupted flow is terminated first, subgraphs included, exactly
+// as Terminate would, with the reason "deleted". Returns 404 for an unknown key, 400 for a subgraph-child key (address the root
+// instead), and 409 for a flow that is still running. Calling it again on an already-marked flow is
+// idempotent success.
 func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 	if err := e.ensureStarted(); err != nil {
 		return errors.Trace(err)
@@ -1330,10 +1332,10 @@ func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 }
 
 // Purge marks flows matching a query (and their subgraph subtrees) for deletion; a background reaper removes
-// them shortly after. Marked flows are excluded from List/History immediately. Returns the count of roots
-// marked - no more than 4096 per call; iterate to mark more. Query.Limit is divided per shard exactly as in
-// List (up to ceil(Limit/shards) roots per shard), so a multi-shard call can mark more than Limit roots.
-// Running flows are skipped.
+// them shortly after. Marked flows are excluded from List/History immediately. Interrupted flows are
+// terminated first, as Delete does, with the reason "purged"; running flows are skipped. Returns the count of roots marked. A call
+// marks at most min(Query.Limit, 4096) roots, divided per shard exactly as in List (up to ceil(n/shards) per
+// shard), so a multi-shard call can mark slightly more; iterate until it returns 0 to mark everything.
 func (e *Engine) Purge(ctx context.Context, query workflow.Query) (int, error) {
 	if err := e.ensureStarted(); err != nil {
 		return 0, errors.Trace(err)
@@ -1360,16 +1362,7 @@ func (e *Engine) Await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
 	}
-	outcome, err := e.await(ctx, flowKey)
-	if err != nil {
-		return nil, err
-	}
-	if !outcome.Stopped() {
-		// The wait ran out: the caller's ctx, or await's default budget for a ctx with no deadline, which
-		// leaves ctx.Err() nil.
-		return nil, errors.New("timed out awaiting flow", cmp.Or(ctx.Err(), context.DeadlineExceeded), http.StatusRequestTimeout)
-	}
-	return outcome, nil
+	return e.awaitStopped(ctx, flowKey)
 }
 
 // Poll returns a flow's current outcome, blocking up to the ctx deadline for it to stop. Unlike Await, a ctx

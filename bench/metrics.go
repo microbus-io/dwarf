@@ -304,7 +304,7 @@ func gaugePoints(m metricdata.Metrics) []gaugeKV {
 }
 
 // agreementGauges are the instruments every replica reports the SAME value for, so the fleet reading is
-// their MAX and never their sum. Two kinds land here and both are documented in engine/CLAUDE.md:
+// their MAX and never their sum. Two kinds land here:
 //
 //   - CLUSTER-WIDE gauges, computed by querying the shared shard databases (pending, oldest age, running
 //     per task). Every replica observes one backlog, so summing multiplies it by the replica count - a

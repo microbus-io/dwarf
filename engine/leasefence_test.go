@@ -299,7 +299,7 @@ func TestLeaseFence_CohortNoDoubleArrival(t *testing.T) {
 }
 
 // TestLeaseFence_RecoveryResetFenced pins the fence on the processStep recovery defer's own reset - the one
-// guarding the recovery machinery itself, previously reasoned-only (the leaseSeq>0 gate). Distinct from
+// guarding the recovery machinery itself (the leaseSeq>0 gate). Distinct from
 // engineseams.FaultRecoveryResetErr (which tests the reset *failing*): this proves a zombie's reset (completed->pending)
 // carrying a stale lease generation matches zero rows, so it cannot rewind a peer's freshly-claimed step.
 //

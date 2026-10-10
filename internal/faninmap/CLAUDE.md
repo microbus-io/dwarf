@@ -36,6 +36,13 @@ arrival with no cohort), and that guard is in `processStep`, not here. If you fi
 harden this traversal against a malformed graph, the question to ask first is whether the engine already
 fails that flow loudly — it does for the known case.
 
+**The traversal must stay in lockstep with `validateLineage`, arm for arm.** In particular the fan-in arm
+precedes the goto/error arm in both: an edge of any kind into a fan-in is a cohort arrival, so a branch whose only
+route to the fan-in is a goto or onError edge still converges there. With the arms the other way round, `Validate`
+accepts that graph while this map answers `""`, and an empty `forEach` completes the flow at the source, skipping
+the fan-in and everything after it. Pinned by `TestFanInMap_OverrideEdgeIsTheOnlyRouteToFanIn` and
+`fixtures/overridefaninflow_test.go`.
+
 ## What consumes it
 
 One thing: routing an **empty** `forEach` cohort straight to its convergence node. A non-empty cohort

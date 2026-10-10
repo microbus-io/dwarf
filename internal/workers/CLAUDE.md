@@ -267,8 +267,8 @@ stopped and waited on first.
 `WaitGroup.Add` concurrent with a `Wait` is a **panic**, not a race to be tolerated, and a worker can try to
 spawn a peer at any instant — including while `Drain` is waiting. A counter comparison cannot close that
 window; only a flag checked under the same lock that guards the `Add` can. This protocol is the strongest
-argument for the package existing at all: it was previously untestable in isolation, and
-`TestCrew_DrainRacesGrowthWithoutPanicking` now drives every worker at the spawn path while `Drain` runs.
+argument for the package existing at all: it is testable only with the crew in isolation, where
+`TestCrew_DrainRacesGrowthWithoutPanicking` drives every worker at the spawn path while `Drain` runs.
 
 ## `runCtx` is held on the struct, which is usually a smell
 

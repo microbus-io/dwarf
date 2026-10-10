@@ -116,7 +116,8 @@ func newCohortRaceRig(t *testing.T, prefix string) *cohortRaceRig {
 
 // arrivals reads the spawn step's cohort counters.
 func (r *cohortRaceRig) arrivals(t *testing.T) (arrivals, size int) {
-	testarossa.For(t).NoError(r.db.QueryRowContext(context.Background(),
+	assert := testarossa.For(t)
+	assert.NoError(r.db.QueryRowContext(context.Background(),
 		"SELECT cohort_arrivals, cohort_size FROM dwarf_steps WHERE flow_id=? AND task_name='A'", r.flowID).Scan(&arrivals, &size))
 	return arrivals, size
 }
@@ -137,8 +138,9 @@ type flowRow struct {
 }
 
 func (r *cohortRaceRig) flowRow(t *testing.T) flowRow {
+	assert := testarossa.For(t)
 	var row flowRow
-	testarossa.For(t).NoError(r.db.QueryRowContext(context.Background(),
+	assert.NoError(r.db.QueryRowContext(context.Background(),
 		"SELECT status, final_state, step_id, touch FROM dwarf_flows WHERE flow_id=?", r.flowID).Scan(&row.status, &row.finalState, &row.stepID, &row.touch))
 	return row
 }

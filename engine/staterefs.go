@@ -111,10 +111,13 @@ func anchorLoader(db sequel.Executor, readBytes *int) staterefs.Loader {
 // meters its residency with - distinct from the read bytes reported to dwarf_state_read_bytes, which are the
 // raw columns scanned (whole anchor rows, and zero on a cache hit). Only the dispatch path needs it; every
 // other caller resolves inside a transaction and discards it.
+//
+// An introspection read (Snapshot, Step) passes an empty workflowURL and is not counted: the metric tracks the
+// execution path's byte throughput, and introspection reads are documented as outside it.
 func (e *Engine) resolveStateRefs(ctx context.Context, db sequel.Executor, shardNum int, state workflow.State, refs staterefs.Refs, want map[string]bool, workflowURL string) (int, error) {
 	var readBytes int
 	materialized, err := e.linkerFor(shardNum).Resolve(ctx, state, refs, want, anchorLoader(db, &readBytes))
-	if readBytes > 0 {
+	if readBytes > 0 && workflowURL != "" {
 		e.metricStateReadBytes(ctx, workflowURL, "state_ref", readBytes)
 	}
 	return materialized, errors.Trace(err)

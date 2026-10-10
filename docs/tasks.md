@@ -106,8 +106,7 @@ f.Get("orderID", &loose)                // ROUNDS to ...800 — untyped lands in
 
 **Typed accessors are exact at any magnitude.** `GetInt`, `GetFloat`, `GetString` and a `Get` into a typed
 target all decode straight into that type. **Untyped reads round**, because JSON's number type decodes into
-`float64` when there is nothing narrower to decode into: `Get` into an `any`, and the whole-state readers
-that produce maps.
+`float64` when there is nothing narrower to decode into: `Get` into an `any`, and `Parse` into a map.
 
 **A `when` expression on a transition is exact too:** condition evaluation compares a >2^53 id as an
 integer, not through a float64.
@@ -117,7 +116,7 @@ g.AddTransitionWhen("A", "B", "orderID == 1234567890123456789")  // exact at any
 ```
 
 So: use typed accessors, and **carry the value as a string** only if it must survive an untyped reader
-(`Get`/`Value`/`All`/`Map`/`Parse` into a map) — the same reason APIs that mint 64-bit ids publish an
+(`Get` into an `any`, `Parse` into a map) — the same reason APIs that mint 64-bit ids publish an
 `id_str` alongside them. A `time.Duration` is nanoseconds, so a duration past ~104 days is in the same
 territory for those readers.
 
@@ -172,8 +171,9 @@ f.Sleep(30 * time.Minute) // the next step won't dispatch for 30 minutes
 return nil
 ```
 
-The engine sets the next step's earliest-run time and wakes precisely when it's due — durable across
-restarts, no goroutine held open.
+The engine sets the next step's earliest-run time, and the step is picked up within a scheduling cycle of
+it coming due (typically tens of milliseconds, at most about a second) — durable across restarts, no
+goroutine held open.
 
 ### Goto
 
@@ -212,8 +212,8 @@ func approve(ctx context.Context, f *workflow.Flow) error {
 }
 ```
 
-On the first call the flow goes to `interrupted`, the payload is surfaced to whoever is awaiting it, and
-the engine fires the stop notification. When the operator calls `eng.Resume(ctx, flowKey, data)`, the task
+On the first call the flow goes to `interrupted` and the payload is surfaced to whoever is awaiting it
+(`Await` returns, as it does for any stop). When the operator calls `eng.Resume(ctx, flowKey, data)`, the task
 re-runs and `Interrupt` returns `(false, nil)` with the caller's data unmarshaled into your `&resume`
 pointer. The resume data is delivered through that pointer — it is **not** merged into state. See
 [Driving flows → Resume](flows.md#resume).
@@ -258,8 +258,8 @@ or locale to task code without the engine interpreting it:
 
 ```go
 func charge(ctx context.Context, f *workflow.Flow) error {
-    claims := workflow.BaggageFrom(ctx) // a workflow.State; nil (safe to index) when none was set
-    if actor, ok := claims["actor"].(string); ok {
+    claims := workflow.BaggageFrom(ctx) // a workflow.State; empty (safe to read) when none was set
+    if actor := claims.GetString("actor"); actor != "" {
         token := mintToken(actor) // e.g. act as the original caller
         ...
     }

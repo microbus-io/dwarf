@@ -26,9 +26,8 @@ import (
 )
 
 // Job holds a step ID, its shard index, and its priority band for the worker pool. Priority is
-// assigned by the cache itself (Refill stamps its floor onto every batch job; Offer stamps the
-// offered priority onto the single job it admits), so a partition's floor is always derivable from
-// its head.
+// assigned by the cache itself: Refill stamps its floor onto every batch job, and Offer stamps the
+// offered priority onto the single job it admits.
 type Job struct {
 	StepID   int
 	Shard    int
@@ -51,12 +50,8 @@ type Cache struct {
 	closed  bool
 }
 
-// partition is one shard's slice of the cache. Its floor is DERIVED - the head item's priority, or
-// math.MaxInt when empty - never stored, because a stored one is a second source of truth that can
-// drift from the items while costing nothing to avoid.
-//
-// Its floor is the band it is serving for the current window - see floor for why that is frozen rather
-// than read off the head.
+// partition is one shard's slice of the cache. Its floor is the band it is serving for the current window,
+// stored rather than read off the head - see floor for why that is frozen.
 type partition struct {
 	items []Job
 	// lastFill is the depth of the last wholesale Refill; the partition's low-water mark is half of
@@ -83,12 +78,11 @@ type partition struct {
 // 6,6,5,6 as it drained, oscillating Pop's partition choice - and worse, Offer's own admission test would
 // swing with it, so an offered band-6 step would be declined or accepted purely on pop timing.
 //
-// Storing it is safe HERE in a way it was not before, and the direction is the whole argument. Offer
-// declines anything worse than this band, so every item present is at least as good as it: a frozen floor
-// can only ever UNDERSTATE the partition's urgency, which delays a buried better-band step by at most a
-// cycle. The old stored floor failed the other way - back when Offer could head-insert, it kept
-// advertising band 1 after the band-1 head had popped, OVERSTATING urgency and draining a whole band-5
-// body ahead of another partition's band-3 work.
+// Storing it is safe because of its direction. Offer declines anything worse than this band, so every item
+// present is at least as good as it: a frozen floor can only ever UNDERSTATE the partition's urgency, which
+// delays a buried better-band step by at most a cycle. That rests on Offer never head-inserting a better
+// band: with a head-insert, a stored floor would keep advertising the better band after that head had popped,
+// OVERSTATING urgency and draining a whole worse-band body ahead of another partition's better work.
 func (p *partition) floor() int {
 	if len(p.items) == 0 {
 		return math.MaxInt
@@ -129,9 +123,8 @@ func (c *Cache) totalLen() int {
 // Resize re-bounds the cache to a new worker count, live, and applies to ALL partitions: when the
 // sum overflows the new bound, each partition's tail is trimmed proportionally to its depth
 // (largest-remainder rounding, lower shard first on ties, so the trim is deterministic). A trimmed
-// candidate stays `pending` in the database and is simply re-selected - exactly what already happens
-// when an Offer's head-insert pushes one past the bound - so this adds no new state, only a smaller
-// bound.
+// candidate stays `pending` in the database and is simply re-selected, so this adds no new state, only a
+// smaller bound.
 //
 // The engine calls this when the observed replica count changes and each shard's connection budget is
 // re-divided. The cache MUST follow that split: it is sized from what the replica can actually CLAIM,
@@ -257,7 +250,7 @@ func (c *Cache) bestPartition() (*partition, int) {
 //
 // It exists so a worker can park holding NOTHING. A worker that took a permit and then blocked waiting for
 // work would hoard admission capacity it is not using, so the order must be park, then acquire, then take
-// work non-blockingly - which is what splits the old Pop into this plus TryPopFrom.
+// work non-blockingly - which is why this is separate from TryPopFrom.
 //
 // The shard is a HINT and nothing more. By the time the caller acts on it another worker may have taken the
 // peeked entry and a better-banded arrival may have landed, which is why the pop that follows must tolerate
@@ -363,8 +356,8 @@ func (c *Cache) Refill(shard int, batch []Job, floor int) (discarded int) {
 	for i := range batch {
 		batch[i].Priority = floor
 	}
-	// Deliberately NOT trimmed to c.size. The bound is a sizing target, not an invariant: Offer enforces it on a
-	// head-insert and Resize enforces it when the bound moves, but each refiller slices its batch from its own
+	// Deliberately NOT trimmed to c.size. The bound is a sizing target, not an invariant: Offer admits into a
+	// non-empty partition only below it and Resize enforces it when the bound moves, but each refiller slices its batch from its own
 	// roll of the global plan, so the sum of independently-rolled slices can transiently overshoot the bound and
 	// simply drains within a cycle. Trimming here would make the bound strict for the first time, and nothing
 	// needs it to be.

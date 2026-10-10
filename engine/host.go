@@ -57,7 +57,9 @@ type Host interface {
 // only exercise schema/lifecycle, not dispatch.
 type noopHost struct{}
 
-func (noopHost) LoadGraph(ctx context.Context, name string) (*workflow.Graph, error) { return nil, nil }
-func (noopHost) ExecuteTask(ctx context.Context, name string, flow *workflow.Flow) error {
+func (noopHost) LoadGraph(ctx context.Context, workflowURL string) (*workflow.Graph, error) {
+	return nil, nil
+}
+func (noopHost) ExecuteTask(ctx context.Context, taskURL string, flow *workflow.Flow) error {
 	return nil
 }

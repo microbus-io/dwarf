@@ -70,11 +70,11 @@
 - [ ] **A retention policy exists and something enforces it.** The engine **never** auto-purges — every flow
   stays until you remove it, because every flow is potentially resumable, continuable or forkable.
   → [Data handling](data-handling.md#retention-and-deletion)
-- [ ] **The retention job loops.** `Purge` marks at most 4,096 roots per call.
+- [ ] **The retention job loops.** `Purge` marks a bounded batch per call (about 4,096 roots); loop until it returns 0.
 - [ ] **Backups cover every shard on the same schedule**, and a restore has been rehearsed against a staging
   fleet — the part worth testing is what your workflows do when they re-run.
   → [Backup and restore](backup-and-restore.md)
-- [ ] **`List` and `Search` are gated by credential** in your host. The engine has no notion of a caller, and
+- [ ] **`List` (and its `Query.Search`) is gated by credential** in your host. The engine has no notion of a caller, and
   `List` is the one operation that returns flow keys wholesale — which are capabilities.
   → [Data handling](data-handling.md#access-control-is-the-hosts-job)
 - [ ] **Quotas enforced before `Create`.** The engine bounds nothing: not initial state size, not baggage,
@@ -86,11 +86,11 @@
   at-least-once and two attempts can overlap. → [Writing tasks](tasks.md#idempotency)
 - [ ] **Tasks respect their context deadline.** A task that overruns its `TimeBudget` loses its lease to a
   peer and runs twice concurrently.
-- [ ] **No PII in error text or terminate reasons.** Error text is returned by both `List` and `History` — the
-  readers that otherwise expose no state payloads — and the terminate reason by `List`. Both are
-  substring-searchable. → [Writing tasks](tasks.md#keep-payload-data-out-of-error-text)
+- [ ] **No PII in error text or terminate/cancel reasons.** Error text is returned by both `List` and
+  `History` — the readers that otherwise expose no state payloads — and the terminate or cancel reason by
+  `List`. Both are substring-searchable. → [Writing tasks](tasks.md#keep-payload-data-out-of-error-text)
 - [ ] **Large integers read with typed accessors, or carried as strings.** Beyond ±2^53 storage is exact and
-  `GetInt` is exact, but an untyped read or a `when` expression rounds. And **binary data base64-encoded** —
+  `GetInt` and `when` expressions are exact, but an untyped read rounds. And **binary data base64-encoded** —
   a `NUL` byte is rejected by PostgreSQL and accepted by everything else.
   → [Writing tasks](tasks.md#large-integers-exact-in-storage-rounded-by-untyped-reads)
 - [ ] **Every non-default fan-in field has an explicit reducer.** There is no inference from a field's name —

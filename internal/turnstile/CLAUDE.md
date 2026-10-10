@@ -22,8 +22,8 @@ admission into it is by band and then by age. Pool wait at saturation is therefo
 state, not a sign the mechanism is failing.
 
 **DO NOT SIZE THE PASSES TO THE RESOURCE.** One pass per unit is the intuitive reading of "bound the
-population" and it is measured catastrophic — the engine's arm collapsed **6x** (281 steps/s against 1,687)
-against the gate it replaced. With as many passes as units there are exactly as many candidates for one, so
+population" and it is measured catastrophic — the engine's arm collapsed **6x** on local Postgres: 281
+steps/s, against 1,687 for a gate sized above the pool on the same rig. With as many passes as units there are exactly as many candidates for one, so
 every gap between a holder finishing and the next waiter being woken, scheduled and asking for the resource
 is idle resource time. **A queue at the resource is not waste; it is what keeps the resource busy.** The
 engine sizes at 2 passes per connection; the turn count is also what a saturated worker crew grows to.
@@ -260,8 +260,8 @@ forces the interleaving rather than racing for it.
 The other window: the pass can be granted between `ctx.Done()` firing and the caller taking the lock. The caller then holds a pass **nobody else knows about**, so walking away retires it — the
 ceiling shrinks by one, silently, permanently, and again on every recurrence. It must be passed on instead.
 `TestTurnstile_AbandonedGrantIsNotLost` **forces** that interleaving with the turnstile's own lock rather
-than racing for it; an earlier stochastic version of that test passed against an implementation that
-dropped the pass outright, which is the standing warning about how to test this window.
+than racing for it. Do not make it stochastic: a racing version of that test passes against an
+implementation that drops the pass outright.
 
 ## `Resize` moves `avail` by the DELTA, never assigns it
 

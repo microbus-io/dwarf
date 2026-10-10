@@ -12,7 +12,7 @@
 #     over-connecting the shard; a falling one means the split is costing more than it saves.
 #   - Does the REFILLER survive it? The refiller runs per replica per shard and its cost does NOT
 #     divide by R: R replicas x S shards = R*S scan streams against one backlog, each paying the
-#     per-pass floor, each discarding a fraction of what it selects (21-45% at R=1, campaign 11).
+#     per-pass floor, each discarding a fraction of what it selects (measured 21-45% at R=1).
 #     This is the predicted failure mode, and the summary below is built to show it.
 #
 # THE CONTROLS, and why each is not optional:

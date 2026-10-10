@@ -128,6 +128,6 @@ func TestFanInNoCohort_FailsInsteadOfHotLooping(t *testing.T) {
 	// emphatically not thousands (the reviewer measured 2,735 failed transitions in 2 seconds). Two pushing
 	// cycles after the flow has FAILED close the window: a hot loop re-dispatches through the same pending
 	// candidate the cycle scans for, so the dispatcher has demonstrably looked twice and found nothing.
-	enginetest.AwaitShardCycles(t, e, 1, 2)
+	enginetest.AwaitShardCycles(t, e, 2)
 	assert.True(workRuns.Load() <= 4, "the task did not hot-loop (ran %d times)", workRuns.Load())
 }

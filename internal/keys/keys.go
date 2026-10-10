@@ -40,37 +40,30 @@ func New(shardNum, id int, token string) string {
 // ParseFlowKey extracts the shard, numeric flow ID and flow token from a composite flow key.
 // Format: "{shard}-{flowID}-{token}" with a 1-based shard.
 func ParseFlowKey(flowKey string) (shardNum int, flowID int, flowToken string, err error) {
-	parts := strings.SplitN(flowKey, "-", 3)
-	if len(parts) != 3 {
-		return 0, 0, "", errors.New("invalid flow key", http.StatusBadRequest)
-	}
-	shardNum64, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil || shardNum64 < 1 {
-		return 0, 0, "", errors.New("invalid flow key", http.StatusBadRequest)
-	}
-	flowID64, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil {
-		return 0, 0, "", errors.New("invalid flow key", http.StatusBadRequest)
-	}
-	return int(shardNum64), int(flowID64), parts[2], nil
+	return parseKey(flowKey, "invalid flow key")
 }
 
 // ParseStepKey extracts the shard, numeric step ID and step token from a composite step key.
 // Format: "{shard}-{stepID}-{token}" with a 1-based shard.
 func ParseStepKey(stepKey string) (shardNum int, stepID int, stepToken string, err error) {
-	parts := strings.SplitN(stepKey, "-", 3)
+	return parseKey(stepKey, "invalid step key")
+}
+
+// parseKey splits a "{shard}-{id}-{token}" key; invalid names the key kind in the 400 it returns.
+func parseKey(key, invalid string) (shardNum int, id int, token string, err error) {
+	parts := strings.SplitN(key, "-", 3)
 	if len(parts) != 3 {
-		return 0, 0, "", errors.New("invalid step key", http.StatusBadRequest)
+		return 0, 0, "", errors.New("%s", invalid, http.StatusBadRequest)
 	}
 	shardNum64, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil || shardNum64 < 1 {
-		return 0, 0, "", errors.New("invalid step key", http.StatusBadRequest)
+		return 0, 0, "", errors.New("%s", invalid, http.StatusBadRequest)
 	}
-	stepID64, err := strconv.ParseInt(parts[1], 10, 64)
+	id64, err := strconv.ParseInt(parts[1], 10, 64)
 	if err != nil {
-		return 0, 0, "", errors.New("invalid step key", http.StatusBadRequest)
+		return 0, 0, "", errors.New("%s", invalid, http.StatusBadRequest)
 	}
-	return int(shardNum64), int(stepID64), parts[2], nil
+	return int(shardNum64), int(id64), parts[2], nil
 }
 
 // CorrelationID is the non-secret, capability-free flow identifier for telemetry (spans, logs,

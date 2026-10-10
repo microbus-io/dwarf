@@ -92,7 +92,8 @@ matching one before working there:**
 - **`internal/migrations/CLAUDE.md`** - schema: the `dwarf_flows`/`dwarf_steps` column catalog, indexing strategy, and the
   SQL-authoring gotchas.
 - **`fixtures/CLAUDE.md`** - the test harness: the name-keyed `NewEngineUnderTest` test mode and its
-  caller-owned teardown, the per-test-engine + no-`t.Parallel` connection-load rule, and `HostMux` conventions.
+  caller-owned teardown, the per-test-engine rule under a `t.Parallel` suite (and which tests opt out), and
+  `HostMux` conventions.
 - **`internal/database/CLAUDE.md`** - the sharded SQL connections (`ShardSet`): SQL-dialect guidance, shard-count
   sizing + shard-per-server topology, the connection lifecycle, and the sharding *mechanics* (1-indexed routing,
   parallel `OnEach` fan-out, DSN/test-mode resolution). The pool-sizing *formula* and sharding *semantics* stay in
@@ -111,11 +112,12 @@ matching one before working there:**
 - **`bench/CLAUDE.md`** - the load harness: how a rig lies (RTT dominance, database litter, stale peer
   rows), how to design an arm so the comparison survives it, and what a workload must do to exercise the
   refiller at all.
-- **`internal/planner/CLAUDE.md`** - the cross-shard band + fairness decision: why per-shard tallies replaced a
+- **`internal/planner/CLAUDE.md`** - the cross-shard band + fairness decision: why per-shard tallies rather than a
   barrier, why participation is *declared* (`Clear`) rather than inferred from silence, and the slice rule's
   determinism.
-- **`internal/pipeline/CLAUDE.md`** - one shard's supply cycle (`sleep -> tallying -> planning -> fetching ->
-  pushing`): its self-pacing, and the asymmetric error policy (a failed scan clears the shard but spares the
+- **`internal/pipeline/CLAUDE.md`** - one shard's supply, in two independently paced loops (a Tallier:
+  `sleep -> tallying`; a Supplier: `sleep -> planning -> fetching -> pushing`): why they are split, their
+  self-pacing, and the asymmetric error policy (a failed scan clears the shard but spares the
   cache; a failed fetch touches neither; an empty plan clears the partition).
 - **`internal/piston/CLAUDE.md`** - the per-shard cylinder that drives that cycle: the two SQL queries, idle
   mode, the replica-partition predicate, and `Liveness` (why dispatch evidence is a turn COUNTER plus a
@@ -132,21 +134,25 @@ matching one before working there:**
 - **`internal/latch/CLAUDE.md`** - parking callers on a key until it settles: why polling makes registration
   order irrelevant, why the board holds no notion of what a status means, and why closing travels the same
   one-slot channel as a status.
+- **`internal/turnstile/CLAUDE.md`** - the priority-and-age ordered admission gate in front of each shard's
+  connections: why the waiting happens there, why passes are NOT sized to the resource, and what `Close`
+  promises.
 
-**Landmines that radiate into engine code - obey these even though the full detail now lives in a package doc:**
+**Landmines that radiate into engine code - obey these; the full detail lives in the named package doc:**
 
 - **Timestamps:** never bind a Go `time.Time` into SQL; write with `NOW_UTC()`/`DATE_ADD_MILLIS`. (`internal/migrations/CLAUDE.md`)
 - **MySQL JSON compare:** `json_col = '{}'` never matches on MySQL - use a per-driver `CAST(... AS CHAR)`. (`internal/migrations/CLAUDE.md`)
-- **Canonical JSON in storage is a PRECONDITION being kept, not a rule anything currently enforces.**
-  Nothing in the engine compares stored payload bytes today: `union` dedupes with `reflect.DeepEqual` over
-  *materialized* values (order-independent for maps), `Fingerprint` hashes `status|count|max(updated_at)`,
-  and no query compares one payload column with another. What canonicalization actually buys is **Go TYPE
-  normalization** - `Set` round-trips a value so a struct is stored as a `map[string]any`, because
-  `DeepEqual` between a struct and its decoded twin is false. That is the real mechanism behind the
-  `Continue`-`additionalState` bug; key ORDER never entered into it.
-  Keep writing canonical bytes anyway: it is what a **byte-comparing reducer** would need (comparing raw
-  arrays instead of materializing every element), and that is the standing plan for `union`/`append`. Break
-  it and that optimization is foreclosed, silently and much later. (`workflow/CLAUDE.md`)
+- **Stored JSON bytes are NOT canonical, and nothing compares them.** `Set` and `NewState` store what
+  `json.Marshal` writes (struct fields in declaration order, nested ones too), a `json.RawMessage` or `SetJSON`
+  value and a column read keep their bytes as given, and Postgres `JSONB` re-spells a value on read. Nothing
+  depends on the bytes: `union` dedupes with `reflect.DeepEqual` over *decoded* values (order-independent for
+  maps), `Flow.SetChanges` compares by meaning, `Fingerprint` hashes `status|count|max(updated_at)`, and no
+  query compares one payload column with another. What storing every value as JSON does buy is **Go TYPE
+  normalization**: a caller's struct decodes as the same `map[string]any`/`float64` as its twin read from a
+  column, and `DeepEqual` between a struct and its decoded twin is false - so never hand a reducer a caller's
+  Go value that has not been marshalled. A **byte-comparing reducer** (comparing raw array elements instead of
+  decoding them - the standing plan for `union`/`append`) would have to canonicalize what it compares; the
+  stored bytes do not give it that. (`workflow/CLAUDE.md`)
 - **State delete:** `flow.Del`/`Set(k,nil)` writes a JSON `null` tombstone, which has **two spellings** - a
   Go nil, and the raw bytes `null` on a field still held as JSON - and `isCleared` must recognize both or a
   delete read back from a column silently stops taking effect. `State.Merge`/`MergeReduce`
@@ -159,7 +165,7 @@ matching one before working there:**
   **STORAGE IS EXACT** - raw-field storage means a carried field is never decoded, so it round-trips
   byte-exact into the next step's `state`, `final_state`, a `Fork` and a `Continue`, and reading one does not
   memoize the rounded form. The exposure is **per-READER, not per-field**: a read into an `any`
-  (`Get`/`Value`/`All`/`Map`/`Parse` into a map) rounds, while **`GetInt` does not** - it unmarshals straight
+  (`Get` into an `any`, `Parse` into a map) rounds, while **`GetInt` does not** - it unmarshals straight
   into an `int`, exact at any int64 magnitude - and neither does a `when` expression, which compares a
   >2^53 id as an integer rather than through a float64. Carry a large id as a string only if it must
   survive an untyped reader. (2) A **NUL** (`U+0000`) in a string - Postgres `JSONB`
@@ -213,6 +219,7 @@ default), `append` (concatenate arrays), `union` (concatenate arrays, deduplicat
 objects, new key wins). A field with no registered reducer uses `replace`; every non-default fan-in field is wired
 explicitly with `graph.SetReducer(name, reducer)`. There is **no** inference from a field's name - a `sum*`/`list*`/
 `set*` prefix means nothing, so an unwired field silently takes `replace` instead of the reducer its name implies.
+`Graph.Validate` rejects a reducer name outside the ten, and a value a reducer cannot fold fails the flow.
 
 **Thread** - A chain of flows linked by `Continue`. Each flow has a `thread_id` grouping it with others in the same
 multi-turn conversation; defaults to `flow_id` (each flow its own thread). `Continue` inherits the thread's
@@ -248,13 +255,16 @@ Create --> running --> completed   (terminal, immutable)
 
   terminated (terminal, immutable, via Terminate)
 
+  cancelled  (terminal, immutable, via Cancel when every unrecovered loss was a cancellation)
+
 Recovery/exploration: Fork clones a terminal flow up to a chosen step into a NEW flow.
 ```
 
 1. **Create** inserts a flow and its entry step and starts them in one transaction - the flow is returned
    already `running` (its entry step `pending`), and the doorbell is rung. There is no separate `Start`
-   step and no externally-visible `created` resting state (`created` survives only as an internal/transient
-   state inside Create's own transaction and Fork's leaf-gate).
+   step and no externally-visible `created` resting state (`created` survives only as a transient status
+   inside Fork's clone transaction, where the cloned flows and the leaf step are held `created` until the id
+   mapping is complete).
 2. A worker picks up the step, executes the task, and evaluates transitions to create next steps.
 3. Repeats until no transitions match (flow completes), a task errors (flow fails), or the flow is terminated.
 4. Tasks can call `flow.Interrupt()` to pause for external input; `Resume` continues. A flow that should

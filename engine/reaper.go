@@ -62,8 +62,7 @@ func (e *Engine) reaperLoop(ctx context.Context) {
 // row the wedge sweep would terminate anyway, and a worker mid-dispatch on it simply no-ops via the lease
 // fence (its claim/write matches zero rows once the row is gone). So the reaper does not reguard on
 // descendant status; whichever of the reaper and the wedge sweep reaches the orphan first wins, both
-// removing it cleanly. This is a deliberate
-// behavior change from the old inline deleteFlow, which 409'd if any descendant was running.
+// removing it cleanly.
 func (e *Engine) reapDueFlows(ctx context.Context) {
 	const reapBatch = 4096
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {

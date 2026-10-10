@@ -71,9 +71,11 @@ Expect, and do not be alarmed by:
 - **A burst of `dwarf_steps_recovered_total`** as expired leases re-dispatch. This is the designed path.
 - **A backlog spike**, since everything that was in flight becomes runnable at once.
   `dwarf_steps_oldest_pending_age_seconds` will climb and then drain.
-- **Phantom peers** if the `dwarf_peers` rows were captured in the backup. Replicas that no longer exist
-  will be counted until their rows age out (they stop counting after 40 seconds; the rows are deleted once
-  over 80 seconds old with the registry continuously readable for 5 minutes), shrinking every live replica's connection pool meanwhile. See the
+- **Phantom peers**, but only from a backup taken less than about 40 seconds before the restore. The
+  replica registry is restored with the rest of the database, and a restored entry is as old as the backup:
+  a replica stops counting 40 seconds after its last heartbeat, so entries from an older backup count for
+  nothing. Within that window, replicas that no longer exist are counted until their entries age out,
+  shrinking every live replica's connection pool meanwhile. See the
   [Runbook](runbook.md#throughput-collapsed-after-a-restart-or-crash) if it does not resolve on its own.
 
 What should **not** happen: `dwarf_steps_write_failed_total`, `dwarf_steps_unwedged_total` or

@@ -101,8 +101,7 @@ func TestFaultComposition_FanOutBranch(t *testing.T) {
 
 	// X's transition transaction fails once after X was marked completed with a non-contention error: persist
 	// retries the transaction in place, so X's task runs only ONCE and the cohort arrival is still bumped
-	// exactly once by the successful commit. (It used to run twice - the recovery defer rewound and
-	// re-dispatched the branch, re-executing the task to recover from a database blip.)
+	// exactly once by the successful commit.
 	e.seams.Inject(engineseams.Join(engineseams.FaultTransitionCommit, "X"))
 	fk, out := batteryRun(t, e, "fcfan/g")
 	assert.Equal(workflow.StatusCompleted, out.Status)
@@ -161,7 +160,7 @@ func TestFaultComposition_SubgraphChild(t *testing.T) {
 
 	// X's transition (X->Y) inside the child fails once after X was marked completed: persist retries the
 	// transaction in place, so the child proceeds to Y->END and completes without re-running X, and the parent
-	// revives. (X used to run twice, re-dispatched by the recovery defer.)
+	// revives.
 	e.seams.Inject(engineseams.Join(engineseams.FaultTransitionCommit, "X"))
 	_, out := batteryRun(t, e, "fcsub/parent")
 	assert.Equal(workflow.StatusCompleted, out.Status)
@@ -193,8 +192,7 @@ func TestFaultComposition_RepeatedFault(t *testing.T) {
 
 	// A's transition fails 3 times in a row. persist's backoff has 3 retries, so all three failures are absorbed
 	// IN PLACE and the fourth attempt commits - A's task runs exactly ONCE and the flow still completes with an
-	// identical final_state. (It used to run 4 times: each failure drove a recovery-defer reset + re-dispatch,
-	// re-executing the task once per database blip.)
+	// identical final_state.
 	*calls["a"], *calls["b"] = 0, 0
 	e.seams.InjectN(engineseams.Join(engineseams.FaultTransitionCommit, "A"), 3)
 	fk, out := batteryRun(t, e, "fcrep/g")

@@ -98,7 +98,7 @@ func TestRetryCancelRaceflow(t *testing.T) {
 	// one reading taken after the window has closed is as strong as the two seconds of polling this
 	// replaces - and the window closes on the dispatcher's own terms rather than on a clock. Two pushing
 	// cycles are the dispatcher demonstrably looking for pending candidates and finding none.
-	enginetest.AwaitShardCycles(t, eng, 1, 2)
+	enginetest.AwaitShardCycles(t, eng, 2)
 
 	final := stepRecordByTask(t, eng, flowKey, "Work")
 	assert.Equal(workflow.StatusTerminated, final.Status)

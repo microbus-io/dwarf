@@ -42,7 +42,7 @@ Do not run SQLite in production.
 
 ## Sharding guidance & topology
 
-Registering multiple shards with `SetShard(index, dsn)` partitions flows across databases (or schemas). Shard count
+Registering multiple shards with `SetShard(ShardSpec{Index, DSN, ...})` partitions flows across databases (or schemas). Shard count
 should equal or exceed steady-state concurrent flow-creating threads divided by the per-shard write contention the
 engine tolerates. Rough sizing:
 
@@ -62,12 +62,12 @@ shard).
 
 ```
 # PROD (distributed): one server per shard
-SetShard(1, "postgres://user:pass@db-a.internal:5432/dwarf?sslmode=disable")
-SetShard(2, "postgres://user:pass@db-b.internal:5432/dwarf?sslmode=disable")
+SetShard(ShardSpec{Index: 1, DSN: "postgres://user:pass@db-a.internal:5432/dwarf?sslmode=disable"})
+SetShard(ShardSpec{Index: 2, DSN: "postgres://user:pass@db-b.internal:5432/dwarf?sslmode=disable"})
 
 # test/dev (co-located): shards as databases on one server - each named exactly
-SetShard(1, "postgres://user:pass@127.0.0.1:5432/dwarf_1?sslmode=disable")
-SetShard(2, "postgres://user:pass@127.0.0.1:5432/dwarf_2?sslmode=disable")
+SetShard(ShardSpec{Index: 1, DSN: "postgres://user:pass@127.0.0.1:5432/dwarf_1?sslmode=disable"})
+SetShard(ShardSpec{Index: 2, DSN: "postgres://user:pass@127.0.0.1:5432/dwarf_2?sslmode=disable"})
 ```
 
 The connection budget is a **per-server** property. With distributed shards each server hosts one shard, so it
@@ -92,8 +92,8 @@ during the fast test suite.
 
 ## Sharding mechanics
 
-**Shard indices are sparse.** Valid indices are unique integers `>= 1`, not necessarily contiguous (`SetShard(1, …)`
-+ `SetShard(99, …)` is fine - arbitrary DSNs need no naming pattern, and a drained shard's index could one day retire
+**Shard indices are sparse.** Valid indices are unique integers `>= 1`, not necessarily contiguous (`Index: 1`
++ `Index: 99` is fine - arbitrary DSNs need no naming pattern, and a drained shard's index could one day retire
 without renumbering); `0` is a sentinel meaning "no shard / all shards" (used by `Query.Shard`). The index is the
 leading number in flow keys (`{shard}-{flowID}-{token}`) and what `Query.Shard`/`ShardInfo` report. Internally `dbs`
 is a `map[int]*sequel.DB` plus a sorted `indices` slice (deterministic `OnEach`/`Indices()` order); `Shard(n)` is a

@@ -103,13 +103,13 @@ type Graph struct {
 	tasks       []Task
 	transitions []Transition
 	reducers    map[string]Reducer
-	fanInNodes  map[string]bool
+	fanInTasks  map[string]bool
 }
 
 // NewGraph creates a new workflow graph with the given display name. The name is a human-friendly
 // label (surfaced in rendering and Validate error messages); it is NOT the resolve key. The value
-// passed to Create/Run and to the host's LoadGraph is a separate opaque URL that the engine stores on
-// the flow (workflow_url) - it is never kept on the graph itself.
+// passed to Create/Run and to the host's LoadGraph is a separate opaque workflow URL that the engine
+// keeps with the flow - it is never kept on the graph itself.
 func NewGraph(name string) *Graph {
 	return &Graph{
 		name: name,
@@ -142,7 +142,7 @@ func (g *Graph) Transitions() []Transition {
 // if it does not exist and updating its URL if it does. It is optional: a task first named inside an
 // AddTransition* call is auto-registered with its URL equal to its name (see AddTransition). The name is the task's identity in the graph
 // (used by transitions, fan-in, goto); the URL is the opaque downstream endpoint the engine
-// hands to the host's ExecuteTask and groups the saturation/concurrency metric by. The first task bound
+// hands to the host's ExecuteTask. The first task bound
 // becomes the default entry point unless SetEntryPoint is called explicitly. End is not
 // registered.
 //
@@ -365,17 +365,18 @@ func (g *Graph) ErrorTransition(name string) (Transition, bool) {
 	return Transition{}, false
 }
 
-// SetFanIn marks a task as a fan-in nexus. Opts the graph into the lineage validator.
+// SetFanIn marks a task as a fan-in: the task where the branches of a fan-out converge, and where their
+// changes are merged by the fields' reducers. Validate checks that every fan-out converges on one.
 func (g *Graph) SetFanIn(name string) {
-	if g.fanInNodes == nil {
-		g.fanInNodes = make(map[string]bool)
+	if g.fanInTasks == nil {
+		g.fanInTasks = make(map[string]bool)
 	}
-	g.fanInNodes[name] = true
+	g.fanInTasks[name] = true
 }
 
 // IsFanIn reports whether the named task is a fan-in nexus.
 func (g *Graph) IsFanIn(name string) bool {
-	return g.fanInNodes[name]
+	return g.fanInTasks[name]
 }
 
 // IsFanOutSource reports whether the named task has 2+ non-goto/non-error outgoing
@@ -399,7 +400,8 @@ func (g *Graph) IsFanOutSource(name string) bool {
 }
 
 // SetReducer sets the merge strategy for a state field during fan-in. The field must be a plain identifier -
-// an ASCII letter or underscore, then ASCII letters, digits, or underscores - or Validate rejects the graph.
+// an ASCII letter or underscore, then ASCII letters, digits, or underscores - and the reducer one of the
+// Reducer constants, or Validate rejects the graph.
 func (g *Graph) SetReducer(field string, reducer Reducer) {
 	if g.reducers == nil {
 		g.reducers = make(map[string]Reducer)
@@ -442,22 +444,22 @@ func (g *Graph) Validate() error {
 	if len(g.tasks) == 0 {
 		return errors.New("graph '%s' has no tasks", g.name)
 	}
-	nodeSet := make(map[string]bool, len(g.tasks)+1)
-	nodeSet[End] = true
+	taskSet := make(map[string]bool, len(g.tasks)+1)
+	taskSet[End] = true
 	for _, t := range g.tasks {
-		if nodeSet[t.Name] {
+		if taskSet[t.Name] {
 			return errors.New("duplicate task '%s' in graph '%s'", t.Name, g.name)
 		}
-		nodeSet[t.Name] = true
+		taskSet[t.Name] = true
 		if t.URL == "" {
 			return errors.New("task '%s' in graph '%s' has no URL", t.Name, g.name)
 		}
 	}
-	if !nodeSet[g.entryPoint] {
+	if !taskSet[g.entryPoint] {
 		return errors.New("entry point '%s' is not a registered task in graph '%s'", g.entryPoint, g.name)
 	}
-	for fanInName := range g.fanInNodes {
-		if !nodeSet[fanInName] {
+	for fanInName := range g.fanInTasks {
+		if !taskSet[fanInName] {
 			return errors.New("SetFanIn references unknown task '%s' in graph '%s'", fanInName, g.name)
 		}
 		if fanInName == End {
@@ -469,10 +471,10 @@ func (g *Graph) Validate() error {
 		if tr.From == End {
 			return errors.New("transition out of END to '%s' in graph '%s'; END is terminal and has no outgoing transitions", tr.To, g.name)
 		}
-		if !nodeSet[tr.From] {
+		if !taskSet[tr.From] {
 			return errors.New("transition from unknown task '%s' to '%s' in graph '%s'", tr.From, tr.To, g.name)
 		}
-		if !nodeSet[tr.To] {
+		if !taskSet[tr.To] {
 			return errors.New("transition from '%s' to unknown task '%s' in graph '%s'", tr.From, tr.To, g.name)
 		}
 		switch tr.Kind {
@@ -517,6 +519,9 @@ func (g *Graph) Validate() error {
 	for _, field := range slices.Sorted(maps.Keys(g.reducers)) {
 		if !isFieldName(field) {
 			return errors.New("reducer in graph '%s' is set on invalid field name '%s'; %s", g.name, field, fieldNameRule)
+		}
+		if r := g.reducers[field]; !r.isKnown() {
+			return errors.New("reducer '%s' on field '%s' in graph '%s' is not a known reducer", string(r), field, g.name)
 		}
 	}
 
@@ -627,10 +632,10 @@ func (g *Graph) validateLineage() error {
 			// whose target is a fan-in task as a cohort arrival - it does not care which kind of edge
 			// carried it - so a goto/error/switch edge into a fan-in from a task with no fan-out
 			// frame is exactly the "arrive at a cohort that does not exist" shape, and at runtime it bumps
-			// cohort_arrivals on step_id=0 and hot-loops the flow. Testing goto/error/switch first (as
-			// this switch once did) skipped the frame-pop check for precisely the edges that can reach a
-			// fan-in from outside a cohort.
-			case g.fanInNodes[tr.To]:
+			// cohort_arrivals on step_id=0 and hot-loops the flow. Testing goto/error/switch first would
+			// skip the frame-pop check for precisely the edges that can reach a fan-in from outside a
+			// cohort. internal/faninmap's traversal must order its arms the same way.
+			case g.fanInTasks[tr.To]:
 				var fanOutSource string
 				if fromIsFanOut {
 					nextStack = fromStack
@@ -718,33 +723,37 @@ func stripProto(s string) string {
 	return x
 }
 
+// graphJSON is the graph's wire form, shared by MarshalJSON and UnmarshalJSON.
+type graphJSON struct {
+	Name        string             `json:"name,omitzero"`
+	EntryPoint  string             `json:"entryPoint"`
+	Tasks       []taskJSON         `json:"tasks"`
+	Transitions []Transition       `json:"transitions"`
+	Reducers    map[string]Reducer `json:"reducers,omitzero"`
+}
+
+// taskJSON is one task's wire form.
+type taskJSON struct {
+	Name  string `json:"name"`
+	URL   string `json:"url,omitzero"`
+	FanIn bool   `json:"fanIn,omitzero"`
+}
+
 // MarshalJSON serializes the graph to JSON.
 func (g *Graph) MarshalJSON() ([]byte, error) {
-	type jsonTask struct {
-		Name  string `json:"name"`
-		URL   string `json:"url,omitzero"`
-		FanIn bool   `json:"fanIn,omitzero"`
-	}
-	jsonTasks := make([]jsonTask, len(g.tasks))
+	tasks := make([]taskJSON, len(g.tasks))
 	for i, t := range g.tasks {
-		jsonTasks[i] = jsonTask{Name: t.Name, URL: t.URL, FanIn: g.fanInNodes[t.Name]}
+		tasks[i] = taskJSON{Name: t.Name, URL: t.URL, FanIn: g.fanInTasks[t.Name]}
 	}
-	type jsonGraph struct {
-		Name        string             `json:"name,omitzero"`
-		EntryPoint  string             `json:"entryPoint"`
-		Tasks       []jsonTask         `json:"tasks"`
-		Transitions []Transition       `json:"transitions"`
-		Reducers    map[string]Reducer `json:"reducers,omitzero"`
-	}
-	jg := jsonGraph{
+	jg := graphJSON{
 		Name:        g.name,
 		EntryPoint:  g.entryPoint,
-		Tasks:       jsonTasks,
+		Tasks:       tasks,
 		Transitions: g.transitions,
 		Reducers:    g.reducers,
 	}
 	if jg.Tasks == nil {
-		jg.Tasks = []jsonTask{}
+		jg.Tasks = []taskJSON{}
 	}
 	if jg.Transitions == nil {
 		jg.Transitions = []Transition{}
@@ -754,19 +763,7 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON deserializes the graph from JSON.
 func (g *Graph) UnmarshalJSON(data []byte) error {
-	type jsonTask struct {
-		Name  string `json:"name"`
-		URL   string `json:"url,omitzero"`
-		FanIn bool   `json:"fanIn,omitzero"`
-	}
-	type jsonGraph struct {
-		Name        string             `json:"name,omitzero"`
-		EntryPoint  string             `json:"entryPoint"`
-		Tasks       []jsonTask         `json:"tasks"`
-		Transitions []Transition       `json:"transitions"`
-		Reducers    map[string]Reducer `json:"reducers,omitzero"`
-	}
-	var jg jsonGraph
+	var jg graphJSON
 	err := json.Unmarshal(data, &jg)
 	if err != nil {
 		return err
@@ -774,7 +771,7 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 	g.name = jg.Name
 	g.entryPoint = jg.EntryPoint
 	g.tasks = make([]Task, len(jg.Tasks))
-	g.fanInNodes = nil
+	g.fanInTasks = nil
 	for i, jt := range jg.Tasks {
 		g.tasks[i].Name = jt.Name
 		g.tasks[i].URL = jt.URL
@@ -782,10 +779,10 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 			g.tasks[i].URL = jt.Name
 		}
 		if jt.FanIn {
-			if g.fanInNodes == nil {
-				g.fanInNodes = make(map[string]bool)
+			if g.fanInTasks == nil {
+				g.fanInTasks = make(map[string]bool)
 			}
-			g.fanInNodes[jt.Name] = true
+			g.fanInTasks[jt.Name] = true
 		}
 	}
 	g.transitions = jg.Transitions

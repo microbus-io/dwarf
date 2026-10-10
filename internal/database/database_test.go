@@ -26,10 +26,10 @@ import (
 )
 
 // TestResolveShardDSN_ProductionDSNIsVerbatim pins that a production DSN is never formatted or rewritten.
-// It used to go through fmt.Sprintf, which interprets EVERY '%' as a verb - so a percent-encoded
-// credential (a password "p@ss" written "p%40ss", entirely routine) was silently corrupted: %40s parsed as
-// "width 40, verb s", swallowed the shard index there, and left any real %d with no argument
-// (%!d(MISSING)). The driver then failed with an opaque parse error naming neither the shard nor the cause.
+// Passed through fmt.Sprintf, which interprets EVERY '%' as a verb, a percent-encoded credential (a password
+// "p@ss" written "p%40ss", entirely routine) is silently corrupted: %40s parses as "width 40, verb s",
+// swallows the shard index there, and leaves any real %d with no argument (%!d(MISSING)). The driver then
+// fails with an opaque parse error naming neither the shard nor the cause.
 func TestResolveShardDSN_ProductionDSNIsVerbatim(t *testing.T) {
 	assert := testarossa.For(t)
 

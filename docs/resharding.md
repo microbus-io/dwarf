@@ -71,8 +71,8 @@ which means both:
 
 ```go
 // no live work
-flows, _, _ := eng.List(ctx, workflow.Query{Shard: 3, Status: workflow.StatusRunning})
-flows, _, _ := eng.List(ctx, workflow.Query{Shard: 3, Status: workflow.StatusInterrupted})
+running, _, _ := eng.List(ctx, workflow.Query{Shard: 3, Status: workflow.StatusRunning})
+interrupted, _, _ := eng.List(ctx, workflow.Query{Shard: 3, Status: workflow.StatusInterrupted})
 
 // and no terminal flow you still want readable
 count, _ := eng.Purge(ctx, workflow.Query{Shard: 3, OlderThan: 30 * 24 * time.Hour})
@@ -118,14 +118,9 @@ adding a server, you are not adding capacity.
 See [Deployment → Sharding](deployment.md#sharding) for the sizing table, and
 [Cloud benchmarks](benchmark-cloud.md) for the measurements behind it.
 
-## What is not supported
+## When a shard is down
 
-- **Live shard growth.** Cross-replica agreement on a changing shard set, plus rollout sequencing, was
-  designed and deliberately deferred. The two-phase cordoned restart above is the supported substitute.
-- **Rebalancing existing flows.** There is no move, no dual-write, and no re-keying tool. A flow key encodes
-  its shard, so moving a flow would invalidate a handle callers already hold.
-- **Fault tolerance across shards.** Dwarf is not shard-fault-tolerant: `List` and `Purge` fail as a whole
-  if any shard errors. Shards multiply capacity, not availability — each shard's own availability is its
-  database's. (`ShardInfo` is the exception and is deliberately built to survive this: it returns a row per
-  shard with that shard's error recorded on it, so it still answers when a shard is down. It is the
-  diagnostic to reach for in exactly that situation.)
+Shards multiply capacity, not availability — each shard's own availability is its database's. `List` and
+`Purge` fail as a whole if any shard errors. `ShardInfo` is built to answer anyway: it returns a row per
+shard with that shard's error recorded on it, so it is the diagnostic to reach for in exactly that
+situation.

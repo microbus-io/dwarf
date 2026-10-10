@@ -53,9 +53,10 @@ are all in `internal/pipeline/CLAUDE.md`. What belongs *here* are the three cons
 - **`Liveness`'s turn count is the MINIMUM of the two loops'** — see below.
 - **The steal must not acquire a flag one loop writes and the other reads** — see below. Anything shared
   between them is sampled at an arbitrary phase of the other's cadence, and the phases are not independent:
-  both loops start together and the tally's interval is a whole multiple of the supply's (the owner paces it
-  by the number of scanning pistons), so a "race" of that shape lands the same way every time rather than
-  half the time.
+  both loops start together and the tally's interval is derived from the supply's - the owner multiplies it
+  by the number of scanning pistons and clamps the product at 1s, so the two are equal with one scanner, a
+  whole multiple below the clamp, and a fixed ratio at it - so a "race" of that shape lands the same way
+  every time rather than half the time.
 
 ## `Liveness` — a counter, and why publishing is somebody else's job
 
@@ -269,7 +270,8 @@ to the fill order, it answers the same question, and it fails three independent 
   fires on every other cycle at best — and the cycles in between plan from a thin strict tally and supply a
   correspondingly short batch.
 - **The two loops read it at different phases, and the phases are not independent.** Both start together and
-  run at the same interval, so the fetch reliably catches the *disarmed* half: it goes strict against a plan
+  run at a fixed ratio of intervals (the same interval when one piston scans the shard), so the fetch reliably
+  catches the *disarmed* half: it goes strict against a plan
   built from the relaxed tally, asks for the foreign steps that tally promised, and selects none of them.
   Measured: `TestPeerStalledDispatcherflow` fails most runs that way, at ~6.4s against ~0.9s, because the
   work falls through to the 5s dispatch-window eviction instead of being taken. A latch (record the scan's
@@ -277,9 +279,8 @@ to the fill order, it answers the same question, and it fails three independent 
 
 The fill order answers the same question **exactly, currently, and per slot**, with no flag to keep in step.
 
-**Do not weaken the grace to "any foreign step".** An earlier cut of the gate armed on `Band == NoBand` —
-nothing due in this replica's own class at all — and it **passed every fixture while doing nothing in
-production shape**: a burst workload drains a class to zero, so the fixtures armed, but a workload with
+**Do not weaken the grace to "any foreign step".** A gate armed on `Band == NoBand` — nothing due in this
+replica's own class at all — **passes every fixture while doing nothing in production shape**: a burst workload drains a class to zero, so the fixtures armed, but a workload with
 continuous arrivals leaves a keeping-up replica a step or two due on almost every scan. Measured against a
 50 flows/s open-loop bench with one crippled peer: **zero steals, throughput unchanged at 177.** The general
 lesson holds for the fill order too — the fixtures cannot distinguish a mechanism that fires from one that
@@ -348,7 +349,7 @@ remaining tiers only if short: it walks half as much on the healthy path (`perKe
 above is the measurement, so that decision needs no re-run.
 
 **Known exposure: fairness-key CARDINALITY.** The tally is relaxed too (it must be — see below), so the R
-replicas no longer have disjoint plans by construction. This replica owns a row for a planned key with
+replicas do not have disjoint plans by construction. This replica owns a row for a planned key with
 probability `1 − ((R−1)/R)^n`, where n is that key's due depth: at R=4 that is **94% at n=10** but only
 **25% at n=1**. So with many keys holding ~1 due step each, tier 0 is empty for most planned keys and every
 non-owner ranks the same single row first. **Unmeasured — the entire cloud archive ran at
@@ -461,7 +462,7 @@ find the partition boundary; only the single-partition-at-plan-time case can sto
 re-derive a per-key cap as a fix for scan cost on any dialect: the cap is what the *planner* needs, and on
 the ranking shape it buys nothing on the scan.
 
-The gap widens with the backlog, since the old shape is proportional to it and the new one is flat.
+The gap widens with the backlog, since the window shape is proportional to it and the lateral is flat.
 
 ### On pgx the keys are a native `text[]`, so the planner can count them
 
@@ -507,8 +508,8 @@ join predicate raises `Error 1267: Illegal mix of collations` — measured on My
 `utf8mb4_0900_ai_ci` server against a `utf8mb4_general_ci` database. **MariaDB cannot reproduce it** (it has
 no `utf8mb4_0900` family), so it passes every MariaDB run and fails on the engine CI uses; a local MariaDB is
 not a proxy for MySQL here. A bind parameter is immune: its collation is COERCIBLE, so the column's wins.
-That makes the `IN`-list the *safe* shape on this dialect rather than merely the old one — and it keeps the
-supported-version floor where it was, since nothing needs `JSON_TABLE`.
+That makes the `IN`-list the *safe* shape on this dialect, not merely the simpler one — and it keeps the
+supported-version floor down, since nothing needs `JSON_TABLE`.
 
 One bind per key is sound *here specifically*: MySQL's ceiling is 65,535 placeholders against a key count
 bounded by the cache capacity (twice the worker count, a few thousand on a large pool) — better than 20x of
@@ -551,8 +552,7 @@ package — the conflict only exists across the two — so it is a rule rather t
 **`refillBuckets`' LOW end is load-bearing and must not be raised.** A warm same-zone band scan measures
 ~0.29ms; the *same* query on the *same* data measures ~100ms once its Postgres statistics go stale and the
 plan flips to a sequential scan — the flip the `phase` label exists to expose. Boundaries starting at
-0.0005 file the healthy case in the first bucket and hide exactly that, which is what an earlier cut of
-this package did. The values are a public surface in their own right: a histogram whose boundaries changed
+0.0005 file the healthy case in the first bucket and hide exactly that. The values are a public surface in their own right: a histogram whose boundaries changed
 under a dashboard is a silent regression, so treat them as fixed rather than as a tuning knob.
 
 ## Two seams, and why each is the exception

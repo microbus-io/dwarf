@@ -49,7 +49,7 @@ neither hides data from a query nor exposes any.
 - the workflow URL and display name
 - the task name
 - **the flow's error text**
-- **the terminate reason**
+- **the terminate or cancel reason**
 - the flow key
 
 **It does not reach state, changes, final state, baggage, interrupt payloads, or resume data.** Workflow
@@ -57,7 +57,7 @@ payloads are not searchable.
 
 The exposure to weigh is the error text, and it has two layers.
 
-**Errors are returned outright.** `List` returns each flow's error and terminate reason, and `History` returns
+**Errors are returned outright.** `List` returns each flow's error and terminate or cancel reason, and `History` returns
 each step's error — including in the payload-free readers. Task errors routinely quote the input that caused
 them (an address, an account number, a downstream API's rejection message quoting the record it rejected),
 so whatever your tasks interpolate into an error string is visible to anyone who can list flows, whether or
@@ -75,7 +75,7 @@ two obligations outside the engine:
 - **Task authors keep PII out of error text.** Name the failure, don't quote the payload — reference data by
   an internal identifier instead of by its value. See
   [Writing tasks → Keep payload data out of error text](tasks.md#keep-payload-data-out-of-error-text) for
-  the rule and examples. The same applies to whatever you pass as a terminate reason, which is stored verbatim.
+  the rule and examples. The same applies to whatever you pass as a terminate or cancel reason, which is stored verbatim.
 - **Your host restricts who may call what.** The engine has no notion of a caller, so gating `List` — and
   `Search` in particular — by credential is yours to do, in the layer that holds the principal.
 
@@ -153,10 +153,10 @@ the engine refuses to pick one.
 Three ways to remove data:
 
 ```go
-// One flow and its whole subgraph tree. Refuses a running flow.
+// One flow and its whole subgraph tree. Refuses a running flow; terminates an interrupted one first.
 eng.Delete(ctx, flowKey)
 
-// Everything matching a query, except running flows. Marks at most 4096 roots per call.
+// Everything matching a query, except running flows; interrupted ones are terminated first.
 count, err := eng.Purge(ctx, workflow.Query{
     Status:    workflow.StatusCompleted,
     OlderThan: 30 * 24 * time.Hour,
@@ -174,11 +174,13 @@ minute. A flow marked by `DeleteOnCompletion` keeps serving its outcome to `Snap
 one-minute grace window first, so a fire-and-forget caller can still read its result.
 
 **For a deletion request, that grace matters.** A flow is logically gone the moment it is marked, but its
-rows exist for up to a minute afterward, and `Snapshot` still answers for a `DeleteOnCompletion` flow during
-its window. If you need a hard immediate erasure guarantee, the marking is not it — verify the rows are gone.
+rows exist for up to about a minute afterward — up to about two for a `DeleteOnCompletion` flow, whose
+one-minute window comes before the reaper's pass — and `Snapshot` still answers until the reaper removes
+them. If you need a hard immediate erasure guarantee, the marking is not it — verify the rows are gone.
 
-**A scheduled retention job is the normal pattern.** `Purge` marks at most 4,096 roots per call, so a
-retention sweep is a loop, not a single call. `OlderThan` is anchored to the database's clock and measured
+**A scheduled retention job is the normal pattern.** `Purge` marks at most 4,096 roots per call (fewer if
+`Query.Limit` is lower), divided across shards as `List` divides it, so a multi-shard call can mark slightly
+more. A retention sweep is a loop until it returns 0, not a single call. `OlderThan` is anchored to the database's clock and measured
 from the flow's finish time, which is the right signal for "keep for 30 days after it ended."
 
 **Deleting a flow deletes its whole subgraph tree**, keyed on the tree root — children are not left behind.
@@ -198,8 +200,8 @@ Two values are known not to survive storage, and both fail silently rather than 
 
 - **An integer beyond ±2^53, read untyped.** Storage itself is exact — the value round-trips byte-for-byte
   through steps, `final_state`, `Fork` and `Continue` — and typed accessors like `GetInt`, and a `when`
-  expression comparing it, are exact too. But a read into an untyped `any` (`Get`, `Value`, `All`, `Map`,
-  `Parse`) comes back **rounded**, with no error anywhere. Carry large ids as strings if that applies.
+  expression comparing it, are exact too. But a read into an untyped `any` (`Get` into an `any`, `Parse`
+  into a map) comes back **rounded**, with no error anywhere. Carry large ids as strings if that applies.
 - **A `NUL` byte (`U+0000`) in a string.** PostgreSQL rejects it; other dialects accept it. Base64-encode
   binary data. On PostgreSQL this surfaces as `dwarf_steps_write_failed_total` — see the
   [Runbook](runbook.md#dwarf_steps_write_failed-is-non-zero).

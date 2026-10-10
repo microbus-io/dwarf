@@ -13,9 +13,9 @@ says no worse band is served while a better one has due work anywhere in the fle
 the distinct keys at that band split the batch by weight. Neither is evaluable from one shard's view, so
 one shard cannot decide what it may dispatch on its own.
 
-The tally map is what a cross-shard **barrier** used to be. A barrier made every shard wait for the
-slowest before anyone could plan — an order-statistics tax measured at 2.02x by 6 shards, on the path that
-is the throughput ceiling. Retaining each shard's last tally costs one struct and zero extra queries, and
+The tally map stands where a cross-shard **barrier** would. Do not reintroduce one: a barrier makes every
+shard wait for the slowest before anyone can plan — an order-statistics tax measured at 2.02x by 6 shards,
+on the path that is the throughput ceiling. Retaining each shard's last tally costs one struct and zero extra queries, and
 lets every shard plan on its own clock. The trade: a shard sees its peers up to one of their cycles stale.
 Fairness (slowly varying) absorbs that; dispatch never sees it, because a shard's own tally is always fresh
 by the time it plans.
@@ -126,8 +126,7 @@ boundary means no producer can reintroduce it.
 **`LastBand` reports a negative band for "nothing to report."** An idle fleet's real value is
 `math.MaxInt`, which reads as a genuine band — wrong in the direction of looking valid — so it is reported
 as a sentinel a caller can test for instead. Its readers are the piston's tests and this package's own;
-it fed a `dwarf_steps_fairness_keys` gauge that was removed as a scheduling diagnostic that had served
-its purpose, so treat the key count as a test observable rather than a shipped signal.
+no metric reads it, so treat the key count as a test observable rather than a shipped signal.
 
 ## Contracts a caller must hold
 

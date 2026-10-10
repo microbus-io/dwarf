@@ -44,7 +44,7 @@ It defaults to the global `otel.GetMeterProvider()` — the no-op provider unles
 OpenTelemetry SDK. The engine builds its instruments under the scope `github.com/microbus-io/dwarf`;
 service identity comes from the provider's Resource, not from per-metric attributes.
 
-The engine emits 33 instruments — 17 counters, 12 gauges, and 4 histograms. Counter instrument names carry **no** `_total`
+The engine emits 34 instruments — 17 counters, 13 gauges, and 4 histograms. Counter instrument names carry **no** `_total`
 suffix; a Prometheus exporter appends it at the scrape boundary, so the names below are what you query in
 PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried as `dwarf_flows_started_total`):
 
@@ -133,11 +133,12 @@ Labels are deliberately bounded: there are no per-`fairness_key` labels (that wo
 cardinality), so fairness/priority metrics are aggregate-only.
 
 **Reading the two refill histograms.** They answer "is candidate selection costing me throughput, and if so
-where." Selection queries every shard concurrently and proceeds only when the last one answers, so:
+where." Each shard's selection runs on its own cycle, against its own database, so:
 
 - `dwarf_refill_query_duration_seconds` split **by `shard`** shows whether one database is slower than its
-  peers. A single shard's tail dragging while the others stay flat is the shard, not the engine — and because
-  the whole pass waits for it, that one shard bounds dispatch for the entire replica.
+  peers. A single shard's tail dragging while the others stay flat is the shard, not the engine. It slows
+  that shard's own dispatch; the other shards keep selecting on their own cycles, planning from the slow
+  shard's last report (`dwarf_refill_tally_age_seconds` shows how old that report is).
 - The same metric split **by `phase`** separates the two queries a pass runs. A tail that appears only on
   `band_keys` and only intermittently, on a backlog that has not changed, points at the database's query
   planner rather than at load (on PostgreSQL, stale table statistics can flip this query between an index scan
@@ -146,7 +147,7 @@ where." Selection queries every shard concurrently and proceeds only when the la
 - Do **not** sum the phases. Selection runs as two independently paced loops — one scanning the priority
   band, one turning the resulting plan into cached candidates — so `band_keys` and the other three phases are
   measured on different clocks and their sum describes nothing. Read each phase on its own; the rate at which
-  candidates reach the workers is set by the second loop, and a slow `band_keys` no longer holds it back.
+  candidates reach the workers is set by the second loop, so a slow `band_keys` does not hold it back.
 
 `dwarf_refill_candidates_discarded` over `dwarf_refill_candidates_selected` is the selection **waste ratio**.
 Each pass replaces the cache wholesale, so anything the workers had not yet picked up is dropped and
@@ -192,7 +193,7 @@ workflows shows up in the same pipeline: per-operation spans (nested under the a
 logs, and nine `sequel_*` instruments — all under the scope `github.com/microbus-io/sequel`. The logger is
 forwarded only when you explicitly set one, so an unconfigured engine stays silent here too.
 
-**These are not dwarf's instruments and are not part of the 33 above**, but you will see them on the same
+**These are not dwarf's instruments and are not part of the 34 above**, but you will see them on the same
 scrape, and two of them answer questions no `dwarf_*` metric can:
 
 | `sequel_*` instrument | Type | Labels | Measures |
@@ -229,7 +230,7 @@ and want these split per shard, give each server's database a distinct name; `dw
 
 All three observability knobs — `SetLogger`, `SetMeterProvider`, `SetTracerProvider` — are
 **construction-time**: set them before `Startup`. The engine resolves the providers and wires them into the
-worker hot path and the shard DBs once at startup, so a call after `Startup` is a deliberate no-op (it
+worker hot path and the shard DBs once at startup, so a call after `Startup` is rejected with a 409 (it
 keeps the hot-path reads lock-free). Hot-swapping a provider on a live engine is not supported.
 
 ## Putting it together

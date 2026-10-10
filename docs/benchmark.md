@@ -4,8 +4,8 @@
 > single-host laptop-scale numbers — good for *relative* comparison, not for capacity planning. For
 > absolute numbers and the sizing formula, see [Cloud benchmarks](benchmark-cloud.md).
 
-`fixtures/benchmark_test.go` measures end-to-end flow throughput and latency through the **public API**
-(`Run` = create + await) against whatever SQL dialect `SEQUEL_TESTING_DSN` points at. It measures what code
+The benchmarks in `./fixtures` measure end-to-end flow throughput and latency through the **public API**
+(`Run` = create + await) against whatever SQL dialect `SEQUEL_TESTING_DSN` points at. They measure what code
 review cannot tell you: how many flows and steps per second each dialect sustains at each shard count, and the
 dispatch-latency percentiles.
 
@@ -142,17 +142,15 @@ differences under ~25% as noise and never quote a single pass.
 ## State payload throughput (bytes/sec)
 
 `BenchmarkStatePayload` seeds each flow's initial state with a JSON string of a given size and carries it
-through every step (each step persists `merge(prevState, changes)`, and no-op tasks forward state unchanged),
-so the engine serializes, writes, and re-merges the whole payload once per step — 3× per flow here. The
-headline metric is **payloadMB/s = payload size × steps/sec**: the rate at which caller state bytes move
-through durable storage. Fixed at 1 shard. (Same hardware/config as above; median of three runs at
+unchanged through the three no-op steps, so every step reads it and hands it on. The headline metric is
+**payloadMB/s = payload size × steps/sec**: the rate at which caller state passes through steps. Fixed at 1 shard. (Same hardware/config as above; median of three runs at
 `-benchtime=100x`.)
 
 **Persisted bytes are not a fixed multiple of this number.** The engine avoids re-storing a payload a
 step did not change, referring to the copy the predecessor already stored instead. How many bytes actually
-land on disk therefore depends on the flow's shape: a chain that *rewrites* the payload at every step (what
-this benchmark measures, the worst case) stores roughly one copy per step, while a chain that merely
-*carries* a payload it never touches stores far less than one. Size storage from your own workload's shape,
+land on disk therefore depends on the flow's shape: a chain that *rewrites* the payload at every step stores
+roughly one copy per step, while a chain that merely *carries* a payload it never touches (what this
+benchmark measures) stores far less than one. Size storage from your own workload's shape,
 not from a constant.
 
 ![Caller state bytes moved per second by payload size](benchmark-dialects-payload.png)
@@ -201,4 +199,4 @@ A single-host laptop run cannot show what production hardware does — those dim
 and worker sizing (the sizing formula), the effect of real network latency, byte-throughput ceilings, and
 throughput at high volume (100M+ accumulated rows). Still open anywhere: a sustained multi-hour soak for
 drift (goroutine/memory/connection growth). This benchmark remains the per-dialect throughput/latency
-baseline the cloud numbers build on — the cloud campaign runs PostgreSQL only, on the ranking measured here.
+baseline the cloud numbers build on — the cloud benchmarks run PostgreSQL only, on the ranking measured here.

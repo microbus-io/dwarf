@@ -93,8 +93,11 @@ func TestFault_InterruptStaleWriteRollback(t *testing.T) {
 	// The flow reaches interrupted only via that recovered second attempt — the fenced first attempt rolled
 	// back, so the interrupt could not take on the first try.
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusInterrupted, 10*time.Second)
-	assert.Equal(int32(2), xCalls.Load()) // fenced attempt + recovered real attempt: proof the fence forced a re-dispatch
-	enginetest.AssertInvariants(t, e)     // no strand: the rollback undid the ancestor re-park, so no terminal-flow-with-live-step
+	// At least the fenced attempt plus the recovered one: the fence forced a re-dispatch. Not exactly two -
+	// execution is at-least-once, and a re-dispatch that stalls past its own 300ms lease is itself recovered
+	// while driveLeaseRecovery is still looping, fenced, and run a third time.
+	assert.True(xCalls.Load() >= 2, "the fenced attempt must have forced a re-dispatch, got %d calls", xCalls.Load())
+	enginetest.AssertInvariants(t, e) // no strand: the rollback undid the ancestor re-park, so no terminal-flow-with-live-step
 
 	// The rollback left a clean, resumable tree: Resume threads down to the leaf and the whole tree completes.
 	err = e.Resume(ctx, fk, map[string]any{"answer": "yes"})
@@ -105,15 +108,15 @@ func TestFault_InterruptStaleWriteRollback(t *testing.T) {
 
 // TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt pins the leaf-transition fence. handleInterrupt writes the
 // leaf's interrupt AND re-parks the whole surgraph chain (ancestor callers running+parkedSubgraph -> interrupted,
-// chain flows -> interrupted) in one combined UPDATE guarded on status IN ('running','interrupted'). The only
-// post-UPDATE gate USED to be a lease_seq compare. But lease recovery resets an expired leaf running->pending
-// WITHOUT bumping lease_seq, so for a zombie whose leaf recovery already reclaimed, the generation still matched
-// while the combined UPDATE matched the leaf ZERO rows - and the transaction committed only the OTHER rows: the
-// ancestor callers were flipped OUT of parkedSubgraph (stranding the parent's revive, since
-// deliverFlowFailureToParent needs status='running' AND parked=parkedSubgraph) and the chain flows were marked
-// interrupted, all while the leaf sat pending with no interrupt_done.
+// chain flows -> interrupted) in one combined UPDATE guarded on status IN ('running','interrupted'). A lease_seq
+// compare alone is not a sufficient post-UPDATE gate: lease recovery resets an expired leaf running->pending
+// WITHOUT bumping lease_seq, so for a zombie whose leaf recovery already reclaimed, the generation still matches
+// while the combined UPDATE matches the leaf ZERO rows - and committing would write only the OTHER rows: the
+// ancestor callers flipped OUT of parkedSubgraph (stranding the parent's revive, since
+// deliverFlowFailureToParent needs status='running' AND parked=parkedSubgraph) and the chain flows marked
+// interrupted, all while the leaf sits pending with no interrupt_done.
 //
-// The fence now also requires the leaf to have actually transitioned to `interrupted`. The scenario is built
+// So the fence also requires the leaf to have actually transitioned to `interrupted`. The scenario is built
 // directly: a parent caller step parked on its subgraph child, whose leaf recovery has reset to `pending` under
 // the same generation. handleInterrupt must fence (roll back) and touch nothing.
 func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing.T) {

@@ -68,8 +68,12 @@ graph LR
 state fields:
 
 ```go
-g.AddTransitionWhen("Triage", "Escalate", "severity >= 3")
-g.AddTransitionWhen("Triage", "AutoResolve", "severity < 3")
+// Each check opts in on its own condition; every one that holds runs, in parallel.
+g.AddTransitionWhen("Intake", "CreditCheck", "amount >= 1000")
+g.AddTransitionWhen("Intake", "FraudCheck", "international == true")
+g.AddTransition("CreditCheck", "Decide")
+g.AddTransition("FraudCheck", "Decide")
+g.SetFanIn("Decide")
 ```
 
 ```mermaid
@@ -78,18 +82,25 @@ graph LR
     classDef term fill:#e5f4f3,color:#434343,stroke:#32a7c1
     linkStyle default stroke:#32a7c1
 
-    t0["Triage"]:::task
+    t0["Intake"]:::task
     t0_when{"when"}:::term
-    t1["Escalate"]:::task
-    t2["AutoResolve"]:::task
+    t1["CreditCheck"]:::task
+    t2["FraudCheck"]:::task
+    t3["Decide"]:::task
     t0 --> t0_when
-    t0_when -->|"severity #gt;= 3"| t1
-    t0_when -->|"severity #lt; 3"| t2
+    t0_when -->|"amount #gt;= 1000"| t1
+    t0_when -->|"international == true"| t2
+    t1 --> t3
+    t2 --> t3
     _start(( )):::term --> t0
 ```
 
-If **several** `when` transitions match, **all** of them fire in parallel — that's a fan-out (see
-[Fan-out & subgraphs](fan-out-and-subgraphs.md)). If none match, the flow ends at the source task.
+Every `when` transition is evaluated **independently**: if several match, **all** of them fire in parallel —
+that's a fan-out (see [Fan-out & subgraphs](fan-out-and-subgraphs.md)). A source with two or more `when`
+transitions is a fan-out source even when its conditions happen to be mutually exclusive, so its branches
+must converge on a `SetFanIn` task; if none match, the fan-in runs on the source's own state, as it does for
+an empty `forEach` array. A single `when` that does not match ends the flow at the source task. For an
+either/or, where exactly one branch runs and no fan-in is needed, use `switch` below.
 
 ### First-match-wins (`switch`)
 
@@ -180,7 +191,8 @@ graph LR
 ```
 
 Each branch also gets `<as>Index` (its position) and `<as>Count` (the cohort size) injected. An empty
-array spawns nothing; if `forEach` is the only outgoing transition, an empty array ends the flow there.
+array spawns no branches but does not end the flow: it routes straight to the fan-in task, which runs on the
+source task's own state.
 
 ### Explicit jumps (`goto`)
 
@@ -282,7 +294,7 @@ target once. Mark the convergence task and wire non-default merges:
 ```go
 g.AddTransitionForEach("Split", "Process", "lineItems", "item")
 g.AddTransition("Process", "Summarize")
-g.SetFanIn("Summarize")                          // opts into fan-in validation
+g.SetFanIn("Summarize")                          // the branches converge here
 g.SetReducer("results", workflow.ReducerAppend)  // each branch appends its result
 g.SetReducer("total", workflow.ReducerAdd)       // each branch adds its subtotal
 ```
@@ -316,7 +328,8 @@ may carry fields under any name; the rule applies only to the names a graph decl
 ## Validation
 
 Call `g.Validate()` to check structural integrity before use — unreachable tasks, dangling transition
-targets, inconsistent fan-out siblings, illegal mixes (switch with non-switch), and so on. The engine also
+targets, inconsistent fan-out siblings, illegal mixes (switch with non-switch), a reducer that is not one
+of the `Reducer` constants, and so on. The engine also
 validates at create time. Validate early in tests:
 
 ```go
@@ -329,9 +342,7 @@ if err != nil {
 ## Inspection
 
 Read-only inspectors include `Name`, `EntryPoint`, `Tasks`, `Transitions`, `Reducers`, `URLOf`,
-`IsFanIn`, and `IsFanOutSource`. A graph carries only its definition; the fan-out-to-fan-in routing map
-is an engine-side optimization derived from the definition at dispatch, not part of the
-graph. Graphs marshal to and from JSON (`MarshalJSON`/`UnmarshalJSON`), which is how the engine freezes a
-graph onto a flow.
+`ErrorTransition`, `IsFanIn`, and `IsFanOutSource`. Graphs marshal to and from JSON
+(`MarshalJSON`/`UnmarshalJSON`), which is how the engine freezes a graph onto a flow.
 
 Next: [Writing tasks](tasks.md).

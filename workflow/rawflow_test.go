@@ -15,3 +15,24 @@ limitations under the License.
 */
 
 package workflow
+
+import (
+	"testing"
+	"time"
+
+	"github.com/microbus-io/testarossa"
+)
+
+// TestRawFlow_RetryDelay pins the backoff the engine applies after a Retry: exponential in the attempt, capped,
+// and zero when Retry was not called.
+func TestRawFlow_RetryDelay(t *testing.T) {
+	assert := testarossa.For(t)
+
+	rf := NewRawFlow()
+	assert.Equal(time.Duration(0), rf.RetryDelay(3))
+	assert.True(rf.Retry(time.Second, 2, 5*time.Second, 0))
+	assert.Equal(time.Second, rf.RetryDelay(0))
+	assert.Equal(4*time.Second, rf.RetryDelay(2))
+	assert.Equal(5*time.Second, rf.RetryDelay(3))
+	assert.Equal(5*time.Second, rf.RetryDelay(1000))
+}

@@ -102,7 +102,7 @@ func (r *GraphRenderer) Render() string {
 	fmt.Fprintf(&b, "    linkStyle default stroke:%s\n", r.primaryFill)
 	b.WriteString("\n")
 
-	heads, endEdges := r.renderBody(&b, "    ", "")
+	heads, endEdges := r.renderBody(&b)
 
 	if len(heads) > 0 {
 		for _, h := range heads {
@@ -127,7 +127,8 @@ type endEdge struct {
 	label string
 }
 
-func (r *GraphRenderer) renderBody(b *strings.Builder, indent string, prefix string) (heads []string, endEdges []endEdge) {
+func (r *GraphRenderer) renderBody(b *strings.Builder) (heads []string, endEdges []endEdge) {
+	const indent = "    "
 	g := r.g
 	// The graph carries no URL of its own; use the entry node's URL host as the "own host"
 	// for stripping the local host:port from node labels (cosmetic). Bare keys (no "://") yield "".
@@ -135,14 +136,14 @@ func (r *GraphRenderer) renderBody(b *strings.Builder, indent string, prefix str
 	ids := make(map[string]string, len(g.tasks))
 	labels := make(map[string]string, len(g.tasks))
 	for i, t := range g.tasks {
-		ids[t.Name] = fmt.Sprintf("%st%d", prefix, i)
+		ids[t.Name] = fmt.Sprintf("t%d", i)
 		labels[t.Name] = stripHostPort(t.Name, ownHost)
 	}
 
 	entries := make(map[string][]string, len(g.tasks))
 	exits := make(map[string][]string, len(g.tasks))
 	for _, t := range g.tasks {
-		if g.fanInNodes[t.Name] {
+		if g.fanInTasks[t.Name] {
 			entries[t.Name] = []string{ids[t.Name] + "_reduce"}
 		} else {
 			entries[t.Name] = []string{ids[t.Name]}
@@ -169,15 +170,15 @@ func (r *GraphRenderer) renderBody(b *strings.Builder, indent string, prefix str
 		}
 	}
 
-	emitNodeBody := func(name string, indent string) {
+	emitNodeBody := func(name string) {
 		fmt.Fprintf(b, "%s%s[\"%s\"]:::task\n", indent, ids[name], escapeMermaid(labels[name]))
 		if r.linkParam != "" {
 			fmt.Fprintf(b, "%sclick %s \"?%s=%s\"\n", indent, ids[name], r.linkParam, url.QueryEscape(name))
 		}
 	}
-	emitOneNode := func(name string, indent string) {
-		emitNodeBody(name, indent)
-		if g.fanInNodes[name] {
+	emitOneNode := func(name string) {
+		emitNodeBody(name)
+		if g.fanInTasks[name] {
 			fmt.Fprintf(b, "%s%s_reduce((%q)):::term\n", indent, ids[name], "reduce")
 			fmt.Fprintf(b, "%s%s_reduce --> %s\n", indent, ids[name], ids[name])
 		}
@@ -190,7 +191,7 @@ func (r *GraphRenderer) renderBody(b *strings.Builder, indent string, prefix str
 	}
 
 	for _, t := range g.tasks {
-		emitOneNode(t.Name, indent)
+		emitOneNode(t.Name)
 	}
 
 	type edge struct {
@@ -214,6 +215,8 @@ func (r *GraphRenderer) renderBody(b *strings.Builder, indent string, prefix str
 			label = "goto"
 		case tr.Kind == TransitionError:
 			label = "onError"
+		case tr.ForEach != "" && tr.When != "":
+			label = "for each when " + tr.When
 		case tr.ForEach != "":
 			label = "for each"
 		}
@@ -293,7 +296,7 @@ func stripHostPort(s, ownHost string) string {
 		host = before
 		path = after0
 	}
-	if ownHost == "" || host == ownHost {
+	if (ownHost == "" || host == ownHost) && path != "" {
 		return path
 	}
 	return after

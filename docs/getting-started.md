@@ -17,8 +17,8 @@ For tests and local experiments it uses SQLite in-memory automatically — no da
 The engine handles scheduling, state, durability, and recovery. You provide three things:
 
 1. **A graph** — the shape of the workflow, built with `workflow.NewGraph`.
-2. **A `Host` implementing `LoadGraph`** — returns a graph by name. The engine calls it once when a flow is
-   created, then freezes the graph onto the flow.
+2. **A `Host` implementing `LoadGraph`** — returns a graph by workflow URL. The engine calls it when a flow
+   is created (including a subgraph's child flow), then freezes the graph onto the flow.
 3. **The same `Host` implementing `ExecuteTask`** — runs one task. It receives a `*workflow.Flow` with the
    step's input state already populated; it does the work and writes outputs back onto the flow.
 

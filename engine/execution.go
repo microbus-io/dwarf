@@ -58,8 +58,6 @@ func cohortLockStripe(shard, spawnStepID int) int {
 	return int(h >> (64 - cohortLockStripesLog2))
 }
 
-const successorCols = "flow_id, step_depth, step_token, task_name, task_url, state, state_refs, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id, cancelling"
-
 // processStep acquires a step, executes its task, and enqueues the next step if applicable.
 //
 // THE CTX CARRIES THIS JOB'S PLACE IN LINE, stamped by the crew's gate at the moment the candidate was
@@ -115,8 +113,10 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			// it (a claim/read error microseconds after claiming, before any ExecuteTask ran) - there a
 			// peer cannot have stolen the lease yet, so the reset stays unfenced to preserve prompt
 			// recovery; every reset that follows an execution has leaseSeq>0 and is fenced.
-			resetSQL := "UPDATE dwarf_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?"
-			resetArgs := []any{workflow.StatusPending, stepID, fromStatus}
+			// A parked step is not this worker's to rewind: it is waiting on its child, and a rewind would leave
+			// it pending AND parked, which nothing selects or recovers.
+			resetSQL := "UPDATE dwarf_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=? AND parked=?"
+			resetArgs := []any{workflow.StatusPending, stepID, fromStatus, parkedNone}
 			if leaseSeq > 0 {
 				resetSQL += " AND lease_seq=?"
 				resetArgs = append(resetArgs, leaseSeq)
@@ -191,6 +191,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	var flowCancelReason string
 	flowDest := []any{&flowToken, &flowStatus, &workflowURL, &baggageJSON, &traceParent, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight, &flowTimeBudgetMs, &flowCancelReason}
 	flowRead := true
+	// The step columns every dialect's claim reads back, in claimCols order.
+	stepDest := []any{&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq, &fanOutOrdinal, &stepCancelling, &replaying, &replayGoto, &replaySleepLeftMs, &replayOnError}
 
 	switch db.DriverName() {
 	case "pgx":
@@ -201,9 +203,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// Every claim-side column is qualified, because dwarf_flows shares several names with dwarf_steps
 		// (status, created_at, updated_at, time_budget_ms).
 		err = db.QueryRowContext(ctx,
-			claimSQLPostgres(),
+			claimSQLPostgres,
 			workflow.StatusRunning, leaseMarginMs, e.engineID, stepID, parkedNone,
-		).Scan(append([]any{&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq, &fanOutOrdinal, &stepCancelling, &replaying, &replayGoto, &replaySleepLeftMs, &replayOnError}, flowDest...)...)
+		).Scan(append(stepDest, flowDest...)...)
 		if err == sql.ErrNoRows {
 			n, err = 0, nil
 		} else if err == nil {
@@ -211,12 +213,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		}
 	case "sqlite":
 		err = db.QueryRowContext(ctx,
-			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, engine_id=?, updated_at=NOW_UTC(),"+
-				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 OR advancing=1 THEN started_at ELSE NOW_UTC() END"+
-				" WHERE step_id=? AND "+claimEligible("")+
-				" RETURNING step_depth, task_name, step_token, state, changes, state_refs, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at, lease_seq, fan_out_ordinal, cancelling, advancing, advance_goto, DATE_DIFF_MILLIS(advance_sleep_until, NOW_UTC()), advance_on_error",
+			claimSQLSQLite,
 			workflow.StatusRunning, leaseMarginMs, e.engineID, stepID, parkedNone,
-		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq, &fanOutOrdinal, &stepCancelling, &replaying, &replayGoto, &replaySleepLeftMs, &replayOnError)
+		).Scan(stepDest...)
 		if err == sql.ErrNoRows {
 			n, err = 0, nil
 		} else if err == nil {
@@ -224,12 +223,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		}
 	case "mssql":
 		err = db.QueryRowContext(ctx,
-			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, engine_id=?, updated_at=NOW_UTC(),"+
-				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 OR advancing=1 THEN started_at ELSE NOW_UTC() END"+
-				" OUTPUT INSERTED.step_depth, INSERTED.task_name, INSERTED.step_token, INSERTED.state, INSERTED.changes, INSERTED.state_refs, INSERTED.attempt, INSERTED.lineage_id, INSERTED.flow_id, INSERTED.time_budget_ms, INSERTED.interrupt_done, INSERTED.resume_data, INSERTED.subgraph_done, INSERTED.subgraph_result, INSERTED.subgraph_error, INSERTED.created_at, INSERTED.lease_seq, INSERTED.fan_out_ordinal, INSERTED.cancelling, INSERTED.advancing, INSERTED.advance_goto, DATE_DIFF_MILLIS(INSERTED.advance_sleep_until, NOW_UTC()), INSERTED.advance_on_error"+
-				" WHERE step_id=? AND "+claimEligible(""),
+			claimSQLMSSQL,
 			workflow.StatusRunning, leaseMarginMs, e.engineID, stepID, parkedNone,
-		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq, &fanOutOrdinal, &stepCancelling, &replaying, &replayGoto, &replaySleepLeftMs, &replayOnError)
+		).Scan(stepDest...)
 		if err == sql.ErrNoRows {
 			n, err = 0, nil
 		} else if err == nil {
@@ -245,9 +241,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// reading only on a successful claim, guarantees the read's snapshot is after the claim commit (and
 		// thus after the pending-setter's commit). A lost claim skips the read entirely (n==0 returns below).
 		res, claimErr := db.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, engine_id=?, updated_at=NOW_UTC(),"+
-				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 OR advancing=1 THEN started_at ELSE NOW_UTC() END"+
-				" WHERE step_id=? AND "+claimEligible(""),
+			claimSQLMySQL,
 			workflow.StatusRunning, leaseMarginMs, e.engineID, stepID, parkedNone,
 		)
 		if claimErr != nil {
@@ -257,9 +251,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		n, _ = res.RowsAffected()
 		if n == 1 {
 			readErr := db.QueryRowContext(ctx,
-				"SELECT step_depth, task_name, step_token, state, changes, state_refs, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at, lease_seq, fan_out_ordinal, cancelling, advancing, advance_goto, DATE_DIFF_MILLIS(advance_sleep_until, NOW_UTC()), advance_on_error FROM dwarf_steps WHERE step_id=?",
+				claimReadMySQL,
 				stepID,
-			).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq, &fanOutOrdinal, &stepCancelling, &replaying, &replayGoto, &replaySleepLeftMs, &replayOnError)
+			).Scan(stepDest...)
 			if readErr != nil && readErr != sql.ErrNoRows {
 				err = readErr
 			}
@@ -290,6 +284,12 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	}
 	if flowID == 0 {
 		return nil
+	}
+	if e.seams.Enabled() { // Enabled gates the assembled name in production
+		defer func() {
+			e.seams.Checkpoint(ctx, engineseams.CheckpointClaimedDispatchDone)
+			e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shardNum), strconv.Itoa(stepID)))
+		}()
 	}
 
 	// The graph is frozen at flow creation, so a cached parse makes its JSON - the largest payload on the flow
@@ -492,7 +492,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// reaches this step - the claim's re-check then sees the mark, but the reason it returned is empty.
 		// Cancel writes the reason before the mark, so a read after the claim finds it. A rare path.
 		reasonPass := turnstile.WaitTurn(ctx)
-		rerr := db.QueryRowContext(ctx, "SELECT cancel_reason FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&flowCancelReason)
+		var rerr error
+		flowCancelReason, rerr = readCancelReason(ctx, db, flowID)
 		reasonPass.Return()
 		if rerr != nil {
 			return errors.Trace(rerr)
@@ -518,12 +519,12 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// job is by now older than anything admitted while its task ran, so it outranks them without any rule
 	// saying so.
 	//
-	// A DEDICATED RESERVATION FOR COMPLETIONS IS WHAT THIS REPLACES, and the age ordering is why none is
-	// needed. Sharing one pool between the two populations used to force a choice about who wins, and both
-	// answers were measured failing: served evenly, completions lose at random and queue behind admission
-	// (286 of them waiting out a full 1s budget); served with completions preferred, dispatch starves and
-	// short-task throughput collapsed 3x (4,416 vs 7,964 steps/s). Ordering by age answers it without a
-	// rule, and without either population being able to starve - every claim eventually becomes the oldest.
+	// Do not add a dedicated reservation for completions; the age ordering is why none is needed. A shared
+	// pool that must CHOOSE who wins fails both ways, measured: served evenly, completions lose at random and
+	// queue behind admission (286 of them waiting out a full 1s budget); served with completions preferred,
+	// dispatch starves and short-task throughput collapses 3x (4,416 vs 7,964 steps/s). Ordering by age
+	// answers it without a rule, and without either population being able to starve - every claim
+	// eventually becomes the oldest.
 	//
 	// A turn is never refused, so a drain records the work anyway: the outcome exists nowhere but in this
 	// goroutine. The return is still mandatory - a lost one shrinks this shard's ceiling permanently - and
@@ -564,14 +565,6 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// the step.
 		if tr, ok := graph.ErrorTransition(taskName); ok {
 			e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "workflow", workflowURL, "error", execErr)
-			tracedErr := errors.Convert(execErr)
-			// Persist the error into flow state WITHOUT its stack frames. onErr rides into changes ->
-			// final_state and is readable by any flow reader (History/Snapshot/List), and internal stack
-			// traces are code-structure disclosure. The onError handler still gets the message, status
-			// code, trace id and properties for routing - only the frames are dropped. Shallow-copy so the
-			// shared error object keeps its stack (e.g. for the debug log above / a later failStep).
-			redactedErr := *tracedErr
-			redactedErr.Stack = nil
 			// A FRESH flow, deliberately: an error voids the task's changes. Whatever it wrote before
 			// returning the error is dropped rather than carried to the handler - execution is at-least-once,
 			// so a lease-lost re-run recomputes those changes and a half-written attempt is not a fact
@@ -579,7 +572,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			// does not turn on whether the author declared a handler. Do not "restore" rawChanges here.
 			resultFlow = workflow.NewRawFlow()
 			resultFlow.SetRawState(state)
-			resultFlow.Set("onErr", &redactedErr)
+			resultFlow.Set("onErr", onErrValue(execErr))
 			errorRouted = true
 			errorTarget = tr.To
 		} else {
@@ -651,8 +644,13 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// Handle interrupt
 	if interruptPayload, interrupted := resultFlow.InterruptRequested(); interrupted {
 		e.logger.DebugContext(ctx, "Task interrupted", "task", taskName, "workflow", workflowURL)
-		e.metricStepExecuted(ctx, taskName, workflow.StatusInterrupted, shardNum)
-		return e.handleInterrupt(ctx, shardNum, db, stepID, leaseSeq, flowID, flowToken, workflowURL, changesJSON, interruptPayload)
+		landed, err := e.settlePersist(ctx, e.persistYielding(ctx, db, shardNum, stepID, leaseSeq, &persistPass, func() error {
+			return e.handleInterrupt(ctx, shardNum, db, stepID, leaseSeq, flowID, flowToken, workflowURL, changesJSON, interruptPayload)
+		}), shardNum, stepID, leaseSeq, flowID, flowToken, taskName)
+		if landed {
+			e.metricStepExecuted(ctx, taskName, workflow.StatusInterrupted, shardNum)
+		}
+		return err
 	}
 
 	// Handle subgraph
@@ -708,8 +706,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// spawn back too, and this worker returns quietly.
 		parkCaller := func(tx *sequel.Tx) error {
 			res, err := tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET changes=?, parked=?, updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND lease_seq=?",
-				changesJSON, parkedSubgraph, stepID, leaseSeq,
+				"UPDATE dwarf_steps SET changes=?, parked=?, updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=? AND lease_seq=?",
+				changesJSON, parkedSubgraph, stepID, parkedNone, leaseSeq,
 			)
 			if err != nil {
 				return errors.Trace(err)
@@ -727,15 +725,23 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// so the subgraph subtree nests beneath this task in the trace.
 		callerTraceParent := extractTraceParent(taskCtx)
 		e.seams.Checkpoint(ctx, engineseams.CheckpointBeforeSubgraphSpawn)
-		// createSubgraphFlow inserts the child already surgraph-linked and running, so no separate start.
-		_, err = e.createSubgraphFlow(ctx, shardNum, flowID, stepDepth, stepID, subgraphURL, subgraphGraph, childInputState, baggageJSON, callerTraceParent, parkCaller)
-		if errors.Is(err, errCallerGone) {
+		// createSubgraphFlow inserts the child already surgraph-linked and running, so no separate start. The
+		// spawn is one transaction, so persist may re-run it whole.
+		callerGone := false
+		landed, err := e.settlePersist(ctx, e.persistYielding(ctx, db, shardNum, stepID, leaseSeq, &persistPass, func() error {
+			_, err := e.createSubgraphFlow(ctx, shardNum, flowID, stepDepth, stepID, subgraphURL, subgraphGraph, childInputState, baggageJSON, callerTraceParent, parkCaller)
+			callerGone = errors.Is(err, errCallerGone)
+			if callerGone {
+				return nil
+			}
+			return err
+		}), shardNum, stepID, leaseSeq, flowID, flowToken, taskName)
+		if !landed {
+			return err
+		}
+		if callerGone {
 			e.seams.Checkpoint(ctx, engineseams.CheckpointSubgraphSpawnAbandoned)
 			return nil
-		}
-		if err != nil {
-			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
-			return errors.Trace(err)
 		}
 		e.metricStateWriteBytes(ctx, workflowURL, "changes", len(changesJSON))
 		e.metricStepExecuted(ctx, taskName, "subgraph", shardNum)
@@ -745,28 +751,12 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	sleepDur := resultFlow.SleepRequested()
 
 	// Handle retry
-	if initialDelay, multiplier, maxDelay, retryRequested := resultFlow.RetryRequested(); retryRequested {
+	if _, _, _, retryRequested := resultFlow.RetryRequested(); retryRequested {
 		e.logger.DebugContext(ctx, "Task retried", "task", taskName, "workflow", workflowURL, "step", stepID, "attempt", attempt)
 		// Sleep is the floor and the backoff adds on top: total = Sleep + min(backoff, maxDelay). This lets a
 		// task set a precise wait (e.g. a downstream's Retry-After via Sleep) and still get exponential backoff
 		// on repeated attempts. maxDelay caps the backoff component, not the total.
-		retrySleepMs := sleepDur.Milliseconds()
-		{
-			// Clamp in float space, and stop multiplying at the cap, so delay never overflows int64 ns.
-			delay := float64(initialDelay)
-			if multiplier > 0 {
-				for range attempt {
-					if maxDelay > 0 && delay >= float64(maxDelay) {
-						break
-					}
-					delay *= multiplier
-				}
-			}
-			if maxDelay > 0 && delay > float64(maxDelay) {
-				delay = float64(maxDelay)
-			}
-			retrySleepMs += time.Duration(delay).Milliseconds()
-		}
+		retrySleepMs := sleepDur.Milliseconds() + resultFlow.RetryDelay(attempt).Milliseconds()
 		// A retry rewinds this step in place and clears its subgraph park slot, so on
 		// re-dispatch flow.Subgraph re-arms and spawns a *fresh* child. The prior attempt's
 		// child (always terminal by now - the park only resolves on a terminal child) must be
@@ -784,26 +774,29 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// flow (terminalizing this running step) in exactly the window the status='running' rewind guard protects.
 		e.seams.Checkpoint(ctx, engineseams.CheckpointBeforeRetryRewind)
 		var rewound bool
-		err := db.Transact(ctx, func(tx *sequel.Tx) error {
-			res, execErr := tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, changes=?, attempt=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), lease_expires=NOW_UTC(), updated_at=NOW_UTC(), interrupt_done=0, resume_data=?, subgraph_done=0, subgraph_result=?, subgraph_error='' WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND lease_seq=?",
-				workflow.StatusPending, changesJSON, attempt+1, retrySleepMs, emptyJSON, emptyJSON, stepID, leaseSeq,
-			)
-			if execErr != nil {
-				return errors.Trace(execErr)
+		landed, err := e.settlePersist(ctx, e.persistYielding(ctx, db, shardNum, stepID, leaseSeq, &persistPass, func() error {
+			rewound = false
+			if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultRetryRewindErr, taskName)) {
+				return errors.New("injected fault: " + engineseams.FaultRetryRewindErr + " " + taskName)
 			}
-			if n, _ := res.RowsAffected(); n == 0 {
-				return nil
-			}
-			rewound = true
-			return errors.Trace(e.deleteSubgraphFlowsRootedAt(ctx, tx, stepID))
-		})
-		if err != nil {
-			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
-			return errors.Trace(err)
-		}
-		if !rewound {
-			return nil
+			return db.Transact(ctx, func(tx *sequel.Tx) error {
+				rewound = false
+				res, execErr := tx.ExecContext(ctx,
+					"UPDATE dwarf_steps SET status=?, changes=?, attempt=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), lease_expires=NOW_UTC(), updated_at=NOW_UTC(), interrupt_done=0, resume_data=?, subgraph_done=0, subgraph_result=?, subgraph_error='' WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND lease_seq=?",
+					workflow.StatusPending, changesJSON, attempt+1, retrySleepMs, emptyJSON, emptyJSON, stepID, leaseSeq,
+				)
+				if execErr != nil {
+					return errors.Trace(execErr)
+				}
+				if n, _ := res.RowsAffected(); n == 0 {
+					return nil
+				}
+				rewound = true
+				return errors.Trace(e.deleteSubgraphFlowsRootedAt(ctx, tx, stepID))
+			})
+		}), shardNum, stepID, leaseSeq, flowID, flowToken, taskName)
+		if !landed || !rewound {
+			return err
 		}
 		// The step was rewound in place for re-dispatch; drop this replica's reservation so the immediate
 		// re-offer below (enqueueStepDue on a zero-backoff retry) is not skipped by its own still-live entry.
@@ -915,16 +908,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		}
 		return nil
 	})
-	switch {
-	case errors.Is(err, errPersistFenced), errors.Is(err, errPersistDrained):
-		return nil // a peer owns the step now; abandon it silently
-	case sequel.IsLockContentionError(err):
-		// Contention is NOT a persistence failure and must never be classified as one: terminalizing on it
-		// would kill live flows during a contention storm - exactly backwards. Transact already retried it to
-		// exhaustion; hand it to the recovery defer, which rewinds the step and re-polls.
-		return errors.Trace(err)
-	case err != nil:
-		return errors.Trace(e.failOnPersistError(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName))
+	if landed, err := e.settlePersist(ctx, err, shardNum, stepID, leaseSeq, flowID, flowToken, taskName); !landed {
+		return err
 	}
 	if stepRowsAffected == 0 {
 		return nil
@@ -939,7 +924,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// The flow row was read at claim time, which for a step already running when Cancel landed predates
 		// the reason. Cancel writes the reason before the mark, so a step that sees the mark finds the reason
 		// on a fresh read; this path is rare, so the extra round trip is too.
-		if rerr := db.QueryRowContext(ctx, "SELECT cancel_reason FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&flowCancelReason); rerr != nil {
+		var rerr error
+		if flowCancelReason, rerr = readCancelReason(ctx, db, flowID); rerr != nil {
 			return errors.Trace(rerr)
 		}
 		tr, ok := graph.ErrorTransition(taskName)
@@ -955,11 +941,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// The extra write puts onErr into the step's persisted changes, so the step reads afterwards the way an
 		// error-routed step does; it runs only on this rare path, so the completion write above never carries
 		// a second copy of the changes.
-		tracedErr := errors.Convert(cancelmarker.New(flowCancelReason))
-		redactedErr := *tracedErr
-		redactedErr.Stack = nil
 		accumulatedChanges = accumulatedChanges.Clone()
-		_ = accumulatedChanges.Set("onErr", &redactedErr)
+		_ = accumulatedChanges.Set("onErr", onErrValue(cancelmarker.New(flowCancelReason)))
 		changesJSON, _ = json.Marshal(accumulatedChanges)
 		// The route is recorded with the changes, so a replay of this step routes to the handler too.
 		if _, uerr := db.ExecContext(ctx,
@@ -1041,7 +1024,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	//
 	// routedToEnd is what keeps that convenience from swallowing a deliberate termination. An explicit route to
 	// END and "no candidates at all" both leave cohortSize at 0, but only the second is the empty-cohort shape:
-	// a task on a fan-out source that calls Goto(END) - "fan out over the array, or end the flow when there is
+	// a task on a fan-out source that calls Goto(workflow.End) - "fan out over the array, or end the flow when there is
 	// nothing to do" - has asked to terminate, and converging on the fan-in instead sends the flow back around
 	// the loop that reaches the source again, writing a step per lap until something outside kills it.
 	fanInOfSource := ""
@@ -1155,15 +1138,11 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	sleepMs := sleepDur.Milliseconds()
 
 	var newStepIDs []int
-	flowFailed := false
-	flowFailedStatus := workflow.StatusFailed
+	// A cohort resolving as a loss fails the flow in this transaction; its post-commit tail runs after it.
+	var loss flowLoss
 	// State bytes moved by this transition (successor snapshots, fan-in merge), accumulated in the
 	// closure and emitted only after commit (see stateByteCount).
 	var txBytes stateByteCount
-	// When the failing flow is a subgraph child, its failure is delivered to the parent's flow.Subgraph
-	// call rather than notified directly (see failStep). Captured in the transaction, acted on after it.
-	flowFailedParentStepID := 0
-	flowFailedReDispatchParent := false
 
 	// The transition (insert next steps, then advance or fail the flow) runs as one retryable
 	// transaction. Under pessimistic locking it can deadlock with a concurrent worker, and a deadlocked
@@ -1207,9 +1186,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	err = e.persistYielding(ctx, db, shardNum, stepID, leaseSeq, &persistPass, func() error {
 		err := db.Transact(ctx, func(tx *sequel.Tx) error {
 			newStepIDs = newStepIDs[:0]
-			flowFailed, flowFailedStatus = false, workflow.StatusFailed
+			loss = flowLoss{}
 			txBytes = stateByteCount{}
-			flowFailedParentStepID, flowFailedReDispatchParent = 0, false
 
 			// engineseams.FaultContention returns a retryable lock-contention error (consumed on the first attempt), so the
 			// test proves Transact rolls back and re-runs the closure to a clean commit. engineseams.FaultTransitionCommit
@@ -1299,15 +1277,14 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				}
 				stepStateJSON, stepRefsJSON := linearStateJSON, linearRefsJSON
 				if next.itemKey != "" {
-					// A forEach branch's state is the flow state plus its element and ordinal context. The
-					// source array is NOT stripped: the engine once deleted it from each branch's local state
-					// to avoid N copies of it in every step row of every branch, but that was a byte
-					// optimization for the one field the engine happens to know the name of, while every other
-					// carried field paid the same cost unaddressed. It also made a branch's state a LIE - the
-					// branch could not see the array its own element came from - and it is what made a failed
-					// fan-out's final_state come back missing the array (a completed sibling's branch-local
-					// snapshot is the merge base there). The general mechanism that owns the cost is state refs:
-					// the array is REF'd, so the branches share one copy of it and each still sees it whole.
+					// A forEach branch's state is the flow state plus its element and ordinal context. Do not strip
+					// the source array from it to save N copies: that is a byte optimization for the one field the
+					// engine happens to know the name of, while every other carried field pays the same cost; it
+					// makes a branch's state a LIE - the branch cannot see the array its own element came from -
+					// and it makes a failed fan-out's final_state come back missing the array (a completed
+					// sibling's branch-local snapshot is the merge base there). The general mechanism that owns the
+					// cost is state refs: the array is REF'd, so the branches share one copy of it and each still
+					// sees it whole.
 					perStepState := childInputState.Clone()
 					_ = perStepState.Set(next.itemKey, next.item)
 					_ = perStepState.Set(next.itemKey+"Index", next.cohortIndex)
@@ -1481,32 +1458,14 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 						}
 					}
 					if failFlow {
-						flowFailedStatus = workflow.StatusFailed
-						if flowCancelled {
-							flowFailedStatus = workflow.StatusCancelled
-						}
-						lossErr := e.flowLossError(ctx, tx, flowID, flowCancelled, nil)
-						finalStateJSON, _, cfsErr := e.computeFinalState(ctx, tx, shardNum, flowID)
-						if cfsErr != nil {
-							return errors.Trace(cfsErr)
-						}
-						tx.ExecContext(ctx,
-							"UPDATE dwarf_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
-							finalStateJSON, flowFailedStatus, flowErrorText(flowCancelled, lossErr), flowID,
-						)
-						flowFailed = true
 						// The cohort fully resolved here (this branch completed last), so every sibling has
-						// settled - nothing is stranded. If this flow is a subgraph child, deliver the failure
-						// to the parked parent caller step rather than notifying directly.
+						// settled - nothing is stranded.
 						var parentStepID int
 						tx.QueryRowContext(ctx, "SELECT surgraph_step_id FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&parentStepID)
-						if parentStepID != 0 {
-							rd, derr := e.deliverFlowFailureToParent(ctx, tx, parentStepID, lossErr)
-							if derr != nil {
-								return errors.Trace(derr)
-							}
-							flowFailedParentStepID = parentStepID
-							flowFailedReDispatchParent = rd
+						var lerr error
+						loss, lerr = e.failFlowTx(ctx, tx, shardNum, flowID, flowCancelled, nil, parentStepID)
+						if lerr != nil {
+							return errors.Trace(lerr)
 						}
 					}
 				}
@@ -1517,7 +1476,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			// unresolved pure arrival never takes the grab, and its write here would be step_id=0 over the 0 a fan-out
 			// already carries - pure WAL amplification on the flow's hottest row (two extra tuple
 			// versions per sibling; 126 per 64-wide cohort) plus the lock hold that serializes the cohort.
-			if !flowFailed && (!pureArrival || flowRowLocked) {
+			if loss.status == "" && (!pureArrival || flowRowLocked) {
 				if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
 					e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
 				}
@@ -1545,40 +1504,15 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		cohortMu.unlock()
 		cohortMu = nil
 	}
-	switch {
-	case errors.Is(err, errPersistFenced), errors.Is(err, errPersistDrained):
-		return nil // a peer owns the step now; abandon it silently
-	case sequel.IsLockContentionError(err):
-		// Contention is NOT a persistence failure and must never be classified as one: terminalizing on it
-		// would kill live flows during a contention storm - exactly backwards. Transact already retried it to
-		// exhaustion; hand it to the recovery defer, which rewinds the step and re-polls.
-		return errors.Trace(err)
-	case err != nil:
-		return errors.Trace(e.failOnPersistError(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName))
+	if landed, err := e.settlePersist(ctx, err, shardNum, stepID, leaseSeq, flowID, flowToken, taskName); !landed {
+		return err
 	}
 	e.metricStateWriteBytes(ctx, workflowURL, "state", txBytes.stateWritten)
 	e.metricStateReadBytes(ctx, workflowURL, "state", txBytes.stateRead)
 	e.metricStateReadBytes(ctx, workflowURL, "changes", txBytes.changesRead)
 
-	if flowFailed {
-		// This path fails a flow WITHOUT going through failStep - a completing last arriver resolving a cohort
-		// that carries failures - so it must count the termination itself, on both branches, exactly as
-		// failStep does. Missing it here would leave the in-flight panel drifting for precisely the fan-out
-		// failures the cohort accounting exists to get right.
-		e.metricFlowEnded(ctx, workflowURL, flowFailedStatus, shardNum)
-		if flowFailedParentStepID != 0 {
-			// Subgraph child: the failure is delivered to the parent's flow.Subgraph call - but the child has
-			// still stopped, so wake any Await on the child key (legal read-only introspection), mirroring
-			// failStep's subgraph-child branch. Without this, an Await(childKey) on a child failed by its
-			// completing last arriver (this path) would wait on the latch detector to read the stop instead.
-			e.signalStop(ctx, keys.New(shardNum, flowID, flowToken), flowFailedStatus)
-			if flowFailedReDispatchParent {
-				e.enqueueStep(ctx, shardNum, flowFailedParentStepID)
-			}
-			return nil
-		}
-		compositeID := keys.New(shardNum, flowID, flowToken)
-		e.signalStop(ctx, compositeID, flowFailedStatus)
+	if loss.status != "" {
+		e.endLostFlow(ctx, shardNum, flowID, flowToken, workflowURL, loss)
 		return nil
 	}
 
@@ -1589,6 +1523,26 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		e.enqueueStepDue(ctx, shardNum, newStepIDs[0], flowPriority)
 	}
 	return nil
+}
+
+// onErrValue is the value an error-routed step records under onErr for its handler: the error WITHOUT its stack
+// frames. onErr rides into changes -> final_state and is readable by any state-bearing reader (Snapshot's
+// final_state, Step's state/changes), and internal stack traces are code-structure disclosure. The handler still
+// gets the message, status code, trace id and properties for routing. It is a shallow copy, so the shared error
+// keeps its stack for logs and a later failStep.
+func onErrValue(err error) *errors.TracedError {
+	redacted := *errors.Convert(err)
+	redacted.Stack = nil
+	return &redacted
+}
+
+// readCancelReason reads a flow's cancel reason fresh. A step that sees its cancel mark may hold a flow row read
+// before the reason was written (Cancel writes the reason before the mark), so the reason is re-read rather than
+// taken from that row.
+func readCancelReason(ctx context.Context, db sequel.Executor, flowID int) (string, error) {
+	var reason string
+	err := db.QueryRowContext(ctx, "SELECT cancel_reason FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&reason)
+	return reason, errors.Trace(err)
 }
 
 // errLeaseFenced is an in-transaction sentinel: a post-execution write found the dispatch's lease had
@@ -1707,15 +1661,16 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 		// upgrade deadlock closed). Ordering steps before flows removes the cycle with a concurrent
 		// resume, which holds the chain step rows and wants the chain flow rows: acquiring in the same order
 		// on both sides means one blocks rather than deadlocks. The flow-first transition/completion cluster
-		// (advanceFlow, completeFlow) is unaffected — it shares only the single flow row with this path (it
-		// never locks a sibling's step row), and one shared resource cannot cycle.
+		// (the transition transaction, completeFlow) cannot cycle with this path either: the only step rows it
+		// locks besides its own are a cohort's spawn and exit rows, and an interrupting leaf is a member that has
+		// not arrived, so its cohort cannot be resolving while it interrupts.
 		allStepIDs := append([]any{stepID}, chainStepIDs...)
 		stepPlaceholders := strings.Repeat("?,", len(allStepIDs)-1) + "?"
 		stepArgs := []any{stepID, changesJSON, stepID, workflow.StatusInterrupted, parkedNone}
 		stepArgs = append(stepArgs, allStepIDs...)
 		chainSQL := "UPDATE dwarf_steps SET changes=CASE WHEN step_id=? THEN ? ELSE changes END, interrupt_done=CASE WHEN step_id=? THEN 1 ELSE interrupt_done END, status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN (" + stepPlaceholders + ") AND status IN ('" + workflow.StatusRunning + "', '" + workflow.StatusInterrupted + "')"
 		// engineseams.FaultInterruptChainWrite reproduces a deadlock victim dialect-independently: the statement errors and
-		// applies NOTHING, so the leaf stays `running` - the shape that used to read back as a genuine fence.
+		// applies NOTHING, so the leaf stays `running` - the shape that must not read back as a genuine fence.
 		if e.seams.IsFault(engineseams.FaultInterruptChainWrite) {
 			chainSQL, stepArgs = "UPDATE dwarf_steps SET no_such_column=1 WHERE step_id=?", []any{stepID}
 		}
@@ -1743,10 +1698,9 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 		// pre-UPDATE row instead of the transaction's error would make the fence below trip on a merely-
 		// contended write and `return nil`: a leaf we still own, abandoned with no interrupt, no error and no
 		// retry, its flow stuck `running` until the lease lapses (minutes) - permanently if a Resume lands in
-		// that window, since the lost branch never marked its caller step interrupted. That was the live bug
-		// while sequel's QueryRow uniquely neither short-circuited nor latched; it now reports the
-		// transaction's error like every other statement method, so the check below catches it and Transact
-		// retries. Observed on SQL Server, where two parallel subgraph callers interrupting at once deadlock:
+		// that window, since the lost branch never marked its caller step interrupted. sequel's QueryRow
+		// reports the transaction's error like every other statement method, so the check below catches it and
+		// the write is retried. Observed on SQL Server, where two parallel subgraph callers interrupting at once deadlock:
 		// moving a step running->interrupted deletes keys from the three status-filtered dwarf_steps indexes,
 		// so even disjoint row sets cycle. Never let this error go unchecked, and never decide the fence ahead
 		// of it.
@@ -1820,7 +1774,9 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 	return nil
 }
 
-// fireFanInDirect creates the fan-in step immediately for an empty-cohort case.
+// fireFanInDirect creates the fan-in step immediately for a fan-out source that converges with no branches:
+// an empty forEach, or a goto/onError/when/switch route straight to the source's own fan-in. The source is the
+// spawn, so the fan-in runs on the source's own state and changes.
 func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.DB, flowID int, stepID, leaseSeq int, stepDepth int, lineageID int, fanOutOrdinal int, fanInTarget, fanInURL string, workflowURL string, graph *workflow.Graph, sleepDur time.Duration, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int, inheritCancel int) error {
 	var fanInStepID int64
 	var txBytes stateByteCount
@@ -1861,7 +1817,10 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		// cleared reduced field was ignored during the fold. An empty forEach spawns no members, so this is the
 		// whole merge - agreeing with fanInRow's populated path on the same primitive.
 		mergedState := ourState.Clone()
-		_ = mergedState.MergeReduce(ourChanges, graph.Reducers())
+		rerr = mergedState.MergeReduce(ourChanges, graph.Reducers())
+		if rerr != nil {
+			return errors.Trace(&permanentError{rerr})
+		}
 		mergedState.DelNils()
 		// This step IS the cohort spawn (an empty forEach spawns no branches), so it anchors exactly as a
 		// populated cohort's spawn does in fanInRow. There are no members, but a field this step wrote
@@ -2009,7 +1968,10 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 	// cleared reduced field is ignored (reducer identity); a cleared replace field rides as a tombstone that
 	// DelNils enacts once all members are folded.
 	merged := spawnState.Clone()
-	_ = merged.MergeReduce(spawnChanges, graph.Reducers())
+	err = merged.MergeReduce(spawnChanges, graph.Reducers())
+	if err != nil {
+		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(&permanentError{err})
+	}
 	// Fields a cohort MEMBER contributed. Their bytes are in that member's `changes` - not in the spawn's row -
 	// and a reducer's COMBINED output exists in no row at all, so neither can be anchored at the spawn. They are
 	// inlined into the fan-in step's own state, which becomes their anchor for everything downstream (the third
@@ -2054,7 +2016,10 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 	// One fold for the whole cohort, not one per member: a combining reducer decodes its accumulator and
 	// re-encodes the result, so folding per member re-encodes a value that grows as it goes - quadratic in
 	// the accumulated bytes across the cohort's width, and a fan-out is exactly where width is large.
-	_ = merged.MergeReduceAll(memberChanges, graph.Reducers())
+	err = merged.MergeReduceAll(memberChanges, graph.Reducers())
+	if err != nil {
+		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(&permanentError{err})
+	}
 
 	// Materialize the fan-in snapshot: the folds preserved replace-field delete tombstones (accumulation);
 	// DelNils enacts them now, before the state is minted onto the fan-in step. Reduced fields are
@@ -2134,13 +2099,46 @@ func claimEligible(alias string) string {
 		alias + "not_before<=NOW_UTC() AND " + alias + "lease_expires<=NOW_UTC() THEN 1 END=1"
 }
 
-// claimSQLPostgres is the Postgres claim: the CAS on the step row, its read, and the flow row joined in, in one
-// round trip. Binds: the running status, the lease margin in ms, the engine ID, the step ID, the unparked value.
-func claimSQLPostgres() string {
-	return "UPDATE dwarf_steps s SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), s.time_budget_ms + ?), lease_seq=s.lease_seq+1, engine_id=?, updated_at=NOW_UTC()," +
-		" started_at=CASE WHEN s.attempt>0 OR s.subgraph_done=1 OR s.interrupt_done=1 OR s.advancing=1 THEN s.started_at ELSE NOW_UTC() END" +
+// claimSet is the claim's SET clause: take the lease, bump its generation, and stamp started_at unless the
+// dispatch continues an earlier one (a retry, a resumed park, a replay). alias qualifies the step table's columns
+// ("s." or ""), since an assignment's right-hand side may need it. Binds: the running status, the lease margin in
+// ms, the engine ID.
+func claimSet(alias string) string {
+	return "status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), " + alias + "time_budget_ms + ?), lease_seq=" + alias + "lease_seq+1, engine_id=?, updated_at=NOW_UTC()," +
+		" started_at=CASE WHEN " + alias + "attempt>0 OR " + alias + "subgraph_done=1 OR " + alias + "interrupt_done=1 OR " + alias + "advancing=1 THEN " + alias + "started_at ELSE NOW_UTC() END"
+}
+
+// claimReadCols is the step columns the claim reads back, in the order processStep scans them.
+var claimReadCols = []string{"step_depth", "task_name", "step_token", "state", "changes", "state_refs", "attempt",
+	"lineage_id", "flow_id", "time_budget_ms", "interrupt_done", "resume_data", "subgraph_done", "subgraph_result",
+	"subgraph_error", "created_at", "lease_seq", "fan_out_ordinal", "cancelling", "advancing", "advance_goto",
+	"advance_sleep_until", "advance_on_error"}
+
+// claimCols is claimReadCols as a select list, each qualified by prefix ("s.", "INSERTED." or ""). A recorded
+// sleep is read as what remains of it, on the database clock.
+func claimCols(prefix string) string {
+	cols := make([]string, len(claimReadCols))
+	for i, c := range claimReadCols {
+		cols[i] = prefix + c
+		if c == "advance_sleep_until" {
+			cols[i] = "DATE_DIFF_MILLIS(" + prefix + c + ", NOW_UTC())"
+		}
+	}
+	return strings.Join(cols, ", ")
+}
+
+// The claim, per dialect, built once: it runs on every step. Binds: the running status, the lease margin in ms,
+// the engine ID, the step ID, the unparked value. claimSQLPostgres is the CAS on the step row, its read, and the
+// flow row joined in, in one round trip; SQLite and SQL Server read the step back with RETURNING/OUTPUT; MySQL has
+// neither, so it claims and then reads (claimReadMySQL, bound to the step ID).
+var (
+	claimSQLSQLite   = "UPDATE dwarf_steps SET " + claimSet("") + " WHERE step_id=? AND " + claimEligible("") + " RETURNING " + claimCols("")
+	claimSQLMSSQL    = "UPDATE dwarf_steps SET " + claimSet("") + " OUTPUT " + claimCols("INSERTED.") + " WHERE step_id=? AND " + claimEligible("")
+	claimSQLMySQL    = "UPDATE dwarf_steps SET " + claimSet("") + " WHERE step_id=? AND " + claimEligible("")
+	claimReadMySQL   = "SELECT " + claimCols("") + " FROM dwarf_steps WHERE step_id=?"
+	claimSQLPostgres = "UPDATE dwarf_steps s SET " + claimSet("s.") +
 		" FROM dwarf_flows f" +
 		" WHERE s.step_id=? AND " + claimEligible("s.") + " AND f.flow_id=s.flow_id" +
-		" RETURNING s.step_depth, s.task_name, s.step_token, s.state, s.changes, s.state_refs, s.attempt, s.lineage_id, s.flow_id, s.time_budget_ms, s.interrupt_done, s.resume_data, s.subgraph_done, s.subgraph_result, s.subgraph_error, s.created_at, s.lease_seq, s.fan_out_ordinal, s.cancelling, s.advancing, s.advance_goto, DATE_DIFF_MILLIS(s.advance_sleep_until, NOW_UTC()), s.advance_on_error," +
+		" RETURNING " + claimCols("s.") + "," +
 		" f.flow_token, f.status, f.workflow_url, f.baggage, f.trace_parent, f.created_at, f.updated_at, f.priority, f.fairness_key, f.fairness_weight, f.time_budget_ms, f.cancel_reason"
-}
+)

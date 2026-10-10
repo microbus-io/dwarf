@@ -38,7 +38,7 @@ var traceProp = propagation.TraceContext{}
 // initTracer resolves the engine's tracer from the injected TracerProvider, falling back to the global
 // otel.GetTracerProvider() (the no-op provider unless the host configures the OTEL SDK). Called from
 // initRuntime. With no provider injected the tracer is a no-op: Start returns a non-recording span,
-// mintRootTraceParent yields "" (so trace_parent stays empty), and there is zero per-step overhead.
+// mintWorkflowSpan yields "" (so trace_parent stays empty), and there is zero per-step overhead.
 func (e *Engine) initTracer() {
 	tp := e.tracerProvider
 	if tp == nil {

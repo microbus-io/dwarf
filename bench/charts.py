@@ -68,7 +68,7 @@ finish(fig, ax, f"{OUT}/benchmark-cloud-tiers.png")
 # grows with the pool. Carrying M=8 constants to an M=96 rig over-predicts throughput by 21-44%.
 rtt8 = [0.28, 0.82, 1.34, 2.35, 5.34]
 held8 = [8/1021.2*1000, 8/529.3*1000, 8/372.0*1000, 8/243.9*1000, 8/115.7*1000]
-rtt96 = [0.829, 1.313, 1.806, 2.800, 4.814]                       # campaign 27, linear, M=96
+rtt96 = [0.829, 1.313, 1.806, 2.800, 4.814]                       # linear, M=96
 held96 = [16.77, 22.19, 25.06, 35.63, 53.21]                      # every arm verified 96/96 in use
 fig, ax = plt.subplots(figsize=(7, 4.2))
 xs = [0, 5.6]
@@ -325,7 +325,7 @@ else:
     ax.grid(axis="x", visible=False)
     finish(fig, ax, f"{OUT}/benchmark-cloud-shardladder.png")
 
-# ---- Campaign 14: vertical scaling 1-64 vCPU (2026-07-27) ----
+# ---- Vertical scaling 1-64 vCPU ----
 # One session, one engine host, 1TB SSD and ~4GB RAM per vCPU on every tier, open-loop `linear`.
 # Each tier runs the connection pool the engine derives for it, which is why the ratio changes at 32.
 VERT_DIR = "bench/results/14-vertical-20260727"

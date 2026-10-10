@@ -70,9 +70,8 @@ func New(g *workflow.Graph) *Map {
 			}
 			var nextStack []string
 			switch {
-			case tr.Kind != "":
-				// Control-flow edges neither push nor pop a fan-out frame.
-				nextStack = fromStack
+			// The fan-in arm precedes the override arm, as in Validate: an edge of any kind into a fan-in is a
+			// cohort arrival, so a goto/error edge that is a branch's only route to the fan-in must still map it.
 			case g.IsFanIn(tr.To):
 				var source string
 				if fromIsFanOut {
@@ -86,6 +85,9 @@ func New(g *workflow.Graph) *Map {
 				if source != "" {
 					fanOutToFanIn[source] = tr.To
 				}
+			case tr.Kind != "":
+				// Control-flow edges neither push nor pop a fan-out frame.
+				nextStack = fromStack
 			case fromIsFanOut:
 				nextStack = append(stackCopy(fromStack), from)
 			default:

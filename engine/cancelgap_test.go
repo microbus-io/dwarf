@@ -195,8 +195,8 @@ func TestCancelMarkSparesAHandlerInsertedAfterTheWatermark(t *testing.T) {
 
 // TestCancelOncePerFlow pins that a flow is cancelled once. A handler catches the first cancellation and the
 // flow carries on; a second Cancel - a host retrying a call whose response it lost - must not reach the
-// recovered flow, so it neither re-marks the step now running nor overwrites the recorded reason. Re-marking
-// was what a repeat used to do, and it cancelled a flow its author had recovered.
+// recovered flow, so it neither re-marks the step now running nor overwrites the recorded reason. A re-mark
+// would cancel a flow its author had recovered.
 func TestCancelOncePerFlow(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)

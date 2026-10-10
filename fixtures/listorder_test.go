@@ -33,8 +33,8 @@ import (
 // newest flows, then shard 2's newest - so shard 2's newest flow follows shard 1's oldest returned one, and
 // the concatenation is not one descending time order. There is no cross-shard order to give: flow ids are
 // per-shard sequences (a shard with fewer flows has lower ids, so they do not compare), and merging by
-// created_at - the obvious repair - would compare two different database servers' CLOCKS. The doc was the
-// bug; this test is what stops someone "fixing" the code to match the old promise.
+// created_at - the obvious repair - would compare two different database servers' CLOCKS. The docs say
+// "newest first per shard"; this test is what stops someone "fixing" the code into a global-order promise.
 func TestList_NewestFirstIsPerShardNotGlobal(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)

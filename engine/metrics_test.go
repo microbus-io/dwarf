@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -641,4 +642,92 @@ func TestMetrics_EndedCountsEveryTerminalStatus(t *testing.T) {
 	started, _ := sumCounter(rm, "dwarf_flows_started", "", "")
 	allEnded, _ := sumCounter(rm, "dwarf_flows_ended", "", "")
 	assert.Equal(started, allEnded, "started minus ended must not drift when flows fail or terminate")
+}
+
+// TestMetrics_StartedAndEndedBalanceAcrossTrees pins that every flow counted in dwarf_flows_started is counted
+// once in dwarf_flows_ended, for the paths that start or end a whole subgraph tree at once: a Fork at a step
+// inside a subgraph (which clones every flow on the path to it running), and a Delete or Purge of an
+// interrupted root whose interrupted subgraph child would otherwise never end.
+func TestMetrics_StartedAndEndedBalanceAcrossTrees(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	mux := NewHostMux()
+	parent := workflow.NewGraph("Parent")
+	parent.SetURL("Call", "treemetrics.verify:429/call")
+	parent.AddTransition("Call", workflow.End)
+	mux.HandleGraph("treemetrics.verify:429/parent", parent)
+	child := workflow.NewGraph("Child")
+	child.SetURL("Inner", "treemetrics.verify:429/inner")
+	child.AddTransition("Inner", workflow.End)
+	mux.HandleGraph("treemetrics.verify:429/child", child)
+	mux.HandleTask("treemetrics.verify:429/call", func(ctx context.Context, f *workflow.Flow) error {
+		yield, err := f.Subgraph("treemetrics.verify:429/child", map[string]any{"park": f.GetBool("park")}, nil)
+		if yield || err != nil {
+			return err
+		}
+		return nil
+	})
+	mux.HandleTask("treemetrics.verify:429/inner", func(ctx context.Context, f *workflow.Flow) error {
+		if f.GetBool("park") {
+			_, err := f.Interrupt(nil, nil)
+			return err
+		}
+		return nil
+	})
+
+	eng := NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
+	eng.SetHost(mux)
+	if !assert.NoError(eng.Startup(t.Context())) {
+		return
+	}
+	balanced := func(t *testing.T) {
+		assert := testarossa.For(t)
+		assert.Equal(eng.FlowsStarted(), eng.FlowsEnded(), "started and ended disagree")
+	}
+
+	t.Run("fork_inside_a_subgraph", func(t *testing.T) {
+		assert := testarossa.For(t)
+		flowKey, outcome, err := eng.Run(ctx, "treemetrics.verify:429/parent", nil, nil)
+		if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, outcome.Status) {
+			return
+		}
+		balanced(t)
+		steps, err := eng.History(ctx, flowKey)
+		if !assert.NoError(err) || !assert.Len(steps, 1) || !assert.Len(steps[0].SubHistory, 1) {
+			return
+		}
+		forkKey, err := eng.Fork(ctx, steps[0].SubHistory[0].StepKey, nil)
+		if !assert.NoError(err) {
+			return
+		}
+		enginetest.AwaitFlowStatus(t, eng, forkKey, workflow.StatusCompleted, 15*time.Second)
+		balanced(t)
+	})
+
+	parkedTree := func(t *testing.T) string {
+		assert := testarossa.For(t)
+		flowKey, err := eng.Create(ctx, "treemetrics.verify:429/parent", map[string]any{"park": true}, nil)
+		assert.NoError(err)
+		enginetest.AwaitFlowStatus(t, eng, flowKey, workflow.StatusInterrupted, 15*time.Second)
+		return flowKey
+	}
+
+	t.Run("delete_interrupted_tree", func(t *testing.T) {
+		assert := testarossa.For(t)
+		flowKey := parkedTree(t)
+		assert.NoError(eng.Delete(ctx, flowKey))
+		balanced(t)
+	})
+
+	t.Run("purge_interrupted_tree", func(t *testing.T) {
+		assert := testarossa.For(t)
+		parkedTree(t)
+		n, err := eng.Purge(ctx, workflow.Query{Status: workflow.StatusInterrupted})
+		assert.NoError(err)
+		assert.Equal(1, n)
+		balanced(t)
+	})
 }

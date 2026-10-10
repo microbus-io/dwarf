@@ -111,14 +111,14 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 	assert.Equal(workflow.StatusTerminated, status)
 	assert.True(deleteAfterMs > 0)
 
-	// Resume's step writes rolled back: no step was flipped to `pending`, and the leaf is still `interrupted`
-	// (the transient terminated-flow-with-non-terminal-steps state the reaper mops up - Resume added nothing to
-	// it). A pre-fix Resume would have left the leaf `pending` and returned nil.
-	var pending, interrupted int
+	// Resume's step writes rolled back: no step was flipped to `pending`, and the leaf is `terminated` - Delete
+	// terminated the tree as Terminate would, and Resume added nothing to it. A Resume that ignored its gate
+	// would have left the leaf `pending` and returned nil.
+	var pending, terminated int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusPending+"'", flowID).Scan(&pending))
-	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'", flowID).Scan(&interrupted))
+	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusTerminated+"'", flowID).Scan(&terminated))
 	assert.Equal(0, pending)
-	assert.Equal(1, interrupted)
+	assert.Equal(1, terminated)
 
 	// The reaper then removes the whole tree, resolving the transient state cleanly. The reaper's due-check is
 	// `DATE_ADD_MILLIS(updated_at, delete_after_ms) <= NOW_UTC()`; Delete stamped delete_after_ms=1 but left
@@ -291,7 +291,8 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		child := workflow.NewGraph("Child")
 		child.SetURL("X", "cvs/x")
 		child.AddTransition("X", workflow.End)
-		testarossa.For(t).NoError(child.Validate())
+		assert := testarossa.For(t)
+		assert.NoError(child.Validate())
 		r.mux.HandleGraph("cvs/child", child)
 		r.e = NewEngineUnderTest(t.Name())
 		r.e.SetHost(r.mux)
@@ -349,7 +350,8 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		parent := workflow.NewGraph("Parent")
 		parent.SetURL("Call", "cvs/call")
 		parent.AddTransition("Call", workflow.End)
-		testarossa.For(t).NoError(parent.Validate())
+		assert := testarossa.For(t)
+		assert.NoError(parent.Validate())
 		r.mux.HandleGraph("cvs/parent", parent)
 		r.mux.HandleTask("cvs/call", callSubgraph("cvs/child", nil))
 	}
@@ -648,4 +650,71 @@ func TestRetryRewindVsTerminate_Deterministic(t *testing.T) {
 	assert.Equal(0, attempt)                            // rewind did not bump the attempt
 	assert.Equal(1, aRuns)                              // no re-dispatch
 	enginetest.AssertInvariants(t, e)
+}
+
+// TestDeleteVsResume_ResumeWinsInsideTerminate pins the onlyIfInterrupted gate: a Delete or Purge that has read
+// the flow as interrupted and is about to terminate its tree loses to a Resume that commits in between. The flow
+// stays running, unmarked, and Delete answers 409 while Purge marks nothing.
+func TestDeleteVsResume_ResumeWinsInsideTerminate(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	mux := NewHostMux()
+	g := workflow.NewGraph("Gate")
+	g.SetURL("Gate", "dvrin/gate")
+	g.AddTransition("Gate", workflow.End)
+	mux.HandleGraph("dvrin/g", g)
+	hold := make(chan struct{})
+	mux.HandleTask("dvrin/gate", func(ctx context.Context, f *workflow.Flow) error {
+		yield, err := f.Interrupt(nil, nil)
+		if yield || err != nil {
+			return err
+		}
+		<-hold // resumed: keep the flow running while the test inspects it
+		return nil
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
+	defer close(hold) // declared after Shutdown's defer, so it unwinds first and frees the held worker
+	e.SetHost(mux)
+	if !assert.NoError(e.Startup(t.Context())) {
+		return
+	}
+
+	for _, op := range []string{"delete", "purge"} {
+		t.Run(op, func(t *testing.T) {
+			assert := testarossa.For(t)
+			ctx := t.Context()
+			fk := createInterruptedFlow(t, e, "dvrin/g")
+			shard, flowID, _, err := keys.ParseFlowKey(fk)
+			assert.NoError(err)
+
+			e.seams.Break(engineseams.CheckpointTerminateAfterScan)
+			opDone := make(chan error, 1)
+			var marked int
+			go func() {
+				if op == "delete" {
+					opDone <- e.Delete(ctx, fk)
+					return
+				}
+				n, err := e.Purge(ctx, workflow.Query{Status: workflow.StatusInterrupted})
+				marked = n
+				opDone <- err
+			}()
+			assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointTerminateAfterScan, 10*time.Second), "the operation never reached terminateSubtree")
+
+			assert.NoError(e.Resume(ctx, fk, nil))
+			e.seams.Resume(engineseams.CheckpointTerminateAfterScan)
+			opErr := <-opDone
+			if op == "delete" {
+				assert.Equal(409, errors.StatusCode(opErr))
+			} else {
+				assert.NoError(opErr)
+				assert.Equal(0, marked)
+			}
+			assert.Equal(1, enginetest.CountRows(t, e, shard,
+				"SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusRunning+"' AND delete_after_ms=0", flowID),
+				"the resumed flow was terminated or marked")
+		})
+	}
 }

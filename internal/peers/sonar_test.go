@@ -409,6 +409,37 @@ func TestPeers_CutEntryThroughSustainedGaps(t *testing.T) {
 	assert.Equal(1, cands)
 }
 
+// TestPeers_ReplicaFallThroughSustainedGaps pins that a fall in the replica count, like the cut and the
+// candidate count, is withheld for one reading and no more when every reading is gapped. Held against the
+// published value instead, the count could not fall until a reading arrived on time, so under a slow pass it
+// lagged the candidate count - the two values one reading describes disagreed.
+func TestPeers_ReplicaFallThroughSustainedGaps(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	fleet := []peer{
+		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
+		{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
+	}
+	alone := fleet[1:]
+
+	r.s.observe(ctx, fleet, nil)
+	assert.Equal(2, r.s.Replicas())
+
+	// Every reading from here on ends a gap.
+	r.clk.advance(3 * r.s.scan)
+	r.s.observe(ctx, alone, nil)
+	_, cands := r.s.Rank()
+	assert.Equal(2, r.s.Replicas(), "the first reading after the peer left is withheld")
+	assert.Equal(2, cands)
+	r.clk.advance(3 * r.s.scan)
+	r.s.observe(ctx, alone, nil)
+	_, cands = r.s.Rank()
+	assert.Equal(1, r.s.Replicas(), "the second agrees with it, so it is believed though it too is gapped")
+	assert.Equal(1, cands, "and the candidate count falls on the same reading")
+}
+
 // TestPeers_WithdrawDropsTheReplicaFromEveryRanking pins what a draining replica publishes: its row stays -
 // it still holds connections - but it no longer ranks, and a repair cannot put it back in the running.
 func TestPeers_WithdrawDropsTheReplicaFromEveryRanking(t *testing.T) {
@@ -964,8 +995,8 @@ func TestPeers_RunReadsUntilTheContextEnds(t *testing.T) {
 	// oversubscription pushes a healthy loop past the grace and the failure reports the machine rather than
 	// the code. (The same starvation also resets healthySince, which the last assertion checks, so both of
 	// this test's real properties ride on the loop being scheduled.) An OUTCOME assertion tolerates
-	// parallelism because it merely waits longer; this does not. Same rule fixtures/CLAUDE.md applies to its
-	// reaction-latency fixtures, and the 25 sibling tests in this package - several driving their own
+	// parallelism because it merely waits longer; this does not. It is the same rule the reaction-latency
+	// fixtures follow, and the 25 sibling tests in this package - several driving their own
 	// real-clock Sonar loops - are exactly the competition it exists to avoid.
 	//
 	// Evidence, stated honestly because it is thinner than the rule: this was observed failing ONCE under

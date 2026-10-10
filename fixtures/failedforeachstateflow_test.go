@@ -63,7 +63,7 @@ func TestFailedforeachstateflow(t *testing.T) {
 		return nil
 	})
 	mux.HandleTask("failedforeachstateflow.verify:428/cell", func(ctx context.Context, f *workflow.Flow) error {
-		// A branch can see the array its own element came from - the engine no longer strips it.
+		// A branch can see the array its own element came from - the engine does not strip it.
 		if len(f.GetStrings("items")) != 3 {
 			return errors.New("branch cannot see its forEach source array")
 		}

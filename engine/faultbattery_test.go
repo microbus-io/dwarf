@@ -140,15 +140,13 @@ func TestFault_RecoveryLeavesCleanWorld(t *testing.T) {
 		wantBCalls int // task B dispatches expected in the faulted run
 	}{
 		// A's transition tx fails once after A was marked completed with a NON-contention error: persist retries
-		// the transaction in place, so it lands and A runs only ONCE. (It used to run twice - the recovery defer
-		// rewound and re-dispatched it, re-executing the task to recover from a database blip.)
+		// the transaction in place, so it lands and A runs only ONCE.
 		{"transitionCommit", func(e *Engine) { e.seams.Inject(engineseams.Join(engineseams.FaultTransitionCommit, "A")) }, 1, 1},
 		// A's transition tx returns a retryable lock-contention error: Transact retries the closure inside the
 		// tx, transparently - A runs only once.
 		{"contention", func(e *Engine) { e.seams.Inject(engineseams.Join(engineseams.FaultContention, "A")) }, 1, 1},
 		// B's flow-completion tx fails once after B was marked completed (B is the terminal node) with a
-		// non-contention error: persist retries the transaction in place, so B runs only ONCE. (It used to run
-		// twice - the recovery defer rewound and re-dispatched it.)
+		// non-contention error: persist retries the transaction in place, so B runs only ONCE.
 		{"completeFlowCommit", func(e *Engine) { e.seams.Inject(engineseams.FaultCompleteFlowCommit) }, 1, 1},
 	}
 	for _, tc := range cases {

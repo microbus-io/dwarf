@@ -153,6 +153,75 @@ func TestFlow_SetChangesNoChanges(t *testing.T) {
 	assert.Equal(0, f.changes.Len())
 }
 
+// TestFlow_SetChangesNamesFieldsLikeParse pins that SetChanges writes every field Parse reads: an untagged
+// field under its Go name, an option-only tag, and the fields of an embedded struct. A field skipped here is
+// read by Parse, mutated by the task and then silently dropped.
+func TestFlow_SetChangesNamesFieldsLikeParse(t *testing.T) {
+	assert := testarossa.For(t)
+
+	type Base struct {
+		Region string `json:"region"`
+	}
+	type Order struct {
+		Base
+		Status  string
+		Total   int    `json:",omitempty"`
+		Skipped string `json:"-"`
+		secret  string
+	}
+	f := NewFlow()
+	f.Set("Status", "new")
+	f.Set("Total", 1)
+	f.Set("region", "us")
+	f.changes, _ = NewState()
+	snap := f.Snapshot()
+
+	var order Order
+	assert.NoError(f.Parse(&order))
+	assert.Equal("new", order.Status)
+	assert.Equal("us", order.Region)
+	order.Status = "charged"
+	order.Total = 2
+	order.Region = "eu"
+	order.Skipped = "x"
+	order.secret = "y"
+	assert.NoError(f.SetChanges(order, snap))
+
+	assert.Equal("charged", f.changes.GetString("Status"))
+	assert.Equal(2, f.changes.GetInt("Total"))
+	assert.Equal("eu", f.changes.GetString("region"))
+	assert.False(f.changes.Has("Skipped"))
+	assert.False(f.changes.Has("secret"))
+	assert.False(f.changes.Has("Base"))
+	assert.Equal(3, f.changes.Len())
+}
+
+// TestFlow_SetChangesComparesByMeaning pins that a snapshot value re-spelled by the database - whitespace and
+// object-key order, as JSONB returns it - is not mistaken for a change. A false change on a reducer-managed
+// field would re-contribute the whole value at fan-in.
+func TestFlow_SetChangesComparesByMeaning(t *testing.T) {
+	assert := testarossa.For(t)
+
+	var raw State
+	assert.NoError(json.Unmarshal([]byte(`{"items": ["a", "b"], "meta": {"z": 1, "a": 9007199254740993}}`), &raw))
+	f := NewFlow()
+	f.state = raw
+	snap := f.Snapshot()
+
+	var view struct {
+		Items []string       `json:"items"`
+		Meta  map[string]any `json:"meta"`
+	}
+	assert.NoError(f.Parse(&view))
+	view.Meta["a"] = json.Number("9007199254740993")
+	assert.NoError(f.SetChanges(view, snap))
+	assert.Equal(0, f.changes.Len())
+
+	view.Meta["a"] = json.Number("9007199254740992")
+	assert.NoError(f.SetChanges(view, snap))
+	assert.True(f.changes.Has("meta"), "a change beyond float64 precision must be recorded")
+}
+
 func TestFlow_Has(t *testing.T) {
 	assert := testarossa.For(t)
 	f := NewFlow()
@@ -447,4 +516,59 @@ func TestFlow_GetReportsPresence(t *testing.T) {
 	ok, err = f.Get("name", &n)
 	assert.Error(err, "a mismatch is an error, not a panic")
 	assert.False(ok)
+}
+
+// TestFlow_DecodedWithoutChangesTakesWrites pins that a Flow decoded from a wire form missing its state or
+// changes still accepts the setters, which write to both.
+func TestFlow_DecodedWithoutChangesTakesWrites(t *testing.T) {
+	assert := testarossa.For(t)
+
+	for _, wire := range []string{`{}`, `{"state":{"a":1}}`, `{"changes":{"a":1}}`} {
+		var f Flow
+		if !assert.NoError(json.Unmarshal([]byte(wire), &f), wire) {
+			continue
+		}
+		f.SetString("b", "v")
+		assert.Equal("v", f.GetString("b"), wire)
+	}
+}
+
+// TestFlow_SetChangesResolvesNamesLikeEncodingJSON pins that when an embedded struct and the outer struct
+// declare the same JSON name, the shallower field is the one recorded - as encoding/json marshals it - whatever
+// the declaration order; and that a ",string" field is recorded in the quoted form Parse reads back.
+func TestFlow_SetChangesResolvesNamesLikeEncodingJSON(t *testing.T) {
+	assert := testarossa.For(t)
+
+	type Base struct {
+		Region string `json:"region"`
+	}
+	type Order struct {
+		Region string `json:"region"`
+		Base
+		Count int `json:"count,string"`
+	}
+	f := NewFlow()
+	f.Set("region", "us")
+	f.changes, _ = NewState()
+	snap := f.Snapshot()
+
+	order := Order{Region: "eu", Base: Base{Region: "stale"}, Count: 7}
+	assert.NoError(f.SetChanges(order, snap))
+	assert.Equal("eu", f.changes.GetString("region"))
+
+	var back Order
+	assert.NoError(f.Parse(&back))
+	assert.Equal("eu", back.Region)
+	assert.Equal(7, back.Count)
+}
+
+// TestJSONEqual_NumbersByValue pins that a number re-spelled by a database compares equal to the original, while
+// integers beyond float64 precision still compare exactly.
+func TestJSONEqual_NumbersByValue(t *testing.T) {
+	assert := testarossa.For(t)
+
+	assert.True(jsonEqual([]byte(`{"n":100}`), []byte(`{"n": 1e2}`)))
+	assert.True(jsonEqual([]byte(`[1]`), []byte(`[1.0]`)))
+	assert.False(jsonEqual([]byte(`9007199254740993`), []byte(`9007199254740992`)))
+	assert.False(jsonEqual([]byte(`"1"`), []byte(`1`)))
 }

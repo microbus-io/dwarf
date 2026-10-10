@@ -47,9 +47,9 @@ To run a single unit of work with the engine's durability and scheduling, declar
 create a flow for it like any other. A task only ever runs as part of a graph, not as an independently
 invocable unit.
 
-> `Run`'s Go `error` is reserved for infrastructure failures (database, context deadline). A *workflow*
-> failure surfaces as `outcome.Status == "failed"` with `outcome.Error` set — so you never have to
-> disambiguate "the workflow rejected my input" from "the engine is down."
+> `Run`'s Go `error` means the call itself did not go through: a malformed request, no graph for the URL, a
+> wait that ended before the flow did, or an infrastructure failure (see [Errors](#errors)). A *workflow*
+> failure is not an error — it surfaces as `outcome.Status == "failed"` with `outcome.Error` set.
 
 ### Detecting completion
 
@@ -60,8 +60,7 @@ and when to use each are covered in [Detecting flow completion](detecting-comple
 
 ### Deferring work
 
-`Create` runs a flow immediately — there is no separate start step and no creation-time delay (no `StartAt`).
-Deferral is expressed in author space:
+`Create` runs a flow immediately. Deferral is expressed in author space:
 
 - **Wait a duration (durably):** make the entry task a **gate** that calls `flow.Sleep(duration)` and
   returns; the real work is the next step. The delay survives restarts — and the flow's status honestly
@@ -139,8 +138,8 @@ step,     err := eng.Step(ctx, stepKey)                // one step by key
 summaries, next, err := eng.List(ctx, query)           // paginated flow listing
 ```
 
-`History` returns each step's task, depth, status, error, and timings — metadata only, **not** `state`/`changes`
-(those columns are deliberately not fetched); use `Step` to read a single step's `state`/`changes`. Subgraph-executing
+`History` returns each step's task, depth, status, error, and timings — metadata only, **not** `state`/`changes`;
+use `Step` to read a single step's `state`/`changes`. Subgraph-executing
 steps carry nested `SubHistory`. `List` takes a `workflow.Query` (status, workflow name, thread, task,
 fairness key, priority, time window, shard, free-text `Search`, `Limit`) and returns newest-first with an
 opaque pagination cursor as its second return; see [Retention](#retention) for the same query shape.
@@ -264,7 +263,11 @@ count, err := eng.Purge(ctx, query)      // schedule matching flows (except runn
 
 `Delete` and `Purge` **mark** flows for deletion (they do not delete inline); a background reaper removes each
 flow's whole subgraph subtree shortly after. The marked flow drops out of `List` and `History` immediately, so
-it is logically gone even though the row lingers briefly. `Purge` returns the count of roots marked.
+it is logically gone even though the row lingers briefly. An `interrupted` flow is first terminated exactly as
+`Terminate` would, subgraphs included; if a `Resume` gets there first, the flow is running again, so `Delete`
+returns 409 and `Purge` skips it. `Purge` returns the count of roots marked, at most 4096 per call (fewer if
+`Query.Limit` is lower), divided across shards as `List` divides it, so a multi-shard call can mark slightly
+more.
 
 `Purge` takes the same `workflow.Query` as `List`. `OlderThan` / `NewerThan` are database-anchored and
 compose (e.g. "completed, older than 30 days"):
@@ -319,7 +322,7 @@ Each operation adds these to the 503 and 500 every call can return:
 | `Cancel`, `Terminate` | malformed key, a subgraph child's key | unknown flow | | |
 | `Fork` | malformed key, overrides not JSON-marshalable | unknown step | | the flow is not terminal, is scheduled for deletion, or holds an unresolved interrupt off the fork path |
 | `Continue` | malformed key, a subgraph child's key, `additionalState` not JSON-marshalable | unknown flow | | the thread's latest flow is not completed, including when a concurrent `Continue` won |
-| `Delete` | malformed key, a subgraph child's key | unknown flow | | the flow is running |
+| `Delete` | malformed key, a subgraph child's key | unknown flow | | the flow is running, including when a `Resume` won the race |
 
 Stopping or deleting what is already stopped or deleted is not an error. `Cancel` and `Terminate` on a flow
 that has ended, and `Delete` on a flow already scheduled for deletion, return nil and change nothing, so a

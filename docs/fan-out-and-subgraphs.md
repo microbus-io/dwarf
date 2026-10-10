@@ -53,7 +53,7 @@ cohort of zero (a reducer-managed field just keeps its incoming value; any per-e
 absent), and expect the branch task to sometimes never run at all.
 
 A large carried field above a size threshold is stored once and referenced rather than copied into every
-branch's step row, so an N-element fan-out over a chain of depth D does not cost N×D copies of it. To drop
+branch's stored steps, so an N-element fan-out over a chain of depth D does not cost N×D copies of it. To drop
 a field entirely once it has been fanned out, a branch can still call `f.Set("<source>", nil)` to remove
 it from the flow's state past the fan-in.
 
@@ -92,14 +92,15 @@ A few rules worth knowing:
 - **All branches of one fan-out must converge on the same fan-in task**, and `Validate()` enforces it at
   `Create`. The engine picks the convergence task from whichever sibling finishes last, so branches routed
   to *different* fan-ins would make the result depend on finish order. Branches may take different
-  intermediate paths — only the fan-in they end at must agree.
+  intermediate paths, and may reach the fan-in by any kind of edge (a `goto` or `onError` included) — only
+  the fan-in they end at must agree.
 - **A goto or error transition out of the fan-out task bypasses the fan-out, so it must not rejoin it.**
   Taking one means no branches are spawned at all, so `Validate()` accepts it only where that holds together:
   to `workflow.End`, straight to the fan-in task (which then runs once on the source's own state, exactly as an empty
   array does), or onto a path that never reaches the fan-in. Routing it into a *branch*, or onto a path that
   later leads back into the fan-in, is rejected at `Create` — the fan-in would be waiting on a set of branches
   that was never created. This is what makes the "fan out over the array, or end the flow when there is
-  nothing left to do" loop expressible: give the source an `AddTransitionGoto(source, END)` alongside its
+  nothing left to do" loop expressible: give the source an `AddTransitionGoto(source, workflow.End)` alongside its
   `AddTransitionForEach`, and the task picks per round.
 - **The per-branch bookkeeping (`item`, `itemIndex`, `itemCount`) does not survive the fan-out.** It is gone
   from the flow's state once the cohort is behind it — at the fan-in, and in the final state of a flow whose
@@ -107,6 +108,10 @@ A few rules worth knowing:
   whichever branch happened to finish last.) Forward an element value under a different key if you need it.
 - **A failed, terminated, or cancelled sibling doesn't poison the fan-in.** It contributes nothing to the
   merge; the flow is driven by the failure/error path instead.
+- **A value its reducer cannot fold fails the flow.** A branch writing a string to an `add` field, say, fails
+  the flow at the fan-in with an error naming the field; the fan-in task does not run. The step recorded as
+  failed is the branch step whose arrival resolved the cohort, which need not be the one that wrote the value,
+  and the failed flow's final state is empty, since it cannot be merged either.
 
 ## Subgraphs
 

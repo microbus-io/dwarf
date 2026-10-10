@@ -19,14 +19,15 @@ limitations under the License.
 // Dwarf executes workflow graphs: it dispatches tasks, manages state between steps, and handles
 // fan-out/fan-in, retries, sleeps, conditional routing, subgraphs, and human-in-the-loop interrupts. It
 // is library code with no built-in transport: a host application wires it to its own task execution,
-// graph storage, and observability through a small set of injected dependency interfaces (see the engine
-// package). It depends only on a SQL database (via sequel).
+// graph storage, and observability through a single injected Host interface plus optional logging,
+// metrics and tracing providers (see the engine package). Its one infrastructure dependency is a SQL
+// database (via sequel).
 //
 // This root package is a thin convenience: NewEngine returns an *engine.Engine. The real API lives in
 // two sub-packages:
 //
 //   - github.com/microbus-io/dwarf/engine - the engine: Startup/Shutdown, the Create/Run/Await
-//     operations, configuration, and the dependency interfaces. Import this only in the process that
+//     operations, configuration, and the Host interface. Import this only in the process that
 //     hosts the engine.
 //   - github.com/microbus-io/dwarf/workflow - the pure types: Graph, Flow, FlowOptions, FlowOutcome,
 //     and reducers. Import this in code that defines tasks and graphs; it has no heavy dependencies.

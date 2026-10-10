@@ -122,10 +122,10 @@ func TestClaim_NoPartialIndexPlan(t *testing.T) {
 		return found
 	}
 
-	claim := plan(claimSQLPostgres())
+	claim := plan(claimSQLPostgres)
 	assert.Equal(0, len(uses(claim)), "the claim must not be servable by a partial index:\n%s", claim)
 
 	plain := "s.status='" + workflow.StatusPending + "' AND s.parked=? AND s.not_before<=NOW_UTC() AND s.lease_expires<=NOW_UTC()"
-	control := plan(strings.Replace(claimSQLPostgres(), claimEligible("s."), plain, 1))
+	control := plan(strings.Replace(claimSQLPostgres, claimEligible("s."), plain, 1))
 	assert.True(len(uses(control)) > 0, "control: plain conjuncts should let a partial index serve the claim:\n%s", control)
 }

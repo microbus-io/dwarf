@@ -720,3 +720,53 @@ func TestState_TypedGettersPreserveTypeAcrossJSONStorage(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(42, asInt)
 }
+
+// TestState_SetCopiesRawMessage pins that a json.RawMessage passed to Set is copied: the caller reusing its
+// buffer must not rewrite the stored value, which Clone and every fan-out branch share.
+func TestState_SetCopiesRawMessage(t *testing.T) {
+	assert := testarossa.For(t)
+
+	s, _ := NewState()
+	raw := json.RawMessage(`"abc"`)
+	assert.NoError(s.Set("k", raw))
+	raw[1] = 'X'
+	assert.Equal("abc", s.GetString("k"))
+}
+
+// TestState_NewStateOfTypedNil pins that a nil map or pointer - which marshals to null - yields an empty,
+// writable State, as the untyped nil does.
+func TestState_NewStateOfTypedNil(t *testing.T) {
+	assert := testarossa.For(t)
+
+	var m map[string]any
+	var p *struct{ A int }
+	for _, v := range []any{m, p} {
+		s, err := NewState(v)
+		if !assert.NoError(err) {
+			continue
+		}
+		assert.False(s.IsZero())
+		assert.NoError(s.Set("k", 1))
+	}
+}
+
+// TestState_ParseSkipsClearedFields pins that a cleared field leaves the target's field as it was, rather than
+// being decoded as a null that resets a slice, map or pointer field.
+func TestState_ParseSkipsClearedFields(t *testing.T) {
+	assert := testarossa.For(t)
+
+	var s State
+	assert.NoError(json.Unmarshal([]byte(`{"items":null,"name":"x"}`), &s))
+	target := struct {
+		Items []string `json:"items"`
+		Name  string   `json:"name"`
+	}{Items: []string{"keep"}}
+	assert.NoError(s.Parse(&target))
+	assert.Equal([]string{"keep"}, target.Items)
+	assert.Equal("x", target.Name)
+
+	m := map[string]any{}
+	assert.NoError(s.Parse(&m))
+	_, has := m["items"]
+	assert.False(has)
+}

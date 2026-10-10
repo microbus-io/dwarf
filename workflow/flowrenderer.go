@@ -22,15 +22,13 @@ import (
 	"time"
 )
 
+// The flow renderer's palette extends the graph renderer's (defaultPrimaryFill and friends) with the two
+// status pairs only an execution has.
 const (
-	defaultFlowPrimaryFill   = "#32a7c1"
-	defaultFlowPrimaryText   = "#f4f2ef"
-	defaultFlowSecondaryFill = "#e5f4f3"
-	defaultFlowSecondaryText = "#434343"
-	defaultFlowErrorFill     = "#f15922"
-	defaultFlowErrorText     = "#f4f2ef"
-	defaultFlowAttentionFill = "#ed2e92"
-	defaultFlowAttentionText = "#f4f2ef"
+	defaultErrorFill     = "#f15922"
+	defaultErrorText     = "#f4f2ef"
+	defaultAttentionFill = "#ed2e92"
+	defaultAttentionText = "#f4f2ef"
 )
 
 // FlowRenderer renders the execution history of a flow as a Mermaid flowchart.
@@ -52,14 +50,14 @@ type FlowRenderer struct {
 func NewFlowRenderer(steps []FlowStep) *FlowRenderer {
 	return &FlowRenderer{
 		steps:         steps,
-		primaryFill:   defaultFlowPrimaryFill,
-		primaryText:   defaultFlowPrimaryText,
-		secondaryFill: defaultFlowSecondaryFill,
-		secondaryText: defaultFlowSecondaryText,
-		errorFill:     defaultFlowErrorFill,
-		errorText:     defaultFlowErrorText,
-		attentionFill: defaultFlowAttentionFill,
-		attentionText: defaultFlowAttentionText,
+		primaryFill:   defaultPrimaryFill,
+		primaryText:   defaultPrimaryText,
+		secondaryFill: defaultSecondaryFill,
+		secondaryText: defaultSecondaryText,
+		errorFill:     defaultErrorFill,
+		errorText:     defaultErrorText,
+		attentionFill: defaultAttentionFill,
+		attentionText: defaultAttentionText,
 		direction:     "TD",
 	}
 }
@@ -92,8 +90,7 @@ func (r *FlowRenderer) WithPrimaryColors(fill, text string) *FlowRenderer {
 	return r
 }
 
-// WithSecondaryColors overrides the pair used for pending steps and for diagram chrome - the start/end
-// terminals, fan-out cohort wrappers, and subgraph block fills.
+// WithSecondaryColors overrides the pair used for pending steps and for the start/end terminals.
 func (r *FlowRenderer) WithSecondaryColors(fill, text string) *FlowRenderer {
 	r.secondaryFill = fill
 	r.secondaryText = text

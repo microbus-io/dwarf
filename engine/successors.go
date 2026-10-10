@@ -49,6 +49,9 @@ the handler, whose successors would then be cancelled too.
 const successorRowSQL = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?," +
 	" (SELECT CASE WHEN ?=1 AND ? <= cancel_watermark THEN 1 ELSE 0 END FROM dwarf_flows WHERE flow_id=?))"
 
+// successorCols is a successor row's column list, shared by the single-row and multi-row INSERTs.
+const successorCols = "flow_id, step_depth, step_token, task_name, task_url, state, state_refs, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id, cancelling"
+
 // successorInsertSQL inserts one successor row (successorRowSQL).
 const successorInsertSQL = "INSERT INTO dwarf_steps (" + successorCols + ") VALUES " + successorRowSQL
 

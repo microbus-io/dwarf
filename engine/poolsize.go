@@ -93,7 +93,7 @@ const (
 	// as a multiple of that shard's connection pool.
 	//
 	// ONE TURN PER CONNECTION IS CATASTROPHIC, AND A QUEUE AT THE POOL IS WHY. Measured at 600 flows/s on a
-	// local Postgres: 281 steps/s against the 1,687 the previous gate managed on the same rig, a 6x collapse.
+	// local Postgres: 281 steps/s against the 1,687 of a gate sized above the pool on the same rig, a 6x collapse.
 	// With exactly as many turns as connections there are exactly as many candidates for a connection, so
 	// every gap between a turn-holder finishing and the next waiter being woken, scheduled and asking the pool
 	// is IDLE CONNECTION TIME - on the critical path of every round trip a step makes. Any multiple above one
@@ -127,9 +127,9 @@ const (
 	// Everything else shares priorityCommon and is separated by age alone. That is deliberate rather than
 	// unfinished: age ordering is starvation-free (every claim eventually becomes the oldest), while any
 	// second band handed to a caller that can arrive faster than it is served starves the band below it -
-	// which is the shape of the measured 3x short-task collapse that killed the single-permit-pool design.
-	// internal/turnstile/CLAUDE.md records the specific band that keeps being proposed - one for EXITING
-	// workers - and why it is not here.
+	// which is the shape of the measured 3x short-task collapse of a single-permit pool. Do not add a band for
+	// EXITING (completing) work either: a completing step already holds an older claim than anything admitted
+	// while its task ran, so age ordering serves it first without one.
 	//
 	// The values are spaced, and are ordinals only: nothing reads the distance between them. A band can
 	// therefore be inserted between two in use without renumbering the callers of either.
@@ -138,7 +138,8 @@ const (
 	priorityWorker = priorityCommon
 
 	// completionServerMs is the server-side half of a completion: row work plus the group-committed
-	// WAL fsync, measured ~3ms (cross-checked by the whole-step fit db = 12.1 x RTT + 4.4ms).
+	// WAL fsync, measured ~3ms (cross-checked by a whole-step fit db = 12.1 x RTT + 4.4ms, taken on PostgreSQL
+	// before the transition was pipelined - the 4.4ms intercept is the part that carries over).
 	completionServerMs = 3.0
 
 	// defaultRTTMs is the same-zone round-trip time (measured 0.28-0.34ms on GCP private IP), used by the worker
@@ -367,55 +368,60 @@ func inWindow(rank, candidates, place, slots int) bool {
 // pools are pinned and never divided, so there is no budget for the ranking to protect - and the count is
 // every candidate, which is who drains the shard.
 func (e *Engine) slotsOn(shard int) int {
-	if e.zeroWorkers() {
-		return 0
-	}
-	s := e.sonarFor(shard)
-	if s == nil {
-		return 1
-	}
-	_, candidates := s.Rank()
-	if e.maxOpenConns.Load() != 0 {
-		return candidates
-	}
-	if !s.InCut() {
-		return 0
-	}
-	return dispatcherSlots(candidates) + s.Draining()
+	return e.readRole(shard).slots
 }
 
-// heldDivisor is what a replica holding a pool for in-flight steps on a shard it no longer dispatches
-// divides the budget by: the same count its peers divide by, which counts it among the draining.
-func (e *Engine) heldDivisor(shard int) int {
-	s := e.sonarFor(shard)
-	if s == nil {
-		return 1
-	}
-	_, candidates := s.Rank()
-	return dispatcherSlots(candidates) + s.Draining() + 1
-}
-
-// scannersOn is how many pistons cycle a shard across the fleet: its dispatchers, or every candidate under a
+// roleReading is what one reading of this replica's standing on a shard implies: the slots slotsOn returns, and
+// how many pistons cycle the shard across the fleet - its dispatchers, or every candidate under a
 // setMaxOpenConns override, where every replica dispatches. Draining replicas hold a share but idle their
-// pistons, so they are not counted. A shard with no Sonar is scanned by this replica alone.
-func (e *Engine) scannersOn(shard int) int {
-	s := e.sonarFor(shard)
-	if s == nil {
-		return 1
-	}
-	_, candidates := s.Rank()
-	if e.maxOpenConns.Load() != 0 {
-		return candidates
-	}
-	return dispatcherSlots(candidates)
+// pistons, so they are not scanners.
+type roleReading struct {
+	slots, scanners int
+	// held is what a replica holding a pool for in-flight steps on a shard it no longer dispatches divides the
+	// budget by: the same count its peers divide by, which counts it among the draining.
+	held int
 }
 
-// slotsByShard is every open shard's current role (slotsOn), read once so that everything derived from
-// the roles in one pass is derived from the same reading.
-func (e *Engine) slotsByShard(sizing map[int]shardSizing) map[int]int {
-	slots := make(map[int]int, len(sizing))
+// readRole reads this replica's standing on one shard ONCE and derives its roleReading from it. A shard with no
+// Sonar is dispatched and scanned by this replica alone.
+func (e *Engine) readRole(shard int) roleReading {
+	s := e.sonarFor(shard)
+	if s == nil {
+		if e.zeroWorkers() {
+			return roleReading{held: 1}
+		}
+		return roleReading{slots: 1, scanners: 1, held: 1}
+	}
+	st := s.Standing()
+	held := dispatcherSlots(st.Candidates) + st.Draining + 1
+	if e.zeroWorkers() {
+		return roleReading{held: held}
+	}
+	if e.maxOpenConns.Load() != 0 {
+		return roleReading{slots: st.Candidates, scanners: st.Candidates, held: held}
+	}
+	scanners := dispatcherSlots(st.Candidates)
+	if !st.InCut {
+		return roleReading{scanners: scanners, held: held}
+	}
+	return roleReading{slots: scanners + st.Draining, scanners: scanners, held: held}
+}
+
+// rolesByShard is every open shard's roleReading, read once so that everything derived from the roles in one
+// pass is derived from the same reading.
+func (e *Engine) rolesByShard() map[int]roleReading {
+	roles := make(map[int]roleReading, len(e.db.Indices()))
 	for _, idx := range e.db.Indices() {
-		slots[idx] = e.slotsOn(idx)
+		roles[idx] = e.readRole(idx)
+	}
+	return roles
+}
+
+// slotsOf projects the slots out of a set of role readings.
+func slotsOf(roles map[int]roleReading) map[int]int {
+	slots := make(map[int]int, len(roles))
+	for idx, r := range roles {
+		slots[idx] = r.slots
 	}
 	return slots
 }
@@ -494,7 +500,8 @@ func readMaxConnections(ctx context.Context, db *sequel.DB) int {
 }
 
 // checkFleetFits warns when the connections the fleet can hold on one shard approach the server's limit:
-// the dispatchers' budget plus up to readerOpenConns for every replica that does not dispatch there.
+// the budget, which the dispatchers and any replicas draining a share divide between them, plus up to
+// readerOpenConns for every other replica.
 // Advisory and edge-triggered - it never resizes anything, since shrinking dispatchers to make room for
 // idle readers is the wrong trade, and a fleet that size wants an external pooler. It is evaluated on
 // every reconcile tick, because it is the replica count that moves it and a non-dispatcher joining
@@ -505,11 +512,12 @@ func (e *Engine) checkFleetFits(shard int, sz shardSizing) {
 		return
 	}
 	replicas := e.replicasOn(shard)
-	candidates := 1
+	sharing := 1
 	if s := e.sonarFor(shard); s != nil {
-		_, candidates = s.Rank()
+		st := s.Standing()
+		sharing = dispatcherSlots(st.Candidates) + st.Draining
 	}
-	held := sz.budget + readerOpenConns*max(0, replicas-dispatcherSlots(candidates))
+	held := sz.budget + readerOpenConns*max(0, replicas-sharing)
 	over := held > maxConns*fleetLimitPercent/100
 	if over == e.fleetOverLimit[shard] {
 		return
@@ -535,8 +543,8 @@ func (e *Engine) checkFleetFits(shard int, sz shardSizing) {
 // clear the parallel register + read + probe, which are a couple of statements per shard.
 const startupBootstrapConns = 4
 
-// slowPoolPushDelay is how long the engineseams.FaultSlowPoolPush seam stalls a recompute between reading R and pushing
-// the derived sizes. Test-only (the fault is inert in production); a var so it stays adjustable.
+// slowPoolPushDelay is how long the engineseams.FaultSlowPoolPush seam stalls a recompute between reading the roles
+// and pushing the derived sizes. Test-only (the fault is inert in production); a var so it stays adjustable.
 var slowPoolPushDelay = 200 * time.Millisecond
 
 // recomputePools re-derives every shard's role and connection pool from that shard's OWN registry reading
@@ -571,12 +579,15 @@ func (e *Engine) recomputePools() {
 	// Read every shard's role first and compare as a whole: a push is all-or-nothing, so a single shard
 	// moving is enough to re-derive, and nothing moving is the cheap common case.
 	observed := make(map[int]int, len(e.lastAppliedSlots))
+	roles := make(map[int]roleReading, len(e.lastAppliedSlots))
 	changed := false
 	for _, idx := range e.db.Indices() {
 		if override == 0 {
 			e.checkFleetFits(idx, sizing[idx])
 		}
-		slots := e.slotsOn(idx)
+		role := e.readRole(idx)
+		roles[idx] = role
+		slots := role.slots
 		observed[idx] = slots
 		if prev, ok := e.lastAppliedSlots[idx]; !ok || prev != slots {
 			changed = true
@@ -586,7 +597,7 @@ func (e *Engine) recomputePools() {
 	// no role of this replica's having moved.
 	heldMoved := false
 	for idx, divisor := range e.heldDivisors {
-		if e.inFlightOn(idx) == 0 || e.heldDivisor(idx) != divisor {
+		if e.inFlightOn(idx) == 0 || roles[idx].held != divisor {
 			heldMoved = true
 			break
 		}
@@ -620,7 +631,7 @@ func (e *Engine) recomputePools() {
 		held := slots == 0 && e.inFlightOn(idx) > 0
 		divisor := slots
 		if held {
-			divisor = e.heldDivisor(idx)
+			divisor = roles[idx].held
 			if _, ok := e.heldDivisors[idx]; !ok {
 				e.logger.Info("Shard pool held for in-flight steps", "shard", idx)
 			}
@@ -686,7 +697,7 @@ func (e *Engine) recomputePools() {
 	// the same rule the dispatch count and worker ceiling obey just above. Reuses the sizing/rtts already
 	// locked-and-cloned above rather than paying for a second (and, below, a third) lock/clone pass over
 	// the same maps.
-	e.recomputeRefillIntervalsWith(sizing, observed)
+	e.recomputeRefillIntervalsWith(sizing, roles)
 	e.logger.Info("Derived pools recomputed", "slots", observed, "dispatch", dispatch)
 	e.recomputeWorkerCeilingWith(e.lifetimeCtx, sizing, rtts, observed)
 }
@@ -721,7 +732,7 @@ func (e *Engine) recomputeWorkerCeiling(ctx context.Context) {
 	sizing := maps.Clone(e.shardSizing)
 	rtts := maps.Clone(e.shardRTTMs)
 	e.shardsLock.Unlock()
-	e.recomputeWorkerCeilingWith(ctx, sizing, rtts, e.slotsByShard(sizing))
+	e.recomputeWorkerCeilingWith(ctx, sizing, rtts, slotsOf(e.rolesByShard()))
 }
 
 // shardDriver is the driver name of a shard's connection, or empty when the shard is not open.
@@ -840,6 +851,7 @@ func (e *Engine) pickShard() (int, error) {
 		return 0, errors.New("all shards are cordoned", http.StatusServiceUnavailable)
 	}
 	r := rand.Float64() * total
+	last := -1
 	for i, w := range weights {
 		if w == 0 {
 			continue
@@ -848,6 +860,9 @@ func (e *Engine) pickShard() (int, error) {
 			return specs[i].Index, nil
 		}
 		r -= w
+		last = i
 	}
-	return specs[len(specs)-1].Index, nil // unreachable; defensive
+	// Floating-point rounding can leave r at the very end of the range; the last eligible shard takes it. Never
+	// a cordoned or zero-weight one.
+	return specs[last].Index, nil
 }

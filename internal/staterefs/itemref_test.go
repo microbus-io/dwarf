@@ -85,8 +85,9 @@ func TestLinker_MintItem(t *testing.T) {
 	ordinals := map[string]bool{"itemIndex": true, "itemCount": true}
 	mint := func(t *testing.T, merged workflow.State, inherited Refs, item *Item) (workflow.State, Refs) {
 		t.Helper()
+		assert := testarossa.For(t)
 		stateJSON, refsJSON, err := New("sqlite").Mint(merged, mustState(map[string]any{}), inherited, anchor, width, ordinals, item)
-		testarossa.For(t).NoError(err)
+		assert.NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)
 		return stored, mustParse(refsJSON)

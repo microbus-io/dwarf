@@ -106,16 +106,16 @@ func (e *Engine) recomputeRefillIntervals() {
 	e.shardsLock.Lock()
 	sizing := maps.Clone(e.shardSizing)
 	e.shardsLock.Unlock()
-	e.recomputeRefillIntervalsWith(sizing, e.slotsByShard(sizing))
+	e.recomputeRefillIntervalsWith(sizing, e.rolesByShard())
 }
 
 // recomputeRefillIntervalsWith is recomputeRefillIntervals' core, taking the shard sizing and roles as
 // already-read snapshots rather than re-acquiring shardsLock or re-reading the roles to fetch them.
-func (e *Engine) recomputeRefillIntervalsWith(sizing map[int]shardSizing, slotsBy map[int]int) {
+func (e *Engine) recomputeRefillIntervalsWith(sizing map[int]shardSizing, roles map[int]roleReading) {
 	// The shards this replica dispatches, which are the only ones whose partitions the cache holds.
 	n := 0
-	for _, slots := range slotsBy {
-		if slots > 0 {
+	for _, role := range roles {
+		if role.slots > 0 {
 			n++
 		}
 	}
@@ -149,7 +149,7 @@ func (e *Engine) recomputeRefillIntervalsWith(sizing map[int]shardSizing, slotsB
 		// dispatcher count, which is what the buffer drains through. A shard this replica only reads has an
 		// idle piston, which reads no period, and recomputePools re-derives this on the promotion that wakes
 		// it.
-		slots := slotsBy[idx]
+		slots := roles[idx].slots
 		if slots == 0 {
 			continue
 		}
@@ -162,7 +162,7 @@ func (e *Engine) recomputeRefillIntervalsWith(sizing map[int]shardSizing, slotsB
 		// better band - the cheap thing to be stale about. Capped like the derived period: Liveness counts the
 		// slower loop's turns, and a tally slower than the registry's dispatch window would drop a healthy
 		// dispatcher out of the residue divisor.
-		p.SetTallyCadence(min(derived*time.Duration(e.scannersOn(idx)), refillIntervalCap), pipeline.DefaultMinGap)
+		p.SetTallyCadence(min(derived*time.Duration(roles[idx].scanners), refillIntervalCap), pipeline.DefaultMinGap)
 		p.SetSupplyCadence(derived, min(pipeline.DefaultMinGap, derived/supplyGapDivisor))
 	}
 }

@@ -28,7 +28,7 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// The selection ALGORITHM is no longer tested here. The cross-shard merge, the fairness lottery, the
+// The selection ALGORITHM is not tested here. The cross-shard merge, the fairness lottery, the
 // slice rule and its starvation guard live in internal/planner and are pinned by its own tests; the
 // cycle's error policy lives in internal/pipeline; the two queries live in internal/piston. What remains
 // here is what only a whole engine can show: that the pistons drain a real fleet, that the cycle period
@@ -75,11 +75,10 @@ func TestRefillDecoupled_MultiShardDrains(t *testing.T) {
 	assert.Equal(2, len(shardsSeen), "placement should have used both shards (key prefix is the shard)")
 }
 
-// TestRefillInterval_OneCyclePerPistonNoTrigger pins the shape that replaced the single-slot trigger: a
-// piston cycles UNCONDITIONALLY on its period, so a step no local activity ever announced is still picked
-// up. Nothing arms anything - that is the point. Under the old design an idle shard parked on a trigger
-// only its own activity could arm, which is why a cross-replica doorbell had to exist and then why an
-// idle tick had to replace it; an unconditional cycle subsumes both.
+// TestRefillInterval_OneCyclePerPistonNoTrigger pins that a piston cycles UNCONDITIONALLY on its period, so
+// a step no local activity ever announced is still picked up. Nothing arms anything - that is the point. A
+// refiller parked on a trigger only its own shard's activity can arm would need a cross-replica doorbell or an
+// idle tick to find such a step; an unconditional cycle needs neither.
 func TestRefillInterval_OneCyclePerPistonNoTrigger(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -171,7 +170,7 @@ func TestRefillInterval_OverridePinsAndRestores(t *testing.T) {
 //
 // Deriving rather than hardcoding is what keeps the period correct when the sizing it depends on moves:
 // capacity is 2 x workersPerConnBudget x conns, so a change there silently rescales the buffer this
-// period is measured against. Campaign 11 nearly made exactly that change.
+// period is measured against.
 func TestRefillInterval_DerivedFromStaticConfig(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)

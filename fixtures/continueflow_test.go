@@ -76,7 +76,7 @@ func TestContinueflow(t *testing.T) {
 	})
 }
 
-// TestContinueInheritsThreadPolicy verifies a Continue turn (which no longer takes FlowOptions) inherits
+// TestContinueInheritsThreadPolicy verifies a Continue turn (which takes no FlowOptions) inherits
 // the thread's policy: scheduling priority (not reset to the engine default).
 func TestContinueInheritsThreadPolicy(t *testing.T) {
 	t.Parallel()

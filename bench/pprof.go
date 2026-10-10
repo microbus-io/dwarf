@@ -58,9 +58,8 @@ func startProfiling(dir, label string) (stop func(), err error) {
 		f.Close()
 		return nil, errors.Trace(err)
 	}
-	// Failures WARN rather than returning quietly. That is this harness's own most expensive lesson: metric
-	// collection used to fail silently, which turned a corrupt run into a confident measurement of zero
-	// rather than into an error. A missing profile is far less dangerous than that - nothing downstream
+	// Failures WARN rather than returning quietly. A collection that fails silently turns a corrupt run into a
+	// confident measurement of zero rather than into an error. A missing profile is far less dangerous than that - nothing downstream
 	// averages it in - but the failure mode is the same shape, and silence costs whoever goes looking for
 	// the file an hour of confusion at the end of a run that is expensive to repeat.
 	return func() {

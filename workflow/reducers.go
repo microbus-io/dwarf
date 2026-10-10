@@ -24,8 +24,8 @@ import (
 )
 
 // Reducer names how concurrent state modifications from parallel branches are merged during fan-in. A
-// field is bound to one with graph.SetReducer; the engine consults it via State.MergeReduce. The fold
-// implementations live in reducers.go (Reducer.Reduce dispatches to them).
+// field is bound to one with graph.SetReducer, and State.MergeReduce and MergeReduceAll fold by it. A name
+// other than the constants below is rejected by Graph.Validate.
 type Reducer string
 
 const (
@@ -40,6 +40,16 @@ const (
 	ReducerOr      Reducer = "or"      // Logical OR of booleans
 	ReducerConcat  Reducer = "concat"  // Concatenate strings
 )
+
+// isKnown reports whether r names one of the reducers above. The empty Reducer means replace.
+func (r Reducer) isKnown() bool {
+	switch r {
+	case "", ReducerReplace, ReducerAppend, ReducerAdd, ReducerMin, ReducerMax, ReducerUnion, ReducerMerge,
+		ReducerAnd, ReducerOr, ReducerConcat:
+		return true
+	}
+	return false
+}
 
 // The reducer functions below are the Go-native fold implementations selected by the Reducer string type
 // (the vocabulary the graph produces and State.MergeReduce consumes). They are unexported: a caller names
