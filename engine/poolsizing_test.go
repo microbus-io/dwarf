@@ -51,7 +51,7 @@ func probedRTT(e *Engine, shard int) float64 {
 }
 
 // declaredBudget is the ShardSpec.MaxConnections the sizing tests declare, so their expectations hold
-// whatever RTT each engine probes and whatever server it runs against. 48 takes four dispatchers.
+// whatever RTT each engine probes and whatever server it runs against.
 const declaredBudget = 48
 
 // shareOf is one dispatcher's pool when declaredBudget splits `slots` ways. Through shardPool rather than
@@ -201,32 +201,8 @@ func TestPoolSizing_ShardBudget(t *testing.T) {
 	for _, c := range cases {
 		assert.Equal(c.want, shardBudget(ShardSpec{MaxConnections: c.lever}, c.rttMs, c.serverMax, c.driver), "%+v", c)
 	}
-	// The fleet-agreed budget is the rule at the near distance, whatever this replica probed.
-	sz := sizeShard(ShardSpec{}, 1.0, 0, "pgx")
-	assert.Equal(500, sz.budget)
-	assert.Equal(250, sz.ref)
-}
-
-// TestPoolSizing_DispatcherCountAgreesAcrossReplicas pins that the dispatcher count depends on nothing a replica
-// measures for itself: replicas at different distances from the database, and one whose read of the server's
-// connection limit failed, derive the same count from the same spec - or two of them would both claim, or both
-// leave, one slot.
-func TestPoolSizing_DispatcherCountAgreesAcrossReplicas(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-
-	for _, spec := range []ShardSpec{{}, {MaxConnections: 24}, {MaxConnections: 700}} {
-		for _, replicas := range []int{1, 2, 3, 8} {
-			want := dispatcherSlots(sizeShard(spec, 0.1, 100, "pgx").ref, replicas)
-			for _, sz := range []shardSizing{
-				sizeShard(spec, 2.0, 100, "pgx"), // far
-				sizeShard(spec, 0.3, 0, "pgx"),   // the limit read failed
-				sizeShard(spec, 0, 40, "pgx"),    // unprobed, and a small server
-			} {
-				assert.Equal(want, dispatcherSlots(sz.ref, replicas), "spec %+v replicas %d sizing %+v", spec, replicas, sz)
-			}
-		}
-	}
+	// sizeShard carries the budget at the RTT this replica probed.
+	assert.Equal(500, sizeShard(ShardSpec{}, 1.0, 0, "pgx").budget)
 }
 
 // TestPoolSizing_StartupDerivesTheBudget pins the wiring of the derived path: with no MaxConnections declared,
@@ -306,12 +282,18 @@ func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
 	assert.Equal(2, e.replicasOn(1))
 	assert.Equal(shareOf(2), db.DB.Stats().MaxOpenConnections, "1/2 share once the peer registered")
 
+	// A third replica does not divide the budget further: two dispatch, and this replica holds either the
+	// half share or, ranked out, the reader pool. Which one depends on the random engine ids.
 	addPeerRow(t, e, 1002)
 	assert.Equal(3, e.replicasOn(1))
-	assert.Equal(shareOf(3), db.DB.Stats().MaxOpenConnections, "1/3 share at three replicas")
+	want := readerOpenConns
+	if e.dispatchesOn(1) {
+		want = shareOf(maxDispatchers)
+	}
+	assert.Equal(want, db.DB.Stats().MaxOpenConnections, "two dispatchers at three replicas")
 
 	e.recomputePools() // recompute with no fleet change: dedupes, so the pools are untouched
-	assert.Equal(shareOf(3), db.DB.Stats().MaxOpenConnections)
+	assert.Equal(want, db.DB.Stats().MaxOpenConnections)
 
 	delPeerRow(t, e, 1001)
 	delPeerRow(t, e, 1002)
@@ -361,8 +343,12 @@ func TestPoolSizing_IdleCoreTracksTheDerivedPool(t *testing.T) {
 	assert.Equal(shareOf(2), idle(), "idle follows the pool down to the 1/2 share")
 
 	addPeerRow(t, e, 2002)
-	assert.Equal(shareOf(3), db.DB.Stats().MaxOpenConnections)
-	assert.Equal(shareOf(3), idle(), "and down again to the 1/3 share")
+	wantOpen, wantIdle := readerOpenConns, readerIdleConns
+	if e.dispatchesOn(1) {
+		wantOpen, wantIdle = shareOf(maxDispatchers), shareOf(maxDispatchers)
+	}
+	assert.Equal(wantOpen, db.DB.Stats().MaxOpenConnections)
+	assert.Equal(wantIdle, idle(), "and with the share - or down to the reader pool when ranked out at three")
 
 	delPeerRow(t, e, 2001)
 	delPeerRow(t, e, 2002)
@@ -445,8 +431,8 @@ func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 8})) // a resident set of 64 keeps the flow count small
 	assert.NoError(e.Startup(t.Context()))
 	resident := int32(e.crew.Resident())
-	assert.Equal(int32(max(64, workersPerConnBudget*sizingOf(e, 1).budget)), resident,
-		"resident set is the connection-derived dispatch count")
+	assert.Equal(int32(max(64, residentWorkersPerConn*sizingOf(e, 1).budget)), resident,
+		"resident set is the connection-derived floor")
 
 	// Start more flows than the resident set can hold concurrently.
 	flows := int(resident) + 34
@@ -594,11 +580,11 @@ func TestPoolSizing_AllCordoned(t *testing.T) {
 }
 
 // TestPoolSizing_ConcurrentRecomputeAppliesLatestR pins the ORDERING of pool application, which the
-// lastAppliedSlots dedupe does not give. Two peers saying hello microseconds apart during a rolling deploy each
-// run a recompute: one reads R=2, the other R=3. Nothing ordered their pushes, so the R=2 sizes could land
-// AFTER the R=3 sizes and leave the replica holding a half-of-the-budget pool against a fleet of three -
+// lastAppliedSlots dedupe does not give. A peer leaving and rejoining microseconds apart during a rolling deploy
+// runs two recomputes: one reads R=1, the other R=2. Nothing ordered their pushes, so the R=1 sizes could land
+// AFTER the R=2 sizes and leave the replica holding the whole budget beside a second dispatcher -
 // over-connecting the shard's server, and sticky until the next fleet change (the dedupe sees R unchanged
-// and skips). poolsLock now spans read-of-R through push, so the last writer wins with the value it read.
+// and skips). poolsLock spans read-of-R through push, so the last writer wins with the value it read.
 //
 // The interleaving is forced, not raced: a fault freezes the first recompute in exactly that window. With
 // the lock, the second recompute blocks on it and applies AFTER - which is the fix working. The two counts
@@ -621,30 +607,37 @@ func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
 	}
 	assert.Equal(declaredBudget, db.DB.Stats().MaxOpenConnections, "full budget while alone (R=1)")
 
-	// Stall the first recompute (one-shot) after it has read a fleet of 2, before it pushes the R=2 share.
+	// Stall the first recompute (one-shot) after it has read a fleet of 1, before it pushes the full budget.
 	insertPeerRows(t, e, 1001)
 	awaitPeerCount(t, e, 1, 2)
+	e.recomputePools()
+	assert.Equal(shareOf(2), db.DB.Stats().MaxOpenConnections, "half share with a peer")
+	assert.NoError(e.db.OnEach(t.Context(), func(ctx context.Context, sdb *sequel.DB, shard int) error {
+		_, derr := sdb.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id=1001")
+		return derr
+	}))
+	awaitPeerCount(t, e, 1, 1)
 	e.seams.InjectN(engineseams.FaultSlowPoolPush, 1)
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		e.recomputePools()
 	})
-	time.Sleep(slowPoolPushDelay / 10) // the first recompute is now inside the window, holding a stale 2
+	time.Sleep(slowPoolPushDelay / 10) // the first recompute is now inside the window, holding a stale 1
 
-	// A second recompute runs while the first is stalled, and is NOT stalled: it sees 3 and wants the R=3
-	// share. Unserialized, it pushes that immediately and the first then overwrites it with the stale R=2
-	// one. Serialized, it cannot start until the first's push is done, so R=3 lands last - the correct value.
-	insertPeerRows(t, e, 1002)
-	awaitPeerCount(t, e, 1, 3)
+	// A second recompute runs while the first is stalled, and is NOT stalled: it sees 2 and wants the half
+	// share. Unserialized, it pushes that immediately and the first then overwrites it with the stale full
+	// budget. Serialized, it cannot start until the first's push is done, so the half share lands last.
+	insertPeerRows(t, e, 1001)
+	awaitPeerCount(t, e, 1, 2)
 	wg.Go(func() {
 		e.recomputePools()
 	})
 	wg.Wait()
 
-	// The fleet is 3, so the pool must be the R=3 share - not the R=2 share applied last.
-	assert.Equal(3, e.replicasOn(1))
-	assert.Equal(shareOf(3), db.DB.Stats().MaxOpenConnections,
-		"the pool must reflect the LATEST replica count (budget/3), not a stale recompute that pushed last")
+	// The fleet is 2, so the pool must be the half share - not the full budget applied last.
+	assert.Equal(2, e.replicasOn(1))
+	assert.Equal(shareOf(2), db.DB.Stats().MaxOpenConnections,
+		"the pool must reflect the LATEST replica count (budget/2), not a stale recompute that pushed last")
 }
 
 // TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride is the same race against the OTHER writer of pool
@@ -825,15 +818,15 @@ func TestPoolSizing_WorkerCeiling(t *testing.T) {
 }
 
 // TestPoolSizing_DerivedWorkers pins the derived worker default (the lease-margin ceiling, so it holds
-// for any task duration) and the resident/dispatch split: the eagerly-spawned set and the candidate
-// cache stay sized by the connection budget (8x conns, floor 64), because a worker parked in a long
-// ExecuteTask holds no connection and must not inflate the refill scan.
+// for any task duration) and the resident/dispatch split: the eagerly-spawned floor (2x conns) and the
+// candidate cache (2 x 8x conns) are both sized by the connection budget (floor 64), because a worker parked
+// in a long ExecuteTask holds no connection and must not inflate the refill scan.
 func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
 	// Zero-config: one default shard, at its derived budget. The max is the ceiling (large - set by the 30s
-	// margin, not by the task); the resident set and cache follow the connection budget: max(64, 8 x budget).
+	// margin, not by the task); the resident floor and the cache follow the connection budget.
 	e := newSolo(t, "e")
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
@@ -849,7 +842,7 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	// dispatch count.
 	assert.Equal(workerCeiling(zeroConfig, probedRTT(e, 1), e.shardDriver(1)), int(e.workers.Load()), "the worker max is the lease-margin ceiling")
 	assert.True(int(e.workers.Load()) > e.workersDispatch, "the max is the ceiling, not the dispatch count")
-	assert.Equal(int32(max(64, workersPerConnBudget*zeroConfig)), int32(e.crew.Resident()), "only the resident set is spawned eagerly")
+	assert.Equal(int32(max(64, residentWorkersPerConn*zeroConfig)), int32(e.crew.Resident()), "only the resident floor is spawned eagerly")
 
 	// A large budget plus a small one: the dispatch count follows their AGGREGATE budget, while the ceiling
 	// is keyed on the WORST shard (the small pool), never the aggregate.

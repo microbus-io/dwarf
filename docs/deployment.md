@@ -221,9 +221,8 @@ same-zone round trips run **0.05-0.96 ms** and cross-AZ same-region about **1.1 
 > times over. The engine handles this
 > automatically. Each replica records a periodic heartbeat in the shard databases it already shares with
 > the others, and from those rows the fleet agrees **per shard** on a small number of **dispatchers** that
-> split that shard's budget and run its steps: up to four per shard - enough for any one database - never
-> more than there are replicas, and at least two once there are two, so one replica failing does not stop a
-> shard. A small budget (one you set low, or SQLite's) takes fewer, so each dispatcher keeps a usable pool. Every other replica
+> split that shard's budget and run its steps: two per shard once there are two replicas, so one replica
+> failing does not stop a shard. Every other replica
 > holds just **two connections** to that shard, enough to create flows, answer reads and wait on outcomes,
 > and runs none of its steps. A replica that stops dispatching a shard — another replica took its place, or
 > it is shutting down — keeps a dispatcher-sized share until the steps it already started there finish, and
@@ -236,8 +235,8 @@ same-zone round trips run **0.05-0.96 ms** and cross-AZ same-region about **1.1 
 > room for it rather than briefly overshooting together. (Lowering a pool's limit closes nothing, so a
 > peer's surplus connections drain as they are returned rather than instantly.)
 >
-> Declare **the same `MaxConnections` for a shard on every replica**: it decides how many dispatchers that shard
-> has, and replicas that disagree on it disagree on which of them dispatch. A new flow is created on a shard
+> Declare **the same `MaxConnections` for a shard on every replica**, so every dispatcher takes the same share
+> of it. A new flow is created on a shard
 > its replica dispatches when it has one, so its first step runs at once; a flow created, resumed, forked or
 > continued on a replica that does not dispatch its shard waits for the next scan (well under a second)
 > before its first step runs, and then runs normally. The engine warns in the log when a fleet's

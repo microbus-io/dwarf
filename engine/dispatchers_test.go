@@ -79,25 +79,20 @@ func leaveFakeFleet(t *testing.T, e *Engine) {
 }
 
 // TestDispatchers_Slots pins how many replicas dispatch a shard: maxDispatchers, never more than the
-// replicas there are, at least two once there are two, and fewer than maxDispatchers only when the
-// fleet-agreed budget cannot give each minDispatcherPool connections.
+// replicas there are, and never zero.
 func TestDispatchers_Slots(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	cases := []struct {
-		ref, replicas, want int
+		replicas, want int
 	}{
-		{7, 1, 1},     // a lone replica is its own dispatcher
-		{7, 2, 2},     // a small budget still takes two once there are two, so one death does not stop it
-		{7, 7, 2},     // ...and no more: the budget cannot feed a third
-		{48, 2, 2},    // never more dispatchers than replicas
-		{36, 100, 3},  // a budget of 36 feeds three dispatchers of 12
-		{48, 100, 4},  // 48 feeds four
-		{250, 100, 4}, // the near budget is capped at maxDispatchers
-		{500, 3, 3},
+		{0, 1},   // an empty reading still names a dispatcher: this replica, about to register
+		{1, 1},   // a lone replica is its own dispatcher
+		{2, 2},   // two once there are two, so one death does not stop the shard
+		{100, 2}, // and no more: every dispatcher's piston walks the whole band
 	}
 	for _, c := range cases {
-		assert.Equal(c.want, dispatcherSlots(c.ref, c.replicas), "%+v", c)
+		assert.Equal(c.want, dispatcherSlots(c.replicas), "%+v", c)
 	}
 }
 
@@ -133,7 +128,7 @@ func TestDispatchers_ReaderReplicaHoldsTheReaderPoolAndRunsNothing(t *testing.T)
 	if rank, _ := e.sonarFor(1).Rank(); !assert.Equal(3, rank, "fixture: readerID must rank below a 2-slot cut") {
 		return
 	}
-	assert.Equal(0, e.slotsOn(1, sizeShard(ShardSpec{MaxConnections: 24}, 0, 0, "")))
+	assert.Equal(0, e.slotsOn(1))
 	assert.False(e.dispatchesOn(1))
 	assert.True(e.pistons[1].Idle(), "a reader's piston idles")
 	assert.Equal(readerOpenConns, db.DB.Stats().MaxOpenConnections, "a reader holds the reader pool")
@@ -394,7 +389,7 @@ func TestDispatchers_RankedReplicaSplitsTheBudget(t *testing.T) {
 	assert.NoError(err)
 
 	joinFakeFleet(t, e)
-	slots := dispatcherSlots(48, len(fakeFleet)+1)
+	slots := dispatcherSlots(len(fakeFleet) + 1)
 	if rank, _ := e.sonarFor(1).Rank(); !assert.Equal(1, rank, "fixture: dispatcherID must rank inside a %d-slot cut", slots) {
 		return
 	}
@@ -422,7 +417,7 @@ func TestDispatchers_DrainingReplicasDivideTheBudget(t *testing.T) {
 	assert.NoError(err)
 
 	joinFakeFleet(t, e)
-	slots := dispatcherSlots(spec.MaxConnections, len(fakeFleet)+1)
+	slots := dispatcherSlots(len(fakeFleet) + 1)
 	if !assert.True(e.dispatchesOn(1), "fixture: dispatcherID must rank inside the cut") {
 		return
 	}
@@ -586,11 +581,11 @@ func TestDispatchers_FleetLimitWarnsOnTheEdge(t *testing.T) {
 
 	e.poolsLock.Lock()
 	defer e.poolsLock.Unlock()
-	e.checkFleetFits(1, shardSizing{budget: spec.MaxConnections, ref: spec.MaxConnections, serverMax: 0})
+	e.checkFleetFits(1, shardSizing{budget: spec.MaxConnections, serverMax: 0})
 	assert.False(e.fleetOverLimit[1], "no known limit, no verdict")
-	e.checkFleetFits(1, shardSizing{budget: spec.MaxConnections, ref: spec.MaxConnections, serverMax: 10})
+	e.checkFleetFits(1, shardSizing{budget: spec.MaxConnections, serverMax: 10})
 	assert.True(e.fleetOverLimit[1], "a budget of 48 does not fit in 80% of 10")
-	e.checkFleetFits(1, shardSizing{budget: spec.MaxConnections, ref: spec.MaxConnections, serverMax: 1000})
+	e.checkFleetFits(1, shardSizing{budget: spec.MaxConnections, serverMax: 1000})
 	assert.False(e.fleetOverLimit[1], "and fits again under a larger limit")
 }
 

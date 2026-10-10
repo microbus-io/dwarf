@@ -776,7 +776,7 @@ so a dwarf shard on Limitless is double-sharded, and its distributed planner is 
 assume; `EXPLAIN` on the actual target.**
 
 **Phase 3 (`piston.FetchSteps`) is dialect-split, and the split is not optional.** On pgx and mssql each chosen key
-is fetched by a `LIMIT`/`TOP` inside a `CROSS JOIN LATERAL`/`CROSS APPLY` over the keys passed as ONE json bind, so
+is fetched by a `LIMIT`/`TOP` inside a `CROSS JOIN LATERAL`/`CROSS APPLY` over the keys passed as ONE bind, so
 the index walk stops after `perKey` rows per key - measured 400,000 rows read (64.4ms) with the window shape against
 32 (0.25ms) with the lateral. mysql (which must also run on MariaDB, which has no lateral join) and sqlite keep the
 window shape and its O(due rows at the band) cost. **Do not fetch with a UNION-ALL branch per chosen key**: it hits
@@ -917,12 +917,12 @@ Confirmed after the IOPS diagnostic (below) made throughput resolvable.
 
 **THE FLOOR DEPENDS ON `workersPerConnBudget` (8) THROUGH THE CACHE - which is why it is derived rather
 than hardcoded.** `capacity = 2 x workersDispatch = 2 x 8 x conns`, so anything changing the 8 rescales the
-buffer this floor is measured against, proportionally. The 8 assumes `T/db≈8` while 5ms tasks measure
-~1.5-2, so the resident worker count overshoots ~4x, and the overshoot is deliberately KEPT (it is
-throughput-neutral - surplus workers queue for a connection and connections are never idle). "Correcting" it
-under a hardcoded floor would cut capacity ~4x, the per-partition share 768 -> 192 and the supply ceiling
-proportionally, leaving the floor **longer than the buffer can cover** - the measured starvation mode (-10%
-throughput). Deriving it closes that by construction: **a change to worker or cache sizing rescales the floor
+buffer this floor is measured against, proportionally. The 8 is a generous `T/db` (5ms tasks measure
+~1.5-2), and it sizes the CACHE only - the crew's floor and its saturated size come from
+`residentWorkersPerConn` and `turnstilePassesPerConn` (see "Worker sizing"). Cutting the 8 itself would cut
+capacity ~4x, the per-partition share 768 -> 192 and the supply ceiling proportionally, leaving the floor
+**longer than the buffer can cover** - the measured starvation mode (-10% throughput). So the crew is
+shrunk through its own two constants, never through this one. Deriving it closes that by construction: **a change to worker or cache sizing rescales the floor
 automatically; do not put a constant here.**
 
 **Why scanning less often helps more than the scan count alone suggests:** the band scan's apparent "fixed
@@ -1076,8 +1076,8 @@ runs only when a replica dies without draining - a graceful shutdown releases it
 rates: `recoverExpiredLeases` every tick (1m), the heavy detectors every `heavyRepairEvery`-th (5m), since they
 carry 5-minute age guards and running them more often finds nothing. The tick's cost is the lease reset's scan:
 it reads every `running` non-parked row (`lease_expires` is not a seekable key in the selection index), so it
-grows with the in-flight count, and every dispatcher of a shard runs it, up to four - about one scan
-of the in-flight set every 15s per shard at the top end, against a piston scanning ~15 times a second. Making that
+grows with the in-flight count, and every dispatcher of a shard runs it, up to two - about one scan
+of the in-flight set every 30s per shard at the top end, against a piston scanning ~15 times a second. Making that
 scan O(expired) would need a `lease_expires` index on `running` rows, maintained on every claim and completion of
 the hottest table; not worth it at this rate. The orphan-flow repair (Background Recovery #3) keeps its
 5-minute floor through `orphanFlowThreshold`, so a crash between a step's completion and its transition still
@@ -2441,9 +2441,8 @@ the transition, and 9-11 elsewhere), `s` is the per-step time that is not a roun
 (server execution, WAL, queueing at the pool). Three consequences that govern engine changes:
 
 - **Workers are NOT a term.** A worker inside `ExecuteTask` holds no connection, so adding workers cannot
-  move this - it moves the queue. That is the same fact `workersPerConnBudget`'s deliberate overshoot
-  rests on, reached from the other direction, and it is why a "grow the crew" fix for a throughput
-  problem is always wrong.
+  move this - it moves the queue. It is why a "grow the crew" fix for a throughput problem is always
+  wrong.
 - **`k` is the ONLY term the engine controls, and it MULTIPLIES RTT.** At ~10 round trips, 0.1 ms of RTT
   costs ~1 ms of occupancy on EVERY step. That is what makes the round-trip collapsing work
   throughput-critical rather than cosmetic - the single-round-trip claim+read via `RETURNING`/`OUTPUT`,
@@ -2690,7 +2689,7 @@ two, each further replica adds its minimum pool to a budget that does not grow -
 becomes 200, **4.2x over** - and even a large budget split a hundred ways gives every replica a pool too
 small to dispatch from. The realistic fleet that reaches it is not a large dwarf deployment but a host scaled wide
 for its own traffic, every instance paying for connections to shards it barely uses. So each shard has
-`X = dispatcherSlots(ref, R)` **dispatchers** that split the budget, and every other replica holds a
+`X = dispatcherSlots(C)` **dispatchers** that split the budget, and every other replica holds a
 **reader pool** (1 idle, 2 open) and runs no step there - except a demoted one still finishing the steps
 it claimed, which holds a share until they are done (below). Connections per shard become `budget + ~R` held,
 most of the `R` idle, instead of `max(budget, 2R)` active.
@@ -2700,24 +2699,23 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
   included, and is what readers count against. Subtracting the readers from the budget
   (`(budget - 2(R-X))/X`) goes negative on a small budget at `R=10`, and shrinks the active pool to make room
   for connections that are not active.
-- **`X` MUST AGREE ACROSS THE FLEET, so it is derived from the NEAR-distance budget (`shardSizing.ref`),
-  never the probed one.** Each replica probes its own RTT, so replicas in different zones derive different
-  budgets. That is right for the *pool* (a farther replica needs more connections to keep the same backends
-  busy - Little's law - and the server sees roughly the mean) but wrong for `X`, which is the rank cut: two
-  replicas disagreeing on it both claim, or both leave, one slot. `ref` depends only on
-  `ShardSpec.MaxConnections`, declared fleet-wide, and the server's `max_connections`, read from the shared
-  database - so a replica declaring a different `MaxConnections` for a shard derives a different `X` there.
-- **`X = clamp(min(maxDispatchers, round(ref/minDispatcherPool)), min(2,C), C)`, where `C` is the CANDIDATES** - the fresh
-  replicas registered `working`, from `Sonar.Rank`, not `Replicas`. Dividing by every registered replica
-  would split the budget among dispatchers that do not exist: one worker beside await-only frontends would
-  run on a fraction of its shard (pinned by `TestDispatchers_ZeroWorkersPeersDoNotDivideTheBudget`). The floor
-  of two is availability, not throughput: one replica dying leaves the other dispatching while the slot
-  passes. `maxDispatchers` (4) is enough engine CPU for any one shard: a shard tops out near 21-28k steps/s
-  (32-64 vCPU) and one engine core drives ~4,200 linear steps/s, so four dispatchers need ~1.3-1.7 cores each;
-  more would only cut the budget into smaller pools. `minDispatcherPool` (12, an estimate) lowers `X` below
-  four only for a small budget (an operator's lever or SQLite's 8). `ref` - the budget `X` is derived from -
-  leaves out the server clamp as well as the RTT, so a replica whose read of `max_connections` failed still
-  agrees with its peers on `X`.
+- **`X = min(maxDispatchers, C)`, where `C` is the CANDIDATES** - the fresh replicas registered `working`,
+  from `Sonar.Rank`, not `Replicas`. Dividing by every registered replica would split the budget among
+  dispatchers that do not exist: one worker beside await-only frontends would run on a fraction of its shard
+  (pinned by `TestDispatchers_ZeroWorkersPeersDoNotDivideTheBudget`). **`X` must agree across the fleet**
+  (it is the rank cut: two replicas disagreeing would both claim, or both leave, one slot), and it does
+  because `C` is read from the one registry every replica reads. **Give it no input a replica derives for
+  itself** - its probed RTT, its read of the server's limit - or replicas in different zones split the cut.
+- **`maxDispatchers` is 2: the availability floor, and the most a shard should pay for.** Two means one
+  replica dying leaves the other dispatching while the slot passes. Engine CPU does not need more: a saturated
+  32 vCPU shard takes ~6 engine cores, ~3 per dispatcher. **Each dispatcher costs the shard database work**:
+  its piston's band scan and fetch walk the whole band, because the residue predicate that gives it a slice
+  cannot seek, so the shard's refill cost grows with `X`. Measured locally (one shard, budget 40, saturated,
+  in-process replicas): 727 ms of statement time per 1,000 steps at one dispatcher, 957 at four, every
+  per-step statement flat and the whole increase in the scan and the fetch, each called ~3.5x as often. The
+  TALLY loop is paced by the slot count for the same reason (`recomputeRefillIntervalsWith`), keeping the
+  shard scanned as often as one dispatcher would; the supply loop is not, since a fetch walks rows in
+  proportion to what it takes and a longer period does not shrink that.
 - **Which replicas: the Sonar's rendezvous rank** (`internal/peers/CLAUDE.md`), ranks `0..X-1` dispatch.
   Per-shard scores spread the slots across the fleet; "oldest X" would hand every shard to the same few.
   A joining replica can displace a sitting dispatcher on a shard with probability ~`X/(R+1)`; `Join`'s
@@ -2864,15 +2862,18 @@ observe the change) rather than through signals.
 **Worker sizing: the lease-margin ceiling, with a grow-on-demand pool (`poolsize.go`, `engine.go`).**
 The worker count is split into two numbers, because they answer different questions:
 
-- **`workersDispatch` (resident, eagerly spawned; also the candidate cache's size)** =
-  `max(64, 8 x sum(per-shard open))` (`workersPerConnBudget`). Dispatch is DATABASE-bound, so the
-  connection budget is what sizes it; the 8 is a generous `T/db` allowance (measured ~3 for no-op tasks).
+- **`workersDispatch` (the candidate cache's size)** = `max(64, 8 x sum(per-shard open))`
+  (`workersPerConnBudget`). Dispatch is DATABASE-bound, so the connection budget is what sizes it; the 8
+  is a generous `T/db` allowance (measured ~3 for no-op tasks).
+- **`workersResident` (eagerly spawned, and the floor the crew never shrinks below)** =
+  `max(64, 2 x sum(per-shard open))` (`residentWorkersPerConn`). A floor, not a target: under saturation
+  the crew grows to the turn count whatever the floor is (below), so the floor only sets the idle crew.
   **The cache - and therefore the refiller's selection, which fills at most the cache capacity of candidates
   and fetches per fairness key capped by it (see "Selection") - must never be sized from the maximum below**:
   a worker parked in a long `ExecuteTask` holds no connection and dispatches nothing, so a ceiling-sized cache
   would select far more of the backlog than the replica can ever claim.
   **The CACHE follows the pool split; the RESIDENT WORKER COUNT does not, and that asymmetry is deliberate.**
-  `workersDispatch` is computed once in `Startup`, from the pools already sized for the R **discovered there** (for
+  Both are computed once in `Startup`, from the pools already sized for the R **discovered there** (for
   a solo start that is R=1, so `sum(per-shard open)` is the full per-database budget). Every later fleet change
   re-divides the pools by R (`recomputePools`), which **also re-derives the dispatch count from the post-split
   budget and `cache.Resize`s to it** - the same "every path that changes a pool must re-derive what depends on it"
@@ -2894,10 +2895,8 @@ The worker count is split into two numbers, because they answer different questi
     actuator on a quantity that already self-corrects, and it would have to serialize against a shrink in
     flight. What `recomputePools` re-derives is the cache and the ceiling, which do NOT self-correct.
     **The resident floor is deliberately left at the Startup value** (derived at R=1), so a large-R fleet keeps
-    an over-provisioned floor. That is the safe direction and the same bounded, non-compounding over-provision
-    `workersPerConnBudget` keeps on purpose: surplus workers queue on the pool, and the growth trigger counts
-    workers OFFSITE rather than saturation. The prize for tightening it further is goroutine stacks, and the
-    shrink rule collects those without any protocol on the hot path.
+    an over-provisioned floor. That is the safe direction: surplus workers queue on the pool, and the
+    shrink rule collects their stacks without any protocol on the hot path.
 - **`workers` (the MAXIMUM the pool may grow to)** = `workerCeiling` = `M x margin / txTime x safety`,
   the largest pool that keeps a **synchronized completion storm** inside the crash-recovery lease margin.
   The storm: every in-flight task blocks on one downstream (an LLM provider outage) and is released at
@@ -2915,7 +2914,7 @@ The worker count is split into two numbers, because they answer different questi
   constant. Every input is engine-visible - **no task duration T anywhere**, which is exactly what makes
   this derivable where `N = M x T/db` is not.
 - **`turnstiles` (how many database calls may be admitted on a shard at once)** = `turnstilePassesPerConn x
-  open`, eight turns per connection - deliberately MORE than the pool, so a queue forms in front of it (see
+  open`, two turns per connection - deliberately MORE than the pool, so a queue forms in front of it (see
   "Turn-taking on the database"; sizing it to the pool measured a 6x collapse). This is what lets the crew grow
   freely for long tasks without the
   growth turning into pool contention, and the turn taken BEFORE a candidate is picked up is what regulates
@@ -2986,7 +2985,7 @@ park for work                       <- holding NOTHING
   -> persist / transitions           <- its own turn, still on the pickup-time claim
 ```
 
-**Sizing is `turnstilePassesPerConn = 8`, and ONE TURN PER CONNECTION IS THE TRAP.** The turnstile does not
+**Sizing is `turnstilePassesPerConn = 2`, and ONE TURN PER CONNECTION IS THE TRAP.** The turnstile does not
 remove the wait for a connection, and it does not empty the pool's queue — **a caller holding a turn still
 competes for a connection, and still waits when they are all busy.** What it changes is *who gets to
 compete, and in what order*: the population at the pool is bounded by the turn count, and admission into
@@ -2997,12 +2996,13 @@ of anything being wrong.
 gate it replaced, at 600 flows/s on a local Postgres. With exactly as many turns as connections there are
 exactly as many candidates for one, so every gap between a turn-holder finishing and the next waiter being
 woken, scheduled and asking the pool is idle connection time, on the critical path of every round trip a step
-makes. **The pool queue is not waste; it is what keeps connections busy** — the same margin
-`workersPerConnBudget` deliberately keeps, reached through a different door.
+makes. **The pool queue is not waste; it is what keeps connections busy.**
 
-Above 8 the returns are small and unsettled: 10x and 12x measured 1,688 and 1,734 against 8x's 1,559, with
-per-connection service time identical across all three, so what the extra multiple buys is queue depth
-rather than throughput — and those arms differed by less than the rig's own RTT drift.
+**Past the first queued caller, the multiple buys queue depth, not throughput - and it sets the saturated
+crew.** 8x/10x/12x measured within noise of each other on a small pool (1,559/1,688/1,734), and 2x/4x/8x ran at
+the same rate locally at 40 connections, with crews of 87/167/325: a worker waiting for a connection holds a
+candidate and counts busy, so a saturated crew grows to the turn count. At 8x, a replica dispatching 4 shards
+of 250 connections held 8,000 workers and spent ~28% of its CPU in GC. A higher multiple is not "headroom".
 
 **A turn is held for ONE CALL, and that is what the count MEANS - not what makes it small.** A turn admits
 one round trip, so the multiple is how many round trips may be queued for the pool at once, not how many
@@ -3027,7 +3027,7 @@ why nothing wraps `sequel.DB` — the call site is what knows when the connectio
 **Two bands, and the second one is the piston's alone.** `priorityRefill` (0) is above `priorityCommon` (1),
 and bands are strict — a band is exhausted before the next is looked at. The piston has it because it is the
 only caller bounded by construction (a derived period, and two loops taking one turn each per cycle against
-a turn count of 8x the connections), so it cannot starve
+a turn count of 2x the connections), so it cannot starve
 what sits below it; and it needs it because candidate supply runs only 1.04–1.47x ahead of consumption, so a
 cycle queueing behind the dispatch it feeds starves the workers it is filling for.
 
@@ -3110,7 +3110,11 @@ only load-balancing moment - flows are shard-pinned for life (subgraph affinity,
 - so a heterogeneous fleet must be weighted or the smallest shard saturates first while larger ones idle. The
 weight is DECLARED, not inferred from the server's size: capacity is not proportional to vCPUs (16 -> 32 vCPU
 measured x2.46, 32 -> 64 x1.2), so a vCPU-derived weight would misplace exactly the mixed fleets that need
-one. `Cordoned` shards are excluded from
+one. **Do not steer placement by observed shard load** (the planner's tallies, a "power of two choices"
+pick). Built and measured locally on two shards weighted 3:1: comparing due-step counts per unit of weight
+placed 94/6 instead of 75/25 and starved the lighter shard (p99 3x), because a tally count is capped at the
+cache capacity, so a deep shard reads shallow; and any load-steered pick shifts load in the direction that
+changes its own reading, so it oscillates. A slow shard is the operator's to weight down. `Cordoned` shards are excluded from
 placement entirely (everything resident proceeds - execution, subgraph children, `Continue`, `Fork`); all
 shards cordoned is a loud 503 at `Create`. Pinned by `engine/poolsizing_test.go`.
 
@@ -3306,12 +3310,12 @@ WRONG if unknown:
   regime (at deep backlog the scan is server-execution-bound; at shallow the refiller was not the
   constraint), and flow p99 did not move — the queue is deep because the DB is the constraint, and
   shortening the line does not speed up the server.
-- **The pool queue is `workersPerConnBudget`'s deliberate margin, and it is FREE — do not "fix" it.**
-  The resident set is 8 x conns against a measured `T/db ~= 1.5-3` for short tasks, so it overshoots
-  ~4x by design. Cutting N 4x was measured: null throughput, null p99, flat host CPU across 288
-  goroutines. The asymmetry is what settles it — overshoot buys a queue nobody pays for, undershoot
-  idles connections and costs real throughput, so generous-and-fixed is correct and precision is
-  worthless. Deriving N from a measured duty cycle (`M x T/db`) is a REGRESSION, not the next rung:
+- **A queue at the pool is needed, and its depth is NOT free at scale.** A crew of 4x what a pool needs
+  measured null throughput, null p99 and flat host CPU at 288 goroutines - but at 8,000 (one replica
+  dispatching 4 shards of 250) ~28% of the engine's CPU went to GC, scanning parked stacks. Size the queue
+  by turns per connection (`turnstilePassesPerConn`), not by precision: undershooting to one per connection
+  idles connections and costs real throughput. Deriving N from a measured duty cycle (`M x T/db`) is a
+  REGRESSION, not the next rung:
   it reintroduces the task-duration dependence `workerCeiling` exists to avoid, and under a mixed
   workload it fits a blend wrong for every class in it. The bound that matters is the lease margin,
   and `workerCeiling` already enforces it without knowing T.

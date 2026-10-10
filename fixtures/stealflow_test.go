@@ -270,9 +270,10 @@ func TestStealTwoBadApplesflow(t *testing.T) {
 	// Four replicas: an await-only creator plus three dispatchers, two of them crippled. The creator's work
 	// is reachable only by scanning, which is what puts the residue class in the path.
 	//
-	// The shard declares a budget of 48 so it feeds three dispatchers. A small budget - SQLite's default -
-	// takes two, which would leave one of the three a reader - and when that one is the healthy replica, the two
-	// crippled ones carry the whole load and there is nothing for it to steal.
+	// The pools are pinned, which turns the dispatcher ranking off so all three working replicas dispatch.
+	// Derived pools give a shard at most two dispatchers, leaving one of the three a reader - and when that one
+	// is the healthy replica, the two crippled ones carry the whole load and there is nothing for it to steal.
+	// Three dispatchers, and with them a far class past a neighbour, are reachable only under the pin.
 	ran := map[string]*atomic.Int64{"creator": {}, "healthy": {}, "bad1": {}, "bad2": {}}
 	build := func(replica string, delay time.Duration) *engine.HostMux {
 		p := engine.NewHostMux()
@@ -302,7 +303,8 @@ func TestStealTwoBadApplesflow(t *testing.T) {
 		defer e.Shutdown(ctx)
 		e.SetHost(build(replica, delay))
 		assert.NoError(e.SetWorkers(workers))
-		assert.NoError(e.SetShard(engine.ShardSpec{Index: 1, MaxConnections: 48}))
+		assert.NoError(e.SetShard(engine.ShardSpec{Index: 1}))
+		assert.NoError(engineseams.SetMaxOpenConns(e, 16))
 		return e
 	}
 	healthy := mk("healthy", 4, 0)

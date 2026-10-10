@@ -210,24 +210,25 @@ type Engine struct {
 	testHashedID string
 
 	// Candidate cache and worker pool. `workers` is the pool's MAXIMUM (the lease-margin ceiling, or an
-	// explicit SetWorkers); the pool is grow-on-demand: initRuntime spawns `workersResident` = the
-	// dispatch-sized set (8 x conns, floored at 64), and a worker that finds every spawned peer busy
-	// while work is waiting spawns one more, up to the max. A worker blocked in a long ExecuteTask holds
-	// no connection, so the ceiling can be large without the resident set - and therefore the candidate
-	// cache and its refill scan, both sized from the resident count - paying for it.
+	// explicit SetWorkers); the pool is grow-on-demand: initRuntime spawns `workersResident` (2 x conns,
+	// floored at 64), and a worker that takes a candidate and leaves nobody idle spawns one more, up to the
+	// max. The candidate cache and its refill scan are sized from `workersDispatch` (8 x conns), never from
+	// the max: a worker blocked in a long ExecuteTask holds no connection, so the ceiling can be large
+	// without the cache paying for it.
 	cache candidates.Cache
 	// crew runs processStep on the candidates it pops. The engine supplies both sizing numbers.
 	crew *workers.Crew
 	// turnstiles orders access to each shard's connections by band and then by how long the job asking
-	// has been running, so that work already under way finishes ahead of work just starting. Sized at one
-	// turn per connection, so every path that changes a pool must re-size it - the same rule the worker
-	// ceiling, the cache and the refill interval already obey.
+	// has been running, so that work already under way finishes ahead of work just starting. Sized at
+	// turnstilePassesPerConn turns per connection, so every path that changes a pool must re-size it - the
+	// same rule the worker ceiling, the cache and the refill interval already obey.
 	turnstiles *turnstile.Set
 	// drainStop is closed at the top of drainRuntime, before the crew is waited on.
 	drainStop chan struct{}
-	// workersDispatch is the resident (eagerly spawned) worker count and the candidate cache's sizing
-	// input, resolved at Startup.
+	// workersDispatch is the candidate cache's sizing input, and workersResident the eagerly spawned worker
+	// count the crew never shrinks below; both resolved at Startup.
 	workersDispatch int
+	workersResident int
 	// dbPhaseWorkers counts how many workers are inside a metered DATABASE PHASE right now, indexed
 	// 0=enter 1=exit. See enterDBPhase for why it is not derivable from anything that already existed.
 	// There is deliberately no high-water companion: a lifetime peak is a constant within hours of
@@ -387,16 +388,15 @@ type ShardSpec struct {
 	// with the shard index, which is what gives each shard its own isolated test database).
 	DSN string
 	// MaxConnections is the shard's connection budget: the connections the replicas that dispatch the
-	// shard (up to four of them) share. Every other replica holds a reader pool of its own there - one
+	// shard (up to two of them) share. Every other replica holds a reader pool of its own there - one
 	// connection, two at most - outside the budget, and each dispatcher keeps at least two, so the shard's
 	// total can run a little past it. Left at 0, the engine
 	// derives it: 250, rising to 500 as the measured round-trip time to the database grows from 0.25 ms to
 	// 1 ms, and never more than half the server's own max_connections (on SQLite, a fixed 8). Set it to give
 	// a large database more (a 64-vCPU server gains throughput up to ~500 even when close), or a shared one
 	// less. Shards that are databases on ONE server each take their own budget from that server's limit, so
-	// set it explicitly when shards share a server. Declare the SAME value for a shard on every replica: it
-	// also decides how many replicas dispatch the shard, and replicas that disagree on it disagree on which
-	// of them dispatch.
+	// set it explicitly when shards share a server. Declare the SAME value for a shard on every replica, as
+	// with the shard set itself.
 	MaxConnections int
 	// Weight is the shard's share of new-flow placement, relative to the other shards. Left at 0, it is 1,
 	// so flows are spread evenly. Give a larger database a larger weight in a mixed fleet.
@@ -790,7 +790,7 @@ func (e *Engine) Startup(ctx context.Context) error {
 		}
 		// This replica's role on the shard, from the ranking Join just read. A shard it does not dispatch
 		// gets the reader pool and a piston that initRuntime starts idle.
-		slots := e.slotsOn(idx, sizing[idx])
+		slots := e.slotsOn(idx)
 		e.dispatchFlag(idx).Store(slots > 0)
 		idle, open := shardPool(sizing[idx].budget, override, slots)
 		// Through the shard set, which applies the test-mode cap; a push onto the shard's own handle would not.
@@ -808,10 +808,11 @@ func (e *Engine) Startup(ctx context.Context) error {
 			totalConns += open
 		}
 	}
-	// The RESIDENT worker set (and, with it, the candidate cache and every refill scan) is sized from
-	// the aggregate connection budget: dispatch is database-bound, so 8 x conns keeps the pool saturated
-	// for short tasks, floored at the historical 64 for the zero-config case.
+	// The candidate cache (and every refill scan) is sized from the aggregate connection budget: dispatch is
+	// database-bound, so 8 x conns keeps the pool supplied for short tasks. The resident set is a smaller
+	// floor the crew grows from on demand. Both are floored at the historical 64 for the zero-config case.
 	e.workersDispatch = max(64, workersPerConnBudget*totalConns)
+	e.workersResident = max(64, residentWorkersPerConn*totalConns)
 	e.recomputeWorkerCeiling(ctx)
 
 	if err := e.initRuntime(); err != nil {
@@ -840,19 +841,20 @@ func (e *Engine) initRuntime() error {
 	// is honored in full: the operator's number is the pool, not a ceiling the pool might never reach
 	// (no-op tasks never park, so growth would never take it there). The DERIVED maximum is the
 	// lease-margin ceiling - tens of thousands - and is emphatically not spawned up front; there the
-	// resident set is the connection-derived dispatch count and growth fills the rest on demand.
+	// resident set is the connection-derived floor and growth fills the rest on demand.
 	maxWorkers := int(e.workers.Load())
 	resident := maxWorkers
 	if !e.workersSet.Load() {
-		resident = min(e.workersDispatch, maxWorkers)
+		resident = min(e.workersResident, maxWorkers)
 	}
 	// The cache (and every refill scan, which reads up to its capacity) is sized from the DISPATCH count,
 	// never from the worker maximum: a worker parked in a long ExecuteTask holds no connection and
 	// dispatches nothing, so letting the ceiling size the cache would scan a backlog orders of magnitude
 	// larger than the engine can ever claim. workersDispatch is always resolved here - Startup computes it
 	// (max(64, ...), so never zero) before it calls initRuntime, which is its only caller - so there is no
-	// unresolved-dispatch case to fall back from.
-	e.cache.Init(min(resident, e.workersDispatch))
+	// unresolved-dispatch case to fall back from. It is capped by the worker maximum, not the resident set:
+	// a pinned SetWorkers spawns its maximum in full, and the derived resident set is only a floor.
+	e.cache.Init(min(maxWorkers, e.workersDispatch))
 	e.drainStop = make(chan struct{})
 	// One planner for the whole replica, one piston per shard. Reset rather than reused across a
 	// Shutdown/Startup cycle: a tally left from the previous run would claim a band nobody is serving.
@@ -934,7 +936,7 @@ func (e *Engine) initRuntime() error {
 			// it outside the population the turn count bounds. Band 0 keeps both properties and costs it
 			// nothing: strict priority means it waits only for the NEXT turn to free rather than for the
 			// queue to drain, and it shares the band with one piston whose two loops take one turn each per
-			// cycle, against a turn count of 8x the connections.
+			// cycle, against a turn count of turnstilePassesPerConn x the connections.
 			s.SetTurnFunc(func(ctx context.Context) (context.Context, func()) {
 				return e.dbTurnAt(ctx, idx, priorityRefill)
 			})

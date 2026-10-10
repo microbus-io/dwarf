@@ -26,7 +26,7 @@ population" and it is measured catastrophic — the engine's arm collapsed **6x*
 against the gate it replaced. With as many passes as units there are exactly as many candidates for one, so
 every gap between a holder finishing and the next waiter being woken, scheduled and asking for the resource
 is idle resource time. **A queue at the resource is not waste; it is what keeps the resource busy.** The
-engine sizes at 8 passes per connection, matching the margin it already keeps for its worker set.
+engine sizes at 2 passes per connection; the turn count is also what a saturated worker crew grows to.
 
 What the count still buys is that the contending population is BOUNDED AT ALL rather than growing with the
 caller pool, and that admission into it is ordered. Both survive a generous multiple; neither survives no

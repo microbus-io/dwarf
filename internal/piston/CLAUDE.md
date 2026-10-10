@@ -53,8 +53,9 @@ are all in `internal/pipeline/CLAUDE.md`. What belongs *here* are the three cons
 - **`Liveness`'s turn count is the MINIMUM of the two loops'** — see below.
 - **The steal must not acquire a flag one loop writes and the other reads** — see below. Anything shared
   between them is sampled at an arbitrary phase of the other's cadence, and the phases are not independent:
-  both loops start together and run at the same interval, so a "race" of that shape lands the same way every
-  time rather than half the time.
+  both loops start together and the tally's interval is a whole multiple of the supply's (the owner paces it
+  by the number of scanning pistons), so a "race" of that shape lands the same way every time rather than
+  half the time.
 
 ## `Liveness` — a counter, and why publishing is somebody else's job
 
@@ -427,7 +428,7 @@ what its test exercised). The age was a leftover from the engine's version, wher
 that does not exist here: the planner has already assigned the slots. Note the ordering is per key only —
 rows are grouped by key, not sorted across them, which is all `assemble` reads.
 
-## `FetchSteps` passes its keys as ONE json bind, and that is a correctness bound
+## `FetchSteps` passes its keys as ONE bind, and that is a correctness bound
 
 **One bind per key overruns SQL Server's hard ceiling of 2,100 parameters per statement at ~2,095 keys.**
 The key count is bounded only by the candidate cache's capacity — twice the worker count — so a
@@ -462,11 +463,31 @@ the ranking shape it buys nothing on the scan.
 
 The gap widens with the backlog, since the old shape is proportional to it and the new one is flat.
 
+### On pgx the keys are a native `text[]`, so the planner can count them
+
+A custom plan sizes `unnest`'s output from the bound array. A JSON set-returning function
+(`jsonb_array_elements_text`) is estimated at 100 rows whatever it holds, which multiplies
+the fetch's estimated cost by 100/keys - at one key a flipped plan priced ~500k, past Postgres's JIT thresholds
+(100k / 500k by default), so it was compiled with full optimization on every execution: measured locally, JIT
+in 439-633 of the slow statements a saturated run logged, and none once the keys were an array. **Do not bind a
+text literal and cast it to `text[]`** to keep the argument a plain string: the cast is not folded at plan time,
+so the estimate stays at 100. Pinned by `TestFetchQuery_PostgresPlan`.
+
+### The lateral fetch must not be able to range-seek due-ness
+
+`dueStepsOrdered` wraps `not_before`/`lease_expires` in CASE, so `idx_dwarf_steps_due` cannot seek them. The
+lateral's early stop needs `idx_dwarf_steps_selection` (equality on parked, priority, fairness_key, then rows
+already in `(created_at, step_id)` order); after an ANALYZE taken at a small backlog the planner priced the due
+index's `not_before` range as selective, took it, and read every due row at the band and sorted them: 190-210 ms
+per fetch against 9 ms, measured locally on PG 18 at saturation. Without the range the due index offers less
+than the selection index on every column. The band scan keeps the plain predicate - it is what the due index is
+for. Pinned by `TestFetchQuery_PostgresPlan`, whose control (plain conjuncts) must seek `not_before`.
+
 ### The lateral join is NOT available on two of the four dialects
 
 | dialect | key list | per-key cap | cost |
 |---|---|---|---|
-| pgx | `jsonb_array_elements_text` (1 bind) | `LIMIT` in `CROSS JOIN LATERAL` | O(keys × perKey) |
+| pgx | `unnest` of a `text[]` (1 bind) | `LIMIT` in `CROSS JOIN LATERAL` | O(keys × perKey) |
 | mssql | `OPENJSON` (1 bind) | `TOP` in `CROSS APPLY` | O(keys × perKey) |
 | sqlite | `json_each` (1 bind) | `WHERE rn<=?` after the window | O(due rows at the band) |
 | mysql | `IN`-list (**one bind per key**) | `WHERE rn<=?` after the window | O(due rows at the band) |

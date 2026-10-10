@@ -165,7 +165,7 @@ deliberately:
   rank already says who the dispatchers are, so a dispatcher states nothing, and the flag flips only when a
   replica leaves the cut with work still in flight. With `B` the shard's budget, `X` its dispatcher slots and
   `D` the other replicas draining, everyone dividing by the same count keeps the shard on budget during a
-  DEMOTION drain: four dispatchers and one draining replica each hold a fifth. A SHUTDOWN
+  DEMOTION drain: two dispatchers and one draining replica each hold a third. A SHUTDOWN
   drain is narrower: the owner's reconcile loop has stopped by then, so the withdrawn replica keeps the
   `B/X` share it had while its peers divide by `X+1`, and the shard is over by `B/(X(X+1))` for the drain.
 

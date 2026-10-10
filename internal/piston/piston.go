@@ -864,7 +864,7 @@ func (p *Piston) ScanBand(ctx context.Context, shard int) (band int, tallies []p
 // plan replay reads. Rows are grouped by key rather than sorted across keys.
 //
 // perKey is a UNIFORM cap, the max per-key demand across this shard's slice rather than each key's exact
-// demand. The chosen keys travel as ONE json-encoded parameter and are joined back to rows in SQL, so the
+// demand. The chosen keys travel as ONE parameter (a text[] on pgx, JSON elsewhere) and are joined back to rows in SQL, so the
 // bind count is FIXED at four or five however many keys the plan chose - see fetchQuery.
 //
 // Cost is O(len(keys) x perKey) rows examined on pgx/mysql/mssql, where the per-key cap is a LIMIT on an

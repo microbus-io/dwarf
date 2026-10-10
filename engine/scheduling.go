@@ -155,7 +155,14 @@ func (e *Engine) recomputeRefillIntervalsWith(sizing map[int]shardSizing, slotsB
 		}
 		_, pool := shardPool(sizing[idx].budget, pinned, slots)
 		derived := deriveRefillInterval(share, pool, dispatchers)
-		p.SetTallyCadence(derived, pipeline.DefaultMinGap)
+		// Every dispatcher's band scan reads the shard's whole band - the residue predicate cannot seek - so the
+		// tally is paced by how many pistons scan the shard, keeping it scanned about as often as one would
+		// scan it. The supply loop is not: its fetch walks rows in proportion to what it takes, so its cost
+		// does not shrink with a longer period. What goes staler is the fairness tally and a peer-created
+		// better band - the cheap thing to be stale about. Capped like the derived period: Liveness counts the
+		// slower loop's turns, and a tally slower than the registry's dispatch window would drop a healthy
+		// dispatcher out of the residue divisor.
+		p.SetTallyCadence(min(derived*time.Duration(e.scannersOn(idx)), refillIntervalCap), pipeline.DefaultMinGap)
 		p.SetSupplyCadence(derived, min(pipeline.DefaultMinGap, derived/supplyGapDivisor))
 	}
 }

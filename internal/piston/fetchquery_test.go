@@ -30,7 +30,8 @@ import (
 var fetchDrivers = []string{"pgx", "mysql", "mssql", "sqlite", "unknown"}
 
 // TestFetchQuery_BindCountIsFixed is the regression this file exists for: the chosen keys travel as ONE
-// json parameter, so the bind count must not move with how many keys the plan picked.
+// parameter (a text[] on pgx, JSON elsewhere), so the bind count must not move with how many keys the plan
+// picked.
 //
 // The bound it protects is a HARD one, not a budget - SQL Server rejects a statement with more than 2,100
 // parameters outright, and the key count is bounded only by the candidate cache's capacity (twice the

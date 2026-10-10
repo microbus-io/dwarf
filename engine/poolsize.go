@@ -53,47 +53,66 @@ const (
 	nearRTTMs  = 0.25
 	farRTTMs   = 1.0
 
-	// maxDispatchers caps how many replicas dispatch one shard. A shard tops out near 21-28k steps/s (32-64
-	// vCPU) and one engine core drives ~4,200 linear steps/s, so four dispatchers need about 1.3-1.7 cores
-	// each; more would only cut the budget into smaller pools.
-	maxDispatchers = 4
+	// maxDispatchers caps how many replicas dispatch one shard. Two is the availability floor (one dying
+	// leaves the other running while its slot passes) and enough engine CPU: a saturated 32 vCPU shard takes
+	// ~6 engine cores, ~3 per dispatcher.
+	//
+	// Do not raise it for engine CPU. Every dispatcher runs its own piston, and its band scan and fetch walk
+	// the shard's whole band - the residue predicate that gives each its slice cannot seek - so the shard's
+	// refill cost grows with the dispatcher count. Measured locally (one shard, budget 40, saturated): the
+	// database spent 727 ms per 1,000 steps at one dispatcher and 957 at four, every per-step statement flat
+	// and the whole increase in the band scan and the fetch, each called ~3.5x as often.
+	maxDispatchers = 2
 
 	// sqliteBudget is the budget on SQLite, in place of the ramp. SQLite runs one writer at a time, so
 	// connections past a handful only queue on its write lock and spin in busy_timeout, and it reports no
 	// connection limit to clamp against.
 	sqliteBudget = 8
 
-	// workersPerConnBudget sizes the RESIDENT worker set (and the candidate cache) from the aggregate
-	// connection budget: dispatch is database-bound, and useful dispatching workers = conns x T/db,
-	// with T/db measured ~3 for no-op tasks. 8 is deliberately generous for short tasks. Workers beyond
-	// this are spawned on demand (see workerCeiling): a worker blocked in a long ExecuteTask holds no
-	// connection, so it must not inflate the cache/refill scan, which serves dispatch only.
+	// workersPerConnBudget sizes the dispatch count - the candidate cache (twice it) and with it every
+	// refill scan - from the aggregate connection budget: dispatch is database-bound, and useful
+	// dispatching workers = conns x T/db, with T/db measured ~3 for no-op tasks. 8 is deliberately
+	// generous for short tasks. A worker blocked in a long ExecuteTask holds no connection, so the cache
+	// must never be sized from the worker maximum (see workerCeiling), which serves long tasks only.
 	workersPerConnBudget = 8
+
+	// residentWorkersPerConn sizes the RESIDENT (eagerly spawned) worker set, which is also the floor the crew
+	// never shrinks below. It is a floor, not a target: the crew grows one worker per take that leaves nobody
+	// idle, so demand fills in what the floor leaves out within microseconds per spawn.
+	//
+	// Do not size the floor from workersPerConnBudget. At the 250-connection budget that put 2,000 resident
+	// workers on every shard, and one replica dispatching 4 shards ran 8,000 of them: measured on 4 x 32 vCPU
+	// shards, ~28% of its CPU went to GC (stack scanning 22%, mark-assist 18.5%) at 0.54 ms of engine CPU per
+	// step, with the databases holding ~43 backends per shard `idle in transaction` waiting on it - against
+	// 0.31 ms per step for the same shards driven from four replicas of ~2,000 workers each. A parked goroutine
+	// still costs a stack scan every GC cycle, and the cycles come at the allocation rate, so the cost is the
+	// product of the floor and throughput.
+	residentWorkersPerConn = 2
 
 	// turnstilePassesPerConn sizes each shard's turnstile: the number of turns that may be out at once,
 	// as a multiple of that shard's connection pool.
 	//
-	// IT IS 8x, AND A QUEUE AT THE POOL IS WHY. One turn per connection was the first cut and it is
-	// CATASTROPHIC: measured at 600 flows/s on a local Postgres, 281 steps/s against the 1,687 the previous
-	// gate managed on the same rig, a 6x collapse. With exactly as many turns as connections there are
-	// exactly as many candidates for a connection, so every gap between a turn-holder finishing and the next
-	// waiter being woken, scheduled and asking the pool is IDLE CONNECTION TIME - on the critical path of every
-	// round trip a step makes. The queue this was "fixing" is the same margin workersPerConnBudget
-	// deliberately keeps, and for the same reason: a resource with nobody queued for it runs below capacity.
+	// ONE TURN PER CONNECTION IS CATASTROPHIC, AND A QUEUE AT THE POOL IS WHY. Measured at 600 flows/s on a
+	// local Postgres: 281 steps/s against the 1,687 the previous gate managed on the same rig, a 6x collapse.
+	// With exactly as many turns as connections there are exactly as many candidates for a connection, so
+	// every gap between a turn-holder finishing and the next waiter being woken, scheduled and asking the pool
+	// is IDLE CONNECTION TIME - on the critical path of every round trip a step makes. Any multiple above one
+	// keeps a queue at the pool, and the queue is what keeps connections busy.
 	//
 	// So the turnstile does not remove the wait for a connection and does not empty the pool's queue - a
 	// caller holding a turn still competes for one, and still waits when they are all busy. What it changes
 	// is WHO gets to compete and in what ORDER: the population at the pool is bounded by the turn count, and
 	// admission into it is by band and then by age.
 	//
-	// 8 is the same multiple workersPerConnBudget uses, which is not a coincidence - it is what keeps the
-	// contending population at the size the cache and the resident worker set are already sized for. Raising
-	// it recovers a little more (10x and 12x measured 1,688 and 1,734 against 8x's 1,559) and grows the crew
-	// with it (480 -> 572 -> 686), but per-connection service time was identical across all of them, so what
-	// the multiple buys past 8 is queue depth rather than throughput. Treat the ordering between 8, 10 and 12
-	// as UNSETTLED: those arms differed by less than the rig's own RTT drift, and only the 1x collapse and
-	// the direction are established.
-	turnstilePassesPerConn = 8
+	// THE TURN COUNT IS ALSO THE CREW'S SIZE UNDER SATURATION. A worker waiting for a connection holds a
+	// candidate and so counts busy, and the crew grows on every take that leaves nobody idle - so a saturated
+	// crew climbs from its resident floor to the turn count, whatever the floor is (measured: 40 connections,
+	// a floor of 80, a crew of 325 at 8x), so the multiple is kept small. Measured locally on one shard at 40
+	// connections, saturated, 2x / 4x / 8x ran at the same rate in each of the two throughput states every run
+	// passed through, with crews of 87 / 167 / 325; and at 8x, one replica dispatching 4 shards of 250
+	// connections ran 8,000 workers and spent ~28% of its CPU in GC (see residentWorkersPerConn). 10x and 12x
+	// were measured within noise of 8x on a smaller pool; nothing above 1x has been shown to cost throughput.
+	turnstilePassesPerConn = 2
 
 	// The turnstile bands. Lower is served first, and STRICTLY: a band is exhausted before the next is
 	// looked at, so a band may only be given to a source that cannot flood it. Within a band, order is by
@@ -129,11 +148,6 @@ const (
 	// a louder problem than a mis-sized pool. The connection budget does not use it: an unprobed shard takes
 	// the near budget.
 	defaultRTTMs = 0.3
-
-	// minDispatcherPool is the smallest pool worth dispatching a shard from - a piston's two queries plus
-	// workers enough to use them. It lowers the dispatcher count below maxDispatchers only when the budget is
-	// small (an operator's lever, or a clamp to a small max_connections). An estimate, not a measurement.
-	minDispatcherPool = 12.0
 
 	// readerIdleConns / readerOpenConns size a replica's pool to a shard it does not dispatch. It still beats
 	// that shard's registry every second and polls it for parked Awaits, so one connection stays warm; the
@@ -238,12 +252,6 @@ func probeRTT(ctx context.Context, db *sequel.DB) float64 {
 type shardSizing struct {
 	// budget is this replica's view of the shard's fleet-wide budget: shardBudget at the RTT it probed.
 	budget int
-	// ref is the same rule at the near distance and without the server clamp - the budget the fleet AGREES on,
-	// which the dispatcher count is derived from. Each replica probes its own RTT and reads the server's limit
-	// itself, so replicas in different zones, or one whose read failed, derive different budgets; that is right
-	// for the pool (a farther replica needs more connections to keep the same backends busy) and wrong for the
-	// rank cut, where two replicas disagreeing on the count would both claim, or both leave, one slot.
-	ref int
 	// serverMax is the server's max_connections, 0 when unknown.
 	serverMax int
 }
@@ -253,7 +261,6 @@ type shardSizing struct {
 func sizeShard(spec ShardSpec, rttMs float64, serverMax int, driver string) shardSizing {
 	return shardSizing{
 		budget:    shardBudget(spec, rttMs, serverMax, driver),
-		ref:       shardBudget(spec, 0, 0, driver),
 		serverMax: serverMax,
 	}
 }
@@ -315,19 +322,12 @@ func shardPool(budget, override, slots int) (idle, open int) {
 }
 
 // dispatcherSlots is how many replicas dispatch one shard: maxDispatchers, never more than the replicas there
-// are, never fewer than two once there are two (one replica dying must not stop the shard while its slot
-// passes to the next rank), and fewer than maxDispatchers when the budget cannot give each at least
-// minDispatcherPool.
-//
-// IT MUST AGREE ACROSS THE FLEET, which is why it takes shardSizing.ref rather than the budget this replica
-// derived from its own probe and its own read of the server's limit: the replicas ranked below this number
-// are the shard's dispatchers, and two replicas that disagreed on it would both claim, or both leave, the
-// same slot. ref depends only on the spec, declared fleet-wide, and the driver, and replicas is read from one
-// registry, so every replica derives the same answer.
-func dispatcherSlots(ref, replicas int) int {
-	replicas = max(1, replicas)
-	want := min(maxDispatchers, int(math.Round(float64(ref)/minDispatcherPool)))
-	return min(replicas, max(want, min(2, replicas)))
+// are. It must agree across the fleet - the replicas ranked below it are the shard's dispatchers, and two
+// replicas that disagreed would both claim, or both leave, one slot - and it does, because it depends on
+// nothing but the candidate count every replica reads from the same registry. Keep it that way: an input a
+// replica derives for itself (its probed RTT, its read of the server's limit) would split the fleet.
+func dispatcherSlots(replicas int) int {
+	return min(maxDispatchers, max(1, replicas))
 }
 
 // slotsOn is this replica's role on one shard: how many dispatcher-sized shares its budget divides into
@@ -344,7 +344,7 @@ func dispatcherSlots(ref, replicas int) int {
 // A shard with no Sonar dispatches solo. Under a setMaxOpenConns override every replica dispatches - the
 // pools are pinned and never divided, so there is no budget for the ranking to protect - and the count is
 // every candidate, which is who drains the shard.
-func (e *Engine) slotsOn(shard int, sz shardSizing) int {
+func (e *Engine) slotsOn(shard int) int {
 	if e.zeroWorkers() {
 		return 0
 	}
@@ -356,7 +356,7 @@ func (e *Engine) slotsOn(shard int, sz shardSizing) int {
 	if e.maxOpenConns.Load() != 0 {
 		return candidates
 	}
-	slots := dispatcherSlots(sz.ref, candidates)
+	slots := dispatcherSlots(candidates)
 	if rank >= slots {
 		return 0
 	}
@@ -365,13 +365,28 @@ func (e *Engine) slotsOn(shard int, sz shardSizing) int {
 
 // heldDivisor is what a replica holding a pool for in-flight steps on a shard it no longer dispatches
 // divides the budget by: the same count its peers divide by, which counts it among the draining.
-func (e *Engine) heldDivisor(shard int, sz shardSizing) int {
+func (e *Engine) heldDivisor(shard int) int {
 	s := e.sonarFor(shard)
 	if s == nil {
 		return 1
 	}
 	_, candidates := s.Rank()
-	return dispatcherSlots(sz.ref, candidates) + s.Draining() + 1
+	return dispatcherSlots(candidates) + s.Draining() + 1
+}
+
+// scannersOn is how many pistons cycle a shard across the fleet: its dispatchers, or every candidate under a
+// setMaxOpenConns override, where every replica dispatches. Draining replicas hold a share but idle their
+// pistons, so they are not counted. A shard with no Sonar is scanned by this replica alone.
+func (e *Engine) scannersOn(shard int) int {
+	s := e.sonarFor(shard)
+	if s == nil {
+		return 1
+	}
+	_, candidates := s.Rank()
+	if e.maxOpenConns.Load() != 0 {
+		return candidates
+	}
+	return dispatcherSlots(candidates)
 }
 
 // slotsByShard is every open shard's current role (slotsOn), read once so that everything derived from
@@ -379,7 +394,7 @@ func (e *Engine) heldDivisor(shard int, sz shardSizing) int {
 func (e *Engine) slotsByShard(sizing map[int]shardSizing) map[int]int {
 	slots := make(map[int]int, len(sizing))
 	for _, idx := range e.db.Indices() {
-		slots[idx] = e.slotsOn(idx, sizing[idx])
+		slots[idx] = e.slotsOn(idx)
 	}
 	return slots
 }
@@ -473,7 +488,7 @@ func (e *Engine) checkFleetFits(shard int, sz shardSizing) {
 	if s := e.sonarFor(shard); s != nil {
 		_, candidates = s.Rank()
 	}
-	held := sz.budget + readerOpenConns*max(0, replicas-dispatcherSlots(sz.ref, candidates))
+	held := sz.budget + readerOpenConns*max(0, replicas-dispatcherSlots(candidates))
 	over := held > maxConns*fleetLimitPercent/100
 	if over == e.fleetOverLimit[shard] {
 		return
@@ -540,7 +555,7 @@ func (e *Engine) recomputePools() {
 		if override == 0 {
 			e.checkFleetFits(idx, sizing[idx])
 		}
-		slots := e.slotsOn(idx, sizing[idx])
+		slots := e.slotsOn(idx)
 		observed[idx] = slots
 		if prev, ok := e.lastAppliedSlots[idx]; !ok || prev != slots {
 			changed = true
@@ -550,7 +565,7 @@ func (e *Engine) recomputePools() {
 	// no role of this replica's having moved.
 	heldMoved := false
 	for idx, divisor := range e.heldDivisors {
-		if e.inFlightOn(idx) == 0 || e.heldDivisor(idx, sizing[idx]) != divisor {
+		if e.inFlightOn(idx) == 0 || e.heldDivisor(idx) != divisor {
 			heldMoved = true
 			break
 		}
@@ -584,7 +599,7 @@ func (e *Engine) recomputePools() {
 		held := slots == 0 && e.inFlightOn(idx) > 0
 		divisor := slots
 		if held {
-			divisor = e.heldDivisor(idx, sizing[idx])
+			divisor = e.heldDivisor(idx)
 			if _, ok := e.heldDivisors[idx]; !ok {
 				e.logger.Info("Shard pool held for in-flight steps", "shard", idx)
 			}

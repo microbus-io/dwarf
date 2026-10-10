@@ -83,8 +83,8 @@ func (f *restartFleet) bound(shard, wantR, budget int) int {
 	live := f.snapshot()
 	total, minExcused := 0, -1
 	for range live {
-		_, before := shardPool(budget, 0, dispatcherSlots(budget, wantR-1))
-		_, after := shardPool(budget, 0, dispatcherSlots(budget, wantR))
+		_, before := shardPool(budget, 0, dispatcherSlots(wantR-1))
+		_, after := shardPool(budget, 0, dispatcherSlots(wantR))
 		total += before
 		if minExcused < 0 || before-after < minExcused {
 			minExcused = before - after
@@ -110,11 +110,16 @@ func (f *restartFleet) bound(shard, wantR, budget int) int {
 func awaitFleetSettled(t *testing.T, fleet *restartFleet, shard, wantR, budget int) {
 	t.Helper()
 	assert := testarossa.For(t)
-	// The engine probes once at Startup and holds it, so this is stable for the life of the replica.
-	// Every replica of these fleets ranks inside the dispatcher cut - a budget of 48 takes four, and no
-	// fleet here is larger - so each divides the budget by the slot count.
+	// A replica inside the dispatcher cut divides the budget by the slot count; one ranked out holds the
+	// reader pool. A pinned override is every replica's pool, never divided.
 	wantFor := func(e *Engine) int {
-		_, open := shardPool(budget, int(e.maxOpenConns.Load()), dispatcherSlots(budget, wantR))
+		if pinned := int(e.maxOpenConns.Load()); pinned > 0 {
+			return pinned
+		}
+		if !e.dispatchesOn(shard) {
+			return readerOpenConns
+		}
+		_, open := shardPool(budget, 0, dispatcherSlots(wantR))
 		return open
 	}
 	deadline := time.Now().Add(30 * time.Second)
@@ -147,11 +152,12 @@ func awaitFleetSettled(t *testing.T, fleet *restartFleet, shard, wantR, budget i
 // claim on one shard's server never exceeds that server's budget, at any instant of the rollout.
 //
 // The rollout is the case that can break it, because it moves the count in BOTH directions within a second
-// or two. A replica leaving RAISES every survivor's share (three replicas take budget/3 each, not
-// budget/4), and the replacement then has to fit inside a budget its peers have not given back yet. If it
-// sized its pool from the fleet it is joining before its peers had read its row, the shard's server would
-// see four replicas' worth of a three-replica split - over budget by a full share, on every step of every
-// deploy. `Join` closes that by announcing, waiting two read cadences, and only then sizing, so a joining
+// or two. A replica leaving RAISES the survivor's share (alone, it takes the whole budget, not half), and
+// the replacement then has to fit inside a budget its peer has not given back yet. If it sized its pool from
+// the fleet it is joining before its peer had read its row, the shard's server would see two replicas' worth
+// of a one-replica split - over budget by a full share, on every step of every deploy. The rollout runs at
+// two replicas because that is where the dispatcher count moves (1 <-> 2); past two it stays at two, so the
+// shares either side of a step are equal and the ordering this pins would be invisible. `Join` closes that by announcing, waiting two read cadences, and only then sizing, so a joining
 // replica's whole claim during the window is its tiny bootstrap pool.
 //
 // THE BOUND IS EVERY REPLICA ON ITS R-1 SHARE EXCEPT ONE ON ITS R SHARE - the budget plus one post-join
@@ -164,7 +170,7 @@ func awaitFleetSettled(t *testing.T, fleet *restartFleet, shard, wantR, budget i
 // the joiner for R.
 //
 // It still catches what this test exists for. A regression in the announce-before-consume ordering puts
-// the joiner on its R-1 share too, which exceeds this bound by the difference between its two shares (4
+// the joiner on its R-1 share too, which exceeds this bound by the difference between its two shares (24
 // connections at a 48 budget), deterministically, on every step of every rollout. The margin is small on
 // purpose: a bound loose enough to be comfortable would stop distinguishing the two.
 //
@@ -177,7 +183,7 @@ func TestPeerRollingRestart_FleetNeverExceedsTheShardBudget(t *testing.T) {
 	const (
 		shard    = 1
 		budget   = 48
-		replicas = 4
+		replicas = 2
 	)
 	// Every replica of the fleet shares one registry, which is all a fleet is. SetWorkers(1) keeps the
 	// resident crews small - this test asserts on pool arithmetic, and a derived crew per replica would

@@ -78,7 +78,7 @@ func TestClaim_NoPartialIndexPlan(t *testing.T) {
 		t.Skip("the partial-index plan choice is Postgres's: its claim is the only one joined and planned this way")
 	}
 
-	partial := []string{"idx_dwarf_steps_due", "idx_dwarf_steps_selection", "idx_dwarf_steps_saturation", "idx_dwarf_steps_status"}
+	partial := []string{"idx_dwarf_steps_due", "idx_dwarf_steps_selection", "idx_dwarf_steps_status"}
 	errRollback := errors.New("rollback")
 	plan := func(stmt string) string {
 		var out strings.Builder

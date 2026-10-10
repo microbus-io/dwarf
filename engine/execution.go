@@ -2123,9 +2123,9 @@ func dispatchURLOf(graph *workflow.Graph, name string) string {
 // claimEligible is the claim's test that the step is still claimable - pending, unparked, due, lease lapsed -
 // wrapped in CASE so that no index can serve it, leaving the primary key on step_id as the claim's only index
 // path. Written as plain conjuncts, the test implies status='pending', which makes every partial index on
-// pending rows (idx_dwarf_steps_due, _selection, _saturation, _status) a candidate, and a scan of one of them
-// filtered on step_id walks the whole backlog. Measured on Postgres: after an ANALYZE taken at a small backlog,
-// both the generic and the custom plan claimed through idx_dwarf_steps_saturation, every claim cost O(backlog),
+// pending rows (idx_dwarf_steps_due, _selection, _status) a candidate, and a scan of one of them filtered on
+// step_id walks the whole backlog. Measured on Postgres: after an ANALYZE taken at a small backlog, both the
+// generic and the custom plan claimed through a partial index on pending rows, every claim cost O(backlog),
 // and a 5,000 steps/s run fell to ~800 steps/s with its backlog at the cap until an ANALYZE taken at a large
 // backlog flipped the plan back. The status stays a literal (the inline-status rule); parked is the caller's
 // bind. alias is the table alias with its dot ("s.") or "".

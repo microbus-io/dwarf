@@ -70,23 +70,22 @@ func TestPeerFault_BlindHoldsThePoolsAndFailsOpen(t *testing.T) {
 		return
 	}
 	addPeerRow(t, e, 5001)
-	addPeerRow(t, e, 5002)
-	assert.Equal(3, e.replicasOn(1))
-	assert.Equal(shareOf(3), awaitPoolSize(t, db, shareOf(3)), "1/3 share at three replicas")
-	awaitPartition(t, e, 1, 3, -1)
+	assert.Equal(2, e.replicasOn(1))
+	assert.Equal(shareOf(2), awaitPoolSize(t, db, shareOf(2)), "1/2 share at two replicas")
+	awaitPartition(t, e, 1, 2, -1)
 
 	// The registry stops answering on this shard.
 	e.seams.InjectN(engineseams.FaultPeerReadErr, 1<<20)
 
 	// The fleet is HELD. Even after the peers' rows are deleted outright, this replica cannot see it, so it
-	// must go on sizing for three - the safe direction, and the one a blip must not undo.
+	// must go on sizing for two - the safe direction, and the one a blip must not undo.
 	assert.NoError(e.db.OnEach(context.Background(), func(ctx context.Context, sdb *sequel.DB, shard int) error {
-		_, derr := sdb.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id IN (5001, 5002)")
+		_, derr := sdb.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id=5001")
 		return derr
 	}))
 	time.Sleep(10 * testPeerCadence)
-	assert.Equal(3, e.replicasOn(1), "a failed reading publishes nothing")
-	assert.Equal(shareOf(3), db.DB.Stats().MaxOpenConnections, "so the pools stay where the last good reading put them")
+	assert.Equal(2, e.replicasOn(1), "a failed reading publishes nothing")
+	assert.Equal(shareOf(2), db.DB.Stats().MaxOpenConnections, "so the pools stay where the last good reading put them")
 
 	// The partition, by contrast, is off: the pair is stale and nothing justifies excluding rows on it.
 	_, _, ok := e.partitionOn(1)

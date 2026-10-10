@@ -35,10 +35,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -90,6 +92,10 @@ func run() error {
 		// pool from the shard's budget). A sweep pins them; a validation run must not.
 		workers  = flag.Int("workers", 0, "engine worker goroutines (0 = derived from the lease-margin ceiling)")
 		maxConns = flag.Int("max-connections", 0, "ShardSpec.MaxConnections for every shard: the fleet-wide budget the dispatching replicas divide (0 = derived from the RTT and the server's max_connections)")
+		// Placement is even by default, so one slow shard holds a multi-shard saturated run to N x its own rate:
+		// its flows stay in flight longest and fill the shared -max-outstanding cap. Weighting it down, from the
+		// per-shard rates the run summary prints, is the operator's lever and the bench's.
+		weightsFlag = flag.String("weights", "", "ShardSpec.Weight per shard as comma-separated N=w (e.g. '1=1,2=0.8'); unlisted shards weigh 1")
 		// engineseams.SetMaxOpenConns pins every shard's pool to exactly this size, which is what a
 		// pool-size sweep needs.
 		maxOpenConns     = flag.Int("max-open-conns", 0, "engine per-shard pool size, per replica and never divided (0 = derived; else pinned exactly)")
@@ -125,6 +131,20 @@ func run() error {
 	)
 	flag.Var(&dsns, "dsn", "shard DSN, repeatable; 'N=dsn' sets shard N, a bare dsn sets shard 1 (default: throwaway local SQLite)")
 	flag.Parse()
+	weights, err := parseWeights(*weightsFlag)
+	if err != nil {
+		return err
+	}
+	for idx := range weights {
+		if !slices.ContainsFunc(dsns, func(sh struct {
+			index int
+			dsn   string
+		}) bool {
+			return sh.index == idx
+		}) {
+			return fmt.Errorf("-weights: shard %d is not one of the -dsn shards", idx)
+		}
+	}
 	if *printPool > 0 {
 		fmt.Println(engineseams.ShardBudget(*printPool, *serverMaxConns))
 		return nil
@@ -222,7 +242,7 @@ func run() error {
 		hosts[i] = host
 		eng := engine.NewEngine()
 		for _, sh := range dsns {
-			err = eng.SetShard(engine.ShardSpec{Index: sh.index, DSN: sh.dsn, MaxConnections: *maxConns})
+			err = eng.SetShard(engine.ShardSpec{Index: sh.index, DSN: sh.dsn, MaxConnections: *maxConns, Weight: weights[sh.index]})
 			if err != nil {
 				return err
 			}
@@ -307,6 +327,7 @@ func run() error {
 			"carryRead":      *carryRead,
 			"workers":        *workers,
 			"maxConnections": *maxConns,
+			"weights":        weights,
 			"maxOpenConns":   *maxOpenConns,
 			"replicas":       *replicas,
 			"replicaWorkers": *replicaWorkers,
@@ -384,6 +405,9 @@ func run() error {
 				k, res.FlowsPerSec, res.StepsPerSec, res.MBPerSec, res.P50ms, res.P95ms, res.P99ms,
 				res.Host.CPUCores, res.Host.CPUPct, res.Host.StepsPerCore,
 				res.Host.NetRxMBps, res.Host.NetTxMBps, res.Errors)
+			if len(dsns) > 1 {
+				fmt.Println(perShardLine(res, dsns))
+			}
 			if why := windowInvalidity(res, *arrivalRate, *maxOutstanding); why != "" {
 				art.Valid = false
 				art.Invalidity = fmt.Sprintf("at concurrency %d: %s", k, why)
@@ -534,4 +558,55 @@ func parseConcurrency(s string) ([]int, error) {
 		ks = append(ks, k)
 	}
 	return ks, nil
+}
+
+// parseWeights reads -weights ("N=w,N=w") into a shard index -> weight map. A shard left out weighs 1 in the
+// engine (a zero Weight means unset).
+func parseWeights(v string) (map[int]float64, error) {
+	out := map[int]float64{}
+	if v == "" {
+		return out, nil
+	}
+	for part := range strings.SplitSeq(v, ",") {
+		n, w, ok := strings.Cut(strings.TrimSpace(part), "=")
+		idx, errIdx := strconv.Atoi(n)
+		weight, errW := strconv.ParseFloat(w, 64)
+		if !ok || errIdx != nil || errW != nil || !(weight > 0) || math.IsInf(weight, 0) {
+			return nil, fmt.Errorf("-weights: %q is not N=w with a positive weight", part)
+		}
+		out[idx] = weight
+	}
+	return out, nil
+}
+
+// perShardLine summarizes a multi-shard window per shard: flows ended per second, and how far the shard's
+// backlog moved (flows placed there minus flows ended there). Equal rates with one shard's backlog growing,
+// or one shard's rate below the rest, is a slow shard holding the run back. Read off the engine's own
+// shard-attributed counters, which this process's engines record for the flows they placed and ended.
+func perShardLine(res stepResult, dsns shardFlags) string {
+	var b strings.Builder
+	b.WriteString("  per shard:")
+	for _, sh := range dsns {
+		started := shardCounter(res.EngineCounters, "dwarf_flows_started", sh.index)
+		ended := shardCounter(res.EngineCounters, "dwarf_flows_ended", sh.index)
+		fmt.Fprintf(&b, "  %d: %.0f flows/s, backlog %+d", sh.index, float64(ended)/res.WindowSec, started-ended)
+	}
+	return b.String()
+}
+
+// shardCounter sums a counter's attributed series for one shard. Keys are spelled name|k=v|k=v with the
+// attributes sorted (collectCounters).
+func shardCounter(counters map[string]int64, name string, shard int) int64 {
+	want := "shard=" + strconv.Itoa(shard)
+	var n int64
+	for k, v := range counters {
+		rest, ok := strings.CutPrefix(k, name+"|")
+		if !ok {
+			continue
+		}
+		if slices.Contains(strings.Split(rest, "|"), want) {
+			n += v
+		}
+	}
+	return n
 }

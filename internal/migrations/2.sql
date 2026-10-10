@@ -61,8 +61,7 @@ CREATE TABLE IF NOT EXISTS dwarf_steps (
     INDEX idx_dwarf_steps_flow_id (flow_id, step_id),
     INDEX idx_dwarf_steps_status (status, updated_at),
     INDEX idx_dwarf_steps_selection (status, parked, priority, fairness_key, created_at, step_id, not_before, lease_expires, fairness_weight),
-    INDEX idx_dwarf_steps_due (status, parked, priority, not_before, fairness_key, created_at, step_id, lease_expires, fairness_weight),
-    INDEX idx_dwarf_steps_saturation (status, parked, task_url)
+    INDEX idx_dwarf_steps_due (status, parked, priority, not_before, fairness_key, created_at, step_id, lease_expires, fairness_weight)
 );
 
 -- DRIVER: pgx
@@ -125,9 +124,6 @@ CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority,
 -- DRIVER: pgx
 CREATE INDEX idx_dwarf_steps_due ON dwarf_steps (status, parked, priority, not_before) INCLUDE (fairness_key, created_at, step_id, lease_expires, fairness_weight) WHERE status = 'pending';
 
--- DRIVER: pgx
-CREATE INDEX idx_dwarf_steps_saturation ON dwarf_steps (status, parked, task_url) WHERE status IN ('pending', 'running');
-
 -- DRIVER: mssql
 CREATE TABLE dwarf_steps (
     step_id           BIGINT        NOT NULL IDENTITY(1,1),
@@ -188,9 +184,6 @@ CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority,
 -- DRIVER: mssql
 CREATE INDEX idx_dwarf_steps_due ON dwarf_steps (status, parked, priority, not_before) INCLUDE (fairness_key, created_at, step_id, lease_expires, fairness_weight) WHERE status = 'pending';
 
--- DRIVER: mssql
-CREATE INDEX idx_dwarf_steps_saturation ON dwarf_steps (status, parked, task_url) WHERE status IN ('pending', 'running');
-
 -- DRIVER: sqlite
 CREATE TABLE IF NOT EXISTS dwarf_steps (
     step_id           INTEGER  NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -249,6 +242,3 @@ CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority,
 
 -- DRIVER: sqlite
 CREATE INDEX idx_dwarf_steps_due ON dwarf_steps (status, parked, priority, not_before, fairness_key, created_at, step_id, lease_expires, fairness_weight) WHERE status = 'pending';
-
--- DRIVER: sqlite
-CREATE INDEX idx_dwarf_steps_saturation ON dwarf_steps (status, parked, task_url) WHERE status IN ('pending', 'running');

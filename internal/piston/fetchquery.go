@@ -30,11 +30,23 @@ import (
 const dueSteps = "status='" + workflow.StatusPending + "' AND parked=0" +
 	" AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"
 
+// dueStepsOrdered is dueSteps for the lateral fetch, with the due-ness test wrapped in CASE so that no index
+// can seek it. The lateral's early stop needs idx_dwarf_steps_selection, which seeks (parked, priority,
+// fairness_key) and returns each key's run already ordered by (created_at, step_id). idx_dwarf_steps_due can
+// seek (parked, priority, not_before), and after an ANALYZE taken at a small backlog the planner prices that
+// range as selective and picks it - then reads every due row at the band and sorts them, O(backlog) per key.
+// Measured on a local Postgres 18 at saturation: 9 ms per fetch on the selection index, 190-210 ms on the due
+// index. Without the range seek the due index offers less than the selection index on every column, so no
+// statistics make it the cheaper plan. The band scan keeps the plain form: it wants the due index.
+const dueStepsOrdered = "status='" + workflow.StatusPending + "' AND parked=0" +
+	" AND CASE WHEN not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() THEN 1 ELSE 0 END=1"
+
 // fetchQuery builds one dialect's per-key fetch: the statement, and the bind arguments in the order their
 // placeholders appear in it. Every branch projects (fairness_key, step_id), in that order, so the caller's
 // scan loop is dialect-blind.
 //
-// THE KEYS TRAVEL AS ONE JSON ARRAY, and that is a correctness bound rather than a tuning one. One bind per
+// THE KEYS TRAVEL AS ONE BIND - a text[] on pgx, a JSON array elsewhere - and that is a correctness bound
+// rather than a tuning one. One bind per
 // key overruns SQL Server's hard ceiling of 2,100 parameters per statement at ~2,095 keys - and the key
 // count is bounded by the candidate cache's capacity, which is twice the worker count, so a 192-connection
 // pool plans at 3,072. SQLite's own ceiling (SQLITE_MAX_VARIABLE_NUMBER) is 32,766 on a current build but
@@ -52,8 +64,8 @@ const dueSteps = "status='" + workflow.StatusPending + "' AND parked=0" +
 // at the band), which is the same shape ScanBand has on every dialect, so it is a standing ceiling rather
 // than a new one.
 //
-// MINIMUM SERVER VERSIONS for the json argument: PostgreSQL 9.4 and SQL Server 2016, both below what the
-// rest of the engine already requires. The mysql branch uses no JSON function, so it adds no floor.
+// MINIMUM SERVER VERSIONS for the json argument: SQL Server 2016, below what the rest of the engine already
+// requires. The pgx branch binds an array and the mysql branch uses no JSON function, so neither adds a floor.
 //
 // Non-UTF-8 bytes in a fairness key would be replaced with U+FFFD by the json encoding and would then match
 // nothing. Postgres, SQL Server and MySQL all reject such bytes in the text column the key came out of, so
@@ -66,16 +78,19 @@ func fetchQuery(driverName string, band int, keys []string, perKey int, part str
 	args := make([]any, 0, len(partArgs)+3)
 	switch driverName {
 	case "pgx":
-		// CAST(? AS JSONB) rather than a native text[]: the placeholder stays sequel's '?', and the argument
-		// stays a plain string, so nothing here depends on the driver's array encoding.
-		args = append(args, string(keysJSON), band)
+		// A native text[] expanded by unnest, so a custom plan knows how many keys there are. A JSON
+		// set-returning function is estimated at 100 rows whatever it holds, which multiplies the fetch's
+		// estimated cost by 100/keys: at one key a flipped plan priced ~500k and crossed Postgres's JIT
+		// thresholds, so it was compiled with full optimization on every execution. A text literal cast to
+		// text[] does not help - the cast is not folded at plan time, so the estimate stays at 100.
+		args = append(args, keys, band)
 		args = append(args, partArgs...)
 		args = append(args, perKey)
 		return "SELECT k.fairness_key, s.step_id" +
-			" FROM jsonb_array_elements_text(CAST(? AS JSONB)) AS k(fairness_key)" +
+			" FROM unnest(CAST(? AS TEXT[])) AS k(fairness_key)" +
 			" CROSS JOIN LATERAL (" +
 			"SELECT step_id FROM dwarf_steps" +
-			" WHERE " + dueSteps +
+			" WHERE " + dueStepsOrdered +
 			" AND priority=? AND fairness_key=k.fairness_key" +
 			part +
 			" ORDER BY created_at, step_id LIMIT ?" +
@@ -126,7 +141,7 @@ func fetchQuery(driverName string, band int, keys []string, perKey int, part str
 			" FROM OPENJSON(?) WITH (fairness_key NVARCHAR(256) '$') AS k" +
 			" CROSS APPLY (" +
 			"SELECT TOP (?) step_id FROM dwarf_steps" +
-			" WHERE " + dueSteps +
+			" WHERE " + dueStepsOrdered +
 			" AND priority=? AND fairness_key=k.fairness_key" +
 			part +
 			" ORDER BY created_at, step_id" +
