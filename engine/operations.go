@@ -362,7 +362,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	// its own candidate cache, so it is about to claim the step and would otherwise read back the graph it just
 	// wrote. After the commit, so a rolled-back flow id - which SQLite can hand out again - is never cached.
 	if e.dispatchesOn(shardNum) {
-		if cg, perr := parseCachedGraph(graphJSON, workflowURL); perr == nil {
+		if cg, perr := e.internGraph(graphJSON, workflowURL); perr == nil {
 			e.graphCache.Store(graphCacheKey{shard: shardNum, flowID: int(newFlowID)}, cg)
 		}
 	}

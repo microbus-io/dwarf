@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -71,4 +72,60 @@ func TestCreate_SeedsGraphCache(t *testing.T) {
 	assert.Error(err)
 	_, ok = e.graphCache.Load(graphCacheKey{shard: shard, flowID: maxID + 1})
 	assert.False(ok, "a rolled-back create caches nothing")
+}
+
+// TestGraphCache_FlowsShareOneParse pins the shared layer: the flows of one graph point at one parsed entry,
+// whether seeded by Create or read back from the column, while different bytes or a different workflow URL
+// never share one.
+func TestGraphCache_FlowsShareOneParse(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	mux := NewHostMux()
+	registerGate(mux, "sharecache")
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+
+	var entries []*cachedGraph
+	for range 2 {
+		fk, err := e.Create(ctx, "sharecache/g", nil, nil)
+		assert.NoError(err)
+		shard, flowID, _, err := keys.ParseFlowKey(fk)
+		assert.NoError(err)
+		cg, ok := e.graphCache.Load(graphCacheKey{shard: shard, flowID: flowID})
+		assert.True(ok)
+		entries = append(entries, cg)
+
+		// The column read path (a cold flow, or completion's flowGraph) interns the stored bytes the same way.
+		db, err := e.db.Shard(shard)
+		assert.NoError(err)
+		var graphJSON []byte
+		assert.NoError(db.QueryRowContext(ctx, "SELECT graph FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&graphJSON))
+		read1, err := e.internGraph(graphJSON, "sharecache/g")
+		assert.NoError(err)
+		read2, err := e.internGraph(graphJSON, "sharecache/g")
+		assert.NoError(err)
+		assert.True(read1 == read2, "one stored graph is parsed once")
+	}
+	assert.True(entries[0] == entries[1], "two flows of one graph share one parsed entry")
+
+	cg, err := e.internGraph([]byte(`{"name":"other"}`), "sharecache/g")
+	if assert.NoError(err) {
+		assert.True(cg != entries[0], "different bytes are a different entry")
+	}
+	sameBytesOtherURL, err := e.internGraph(mustGraphJSON(t, entries[0].graph), "sharecache/other")
+	if assert.NoError(err) {
+		assert.Equal("sharecache/other", sameBytesOtherURL.workflowURL, "the workflow URL is part of the key")
+	}
+}
+
+func mustGraphJSON(t *testing.T, g *workflow.Graph) []byte {
+	b, err := json.Marshal(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

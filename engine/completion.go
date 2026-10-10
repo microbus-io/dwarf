@@ -219,12 +219,11 @@ func (e *Engine) flowGraph(ctx context.Context, db sequel.Executor, shardNum, fl
 	if err != nil {
 		return nil, "", errors.Trace(err)
 	}
-	graph := &workflow.Graph{}
-	err = json.Unmarshal(graphJSON, graph)
+	cg, err := e.internGraph(graphJSON, workflowURL)
 	if err != nil {
 		return nil, "", errors.Trace(err)
 	}
-	return graph, workflowURL, nil
+	return cg.graph, workflowURL, nil
 }
 
 // computeFinalState computes the merged state for a flow.

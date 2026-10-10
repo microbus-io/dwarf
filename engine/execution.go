@@ -338,7 +338,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	}
 
 	if !cached {
-		cg, err = parseCachedGraph(graphJSON, workflowURL)
+		cg, err = e.internGraph(graphJSON, workflowURL)
 		if err != nil {
 			// Its own turn: this is the entry phase, so the persist turn that covers every LATER failStep
 			// does not exist yet, and failStep runs a whole transaction. Without it the two failure paths

@@ -53,10 +53,33 @@ type cachedGraph struct {
 	workflowURL string
 }
 
-// parseCachedGraph parses a flow's stored graph JSON into a cache entry. Both the dispatch miss and Create's
-// seed go through it, so a seeded entry is exactly what a miss would have built - in particular, a parse of
-// the stored bytes and never a caller's live object, which could change under the concurrent dispatches
-// that share the entry.
+// sharedGraphKey names a parsed graph by its EXACT stored bytes, so the flows of one graph share one entry
+// and two different graphs can never collide. The workflow URL is in the key because the entry carries it.
+// Do not key by a hash alone: a collision would run a flow on another flow's graph. A dialect that re-spells
+// JSON on read (Postgres JSONB) gives Create's seed and a column read two entries for one graph - harmless.
+type sharedGraphKey struct {
+	workflowURL string
+	graphJSON   string
+}
+
+// internGraph returns the shared cache entry for a flow's stored graph JSON, parsing it only the first time
+// these bytes are seen. Both the dispatch miss and Create's seed go through it, so a seeded entry is exactly
+// what a miss would have built - in particular, a parse of the stored bytes and never a caller's live
+// object, which could change under the concurrent dispatches that share the entry.
+func (e *Engine) internGraph(graphJSON []byte, workflowURL string) (*cachedGraph, error) {
+	key := sharedGraphKey{workflowURL: workflowURL, graphJSON: string(graphJSON)}
+	if cg, ok := e.sharedGraphs.Load(key); ok {
+		return cg, nil
+	}
+	cg, err := parseCachedGraph(graphJSON, workflowURL)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	e.sharedGraphs.Store(key, cg)
+	return cg, nil
+}
+
+// parseCachedGraph parses a flow's stored graph JSON into a cache entry.
 func parseCachedGraph(graphJSON []byte, workflowURL string) (*cachedGraph, error) {
 	parsed := &workflow.Graph{}
 	if err := json.Unmarshal(graphJSON, parsed); err != nil {

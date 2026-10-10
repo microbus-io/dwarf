@@ -1122,6 +1122,12 @@ not parallelism:
   workflow URL from `graphCache` (`flowGraph`) and reads the row only on a miss, so every `computeFinalState`
   caller on a replica that dispatched the flow pays no graph round trip. Every field of `cachedGraph` must
   stay frozen for the flow's life - nothing invalidates an entry.
+- **The graph cache is two layers, and the per-flow layer must be sized for flows IN FLIGHT, not for memory.**
+  `graphCache` maps `(shard, flow_id)` to an entry in `sharedGraphs`, which is keyed by the stored graph bytes,
+  so the flows of one graph share one parse and a per-flow entry is a pointer (~130 bytes). A per-flow miss is
+  a `SELECT graph` with its own turn: at a 4,096-entry bound, one process holding ~8,200 flows (4 shards x
+  2,000 in flight) paid 0.98 of them per executed step, against 0.38 at 2 shards. Key the shared layer by the
+  exact bytes, never a hash alone - a collision would run a flow on another flow's graph.
 - **A transition's successors go in as multi-row INSERTs** (`successorBatch`), in power-of-two chunks of at
   most 64 rows (21 binds each, under SQL Server's 2,100-parameter ceiling). The ids come back by `RETURNING`/`OUTPUT`
   and are matched to rows by `step_token`, since neither promises VALUES order. MySQL inserts row by row: it has no

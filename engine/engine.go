@@ -68,6 +68,12 @@ const (
 	parkedSubgraph = 1
 )
 
+// The bounds of the two parsed-graph cache layers (see initRuntime).
+const (
+	graphCacheFlows  = 1 << 16
+	graphCacheGraphs = 1024
+)
+
 // terminalStatusesSQL is every terminal flow/step status pre-joined into a quoted literal ready to inline into a
 // WHERE clause, e.g. "status IN (" + terminalStatusesSQL + ")" or "status NOT IN (" + terminalStatusesSQL + ")".
 // Never bind this as a parameter - a bound status defeats the SQL Server / SQLite filtered index. In Go, test a
@@ -277,9 +283,11 @@ type Engine struct {
 	latchStop   chan struct{}
 	latchWorker sync.WaitGroup
 
-	// Per-flow parsed-graph cache. The graph JSON is frozen at flow creation, so processStep reuses
-	// the parsed *workflow.Graph across the flow's steps instead of re-unmarshalling it each step.
-	graphCache *lru.Cache[graphCacheKey, *cachedGraph]
+	// Parsed-graph caches, in two layers. graphCache maps a flow to its entry so a dispatch reads no graph
+	// column; sharedGraphs holds the entries themselves, keyed by the stored bytes, so every flow of one
+	// graph points at one parse. The graph JSON is frozen at flow creation, so neither ever goes stale.
+	graphCache   *lru.Cache[graphCacheKey, *cachedGraph]
+	sharedGraphs *lru.Cache[sharedGraphKey, *cachedGraph]
 	// State-ref linkers, one per shard: they decide which state fields a successor step stores by reference
 	// rather than by value, and resolve those references back. Per shard because a step id is only unique
 	// within one, and because a shard's own cache of resolved bytes should not be evicted by another's.
@@ -860,7 +868,11 @@ func (e *Engine) initRuntime() error {
 	e.linkers = make(map[int]*staterefs.Linker)
 	e.recoveryStop = make(chan struct{})
 	e.reaperStop = make(chan struct{})
-	e.graphCache = lru.New[graphCacheKey, *cachedGraph](4096, 15*time.Minute)
+	// A per-flow entry is a pointer into sharedGraphs (~130 bytes), so the flow layer is sized for the flows
+	// one process has in flight rather than for memory: 4,096 thrashed at 4 shards x 2,000 flows in flight
+	// (~1 extra graph SELECT per step). The shared layer holds one parse per distinct graph.
+	e.graphCache = lru.New[graphCacheKey, *cachedGraph](graphCacheFlows, 15*time.Minute)
+	e.sharedGraphs = lru.New[sharedGraphKey, *cachedGraph](graphCacheGraphs, 15*time.Minute)
 	// A fresh board per run: the previous one was closed at drain, and a closed board turns every Await
 	// away. resolveStoppedFlows is non-nil, so New cannot fail.
 	e.latches, _ = latch.New(e.resolveStoppedFlows)
