@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"strconv"
 	"strings"
@@ -1802,32 +1803,17 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		txBytes.changesRead = len(ourChangesJSON)
 		ourState, _ := workflow.NewState(ourStateJSON)
 		ourChanges, _ := workflow.NewState(ourChangesJSON)
-		// Resolve only what the reducers actually fold; a merely-carried ref rides through the (empty) cohort
-		// untouched, still pointing at its original anchor - see resolveReducedRefs. resolveReducedRefs mutates
-		// the state map in place, so it gets the live map.
 		ourRefs, rerr := staterefs.Parse(ourRefsJSON)
 		if rerr != nil {
 			return errors.Trace(rerr)
 		}
-		rerr = e.resolveReducedRefs(ctx, tx, shardNum, ourState, ourRefs, graph.Reducers(), workflowURL)
-		if rerr != nil {
-			return errors.Trace(rerr)
-		}
-		// Fold our own delta via the reducers, then materialize: DelNils enacts replace-field deletes, and a
-		// cleared reduced field was ignored during the fold. An empty forEach spawns no members, so this is the
-		// whole merge - agreeing with fanInRow's populated path on the same primitive.
+		// With no members there is nothing to reduce: the fan-in's state is this step's own changes over its
+		// state, replaced exactly as fanInRow builds its base and as a linear transition does - reducers fold
+		// only what branches contribute. So it mints as a linear successor would, carried refs and all.
 		mergedState := ourState.Clone()
-		rerr = mergedState.MergeReduce(ourChanges, graph.Reducers())
-		if rerr != nil {
-			return errors.Trace(&permanentError{rerr})
-		}
+		mergedState.Merge(ourChanges)
 		mergedState.DelNils()
-		// This step IS the cohort spawn (an empty forEach spawns no branches), so it anchors exactly as a
-		// populated cohort's spawn does in fanInRow. There are no members, but a field this step wrote
-		// through a COMBINING reducer still has a merged value (reduce(ourState[k], ourChanges[k])) that exists
-		// in no row, so it must be inlined rather than anchored - the same exclusion fanInRow applies.
-		inlineOnly := staterefs.CombinedReducerFields(ourState, ourChanges, graph.Reducers())
-		mergedJSON, refsJSON, merr := e.linkerFor(shardNum).Mint(mergedState, ourChanges, ourRefs, stepID, staterefs.Linear, inlineOnly, nil)
+		mergedJSON, refsJSON, merr := e.linkerFor(shardNum).Mint(mergedState, ourChanges, ourRefs, stepID, staterefs.Linear, nil, nil)
 		if merr != nil {
 			return errors.Trace(merr)
 		}
@@ -1954,24 +1940,31 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 	// its accumulated base, and folding a delta onto an absent base would silently lose everything so far. A
 	// merely-carried ref is left alone and re-emitted onto the fan-in step below, still pointing at its
 	// original anchor: resolving it here would materialize the payload and re-anchor it at EVERY fan-in,
-	// giving back the win in exactly the fan-out graphs this design exists for. resolveReducedRefs mutates
-	// the state map in place, so it gets the live map.
+	// giving back the win in exactly the fan-out graphs this design exists for. A reduced field the spawn
+	// itself wrote needs no base either: its write replaces it below, so reading the old value would be a wasted
+	// anchor read inside this transaction. resolveReducedRefs mutates the state map in place, so it gets the live
+	// map.
 	spawnRefs, err := staterefs.Parse(c.spawnRefsJSON)
 	if err != nil {
 		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(err)
 	}
-	err = e.resolveReducedRefs(ctx, tx, shardNum, spawnState, spawnRefs, graph.Reducers(), workflowURL)
+	folded := graph.Reducers()
+	if spawnChanges.Len() > 0 {
+		folded = maps.Clone(folded)
+		for k := range spawnChanges.Names() {
+			delete(folded, k)
+		}
+	}
+	err = e.resolveReducedRefs(ctx, tx, shardNum, spawnState, spawnRefs, folded, workflowURL)
 	if err != nil {
 		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(err)
 	}
-	// The fan-in accumulator's base: the spawn's state with its own delta folded in via the reducers. A
-	// cleared reduced field is ignored (reducer identity); a cleared replace field rides as a tombstone that
-	// DelNils enacts once all members are folded.
+	// The fan-in accumulator's base: the spawn's changes over its state, REPLACED - the value every branch was
+	// handed. Reducers fold only what the members contribute; a task's own write to a reduced field is a value,
+	// not a delta onto its input. A cleared field rides as a tombstone that DelNils enacts once all members
+	// are folded, and a reducer folding onto it seeds from the first contribution.
 	merged := spawnState.Clone()
-	err = merged.MergeReduce(spawnChanges, graph.Reducers())
-	if err != nil {
-		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(&permanentError{err})
-	}
+	merged.Merge(spawnChanges)
 	// Fields a cohort MEMBER contributed. Their bytes are in that member's `changes` - not in the spawn's row -
 	// and a reducer's COMBINED output exists in no row at all, so neither can be anchored at the spawn. They are
 	// inlined into the fan-in step's own state, which becomes their anchor for everything downstream (the third
@@ -2044,20 +2037,12 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 		delete(spawnRefs, k)
 	}
 
-	// A field the SPAWN itself wrote through a COMBINING reducer (reduce(spawnState[k], spawnChanges[k])) is the
-	// other value that exists in no row - the spawn's `changes` holds only its delta - so it too must be inlined,
-	// not anchored at the spawn. memberWrites already excludes member-contributed fields; add the spawn's own
-	// combined ones. (A spawn field with a combining reducer but no base has merged[k]==changes[k] and stays a
-	// sound anchor, so combinedReducerFields leaves it off.)
-	for k := range staterefs.CombinedReducerFields(spawnState, spawnChanges, graph.Reducers()) {
-		memberWrites[k] = true
-	}
-
 	// Mint against the SPAWN step, not this one: a field the cohort merely carried has its bytes in the spawn's
 	// row (its `state` if the spawn received it - e.g. the entry step holding the flow's initial input - or its
 	// `changes` if the spawn's task wrote it), so the spawn is a legitimate anchor and the fan-in must not
 	// re-copy the payload into its own row. A field that arrived at the spawn as a ref keeps that ref, so the
-	// chain stays one hop. Member-contributed and reduced fields are excluded and therefore inline (above).
+	// chain stays one hop. Member-contributed fields are excluded and therefore inline (above); a reduced field no
+	// member touched is carried or anchored at the spawn like any other.
 	mergedJSON, refsJSON, err := e.linkerFor(shardNum).Mint(merged, spawnChanges, spawnRefs, cohortSpawnID, staterefs.Linear, memberWrites, nil)
 	if err != nil {
 		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(err)

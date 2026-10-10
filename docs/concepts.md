@@ -84,8 +84,10 @@ field's changes are combined with its reducer:
 | concat | `ReducerConcat` | Concatenate strings |
 
 A field with no registered reducer uses `replace`. You wire non-default fields with
-`graph.SetReducer(field, reducer)`. **Important:** a task writing to a reducer-managed field sets only its
-*delta* (e.g. the one item to append), not the accumulated value — otherwise fan-in double-counts.
+`graph.SetReducer(field, reducer)`. Reducers combine what parallel branches contribute at their fan-in, and the
+state `Continue` adds to a thread; anywhere else, a task's write to a field replaces it. So a **branch** writing to
+a reducer-managed field sets only its own contribution (e.g. the one item to append), not the accumulated value —
+otherwise the fan-in counts it twice — while a task outside a fan-out writes the field's whole new value.
 
 See [Fan-out & subgraphs](fan-out-and-subgraphs.md).
 

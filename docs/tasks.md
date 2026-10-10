@@ -120,15 +120,23 @@ So: use typed accessors, and **carry the value as a string** only if it must sur
 `id_str` alongside them. A `time.Duration` is nanoseconds, so a duration past ~104 days is in the same
 territory for those readers.
 
-### Deltas, not totals, for reducer fields
+### Contributions, not totals, in a fan-out branch
 
-If a field is managed by a reducer (append, add, union, merge, …) at a fan-in, write only your **delta** —
+A reducer (append, add, union, merge, …) combines what parallel branches contribute when they converge at their
+fan-in. So a task running as a **fan-out branch** writes only its own contribution to a reducer-managed field —
 the increment, not the accumulated value:
 
 ```go
-// "messages" is wired to ReducerAppend. Write the new message only.
+// In a branch. "messages" is wired to ReducerAppend: contribute the new message only.
 f.Set("messages", []string{newMessage})   // correct
-// f.Set("messages", entireHistory)        // WRONG: fan-in would duplicate
+// f.Set("messages", entireHistory)        // WRONG: the fan-in would duplicate the history
+```
+
+Anywhere else — a task that is not a fan-out branch — a write replaces the field, reducer or not. To add to a
+list there, append to what you read and write the result:
+
+```go
+f.SetStrings("messages", append(f.GetStrings("messages"), newMessage))
 ```
 
 See [Concepts → Reducer](concepts.md#reducer).

@@ -88,48 +88,6 @@ func TestFanIn_ReducerErrorFailsTheFlow(t *testing.T) {
 	}
 }
 
-// TestCompleteFlow_ReducerErrorFailsTheFlow pins the same for the terminal merge: a final step whose output a
-// reducer cannot fold onto its input fails the flow at once, naming the field, without the write retries or the
-// write-failed alarm a storage fault would raise.
-func TestCompleteFlow_ReducerErrorFailsTheFlow(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	ctx := context.Background()
-
-	mux := NewHostMux()
-	g := workflow.NewGraph("CompleteReducerError")
-	g.SetURL("Last", "reducererror.verify:429/last")
-	g.SetReducer("total", workflow.ReducerAdd)
-	g.AddTransition("Last", workflow.End)
-	assert.NoError(g.Validate())
-	mux.HandleGraph("reducererror.verify:429/complete", g)
-	mux.HandleTask("reducererror.verify:429/last", func(ctx context.Context, f *workflow.Flow) error {
-		f.SetString("total", "not a number")
-		return nil
-	})
-
-	eng := NewEngineUnderTest(t.Name())
-	defer eng.Shutdown(ctx)
-	eng.SetHost(mux)
-	reader := withManualReader(eng)
-	assert.NoError(eng.Startup(t.Context()))
-
-	_, outcome, err := eng.Run(ctx, "reducererror.verify:429/complete", map[string]any{"total": 10}, nil)
-	if !assert.NoError(err) || !assert.NotNil(outcome) {
-		return
-	}
-	assert.Equal(workflow.StatusFailed, outcome.Status)
-	assert.True(strings.Contains(outcome.Error, "total"), outcome.Error)
-
-	var rm metricdata.ResourceMetrics
-	if assert.NoError(reader.Collect(ctx, &rm)) {
-		for _, name := range []string{"dwarf_steps_write_retried", "dwarf_steps_write_failed"} {
-			n, _ := sumCounter(rm, name, "", "")
-			assert.Equal(int64(0), n, name)
-		}
-	}
-}
-
 // TestTerminate_ReducerErrorDoesNotBlockTerminate pins that a flow whose state a reducer cannot fold can still be
 // stopped. A completed branch holds a string under `add` while a sibling waits on an interrupt, so computing the
 // final state fails identically on every attempt; Terminate terminalizes the tree with an empty final state rather

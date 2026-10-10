@@ -26,22 +26,45 @@ is never persisted. Such a method reads as the natural write-side twin of `Parse
 write - and the result is **silent, inconsistent data loss**: `processStep` sees an empty `changes` and persists
 the *prior* attempt's, so the write never reaches the next step's `state` nor `final_state`, while
 `evaluateTransitions` routes off `RawState()`, which *does* contain it. The flow branches on a value it then
-throws away. The correct pairing, which `Parse`'s godoc shows, is `Snapshot` -> `Parse` -> mutate ->
-`SetChanges(source, snap)`. `RawFlow.SetRawState` is the engine's own seeding path, not task-facing.
-`SetChanges` names fields exactly as `encoding/json` (and so `Parse`) does - tag name, else Go name, untagged
-embedded fields promoted, `"-"` and unexported skipped - and compares each against the snapshot by meaning
-(`jsonEqual`, numbers as `json.Number`), not by bytes: a field read back from a JSONB/JSON column is re-spelled
-(whitespace, key order), and a byte compare would record every such field as a change.
+throws away. A task writes with `Set` and the typed setters. `RawFlow.SetRawState` is the engine's own seeding
+path, not task-facing.
 
-**State mutation on retry:** on `flow.Retry()`, the engine merges `state + changes` back into `state` so the task
-sees its own prior output next attempt; `changes` is preserved. `Resume` does **not** mutate `state`: it writes the
-caller's data to `resume_data`, which `flow.Interrupt` returns on re-dispatch.
+**`SetChanges(source)` is `Set` for each field `json.Marshal(source)` emits, and nothing more.** It exists for a
+host's generated task wrappers, which write a typed output struct (decode -> parse the input -> handler ->
+`SetChanges(out)`). It marshals the struct once and `Set`s each key, so encoding/json alone decides the names and
+which fields are included (`omitempty`/`omitzero`, `,string`, embedded promotion, a custom `MarshalJSON`). **Do not
+diff against a snapshot.** A diff dropped a branch's contribution that happened to equal the accumulated value
+(`total` 5 under `add`, contribution 5). It also recorded an empty `omitzero` output field as null - a delete - so
+a host returning "no new items" wiped the field. Pinned by `TestFlow_SetChangesIsSetPerField`.
 
-**Reducer delta convention:** tasks writing to reducer-managed fields (append, add, union, merge) set only the
-**delta**, not the accumulated value. E.g. for a field wired to the append reducer via
-`graph.SetReducer("messages", workflow.ReducerAppend)`, set `flow.Set("messages", []string{newMessage})`, not the
-whole history. Violating this duplicates during fan-in merge. `Graph.Validate` rejects a reducer name that is not
-one of the `Reducer` constants, so a misspelled reducer fails at `Create` rather than at the first fan-in.
+**State mutation on retry:** on `flow.Retry()`, the re-dispatched task's view is `state` with `changes` merged onto
+it, so it sees its own prior output; `changes` is preserved, and the rewind writes nothing to `state`. `Resume`
+does **not** mutate `state`: it writes the caller's data to `resume_data`, which `flow.Interrupt` returns on
+re-dispatch.
+
+**Reducers fold only what fan-out BRANCHES contribute, at their fan-in - and `Continue`'s `additionalState`.**
+Everywhere else a write replaces: the hand-off to the next step, the fan-out source's own write (the base its
+branches fold onto), and the final state. So a branch writing a reduced field sets only its **contribution**
+(`flow.Set("messages", []string{newMessage})` under `ReducerAppend`), while a trunk task writes the whole value
+(`f.SetStrings("messages", append(f.GetStrings("messages"), m))`). Pinned by
+`fixtures/terminalreducerflow_test.go` and `fixtures/emptyforeachreducerflow_test.go`.
+
+- **Folding a step's own write onto its own input is the trap.** It treats the write as a delta, so the outcome
+  depends on graph shape: `total` 10 under `add` and a last task setting 15 end at 25 if the final state folds
+  and at 15 if a do-nothing step follows, since the hand-off replaces.
+- **Do not reduce on every hand-off (LangGraph's model) without answering four costs:**
+  - a sentinel overwrite value has to stay out of Fork's overrides, `Create`'s input and `Subgraph`'s `in`;
+  - per-field input tracking in the carrier, where a `Set` after an overwrite undoes it;
+  - reducers shipped to remote tasks, where an older remote task computes the view `when` routes on
+    differently;
+  - refs, since `reduce(nil, d)` is not `d` for `append` of a single value, so a ref to the writer's
+    `changes` resolves to the bare delta.
+- **No `Append`-style helper.** On the trunk it would be a plain read-append-write; in a branch, on a reduced
+  field, it would contribute the whole history plus the item, duplicating the history at the fan-in. The carrier
+  cannot tell a branch from the trunk.
+
+`Graph.Validate` rejects a reducer name that is not one of the `Reducer` constants, so a misspelled reducer fails
+at `Create` rather than at the first fan-in.
 
 **forEach element injection:** the current element is injected into `state` only (under `as`), not `changes`, so it is
 available to the task but does not participate in fan-in merge.
@@ -51,8 +74,8 @@ methods.** `flow.Del` writes a Go-nil tombstone into `changes` and `Set(k, nil)`
 delete read back from a column is `null` too. `isCleared` treats both spellings as cleared - `dwarf` conflates
 null and absent everywhere, so there is no way to store a literal null value. `State.Merge`/`MergeReduce`
 are the **accumulation** primitive: a cleared key is **preserved** (the replace path stores the tombstone; a
-reducer-managed field *ignores* the clear - see below), so a changes delta can be built up across attempts/members
-with the pending-delete marker intact. `State.DelNils` is the **materialization** step: it drops every cleared
+branch's contribution to a reducer-managed field *ignores* the clear - see below), so a changes delta can be built
+up across attempts/members with the pending-delete marker intact. `State.DelNils` is the **materialization** step: it drops every cleared
 key, so a delete never survives as a `"k": null` tombstone in materialized state - which is what
 `final_state`/`FlowOutcome.State`/`Snapshot` expose to the host, and what the next step's `state` column becomes.
 So *materialize* = `Merge`/`MergeReduce` then `DelNils`; *accumulate* = `Merge` alone. `processStep`'s changes
@@ -60,11 +83,13 @@ accumulation (folding a task's fresh output onto a prior attempt's `changes` bef
 column) uses `Merge` **without** `DelNils`, because there the null must be **preserved** - it only enacts the
 delete when `changes` later folds onto `state` (a don't-materialize-here note is at that site in `execution.go`).
 
-**A cleared incoming for a reducer-managed field is the reducer's IDENTITY - ignored, not dropped.** `MergeReduce`
-skips a cleared value on a reduced field (`isCleared` check before the fold), leaving the accumulator untouched, so
-a branch that `flow.Del`s a reduced field never wipes the cohort's contributions to it. Deleting a reduced field
-is not a supported way to clear it - a delete is a *replace*-field concern. Pinned by
-`fixtures/reducerdeleteflow_test.go`.
+**A branch's cleared contribution to a reducer-managed field is the reducer's IDENTITY - ignored, not dropped.**
+`MergeReduce` skips a cleared value on a reduced field (`isCleared` check before the fold), leaving the
+accumulator untouched, so a branch that `flow.Del`s a reduced field clears it in its own view only and never wipes
+the cohort's contributions - order-independent. The same holds for a cleared field in `Continue`'s
+`additionalState`. Anywhere else a delete replaces like any write: a trunk step's or the fan-out source's `Del`
+removes the field (the source's delete leaves the fan-in to fold the branches onto nothing). Pinned by
+`fixtures/reducerdeleteflow_test.go` and `fixtures/terminalreducerflow_test.go`.
 
 ### `State` stores every value as JSON, and decodes only what is read
 
@@ -157,7 +182,7 @@ is why some tests assert `float64` where a reader might expect `int`.
 **Stored bytes are NOT canonical, and nothing compares them.** `Set` keeps what `json.Marshal` writes (a
 map's keys sorted, a struct's in declaration order), a `json.RawMessage` and `SetJSON` keep the caller's
 bytes as given, and a column read keeps the database's spelling (JSONB/JSON re-space and reorder). Every
-comparison that exists decodes first - `union` over decoded values, `SetChanges` through `jsonEqual`. A
+comparison that exists decodes first - `union` over decoded values. A
 byte-comparing `union` (the standing plan in the root `CLAUDE.md` landmine) therefore cannot assume canonical
 input: it must canonicalize what it compares, or every write path above must be made canonical first.
 

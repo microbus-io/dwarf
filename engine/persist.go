@@ -270,8 +270,8 @@ func (e *Engine) persistStep(ctx context.Context, db *sequel.DB, shardNum, stepI
 }
 
 // permanentError marks a failure of the engine's own computation inside a persisted write - deterministic, so a
-// retry would compute it again, and not a storage fault. A reducer fold that fails on a value of the wrong type
-// under a combining reducer - at a fan-in, or in a flow's terminal merge - is one. persist does not retry it, and
+// retry would compute it again, and not a storage fault. A fan-in's fold of its branches' contributions that fails
+// on a value of the wrong type under a combining reducer is one. persist does not retry it, and
 // settlePersist fails the step with it without counting a write that could not be stored. Wrap only a failure
 // that is a pure function of stored data: a database error from the same computation is transient, and wrapping
 // it would fail a live flow over a blip.

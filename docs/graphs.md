@@ -315,7 +315,7 @@ graph LR
     _start(( )):::term --> t0
 ```
 
-A field with no reducer uses `replace` (last write wins). Remember: a task writes only its **delta** to a
+A field with no reducer uses `replace` (last write wins). Remember: a branch writes only its **contribution** to a
 reducer-managed field. See [Fan-out & subgraphs](fan-out-and-subgraphs.md) for the full treatment.
 
 ## Field names

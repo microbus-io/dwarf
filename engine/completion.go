@@ -171,10 +171,12 @@ func readTerminalTails(ctx context.Context, db sequel.Executor, query string, fl
 }
 
 // mergeTerminalSteps computes a flow's terminal state from the execution-DAG tail, given its completed tails; when
-// there are none, it reads and merges every tail instead.
+// there are none, it reads and merges every tail instead. Each tail's changes REPLACE onto the base, as a linear
+// transition's do: reducers fold only branch contributions at a fan-in, and a tail that is a cohort member is
+// rebuilt that way by computeFinalStateFrom.
 // It also returns the merge base tail's lineage_id, so the caller can strip exactly the forEach bookkeeping of
 // the cohorts that tail is inside - and nothing else.
-func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, shardNum, flowID int, completed *terminalTails, reducers map[string]workflow.Reducer, workflowURL string) (workflow.State, int, error) {
+func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, shardNum, flowID int, completed *terminalTails, workflowURL string) (workflow.State, int, error) {
 	t := completed
 	if !t.found {
 		t = &terminalTails{}
@@ -194,8 +196,8 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, sha
 		return workflow.State{}, 0, errors.Trace(err)
 	}
 	merged := t.baseState
-	if err := merged.MergeReduceAll(t.changes, reducers); err != nil {
-		return workflow.State{}, 0, errors.Trace(&permanentError{err})
+	for _, c := range t.changes {
+		merged.Merge(c)
 	}
 	merged.DelNils()
 	return merged, t.baseLineage, nil
@@ -255,7 +257,7 @@ func (e *Engine) computeFinalStateFrom(ctx context.Context, db sequel.Executor, 
 		return nil, "", errors.Trace(err)
 	}
 
-	merged, baseLineageID, err := e.mergeTerminalSteps(ctx, db, shardNum, flowID, completed, graph.Reducers(), workflowURL)
+	merged, baseLineageID, err := e.mergeTerminalSteps(ctx, db, shardNum, flowID, completed, workflowURL)
 	if err != nil {
 		return nil, "", errors.Trace(err)
 	}
@@ -344,11 +346,9 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 		return workflow.State{}, errors.Trace(err)
 	}
 	// The failed cohort's terminal state is built the SAME way convergence would (fanInRow): the spawn's
-	// state with its own delta folded via the reducers, as the base the completed members fold onto below.
+	// changes over its state, replaced, as the base the completed members fold onto below.
 	merged := spawnState.Clone()
-	if err := merged.MergeReduce(spawnChanges, graph.Reducers()); err != nil {
-		return workflow.State{}, errors.Trace(&permanentError{err})
-	}
+	merged.Merge(spawnChanges)
 
 	rows, err := db.QueryContext(ctx,
 		"SELECT status, changes FROM dwarf_steps WHERE flow_id=? AND lineage_id=? ORDER BY fan_out_ordinal, step_depth, step_id",

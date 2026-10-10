@@ -146,7 +146,7 @@ matching one before working there:**
   `json.Marshal` writes (struct fields in declaration order, nested ones too), a `json.RawMessage` or `SetJSON`
   value and a column read keep their bytes as given, and Postgres `JSONB` re-spells a value on read. Nothing
   depends on the bytes: `union` dedupes with `reflect.DeepEqual` over *decoded* values (order-independent for
-  maps), `Flow.SetChanges` compares by meaning, `Fingerprint` hashes `status|count|max(updated_at)`, and no
+  maps), `Fingerprint` hashes `status|count|max(updated_at)`, and no
   query compares one payload column with another. What storing every value as JSON does buy is **Go TYPE
   normalization**: a caller's struct decodes as the same `map[string]any`/`float64` as its twin read from a
   column, and `DeepEqual` between a struct and its decoded twin is false - so never hand a reducer a caller's
@@ -157,9 +157,10 @@ matching one before working there:**
   Go nil, and the raw bytes `null` on a field still held as JSON - and `isCleared` must recognize both or a
   delete read back from a column silently stops taking effect. `State.Merge`/`MergeReduce`
   *preserve* it (accumulation); `State.DelNils` *enacts* it (materialization) - the engine accumulates the
-  changes delta with the tombstone intact, then `DelNils` when the delta folds onto state. A cleared value on
-  a *reducer*-managed field is *ignored* (the reducer's identity), never dropped. (`workflow/CLAUDE.md`; enforced
-  at `execution.go`)
+  changes delta with the tombstone intact, then `DelNils` when the delta folds onto state. A delete replaces like
+  any write - except a fan-out branch's cleared contribution to a *reducer*-managed field (or one in `Continue`'s
+  `additionalState`), which the fold *ignores* as the reducer's identity. (`workflow/CLAUDE.md`; enforced at
+  `execution.go`)
 - **Two problem values are KNOWN and currently UNGUARDED - a deliberate, backlogged punt.** Nothing checks
   storability on the write side, by decision, not oversight. (1) An integer-shaped value beyond **±2^53**.
   **STORAGE IS EXACT** - raw-field storage means a carried field is never decoded, so it round-trips

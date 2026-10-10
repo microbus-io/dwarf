@@ -185,7 +185,7 @@ across branches and overload a value that already means something else.
 ## The Loader is per call, and batched, on purpose
 
 `Resolve` takes a `Loader` rather than owning a connection because **several resolve sites run inside an
-open transaction** (the fan-in paths in `engine/execution.go` and the final-state merge in
+open transaction** (the populated fan-in in `engine/execution.go` and the final-state merge in
 `engine/completion.go`), and their read must land on that transaction's connection. Binding a shard's `*sequel.DB` at construction would silently move those reads onto
 a different connection, where they cannot see the transaction's own uncommitted writes. Anchors never cross a
 flow and a flow never crosses a shard, which is what makes a same-connection read always sufficient.
@@ -226,7 +226,7 @@ a bigger cache would not have fixed it.
 
 The shape is load-bearing in four ways:
 - **Only the dispatch resolve waits** (`ResolveShared`, `engine/staterefs.go` `resolveDispatchRefs`). Every
-  other resolve - the fan-in paths, the terminal merge, `Fork` - may run inside a transaction holding a
+  other resolve - the fan-in, the terminal merge, `Fork` - may run inside a transaction holding a
   connection and the flow row's lock, and must not wait on another goroutine: parked fan-ins could drain the
   pool while the dispatch they wait on queues for a connection. `Resolve` and `Flatten` read for themselves.
 - **The claim is per field (`cacheKey`), and a read resolves every pending ref on the rows it fetched.** A

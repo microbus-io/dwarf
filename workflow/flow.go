@@ -18,7 +18,6 @@ package workflow
 
 import (
 	"encoding/json"
-	"reflect"
 	"time"
 
 	"github.com/microbus-io/errors"
@@ -181,18 +180,7 @@ func (f *Flow) Has(name string) bool {
 // fields with no matching struct field are ignored, cleared fields are skipped, and struct fields with no
 // matching state field keep their values.
 //
-// Parse only reads. To write a modified struct back as the task's output, take a Snapshot before parsing and
-// pass it to SetChanges, which records the fields that differ from it:
-//
-//	snap := f.Snapshot()
-//	var order Order
-//	if err := f.Parse(&order); err != nil {
-//		return err
-//	}
-//	order.Status = "charged"
-//	if err := f.SetChanges(order, snap); err != nil {
-//		return err
-//	}
+// Parse only reads. A task writes its output with Set and the typed setters.
 func (f *Flow) Parse(target any) error {
 	return f.state.Parse(target)
 }
@@ -323,35 +311,42 @@ func (f *Flow) deleteOne(name string) {
 	f.state.Del(name)
 }
 
-// Snapshot captures an independent copy of the flow's current state (including any changes applied so far).
-// Pass the returned snapshot to SetChanges to record only the fields that differ.
+// Snapshot captures an independent copy of the flow's current state (including any changes applied so far) -
+// for instance, to pass a subgraph the flow's whole state as its input.
 //
-// The copy is independent of the flow, so writing to the flow afterwards does not disturb it - which is
-// what makes it usable as a diff baseline. It does not materialize field values, so snapshotting a large
-// carried payload costs a map entry rather than the payload.
+// The copy is independent of the flow, so writing to the flow afterwards does not disturb it. It does not
+// materialize field values, so snapshotting a large carried payload costs a map entry rather than the payload.
 func (f *Flow) Snapshot() State {
 	return f.state.Clone()
 }
 
-// SetChanges marshals the source struct back to state, comparing against the provided snapshot.
-// Only fields whose JSON value differs from the snapshot are recorded as changes.
-// Changed fields are written to both the state and changes maps, so that subsequent reads
-// (including transition condition evaluation) see the updated values.
-//
-// Fields are named as encoding/json names them - and so as Parse reads them: by the json tag when it has
-// a name, else by the Go field name, with an untagged embedded struct's fields promoted. A field tagged
-// "-" and an unexported field are skipped. Values are compared by meaning, not spelling, so a field read
-// back from the database in a different but equivalent JSON form is not recorded as a change.
-//
-// It returns an error if a field cannot be marshalled; fields visited before it are already recorded.
-func (f *Flow) SetChanges(source any, snap State) error {
+// SetChanges sets each field of source exactly as Set would, one by one. source is any value that marshals to a
+// JSON object - typically a struct, or a pointer to one - and its fields are those encoding/json emits, under the
+// names it emits them: a json tag's name, else the Go name, with an untagged embedded struct's fields promoted, a
+// "-" or unexported field skipped, and an omitempty or omitzero field skipped when empty. A field that marshals
+// to null deletes, as Set(name, nil) does. It returns an error if source cannot be marshalled or is not an
+// object; on an error, no field is set.
+func (f *Flow) SetChanges(source any) error {
+	data, err := json.Marshal(source)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil || fields == nil {
+		return errors.New("SetChanges: source must marshal to a JSON object")
+	}
 	if f.changes.IsZero() {
 		f.changes, _ = NewState()
 	}
 	if f.state.IsZero() {
 		f.state, _ = NewState()
 	}
-	return f.diffAndApply(source, snap, f.state.d, f.changes.d)
+	for name, value := range fields {
+		if err := f.Set(name, value); err != nil {
+			return errors.Trace(err)
+		}
+	}
+	return nil
 }
 
 // --- Control ---
@@ -547,47 +542,6 @@ func (f *Flow) Sleep(duration time.Duration) {
 }
 
 // --- Internal helpers ---
-
-// isQuotableKind reports the kinds the ",string" option applies to.
-func isQuotableKind(k reflect.Kind) bool {
-	switch k {
-	case reflect.String, reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
-		reflect.Float32, reflect.Float64:
-		return true
-	}
-	return false
-}
-
-// diffAndApply marshals each field of source that encoding/json would marshal, compares it against the
-// snapshot, and writes changed fields to both state and changes.
-func (f *Flow) diffAndApply(source any, snapshot State, state, changes map[string]json.RawMessage) error {
-	v := reflect.ValueOf(source)
-	if v.Kind() == reflect.Ptr {
-		v = v.Elem()
-	}
-	if v.Kind() != reflect.Struct {
-		return errors.New("source must be a struct or pointer to struct, got %s", v.Kind())
-	}
-	return eachJSONField(v, func(name string, fv reflect.Value, quoted bool) error {
-		data, err := json.Marshal(fv.Interface())
-		if err != nil {
-			return err
-		}
-		if quoted && isQuotableKind(fv.Kind()) {
-			data, err = json.Marshal(string(data))
-			if err != nil {
-				return err
-			}
-		}
-		if prev := snapshot.GetJSON(name); prev != nil && jsonEqual(prev, data) {
-			return nil
-		}
-		state[name] = data
-		changes[name] = data
-		return nil
-	})
-}
 
 // --- JSON serialization ---
 

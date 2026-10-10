@@ -1231,8 +1231,8 @@ a `sequel.Executor`). It applies to `computeFinalState` and code inside `failSte
 **Dynamic fan-out** uses `forEach` on a transition to iterate a state array and spawn one task instance per element,
 each receiving the element under the `as` key. An **empty array** spawns no branches but does **not** stop the flow:
 the transition path routes straight to the fan-in node (`fireFanInDirect`), which runs on the source step's own
-`state + changes` with the graph's reducers applied - so an empty cohort and a non-empty one agree on what the fan-in
-sees for a reducer-managed field the branches never touched (`fixtures/emptyforeachreducerflow_test.go`). The
+`changes` over its `state`, replaced - the base `fanInRow` folds a populated cohort onto, with nothing to fold
+(`fixtures/emptyforeachreducerflow_test.go`). The
 fan-in target comes from the routing map the engine derives per flow at dispatch (`internal/faninmap`), not from
 `Validate`. The `fanInTarget == ""` arm - complete the flow at the source - is therefore effectively unreachable for
 any graph the engine accepted: `Validate` (run at `Create`) requires a fan-out source to converge on a `SetFanIn`
@@ -1326,6 +1326,14 @@ calling `failStep` on its own step: doing
 so would race an in-flight `OnError` handler (an errored branch routes to its handler, whose next step runs at depth
 N+1 while the fan-in worker is still finishing depth N) and could incorrectly fail an otherwise-recoverable flow.
 
+**Reducers fold ONLY what branches contribute at a fan-in - never a step's own write onto its own input.** A
+task's write to a reduced field is a value, as it is to any field: the fan-in's base is the spawn's `changes` over
+its `state`, REPLACED (the value every branch was handed), and a flow's final state replaces each tail's
+`changes` onto its `state` (`mergeTerminalSteps`). Folding a step's own write through its reducer treats it as a
+delta onto its input, and the outcome then depends on graph shape: `total` 10, a last task setting 15 under `add`,
+ended a flow at 25 - and at 15 with a do-nothing step appended. Pinned by `fixtures/terminalreducerflow_test.go`
+and `fixtures/emptyforeachreducerflow_test.go` (branches handed 5, fan-in 5 plus their contributions).
+
 **Fan-in merge order and contribution (lineage `SetFanIn` path).** `queueCohortRead` reads cohort members
 (`lineage_id = cohortSpawnID`) `ORDER BY fan_out_ordinal, step_depth, step_id` and `fanInRow` folds them in that
 order. `fan_out_ordinal` is stamped at fan-out from the branch's position in the spawn loop (the `forEach` array
@@ -1334,17 +1342,16 @@ completion order; `step_id` breaks ties. The firing gate is
 `cohort_arrivals >= cohort_size`, a counter on the spawn step independent of the merge query, so the merge's status
 filter cannot deadlock fan-in. Only `completed` members contribute `changes`; `failed`/`terminated`/`cancelled`/
 `pending`/`running` contribute nothing. **A reducer error fails the flow** - a value a reducer cannot fold (a
-string under `add`) errors `fanInRow`/`fireFanInDirect` and the resolving step fails naming the field; never
+string under `add`) errors `fanInRow` and the resolving step fails naming the field; never
 discard it, or the fan-in runs with that field's accumulated contributions silently dropped. It is wrapped as a
 `permanentError` - a deterministic failure of the engine's own computation inside a persisted write - which
 persist does NOT retry and `settlePersist` fails without `dwarf_steps_write_failed`: routing it through the
 storage classifier would page an operator for a type mistake after ~7s of pointless backoff. Wrap only a failure
 that is a pure function of stored data; a database error from the same computation is transient. The failed flow's `final_state` is `{}` - `computeFinalState` folds the
 same values and hits the same error, and `failFlowTx` falls back. (An unknown reducer name never gets this far:
-`Graph.Validate` rejects it at `Create`.) The terminal merge's folds (`mergeTerminalSteps`, `mergeCohortState`) are wrapped the same way, since
-`completeFlow` runs them inside its persisted write. Pinned by `TestFanIn_ReducerErrorFailsTheFlow` and
-`TestCompleteFlow_ReducerErrorFailsTheFlow`, which also assert neither write metric moves. A path that terminalizes a
-flow whatever it holds - `terminateSubtree` (Terminate, Delete, Purge, the orphan sweep) and the wedge sweep's
+`Graph.Validate` rejects it at `Create`.) Pinned by `TestFanIn_ReducerErrorFailsTheFlow`, which also asserts neither
+write metric moves. `mergeCohortState`'s member fold - a failed fan-out's final state - is wrapped the same way, and
+a path that terminalizes a flow whatever it holds - `terminateSubtree` (Terminate, Delete, Purge, the orphan sweep) and the wedge sweep's
 `deliverSubgraphError` - reads the final state through `terminalFinalState`, which takes a `permanentError` as
 `{}`; propagating it would leave the flow impossible to stop (`TestTerminate_ReducerErrorDoesNotBlockTerminate`).
 
@@ -1658,7 +1665,7 @@ ref policy, and they are what `engine/staterefs.go` holds:
   within a shard, so the resolve cache's key is too; the driver (the policy's one dialect-dependent term) is a
   property of that handle as well.
 - **How an anchor is read.** `anchorLoader` turns a shard handle into the `staterefs.Loader` the Linker calls once
-  per resolve. It **may be a transaction**, and at the two fan-in sites it is: anchors never cross a flow and a
+  per resolve. It **may be a transaction**, and at the populated fan-in (`fanInRow`) it is: anchors never cross a flow and a
   flow never crosses a shard, so resolution is always a same-connection read and those paths resolve
   inside the transactions they already run in. That is exactly why the Loader is a per-call argument rather than a
   connection bound at construction.

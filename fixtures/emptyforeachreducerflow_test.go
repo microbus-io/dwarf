@@ -18,6 +18,7 @@ package fixtures
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
@@ -25,12 +26,11 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestEmptyforeachreducerflow pins that an empty forEach converging on a fan-in applies the graph's reducers
-// to the spawn task's own delta, exactly like a non-empty forEach. The spawn task (TaskA) writes a delta (5)
-// to "sum", wired to ReducerAdd, over an accumulated base (10) in initial state. Both the empty and non-empty
-// runs must fold that delta onto the base at the fan-in (sum -> 15) - the result must not depend on cohort
-// size. Before the fix, the empty-cohort path (fireFanInDirect) merged with nil reducers, so the delta
-// replaced the base (sum -> 5) past an empty array while a non-empty array reduced correctly.
+// TestEmptyforeachreducerflow pins what a fan-out source's own write to a reducer-managed field means: a value
+// that replaces its input, exactly as a linear step's write does. Reducers fold only what the branches
+// contribute. The spawn task (TaskA) writes 5 to "sum", wired to ReducerAdd, over 10 in the initial state; every
+// branch is handed 5, and the fan-in sees 5 plus the branches' contributions. An empty forEach must agree: no
+// branches, so the fan-in sees 5 - not 15, which would treat the spawn's write as a delta onto its own input.
 func TestEmptyforeachreducerflow(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -57,14 +57,16 @@ func TestEmptyforeachreducerflow(t *testing.T) {
 	assert.NoError(graph.Validate())
 	mux.HandleGraph("emptyforeachreducerflow.verify:428/empty-for-each-reducer", graph)
 
-	// The spawn (fan-out source) writes a delta to the reducer-managed "sum" field, then fans out.
+	// The spawn (fan-out source) sets the reducer-managed "sum" field, then fans out.
 	mux.HandleTask("emptyforeachreducerflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("sum", 5)
 		return nil
 	})
-	// A branch contributes only to "processed", never to "sum", so the fan-in's "sum" is the spawn base+delta
-	// alone - identical regardless of how many branches ran.
+	// A branch records the sum it was handed, then contributes 1 to it and 1 to "processed".
+	var handed sync.Map
 	mux.HandleTask("emptyforeachreducerflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+		handed.Store(f.GetString("item"), f.GetInt("sum"))
+		f.SetInt("sum", 1)
 		f.SetInt("processed", 1)
 		return nil
 	})
@@ -74,25 +76,29 @@ func TestEmptyforeachreducerflow(t *testing.T) {
 		return nil
 	})
 
-	t.Run("non_empty_reduces", func(t *testing.T) {
+	t.Run("non_empty_folds_the_branches", func(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"items": []string{"x", "y"}, "sum": 10}
 		_, outcome, err := eng.Run(ctx, "emptyforeachreducerflow.verify:428/empty-for-each-reducer", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(15.0, stateVal(outcome.State, "sumOut"))        // 10 base + 5 delta, folded by ReducerAdd
+		for _, item := range []string{"x", "y"} {
+			v, _ := handed.Load(item)
+			assert.Equal(5, v, "branch %s is handed the spawn's value", item)
+		}
+		assert.Equal(7.0, stateVal(outcome.State, "sumOut"))         // the spawn's 5, plus 1 from each branch
 		assert.Equal(2.0, stateVal(outcome.State, "processedCount")) // both branches ran through the fan-in
 	})
 
-	t.Run("empty_reduces_identically", func(t *testing.T) {
+	t.Run("empty_keeps_the_spawn_value", func(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"items": []string{}, "sum": 10}
 		_, outcome, err := eng.Run(ctx, "emptyforeachreducerflow.verify:428/empty-for-each-reducer", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(15.0, stateVal(outcome.State, "sumOut"))        // same 10+5 as the non-empty run, not 5 (replace)
+		assert.Equal(5.0, stateVal(outcome.State, "sumOut"))         // the spawn's 5, with nothing to fold onto it
 		assert.Equal(0.0, stateVal(outcome.State, "processedCount")) // no branches ran, but the fan-in still fired
 	})
 }

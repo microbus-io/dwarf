@@ -393,9 +393,9 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.State, inherited R
 
 	// Carry forward an inherited ref whose key never appeared in merged. The loop above only sees keys
 	// present in merged (via raw), which is every inherited key on the paths that resolve state in FULL at
-	// dispatch (linear, fan-out branch). But the fan-in paths resolve only the fields their reducers fold: a
-	// merely-CARRIED ref is deliberately not materialized, so its key is absent from merged and the loop
-	// never carried it. Without this, that ref is neither materialized nor re-emitted and the carried field
+	// dispatch (linear, fan-out branch). But a fan-in resolves at most the fields its reducers fold, and a direct
+	// fan-in with no members resolves none: a merely-CARRIED ref is deliberately not materialized, so its key is
+	// absent from merged and the loop never carried it. Without this, that ref is neither materialized nor re-emitted and the carried field
 	// is silently, permanently dropped from the fan-in step onward and from the flow's final state. A key
 	// already handled above (rewritten -> re-anchored, or inline-only) is skipped; a tombstoned or
 	// member-overwritten field appears in changes/inlineOnly and is correctly left dropped.
@@ -453,26 +453,6 @@ func mintItem(raw map[string]json.RawMessage, refs Refs, item Item) {
 	path := append(slices.Clone(src.Path), item.Index)
 	refs[item.Key] = Ref{Anchor: src.Anchor, Field: field, Path: path}
 	delete(raw, item.Key)
-}
-
-// CombinedReducerFields names the keys whose merged fan-in value came from a COMBINING (non-replace)
-// reducer folding a delta the anchor step wrote onto a base it also held - reduce(state[k], changes[k]).
-// That value exists in NO step row: the anchor's changes column holds only the delta, its state only the
-// base. So it must never be minted as a ref against that anchor (resolution reads changes first and would
-// splice back the bare delta, silently dropping the accumulated base). The fan-in mint therefore passes
-// these as inlineOnly. A key present only in changes (no base) is left off: there merged[k] == changes[k],
-// so the anchor's changes is a sound anchor and keeping the ref preserves the byte win.
-func CombinedReducerFields(state, changes workflow.State, reducers map[string]workflow.Reducer) map[string]bool {
-	out := map[string]bool{}
-	for k := range changes.Names() {
-		if r := reducers[k]; r == "" || r == workflow.ReducerReplace {
-			continue
-		}
-		if mentions(state, k) {
-			out[k] = true
-		}
-	}
-	return out
 }
 
 // inlineExcessAnchors caps the pointer fan at maxAnchors by inlining the cheapest anchors' fields back into

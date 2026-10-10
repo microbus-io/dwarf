@@ -18,6 +18,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -107,50 +108,74 @@ func TestFlow_SetTracksChanges(t *testing.T) {
 	assert.Equal("1", stateVal(f.changes, "a")) // stored decoded, not as raw JSON bytes
 }
 
-func TestFlow_ParseAndSetChanges(t *testing.T) {
+// TestFlow_SetChangesIsSetPerField pins that SetChanges sets every field the source marshals, as Set would one by
+// one: an unchanged field too, an empty omitempty/omitzero field not at all, and a null field as a delete.
+func TestFlow_SetChangesIsSetPerField(t *testing.T) {
 	assert := testarossa.For(t)
 	f := NewFlow()
 	f.Set("name", "Alice")
 	f.Set("score", 10)
+	f.Set("gone", "x")
 	f.Set("extra", "untouched")
-	f.changes, _ = NewState() // reset changes from Set calls
-	snap := f.Snapshot()
-	var view struct {
-		Name  string `json:"name"`
-		Score int    `json:"score"`
+	f.changes, _ = NewState()
+
+	var out struct {
+		Name    string   `json:"name"`
+		Score   int      `json:"score"`
+		Skipped []string `json:"skipped,omitempty"`
+		Zero    int      `json:"zero,omitzero"`
+		Gone    *string  `json:"gone"`
 	}
-	err := f.Parse(&view)
-	assert.NoError(err)
-	assert.Equal("Alice", view.Name)
-	assert.Equal(10, view.Score)
+	assert.NoError(f.Parse(&out))
+	out.Score = 25
+	out.Gone = nil
+	assert.NoError(f.SetChanges(out))
 
-	// Modify only score
-	view.Score = 25
-	err = f.SetChanges(view, snap)
-	assert.NoError(err)
+	assert.Equal("Alice", f.changes.GetString("name"), "an unchanged field is set too")
+	assert.Equal(25, f.changes.GetInt("score"))
+	assert.False(f.changes.Has("skipped"), "an empty omitempty field is not set")
+	assert.False(f.changes.Has("zero"), "an empty omitzero field is not set")
+	assert.True(f.changes.IsDeleted("gone"), "a null field deletes, as Set(name, nil) does")
+	assert.False(f.Has("gone"))
+	assert.Equal("untouched", f.GetString("extra"))
+	assert.Equal(3, f.changes.Len())
 
-	// Only score should be in changes (decoded to float64, the canonical JSON number form)
-	assert.Equal(1, f.changes.Len())
-	assert.Equal(float64(25), stateVal(f.changes, "score"))
-	// Extra field should be untouched
-	assert.Equal("untouched", stateVal(f.state, "extra"))
+	assert.Error(f.SetChanges([]int{1}), "a source that is not an object")
+	assert.Error(f.SetChanges((*struct{})(nil)), "a nil pointer marshals to null")
 }
 
-func TestFlow_SetChangesNoChanges(t *testing.T) {
+// upperName marshals itself, so SetChanges must take its bytes as encoding/json writes them.
+type upperName string
+
+func (u upperName) MarshalJSON() ([]byte, error) {
+	return json.Marshal(strings.ToUpper(string(u)))
+}
+
+// TestFlow_SetChangesTakesWhatEncodingJSONEmits pins that SetChanges accepts any source that marshals to an object
+// - a map as well as a struct - and records each field as encoding/json spells it: a custom MarshalJSON's output,
+// and a json.RawMessage field's bytes, copied rather than aliased.
+func TestFlow_SetChangesTakesWhatEncodingJSONEmits(t *testing.T) {
 	assert := testarossa.For(t)
+
 	f := NewFlow()
-	f.Set("name", "Alice")
-	f.changes, _ = NewState() // reset changes from Set calls
-	snap := f.Snapshot()
-	var view struct {
-		Name string `json:"name"`
+	assert.NoError(f.SetChanges(map[string]any{"a": 1, "b": []string{"x"}}))
+	assert.Equal(1, f.GetInt("a"))
+	assert.Equal([]string{"x"}, f.GetStrings("b"))
+
+	raw := json.RawMessage(`{"k":1}`)
+	var src struct {
+		Name upperName       `json:"name"`
+		Raw  json.RawMessage `json:"raw"`
 	}
-	err := f.Parse(&view)
+	src.Name = "alice"
+	src.Raw = raw
+	assert.NoError(f.SetChanges(src))
+	assert.Equal("ALICE", f.GetString("name"))
+	raw[2] = 'j' // the caller's buffer is not the stored value
+	var got map[string]int
+	_, err := f.Get("raw", &got)
 	assert.NoError(err)
-	// No modifications
-	err = f.SetChanges(view, snap)
-	assert.NoError(err)
-	assert.Equal(0, f.changes.Len())
+	assert.Equal(map[string]int{"k": 1}, got)
 }
 
 // TestFlow_SetChangesNamesFieldsLikeParse pins that SetChanges writes every field Parse reads: an untagged
@@ -174,7 +199,6 @@ func TestFlow_SetChangesNamesFieldsLikeParse(t *testing.T) {
 	f.Set("Total", 1)
 	f.Set("region", "us")
 	f.changes, _ = NewState()
-	snap := f.Snapshot()
 
 	var order Order
 	assert.NoError(f.Parse(&order))
@@ -185,7 +209,7 @@ func TestFlow_SetChangesNamesFieldsLikeParse(t *testing.T) {
 	order.Region = "eu"
 	order.Skipped = "x"
 	order.secret = "y"
-	assert.NoError(f.SetChanges(order, snap))
+	assert.NoError(f.SetChanges(order))
 
 	assert.Equal("charged", f.changes.GetString("Status"))
 	assert.Equal(2, f.changes.GetInt("Total"))
@@ -194,32 +218,6 @@ func TestFlow_SetChangesNamesFieldsLikeParse(t *testing.T) {
 	assert.False(f.changes.Has("secret"))
 	assert.False(f.changes.Has("Base"))
 	assert.Equal(3, f.changes.Len())
-}
-
-// TestFlow_SetChangesComparesByMeaning pins that a snapshot value re-spelled by the database - whitespace and
-// object-key order, as JSONB returns it - is not mistaken for a change. A false change on a reducer-managed
-// field would re-contribute the whole value at fan-in.
-func TestFlow_SetChangesComparesByMeaning(t *testing.T) {
-	assert := testarossa.For(t)
-
-	var raw State
-	assert.NoError(json.Unmarshal([]byte(`{"items": ["a", "b"], "meta": {"z": 1, "a": 9007199254740993}}`), &raw))
-	f := NewFlow()
-	f.state = raw
-	snap := f.Snapshot()
-
-	var view struct {
-		Items []string       `json:"items"`
-		Meta  map[string]any `json:"meta"`
-	}
-	assert.NoError(f.Parse(&view))
-	view.Meta["a"] = json.Number("9007199254740993")
-	assert.NoError(f.SetChanges(view, snap))
-	assert.Equal(0, f.changes.Len())
-
-	view.Meta["a"] = json.Number("9007199254740992")
-	assert.NoError(f.SetChanges(view, snap))
-	assert.True(f.changes.Has("meta"), "a change beyond float64 precision must be recorded")
 }
 
 func TestFlow_Has(t *testing.T) {
@@ -550,25 +548,13 @@ func TestFlow_SetChangesResolvesNamesLikeEncodingJSON(t *testing.T) {
 	f := NewFlow()
 	f.Set("region", "us")
 	f.changes, _ = NewState()
-	snap := f.Snapshot()
 
 	order := Order{Region: "eu", Base: Base{Region: "stale"}, Count: 7}
-	assert.NoError(f.SetChanges(order, snap))
+	assert.NoError(f.SetChanges(order))
 	assert.Equal("eu", f.changes.GetString("region"))
 
 	var back Order
 	assert.NoError(f.Parse(&back))
 	assert.Equal("eu", back.Region)
 	assert.Equal(7, back.Count)
-}
-
-// TestJSONEqual_NumbersByValue pins that a number re-spelled by a database compares equal to the original, while
-// integers beyond float64 precision still compare exactly.
-func TestJSONEqual_NumbersByValue(t *testing.T) {
-	assert := testarossa.For(t)
-
-	assert.True(jsonEqual([]byte(`{"n":100}`), []byte(`{"n": 1e2}`)))
-	assert.True(jsonEqual([]byte(`[1]`), []byte(`[1.0]`)))
-	assert.False(jsonEqual([]byte(`9007199254740993`), []byte(`9007199254740992`)))
-	assert.False(jsonEqual([]byte(`"1"`), []byte(`1`)))
 }
