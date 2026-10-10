@@ -18,6 +18,7 @@ package engine
 
 import (
 	"encoding/json"
+	"weak"
 
 	"github.com/microbus-io/dwarf/internal/faninmap"
 	"github.com/microbus-io/dwarf/workflow"
@@ -41,22 +42,40 @@ type graphCacheKey struct {
 	flowID int
 }
 
-// cachedGraph is the per-flow parsed graph paired with its derived fan-in map. The fan-in map is a pure
-// function of the graph, not persisted with it, so it is computed once when a flow's graph is first parsed
-// and cached alongside - amortizing the O(V+E) analysis across every step of the flow.
+// cachedGraph is a parsed graph paired with its derived fan-in map, shared by every flow whose stored graph
+// bytes it was parsed from. The fan-in map is a pure function of the graph, not persisted with it, so it is
+// computed once per parse and cached alongside - amortizing the O(V+E) analysis across every step.
 //
-// Every field must be frozen for the flow's life: nothing invalidates an entry, so a field that could change
-// would go stale silently. The key relies on a flow_id not being reused while its entry lives.
+// Every field must be frozen for the flow's life, and nothing may mutate one after the parse: concurrent
+// dispatches of many flows read the same entry. The per-flow key relies on a flow_id not being reused while
+// its entry lives.
 type cachedGraph struct {
 	graph       *workflow.Graph
 	fanIn       *faninmap.Map
 	workflowURL string
 }
 
+// cachedFlowGraph returns the flow's entry when this replica holds it. The per-flow layer holds weak
+// pointers, so a parse the shared layer has evicted reads as a miss once no dispatch still holds it.
+func (e *Engine) cachedFlowGraph(shardNum, flowID int) (*cachedGraph, bool) {
+	wp, ok := e.graphCache.Load(graphCacheKey{shard: shardNum, flowID: flowID})
+	if !ok {
+		return nil, false
+	}
+	cg := wp.Value()
+	return cg, cg != nil
+}
+
+// cacheFlowGraph points the flow at a shared entry from internGraph.
+func (e *Engine) cacheFlowGraph(shardNum, flowID int, cg *cachedGraph) {
+	e.graphCache.Store(graphCacheKey{shard: shardNum, flowID: flowID}, weak.Make(cg))
+}
+
 // sharedGraphKey names a parsed graph by its EXACT stored bytes, so the flows of one graph share one entry
 // and two different graphs can never collide. The workflow URL is in the key because the entry carries it.
 // Do not key by a hash alone: a collision would run a flow on another flow's graph. A dialect that re-spells
-// JSON on read (Postgres JSONB) gives Create's seed and a column read two entries for one graph - harmless.
+// JSON on read (Postgres JSONB, MySQL JSON) gives Create's seed and a column read two entries for one graph,
+// which costs one extra parse.
 type sharedGraphKey struct {
 	workflowURL string
 	graphJSON   string

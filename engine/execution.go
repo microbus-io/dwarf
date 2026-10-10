@@ -295,8 +295,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 
 	// The graph is frozen at flow creation, so a cached parse makes its JSON - the largest payload on the flow
 	// row - dead weight; it is selected only on a miss, which is why the Postgres claim leaves it out.
-	graphKey := graphCacheKey{shard: shardNum, flowID: flowID} // scopes the cache by shard, since flow_id is only unique within a shard
-	cg, cached := e.graphCache.Load(graphKey)
+	cg, cached := e.cachedFlowGraph(shardNum, flowID)
 	var graphJSON []byte
 	readFlow := func(cols string, dest ...any) error {
 		flowPass := turnstile.WaitTurn(ctx)
@@ -348,7 +347,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			doneTurn()
 			return errors.Trace(err)
 		}
-		e.graphCache.Store(graphKey, cg)
+		e.cacheFlowGraph(shardNum, flowID, cg)
 	}
 	graph := cg.graph
 

@@ -207,7 +207,7 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, sha
 // dispatched on this replica and from its row otherwise. The returned graph may be shared with concurrent
 // dispatches and must not be mutated. A cache hit reads nothing, so it does not prove the flow row still exists.
 func (e *Engine) flowGraph(ctx context.Context, db sequel.Executor, shardNum, flowID int) (*workflow.Graph, string, error) {
-	if cg, ok := e.graphCache.Load(graphCacheKey{shard: shardNum, flowID: flowID}); ok {
+	if cg, ok := e.cachedFlowGraph(shardNum, flowID); ok {
 		return cg.graph, cg.workflowURL, nil
 	}
 	var workflowURL string

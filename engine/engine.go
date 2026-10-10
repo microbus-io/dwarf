@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"weak"
 
 	"log/slog"
 
@@ -68,10 +69,11 @@ const (
 	parkedSubgraph = 1
 )
 
-// The bounds of the two parsed-graph cache layers (see initRuntime).
+// The bounds of the two parsed-graph cache layers. Memory is bounded by graphCacheGraphs parses, since the
+// per-flow layer holds only weak pointers (~150 bytes an entry).
 const (
 	graphCacheFlows  = 1 << 16
-	graphCacheGraphs = 1024
+	graphCacheGraphs = 4096
 )
 
 // terminalStatusesSQL is every terminal flow/step status pre-joined into a quoted literal ready to inline into a
@@ -284,9 +286,9 @@ type Engine struct {
 	latchWorker sync.WaitGroup
 
 	// Parsed-graph caches, in two layers. graphCache maps a flow to its entry so a dispatch reads no graph
-	// column; sharedGraphs holds the entries themselves, keyed by the stored bytes, so every flow of one
-	// graph points at one parse. The graph JSON is frozen at flow creation, so neither ever goes stale.
-	graphCache   *lru.Cache[graphCacheKey, *cachedGraph]
+	// column; sharedGraphs owns the entries, keyed by the stored bytes, so every flow of one graph points at
+	// one parse. The graph JSON is frozen at flow creation, so neither ever goes stale.
+	graphCache   *lru.Cache[graphCacheKey, weak.Pointer[cachedGraph]]
 	sharedGraphs *lru.Cache[sharedGraphKey, *cachedGraph]
 	// State-ref linkers, one per shard: they decide which state fields a successor step stores by reference
 	// rather than by value, and resolve those references back. Per shard because a step id is only unique
@@ -868,11 +870,10 @@ func (e *Engine) initRuntime() error {
 	e.linkers = make(map[int]*staterefs.Linker)
 	e.recoveryStop = make(chan struct{})
 	e.reaperStop = make(chan struct{})
-	// A per-flow entry is a pointer into sharedGraphs (~130 bytes), so the flow layer is sized for the flows
-	// one process has in flight rather than for memory: 4,096 thrashed at 4 shards x 2,000 flows in flight
-	// (~1 extra graph SELECT per step). The shared layer holds one parse per distinct graph.
-	e.graphCache = lru.New[graphCacheKey, *cachedGraph](graphCacheFlows, 15*time.Minute)
-	e.sharedGraphs = lru.New[sharedGraphKey, *cachedGraph](graphCacheGraphs, 15*time.Minute)
+	// The shared layer has no TTL: a graph's bytes never change, and expiring a hot graph would turn every
+	// one of its flows into a miss at once.
+	e.graphCache = lru.New[graphCacheKey, weak.Pointer[cachedGraph]](graphCacheFlows, 15*time.Minute)
+	e.sharedGraphs = lru.New[sharedGraphKey, *cachedGraph](graphCacheGraphs, 0)
 	// A fresh board per run: the previous one was closed at drain, and a closed board turns every Await
 	// away. resolveStoppedFlows is non-nil, so New cannot fail.
 	e.latches, _ = latch.New(e.resolveStoppedFlows)

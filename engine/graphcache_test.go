@@ -19,9 +19,12 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"runtime"
 	"testing"
+	"weak"
 
 	"github.com/microbus-io/dwarf/internal/keys"
+	"github.com/microbus-io/dwarf/internal/lru"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -47,7 +50,7 @@ func TestCreate_SeedsGraphCache(t *testing.T) {
 	assert.NoError(err)
 	shard, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	cg, ok := e.graphCache.Load(graphCacheKey{shard: shard, flowID: flowID})
+	cg, ok := e.cachedFlowGraph(shard, flowID)
 	if assert.True(ok, "the creating replica caches the graph it just stored") {
 		assert.Equal("seedcache/g", cg.workflowURL)
 		hostGraph, err := mux.LoadGraph(ctx, "seedcache/g")
@@ -70,7 +73,7 @@ func TestCreate_SeedsGraphCache(t *testing.T) {
 		func(tx *sequel.Tx) error { return errors.New("rolled back") })
 	doneTurn()
 	assert.Error(err)
-	_, ok = e.graphCache.Load(graphCacheKey{shard: shard, flowID: maxID + 1})
+	_, ok = e.cachedFlowGraph(shard, maxID+1)
 	assert.False(ok, "a rolled-back create caches nothing")
 }
 
@@ -95,7 +98,7 @@ func TestGraphCache_FlowsShareOneParse(t *testing.T) {
 		assert.NoError(err)
 		shard, flowID, _, err := keys.ParseFlowKey(fk)
 		assert.NoError(err)
-		cg, ok := e.graphCache.Load(graphCacheKey{shard: shard, flowID: flowID})
+		cg, ok := e.cachedFlowGraph(shard, flowID)
 		assert.True(ok)
 		entries = append(entries, cg)
 
@@ -128,4 +131,83 @@ func mustGraphJSON(t *testing.T, g *workflow.Graph) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// TestGraphCache_DispatchMissInterns pins the dispatch-miss path: flows created by a replica that does not
+// dispatch (so nothing seeds a cache) are read back from the column by the replica that runs them, and the
+// flows of one graph still share one parse there.
+func TestGraphCache_DispatchMissInterns(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	mux := NewHostMux()
+	registerGate(mux, "misscache")
+	creator := NewEngineUnderTest(t.Name())
+	defer creator.Shutdown(ctx)
+	creator.SetHost(mux)
+	assert.NoError(creator.SetWorkers(0))
+	assert.NoError(creator.Startup(t.Context()))
+	runner := NewEngineUnderTest(t.Name()) // same name, same database
+	defer runner.Shutdown(ctx)
+	runner.SetHost(mux)
+	assert.NoError(runner.Startup(t.Context()))
+
+	var entries []*cachedGraph
+	for range 2 {
+		fk, err := creator.Create(ctx, "misscache/g", nil, nil)
+		assert.NoError(err)
+		out, err := creator.Await(ctx, fk)
+		if assert.NoError(err) {
+			assert.Equal(workflow.StatusInterrupted, out.Status, "the runner dispatched the gate")
+		}
+		shard, flowID, _, err := keys.ParseFlowKey(fk)
+		assert.NoError(err)
+		_, seeded := creator.cachedFlowGraph(shard, flowID)
+		assert.False(seeded, "a replica that does not dispatch the shard seeds nothing")
+		cg, ok := runner.cachedFlowGraph(shard, flowID)
+		if assert.True(ok, "the dispatch miss caches the flow") {
+			entries = append(entries, cg)
+		}
+	}
+	if len(entries) == 2 {
+		assert.True(entries[0] == entries[1], "two flows of one graph share one parse after a miss")
+	}
+}
+
+// TestGraphCache_SharedEvictionReleasesTheParse pins the bound that makes the per-flow layer cheap: it holds
+// weak pointers, so a parse the shared layer evicts is released, and its flows read as a miss.
+func TestGraphCache_SharedEvictionReleasesTheParse(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	e := &Engine{
+		graphCache:   lru.New[graphCacheKey, weak.Pointer[cachedGraph]](16, 0),
+		sharedGraphs: lru.New[sharedGraphKey, *cachedGraph](1, 0),
+	}
+	graphJSON := func(name string) []byte {
+		g := workflow.NewGraph(name)
+		g.SetURL(name, "evict/"+name)
+		g.AddTransition(name, workflow.End)
+		return mustGraphJSON(t, g)
+	}
+	func() {
+		cg, err := e.internGraph(graphJSON("First"), "evict/g")
+		assert.NoError(err)
+		e.cacheFlowGraph(1, 1, cg)
+	}()
+	_, ok := e.cachedFlowGraph(1, 1)
+	assert.True(ok, "held while the shared layer holds it")
+
+	_, err := e.internGraph(graphJSON("Second"), "evict/g") // evicts the first parse from the one-entry layer
+	assert.NoError(err)
+	released := false
+	for range 10 {
+		runtime.GC()
+		if _, ok := e.cachedFlowGraph(1, 1); !ok {
+			released = true
+			break
+		}
+	}
+	assert.True(released, "an evicted parse is not kept alive by the per-flow layer")
 }

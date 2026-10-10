@@ -1122,12 +1122,20 @@ not parallelism:
   workflow URL from `graphCache` (`flowGraph`) and reads the row only on a miss, so every `computeFinalState`
   caller on a replica that dispatched the flow pays no graph round trip. Every field of `cachedGraph` must
   stay frozen for the flow's life - nothing invalidates an entry.
-- **The graph cache is two layers, and the per-flow layer must be sized for flows IN FLIGHT, not for memory.**
-  `graphCache` maps `(shard, flow_id)` to an entry in `sharedGraphs`, which is keyed by the stored graph bytes,
-  so the flows of one graph share one parse and a per-flow entry is a pointer (~130 bytes). A per-flow miss is
-  a `SELECT graph` with its own turn: at a 4,096-entry bound, one process holding ~8,200 flows (4 shards x
-  2,000 in flight) paid 0.98 of them per executed step, against 0.38 at 2 shards. Key the shared layer by the
-  exact bytes, never a hash alone - a collision would run a flow on another flow's graph.
+- **The graph cache is two layers: the per-flow layer is sized for flows IN FLIGHT, the shared layer for memory.**
+  `graphCache` maps `(shard, flow_id)` to a WEAK pointer into `sharedGraphs`, which owns the parses and is keyed
+  by the stored graph bytes, so the flows of one graph share one parse and a per-flow entry is ~150 bytes. A
+  per-flow miss is a `SELECT graph` with its own turn: at a 4,096-entry bound, one process holding ~8,200 flows
+  (4 shards x 2,000 in flight) paid 0.98 of them per executed step, against 0.38 at 2 shards.
+  - **Keep the per-flow pointer weak.** A strong one lets the per-flow layer pin a parse the shared layer evicted,
+    so a workload whose flows rarely share graph bytes (per-actor graphs) holds up to 65,536 parses - measured
+    2.4-14 KB each (5-50 tasks), ~0.5-0.9 GB. Weak, memory is bounded by the shared layer's 4,096 parses and
+    such a workload still gets 4,096 flows of cover.
+  - **The shared layer has no TTL.** A graph's bytes never change, and expiring a hot graph would turn every one
+    of its flows into a miss at once. Its recency is refreshed by each new flow of the graph (Create's seed, or a
+    first dispatch), which is what keeps a graph in use from being evicted.
+  - **Key the shared layer by the exact bytes, never a hash alone** - a collision would run a flow on another
+    flow's graph.
 - **A transition's successors go in as multi-row INSERTs** (`successorBatch`), in power-of-two chunks of at
   most 64 rows (21 binds each, under SQL Server's 2,100-parameter ceiling). The ids come back by `RETURNING`/`OUTPUT`
   and are matched to rows by `step_token`, since neither promises VALUES order. MySQL inserts row by row: it has no
@@ -1142,7 +1150,7 @@ not parallelism:
   flow ~11, a fan-out cycle of two branches ~20.5.
 - **On PostgreSQL the claim returns the flow row too** (`UPDATE dwarf_steps s ... FROM dwarf_flows f ...
   RETURNING s.*, f.*`), so dispatch reads the flow row only for the graph on a `graphCache` miss. `Create` seeds
-  the cache (`parseCachedGraph`, from the stored JSON, after the commit) on a replica that dispatches the shard,
+  the cache (`internGraph`, from the stored JSON, after the commit) on a replica that dispatches the shard,
   since its doorbell offers the entry step to its own cache. A miss is then a flow's first dispatch on a replica
   that did not create it, or one after the entry aged out (the LRU's bound or TTL) or the replica restarted. The join reads the flow row without locking it: Postgres locks only an
   UPDATE's target rows, so the claim cannot deadlock with Cancel/Terminate, which lock the flow row before its
@@ -3715,11 +3723,11 @@ outcomes (no `onError` → flow `failed`; with `onError` → routed to the handl
 
 ### Worker context (the engine lifetime)
 
-Workers, the background loops and the pistons share the engine's lifetime context (`e.lifetimeCtx`), created at
-Startup and cancelled only after `Shutdown` drains them all. So by the time the lifetime ctx is cancelled, every DB
-operation
-has committed - in-flight writes are never interrupted by ctx cancellation. The only *cancellable*, time-bounded ctx
-is the `ExecuteTask` call: `executeTask` derives it from the lifetime ctx with the step's `time_budget_ms`.
+The background loops and the pistons run on the engine's lifetime context (`e.lifetimeCtx`), created at Startup
+and cancelled only after `Shutdown` drains them all; the workers run on a non-cancelable copy of it. So by the
+time the lifetime ctx is cancelled, every DB operation has committed - in-flight writes are never interrupted by
+ctx cancellation. The only *cancellable*, time-bounded ctx on a worker is the `ExecuteTask` call: `executeTask`
+derives it from the worker's ctx with the step's `time_budget_ms`.
 
 **The crew runs on `context.WithoutCancel(e.lifetimeCtx)`, and it must stay non-cancelable.** Since no worker
 can observe the lifetime ctx's cancellation, cancelability buys the crew nothing - and it costs per QUERY: pgx
