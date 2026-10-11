@@ -150,7 +150,8 @@ const Linear = 1
 
 // Anchor is one anchor step's payload, as a Loader returns it. Both columns are searched because either
 // can hold a ref'd field's bytes; Refs is what lets Resolve assert that a ref is one hop rather than
-// silently walking a chain.
+// silently walking a chain. Each map is its column's JSON object as stored, so Changes names a field the step
+// overwrote with workflow.OverwriteSuffix.
 type Anchor struct {
 	State   map[string]json.RawMessage
 	Changes map[string]json.RawMessage
@@ -305,11 +306,9 @@ func openThreshold(successors int, inflation int) int {
 	return max(minField, min(threshold, budget/successors)) / inflation
 }
 
-// mentions reports whether a delta speaks about a field AT ALL - holding a value, or recording a delete.
-// The mint needs exactly this and Has alone is wrong for it: a task that DELETED a field has still rewritten
-// it, so its inherited ref must not be carried forward. Spelled here rather than on State because
-// "present, including a delete" is a confusing thing for a carrier to offer generally - a caller asking
-// about a field wants Has, or IsDeleted, and almost never the union of the two.
+// mentions reports whether a state holds a field AT ALL - a value, or a null. Has alone is wrong for the mint:
+// a field merged to a null is still present in it. Whether a STEP rewrote a field is Changes.Mentions, which
+// counts a delete too, so a deleted field's inherited ref is not carried forward.
 func mentions(s workflow.State, field string) bool {
 	return s.Has(field) || s.IsDeleted(field)
 }
@@ -340,7 +339,7 @@ func mentions(s workflow.State, field string) bool {
 //
 // Minting needs no database read: merged was resolved at dispatch, so every literal is already in hand and
 // "inlining" is simply declining to omit a field.
-func (l *Linker) Mint(merged workflow.State, changes workflow.State, inherited Refs, anchorID int, successors int, inlineOnly map[string]bool, item *Item) ([]byte, []byte, error) {
+func (l *Linker) Mint(merged workflow.State, changes workflow.Changes, inherited Refs, anchorID int, successors int, inlineOnly map[string]bool, item *Item) ([]byte, []byte, error) {
 	refs := Refs{}
 	literal := func(k string) bool {
 		return inlineOnly[k] || (item != nil && k == item.Key)
@@ -361,7 +360,7 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.State, inherited R
 			// re-minted against this step, whose row does not hold the bytes. This is the one-hop guard, and it
 			// is unconditional precisely because the fan-out policy below is not size-based.
 			if anchor, isRef := inherited[k]; isRef {
-				if !mentions(changes, k) {
+				if !changes.Mentions(k) {
 					refs[k] = anchor
 					continue
 				}
@@ -406,7 +405,7 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.State, inherited R
 		if literal(k) {
 			continue
 		}
-		if mentions(changes, k) {
+		if changes.Mentions(k) {
 			continue
 		}
 		refs[k] = anchor
@@ -417,11 +416,6 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.State, inherited R
 	}
 
 	inlineExcessAnchors(raw, refs, merged)
-
-	// The metadata is not a field, so the loops above never see it; it is stored with the state as it is.
-	if meta := merged.MetaJSON(); meta != nil {
-		raw[workflow.MetaKey] = meta
-	}
 
 	stateJSON, err := json.Marshal(raw)
 	if err != nil {
@@ -766,9 +760,14 @@ func (l *Linker) loadInto(ctx context.Context, anchors []int, pending map[string
 		}
 		// changes shadows state: the anchor's changes hold the value its task PRODUCED, while its state holds
 		// a value it merely received (the flow's initial input at the entry step, or a fan-in's reduced
-		// output). Both are legitimate anchor locations; changes is the newer of the two.
+		// output). Both are legitimate anchor locations; changes is the newer of the two. In changes, a field the
+		// task overwrote is named with the overwrite suffix.
 		field := ref.field(key)
-		value, found := row.Changes[field]
+		value, found := row.Changes[field+workflow.OverwriteSuffix]
+		if !found && !strings.HasSuffix(field, workflow.OverwriteSuffix) {
+			// A key ending with the suffix is always an overwrite of another field, never this one.
+			value, found = row.Changes[field]
+		}
 		if !found {
 			value, found = row.State[field]
 		}

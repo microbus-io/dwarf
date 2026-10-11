@@ -242,19 +242,8 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	if _, err = e.resolveStateRefs(ctx, db, shardNum, fs.State, refs, nil, ""); err != nil {
 		return nil, errors.Trace(err)
 	}
-	redactMeta(fs.State)
-	fs.Changes, err = workflow.NewState(changesJSON)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	// A delete is a mark in the changes' metadata, which is redacted; it is shown as a null, which is how a
-	// caller reads a delete.
-	for _, k := range slices.Collect(fs.Changes.Writes()) {
-		if fs.Changes.IsDeleted(k) && !fs.Changes.Has(k) {
-			_ = fs.Changes.Set(k, nil)
-		}
-	}
-	redactMeta(fs.Changes)
+	// An overwrite shows as its new value and a delete as a null, which is how a caller reads a delete.
+	fs.Changes = changesView(changesOf(changesJSON))
 	if len(interruptJSON) > 0 {
 		fs.InterruptPayload, err = workflow.NewState(interruptJSON)
 		if err != nil {
@@ -944,9 +933,6 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	if err != nil {
 		return "", errors.Trace(err, http.StatusBadRequest)
 	}
-	if err := rejectMeta(additional, "additional state"); err != nil {
-		return "", errors.Trace(err)
-	}
 
 	var threadID int
 	var threadToken string
@@ -1023,7 +1009,7 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 		// Fold the caller's additionalState onto the prior turn's final_state through the graph's reducers. A nil
 		// deletes a plain field and contributes nothing to a reduced one, so a new turn cannot reset a reduced
 		// field; the turn's first task can, with Overwrite.
-		if err := finalState.Apply(additional, graph.Reducers()); err != nil {
+		if err := finalState.Apply(workflow.ChangesOf(additional), graph.Reducers()); err != nil {
 			// A value that will not fold onto the thread's state is the caller's mistake, not a server fault.
 			return errors.Trace(err, http.StatusBadRequest)
 		}

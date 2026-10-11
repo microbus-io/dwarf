@@ -1143,7 +1143,7 @@ not parallelism:
     of its flows into a miss at once. Its recency is refreshed by each new flow of the graph (Create's seed, or a
     first dispatch), which is what keeps a graph in use from being evicted.
 - **A transition's successors go in as multi-row INSERTs** (`successorBatch`), in power-of-two chunks of at
-  most 64 rows (21 binds each, under SQL Server's 2,100-parameter ceiling). The ids come back by `RETURNING`/`OUTPUT`
+  most 64 rows (22 binds each, under SQL Server's 2,100-parameter ceiling). The ids come back by `RETURNING`/`OUTPUT`
   and are matched to rows by `step_token`, since neither promises VALUES order. MySQL inserts row by row: it has no
   `RETURNING`, and under the default `innodb_autoinc_lock_mode=2` a multi-row insert's ids are not guaranteed
   contiguous.
@@ -1350,7 +1350,7 @@ N+1 while the fan-in worker is still finishing depth N) and could incorrectly fa
 the dispatch view (input ⊕ earlier runs' changes), the successor base (`successorBase`, which routing also
 reads), the fan-in's base (the spawn's changes folded onto its state - the value every branch was handed),
 `fireFanInDirect`, the final state (`mergeTerminalSteps`, each tail's changes onto its state), a failed
-cohort's rebuild, and the interrupted `Snapshot` (through the reducers its stored state is tagged with). A
+cohort's rebuild, and the interrupted `Snapshot` (through the reducers of the flow's graph). A
 fold that fails is a pure function of the data: a successor-base failure fails the step before anything is
 written, and the final-state and cohort folds are `permanentError`s. Pinned by
 `fixtures/terminalreducerflow_test.go`, `fixtures/emptyforeachreducerflow_test.go` (branches handed 15, the
@@ -1368,7 +1368,7 @@ fan-in 15 plus their contributions) and `TestHandOff_ReducerErrorFailsTheStep`.
 - **A null on a reduced field is dropped from a delta as it enters** (`dropIdentityNulls`: the task's result,
   `fireFanInDirect`'s and the spawn's stored changes). It contributes nothing, but the state-refs mint reads any
   key a delta writes as a rewrite: it would drop the carried ref and re-anchor the field at a row holding the
-  null. The carrier never writes one; a remote host or a row from before deletes were marks can.
+  null. The carrier never writes one; a remote host or a row stored before overwrites existed can.
 - **Known cost: a folded field cannot be shared by a ref across a fan-out's branches.** It exists in no row, so
   a fan-out source that folds into a large reduced field stores it inline in every branch's state, N copies.
   A forEach over a reduced array is the case to watch.
@@ -1387,7 +1387,8 @@ an inner fan-in carries its spawn's lineage, so it is a member of the next cohor
 its own task's writes. Everything its cohort added sits in its `state`. So:
 
 - **A fan-in inside an outer cohort records which part of each field its cohort added** (`foldCohort`,
-  stored as `__meta__.<field>.reduced`), as metadata about the folded value, never a second copy of it. A
+  stored per field in the fan-in step's `state_reduced` column), as a description of the folded value, never a
+  second copy of it. A
   fan-in on the trunk (its spawn's `lineage_id` is 0) is never read as a member, so it skips the work:
   - `from` for `append`/`union`/`concat` - they only add to the end, so the cohort's part is a suffix;
   - `keys` for `merge` - new wins, so the folded value under those keys IS the cohort's;
@@ -1408,14 +1409,17 @@ its own task's writes. Everything its cohort added sits in its `state`. So:
   Rejected: re-folding the subtree (N x M reads, N x M x O three deep); storing the cohort's delta beside the
   folded value (every contribution stored twice per level); a `replace` of the folded value (the second
   branch's replace wipes the first's).
-- **`reduced` belongs to its fan-in step alone.** Every stamp replaces the metadata wholesale, so it is
-  dropped at the fan-in's own dispatch and from the final state, and never reaches a successor's row.
+- **`state_reduced` belongs to its fan-in step alone.** Only `fanInRow` writes it (`successorRow.reducedJSON`);
+  every other row holds `{}`, and only `cohortParts` reads it. Fork's clone copies it with the row it describes,
+  the leaf included. **Known gap:** a Fork override of a recorded field at an inner fan-in leaf rewrites the
+  `state` the record describes, so the outer fold then takes the wrong part (a `from` offset into the new value,
+  or the original `value`).
   Otherwise a step after the inner fan-in would carry a boundary that does not describe its own input.
-  Pinned by `TestMeta_ReducedStaysWithTheInnerFanIn`.
+  Pinned by `TestChanges_ReducedStaysWithTheInnerFanIn`.
 - **Every field a cohort wrote must be stored INLINE in its fan-in's `state`, never as a ref.** The projection
-  reads the raw column: a ref'd field reads as absent, which projects a plain field as a DELETE. `fanInRow`
+  reads the raw `state` and `state_reduced` columns: a ref'd field reads as absent, which projects a plain field as a DELETE. `fanInRow`
   guarantees it by passing the contributed fields to `Mint` as `inlineOnly` (`memberWrites`). Keep it so.
-- **The reducer comes from the graph,** never from the stored metadata.
+- **The reducer comes from the graph,** never from the stored record.
 
 Pinned by `TestCohortFold_ProjectionEqualsContributions` (every reducer: the projected part folds exactly as
 the contributions one by one; it fails with the offset dropped) and `fixtures/nestedreducerflow_test.go`
@@ -1726,29 +1730,27 @@ Three things stay the engine's:
   **the fixtures do not** - they run at the production default and still exercise the steal, which is the
   stronger statement of the two.
 
-### Field metadata (`__meta__`): the engine stamps it, never trusts it, and hides it
+### Reducers come from the graph; `changes` holds both kinds of write
 
-Every field the graph declares a reducer for is tagged in the state's metadata (`stampReducers`, `meta.go`),
-a field with no value yet included - a reducer has to be known before the first write, since `append`
-folding onto nothing must yield a list.
+**Every place that combines writes reads the reducers from the flow's frozen graph** (`graph.Reducers()`), and
+no row stores them. Dispatch hands them to the carrier (`flow.SetReducers`, the error-route carrier too, so its
+`onErr` composes onto the earlier runs' writes); every fold takes them as an argument; the interrupted
+`Snapshot` loads the graph (`flowGraph`) to fold the step's changes. A reducer stored on a row could go stale
+or be forged by a remote host; one read from the graph cannot. Pinned by `TestChanges_ReducersComeFromTheGraph`
+(including a remote host returning other reducers), `TestChanges_InterruptedSnapshotFoldsThroughTheReducers`
+and `TestChanges_ErrorRouteComposesThroughTheReducers`, each failing with its site's reducers removed.
 
-- **Stamped from the frozen graph** at `createWithGraph` (Create, Continue, a subgraph child), at dispatch
-  (`processStep`, before the carrier is built), and at both fan-in paths (`fanInRow`, `fireFanInDirect`).
-  Successor rows inherit it through `Mint`. A stamp REPLACES the metadata wholesale, which is also what
-  discards a forged entry - a subgraph `in` carrying one, say.
-- **The dispatch stamp is not redundant with the rows.** It is what tags a flow already in flight when the
-  engine was upgraded, whose rows hold none. Pinned by `TestMeta_DispatchRestampsAnUntaggedRow`, which
-  fails without it while every other test passes.
-- **A task's result is checked, not trusted** (`checkDeltaMeta`): the only metadata its `changes` may carry
-  is an overwrite mark, and none on a reduced field inside a fan-out branch; anything else fails the step,
-  naming the field. Pinned by `TestMeta_ForgedChangesMetaFailsTheStep`.
-- **Redacted from every state handed outside the engine** (`redactMeta`): `FlowOutcome.State` (Snapshot,
-  Await, Run), `Step`'s state and changes, a subgraph's result on its way to the caller's `out`, and what
-  `when`/`switch` evaluate. The stored columns keep it - `Continue` and `Fork` build on `final_state`.
-- **Rejected in caller input** with a 400 (`rejectMeta`): `Create`'s initial state, `Continue`'s
-  `additionalState`, `Fork`'s overrides.
-
-Pinned by `engine/meta_test.go`.
+- **The `changes` column is `workflow.Changes` JSON** - contributions under their names, overwrites under
+  `name!` (`workflow/CLAUDE.md`). Read it with `changesOf`, never `workflow.NewState`: a plain decode reads an
+  overwrite as a field named `name!`. Write it with `json.Marshal`. The state-refs anchor loader is the one
+  raw reader, and `internal/staterefs` looks up `field!` before `field`.
+- **A task's result is checked, not trusted** (`checkChanges`): no name ending with the suffix, and no
+  overwrite or delete of a reduced field inside a fan-out branch. Either fails the step, naming the field.
+  Pinned by `TestChanges_RemoteResultIsChecked`.
+- **`Step` shows a step's changes as a `State`** (`changesView`): an overwrite as its value, a delete as a
+  null.
+- **`state_reduced` holds a fan-in's `reduced` record and nothing else** (see "A member's contribution is its
+  `changes`, EXCEPT an inner fan-in's" above).
 
 ### State refs — a large carried field is stored once (`internal/staterefs`)
 

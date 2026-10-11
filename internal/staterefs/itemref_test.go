@@ -86,7 +86,7 @@ func TestLinker_MintItem(t *testing.T) {
 	mint := func(t *testing.T, merged workflow.State, inherited Refs, item *Item) (workflow.State, Refs) {
 		t.Helper()
 		assert := testarossa.For(t)
-		stateJSON, refsJSON, err := New("sqlite").Mint(merged, mustState(map[string]any{}), inherited, anchor, width, ordinals, item)
+		stateJSON, refsJSON, err := New("sqlite").Mint(merged, workflow.NewChanges(), inherited, anchor, width, ordinals, item)
 		assert.NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)
@@ -128,7 +128,7 @@ func TestLinker_MintItem(t *testing.T) {
 		// A narrow fan-out of a small array: the array stays inline, so there is no anchor to point into.
 		few := []any{map[string]any{"text": blob(150)}, map[string]any{"text": blob(150)}}
 		merged := mustState(map[string]any{"items": few, "item": few[1]})
-		stateJSON, refsJSON, err := New("sqlite").Mint(merged, mustState(map[string]any{}), nil, anchor, 2, nil, &Item{Key: "item", Source: "items", Index: 1})
+		stateJSON, refsJSON, err := New("sqlite").Mint(merged, workflow.NewChanges(), nil, anchor, 2, nil, &Item{Key: "item", Source: "items", Index: 1})
 		assert.NoError(err)
 		refs := mustParse(refsJSON)
 		assert.NotContains(refs, "items")

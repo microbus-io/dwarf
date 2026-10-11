@@ -107,7 +107,7 @@ type terminalTails struct {
 	baseState   workflow.State
 	baseRefs    staterefs.Refs
 	baseLineage int
-	changes     []workflow.State
+	changes     []workflow.Changes
 }
 
 // scan reads one tail row.
@@ -129,11 +129,7 @@ func (t *terminalTails) scan(row interface{ Scan(dest ...any) error }) error {
 		}
 		t.baseState, t.baseRefs, t.baseLineage = baseState, baseRefs, lineageID
 	}
-	changes, err := workflow.NewState(changesJSON)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	t.changes = append(t.changes, changes)
+	t.changes = append(t.changes, changesOf(changesJSON))
 	return nil
 }
 
@@ -307,9 +303,6 @@ func (e *Engine) computeFinalStateFrom(ctx context.Context, db sequel.Executor, 
 	for _, spawnTask := range spawns {
 		stripForEachBookkeeping(merged, graph, spawnTask)
 	}
-	// The final state is a hand-off too: a fan-in tail's description of what its cohort added stays with that
-	// step's row.
-	stampReducers(merged, graph.Reducers())
 
 	data, err := json.Marshal(merged)
 	if err != nil {
@@ -345,7 +338,7 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 		return workflow.State{}, errors.Trace(err)
 	}
 	spawnState, _ := workflow.NewState(spawnStateJSON)
-	spawnChanges, _ := workflow.NewState(spawnChangesJSON)
+	spawnChanges := changesOf(spawnChangesJSON)
 	// FLATTEN: final_state is a flow-boundary value, so everything the spawn carried by reference is materialized
 	// here - unlike the fan-in, which may pass a carried ref through. resolveStateRefs mutates the map in place.
 	spawnRefs, err := staterefs.Parse(spawnRefsJSON)
@@ -381,7 +374,7 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 //
 // It runs only on the path that terminalizes a flow whose fan-out never converged, so reading a cohort per
 // level is affordable.
-func (e *Engine) cohortContributions(ctx context.Context, db sequel.Executor, flowID, cohortSpawnID int, graph *workflow.Graph) ([]workflow.State, error) {
+func (e *Engine) cohortContributions(ctx context.Context, db sequel.Executor, flowID, cohortSpawnID int, graph *workflow.Graph) ([]workflow.Changes, error) {
 	type member struct {
 		cohortMember
 		cohortSize, arrivals, failures int
@@ -407,7 +400,7 @@ func (e *Engine) cohortContributions(ctx context.Context, db sequel.Executor, fl
 		// branch's partial output is not a fact the flow can build on (an error voids the task's changes). An
 		// inner fan-in that did not complete still brings its cohort's part (memberContribution).
 		if m.completed = status == workflow.StatusCompleted; m.completed {
-			m.changes, _ = workflow.NewState(changesJSON)
+			m.changes = changesOf(changesJSON)
 		}
 		members = append(members, m)
 	}
@@ -422,14 +415,14 @@ func (e *Engine) cohortContributions(ctx context.Context, db sequel.Executor, fl
 		asMembers[i] = m.cohortMember
 	}
 	reducers := graph.Reducers()
-	var parts map[int]workflow.State
+	var parts map[int]workflow.Changes
 	if ids := innerFanInIDs(graph, asMembers); len(ids) > 0 {
 		parts, _, err = cohortParts(ctx, db, ids, reducers)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
 	}
-	var contributions []workflow.State
+	var contributions []workflow.Changes
 	for _, m := range members {
 		contribution, ok, err := memberContribution(parts[m.stepID], m.changes, reducers)
 		if err != nil {

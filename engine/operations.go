@@ -109,9 +109,6 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 	if err != nil {
 		return "", errors.Trace(err, http.StatusBadRequest)
 	}
-	if err := rejectMeta(state, "initial state"); err != nil {
-		return "", errors.Trace(err)
-	}
 	// Creation takes a turn like any other database work, and it is the one caller that most needs to: it
 	// arrives at a rate the caller chooses rather than one dispatch sets, so left unordered it competes for
 	// connections against every step already running and wins a share that grows with the offered rate -
@@ -299,7 +296,6 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	if initialState.IsZero() {
 		initialState, _ = workflow.NewState()
 	}
-	stampReducers(initialState, graph.Reducers())
 	stateJSON, err := json.Marshal(initialState)
 	if err != nil {
 		return "", errors.New("initial state is not JSON-marshalable: %v", err, http.StatusBadRequest)
@@ -444,14 +440,11 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 	switch flowStatus {
 	case workflow.StatusCompleted:
 		out.State, _ = workflow.NewState(finalStateJSON)
-		redactMeta(out.State)
 	case workflow.StatusFailed:
 		out.State, _ = workflow.NewState(finalStateJSON)
-		redactMeta(out.State)
 		out.Error = flowErrorMsg
 	case workflow.StatusTerminated, workflow.StatusCancelled:
 		out.State, _ = workflow.NewState(finalStateJSON)
-		redactMeta(out.State)
 		out.TerminateReason, out.CancelReason = splitTerminateCancelReason(flowStatus, flowCancelReason)
 	case workflow.StatusInterrupted:
 		// For interrupted, query the leaf step's state and interrupt payload
@@ -471,7 +464,6 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 		}
 		if err == nil {
 			stepState, _ := workflow.NewState(stepStateJSON)
-			stepChanges, _ := workflow.NewState(stepChangesJSON)
 			// The ref encoding is a storage detail, never API-visible: a caller sees the state the step
 			// actually saw. resolveStateRefs mutates the map in place, so it gets the live map.
 			stepRefs, rerr := staterefs.Parse(stepRefsJSON)
@@ -481,12 +473,15 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 			if rerr != nil {
 				return nil, errors.Trace(rerr)
 			}
-			// The interrupted step's view: its changes so far folded onto its state, through the reducers its
-			// state is tagged with.
-			if err := stepState.Apply(stepChanges, reducersOf(stepState)); err != nil {
+			// The interrupted step's view: its changes so far folded onto its state, through the graph's reducers.
+			graph, _, gerr := e.flowGraph(ctx, db, shardNum, flowID)
+			if gerr != nil {
+				return nil, errors.Trace(gerr)
+			}
+			if err := stepState.Apply(changesOf(stepChangesJSON), graph.Reducers()); err != nil {
 				return nil, errors.Trace(err)
 			}
-			out.State = redactMeta(stepState)
+			out.State = stepState
 			out.InterruptPayload, _ = workflow.NewState(interruptPayloadJSON)
 		}
 	case workflow.StatusRunning, workflow.StatusCreated:

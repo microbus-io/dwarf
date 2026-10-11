@@ -27,7 +27,7 @@ import (
 
 // successorBatchMax is the largest number of successor rows one INSERT carries. Chunks are powers of two up to
 // it, so the statement texts a transition can produce are a fixed handful rather than one per fan-out width.
-// At 21 binds per row, 64 rows stay under SQL Server's 2,100-parameter ceiling, the tightest of the dialects.
+// At 22 binds per row, 64 rows stay under SQL Server's 2,100-parameter ceiling, the tightest of the dialects.
 const successorBatchMax = 64
 
 /*
@@ -38,7 +38,7 @@ id is at or below the flow's cancel_watermark) and the source was not itself cov
 with its successors still to be inserted - while the successor of a step inserted after the Cancel, such as a
 handler that caught the cancellation and everything it leads to, stays unmarked, which is what lets a flow
 recover. Every insert of a step holds the flow row's lock, and Cancel writes the watermark only under it, so the
-read cannot race it. Arguments: the eighteen step columns in order, then the inherit flag, the source step id and
+read cannot race it. Arguments: the nineteen step columns in order, then the inherit flag, the source step id and
 the flow id.
 
 Do not compare timestamps here (the flow's cancel time against the source's started_at). Three dialects store
@@ -46,22 +46,23 @@ milliseconds, and a source that starts in the same millisecond as the Cancel rea
 Cancel - measured at ~1 in 4 runs of TestCancelInTransitionGap on SQLite. Making it inclusive only moves the tie to
 the handler, whose successors would then be cancelled too.
 */
-const successorRowSQL = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?," +
+const successorRowSQL = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?," +
 	" (SELECT CASE WHEN ?=1 AND ? <= cancel_watermark THEN 1 ELSE 0 END FROM dwarf_flows WHERE flow_id=?))"
 
 // successorCols is a successor row's column list, shared by the single-row and multi-row INSERTs.
-const successorCols = "flow_id, step_depth, step_token, task_name, task_url, state, state_refs, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id, cancelling"
+const successorCols = "flow_id, step_depth, step_token, task_name, task_url, state, state_refs, state_reduced, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id, cancelling"
 
 // successorInsertSQL inserts one successor row (successorRowSQL).
 const successorInsertSQL = "INSERT INTO dwarf_steps (" + successorCols + ") VALUES " + successorRowSQL
 
 // successorRow is what differs between the successors one transition inserts.
 type successorRow struct {
-	taskName  string
-	taskURL   string
-	stateJSON []byte
-	refsJSON  []byte
-	ordinal   int
+	taskName    string
+	taskURL     string
+	stateJSON   []byte
+	refsJSON    []byte
+	reducedJSON []byte // the fan-in's state_reduced record; nil stores an empty one
+	ordinal     int
 }
 
 /*
@@ -121,7 +122,7 @@ func (s *successorBatch) queue(b *txBatch, ids *[]int) {
 			continue
 		}
 		tokens := make([]string, n)
-		args := make([]any, 0, n*21)
+		args := make([]any, 0, n*22)
 		for i, r := range rest[:n] {
 			tokens[i] = keys.RandomIdentifier(16)
 			args = append(args, s.rowArgs(r, tokens[i])...)
@@ -164,7 +165,15 @@ func (s *successorBatch) queue(b *txBatch, ids *[]int) {
 // rowArgs are successorRowSQL's arguments for r.
 func (s *successorBatch) rowArgs(r successorRow, token string) []any {
 	return []any{
-		s.flowID, s.stepDepth, token, r.taskName, r.taskURL, r.stateJSON, r.refsJSON, workflow.StatusPending, parkedNone, s.timeBudgetMs, s.lineageID, r.ordinal, s.predecessorID, s.sleepMs, s.priority, s.fairnessKey, s.fairnessWeight, s.engineID,
+		s.flowID, s.stepDepth, token, r.taskName, r.taskURL, r.stateJSON, r.refsJSON, orEmptyJSON(r.reducedJSON), workflow.StatusPending, parkedNone, s.timeBudgetMs, s.lineageID, r.ordinal, s.predecessorID, s.sleepMs, s.priority, s.fairnessKey, s.fairnessWeight, s.engineID,
 		s.inheritCancel, s.predecessorID, s.flowID,
 	}
+}
+
+// orEmptyJSON is b, or an empty JSON object if b is empty.
+func orEmptyJSON(b []byte) []byte {
+	if len(b) == 0 {
+		return emptyJSON
+	}
+	return b
 }

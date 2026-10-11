@@ -83,6 +83,26 @@ func TestLinker_ResolveReadsBothColumns(t *testing.T) {
 	assert.Equal("new", stateVal(state, "shadowed"), "changes shadows state - it is the newer of the two")
 }
 
+// TestLinker_ResolveReadsAnOverwriteBySuffix pins how the anchor's changes name a field the task overwrote:
+// with the overwrite suffix. A carried field whose own name ends with the suffix is never read from such a key.
+func TestLinker_ResolveReadsAnOverwriteBySuffix(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	anchors := &fakeAnchors{rows: map[int]Anchor{
+		7: {
+			State:   cols(map[string]any{"doc!": "the input doc", "doc": "old"}),
+			Changes: cols(map[string]any{"doc!": "overwritten doc"}),
+		},
+	}}
+	state := newState()
+	_, err := New("sqlite").Resolve(ctx, state, Refs{"doc": {Anchor: 7}, "doc!": {Anchor: 7}}, nil, anchors.load)
+	assert.NoError(err)
+	assert.Equal("overwritten doc", stateVal(state, "doc"))
+	assert.Equal("the input doc", stateVal(state, "doc!"))
+}
+
 // TestLinker_ResolveOneRoundTripPerBatch pins the cost model the free tier is priced on. Several fields at
 // one anchor, and several distinct anchors, must all be fetched in ONE Loader call - if resolution degraded
 // to one call per ref, "an already-fetched row's other fields are free" would stop being true and the

@@ -61,12 +61,12 @@ import (
 // Fanning work out across STEPS (a forEach transition) is the first-class way to parallelize, and each
 // branch gets its own Flow.
 type Flow struct {
-	// State: the task's view (input combined with what it wrote) and its delta. reducersOf caches the field
-	// reducers recorded with the input; inBranch says the step runs inside a fan-out branch.
-	state      State
-	changes    State
-	reducersOf map[string]Reducer
-	inBranch   bool
+	// State: the task's view (input combined with what it wrote) and what it wrote. reducers are the graph's
+	// field reducers, which every write combines through; inBranch says the step runs inside a fan-out branch.
+	state    State
+	changes  Changes
+	reducers map[string]Reducer
+	inBranch bool
 
 	// Control
 	gotoNext         string
@@ -111,10 +111,9 @@ type Flow struct {
 // NewFlow creates a new Flow with initialized state.
 func NewFlow() *Flow {
 	state, _ := NewState()
-	changes, _ := NewState()
 	return &Flow{
 		state:   state,
-		changes: changes,
+		changes: NewChanges(),
 	}
 }
 
@@ -234,23 +233,22 @@ func (f *Flow) StepKey() string {
 
 // --- State mutation ---
 
-// A task's output is its changes; state is the in-task working view. Every setter builds a one-field delta and
-// writes it to BOTH: composed into changes (which is what the orchestrator persists) and applied to state (so a
-// later read in the same task sees the field's combined value). On a field the graph declares a reducer for, a
+// A task's output is its changes; state is the in-task working view. Every setter records a one-field Changes
+// and writes it to BOTH: composed into changes (which is what the orchestrator persists) and applied to state (so
+// a later read in the same task sees the field's combined value). On a field the graph declares a reducer for, a
 // write is a contribution: Set adds to the field rather than replacing it, and two Sets in one task both count.
 // Overwrite and Del replace instead.
 
-// write applies a one-field delta to the view and composes it into changes, leaving both untouched on error.
-func (f *Flow) write(name string, delta State) error {
-	reducers := f.reducers()
+// write applies a one-field Changes to the view and composes it into changes, leaving both untouched on error.
+func (f *Flow) write(name string, one Changes) error {
 	prev, had := f.state.d[name]
-	if err := f.state.Apply(delta, reducers); err != nil {
+	if err := f.state.Apply(one, f.reducers); err != nil {
 		return errors.Trace(err)
 	}
 	if f.changes.IsZero() {
-		f.changes, _ = NewState()
+		f.changes = NewChanges()
 	}
-	if err := f.changes.Compose(delta, reducers); err != nil {
+	if err := f.changes.Compose(one, f.reducers); err != nil {
 		if had {
 			f.state.d[name] = prev
 		} else {
@@ -259,19 +257,6 @@ func (f *Flow) write(name string, delta State) error {
 		return errors.Trace(err)
 	}
 	return nil
-}
-
-// reducers returns the field reducers recorded with the flow's input state.
-func (f *Flow) reducers() map[string]Reducer {
-	if f.reducersOf == nil {
-		f.reducersOf = map[string]Reducer{}
-		for k, fm := range f.state.Meta() {
-			if fm.Reducer != "" {
-				f.reducersOf[k] = fm.Reducer
-			}
-		}
-	}
-	return f.reducersOf
 }
 
 // Set writes a state field. Use this for complex types (structs, maps, etc.).
@@ -283,16 +268,13 @@ func (f *Flow) reducers() map[string]Reducer {
 // replace such a field.
 //
 // It returns an error if the value cannot be marshalled to JSON (a NaN, an +Inf, a channel), if the reducer
-// cannot combine it with the field's value (a string under ReducerAdd), or if name is MetaKey.
+// cannot combine it with the field's value (a string under ReducerAdd), or if name ends with OverwriteSuffix.
 func (f *Flow) Set(name string, value any) error {
-	if name == MetaKey {
-		return errors.New("workflow: state field name %q is reserved", name)
-	}
-	delta := State{d: map[string]json.RawMessage{}}
-	if err := delta.Set(name, value); err != nil {
+	one := NewChanges()
+	if err := one.Set(name, value, f.reducers); err != nil {
 		return errors.Trace(err)
 	}
-	return f.write(name, delta)
+	return f.write(name, one)
 }
 
 // mustSet is Set for the typed setters, which have no error to return. A value of a primitive type always
@@ -328,32 +310,30 @@ func (f *Flow) SetDuration(name string, value time.Duration) { f.mustSet(name, v
 //
 // Overwriting a reduced field is not allowed inside a fan-out branch, at any depth: the branches are parallel,
 // and a reset in one of them has no defined meaning for the others. It returns an error there, and the step
-// fails if the call is made anyway. A field with no reducer can be overwritten anywhere.
+// fails if the call is made anyway. A field with no reducer can be overwritten anywhere. It also returns an
+// error if the value cannot be marshalled or name ends with OverwriteSuffix.
 func (f *Flow) Overwrite(name string, value any) error {
-	if name == MetaKey {
-		return errors.New("workflow: state field name %q is reserved", name)
-	}
-	if r := f.reducers()[name]; f.inBranch && r != "" && r != ReducerReplace {
+	if r := f.reducers[name]; f.inBranch && r != "" && r != ReducerReplace {
 		return errors.New("workflow: cannot overwrite reduced field %q inside a fan-out branch", name)
 	}
-	delta := State{d: map[string]json.RawMessage{}}
-	if err := delta.Overwrite(name, value); err != nil {
+	one := NewChanges()
+	if err := one.Overwrite(name, value); err != nil {
 		return errors.Trace(err)
 	}
-	return f.write(name, delta)
+	return f.write(name, one)
 }
 
 // Del deletes the listed state fields, whatever reducer they have: it is Overwrite with nil. Later reads in the
 // task see each field as absent. Deleting a reduced field inside a fan-out branch fails the step, as Overwrite
-// does.
+// does. A name ending with OverwriteSuffix cannot be written, and panics like a typed setter's error, which
+// the orchestrator turns into a failure of the step.
 func (f *Flow) Del(names ...string) {
 	for _, n := range names {
-		if n == MetaKey {
-			continue
+		one := NewChanges()
+		if err := one.Overwrite(n, nil); err != nil {
+			panic(errors.Trace(err))
 		}
-		delta := State{d: map[string]json.RawMessage{}}
-		_ = delta.Overwrite(n, nil)
-		_ = f.write(n, delta) // a delete combines with nothing, so it cannot fail
+		_ = f.write(n, one) // a delete combines with nothing, so it cannot fail
 	}
 }
 
@@ -370,11 +350,8 @@ func (f *Flow) Clear() {
 //
 // The copy is independent of the flow, so writing to the flow afterwards does not disturb it. It does not
 // materialize field values, so snapshotting a large carried payload costs a map entry rather than the payload.
-// The state's metadata is not included.
 func (f *Flow) Snapshot() State {
-	snapshot := f.state.Clone()
-	snapshot.SetMeta(nil)
-	return snapshot
+	return f.state.Clone()
 }
 
 // SetChanges sets each field of source exactly as Set would, one by one. source is any value that marshals to a
@@ -394,7 +371,7 @@ func (f *Flow) SetChanges(source any) error {
 		return errors.New("SetChanges: source must marshal to a JSON object")
 	}
 	if f.changes.IsZero() {
-		f.changes, _ = NewState()
+		f.changes = NewChanges()
 	}
 	if f.state.IsZero() {
 		f.state, _ = NewState()
@@ -605,30 +582,31 @@ func (f *Flow) Sleep(duration time.Duration) {
 
 // flowJSON is the wire format for Flow.
 type flowJSON struct {
-	FlowKey                string        `json:"flowKey,omitzero"`
-	StepKey                string        `json:"stepKey,omitzero"`
-	State                  State         `json:"state,omitzero"`
-	Changes                State         `json:"changes,omitzero"`
-	Goto                   string        `json:"goto,omitzero"`
-	Retry                  bool          `json:"retry,omitzero"`
-	SleepDuration          time.Duration `json:"sleepDuration,omitzero"`
-	Interrupt              bool          `json:"interrupt,omitzero"`
-	InterruptPayload       State         `json:"interruptPayload,omitzero"`
-	SubgraphURL            string        `json:"subgraphURL,omitzero"`
-	SubgraphInput          State         `json:"subgraphInput,omitzero"`
-	InterruptDone          bool          `json:"interruptDone,omitzero"`
-	ResumeData             State         `json:"resumeData,omitzero"`
-	SubgraphDone           bool          `json:"subgraphDone,omitzero"`
-	SubgraphResult         State         `json:"subgraphResult,omitzero"`
-	SubgraphError          string        `json:"subgraphError,omitzero"`
-	Attempt                int           `json:"attempt,omitzero"`
-	BackoffInitialDelay    time.Duration `json:"backoffInitialDelay,omitzero"`
-	BackoffDelayMultiplier float64       `json:"backoffDelayMultiplier,omitzero"`
-	BackoffMaxDelay        time.Duration `json:"backoffMaxDelay,omitzero"`
-	CreatedAt              time.Time     `json:"createdAt,omitzero"`
-	UpdatedAt              time.Time     `json:"updatedAt,omitzero"`
-	StepCreatedAt          time.Time     `json:"stepCreatedAt,omitzero"`
-	InBranch               bool          `json:"inBranch,omitzero"`
+	FlowKey                string             `json:"flowKey,omitzero"`
+	StepKey                string             `json:"stepKey,omitzero"`
+	State                  State              `json:"state,omitzero"`
+	Reducers               map[string]Reducer `json:"reducers,omitzero"`
+	Changes                Changes            `json:"changes,omitzero"`
+	Goto                   string             `json:"goto,omitzero"`
+	Retry                  bool               `json:"retry,omitzero"`
+	SleepDuration          time.Duration      `json:"sleepDuration,omitzero"`
+	Interrupt              bool               `json:"interrupt,omitzero"`
+	InterruptPayload       State              `json:"interruptPayload,omitzero"`
+	SubgraphURL            string             `json:"subgraphURL,omitzero"`
+	SubgraphInput          State              `json:"subgraphInput,omitzero"`
+	InterruptDone          bool               `json:"interruptDone,omitzero"`
+	ResumeData             State              `json:"resumeData,omitzero"`
+	SubgraphDone           bool               `json:"subgraphDone,omitzero"`
+	SubgraphResult         State              `json:"subgraphResult,omitzero"`
+	SubgraphError          string             `json:"subgraphError,omitzero"`
+	Attempt                int                `json:"attempt,omitzero"`
+	BackoffInitialDelay    time.Duration      `json:"backoffInitialDelay,omitzero"`
+	BackoffDelayMultiplier float64            `json:"backoffDelayMultiplier,omitzero"`
+	BackoffMaxDelay        time.Duration      `json:"backoffMaxDelay,omitzero"`
+	CreatedAt              time.Time          `json:"createdAt,omitzero"`
+	UpdatedAt              time.Time          `json:"updatedAt,omitzero"`
+	StepCreatedAt          time.Time          `json:"stepCreatedAt,omitzero"`
+	InBranch               bool               `json:"inBranch,omitzero"`
 }
 
 // MarshalJSON serializes the Flow including private fields.
@@ -637,6 +615,7 @@ func (f *Flow) MarshalJSON() ([]byte, error) {
 		FlowKey:                f.flowKey,
 		StepKey:                f.stepKey,
 		State:                  f.state,
+		Reducers:               f.reducers,
 		Changes:                f.changes,
 		Goto:                   f.gotoNext,
 		Retry:                  f.retry,
@@ -677,8 +656,9 @@ func (f *Flow) UnmarshalJSON(data []byte) error {
 		f.state, _ = NewState()
 	}
 	if f.changes.IsZero() {
-		f.changes, _ = NewState()
+		f.changes = NewChanges()
 	}
+	f.reducers = wire.Reducers
 	f.gotoNext = wire.Goto
 	f.retry = wire.Retry
 	f.sleepDuration = wire.SleepDuration
@@ -699,6 +679,5 @@ func (f *Flow) UnmarshalJSON(data []byte) error {
 	f.updatedAt = wire.UpdatedAt
 	f.stepCreatedAt = wire.StepCreatedAt
 	f.inBranch = wire.InBranch
-	f.reducersOf = nil
 	return nil
 }

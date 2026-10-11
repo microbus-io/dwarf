@@ -57,7 +57,7 @@ func FuzzStateApply(f *testing.F) {
 			reducers[k] = fuzzReducers[i%len(fuzzReducers)]
 			i++
 		}
-		if err := base.Apply(incoming, reducers); err != nil {
+		if err := base.Apply(ChangesOf(incoming), reducers); err != nil {
 			return // rejected inputs are fine; panics are not
 		}
 		for k := range base.Names() {

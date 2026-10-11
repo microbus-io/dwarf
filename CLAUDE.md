@@ -153,13 +153,15 @@ matching one before working there:**
   Go value that has not been marshalled. A **byte-comparing reducer** (comparing raw array elements instead of
   decoding them - the standing plan for `union`/`append`) would have to canonicalize what it compares; the
   stored bytes do not give it that. (`workflow/CLAUDE.md`)
-- **State delete and overwrite are MARKS, not values:** `flow.Del`/`Overwrite` record `"k": {"overwrite": true}`
-  in the delta's `__meta__` (a delete with `k` absent from the values), and `State.Apply` enacts them; a
-  materialized state holds no deletes. A JSON `null` VALUE still means "nothing" - it deletes a field with no
-  reducer and is the reducer's identity on a reduced field - so `isCleared` must recognize both null spellings (a
-  Go-nil `json.RawMessage` and the bytes `null`) or a null read back from a column stops meaning that. A task's
-  `changes` may carry nothing else in `__meta__`, and no overwrite of a reduced field inside a fan-out branch
-  (`checkDeltaMeta`). (`workflow/CLAUDE.md`)
+- **A step's `changes` is `workflow.Changes`, and an overwrite is its field name with a `!` suffix:**
+  `{"log": ["m"], "summary!": "trimmed", "scratch!": null}` contributes to `log`, replaces `summary` and deletes
+  `scratch`. Decode a `changes` column with `changesOf` (engine) / `Changes.UnmarshalJSON`, never as a plain
+  `State`, which reads `summary!` as a field of its own. `State.Apply` enacts overwrites, so a materialized state
+  holds no deletes. A null CONTRIBUTION still means "nothing" - it deletes a field with no reducer and is the
+  reducer's identity on a reduced field - so `isCleared` must recognize both null spellings (a Go-nil
+  `json.RawMessage` and the bytes `null`). A task may not write a name ending in `!`, nor overwrite a reduced
+  field inside a fan-out branch (`checkChanges`). Reducers are read from the graph, never stored.
+  (`workflow/CLAUDE.md`)
 - **Two problem values are KNOWN and currently UNGUARDED - a deliberate, backlogged punt.** Nothing checks
   storability on the write side, by decision, not oversight. (1) An integer-shaped value beyond **±2^53**.
   **STORAGE IS EXACT** - raw-field storage means a carried field is never decoded, so it round-trips

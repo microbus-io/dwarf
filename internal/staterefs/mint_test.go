@@ -118,7 +118,7 @@ func TestLinker_MintTiers(t *testing.T) {
 	mint := func(t *testing.T, state workflow.State, changes workflow.State, inherited Refs, successors int) (workflow.State, Refs) {
 		t.Helper()
 		assert := testarossa.For(t)
-		stateJSON, refsJSON, err := New("sqlite").Mint(state, changes, inherited, anchor, successors, nil, nil)
+		stateJSON, refsJSON, err := New("sqlite").Mint(state, workflow.ChangesOf(changes), inherited, anchor, successors, nil, nil)
 		assert.NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)
@@ -225,7 +225,7 @@ func TestLinker_MintTiers(t *testing.T) {
 		// dangle. Even a huge element stays inline. (The same inlineOnly set carries a cohort member's contribution
 		// past the fan-in's mint, whose bytes are likewise not in the anchor's row.)
 		state := mustState(map[string]any{"item": blob(50000), "doc": blob(50000)})
-		stateJSON, refsJSON, err := New("sqlite").Mint(state, mustState(map[string]any{}), nil, anchor, 32, map[string]bool{"item": true}, nil)
+		stateJSON, refsJSON, err := New("sqlite").Mint(state, workflow.ChangesOf(mustState(map[string]any{})), nil, anchor, 32, map[string]bool{"item": true}, nil)
 		assert.NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)
@@ -251,7 +251,7 @@ func TestLinker_MintTiers(t *testing.T) {
 
 		// PostgreSQL: jsonb stores this array ~4.7x larger than its text length, which the dialect factor
 		// corrects for, so the array refs.
-		stateJSON, refsJSON, err := New("pgx").Mint(state, mustState(map[string]any{}), nil, anchor, 64, noRef, nil)
+		stateJSON, refsJSON, err := New("pgx").Mint(state, workflow.ChangesOf(mustState(map[string]any{})), nil, anchor, 64, noRef, nil)
 		assert.NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)
@@ -349,27 +349,4 @@ func stateVal(s workflow.State, name string) any {
 	var v any
 	_, _ = s.Get(name, &v)
 	return v
-}
-
-func TestLinker_MintKeepsMeta(t *testing.T) {
-	assert := testarossa.For(t)
-
-	tags := map[string]workflow.FieldMeta{"log": {Reducer: workflow.ReducerAppend}}
-	state := mustState(map[string]any{"doc": strings.Repeat("x", 100_000), "small": 1})
-	state.SetMeta(tags)
-
-	// The large field is ref'd and the small one inlined; the metadata is stored either way, and is never a
-	// ref candidate itself.
-	stateJSON, refsJSON, err := New("sqlite").Mint(state, mustState(map[string]any{}), nil, 7, 1, nil, nil)
-	assert.NoError(err)
-	refs := mustParse(refsJSON)
-	_, docRefd := refs["doc"]
-	assert.True(docRefd)
-	_, metaRefd := refs[workflow.MetaKey]
-	assert.False(metaRefd)
-	stored := mustState(nil)
-	assert.NoError(stored.UnmarshalJSON(stateJSON))
-	assert.Equal(tags, stored.Meta())
-	assert.False(stored.Has("doc"))
-	assert.True(stored.Has("small"))
 }

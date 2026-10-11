@@ -55,7 +55,7 @@ input for large elements, `D/(1+D)` for mid-size ones. Task outputs (`changes`) 
 - **The split cache (`Linker.splits`) is required, not an optimization.** A plain ref is spliced without being
   decoded, so a branch never scans the array; extracting an element does. Without a cached split every branch
   scans the whole array for its one element - O(N) per branch, **O(N²) per cohort**. The splitter returns
-  sub-slices of the cached bytes (no copy), safe to share for the same reason invariant 7 is. **Do not swap it
+  sub-slices of the cached bytes (no copy), safe to share for the same reason invariant 6 is. **Do not swap it
   for `json.Unmarshal` into `[]json.RawMessage`:** that copies every element, so a cached array (a document's
   page images, say) is held twice. The sub-slices are capped (`data[start:i:i]`), so an `append` onto one
   cannot overwrite the next element in the shared bytes.
@@ -126,8 +126,9 @@ both measure ~1x, so the ambiguity is moot and no server-version probe is needed
 
 ## Invariants that cost bugs to find
 
-1. **Refs live only in `state`, never in `changes`.** `changes` is always a task's literal output or a
-   reducer's literal result. That is what makes one refs column sufficient and the changes-shadows-state rule
+1. **Refs live only in `state`, never in `changes`.** `changes` always holds a task's writes as literal
+   values - an overwrite's new value, or a contribution to a reduced field (whose folded result is never
+   anchored at the step that wrote it). That is what makes one refs column sufficient and the changes-shadows-state rule
    safe — there is no case where both sides are indirections.
 2. **Refs are ONE HOP** - item refs included: an item ref points at literal array bytes at its anchor, never at
    another ref. This mostly holds by construction (a ref is a few bytes, so it never trips the size
@@ -141,7 +142,9 @@ both measure ~1x, so the ambiguity is moot and no server-version probe is needed
    and it is the headline case); a **reducer's output** → the `state` of the step that RECEIVED it (a fold's
    value exists nowhere else: not in the folding step's `state`, which predates it, nor its `changes`, which
    hold the delta). That is why the caller passes a step's folded fields as `inlineOnly`. A changes-only resolver silently misses the last two. Pinned by
-   `TestLinker_ResolveReadsBothColumns`.
+   `TestLinker_ResolveReadsBothColumns`. In `changes` a field the task OVERWROTE is stored as `field!`
+   (`workflow.OverwriteSuffix`), so the lookup tries that spelling first; a resolver that tries only `field`
+   misses every overwritten anchor (`TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue` fails).
 4. **A carried ref absent from `merged` must still be re-emitted.** The fan-in resolves only what its reducers
    fold, so a merely-carried ref's key is absent from `merged` and `Mint`'s main candidate loop never sees it.
    Omitting the trailing carry-forward silently dropped the field from the fan-in step onward and from
@@ -150,10 +153,7 @@ both measure ~1x, so the ambiguity is moot and no server-version probe is needed
 5. **`inlineExcessAnchors` must never drop an un-inlineable carried ref.** Its literal is not in `merged` to
    inline back, so dropping it would delete the field outright. Such an anchor is *pinned* past the
    `maxAnchors` cap — correctness over the perf bound.
-6. **`Mint` copies the state's metadata (`workflow.MetaKey`) across explicitly.** It rebuilds the stored
-   state from `Names`, which hides the metadata, so without the copy every successor row loses its tags.
-   The metadata is never a ref candidate. Pinned by `TestLinker_MintKeepsMeta`.
-7. **The cache holds BYTES, never decoded values — and `Resolve` splices those bytes STRAIGHT INTO
+6. **The cache holds BYTES, never decoded values — and `Resolve` splices those bytes STRAIGHT INTO
    state rather than decoding them.** `State` holds a field as raw JSON until something reads it
    (`SetJSON`), so resolving a ref costs the field's byte length instead of the several times that
    its decoded Go form occupies. This is where the two designs meet: refs already collapse N branches onto

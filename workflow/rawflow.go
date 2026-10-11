@@ -40,16 +40,19 @@ func (f *RawFlow) RawState() State {
 	return f.state.Clone()
 }
 
-// RawChanges returns a copy of the raw changes.
-func (f *RawFlow) RawChanges() State {
+// RawChanges returns a copy of what the task wrote.
+func (f *RawFlow) RawChanges() Changes {
 	return f.changes.Clone()
 }
 
-// SetRawState replaces the entire state with a copy of the given state, without tracking changes. The field
-// reducers the task's writes combine through are read from the state's metadata.
+// SetRawState replaces the entire state with a copy of the given state, without tracking changes.
 func (f *RawFlow) SetRawState(state State) {
 	f.state = state.Clone()
-	f.reducersOf = nil
+}
+
+// SetReducers sets the field reducers the task's writes combine through - the graph's.
+func (f *RawFlow) SetReducers(reducers map[string]Reducer) {
+	f.reducers = reducers
 }
 
 // SetInBranch records whether the step runs inside a fan-out branch, where overwriting a reduced field is not
@@ -58,8 +61,8 @@ func (f *RawFlow) SetInBranch(inBranch bool) {
 	f.inBranch = inBranch
 }
 
-// SetRawChanges replaces the entire changes with a copy of the given changes.
-func (f *RawFlow) SetRawChanges(changes State) {
+// SetRawChanges replaces what the task has written with a copy of the given changes.
+func (f *RawFlow) SetRawChanges(changes Changes) {
 	f.changes = changes.Clone()
 }
 

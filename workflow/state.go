@@ -48,47 +48,11 @@ import (
 // or through Get with a typed target and you get the type you asked for; only an untyped read is
 // float64-domain. Carry an integer that exceeds 2^53 as a string.
 //
-// # Metadata
-//
-// A State may also carry metadata about its fields, such as the reducer a field is declared with (see Meta).
-// The orchestrator maintains it. It travels with the state's JSON under the reserved name MetaKey, but it is
-// not a field: Names, Len, Get, GetJSON, Has and Parse do not see it, Set rejects the name, and Apply never
-// takes it from the incoming State.
-//
 // A zero State is empty and safe to read (Get, Has, Len, Names, MarshalJSON all work on it), but the
 // mutating methods do not allocate, so one must be initialized via NewState or UnmarshalJSON before
 // Set/Apply.
 type State struct {
 	d map[string]json.RawMessage
-}
-
-// MetaKey is the reserved name under which a State's JSON carries its per-field metadata. No field may have
-// this name.
-const MetaKey = "__meta__"
-
-// FieldMeta is what a State records about one of its fields beyond its value. A field may have metadata
-// without having a value, such as a reduced field nothing has written yet.
-type FieldMeta struct {
-	// Reducer is the reducer the field is declared with. Empty means ReducerReplace.
-	Reducer Reducer `json:"reducer,omitempty"`
-	// Reduced is set only on the state of a fan-in step, for a field its cohort wrote, and describes which
-	// part of the field's value the cohort added.
-	Reduced *Reduced `json:"reduced,omitempty"`
-	// Overwrite is set only in a delta, on a field the delta replaces rather than combines (see Overwrite).
-	Overwrite bool `json:"overwrite,omitempty"`
-}
-
-// Reduced describes which part of a fan-in step's value for a field its cohort added. Exactly one form is
-// set, chosen by the field's reducer:
-//   - From, for append, union and concat: the cohort's part starts at this offset into the value (array
-//     elements, or bytes of a concat string);
-//   - Keys, for merge: the keys the cohort wrote; and for a field with no reducer, an empty list meaning only
-//     that the cohort wrote it;
-//   - Value, for add, min, max, and and or: the cohort's combined contribution itself.
-type Reduced struct {
-	From  *int            `json:"from,omitempty"`
-	Keys  []string        `json:"keys,omitzero"`
-	Value json.RawMessage `json:"value,omitzero"`
 }
 
 // NewState builds a State from its arguments, in one of two mutually exclusive modes.
@@ -163,12 +127,8 @@ func NewState(data ...any) (State, error) {
 // database. So a task that stores an int reads it back as an int via GetInt, but a plain Get into an any
 // sees a float64 - JSON has one number type, and the typed getters coerce. The stored bytes are the State's
 // own, so a later mutation of the caller's value cannot change what was stored. Returns an error only if
-// value cannot be marshalled (a NaN, an +Inf, a channel), is a json.RawMessage that is not valid JSON, or
-// name is MetaKey.
+// value cannot be marshalled (a NaN, an +Inf, a channel) or is a json.RawMessage that is not valid JSON.
 func (s State) Set(name string, value any) error {
-	if name == MetaKey {
-		return errors.New("workflow: state field name %q is reserved", name)
-	}
 	// A json.RawMessage is already JSON and is stored as-is, validated but not decoded. A []byte is NOT -
 	// it is binary data and marshals to a base64 string, which is what a caller storing a blob wants. The
 	// two are distinguished by TYPE, so a call site cannot pick the wrong one by accident.
@@ -215,28 +175,19 @@ func (s State) mustSet(name string, value any) {
 
 // Len returns the number of fields in the state.
 func (s State) Len() int {
-	if _, ok := s.d[MetaKey]; ok {
-		return len(s.d) - 1
-	}
 	return len(s.d)
 }
 
 // Del removes the named fields. Names that are not present are ignored.
 func (s State) Del(names ...string) {
 	for _, name := range names {
-		if name != MetaKey {
-			delete(s.d, name)
-		}
+		delete(s.d, name)
 	}
 }
 
-// Clear removes every field, leaving a State with no fields. Its metadata is kept.
+// Clear removes every field, leaving a State with no fields.
 func (s State) Clear() {
-	meta, ok := s.d[MetaKey]
 	clear(s.d)
-	if ok {
-		s.d[MetaKey] = meta
-	}
 }
 
 // decodeValue turns a stored field into a Go value. An absent or cleared field decodes to nil, which is
@@ -274,9 +225,6 @@ func decodeValue(raw json.RawMessage) (any, error) {
 func (s State) Names() iter.Seq[string] {
 	return func(yield func(string) bool) {
 		for k := range s.d {
-			if k == MetaKey {
-				continue
-			}
 			if !yield(k) {
 				return
 			}
@@ -297,9 +245,6 @@ func (s State) IsZero() bool {
 //
 // The returned slice is the state's own. Do not modify it.
 func (s State) GetJSON(name string) json.RawMessage {
-	if name == MetaKey {
-		return nil
-	}
 	return s.d[name]
 }
 
@@ -312,8 +257,6 @@ func (s State) GetJSON(name string) json.RawMessage {
 // json.RawMessage rather than []byte is deliberate and is the same distinction Set draws: a []byte is binary
 // data and belongs in a base64 string, a json.RawMessage is JSON. The type says which, so the compiler
 // keeps a call site honest.
-//
-// name must not be MetaKey.
 func (s State) SetJSON(name string, data json.RawMessage) {
 	s.d[name] = data
 }
@@ -327,7 +270,7 @@ func (s State) SetJSON(name string, data json.RawMessage) {
 // getters (GetInt, ...) panic on the same mismatch instead.
 func (s State) Get(name string, target any) (ok bool, err error) {
 	raw, exists := s.d[name]
-	if !exists || isCleared(raw) || name == MetaKey {
+	if !exists || isCleared(raw) {
 		return false, nil
 	}
 	if err := json.Unmarshal(raw, target); err != nil {
@@ -405,25 +348,14 @@ func (s State) GetDuration(name string) time.Duration {
 // a caller asking "is there something here to read" wants - see IsDeleted for the other question.
 func (s State) Has(name string) bool {
 	v, ok := s.d[name]
-	return ok && !isCleared(v) && name != MetaKey
+	return ok && !isCleared(v)
 }
 
-// IsDeleted reports whether this State, used as a delta, deletes the field: it records the field as
-// overwritten with no value (see Overwrite), or holds a JSON null for it. It is false both for a field holding
-// a value and for one the delta does not write at all; Has answers the first, and neither being true means
-// the second. Del removes the field outright rather than recording a delete, so a field removed with Del is
-// indistinguishable from one never mentioned.
-//
-// A delta is the only place this is observable: a materialized state has its deletes enacted.
+// IsDeleted reports whether the field is present and holds a JSON null - what Set(name, nil) stores. Applied as
+// a contribution (see Changes), a null deletes a field with no reducer and is a reducer's identity otherwise.
 func (s State) IsDeleted(name string) bool {
-	if name == MetaKey {
-		return false
-	}
 	v, ok := s.d[name]
-	if ok {
-		return isCleared(v)
-	}
-	return s.IsOverwritten(name)
+	return ok && isCleared(v)
 }
 
 // Parse unmarshals the state's fields into target, typically a pointer to a struct whose fields are matched
@@ -435,10 +367,10 @@ func (s State) Parse(target any) error {
 		return nil
 	}
 	// A cleared field is skipped rather than handed to the decoder as a null, which would reset a pointer,
-	// slice, map or interface field the caller had set. The metadata is not a field.
+	// slice, map or interface field the caller had set.
 	live := s.d
 	for k, v := range s.d {
-		if isCleared(v) || k == MetaKey {
+		if isCleared(v) {
 			if len(live) == len(s.d) {
 				live = maps.Clone(s.d)
 			}
@@ -458,7 +390,7 @@ func (s State) Parse(target any) error {
 // large carried field cost a map entry rather than the field.
 //
 //	safe := state.Clone()
-//	if err := state.Apply(delta, reducers); err != nil {
+//	if err := state.Apply(changes, reducers); err != nil {
 //	    state = safe // roll back to the state before the failed fold
 //	}
 func (s State) Clone() State {
@@ -467,24 +399,24 @@ func (s State) Clone() State {
 	return clone
 }
 
-// Apply folds a delta onto this State, mutating the receiver. It is ApplyAll of one delta.
-func (s State) Apply(delta State, reducers map[string]Reducer) error {
-	return s.ApplyAll([]State{delta}, reducers)
+// Apply folds a step's changes onto this State, mutating the receiver. It is ApplyAll of one Changes.
+func (s State) Apply(c Changes, reducers map[string]Reducer) error {
+	return s.ApplyAll([]Changes{c}, reducers)
 }
 
-// ApplyAll folds deltas onto this State in order, mutating the receiver. A delta is what a step writes: a value
-// per field it wrote, and a mark (see Overwrite) on each field it overwrote or deleted. For each field:
+// ApplyAll folds several steps' changes onto this State in order, mutating the receiver. For each field:
 //
-//   - a field marked as overwritten takes the delta's value, or is removed if the delta holds none;
-//   - a field with no reducer, or ReducerReplace, takes the delta's value, or is removed if it is null;
-//   - any other field is combined through its reducer, whose base is this State's current value or nil if it
-//     holds none. A null contributes nothing: it is the reducer's identity.
+//   - an overwrite takes the new value, or removes the field if the value is null;
+//   - a contribution to a field with no reducer, or ReducerReplace, takes the new value, or removes the field
+//     if the value is null;
+//   - a contribution to any other field is combined through its reducer, whose base is this State's current
+//     value or nil if it holds none. A null contributes nothing: it is the reducer's identity.
 //
-// The receiver's metadata is kept, and the deltas' is consumed rather than copied. Pass nil reducers to replace
-// every field. Each combined field is decoded once and encoded once whatever the number of deltas, because a
-// combining reducer re-encodes its accumulator, and folding per delta would be quadratic in the accumulated
-// bytes across a wide fan-in. On a reducer error the receiver is left partly folded; discard it.
-func (s State) ApplyAll(deltas []State, reducers map[string]Reducer) error {
+// Pass nil reducers to replace every field. Each combined field is decoded once and encoded once whatever the
+// number of changes, because a combining reducer re-encodes its accumulator, and folding per member would be
+// quadratic in the accumulated bytes across a wide fan-in. On a reducer error the receiver is left partly
+// folded; discard it.
+func (s State) ApplyAll(cs []Changes, reducers map[string]Reducer) error {
 	acc := map[string]any{}
 	decoded := map[string]bool{}
 	set := func(k string, v json.RawMessage) {
@@ -496,14 +428,10 @@ func (s State) ApplyAll(deltas []State, reducers map[string]Reducer) error {
 			s.d[k] = v
 		}
 	}
-	for _, d := range deltas {
-		overwritten := d.overwritten()
-		for k, v := range d.d {
-			if k == MetaKey {
-				continue
-			}
+	for _, c := range cs {
+		for k, v := range c.contributions.d {
 			r := reducers[k]
-			if overwritten[k] || r == "" || r == ReducerReplace {
+			if r == "" || r == ReducerReplace {
 				set(k, v)
 				continue
 			}
@@ -514,6 +442,11 @@ func (s State) ApplyAll(deltas []State, reducers map[string]Reducer) error {
 				base, err := decodeValue(s.d[k])
 				if err != nil {
 					return errors.New("reducer '%s' for field %q: %w", string(r), k, err)
+				}
+				if base == nil && (r == ReducerAppend || r == ReducerUnion) {
+					// Onto nothing, a single value would start a typed list ([]string) that a later member's
+					// decoded []any cannot extend; Apply per member never sees it, re-encoding in between.
+					base = []any{}
 				}
 				acc[k], decoded[k] = base, true
 			}
@@ -527,10 +460,8 @@ func (s State) ApplyAll(deltas []State, reducers map[string]Reducer) error {
 			}
 			acc[k] = result
 		}
-		for k := range overwritten {
-			if _, written := d.d[k]; !written {
-				set(k, nil)
-			}
+		for k, v := range c.overwrites.d {
+			set(k, v)
 		}
 	}
 	for k := range decoded {
@@ -541,176 +472,6 @@ func (s State) ApplyAll(deltas []State, reducers map[string]Reducer) error {
 		s.d[k] = encoded
 	}
 	return nil
-}
-
-// Compose folds a later delta onto this one, mutating the receiver, so that applying the result equals applying
-// the two in turn. A field the later delta overwrites is overwritten in the result. A later write to a field the
-// receiver overwrote folds onto the overwritten value, and the field stays overwritten. Two writes to a reduced
-// field combine through its reducer, the first onto nil, so a single value under ReducerAppend becomes a list. On
-// a reducer error the receiver is left partly composed; discard it.
-func (s State) Compose(later State, reducers map[string]Reducer) error {
-	marks := s.overwritten()
-	laterMarks := later.overwritten()
-	for k, v := range later.d {
-		if k == MetaKey {
-			continue
-		}
-		r := reducers[k]
-		switch {
-		case laterMarks[k], (r == "" || r == ReducerReplace) && isCleared(v):
-			// An overwrite, or a delete of a plain field, which is an overwrite with nothing.
-			marks[k] = true
-			if isCleared(v) {
-				delete(s.d, k)
-			} else {
-				s.d[k] = v
-			}
-		case r == "" || r == ReducerReplace:
-			s.d[k] = v
-		case isCleared(v):
-			// The reducer's identity.
-		default:
-			base, err := decodeValue(s.d[k])
-			if err != nil {
-				return errors.New("reducer '%s' for field %q: %w", string(r), k, err)
-			}
-			if _, isList := base.([]any); base != nil && !isList && !marks[k] && (r == ReducerAppend || r == ReducerUnion) {
-				// A delta's value is the fold of its writes onto nothing, which under append and union is a list;
-				// an older writer may have stored a bare value, which is the one-element list it stands for.
-				base = []any{base}
-			}
-			inc, err := decodeValue(v)
-			if err != nil {
-				return errors.New("reducer '%s' for field %q: %w", string(r), k, err)
-			}
-			result, err := r.Reduce(base, inc)
-			if err != nil {
-				return errors.New("reducer '%s' for field %q: %w", string(r), k, err)
-			}
-			encoded, err := json.Marshal(result)
-			if err != nil {
-				return errors.New("reducer for field %q: %w", k, err)
-			}
-			s.d[k] = encoded
-		}
-	}
-	for k := range laterMarks {
-		if _, written := later.d[k]; !written {
-			marks[k] = true
-			delete(s.d, k)
-		}
-	}
-	s.setOverwritten(marks)
-	return nil
-}
-
-// Overwrite records, in this State used as a delta, that the field is replaced by value rather than combined
-// through its reducer. A nil value records a delete. See Apply.
-func (s State) Overwrite(name string, value any) error {
-	if name == MetaKey {
-		return errors.New("workflow: state field name %q is reserved", name)
-	}
-	if value == nil {
-		delete(s.d, name)
-	} else if err := s.Set(name, value); err != nil {
-		return errors.Trace(err)
-	}
-	marks := s.overwritten()
-	marks[name] = true
-	s.setOverwritten(marks)
-	return nil
-}
-
-// IsOverwritten reports whether this State, used as a delta, records the field as overwritten or deleted.
-func (s State) IsOverwritten(name string) bool {
-	return s.overwritten()[name]
-}
-
-// Writes iterates the fields this State, used as a delta, writes: every field it holds a value for, and every
-// field it records as overwritten or deleted. Order is unspecified.
-func (s State) Writes() iter.Seq[string] {
-	return func(yield func(string) bool) {
-		for k := range s.Names() {
-			if !yield(k) {
-				return
-			}
-		}
-		for k := range s.overwritten() {
-			if _, ok := s.d[k]; ok {
-				continue
-			}
-			if !yield(k) {
-				return
-			}
-		}
-	}
-}
-
-// overwritten returns the set of fields the state's metadata marks as overwritten, never nil.
-func (s State) overwritten() map[string]bool {
-	marks := map[string]bool{}
-	for k, fm := range s.Meta() {
-		if fm.Overwrite {
-			marks[k] = true
-		}
-	}
-	return marks
-}
-
-// setOverwritten records exactly the given fields as overwritten, keeping the rest of the metadata.
-func (s State) setOverwritten(marks map[string]bool) {
-	meta := s.Meta()
-	if meta == nil {
-		meta = map[string]FieldMeta{}
-	}
-	for k, fm := range meta {
-		fm.Overwrite = marks[k]
-		if fm == (FieldMeta{}) {
-			delete(meta, k)
-		} else {
-			meta[k] = fm
-		}
-	}
-	for k := range marks {
-		if _, ok := meta[k]; !ok {
-			meta[k] = FieldMeta{Overwrite: true}
-		}
-	}
-	s.SetMeta(meta)
-}
-
-// Meta returns a copy of the state's per-field metadata, keyed by field name, or nil if it has none.
-func (s State) Meta() map[string]FieldMeta {
-	raw, ok := s.d[MetaKey]
-	if !ok || isCleared(raw) {
-		return nil
-	}
-	var meta map[string]FieldMeta
-	if err := json.Unmarshal(raw, &meta); err != nil {
-		return nil
-	}
-	return meta
-}
-
-// SetMeta replaces the state's per-field metadata. A nil or empty map removes it. Like Set, it needs an
-// initialized State.
-func (s State) SetMeta(meta map[string]FieldMeta) {
-	if len(meta) == 0 {
-		delete(s.d, MetaKey)
-		return
-	}
-	b, err := json.Marshal(meta)
-	if err != nil {
-		// The metadata the engine builds always marshals; only a Reduced.Value that is not valid JSON fails.
-		panic(errors.Trace(err))
-	}
-	s.d[MetaKey] = b
-}
-
-// MetaJSON returns the state's per-field metadata as JSON, or nil if it has none. The returned slice is the
-// state's own. Do not modify it.
-func (s State) MetaJSON() json.RawMessage {
-	return s.d[MetaKey]
 }
 
 // MarshalJSON serializes the State's fields as a JSON object.

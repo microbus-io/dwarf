@@ -72,6 +72,10 @@ f.Del("coupon", "scratch") // remove fields
 f.Clear()                     // remove everything (Del on every field)
 ```
 
+A task cannot write a field whose name ends with `!`: `Set` and `Overwrite` return an error for one, and `Del`
+fails the step. In the flow's JSON form - what a host reaching tasks over a transport exchanges - a written name
+with that suffix records a field the task replaced rather than added to.
+
 ### Binary data must be base64-encoded
 
 **Known limitation:** a **NUL character** (`U+0000`) in a string cannot be stored. It is valid UTF-8 and

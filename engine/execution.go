@@ -388,10 +388,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		doneTurn()
 		return errors.Trace(err)
 	}
-	// The tags travel with the state so a task, local or remote, knows how each field folds. They are rebuilt
-	// from the frozen graph on every dispatch rather than trusted from the row.
-	stampReducers(state, graph.Reducers())
-	priorChanges, _ := workflow.NewState(priorChangesJSON)
+	priorChanges := changesOf(priorChangesJSON)
 	// The carrier's view is the step's input with the changes of its earlier runs (a Retry, a resumed
 	// Interrupt, a Subgraph re-entry) folded in through the reducers, and its changes are those runs' delta: a
 	// step is one unit of work however many times its task runs, so this run's writes compose onto theirs.
@@ -407,7 +404,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	flow := workflow.NewRawFlow()
 	flow.SetRawState(mergedInputState)
 	flow.SetRawChanges(priorChanges)
+	// The graph's reducers travel with the carrier, so a task, local or remote, knows how each write combines.
 	// Inside a fan-out branch a task may not overwrite a reduced field; the carrier refuses it at the call.
+	flow.SetReducers(reducers)
 	flow.SetInBranch(lineageID != 0)
 	flow.SetAttempt(attempt)
 	flow.SetCreatedAt(flowCreatedAt)
@@ -425,7 +424,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	}
 	if subgraphDone {
 		subgraphResult, _ := workflow.NewState(subgraphResultJSON)
-		flow.SetSubgraphResolution(redactMeta(subgraphResult), subgraphErrorStr)
+		flow.SetSubgraphResolution(subgraphResult, subgraphErrorStr)
 	}
 
 	// Parse baggage for the task executor. A "null" column (from a nil FlowOptions.Baggage) and an empty
@@ -584,6 +583,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			resultFlow = workflow.NewRawFlow()
 			resultFlow.SetRawState(mergedInputState)
 			resultFlow.SetRawChanges(priorChanges)
+			resultFlow.SetReducers(reducers)
 			resultFlow.Set("onErr", onErrValue(execErr))
 			errorRouted = true
 			errorTarget = tr.To
@@ -607,10 +607,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 
 	// Accumulate changes
 	// The carrier was seeded with the earlier runs' changes, so what it returns is the step's whole delta. It is
-	// the task's output, so its metadata is checked rather than trusted: an overwrite mark is the only thing a
-	// task may record there, and not on a reduced field inside a fan-out branch.
+	// the task's output, so it is checked rather than trusted.
 	accumulatedChanges := resultFlow.RawChanges()
-	if err := checkDeltaMeta(accumulatedChanges, reducers, lineageID != 0); err != nil {
+	if err := checkChanges(accumulatedChanges, reducers, lineageID != 0); err != nil {
 		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
 		return errors.Trace(err)
 	}
@@ -958,7 +957,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// error-routed step does; it runs only on this rare path, so the completion write above never carries
 		// a second copy of the changes.
 		accumulatedChanges = accumulatedChanges.Clone()
-		_ = accumulatedChanges.Set("onErr", onErrValue(cancelmarker.New(flowCancelReason)))
+		_ = accumulatedChanges.Set("onErr", onErrValue(cancelmarker.New(flowCancelReason)), reducers)
 		changesJSON, _ = json.Marshal(accumulatedChanges)
 		successorBase = state.Clone()
 		if err := successorBase.Apply(accumulatedChanges, reducers); err != nil {
@@ -1824,7 +1823,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		txBytes.stateRead = len(ourStateJSON)
 		txBytes.changesRead = len(ourChangesJSON)
 		ourState, _ := workflow.NewState(ourStateJSON)
-		ourChanges, _ := workflow.NewState(ourChangesJSON)
+		ourChanges := changesOf(ourChangesJSON)
 		ourRefs, rerr := staterefs.Parse(ourRefsJSON)
 		if rerr != nil {
 			return errors.Trace(rerr)
@@ -1843,7 +1842,6 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		if err := mergedState.Apply(ourChanges, reducers); err != nil {
 			return errors.Trace(&permanentError{err})
 		}
-		stampReducers(mergedState, reducers)
 		mergedJSON, refsJSON, merr := e.linkerFor(shardNum).Mint(mergedState, ourChanges, ourRefs, stepID, staterefs.Linear, folded, nil)
 		if merr != nil {
 			return errors.Trace(merr)
@@ -1854,7 +1852,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		sleepMs := sleepDur.Milliseconds()
 		var err error
 		fanInStepID, err = tx.InsertReturnID(ctx, "step_id", successorInsertSQL,
-			flowID, nextStepDepth, keys.RandomIdentifier(16), fanInTarget, fanInURL, mergedJSON, refsJSON, workflow.StatusPending, parkedNone, timeBudgetMs, lineageID, fanOutOrdinal, stepID, sleepMs, priority, fairnessKey, fairnessWeight, e.engineID,
+			flowID, nextStepDepth, keys.RandomIdentifier(16), fanInTarget, fanInURL, mergedJSON, refsJSON, emptyJSON, workflow.StatusPending, parkedNone, timeBudgetMs, lineageID, fanOutOrdinal, stepID, sleepMs, priority, fairnessKey, fairnessWeight, e.engineID,
 			inheritCancel, stepID, flowID,
 		)
 		if err != nil {
@@ -1927,7 +1925,7 @@ type cohortMember struct {
 	stepID      int
 	taskName    string
 	completed   bool
-	changes     workflow.State
+	changes     workflow.Changes
 	depth       int
 	successorID int
 }
@@ -1952,7 +1950,7 @@ func queueCohortRead(b *txBatch, flowID, cohortSpawnID int, c *cohortRead) {
 			}
 			c.changesRead += len(changesJSON)
 			if m.completed = status == workflow.StatusCompleted; m.completed {
-				m.changes, _ = workflow.NewState(changesJSON)
+				m.changes = changesOf(changesJSON)
 			}
 			c.members = append(c.members, m)
 		}
@@ -1967,7 +1965,7 @@ func queueCohortRead(b *txBatch, flowID, cohortSpawnID int, c *cohortRead) {
 func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nextStepDepth, cohortSpawnID int, c *cohortRead, fanInTaskName string, graph *workflow.Graph, workflowURL string) (row successorRow, depth int, exitStepIDs []int, bytes stateByteCount, err error) {
 	bytes = stateByteCount{stateRead: len(c.spawnStateJSON), changesRead: len(c.spawnChangesJSON) + c.changesRead}
 	spawnState, _ := workflow.NewState(c.spawnStateJSON)
-	spawnChanges, _ := workflow.NewState(c.spawnChangesJSON)
+	spawnChanges := changesOf(c.spawnChangesJSON)
 	// Materialize only the ref'd fields a reducer will FOLD - a combining reducer (append/add/union/...) needs
 	// its accumulated base, and folding a delta onto an absent base would silently lose everything so far. A
 	// merely-carried ref is left alone and re-emitted onto the fan-in step below, still pointing at its
@@ -1982,12 +1980,10 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 	reducers := graph.Reducers()
 	dropIdentityNulls(spawnChanges, reducers)
 	folded := reducers
-	if spawnChanges.MetaJSON() != nil {
+	if spawnChanges.Overwrites().Len() > 0 {
 		folded = maps.Clone(folded)
-		for k := range spawnChanges.Writes() {
-			if spawnChanges.IsOverwritten(k) {
-				delete(folded, k)
-			}
+		for k := range spawnChanges.Overwrites().Names() {
+			delete(folded, k)
 		}
 	}
 	err = e.resolveReducedRefs(ctx, tx, shardNum, spawnState, spawnRefs, folded, workflowURL)
@@ -2009,12 +2005,12 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 	for k := range foldedFields(spawnChanges, reducers) {
 		memberWrites[k] = true
 	}
-	var contributions []workflow.State
+	var contributions []workflow.Changes
 
 	// A member that is itself an inner fan-in contributes what its own cohort added, which is in its STATE, not
 	// its changes: its changes hold only its own task's writes. Its state records which part its cohort added
 	// (foldCohort), so one row per inner fan-in carries the whole subtree below it, at any depth.
-	var parts map[int]workflow.State
+	var parts map[int]workflow.Changes
 	if ids := innerFanInIDs(graph, c.members); len(ids) > 0 {
 		var n int
 		parts, n, err = cohortParts(ctx, tx, ids, reducers)
@@ -2057,7 +2053,7 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 		if !ok {
 			continue
 		}
-		for k := range contribution.Writes() {
+		for k := range contribution.Names() {
 			memberWrites[k] = true
 		}
 		contributions = append(contributions, contribution)
@@ -2067,12 +2063,10 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 	// the accumulated bytes across the cohort's width, and a fan-out is exactly where width is large.
 	// Only a fan-in inside an outer cohort is ever read as a member, so only it describes what its cohort added.
 	// The fan-in takes its spawn's lineage.
-	reduced, err := foldCohort(merged, contributions, reducers, c.spawnLineageID != 0)
+	rec, err := foldCohort(merged, contributions, reducers, c.spawnLineageID != 0)
 	if err != nil {
 		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(&permanentError{err})
 	}
-
-	stampFanIn(merged, reducers, reduced)
 
 	// The fan-in sits one level below the DEEPEST cohort branch, not merely below the last sibling to
 	// complete - branch lengths can differ (loops, gotos, varying chains), so step_depth must reflect the
@@ -2105,7 +2099,7 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 	bytes.stateWritten = len(mergedJSON)
 	row = successorRow{
 		taskName: fanInTaskName, taskURL: dispatchURLOf(graph, fanInTaskName),
-		stateJSON: mergedJSON, refsJSON: refsJSON, ordinal: c.spawnFanOutOrdinal,
+		stateJSON: mergedJSON, refsJSON: refsJSON, reducedJSON: reducedColumn(rec), ordinal: c.spawnFanOutOrdinal,
 	}
 	return row, depth, exitStepIDs, bytes, nil
 }

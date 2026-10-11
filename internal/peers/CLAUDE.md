@@ -347,7 +347,9 @@ every other moves nothing. The shards tile the order, so:
   and churns least, but it does not balance: at 8 replicas and 4 shards a replica misses a shard's top two
   with probability 6/8 and all four with 0.75^4 ~ 0.32, so about a third of the fleet dispatched nothing while
   others carried three shards - uneven engine CPU, and the multi-shard-process case where GC cost was
-  measured at ~28% of a replica's CPU.
+  measured at ~28% of a replica's CPU. A consistent-hash ring is the same draw in another form and balances
+  no better: simulated at 4 shards x 8 replicas, 34% of replicas held no role, against 32% for the draw and 0%
+  for the window.
 - **A fleet-wide assignment over every shard's roster** (bounded-load rendezvous: shards in order, each
   taking its top replicas below a role cap). It balances and churns less than the window, but every shard's
   cut then depends on every other shard's roster: one blind or lagging read moves dispatchers everywhere, and

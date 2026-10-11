@@ -453,7 +453,7 @@ func TestGraph_IsFieldName(t *testing.T) {
 	for _, name := range []string{"x", "_", "_x", "item", "orderID", "order_id", "x1", "X_9_y"} {
 		assert.True(isFieldName(name), "%s", name)
 	}
-	for _, name := range []string{"", "1x", "9", "order-id", "order id", "order.items", "é", "x$", " x", "x\n", MetaKey} {
+	for _, name := range []string{"", "1x", "9", "order-id", "order id", "order.items", "é", "x$", " x", "x\n"} {
 		assert.False(isFieldName(name), "%q", name)
 	}
 }

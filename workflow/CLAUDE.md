@@ -51,68 +51,66 @@ history again, and that is the contract, not a bug - pinned by `terminalreducerf
 `read_modify_write_counts_the_input_twice`. Because every hand-off folds, the outcome does not depend on graph
 shape: a do-nothing step changes nothing (`padding_does_not_change_the_outcome`).
 
-**The carrier (`flow.go`): every write is a one-field delta, composed into `changes` and applied to the view**
-(`State.Compose`, `State.Apply`), through the reducers the engine stamps on the input state's `__meta__` at
-dispatch. `Overwrite(k, v)` and `Del(k)` (= `Overwrite(k, nil)`) record an overwrite
-MARK in the delta's metadata (`"k": {"overwrite": true}`), never a sentinel value. The four traps the
-always-reduce model has to answer, each answered here and pinned:
+**The carrier (`flow.go`): every write is a one-field `Changes`, composed into `changes` and applied to the
+view** (`Changes.Compose`, `State.Apply`), through the graph's reducers. The engine hands the carrier those
+reducers at every dispatch (`RawFlow.SetReducers`, the `reducers` wire field); nothing stores them, and the
+reducers a remote host returns are never read back. `Changes` holds each field it writes in one of two maps,
+never both: `contributions`, combined through the field's reducer, and `overwrites` - `Overwrite(k, v)`, and
+`Del(k)`, which is `Overwrite(k, nil)`. The traps the always-reduce model has to answer, each pinned:
 
-- **No overwrite value may leak.** The mark is metadata, and caller input carrying `__meta__` is rejected
-  (`rejectMeta`), so `Create`'s input, `Continue`'s `additionalState`, Fork's overrides and a subgraph's `in`
-  are plain values and cannot smuggle one.
-- **An overwrite is STICKY within the task.** A later `Set` folds onto the overwritten value and the key stays
-  marked (`Compose`; `TestState_ComposeTable`, `TestFlow_OverwriteAndDelThenSet`). Treating a later `Set` as a
-  fresh delta undoes the overwrite - "trim to 5, then append" kept everything.
+- **Plain input carries no overwrite.** `Create`'s input, `Continue`'s `additionalState` (`ChangesOf`), Fork's
+  overrides and a subgraph's `in` are plain values; only a task's `Changes` can overwrite a reduced field.
+- **An overwrite is STICKY within the step.** A later `Set` folds onto the overwritten value and the field stays
+  an overwrite (`Changes.contribute`; `TestChanges_ComposeTable`, `TestFlow_OverwriteAndDelThenSet`). Treating a
+  later `Set` as a fresh contribution undoes the overwrite - "trim to 5, then append" kept everything.
 - **Routing reads the ENGINE's fold, never the carrier's returned view** (`evaluateTransitions` takes the
   successor base). A remote task is untrusted and may compute its view differently.
 - **A folded value exists in no row**, so a ref must never anchor it at the step that folded it: not its
-  `state` (before the fold) nor its `changes` (the delta). It is stored inline in the successor's state
+  `state` (before the fold) nor its `changes` (the contribution). It is stored inline in the successor's state
   (`foldedFields` -> `Mint`'s `inlineOnly`). Never assume `reduce(nil, d) == d` - false for `append` of a single
   value and for `union` with duplicates.
 
-**A delete is an overwrite mark with no value, and a materialized state holds no deletes.** `State.Apply` enacts
-marks; `IsDeleted`/`Writes` see a mark-only key, `Names`/`Has` do not. A JSON `null` VALUE (no mark) is still
-read, for rows written before marks existed and for plain-map input: it deletes a field with no reducer and is
-the reducer's IDENTITY on a reduced field. That identity is what lets a task that collected nothing into a nil
-slice write it safely - at the JSON level a nil slice and a bare nil cannot be told apart. `isCleared` therefore
-still recognizes both null spellings (a Go-nil `json.RawMessage` and the bytes `null`).
+**A delete is an overwrite with a null value, and a materialized state holds no deletes.** `State.Apply` enacts
+it. `Changes.Set` turns a nil on a plain field into such a delete and drops a nil on a reduced one. A null
+CONTRIBUTION is still read - from `ChangesOf` of plain input, from a remote host, and from a row stored before
+overwrites existed: it deletes a field with no reducer and is the reducer's IDENTITY on a reduced field. That
+identity is what lets a task that collected nothing into a nil slice write it safely - at the JSON level a nil
+slice and a bare nil cannot be told apart. `isCleared` therefore still recognizes both null spellings (a Go-nil
+`json.RawMessage` and the bytes `null`).
 
 **Overwriting or deleting a reduced field inside a fan-out branch fails the step**, at any depth: the branches
 are parallel, and a reset in one has no defined meaning for the others. The carrier refuses `Overwrite` when
 told it is in a branch (`RawFlow.SetInBranch`, carried on the wire), and the engine re-checks every result
-(`checkDeltaMeta`), since `Del` cannot return an error and a remote task is untrusted. A field with no reducer
+(`checkChanges`), since `Del` cannot return an error and a remote task is untrusted. A field with no reducer
 may be deleted in a branch; it folds in branch order. Pinned by `fixtures/reducerdeleteflow_test.go` and
-`TestMeta_ForgedChangesMetaFailsTheStep`.
+`TestChanges_RemoteResultIsChecked`.
+
+### `Changes` is ONE JSON object, an overwrite named with the `!` suffix
+
+`Changes.MarshalJSON` writes a contribution under the field's name and an overwrite under `name!`
+(`OverwriteSuffix`); a delete is `"name!": null`. That one object is the `changes` column, the carrier's
+`changes` wire field, and a remote host's result. `State`'s JSON stays plain data.
+
+- **The suffix is reserved in the names a task WRITES.** `Changes.Set`/`Overwrite` and `Flow.Set`/`Overwrite`
+  return an error for a name ending in `!`, `Flow.Del` panics (the host-call boundary turns it into a step
+  failure), and the engine re-checks a returned result (`checkChanges`), because a remote host can send `x!!`.
+  Graph-declared names cannot contain `!`. A plain state - input, a step's `state`, `final_state` - may still
+  hold such a name as data.
+- **A row stored before the suffix reads as it was meant**: with no `!` key, every field is a contribution,
+  which is what a stored write was. If both spellings of a field appear, the overwrite wins.
+- **Every reader of a `changes` column decodes it as `Changes`** (`changesOf` in the engine). A plain `State`
+  decode reads `name!` as a field of its own. The state-refs anchor lookup is the one exception, reading the raw
+  object and trying `field!` before `field`: an anchored field is one the step replaced, so it is under one of
+  the two. `FlowStep.Changes` stays a `State`, showing an overwrite as its value and a delete as a null.
+- **Do not move overwrites into a column, wire field or `State` property of their own.** Each is a second
+  thing every writer and reader of `changes` must carry, nothing fails to compile when one misses it, and a miss
+  silently turns an overwrite into a contribution. In one object, a writer that stores `changes` stores both.
 
 `Graph.Validate` rejects a reducer name that is not one of the `Reducer` constants, so a misspelled reducer fails
 at `Create` rather than at the first fold.
 
 **forEach element injection:** the current element is injected into `state` only (under `as`), not `changes`, so it is
 available to the task but does not participate in fan-in merge.
-
-### Field metadata (`__meta__`) is stored as a field and hidden as one
-
-A `State` carries per-field metadata (`FieldMeta`; today the declared reducer) under the reserved key
-`MetaKey` inside the same `map[string]json.RawMessage` as the fields. The engine writes it; tasks and
-callers never do.
-
-- **It lives in the map so every BYTE path carries it for free:** the `state`/`changes`/`final_state`
-  columns, `Fork`'s DB-side `INSERT...SELECT`, `staterefs.Flatten`'s splice, and the carrier's wire JSON
-  to a remote host. A separate struct field would have to be threaded through each of them.
-- **It is hidden from every FIELD accessor:** `Names`, `Len`, `Get`, `GetJSON`, `Has`, `IsDeleted`,
-  `Parse` and `Del` skip it; `Clear` keeps it; `Set` rejects the name. The price is that anything rebuilding a
-  state field by field from `Names` drops it. `staterefs.Mint` is the one such place, and it copies the
-  metadata back explicitly. **A new field-by-field rebuild must do the same.**
-- **`Apply`/`ApplyAll`/`Compose` keep the receiver's metadata and never COPY the incoming State's**; they
-  only read its overwrite marks. So a delta never carries reducer tags or a fan-in's description into a state.
-- **`Flow.Snapshot` drops it,** because a snapshot is handed to task code and onward (e.g. as a subgraph's
-  `in`). `Flow.Clear` deletes fields, never the metadata.
-- **`FieldMeta.Reduced` is the engine's, on a fan-in step's state only** - which part of a field its cohort
-  added, so an outer fan-in can take that step's contribution from its one row. Its forms and rules are in
-  `engine/CLAUDE.md` ("A member's contribution is its `changes`, EXCEPT an inner fan-in's").
-
-Pinned by `TestState_MetaIsNotAField`, `TestState_MergeKeepsReceiversMeta`,
-`TestFlow_MetaStaysOutOfTheTasksView` and `TestLinker_MintKeepsMeta`.
 
 ### `State` stores every value as JSON, and decodes only what is read
 
@@ -197,9 +195,9 @@ is why some tests assert `float64` where a reader might expect `int`.
    unrecoverable runtime **throw** `errors.CatchPanic` cannot contain. Two reads of a field therefore yield
    independent values, which is also what makes sharing one stored value across fan-out branches safe.
 5. **`Has` and `IsDeleted` are different questions.** `Has` = present and holding a value; `IsDeleted` =
-   present as a delete. A delta is the only place the difference is normally observable, and the mint needs
-   the union of the two (`mentions` in `internal/staterefs`) - with `Has` alone it silently drops carried
-   fields.
+   present as a null. A null contribution is the only place the difference is normally observable. Whether a
+   STEP rewrote a field is `Changes.Mentions` - a contribution or an overwrite, a delete included - which is
+   what the state-refs mint needs; `Has` alone would carry a deleted field's ref forward.
 
 **Stored bytes are NOT canonical, and nothing compares them.** `Set` keeps what `json.Marshal` writes (a
 map's keys sorted, a struct's in declaration order), a `json.RawMessage` and `SetJSON` keep the caller's
@@ -293,8 +291,8 @@ proven not to have proceeded past the read).
 
 ### The `Flow` carrier is single-owner and carries no lock
 
-A task owns its `Flow` exclusively for its execution; `Flow` is a bare struct holding two `State` values
-(`state` and `changes`, each a reference to a map) with no mutex, and **deliberately so** - a mutex would paper over a misuse pattern (concurrent writes with
+A task owns its `Flow` exclusively for its execution; `Flow` is a bare struct holding a `State` and a `Changes`
+(`state` and `changes`, references to maps) with no mutex, and **deliberately so** - a mutex would paper over a misuse pattern (concurrent writes with
 no defined ordering) rather than prevent it, and the carrier is single-owner by design.
 
 The failure mode is why this is documented rather than merely implied: two goroutines writing a `Flow`
@@ -302,7 +300,7 @@ trip the Go runtime's concurrent-map-write detector, which is a **`throw`, not a
 around `ExecuteTask` (the host-call panic isolation) **cannot recover it**, so one task fanning out
 internally with an errgroup and writing results straight back to the `Flow` takes down the whole replica and
 every unrelated in-flight flow on it. The godoc on `Flow` (and the package doc) says so, with the
-collect-then-write-from-one-goroutine pattern spelled out. `Flow.UnmarshalJSON` initializes both `State`s even
+collect-then-write-from-one-goroutine pattern spelled out. `Flow.UnmarshalJSON` initializes both even
 when the wire omits them, because the setters write to both and a nil map there panics. Parallelizing across *steps* (a `forEach`
 transition, one `Flow` per branch) is the first-class answer.
 

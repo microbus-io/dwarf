@@ -28,13 +28,39 @@ import (
 	"github.com/microbus-io/sequel"
 )
 
+// reduced describes which part of a fan-in step's value for a field its cohort added, as the step's
+// state_reduced column records it per field. Exactly one form is set, chosen by the field's reducer:
+//   - From, for append, union and concat: the cohort's part starts at this offset into the value (array
+//     elements, or bytes of a concat string);
+//   - Keys, for merge: the keys the cohort wrote; and for a field with no reducer, an empty list meaning only
+//     that the cohort wrote it;
+//   - Value, for add, min, max, and and or: the cohort's combined contribution itself.
+type reduced struct {
+	From  *int            `json:"from,omitempty"`
+	Keys  []string        `json:"keys,omitzero"`
+	Value json.RawMessage `json:"value,omitzero"`
+}
+
+// reducedColumn is what a state_reduced column stores for rec: its JSON, or an empty object.
+func reducedColumn(rec map[string]*reduced) []byte {
+	if len(rec) == 0 {
+		return []byte("{}")
+	}
+	b, err := json.Marshal(rec)
+	if err != nil {
+		// Every property is an int, a string list or a Value that was itself produced as JSON.
+		panic(errors.Trace(err))
+	}
+	return b
+}
+
 // foldCohort folds a cohort's contributions onto the fan-in's base, in order, and, if describe is set, returns
 // for every field a contribution mentions which part of the folded value the cohort added. It mutates base; on
 // an error base is partly folded and must be discarded.
 //
 // The description is what lets the next cohort out take this fan-in's contribution from its one row, rather
 // than re-reading every member below it (see projectReduced).
-func foldCohort(base workflow.State, contributions []workflow.State, reducers map[string]workflow.Reducer, describe bool) (map[string]*workflow.Reduced, error) {
+func foldCohort(base workflow.State, contributions []workflow.Changes, reducers map[string]workflow.Reducer, describe bool) (map[string]*reduced, error) {
 	if !describe {
 		return nil, errors.Trace(base.ApplyAll(contributions, reducers))
 	}
@@ -42,15 +68,13 @@ func foldCohort(base workflow.State, contributions []workflow.State, reducers ma
 	// a write with a value counts; on a plain field a delete is a write like any other.
 	written := map[string]bool{}
 	for _, c := range contributions {
-		for k := range c.Writes() {
-			if c.Has(k) {
-				written[k] = true
-			} else if r := reducers[k]; r == "" || r == workflow.ReducerReplace {
+		for k := range c.Names() {
+			if r := reducers[k]; r == "" || r == workflow.ReducerReplace || c.Contributions().Has(k) || c.Overwrites().Has(k) {
 				written[k] = true
 			}
 		}
 	}
-	reduced := make(map[string]*workflow.Reduced, len(written))
+	rec := make(map[string]*reduced, len(written))
 	for k := range written {
 		r := reducers[k]
 		switch r {
@@ -61,34 +85,34 @@ func foldCohort(base workflow.State, contributions []workflow.State, reducers ma
 			if err != nil {
 				return nil, errors.New("reducer '%s' for field %q: %w", string(r), k, err)
 			}
-			reduced[k] = &workflow.Reduced{From: &from}
+			rec[k] = &reduced{From: &from}
 		case workflow.ReducerMerge:
 			// New wins, so for a key the cohort wrote the folded value IS the cohort's value.
 			keys := map[string]bool{}
 			for _, c := range contributions {
-				if !c.Has(k) {
+				if !c.Contributions().Has(k) {
 					continue
 				}
 				var obj map[string]json.RawMessage
-				if json.Unmarshal(c.GetJSON(k), &obj) == nil {
+				if json.Unmarshal(c.Contributions().GetJSON(k), &obj) == nil {
 					for key := range obj {
 						keys[key] = true
 					}
 				}
 			}
-			reduced[k] = &workflow.Reduced{Keys: slices.Sorted(maps.Keys(keys))}
+			rec[k] = &reduced{Keys: slices.Sorted(maps.Keys(keys))}
 		case "", workflow.ReducerReplace:
-			reduced[k] = &workflow.Reduced{Keys: []string{}}
+			rec[k] = &reduced{Keys: []string{}}
 		default:
 			// A sum loses its split and a minimum loses its base, so the cohort's part cannot be read back out of
 			// the folded value. It is kept instead: one number or bool.
 			var acc any
 			for _, c := range contributions {
-				if !c.Has(k) {
+				if !c.Contributions().Has(k) {
 					continue
 				}
 				var inc any
-				if err := json.Unmarshal(c.GetJSON(k), &inc); err != nil {
+				if err := json.Unmarshal(c.Contributions().GetJSON(k), &inc); err != nil {
 					return nil, errors.New("reducer '%s' for field %q: %w", string(r), k, err)
 				}
 				var err error
@@ -103,13 +127,13 @@ func foldCohort(base workflow.State, contributions []workflow.State, reducers ma
 			if err != nil {
 				return nil, errors.New("reducer '%s' for field %q: %w", string(r), k, err)
 			}
-			reduced[k] = &workflow.Reduced{Value: value}
+			rec[k] = &reduced{Value: value}
 		}
 	}
 	if err := base.ApplyAll(contributions, reducers); err != nil {
 		return nil, errors.Trace(err)
 	}
-	return reduced, nil
+	return rec, nil
 }
 
 // lengthOf is the offset a cohort's part starts at: the element count of an array, or the byte length of a
@@ -128,17 +152,14 @@ func lengthOf(raw json.RawMessage, r workflow.Reducer) (int, error) {
 	return len(arr), errors.Trace(err)
 }
 
-// projectReduced returns what a fan-in step's cohort added, read from the step's state and the reduced
-// metadata foldCohort recorded there: a delta that folds onto an outer cohort's accumulator exactly as the
-// inner cohort's contributions would have, one by one. A field with no reducer projects as its value, or as a
-// delete if the cohort left it absent. The reducer is taken from the graph, never from the stored metadata.
-func projectReduced(state workflow.State, reducers map[string]workflow.Reducer) (workflow.State, error) {
-	delta, _ := workflow.NewState()
-	for k, fm := range state.Meta() {
-		rd := fm.Reduced
-		if rd == nil {
-			continue
-		}
+// projectReduced returns what a fan-in step's cohort added, read from the step's state and the record foldCohort
+// stored in its state_reduced column: Changes that fold onto an outer cohort's accumulator exactly as the inner
+// cohort's contributions would have, one by one. A field with no reducer projects as its value, or as a delete if
+// the cohort left it absent. The reducer is taken from the graph, never from the stored record.
+func projectReduced(state workflow.State, rec map[string]*reduced, reducers map[string]workflow.Reducer) (workflow.Changes, error) {
+	part := workflow.NewChanges()
+	contributed := part.Contributions()
+	for k, rd := range rec {
 		r := reducers[k]
 		raw := state.GetJSON(k)
 		switch {
@@ -148,64 +169,64 @@ func projectReduced(state workflow.State, reducers map[string]workflow.Reducer) 
 				var s string
 				if len(raw) > 0 {
 					if err := json.Unmarshal(raw, &s); err != nil {
-						return workflow.State{}, errors.New("field %q: %w", k, err)
+						return workflow.Changes{}, errors.New("field %q: %w", k, err)
 					}
 				}
-				if err := delta.Set(k, s[min(from, len(s)):]); err != nil {
-					return workflow.State{}, errors.Trace(err)
+				if err := contributed.Set(k, s[min(from, len(s)):]); err != nil {
+					return workflow.Changes{}, errors.Trace(err)
 				}
 				continue
 			}
 			var arr []json.RawMessage
 			if len(raw) > 0 {
 				if err := json.Unmarshal(raw, &arr); err != nil {
-					return workflow.State{}, errors.New("field %q: %w", k, err)
+					return workflow.Changes{}, errors.New("field %q: %w", k, err)
 				}
 			}
 			tail := arr[min(from, len(arr)):]
 			if tail == nil {
 				tail = []json.RawMessage{}
 			}
-			if err := delta.Set(k, tail); err != nil {
-				return workflow.State{}, errors.Trace(err)
+			if err := contributed.Set(k, tail); err != nil {
+				return workflow.Changes{}, errors.Trace(err)
 			}
 		case rd.Value != nil:
-			delta.SetJSON(k, rd.Value)
+			contributed.SetJSON(k, rd.Value)
 		case r == workflow.ReducerMerge:
 			var obj map[string]json.RawMessage
 			if len(raw) > 0 {
 				if err := json.Unmarshal(raw, &obj); err != nil {
-					return workflow.State{}, errors.New("field %q: %w", k, err)
+					return workflow.Changes{}, errors.New("field %q: %w", k, err)
 				}
 			}
-			part := make(map[string]json.RawMessage, len(rd.Keys))
+			kept := make(map[string]json.RawMessage, len(rd.Keys))
 			for _, key := range rd.Keys {
 				if v, ok := obj[key]; ok {
-					part[key] = v
+					kept[key] = v
 				}
 			}
-			if err := delta.Set(k, part); err != nil {
-				return workflow.State{}, errors.Trace(err)
+			if err := contributed.Set(k, kept); err != nil {
+				return workflow.Changes{}, errors.Trace(err)
 			}
 		default:
 			if state.Has(k) {
-				delta.SetJSON(k, raw)
-			} else {
-				_ = delta.Overwrite(k, nil)
+				contributed.SetJSON(k, raw)
+			} else if err := part.Overwrite(k, nil); err != nil {
+				return workflow.Changes{}, errors.Trace(err)
 			}
 		}
 	}
-	return delta, nil
+	return part, nil
 }
 
 // memberContribution is what one cohort member adds to its cohort's fold. part is what the member's own cohort
-// added if the member is an inner fan-in (cohortParts), and the zero State otherwise; changes is the member's
-// own changes if it completed, and the zero State otherwise. ok is false for a member that adds nothing.
+// added if the member is an inner fan-in (cohortParts), and the zero Changes otherwise; changes are the member's
+// own changes if it completed, and the zero Changes otherwise. ok is false for a member that adds nothing.
 //
 // An inner fan-in's part counts whatever the fan-in step's own status: every step of its cohort completed, and
 // the fan-in step only exists because the cohort converged. Its own writes count only if it completed, like any
 // member's.
-func memberContribution(part, changes workflow.State, reducers map[string]workflow.Reducer) (contribution workflow.State, ok bool, err error) {
+func memberContribution(part, changes workflow.Changes, reducers map[string]workflow.Reducer) (contribution workflow.Changes, ok bool, err error) {
 	if part.IsZero() {
 		return changes, !changes.IsZero(), nil
 	}
@@ -213,27 +234,9 @@ func memberContribution(part, changes workflow.State, reducers map[string]workfl
 		return part, true, nil
 	}
 	if err := part.Compose(changes, reducers); err != nil {
-		return workflow.State{}, false, errors.Trace(err)
+		return workflow.Changes{}, false, errors.Trace(err)
 	}
 	return part, true, nil
-}
-
-// stampFanIn stamps a fan-in step's state: the graph's reducers, plus the description of what its cohort added.
-func stampFanIn(state workflow.State, reducers map[string]workflow.Reducer, reduced map[string]*workflow.Reduced) {
-	stampReducers(state, reducers)
-	if len(reduced) == 0 {
-		return
-	}
-	meta := state.Meta()
-	if meta == nil {
-		meta = make(map[string]workflow.FieldMeta, len(reduced))
-	}
-	for k, rd := range reduced {
-		fm := meta[k]
-		fm.Reduced = rd
-		meta[k] = fm
-	}
-	state.SetMeta(meta)
 }
 
 // innerFanInIDs returns the members of a cohort that are themselves fan-in steps, whatever their status.
@@ -251,8 +254,8 @@ func innerFanInIDs(graph *workflow.Graph, members []cohortMember) []int {
 // cohort added (projectReduced), along with the bytes it read. Each row is projected as it is read and then
 // dropped, so a wide cohort holds the parts rather than every inner fan-in's full state. The id list goes out in
 // chunks padded to a power of two, so the statement text takes one of a few arities rather than one per width.
-func cohortParts(ctx context.Context, db sequel.Executor, stepIDs []int, reducers map[string]workflow.Reducer) (map[int]workflow.State, int, error) {
-	parts := make(map[int]workflow.State, len(stepIDs))
+func cohortParts(ctx context.Context, db sequel.Executor, stepIDs []int, reducers map[string]workflow.Reducer) (map[int]workflow.Changes, int, error) {
+	parts := make(map[int]workflow.Changes, len(stepIDs))
 	read := 0
 	for chunk := range slices.Chunk(stepIDs, 512) {
 		arity := 1
@@ -264,21 +267,26 @@ func cohortParts(ctx context.Context, db sequel.Executor, stepIDs []int, reducer
 			args[i] = chunk[min(i, len(chunk)-1)]
 		}
 		rows, err := db.QueryContext(ctx,
-			"SELECT step_id, state FROM dwarf_steps WHERE step_id IN ("+strings.Repeat("?,", arity-1)+"?)",
+			"SELECT step_id, state, state_reduced FROM dwarf_steps WHERE step_id IN ("+strings.Repeat("?,", arity-1)+"?)",
 			args...)
 		if err != nil {
 			return nil, 0, errors.Trace(err)
 		}
 		for rows.Next() {
 			var id int
-			var stateJSON []byte
-			if err := rows.Scan(&id, &stateJSON); err != nil {
+			var stateJSON, reducedJSON []byte
+			if err := rows.Scan(&id, &stateJSON, &reducedJSON); err != nil {
 				rows.Close()
 				return nil, 0, errors.Trace(err)
 			}
-			read += len(stateJSON)
+			read += len(stateJSON) + len(reducedJSON)
 			state, _ := workflow.NewState(stateJSON)
-			part, err := projectReduced(state, reducers)
+			var rec map[string]*reduced
+			if err := json.Unmarshal(reducedJSON, &rec); err != nil {
+				rows.Close()
+				return nil, 0, errors.Trace(&permanentError{err})
+			}
+			part, err := projectReduced(state, rec, reducers)
 			if err != nil {
 				rows.Close()
 				return nil, 0, errors.Trace(&permanentError{err})

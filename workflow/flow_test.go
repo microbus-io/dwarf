@@ -105,8 +105,8 @@ func TestFlow_SetTracksChanges(t *testing.T) {
 	f := NewFlow()
 	f.Set("a", "1")
 	f.Set("b", "2")
-	assert.Equal(2, f.changes.Len())
-	assert.Equal("1", stateVal(f.changes, "a")) // stored decoded, not as raw JSON bytes
+	assert.Equal(2, f.changes.Contributions().Len())
+	assert.Equal("1", stateVal(f.changes.Contributions(), "a")) // stored decoded, not as raw JSON bytes
 }
 
 // TestFlow_SetChangesIsSetPerField pins that SetChanges sets every field the source marshals, as Set would one by
@@ -118,7 +118,7 @@ func TestFlow_SetChangesIsSetPerField(t *testing.T) {
 	f.Set("score", 10)
 	f.Set("gone", "x")
 	f.Set("extra", "untouched")
-	f.changes, _ = NewState()
+	f.changes = NewChanges()
 
 	var out struct {
 		Name    string   `json:"name"`
@@ -132,14 +132,14 @@ func TestFlow_SetChangesIsSetPerField(t *testing.T) {
 	out.Gone = nil
 	assert.NoError(f.SetChanges(out))
 
-	assert.Equal("Alice", f.changes.GetString("name"), "an unchanged field is set too")
-	assert.Equal(25, f.changes.GetInt("score"))
-	assert.False(f.changes.Has("skipped"), "an empty omitempty field is not set")
-	assert.False(f.changes.Has("zero"), "an empty omitzero field is not set")
+	assert.Equal("Alice", f.changes.Contributions().GetString("name"), "an unchanged field is set too")
+	assert.Equal(25, f.changes.Contributions().GetInt("score"))
+	assert.False(f.changes.Contributions().Has("skipped"), "an empty omitempty field is not set")
+	assert.False(f.changes.Contributions().Has("zero"), "an empty omitzero field is not set")
 	assert.True(f.changes.IsDeleted("gone"), "a null field deletes, as Set(name, nil) does")
 	assert.False(f.Has("gone"))
 	assert.Equal("untouched", f.GetString("extra"))
-	assert.Len(slices.Collect(f.changes.Writes()), 3)
+	assert.Len(slices.Collect(f.changes.Names()), 3)
 
 	assert.Error(f.SetChanges([]int{1}), "a source that is not an object")
 	assert.Error(f.SetChanges((*struct{})(nil)), "a nil pointer marshals to null")
@@ -199,7 +199,7 @@ func TestFlow_SetChangesNamesFieldsLikeParse(t *testing.T) {
 	f.Set("Status", "new")
 	f.Set("Total", 1)
 	f.Set("region", "us")
-	f.changes, _ = NewState()
+	f.changes = NewChanges()
 
 	var order Order
 	assert.NoError(f.Parse(&order))
@@ -212,13 +212,13 @@ func TestFlow_SetChangesNamesFieldsLikeParse(t *testing.T) {
 	order.secret = "y"
 	assert.NoError(f.SetChanges(order))
 
-	assert.Equal("charged", f.changes.GetString("Status"))
-	assert.Equal(2, f.changes.GetInt("Total"))
-	assert.Equal("eu", f.changes.GetString("region"))
-	assert.False(f.changes.Has("Skipped"))
-	assert.False(f.changes.Has("secret"))
-	assert.False(f.changes.Has("Base"))
-	assert.Equal(3, f.changes.Len())
+	assert.Equal("charged", f.changes.Contributions().GetString("Status"))
+	assert.Equal(2, f.changes.Contributions().GetInt("Total"))
+	assert.Equal("eu", f.changes.Contributions().GetString("region"))
+	assert.False(f.changes.Contributions().Has("Skipped"))
+	assert.False(f.changes.Contributions().Has("secret"))
+	assert.False(f.changes.Contributions().Has("Base"))
+	assert.Equal(3, f.changes.Contributions().Len())
 }
 
 func TestFlow_Has(t *testing.T) {
@@ -236,7 +236,7 @@ func TestFlow_Delete(t *testing.T) {
 	f.SetString("name", "Alice")
 	f.SetInt("score", 42)
 	f.SetBool("active", true)
-	f.changes, _ = NewState() // reset changes from typed setters
+	f.changes = NewChanges() // reset changes from typed setters
 
 	f.Del("name", "score")
 	// State reads see the deleted fields as absent.
@@ -247,7 +247,7 @@ func TestFlow_Delete(t *testing.T) {
 	// Changes records a cleared tombstone for each deleted key.
 	for _, k := range []string{"name", "score"} {
 		assert.True(f.changes.IsDeleted(k), "changes must record %q as a delete, not drop it", k)
-		assert.False(f.changes.Has(k), "a delete holds no value")
+		assert.False(f.changes.Contributions().Has(k), "a delete holds no value")
 	}
 	// Unlisted field is unaffected.
 	assert.True(f.Has("active"))
@@ -260,17 +260,17 @@ func TestFlow_Clear(t *testing.T) {
 	f := NewFlow()
 	f.SetString("name", "Alice")
 	f.SetInt("score", 42)
-	f.changes, _ = NewState()
+	f.changes = NewChanges()
 
 	f.Clear()
 	// Every field reads as absent.
 	assert.False(f.Has("name"))
 	assert.False(f.Has("score"))
 	// Every prior field is recorded as a delete in changes.
-	assert.Len(slices.Collect(f.changes.Writes()), 2)
+	assert.Len(slices.Collect(f.changes.Names()), 2)
 	for _, k := range []string{"name", "score"} {
 		assert.True(f.changes.IsDeleted(k), "changes must record %q as a delete, not drop it", k)
-		assert.False(f.changes.Has(k), "a delete holds no value")
+		assert.False(f.changes.Contributions().Has(k), "a delete holds no value")
 	}
 }
 
@@ -548,11 +548,11 @@ func TestFlow_SetChangesResolvesNamesLikeEncodingJSON(t *testing.T) {
 	}
 	f := NewFlow()
 	f.Set("region", "us")
-	f.changes, _ = NewState()
+	f.changes = NewChanges()
 
 	order := Order{Region: "eu", Base: Base{Region: "stale"}, Count: 7}
 	assert.NoError(f.SetChanges(order))
-	assert.Equal("eu", f.changes.GetString("region"))
+	assert.Equal("eu", f.changes.Contributions().GetString("region"))
 
 	var back Order
 	assert.NoError(f.Parse(&back))
@@ -560,41 +560,36 @@ func TestFlow_SetChangesResolvesNamesLikeEncodingJSON(t *testing.T) {
 	assert.Equal(7, back.Count)
 }
 
-func TestFlow_MetaStaysOutOfTheTasksView(t *testing.T) {
+func TestFlow_ReducersAndChangesCrossTheWire(t *testing.T) {
 	assert := testarossa.For(t)
 
-	tags := map[string]FieldMeta{"log": {Reducer: ReducerAppend}}
-	state, _ := NewState("a", 1)
-	state.SetMeta(tags)
-	f := NewRawFlow()
-	f.SetRawState(state)
+	f := reducedFlow(true)
+	assert.NoError(f.Set("log", []string{"b"}))
+	f.Del("note")
 
-	assert.False(f.Has(MetaKey))
-	assert.Error(f.Set(MetaKey, 1))
-	assert.Nil(f.Snapshot().MetaJSON())
-
-	// Deleting every field records a delete for each field, never for the metadata, and keeps it.
-	f.Del(MetaKey)
-	f.Clear()
-	assert.Equal(map[string]FieldMeta{"a": {Overwrite: true}}, f.RawChanges().Meta())
-	assert.True(f.RawChanges().IsDeleted("a"))
-	assert.Equal(tags, f.RawState().Meta())
-
-	// The wire form carries it, so a task reached remotely sees it too.
+	// A task reached remotely receives the reducers and the branch flag, and returns its changes with the
+	// overwrite marked by the suffix.
 	data, err := json.Marshal(f)
 	assert.NoError(err)
+	assert.Contains(string(data), `"reducers":{"log":"append"}`)
+	assert.Contains(string(data), `"changes":{"log":["b"],"note!":null}`)
+	assert.Contains(string(data), `"inBranch":true`)
 	var remote Flow
 	assert.NoError(json.Unmarshal(data, &remote))
-	assert.Equal(tags, remote.state.Meta())
+	assert.Equal(map[string]Reducer{"log": ReducerAppend}, remote.reducers)
+	assert.True(remote.changes.IsDeleted("note"))
+	assert.NoError(remote.Set("log", []string{"c"}))
+	assert.Equal([]string{"a", "b", "c"}, remote.GetStrings("log"))
+	assert.Equal([]string{"b", "c"}, remote.changes.Contributions().GetStrings("log"))
 }
 
 // reducedFlow returns a carrier whose input state holds log=[a] on ReducerAppend and note="n" with no reducer,
 // as the orchestrator hands it to a task.
 func reducedFlow(inBranch bool) *RawFlow {
 	state, _ := NewState("log", []string{"a"}, "note", "n")
-	state.SetMeta(map[string]FieldMeta{"log": {Reducer: ReducerAppend}})
 	f := NewRawFlow()
 	f.SetRawState(state)
+	f.SetReducers(map[string]Reducer{"log": ReducerAppend})
 	f.SetInBranch(inBranch)
 	return f
 }
@@ -607,7 +602,7 @@ func TestFlow_SetOnAReducedFieldContributes(t *testing.T) {
 	assert.NoError(f.Set("log", "c")) // a single value under append is one element
 	// The task reads the combined value; its changes hold its contribution alone.
 	assert.Equal([]string{"a", "b", "c"}, f.GetStrings("log"))
-	assert.Equal([]string{"b", "c"}, f.RawChanges().GetStrings("log"))
+	assert.Equal([]string{"b", "c"}, f.RawChanges().Contributions().GetStrings("log"))
 	assert.False(f.RawChanges().IsOverwritten("log"))
 
 	// A nil contributes nothing to a reduced field, and deletes a plain one.
@@ -619,13 +614,22 @@ func TestFlow_SetOnAReducedFieldContributes(t *testing.T) {
 	assert.True(f.RawChanges().IsDeleted("note"))
 
 	// A value the reducer cannot combine is an error, and changes nothing.
-	add := reducedFlow(false)
+	add := NewRawFlow()
 	st, _ := NewState("n", 1)
-	st.SetMeta(map[string]FieldMeta{"n": {Reducer: ReducerAdd}})
 	add.SetRawState(st)
+	add.SetReducers(map[string]Reducer{"n": ReducerAdd})
 	assert.Error(add.Set("n", "x"))
 	assert.Equal(1, add.GetInt("n"))
-	assert.False(add.RawChanges().Has("n"))
+	assert.False(add.RawChanges().Mentions("n"))
+
+	// A name ending with the overwrite suffix cannot be written.
+	assert.Error(f.Set("x!", 1))
+	assert.Error(f.Overwrite("x!", 1))
+	assert.True(func() (panicked bool) {
+		defer func() { panicked = recover() != nil }()
+		f.Del("x!")
+		return false
+	}(), "Del of a reserved name panics")
 }
 
 func TestFlow_OverwriteAndDelThenSet(t *testing.T) {
@@ -640,7 +644,7 @@ func TestFlow_OverwriteAndDelThenSet(t *testing.T) {
 	assert.Equal([]string{"d1", "d2"}, f.GetStrings("log"))
 	changes := f.RawChanges()
 	assert.True(changes.IsOverwritten("log"))
-	assert.Equal([]string{"d1", "d2"}, changes.GetStrings("log"))
+	assert.Equal([]string{"d1", "d2"}, changes.Overwrites().GetStrings("log"))
 
 	// Overwrite then Set: the Set folds onto the overwritten value.
 	f = reducedFlow(false)
@@ -670,38 +674,4 @@ func TestFlow_OverwriteOfAReducedFieldInABranch(t *testing.T) {
 	var remote Flow
 	assert.NoError(json.Unmarshal(data, &remote))
 	assert.Error(remote.Overwrite("log", nil))
-}
-
-func TestState_ComposeTable(t *testing.T) {
-	assert := testarossa.For(t)
-	reducers := map[string]Reducer{"f": ReducerAppend}
-	delta := func(v any, overwrite bool) State {
-		d, _ := NewState()
-		if overwrite {
-			assert.NoError(d.Overwrite("f", v))
-		} else {
-			assert.NoError(d.Set("f", v))
-		}
-		return d
-	}
-	cases := []struct {
-		name          string
-		earlier       State
-		later         State
-		want          any
-		wantOverwrite bool
-	}{
-		{"delta then delta", delta([]any{"a"}, false), delta([]any{"b"}, false), []any{"a", "b"}, false},
-		{"overwrite then delta", delta([]any{"x"}, true), delta([]any{"b"}, false), []any{"x", "b"}, true},
-		{"delete then delta", delta(nil, true), delta([]any{"b"}, false), []any{"b"}, true},
-		{"delta then overwrite", delta([]any{"a"}, false), delta([]any{"y"}, true), []any{"y"}, true},
-		{"delta then delete", delta([]any{"a"}, false), delta(nil, true), nil, true},
-	}
-	for _, tc := range cases {
-		assert.NoError(tc.earlier.Compose(tc.later, reducers), tc.name)
-		var got any
-		_, _ = tc.earlier.Get("f", &got)
-		assert.Equal(tc.want, got, tc.name)
-		assert.Equal(tc.wantOverwrite, tc.earlier.IsOverwritten("f"), tc.name)
-	}
 }

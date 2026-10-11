@@ -27,7 +27,7 @@ func TestApply_Append(t *testing.T) {
 	assert := testarossa.For(t)
 
 	base, _ := NewState("items", []int{1, 2})
-	err := base.Apply(st("items", []int{3, 4}), map[string]Reducer{"items": ReducerAppend})
+	err := base.Apply(ChangesOf(st("items", []int{3, 4})), map[string]Reducer{"items": ReducerAppend})
 	assert.NoError(err)
 
 	var items []int
@@ -39,7 +39,7 @@ func TestApply_AppendSingleElement(t *testing.T) {
 	assert := testarossa.For(t)
 
 	base, _ := NewState("items", []string{"a"})
-	err := base.Apply(st("items", "b"), map[string]Reducer{"items": ReducerAppend})
+	err := base.Apply(ChangesOf(st("items", "b")), map[string]Reducer{"items": ReducerAppend})
 	assert.NoError(err)
 
 	var items []string
@@ -51,7 +51,7 @@ func TestApply_IncomingAbsentIsNoOp(t *testing.T) {
 	assert := testarossa.For(t)
 
 	base, _ := NewState("items", []int{1, 2})
-	err := base.Apply(st("other", 1), map[string]Reducer{"items": ReducerAppend})
+	err := base.Apply(ChangesOf(st("other", 1)), map[string]Reducer{"items": ReducerAppend})
 	assert.NoError(err)
 
 	var items []int
@@ -65,7 +65,7 @@ func TestApply_BaseAbsentSeedsViaReducer(t *testing.T) {
 	// base has no "items" yet, so the reducer is called with a nil base and decides how to seed.
 	base, _ := NewState("other", 1)
 	reducers := map[string]Reducer{"items": ReducerAppend}
-	err := base.Apply(st("items", []int{3, 4}), reducers)
+	err := base.Apply(ChangesOf(st("items", []int{3, 4})), reducers)
 	assert.NoError(err)
 
 	var items []int
@@ -73,7 +73,7 @@ func TestApply_BaseAbsentSeedsViaReducer(t *testing.T) {
 	assert.Equal([]int{3, 4}, items)
 
 	// A second merge accumulates onto the seeded slice.
-	err = base.Apply(st("items", 5), reducers)
+	err = base.Apply(ChangesOf(st("items", 5)), reducers)
 	assert.NoError(err)
 	_, _ = base.Get("items", &items)
 	assert.Equal([]int{3, 4, 5}, items)
@@ -83,7 +83,7 @@ func TestApply_NoReducerOverwrites(t *testing.T) {
 	assert := testarossa.For(t)
 
 	base, _ := NewState("items", []int{1, 2})
-	err := base.Apply(st("items", []int{3, 4}), nil) // no reducers
+	err := base.Apply(ChangesOf(st("items", []int{3, 4})), nil) // no reducers
 	assert.NoError(err)
 
 	var items []int
@@ -98,21 +98,21 @@ func TestApply_ErrorPropagates(t *testing.T) {
 	// append. An element-type mismatch is NOT reachable: every base in the live path arrives from JSON as a
 	// []any, which accepts any element, so appending a string to a list of numbers is legal there.
 	base, _ := NewState("items", "not a list")
-	err := base.Apply(st("items", 3), map[string]Reducer{"items": ReducerAppend})
+	err := base.Apply(ChangesOf(st("items", 3)), map[string]Reducer{"items": ReducerAppend})
 	assert.Error(err)
 	assert.Contains(err.Error(), "must be a slice or array")
 
 	// And the confirmation that the other branch is dead in production: a normalized []any base takes a
 	// string element without complaint.
 	nums, _ := NewState("items", []int{1, 2})
-	assert.NoError(nums.Apply(st("items", "three"), map[string]Reducer{"items": ReducerAppend}))
+	assert.NoError(nums.Apply(ChangesOf(st("items", "three")), map[string]Reducer{"items": ReducerAppend}))
 }
 
 func TestApply_AddByReducerName(t *testing.T) {
 	assert := testarossa.For(t)
 
 	base, _ := NewState("total", 10)
-	err := base.Apply(st("total", 5), map[string]Reducer{"total": ReducerAdd})
+	err := base.Apply(ChangesOf(st("total", 5)), map[string]Reducer{"total": ReducerAdd})
 	assert.NoError(err)
 
 	var total int

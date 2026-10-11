@@ -67,35 +67,37 @@ func TestCohortFold_ProjectionEqualsContributions(t *testing.T) {
 				return s
 			}
 			outerBase := state(tc.outer, tc.outer != nil)
-			spawn := state(tc.spawn, tc.spawn != nil)
-			var inner []workflow.State
+			spawn := workflow.ChangesOf(state(tc.spawn, tc.spawn != nil))
+			var inner []workflow.Changes
 			for _, v := range tc.inner {
-				inner = append(inner, state(v, true)) // a nil is written, as Set(k, nil) writes it
+				inner = append(inner, workflow.ChangesOf(state(v, true))) // a nil is written, as Set(k, nil) writes it
 			}
-			own := state(tc.own, tc.own != nil)
+			own := workflow.ChangesOf(state(tc.own, tc.own != nil))
 
 			// One by one: the outer cohort folds the spawn, every inner contribution, then the fan-in's own write.
 			flat := outerBase.Clone()
-			assert.NoError(flat.ApplyAll(append(append([]workflow.State{spawn}, inner...), own), reducers))
+			assert.NoError(flat.ApplyAll(append(append([]workflow.Changes{spawn}, inner...), own), reducers))
 
 			// Nested: the inner fan-in folds its cohort onto the spawn's folded state and records what it added.
 			innerState := outerBase.Clone()
 			assert.NoError(innerState.Apply(spawn, reducers))
-			reduced, err := foldCohort(innerState, inner, reducers, true)
+			rec, err := foldCohort(innerState, inner, reducers, true)
 			assert.NoError(err)
-			stampFanIn(innerState, reducers, reduced)
-			// Its row is stored and read back before the outer fold reads it.
+			// Its row - the state and its state_reduced column - is stored and read back before the outer fold
+			// reads it.
 			data, err := json.Marshal(innerState)
 			assert.NoError(err)
 			stored, err := workflow.NewState(data)
 			assert.NoError(err)
-			part, err := projectReduced(stored, reducers)
+			var storedRec map[string]*reduced
+			assert.NoError(json.Unmarshal(reducedColumn(rec), &storedRec))
+			part, err := projectReduced(stored, storedRec, reducers)
 			assert.NoError(err)
 			contribution, ok, err := memberContribution(part, own, reducers)
 			assert.NoError(err)
 			assert.True(ok)
 			nested := outerBase.Clone()
-			assert.NoError(nested.ApplyAll([]workflow.State{spawn, contribution}, reducers))
+			assert.NoError(nested.ApplyAll([]workflow.Changes{spawn, contribution}, reducers))
 
 			var want, got any
 			_, err = flat.Get("f", &want)

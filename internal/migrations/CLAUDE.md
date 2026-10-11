@@ -78,8 +78,9 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `step_token` | Random token component of the stepKey |
 | `task_name` | Graph node name of the task this step executes |
 | `state` | JSON input snapshot. Immutable except on retry/resume. A field carried by REFERENCE is **absent** here - see `state_refs` |
-| `changes` | JSON output delta the task produced. Always literal: a ref never appears in `changes`, which is what lets one refs column cover the whole scheme |
+| `changes` | JSON output delta the task produced: `workflow.Changes`, one object holding a contribution under its field's name and an overwrite under `name!` (a delete is `"name!": null`). Decode it as `Changes` (`changesOf`), never as a plain `State`, which reads `name!` as a field of its own. Always literal: a ref never appears in `changes`, which is what lets one refs column cover the whole scheme |
 | `state_refs` | `{"<field>": <anchor step_id>}` (a forEach element: `"<field>": "<anchor> <array field>[<index>]"`, an item ref into the array) - fields whose bytes live in another step's row rather than in this step's `state`, so a large carried field is stored once instead of once per step (measured ~29x fewer state bytes on a fan-out doc-extraction shape). The anchor's bytes may be in **either** its `changes` (a task produced them) or its `state` (the flow's initial input at the entry step; a fan-in's reducer output), so resolution reads both, `changes` shadowing `state`. Own column, not an inline `$ref` key, so `Fork`'s DB-side `INSERT...SELECT` clone can remap anchors with one tiny UPDATE instead of pulling every large state blob through the engine. Empty (`'{}'`) for the overwhelming majority of rows. The full design is in `engine/CLAUDE.md` |
+| `state_reduced` | On a fan-in step inside an outer cohort only: per field, which part of the folded value in its `state` its cohort added (`{"log": {"from": 3}, "total": {"value": 5}, "tags": {"keys": ["a"]}}`), so the next cohort out takes that fan-in's contribution from its one row (`cohortParts`). `'{}'` on every other row. Written only by the fan-in INSERT, read only by `cohortParts`, copied by Fork's clone. Its own column so the record never travels with the state: a successor's row that inherited it would carry a boundary that does not describe its own input. See "A member's contribution is its `changes`, EXCEPT an inner fan-in's" in `engine/CLAUDE.md` |
 | `interrupt_payload` | JSON outbound payload from `flow.Interrupt()` - what the awaiting caller sees |
 | `interrupt_done` | `1` once the interrupt park has been resumed; drives `flow.Interrupt`'s return-vs-arm decision |
 | `resume_data` | JSON inbound payload recorded by `Resume`; returned by `flow.Interrupt` on re-dispatch. `'{}'` until resumed |
@@ -231,9 +232,16 @@ over dead tuples is that fragmentation persists while latency recovers.
   climbed steadily to 395ms and never recovered. Vacuum is the cure, not the contention.
 - **Aggressive autovacuum** (`scale_factor=0.02`, `cost_delay=0`): 5,702 steps/s with a 115-second p99. Neither
   direction away from the defaults helps.
-- **`fillfactor` 70 or 90, to get HOT updates:** made no difference to throughput. The HOT ratio moved only
-  25.7% -> 29.8%. It cannot work by construction: HOT requires that no indexed column changes, and about 70% of
-  the engine's roughly 5.6 updates per step write `status`, which leads three indexes.
+- **`fillfactor` below 100, to get HOT updates:** made no difference to throughput at 70 or 90, and the HOT
+  ratio moved only 25.7% -> 29.8%. A local sweep (linear workload, ~1,000 steps/s, 60s per setting) read
+  30.7 / 30.8 / 31.0 / 31.0% HOT on `dwarf_steps` at 100 / 90 / 80 / 70. It cannot work by construction: HOT
+  requires that no indexed column changes, and about 70% of the engine's roughly 5.6 updates per step write
+  `status`, which leads three indexes. On a linear step (claim, completion, successor link) only the link is
+  HOT-eligible, which caps the ratio near 1/3, and HOT pruning already leaves the link room on the page without
+  a lower fillfactor. A higher ratio needs the claim and completion to stop writing an indexed column - a schema
+  change, not a storage setting. `dwarf_flows` already sits at ~90% HOT at every fillfactor: the per-step
+  `touch`/`step_id` writes are HOT, and the remaining ~10% are status transitions, which move
+  `idx_dwarf_flows_status`.
 - **It is not client-side.** Active backends held at 72-99 before, during and after the stall (the pool caps
   them), and row-lock waits (`Lock:transactionid`, `Lock:tuple`) read zero in every sample.
 
@@ -340,8 +348,8 @@ must apply the same treatment.
 
 ### Payload columns are binary on SQL Server, and every payload bind is a Go `[]byte`
 
-On the `-- DRIVER: mssql` blocks the nine JSON payload columns - `dwarf_flows.graph`/`baggage`/`final_state` and
-`dwarf_steps.state`/`changes`/`interrupt_payload`/`state_refs`/`resume_data`/`subgraph_result` - are
+On the `-- DRIVER: mssql` blocks the ten JSON payload columns - `dwarf_flows.graph`/`baggage`/`final_state` and
+`dwarf_steps.state`/`changes`/`interrupt_payload`/`state_refs`/`state_reduced`/`resume_data`/`subgraph_result` - are
 **`VARBINARY(MAX) NOT NULL DEFAULT 0x7B7D`** (`0x7B7D` is `{}`), not `NVARCHAR(MAX)`. The genuinely-textual columns
 (`error`, `subgraph_error`, `cancel_reason`, `workflow_url`, `workflow_name`, `task_name`, `task_url`,
 `fairness_key`, `status`, the tokens, `trace_parent`) stay `NVARCHAR`/`NCHAR` - they are compared, searched, and read

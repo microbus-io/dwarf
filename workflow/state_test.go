@@ -289,7 +289,7 @@ func TestState_CloneRestoresAfterFailedApply(t *testing.T) {
 
 	safe := state.Clone()
 	incoming, _ := NewState("items", 3)
-	err := state.Apply(incoming, reducers)
+	err := state.Apply(ChangesOf(incoming), reducers)
 	assert.Error(err)
 
 	// Roll back to the snapshot, then fold onto a list base successfully.
@@ -297,7 +297,7 @@ func TestState_CloneRestoresAfterFailedApply(t *testing.T) {
 	assert.Equal("not a list", state.GetString("items"), "the failed fold left the snapshot intact")
 	state, _ = NewState("items", []int{1, 2})
 	ok, _ := NewState("items", []int{3, 4})
-	err = state.Apply(ok, reducers)
+	err = state.Apply(ChangesOf(ok), reducers)
 	assert.NoError(err)
 
 	var items []int
@@ -311,7 +311,7 @@ func TestState_ApplyReplaces(t *testing.T) {
 	a, _ := NewState("x", 1, "y", 2)
 	b, _ := NewState("y", 20, "z", 30)
 
-	err := a.Apply(b, nil)
+	err := a.Apply(ChangesOf(b), nil)
 	assert.NoError(err)
 
 	var x, y, z int
@@ -334,7 +334,7 @@ func TestState_ApplyNullDeletesAPlainField(t *testing.T) {
 	// A null for a field with no reducer, or ReducerReplace, deletes it.
 	for _, reducers := range []map[string]Reducer{nil, {"b": ReducerReplace}} {
 		base, _ := NewState("a", 1, "b", 2)
-		assert.NoError(base.Apply(mustS("b", nil), reducers))
+		assert.NoError(base.Apply(ChangesOf(mustS("b", nil)), reducers))
 		assert.Equal(1, base.Len())
 		assert.False(base.Has("b"))
 		assert.False(base.IsDeleted("b"), "a materialized state holds no delete")
@@ -347,12 +347,12 @@ func TestState_ApplyNullIsAReducersIdentity(t *testing.T) {
 	// A null for a reduced field contributes nothing; only an overwrite clears it.
 	base, _ := NewState("items", []int{1, 2})
 	reducers := map[string]Reducer{"items": ReducerAppend}
-	assert.NoError(base.Apply(mustS("items", nil), reducers))
+	assert.NoError(base.Apply(ChangesOf(mustS("items", nil)), reducers))
 	var items []int
 	_, _ = base.Get("items", &items)
 	assert.Equal([]int{1, 2}, items)
 
-	del, _ := NewState()
+	del := NewChanges()
 	assert.NoError(del.Overwrite("items", nil))
 	assert.NoError(base.Apply(del, reducers))
 	assert.False(base.Has("items"))
@@ -362,8 +362,8 @@ func TestState_ApplySequentialOrder(t *testing.T) {
 	assert := testarossa.For(t)
 
 	base, _ := NewState("k", "base")
-	assert.NoError(base.Apply(mustS("k", "first"), nil))
-	assert.NoError(base.Apply(mustS("k", "last"), nil))
+	assert.NoError(base.Apply(ChangesOf(mustS("k", "first")), nil))
+	assert.NoError(base.Apply(ChangesOf(mustS("k", "last")), nil))
 
 	var k string
 	_, _ = base.Get("k", &k)
@@ -504,7 +504,7 @@ func TestState_RawTombstoneIsCleared(t *testing.T) {
 
 	// Applying the delta enacts the delete: nothing deleted-and-present is left behind.
 	base, _ := NewState("gone", "was here", "other", 2)
-	assert.NoError(base.Apply(s, nil))
+	assert.NoError(base.Apply(ChangesOf(s), nil))
 	assert.False(base.IsDeleted("gone"), "Apply enacts the delete")
 	assert.False(base.Has("gone"))
 	assert.True(base.Has("kept"))
@@ -522,7 +522,7 @@ func TestState_ReducerFoldsRawOperands(t *testing.T) {
 	incoming, err := NewState([]byte(`{"total":5,"list":["b"]}`))
 	assert.NoError(err)
 
-	err = base.Apply(incoming, map[string]Reducer{"total": ReducerAdd, "list": ReducerAppend})
+	err = base.Apply(ChangesOf(incoming), map[string]Reducer{"total": ReducerAdd, "list": ReducerAppend})
 	assert.NoError(err)
 	assert.Equal(15, base.GetInt("total"), "a raw base and a raw incoming must add")
 	assert.Equal([]string{"a", "b"}, base.GetStrings("list"))
@@ -571,7 +571,7 @@ func TestState_SetNormalizesGoType(t *testing.T) {
 	incoming, _ := NewState()
 	assert.NoError(incoming.Set("list", []item{{Z: "z", A: "a"}}))
 
-	assert.NoError(base.Apply(incoming, map[string]Reducer{"list": ReducerUnion}))
+	assert.NoError(base.Apply(ChangesOf(incoming), map[string]Reducer{"list": ReducerUnion}))
 	out := base.GetJSON("list")
 	assert.Equal(`[{"a":"a","z":"z"}]`, string(out),
 		"a struct-contributed element must dedupe against its decoded twin, not be kept alongside it")
@@ -650,11 +650,11 @@ func TestState_ApplyAllMatchesPerMember(t *testing.T) {
 		"list": ReducerAppend, "set": ReducerUnion, "total": ReducerAdd,
 		"obj": ReducerMerge, "flag": ReducerOr, "txt": ReducerConcat,
 	}
-	members := func() []State {
-		return []State{
-			mustS("list", []int{1}, "set", []string{"a"}, "total", 1, "obj", map[string]any{"x": 1}, "flag", false, "txt", "a", "plain", "first"),
-			mustS("list", []int{2}, "set", []string{"a", "b"}, "total", 2, "obj", map[string]any{"y": 2}, "flag", true, "txt", "b", "plain", "second"),
-			mustS("list", []int{3}, "set", []string{"b", "c"}, "total", 3, "obj", map[string]any{"x": 9}, "flag", false, "txt", "c"),
+	members := func() []Changes {
+		return []Changes{
+			ChangesOf(mustS("list", []int{1}, "set", []string{"a"}, "total", 1, "obj", map[string]any{"x": 1}, "flag", false, "txt", "a", "plain", "first")),
+			ChangesOf(mustS("list", []int{2}, "set", []string{"a", "b"}, "total", 2, "obj", map[string]any{"y": 2}, "flag", true, "txt", "b", "plain", "second")),
+			ChangesOf(mustS("list", []int{3}, "set", []string{"b", "c"}, "total", 3, "obj", map[string]any{"x": 9}, "flag", false, "txt", "c")),
 		}
 	}
 
@@ -754,138 +754,20 @@ func TestState_ParseSkipsClearedFields(t *testing.T) {
 	assert.False(has)
 }
 
-func TestState_MetaIsNotAField(t *testing.T) {
+// TestState_ApplyAllBareValueOntoNothing pins that a single value appended to an absent field folds in one pass
+// as it does member by member, when a later member brings a list.
+func TestState_ApplyAllBareValueOntoNothing(t *testing.T) {
 	assert := testarossa.For(t)
-
-	s, _ := NewState("a", 1)
-	tags := map[string]FieldMeta{"log": {Reducer: ReducerAppend}}
-	s.SetMeta(tags)
-
-	// Stored with the state, and read back through Meta.
-	assert.Equal(tags, s.Meta())
-	data, err := json.Marshal(s)
-	assert.NoError(err)
-	assert.Equal(`{"__meta__":{"log":{"reducer":"append"}},"a":1}`, string(data))
-	back, err := NewState(data)
-	assert.NoError(err)
-	assert.Equal(tags, back.Meta())
-
-	// Invisible to every field accessor.
-	assert.Equal(1, s.Len())
-	assert.Equal([]string{"a"}, slices.Collect(s.Names()))
-	assert.False(s.Has(MetaKey))
-	assert.False(s.IsDeleted(MetaKey))
-	assert.Nil(s.GetJSON(MetaKey))
-	var v any
-	ok, err := s.Get(MetaKey, &v)
-	assert.NoError(err)
-	assert.False(ok)
-	var parsed map[string]any
-	assert.NoError(s.Parse(&parsed))
-	assert.Equal(map[string]any{"a": 1.0}, parsed)
-
-	// Not writable or removable as a field.
-	assert.Error(s.Set(MetaKey, map[string]any{}))
-	_, err = NewState(MetaKey, 1)
-	assert.Error(err)
-	s.Del(MetaKey)
-	assert.Equal(tags, s.Meta())
-
-	// Clear removes the fields and keeps the metadata.
-	s.Clear()
-	assert.Equal(0, s.Len())
-	assert.Equal(tags, s.Meta())
-
-	// SetMeta with nothing removes it.
-	s.SetMeta(nil)
-	assert.Nil(s.Meta())
-	assert.Nil(s.MetaJSON())
-}
-
-func TestState_ApplyKeepsReceiversMeta(t *testing.T) {
-	assert := testarossa.For(t)
-
-	mine := map[string]FieldMeta{"log": {Reducer: ReducerAppend}}
-	forged := map[string]FieldMeta{"log": {Reducer: ReducerUnion}, "n": {Reducer: ReducerAdd}}
-	newIncoming := func() State {
-		in, _ := NewState("log", []string{"b"}, "n", 2)
-		in.SetMeta(forged)
-		return in
-	}
-
-	s, _ := NewState("log", []string{"a"})
-	s.SetMeta(mine)
-	assert.NoError(s.Apply(newIncoming(), nil))
-	assert.Equal(mine, s.Meta())
-	assert.Equal([]string{"b"}, s.GetStrings("log"))
-
-	s, _ = NewState("log", []string{"a"})
-	s.SetMeta(mine)
-	assert.NoError(s.ApplyAll([]State{newIncoming()}, map[string]Reducer{"log": ReducerAppend}))
-	assert.Equal(mine, s.Meta())
-	assert.Equal([]string{"a", "b"}, s.GetStrings("log"))
-
-	// A receiver with no metadata does not acquire the incoming State's.
-	s, _ = NewState()
-	assert.NoError(s.Apply(newIncoming(), nil))
-	assert.Nil(s.MetaJSON())
-}
-
-// TestState_ComposeIsApplyInTurn pins, for every reducer, that applying two deltas composed into one equals
-// applying them in turn - with and without an overwrite on either side. It is what lets a step's runs, and a
-// task's writes within a run, accumulate in one delta.
-func TestState_ComposeIsApplyInTurn(t *testing.T) {
-	t.Parallel()
-	values := map[Reducer][3]any{ // base, first write, second write
-		ReducerReplace: {"base", "a", "b"},
-		ReducerAppend:  {[]any{"x"}, []any{"a"}, "b"},
-		ReducerUnion:   {[]any{"x", "a"}, []any{"a", "b"}, []any{"b", "c", "x"}},
-		ReducerConcat:  {"x", "a", "b"},
-		ReducerMerge:   {map[string]any{"x": 1.0, "k": 0.0}, map[string]any{"k": 1.0}, map[string]any{"k": 2.0, "y": 3.0}},
-		ReducerAdd:     {10.0, 1.0, 2.0},
-		ReducerMin:     {5.0, 7.0, 3.0},
-		ReducerMax:     {5.0, 1.0, 9.0},
-		ReducerAnd:     {true, true, false},
-		ReducerOr:      {false, false, true},
-	}
-	for r, v := range values {
-		for _, overwrite := range [][2]bool{{false, false}, {true, false}, {false, true}, {true, true}} {
-			assert := testarossa.For(t)
-			reducers := map[string]Reducer{"f": r}
-			delta := func(value any, ow bool) State {
-				d, _ := NewState()
-				if ow {
-					assert.NoError(d.Overwrite("f", value))
-				} else {
-					assert.NoError(d.Set("f", value))
-				}
-				return d
-			}
-			d1, d2 := delta(v[1], overwrite[0]), delta(v[2], overwrite[1])
-
-			inTurn, _ := NewState("f", v[0])
-			assert.NoError(inTurn.Apply(d1, reducers))
-			assert.NoError(inTurn.Apply(d2, reducers))
-
-			composed := delta(v[1], overwrite[0])
-			assert.NoError(composed.Compose(d2, reducers))
-			once, _ := NewState("f", v[0])
-			assert.NoError(once.Apply(composed, reducers))
-
-			want, _ := inTurn.MarshalJSON()
-			got, _ := once.MarshalJSON()
-			assert.Equal(string(want), string(got), "%s overwrite=%v", r, overwrite)
+	for _, r := range []Reducer{ReducerAppend, ReducerUnion} {
+		reducers := map[string]Reducer{"f": r}
+		members := []Changes{ChangesOf(mustS("f", "x")), ChangesOf(mustS("f", []string{"y"}))}
+		oneByOne := mustS()
+		for _, m := range members {
+			assert.NoError(oneByOne.Apply(m, reducers), r)
 		}
+		allAtOnce := mustS()
+		assert.NoError(allAtOnce.ApplyAll(members, reducers), r)
+		assert.Equal([]string{"x", "y"}, allAtOnce.GetStrings("f"), r)
+		assert.Equal(oneByOne.GetStrings("f"), allAtOnce.GetStrings("f"), r)
 	}
-}
-
-// TestState_ComposeNormalizesAStoredValue pins that a delta value stored by an older writer - a bare value under
-// append, rather than the list a fold produces - composes as Apply would read it.
-func TestState_ComposeNormalizesAStoredValue(t *testing.T) {
-	assert := testarossa.For(t)
-	reducers := map[string]Reducer{"log": ReducerAppend}
-	stored, err := NewState([]byte(`{"log":"m"}`))
-	assert.NoError(err)
-	assert.NoError(stored.Compose(mustS("log", []any{"n"}), reducers))
-	assert.Equal([]string{"m", "n"}, stored.GetStrings("log"))
 }

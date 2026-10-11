@@ -324,11 +324,9 @@ See [Writing tasks](tasks.md#contributions-not-totals-on-a-reduced-field) and
 
 The state field names a graph declares — `forEach`, `as`, and the field of `SetReducer` — must be plain
 identifiers: an ASCII letter or underscore, followed by ASCII letters, digits, or underscores
-(`lineItems`, `line_item`), other than the reserved `__meta__`. `Validate` rejects a graph that declares any
-other name. The flow's state itself
-may carry fields under any name except `__meta__`, which the engine reserves: `Set` rejects it, and `Create`,
-`Continue` and `Fork` reject a state that contains it. The identifier rule applies only to the names a graph
-declares.
+(`lineItems`, `line_item`). `Validate` rejects a graph that declares any other name. The flow's state itself
+may carry fields under other names too, but a name must not end with `!`: in the flow's JSON form that suffix
+marks a field a task replaced, and a task cannot write or delete such a field.
 
 ## Validation
 
