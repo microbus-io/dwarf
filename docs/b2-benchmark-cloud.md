@@ -2,9 +2,9 @@
 
 > **Draft.** This page replaces [the current cloud benchmarks](benchmark-cloud.md) once its remaining runs
 > are in. Measured so far: database sizes from 8 to 32 vCPU with their engine pairings,
-> shards, replicas, one engine for several shards, the recommended shape, and engine host sizes. Still to
-> run: workload shape and payload size, long tasks, database volume, and failover. Each pending section
-> says so.
+> shards, replicas, one engine for several shards, the recommended shape, engine host sizes, and long
+> tasks. Still to run: workload shape and payload size, database volume, and failover. Each pending
+> section says so.
 
 > **For operators** sizing a deployment. This page answers how much one database serves, what adding
 > shards and engine replicas does, and what the engine itself costs. Every number was measured, and the
@@ -22,6 +22,8 @@
   the least per step: about $0.05 per million steps at full load.
 - **The engine is cheap.** A shard's work takes about 5.5 engine cores. Two 8 vCPU engine hosts per
   32 vCPU database serve it at about a third of their CPU each, and either can carry it alone.
+- **Long tasks cost no throughput.** With 8-second tasks the engine delivered the full offered rate, and
+  each step's hand-off added under 10 ms. 10,000 concurrent 60-second tasks ran on under one engine core.
 - **Prefer more, smaller engine hosts.** One engine serves up to two shards at full speed; past that, add
   replicas. On a 48 vCPU host the engine spends up to 40% more CPU per step than on 8 or 16 vCPU hosts.
 
@@ -198,11 +200,53 @@ with a p99 of **1.8–2.3 s**, in every run. A smaller database works through th
 the p99 was ~3.5 s at 16 vCPU and ~8.2 s at 8 vCPU. That reflects the backlog chosen for the test, not the
 latency of an unsaturated deployment.
 
+## Long tasks
+
+A task that waits on something slow, such as a model call or a human, ties up the flow but not the
+database. These runs check that the engine keeps the offered rate as tasks lengthen, and that a waiting
+task costs little.
+
+**Seconds-long tasks at a fixed rate.** 1,000 flows/s of the 10-step `linear` workflow, about 10,000
+steps/s or half of what the database runs saturated, with every task sleeping 0, 1 or 8 seconds. One
+32 vCPU database, one 16 vCPU engine host, a 6-minute window after 2 minutes of warmup:
+
+| Task duration | flows/s | steps/s | Flow p50 | Flow p99 | Hand-off per step | Flows in flight | Engine CPU | `Create` p99 |
+|---|---|---|---|---|---|---|---|---|
+| 0 s | 999 | 9,988 | 0.045 s | 0.37 s | ~5 ms | ~750 | 2.7 cores | 29 ms |
+| 1 s | 999 | 9,987 | 10.06 s | 10.47 s | ~6 ms | ~10,500 | 3.0 cores | 68 ms |
+| 8 s | 997 | 9,970 | 80.09 s | 80.42 s | ~9 ms | ~80,250 | 3.2 cores | 49 ms |
+
+*Hand-off per step is the flow p50, less ten task durations, divided by the ten steps.*
+
+- **Task duration drops out of throughput.** Every run delivered the offered rate, and a flow took ten
+  times its task duration plus a few milliseconds per step.
+- **The database does the same work at every duration.** It committed ~31,000 transactions/s in all
+  three runs. A task in progress holds no database connection.
+- **Creating a flow stays fast.** `Create` p99 stayed between 29 and 68 ms at every duration, while the
+  engine held up to 80,000 flows in flight.
+- **Memory follows flows in flight.** Holding ~80,000 flows, the engine's heap peaked at ~1.2 GB, about
+  15 KB per flow.
+
+**Minute-long tasks.** One 60-second task per flow, the shape of a workflow that waits on a model call,
+with a fixed number of flows in flight:
+
+| Flows in flight | flows/s | In flight ÷ 60 s | Flow p50 | Flow p99 | Worker goroutines | Engine CPU |
+|---|---|---|---|---|---|---|
+| 500 | 8.3 | 8.3 | 60.008 s | 60.044 s | 502 | 0.04 cores |
+| 2,000 | 33.3 | 33.3 | 60.011 s | 60.110 s | 2,002 | 0.14 cores |
+| 10,000 | 166.7 | 166.7 | 60.013 s | 60.276 s | 10,004 | 0.74 cores |
+
+- **Throughput is the work in flight divided by the task duration,** exactly, at every level, and a
+  flow takes as long as its task and no longer.
+- **The engine grows its workers to fit the work.** It ran one worker per task in progress and needed
+  under one core to hold 10,000 of them.
+
+No flow errors in any of the six runs.
+
 ## Pending sections
 
 - **Workload shape and payload.** Linear, fan-out and scatter workflows; payloads from 0 to 1 MB per
   task; stored and write-ahead-log bytes per task byte.
-- **Long tasks.** Tasks of 0, 1 and 8 seconds, and 10,000 flows each waiting on a 60-second task.
 - **Database volume.** Throughput as the database grows to hundreds of millions of rows and hundreds
   of GB.
 - **Failover.** A fixed load while dispatchers are killed one at a time.
