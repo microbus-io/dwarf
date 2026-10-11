@@ -183,6 +183,39 @@ full command at 116 flows outstanding and the smallest falling half short. The f
 backlog-bound (a deep same-band queue inflates the band scan and with it RTT), so they measured the scan,
 not the pool. Size the rig under the regime the experiment will actually run in.
 
+## Running the cloud rig
+
+Operational traps on Cloud SQL + GCE, each of which has cost a run.
+
+- **Cloud SQL provisions IOPS by disk size (~30 IOPS/GB).** A 100 GB disk gives ~3,000 IOPS (~23 MB/s of
+  random 8 KB I/O), and a write-heavy or volume run then measures the disk: the fill rate falls off a cliff
+  rather than a slope, with requested checkpoints far outnumbering timed ones. Use 1 TB (~30,000 IOPS) unless
+  disk size is the variable.
+- **Read the database's own log when a run dips.** Cloud SQL Postgres logs checkpoints and autovacuum to Cloud
+  Logging, and the log outlives a deleted instance. At ~70-110 MB/s of WAL the default `max_wal_size` made a
+  32 vCPU instance checkpoint every 3-16 s for a whole run ("checkpoints are occurring too frequently"), and a
+  checkpoint that REMOVED old segments instead of recycling them forced new ones to be created: one backend in
+  `IO/WALInitSync`, ~250 queued on `WALWrite`, dispatch down ~65% for ~10 s.
+- **A wait-event profile is not a utilization figure.** `pg_stat_activity` samples show the queue, not the
+  cores: an instance at 80% CPU read 77% `LWLock:WALWrite` against 7% `CPU:running`. Pair it with the
+  instance's CPU utilization metric before calling anything spare.
+- **Open-loop p50/p99 come from COMPLETED flows only**, so a long-task arm mid-backlog reads a spurious ~0.
+  Judge such an arm on steps/s, flows/s against the commanded rate, and `maxOutstandingObserved`.
+- **`INTERNAL_ERROR` on `gcloud sql instances create` can be partial:** the instance is created and reaches
+  `RUNNABLE` while the command fails. Wait for `RUNNABLE` and carry on; do not create a second instance.
+- **`pkill -f`/`pgrep -f` over ssh match their own command line**, so a poll for a finished driver reads it as
+  running forever. Match the binary's exact name (`-x`), or poll a marker file the driver writes.
+- **`DROP DATABASE` needs `WITH (FORCE)` after engines are killed** - their connections outlive the process
+  long enough to block a plain drop. Wait out the peer freshness window (~40 s) before reusing a database, or
+  the dead engine's row inflates the next run's replica count.
+- **gcloud auth expires mid-session.** An orchestrator must check `gcloud auth print-access-token` before each
+  step and wait rather than fail, or an unattended rig strands resources. Runs started with `setsid nohup` on
+  the VM survive an expiry; the workstation's monitoring does not.
+- **macOS deletes files in `/private/tmp` that have not been touched for a few days**, including a session
+  scratchpad. A rig whose password file or chart virtualenv lives there breaks silently the next day (an empty
+  root password on new instances; a matplotlib without `__init__.py`). Check them before launching, and keep
+  anything long-lived outside `/private/tmp`.
+
 ## Design the comparison, not just the run
 
 **Rotate arm order (Latin square).** A fixed order inside each rep ties every arm to a sequence position:
