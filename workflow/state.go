@@ -419,9 +419,13 @@ func (s State) Apply(c Changes, reducers map[string]Reducer) error {
 func (s State) ApplyAll(cs []Changes, reducers map[string]Reducer) error {
 	acc := map[string]any{}
 	decoded := map[string]bool{}
+	// An append or a concat is spliced as bytes rather than decoded: the base and every contribution are collected
+	// and joined once at the end, so the cost is linear in the bytes and allocates no decoded values.
+	spliced := map[string][]json.RawMessage{}
 	set := func(k string, v json.RawMessage) {
 		delete(decoded, k)
 		delete(acc, k)
+		delete(spliced, k)
 		if isCleared(v) {
 			delete(s.d, k)
 		} else {
@@ -436,6 +440,13 @@ func (s State) ApplyAll(cs []Changes, reducers map[string]Reducer) error {
 				continue
 			}
 			if isCleared(v) {
+				continue
+			}
+			if r == ReducerAppend || r == ReducerConcat {
+				if _, ok := spliced[k]; !ok {
+					spliced[k] = []json.RawMessage{s.d[k]}
+				}
+				spliced[k] = append(spliced[k], v)
 				continue
 			}
 			if !decoded[k] {
@@ -471,7 +482,104 @@ func (s State) ApplyAll(cs []Changes, reducers map[string]Reducer) error {
 		}
 		s.d[k] = encoded
 	}
+	for k, parts := range spliced {
+		var joined json.RawMessage
+		var err error
+		if reducers[k] == ReducerConcat {
+			joined, err = concatRaw(k, parts[0], parts[1:])
+		} else {
+			joined, err = appendRaw(k, parts[0], parts[1:], false)
+		}
+		if err != nil {
+			return errors.Trace(err)
+		}
+		s.d[k] = joined
+	}
 	return nil
+}
+
+// concatRaw is ReducerConcat on JSON bytes: base's string followed by each incoming string, spliced between the
+// quotes rather than decoded. JSON escapes are self-contained, so the joined bytes decode to the joined string.
+// (A UTF-16 surrogate pair escaped across two writes, "\ud83d" then "\ude00", is the exception: decoded
+// separately each half reads as U+FFFD, spliced the pair is whole. Go's encoder never escapes that way.) A base
+// that is absent or null is the empty string; a base or an incoming value that is not a string is an error, as
+// it is for the reducer.
+func concatRaw(name string, base json.RawMessage, incoming []json.RawMessage) (json.RawMessage, error) {
+	isString := func(v []byte) bool { return len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' }
+	parts := make([][]byte, 0, len(incoming)+1)
+	size := 2
+	b := bytes.TrimSpace(base)
+	switch {
+	case len(b) == 0 || bytes.Equal(b, []byte("null")):
+	case isString(b):
+		parts = append(parts, b[1:len(b)-1])
+		size += len(b) - 2
+	default:
+		return nil, errors.New("reducer '%s' for field %q: base must be a string", string(ReducerConcat), name)
+	}
+	for _, inc := range incoming {
+		v := bytes.TrimSpace(inc)
+		if !isString(v) {
+			return nil, errors.New("reducer '%s' for field %q: incoming must be a string", string(ReducerConcat), name)
+		}
+		parts = append(parts, v[1:len(v)-1])
+		size += len(v) - 2
+	}
+	out := make([]byte, 0, size)
+	out = append(out, '"')
+	for _, p := range parts {
+		out = append(out, p...)
+	}
+	return append(out, '"'), nil
+}
+
+// appendRaw is ReducerAppend on JSON bytes: the elements of base followed by those of each incoming value, where
+// an incoming list contributes its elements and anything else is one element. The bytes are spliced, never
+// decoded, so a long list costs a copy rather than a decode and re-encode. A base that is absent or null is the
+// empty list; a base that is not a list is an error, as it is for the reducer, unless bareBase says a single
+// value stored by an older writer stands for the one-element list it is. Every input is already valid JSON: it
+// was marshalled by Set or read from a column or a decoded payload.
+func appendRaw(name string, base json.RawMessage, incoming []json.RawMessage, bareBase bool) (json.RawMessage, error) {
+	parts := make([][]byte, 0, len(incoming)+1)
+	size := 2
+	add := func(elems []byte) {
+		if len(elems) > 0 {
+			parts = append(parts, elems)
+			size += len(elems) + 1
+		}
+	}
+	b := bytes.TrimSpace(base)
+	switch {
+	case len(b) == 0 || bytes.Equal(b, []byte("null")):
+	case b[0] == '[':
+		add(listElements(b))
+	case bareBase:
+		add(b)
+	default:
+		return nil, errors.New("reducer '%s' for field %q: base must be a slice or array", string(ReducerAppend), name)
+	}
+	for _, inc := range incoming {
+		v := bytes.TrimSpace(inc)
+		if len(v) > 0 && v[0] == '[' {
+			add(listElements(v))
+		} else {
+			add(v)
+		}
+	}
+	out := make([]byte, 0, size)
+	out = append(out, '[')
+	for i, p := range parts {
+		if i > 0 {
+			out = append(out, ',')
+		}
+		out = append(out, p...)
+	}
+	return append(out, ']'), nil
+}
+
+// listElements is what lies between a JSON list's brackets, trimmed; empty for an empty list.
+func listElements(list []byte) []byte {
+	return bytes.TrimSpace(list[1 : len(list)-1])
 }
 
 // MarshalJSON serializes the State's fields as a JSON object.

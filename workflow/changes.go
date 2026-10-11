@@ -221,6 +221,12 @@ func (c Changes) contribute(name string, v json.RawMessage, reducers map[string]
 // fold combines inc onto base through r. When base is a contribution (contributed), a bare value stored by an
 // older writer under append or union stands for the one-element list it is, so it is wrapped first.
 func fold(r Reducer, name string, base, inc json.RawMessage, contributed bool) (json.RawMessage, error) {
+	switch r {
+	case ReducerAppend:
+		return appendRaw(name, base, []json.RawMessage{inc}, contributed)
+	case ReducerConcat:
+		return concatRaw(name, base, []json.RawMessage{inc})
+	}
 	baseVal, err := decodeValue(base)
 	if err != nil {
 		return nil, errors.New("reducer '%s' for field %q: %w", string(r), name, err)

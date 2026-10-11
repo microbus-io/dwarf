@@ -17,6 +17,8 @@ limitations under the License.
 package workflow
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -419,4 +421,102 @@ func st(pairs ...any) State {
 		panic(err)
 	}
 	return s
+}
+
+// TestAppendRaw_EqualsTheDecodingFold pins that splicing an append as bytes yields the same list as decoding the
+// base and every contribution, appending and re-encoding - on every input shape a stored or marshalled value can
+// take, including the whitespace a database re-spells a column with.
+func TestAppendRaw_EqualsTheDecodingFold(t *testing.T) {
+	assert := testarossa.For(t)
+	bases := []string{``, `null`, `[]`, `[ ]`, `[1]`, `[1, 2]`, ` [ {"a": [1, 2]} , "x" ] `, `[[1],[2]]`, `[null]`}
+	incomings := []string{`[]`, `[ ]`, `[3]`, `[3, 4]`, `"s"`, `5`, `{"k": [1]}`, `[[5]]`, `[null]`, `true`}
+	decodingFold := func(base string, incs []string) any {
+		var acc any = []any{} // as ApplyAll starts an absent list, so a bare value cannot start a typed one
+		if b := strings.TrimSpace(base); b != "" && b != "null" {
+			assert.NoError(json.Unmarshal([]byte(b), &acc))
+		}
+		for _, inc := range incs {
+			var v any
+			assert.NoError(json.Unmarshal([]byte(inc), &v))
+			var err error
+			acc, err = ReducerAppend.Reduce(acc, v)
+			assert.NoError(err)
+		}
+		data, err := json.Marshal(acc)
+		assert.NoError(err)
+		var out any
+		assert.NoError(json.Unmarshal(data, &out))
+		return out
+	}
+	for _, base := range bases {
+		for _, inc := range incomings {
+			for _, incs := range [][]string{{inc}, {inc, `[7]`}, {`"z"`, inc}} {
+				raws := make([]json.RawMessage, len(incs))
+				for i, s := range incs {
+					raws[i] = json.RawMessage(s)
+				}
+				spliced, err := appendRaw("f", json.RawMessage(base), raws, false)
+				if !assert.NoError(err, "%q + %v", base, incs) {
+					continue
+				}
+				var got any
+				if !assert.NoError(json.Unmarshal(spliced, &got), "%q + %v -> %s", base, incs, spliced) {
+					continue
+				}
+				assert.Equal(decodingFold(base, incs), got, "%q + %v -> %s", base, incs, spliced)
+			}
+		}
+	}
+
+	// A bare base is an error, unless it stands for a one-element list.
+	_, err := appendRaw("f", json.RawMessage(`"x"`), []json.RawMessage{json.RawMessage(`[1]`)}, false)
+	assert.Error(err)
+	spliced, err := appendRaw("f", json.RawMessage(`"x"`), []json.RawMessage{json.RawMessage(`[1]`)}, true)
+	assert.NoError(err)
+	assert.Equal(`["x",1]`, string(spliced))
+
+	// The bytes are kept as given, so an integer beyond 2^53 survives exactly.
+	spliced, err = appendRaw("f", json.RawMessage(`[1234567890123456789]`), []json.RawMessage{json.RawMessage(`9007199254740993`)}, false)
+	assert.NoError(err)
+	assert.Equal(`[1234567890123456789,9007199254740993]`, string(spliced))
+}
+
+// TestConcatRaw_EqualsTheDecodingFold pins that splicing a concat as bytes yields the same string as decoding the
+// base and every contribution, concatenating and re-encoding - escapes, multi-byte text and the whitespace a
+// database re-spells a column with included.
+func TestConcatRaw_EqualsTheDecodingFold(t *testing.T) {
+	assert := testarossa.For(t)
+	bases := []string{``, `null`, `""`, `"abc"`, ` "a\"b\\c" `, `"line\nnext\té"`, `"héllo 😀"`, `"<&"`}
+	incomings := []string{`""`, `"x"`, `"\"q\""`, `" 中文 "`, `" "`, `"\\"`}
+	for _, base := range bases {
+		for _, inc := range incomings {
+			for _, incs := range [][]string{{inc}, {inc, `"z"`}, {`"y"`, inc}} {
+				raws := make([]json.RawMessage, len(incs))
+				for i, s := range incs {
+					raws[i] = json.RawMessage(s)
+				}
+				var want string
+				if b := strings.TrimSpace(base); b != "" && b != "null" {
+					assert.NoError(json.Unmarshal([]byte(b), &want))
+				}
+				for _, s := range incs {
+					var v string
+					assert.NoError(json.Unmarshal([]byte(s), &v))
+					want += v
+				}
+				spliced, err := concatRaw("f", json.RawMessage(base), raws)
+				if !assert.NoError(err, "%q + %v", base, incs) {
+					continue
+				}
+				var got string
+				if assert.NoError(json.Unmarshal(spliced, &got), "%q + %v -> %s", base, incs, spliced) {
+					assert.Equal(want, got, "%q + %v -> %s", base, incs, spliced)
+				}
+			}
+		}
+	}
+	_, err := concatRaw("f", json.RawMessage(`5`), []json.RawMessage{json.RawMessage(`"x"`)})
+	assert.Error(err)
+	_, err = concatRaw("f", json.RawMessage(`"a"`), []json.RawMessage{json.RawMessage(`["x"]`)})
+	assert.Error(err)
 }

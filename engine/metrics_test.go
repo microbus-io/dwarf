@@ -381,6 +381,10 @@ func TestMetrics_ForkCountsAsStarted(t *testing.T) {
 		return
 	}
 	assert.Equal(workflow.StatusCompleted, forkOut.Status)
+	// Run and Await can return as soon as the await detector reads the committed row, before the completing
+	// worker counts the flow ended; the stop checkpoint fires after the count.
+	enginetest.AwaitFlowStatus(t, eng, flowKey, workflow.StatusCompleted, 15*time.Second)
+	enginetest.AwaitFlowStatus(t, eng, forkKey, workflow.StatusCompleted, 15*time.Second)
 
 	var rm metricdata.ResourceMetrics
 	if !assert.NoError(reader.Collect(ctx, &rm)) {
@@ -694,6 +698,9 @@ func TestMetrics_StartedAndEndedBalanceAcrossTrees(t *testing.T) {
 		if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, outcome.Status) {
 			return
 		}
+		// Run can return as soon as the await detector reads the committed row, before the completing worker
+		// counts the flow ended; the stop checkpoint fires after the count.
+		enginetest.AwaitFlowStatus(t, eng, flowKey, workflow.StatusCompleted, 15*time.Second)
 		balanced(t)
 		steps, err := eng.History(ctx, flowKey)
 		if !assert.NoError(err) || !assert.Len(steps, 1) || !assert.Len(steps[0].SubHistory, 1) {

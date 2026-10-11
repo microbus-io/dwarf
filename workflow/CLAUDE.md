@@ -51,6 +51,17 @@ history again, and that is the contract, not a bug - pinned by `terminalreducerf
 `read_modify_write_counts_the_input_twice`. Because every hand-off folds, the outcome does not depend on graph
 shape: a do-nothing step changes nothing (`padding_does_not_change_the_outcome`).
 
+Three alternatives were weighed against this rule and lost; do not re-propose them without new evidence:
+- **A branch's whole OUTPUT as its contribution** (instead of its writes). Consistent when nested, but one level
+  of `append` over base `[a]`, with branches writing `x` and `y`, gives `[a, x, a, y]` where everyone expects
+  `[a, x, y]` - and wrapping a step in a one-item `forEach` would change the result.
+- **A branch as ONE contributor** (writes replace inside a branch; its net addition over what it was handed is its
+  contribution). Every reducer then needs its own "net addition" (a suffix for `append`, a difference for `add`,
+  undefined for `min`/`max`), and a task reads a reduced field differently inside a branch than outside it.
+- **A re-run starts from the step's original input, and only its last run's writes count.** Safer against a
+  `Set` placed before `Interrupt`/`Subgraph`, but it loses the attempt log (one entry per `Retry`) and a task can
+  no longer see what its earlier runs wrote. The ordering rule is documented instead (`docs/tasks.md`).
+
 **The carrier (`flow.go`): every write is a one-field `Changes`, composed into `changes` and applied to the
 view** (`Changes.Compose`, `State.Apply`), through the graph's reducers. The engine hands the carrier those
 reducers at every dispatch (`RawFlow.SetReducers`, the `reducers` wire field); nothing stores them, and the
@@ -188,6 +199,18 @@ is why some tests assert `float64` where a reader might expect `int`.
    `Apply` per member: the accumulator grows as it folds, so re-encoding it per member is quadratic in
    accumulated bytes - roughly 500x the element encodes at width 1,000. The replace path (the default, and
    the overwhelming majority of fields) moves bytes and pays none of this.
+   **`append` and `concat` are not decoded at all: they splice bytes** (`appendRaw`/`concatRaw`, used by
+   `ApplyAll` and `Changes`' fold). They are the reducers a long history or transcript sits under, and every step that adds a message pays the fold twice (the
+   carrier's `Set` and the successor base). Measured (M1 Pro, chat-message objects): decoding ran ~100 MB/s -
+   0.97 ms and 600 KB allocated per fold at a 100 KB history, 9.5 ms at 1 MB - against 17 µs and 0.10 ms
+   spliced, 4 allocations whatever the size (`BenchmarkFold_*`). `ApplyAll` collects the pieces and joins them
+   once, so a wide fan-in stays linear. The splice keeps every element's bytes as given, so an integer beyond
+   2^53 survives an append exactly, which the decoding fold rounded. Pinned by
+   `TestAppendRaw_EqualsTheDecodingFold` and `TestConcatRaw_EqualsTheDecodingFold` (every input shape, escapes
+   and the database's re-spelled whitespace included). `concat` splices between the quotes, which is exact
+   because JSON escapes are self-contained - except a UTF-16 surrogate pair escaped across two writes, which
+   the decoding fold turned into two U+FFFD and the splice reunites; Go's encoder never escapes that way.
+   `union` and `merge` must compare decoded values, so they decode.
    `Apply` is `ApplyAll` of one member, so there is one fold to keep correct. Pinned by
    `TestState_ApplyAllMatchesPerMember`, which asserts the one-pass and per-member results are
    byte-identical, so the optimization can never quietly change a fan-in outcome. **On a reducer error the

@@ -150,9 +150,10 @@ matching one before working there:**
   query compares one payload column with another. What storing every value as JSON does buy is **Go TYPE
   normalization**: a caller's struct decodes as the same `map[string]any`/`float64` as its twin read from a
   column, and `DeepEqual` between a struct and its decoded twin is false - so never hand a reducer a caller's
-  Go value that has not been marshalled. A **byte-comparing reducer** (comparing raw array elements instead of
-  decoding them - the standing plan for `union`/`append`) would have to canonicalize what it compares; the
-  stored bytes do not give it that. (`workflow/CLAUDE.md`)
+  Go value that has not been marshalled. `append` and `concat` fold by SPLICING bytes (`appendRaw`,
+  `concatRaw`), which compare nothing and so need no canonical form. A **byte-comparing reducer** (`union` deduping raw elements instead of
+  decoding them) would have to canonicalize what it compares; the stored bytes do not give it that.
+  (`workflow/CLAUDE.md`)
 - **A step's `changes` is `workflow.Changes`, and an overwrite is its field name with a `!` suffix:**
   `{"log": ["m"], "summary!": "trimmed", "scratch!": null}` contributes to `log`, replaces `summary` and deletes
   `scratch`. Decode a `changes` column with `changesOf` (engine) / `Changes.UnmarshalJSON`, never as a plain
