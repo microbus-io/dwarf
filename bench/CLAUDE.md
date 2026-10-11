@@ -444,6 +444,10 @@ clean commit;
 `bench/charts_redo.py` charts a tree of cells and `-volume` artifacts. Run `dbcpu.sh` with `WRITE=1` first so
 the artifacts carry database CPU.
 
+`bench/charts_cloud.py` draws `docs/benchmark-cloud.md`'s charts and `bench/charts.py` the local dialect charts in
+`docs/benchmark.md`. A cloud chart drawn from many runs or from CPU profiles keeps its numbers as a table in the
+script, because no single artifact holds them; the rest read their artifacts under `bench/results/`.
+
 Test-only knobs the bench CANNOT reach: the engine's seams are enabled only under `testing.Testing()`, so
 arming one from `internal/engineseams` in a bench binary does nothing, and fault injection and `sequel`'s
 `SimulateRTT` are available to fixtures but not here. Reaching them from a
