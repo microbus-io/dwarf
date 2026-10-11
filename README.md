@@ -61,8 +61,9 @@ fmt.Println(out.State.GetString("greeting")) // hello ada
 - **OTEL-native observability.** Structured logs (`slog`), 34 `dwarf_*` instruments, and distributed tracing,
   all through standard providers you inject.
 - **Four SQL dialects.** PostgreSQL, MySQL/MariaDB, SQL Server, and SQLite (testing / single-instance).
-- **Free, and cheap at scale.** Apache 2.0 — no license tier, no vendor, no per-operation pricing. A single
-  4-vCPU engine host sustains [~9,400 steps/s](docs/benchmark-cloud.md) — **billions of steps a month** — and
+- **Free, and cheap at scale.** Apache 2.0 — no license tier, no vendor, no per-operation pricing. One
+  32-vCPU PostgreSQL database with two 8-vCPU engine hosts runs [~18,000 steps/s](docs/benchmark-cloud.md),
+  about $0.05 per million steps — **billions of steps a month** — and
   the whole deployment is your own replicas plus a few ordinary SQL instances. No broker, no control plane,
   nothing else to run or pay for, so the bill is a handful of cloud instances rather than a metered service.
 
@@ -182,7 +183,7 @@ Full guides live in [`docs/`](docs/), split by who they are written for — star
 - [Backup and restore](docs/backup-and-restore.md) — what to back up, and what a restore does to flows
 - [Data handling](docs/data-handling.md) — what is stored, what is searchable, retention
 - [Benchmarks](docs/benchmark.md) — throughput & latency per dialect and shard count, and how to run them
-- [Cloud benchmarks](docs/benchmark-cloud.md) — the sizing formula, measured against managed PostgreSQL
+- [Cloud benchmarks](docs/benchmark-cloud.md) — how to size a deployment, measured against managed PostgreSQL
 
 API reference: [pkg.go.dev/github.com/microbus-io/dwarf](https://pkg.go.dev/github.com/microbus-io/dwarf).
 

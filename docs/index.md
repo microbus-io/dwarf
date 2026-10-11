@@ -65,7 +65,7 @@ what genuinely needs a human, and what belongs on a dashboard. Then:
 - **[Data handling](data-handling.md)** — what the engine stores, what free-text search reaches, what
   telemetry carries, and how retention and deletion actually work.
 - **[Cloud benchmarks](benchmark-cloud.md)** — measured against managed cloud PostgreSQL across a real
-  network hop: the sizing formula and the constants behind the engine's fact-derived tuning.
+  network hop: how to size a deployment, and the measurements behind the engine's defaults.
 
 ## For both
 

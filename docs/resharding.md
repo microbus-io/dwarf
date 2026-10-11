@@ -106,10 +106,10 @@ shard needs no coordination beyond the restart; horizontal growth needs the two-
 ## Changing the shard count is a capacity decision, not a scaling reflex
 
 Before resharding at all, check that the shard count is what actually binds. Shards exist to add *database
-servers*, and the measured ladder keeps paying well past the first one: 2 shards ×1.84, 3 ×2.56, 6 ×4.92
-against a single shard. Scaling is sub-linear but does not flatten in the measured range, so do not stop at
-two on the assumption that later shards add nothing.
-→ [Cloud benchmarks](benchmark-cloud.md#scaling-out-more-shards)
+servers*, and every shard carries what one carries alone: 2 shards ×1.90 and 4 shards ×3.87-4.17 against a
+single shard. Scaling is linear in the measured range, so do not stop at two on the assumption that later
+shards add nothing.
+→ [Cloud benchmarks](benchmark-cloud.md#shards-throughput-adds-up)
 
 **Co-locating several shards on one database server buys nothing.** The point of a shard is a separate write
 path; two shards on one server contend for the same one and add overhead for no capacity. If you are not

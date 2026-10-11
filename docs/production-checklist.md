@@ -38,8 +38,8 @@
   concurrently-live replicas. → [Upgrading](upgrading.md#deploying-your-own-application)
 - [ ] **Logger, meter provider and tracer provider injected.** All three default to no-ops, so an engine with
   nothing injected is silent — including its error logs. → [Observability](observability.md)
-- [ ] **At least 3 replicas**, and **1 engine vCPU per 6 database vCPUs** at a 70% database utilisation
-  target. Two separate constraints, not one maximum. → [Cloud benchmarks](benchmark-cloud.md#the-sizing-formula)
+- [ ] **Two engine replicas per shard, each at half the database's vCPU** (two 8-vCPU replicas per 32-vCPU
+  database), so either can carry the shard alone. → [Cloud benchmarks](benchmark-cloud.md#sizing-a-deployment)
 
 ## Lifecycle
 

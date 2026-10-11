@@ -61,8 +61,8 @@ completely differently:
 
 Placement is a lottery you do not control (Cloud SQL exposes only the zone), and two same-zone instances
 measured **0.32 ms and 0.82 ms — a 29% throughput difference on identical hardware and an identical
-build**. That single fact reconciles the two conflicting 16-vCPU/pool-96 numbers in
-`docs/benchmark-cloud.md` (7,491 and 5,355): one equation, two RTTs. **Always record RTT beside any
+build**. That single fact reconciled two conflicting 16-vCPU/pool-96 measurements (7,491 and 5,355 steps/s):
+one equation, two RTTs. **Always record RTT beside any
 throughput number, and normalize before comparing across sessions.**
 
 Validation that the netem arms are a faithful stand-in for real distance: genuine-placement runs land

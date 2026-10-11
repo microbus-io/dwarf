@@ -324,34 +324,33 @@ That has three consequences worth knowing:
 ## Reference configurations
 
 Measured points to start a capacity plan from. All are Cloud SQL for PostgreSQL 16 on a 1 TB SSD, in the
-same zone as the engine (round trip ≈ 0.3–0.9 ms), running a chain of no-op tasks against a fresh database.
-The full conditions for each are in the [cloud benchmarks](benchmark-cloud.md).
+same zone as the engine (round trip ~0.06 ms), running a 10-step chain of no-op tasks saturated against a
+fresh database, averaged over a 16-minute window. The full conditions are in the
+[cloud benchmarks](benchmark-cloud.md).
 
-| shards × database vCPUs | engine | steps/s | measured over |
-|---|---|---|---|
-| 1 × 2 | 1 replica, 32 vCPU | 1,101 | 60 s peak |
-| 1 × 8 | 1 replica, 32 vCPU | 3,679 peak, **3,105–3,263 sustained** | 60 s / 600 s |
-| 1 × 16 | 1 replica, 32 vCPU | 7,491 peak, **~6,100–6,300 sustained** | 60 s / 600 s |
-| 3 × 8 | 1 replica, 4 vCPU | ~9,400 (the engine host binds, at 79% CPU) | 60 s |
-| 6 × 8 | 1 replica, 16 vCPU | 13,900 (5 ms tasks) | 60 s, median of 3 |
+| shards × database vCPUs | engine replicas | steps/s |
+|---|---|---|
+| 1 × 8 | 2 × 2 vCPU | 4,041 |
+| 1 × 16 | 2 × 4 vCPU | 7,675 |
+| 1 × 32 | 1 × 16 vCPU | 17,938 |
+| 4 × 32 | 4 × 16 vCPU | 69,382 |
+| 4 × 32 | 8 × 8 vCPU | 74,879 |
 
 How to read it:
 
-- **Plan to the sustained figure, not the peak.** Over ten minutes an instance holds about 84% of what a
-  one-minute window reports.
-- **Adding replicas does not add database throughput.** One to eight replicas sharing one 16-vCPU shard
-  measured 6,800–7,200 steps/s; replicas are for availability and engine CPU. Run at least three.
-- **Size the engine at 1 vCPU per 6 database vCPUs**, and plan no more than ~10,000 steps/s per 4-vCPU
-  engine host.
-- **Fan-out costs the database more per step.** On one saturated shard a width-16 fan-out ran ~30% below
-  a linear chain (3,484 against 5,048 steps/s).
+- **Plan on the settled rate.** Every run settles 8–13% below where it starts within its window, so plan a
+  32-vCPU database at ~16,000 steps/s: its settled rate less room to catch up after a failover or a spike.
+- **Give each shard two engine replicas at half its vCPU.** Each runs at about a third of its CPU and can
+  carry the shard alone. Replicas beyond two per shard add standby capacity, not database throughput.
+- **Shard past 32 vCPU.** A 64-vCPU database bought +22% for 1.9 times the price; four 32-vCPU shards ran
+  3.9–4.2 times one.
 - **Disk IOPS scale with disk size on most managed databases.** A 100 GB disk (~3,000 IOPS) throttles a
   write-heavy workload that the same instance serves comfortably on a larger one; see
   [Disk throughput](#disk-throughput).
 
-For example, for ~5,000 steps/s sustained: two 8-vCPU shards (each sustaining ~3,100, and each its own
-server), and 16 database vCPUs ÷ 6 ≈ 3 engine vCPUs, spread as three 2-vCPU replicas. Then measure your
-own workload against it, because task shape, payload size and round-trip time all move these numbers.
+For example, for ~50,000 steps/s at peak: four 32-vCPU shards (each its own server) and eight 8-vCPU engine
+replicas. Then measure your own workload against it, because task shape, payload size and round-trip time
+all move these numbers.
 
 ## Shutting down
 

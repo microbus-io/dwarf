@@ -2,7 +2,7 @@
 
 > **For developers and operators** comparing SQL dialects or shard counts on their own hardware. These are
 > single-host laptop-scale numbers — good for *relative* comparison, not for capacity planning. For
-> absolute numbers and the sizing formula, see [Cloud benchmarks](benchmark-cloud.md).
+> absolute numbers and how to size a deployment, see [Cloud benchmarks](benchmark-cloud.md).
 
 The benchmarks in `./fixtures` measure end-to-end flow throughput and latency through the **public API**
 (`Run` = create + await) against whatever SQL dialect `SEQUEL_TESTING_DSN` points at. They measure what code
@@ -196,7 +196,7 @@ Reading it:
 
 A single-host laptop run cannot show what production hardware does — those dimensions are measured by the
 [cloud benchmarks](benchmark-cloud.md): true horizontal scale on shard-per-server hardware, connection-pool
-and worker sizing (the sizing formula), the effect of real network latency, byte-throughput ceilings, and
+budget and deployment sizing, the effect of real network latency, byte-throughput ceilings, and
 throughput at high volume (100M+ accumulated rows). Still open anywhere: a sustained multi-hour soak for
 drift (goroutine/memory/connection growth). This benchmark remains the per-dialect throughput/latency
 baseline the cloud numbers build on — the cloud benchmarks run PostgreSQL only, on the ranking measured here.

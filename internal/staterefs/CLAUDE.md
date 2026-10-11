@@ -9,8 +9,7 @@
 A step's `state` is a full input snapshot, so a field that is *carried* but not *changed* is re-serialized
 into every row it survives into: D copies down a chain of depth D, and **N·D across a fan-out of N branches**.
 Bytes are the binding resource for large-state workflows (a shard sustaining ~4,600 steps/s on small state
-caps near ~700-900 steps/s rewriting 64KB per step, bound by the instance's disk/WAL path —
-`docs/benchmark-cloud.md`). The doc-extraction shape (a document fanned out over pages, then chunks) measures
+caps near ~700-900 steps/s rewriting 64KB per step, bound by the instance's disk/WAL path). The doc-extraction shape (a document fanned out over pages, then chunks) measures
 **~29x** fewer stored state bytes with refs than without.
 
 So a field above a size bar is not written into the successor's `state` at all: it is omitted, and the refs

@@ -83,13 +83,13 @@ Sizing is measured rather than guessed, and the numbers live with the measuremen
 - **[Deployment](deployment.md)** — choosing a database, declaring shards, connection pools, workers,
   drain windows, the disk-throughput requirement, and
   [reference configurations](deployment.md#reference-configurations) with their measured throughput.
-- **[Cloud benchmarks](benchmark-cloud.md)** — the sizing formula and every constant behind it, measured
+- **[Cloud benchmarks](benchmark-cloud.md)** — how to size a deployment, and the measurements behind it,
   against managed PostgreSQL across a real network hop.
 
-The two rules to carry into a capacity plan: **1 engine vCPU per 6 database vCPUs** at a 70% database
-utilisation target, and **at least 3 replicas** for resiliency. They are separate constraints on different
-dimensions, not a single maximum. Both assume your tasks are cheap; a host dispatching tasks over a network
-transport pays more engine CPU per step and should measure its own.
+The rules to carry into a capacity plan: plan a 32-vCPU database at **~16,000 steps/s**, and give each shard
+**two engine replicas at half its vCPU**, either of which can carry the shard alone. Both assume your tasks
+are cheap; a host dispatching tasks over a network transport pays more engine CPU per step and should
+measure its own.
 
 ## Where to look next
 
@@ -103,4 +103,4 @@ transport pays more engine CPU per step and should measure its own.
 | [Data handling](data-handling.md) | What is stored, what is searchable, retention |
 | [Observability](observability.md) | Logs, metrics, traces |
 | [Deployment](deployment.md) | Database choice, pools, replicas, shutdown |
-| [Cloud benchmarks](benchmark-cloud.md) | Sizing formula and the measurements behind it |
+| [Cloud benchmarks](benchmark-cloud.md) | Sizing a deployment and the measurements behind it |
