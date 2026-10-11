@@ -69,7 +69,7 @@ f.SetStrings("errors", msgs)
 f.Set("order", order)         // any JSON-marshalable value
 
 f.Del("coupon", "scratch") // remove fields
-f.Clear()                     // remove everything
+f.Clear()                     // remove everything (Del on every field)
 ```
 
 ### Binary data must be base64-encoded
@@ -120,24 +120,49 @@ So: use typed accessors, and **carry the value as a string** only if it must sur
 `id_str` alongside them. A `time.Duration` is nanoseconds, so a duration past ~104 days is in the same
 territory for those readers.
 
-### Contributions, not totals, in a fan-out branch
+### Contributions, not totals, on a reduced field
 
-A reducer (append, add, union, merge, …) combines what parallel branches contribute when they converge at their
-fan-in. So a task running as a **fan-out branch** writes only its own contribution to a reducer-managed field —
-the increment, not the accumulated value:
-
-```go
-// In a branch. "messages" is wired to ReducerAppend: contribute the new message only.
-f.Set("messages", []string{newMessage})   // correct
-// f.Set("messages", entireHistory)        // WRONG: the fan-in would duplicate the history
-```
-
-Anywhere else — a task that is not a fan-out branch — a write replaces the field, reducer or not. To add to a
-list there, append to what you read and write the result:
+A field the graph wires to a reducer (append, add, union, merge, …) takes **contributions**. A write combines
+with what the field already holds, wherever the task runs — in a straight line, in a fan-out branch, or at a
+fan-in — and a read returns the combined value. So write only your contribution, never the value you read:
 
 ```go
-f.SetStrings("messages", append(f.GetStrings("messages"), newMessage))
+// "messages" is wired to ReducerAppend.
+f.Set("messages", []any{reply})   // correct: adds the reply
+// f.Set("messages", append(f.GetStrings("messages"), reply))   // WRONG: adds the whole history again
 ```
+
+Two writes in one task both count, and a read in between sees the first. A `nil` contributes nothing, so a task
+that collected nothing into a nil slice can write it safely.
+
+**To replace or clear a reduced field, say so.** `Overwrite` replaces the field, and `Del` (which is
+`Overwrite` with `nil`) clears it; later writes in the same task add to the new value:
+
+```go
+history := f.GetStrings("messages")
+f.Overwrite("messages", history[max(0, len(history)-20):])   // keep the last 20
+f.Set("messages", []any{reply})                              // then add the reply
+```
+
+Neither is allowed on a reduced field **inside a fan-out branch**: the branches run in parallel, and a reset in
+one has no defined meaning for the others. `Overwrite` returns an error there, and a `Del` fails the step - as
+does `Clear`, which deletes every field. Reset the field before the fan-out or after its fan-in.
+
+**A task that runs more than once keeps every run's writes.** A step re-runs its task after `Retry`, after a
+`Resume` of an `Interrupt`, and when a `Subgraph` returns, and each run's contributions add to the previous
+runs'. That lets a task record one entry per attempt. It also means a contribution made **before**
+`Interrupt` or `Subgraph` is made twice, because the task runs from the top again:
+
+```go
+yield, err := f.Interrupt(map[string]any{"draft": draft}, &resume)
+if err != nil || yield {
+    return err
+}
+f.Set("messages", []any{draft})   // after the approval: written once
+```
+
+Call `Retry` before a contribution that must not repeat, for the same reason. A field with no reducer is
+unaffected: the last write wins.
 
 See [Concepts → Reducer](concepts.md#reducer).
 

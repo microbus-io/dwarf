@@ -153,14 +153,13 @@ matching one before working there:**
   Go value that has not been marshalled. A **byte-comparing reducer** (comparing raw array elements instead of
   decoding them - the standing plan for `union`/`append`) would have to canonicalize what it compares; the
   stored bytes do not give it that. (`workflow/CLAUDE.md`)
-- **State delete:** `flow.Del`/`Set(k,nil)` writes a JSON `null` tombstone, which has **two spellings** - a
-  Go nil, and the raw bytes `null` on a field still held as JSON - and `isCleared` must recognize both or a
-  delete read back from a column silently stops taking effect. `State.Merge`/`MergeReduce`
-  *preserve* it (accumulation); `State.DelNils` *enacts* it (materialization) - the engine accumulates the
-  changes delta with the tombstone intact, then `DelNils` when the delta folds onto state. A delete replaces like
-  any write - except a fan-out branch's cleared contribution to a *reducer*-managed field (or one in `Continue`'s
-  `additionalState`), which the fold *ignores* as the reducer's identity. (`workflow/CLAUDE.md`; enforced at
-  `execution.go`)
+- **State delete and overwrite are MARKS, not values:** `flow.Del`/`Overwrite` record `"k": {"overwrite": true}`
+  in the delta's `__meta__` (a delete with `k` absent from the values), and `State.Apply` enacts them; a
+  materialized state holds no deletes. A JSON `null` VALUE still means "nothing" - it deletes a field with no
+  reducer and is the reducer's identity on a reduced field - so `isCleared` must recognize both null spellings (a
+  Go-nil `json.RawMessage` and the bytes `null`) or a null read back from a column stops meaning that. A task's
+  `changes` may carry nothing else in `__meta__`, and no overwrite of a reduced field inside a fan-out branch
+  (`checkDeltaMeta`). (`workflow/CLAUDE.md`)
 - **Two problem values are KNOWN and currently UNGUARDED - a deliberate, backlogged punt.** Nothing checks
   storability on the write side, by decision, not oversight. (1) An integer-shaped value beyond **±2^53**.
   **STORAGE IS EXACT** - raw-field storage means a carried field is never decoded, so it round-trips
@@ -191,7 +190,7 @@ matching one before working there:**
 **Workflow graph** - A directed graph defining a workflow's structure: which tasks run, in what order, under what
 conditions. Built in code with the `workflow.Graph` API via `NewGraph(name)`. Each graph has a human-friendly
 display name (surfaced in rendering and denormalized onto the flow row as `workflow_name`), an entry point,
-tasks, transitions, and optional reducers for fan-in state merging. The graph does **not** carry its own
+tasks, transitions, and optional per-field reducers. The graph does **not** carry its own
 resolve URL: the resolve key is a separate opaque `workflowURL` passed to `Create`/`Run`/`LoadGraph` and stored
 on the flow (`workflow_url`); the engine never keeps it on the graph. Each task is bound to its dispatch
 URL with `graph.SetURL(taskName, url)` (create-or-update); the same URL may be bound under multiple task
@@ -213,11 +212,13 @@ maintains a state map that evolves as tasks execute. Statuses: `created` -> `run
 delta (`changes`), and metadata (status, error, timing). Steps are numbered by `step_depth`; parallel fan-out
 siblings share a `step_depth`. Once terminal (`completed`/`failed`/`terminated`/`cancelled`), a step is immutable.
 
-**Reducer** - A merge strategy for state fields during fan-in. When parallel branches converge, each branch's changes
-are merged using the reducer for that field. Ten are defined (`workflow/reducers.go`): `replace` (last write wins,
+**Reducer** - How writes to a state field combine. On a reduced field every write is a delta, folded through the
+field's reducer at every hand-off - a step's successor, a fan-in (in branch order), the final state, `Continue` -
+so a task writes only its contribution and a read returns the combined value; `Overwrite`/`Del` replace instead,
+and are not allowed on a reduced field inside a fan-out branch. Ten are defined (`workflow/reducers.go`): `replace` (last write wins,
 default), `append` (concatenate arrays), `union` (concatenate arrays, deduplicated), `add` (sum numbers), `min`/`max`
 (smaller/larger number), `and`/`or` (logical fold of booleans), `concat` (concatenate strings), and `merge` (combine
-objects, new key wins). A field with no registered reducer uses `replace`; every non-default fan-in field is wired
+objects, new key wins). A field with no registered reducer uses `replace`; every non-default field is wired
 explicitly with `graph.SetReducer(name, reducer)`. There is **no** inference from a field's name - a `sum*`/`list*`/
 `set*` prefix means nothing, so an unwired field silently takes `replace` instead of the reducer its name implies.
 `Graph.Validate` rejects a reducer name outside the ten, and a value a reducer cannot fold fails the flow.

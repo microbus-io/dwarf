@@ -52,12 +52,12 @@ import (
 //
 // A State may also carry metadata about its fields, such as the reducer a field is declared with (see Meta).
 // The orchestrator maintains it. It travels with the state's JSON under the reserved name MetaKey, but it is
-// not a field: Names, Len, Get, GetJSON, Has and Parse do not see it, Set rejects the name, and Merge never
+// not a field: Names, Len, Get, GetJSON, Has and Parse do not see it, Set rejects the name, and Apply never
 // takes it from the incoming State.
 //
 // A zero State is empty and safe to read (Get, Has, Len, Names, MarshalJSON all work on it), but the
 // mutating methods do not allocate, so one must be initialized via NewState or UnmarshalJSON before
-// Set/Merge.
+// Set/Apply.
 type State struct {
 	d map[string]json.RawMessage
 }
@@ -74,6 +74,8 @@ type FieldMeta struct {
 	// Reduced is set only on the state of a fan-in step, for a field its cohort wrote, and describes which
 	// part of the field's value the cohort added.
 	Reduced *Reduced `json:"reduced,omitempty"`
+	// Overwrite is set only in a delta, on a field the delta replaces rather than combines (see Overwrite).
+	Overwrite bool `json:"overwrite,omitempty"`
 }
 
 // Reduced describes which part of a fan-in step's value for a field its cohort added. Exactly one form is
@@ -406,17 +408,22 @@ func (s State) Has(name string) bool {
 	return ok && !isCleared(v) && name != MetaKey
 }
 
-// IsDeleted reports whether the field is present as a DELETE - a stored JSON null, such as Set(name, nil)
-// writes, and the form a delete takes while it is in transit in a changes delta. It is false both for a
-// field holding a value and for one that was never mentioned at all; Has answers the first, and neither
-// being true means the second. Del removes the field outright rather than writing this marker, so a field
-// removed with Del is indistinguishable from one never mentioned.
+// IsDeleted reports whether this State, used as a delta, deletes the field: it records the field as
+// overwritten with no value (see Overwrite), or holds a JSON null for it. It is false both for a field holding
+// a value and for one the delta does not write at all; Has answers the first, and neither being true means
+// the second. Del removes the field outright rather than recording a delete, so a field removed with Del is
+// indistinguishable from one never mentioned.
 //
-// A delta is the only place this is normally observable: materialized state has its deletes enacted, so
-// nothing there is deleted-and-present.
+// A delta is the only place this is observable: a materialized state has its deletes enacted.
 func (s State) IsDeleted(name string) bool {
+	if name == MetaKey {
+		return false
+	}
 	v, ok := s.d[name]
-	return ok && isCleared(v) && name != MetaKey
+	if ok {
+		return isCleared(v)
+	}
+	return s.IsOverwritten(name)
 }
 
 // Parse unmarshals the state's fields into target, typically a pointer to a struct whose fields are matched
@@ -446,13 +453,13 @@ func (s State) Parse(target any) error {
 }
 
 // Clone returns a copy of the State backed by a freshly allocated map, so mutations to either side
-// (Set/Del/Merge) do not affect the other. Field values are shared, which is safe because a stored value is
+// (Set/Del/Apply) do not affect the other. Field values are shared, which is safe because a stored value is
 // an immutable byte slice - nothing can rewrite one in place - and it is what makes cloning a state with a
 // large carried field cost a map entry rather than the field.
 //
 //	safe := state.Clone()
-//	if err := state.MergeReduce(incoming, reducers); err != nil {
-//	    state = safe // roll back to the pre-Merge state
+//	if err := state.Apply(delta, reducers); err != nil {
+//	    state = safe // roll back to the state before the failed fold
 //	}
 func (s State) Clone() State {
 	clone := State{d: make(map[string]json.RawMessage, len(s.d))}
@@ -460,81 +467,46 @@ func (s State) Clone() State {
 	return clone
 }
 
-// Merge overlays the incoming State's fields onto this State with replace semantics (last write wins),
-// mutating the receiver. It is MergeReduce with no reducers. The receiver's metadata is kept, and the
-// incoming State's is ignored.
-//
-// Merge is an accumulation primitive: a cleared incoming value (Go nil or a JSON null, i.e. a delete
-// tombstone) is preserved as-is, not dropped, so a delta can be built up across successive merges. To
-// materialize a snapshot - folding pending deletes into actual absences - call DelNils afterward.
-func (s State) Merge(incoming State) error {
-	copyFields(s.d, incoming.d)
-	return nil
+// Apply folds a delta onto this State, mutating the receiver. It is ApplyAll of one delta.
+func (s State) Apply(delta State, reducers map[string]Reducer) error {
+	return s.ApplyAll([]State{delta}, reducers)
 }
 
-// copyFields copies every field of src into dst, leaving dst's metadata as it is.
-func copyFields(dst, src map[string]json.RawMessage) {
-	for k, v := range src {
-		if k != MetaKey {
-			dst[k] = v
-		}
-	}
-}
-
-// MergeReduce overlays the incoming State's fields onto this State, mutating the receiver, using the
-// per-field strategy in reducers (as produced by Graph.Reducers). Pass nil for plain last-write-wins on
-// every field. To fold several incoming States in order, use MergeReduceAll.
+// ApplyAll folds deltas onto this State in order, mutating the receiver. A delta is what a step writes: a value
+// per field it wrote, and a mark (see Overwrite) on each field it overwrote or deleted. For each field:
 //
-// A field mapped to ReducerReplace (or absent from reducers, or the empty Reducer) is overwritten,
-// tombstones included (see Merge - call DelNils to enact them). A field mapped to any other reducer is
-// combined via that reducer, whose base is this State's current value or nil if it holds none yet. A
-// cleared incoming value on such a field is ignored: it is the reducer's identity, not a delete.
+//   - a field marked as overwritten takes the delta's value, or is removed if the delta holds none;
+//   - a field with no reducer, or ReducerReplace, takes the delta's value, or is removed if it is null;
+//   - any other field is combined through its reducer, whose base is this State's current value or nil if it
+//     holds none. A null contributes nothing: it is the reducer's identity.
 //
-// As with Merge, the receiver's metadata is kept and the incoming State's is ignored. The incoming State is
-// left unmodified. On a reducer error the receiver is left partly merged; discard it.
-func (s State) MergeReduce(incoming State, reducers map[string]Reducer) error {
-	return s.MergeReduceAll([]State{incoming}, reducers)
-}
-
-// MergeReduceAll folds a whole cohort of incoming deltas in one pass, in order, and is what a fan-in should
-// use instead of calling MergeReduce once per member.
-//
-// The difference is not stylistic. Values are stored as JSON, so a COMBINING reducer (append, union, add,
-// merge, ...) decodes its accumulator, folds, and re-encodes; doing that per member re-encodes an
-// accumulator that grows as it goes, which is quadratic in the accumulated bytes across a wide cohort - at
-// width 1,000 roughly 500x the element encodes of a single pass. Here each combined field is decoded once,
-// folded against every member, and encoded once, whatever the width.
-//
-// Replace-reducer fields (the default, and the overwhelming majority) never decode at all on either path -
-// they move bytes - so this only changes the cost of fields the graph actually registered a reducer for.
-// Semantics are identical to folding one at a time: same order, same tombstone accumulation. The first error
-// stops the fold and leaves the receiver partly merged; discard it.
-func (s State) MergeReduceAll(incoming []State, reducers map[string]Reducer) error {
-	if len(incoming) == 0 {
-		return nil
-	}
-	if len(reducers) == 0 {
-		for _, in := range incoming {
-			copyFields(s.d, in.d)
-		}
-		return nil
-	}
-	// Accumulators for the combined fields only, held decoded across the whole cohort.
+// The receiver's metadata is kept, and the deltas' is consumed rather than copied. Pass nil reducers to replace
+// every field. Each combined field is decoded once and encoded once whatever the number of deltas, because a
+// combining reducer re-encodes its accumulator, and folding per delta would be quadratic in the accumulated
+// bytes across a wide fan-in. On a reducer error the receiver is left partly folded; discard it.
+func (s State) ApplyAll(deltas []State, reducers map[string]Reducer) error {
 	acc := map[string]any{}
 	decoded := map[string]bool{}
-	for _, in := range incoming {
-		for k, v := range in.d {
+	set := func(k string, v json.RawMessage) {
+		delete(decoded, k)
+		delete(acc, k)
+		if isCleared(v) {
+			delete(s.d, k)
+		} else {
+			s.d[k] = v
+		}
+	}
+	for _, d := range deltas {
+		overwritten := d.overwritten()
+		for k, v := range d.d {
 			if k == MetaKey {
 				continue
 			}
 			r := reducers[k]
-			if r == "" || r == ReducerReplace {
-				s.d[k] = v
+			if overwritten[k] || r == "" || r == ReducerReplace {
+				set(k, v)
 				continue
 			}
-			// A cleared incoming is the reducer's identity: ignored, leaving the accumulator untouched. So a
-			// branch that deletes a reduced field does not wipe the cohort's contributions to it. (Deleting a
-			// field is a REPLACE concern, handled above via the tombstone; reducers only ever combine values.)
 			if isCleared(v) {
 				continue
 			}
@@ -555,6 +527,11 @@ func (s State) MergeReduceAll(incoming []State, reducers map[string]Reducer) err
 			}
 			acc[k] = result
 		}
+		for k := range overwritten {
+			if _, written := d.d[k]; !written {
+				set(k, nil)
+			}
+		}
 	}
 	for k := range decoded {
 		encoded, err := json.Marshal(acc[k])
@@ -564,6 +541,142 @@ func (s State) MergeReduceAll(incoming []State, reducers map[string]Reducer) err
 		s.d[k] = encoded
 	}
 	return nil
+}
+
+// Compose folds a later delta onto this one, mutating the receiver, so that applying the result equals applying
+// the two in turn. A field the later delta overwrites is overwritten in the result. A later write to a field the
+// receiver overwrote folds onto the overwritten value, and the field stays overwritten. Two writes to a reduced
+// field combine through its reducer, the first onto nil, so a single value under ReducerAppend becomes a list. On
+// a reducer error the receiver is left partly composed; discard it.
+func (s State) Compose(later State, reducers map[string]Reducer) error {
+	marks := s.overwritten()
+	laterMarks := later.overwritten()
+	for k, v := range later.d {
+		if k == MetaKey {
+			continue
+		}
+		r := reducers[k]
+		switch {
+		case laterMarks[k], (r == "" || r == ReducerReplace) && isCleared(v):
+			// An overwrite, or a delete of a plain field, which is an overwrite with nothing.
+			marks[k] = true
+			if isCleared(v) {
+				delete(s.d, k)
+			} else {
+				s.d[k] = v
+			}
+		case r == "" || r == ReducerReplace:
+			s.d[k] = v
+		case isCleared(v):
+			// The reducer's identity.
+		default:
+			base, err := decodeValue(s.d[k])
+			if err != nil {
+				return errors.New("reducer '%s' for field %q: %w", string(r), k, err)
+			}
+			if _, isList := base.([]any); base != nil && !isList && !marks[k] && (r == ReducerAppend || r == ReducerUnion) {
+				// A delta's value is the fold of its writes onto nothing, which under append and union is a list;
+				// an older writer may have stored a bare value, which is the one-element list it stands for.
+				base = []any{base}
+			}
+			inc, err := decodeValue(v)
+			if err != nil {
+				return errors.New("reducer '%s' for field %q: %w", string(r), k, err)
+			}
+			result, err := r.Reduce(base, inc)
+			if err != nil {
+				return errors.New("reducer '%s' for field %q: %w", string(r), k, err)
+			}
+			encoded, err := json.Marshal(result)
+			if err != nil {
+				return errors.New("reducer for field %q: %w", k, err)
+			}
+			s.d[k] = encoded
+		}
+	}
+	for k := range laterMarks {
+		if _, written := later.d[k]; !written {
+			marks[k] = true
+			delete(s.d, k)
+		}
+	}
+	s.setOverwritten(marks)
+	return nil
+}
+
+// Overwrite records, in this State used as a delta, that the field is replaced by value rather than combined
+// through its reducer. A nil value records a delete. See Apply.
+func (s State) Overwrite(name string, value any) error {
+	if name == MetaKey {
+		return errors.New("workflow: state field name %q is reserved", name)
+	}
+	if value == nil {
+		delete(s.d, name)
+	} else if err := s.Set(name, value); err != nil {
+		return errors.Trace(err)
+	}
+	marks := s.overwritten()
+	marks[name] = true
+	s.setOverwritten(marks)
+	return nil
+}
+
+// IsOverwritten reports whether this State, used as a delta, records the field as overwritten or deleted.
+func (s State) IsOverwritten(name string) bool {
+	return s.overwritten()[name]
+}
+
+// Writes iterates the fields this State, used as a delta, writes: every field it holds a value for, and every
+// field it records as overwritten or deleted. Order is unspecified.
+func (s State) Writes() iter.Seq[string] {
+	return func(yield func(string) bool) {
+		for k := range s.Names() {
+			if !yield(k) {
+				return
+			}
+		}
+		for k := range s.overwritten() {
+			if _, ok := s.d[k]; ok {
+				continue
+			}
+			if !yield(k) {
+				return
+			}
+		}
+	}
+}
+
+// overwritten returns the set of fields the state's metadata marks as overwritten, never nil.
+func (s State) overwritten() map[string]bool {
+	marks := map[string]bool{}
+	for k, fm := range s.Meta() {
+		if fm.Overwrite {
+			marks[k] = true
+		}
+	}
+	return marks
+}
+
+// setOverwritten records exactly the given fields as overwritten, keeping the rest of the metadata.
+func (s State) setOverwritten(marks map[string]bool) {
+	meta := s.Meta()
+	if meta == nil {
+		meta = map[string]FieldMeta{}
+	}
+	for k, fm := range meta {
+		fm.Overwrite = marks[k]
+		if fm == (FieldMeta{}) {
+			delete(meta, k)
+		} else {
+			meta[k] = fm
+		}
+	}
+	for k := range marks {
+		if _, ok := meta[k]; !ok {
+			meta[k] = FieldMeta{Overwrite: true}
+		}
+	}
+	s.SetMeta(meta)
 }
 
 // Meta returns a copy of the state's per-field metadata, keyed by field name, or nil if it has none.
@@ -600,17 +713,6 @@ func (s State) MetaJSON() json.RawMessage {
 	return s.d[MetaKey]
 }
 
-// DelNils removes every field whose value is cleared - a Go nil or a JSON null. Merge and MergeReduce
-// preserve such tombstones (a delete in transit while a changes-delta is accumulated); DelNils enacts
-// them, so Merge followed by DelNils materializes a snapshot (the pending deletes become absences).
-func (s State) DelNils() {
-	for k, v := range s.d {
-		if isCleared(v) {
-			delete(s.d, k)
-		}
-	}
-}
-
 // MarshalJSON serializes the State's fields as a JSON object.
 func (s State) MarshalJSON() ([]byte, error) {
 	if s.d == nil {
@@ -631,7 +733,7 @@ func (s State) MarshalJSON() ([]byte, error) {
 // ignored). Two inputs are tolerated as an empty State instead: an empty/nil payload, and a JSON "null" -
 // matching how an absent or NULL column reads (and a nil value marshaled to "null"). Anything else - a JSON
 // array, number, string, or malformed bytes - is an error. The result is always initialized, so the
-// mutating methods (Set/Merge), which do not allocate, are safe to call afterward.
+// mutating methods (Set/Apply), which do not allocate, are safe to call afterward.
 func (s *State) UnmarshalJSON(data []byte) error {
 	data = bytes.TrimSpace(data)
 	if len(data) == 0 || bytes.Equal(data, []byte("null")) {

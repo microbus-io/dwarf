@@ -34,9 +34,11 @@ type nextStep struct {
 	cohortCount int
 }
 
-// evaluateTransitions determines the next task(s) to execute based on the graph transitions
-// and the current flow state. Returns multiple candidates for fan-out.
-func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workflow.RawFlow) ([]nextStep, error) {
+// evaluateTransitions determines the next task(s) to execute based on the graph transitions. Returns multiple
+// candidates for fan-out. The task's Goto is read from flow; `when`, `switch` and `forEach` read state, which is
+// what the successors will be handed - the engine's own fold of the step's input and changes, never the task's
+// returned view.
+func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workflow.RawFlow, state workflow.State) ([]nextStep, error) {
 	if gotoTarget := flow.GotoRequested(); gotoTarget != "" {
 		for _, tr := range graph.Transitions() {
 			if tr.From != currentTask || tr.Kind != workflow.TransitionGoto {
@@ -56,7 +58,7 @@ func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workfl
 	haveNormalized := false
 	normalize := func() (map[string]any, error) {
 		if !haveNormalized {
-			normalized, normalizeErr = boolexp.Normalize(redactMeta(flow.RawState()))
+			normalized, normalizeErr = boolexp.Normalize(redactMeta(state.Clone()))
 			haveNormalized = true
 		}
 		return normalized, errors.Trace(normalizeErr)
@@ -114,7 +116,7 @@ func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workfl
 			// An absent or cleared source yields no elements (like an empty array), which routes straight to
 			// the fan-in; any non-array is an error.
 			var val any
-			present, gerr := flow.RawState().Get(tr.ForEach, &val)
+			present, gerr := state.Get(tr.ForEach, &val)
 			if gerr != nil {
 				return nil, errors.Trace(gerr)
 			}

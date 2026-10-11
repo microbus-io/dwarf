@@ -215,6 +215,9 @@ err := eng.Terminate(ctx, flowKey, "superseded by newer order") // abort; surfac
 newFlowKey, err := eng.Fork(ctx, stepKey, map[string]any{"amount": 0})
 ```
 
+Fork's overrides **replace** the fields they name in the forked step's input, reduced fields included - they
+are an edit for repairing a run, not a task's contribution - and a `nil` override deletes the field.
+
 `Terminate` forcefully, unconditionally aborts a running or interrupted flow (and its subgraph hierarchy) -
 in-flight work is abandoned immediately, not awaited. `Fork`'s step may be
 **any recorded step**, including one inside a subgraph; the clone re-runs from that step and bubbles back up
@@ -246,7 +249,9 @@ nextKey, err := eng.Continue(ctx, threadKey, additionalState)
 ```
 
 The `threadKey` is any flow key in the thread (the original `Create` key works). The prior turn's final
-state passes through, merged with `additionalState` using the graph's reducers. `Continue` inherits the
+state passes through, combined with `additionalState` through the graph's reducers: a reduced field adds what
+you pass, and a `nil` there adds nothing, so a new turn cannot clear a reduced field this way (the turn's first
+task can, with `Overwrite`); on any other field a value replaces and a `nil` deletes. `Continue` inherits the
 thread's policy from the latest completed flow — priority, fairness, time budget, and baggage. The new flow
 is returned already `running`. (To join a thread but set policy explicitly
 instead of inheriting it, use `Create`/`Run` with `FlowOptions.ThreadKey`.)

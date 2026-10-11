@@ -26,8 +26,8 @@ import (
 
 // TestCohortFold_ProjectionEqualsContributions pins, for every reducer, that an inner fan-in's projected part
 // folds into the outer cohort exactly as the inner cohort's contributions would have one by one. The outer
-// cohort has a spawn-side member before the inner fan-in (the inner cohort's spawn), whose write the inner base
-// takes as a replace, as the engine hands a spawn's state to its branches.
+// cohort has a member before the inner fan-in - the inner cohort's spawn - whose write folds into the base its
+// branches are handed.
 func TestCohortFold_ProjectionEqualsContributions(t *testing.T) {
 	t.Parallel()
 
@@ -76,15 +76,13 @@ func TestCohortFold_ProjectionEqualsContributions(t *testing.T) {
 
 			// One by one: the outer cohort folds the spawn, every inner contribution, then the fan-in's own write.
 			flat := outerBase.Clone()
-			assert.NoError(flat.MergeReduceAll(append(append([]workflow.State{spawn}, inner...), own), reducers))
-			flat.DelNils()
+			assert.NoError(flat.ApplyAll(append(append([]workflow.State{spawn}, inner...), own), reducers))
 
-			// Nested: the inner fan-in folds its cohort onto the spawn's state, replaced, and records what it added.
+			// Nested: the inner fan-in folds its cohort onto the spawn's folded state and records what it added.
 			innerState := outerBase.Clone()
-			assert.NoError(innerState.Merge(spawn))
+			assert.NoError(innerState.Apply(spawn, reducers))
 			reduced, err := foldCohort(innerState, inner, reducers, true)
 			assert.NoError(err)
-			innerState.DelNils()
 			stampFanIn(innerState, reducers, reduced)
 			// Its row is stored and read back before the outer fold reads it.
 			data, err := json.Marshal(innerState)
@@ -97,8 +95,7 @@ func TestCohortFold_ProjectionEqualsContributions(t *testing.T) {
 			assert.NoError(err)
 			assert.True(ok)
 			nested := outerBase.Clone()
-			assert.NoError(nested.MergeReduceAll([]workflow.State{spawn, contribution}, reducers))
-			nested.DelNils()
+			assert.NoError(nested.ApplyAll([]workflow.State{spawn, contribution}, reducers))
 
 			var want, got any
 			_, err = flat.Get("f", &want)

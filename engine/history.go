@@ -247,6 +247,13 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
+	// A delete is a mark in the changes' metadata, which is redacted; it is shown as a null, which is how a
+	// caller reads a delete.
+	for _, k := range slices.Collect(fs.Changes.Writes()) {
+		if fs.Changes.IsDeleted(k) && !fs.Changes.Has(k) {
+			_ = fs.Changes.Set(k, nil)
+		}
+	}
 	redactMeta(fs.Changes)
 	if len(interruptJSON) > 0 {
 		fs.InterruptPayload, err = workflow.NewState(interruptJSON)
@@ -1013,13 +1020,13 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 		if entryPoint == "" {
 			return errors.New("workflow has no entry point", http.StatusBadRequest)
 		}
-		// Merge the caller's additionalState onto the prior turn's final_state via the graph's reducers, then
-		// materialize (DelNils enacts a delete the caller passed on a replace-managed field).
-		if err := finalState.MergeReduce(additional, graph.Reducers()); err != nil {
+		// Fold the caller's additionalState onto the prior turn's final_state through the graph's reducers. A nil
+		// deletes a plain field and contributes nothing to a reduced one, so a new turn cannot reset a reduced
+		// field; the turn's first task can, with Overwrite.
+		if err := finalState.Apply(additional, graph.Reducers()); err != nil {
 			// A value that will not fold onto the thread's state is the caller's mistake, not a server fault.
 			return errors.Trace(err, http.StatusBadRequest)
 		}
-		finalState.DelNils()
 		mergedStateJSON, err := json.Marshal(finalState)
 		if err != nil {
 			return errors.Trace(err)

@@ -138,8 +138,9 @@ both measure ~1x, so the ambiguity is moot and no server-version probe is needed
 3. **An anchor's bytes can be in EITHER payload column**, `changes` shadowing `state`. Three places they sit,
    and only the first is the obvious one: a task produced the value → the anchor's `changes`; the flow's
    **initial input** → the **entry step's `state`** (no task produced it, so it is in no `changes` anywhere —
-   and it is the headline case); a fan-in **reducer's output** → the **fan-in step's `state`** (the merged
-   value exists nowhere else). A changes-only resolver silently misses the last two. Pinned by
+   and it is the headline case); a **reducer's output** → the `state` of the step that RECEIVED it (a fold's
+   value exists nowhere else: not in the folding step's `state`, which predates it, nor its `changes`, which
+   hold the delta). That is why the caller passes a step's folded fields as `inlineOnly`. A changes-only resolver silently misses the last two. Pinned by
    `TestLinker_ResolveReadsBothColumns`.
 4. **A carried ref absent from `merged` must still be re-emitted.** The fan-in resolves only what its reducers
    fold, so a merely-carried ref's key is absent from `merged` and `Mint`'s main candidate loop never sees it.
@@ -182,7 +183,7 @@ would otherwise be ref'd against an anchor whose row does not hold it, and dangl
 anchor.) The two sets genuinely differ in both directions — the ordinal context is `inlineOnly` and *not* in
 `changes`; an ordinary task write is in `changes` and *not* `inlineOnly`. There is a second reason at the forEach site: the engine's
 `accumulatedChanges` map is shared across the linear mint and every branch mint, and a JSON null in a
-persisted `changes` column is a tombstone `DelNils` enacts as a delete — so synthesizing nils there would leak
+persisted `changes` column deletes a plain field when it is applied — so synthesizing nils there would leak
 across branches and overload a value that already means something else.
 
 ## The Loader is per call, and batched, on purpose

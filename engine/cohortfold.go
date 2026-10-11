@@ -36,13 +36,13 @@ import (
 // than re-reading every member below it (see projectReduced).
 func foldCohort(base workflow.State, contributions []workflow.State, reducers map[string]workflow.Reducer, describe bool) (map[string]*workflow.Reduced, error) {
 	if !describe {
-		return nil, errors.Trace(base.MergeReduceAll(contributions, reducers))
+		return nil, errors.Trace(base.ApplyAll(contributions, reducers))
 	}
-	// A field is described if the cohort wrote it. On a reduced field a cleared write is the reducer's identity,
-	// so only a write with a value counts; on a plain field a delete is a write like any other.
+	// A field is described if the cohort wrote it. On a reduced field a null is the reducer's identity, so only
+	// a write with a value counts; on a plain field a delete is a write like any other.
 	written := map[string]bool{}
 	for _, c := range contributions {
-		for k := range c.Names() {
+		for k := range c.Writes() {
 			if c.Has(k) {
 				written[k] = true
 			} else if r := reducers[k]; r == "" || r == workflow.ReducerReplace {
@@ -106,7 +106,7 @@ func foldCohort(base workflow.State, contributions []workflow.State, reducers ma
 			reduced[k] = &workflow.Reduced{Value: value}
 		}
 	}
-	if err := base.MergeReduceAll(contributions, reducers); err != nil {
+	if err := base.ApplyAll(contributions, reducers); err != nil {
 		return nil, errors.Trace(err)
 	}
 	return reduced, nil
@@ -191,7 +191,7 @@ func projectReduced(state workflow.State, reducers map[string]workflow.Reducer) 
 			if state.Has(k) {
 				delta.SetJSON(k, raw)
 			} else {
-				_ = delta.Set(k, nil)
+				_ = delta.Overwrite(k, nil)
 			}
 		}
 	}
@@ -212,7 +212,7 @@ func memberContribution(part, changes workflow.State, reducers map[string]workfl
 	if changes.IsZero() {
 		return part, true, nil
 	}
-	if err := part.MergeReduceAll([]workflow.State{changes}, reducers); err != nil {
+	if err := part.Compose(changes, reducers); err != nil {
 		return workflow.State{}, false, errors.Trace(err)
 	}
 	return part, true, nil

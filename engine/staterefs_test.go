@@ -18,8 +18,10 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -273,10 +275,11 @@ func TestStateRefs_ReducedFieldIsResolvedAndReanchored(t *testing.T) {
 	assert.True(joinState.Has("log"), "the fan-in step inlines it, anchoring it for everything downstream")
 }
 
-// TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue pins what a fan-out source's own write to a reduced field
-// means at the fan-in: the value it wrote, replacing its input, exactly as each branch was handed it - a reducer
-// folds only what the branches contribute. That value is the spawn's `changes`, so the fan-in may anchor it there.
-// The branches never touch the field, so the spawn's write is the only thing deciding it.
+// TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue pins where a fan-out source's own write to a large reduced
+// field is stored at the fan-in. A Set folds into the input, and the folded value exists in no row - not the
+// spawn's state (before the fold) nor its changes (the delta alone) - so the fan-in must store it inline; a ref
+// to the spawn would resolve to the delta. An Overwrite is the value the spawn wrote, which is in its changes,
+// so the fan-in may anchor it there.
 func TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -299,14 +302,16 @@ func TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue(t *testing.T) {
 	assert.NoError(g.Validate())
 	mux.HandleGraph("sc/wf", g)
 
-	// The spawn replaces a one-entry log with one large enough to clear the ref threshold.
+	// The spawn writes enough entries to clear the ref threshold.
 	written := make([]string, 400)
 	for i := range written {
 		written[i] = blob(64)
 	}
 	mux.HandleTask("sc/seed", func(ctx context.Context, f *workflow.Flow) error {
-		f.Set("log", written)
-		return nil
+		if f.GetBool("overwrite") {
+			return f.Overwrite("log", written)
+		}
+		return f.Set("log", written)
 	})
 	var workLens []int
 	var mu sync.Mutex
@@ -326,15 +331,34 @@ func TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue(t *testing.T) {
 		return nil
 	})
 
-	_, outcome, err := e.Run(ctx, "sc/wf", map[string]any{"log": []string{"initial"}, "pages": []string{"a", "b", "c"}}, nil)
-	assert.NoError(err)
-	assert.Equal(workflow.StatusCompleted, outcome.Status)
-	assert.Equal([]int{400, 400, 400}, workLens, "each branch is handed the spawn's value")
-	assert.Equal(400.0, stateVal(outcome.State, "logLen"), "the fan-in sees the same value, not the input with it appended")
+	for _, tc := range []struct {
+		overwrite bool
+		want      int
+		anchored  bool
+	}{
+		{overwrite: false, want: 401, anchored: false},
+		{overwrite: true, want: 400, anchored: true},
+	} {
+		workLens = nil
+		flowKey, outcome, err := e.Run(ctx, "sc/wf", map[string]any{"log": []string{"initial"}, "pages": []string{"a", "b", "c"}, "overwrite": tc.overwrite}, nil)
+		assert.NoError(err)
+		assert.Equal(workflow.StatusCompleted, outcome.Status, outcome.Error)
+		assert.Equal([]int{tc.want, tc.want, tc.want}, workLens, "each branch is handed the spawn's result")
+		assert.Equal(float64(tc.want), stateVal(outcome.State, "logLen"), "the fan-in sees the same value")
 
-	join := stepIDsByTask(t, e, "Join")[0]
-	_, joinRefs, _ := stepRefsOf(t, e, join)
-	assert.Contains(joinRefs, "log", "the spawn's own value is in its changes, so the fan-in anchors it there")
+		hist, err := e.History(ctx, flowKey)
+		assert.NoError(err)
+		for _, step := range hist {
+			if step.TaskName != "Join" {
+				continue
+			}
+			_, joinID, _, err := keys.ParseStepKey(step.StepKey)
+			assert.NoError(err)
+			_, joinRefs, _ := stepRefsOf(t, e, joinID)
+			_, isRef := joinRefs["log"]
+			assert.Equal(tc.anchored, isRef, "overwrite=%v", tc.overwrite)
+		}
+	}
 }
 
 // newState is an initialized empty State - the destination a Resolve writes into. The ZERO State is
@@ -373,4 +397,117 @@ func TestStateRefs_UnreadableRefsFailTheStep(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(workflow.StatusFailed, out.Status)
 	assert.Contains(out.Error, "unreadable state refs")
+}
+
+// TestStateRefs_FoldedFieldIsStoredInline pins the linear case of the same trap: each step of a chain adds a
+// large message to an append field, so the folded history outgrows the ref threshold at every hand-off. It
+// exists in no row until the successor's state holds it, so it must be stored inline there; a ref to the step
+// would resolve to the step's own message alone.
+func TestStateRefs_FoldedFieldIsStoredInline(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	mux := NewHostMux()
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+
+	g := workflow.NewGraph("Folded")
+	for _, n := range []string{"A", "B", "C"} {
+		g.SetURL(n, "folded/"+n)
+		mux.HandleTask("folded/"+n, func(ctx context.Context, f *workflow.Flow) error {
+			f.SetInt("saw"+n, len(f.GetStrings("log")))
+			return f.Set("log", []string{n + blob(30_000)})
+		})
+	}
+	g.SetReducer("log", workflow.ReducerAppend)
+	g.AddTransitionChain("A", "B", "C", workflow.End)
+	mux.HandleGraph("folded/wf", g)
+
+	_, outcome, err := e.Run(ctx, "folded/wf", nil, nil)
+	assert.NoError(err)
+	assert.Equal(workflow.StatusCompleted, outcome.Status, outcome.Error)
+	assert.Equal(0, outcome.State.GetInt("sawA"))
+	assert.Equal(1, outcome.State.GetInt("sawB"))
+	assert.Equal(2, outcome.State.GetInt("sawC"))
+	assert.Len(outcome.State.GetStrings("log"), 3)
+}
+
+// TestStateRefs_DeletesAndNullsOfCarriedFields pins how a write that removes or adds nothing meets a field carried
+// by ref. A branch's Del of a plain field the spawn carried must reach the fan-in as a delete - the delete is a
+// mark with no value, and the fan-in must count it as a member write or the spawn's ref is carried forward and
+// the field comes back. And a null on a reduced field contributes nothing, so a field carried by ref must survive
+// it - read as a rewrite, it would be re-anchored at a step whose changes hold the null.
+func TestStateRefs_DeletesAndNullsOfCarriedFields(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	mux := NewHostMux()
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+
+	t.Run("branch_delete_of_a_carried_plain_field", func(t *testing.T) {
+		assert := testarossa.For(t)
+		// Seed holds the document, so Split carries it by a ref, as does each branch.
+		g := workflow.NewGraph("DeleteCarried")
+		g.SetURL("Seed", "delcarried/seed")
+		g.SetURL("Split", "delcarried/split")
+		g.SetURL("Work", "delcarried/work")
+		g.SetURL("Join", "delcarried/join")
+		g.SetFanIn("Join")
+		g.AddTransition("Seed", "Split")
+		g.AddTransitionForEach("Split", "Work", "pages", "page")
+		g.AddTransitionChain("Work", "Join", workflow.End)
+		mux.HandleGraph("delcarried/wf", g)
+		mux.HandleTask("delcarried/seed", func(ctx context.Context, f *workflow.Flow) error { return nil })
+		mux.HandleTask("delcarried/split", func(ctx context.Context, f *workflow.Flow) error { return nil })
+		mux.HandleTask("delcarried/work", func(ctx context.Context, f *workflow.Flow) error {
+			f.Del("pdf")
+			return nil
+		})
+		var joinSaw atomic.Bool
+		mux.HandleTask("delcarried/join", func(ctx context.Context, f *workflow.Flow) error {
+			joinSaw.Store(f.Has("pdf"))
+			return nil
+		})
+
+		_, outcome, err := e.Run(ctx, "delcarried/wf", map[string]any{"pdf": blob(20_000), "pages": []string{"a", "b"}}, nil)
+		if assert.NoError(err) {
+			assert.Equal(workflow.StatusCompleted, outcome.Status, outcome.Error)
+			assert.False(joinSaw.Load(), "the fan-in still sees a field every branch deleted")
+			assert.False(outcome.State.Has("pdf"))
+		}
+	})
+
+	t.Run("null_on_a_carried_reduced_field", func(t *testing.T) {
+		assert := testarossa.For(t)
+		g := workflow.NewGraph("NullCarried")
+		g.SetURL("First", "nullcarried/first")
+		g.SetURL("Last", "nullcarried/last")
+		g.SetReducer("log", workflow.ReducerConcat)
+		g.AddTransitionChain("First", "Last", workflow.End)
+		mux.HandleGraph("nullcarried/wf", g)
+		mux.HandleTask("nullcarried/first", func(ctx context.Context, f *workflow.Flow) error {
+			// What a remote host's decoded result can carry; the carrier itself records nothing for a nil.
+			data, _ := json.Marshal(map[string]any{"state": map[string]any{}, "changes": map[string]any{"log": nil}})
+			return f.UnmarshalJSON(data)
+		})
+		var lastSaw atomic.Int64
+		mux.HandleTask("nullcarried/last", func(ctx context.Context, f *workflow.Flow) error {
+			lastSaw.Store(int64(len(f.GetString("log"))))
+			return nil
+		})
+
+		_, outcome, err := e.Run(ctx, "nullcarried/wf", map[string]any{"log": blob(20_000)}, nil)
+		if assert.NoError(err) {
+			assert.Equal(workflow.StatusCompleted, outcome.Status, outcome.Error)
+			assert.Equal(int64(20_000), lastSaw.Load())
+			assert.Len(outcome.State.GetString("log"), 20_000)
+		}
+	})
 }

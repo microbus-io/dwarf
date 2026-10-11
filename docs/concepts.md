@@ -69,8 +69,7 @@ See [Continue](flows.md#continue-a-thread).
 
 ## Reducer
 
-A **reducer** is a merge strategy for a state field during fan-in. When parallel branches converge, each
-field's changes are combined with its reducer:
+A **reducer** decides how writes to a state field combine:
 
 | Reducer | Constant | Effect |
 |---|---|---|
@@ -84,12 +83,17 @@ field's changes are combined with its reducer:
 | concat | `ReducerConcat` | Concatenate strings |
 
 A field with no registered reducer uses `replace`. You wire non-default fields with
-`graph.SetReducer(field, reducer)`. Reducers combine what parallel branches contribute at their fan-in, and the
-state `Continue` adds to a thread; anywhere else, a task's write to a field replaces it. So a **branch** writing to
-a reducer-managed field sets only its own contribution (e.g. the one item to append), not the accumulated value —
-otherwise the fan-in counts it twice — while a task outside a fan-out writes the field's whole new value.
+`graph.SetReducer(field, reducer)`. On a reduced field, every write is a **contribution**, combined with what the
+field already holds wherever the task runs. Reading the field returns the combined value:
 
-See [Fan-out & subgraphs](fan-out-and-subgraphs.md).
+- A step's write combines with the value it was handed, and the next step reads the result.
+- Parallel branches' writes combine at their fan-in, in branch order.
+- `Continue`'s additional state combines with the thread's state.
+
+So a task writes only its contribution — the message to append, the amount to add — never the value it read,
+which would count it again. To replace or clear a reduced field, a task calls `Overwrite` or `Del`, which are
+not allowed inside a fan-out branch. See [Writing tasks](tasks.md#contributions-not-totals-on-a-reduced-field)
+and [Fan-out & subgraphs](fan-out-and-subgraphs.md).
 
 ## State model
 

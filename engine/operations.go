@@ -481,9 +481,11 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 			if rerr != nil {
 				return nil, errors.Trace(rerr)
 			}
-			// Materialize the interrupted step's view: state + changes with pending deletes enacted.
-			_ = stepState.Merge(stepChanges)
-			stepState.DelNils()
+			// The interrupted step's view: its changes so far folded onto its state, through the reducers its
+			// state is tagged with.
+			if err := stepState.Apply(stepChanges, reducersOf(stepState)); err != nil {
+				return nil, errors.Trace(err)
+			}
 			out.State = redactMeta(stepState)
 			out.InterruptPayload, _ = workflow.NewState(interruptPayloadJSON)
 		}

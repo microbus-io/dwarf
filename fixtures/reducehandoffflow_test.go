@@ -64,7 +64,6 @@ func TestReducehandoffflow(t *testing.T) {
 	}
 
 	t.Run("linear_steps_accumulate", func(t *testing.T) {
-		pendingFixture(t, "a write to a reduced field replaces it at a linear hand-off")
 		assert := testarossa.For(t)
 		// An agent loop: each step adds one message and the next step reads the whole conversation. Noop
 		// writes nothing and changes nothing.
@@ -89,7 +88,6 @@ func TestReducehandoffflow(t *testing.T) {
 	})
 
 	t.Run("when_routes_on_the_folded_value", func(t *testing.T) {
-		pendingFixture(t, "a write to a reduced field replaces it at a linear hand-off")
 		assert := testarossa.For(t)
 		g := workflow.NewGraph("When")
 		for _, task := range []string{"Add", "Hit", "Miss"} {
@@ -124,7 +122,6 @@ func TestReducehandoffflow(t *testing.T) {
 	})
 
 	t.Run("retry_runs_compose", func(t *testing.T) {
-		pendingFixture(t, "two writes to a reduced field within one step replace rather than compose")
 		assert := testarossa.For(t)
 		// A step is one unit of work however many times its task runs, so each run's write adds to the last.
 		handle("Retry", map[string]func(f *workflow.Flow) error{
@@ -146,7 +143,6 @@ func TestReducehandoffflow(t *testing.T) {
 	})
 
 	t.Run("interrupt_rerun_composes", func(t *testing.T) {
-		pendingFixture(t, "two writes to a reduced field within one step replace rather than compose")
 		assert := testarossa.For(t)
 		// The task re-runs from the top when resumed, so a write placed before the Interrupt lands twice.
 		handle("Interrupt", map[string]func(f *workflow.Flow) error{
@@ -180,7 +176,6 @@ func TestReducehandoffflow(t *testing.T) {
 	})
 
 	t.Run("subgraph_reentry_composes", func(t *testing.T) {
-		pendingFixture(t, "two writes to a reduced field within one step replace rather than compose")
 		assert := testarossa.For(t)
 		handle("Child", map[string]func(f *workflow.Flow) error{
 			"Leaf": func(f *workflow.Flow) error { return nil },
@@ -206,7 +201,6 @@ func TestReducehandoffflow(t *testing.T) {
 	})
 
 	t.Run("del_then_sets_compose", func(t *testing.T) {
-		pendingFixture(t, "two writes to a reduced field within one step replace rather than compose")
 		assert := testarossa.For(t)
 		// A Del starts the field fresh; every later Set in the step folds onto the fresh value.
 		handle("DelSets", map[string]func(f *workflow.Flow) error{
@@ -227,7 +221,6 @@ func TestReducehandoffflow(t *testing.T) {
 	})
 
 	t.Run("bare_nil_is_identity", func(t *testing.T) {
-		pendingFixture(t, "a nil write to a reduced field deletes it rather than adding nothing")
 		assert := testarossa.For(t)
 		// A task that collected nothing into a nil slice adds nothing; only Del clears a reduced field.
 		handle("Nil", map[string]func(f *workflow.Flow) error{
@@ -244,6 +237,56 @@ func TestReducehandoffflow(t *testing.T) {
 		}
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal([]any{"a"}, stateVal(outcome.State, "messages"))
+	})
+
+	t.Run("overwrite_trims_then_set_appends", func(t *testing.T) {
+		assert := testarossa.For(t)
+		// The LLM history pattern: keep the last two messages, then add the new one.
+		handle("Trim", map[string]func(f *workflow.Flow) error{
+			"Trim": func(f *workflow.Flow) error {
+				history := f.GetStrings("messages")
+				if err := f.Overwrite("messages", history[len(history)-2:]); err != nil {
+					return err
+				}
+				appendMessage(f, "new")
+				return nil
+			},
+			"After": func(f *workflow.Flow) error { appendMessage(f, "after"); return nil },
+		}, "Trim", "After")
+
+		_, outcome := run("Trim", map[string]any{"messages": []string{"a", "b", "c", "d"}})
+		if outcome == nil {
+			return
+		}
+		assert.Equal(workflow.StatusCompleted, outcome.Status, outcome.Error)
+		assert.Equal([]any{"c", "d", "new", "after"}, stateVal(outcome.State, "messages"))
+	})
+
+	t.Run("continue_folds_through_the_reducer", func(t *testing.T) {
+		assert := testarossa.For(t)
+		g := workflow.NewGraph("Turns")
+		g.SetURL("Turn", url+"Turns/Turn")
+		g.SetReducer("tags", workflow.ReducerUnion)
+		g.AddTransition("Turn", workflow.End)
+		mux.HandleGraph(url+"Turns", g)
+		mux.HandleTask(url+"Turns/Turn", func(ctx context.Context, f *workflow.Flow) error {
+			return f.Set("tags", []string{"turn"})
+		})
+
+		key, outcome := run("Turns", map[string]any{"tags": []string{"a"}})
+		if outcome == nil {
+			return
+		}
+		assert.Equal([]any{"a", "turn"}, stateVal(outcome.State, "tags"))
+		next, err := eng.Continue(ctx, key, map[string]any{"tags": []string{"a", "b"}})
+		if !assert.NoError(err) {
+			return
+		}
+		outcome, err = eng.Await(ctx, next)
+		if assert.NoError(err) {
+			assert.Equal(workflow.StatusCompleted, outcome.Status, outcome.Error)
+			assert.Equal([]any{"a", "turn", "b"}, stateVal(outcome.State, "tags"))
+		}
 	})
 
 	t.Run("del_then_set_replaces", func(t *testing.T) {

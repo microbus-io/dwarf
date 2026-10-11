@@ -1251,7 +1251,7 @@ a `sequel.Executor`). It applies to `computeFinalState` and code inside `failSte
 **Dynamic fan-out** uses `forEach` on a transition to iterate a state array and spawn one task instance per element,
 each receiving the element under the `as` key. An **empty array** spawns no branches but does **not** stop the flow:
 the transition path routes straight to the fan-in node (`fireFanInDirect`), which runs on the source step's own
-`changes` over its `state`, replaced - the base `fanInRow` folds a populated cohort onto, with nothing to fold
+`changes` folded onto its `state` - the base `fanInRow` folds a populated cohort onto, with nothing more to fold
 (`fixtures/emptyforeachreducerflow_test.go`). The
 fan-in target comes from the routing map the engine derives per flow at dispatch (`internal/faninmap`), not from
 `Validate`. The `fanInTarget == ""` arm - complete the flow at the source - is therefore effectively unreachable for
@@ -1346,13 +1346,32 @@ calling `failStep` on its own step: doing
 so would race an in-flight `OnError` handler (an errored branch routes to its handler, whose next step runs at depth
 N+1 while the fan-in worker is still finishing depth N) and could incorrectly fail an otherwise-recoverable flow.
 
-**Reducers fold ONLY what branches contribute at a fan-in - never a step's own write onto its own input.** A
-task's write to a reduced field is a value, as it is to any field: the fan-in's base is the spawn's `changes` over
-its `state`, REPLACED (the value every branch was handed), and a flow's final state replaces each tail's
-`changes` onto its `state` (`mergeTerminalSteps`). Folding a step's own write through its reducer treats it as a
-delta onto its input, and the outcome then depends on graph shape: `total` 10, a last task setting 15 under `add`,
-ended a flow at 25 - and at 15 with a do-nothing step appended. Pinned by `fixtures/terminalreducerflow_test.go`
-and `fixtures/emptyforeachreducerflow_test.go` (branches handed 5, fan-in 5 plus their contributions).
+**Every place a step's changes meet its state folds them through the reducers (`State.Apply`).** That covers
+the dispatch view (input ⊕ earlier runs' changes), the successor base (`successorBase`, which routing also
+reads), the fan-in's base (the spawn's changes folded onto its state - the value every branch was handed),
+`fireFanInDirect`, the final state (`mergeTerminalSteps`, each tail's changes onto its state), a failed
+cohort's rebuild, and the interrupted `Snapshot` (through the reducers its stored state is tagged with). A
+fold that fails is a pure function of the data: a successor-base failure fails the step before anything is
+written, and the final-state and cohort folds are `permanentError`s. Pinned by
+`fixtures/terminalreducerflow_test.go`, `fixtures/emptyforeachreducerflow_test.go` (branches handed 15, the
+fan-in 15 plus their contributions) and `TestHandOff_ReducerErrorFailsTheStep`.
+
+- **The step's whole delta is what the carrier returns** (it was seeded with the earlier runs' changes); persist
+  it as is, never composed onto them again (`workflow/CLAUDE.md`, "A step's runs compose").
+- **A fold's result must be stored where it is held.** It exists in no row until a successor's state holds
+  it, so `processStep`'s mints, `fireFanInDirect`'s mint and `fanInRow`'s (for the spawn's own folded
+  fields) pass `foldedFields` as `inlineOnly`. A ref to the folding step would resolve to the delta alone.
+  Pinned by `TestStateRefs_FoldedFieldIsStoredInline` and `TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue`
+  (each fails with its inline set removed).
+- **A folded field's BASE may be carried by a ref**, so the fan-in paths resolve it before folding:
+  `fanInRow` resolves every reduced field the spawn did not overwrite, `fireFanInDirect` the fields it folds.
+- **A null on a reduced field is dropped from a delta as it enters** (`dropIdentityNulls`: the task's result,
+  `fireFanInDirect`'s and the spawn's stored changes). It contributes nothing, but the state-refs mint reads any
+  key a delta writes as a rewrite: it would drop the carried ref and re-anchor the field at a row holding the
+  null. The carrier never writes one; a remote host or a row from before deletes were marks can.
+- **Known cost: a folded field cannot be shared by a ref across a fan-out's branches.** It exists in no row, so
+  a fan-out source that folds into a large reduced field stores it inline in every branch's state, N copies.
+  A forEach over a reduced array is the case to watch.
 
 **Fan-in merge order and contribution (lineage `SetFanIn` path).** `queueCohortRead` reads cohort members
 (`lineage_id = cohortSpawnID`) `ORDER BY fan_out_ordinal, step_depth, step_id` and `fanInRow` folds them in that
@@ -1720,8 +1739,9 @@ folding onto nothing must yield a list.
 - **The dispatch stamp is not redundant with the rows.** It is what tags a flow already in flight when the
   engine was upgraded, whose rows hold none. Pinned by `TestMeta_DispatchRestampsAnUntaggedRow`, which
   fails without it while every other test passes.
-- **A task's result is never trusted for it.** `Merge` ignores the incoming delta's metadata (see
-  `workflow/CLAUDE.md`), so a forged `__meta__` in a remote task's `changes` is neither stored nor folded.
+- **A task's result is checked, not trusted** (`checkDeltaMeta`): the only metadata its `changes` may carry
+  is an overwrite mark, and none on a reduced field inside a fan-out branch; anything else fails the step,
+  naming the field. Pinned by `TestMeta_ForgedChangesMetaFailsTheStep`.
 - **Redacted from every state handed outside the engine** (`redactMeta`): `FlowOutcome.State` (Snapshot,
   Await, Run), `Step`'s state and changes, a subgraph's result on its way to the caller's `out`, and what
   `when`/`switch` evaluate. The stored columns keep it - `Continue` and `Fork` build on `final_state`.
@@ -1760,9 +1780,9 @@ ref policy, and they are what `engine/staterefs.go` holds:
 **The shape: resolve once at dispatch, mint once at the successor write.** Everything in between works on
 literals — `when` evaluation, `forEach` expansion, the task carrier, the transport to a remote task — so the ref
 encoding never leaks into transition evaluation or task-facing code. Minting needs **no database read**, which is
-what makes the write-side win free of round-trips. Intra-step merge is replace-only (`State.Merge`, then
-`DelNils`), so three cases per key: a literal drops the ref (and may re-anchor here), a tombstone drops field and
-ref, absence carries the ref forward.
+what makes the write-side win free of round-trips. Three cases per key: a literal drops the ref (and may
+re-anchor here, unless it is a fold's result - see the reducer section above), a delete drops field and ref,
+absence carries the ref forward.
 
 **Engine-side invariants** (the storage-side ones are in the package doc):
 
@@ -1780,8 +1800,8 @@ ref'd field it folds must be materialized or the fold would apply the delta to a
 everything accumulated. A field is materialized iff the graph registers a reducer for it — a safe superset. A
 merely *carried* ref is passed through untouched, still pointing at its original anchor: materializing it at every
 fan-in would re-anchor the payload and hand back the win in exactly the fan-out graphs the design exists for. The
-fan-in mints against the **spawn** step, while member-contributed and reduced fields are inlined into the fan-in's
-own `state`.
+fan-in mints against the **spawn** step, while member-contributed fields and the spawn's own folded fields are
+inlined into the fan-in's own `state`.
 
 **A carried ref's anchor is NOT necessarily the spawn.** The spawn's row holds a carried field's bytes only when
 the spawn is itself that field's anchor (e.g. a fan-out source that is also the entry step holding the flow's
@@ -4012,9 +4032,8 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
    `workflow.replay=true`, and the claim keeps the step's `started_at` (as it does for a retry or a resumed park),
    so its recorded duration and wait are the task's. The `Sleep` is recorded as a DEADLINE (`DATE_ADD_MILLIS(NOW_UTC(), ?)`, on the database
    clock like every timestamp), and the claim returns what remains of it, so a replay keeps the original wake time
-   rather than restarting the sleep; one that has already passed applies none. A field the task
-   cleared reads as absent to the replay's `when` evaluation, where the live carrier held a JSON null for a
-   `Set(k, nil)` - the two spellings of a delete that the rest of the engine already treats as one.
+   rather than restarting the sleep; one that has already passed applies none. Routing reads the engine's fold
+   of the recorded changes (`successorBase`) on a live run and a replay alike, so both route on the same state.
 
    *A slow worker is excluded, then fenced.* The scan skips a flow whose flagged step still holds an unexpired
    lease (it is still its worker's), and the rewind bumps `lease_seq`, so a worker that outlived its lease rolls

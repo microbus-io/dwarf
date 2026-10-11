@@ -26,11 +26,10 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestEmptyforeachreducerflow pins what a fan-out source's own write to a reducer-managed field means: a value
-// that replaces its input, exactly as a linear step's write does. Reducers fold only what the branches
-// contribute. The spawn task (TaskA) writes 5 to "sum", wired to ReducerAdd, over 10 in the initial state; every
-// branch is handed 5, and the fan-in sees 5 plus the branches' contributions. An empty forEach must agree: no
-// branches, so the fan-in sees 5 - not 15, which would treat the spawn's write as a delta onto its own input.
+// TestEmptyforeachreducerflow pins what a fan-out source's own write to a reducer-managed field means: a
+// contribution folded onto its input, exactly as a linear step's write is. The spawn task (TaskA) writes 5 to
+// "sum", wired to ReducerAdd, over 10 in the initial state; every branch is handed 15, and the fan-in sees 15
+// plus the branches' contributions. An empty forEach must agree: no branches, so the fan-in sees 15.
 func TestEmptyforeachreducerflow(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -85,9 +84,9 @@ func TestEmptyforeachreducerflow(t *testing.T) {
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		for _, item := range []string{"x", "y"} {
 			v, _ := handed.Load(item)
-			assert.Equal(5, v, "branch %s is handed the spawn's value", item)
+			assert.Equal(15, v, "branch %s is handed the spawn's result", item)
 		}
-		assert.Equal(7.0, stateVal(outcome.State, "sumOut"))         // the spawn's 5, plus 1 from each branch
+		assert.Equal(17.0, stateVal(outcome.State, "sumOut"))        // 10, the spawn's 5, and 1 from each branch
 		assert.Equal(2.0, stateVal(outcome.State, "processedCount")) // both branches ran through the fan-in
 	})
 
@@ -98,7 +97,7 @@ func TestEmptyforeachreducerflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "emptyforeachreducerflow.verify:428/empty-for-each-reducer", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(5.0, stateVal(outcome.State, "sumOut"))         // the spawn's 5, with nothing to fold onto it
+		assert.Equal(15.0, stateVal(outcome.State, "sumOut"))        // 10 and the spawn's 5, with no branch to add
 		assert.Equal(0.0, stateVal(outcome.State, "processedCount")) // no branches ran, but the fan-in still fired
 	})
 }

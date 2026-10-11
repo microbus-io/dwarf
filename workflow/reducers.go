@@ -23,9 +23,9 @@ import (
 	"github.com/microbus-io/errors"
 )
 
-// Reducer names how concurrent state modifications from parallel branches are merged during fan-in. A
-// field is bound to one with graph.SetReducer, and State.MergeReduce and MergeReduceAll fold by it. A name
-// other than the constants below is rejected by Graph.Validate.
+// Reducer names how writes to a state field combine: on a field bound to one with graph.SetReducer, a write is a
+// contribution, folded with what the field holds (see State.Apply). A name other than the constants below is
+// rejected by Graph.Validate.
 type Reducer string
 
 const (
@@ -52,18 +52,18 @@ func (r Reducer) isKnown() bool {
 }
 
 // The reducer functions below are the Go-native fold implementations selected by the Reducer string type
-// (the vocabulary the graph produces and State.MergeReduce consumes). They are unexported: a caller names
+// (the vocabulary the graph produces and State.Apply consumes). They are unexported: a caller names
 // a reducer with a Reducer constant, never by calling the function directly. Each operates on the Go
 // values (no JSON round trip) and treats a nil base - an absent field on the accumulating State - as
 // "seed from incoming", letting the field appear for the first time. None mutates its arguments; results
 // are freshly allocated.
 //
-// Replace (and the empty Reducer) is handled by MergeReduce itself, not here: it needs no base and its
-// cleared-incoming case is a delete tombstone, which Reduce has no way to express.
+// Replace (and the empty Reducer) is handled by State.Apply itself, not here: it needs no base, and a null
+// incoming there is a delete, which Reduce has no way to express.
 
-// Reduce folds incoming onto base using the strategy named by r, and is how State.MergeReduce dispatches a
-// field to its reducer. The empty and Replace cases are resolved by MergeReduce itself (a delete tombstone,
-// which this cannot express) and reach here only defensively.
+// Reduce folds incoming onto base using the strategy named by r, and is how State.Apply dispatches a field to
+// its reducer. The empty and Replace cases are resolved by State.Apply itself (a null there is a delete, which
+// this cannot express) and reach here only defensively.
 func (r Reducer) Reduce(base any, incoming any) (any, error) {
 	switch r {
 	case ReducerAppend:

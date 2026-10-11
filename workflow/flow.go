@@ -18,6 +18,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"slices"
 	"time"
 
 	"github.com/microbus-io/errors"
@@ -60,9 +61,12 @@ import (
 // Fanning work out across STEPS (a forEach transition) is the first-class way to parallelize, and each
 // branch gets its own Flow.
 type Flow struct {
-	// State
-	state   State
-	changes State
+	// State: the task's view (input combined with what it wrote) and its delta. reducersOf caches the field
+	// reducers recorded with the input; inBranch says the step runs inside a fan-out branch.
+	state      State
+	changes    State
+	reducersOf map[string]Reducer
+	inBranch   bool
 
 	// Control
 	gotoNext         string
@@ -230,88 +234,135 @@ func (f *Flow) StepKey() string {
 
 // --- State mutation ---
 
-// A task's output is its changes; state is the in-task working copy. So every setter writes to BOTH: state
-// (so a later read in the same task sees it) and changes (which is what the orchestrator persists). Each
-// delegates to the matching State method on the two fields; State normalizes the value through JSON.
+// A task's output is its changes; state is the in-task working view. Every setter builds a one-field delta and
+// writes it to BOTH: composed into changes (which is what the orchestrator persists) and applied to state (so a
+// later read in the same task sees the field's combined value). On a field the graph declares a reducer for, a
+// write is a contribution: Set adds to the field rather than replacing it, and two Sets in one task both count.
+// Overwrite and Del replace instead.
 
-// Set sets a state field and tracks the change. Use this for complex types (structs, maps, etc.).
-// It returns an error only if the value cannot be marshalled to JSON (a NaN, an +Inf, a channel).
-func (f *Flow) Set(name string, value any) error {
-	if err := f.state.Set(name, value); err != nil {
-		return err
+// write applies a one-field delta to the view and composes it into changes, leaving both untouched on error.
+func (f *Flow) write(name string, delta State) error {
+	reducers := f.reducers()
+	prev, had := f.state.d[name]
+	if err := f.state.Apply(delta, reducers); err != nil {
+		return errors.Trace(err)
 	}
-	return f.changes.Set(name, value)
+	if f.changes.IsZero() {
+		f.changes, _ = NewState()
+	}
+	if err := f.changes.Compose(delta, reducers); err != nil {
+		if had {
+			f.state.d[name] = prev
+		} else {
+			delete(f.state.d, name)
+		}
+		return errors.Trace(err)
+	}
+	return nil
 }
 
-// SetString sets a state string field and tracks the change.
-func (f *Flow) SetString(name string, value string) {
-	f.state.SetString(name, value)
-	f.changes.SetString(name, value)
+// reducers returns the field reducers recorded with the flow's input state.
+func (f *Flow) reducers() map[string]Reducer {
+	if f.reducersOf == nil {
+		f.reducersOf = map[string]Reducer{}
+		for k, fm := range f.state.Meta() {
+			if fm.Reducer != "" {
+				f.reducersOf[k] = fm.Reducer
+			}
+		}
+	}
+	return f.reducersOf
 }
 
-// SetStrings sets a state string slice field and tracks the change.
-func (f *Flow) SetStrings(name string, value []string) {
-	f.state.SetStrings(name, value)
-	f.changes.SetStrings(name, value)
+// Set writes a state field. Use this for complex types (structs, maps, etc.).
+//
+// On a field with no reducer, the value replaces the field, and nil deletes it. On a field the graph declares
+// a reducer for, the value is a contribution, combined through the reducer with what the field already holds:
+// under ReducerAppend, Set("messages", []any{m}) adds m to the history. Write only your contribution, never the
+// value you read, which would add it again. A nil contributes nothing there; use Del or Overwrite to clear or
+// replace such a field.
+//
+// It returns an error if the value cannot be marshalled to JSON (a NaN, an +Inf, a channel), if the reducer
+// cannot combine it with the field's value (a string under ReducerAdd), or if name is MetaKey.
+func (f *Flow) Set(name string, value any) error {
+	if name == MetaKey {
+		return errors.New("workflow: state field name %q is reserved", name)
+	}
+	delta := State{d: map[string]json.RawMessage{}}
+	if err := delta.Set(name, value); err != nil {
+		return errors.Trace(err)
+	}
+	return f.write(name, delta)
 }
 
-// SetInt sets a state int field and tracks the change.
-func (f *Flow) SetInt(name string, value int) {
-	f.state.SetInt(name, value)
-	f.changes.SetInt(name, value)
+// mustSet is Set for the typed setters, which have no error to return. A value of a primitive type always
+// marshals, so the panic is for a value the field's reducer cannot combine - which the orchestrator turns into
+// a failure of the step, naming the field.
+func (f *Flow) mustSet(name string, value any) {
+	if err := f.Set(name, value); err != nil {
+		panic(errors.New("state field %q: %v", name, err))
+	}
 }
 
-// SetFloat sets a state float64 field and tracks the change.
-func (f *Flow) SetFloat(name string, value float64) {
-	f.state.SetFloat(name, value)
-	f.changes.SetFloat(name, value)
+// SetString writes a state string field, as Set does.
+func (f *Flow) SetString(name string, value string) { f.mustSet(name, value) }
+
+// SetStrings writes a state string slice field, as Set does.
+func (f *Flow) SetStrings(name string, value []string) { f.mustSet(name, value) }
+
+// SetInt writes a state int field, as Set does.
+func (f *Flow) SetInt(name string, value int) { f.mustSet(name, value) }
+
+// SetFloat writes a state float64 field, as Set does.
+func (f *Flow) SetFloat(name string, value float64) { f.mustSet(name, value) }
+
+// SetBool writes a state bool field, as Set does.
+func (f *Flow) SetBool(name string, value bool) { f.mustSet(name, value) }
+
+// SetDuration writes a state time.Duration field, in nanoseconds, as Set does.
+func (f *Flow) SetDuration(name string, value time.Duration) { f.mustSet(name, value) }
+
+// Overwrite replaces a state field with value, whatever reducer the field has; a nil value deletes it. Later
+// Sets in the same task combine onto the new value. Use it to reset or trim a reduced field, such as a
+// conversation history.
+//
+// Overwriting a reduced field is not allowed inside a fan-out branch, at any depth: the branches are parallel,
+// and a reset in one of them has no defined meaning for the others. It returns an error there, and the step
+// fails if the call is made anyway. A field with no reducer can be overwritten anywhere.
+func (f *Flow) Overwrite(name string, value any) error {
+	if name == MetaKey {
+		return errors.New("workflow: state field name %q is reserved", name)
+	}
+	if r := f.reducers()[name]; f.inBranch && r != "" && r != ReducerReplace {
+		return errors.New("workflow: cannot overwrite reduced field %q inside a fan-out branch", name)
+	}
+	delta := State{d: map[string]json.RawMessage{}}
+	if err := delta.Overwrite(name, value); err != nil {
+		return errors.Trace(err)
+	}
+	return f.write(name, delta)
 }
 
-// SetBool sets a state bool field and tracks the change.
-func (f *Flow) SetBool(name string, value bool) {
-	f.state.SetBool(name, value)
-	f.changes.SetBool(name, value)
-}
-
-// SetDuration sets a state time.Duration field and tracks the change (nanoseconds).
-func (f *Flow) SetDuration(name string, value time.Duration) {
-	f.state.SetDuration(name, value)
-	f.changes.SetDuration(name, value)
-}
-
-// Del removes the listed state fields. Each is recorded as a cleared value
-// (JSON null) in changes so the following merge drops it, and is removed from the
-// local state map so later reads in this task see it as absent.
+// Del deletes the listed state fields, whatever reducer they have: it is Overwrite with nil. Later reads in the
+// task see each field as absent. Deleting a reduced field inside a fan-out branch fails the step, as Overwrite
+// does.
 func (f *Flow) Del(names ...string) {
 	for _, n := range names {
-		f.deleteOne(n)
+		if n == MetaKey {
+			continue
+		}
+		delta := State{d: map[string]json.RawMessage{}}
+		_ = delta.Overwrite(n, nil)
+		_ = f.write(n, delta) // a delete combines with nothing, so it cannot fail
 	}
 }
 
-// Clear removes every state field. Equivalent to Del on every current field: each is recorded as a cleared
-// value (JSON null) in changes so the following merge drops it, and state is emptied. Useful at workflow
-// boundaries or anywhere a task wants a blank slate before populating it.
+// Clear deletes every state field, as Del on each. Useful at workflow boundaries or anywhere a task wants a
+// blank slate before populating it.
 func (f *Flow) Clear() {
-	if f.changes.IsZero() {
-		f.changes, _ = NewState()
+	for _, k := range slices.Collect(f.state.Names()) {
+		f.Del(k)
 	}
-	for k := range f.state.Names() {
-		f.changes.d[k] = nil // tombstone so the delete propagates into the task's persisted changes
-	}
-	f.state.Clear()
-}
-
-// deleteOne is the shared worker: writes a cleared (Go nil) tombstone to changes so the following merge
-// drops the field, and removes it from state so later reads in this task see it as absent.
-func (f *Flow) deleteOne(name string) {
-	if name == MetaKey {
-		return
-	}
-	if f.changes.IsZero() {
-		f.changes, _ = NewState()
-	}
-	f.changes.d[name] = nil // tombstone; isCleared treats a Go nil (or JSON null) as cleared
-	f.state.Del(name)
 }
 
 // Snapshot captures an independent copy of the flow's current state (including any changes applied so far) -
@@ -330,8 +381,9 @@ func (f *Flow) Snapshot() State {
 // JSON object - typically a struct, or a pointer to one - and its fields are those encoding/json emits, under the
 // names it emits them: a json tag's name, else the Go name, with an untagged embedded struct's fields promoted, a
 // "-" or unexported field skipped, and an omitempty or omitzero field skipped when empty. A field that marshals
-// to null deletes, as Set(name, nil) does. It returns an error if source cannot be marshalled or is not an
-// object; on an error, no field is set.
+// to null is Set(name, nil): it deletes a field with no reducer and contributes nothing to a reduced one. It
+// returns an error if source cannot be marshalled or is not an object, in which case no field is set, or if a
+// field's reducer cannot combine its value, in which case the fields before it are set.
 func (f *Flow) SetChanges(source any) error {
 	data, err := json.Marshal(source)
 	if err != nil {
@@ -576,6 +628,7 @@ type flowJSON struct {
 	CreatedAt              time.Time     `json:"createdAt,omitzero"`
 	UpdatedAt              time.Time     `json:"updatedAt,omitzero"`
 	StepCreatedAt          time.Time     `json:"stepCreatedAt,omitzero"`
+	InBranch               bool          `json:"inBranch,omitzero"`
 }
 
 // MarshalJSON serializes the Flow including private fields.
@@ -604,6 +657,7 @@ func (f *Flow) MarshalJSON() ([]byte, error) {
 		CreatedAt:              f.createdAt,
 		UpdatedAt:              f.updatedAt,
 		StepCreatedAt:          f.stepCreatedAt,
+		InBranch:               f.inBranch,
 	})
 }
 
@@ -644,5 +698,7 @@ func (f *Flow) UnmarshalJSON(data []byte) error {
 	f.createdAt = wire.CreatedAt
 	f.updatedAt = wire.UpdatedAt
 	f.stepCreatedAt = wire.StepCreatedAt
+	f.inBranch = wire.InBranch
+	f.reducersOf = nil
 	return nil
 }

@@ -45,9 +45,17 @@ func (f *RawFlow) RawChanges() State {
 	return f.changes.Clone()
 }
 
-// SetRawState replaces the entire state with a copy of the given state, without tracking changes.
+// SetRawState replaces the entire state with a copy of the given state, without tracking changes. The field
+// reducers the task's writes combine through are read from the state's metadata.
 func (f *RawFlow) SetRawState(state State) {
 	f.state = state.Clone()
+	f.reducersOf = nil
+}
+
+// SetInBranch records whether the step runs inside a fan-out branch, where overwriting a reduced field is not
+// allowed.
+func (f *RawFlow) SetInBranch(inBranch bool) {
+	f.inBranch = inBranch
 }
 
 // SetRawChanges replaces the entire changes with a copy of the given changes.

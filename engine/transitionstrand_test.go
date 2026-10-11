@@ -224,6 +224,8 @@ func TestOrphanSweep_ReplaysSlowWorkersStep(t *testing.T) {
 		{name: "goto", taskA: func(f *workflow.Flow) error { f.Goto("C"); return nil }, next: "C"},
 		{name: "on_error", taskA: func(f *workflow.Flow) error { return errors.New("boom") }, next: "D"},
 		{name: "sleep", taskA: func(f *workflow.Flow) error { f.Sleep(6 * time.Second); return nil }, next: "B"},
+		// The replay folds the recorded contribution once: B is handed one entry, not two.
+		{name: "reduced", taskA: func(f *workflow.Flow) error { return f.Set("log", []string{"a"}) }, next: "B"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -234,6 +236,7 @@ func TestOrphanSweep_ReplaysSlowWorkersStep(t *testing.T) {
 			for _, n := range []string{"A", "B", "C", "D"} {
 				g.SetURL(n, "slowstrand/"+strings.ToLower(n))
 			}
+			g.SetReducer("log", workflow.ReducerAppend)
 			g.AddTransition("A", "B")
 			g.AddTransitionGoto("A", "C")
 			g.AddTransitionOnError("A", "D")
@@ -243,8 +246,13 @@ func TestOrphanSweep_ReplaysSlowWorkersStep(t *testing.T) {
 			mux.HandleGraph("slowstrand/g", g)
 			runs := map[string]*atomic.Int32{"A": {}, "B": {}, "C": {}, "D": {}}
 			var dSawErr atomic.Bool
+			var bLogLen atomic.Int32
 			mux.HandleTask("slowstrand/a", func(ctx context.Context, f *workflow.Flow) error { runs["A"].Add(1); return tc.taskA(f) })
-			mux.HandleTask("slowstrand/b", func(ctx context.Context, f *workflow.Flow) error { runs["B"].Add(1); return nil })
+			mux.HandleTask("slowstrand/b", func(ctx context.Context, f *workflow.Flow) error {
+				runs["B"].Add(1)
+				bLogLen.Store(int32(len(f.GetStrings("log"))))
+				return nil
+			})
 			mux.HandleTask("slowstrand/c", func(ctx context.Context, f *workflow.Flow) error { runs["C"].Add(1); return nil })
 			mux.HandleTask("slowstrand/d", func(ctx context.Context, f *workflow.Flow) error {
 				runs["D"].Add(1)
@@ -277,6 +285,9 @@ func TestOrphanSweep_ReplaysSlowWorkersStep(t *testing.T) {
 			}
 			if tc.name == "on_error" {
 				assert.True(dSawErr.Load(), "the handler did not receive onErr")
+			}
+			if tc.name == "reduced" {
+				assert.Equal(int32(1), bLogLen.Load(), "the replay folded A's contribution more than once")
 			}
 			enginetest.AssertInvariants(t, e)
 		})

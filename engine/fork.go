@@ -634,12 +634,11 @@ func mergeWithOverrides(originalJSON []byte, overrides workflow.State) ([]byte, 
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	// Replace-merge the overrides onto the leaf state; a nil override is a delete (Merge keeps the tombstone,
-	// DelNils enacts it).
-	if err := state.Merge(overrides); err != nil {
+	// The overrides REPLACE, reduced fields included - they edit the forked step's input, they are not a step's
+	// write, and folding them would make a corrupted history unrepairable. A nil override deletes.
+	if err := state.Apply(overrides, nil); err != nil {
 		return nil, errors.Trace(err)
 	}
-	state.DelNils()
 	return json.Marshal(state)
 }
 

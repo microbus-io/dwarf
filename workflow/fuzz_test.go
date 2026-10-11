@@ -33,11 +33,10 @@ var fuzzReducers = []Reducer{
 	"", "bogus",
 }
 
-// FuzzStateMergeReduce asserts the state-merge core never panics and never leaks a null tombstone into
-// materialized state, for arbitrary (state, changes, reducer) combinations. State.MergeReduce (accumulate)
-// followed by DelNils (materialize) is what every step transition, fan-in, final-state computation, and
-// Continue runs through.
-func FuzzStateMergeReduce(f *testing.F) {
+// FuzzStateApply asserts the state fold never panics and never leaves a null in materialized state, for
+// arbitrary (state, changes, reducer) combinations. State.Apply is what every step transition, fan-in,
+// final-state computation, and Continue runs through.
+func FuzzStateApply(f *testing.F) {
 	f.Add([]byte(`{"a":1}`), []byte(`{"a":null}`), uint8(0))
 	f.Add([]byte(`{"log":["x"]}`), []byte(`{"log":["y"]}`), uint8(1))
 	f.Add([]byte(`{"n":1}`), []byte(`{"n":"NaN"}`), uint8(2))
@@ -58,10 +57,9 @@ func FuzzStateMergeReduce(f *testing.F) {
 			reducers[k] = fuzzReducers[i%len(fuzzReducers)]
 			i++
 		}
-		if err := base.MergeReduce(incoming, reducers); err != nil {
+		if err := base.Apply(incoming, reducers); err != nil {
 			return // rejected inputs are fine; panics are not
 		}
-		base.DelNils()
 		for k := range base.Names() {
 			if base.IsDeleted(k) {
 				t.Fatalf("null tombstone leaked into merged state at key %q", k)

@@ -18,7 +18,6 @@ package fixtures
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
@@ -26,15 +25,6 @@ import (
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
-
-// pendingFixture skips a test that pins behavior the engine does not have yet, naming what is missing.
-// DWARF_RUN_PENDING=1 runs it anyway, to watch it fail while the behavior is being built.
-func pendingFixture(t *testing.T, missing string) {
-	t.Helper()
-	if os.Getenv("DWARF_RUN_PENDING") == "" {
-		t.Skip("pending: " + missing)
-	}
-}
 
 // TestNestedreducerflow pins that a fan-out nested three levels deep delivers every level's contributions
 // to the outermost fan-in, and to the final state of a fan-out that failed at either level:

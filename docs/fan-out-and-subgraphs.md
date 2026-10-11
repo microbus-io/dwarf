@@ -152,6 +152,9 @@ To invoke a single unit of work in isolation, declare a one-task workflow and `S
 ever runs as part of a graph, never as an independently invocable child on its own.
 
 - Pass `nil` input for "no arguments"; pass `f.Snapshot()` to forward the parent's entire state.
+- Writing the child's result into a reduced field of the parent is a contribution like any other. So have the
+  child return only what it adds — its new messages, say — and `Set` those. Passing the history in and
+  `Set`ting the history the child returns would add it twice.
 - Pass a struct or `map[string]any` as `in` to hand the child exactly the fields it expects — no need to
   reshape the parent's state first.
 - Subgraphs inherit the parent's baggage and run on the parent's shard. They start their own thread, so

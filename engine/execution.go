@@ -392,15 +392,23 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// from the frozen graph on every dispatch rather than trusted from the row.
 	stampReducers(state, graph.Reducers())
 	priorChanges, _ := workflow.NewState(priorChangesJSON)
-	// The carrier's input is state + priorChanges, materialized: Merge accumulates (keeping a prior
-	// delete's tombstone), then DelNils enacts it so the carrier sees the key absent. Clone so `state`
-	// stays the pristine resolved snapshot the successor mint re-uses below.
+	// The carrier's view is the step's input with the changes of its earlier runs (a Retry, a resumed
+	// Interrupt, a Subgraph re-entry) folded in through the reducers, and its changes are those runs' delta: a
+	// step is one unit of work however many times its task runs, so this run's writes compose onto theirs.
+	// Clone so `state` stays the pristine resolved input the successors are folded from below.
+	reducers := graph.Reducers()
 	mergedInputState := state.Clone()
-	_ = mergedInputState.Merge(priorChanges)
-	mergedInputState.DelNils()
+	if err := mergedInputState.Apply(priorChanges, reducers); err != nil {
+		fctx, doneTurn := e.dbTurn(ctx, shardNum)
+		err = e.failAndReturn(fctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
+		doneTurn()
+		return errors.Trace(err)
+	}
 	flow := workflow.NewRawFlow()
 	flow.SetRawState(mergedInputState)
 	flow.SetRawChanges(priorChanges)
+	// Inside a fan-out branch a task may not overwrite a reduced field; the carrier refuses it at the call.
+	flow.SetInBranch(lineageID != 0)
 	flow.SetAttempt(attempt)
 	flow.SetCreatedAt(flowCreatedAt)
 	flow.SetUpdatedAt(flowUpdatedAt)
@@ -574,7 +582,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			// anything can be built on. failStep does the same (it writes status/error only), so the contract
 			// does not turn on whether the author declared a handler. Do not "restore" rawChanges here.
 			resultFlow = workflow.NewRawFlow()
-			resultFlow.SetRawState(state)
+			resultFlow.SetRawState(mergedInputState)
+			resultFlow.SetRawChanges(priorChanges)
 			resultFlow.Set("onErr", onErrValue(execErr))
 			errorRouted = true
 			errorTarget = tr.To
@@ -597,18 +606,22 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	}
 
 	// Accumulate changes
-	var accumulatedChanges workflow.State
-	var changesJSON []byte
-	rawChanges := resultFlow.RawChanges()
-	if rawChanges.Len() == 0 {
-		accumulatedChanges = priorChanges
-		changesJSON = priorChangesJSON
-	} else {
-		// Accumulation, not materialization: Merge preserves a cleared (null) entry as a pending-delete
-		// marker. It is enacted (via DelNils) only when the changes later fold onto state below.
-		accumulatedChanges = priorChanges.Clone()
-		_ = accumulatedChanges.Merge(rawChanges)
-		changesJSON, _ = json.Marshal(accumulatedChanges)
+	// The carrier was seeded with the earlier runs' changes, so what it returns is the step's whole delta. It is
+	// the task's output, so its metadata is checked rather than trusted: an overwrite mark is the only thing a
+	// task may record there, and not on a reduced field inside a fan-out branch.
+	accumulatedChanges := resultFlow.RawChanges()
+	if err := checkDeltaMeta(accumulatedChanges, reducers, lineageID != 0); err != nil {
+		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
+		return errors.Trace(err)
+	}
+	dropIdentityNulls(accumulatedChanges, reducers)
+	changesJSON, _ := json.Marshal(accumulatedChanges)
+	// What the successors are handed, and what routing reads: the input with the step's delta folded in. A value
+	// the reducer cannot combine fails the step here, naming the field, before anything is written.
+	successorBase := state.Clone()
+	if err := successorBase.Apply(accumulatedChanges, reducers); err != nil {
+		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
+		return errors.Trace(err)
 	}
 
 	// Competing signals check
@@ -947,6 +960,10 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		accumulatedChanges = accumulatedChanges.Clone()
 		_ = accumulatedChanges.Set("onErr", onErrValue(cancelmarker.New(flowCancelReason)))
 		changesJSON, _ = json.Marshal(accumulatedChanges)
+		successorBase = state.Clone()
+		if err := successorBase.Apply(accumulatedChanges, reducers); err != nil {
+			return errors.Trace(e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName))
+		}
 		// The route is recorded with the changes, so a replay of this step routes to the handler too.
 		if _, uerr := db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET changes=?, advance_sleep_until=NOW_UTC(), advance_on_error=1 WHERE step_id=? AND lease_seq=?",
@@ -988,7 +1005,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	if errorRouted {
 		nextTasks = []nextStep{{taskName: errorTarget}}
 	} else {
-		nextTasks, err = evaluateTransitions(graph, taskName, resultFlow)
+		nextTasks, err = evaluateTransitions(graph, taskName, resultFlow, successorBase)
 		if err != nil {
 			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
@@ -1119,12 +1136,12 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			taskName)
 	}
 
-	// The successors' base state is state + accumulated changes, materialized: Merge accumulates, then
-	// DelNils enacts the changes' delete tombstones so they are absent downstream. Clone leaves `state`
-	// pristine; a forEach branch re-mints per element below.
-	childInputState := state.Clone()
-	_ = childInputState.Merge(accumulatedChanges)
-	childInputState.DelNils()
+	// The successors' base state is the input with the step's delta folded in (successorBase); a forEach branch
+	// re-mints per element below. A reduced field the step folded holds a value that exists in no row - not
+	// in this step's state, which predates the fold, nor its changes, which hold only the delta - so it is
+	// stored inline in the successors' state and never ref'd at this step.
+	childInputState := successorBase
+	folded := foldedFields(accumulatedChanges, reducers)
 	// Mint state refs for the successors: a field big enough to be worth an anchor is omitted from their
 	// `state` and recorded in `state_refs` instead, pointing at THIS step (which holds the bytes in its
 	// `changes` if the task just wrote them, or in its `state` if it merely carried them). A field that
@@ -1132,7 +1149,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	//
 	// The linear/static-fan-out successors all share this one snapshot, so it is minted once; a forEach
 	// branch re-mints because its state carries the injected element (below).
-	linearStateJSON, linearRefsJSON, err := e.linkerFor(shardNum).Mint(childInputState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), nil, nil)
+	linearStateJSON, linearRefsJSON, err := e.linkerFor(shardNum).Mint(childInputState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), folded, nil)
 	if err != nil {
 		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
 		return errors.Trace(err)
@@ -1297,6 +1314,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 					// array, so Mint may point it into whichever anchor holds the array. Everything else in the
 					// branch's state comes from this step and re-mints exactly as the linear case.
 					noRef := map[string]bool{next.itemKey + "Index": true, next.itemKey + "Count": true}
+					for k := range folded {
+						noRef[k] = true
+					}
 					item := &staterefs.Item{Key: next.itemKey, Source: next.forEachKey, Index: next.cohortIndex}
 					var mintErr error
 					stepStateJSON, stepRefsJSON, mintErr = e.linkerFor(shardNum).Mint(perStepState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), noRef, item)
@@ -1809,14 +1829,22 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		if rerr != nil {
 			return errors.Trace(rerr)
 		}
-		// With no members there is nothing to reduce: the fan-in's state is this step's own changes over its
-		// state, replaced exactly as fanInRow builds its base and as a linear transition does - reducers fold
-		// only what branches contribute. So it mints as a linear successor would, carried refs and all.
+		// With no members there is nothing more to fold: the fan-in's state is this step's changes folded onto its
+		// state, exactly as fanInRow builds its base and as a linear transition does. So it mints as a linear
+		// successor would, carried refs and all - except that a field the step folded needs its base, which
+		// may be carried by a ref, and its folded value is in no row, so it is stored inline.
+		reducers := graph.Reducers()
+		dropIdentityNulls(ourChanges, reducers)
+		folded := foldedFields(ourChanges, reducers)
+		if err := e.resolveReducedRefs(ctx, tx, shardNum, ourState, ourRefs, onlyFields(reducers, folded), workflowURL); err != nil {
+			return errors.Trace(err)
+		}
 		mergedState := ourState.Clone()
-		mergedState.Merge(ourChanges)
-		mergedState.DelNils()
-		stampReducers(mergedState, graph.Reducers())
-		mergedJSON, refsJSON, merr := e.linkerFor(shardNum).Mint(mergedState, ourChanges, ourRefs, stepID, staterefs.Linear, nil, nil)
+		if err := mergedState.Apply(ourChanges, reducers); err != nil {
+			return errors.Trace(&permanentError{err})
+		}
+		stampReducers(mergedState, reducers)
+		mergedJSON, refsJSON, merr := e.linkerFor(shardNum).Mint(mergedState, ourChanges, ourRefs, stepID, staterefs.Linear, folded, nil)
 		if merr != nil {
 			return errors.Trace(merr)
 		}
@@ -1945,41 +1973,47 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 	// merely-carried ref is left alone and re-emitted onto the fan-in step below, still pointing at its
 	// original anchor: resolving it here would materialize the payload and re-anchor it at EVERY fan-in,
 	// giving back the win in exactly the fan-out graphs this design exists for. A reduced field the spawn
-	// itself wrote needs no base either: its write replaces it below, so reading the old value would be a wasted
-	// anchor read inside this transaction. resolveReducedRefs mutates the state map in place, so it gets the live
-	// map.
+	// OVERWROTE needs no base: its write replaces it below, so reading the old value would be a wasted anchor
+	// read inside this transaction. resolveReducedRefs mutates the state map in place, so it gets the live map.
 	spawnRefs, err := staterefs.Parse(c.spawnRefsJSON)
 	if err != nil {
 		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(err)
 	}
-	folded := graph.Reducers()
-	if spawnChanges.Len() > 0 {
+	reducers := graph.Reducers()
+	dropIdentityNulls(spawnChanges, reducers)
+	folded := reducers
+	if spawnChanges.MetaJSON() != nil {
 		folded = maps.Clone(folded)
-		for k := range spawnChanges.Names() {
-			delete(folded, k)
+		for k := range spawnChanges.Writes() {
+			if spawnChanges.IsOverwritten(k) {
+				delete(folded, k)
+			}
 		}
 	}
 	err = e.resolveReducedRefs(ctx, tx, shardNum, spawnState, spawnRefs, folded, workflowURL)
 	if err != nil {
 		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(err)
 	}
-	// The fan-in accumulator's base: the spawn's changes over its state, REPLACED - the value every branch was
-	// handed. Reducers fold only what the members contribute; a task's own write to a reduced field is a value,
-	// not a delta onto its input. A cleared field rides as a tombstone that DelNils enacts once all members
-	// are folded, and a reducer folding onto it seeds from the first contribution.
+	// The fan-in accumulator's base: the spawn's changes folded onto its state - the value every branch was
+	// handed - and the members' contributions fold onto it in branch order.
 	merged := spawnState.Clone()
-	merged.Merge(spawnChanges)
+	if err := merged.Apply(spawnChanges, reducers); err != nil {
+		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(&permanentError{err})
+	}
 	// Fields a cohort MEMBER contributed. Their bytes are in that member's `changes` - not in the spawn's row -
 	// and a reducer's COMBINED output exists in no row at all, so neither can be anchored at the spawn. They are
 	// inlined into the fan-in step's own state, which becomes their anchor for everything downstream (the third
 	// of the three places an anchor's bytes can sit). A stale spawn ref for such a field is dropped with them.
+	// A field the spawn itself folded is the same case.
 	memberWrites := map[string]bool{}
+	for k := range foldedFields(spawnChanges, reducers) {
+		memberWrites[k] = true
+	}
 	var contributions []workflow.State
 
 	// A member that is itself an inner fan-in contributes what its own cohort added, which is in its STATE, not
 	// its changes: its changes hold only its own task's writes. Its state records which part its cohort added
 	// (foldCohort), so one row per inner fan-in carries the whole subtree below it, at any depth.
-	reducers := graph.Reducers()
 	var parts map[int]workflow.State
 	if ids := innerFanInIDs(graph, c.members); len(ids) > 0 {
 		var n int
@@ -2023,7 +2057,7 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 		if !ok {
 			continue
 		}
-		for k := range contribution.Names() {
+		for k := range contribution.Writes() {
 			memberWrites[k] = true
 		}
 		contributions = append(contributions, contribution)
@@ -2038,10 +2072,6 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(&permanentError{err})
 	}
 
-	// Materialize the fan-in snapshot: the folds preserved replace-field delete tombstones (accumulation);
-	// DelNils enacts them now, before the state is minted onto the fan-in step. Reduced fields are
-	// unaffected - a cleared reduced field was ignored during the fold, never stored as a tombstone.
-	merged.DelNils()
 	stampFanIn(merged, reducers, reduced)
 
 	// The fan-in sits one level below the DEEPEST cohort branch, not merely below the last sibling to

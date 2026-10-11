@@ -93,7 +93,8 @@ func TestMeta_StampedRedactedAndRebuilt(t *testing.T) {
 		f.Set("log", []string{f.GetString("item")})
 		f.SetInt("total", 1)
 		// Act as a remote host would: the carrier crosses the wire as JSON, and what comes back is decoded
-		// over it. The returned JSON forges metadata in both halves.
+		// over it. The returned JSON forges the input's metadata, which the engine rebuilds rather than reads.
+		// (Forged metadata in the changes fails the step: TestMeta_ForgedChangesMetaFailsTheStep.)
 		data, err := json.Marshal(f)
 		if err != nil {
 			return err
@@ -116,7 +117,6 @@ func TestMeta_StampedRedactedAndRebuilt(t *testing.T) {
 		mu.Unlock()
 		forged := json.RawMessage(`{"log":{"reducer":"union"},"item":{"reducer":"add"}}`)
 		state[workflow.MetaKey] = forged
-		changes[workflow.MetaKey] = forged
 		wire["state"], _ = json.Marshal(state)
 		wire["changes"], _ = json.Marshal(changes)
 		data, err = json.Marshal(wire)
@@ -423,5 +423,94 @@ func TestMeta_ReducedStaysWithTheInnerFanIn(t *testing.T) {
 		for _, s := range states {
 			assert.Equal(tags, s.Meta(), "task %s", task)
 		}
+	}
+}
+
+// TestMeta_ForgedChangesMetaFailsTheStep pins what a task's changes may carry in their metadata: an overwrite
+// mark, and nothing else - and not on a reduced field inside a fan-out branch.
+func TestMeta_ForgedChangesMetaFailsTheStep(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	mux := NewHostMux()
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+
+	// returning makes the task return its carrier as a remote host would, with changesMeta as the metadata of
+	// its changes.
+	returning := func(f *workflow.Flow, changesMeta string) error {
+		data, err := json.Marshal(f)
+		if err != nil {
+			return err
+		}
+		var wire map[string]json.RawMessage
+		if err := json.Unmarshal(data, &wire); err != nil {
+			return err
+		}
+		var changes map[string]json.RawMessage
+		_ = json.Unmarshal(wire["changes"], &changes)
+		if changes == nil {
+			changes = map[string]json.RawMessage{}
+		}
+		changes[workflow.MetaKey] = json.RawMessage(changesMeta)
+		wire["changes"], _ = json.Marshal(changes)
+		data, _ = json.Marshal(wire)
+		return json.Unmarshal(data, f)
+	}
+
+	g := workflow.NewGraph("Forged")
+	g.SetURL("Only", "metaforged/only")
+	g.SetReducer("log", workflow.ReducerAppend)
+	g.AddTransition("Only", workflow.End)
+	mux.HandleGraph("metaforged/wf", g)
+	var changesMeta string
+	mux.HandleTask("metaforged/only", func(ctx context.Context, f *workflow.Flow) error {
+		return returning(f, changesMeta)
+	})
+
+	for _, forged := range []string{
+		`{"log":{"reducer":"union"}}`,
+		`{"log":{"overwrite":true,"reduced":{"from":0}}}`,
+		`{"log":{"overwrite":false}}`,
+		`{"log":"x"}`,
+	} {
+		changesMeta = forged
+		_, outcome, err := e.Run(ctx, "metaforged/wf", map[string]any{"log": []string{"a"}}, nil)
+		if assert.NoError(err) {
+			assert.Equal(workflow.StatusFailed, outcome.Status, forged)
+			assert.Contains(outcome.Error, `"log"`, forged)
+		}
+	}
+
+	// An overwrite mark with no value is a delete, which a step on the trunk may make.
+	changesMeta = `{"log":{"overwrite":true}}`
+	_, outcome, err := e.Run(ctx, "metaforged/wf", map[string]any{"log": []string{"a"}}, nil)
+	if assert.NoError(err) {
+		assert.Equal(workflow.StatusCompleted, outcome.Status, outcome.Error)
+		assert.False(outcome.State.Has("log"))
+	}
+
+	// Inside a fan-out branch it is not allowed on a reduced field, even when the carrier was bypassed.
+	fan := workflow.NewGraph("ForgedBranch")
+	fan.SetURL("Seed", "metaforged/seed")
+	fan.SetURL("Branch", "metaforged/branch")
+	fan.SetURL("Join", "metaforged/join")
+	fan.SetFanIn("Join")
+	fan.SetReducer("log", workflow.ReducerAppend)
+	fan.AddTransitionForEach("Seed", "Branch", "items", "item")
+	fan.AddTransitionChain("Branch", "Join", workflow.End)
+	mux.HandleGraph("metaforged/fan", fan)
+	mux.HandleTask("metaforged/seed", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("metaforged/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("metaforged/branch", func(ctx context.Context, f *workflow.Flow) error {
+		return returning(f, `{"log":{"overwrite":true}}`)
+	})
+	_, outcome, err = e.Run(ctx, "metaforged/fan", map[string]any{"items": []string{"x"}, "log": []string{"a"}}, nil)
+	if assert.NoError(err) {
+		assert.Equal(workflow.StatusFailed, outcome.Status)
+		assert.Contains(outcome.Error, "inside a fan-out branch")
 	}
 }

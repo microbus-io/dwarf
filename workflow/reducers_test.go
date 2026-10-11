@@ -23,11 +23,11 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-func TestMergeReduce_Append(t *testing.T) {
+func TestApply_Append(t *testing.T) {
 	assert := testarossa.For(t)
 
 	base, _ := NewState("items", []int{1, 2})
-	err := base.MergeReduce(st("items", []int{3, 4}), map[string]Reducer{"items": ReducerAppend})
+	err := base.Apply(st("items", []int{3, 4}), map[string]Reducer{"items": ReducerAppend})
 	assert.NoError(err)
 
 	var items []int
@@ -35,11 +35,11 @@ func TestMergeReduce_Append(t *testing.T) {
 	assert.Equal([]int{1, 2, 3, 4}, items)
 }
 
-func TestMergeReduce_AppendSingleElement(t *testing.T) {
+func TestApply_AppendSingleElement(t *testing.T) {
 	assert := testarossa.For(t)
 
 	base, _ := NewState("items", []string{"a"})
-	err := base.MergeReduce(st("items", "b"), map[string]Reducer{"items": ReducerAppend})
+	err := base.Apply(st("items", "b"), map[string]Reducer{"items": ReducerAppend})
 	assert.NoError(err)
 
 	var items []string
@@ -47,11 +47,11 @@ func TestMergeReduce_AppendSingleElement(t *testing.T) {
 	assert.Equal([]string{"a", "b"}, items)
 }
 
-func TestMergeReduce_IncomingAbsentIsNoOp(t *testing.T) {
+func TestApply_IncomingAbsentIsNoOp(t *testing.T) {
 	assert := testarossa.For(t)
 
 	base, _ := NewState("items", []int{1, 2})
-	err := base.MergeReduce(st("other", 1), map[string]Reducer{"items": ReducerAppend})
+	err := base.Apply(st("other", 1), map[string]Reducer{"items": ReducerAppend})
 	assert.NoError(err)
 
 	var items []int
@@ -59,13 +59,13 @@ func TestMergeReduce_IncomingAbsentIsNoOp(t *testing.T) {
 	assert.Equal([]int{1, 2}, items)
 }
 
-func TestMergeReduce_BaseAbsentSeedsViaReducer(t *testing.T) {
+func TestApply_BaseAbsentSeedsViaReducer(t *testing.T) {
 	assert := testarossa.For(t)
 
 	// base has no "items" yet, so the reducer is called with a nil base and decides how to seed.
 	base, _ := NewState("other", 1)
 	reducers := map[string]Reducer{"items": ReducerAppend}
-	err := base.MergeReduce(st("items", []int{3, 4}), reducers)
+	err := base.Apply(st("items", []int{3, 4}), reducers)
 	assert.NoError(err)
 
 	var items []int
@@ -73,17 +73,17 @@ func TestMergeReduce_BaseAbsentSeedsViaReducer(t *testing.T) {
 	assert.Equal([]int{3, 4}, items)
 
 	// A second merge accumulates onto the seeded slice.
-	err = base.MergeReduce(st("items", 5), reducers)
+	err = base.Apply(st("items", 5), reducers)
 	assert.NoError(err)
 	_, _ = base.Get("items", &items)
 	assert.Equal([]int{3, 4, 5}, items)
 }
 
-func TestMergeReduce_NoReducerOverwrites(t *testing.T) {
+func TestApply_NoReducerOverwrites(t *testing.T) {
 	assert := testarossa.For(t)
 
 	base, _ := NewState("items", []int{1, 2})
-	err := base.Merge(st("items", []int{3, 4})) // no reducers
+	err := base.Apply(st("items", []int{3, 4}), nil) // no reducers
 	assert.NoError(err)
 
 	var items []int
@@ -91,28 +91,28 @@ func TestMergeReduce_NoReducerOverwrites(t *testing.T) {
 	assert.Equal([]int{3, 4}, items) // last write wins
 }
 
-func TestMergeReduce_ErrorPropagates(t *testing.T) {
+func TestApply_ErrorPropagates(t *testing.T) {
 	assert := testarossa.For(t)
 
 	// The reachable failure is a BASE that is not a list - a field that held a scalar and was later wired to
 	// append. An element-type mismatch is NOT reachable: every base in the live path arrives from JSON as a
 	// []any, which accepts any element, so appending a string to a list of numbers is legal there.
 	base, _ := NewState("items", "not a list")
-	err := base.MergeReduce(st("items", 3), map[string]Reducer{"items": ReducerAppend})
+	err := base.Apply(st("items", 3), map[string]Reducer{"items": ReducerAppend})
 	assert.Error(err)
 	assert.Contains(err.Error(), "must be a slice or array")
 
 	// And the confirmation that the other branch is dead in production: a normalized []any base takes a
 	// string element without complaint.
 	nums, _ := NewState("items", []int{1, 2})
-	assert.NoError(nums.MergeReduce(st("items", "three"), map[string]Reducer{"items": ReducerAppend}))
+	assert.NoError(nums.Apply(st("items", "three"), map[string]Reducer{"items": ReducerAppend}))
 }
 
-func TestMergeReduce_AddByReducerName(t *testing.T) {
+func TestApply_AddByReducerName(t *testing.T) {
 	assert := testarossa.For(t)
 
 	base, _ := NewState("total", 10)
-	err := base.MergeReduce(st("total", 5), map[string]Reducer{"total": ReducerAdd})
+	err := base.Apply(st("total", 5), map[string]Reducer{"total": ReducerAdd})
 	assert.NoError(err)
 
 	var total int

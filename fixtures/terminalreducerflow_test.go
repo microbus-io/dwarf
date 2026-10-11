@@ -26,10 +26,10 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestTerminalReducerFlow pins that a reducer folds only what fan-out branches contribute: a task's own write to a
-// reducer-managed field replaces the field - on the way to the next step, as the base its branches fold onto when
-// it fans out, and in the flow's final state. Folding a step's write onto its own input would make the outcome
-// depend on graph shape: a do-nothing step after the write would change the final state.
+// TestTerminalReducerFlow pins that a task's write to a reducer-managed field is a contribution wherever the task
+// runs, folded through the reducer at every hand-off: on the way to the next step, as the base its branches fold
+// onto when it fans out, and into the flow's final state. So the outcome does not depend on graph shape: a
+// do-nothing step after the write changes nothing. Del and Overwrite replace instead.
 func TestTerminalReducerFlow(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -56,7 +56,11 @@ func TestTerminalReducerFlow(t *testing.T) {
 		return base + name
 	}
 	noop := task("noop", func(f *workflow.Flow) error { return nil })
-	plus5 := task("plus5", func(f *workflow.Flow) error {
+	add5 := task("add5", func(f *workflow.Flow) error {
+		f.SetInt("total", 5)
+		return nil
+	})
+	readPlus5 := task("readplus5", func(f *workflow.Flow) error {
 		f.SetInt("total", f.GetInt("total")+5)
 		return nil
 	})
@@ -69,21 +73,36 @@ func TestTerminalReducerFlow(t *testing.T) {
 		return outcome
 	}
 
-	t.Run("padding_does_not_change_the_outcome", func(t *testing.T) {
-		assert := testarossa.For(t)
-		bare := graph("Bare", func(g *workflow.Graph) {
-			g.SetURL("Work", plus5)
+	shapes := func(name, work string) []string {
+		bare := graph(name+"Bare", func(g *workflow.Graph) {
+			g.SetURL("Work", work)
 			g.AddTransition("Work", workflow.End)
 		})
-		padded := graph("Padded", func(g *workflow.Graph) {
-			g.SetURL("Work", plus5)
+		padded := graph(name+"Padded", func(g *workflow.Graph) {
+			g.SetURL("Work", work)
 			g.SetURL("Noop", noop)
 			g.AddTransitionChain("Work", "Noop", workflow.End)
 		})
-		for _, url := range []string{bare, padded} {
+		return []string{bare, padded}
+	}
+
+	t.Run("padding_does_not_change_the_outcome", func(t *testing.T) {
+		assert := testarossa.For(t)
+		for _, url := range shapes("Delta", add5) {
 			out := run(t, url, map[string]any{"total": 10})
 			assert.Equal(workflow.StatusCompleted, out.Status)
 			assert.Equal(15.0, stateVal(out.State, "total"), url)
+		}
+	})
+
+	t.Run("read_modify_write_counts_the_input_twice", func(t *testing.T) {
+		assert := testarossa.For(t)
+		// Writing back the value read plus 5 contributes 15 onto 10. That is the contract - write the delta,
+		// not the result - and it holds whatever follows the write.
+		for _, url := range shapes("ReadModify", readPlus5) {
+			out := run(t, url, map[string]any{"total": 10})
+			assert.Equal(workflow.StatusCompleted, out.Status)
+			assert.Equal(25.0, stateVal(out.State, "total"), url)
 		}
 	})
 
@@ -139,6 +158,6 @@ func TestTerminalReducerFlow(t *testing.T) {
 		}))
 		out := run(t, url, map[string]any{"total": 10, "items": []string{"a", "bad"}})
 		assert.Equal(workflow.StatusFailed, out.Status)
-		assert.Equal(6.0, stateVal(out.State, "total"), "the source's 5 plus the completed branch's 1")
+		assert.Equal(16.0, stateVal(out.State, "total"), "the input's 10, the source's 5, and the completed branch's 1")
 	})
 }

@@ -178,3 +178,52 @@ func TestContinue_ReducerErrorIs400(t *testing.T) {
 	assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
 	assert.True(strings.Contains(err.Error(), "total"), err.Error())
 }
+
+// TestHandOff_ReducerErrorFailsTheStep pins that a write a reducer cannot fold fails the step at the hand-off,
+// naming the field, even from a task that bypassed the carrier's own check - a remote host returning a string
+// under `add`. The engine folds the step's changes onto its input before anything is written, and the fold is a
+// pure function of the data, so it is not retried and neither write metric counts it.
+func TestHandOff_ReducerErrorFailsTheStep(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	mux := NewHostMux()
+	g := workflow.NewGraph("HandOffReducerError")
+	g.SetURL("Work", "handofferror.verify:429/work")
+	g.SetURL("Next", "handofferror.verify:429/next")
+	g.SetReducer("total", workflow.ReducerAdd)
+	g.AddTransitionChain("Work", "Next", workflow.End)
+	mux.HandleGraph("handofferror.verify:429/g", g)
+	mux.HandleTask("handofferror.verify:429/work", func(ctx context.Context, f *workflow.Flow) error {
+		// What a remote host's decoded result carries; the carrier itself would have refused the write.
+		return f.UnmarshalJSON([]byte(`{"state":{"total":10},"changes":{"total":"not a number"}}`))
+	})
+	var nextRan atomic.Bool
+	mux.HandleTask("handofferror.verify:429/next", func(ctx context.Context, f *workflow.Flow) error {
+		nextRan.Store(true)
+		return nil
+	})
+
+	eng := NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
+	eng.SetHost(mux)
+	reader := withManualReader(eng)
+	assert.NoError(eng.Startup(t.Context()))
+
+	_, outcome, err := eng.Run(ctx, "handofferror.verify:429/g", map[string]any{"total": 10}, nil)
+	if !assert.NoError(err) || !assert.NotNil(outcome) {
+		return
+	}
+	assert.Equal(workflow.StatusFailed, outcome.Status)
+	assert.True(strings.Contains(outcome.Error, "total"), outcome.Error)
+	assert.False(nextRan.Load(), "the successor ran on a state that could not be folded")
+
+	var rm metricdata.ResourceMetrics
+	if assert.NoError(reader.Collect(ctx, &rm)) {
+		for _, name := range []string{"dwarf_steps_write_retried", "dwarf_steps_write_failed"} {
+			n, _ := sumCounter(rm, name, "", "")
+			assert.Equal(int64(0), n, name)
+		}
+	}
+}

@@ -24,9 +24,7 @@ crash recovery.
 The engine reads back only `changes`, so a write into `state` alone (marshal a struct into it, tracking nothing)
 is never persisted. Such a method reads as the natural write-side twin of `Parse` - `Parse(&order)` / mutate /
 write - and the result is **silent, inconsistent data loss**: `processStep` sees an empty `changes` and persists
-the *prior* attempt's, so the write never reaches the next step's `state` nor `final_state`, while
-`evaluateTransitions` routes off `RawState()`, which *does* contain it. The flow branches on a value it then
-throws away. A task writes with `Set` and the typed setters. `RawFlow.SetRawState` is the engine's own seeding
+the *prior* attempt's, so the write never reaches the next step's `state` nor `final_state`. A task writes with `Set` and the typed setters. `RawFlow.SetRawState` is the engine's own seeding
 path, not task-facing.
 
 **`SetChanges(source)` is `Set` for each field `json.Marshal(source)` emits, and nothing more.** It exists for a
@@ -37,59 +35,60 @@ diff against a snapshot.** A diff dropped a branch's contribution that happened 
 (`total` 5 under `add`, contribution 5). It also recorded an empty `omitzero` output field as null - a delete - so
 a host returning "no new items" wiped the field. Pinned by `TestFlow_SetChangesIsSetPerField`.
 
-**State mutation on retry:** on `flow.Retry()`, the re-dispatched task's view is `state` with `changes` merged onto
-it, so it sees its own prior output; `changes` is preserved, and the rewind writes nothing to `state`. `Resume`
-does **not** mutate `state`: it writes the caller's data to `resume_data`, which `flow.Interrupt` returns on
-re-dispatch.
+**A step's runs compose:** on `flow.Retry()`, a resumed `Interrupt` or a `Subgraph` re-entry, the re-dispatched
+carrier's view is `state` with the earlier runs' `changes` folded in, and its `changes` are seeded with them, so
+the run's writes compose onto theirs and the carrier returns the step's WHOLE delta. The engine persists that
+delta as it is. **Never fold the earlier runs' changes onto the carrier's returned changes again**: that counts
+them twice, which a replay (whose carrier is the recorded changes) makes visible at once - pinned by the
+`reduced` case of `TestOrphanSweep_ReplaysSlowWorkersStep`. `Resume` does **not** mutate `state`: it writes the
+caller's data to `resume_data`, which `flow.Interrupt` returns on re-dispatch.
 
-**Reducers fold only what fan-out BRANCHES contribute, at their fan-in - and `Continue`'s `additionalState`.**
-Everywhere else a write replaces: the hand-off to the next step, the fan-out source's own write (the base its
-branches fold onto), and the final state. So a branch writing a reduced field sets only its **contribution**
-(`flow.Set("messages", []string{newMessage})` under `ReducerAppend`), while a trunk task writes the whole value
-(`f.SetStrings("messages", append(f.GetStrings("messages"), m))`). Pinned by
-`fixtures/terminalreducerflow_test.go` and `fixtures/emptyforeachreducerflow_test.go`.
+**On a reduced field every write is a delta, folded through the field's reducer at every hand-off** - the
+successor's state, the fan-out source's base, the fan-in, the final state, `Continue`'s `additionalState`.
+A read returns the combined value. So a task writes only its contribution, wherever it runs:
+`f.Set("messages", []any{m})` under `ReducerAppend`. A read-modify-write (`Set(k, append(Get(k), m))`) adds the
+history again, and that is the contract, not a bug - pinned by `terminalreducerflow`'s
+`read_modify_write_counts_the_input_twice`. Because every hand-off folds, the outcome does not depend on graph
+shape: a do-nothing step changes nothing (`padding_does_not_change_the_outcome`).
 
-- **Folding a step's own write onto its own input is the trap.** It treats the write as a delta, so the outcome
-  depends on graph shape: `total` 10 under `add` and a last task setting 15 end at 25 if the final state folds
-  and at 15 if a do-nothing step follows, since the hand-off replaces.
-- **Do not reduce on every hand-off (LangGraph's model) without answering four costs:**
-  - a sentinel overwrite value has to stay out of Fork's overrides, `Create`'s input and `Subgraph`'s `in`;
-  - per-field input tracking in the carrier, where a `Set` after an overwrite undoes it;
-  - reducers shipped to remote tasks, where an older remote task computes the view `when` routes on
-    differently;
-  - refs, since `reduce(nil, d)` is not `d` for `append` of a single value, so a ref to the writer's
-    `changes` resolves to the bare delta.
-- **No `Append`-style helper.** On the trunk it would be a plain read-append-write; in a branch, on a reduced
-  field, it would contribute the whole history plus the item, duplicating the history at the fan-in. The carrier
-  cannot tell a branch from the trunk.
+**The carrier (`flow.go`): every write is a one-field delta, composed into `changes` and applied to the view**
+(`State.Compose`, `State.Apply`), through the reducers the engine stamps on the input state's `__meta__` at
+dispatch. `Overwrite(k, v)` and `Del(k)` (= `Overwrite(k, nil)`) record an overwrite
+MARK in the delta's metadata (`"k": {"overwrite": true}`), never a sentinel value. The four traps the
+always-reduce model has to answer, each answered here and pinned:
+
+- **No overwrite value may leak.** The mark is metadata, and caller input carrying `__meta__` is rejected
+  (`rejectMeta`), so `Create`'s input, `Continue`'s `additionalState`, Fork's overrides and a subgraph's `in`
+  are plain values and cannot smuggle one.
+- **An overwrite is STICKY within the task.** A later `Set` folds onto the overwritten value and the key stays
+  marked (`Compose`; `TestState_ComposeTable`, `TestFlow_OverwriteAndDelThenSet`). Treating a later `Set` as a
+  fresh delta undoes the overwrite - "trim to 5, then append" kept everything.
+- **Routing reads the ENGINE's fold, never the carrier's returned view** (`evaluateTransitions` takes the
+  successor base). A remote task is untrusted and may compute its view differently.
+- **A folded value exists in no row**, so a ref must never anchor it at the step that folded it: not its
+  `state` (before the fold) nor its `changes` (the delta). It is stored inline in the successor's state
+  (`foldedFields` -> `Mint`'s `inlineOnly`). Never assume `reduce(nil, d) == d` - false for `append` of a single
+  value and for `union` with duplicates.
+
+**A delete is an overwrite mark with no value, and a materialized state holds no deletes.** `State.Apply` enacts
+marks; `IsDeleted`/`Writes` see a mark-only key, `Names`/`Has` do not. A JSON `null` VALUE (no mark) is still
+read, for rows written before marks existed and for plain-map input: it deletes a field with no reducer and is
+the reducer's IDENTITY on a reduced field. That identity is what lets a task that collected nothing into a nil
+slice write it safely - at the JSON level a nil slice and a bare nil cannot be told apart. `isCleared` therefore
+still recognizes both null spellings (a Go-nil `json.RawMessage` and the bytes `null`).
+
+**Overwriting or deleting a reduced field inside a fan-out branch fails the step**, at any depth: the branches
+are parallel, and a reset in one has no defined meaning for the others. The carrier refuses `Overwrite` when
+told it is in a branch (`RawFlow.SetInBranch`, carried on the wire), and the engine re-checks every result
+(`checkDeltaMeta`), since `Del` cannot return an error and a remote task is untrusted. A field with no reducer
+may be deleted in a branch; it folds in branch order. Pinned by `fixtures/reducerdeleteflow_test.go` and
+`TestMeta_ForgedChangesMetaFailsTheStep`.
 
 `Graph.Validate` rejects a reducer name that is not one of the `Reducer` constants, so a misspelled reducer fails
-at `Create` rather than at the first fan-in.
+at `Create` rather than at the first fold.
 
 **forEach element injection:** the current element is injected into `state` only (under `as`), not `changes`, so it is
 available to the task but does not participate in fan-in merge.
-
-**Delete is a cleared entry in `changes`, and the merge has two modes for it, split across two `State`
-methods.** `flow.Del` writes a Go-nil tombstone into `changes` and `Set(k, nil)` writes the bytes `null`; a
-delete read back from a column is `null` too. `isCleared` treats both spellings as cleared - `dwarf` conflates
-null and absent everywhere, so there is no way to store a literal null value. `State.Merge`/`MergeReduce`
-are the **accumulation** primitive: a cleared key is **preserved** (the replace path stores the tombstone; a
-branch's contribution to a reducer-managed field *ignores* the clear - see below), so a changes delta can be built
-up across attempts/members with the pending-delete marker intact. `State.DelNils` is the **materialization** step: it drops every cleared
-key, so a delete never survives as a `"k": null` tombstone in materialized state - which is what
-`final_state`/`FlowOutcome.State`/`Snapshot` expose to the host, and what the next step's `state` column becomes.
-So *materialize* = `Merge`/`MergeReduce` then `DelNils`; *accumulate* = `Merge` alone. `processStep`'s changes
-accumulation (folding a task's fresh output onto a prior attempt's `changes` before persisting the `changes`
-column) uses `Merge` **without** `DelNils`, because there the null must be **preserved** - it only enacts the
-delete when `changes` later folds onto `state` (a don't-materialize-here note is at that site in `execution.go`).
-
-**A branch's cleared contribution to a reducer-managed field is the reducer's IDENTITY - ignored, not dropped.**
-`MergeReduce` skips a cleared value on a reduced field (`isCleared` check before the fold), leaving the
-accumulator untouched, so a branch that `flow.Del`s a reduced field clears it in its own view only and never wipes
-the cohort's contributions - order-independent. The same holds for a cleared field in `Continue`'s
-`additionalState`. Anywhere else a delete replaces like any write: a trunk step's or the fan-out source's `Del`
-removes the field (the source's delete leaves the fan-in to fold the branches onto nothing). Pinned by
-`fixtures/reducerdeleteflow_test.go` and `fixtures/terminalreducerflow_test.go`.
 
 ### Field metadata (`__meta__`) is stored as a field and hidden as one
 
@@ -104,12 +103,10 @@ callers never do.
   `Parse` and `Del` skip it; `Clear` keeps it; `Set` rejects the name. The price is that anything rebuilding a
   state field by field from `Names` drops it. `staterefs.Mint` is the one such place, and it copies the
   metadata back explicitly. **A new field-by-field rebuild must do the same.**
-- **`Merge`/`MergeReduceAll` keep the receiver's metadata and IGNORE the incoming State's.** A changes
-  delta never carries metadata into state, which is what makes a task's forged `__meta__` inert without a
-  check at every merge site. This changes when a delta starts carrying the kind of each write (an
-  overwrite mark).
+- **`Apply`/`ApplyAll`/`Compose` keep the receiver's metadata and never COPY the incoming State's**; they
+  only read its overwrite marks. So a delta never carries reducer tags or a fan-in's description into a state.
 - **`Flow.Snapshot` drops it,** because a snapshot is handed to task code and onward (e.g. as a subgraph's
-  `in`). `Flow.Clear` tombstones fields, never the metadata.
+  `in`). `Flow.Clear` deletes fields, never the metadata.
 - **`FieldMeta.Reduced` is the engine's, on a fan-in step's state only** - which part of a field its cohort
   added, so an outer fan-in can take that step's contribution from its one row. Its forms and rules are in
   `engine/CLAUDE.md` ("A member's contribution is its `changes`, EXCEPT an inner fan-in's").
@@ -150,12 +147,11 @@ carried-payload win is captured once carried fields are not decoded, and an A/B 
 neutral on every axis (RTT-matched: heap +3.9%, throughput +2.7%, both noise) - so uniformity is chosen for
 what it removes:
 
-- **Every extra tombstone spelling is one more for a cleared-check to miss.** A tombstone already has two: a
-  Go nil (`deleteOne` and `Flow.Clear` write `changes.d[k] = nil`) and the bytes `null` (`Set(k, nil)`, and
-  any delete read back from a column). `encoding/json` marshals a nil `json.RawMessage` as `null`, so both
-  persist as one value, and `isCleared` recognizes both. A decoded slot adds a third (a nil `any`). A
-  cleared-check that misses any spelling makes a delete read back from a `changes` column silently stop
-  taking effect - `DelNils` leaves it, `Has` reports the field present, nothing logs.
+- **Every extra null spelling is one more for a cleared-check to miss.** A null value already has two: a Go
+  nil `json.RawMessage` and the bytes `null` (a `Set(k, nil)`, or a value read back from a column).
+  `encoding/json` marshals a nil `json.RawMessage` as `null`, so both persist as one value, and `isCleared`
+  recognizes both. A decoded slot adds a third (a nil `any`). A cleared-check that misses any spelling makes a
+  null read back from a column stop meaning "nothing" - `Has` reports the field present, nothing logs.
 - **No branch to get wrong.** With one representation no reader has to ask "is this one decoded or not",
   so no path can answer it wrongly.
 - **Reads and writes each do one codec pass.** `Get` only unmarshals and `Set` only marshals; a decoded slot
@@ -187,12 +183,12 @@ is why some tests assert `float64` where a reader might expect `int`.
    caller's slice.** A stored value is shared by `Clone` and every fan-out branch on the strength of being
    immutable, so a caller reusing its buffer after `Set` must not be able to rewrite it (pinned by
    `TestState_SetCopiesRawMessage`); `SetJSON` is for bytes the caller hands over for good.
-3. **A combining reducer decodes and re-encodes, so a cohort folds in ONE pass.** `MergeReduceAll`, not
-   `MergeReduce` per member: the accumulator grows as it folds, so re-encoding it per member is quadratic in
+3. **A combining reducer decodes and re-encodes, so a cohort folds in ONE pass.** `ApplyAll`, not
+   `Apply` per member: the accumulator grows as it folds, so re-encoding it per member is quadratic in
    accumulated bytes - roughly 500x the element encodes at width 1,000. The replace path (the default, and
-   the overwhelming majority of fields) moves bytes and pays none of this; `Merge` is a plain map copy.
-   `MergeReduce` is `MergeReduceAll` of one member, so there is one fold to keep correct. Pinned by
-   `TestState_MergeReduceAllMatchesPerMember`, which asserts the one-pass and per-member results are
+   the overwhelming majority of fields) moves bytes and pays none of this.
+   `Apply` is `ApplyAll` of one member, so there is one fold to keep correct. Pinned by
+   `TestState_ApplyAllMatchesPerMember`, which asserts the one-pass and per-member results are
    byte-identical, so the optimization can never quietly change a fan-in outcome. **On a reducer error the
    receiver is left partly merged and must be discarded** - every caller propagates the error and drops the
    state, so nothing restores a consistent partial result.
