@@ -61,12 +61,12 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 
 	// Resolve the fork step, its owning flow, and that flow's token (needed to walk the surgraph chain).
 	var leafFlowID int
-	var forkStepState, forkStepRefs []byte
+	var forkStepState, forkStepRefs, forkStepReduced []byte
 	var leafFlowToken string
 	err = db.QueryRowContext(ctx,
-		"SELECT s.flow_id, s.state, s.state_refs, f.flow_token FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.step_token=?",
+		"SELECT s.flow_id, s.state, s.state_refs, s.state_reduced, f.flow_token FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.step_token=?",
 		forkStepID, forkStepToken,
-	).Scan(&leafFlowID, &forkStepState, &forkStepRefs, &leafFlowToken)
+	).Scan(&leafFlowID, &forkStepState, &forkStepRefs, &forkStepReduced, &leafFlowToken)
 	if err == sql.ErrNoRows {
 		return "", errors.New("step not found", http.StatusNotFound)
 	}
@@ -110,11 +110,15 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	// The fork's leaf step is rewritten with fully MATERIALIZED state (and state_refs cleared below): the
 	// caller's overrides merge onto the real values, and the leaf is the one row the fork re-runs from, so it
 	// must not depend on anchors whose ids are about to be remapped. Its successors re-mint refs normally.
-	mergedLeafState, err := e.resolvedStepState(ctx, db, shardNum, forkStepState, forkStepRefs, rootWorkflowURL)
+	resolvedLeafState, err := e.resolvedStepState(ctx, db, shardNum, forkStepState, forkStepRefs, rootWorkflowURL)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	mergedLeafState, err = mergeWithOverrides(mergedLeafState, overrides)
+	leafReduced, err := e.forkLeafReduced(ctx, db, shardNum, leafFlowID, resolvedLeafState, forkStepReduced)
+	if err != nil {
+		return "", errors.Trace(err)
+	}
+	mergedLeafState, err := mergeWithOverrides(resolvedLeafState, overrides)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -125,6 +129,7 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 		leafFlowID:      leafFlowID,
 		leafStepID:      forkStepID,
 		mergedLeafState: mergedLeafState,
+		leafReduced:     leafReduced,
 		rewindByFlow:    rewindByFlow,
 		rootFlowToken:   keys.RandomIdentifier(16),
 		rootTraceParent: e.mintWorkflowSpan(ctx, rootWorkflowURL, ""), // detached, like Continue
@@ -179,6 +184,7 @@ type forkClone struct {
 	leafFlowID      int
 	leafStepID      int
 	mergedLeafState []byte
+	leafReduced     []byte // the leaf's state_reduced, frozen against mergedLeafState replacing its state
 	rewindByFlow    map[int]int
 	rootFlowToken   string
 	rootTraceParent string
@@ -582,8 +588,8 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		if isLeafFlow && rewind == cc.leafStepID {
 			// Leaf fork step: merged input, cleared output/park/cohort, gated `created`.
 			_, err = tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, parked=?, state=?, state_refs=?, changes=?, error='', attempt=0, interrupt_done=0, resume_data=?, subgraph_done=0, subgraph_result=?, subgraph_error='', successor_id=0, cohort_size=0, cohort_arrivals=0, cohort_failures=0, cohort_cancellations=0, not_before=NOW_UTC(), lease_expires=NOW_UTC(), created_at=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
-				workflow.StatusCreated, parkedNone, cc.mergedLeafState, emptyJSON, emptyJSON, emptyJSON, emptyJSON, newRewindID,
+				"UPDATE dwarf_steps SET status=?, parked=?, state=?, state_refs=?, state_reduced=?, changes=?, error='', attempt=0, interrupt_done=0, resume_data=?, subgraph_done=0, subgraph_result=?, subgraph_error='', successor_id=0, cohort_size=0, cohort_arrivals=0, cohort_failures=0, cohort_cancellations=0, not_before=NOW_UTC(), lease_expires=NOW_UTC(), created_at=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
+				workflow.StatusCreated, parkedNone, cc.mergedLeafState, emptyJSON, cc.leafReduced, emptyJSON, emptyJSON, emptyJSON, newRewindID,
 			)
 			cc.newLeafStepID = newRewindID
 		} else {
@@ -624,6 +630,32 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	}
 
 	return newFlowID, children, nil
+}
+
+// forkLeafReduced is the state_reduced column for a Fork's leaf: the original record, if any, frozen against the
+// overrides about to replace the state it describes (frozenReduced). stateJSON is the leaf's original state,
+// resolved.
+func (e *Engine) forkLeafReduced(ctx context.Context, db sequel.Executor, shardNum, flowID int, stateJSON, reducedJSON []byte) ([]byte, error) {
+	var rec map[string]*reduced
+	if err := json.Unmarshal(reducedJSON, &rec); err != nil {
+		return nil, errors.Trace(err)
+	}
+	if len(rec) == 0 {
+		return emptyJSON, nil
+	}
+	graph, _, err := e.flowGraph(ctx, db, shardNum, flowID)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	state, err := workflow.NewState(stateJSON)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	frozen, err := frozenReduced(state, rec, graph.Reducers())
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return reducedColumn(frozen), nil
 }
 
 func mergeWithOverrides(originalJSON []byte, overrides workflow.State) ([]byte, error) {

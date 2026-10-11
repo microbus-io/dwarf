@@ -1410,12 +1410,17 @@ its own task's writes. Everything its cohort added sits in its `state`. So:
   folded value (every contribution stored twice per level); a `replace` of the folded value (the second
   branch's replace wipes the first's).
 - **`state_reduced` belongs to its fan-in step alone.** Only `fanInRow` writes it (`successorRow.reducedJSON`);
-  every other row holds `{}`, and only `cohortParts` reads it. Fork's clone copies it with the row it describes,
-  the leaf included. **Known gap:** a Fork override of a recorded field at an inner fan-in leaf rewrites the
-  `state` the record describes, so the outer fold then takes the wrong part (a `from` offset into the new value,
-  or the original `value`).
+  every other row holds `{}`, and only `cohortParts` reads it. Fork's clone copies it with the row it describes.
   Otherwise a step after the inner fan-in would carry a boundary that does not describe its own input.
   Pinned by `TestChanges_ReducedStaysWithTheInnerFanIn`.
+- **A Fork leaf's record is FROZEN to `value`s** (`forkLeafReduced` -> `frozenReduced`): each field's part is
+  projected from the ORIGINAL state and stored as a literal, before the overrides replace the state (a part the
+  cohort deleted is a null `value`). An override edits a step's input and never what its cohort wrote, exactly
+  as overriding an ordinary branch step leaves its `changes` alone. Left unfrozen, the outer fold projects from
+  the overridden state: a `from` offset into the new array, the override's values under the old `keys`, and a
+  plain field's override in place of what the cohort wrote. Pinned by the frozen half of
+  `TestCohortFold_ProjectionEqualsContributions` and `fixtures/nestedreducerflow_test.go`'s
+  `fork_at_inner_fan_in_with_overrides`.
 - **Every field a cohort wrote must be stored INLINE in its fan-in's `state`, never as a ref.** The projection
   reads the raw `state` and `state_reduced` columns: a ref'd field reads as absent, which projects a plain field as a DELETE. `fanInRow`
   guarantees it by passing the contributed fields to `Mint` as `inlineOnly` (`memberWrites`). Keep it so.

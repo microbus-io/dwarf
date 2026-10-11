@@ -34,7 +34,8 @@ import (
 //     elements, or bytes of a concat string);
 //   - Keys, for merge: the keys the cohort wrote; and for a field with no reducer, an empty list meaning only
 //     that the cohort wrote it;
-//   - Value, for add, min, max, and and or: the cohort's combined contribution itself.
+//   - Value, for add, min, max, and and or: the cohort's combined contribution itself; and for every field of a
+//     Fork's re-run leaf (frozenReduced).
 type reduced struct {
 	From  *int            `json:"from,omitempty"`
 	Keys  []string        `json:"keys,omitzero"`
@@ -217,6 +218,27 @@ func projectReduced(state workflow.State, rec map[string]*reduced, reducers map[
 		}
 	}
 	return part, nil
+}
+
+// frozenReduced is rec with every field's part projected from state and kept as a Value. A Fork's leaf replaces
+// the step's state with the overridden one, which no longer holds what the cohort added at the recorded offsets
+// and keys; an override edits the step's input and leaves what its cohort wrote alone, so the part is taken
+// from the original state first. A field the cohort deleted is kept as a null Value: a null contribution deletes
+// a field with no reducer.
+func frozenReduced(state workflow.State, rec map[string]*reduced, reducers map[string]workflow.Reducer) (map[string]*reduced, error) {
+	part, err := projectReduced(state, rec, reducers)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	frozen := make(map[string]*reduced, part.Len())
+	for k := range part.Names() {
+		value := part.Contributions().GetJSON(k)
+		if !part.Contributions().Has(k) {
+			value = json.RawMessage("null")
+		}
+		frozen[k] = &reduced{Value: value}
+	}
+	return frozen, nil
 }
 
 // memberContribution is what one cohort member adds to its cohort's fold. part is what the member's own cohort

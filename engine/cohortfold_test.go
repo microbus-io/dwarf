@@ -106,6 +106,26 @@ func TestCohortFold_ProjectionEqualsContributions(t *testing.T) {
 			assert.NoError(err)
 			assert.Equal(want, got)
 			assert.Equal(flat.Has("f"), nested.Has("f"))
+
+			// A Fork's leaf freezes the record against the original state and then replaces that state with an
+			// override. The frozen record, stored and read back, projects the same part from the new state.
+			frozen, err := frozenReduced(stored, storedRec, reducers)
+			assert.NoError(err)
+			var storedFrozen map[string]*reduced
+			assert.NoError(json.Unmarshal(reducedColumn(frozen), &storedFrozen))
+			overridden := state("override", true)
+			part, err = projectReduced(overridden, storedFrozen, reducers)
+			assert.NoError(err)
+			contribution, ok, err = memberContribution(part, own, reducers)
+			assert.NoError(err)
+			assert.True(ok)
+			forked := outerBase.Clone()
+			assert.NoError(forked.ApplyAll([]workflow.Changes{spawn, contribution}, reducers))
+			got = nil
+			_, err = forked.Get("f", &got)
+			assert.NoError(err)
+			assert.Equal(want, got)
+			assert.Equal(flat.Has("f"), forked.Has("f"))
 		})
 	}
 }

@@ -227,6 +227,56 @@ func TestNestedreducerflow(t *testing.T) {
 		assert.Equal("part:B2y", stateVal(outcome.State, "last"))
 	})
 
+	t.Run("fork_at_inner_fan_in_with_overrides", func(t *testing.T) {
+		assert := testarossa.For(t)
+		// An override edits the forked step's INPUT. An inner fan-in hands its cohort's part to the next cohort
+		// out, and that part is what the cohort wrote, so overriding the fan-in's input does not change it -
+		// just as overriding an ordinary branch step's input does not change what that step wrote. JoinChunk B
+		// is the last branch, so a plain field's part is visible in the final state too.
+		flowKey, outcome, err := eng.Run(ctx, url+"g", map[string]any{
+			"messages": []string{"seed"},
+			"tags":     map[string]any{"seed": "init"},
+		}, nil)
+		if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, outcome.Status) {
+			return
+		}
+		hist, err := eng.History(ctx, flowKey)
+		if !assert.NoError(err) {
+			return
+		}
+		var joinChunkKey string
+		for _, step := range hist {
+			if step.TaskName != "JoinChunk" {
+				continue
+			}
+			detail, err := eng.Step(ctx, step.StepKey)
+			if assert.NoError(err) && detail.State.GetString("cell") == "B" {
+				joinChunkKey = step.StepKey
+			}
+		}
+		if !assert.NotEqual("", joinChunkKey) {
+			return
+		}
+		forkKey, err := eng.Fork(ctx, joinChunkKey, map[string]any{
+			"messages": []string{"over"},
+			"tags":     map[string]any{"over": "ride"},
+			"total":    0,
+			"last":     "over",
+		})
+		if !assert.NoError(err) {
+			return
+		}
+		forked, err := eng.Await(ctx, forkKey)
+		if !assert.NoError(err) {
+			return
+		}
+		assert.Equal(workflow.StatusCompleted, forked.Status, forked.Error)
+		assert.Equal(stateVal(outcome.State, "messages"), stateVal(forked.State, "messages"))
+		assert.Equal(stateVal(outcome.State, "tags"), stateVal(forked.State, "tags"))
+		assert.Equal(stateVal(outcome.State, "total"), stateVal(forked.State, "total"))
+		assert.Equal("part:B2y", stateVal(forked.State, "last"))
+	})
+
 	t.Run("inner_cohort_failed", func(t *testing.T) {
 		assert := testarossa.For(t)
 		// Part B2y fails, so JoinPart B2 never runs, nor JoinChunk B, nor JoinCell. The failure resolves only
