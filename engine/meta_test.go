@@ -70,6 +70,7 @@ func TestMeta_StampedRedactedAndRebuilt(t *testing.T) {
 	g.SetURL("Join", "meta/join")
 	g.SetURL("Tail", "meta/tail")
 	g.SetFanIn("Join")
+	// Join converges a cohort on the trunk, so it describes nothing about its cohort.
 	g.SetReducer("log", workflow.ReducerAppend)
 	g.SetReducer("total", workflow.ReducerAdd)
 	g.AddTransitionForEach("Seed", "Work", "items", "item")
@@ -355,4 +356,72 @@ func TestMeta_DispatchRestampsAnUntaggedRow(t *testing.T) {
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 	}
 	assert.Equal(map[string]workflow.FieldMeta{"log": {Reducer: workflow.ReducerAppend}}, resumedView)
+}
+
+// TestMeta_ReducedStaysWithTheInnerFanIn pins where a cohort's description lives: on an inner fan-in's row,
+// which an outer fan-in reads, and nowhere else - not on the step after it, and not on a fan-in on the trunk,
+// which no outer cohort reads.
+func TestMeta_ReducedStaysWithTheInnerFanIn(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	mux := NewHostMux()
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+
+	g := workflow.NewGraph("Reduced")
+	for _, n := range []string{"Seed", "Cell", "Chunk", "Inner", "After", "Outer"} {
+		g.SetURL(n, "metareduced/"+n)
+		mux.HandleTask("metareduced/"+n, func(ctx context.Context, f *workflow.Flow) error {
+			if n == "Chunk" {
+				f.Set("log", []string{f.GetString("line")})
+				// Large enough to be stored by a ref if it were merely carried.
+				f.SetString("big", f.GetString("page")+f.GetString("line")+blob(60_000))
+			}
+			if n == "Cell" {
+				f.Set("lines", []string{"x", "y"})
+			}
+			return nil
+		})
+	}
+	g.SetFanIn("Inner")
+	g.SetFanIn("Outer")
+	g.SetReducer("log", workflow.ReducerAppend)
+	g.AddTransitionForEach("Seed", "Cell", "pages", "page")
+	g.AddTransitionForEach("Cell", "Chunk", "lines", "line")
+	g.AddTransitionChain("Chunk", "Inner", "After", "Outer", workflow.End)
+	mux.HandleGraph("metareduced/wf", g)
+
+	_, outcome, err := e.Run(ctx, "metareduced/wf", map[string]any{"pages": []string{"a", "b"}}, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	assert.Equal(workflow.StatusCompleted, outcome.Status, outcome.Error)
+	assert.Equal([]string{"x", "y", "x", "y"}, outcome.State.GetStrings("log"))
+	assert.Equal("by"+blob(60_000), outcome.State.GetString("big"))
+
+	tags := map[string]workflow.FieldMeta{"log": {Reducer: workflow.ReducerAppend}}
+	inner, _ := stepColumnsByTask(t, e, "Inner")
+	if assert.Len(inner, 2) {
+		for _, s := range inner {
+			from := 0
+			// Only what the inner cohort wrote: lines is the inner spawn's own write.
+			want := map[string]workflow.FieldMeta{
+				"log": {Reducer: workflow.ReducerAppend, Reduced: &workflow.Reduced{From: &from}},
+				"big": {Reduced: &workflow.Reduced{Keys: []string{}}},
+			}
+			assert.Equal(want, s.Meta())
+			// The outer fold reads this row as stored, so what the cohort wrote is inline, never a ref.
+			assert.True(s.Has("big"))
+		}
+	}
+	for _, task := range []string{"After", "Outer"} {
+		states, _ := stepColumnsByTask(t, e, task)
+		for _, s := range states {
+			assert.Equal(tags, s.Meta(), "task %s", task)
+		}
+	}
 }

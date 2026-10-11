@@ -1360,8 +1360,48 @@ order. `fan_out_ordinal` is stamped at fan-out from the branch's position in the
 index or static declaration order), so order-sensitive reducers (`append`/`union`/`concat`/`merge`) fold in input-array order rather than
 completion order; `step_id` breaks ties. The firing gate is
 `cohort_arrivals >= cohort_size`, a counter on the spawn step independent of the merge query, so the merge's status
-filter cannot deadlock fan-in. Only `completed` members contribute `changes`; `failed`/`terminated`/`cancelled`/
-`pending`/`running` contribute nothing. **A reducer error fails the flow** - a value a reducer cannot fold (a
+filter cannot deadlock fan-in. Only `completed` members contribute; `failed`/`terminated`/`cancelled`/
+`pending`/`running` contribute nothing.
+
+**A member's contribution is its `changes`, EXCEPT an inner fan-in's (`cohortfold.go`).** In a nested fan-out
+an inner fan-in carries its spawn's lineage, so it is a member of the next cohort out, and its `changes` hold only
+its own task's writes. Everything its cohort added sits in its `state`. So:
+
+- **A fan-in inside an outer cohort records which part of each field its cohort added** (`foldCohort`,
+  stored as `__meta__.<field>.reduced`), as metadata about the folded value, never a second copy of it. A
+  fan-in on the trunk (its spawn's `lineage_id` is 0) is never read as a member, so it skips the work:
+  - `from` for `append`/`union`/`concat` - they only add to the end, so the cohort's part is a suffix;
+  - `keys` for `merge` - new wins, so the folded value under those keys IS the cohort's;
+  - `value` for `add`/`min`/`max`/`and`/`or` - a sum or a minimum cannot be split back apart, so the
+    combined contribution is kept (one scalar);
+  - `keys: []` for a field with no reducer, meaning "the cohort wrote it"; it projects as its value, or as
+    a delete if absent.
+- **The outer fold takes an inner fan-in's part ⊕ its own `changes`** (`memberContribution`). The part counts
+  WHATEVER the inner fan-in's own status: its row exists only because its cohort converged, and every step of
+  that cohort completed. Only its own writes need it to have completed. Gating the part on completion lost a
+  converged cohort whole when the fan-in task itself failed, or when a `Terminate` landed before it ran.
+- **The cost is one extra query per resolving fan-in that HAS inner fan-in members** (`cohortParts`, by primary
+  key, padded to power-of-two arities so the statement text takes few forms), and it never reads a row below an
+  inner fan-in, at any depth: each fan-in's state already holds its whole subtree. Each row is projected as it
+  is read and then dropped, so memory holds the parts. The bytes READ are the inner fan-ins' whole rows, which
+  hold the accumulated value from their base for an `append`/`union`/`concat` field, not just the cohort's part:
+  N inner fan-ins over a long carried history read it N times.
+  Rejected: re-folding the subtree (N x M reads, N x M x O three deep); storing the cohort's delta beside the
+  folded value (every contribution stored twice per level); a `replace` of the folded value (the second
+  branch's replace wipes the first's).
+- **`reduced` belongs to its fan-in step alone.** Every stamp replaces the metadata wholesale, so it is
+  dropped at the fan-in's own dispatch and from the final state, and never reaches a successor's row.
+  Otherwise a step after the inner fan-in would carry a boundary that does not describe its own input.
+  Pinned by `TestMeta_ReducedStaysWithTheInnerFanIn`.
+- **Every field a cohort wrote must be stored INLINE in its fan-in's `state`, never as a ref.** The projection
+  reads the raw column: a ref'd field reads as absent, which projects a plain field as a DELETE. `fanInRow`
+  guarantees it by passing the contributed fields to `Mint` as `inlineOnly` (`memberWrites`). Keep it so.
+- **The reducer comes from the graph,** never from the stored metadata.
+
+Pinned by `TestCohortFold_ProjectionEqualsContributions` (every reducer: the projected part folds exactly as
+the contributions one by one; it fails with the offset dropped) and `fixtures/nestedreducerflow_test.go`
+(three levels deep, a step after each inner fan-in, converged, failed at either level, and a Fork repairing
+the inner failure). **A reducer error fails the flow** - a value a reducer cannot fold (a
 string under `add`) errors `fanInRow` and the resolving step fails naming the field; never
 discard it, or the fan-in runs with that field's accumulated contributions silently dropped. It is wrapped as a
 `permanentError` - a deterministic failure of the engine's own computation inside a persisted write - which
@@ -1826,6 +1866,14 @@ set of per-branch outputs - every step of a per-element sub-pipeline inherits th
 scan covers `Cell` *and* `Enrich`, for every branch. Reducer order matters (`append`/`union`/`concat` are not
 commutative), which is why the scan is ordered by the branch's position in the spawn loop rather than by completion
 order. Pinned by `TestFailedFanOut_KeepsEveryBranchesIntermediateOutput`.
+
+**Nested, the rebuild starts at the OUTERMOST cohort on the tail's lineage chain** (`cohortSpawnChain`), whose
+spawn is on the trunk. Do not rebuild from the tail's own cohort: the first completed tail can sit deep inside
+an inner cohort that failed, and that cohort alone is not the flow's state - its base and every other branch at
+every level are outside it. Members contribute as at a convergence (`cohortContributions`): an inner fan-in
+brings its projected part whatever its status, and a completed member that spawned an inner cohort which never
+converged (`cohort_arrivals < cohort_size` or `cohort_failures > 0`) is followed by that cohort's contributions,
+rebuilt the same way - one query per such cohort, on this terminal path only.
 
 `computeFinalState` also reads the DAG, not `step_depth`. The terminal state is the merge of the tail steps -
 completed steps with `successor_id = 0` (`mergeTerminalSteps`) - for a flow that is *not* a failed fan-out. **Do not

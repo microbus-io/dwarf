@@ -106,6 +106,10 @@ A few rules worth knowing:
   from the flow's state once the cohort is behind it — at the fan-in, and in the final state of a flow whose
   fan-out failed. (Otherwise one arbitrary branch's element would ride forward as the flow's own, picked by
   whichever branch happened to finish last.) Forward an element value under a different key if you need it.
+- **Fan-outs nest.** A branch may fan out again, to any depth. Each inner fan-out converges at its own
+  fan-in, and everything its branches wrote reaches the outer fan-in as part of that branch's contribution,
+  folded through the outer reducers in branch order. A flow whose nested fan-out fails keeps, in its final
+  state, everything its completed steps wrote, at every level.
 - **A failed, terminated, or cancelled sibling doesn't poison the fan-in.** It contributes nothing to the
   merge; the flow is driven by the failure/error path instead.
 - **A value its reducer cannot fold fails the flow.** A branch writing a string to an `add` field, say, fails

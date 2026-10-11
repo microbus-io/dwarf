@@ -71,6 +71,22 @@ const MetaKey = "__meta__"
 type FieldMeta struct {
 	// Reducer is the reducer the field is declared with. Empty means ReducerReplace.
 	Reducer Reducer `json:"reducer,omitempty"`
+	// Reduced is set only on the state of a fan-in step, for a field its cohort wrote, and describes which
+	// part of the field's value the cohort added.
+	Reduced *Reduced `json:"reduced,omitempty"`
+}
+
+// Reduced describes which part of a fan-in step's value for a field its cohort added. Exactly one form is
+// set, chosen by the field's reducer:
+//   - From, for append, union and concat: the cohort's part starts at this offset into the value (array
+//     elements, or bytes of a concat string);
+//   - Keys, for merge: the keys the cohort wrote; and for a field with no reducer, an empty list meaning only
+//     that the cohort wrote it;
+//   - Value, for add, min, max, and and or: the cohort's combined contribution itself.
+type Reduced struct {
+	From  *int            `json:"from,omitempty"`
+	Keys  []string        `json:"keys,omitzero"`
+	Value json.RawMessage `json:"value,omitzero"`
 }
 
 // NewState builds a State from its arguments, in one of two mutually exclusive modes.
@@ -572,7 +588,7 @@ func (s State) SetMeta(meta map[string]FieldMeta) {
 	}
 	b, err := json.Marshal(meta)
 	if err != nil {
-		// FieldMeta holds only strings, so this is a defensive assertion rather than a live path.
+		// The metadata the engine builds always marshals; only a Reduced.Value that is not valid JSON fails.
 		panic(errors.Trace(err))
 	}
 	s.d[MetaKey] = b

@@ -171,13 +171,7 @@ func TestItemRefs_NestedFanOut(t *testing.T) {
 		f.Set("chunks", []string{fmt.Sprintf("%d/%d", f.GetInt("pageIndex"), f.GetInt("lineIndex"))})
 		return checkItem(f, "line", lineSize)
 	})
-	// The outer fan-in folds its members' changes, so the inner join re-emits its page's chunks.
 	mux.HandleTask("nested/Inner", func(ctx context.Context, f *workflow.Flow) error {
-		var chunks []string
-		if _, err := f.Get("chunks", &chunks); err != nil {
-			return err
-		}
-		f.Set("chunks", chunks)
 		return checkItem(f, "page", pageSize)
 	})
 	mux.HandleTask("nested/Outer", func(ctx context.Context, f *workflow.Flow) error { return nil })
@@ -363,14 +357,7 @@ func TestItemRefs_TwoDimensionalArray(t *testing.T) {
 		f.Set("cells", []string{fmt.Sprintf("%d/%d", cell.X, cell.Y)})
 		return nil
 	})
-	mux.HandleTask("twod/Inner", func(ctx context.Context, f *workflow.Flow) error {
-		var cells []string
-		if _, err := f.Get("cells", &cells); err != nil {
-			return err
-		}
-		f.Set("cells", cells)
-		return nil
-	})
+	mux.HandleTask("twod/Inner", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	mux.HandleTask("twod/Outer", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	_, outcome, err := e.Run(ctx, "twod/wf", map[string]any{"data": data}, nil)

@@ -110,6 +110,9 @@ callers never do.
   overwrite mark).
 - **`Flow.Snapshot` drops it,** because a snapshot is handed to task code and onward (e.g. as a subgraph's
   `in`). `Flow.Clear` tombstones fields, never the metadata.
+- **`FieldMeta.Reduced` is the engine's, on a fan-in step's state only** - which part of a field its cohort
+  added, so an outer fan-in can take that step's contribution from its one row. Its forms and rules are in
+  `engine/CLAUDE.md` ("A member's contribution is its `changes`, EXCEPT an inner fan-in's").
 
 Pinned by `TestState_MetaIsNotAField`, `TestState_MergeKeepsReceiversMeta`,
 `TestFlow_MetaStaysOutOfTheTasksView` and `TestLinker_MintKeepsMeta`.

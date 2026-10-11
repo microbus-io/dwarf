@@ -1888,6 +1888,7 @@ type cohortRead struct {
 	spawnChangesJSON   []byte
 	spawnRefsJSON      []byte
 	spawnFanOutOrdinal int
+	spawnLineageID     int
 	members            []cohortMember
 	changesRead        int // bytes of the members' changes columns
 }
@@ -1906,9 +1907,9 @@ type cohortMember struct {
 // queueCohortRead queues the reads of a resolving arrival's cohort into c.
 func queueCohortRead(b *txBatch, flowID, cohortSpawnID int, c *cohortRead) {
 	b.queue(func(res *sequel.BatchResults) error {
-		err := res.QueryRow().Scan(&c.spawnStateJSON, &c.spawnChangesJSON, &c.spawnRefsJSON, &c.spawnTaskName, &c.spawnFanOutOrdinal)
+		err := res.QueryRow().Scan(&c.spawnStateJSON, &c.spawnChangesJSON, &c.spawnRefsJSON, &c.spawnTaskName, &c.spawnFanOutOrdinal, &c.spawnLineageID)
 		return errors.Trace(err)
-	}, "SELECT state, changes, state_refs, task_name, fan_out_ordinal FROM dwarf_steps WHERE step_id=?", cohortSpawnID)
+	}, "SELECT state, changes, state_refs, task_name, fan_out_ordinal, lineage_id FROM dwarf_steps WHERE step_id=?", cohortSpawnID)
 	b.queue(func(res *sequel.BatchResults) error {
 		rows, err := res.Query()
 		if err != nil {
@@ -1973,7 +1974,21 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 	// inlined into the fan-in step's own state, which becomes their anchor for everything downstream (the third
 	// of the three places an anchor's bytes can sit). A stale spawn ref for such a field is dropped with them.
 	memberWrites := map[string]bool{}
-	var memberChanges []workflow.State
+	var contributions []workflow.State
+
+	// A member that is itself an inner fan-in contributes what its own cohort added, which is in its STATE, not
+	// its changes: its changes hold only its own task's writes. Its state records which part its cohort added
+	// (foldCohort), so one row per inner fan-in carries the whole subtree below it, at any depth.
+	reducers := graph.Reducers()
+	var parts map[int]workflow.State
+	if ids := innerFanInIDs(graph, c.members); len(ids) > 0 {
+		var n int
+		parts, n, err = cohortParts(ctx, tx, ids, reducers)
+		if err != nil {
+			return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(err)
+		}
+		bytes.stateRead += n
+	}
 
 	// The cohort-exit steps whose successor_id must point at the fan-in step, collected from the cohort read so
 	// the caller's write can target them by primary key.
@@ -2001,18 +2016,24 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 		if exitTaskSet[strings.TrimSpace(m.taskName)] && m.successorID == 0 {
 			exitStepIDs = append(exitStepIDs, m.stepID)
 		}
-		if !m.completed {
+		contribution, ok, cerr := memberContribution(parts[m.stepID], m.changes, reducers)
+		if cerr != nil {
+			return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(&permanentError{cerr})
+		}
+		if !ok {
 			continue
 		}
-		for k := range m.changes.Names() {
+		for k := range contribution.Names() {
 			memberWrites[k] = true
 		}
-		memberChanges = append(memberChanges, m.changes)
+		contributions = append(contributions, contribution)
 	}
 	// One fold for the whole cohort, not one per member: a combining reducer decodes its accumulator and
 	// re-encodes the result, so folding per member re-encodes a value that grows as it goes - quadratic in
 	// the accumulated bytes across the cohort's width, and a fan-out is exactly where width is large.
-	err = merged.MergeReduceAll(memberChanges, graph.Reducers())
+	// Only a fan-in inside an outer cohort is ever read as a member, so only it describes what its cohort added.
+	// The fan-in takes its spawn's lineage.
+	reduced, err := foldCohort(merged, contributions, reducers, c.spawnLineageID != 0)
 	if err != nil {
 		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(&permanentError{err})
 	}
@@ -2021,7 +2042,7 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 	// DelNils enacts them now, before the state is minted onto the fan-in step. Reduced fields are
 	// unaffected - a cleared reduced field was ignored during the fold, never stored as a tombstone.
 	merged.DelNils()
-	stampReducers(merged, graph.Reducers())
+	stampFanIn(merged, reducers, reduced)
 
 	// The fan-in sits one level below the DEEPEST cohort branch, not merely below the last sibling to
 	// complete - branch lengths can differ (loops, gotos, varying chains), so step_depth must reflect the

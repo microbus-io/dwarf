@@ -25,8 +25,12 @@ import (
 
 // stampReducers records every field the graph declares a reducer for in the state's metadata, including a
 // field with no value yet, and drops whatever metadata the state held before. The engine is the only author
-// of a state's metadata, so a stamp is also what discards an entry a task or a caller forged.
+// of a state's metadata, so a stamp is also what discards an entry a task or a caller forged. A zero State is left
+// as it is.
 func stampReducers(s workflow.State, reducers map[string]workflow.Reducer) {
+	if s.IsZero() {
+		return
+	}
 	var meta map[string]workflow.FieldMeta
 	for k, r := range reducers {
 		if r == "" || r == workflow.ReducerReplace {

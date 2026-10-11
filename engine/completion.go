@@ -273,8 +273,16 @@ func (e *Engine) computeFinalStateFrom(ctx context.Context, db sequel.Executor, 
 	//
 	// Every step of a per-element sub-pipeline inherits the spawn's lineage, so "every cohort member" is one
 	// indexed scan and it covers Cell AND Enrich, for every branch.
-	if baseLineageID != 0 {
-		merged, err = e.mergeCohortState(ctx, db, shardNum, flowID, baseLineageID, graph, workflowURL)
+	//
+	// The rebuild starts at the OUTERMOST cohort on the tail's lineage chain, whose spawn is on the trunk. The
+	// tail may sit deep inside a nested fan-out whose inner cohort failed, and rebuilding only that inner cohort
+	// would drop everything outside it - the flow's base state and every other branch at every level.
+	spawns, outermost, err := e.cohortSpawnChain(ctx, db, baseLineageID)
+	if err != nil {
+		return nil, "", errors.Trace(err)
+	}
+	if outermost != 0 {
+		merged, err = e.mergeCohortState(ctx, db, shardNum, flowID, outermost, graph, workflowURL)
 		if err != nil {
 			return nil, "", errors.Trace(err)
 		}
@@ -295,13 +303,12 @@ func (e *Engine) computeFinalStateFrom(ctx context.Context, db sequel.Executor, 
 	// names of every forEach globally reserved and silently deleted a same-named field a task legitimately
 	// wrote - a `forEach ... as "page"` reserved `pageCount` for the whole workflow, so a task writing its own
 	// `pageCount` saw it vanish from final_state while History still showed it.
-	spawns, err := e.cohortSpawnTasks(ctx, db, baseLineageID)
-	if err != nil {
-		return nil, "", errors.Trace(err)
-	}
 	for _, spawnTask := range spawns {
 		stripForEachBookkeeping(merged, graph, spawnTask)
 	}
+	// The final state is a hand-off too: a fan-in tail's description of what its cohort added stays with that
+	// step's row.
+	stampReducers(merged, graph.Reducers())
 
 	data, err := json.Marshal(merged)
 	if err != nil {
@@ -322,6 +329,9 @@ func (e *Engine) computeFinalStateFrom(ctx context.Context, db sequel.Executor, 
 //
 // Reducer ORDER matters (append/union/concat are not commutative), which is why the scan is ordered the same way
 // the convergence orders it: by the branch's position in the spawn loop, not by completion order.
+//
+// A member contributes as it would at a convergence (cohortContributions), so an inner fan-in brings its whole
+// cohort, and an inner cohort that never converged is rebuilt in its place.
 func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shardNum, flowID, cohortSpawnID int, graph *workflow.Graph, workflowURL string) (workflow.State, error) {
 	var spawnStateJSON, spawnChangesJSON, spawnRefsJSON []byte
 	err := db.QueryRowContext(ctx,
@@ -349,39 +359,93 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 	merged := spawnState.Clone()
 	merged.Merge(spawnChanges)
 
-	rows, err := db.QueryContext(ctx,
-		"SELECT status, changes FROM dwarf_steps WHERE flow_id=? AND lineage_id=? ORDER BY fan_out_ordinal, step_depth, step_id",
-		flowID, cohortSpawnID,
-	)
+	contributions, err := e.cohortContributions(ctx, db, flowID, cohortSpawnID, graph)
 	if err != nil {
 		return workflow.State{}, errors.Trace(err)
 	}
-	defer rows.Close()
-	// Collected, then folded in ONE pass: a combining reducer re-encodes its accumulator, so folding per
-	// member re-encodes a growing value once per member - quadratic across a wide cohort.
-	var memberChanges []workflow.State
-	for rows.Next() {
-		var status string
-		var changesJSON []byte
-		if err := rows.Scan(&status, &changesJSON); err != nil {
-			return workflow.State{}, errors.Trace(err)
-		}
-		// Only completed members contribute, matching fanInRow: a failed, terminated, or cancelled
-		// branch's partial output is not a fact the flow can build on (an error voids the task's changes).
-		if status != workflow.StatusCompleted {
-			continue
-		}
-		changes, _ := workflow.NewState(changesJSON)
-		memberChanges = append(memberChanges, changes)
-	}
-	if err := rows.Err(); err != nil {
-		return workflow.State{}, errors.Trace(err)
-	}
-	if err := merged.MergeReduceAll(memberChanges, graph.Reducers()); err != nil {
+	// Folded in ONE pass: a combining reducer re-encodes its accumulator, so folding per member re-encodes a
+	// growing value once per member - quadratic across a wide cohort.
+	if err := merged.MergeReduceAll(contributions, graph.Reducers()); err != nil {
 		return workflow.State{}, errors.Trace(&permanentError{err})
 	}
 	merged.DelNils()
 	return merged, nil
+}
+
+// cohortContributions returns what each completed member of a cohort adds to its fold, in fold order. A member
+// that is an inner fan-in brings what its own cohort added (memberContribution). A member that spawned an inner
+// cohort which never converged - it failed, or the flow stopped first - has no fan-in to carry that cohort's
+// work, so the inner cohort's contributions follow the member's own, rebuilt the same way, at any depth.
+//
+// It runs only on the path that terminalizes a flow whose fan-out never converged, so reading a cohort per
+// level is affordable.
+func (e *Engine) cohortContributions(ctx context.Context, db sequel.Executor, flowID, cohortSpawnID int, graph *workflow.Graph) ([]workflow.State, error) {
+	type member struct {
+		cohortMember
+		cohortSize, arrivals, failures int
+	}
+	rows, err := db.QueryContext(ctx,
+		"SELECT step_id, task_name, status, changes, cohort_size, cohort_arrivals, cohort_failures FROM dwarf_steps"+
+			" WHERE flow_id=? AND lineage_id=? ORDER BY fan_out_ordinal, step_depth, step_id",
+		flowID, cohortSpawnID,
+	)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	var members []member
+	for rows.Next() {
+		var m member
+		var status string
+		var changesJSON []byte
+		if err := rows.Scan(&m.stepID, &m.taskName, &status, &changesJSON, &m.cohortSize, &m.arrivals, &m.failures); err != nil {
+			rows.Close()
+			return nil, errors.Trace(err)
+		}
+		// Only a completed member's changes contribute, matching fanInRow: a failed, terminated, or cancelled
+		// branch's partial output is not a fact the flow can build on (an error voids the task's changes). An
+		// inner fan-in that did not complete still brings its cohort's part (memberContribution).
+		if m.completed = status == workflow.StatusCompleted; m.completed {
+			m.changes, _ = workflow.NewState(changesJSON)
+		}
+		members = append(members, m)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	asMembers := make([]cohortMember, len(members))
+	for i, m := range members {
+		asMembers[i] = m.cohortMember
+	}
+	reducers := graph.Reducers()
+	var parts map[int]workflow.State
+	if ids := innerFanInIDs(graph, asMembers); len(ids) > 0 {
+		parts, _, err = cohortParts(ctx, db, ids, reducers)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+	}
+	var contributions []workflow.State
+	for _, m := range members {
+		contribution, ok, err := memberContribution(parts[m.stepID], m.changes, reducers)
+		if err != nil {
+			return nil, errors.Trace(&permanentError{err})
+		}
+		if ok {
+			contributions = append(contributions, contribution)
+		}
+		// A spawn's cohort exists only once the spawn completed.
+		if m.completed && m.cohortSize > 0 && (m.arrivals < m.cohortSize || m.failures > 0) {
+			inner, err := e.cohortContributions(ctx, db, flowID, m.stepID, graph)
+			if err != nil {
+				return nil, errors.Trace(err)
+			}
+			contributions = append(contributions, inner...)
+		}
+	}
+	return contributions, nil
 }
 
 // errTreeSettled is an in-transaction sentinel: every flow of the tree was already terminal, so terminateSubtree
@@ -600,13 +664,13 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 	return nil
 }
 
-// cohortSpawnTasks walks a step's lineage chain upward and returns the task name of every fan-out spawn whose
-// cohort the step is inside - innermost first. `lineage_id` names the spawn step of the cohort a step belongs
+// cohortSpawnChain walks a step's lineage chain upward and returns the task name of every fan-out spawn whose
+// cohort the step is inside - innermost first - and the step_id of the outermost spawn (0 for a step outside
+// any cohort). `lineage_id` names the spawn step of the cohort a step belongs
 // to (0 outside any cohort), and a spawn is itself a step with its own lineage, so nested fan-outs form a
 // chain. Each level costs one primary-key lookup and the chain is as deep as the graph's fan-out nesting
 // (typically zero or one), on a terminal path.
-func (e *Engine) cohortSpawnTasks(ctx context.Context, db sequel.Executor, lineageID int) ([]string, error) {
-	var tasks []string
+func (e *Engine) cohortSpawnChain(ctx context.Context, db sequel.Executor, lineageID int) (tasks []string, outermost int, err error) {
 	seen := map[int]bool{}
 	for lineageID != 0 && !seen[lineageID] {
 		seen[lineageID] = true // a malformed chain must not spin
@@ -616,15 +680,16 @@ func (e *Engine) cohortSpawnTasks(ctx context.Context, db sequel.Executor, linea
 			"SELECT task_name, lineage_id FROM dwarf_steps WHERE step_id=?", lineageID,
 		).Scan(&taskName, &next)
 		if err == sql.ErrNoRows {
-			return tasks, nil
+			return tasks, outermost, nil
 		}
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, 0, errors.Trace(err)
 		}
 		tasks = append(tasks, strings.TrimSpace(taskName))
+		outermost = lineageID
 		lineageID = next
 	}
-	return tasks, nil
+	return tasks, outermost, nil
 }
 
 // stripForEachBookkeeping deletes the per-branch fields the engine injects into a forEach branch's state - the

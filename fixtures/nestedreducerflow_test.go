@@ -54,7 +54,6 @@ func pendingFixture(t *testing.T, missing string) {
 //   - last (replace) is written only by Part, two levels below the outermost fan-in.
 func TestNestedreducerflow(t *testing.T) {
 	t.Parallel()
-	pendingFixture(t, "a nested fan-in does not pass its inner cohort's contributions to the next cohort out")
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -124,7 +123,11 @@ func TestNestedreducerflow(t *testing.T) {
 		return nil
 	})
 	mux.HandleTask(url+"JoinChunk", func(ctx context.Context, f *workflow.Flow) error {
-		contribute(f, "joinchunk:"+f.GetString("cell"), 100000)
+		c := f.GetString("cell")
+		if f.GetString("failAt") == "joinchunk:"+c {
+			return errors.New("join-chunk %s is broken", c)
+		}
+		contribute(f, "joinchunk:"+c, 100000)
 		return nil
 	})
 	mux.HandleTask(url+"AfterChunk", func(ctx context.Context, f *workflow.Flow) error {
@@ -211,12 +214,39 @@ func TestNestedreducerflow(t *testing.T) {
 		assert.Equal("part:B2y", stateVal(outcome.State, "last"))
 	})
 
+	t.Run("inner_fan_in_failed", func(t *testing.T) {
+		assert := testarossa.For(t)
+		// JoinChunk B's own task fails after its cohort converged. Every step of that cohort completed, so its
+		// work stays in the final state; only JoinChunk B's own writes and what follows it are lost.
+		outcome := run("joinchunk:B")
+		if outcome == nil {
+			return
+		}
+		assert.Equal(workflow.StatusFailed, outcome.Status)
+
+		messages := append([]any{"seed"}, cellMessages("A")...)
+		messages = append(messages, "cell:B")
+		messages = append(messages, chunkMessages("B1")...)
+		messages = append(messages, chunkMessages("B2")...)
+		assert.Equal(messages, stateVal(outcome.State, "messages"))
+		tags := map[string]any{"seed": "init", "lastPart": "B2y"}
+		cellTags("A", tags)
+		cellTags("B", tags)
+		assert.Equal(tags, stateVal(outcome.State, "tags"))
+		assert.Equal(1144842.0, stateVal(outcome.State, "total"))
+		assert.Equal("part:B2y", stateVal(outcome.State, "last"))
+	})
+
 	t.Run("inner_cohort_failed", func(t *testing.T) {
 		assert := testarossa.For(t)
 		// Part B2y fails, so JoinPart B2 never runs, nor JoinChunk B, nor JoinCell. The failure resolves only
 		// once every cohort it passes through has fully arrived, so every completed step below it contributes.
-		outcome := run("part:B2y")
-		if outcome == nil {
+		flowKey, outcome, err := eng.Run(ctx, url+"g", map[string]any{
+			"messages": []string{"seed"},
+			"tags":     map[string]any{"seed": "init"},
+			"failAt":   "part:B2y",
+		}, nil)
+		if !assert.NoError(err) {
 			return
 		}
 		assert.Equal(workflow.StatusFailed, outcome.Status)
@@ -231,5 +261,39 @@ func TestNestedreducerflow(t *testing.T) {
 		assert.Equal(tags, stateVal(outcome.State, "tags"))
 		assert.Equal(1133742.0, stateVal(outcome.State, "total"))
 		assert.Equal("part:B2x", stateVal(outcome.State, "last"))
+
+		// Forking the failed Part with the fault removed re-runs it and everything after it. The kept steps,
+		// inner fan-ins included, are cloned as they were, so the fork converges to the full result.
+		hist, err := eng.History(ctx, flowKey)
+		if !assert.NoError(err) {
+			return
+		}
+		var failedKey string
+		for _, step := range hist {
+			if step.TaskName == "Part" && step.Status == workflow.StatusFailed {
+				failedKey = step.StepKey
+			}
+		}
+		if !assert.NotEqual("", failedKey) {
+			return
+		}
+		forkKey, err := eng.Fork(ctx, failedKey, map[string]any{"failAt": ""})
+		if !assert.NoError(err) {
+			return
+		}
+		forked, err := eng.Await(ctx, forkKey)
+		if !assert.NoError(err) {
+			return
+		}
+		assert.Equal(workflow.StatusCompleted, forked.Status, forked.Error)
+		messages = append([]any{"seed"}, cellMessages("A")...)
+		messages = append(messages, cellMessages("B")...)
+		assert.Equal(messages, stateVal(forked.State, "messages"))
+		tags = map[string]any{"seed": "init", "lastPart": "B2y"}
+		cellTags("A", tags)
+		cellTags("B", tags)
+		assert.Equal(tags, stateVal(forked.State, "tags"))
+		assert.Equal(2244842.0, stateVal(forked.State, "total"))
+		assert.Equal("part:B2y", stateVal(forked.State, "last"))
 	})
 }
