@@ -100,7 +100,8 @@ func TestClaim_NoPartialIndexPlan(t *testing.T) {
 				if err := rows.Scan(&line); err != nil {
 					return err
 				}
-				out.WriteString(line + "\n")
+				out.WriteString(line)
+				out.WriteString("\n")
 			}
 			if err := rows.Err(); err != nil {
 				return err
