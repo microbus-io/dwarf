@@ -873,55 +873,64 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	var stepRowsAffected int64
 	var completedCancelling bool
 	err = e.persistYielding(ctx, db, shardNum, stepID, leaseSeq, &persistPass, func() error {
-		stepRowsAffected, completedCancelling = 0, false
-		// engineseams.FaultPersistErr makes this write fail with a synthetic NON-contention error, consumed per attempt -
-		// so InjectN(1) is a transient blip the retry must absorb with NO re-execution, and InjectN(large) is a
-		// permanent failure the classifier must terminalize rather than loop on.
-		if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultPersistErr, taskName)) {
-			return errors.New("injected fault: " + engineseams.FaultPersistErr + " " + taskName)
-		}
-		const where = " WHERE step_id=? AND status NOT IN ('" + workflow.StatusTerminated + "', '" + workflow.StatusCancelled + "') AND lease_seq=?"
-		switch db.DriverName() {
-		case "pgx", "sqlite":
-			werr := db.QueryRowContext(ctx,
-				"UPDATE dwarf_steps SET status=?, changes=?, "+advanceSet+", updated_at=NOW_UTC()"+where+" RETURNING cancelling",
-				workflow.StatusCompleted, changesJSON, advanceGoto, advanceSleepMs, advanceOnError, stepID, writeSeq,
-			).Scan(&completedCancelling)
-			if werr == sql.ErrNoRows {
-				return nil
+		// Not a transaction, so it retries its own contention (see retryContention). On MySQL a retry after the
+		// follow-up SELECT lost re-runs a landed UPDATE: the row still matches and is rewritten with the same values.
+		return retryContention(ctx, func() error {
+			stepRowsAffected, completedCancelling = 0, false
+			// engineseams.FaultCompletionContention makes this write lose a lock-contention race, consumed per
+			// attempt - so InjectN(1) is a deadlock the retry must absorb without re-running the task.
+			if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultCompletionContention, taskName)) {
+				return errors.New("database is locked (injected fault: " + engineseams.FaultCompletionContention + " " + taskName + ")")
 			}
-			if werr != nil {
-				return errors.Trace(werr)
+			// engineseams.FaultPersistErr makes this write fail with a synthetic NON-contention error, consumed per attempt -
+			// so InjectN(1) is a transient blip the retry must absorb with NO re-execution, and InjectN(large) is a
+			// permanent failure the classifier must terminalize rather than loop on.
+			if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultPersistErr, taskName)) {
+				return errors.New("injected fault: " + engineseams.FaultPersistErr + " " + taskName)
 			}
-			stepRowsAffected = 1
-		case "mssql":
-			werr := db.QueryRowContext(ctx,
-				"UPDATE dwarf_steps SET status=?, changes=?, "+advanceSet+", updated_at=NOW_UTC() OUTPUT INSERTED.cancelling"+where,
-				workflow.StatusCompleted, changesJSON, advanceGoto, advanceSleepMs, advanceOnError, stepID, writeSeq,
-			).Scan(&completedCancelling)
-			if werr == sql.ErrNoRows {
-				return nil
-			}
-			if werr != nil {
-				return errors.Trace(werr)
-			}
-			stepRowsAffected = 1
-		default:
-			res, werr := db.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, changes=?, "+advanceSet+", updated_at=NOW_UTC()"+where,
-				workflow.StatusCompleted, changesJSON, advanceGoto, advanceSleepMs, advanceOnError, stepID, writeSeq,
-			)
-			if werr != nil {
-				return errors.Trace(werr)
-			}
-			stepRowsAffected, _ = res.RowsAffected()
-			if stepRowsAffected > 0 {
-				if rerr := db.QueryRowContext(ctx, "SELECT cancelling FROM dwarf_steps WHERE step_id=?", stepID).Scan(&completedCancelling); rerr != nil {
-					return errors.Trace(rerr)
+			const where = " WHERE step_id=? AND status NOT IN ('" + workflow.StatusTerminated + "', '" + workflow.StatusCancelled + "') AND lease_seq=?"
+			switch db.DriverName() {
+			case "pgx", "sqlite":
+				werr := db.QueryRowContext(ctx,
+					"UPDATE dwarf_steps SET status=?, changes=?, "+advanceSet+", updated_at=NOW_UTC()"+where+" RETURNING cancelling",
+					workflow.StatusCompleted, changesJSON, advanceGoto, advanceSleepMs, advanceOnError, stepID, writeSeq,
+				).Scan(&completedCancelling)
+				if werr == sql.ErrNoRows {
+					return nil
+				}
+				if werr != nil {
+					return errors.Trace(werr)
+				}
+				stepRowsAffected = 1
+			case "mssql":
+				werr := db.QueryRowContext(ctx,
+					"UPDATE dwarf_steps SET status=?, changes=?, "+advanceSet+", updated_at=NOW_UTC() OUTPUT INSERTED.cancelling"+where,
+					workflow.StatusCompleted, changesJSON, advanceGoto, advanceSleepMs, advanceOnError, stepID, writeSeq,
+				).Scan(&completedCancelling)
+				if werr == sql.ErrNoRows {
+					return nil
+				}
+				if werr != nil {
+					return errors.Trace(werr)
+				}
+				stepRowsAffected = 1
+			default:
+				res, werr := db.ExecContext(ctx,
+					"UPDATE dwarf_steps SET status=?, changes=?, "+advanceSet+", updated_at=NOW_UTC()"+where,
+					workflow.StatusCompleted, changesJSON, advanceGoto, advanceSleepMs, advanceOnError, stepID, writeSeq,
+				)
+				if werr != nil {
+					return errors.Trace(werr)
+				}
+				stepRowsAffected, _ = res.RowsAffected()
+				if stepRowsAffected > 0 {
+					if rerr := db.QueryRowContext(ctx, "SELECT cancelling FROM dwarf_steps WHERE step_id=?", stepID).Scan(&completedCancelling); rerr != nil {
+						return errors.Trace(rerr)
+					}
 				}
 			}
-		}
-		return nil
+			return nil
+		})
 	})
 	if landed, err := e.settlePersist(ctx, err, shardNum, stepID, leaseSeq, flowID, flowToken, taskName); !landed {
 		return err

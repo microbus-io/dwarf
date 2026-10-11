@@ -1996,11 +1996,18 @@ sound. It needs **no per-driver error taxonomy** (the part that would rot). Gues
 on any unknown error - would kill live flows on every routine failover, and a terminal flow is **immutable**
 (recovery is a human running `Fork`).
 
-**Lock contention is excluded, and that exclusion is load-bearing.** `Transact` already retries it to exhaustion;
-past that it reaches the recovery **defer** (rewind + re-poll), never the classifier. Terminalizing a flow because
-the database was busy would be exactly backwards, and it is why `processStep` tests `IsLockContentionError` *before*
-calling `failOnPersistError`. Consequence: the defer's `completed→pending` arm is reached only by contention (or
-by a classifier that could not write at all), which is what `TestLeaseFence_RecoveryResetFenced` drives it with.
+**Lock contention is excluded, and that exclusion is load-bearing.** It is retried to exhaustion before it reaches
+`persist` - by `Transact` for a transaction, by `retryContention` for a write that is not a transaction (the
+completion write). **A persist write outside a transaction must go through `retryContention`**: plain
+`ExecContext`/`QueryRowContext` retry nothing, and a contention error on a write that has not landed reaches the
+defer while the step is still `running`, which rewinds it and **re-runs the task** (measured: a MySQL 8 deadlock
+between the lease sweep's scan and a completion write;
+`TestPersist_CompletionWriteContentionIsAbsorbedWithoutReExecution` ran the task 4 times without the retry). Past
+exhaustion contention reaches the recovery **defer** (rewind + re-poll), never the classifier. Terminalizing a flow
+because the database was busy would be exactly backwards, and it is why `processStep` tests `IsLockContentionError`
+*before* calling `failOnPersistError`. Consequence: the defer's `completed→pending` arm is reached only by
+contention (or by a classifier that could not write at all), which is what `TestLeaseFence_RecoveryResetFenced`
+drives it with.
 
 **A fuse that can itself be poisoned is not a fuse.** `failStep` is the only way out, and it reads other steps'
 payloads via `computeFinalState`. If an unreadable value had already landed in a row, that merge would die the same

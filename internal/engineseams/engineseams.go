@@ -89,13 +89,14 @@ const (
 	FaultLoadGraph = "loadGraph" // LoadGraph returns a synthetic error
 
 	// Scoped by task name; force the persistence/transition steps of a dispatch to fail:
-	FaultTransitionCommit   = "transitionCommit"   // the post-completion transition transaction errors
-	FaultCompleteFlowCommit = "completeFlowCommit" // the flow-completion transaction errors
-	FaultContention         = "contention"         // a dispatch transaction returns a lock-contention error
-	FaultLeaseStaleWrite    = "leaseStaleWrite"    // the completion write carries a stale lease_seq (zombie)
-	FaultPersistErr         = "persistErr"         // the step-completion write returns a non-contention database error (consumed per attempt, so InjectN sets how many attempts fail)
-	FaultSubgraphSpawnErr   = "subgraphSpawnErr"   // the subgraph spawn errors before its transaction, with the caller step not yet parked
-	FaultRetryRewindErr     = "retryRewindErr"     // the flow.Retry rewind returns a non-contention database error (consumed per attempt)
+	FaultTransitionCommit     = "transitionCommit"     // the post-completion transition transaction errors
+	FaultCompleteFlowCommit   = "completeFlowCommit"   // the flow-completion transaction errors
+	FaultContention           = "contention"           // a dispatch transaction returns a lock-contention error
+	FaultLeaseStaleWrite      = "leaseStaleWrite"      // the completion write carries a stale lease_seq (zombie)
+	FaultPersistErr           = "persistErr"           // the step-completion write returns a non-contention database error (consumed per attempt, so InjectN sets how many attempts fail)
+	FaultCompletionContention = "completionContention" // the step-completion write returns a lock-contention error (consumed per attempt, so InjectN sets how many attempts fail)
+	FaultSubgraphSpawnErr     = "subgraphSpawnErr"     // the subgraph spawn errors before its transaction, with the caller step not yet parked
+	FaultRetryRewindErr       = "retryRewindErr"       // the flow.Retry rewind returns a non-contention database error (consumed per attempt)
 
 	// Scoped by workflow URL of the subgraph child:
 	FaultSubgraphSpawnCommitLost = "subgraphSpawnCommitLost" // the subgraph spawn commits but reports an error, as if its acknowledgement were lost

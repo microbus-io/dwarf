@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"math/rand/v2"
 	"strings"
 	"time"
 
@@ -40,9 +41,16 @@ import (
 //     re-execution - which is the whole point, and what re-dispatching could never give us.
 //  2. If the retries are exhausted, ask the database to classify the failure for us - see failOnPersistError.
 //
-// Lock contention is NOT handled here: `sequel.Transact` already retries it to exhaustion, and re-litigating it
-// with a second loop would terminalize flows during a contention storm - exactly backwards.
+// Lock contention is NOT handled here: it is retried before it reaches persist - by `sequel.Transact` for a
+// transaction, by retryContention for a statement run on its own - and re-litigating it with a second loop
+// would terminalize flows during a contention storm - exactly backwards. A persist write outside a
+// transaction MUST go through retryContention: plain `ExecContext`/`QueryRowContext` retry nothing, so one
+// deadlock would reach processStep's recovery defer, which rewinds the still-running step and RE-RUNS THE TASK.
 const (
+	// contentionMaxAttempts matches Transact's retry depth, so a statement run on its own survives the same
+	// contention a transaction does.
+	contentionMaxAttempts = 8
+
 	// persistLeaseExtensionMs holds the step across the retry window. Without it a task that consumed most of
 	// its time budget has only `leaseMargin` left, so sleeping through the backoff would put us PAST the lease:
 	// a peer re-claims the step, re-executes the task, and our late write is fenced and discarded - precisely
@@ -59,6 +67,28 @@ var (
 	// rather than waiting out its expiry.
 	errPersistDrained = errors.New("engine is draining; step lease released")
 )
+
+// retryContention runs a write that is not inside a transaction, retrying it on lock contention with the same
+// depth and jittered millisecond backoff Transact gives a transaction. The write must be safe to run again
+// after a contention error: an autocommit statement that lost applied nothing, and a statement that landed
+// before a later one in the same write lost must be one that re-applies cleanly.
+func retryContention(ctx context.Context, stmt func() error) error {
+	var err error
+	for attempt := range contentionMaxAttempts {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return errors.Trace(ctx.Err())
+			case <-time.After(time.Duration(attempt)*time.Millisecond + time.Duration(rand.IntN(3))*time.Millisecond):
+			}
+		}
+		err = stmt()
+		if err == nil || !sequel.IsLockContentionError(err) {
+			return err
+		}
+	}
+	return err
+}
 
 // persist runs a step-persistence write and, on a non-contention database error, retries THE WRITE - never the
 // task - in place while holding the lease.
@@ -84,7 +114,7 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 		return err // deterministic: a retry would compute the same failure
 	}
 	if sequel.IsLockContentionError(err) {
-		// Transact already retried this to exhaustion; a second loop here would only prolong a contention storm.
+		// Already retried to exhaustion (Transact, or retryContention); a second loop would only prolong a storm.
 		return errors.Trace(err)
 	}
 
@@ -293,8 +323,9 @@ func isPermanentError(err error) bool {
 
 // settlePersist applies persistStep's disposition to the error persist returned, and reports whether the write
 // landed - the only case in which the caller goes on. Contention is NOT a persistence failure and must never be
-// classified as one: terminalizing on it would kill live flows during a contention storm. Transact already
-// retried it to exhaustion, so it goes to the recovery defer, which rewinds the step and re-polls.
+// classified as one: terminalizing on it would kill live flows during a contention storm. It was already retried
+// to exhaustion (by Transact, or by retryContention), so it goes to the recovery defer, which rewinds the step
+// and re-polls.
 func (e *Engine) settlePersist(ctx context.Context, err error, shardNum, stepID, leaseSeq, flowID int, flowToken, taskName string) (landed bool, _ error) {
 	switch {
 	case err == nil:

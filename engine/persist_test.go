@@ -75,6 +75,45 @@ func TestPersist_TransientWriteErrorIsAbsorbedWithoutReExecution(t *testing.T) {
 	assert.Equal(int32(1), runs.Load(), "the WRITE is retried, never the task - the task must run exactly once")
 }
 
+// TestPersist_CompletionWriteContentionIsAbsorbedWithoutReExecution pins the contention half of the same rule.
+// The step-completion write is not a transaction, so Transact's contention retry does not cover it; it must
+// retry its own. A contention error that escaped it would reach processStep's recovery defer while the step is
+// still `running`, which rewinds it and re-runs the task - 4 runs here with the retry disabled. The live
+// trigger is a deadlock between the lease sweep's scan and a completion write, seen on MySQL 8.
+func TestPersist_CompletionWriteContentionIsAbsorbedWithoutReExecution(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	var runs atomic.Int32
+	mux := NewHostMux()
+	g := workflow.NewGraph("Persist")
+	g.SetURL("A", "p/contention/a")
+	g.AddTransition("A", workflow.End)
+	assert.NoError(g.Validate())
+	mux.HandleGraph("p/contention/wf", g)
+	mux.HandleTask("p/contention/a", func(ctx context.Context, f *workflow.Flow) error {
+		runs.Add(1)
+		f.SetString("out", "done")
+		return nil
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+	e.seams.InjectN(engineseams.Join(engineseams.FaultCompletionContention, "A"), 3) // three lost deadlocks, then the write lands
+
+	runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	_, outcome, err := e.Run(runCtx, "p/contention/wf", nil, nil)
+	if assert.NoError(err) && assert.NotNil(outcome) {
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
+		assert.Equal("done", stateVal(outcome.State, "out"))
+	}
+	assert.Equal(int32(1), runs.Load(), "contention on the completion write must retry the write, never the task")
+}
+
 // TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever is the bug this closes.
 //
 // A write that will NEVER land (an unstorable payload, a value past a column limit, a constraint violation) used

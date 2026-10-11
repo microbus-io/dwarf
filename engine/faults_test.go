@@ -120,7 +120,8 @@ func driveLeaseRecovery(t *testing.T, e *Engine, retryDuration time.Duration, la
 //     it locks every row it scans, so it can deadlock with a sibling branch's transition.
 //   - Drive the sweep rather than run it once. A failed sweep only logs, and the next tick is a minute away.
 //   - Stop the moment the reset is visible in the row, not when the task re-runs. A sweep still in flight when
-//     the re-run's completion write lands can make that write a deadlock victim, which re-runs the task.
+//     the re-run's completion write lands can deadlock with it, and the write's contention retry is then all
+//     that keeps the task from running a third time - a test that relied on it would not be testing the fence.
 func expireLease(t *testing.T, e *Engine, flowKey, taskName string) {
 	t.Helper()
 	assert := testarossa.For(t)

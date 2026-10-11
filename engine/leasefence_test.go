@@ -139,6 +139,7 @@ func zombieDispatch(t *testing.T, eng *Engine, flowURL, blockTaskName string, ta
 	select {
 	case <-started:
 	case <-time.After(15 * time.Second):
+		unblock() // the caller has not deferred it yet, and a dispatch starting late would block Shutdown
 		t.Fatalf("%s's first dispatch never started", blockTaskName)
 	}
 
