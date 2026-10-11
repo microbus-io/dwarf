@@ -1,7 +1,7 @@
 # Cloud benchmarks
 
 > **Draft.** This page replaces [the current cloud benchmarks](benchmark-cloud.md) once its remaining runs
-> are in. Measured so far, on one engine build: database sizes from 8 to 32 vCPU with their engine pairings,
+> are in. Measured so far: database sizes from 8 to 32 vCPU with their engine pairings,
 > shards, replicas, one engine for several shards, the recommended shape, and engine host sizes. Still to
 > run: workload shape and payload size, long tasks, database volume, and failover. Each pending section
 > says so.
@@ -18,12 +18,12 @@
 - **Replicas add availability, not cost.** One, two or four replicas on a shard deliver the same
   throughput within 6%. Each shard is served by two of them, and any others stand by to take over.
 - **Pair each database with two engines at half its vCPU.** 8 vCPU with 2 × 2 vCPU engines runs ~4,000
-  steps/s, 16 vCPU with 2 × 4 runs ~7,700, 32 vCPU with 2 × 8 runs ~18,700. The 32 vCPU pairing gives the
-  most throughput per dollar.
+  steps/s, 16 vCPU with 2 × 4 runs ~7,700, 32 vCPU with 2 × 8 runs ~18,700. The 32 vCPU pairing costs
+  the least per step: about $0.05 per million steps at full load.
 - **The engine is cheap.** A shard's work takes about 5.5 engine cores. Two 8 vCPU engine hosts per
   32 vCPU database serve it at about a third of their CPU each, and either can carry it alone.
 - **Prefer more, smaller engine hosts.** One engine serves up to two shards at full speed; past that, add
-  replicas. On a 48 vCPU host the engine spends about 40% more CPU per step than on 8 or 16 vCPU hosts.
+  replicas. On a 48 vCPU host the engine spends up to 40% more CPU per step than on 8 or 16 vCPU hosts.
 
 ## How these numbers were measured
 
@@ -59,19 +59,20 @@ flows/s, about 1.5 billion steps a day. A second instance, already used for four
 
 Each database size paired with two engine replicas at half its vCPU, one shard, saturated:
 
-| Database | Engines | steps/s | Engine CPU per replica | Monthly cost | steps/s per $1,000 a month |
-|---|---|---|---|---|---|
-| 8 vCPU, 32 GB | 2 × 2 vCPU | 4,041 | 0.7 of 2 cores | ~$700 | ~5,800 |
-| 16 vCPU, 64 GB | 2 × 4 vCPU | 7,675 | 1.3 of 4 cores | ~$1,240 | ~6,200 |
-| 32 vCPU, 128 GB | 2 × 8 vCPU | 18,720 | 2.3–3.0 of 8 cores | ~$2,310 | ~8,100 |
+| Database | Engines | steps/s | Engine CPU per replica | Monthly cost | Steps a month | $ per million steps |
+|---|---|---|---|---|---|---|
+| 8 vCPU, 32 GB | 2 × 2 vCPU | 4,041 | 0.7 of 2 cores | ~$700 | 10.6 billion | $0.0661 |
+| 16 vCPU, 64 GB | 2 × 4 vCPU | 7,675 | 1.3 of 4 cores | ~$1,240 | 20.2 billion | $0.0613 |
+| 32 vCPU, 128 GB | 2 × 8 vCPU | 18,720 | 2.3–3.0 of 8 cores | ~$2,310 | 49.2 billion | **$0.0469** |
 
 The 32 vCPU row is the per-shard rate of the four-shard, eight-replica run below. Monthly cost is the
 on-demand list price in one US region: the database (without high availability), its 1 TB SSD, and both
 engine hosts. Every database ran on a 1 TB disk so storage IOPS would not limit it; a smaller disk costs less
-and can bind first.
+and can bind first. The cost per million steps assumes the deployment runs at its measured rate around the
+clock (730 hours a month); one that averages half that rate pays twice as much per step.
 
 - **Throughput roughly doubles with each doubling of the database**, and more than doubles from 16 to 32
-  vCPU, which makes 32 vCPU the best throughput per dollar of the three.
+  vCPU, which makes 32 vCPU the lowest cost per step of the three.
 - **The pairing holds at every size.** Each engine runs at about a third of its CPU, so either replica can
   carry its shard alone if the other fails.
 - **The engine's connection budget is the same at every size.** Cloud SQL sets `max_connections` to 600, 800
@@ -106,13 +107,14 @@ The same shard counts, served by a single replica:
 |---|---|---|---|---|
 | 2 | 16 vCPU | 32,564 | 10.3 of 16 cores | saturated |
 | 2 | 48 vCPU | 34,049 | 14.8 of 48 cores | saturated |
-| 4 | 48 vCPU | **52,079 (×2.90)** | 25.7 of 48 cores | about half loaded |
+| 4 | 48 vCPU | **58,719 (×3.27)** | 20.1 of 48 cores | below saturation |
 
 - **One engine serves two shards at full speed**, even on a 16 vCPU host, with a third of its CPU to
   spare.
-- **At four shards one engine is the limit.** It delivered 52,079 steps/s while the databases ran at
-  about half their saturated load and the host had half its CPU free. Four replicas on the same four
-  shards ran 69,382. Beyond two shards per replica, add replicas rather than a bigger host.
+- **At four shards one engine is the limit.** It delivered 58,719 steps/s while the databases ran below
+  saturation and the host had more than half its CPU free. It started near 67,000 and settled about 17%
+  lower over the window. Four replicas on the same four shards ran 69,382, and eight ran 74,879. Beyond
+  two shards per replica, add replicas rather than a bigger host.
 
 ## Replicas: availability without a throughput cost
 
@@ -166,7 +168,7 @@ The same rule scales down: two engines at half the database's vCPU (see
 | 4 vCPU | 2 replicas on a 16 vCPU database | 2,950–3,000 | 10–11% |
 | 8 vCPU | 8 replicas on 4 shards | 3,250–3,600 | 11–15% |
 | 16 vCPU | 1 or 2 shards per replica | 3,150–3,300 | 11–12% |
-| 48 vCPU | 1 replica on 2 and 4 shards | 2,000–2,300 | 19–20% |
+| 48 vCPU | 1 replica on 2 and 4 shards | 2,300–2,950 | 20–22% |
 
 - **The database is the limit at the sizes we recommend.** An engine host from 2 to 16 vCPU runs at about a
   third of its CPU while its database is saturated.
