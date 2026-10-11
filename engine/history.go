@@ -242,10 +242,12 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	if _, err = e.resolveStateRefs(ctx, db, shardNum, fs.State, refs, nil, ""); err != nil {
 		return nil, errors.Trace(err)
 	}
+	redactMeta(fs.State)
 	fs.Changes, err = workflow.NewState(changesJSON)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
+	redactMeta(fs.Changes)
 	if len(interruptJSON) > 0 {
 		fs.InterruptPayload, err = workflow.NewState(interruptJSON)
 		if err != nil {
@@ -934,6 +936,9 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	additional, err := workflow.NewState(additionalState)
 	if err != nil {
 		return "", errors.Trace(err, http.StatusBadRequest)
+	}
+	if err := rejectMeta(additional, "additional state"); err != nil {
+		return "", errors.Trace(err)
 	}
 
 	var threadID int

@@ -109,6 +109,9 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 	if err != nil {
 		return "", errors.Trace(err, http.StatusBadRequest)
 	}
+	if err := rejectMeta(state, "initial state"); err != nil {
+		return "", errors.Trace(err)
+	}
 	// Creation takes a turn like any other database work, and it is the one caller that most needs to: it
 	// arrives at a rate the caller chooses rather than one dispatch sets, so left unordered it competes for
 	// connections against every step already running and wins a share that grows with the offered rate -
@@ -293,6 +296,10 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	if err != nil {
 		return "", errors.Trace(err)
 	}
+	if initialState.IsZero() {
+		initialState, _ = workflow.NewState()
+	}
+	stampReducers(initialState, graph.Reducers())
 	stateJSON, err := json.Marshal(initialState)
 	if err != nil {
 		return "", errors.New("initial state is not JSON-marshalable: %v", err, http.StatusBadRequest)
@@ -437,11 +444,14 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 	switch flowStatus {
 	case workflow.StatusCompleted:
 		out.State, _ = workflow.NewState(finalStateJSON)
+		redactMeta(out.State)
 	case workflow.StatusFailed:
 		out.State, _ = workflow.NewState(finalStateJSON)
+		redactMeta(out.State)
 		out.Error = flowErrorMsg
 	case workflow.StatusTerminated, workflow.StatusCancelled:
 		out.State, _ = workflow.NewState(finalStateJSON)
+		redactMeta(out.State)
 		out.TerminateReason, out.CancelReason = splitTerminateCancelReason(flowStatus, flowCancelReason)
 	case workflow.StatusInterrupted:
 		// For interrupted, query the leaf step's state and interrupt payload
@@ -474,7 +484,7 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 			// Materialize the interrupted step's view: state + changes with pending deletes enacted.
 			_ = stepState.Merge(stepChanges)
 			stepState.DelNils()
-			out.State = stepState
+			out.State = redactMeta(stepState)
 			out.InterruptPayload, _ = workflow.NewState(interruptPayloadJSON)
 		}
 	case workflow.StatusRunning, workflow.StatusCreated:

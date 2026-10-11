@@ -418,6 +418,11 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.State, inherited R
 
 	inlineExcessAnchors(raw, refs, merged)
 
+	// The metadata is not a field, so the loops above never see it; it is stored with the state as it is.
+	if meta := merged.MetaJSON(); meta != nil {
+		raw[workflow.MetaKey] = meta
+	}
+
 	stateJSON, err := json.Marshal(raw)
 	if err != nil {
 		return nil, nil, errors.Trace(err)

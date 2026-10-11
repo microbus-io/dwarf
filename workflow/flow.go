@@ -295,7 +295,7 @@ func (f *Flow) Clear() {
 	if f.changes.IsZero() {
 		f.changes, _ = NewState()
 	}
-	for k := range f.state.d {
+	for k := range f.state.Names() {
 		f.changes.d[k] = nil // tombstone so the delete propagates into the task's persisted changes
 	}
 	f.state.Clear()
@@ -304,6 +304,9 @@ func (f *Flow) Clear() {
 // deleteOne is the shared worker: writes a cleared (Go nil) tombstone to changes so the following merge
 // drops the field, and removes it from state so later reads in this task see it as absent.
 func (f *Flow) deleteOne(name string) {
+	if name == MetaKey {
+		return
+	}
 	if f.changes.IsZero() {
 		f.changes, _ = NewState()
 	}
@@ -316,8 +319,11 @@ func (f *Flow) deleteOne(name string) {
 //
 // The copy is independent of the flow, so writing to the flow afterwards does not disturb it. It does not
 // materialize field values, so snapshotting a large carried payload costs a map entry rather than the payload.
+// The state's metadata is not included.
 func (f *Flow) Snapshot() State {
-	return f.state.Clone()
+	snapshot := f.state.Clone()
+	snapshot.SetMeta(nil)
+	return snapshot
 }
 
 // SetChanges sets each field of source exactly as Set would, one by one. source is any value that marshals to a

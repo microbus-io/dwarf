@@ -415,13 +415,14 @@ func (g *Graph) Reducers() map[string]Reducer {
 	return g.reducers
 }
 
-const fieldNameRule = "a state field name must start with an ASCII letter or underscore, followed by ASCII letters, digits, or underscores"
+const fieldNameRule = "a state field name must start with an ASCII letter or underscore, followed by ASCII letters, digits, or underscores, and must not be the reserved " + MetaKey
 
 // isFieldName reports whether name is a state field name a graph may declare. The rule is the intersection
 // of a Go identifier and a boolexp identifier segment: a name outside it cannot be referenced from a 'when'
-// expression, and a dot would read as a nested path in 'when' but as a flat key everywhere else.
+// expression, and a dot would read as a nested path in 'when' but as a flat key everywhere else. MetaKey is
+// an identifier but never a field.
 func isFieldName(name string) bool {
-	if name == "" {
+	if name == "" || name == MetaKey {
 		return false
 	}
 	for i := 0; i < len(name); i++ {

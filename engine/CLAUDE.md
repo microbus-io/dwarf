@@ -1667,6 +1667,29 @@ Three things stay the engine's:
   **the fixtures do not** - they run at the production default and still exercise the steal, which is the
   stronger statement of the two.
 
+### Field metadata (`__meta__`): the engine stamps it, never trusts it, and hides it
+
+Every field the graph declares a reducer for is tagged in the state's metadata (`stampReducers`, `meta.go`),
+a field with no value yet included - a reducer has to be known before the first write, since `append`
+folding onto nothing must yield a list.
+
+- **Stamped from the frozen graph** at `createWithGraph` (Create, Continue, a subgraph child), at dispatch
+  (`processStep`, before the carrier is built), and at both fan-in paths (`fanInRow`, `fireFanInDirect`).
+  Successor rows inherit it through `Mint`. A stamp REPLACES the metadata wholesale, which is also what
+  discards a forged entry - a subgraph `in` carrying one, say.
+- **The dispatch stamp is not redundant with the rows.** It is what tags a flow already in flight when the
+  engine was upgraded, whose rows hold none. Pinned by `TestMeta_DispatchRestampsAnUntaggedRow`, which
+  fails without it while every other test passes.
+- **A task's result is never trusted for it.** `Merge` ignores the incoming delta's metadata (see
+  `workflow/CLAUDE.md`), so a forged `__meta__` in a remote task's `changes` is neither stored nor folded.
+- **Redacted from every state handed outside the engine** (`redactMeta`): `FlowOutcome.State` (Snapshot,
+  Await, Run), `Step`'s state and changes, a subgraph's result on its way to the caller's `out`, and what
+  `when`/`switch` evaluate. The stored columns keep it - `Continue` and `Fork` build on `final_state`.
+- **Rejected in caller input** with a 400 (`rejectMeta`): `Create`'s initial state, `Continue`'s
+  `additionalState`, `Fork`'s overrides.
+
+Pinned by `engine/meta_test.go`.
+
 ### State refs — a large carried field is stored once (`internal/staterefs`)
 
 A step's `state` is a full input snapshot, so a field that is *carried* but not *changed* is re-serialized into

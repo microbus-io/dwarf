@@ -322,8 +322,11 @@ reducer-managed field. See [Fan-out & subgraphs](fan-out-and-subgraphs.md) for t
 
 The state field names a graph declares — `forEach`, `as`, and the field of `SetReducer` — must be plain
 identifiers: an ASCII letter or underscore, followed by ASCII letters, digits, or underscores
-(`lineItems`, `line_item`). `Validate` rejects a graph that declares any other name. The flow's state itself
-may carry fields under any name; the rule applies only to the names a graph declares.
+(`lineItems`, `line_item`), other than the reserved `__meta__`. `Validate` rejects a graph that declares any
+other name. The flow's state itself
+may carry fields under any name except `__meta__`, which the engine reserves: `Set` rejects it, and `Create`,
+`Continue` and `Fork` reject a state that contains it. The identifier rule applies only to the names a graph
+declares.
 
 ## Validation
 

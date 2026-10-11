@@ -55,7 +55,7 @@ input for large elements, `D/(1+D)` for mid-size ones. Task outputs (`changes`) 
 - **The split cache (`Linker.splits`) is required, not an optimization.** A plain ref is spliced without being
   decoded, so a branch never scans the array; extracting an element does. Without a cached split every branch
   scans the whole array for its one element - O(N) per branch, **O(N²) per cohort**. The splitter returns
-  sub-slices of the cached bytes (no copy), safe to share for the same reason invariant 6 is. **Do not swap it
+  sub-slices of the cached bytes (no copy), safe to share for the same reason invariant 7 is. **Do not swap it
   for `json.Unmarshal` into `[]json.RawMessage`:** that copies every element, so a cached array (a document's
   page images, say) is held twice. The sub-slices are capped (`data[start:i:i]`), so an `append` onto one
   cannot overwrite the next element in the shared bytes.
@@ -149,7 +149,10 @@ both measure ~1x, so the ambiguity is moot and no server-version probe is needed
 5. **`inlineExcessAnchors` must never drop an un-inlineable carried ref.** Its literal is not in `merged` to
    inline back, so dropping it would delete the field outright. Such an anchor is *pinned* past the
    `maxAnchors` cap — correctness over the perf bound.
-6. **The cache holds BYTES, never decoded values — and `Resolve` splices those bytes STRAIGHT INTO
+6. **`Mint` copies the state's metadata (`workflow.MetaKey`) across explicitly.** It rebuilds the stored
+   state from `Names`, which hides the metadata, so without the copy every successor row loses its tags.
+   The metadata is never a ref candidate. Pinned by `TestLinker_MintKeepsMeta`.
+7. **The cache holds BYTES, never decoded values — and `Resolve` splices those bytes STRAIGHT INTO
    state rather than decoding them.** `State` holds a field as raw JSON until something reads it
    (`SetJSON`), so resolving a ref costs the field's byte length instead of the several times that
    its decoded Go form occupies. This is where the two designs meet: refs already collapse N branches onto

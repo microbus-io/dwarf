@@ -388,6 +388,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		doneTurn()
 		return errors.Trace(err)
 	}
+	// The tags travel with the state so a task, local or remote, knows how each field folds. They are rebuilt
+	// from the frozen graph on every dispatch rather than trusted from the row.
+	stampReducers(state, graph.Reducers())
 	priorChanges, _ := workflow.NewState(priorChangesJSON)
 	// The carrier's input is state + priorChanges, materialized: Merge accumulates (keeping a prior
 	// delete's tombstone), then DelNils enacts it so the carrier sees the key absent. Clone so `state`
@@ -414,7 +417,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	}
 	if subgraphDone {
 		subgraphResult, _ := workflow.NewState(subgraphResultJSON)
-		flow.SetSubgraphResolution(subgraphResult, subgraphErrorStr)
+		flow.SetSubgraphResolution(redactMeta(subgraphResult), subgraphErrorStr)
 	}
 
 	// Parse baggage for the task executor. A "null" column (from a nil FlowOptions.Baggage) and an empty
@@ -1812,6 +1815,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		mergedState := ourState.Clone()
 		mergedState.Merge(ourChanges)
 		mergedState.DelNils()
+		stampReducers(mergedState, graph.Reducers())
 		mergedJSON, refsJSON, merr := e.linkerFor(shardNum).Mint(mergedState, ourChanges, ourRefs, stepID, staterefs.Linear, nil, nil)
 		if merr != nil {
 			return errors.Trace(merr)
@@ -2017,6 +2021,7 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 	// DelNils enacts them now, before the state is minted onto the fan-in step. Reduced fields are
 	// unaffected - a cleared reduced field was ignored during the fold, never stored as a tombstone.
 	merged.DelNils()
+	stampReducers(merged, graph.Reducers())
 
 	// The fan-in sits one level below the DEEPEST cohort branch, not merely below the last sibling to
 	// complete - branch lengths can differ (loops, gotos, varying chains), so step_depth must reflect the

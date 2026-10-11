@@ -770,3 +770,80 @@ func TestState_ParseSkipsClearedFields(t *testing.T) {
 	_, has := m["items"]
 	assert.False(has)
 }
+
+func TestState_MetaIsNotAField(t *testing.T) {
+	assert := testarossa.For(t)
+
+	s, _ := NewState("a", 1)
+	tags := map[string]FieldMeta{"log": {Reducer: ReducerAppend}}
+	s.SetMeta(tags)
+
+	// Stored with the state, and read back through Meta.
+	assert.Equal(tags, s.Meta())
+	data, err := json.Marshal(s)
+	assert.NoError(err)
+	assert.Equal(`{"__meta__":{"log":{"reducer":"append"}},"a":1}`, string(data))
+	back, err := NewState(data)
+	assert.NoError(err)
+	assert.Equal(tags, back.Meta())
+
+	// Invisible to every field accessor.
+	assert.Equal(1, s.Len())
+	assert.Equal([]string{"a"}, slices.Collect(s.Names()))
+	assert.False(s.Has(MetaKey))
+	assert.False(s.IsDeleted(MetaKey))
+	assert.Nil(s.GetJSON(MetaKey))
+	var v any
+	ok, err := s.Get(MetaKey, &v)
+	assert.NoError(err)
+	assert.False(ok)
+	var parsed map[string]any
+	assert.NoError(s.Parse(&parsed))
+	assert.Equal(map[string]any{"a": 1.0}, parsed)
+
+	// Not writable or removable as a field.
+	assert.Error(s.Set(MetaKey, map[string]any{}))
+	_, err = NewState(MetaKey, 1)
+	assert.Error(err)
+	s.Del(MetaKey)
+	assert.Equal(tags, s.Meta())
+
+	// Clear removes the fields and keeps the metadata.
+	s.Clear()
+	assert.Equal(0, s.Len())
+	assert.Equal(tags, s.Meta())
+
+	// SetMeta with nothing removes it.
+	s.SetMeta(nil)
+	assert.Nil(s.Meta())
+	assert.Nil(s.MetaJSON())
+}
+
+func TestState_MergeKeepsReceiversMeta(t *testing.T) {
+	assert := testarossa.For(t)
+
+	mine := map[string]FieldMeta{"log": {Reducer: ReducerAppend}}
+	forged := map[string]FieldMeta{"log": {Reducer: ReducerUnion}, "n": {Reducer: ReducerAdd}}
+	newIncoming := func() State {
+		in, _ := NewState("log", []string{"b"}, "n", 2)
+		in.SetMeta(forged)
+		return in
+	}
+
+	s, _ := NewState("log", []string{"a"})
+	s.SetMeta(mine)
+	assert.NoError(s.Merge(newIncoming()))
+	assert.Equal(mine, s.Meta())
+	assert.Equal([]string{"b"}, s.GetStrings("log"))
+
+	s, _ = NewState("log", []string{"a"})
+	s.SetMeta(mine)
+	assert.NoError(s.MergeReduceAll([]State{newIncoming()}, map[string]Reducer{"log": ReducerAppend}))
+	assert.Equal(mine, s.Meta())
+	assert.Equal([]string{"a", "b"}, s.GetStrings("log"))
+
+	// A receiver with no metadata does not acquire the incoming State's.
+	s, _ = NewState()
+	assert.NoError(s.Merge(newIncoming()))
+	assert.Nil(s.MetaJSON())
+}

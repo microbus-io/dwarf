@@ -350,3 +350,26 @@ func stateVal(s workflow.State, name string) any {
 	_, _ = s.Get(name, &v)
 	return v
 }
+
+func TestLinker_MintKeepsMeta(t *testing.T) {
+	assert := testarossa.For(t)
+
+	tags := map[string]workflow.FieldMeta{"log": {Reducer: workflow.ReducerAppend}}
+	state := mustState(map[string]any{"doc": strings.Repeat("x", 100_000), "small": 1})
+	state.SetMeta(tags)
+
+	// The large field is ref'd and the small one inlined; the metadata is stored either way, and is never a
+	// ref candidate itself.
+	stateJSON, refsJSON, err := New("sqlite").Mint(state, mustState(map[string]any{}), nil, 7, 1, nil, nil)
+	assert.NoError(err)
+	refs := mustParse(refsJSON)
+	_, docRefd := refs["doc"]
+	assert.True(docRefd)
+	_, metaRefd := refs[workflow.MetaKey]
+	assert.False(metaRefd)
+	stored := mustState(nil)
+	assert.NoError(stored.UnmarshalJSON(stateJSON))
+	assert.Equal(tags, stored.Meta())
+	assert.False(stored.Has("doc"))
+	assert.True(stored.Has("small"))
+}

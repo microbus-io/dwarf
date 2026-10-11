@@ -558,3 +558,31 @@ func TestFlow_SetChangesResolvesNamesLikeEncodingJSON(t *testing.T) {
 	assert.Equal("eu", back.Region)
 	assert.Equal(7, back.Count)
 }
+
+func TestFlow_MetaStaysOutOfTheTasksView(t *testing.T) {
+	assert := testarossa.For(t)
+
+	tags := map[string]FieldMeta{"log": {Reducer: ReducerAppend}}
+	state, _ := NewState("a", 1)
+	state.SetMeta(tags)
+	f := NewRawFlow()
+	f.SetRawState(state)
+
+	assert.False(f.Has(MetaKey))
+	assert.Error(f.Set(MetaKey, 1))
+	assert.Nil(f.Snapshot().MetaJSON())
+
+	// Deleting every field records a delete for each field, never for the metadata, and keeps it.
+	f.Del(MetaKey)
+	f.Clear()
+	assert.Nil(f.RawChanges().MetaJSON())
+	assert.True(f.RawChanges().IsDeleted("a"))
+	assert.Equal(tags, f.RawState().Meta())
+
+	// The wire form carries it, so a task reached remotely sees it too.
+	data, err := json.Marshal(f)
+	assert.NoError(err)
+	var remote Flow
+	assert.NoError(json.Unmarshal(data, &remote))
+	assert.Equal(tags, remote.state.Meta())
+}

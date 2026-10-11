@@ -48,11 +48,29 @@ import (
 // or through Get with a typed target and you get the type you asked for; only an untyped read is
 // float64-domain. Carry an integer that exceeds 2^53 as a string.
 //
+// # Metadata
+//
+// A State may also carry metadata about its fields, such as the reducer a field is declared with (see Meta).
+// The orchestrator maintains it. It travels with the state's JSON under the reserved name MetaKey, but it is
+// not a field: Names, Len, Get, GetJSON, Has and Parse do not see it, Set rejects the name, and Merge never
+// takes it from the incoming State.
+//
 // A zero State is empty and safe to read (Get, Has, Len, Names, MarshalJSON all work on it), but the
 // mutating methods do not allocate, so one must be initialized via NewState or UnmarshalJSON before
 // Set/Merge.
 type State struct {
 	d map[string]json.RawMessage
+}
+
+// MetaKey is the reserved name under which a State's JSON carries its per-field metadata. No field may have
+// this name.
+const MetaKey = "__meta__"
+
+// FieldMeta is what a State records about one of its fields beyond its value. A field may have metadata
+// without having a value, such as a reduced field nothing has written yet.
+type FieldMeta struct {
+	// Reducer is the reducer the field is declared with. Empty means ReducerReplace.
+	Reducer Reducer `json:"reducer,omitempty"`
 }
 
 // NewState builds a State from its arguments, in one of two mutually exclusive modes.
@@ -127,8 +145,12 @@ func NewState(data ...any) (State, error) {
 // database. So a task that stores an int reads it back as an int via GetInt, but a plain Get into an any
 // sees a float64 - JSON has one number type, and the typed getters coerce. The stored bytes are the State's
 // own, so a later mutation of the caller's value cannot change what was stored. Returns an error only if
-// value cannot be marshalled (a NaN, an +Inf, a channel) or is a json.RawMessage that is not valid JSON.
+// value cannot be marshalled (a NaN, an +Inf, a channel), is a json.RawMessage that is not valid JSON, or
+// name is MetaKey.
 func (s State) Set(name string, value any) error {
+	if name == MetaKey {
+		return errors.New("workflow: state field name %q is reserved", name)
+	}
 	// A json.RawMessage is already JSON and is stored as-is, validated but not decoded. A []byte is NOT -
 	// it is binary data and marshals to a base64 string, which is what a caller storing a blob wants. The
 	// two are distinguished by TYPE, so a call site cannot pick the wrong one by accident.
@@ -175,19 +197,28 @@ func (s State) mustSet(name string, value any) {
 
 // Len returns the number of fields in the state.
 func (s State) Len() int {
+	if _, ok := s.d[MetaKey]; ok {
+		return len(s.d) - 1
+	}
 	return len(s.d)
 }
 
 // Del removes the named fields. Names that are not present are ignored.
 func (s State) Del(names ...string) {
 	for _, name := range names {
-		delete(s.d, name)
+		if name != MetaKey {
+			delete(s.d, name)
+		}
 	}
 }
 
-// Clear removes every field, leaving an empty State.
+// Clear removes every field, leaving a State with no fields. Its metadata is kept.
 func (s State) Clear() {
+	meta, ok := s.d[MetaKey]
 	clear(s.d)
+	if ok {
+		s.d[MetaKey] = meta
+	}
 }
 
 // decodeValue turns a stored field into a Go value. An absent or cleared field decodes to nil, which is
@@ -225,6 +256,9 @@ func decodeValue(raw json.RawMessage) (any, error) {
 func (s State) Names() iter.Seq[string] {
 	return func(yield func(string) bool) {
 		for k := range s.d {
+			if k == MetaKey {
+				continue
+			}
 			if !yield(k) {
 				return
 			}
@@ -245,6 +279,9 @@ func (s State) IsZero() bool {
 //
 // The returned slice is the state's own. Do not modify it.
 func (s State) GetJSON(name string) json.RawMessage {
+	if name == MetaKey {
+		return nil
+	}
 	return s.d[name]
 }
 
@@ -257,6 +294,8 @@ func (s State) GetJSON(name string) json.RawMessage {
 // json.RawMessage rather than []byte is deliberate and is the same distinction Set draws: a []byte is binary
 // data and belongs in a base64 string, a json.RawMessage is JSON. The type says which, so the compiler
 // keeps a call site honest.
+//
+// name must not be MetaKey.
 func (s State) SetJSON(name string, data json.RawMessage) {
 	s.d[name] = data
 }
@@ -270,7 +309,7 @@ func (s State) SetJSON(name string, data json.RawMessage) {
 // getters (GetInt, ...) panic on the same mismatch instead.
 func (s State) Get(name string, target any) (ok bool, err error) {
 	raw, exists := s.d[name]
-	if !exists || isCleared(raw) {
+	if !exists || isCleared(raw) || name == MetaKey {
 		return false, nil
 	}
 	if err := json.Unmarshal(raw, target); err != nil {
@@ -348,7 +387,7 @@ func (s State) GetDuration(name string) time.Duration {
 // a caller asking "is there something here to read" wants - see IsDeleted for the other question.
 func (s State) Has(name string) bool {
 	v, ok := s.d[name]
-	return ok && !isCleared(v)
+	return ok && !isCleared(v) && name != MetaKey
 }
 
 // IsDeleted reports whether the field is present as a DELETE - a stored JSON null, such as Set(name, nil)
@@ -361,7 +400,7 @@ func (s State) Has(name string) bool {
 // nothing there is deleted-and-present.
 func (s State) IsDeleted(name string) bool {
 	v, ok := s.d[name]
-	return ok && isCleared(v)
+	return ok && isCleared(v) && name != MetaKey
 }
 
 // Parse unmarshals the state's fields into target, typically a pointer to a struct whose fields are matched
@@ -373,10 +412,10 @@ func (s State) Parse(target any) error {
 		return nil
 	}
 	// A cleared field is skipped rather than handed to the decoder as a null, which would reset a pointer,
-	// slice, map or interface field the caller had set.
+	// slice, map or interface field the caller had set. The metadata is not a field.
 	live := s.d
 	for k, v := range s.d {
-		if isCleared(v) {
+		if isCleared(v) || k == MetaKey {
 			if len(live) == len(s.d) {
 				live = maps.Clone(s.d)
 			}
@@ -406,14 +445,24 @@ func (s State) Clone() State {
 }
 
 // Merge overlays the incoming State's fields onto this State with replace semantics (last write wins),
-// mutating the receiver. It is MergeReduce with no reducers.
+// mutating the receiver. It is MergeReduce with no reducers. The receiver's metadata is kept, and the
+// incoming State's is ignored.
 //
 // Merge is an accumulation primitive: a cleared incoming value (Go nil or a JSON null, i.e. a delete
 // tombstone) is preserved as-is, not dropped, so a delta can be built up across successive merges. To
 // materialize a snapshot - folding pending deletes into actual absences - call DelNils afterward.
 func (s State) Merge(incoming State) error {
-	maps.Copy(s.d, incoming.d)
+	copyFields(s.d, incoming.d)
 	return nil
+}
+
+// copyFields copies every field of src into dst, leaving dst's metadata as it is.
+func copyFields(dst, src map[string]json.RawMessage) {
+	for k, v := range src {
+		if k != MetaKey {
+			dst[k] = v
+		}
+	}
 }
 
 // MergeReduce overlays the incoming State's fields onto this State, mutating the receiver, using the
@@ -425,7 +474,8 @@ func (s State) Merge(incoming State) error {
 // combined via that reducer, whose base is this State's current value or nil if it holds none yet. A
 // cleared incoming value on such a field is ignored: it is the reducer's identity, not a delete.
 //
-// The incoming State is left unmodified. On a reducer error the receiver is left partly merged; discard it.
+// As with Merge, the receiver's metadata is kept and the incoming State's is ignored. The incoming State is
+// left unmodified. On a reducer error the receiver is left partly merged; discard it.
 func (s State) MergeReduce(incoming State, reducers map[string]Reducer) error {
 	return s.MergeReduceAll([]State{incoming}, reducers)
 }
@@ -449,7 +499,7 @@ func (s State) MergeReduceAll(incoming []State, reducers map[string]Reducer) err
 	}
 	if len(reducers) == 0 {
 		for _, in := range incoming {
-			maps.Copy(s.d, in.d)
+			copyFields(s.d, in.d)
 		}
 		return nil
 	}
@@ -458,6 +508,9 @@ func (s State) MergeReduceAll(incoming []State, reducers map[string]Reducer) err
 	decoded := map[string]bool{}
 	for _, in := range incoming {
 		for k, v := range in.d {
+			if k == MetaKey {
+				continue
+			}
 			r := reducers[k]
 			if r == "" || r == ReducerReplace {
 				s.d[k] = v
@@ -495,6 +548,40 @@ func (s State) MergeReduceAll(incoming []State, reducers map[string]Reducer) err
 		s.d[k] = encoded
 	}
 	return nil
+}
+
+// Meta returns a copy of the state's per-field metadata, keyed by field name, or nil if it has none.
+func (s State) Meta() map[string]FieldMeta {
+	raw, ok := s.d[MetaKey]
+	if !ok || isCleared(raw) {
+		return nil
+	}
+	var meta map[string]FieldMeta
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return nil
+	}
+	return meta
+}
+
+// SetMeta replaces the state's per-field metadata. A nil or empty map removes it. Like Set, it needs an
+// initialized State.
+func (s State) SetMeta(meta map[string]FieldMeta) {
+	if len(meta) == 0 {
+		delete(s.d, MetaKey)
+		return
+	}
+	b, err := json.Marshal(meta)
+	if err != nil {
+		// FieldMeta holds only strings, so this is a defensive assertion rather than a live path.
+		panic(errors.Trace(err))
+	}
+	s.d[MetaKey] = b
+}
+
+// MetaJSON returns the state's per-field metadata as JSON, or nil if it has none. The returned slice is the
+// state's own. Do not modify it.
+func (s State) MetaJSON() json.RawMessage {
+	return s.d[MetaKey]
 }
 
 // DelNils removes every field whose value is cleared - a Go nil or a JSON null. Merge and MergeReduce

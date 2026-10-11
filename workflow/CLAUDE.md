@@ -91,6 +91,29 @@ the cohort's contributions - order-independent. The same holds for a cleared fie
 removes the field (the source's delete leaves the fan-in to fold the branches onto nothing). Pinned by
 `fixtures/reducerdeleteflow_test.go` and `fixtures/terminalreducerflow_test.go`.
 
+### Field metadata (`__meta__`) is stored as a field and hidden as one
+
+A `State` carries per-field metadata (`FieldMeta`; today the declared reducer) under the reserved key
+`MetaKey` inside the same `map[string]json.RawMessage` as the fields. The engine writes it; tasks and
+callers never do.
+
+- **It lives in the map so every BYTE path carries it for free:** the `state`/`changes`/`final_state`
+  columns, `Fork`'s DB-side `INSERT...SELECT`, `staterefs.Flatten`'s splice, and the carrier's wire JSON
+  to a remote host. A separate struct field would have to be threaded through each of them.
+- **It is hidden from every FIELD accessor:** `Names`, `Len`, `Get`, `GetJSON`, `Has`, `IsDeleted`,
+  `Parse` and `Del` skip it; `Clear` keeps it; `Set` rejects the name. The price is that anything rebuilding a
+  state field by field from `Names` drops it. `staterefs.Mint` is the one such place, and it copies the
+  metadata back explicitly. **A new field-by-field rebuild must do the same.**
+- **`Merge`/`MergeReduceAll` keep the receiver's metadata and IGNORE the incoming State's.** A changes
+  delta never carries metadata into state, which is what makes a task's forged `__meta__` inert without a
+  check at every merge site. This changes when a delta starts carrying the kind of each write (an
+  overwrite mark).
+- **`Flow.Snapshot` drops it,** because a snapshot is handed to task code and onward (e.g. as a subgraph's
+  `in`). `Flow.Clear` tombstones fields, never the metadata.
+
+Pinned by `TestState_MetaIsNotAField`, `TestState_MergeKeepsReceiversMeta`,
+`TestFlow_MetaStaysOutOfTheTasksView` and `TestLinker_MintKeepsMeta`.
+
 ### `State` stores every value as JSON, and decodes only what is read
 
 `State` wraps `map[string]json.RawMessage` in a struct. A field is held as its JSON encoding and decoded

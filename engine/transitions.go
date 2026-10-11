@@ -56,7 +56,7 @@ func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workfl
 	haveNormalized := false
 	normalize := func() (map[string]any, error) {
 		if !haveNormalized {
-			normalized, normalizeErr = boolexp.Normalize(flow.RawState())
+			normalized, normalizeErr = boolexp.Normalize(redactMeta(flow.RawState()))
 			haveNormalized = true
 		}
 		return normalized, errors.Trace(normalizeErr)
