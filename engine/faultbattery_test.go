@@ -184,14 +184,11 @@ func TestFault_RecoveryLeavesCleanWorld(t *testing.T) {
 	}
 
 	// leaseStaleWrite recovers via lease expiry + lease recovery (not an in-band re-dispatch), so it is
-	// driven explicitly with a shortened lease.
+	// driven explicitly: the fenced dispatch's lease is expired and lease recovery driven until it resets the step.
 	t.Run("leaseStaleWrite", func(t *testing.T) {
 		assert := testarossa.For(t)
 		ctx := context.Background()
-		e, reader, calls := newFaultBatteryEngine(t, "fbatlease", func(e *Engine) {
-			e.SetTimeBudget(200 * time.Millisecond)
-			e.leaseMargin = 100 * time.Millisecond // lease = budget+margin = 300ms, so it expires quickly
-		})
+		e, reader, calls := newFaultBatteryEngine(t, "fbatlease", nil)
 		defer e.Shutdown(ctx)
 
 		baseKey, baseOut := batteryRun(t, e, "fbatlease/g")
@@ -204,12 +201,17 @@ func TestFault_RecoveryLeavesCleanWorld(t *testing.T) {
 		// stays claimable and lease recovery re-runs it cleanly - A ran twice, state preserved.
 		*calls["a"], *calls["b"] = 0, 0
 		e.seams.Inject(engineseams.Join(engineseams.FaultLeaseStaleWrite, "A"))
+		firstDone := e.seams.Waiter(engineseams.CheckpointClaimedDispatchDone)
 		fk, err := e.Create(ctx, "fbatlease/g", nil, nil)
 		assert.NoError(err)
-		// The 300ms lease must lapse before recovery resets the fenced step; drive the backstop until it does
-		// (see driveLeaseRecovery). Anchored on the flow's own status rather than calls["a"], which is a plain *int shared
-		// across this battery and would race a read from here.
-		driveLeaseRecovery(t, e, leaseRecoveryWait, func() bool { return enginetest.FlowStatus(t, e, fk) == workflow.StatusCompleted })
+		select {
+		case <-firstDone:
+		case <-time.After(10 * time.Second):
+			t.Fatal("A's first dispatch never returned")
+		}
+		// Lapse the FENCED generation's lease, and only that one. Do not shorten the lease instead: the re-run's
+		// claim gets the same short lease, and a re-run slower than it is itself recovered and runs A a third time.
+		expireLease(t, e, fk, "A")
 		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
 
 		assert.Equal(baseFS, readFinalState(t, e, fk), "final_state diverged from the no-fault baseline")

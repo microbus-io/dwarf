@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -117,16 +118,22 @@ func TestLeaseFence_FailStep(t *testing.T) {
 //
 // The zombie's late writes then carry the stale generation N and must be fenced. taskCalls counts dispatches
 // of the blocking task (ends at 2: zombie + owner).
+//
+// The caller must `defer unblock()` right after its `defer eng.Shutdown` (defers are LIFO, so it runs first),
+// and call it again where the test releases the zombie. Without the defer, a failed assertion that returns
+// early leaves the zombie blocked on release, and Shutdown waits on it forever - one failure becomes a
+// package-wide timeout that hides the assertion that caused it.
 func zombieDispatch(t *testing.T, eng *Engine, flowURL, blockTaskName string, taskCalls *atomic.Int64,
-	started chan struct{}, release chan struct{}) (flowKey string, outcome *workflow.FlowOutcome) {
+	started chan struct{}, release chan struct{}) (flowKey string, outcome *workflow.FlowOutcome, unblock func()) {
 	t.Helper()
 	assert := testarossa.For(t)
 	ctx := context.Background()
+	unblock = sync.OnceFunc(func() { close(release) })
 
 	var err error
 	flowKey, err = eng.Create(ctx, flowURL, nil, nil)
 	if !assert.NoError(err) {
-		return "", nil
+		return "", nil, unblock
 	}
 
 	select {
@@ -135,25 +142,17 @@ func zombieDispatch(t *testing.T, eng *Engine, flowURL, blockTaskName string, ta
 		t.Fatalf("%s's first dispatch never started", blockTaskName)
 	}
 
-	db, err := eng.db.Shard(1)
-	if !assert.NoError(err) {
-		return flowKey, nil
-	}
-	// Simulate lease loss on the blocked step only (DB-clock-step / overrun): expire its lease, then run
-	// recovery so a free worker re-claims it (bumping lease_seq) and re-runs the task to completion.
-	_, err = db.ExecContext(ctx,
-		"UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -60000) WHERE status='"+workflow.StatusRunning+"' AND task_name=?",
-		blockTaskName)
-	assert.NoError(err)
-	eng.recoverExpiredLeases(ctx)
+	// Simulate lease loss on the blocked step only (DB-clock-step / overrun): expire its lease and recover it,
+	// so a free worker re-claims it (bumping lease_seq) and re-runs the task to completion.
+	expireLease(t, eng, flowKey, blockTaskName)
 
 	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	outcome, err = eng.Await(awaitCtx, flowKey)
 	if !assert.NoError(err) {
-		return flowKey, nil
+		return flowKey, nil, unblock
 	}
-	return flowKey, outcome
+	return flowKey, outcome, unblock
 }
 
 // TestLeaseFence_CompletionNoDuplicateSuccessor pins the "late success → duplicate successors"
@@ -196,14 +195,15 @@ func TestLeaseFence_CompletionNoDuplicateSuccessor(t *testing.T) {
 	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
-	flowKey, outcome := zombieDispatch(t, eng, "lfb/g", "A", &aCalls, aStarted, aRelease)
+	flowKey, outcome, unblock := zombieDispatch(t, eng, "lfb/g", "A", &aCalls, aStarted, aRelease)
+	defer unblock()
 	if !assert.NotNil(outcome) {
 		return
 	}
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 
 	// Release the zombie; its late completion UPDATE carries the stale lease_seq and must write nothing.
-	close(aRelease)
+	unblock()
 
 	_, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
@@ -270,14 +270,15 @@ func TestLeaseFence_CohortNoDoubleArrival(t *testing.T) {
 	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
-	flowKey, outcome := zombieDispatch(t, eng, "lfc/g", "X", &xCalls, xStarted, xRelease)
+	flowKey, outcome, unblock := zombieDispatch(t, eng, "lfc/g", "X", &xCalls, xStarted, xRelease)
+	defer unblock()
 	if !assert.NotNil(outcome) {
 		return
 	}
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 
 	// Release the zombie X; its late arrival must be fenced (no second cohort_arrivals bump, no second J).
-	close(xRelease)
+	unblock()
 
 	_, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
@@ -450,7 +451,8 @@ func TestLeaseFence_RetryRewindFenced(t *testing.T) {
 	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
-	flowKey, outcome := zombieDispatch(t, eng, "lfr/g", "A", &aCalls, aStarted, aRelease)
+	flowKey, outcome, unblock := zombieDispatch(t, eng, "lfr/g", "A", &aCalls, aStarted, aRelease)
+	defer unblock()
 	if !assert.NotNil(outcome) {
 		return
 	}
@@ -458,7 +460,7 @@ func TestLeaseFence_RetryRewindFenced(t *testing.T) {
 
 	// Release the zombie; its late retry rewind carries the stale lease_seq and must match zero rows (no rewind
 	// of the completed step, no reap, no re-dispatch).
-	close(aRelease)
+	unblock()
 
 	_, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
@@ -530,7 +532,8 @@ func TestLeaseFence_SubgraphParkFenced(t *testing.T) {
 	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
-	flowKey, outcome := zombieDispatch(t, eng, "lfs/g", "A", &aCalls, aStarted, aRelease)
+	flowKey, outcome, unblock := zombieDispatch(t, eng, "lfs/g", "A", &aCalls, aStarted, aRelease)
+	defer unblock()
 	if !assert.NotNil(outcome) {
 		return
 	}
@@ -538,7 +541,7 @@ func TestLeaseFence_SubgraphParkFenced(t *testing.T) {
 
 	// Release the zombie; its late park carries the stale lease_seq and must match zero rows (no re-park, no
 	// second child flow).
-	close(aRelease)
+	unblock()
 
 	_, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
@@ -598,11 +601,9 @@ func TestLeaseRecovery_EndToEnd(t *testing.T) {
 	eng.SetHost(mux)
 	eng.SetMeterProvider(mp)
 	assert.NoError(eng.Startup(t.Context()))
-	// Release the leaked "crashed" execution at teardown, BEFORE the Shutdown defer drains workers (defers
-	// are LIFO, so this one runs first), so the blocked worker returns and Shutdown does not wait out its lease.
-	defer close(aRelease)
 
-	flowKey, outcome := zombieDispatch(t, eng, "lr/g", "A", &aCalls, aStarted, aRelease)
+	flowKey, outcome, unblock := zombieDispatch(t, eng, "lr/g", "A", &aCalls, aStarted, aRelease)
+	defer unblock()
 	if !assert.NotNil(outcome) {
 		return
 	}

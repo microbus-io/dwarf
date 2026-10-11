@@ -111,6 +111,51 @@ func driveLeaseRecovery(t *testing.T, e *Engine, retryDuration time.Duration, la
 	}
 }
 
+// expireLease lapses the lease of the flow's running step named taskName, by primary key, and drives lease
+// recovery until that step has left its current generation's `running` state - so the re-dispatch that follows
+// claims with a full-length lease and cannot lapse again inside the test.
+//
+// Three choices here are load-bearing:
+//   - Expire by primary key. An UPDATE filtered on status and task name scans dwarf_steps, and on MySQL/MariaDB
+//     it locks every row it scans, so it can deadlock with a sibling branch's transition.
+//   - Drive the sweep rather than run it once. A failed sweep only logs, and the next tick is a minute away.
+//   - Stop the moment the reset is visible in the row, not when the task re-runs. A sweep still in flight when
+//     the re-run's completion write lands can make that write a deadlock victim, which re-runs the task.
+func expireLease(t *testing.T, e *Engine, flowKey, taskName string) {
+	t.Helper()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
+	if !assert.NoError(err) {
+		return
+	}
+	db, err := e.db.Shard(shardNum)
+	if !assert.NoError(err) {
+		return
+	}
+	var stepID, leaseSeq int
+	err = db.QueryRowContext(ctx,
+		"SELECT step_id, lease_seq FROM dwarf_steps WHERE flow_id=? AND task_name=? AND status='"+workflow.StatusRunning+"'",
+		flowID, taskName).Scan(&stepID, &leaseSeq)
+	if !assert.NoError(err, "%s is not running", taskName) {
+		return
+	}
+	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -60000) WHERE step_id=?", stepID)
+	if !assert.NoError(err) {
+		return
+	}
+	reset := func() bool {
+		var status string
+		var seq int
+		if db.QueryRowContext(ctx, "SELECT status, lease_seq FROM dwarf_steps WHERE step_id=?", stepID).Scan(&status, &seq) != nil {
+			return false
+		}
+		return status != workflow.StatusRunning || seq != leaseSeq
+	}
+	driveLeaseRecovery(t, e, leaseRecoveryWait, reset)
+	assert.True(reset(), "lease recovery never reset %s", taskName)
+}
+
 // --- Dispatch faults (scoped by task name) ---
 
 func TestFault_ExecuteTask(t *testing.T) {
@@ -299,22 +344,28 @@ func TestFault_LeaseStaleWrite(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	e.SetTimeBudget(200 * time.Millisecond)
-	e.leaseMargin = 100 * time.Millisecond // lease = budget+margin = 300ms, so it expires quickly
 	assert.NoError(e.Startup(t.Context()))
 
 	// A's completion write carries a stale lease generation (a zombie): the fence rejects it (no-op), so the
 	// step stays claimable and lease recovery re-runs it cleanly - a stale write never corrupts or
-	// terminalizes the flow. The first dispatch's write is fenced out; once its lease lapses the poll
-	// backstop resets the step and it re-runs (fault consumed) to a clean completion, so A ran twice.
+	// terminalizes the flow. The first dispatch's write is fenced out; once its lease lapses, lease recovery
+	// resets the step and it re-runs (fault consumed) to a clean completion, so A ran exactly twice.
 	e.seams.Inject(engineseams.Join(engineseams.FaultLeaseStaleWrite, "A"))
-	// Rendezvous on the clean re-run's completion (armed before Create: the fenced first dispatch never stops,
-	// so the first - and only - stop is the recovered completion, caught whichever poll drives it).
+	// Both armed before Create. The fenced first dispatch returns without stopping the flow, so the first - and
+	// only - stop is the recovered completion.
+	firstDone := e.seams.Waiter(engineseams.CheckpointClaimedDispatchDone)
 	waitDone := awaitNextStop(t, e)
 	fk, err := e.Create(ctx, "flease/g", nil, nil)
 	assert.NoError(err)
-	// The 300ms lease must lapse before recovery re-runs A; drive the backstop until it does.
-	driveLeaseRecovery(t, e, leaseRecoveryWait, func() bool { return runs.Load() >= 2 })
+	select {
+	case <-firstDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("A's first dispatch never returned")
+	}
+	// Lapse the FENCED generation's lease, and only that one. Do not shorten the lease instead: the re-run's
+	// claim gets the same short lease, and a re-run slower than it (measured ~1 in 30 on MariaDB at 300ms) is
+	// itself recovered and runs A a third time.
+	expireLease(t, e, fk, "A")
 	waitDone()
 	assert.Equal(workflow.StatusCompleted, enginetest.FlowStatus(t, e, fk))
 	assert.Equal(int32(2), runs.Load())
