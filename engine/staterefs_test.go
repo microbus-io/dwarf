@@ -435,6 +435,59 @@ func TestStateRefs_FoldedFieldIsStoredInline(t *testing.T) {
 	assert.Len(outcome.State.GetStrings("log"), 3)
 }
 
+// TestStateRefs_EmptyForEachFoldsAReffedBase pins the empty-forEach fan-in path's two halves of a fold over a field
+// carried by ref: the base is resolved before the source's contribution folds onto it, and the folded value is
+// stored inline in the fan-in step's state. Without the first the contribution folds onto nothing; without the
+// second the fan-in's ref points at the source, whose changes hold the contribution alone. Either way the field
+// comes out holding the one contribution.
+func TestStateRefs_EmptyForEachFoldsAReffedBase(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	mux := NewHostMux()
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+
+	g := workflow.NewGraph("EmptyForEachRef")
+	for _, n := range []string{"Seed", "Src", "Work", "Join"} {
+		g.SetURL(n, "emptyref/"+n)
+	}
+	g.SetFanIn("Join")
+	g.SetReducer("log", workflow.ReducerAppend)
+	g.AddTransition("Seed", "Src")
+	g.AddTransitionForEach("Src", "Work", "items", "item")
+	g.AddTransitionChain("Work", "Join", workflow.End)
+	mux.HandleGraph("emptyref/wf", g)
+	mux.HandleTask("emptyref/Seed", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("emptyref/Src", func(ctx context.Context, f *workflow.Flow) error {
+		return f.Set("log", []string{"src"})
+	})
+	mux.HandleTask("emptyref/Work", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("emptyref/Join", func(ctx context.Context, f *workflow.Flow) error {
+		f.SetInt("joinSaw", len(f.GetStrings("log")))
+		return nil
+	})
+
+	// Large enough that Src carries the input by a ref to the entry step.
+	initial := make([]string, 3_000)
+	for i := range initial {
+		initial[i] = blob(64)
+	}
+	_, outcome, err := e.Run(ctx, "emptyref/wf", map[string]any{"log": initial, "items": []string{}}, nil)
+	if assert.NoError(err) {
+		assert.Equal(workflow.StatusCompleted, outcome.Status, outcome.Error)
+		assert.Equal(3_001, outcome.State.GetInt("joinSaw"))
+		assert.Len(outcome.State.GetStrings("log"), 3_001)
+	}
+	refs := stepColumn(t, e, "Src", "state_refs")
+	if assert.Len(refs, 1) {
+		assert.Contains(refs[0], "log", "the input was carried by a ref, or the test covers nothing")
+	}
+}
+
 // TestStateRefs_DeletesAndNullsOfCarriedFields pins how a write that removes or adds nothing meets a field carried
 // by ref. A branch's Del of a plain field the spawn carried must reach the fan-in as a delete - the delete is a
 // mark with no value, and the fan-in must count it as a member write or the spawn's ref is carried forward and

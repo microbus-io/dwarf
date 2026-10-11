@@ -309,9 +309,9 @@ func (f *Flow) SetDuration(name string, value time.Duration) { f.mustSet(name, v
 // conversation history.
 //
 // Overwriting a reduced field is not allowed inside a fan-out branch, at any depth: the branches are parallel,
-// and a reset in one of them has no defined meaning for the others. It returns an error there, and the step
-// fails if the call is made anyway. A field with no reducer can be overwritten anywhere. It also returns an
-// error if the value cannot be marshalled or name ends with OverwriteSuffix.
+// and a reset in one of them has no defined meaning for the others. There it returns an error and records
+// nothing, so a task that ignores the error keeps the field as it was. A field with no reducer can be overwritten
+// anywhere. It also returns an error if the value cannot be marshalled or name ends with OverwriteSuffix.
 func (f *Flow) Overwrite(name string, value any) error {
 	if r := f.reducers[name]; f.inBranch && r != "" && r != ReducerReplace {
 		return errors.New("workflow: cannot overwrite reduced field %q inside a fan-out branch", name)

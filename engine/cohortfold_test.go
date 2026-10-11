@@ -27,7 +27,8 @@ import (
 // TestCohortFold_ProjectionEqualsContributions pins, for every reducer, that an inner fan-in's projected part
 // folds into the outer cohort exactly as the inner cohort's contributions would have one by one. The outer
 // cohort has a member before the inner fan-in - the inner cohort's spawn - whose write folds into the base its
-// branches are handed.
+// branches are handed. Each case runs again with a sibling outer branch folded first: the sibling is not part of
+// the inner fan-in's base, so the outer accumulator the part folds onto differs from the base it was cut from.
 func TestCohortFold_ProjectionEqualsContributions(t *testing.T) {
 	t.Parallel()
 
@@ -55,77 +56,98 @@ func TestCohortFold_ProjectionEqualsContributions(t *testing.T) {
 		{workflow.ReducerMerge, nil, nil, []any{nil}, nil},
 		{workflow.ReducerAdd, nil, nil, []any{nil}, nil},
 	}
-	for _, tc := range cases {
-		t.Run(string(tc.reducer), func(t *testing.T) {
-			assert := testarossa.For(t)
-			reducers := map[string]workflow.Reducer{"f": tc.reducer}
-			state := func(v any, present bool) workflow.State {
-				s, _ := workflow.NewState()
-				if present {
-					assert.NoError(s.Set("f", v))
+	// A sibling branch's write per reducer. Under union it repeats an element the inner cohort adds.
+	siblings := map[workflow.Reducer]any{
+		workflow.ReducerAppend:  []any{"q"},
+		workflow.ReducerUnion:   []any{"a", "q"},
+		workflow.ReducerConcat:  "q",
+		workflow.ReducerMerge:   map[string]any{"a": 9, "q": 1},
+		workflow.ReducerAdd:     5,
+		workflow.ReducerMin:     6,
+		workflow.ReducerMax:     7,
+		workflow.ReducerAnd:     true,
+		workflow.ReducerOr:      false,
+		workflow.ReducerReplace: "q",
+	}
+	for _, withSibling := range []bool{false, true} {
+		for _, tc := range cases {
+			name := string(tc.reducer)
+			if withSibling {
+				name += "_after_a_sibling"
+			}
+			t.Run(name, func(t *testing.T) {
+				assert := testarossa.For(t)
+				reducers := map[string]workflow.Reducer{"f": tc.reducer}
+				state := func(v any, present bool) workflow.State {
+					s, _ := workflow.NewState()
+					if present {
+						assert.NoError(s.Set("f", v))
+					}
+					return s
 				}
-				return s
-			}
-			outerBase := state(tc.outer, tc.outer != nil)
-			spawn := workflow.ChangesOf(state(tc.spawn, tc.spawn != nil))
-			var inner []workflow.Changes
-			for _, v := range tc.inner {
-				inner = append(inner, workflow.ChangesOf(state(v, true))) // a nil is written, as Set(k, nil) writes it
-			}
-			own := workflow.ChangesOf(state(tc.own, tc.own != nil))
+				outerBase := state(tc.outer, tc.outer != nil)
+				sibling := workflow.ChangesOf(state(siblings[tc.reducer], withSibling))
+				spawn := workflow.ChangesOf(state(tc.spawn, tc.spawn != nil))
+				var inner []workflow.Changes
+				for _, v := range tc.inner {
+					inner = append(inner, workflow.ChangesOf(state(v, true))) // a nil is written, as Set(k, nil) writes it
+				}
+				own := workflow.ChangesOf(state(tc.own, tc.own != nil))
 
-			// One by one: the outer cohort folds the spawn, every inner contribution, then the fan-in's own write.
-			flat := outerBase.Clone()
-			assert.NoError(flat.ApplyAll(append(append([]workflow.Changes{spawn}, inner...), own), reducers))
+				// One by one: the outer cohort folds the sibling, the spawn, every inner contribution, then the fan-in's
+				// own write.
+				flat := outerBase.Clone()
+				assert.NoError(flat.ApplyAll(append(append([]workflow.Changes{sibling, spawn}, inner...), own), reducers))
 
-			// Nested: the inner fan-in folds its cohort onto the spawn's folded state and records what it added.
-			innerState := outerBase.Clone()
-			assert.NoError(innerState.Apply(spawn, reducers))
-			rec, err := foldCohort(innerState, inner, reducers, true)
-			assert.NoError(err)
-			// Its row - the state and its state_reduced column - is stored and read back before the outer fold
-			// reads it.
-			data, err := json.Marshal(innerState)
-			assert.NoError(err)
-			stored, err := workflow.NewState(data)
-			assert.NoError(err)
-			var storedRec map[string]*reduced
-			assert.NoError(json.Unmarshal(reducedColumn(rec), &storedRec))
-			part, err := projectReduced(stored, storedRec, reducers)
-			assert.NoError(err)
-			contribution, ok, err := memberContribution(part, own, reducers)
-			assert.NoError(err)
-			assert.True(ok)
-			nested := outerBase.Clone()
-			assert.NoError(nested.ApplyAll([]workflow.Changes{spawn, contribution}, reducers))
+				// Nested: the inner fan-in folds its cohort onto the spawn's folded state and records what it added.
+				innerState := outerBase.Clone()
+				assert.NoError(innerState.Apply(spawn, reducers))
+				rec, err := foldCohort(innerState, inner, reducers, true)
+				assert.NoError(err)
+				// Its row - the state and its state_reduced column - is stored and read back before the outer fold
+				// reads it.
+				data, err := json.Marshal(innerState)
+				assert.NoError(err)
+				stored, err := workflow.NewState(data)
+				assert.NoError(err)
+				var storedRec map[string]*reduced
+				assert.NoError(json.Unmarshal(reducedColumn(rec), &storedRec))
+				part, err := projectReduced(stored, storedRec, reducers)
+				assert.NoError(err)
+				contribution, ok, err := memberContribution(part, own, reducers)
+				assert.NoError(err)
+				assert.True(ok)
+				nested := outerBase.Clone()
+				assert.NoError(nested.ApplyAll([]workflow.Changes{sibling, spawn, contribution}, reducers))
 
-			var want, got any
-			_, err = flat.Get("f", &want)
-			assert.NoError(err)
-			_, err = nested.Get("f", &got)
-			assert.NoError(err)
-			assert.Equal(want, got)
-			assert.Equal(flat.Has("f"), nested.Has("f"))
+				var want, got any
+				_, err = flat.Get("f", &want)
+				assert.NoError(err)
+				_, err = nested.Get("f", &got)
+				assert.NoError(err)
+				assert.Equal(want, got)
+				assert.Equal(flat.Has("f"), nested.Has("f"))
 
-			// A Fork's leaf freezes the record against the original state and then replaces that state with an
-			// override. The frozen record, stored and read back, projects the same part from the new state.
-			frozen, err := frozenReduced(stored, storedRec, reducers)
-			assert.NoError(err)
-			var storedFrozen map[string]*reduced
-			assert.NoError(json.Unmarshal(reducedColumn(frozen), &storedFrozen))
-			overridden := state("override", true)
-			part, err = projectReduced(overridden, storedFrozen, reducers)
-			assert.NoError(err)
-			contribution, ok, err = memberContribution(part, own, reducers)
-			assert.NoError(err)
-			assert.True(ok)
-			forked := outerBase.Clone()
-			assert.NoError(forked.ApplyAll([]workflow.Changes{spawn, contribution}, reducers))
-			got = nil
-			_, err = forked.Get("f", &got)
-			assert.NoError(err)
-			assert.Equal(want, got)
-			assert.Equal(flat.Has("f"), forked.Has("f"))
-		})
+				// A Fork's leaf freezes the record against the original state and then replaces that state with an
+				// override. The frozen record, stored and read back, projects the same part from the new state.
+				frozen, err := frozenReduced(stored, storedRec, reducers)
+				assert.NoError(err)
+				var storedFrozen map[string]*reduced
+				assert.NoError(json.Unmarshal(reducedColumn(frozen), &storedFrozen))
+				overridden := state("override", true)
+				part, err = projectReduced(overridden, storedFrozen, reducers)
+				assert.NoError(err)
+				contribution, ok, err = memberContribution(part, own, reducers)
+				assert.NoError(err)
+				assert.True(ok)
+				forked := outerBase.Clone()
+				assert.NoError(forked.ApplyAll([]workflow.Changes{sibling, spawn, contribution}, reducers))
+				got = nil
+				_, err = forked.Get("f", &got)
+				assert.NoError(err)
+				assert.Equal(want, got)
+				assert.Equal(flat.Has("f"), forked.Has("f"))
+			})
+		}
 	}
 }

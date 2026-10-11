@@ -489,7 +489,7 @@ func TestState_RawFieldIsNotDecodedUntilRead(t *testing.T) {
 
 // TestState_RawTombstoneIsCleared pins hazard 3. A delete is recorded as a JSON null; held raw it is the
 // four bytes `null` rather than a Go nil, and a cleared-check that only knows Go nil lets a delete read
-// back from a column silently stop taking effect - DelNils leaves it and Has reports the field present.
+// back from a column silently stop taking effect - Apply keeps the field and Has reports it present.
 // Fails against isCleared(v) == (v == nil).
 func TestState_RawTombstoneIsCleared(t *testing.T) {
 	t.Parallel()

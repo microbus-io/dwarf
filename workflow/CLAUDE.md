@@ -96,8 +96,11 @@ may be deleted in a branch; it folds in branch order. Pinned by `fixtures/reduce
   failure), and the engine re-checks a returned result (`checkChanges`), because a remote host can send `x!!`.
   Graph-declared names cannot contain `!`. A plain state - input, a step's `state`, `final_state` - may still
   hold such a name as data.
-- **A row stored before the suffix reads as it was meant**: with no `!` key, every field is a contribution,
-  which is what a stored write was. If both spellings of a field appear, the overwrite wins.
+- **A row with no `!` key reads as all contributions.** That is right for every row written since writes to
+  a reduced field became contributions. It is WRONG for a v0.11.0 row: there a write to a reduced field outside
+  a fan-out branch was the field's whole value, so read as a contribution it counts the history twice. A v0.11.0
+  database therefore has to be drained of in-flight flows before the upgrade (release notes). If both spellings
+  of a field appear, the overwrite wins.
 - **Every reader of a `changes` column decodes it as `Changes`** (`changesOf` in the engine). A plain `State`
   decode reads `name!` as a field of its own. The state-refs anchor lookup is the one exception, reading the raw
   object and trying `field!` before `field`: an anchored field is one the step replaced, so it is under one of

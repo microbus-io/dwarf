@@ -1316,7 +1316,7 @@ fan-out's state means:
   the tail steps, and a completed sibling of a failed cohort *is* a tail (its `successor_id` was never pointed at a
   fan-in that never fired), so the merge base is a branch-local snapshot carrying that branch's bookkeeping. Without
   the strip, a failed fan-out's `final_state` reports an arbitrary branch's element as the flow's own. The cohorts
-  to strip are read from **the merge base tail's own lineage chain** (`cohortSpawnTasks` walks `lineage_id` upward,
+  to strip are read from **the merge base tail's own lineage chain** (`cohortSpawnChain` walks `lineage_id` upward,
   one PK lookup per nesting level), never from the graph at large.
 
 **The strip is scoped to the cohort being closed, and BOTH halves of that scoping are load-bearing.** Stripping
@@ -1361,10 +1361,12 @@ fan-in 15 plus their contributions) and `TestHandOff_ReducerErrorFailsTheStep`.
 - **A fold's result must be stored where it is held.** It exists in no row until a successor's state holds
   it, so `processStep`'s mints, `fireFanInDirect`'s mint and `fanInRow`'s (for the spawn's own folded
   fields) pass `foldedFields` as `inlineOnly`. A ref to the folding step would resolve to the delta alone.
-  Pinned by `TestStateRefs_FoldedFieldIsStoredInline` and `TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue`
-  (each fails with its inline set removed).
+  Pinned by `TestStateRefs_FoldedFieldIsStoredInline`, `TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue`
+  and, for `fireFanInDirect`, `TestStateRefs_EmptyForEachFoldsAReffedBase` (each fails with its inline set
+  removed).
 - **A folded field's BASE may be carried by a ref**, so the fan-in paths resolve it before folding:
-  `fanInRow` resolves every reduced field the spawn did not overwrite, `fireFanInDirect` the fields it folds.
+  `fanInRow` resolves every reduced field the spawn did not overwrite, `fireFanInDirect` the fields it folds
+  (`TestStateRefs_EmptyForEachFoldsAReffedBase` fails without the resolve).
 - **A null on a reduced field is dropped from a delta as it enters** (`dropIdentityNulls`: the task's result,
   `fireFanInDirect`'s and the spawn's stored changes). It contributes nothing, but the state-refs mint reads any
   key a delta writes as a rewrite: it would drop the carried ref and re-anchor the field at a row holding the
@@ -1409,9 +1411,9 @@ its own task's writes. Everything its cohort added sits in its `state`. So:
   Rejected: re-folding the subtree (N x M reads, N x M x O three deep); storing the cohort's delta beside the
   folded value (every contribution stored twice per level); a `replace` of the folded value (the second
   branch's replace wipes the first's).
-- **`state_reduced` belongs to its fan-in step alone.** Only `fanInRow` writes it (`successorRow.reducedJSON`);
-  every other row holds `{}`, and only `cohortParts` reads it. Fork's clone copies it with the row it describes.
-  Otherwise a step after the inner fan-in would carry a boundary that does not describe its own input.
+- **`state_reduced` belongs to its fan-in step alone.** Only `fanInRow` writes it (`successorRow.reducedJSON`)
+  and every other row holds `{}`, so a step after the inner fan-in never carries a boundary that does not
+  describe its own input. Only `cohortParts` reads it; Fork's clone copies it with the row it describes.
   Pinned by `TestChanges_ReducedStaysWithTheInnerFanIn`.
 - **A Fork leaf's record is FROZEN to `value`s** (`forkLeafReduced` -> `frozenReduced`): each field's part is
   projected from the ORIGINAL state and stored as a literal, before the overrides replace the state (a part the

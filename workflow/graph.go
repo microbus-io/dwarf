@@ -399,7 +399,10 @@ func (g *Graph) IsFanOutSource(name string) bool {
 	return false
 }
 
-// SetReducer sets the merge strategy for a state field during fan-in. The field must be a plain identifier -
+// SetReducer sets how writes to a state field combine. On a field with a reducer every write is a contribution,
+// combined with the field's value wherever one step hands its state to the next: a successor, a fan-in (in branch
+// order), the final state, and Continue. A task writes its contribution with Flow.Set; Flow.Overwrite and Flow.Del
+// replace instead. The field must be a plain identifier -
 // an ASCII letter or underscore, then ASCII letters, digits, or underscores - and the reducer one of the
 // Reducer constants, or Validate rejects the graph.
 func (g *Graph) SetReducer(field string, reducer Reducer) {
