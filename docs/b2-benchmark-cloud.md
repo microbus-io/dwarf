@@ -2,9 +2,9 @@
 
 > **Draft.** This page replaces [the current cloud benchmarks](benchmark-cloud.md) once its remaining runs
 > are in. Measured so far: database sizes from 8 to 32 vCPU with their engine pairings,
-> shards, replicas, one engine for several shards, the recommended shape, engine host sizes, and long
-> tasks. Still to run: workload shape and payload size, database volume, and failover. Each pending
-> section says so.
+> shards, replicas, one engine for several shards, the recommended shape, engine host sizes, long tasks,
+> and failover. Still to run: workload shape and payload size, and database volume. Each pending section
+> says so.
 
 > **For operators** sizing a deployment. This page answers how much one database serves, what adding
 > shards and engine replicas does, and what the engine itself costs. Every number was measured, and the
@@ -24,6 +24,8 @@
   32 vCPU database serve it at about a third of their CPU each, and either can carry it alone.
 - **Long tasks cost no throughput.** With 8-second tasks the engine delivered the full offered rate, and
   each step's hand-off added under 10 ms. 10,000 concurrent 60-second tasks ran on under one engine core.
+- **Failover takes about 40 seconds and loses nothing.** With every dispatcher killed at once, dispatch
+  paused for ~40 s, standby replicas took over, and every flow completed.
 - **Prefer more, smaller engine hosts.** One engine serves up to two shards at full speed; past that, add
   replicas. On a 48 vCPU host the engine spends up to 40% more CPU per step than on 8 or 16 vCPU hosts.
 
@@ -243,10 +245,39 @@ with a fixed number of flows in flight:
 
 No flow errors in any of the six runs.
 
+## Failover
+
+![Failover: dispatchers killed 1, 2, 3, then 4 at a time](b2-benchmark-cloud-failover.png)
+
+Two shards, each a 32 vCPU database, served by eight 8 vCPU engine replicas: four dispatchers (two per
+shard) and four standbys. The offered load is fixed at 2,800 flows/s, 28,000 steps/s, about 80% of what
+the two shards run saturated. At window minutes 2, 6, 10 and 14, 1, 2, 3 and then 4 of the current
+dispatchers are killed at once (`SIGKILL`), and each killed engine is restarted ~8 s later, as an
+orchestrator would. Admission stops at minute 18.
+
+| Kill | Dispatch lost | Throughput during the outage | Back to full dispatch |
+|---|---|---|---|
+| 1 dispatcher | half of shard 1 | 22,000–26,500 steps/s | ~30 s |
+| 2 dispatchers | all of shard 1 | 14,000–16,000 steps/s (shard 2 unaffected) | ~40 s |
+| 3 dispatchers | all of shard 1, half of shard 2 | 8,500–13,000 steps/s | ~40 s |
+| 4 dispatchers | every shard | 0 | ~40 s |
+
+- **No flow is lost.** All 3,334,099 flows completed. None failed, none was left running, and no
+  replica records were left behind.
+- **A dead engine is detected in about 40 seconds**, and a standby takes its place. A shard that keeps
+  one dispatcher keeps running at that dispatcher's share; a shard that loses both pauses until the
+  standbys take over.
+- **A restarted engine rejoins as a standby.** Dispatch roles go to the longest-running replicas, so a
+  loss on one shard can move roles on the other. Those moves cost no throughput.
+- **Flows keep arriving during an outage, and headroom sets the catch-up.** After each takeover the
+  fleet ran 30,000–33,000 steps/s, above the offered rate, until the backlog cleared: about 2 minutes
+  after losing one shard's dispatch. After losing all of them, ~107,000 flows were still waiting when
+  admission stopped 4 minutes later, and they completed within 3 minutes. A fleet with more headroom
+  catches up faster.
+
 ## Pending sections
 
 - **Workload shape and payload.** Linear, fan-out and scatter workflows; payloads from 0 to 1 MB per
   task; stored and write-ahead-log bytes per task byte.
 - **Database volume.** Throughput as the database grows to hundreds of millions of rows and hundreds
   of GB.
-- **Failover.** A fixed load while dispatchers are killed one at a time.
