@@ -309,13 +309,7 @@ func shardBudget(spec ShardSpec, rttMs float64, serverMax int, driver string) in
 //
 // The split rounds to the nearest connection rather than flooring: each dispatcher gains under half a
 // connection, so the shard exceeds its budget by at most slots/2.
-//
-// The setMaxOpenConns override (tests and benchmarks) wins and pins the pool to exactly that size: an exact
-// per-replica number, never divided.
-func shardPool(budget, override, slots int) (idle, open int) {
-	if override > 0 {
-		return override, override
-	}
+func shardPool(budget, slots int) (idle, open int) {
 	if slots <= 0 {
 		return readerIdleConns, readerOpenConns
 	}
@@ -365,17 +359,14 @@ func inWindow(rank, candidates, place, slots int) bool {
 //
 // Every doubt resolves toward dispatching, because the two errors are not symmetric: a replica wrongly
 // dispatching over-connects the shard by one share, while a shard nobody dispatches runs nothing at all.
-// A shard with no Sonar dispatches solo. Under a setMaxOpenConns override every replica dispatches - the
-// pools are pinned and never divided, so there is no budget for the ranking to protect - and the count is
-// every candidate, which is who drains the shard.
+// A shard with no Sonar dispatches solo.
 func (e *Engine) slotsOn(shard int) int {
 	return e.readRole(shard).slots
 }
 
 // roleReading is what one reading of this replica's standing on a shard implies: the slots slotsOn returns, and
-// how many pistons cycle the shard across the fleet - its dispatchers, or every candidate under a
-// setMaxOpenConns override, where every replica dispatches. Draining replicas hold a share but idle their
-// pistons, so they are not scanners.
+// how many pistons cycle the shard across the fleet - its dispatchers. Draining replicas hold a share but idle
+// their pistons, so they are not scanners.
 type roleReading struct {
 	slots, scanners int
 	// held is what a replica holding a pool for in-flight steps on a shard it no longer dispatches divides the
@@ -394,14 +385,11 @@ func (e *Engine) readRole(shard int) roleReading {
 		return roleReading{slots: 1, scanners: 1, held: 1}
 	}
 	st := s.Standing()
-	held := dispatcherSlots(st.Candidates) + st.Draining + 1
+	scanners := dispatcherSlots(st.Candidates)
+	held := scanners + st.Draining + 1
 	if e.zeroWorkers() {
 		return roleReading{held: held}
 	}
-	if e.maxOpenConns.Load() != 0 {
-		return roleReading{slots: st.Candidates, scanners: st.Candidates, held: held}
-	}
-	scanners := dispatcherSlots(st.Candidates)
 	if !st.InCut {
 		return roleReading{scanners: scanners, held: held}
 	}
@@ -554,19 +542,14 @@ var slowPoolPushDelay = 200 * time.Millisecond
 // No-ops when the engine is not running and when no shard's role has moved since the last application.
 // (Startup itself sizes the pools directly from what it read, not through here, and records the roles.)
 //
-// Under a setMaxOpenConns override the roles are still applied - every replica dispatches then, and one
-// that was a reader when the override landed must start - but the pinned pools are left alone:
-// setMaxOpenConns pushed them, and it owns everything that follows from them.
-//
 // The divisor is PER SHARD because the budget is: it belongs to the shard's database, so the replicas that
 // matter are the ones dispatching from THAT database. One shard's fleet changing must not re-push another's
 // unchanged sizes, and one shard's role staying put must not mask a change elsewhere.
 func (e *Engine) recomputePools() {
 	// poolsLock is held across the whole read-then-push, not just the dedupe: lastAppliedSlots keeps a no-op
 	// recompute from touching the pools, but it does not ORDER two live ones, so without this a push derived
-	// from an older reading could land after a newer one (over-connecting the fleet), and a concurrent
-	// setMaxOpenConns could have its pinned pools overwritten by derived ones. The poolsLock -> shardsLock
-	// order below cannot cycle (the roles are lock-free reads of the Sonars' published state).
+	// from an older reading could land after a newer one (over-connecting the fleet). The poolsLock ->
+	// shardsLock order below cannot cycle (the roles are lock-free reads of the Sonars' published state).
 	e.poolsLock.Lock()
 	defer e.poolsLock.Unlock()
 	if !e.started.Load() {
@@ -576,16 +559,13 @@ func (e *Engine) recomputePools() {
 	sizing := maps.Clone(e.shardSizing)
 	rtts := maps.Clone(e.shardRTTMs)
 	e.shardsLock.Unlock()
-	override := int(e.maxOpenConns.Load())
 	// Read every shard's role first and compare as a whole: a push is all-or-nothing, so a single shard
 	// moving is enough to re-derive, and nothing moving is the cheap common case.
 	observed := make(map[int]int, len(e.lastAppliedSlots))
 	roles := make(map[int]roleReading, len(e.lastAppliedSlots))
 	changed := false
 	for _, idx := range e.db.Indices() {
-		if override == 0 {
-			e.checkFleetFits(idx, sizing[idx])
-		}
+		e.checkFleetFits(idx, sizing[idx])
 		role := e.readRole(idx)
 		roles[idx] = role
 		slots := role.slots
@@ -626,9 +606,7 @@ func (e *Engine) recomputePools() {
 			e.applyRole(idx, false)
 		}
 		// Demoted with steps still in flight: hold a share sized like the peers' divisor until they finish,
-		// so their completions do not queue on the reader pool. Decided before the override split: an override
-		// dispatches every shard, so it lands as a release here, and a hold left recorded would keep the
-		// draining statement up and re-push on every tick for the life of the process.
+		// so their completions do not queue on the reader pool.
 		held := slots == 0 && e.inFlightOn(idx) > 0
 		divisor := slots
 		if held {
@@ -641,27 +619,21 @@ func (e *Engine) recomputePools() {
 			delete(e.heldDivisors, idx)
 			e.logger.Info("Shard pool hold released", "shard", idx)
 		}
-		if override != 0 {
-			if slots > 0 {
-				postSplitConns += override
-			}
-		} else {
-			idle, open := shardPool(sizing[idx].budget, 0, divisor)
-			// Through the shard set, which applies the test-mode cap; a push onto the shard's own handle would not.
-			e.db.SetShardPool(idx, idle, open)
-			if e.seams.Enabled() { // Enabled gates the assembled name and the boxed value in production
-				e.seams.Variable(engineseams.Join(engineseams.VariablePoolIdle, strconv.Itoa(idx)), idle)
-			}
-			// The turnstile follows the pool for the same reason the cache and the worker ceiling do: it
-			// orders access to the connections this replica actually holds, and the pool just changed. Resize
-			// moves the available count by the DELTA, so a turn held by an in-flight worker is never handed
-			// out twice.
-			if e.turnstiles != nil {
-				e.turnstiles.Resize(idx, turnstilePassesPerConn*open)
-			}
-			if slots > 0 {
-				postSplitConns += open
-			}
+		idle, open := shardPool(sizing[idx].budget, divisor)
+		// Through the shard set, which applies the test-mode cap; a push onto the shard's own handle would not.
+		e.db.SetShardPool(idx, idle, open)
+		if e.seams.Enabled() { // Enabled gates the assembled name and the boxed value in production
+			e.seams.Variable(engineseams.Join(engineseams.VariablePoolIdle, strconv.Itoa(idx)), idle)
+		}
+		// The turnstile follows the pool for the same reason the cache and the worker ceiling do: it
+		// orders access to the connections this replica actually holds, and the pool just changed. Resize
+		// moves the available count by the DELTA, so a turn held by an in-flight worker is never handed
+		// out twice.
+		if e.turnstiles != nil {
+			e.turnstiles.Resize(idx, turnstilePassesPerConn*open)
+		}
+		if slots > 0 {
+			postSplitConns += open
 		}
 		// After the push: the statement must never lower a peer's divisor while this replica still holds a
 		// share from outside the cut.
@@ -672,10 +644,6 @@ func (e *Engine) recomputePools() {
 			e.applyRole(idx, true)
 		}
 	}
-	// Under an override the pools were pushed by setMaxOpenConns, but what follows from WHICH shards this
-	// replica dispatches still moves with the roles: a replica promoted by the override landing was sized at
-	// Startup as a reader, with the minimum cache and no refill period on shards it now dispatches.
-	//
 	// The candidate cache follows the pool split, for the same reason the worker ceiling does: it is sized from
 	// what this replica can actually CLAIM, and only a dispatched shard's pool claims anything.
 	//
@@ -748,7 +716,6 @@ func (e *Engine) shardDriver(idx int) string {
 // recomputeWorkerCeilingWith is recomputeWorkerCeiling's core, taking the shard sizing, RTTs and roles as
 // already-read snapshots rather than re-acquiring shardsLock or re-reading the roles to fetch them.
 func (e *Engine) recomputeWorkerCeilingWith(ctx context.Context, sizing map[int]shardSizing, rtts map[int]float64, slotsBy map[int]int) {
-	override := int(e.maxOpenConns.Load())
 	ceiling := math.MaxInt
 	for idx, rttMs := range rtts {
 		// Each dispatched shard's own pool, since each is divided by its own dispatchers - and the worst
@@ -758,7 +725,7 @@ func (e *Engine) recomputeWorkerCeilingWith(ctx context.Context, sizing map[int]
 		if slots == 0 {
 			continue
 		}
-		_, open := shardPool(sizing[idx].budget, override, slots)
+		_, open := shardPool(sizing[idx].budget, slots)
 		ceiling = min(ceiling, workerCeiling(open, rttMs, e.shardDriver(idx)))
 	}
 	if ceiling == math.MaxInt {

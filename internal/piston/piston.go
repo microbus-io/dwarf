@@ -671,7 +671,8 @@ func (p *Piston) partitionPredicate(replicas, ordinal int, grace time.Duration) 
 		// working stealer at all (its designated one is itself broken), so that class gets ZERO service
 		// rather than slow service. Indefinite stranding is the exact failure stealing exists to prevent, so
 		// coverage wins over efficiency once the work has demonstrably been ignored by BOTH its owner and its
-		// neighbour. Pinned by TestStealTwoBadApplesflow.
+		// neighbour. With two classes the neighbour is everyone else and the tiers coincide; the second tier
+		// matters from three classes up. Pinned by TestPiston_StealReachesPastTheNeighbourAfterTwoGraces.
 		//
 		// The age is measured from not_before, NOT created_at. not_before is stamped NOW_UTC() at creation
 		// and pushed forward by flow.Sleep and every retry backoff, so this reads as "has been DUE for at

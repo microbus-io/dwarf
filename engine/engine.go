@@ -107,7 +107,6 @@ type Engine struct {
 	workersSet             atomic.Bool // SetWorkers was called: skip the derived default
 	timeBudgetMs           atomic.Int64
 	defaultPriority        atomic.Int32
-	maxOpenConns           atomic.Int32 // test/bench override: exact per-shard pool size; 0 = derive the shard's budget
 	refillIntervalOverride atomic.Int64 // bench override (nanoseconds): pins every piston's cycle period; <=0 = derive
 	skipBacklogGauges      atomic.Bool  // bench override: metrics collection skips observePendingByBand
 
@@ -187,15 +186,12 @@ type Engine struct {
 	// fleetOverLimit is whether checkFleetFits last found the fleet over a shard's server connection limit.
 	// Owned by poolsLock.
 	fleetOverLimit map[int]bool
-	// poolsLock serializes every APPLICATION of a pool size - the derived recompute (recomputePools) and
-	// the live override (setMaxOpenConns). Deduping the recompute on lastAppliedSlots is not enough: two
-	// registry readings microseconds apart during a rolling deploy each derive a different split, and nothing
-	// orders their pushes, so the wider-share sizes can land AFTER the narrower ones and leave every replica
-	// over-connecting the shard - sticky until the next fleet change. The override races the same way, and worse: recomputePools
-	// reads maxOpenConns and then pushes, so a setMaxOpenConns landing in that window has its PINNED pools
-	// silently overwritten by derived ones. Holding this across read-of-roles/override + push makes the last
-	// writer win with the value it actually read. Lock order: poolsLock -> shardsLock (the Sonars' readings
-	// are lock-free loads).
+	// poolsLock serializes every APPLICATION of a pool size (recomputePools). Deduping the recompute on
+	// lastAppliedSlots is not enough: two registry readings microseconds apart during a rolling deploy each
+	// derive a different split, and nothing orders their pushes, so the wider-share sizes can land AFTER the
+	// narrower ones and leave every replica over-connecting the shard - sticky until the next fleet change.
+	// Holding this across read-of-roles + push makes the last writer win with the value it actually read.
+	// Lock order: poolsLock -> shardsLock (the Sonars' readings are lock-free loads).
 	poolsLock sync.Mutex
 
 	// Database
@@ -532,42 +528,6 @@ func (e *Engine) SetDefaultPriority(p int) error {
 	return nil
 }
 
-// setMaxOpenConns is the test and benchmark override that pins every shard's connection pool to exactly n
-// open (and idle) connections, replacing the pool derived from each shard's budget. Reached through
-// internal/engineseams, never by a host: a pinned pool cannot follow the database's size or distance, so the
-// engine offers no production way to set one. Live: pushes to every open shard immediately.
-//
-// With the override set, every replica dispatches every shard: the derived pools are what bound each
-// shard's connections to a few dispatching replicas, and a pinned pool replaces them.
-func (e *Engine) setMaxOpenConns(n int) error {
-	if n < 1 {
-		return errors.New("max open connections must be >= 1", http.StatusBadRequest)
-	}
-	e.poolsLock.Lock()
-	defer e.poolsLock.Unlock()
-	e.maxOpenConns.Store(int32(n))
-	e.db.SetMaxIdleConns(n)
-	e.db.SetMaxOpenConns(n)
-	// The worker ceiling is a function of the pool - it bounds how fast a completion storm can drain
-	// through M connections - so a live pool change must re-derive it. Skipping this leaves the ceiling
-	// at the size computed for the OLD pool: an override that shrinks the pool would keep a bound many times too permissive on exactly the storm the ceiling exists to contain.
-	// recomputePools also re-derives it under an override, but only when a role moves, so a new pin with an
-	// unchanged fleet reaches the ceiling only through here.
-	if e.started.Load() {
-		e.recomputeWorkerCeiling(e.lifetimeCtx)
-		// The turnstiles are a function of the pool too, and for the same reason this path re-derives the
-		// ceiling: recomputePools pushes no pools under an override and runs only when a shard's slots move,
-		// so a pin on an unchanged fleet reaches the turnstiles through here or not at all. The override is
-		// an exact per-replica number and is never divided, so every shard takes the same count.
-		if e.turnstiles != nil {
-			for _, idx := range e.db.Indices() {
-				e.turnstiles.Resize(idx, turnstilePassesPerConn*n)
-			}
-		}
-	}
-	return nil
-}
-
 // setRefillInterval is the benchmark override that PINS every piston's cycle period to d, replacing the
 // value the engine derives from the cache capacity and the pool (deriveRefillInterval); d <= 0 restores derivation. Reached
 // from the bench through internal/engineseams, never by a host.
@@ -677,9 +637,8 @@ func (e *Engine) Startup(ctx context.Context) error {
 	if e.host == nil {
 		return errors.New("host is required", http.StatusBadRequest)
 	}
-	// Per-shard pool sizes: the setMaxOpenConns override pins every pool; otherwise each shard's budget
-	// derives from its own spec, distance and server limit (shardBudget), split across the
-	// replicas that DISPATCH that shard, while every other replica holds a small reader pool there. Which
+	// Per-shard pool sizes: each shard's budget derives from its own spec, distance and server limit
+	// (shardBudget), split across the replicas that DISPATCH that shard, while every other replica holds a small reader pool there. Which
 	// replicas dispatch comes from the shared dwarf_peers registry, which needs open connections to read -
 	// so the shards first open at a small BOOTSTRAP pool (enough to register + probe + read the fleet,
 	// which is all any pre-dispatch work needs), then, once the roles are known, every pool is resized to
@@ -688,7 +647,6 @@ func (e *Engine) Startup(ctx context.Context) error {
 	// one read yields the converged count - no partial-count over-connect. Lazy fill means the bootstrap
 	// ceiling barely materializes (a handful of connections), so the whole fleet's startup stays well
 	// under any server's connection limit.
-	override := int(e.maxOpenConns.Load())
 	e.shardsLock.Lock()
 	shards := make(map[int]database.ShardConfig, len(e.shardSpecs))
 	for idx, spec := range e.shardSpecs {
@@ -720,11 +678,10 @@ func (e *Engine) Startup(ctx context.Context) error {
 	}
 
 	// Measure the RTT to each shard (a few SELECT 1s on connections just opened) and hold it: the worker
-	// ceiling is a function of the shard's POOL, which changes when the fleet changes or an override
-	// lands, so the ceiling is re-derived on those events (recomputeWorkerCeiling) rather than frozen
-	// here. The map is published under shardsLock because its readers are the reconcile loop and the live
-	// setMaxOpenConns, and a Shutdown/Startup restart reassigns it - an unsynchronized map read/write is a
-	// fatal throw, not a recoverable panic.
+	// ceiling is a function of the shard's POOL, which changes when the fleet changes, so the ceiling is
+	// re-derived on that event (recomputeWorkerCeiling) rather than frozen here. The map is published under
+	// shardsLock because its reader is the reconcile loop, and a Shutdown/Startup restart reassigns it - an
+	// unsynchronized map read/write is a fatal throw, not a recoverable panic.
 	//
 	// The budget takes the RAW probe (an unprobed shard takes the near budget), while the worker ceiling
 	// takes the same-zone fallback - each the safe direction for what it sizes.
@@ -794,7 +751,7 @@ func (e *Engine) Startup(ctx context.Context) error {
 		// gets the reader pool and a piston that initRuntime starts idle.
 		slots := e.slotsOn(idx)
 		e.dispatchFlag(idx).Store(slots > 0)
-		idle, open := shardPool(sizing[idx].budget, override, slots)
+		idle, open := shardPool(sizing[idx].budget, slots)
 		// Through the shard set, which applies the test-mode cap; a push onto the shard's own handle would not.
 		e.db.SetShardPool(idx, idle, open)
 		if e.seams.Enabled() { // Enabled gates the assembled name and the boxed value in production

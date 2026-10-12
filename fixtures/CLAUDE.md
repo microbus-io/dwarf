@@ -86,8 +86,8 @@ cooperate.
 - **A per-shard pool CAP.** In test mode each shard's pool is clamped to `defaultTestConnCap` (**4**, `engine.go`)
   instead of the derived budget (8 on SQLite; elsewhere 250 ramping to 500 with RTT, clamped to half the server's `max_connections`). The engine still *derives* that budget and sizes
   its worker ceiling / refill floor from it (those read the engine's notion, not the physical pool), but the
-  physical pool is clamped at open and on every push through the shard set (`ShardSet.SetMaxOpenConns`,
-  `SetShardPool`, in `internal/database/database.go`). **Push pool sizes through the shard set, never onto a
+  physical pool is clamped at open and on every push through the shard set (`ShardSet.SetShardPool`, in
+  `internal/database/database.go`). **Push pool sizes through the shard set, never onto a
   shard's own `*sequel.DB`**: a direct push bypasses the cap, and with a derived budget of up to 500 per shard per
   engine (half the server's `max_connections` on a small one) that exhausts a test server's connections. Four connections is plenty for a fixture; the cap only
   bounds fan-out concurrency, which SQLite serializes anyway.

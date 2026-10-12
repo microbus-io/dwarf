@@ -26,7 +26,7 @@ limitations under the License.
 // Example (RDS PostgreSQL):
 //
 //	go run ./bench -dsn 'postgres://user:pass@db.xyz.us-east-1.rds.amazonaws.com:5432/dwarf' \
-//	  -workload linear -workers 64 -max-open-conns 30 -concurrency 8,16,32,64,128,256 \
+//	  -workload linear -workers 64 -max-connections 30 -concurrency 8,16,32,64,128,256 \
 //	  -window 5m -warmup 60s -label baseline
 package main
 
@@ -95,10 +95,7 @@ func run() error {
 		// Placement is even by default, so one slow shard holds a multi-shard saturated run to N x its own rate:
 		// its flows stay in flight longest and fill the shared -max-outstanding cap. Weighting it down, from the
 		// per-shard rates the run summary prints, is the operator's lever and the bench's.
-		weightsFlag = flag.String("weights", "", "ShardSpec.Weight per shard as comma-separated N=w (e.g. '1=1,2=0.8'); unlisted shards weigh 1")
-		// engineseams.SetMaxOpenConns pins every shard's pool to exactly this size, which is what a
-		// pool-size sweep needs.
-		maxOpenConns     = flag.Int("max-open-conns", 0, "engine per-shard pool size, per replica and never divided (0 = derived; else pinned exactly)")
+		weightsFlag      = flag.String("weights", "", "ShardSpec.Weight per shard as comma-separated N=w (e.g. '1=1,2=0.8'); unlisted shards weigh 1")
 		refillIntervalMs = flag.Int("refill-interval-ms", 0, "pin each shard's refill cycle period in ms (0 = derived from the pool); the scan-rate sweep knob")
 		openLoop         = flag.Bool("open-loop", false, "open-loop load: creators fire flows without awaiting completion, so the backlog grows past the goroutine count (closed-loop caps in-flight flows at -concurrency, keeping a linear backlog inside the cache and never stressing the refiller)")
 		maxOutstanding   = flag.Int("max-outstanding", 100000, "open-loop only: cap on in-flight (created minus ended) flows, the backpressure bound that keeps the backlog from OOMing the DB")
@@ -118,7 +115,7 @@ func run() error {
 		replicaWorkers  = flag.String("replica-workers", "", "comma-separated per-replica worker counts overriding -workers (e.g. '0,4' = replica 1 awaits only)")
 		volume          = flag.Int("volume", 0, "volume mode: fill to this many dwarf_steps rows with NO deletion, probing the read paths at checkpoints, then measure Purge/reaper throughput (0 = disabled)")
 		volumeCheckpt   = flag.Int("volume-checkpoint", 0, "probe every this many step rows during -volume (0 = one fifth of the target)")
-		printPool       = flag.Float64("print-pool", 0, "print the budget the engine derives for one PostgreSQL shard at this round-trip time in ms against -server-max-connections, and exit - what a driver script pins with -max-open-conns, so every arm runs the pool that ships")
+		printPool       = flag.Float64("print-pool", 0, "print the budget the engine derives for one PostgreSQL shard at this round-trip time in ms against -server-max-connections, and exit - what a driver script pins with -max-connections, so every arm runs the pool that ships")
 		serverMaxConns  = flag.Int("server-max-connections", 0, "-print-pool only: the server's max_connections the budget is clamped to half of (0 = unknown, no clamp)")
 		volumeProbeWL   = flag.String("volume-probe-workload", "linear", "-volume-probe only: the workload the probe windows run, which need not be the fill's - a bytes-axis fill is `state` while its probes measure `linear`")
 		volumeProbe     = flag.Duration("volume-probe", 0, "-volume only: at each checkpoint (and on the empty database first), pause the fill for an open-loop saturated window of this length and then one at 2/3 of its flows/s, at the pinned pool (0 = no throughput probe)")
@@ -258,9 +255,6 @@ func run() error {
 		if replicaWorkerCount > 0 || perReplicaWorkers[i] == 0 {
 			setters = append(setters, eng.SetWorkers(replicaWorkerCount))
 		}
-		if *maxOpenConns > 0 {
-			setters = append(setters, engineseams.SetMaxOpenConns(eng, *maxOpenConns))
-		}
 		if *refillIntervalMs > 0 {
 			setters = append(setters, engineseams.SetRefillInterval(eng, time.Duration(*refillIntervalMs)*time.Millisecond))
 		}
@@ -328,7 +322,6 @@ func run() error {
 			"workers":        *workers,
 			"maxConnections": *maxConns,
 			"weights":        weights,
-			"maxOpenConns":   *maxOpenConns,
 			"replicas":       *replicas,
 			"replicaWorkers": *replicaWorkers,
 			"shards":         dsns.redacted(),

@@ -48,7 +48,6 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
-	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/workflow"
 )
 
@@ -67,12 +66,11 @@ const benchConcurrency = 32
 // benchWorkers is the engine worker-pool size, fixed for reproducibility across dialects/shard counts.
 const benchWorkers = 32
 
-// benchMaxOpenConns is the per-shard connection pool, pinned exactly via engineseams.SetMaxOpenConns. The test default
-// (4) is sized to keep many parallel CI test engines under a server's connection cap; a single benchmark
-// engine wants far more or the pool, not the engine, is what's measured. 30 per shard keeps
-// shards * pool under PostgreSQL's default max_connections=100 at 3 co-located shards (≈90). MySQL (151)
-// and SQL Server (~32k) have more headroom.
-const benchMaxOpenConns = 30
+// benchMaxConnections is each shard's declared connection budget (ShardSpec.MaxConnections), so the engine's
+// derived sizing does not move with its RTT probe from run to run. The engine runs in test mode, so the
+// physical pool is clamped to the test-mode cap (4); the budget sizes what the engine derives from it - the
+// worker ceiling, the cache and the refill period.
+const benchMaxConnections = 30
 
 // benchChainLen is the number of task executions per flow (A -> B -> C -> ... -> END). steps/sec derives from
 // flows/sec times this, so a graph change stays reflected in the reported step rate.
@@ -82,10 +80,11 @@ const benchChainLen = 3
 // or in-memory SQLite when unset), wired to a linear chain graph of benchChainLen trivial tasks. It silences
 // the engine's logger (NewEngineUnderTest defaults to stderr at Error, and per-step logging would dominate
 // the timing) and registers cleanup via b.Cleanup. Returns the engine and the workflow URL to Run.
-// setShards registers numShards test-mode shards (empty DSNs resolve per shard at Startup).
+// setShards registers numShards test-mode shards, each declaring benchMaxConnections (empty DSNs resolve per
+// shard at Startup).
 func setShards(eng *engine.Engine, numShards int) error {
 	for i := 1; i <= numShards; i++ {
-		err := eng.SetShard(engine.ShardSpec{Index: i})
+		err := eng.SetShard(engine.ShardSpec{Index: i, MaxConnections: benchMaxConnections})
 		if err != nil {
 			return err
 		}
@@ -126,9 +125,6 @@ func benchEngine(b *testing.B, numShards int) (*engine.Engine, string) {
 		b.Fatal(err)
 	}
 	if err := eng.SetWorkers(benchWorkers); err != nil {
-		b.Fatal(err)
-	}
-	if err := engineseams.SetMaxOpenConns(eng, benchMaxOpenConns); err != nil {
 		b.Fatal(err)
 	}
 	if err := setShards(eng, numShards); err != nil {

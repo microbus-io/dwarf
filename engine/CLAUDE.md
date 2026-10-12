@@ -124,24 +124,23 @@ every setter can surface an error). They split into two groups by whether the kn
 engine:
 
 - **Live** (take effect immediately, callable any time): `SetTimeBudget`, `SetDefaultPriority`, and the
-  test/bench overrides reached through `internal/engineseams` - `setMaxOpenConns` (pins every shard's pool
-  exactly, per replica) and `setRefillInterval`. The production lever is construction-time, not live:
-  `ShardSpec.MaxConnections` declares a shard's fleet-wide budget (see "Connection pool sizing").
+  bench override `setRefillInterval`, reached through `internal/engineseams`. The pool lever is
+  construction-time, not live: `ShardSpec.MaxConnections` declares a shard's fleet-wide budget (see "Connection
+  pool sizing"). There is deliberately no seam that pins a per-replica pool: such a pool is never divided and
+  makes every replica dispatch every shard, so a test or bench using one exercises a fleet shape no deployment
+  can reach. Pin through `MaxConnections` instead (identical to a per-replica pin at R=1).
   `SetTimeBudget`/`SetDefaultPriority` are read fresh at each `Create` (an
   existing flow keeps the budget/priority frozen at its own `Create`). Which replicas dispatch a shard, and so how its
   derived budget divides, is NOT a setter - it is **read** live from the shared `dwarf_peers` registry (see "Peer
   discovery" and "Dispatchers" below), and `recomputePools` pushes each shard's recomputed size through
-  `ShardSet.SetShardPool` (hot/atomic, and it applies the test-mode cap);
-  the uniform override rides `ShardSet.SetMaxIdleConns`/`SetMaxOpenConns`. **The derived *worker* ceiling follows the
+  `ShardSet.SetShardPool` (hot/atomic, and it applies the test-mode cap). **The derived *worker* ceiling follows the
   pools, and EVERY path that changes a pool must re-derive it** (`recomputeWorkerCeiling`): the ceiling encodes how
   fast a completion storm drains through `M` connections, so a shrunken pool must never leave a stale, too-high bound
-  on exactly the storm the ceiling exists to contain. There are two such paths and both call it - `recomputePools`
-  (a fleet change) and `setMaxOpenConns` (the live override). The override path is not optional: `recomputePools`
-  runs its derivations only when some shard's dispatcher slots moved, so a new pin landing on an unchanged fleet
-  reaches the ceiling through `setMaxOpenConns` or not at all. Pinned by `TestPoolSizing_CeilingFollowsLivePoolChange`.
+  on exactly the storm the ceiling exists to contain. Startup derives it, and `recomputePools` (a fleet change) is
+  the one live path. Pinned by `TestPoolSizing_CeilingFollowsLivePoolChange`.
   `shardRTTMs` (the Startup RTT probes the ceiling is derived from) is published and read **under `shardsLock`** -
-  its readers are the reconcile loop (`recomputePools`, `recomputeWorkerCeiling`) and this live setter, while `Startup` reassigns it on a restart, and an
-  unsynchronized map read/write is a *fatal throw*, not a recoverable panic.
+  its reader is the reconcile loop (`recomputePools`, `recomputeWorkerCeiling`), while `Startup` reassigns it on a
+  restart, and an unsynchronized map read/write is a *fatal throw*, not a recoverable panic.
 - **Construction-time only** (return an error if called after `Startup`): `SetShard(ShardSpec)`, `SetWorkers`,
   `SetHost`, `SetLogger`, `SetMeterProvider`, `SetTracerProvider` (plus the `SetDebugLogger` convenience). Applying
   these on a running engine would mean opening live connections and mutating a shard set that flow keys already
@@ -2664,8 +2663,7 @@ Startup into `shardSizing`):
   from outside the cut (see "Dispatchers"), and every other replica holds the reader pool (1 idle, 2 open).
   The knee belongs to the shard's server, not to one replica. Which replicas dispatch is
   never declared: the engine reads it from the shared `dwarf_peers` registry (see "Dispatchers"), and every
-  role change pushes recomputed pools to the open shards immediately. The `setMaxOpenConns` override is a
-  per-replica exact number and is never divided.
+  role change pushes recomputed pools to the open shards immediately.
 
 **Peer discovery (`peers.go` + `internal/peers`).** Everything the engine knows about its fleet comes from
 the shared **`dwarf_peers`** registry, NOT from the host transport, and it comes **per shard**: one
@@ -2704,7 +2702,7 @@ reaches the registry independent of how long a cycle takes.
 and calls `recomputePools`, which early-returns when no shard's count moved. It is a reconcile loop rather than a
 change notification, and the distinction is load-bearing: its invariant is "the applied pool sizes match the
 currently observed fleet", a job that exists whether or not anything announces a change, and it absorbs
-drift no notification could express - an override landing, a push that errored, a count moving while a
+drift no notification could express - a push that errored, a count moving while a
 previous push was in flight. An edge would have to be fired from every path that can move a published value
 (a confirmed fall, a recovery from blindness, a registration repair, a prune); missing one would leave the
 derived sizes stale forever with no backstop, and it would run pool policy on a Sonar's goroutine, coupling
@@ -2776,24 +2774,17 @@ Design posture: a **lookup, not a control loop** (the counts are exact and discr
 independent of the actuation - a shrunk pool still beats), and they are **tuning** numbers (a wrong count
 mis-sizes pools, corrupts nothing).
 
-**Every APPLICATION of a pool size is serialized under `poolsLock`** - both writers: the derived
-recompute (`recomputePools`, driven by the reconcile loop) and the live
-override (`setMaxOpenConns`). The `lastAppliedSlots` dedupe skips a no-op recompute but does **not order two live
+**Every APPLICATION of a pool size is serialized under `poolsLock`** (`recomputePools`, driven by the reconcile
+loop). The `lastAppliedSlots` dedupe skips a no-op recompute but does **not order two live
 ones**: two readings microseconds apart during a rolling deploy each derive a different split, and with nothing
 serializing read through push, the **half-budget sizes can land AFTER the third-budget sizes** - every replica
 then holds a pool sized for a fleet smaller than the one it is in, over-connecting the shard's server, and it is
-*sticky* (the next recompute sees the role unchanged and skips). The override races the same way and worse:
-`recomputePools` reads `maxOpenConns` and only *then* pushes, so a `setMaxOpenConns` landing in that window has
-its **pinned pools silently overwritten by derived ones** - the operator's explicit pin evaporates. With the
-lock spanning read through push, whichever writer goes second sees a settled world (the override applies last,
-or the recompute sees the override and leaves the pools alone). Lock order:
+*sticky* (the next recompute sees the role unchanged and skips). With the lock spanning read through push, the
+second recompute sees a settled world. Lock order:
 `poolsLock` -> `shardsLock` (the counts are lock-free reads of the Sonars' published state, so they drop out of the
-order). Pinned by
-`TestPoolSizing_ConcurrentRecomputeAppliesLatestR` and
-`TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride` (both drive the interleaving with the
+order). Pinned by `TestPoolSizing_ConcurrentRecomputeAppliesLatestR`, which drives the interleaving with the
 `slowPoolPush` seam rather than racing for it - staging the two counts through the registry itself and waiting for
-each to be OBSERVED before the recompute that must read it; without the lock they measure 48 instead of 24, and a
-pinned 7 turning into 24).
+each to be OBSERVED before the recompute that must read it; without the lock it measures 48 instead of 24.
 
 **Dispatchers: a shard's budget divides by a bounded count, not by the fleet (`poolsize.go`).** Dividing the
 budget across every registered replica has a floor, and the floor is what breaks: once `budget/R` drops below
@@ -2828,6 +2819,18 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
   TALLY loop is paced by the slot count for the same reason (`recomputeRefillIntervalsWith`), keeping the
   shard scanned as often as one dispatcher would; the supply loop is not, since a fetch walks rows in
   proportion to what it takes and a longer period does not shrink that.
+  **Consequence: two SLOW dispatchers on one shard are not compensated for, and that is accepted.** A slow
+  replica keeps beating and turning its piston, so it keeps its slot, and a reader scans nothing there. With
+  one slow dispatcher the other steals its class; with both slow, nobody healthy looks at the shard and it
+  runs at their pace until one leaves the cut. A restart does that only if it is GRACEFUL (`leaveFleet`
+  deletes the row; a crash under a pinned `SetEngineID` keeps it) AND a third working replica exists to
+  take the slot - `joined_at` is never rewritten, so with exactly two candidates the restarted one ranks
+  straight back in. Replacing the slow host is the general fix. It is degraded, not
+  stranded - each still serves its own class - and it takes two independent replica faults on the same
+  pair, while a third dispatcher's refill cost is paid on every shard, all the time. A shared cause (a slow
+  database, a bad build) slows every replica and no dispatcher count helps. **Do not demote a replica from
+  the cut on a measured slowness:** throughput or steal counts move with the load placed on it, the
+  self-referential loop the rate valve and load-steered placement failed on.
 - **Which replicas: a window over one shared order** (`internal/peers/CLAUDE.md`, "Who dispatches"). Every
   shard orders its candidates by join time (oldest first), the same on every shard, and the shard at place `p` among the sorted
   indices takes the `X` at positions `[p*X, p*X+X) mod C` (`inWindow`, handed to each Sonar as its cut in
@@ -2870,14 +2873,8 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
   routing API that makes both rare. None of it is built; the one held connection is what makes all of it
   unnecessary. The burst to two keeps a `Create` transaction from queueing behind an `Await` poll, and is
   safe because no code path holds one pooled connection while acquiring a second from the same pool.
-- **`setMaxOpenConns` turns the ranking off**: every replica dispatches every shard (`slotsOn` returns the
-  candidate count) and the pinned pools are never divided - an operator pinning pools, typically behind an external
-  pooler, has taken the budget out of the engine's hands. `recomputePools` still applies roles under the
-  override, so a reader when the override lands starts dispatching, and it re-derives the cache, the refill
-  periods and the worker ceiling from the pinned pool - a replica sized at Startup as a reader would
-  otherwise keep a reader's cache on shards it now dispatches. It leaves the pools themselves to
-  `setMaxOpenConns`. The derivations all take the one role reading `recomputePools` made rather than re-read
-  the roles, so a reading landing mid-pass cannot give them different answers.
+- **`recomputePools`' derivations all take its one role reading** rather than re-read the roles, so a reading
+  landing mid-pass cannot give the cache, the refill periods and the worker ceiling different answers.
 - **An await-only replica (`SetWorkers(0)`) registers `working=0`**, so it is counted in the fleet (its reader
   pools are real connections, and the fleet check prices them) but takes no rank. Registered as working, it
   could win a slot it will never serve - leaving a shard with fewer working dispatchers than `X`, or none.
@@ -2948,13 +2945,9 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
     handoff instantaneous: until every peer has read the statement the shard runs over by about the held
     share, for up to about two scan intervals - an accepted residual whose bound, and the alternative not to
     build, are in `internal/peers/CLAUDE.md` under `Draining`.
-  - A re-promotion while held clears the hold and takes the dispatcher pool directly. A `setMaxOpenConns`
-    override landing while held releases the hold too - the hold is decided before the override branch -
-    since the override pins every pool and leaves no budget to divide; left recorded, the hold would keep
-    the statement up for the life of the process.
+  - A re-promotion while held clears the hold and takes the dispatcher pool directly.
   Pinned by `TestDispatchers_DemotedReplicaHoldsItsPoolUntilInFlightStepsFinish`,
-  `TestDispatchers_PromotionWhileHeldClearsTheHold`, `TestDispatchers_OverrideReleasesAHold` and
-  `TestDispatchers_DrainingReplicasDivideTheBudget`.
+  `TestDispatchers_PromotionWhileHeldClearsTheHold` and `TestDispatchers_DrainingReplicasDivideTheBudget`.
 - **Known residual: a crashed dispatcher holds its slot for the fresh window (40s).** The rank is drawn from
   rows still counted by `Replicas`, so a dispatcher that dies without shutting down keeps its rank until its
   row ages out, and the shard runs on `X-1` meanwhile. With `X >= 2` that is slower, not stopped; **all `X`
@@ -2977,8 +2970,6 @@ observe the change).
   The asymmetry is what makes the derived default safe to leave alone: under-connecting costs throughput but
   stays healthy (excess load queues client-side), while the half clamp keeps the default off the server's
   limit.
-- **`setMaxOpenConns` is the test/bench override** (through `internal/engineseams`): pins every shard's pool
-  to exactly n (idle = open = n), replacing derivation, for tests and pool-size sweeps.
 - Heterogeneous fleets get heterogeneous pools: sizing is per shard (`database.ShardConfig`), resolved at
   `Startup` from each spec.
 **Worker sizing: the lease-margin ceiling, with a grow-on-demand pool (`poolsize.go`, `engine.go`).**
@@ -3223,9 +3214,7 @@ letting it through merely costs ordering. The consequence to hold in mind is tha
 therefore **silent**, visible only as ordering that is not happening.
 
 **Every path that changes a pool must re-size the turnstiles**, the same standing rule the worker ceiling,
-the cache and the refill interval obey: `Startup`, `recomputePools`, and `setMaxOpenConns`. The last is not
-optional: under an override `recomputePools` pushes no pool sizes and re-derives only when a shard's dispatcher
-slots move, so a new pin on an unchanged fleet reaches the turnstiles through `setMaxOpenConns` alone. `Resize`
+the cache and the refill interval obey: `Startup` and `recomputePools`. `Resize`
 moves the available count by the **delta**, never to the new ceiling, or an in-flight holder's turn would be
 handed out twice.
 
@@ -3267,17 +3256,10 @@ are a database-layer mechanism — see `internal/database/CLAUDE.md`.
 **Live re-sizing.** Derived sizing **is** live. `recomputePools` re-derives each shard's pool from the observed
 replica count and pushes it to every open shard through `ShardSet.SetShardPool`, `Resize`s the candidate cache, and
 re-derives the worker ceiling and the refill cadences - on every reconcile tick that finds a shard's dispatcher
-slots moved. The `setMaxOpenConns` override *pins* every shard's pool and suppresses only the pool **push**:
-`recomputePools` still applies roles under it and, when a shard's slots move, re-derives the cache, the refill
-cadences (which read the pinned pool) and the worker ceiling from the pinned size. What it does not do is react to
-the pin itself - a slot change is its only trigger. So every quantity derived from the pool must also be re-derived
-by `setMaxOpenConns`, which covers the worker ceiling and the turnstiles but **not the cache or the refill
-cadences**: a live pin on an unchanged fleet leaves both sized for the previous pool until the next slot change.
-Only a test pinning a running engine reaches that gap; the bench pins before `Startup`, which derives everything
-from the pin.
+slots moved.
 See the live-vs-derived split under "Configuration" and "Dispatchers", and the load-bearing rule there - "EVERY
 path that changes a pool must re-derive it," and "the cache follows the pool split": a new pool-derived quantity
-must be wired into `recomputePools` AND `setMaxOpenConns`, not merely computed once at `Startup`.
+must be wired into `recomputePools`, not merely computed once at `Startup`.
 
 ### Flow Scheduling (priority / fairness)
 

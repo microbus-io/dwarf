@@ -133,7 +133,6 @@ func (e *Engine) recomputeRefillIntervalsWith(sizing map[int]shardSizing, roles 
 	// worker term exists to hold, i.e. straight back into the over-supply regime it was added to close.
 	dispatchers := max(1, share/2)
 	override := time.Duration(e.refillIntervalOverride.Load())
-	pinned := int(e.maxOpenConns.Load()) // >0 when setMaxOpenConns pins every shard's pool
 	for idx, p := range e.pistons {
 		if override > 0 {
 			// The gap is the fuse against a 100%-duty-cycle loop, and a bench sweep measuring below it is the
@@ -145,15 +144,14 @@ func (e *Engine) recomputeRefillIntervalsWith(sizing map[int]shardSizing, roles 
 			p.SetSupplyCadence(override, gap)
 			continue
 		}
-		// The shard's ACTUAL pool (shardPool resolves the setMaxOpenConns pin), divided by this shard's own
-		// dispatcher count, which is what the buffer drains through. A shard this replica only reads has an
-		// idle piston, which reads no period, and recomputePools re-derives this on the promotion that wakes
-		// it.
+		// The shard's ACTUAL pool, divided by this shard's own dispatcher count, which is what the buffer drains
+		// through. A shard this replica only reads has an idle piston, which reads no period, and recomputePools
+		// re-derives this on the promotion that wakes it.
 		slots := roles[idx].slots
 		if slots == 0 {
 			continue
 		}
-		_, pool := shardPool(sizing[idx].budget, pinned, slots)
+		_, pool := shardPool(sizing[idx].budget, slots)
 		derived := deriveRefillInterval(share, pool, dispatchers)
 		// Every dispatcher's band scan reads the shard's whole band - the residue predicate cannot seek - so the
 		// tally is paced by how many pistons scan the shard, keeping it scanned about as often as one would

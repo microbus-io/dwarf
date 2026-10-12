@@ -61,7 +61,7 @@ mkdir -p "$OUT"
 # DB time is then read directly as M / throughput, and the measurement is not confounded by
 # saturation dynamics. Volume is the only variable across every data point of a curve. Axis F
 # overrides the workload but keeps M=8, so its points stay comparable along its own axis.
-PROBE_ARGS=(-workload linear -workers 512 -max-open-conns 8 -concurrency 512 -window 60s -warmup 15s)
+PROBE_ARGS=(-workload linear -workers 512 -max-connections 8 -concurrency 512 -window 60s -warmup 15s)
 
 # An optional SECOND probe at each checkpoint, of a different workload shape against the SAME
 # database. It is what separates the two explanations for a declining curve that the main probe
@@ -78,24 +78,24 @@ case "$AXIS" in
 A)
   DEFAULT_CHECKPOINTS="1 5 10 20 30 40 50 60 70 80 90 100"   # millions of dwarf_steps rows
   UNIT="Mrows"
-  FILL_ARGS=(-workload linear -workers 512 -max-open-conns "$FILL_CONNS" -concurrency 512 -warmup 0s)
+  FILL_ARGS=(-workload linear -workers 512 -max-connections "$FILL_CONNS" -concurrency 512 -warmup 0s)
   RATE=4500   # initial fill-rate guess (rows/s at the measured ~4,600 steps/s ceiling); re-measured per leg
   ;;
 B)
   DEFAULT_CHECKPOINTS="8 16 32 48 64 100 150 200 250 300 350 400"   # GB of pg_database_size
   UNIT="GB"
-  FILL_ARGS=(-workload state -payload 65536 -workers 512 -max-open-conns "$FILL_CONNS" -concurrency 512 -warmup 0s)
+  FILL_ARGS=(-workload state -payload 65536 -workers 512 -max-connections "$FILL_CONNS" -concurrency 512 -warmup 0s)
   RATE=0   # measured after the first leg
   ;;
 F)
   DEFAULT_CHECKPOINTS="1 5 10 20 30 40 50 60 70 80 90 100"   # millions of dwarf_steps rows, same axis as A
   UNIT="Mrows"
   FILL_ARGS=(-workload fanout -fanout-width "$WIDTH" -fairness-keys "$KEYS"
-             -workers 512 -max-open-conns "$FILL_CONNS" -concurrency 512 -warmup 0s)
+             -workers 512 -max-connections "$FILL_CONNS" -concurrency 512 -warmup 0s)
   PROBE_ARGS=(-workload fanout -fanout-width "$WIDTH" -fairness-keys "$KEYS"
-              -workers 512 -max-open-conns 8 -concurrency 512 -window 60s -warmup 15s)
+              -workers 512 -max-connections 8 -concurrency 512 -window 60s -warmup 15s)
   # Same flags as axis A's probe, so the two arms' linear numbers are directly comparable.
-  CROSS_PROBE_ARGS=(-workload linear -workers 512 -max-open-conns 8 -concurrency 512
+  CROSS_PROBE_ARGS=(-workload linear -workers 512 -max-connections 8 -concurrency 512
                     -window 60s -warmup 15s)
   RATE=7000   # measured fan-out fill rate on a 16-vCPU DB with fix1+fix2 (was 2400 pre-fix); re-measured per leg
   ;;
@@ -106,6 +106,9 @@ esac
 CHECKPOINTS=(${CHECKPOINTS:-$DEFAULT_CHECKPOINTS})
 
 psq() { psql "$DSN" -X -q -At -c "$1"; }
+# The bench runs one engine at a time against one database, so between legs no live replica exists: a row
+# left in dwarf_peers is a crashed leg's, and -max-connections divides by it (halving the probe's pool).
+clear_peers() { psq "DELETE FROM dwarf_peers" >/dev/null 2>&1 || true; }
 
 # measure prints the axis variable in base units: rows for A and F, bytes for B.
 #
@@ -167,11 +170,13 @@ sps_of() { # $1 = artifact path
 checkpoint() { # $1 = label
   local vol; vol="$(measure)"
   echo "== checkpoint $1 (measured: $vol) =="
+  clear_peers
   "$BENCH" -dsn "$DSN" "${PROBE_ARGS[@]}" -label "deg$AXIS-$1" -out "$OUT/probe-$1.json"
   local xps=""
   if (( ${#CROSS_PROBE_ARGS[@]} )); then
     # Runs back-to-back with the main probe, never concurrently: two probes sharing the database
     # would contend and neither number would mean anything. The fill is paused for both.
+    clear_peers
     "$BENCH" -dsn "$DSN" "${CROSS_PROBE_ARGS[@]}" -label "deg$AXIS-$1-cross" -out "$OUT/cross-$1.json"
     xps="$(sps_of "$OUT/cross-$1.json")"
   fi
@@ -200,6 +205,7 @@ for cp in "${CHECKPOINTS[@]}"; do
     fi
     leg=$(( leg + 1 ))
     echo "-- fill leg $leg: at $now / target $tgt, window ${window}s (rate $RATE/s)"
+    clear_peers
     "$BENCH" -dsn "$DSN" "${FILL_ARGS[@]}" -window "${window}s" \
       -label "fill$AXIS-leg$leg" -out "$OUT/fill-leg$leg.json"
     after="$(measure)"

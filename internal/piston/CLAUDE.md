@@ -378,8 +378,17 @@ loss to 0.4%** with throughput held.
 Tier two exists because tier one alone can STRAND work. With two consecutive degraded replicas the far
 one's class has no working stealer — its designated one is itself broken — so it gets *zero* service rather
 than slow service, which is qualitatively worse than contention. Past two graces the class opens to
-everyone. Pinned by `fixtures/TestStealTwoBadApplesflow`; measured on the bench at `1,1,64`, the fleet still
-met the full commanded rate with `oldest_pending` at 0s.
+everyone. Measured on the bench at `1,1,64`, the fleet still met the full commanded rate with
+`oldest_pending` at 0s.
+
+**At the engine's two dispatchers per shard the two tiers coincide**: with two classes the neighbour is
+everyone else. The tier still earns its one `OR` term, because the predicate is general in the class count
+and the divisor reaches three for a few seconds during a dispatcher handoff. It is pinned here, by
+`TestPiston_StealReachesPastTheNeighbourAfterTwoGraces` (three classes, real SQL), not by an engine fixture:
+the engine cannot hold three dispatchers on a shard on demand, so a fixture would need a seam no deployment
+has.
+Why the engine does not raise its dispatcher count to make the tier matter is in `engine/CLAUDE.md`
+(`maxDispatchers`).
 
 The honest limit: tier one helps in proportion to the neighbour's SPARE capacity. In a saturated fleet most
 work falls through to tier two and contention returns to the single-tier level. This is a win for one bad

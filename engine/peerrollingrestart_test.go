@@ -83,8 +83,8 @@ func (f *restartFleet) bound(shard, wantR, budget int) int {
 	live := f.snapshot()
 	total, minExcused := 0, -1
 	for range live {
-		_, before := shardPool(budget, 0, dispatcherSlots(wantR-1))
-		_, after := shardPool(budget, 0, dispatcherSlots(wantR))
+		_, before := shardPool(budget, dispatcherSlots(wantR-1))
+		_, after := shardPool(budget, dispatcherSlots(wantR))
 		total += before
 		if minExcused < 0 || before-after < minExcused {
 			minExcused = before - after
@@ -111,15 +111,12 @@ func awaitFleetSettled(t *testing.T, fleet *restartFleet, shard, wantR, budget i
 	t.Helper()
 	assert := testarossa.For(t)
 	// A replica inside the dispatcher cut divides the budget by the slot count; one ranked out holds the
-	// reader pool. A pinned override is every replica's pool, never divided.
+	// reader pool.
 	wantFor := func(e *Engine) int {
-		if pinned := int(e.maxOpenConns.Load()); pinned > 0 {
-			return pinned
-		}
 		if !e.dispatchesOn(shard) {
 			return readerOpenConns
 		}
-		_, open := shardPool(budget, 0, dispatcherSlots(wantR))
+		_, open := shardPool(budget, dispatcherSlots(wantR))
 		return open
 	}
 	deadline := time.Now().Add(30 * time.Second)
@@ -313,7 +310,7 @@ func TestPeerRollingRestart_ShardsStayOnBudgetAndRebalance(t *testing.T) {
 	}
 	settle(replicas)
 
-	_, share := shardPool(budget, 0, dispatcherSlots(replicas))
+	_, share := shardPool(budget, dispatcherSlots(replicas))
 	worst := map[int][2]int{}
 	samplerStop := make(chan struct{})
 	var sampler sync.WaitGroup

@@ -301,7 +301,7 @@ func TestDispatchers_DemotedReplicaHoldsItsPoolUntilInFlightStepsFinish(t *testi
 	assert.NoError(err)
 	assert.True(e.dispatchesOn(1), "alone, the replica dispatches")
 	// Held, it drains alongside a 2-slot cut, so the budget divides three ways.
-	_, heldOpen := shardPool(spec.MaxConnections, 0, 3)
+	_, heldOpen := shardPool(spec.MaxConnections, 3)
 	if !assert.True(heldOpen > readerOpenConns, "fixture: the held pool must exceed the reader pool") {
 		return
 	}
@@ -336,7 +336,7 @@ func TestDispatchers_DemotedReplicaHoldsItsPoolUntilInFlightStepsFinish(t *testi
 	// Another replica starts draining: the held share narrows with every other pool on the shard.
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_peers SET draining=1 WHERE engine_id=1006")
 	assert.NoError(err)
-	_, narrower := shardPool(spec.MaxConnections, 0, 4)
+	_, narrower := shardPool(spec.MaxConnections, 4)
 	assert.Equal(narrower, awaitPoolSize(t, db, narrower), "a held pool follows the draining count")
 
 	close(release)
@@ -387,8 +387,8 @@ func TestDispatchers_PromotionWhileHeldClearsTheHold(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
-	_, soloOpen := shardPool(spec.MaxConnections, 0, 1)
-	_, heldOpen := shardPool(spec.MaxConnections, 0, 3)
+	_, soloOpen := shardPool(spec.MaxConnections, 1)
+	_, heldOpen := shardPool(spec.MaxConnections, 3)
 
 	fk, err := e.Create(ctx, "repromote/g", nil, nil)
 	assert.NoError(err)
@@ -414,58 +414,6 @@ func TestDispatchers_PromotionWhileHeldClearsTheHold(t *testing.T) {
 	if assert.NoError(err) {
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 	}
-}
-
-// TestDispatchers_OverrideReleasesAHold pins that a setMaxOpenConns override landing while a pool is held
-// releases the hold. The override pins every pool and dispatches every shard, so there is no budget left to
-// divide; a hold left recorded would keep the draining statement up - shrinking every peer's pool - for the
-// life of the process.
-func TestDispatchers_OverrideReleasesAHold(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	ctx := context.Background()
-
-	release := make(chan struct{})
-	started := make(chan struct{})
-	mux := NewHostMux()
-	g := workflow.NewGraph("OverrideHold")
-	g.SetURL("Slow", "overridehold/slow")
-	g.AddTransition("Slow", workflow.End)
-	assert.NoError(g.Validate())
-	mux.HandleGraph("overridehold/g", g)
-	mux.HandleTask("overridehold/slow", func(ctx context.Context, f *workflow.Flow) error {
-		close(started)
-		<-release
-		return nil
-	})
-
-	e := NewEngineUnderTest(t.Name())
-	defer e.Shutdown(ctx)
-	defer close(release) // below the Shutdown defer, so it unwinds first and frees the drain
-	e.testConnCap = 0
-	assert.NoError(e.SetHost(mux))
-	assert.NoError(e.SetEngineID(readerID))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 24}))
-	assert.NoError(e.Startup(t.Context()))
-	db, err := e.db.Shard(1)
-	assert.NoError(err)
-
-	_, err = e.Create(ctx, "overridehold/g", nil, nil)
-	assert.NoError(err)
-	<-started
-	joinFakeFleet(t, e)
-	assert.False(e.dispatchesOn(1))
-	assert.Equal(1, awaitDrainingRow(t, db, readerID, 1), "fixture: the pool is held")
-
-	assert.NoError(e.setMaxOpenConns(10))
-	e.recomputePools()
-	assert.True(e.dispatchesOn(1), "the override dispatches every shard")
-	e.poolsLock.Lock()
-	_, pending := e.heldDivisors[1]
-	e.poolsLock.Unlock()
-	assert.False(pending, "the override releases the hold though the step is still in flight")
-	assert.Equal(0, awaitDrainingRow(t, db, readerID, 0), "and lowers the statement")
-	assert.Equal(10, db.DB.Stats().MaxOpenConnections, "the pinned pool stands")
 }
 
 // awaitDrainingRow polls one replica's registry row until its draining column reads want, or 10s pass, and
@@ -507,7 +455,7 @@ func TestDispatchers_RankedReplicaSplitsTheBudget(t *testing.T) {
 		return
 	}
 	assert.True(e.dispatchesOn(1))
-	_, open := shardPool(48, 0, slots)
+	_, open := shardPool(48, slots)
 	assert.Equal(open, db.DB.Stats().MaxOpenConnections, "the budget divides by %d dispatchers, not 7 replicas", slots)
 }
 
@@ -534,7 +482,7 @@ func TestDispatchers_DrainingReplicasDivideTheBudget(t *testing.T) {
 	if !assert.True(e.dispatchesOn(1), "fixture: dispatcherID must rank inside the cut") {
 		return
 	}
-	_, split := shardPool(spec.MaxConnections, 0, slots)
+	_, split := shardPool(spec.MaxConnections, slots)
 	assert.Equal(split, db.DB.Stats().MaxOpenConnections)
 
 	setDraining := func(flag int) {
@@ -542,37 +490,11 @@ func TestDispatchers_DrainingReplicasDivideTheBudget(t *testing.T) {
 		assert.NoError(err)
 	}
 	setDraining(1)
-	_, wide := shardPool(spec.MaxConnections, 0, slots+2)
+	_, wide := shardPool(spec.MaxConnections, slots+2)
 	assert.Equal(wide, awaitPoolSize(t, db, wide), "two draining replicas divide the budget with the dispatchers")
 
 	setDraining(0)
 	assert.Equal(split, awaitPoolSize(t, db, split), "cleared statements return the pool to the dispatcher split")
-}
-
-// TestDispatchers_OverrideDispatchesEveryReplica pins the override path: with setMaxOpenConns pinning the
-// pools there is no budget to divide, so a replica ranked below the cut dispatches anyway - including one
-// that was already a reader when the override landed.
-func TestDispatchers_OverrideDispatchesEveryReplica(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	e := NewEngineUnderTest(t.Name())
-	defer e.Shutdown(t.Context())
-	e.testConnCap = 0
-	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.SetEngineID(readerID))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 24}))
-	assert.NoError(e.Startup(t.Context()))
-
-	joinFakeFleet(t, e)
-	assert.False(e.dispatchesOn(1))
-
-	assert.NoError(e.setMaxOpenConns(9))
-	e.recomputePools()
-	assert.True(e.dispatchesOn(1), "an override makes every replica a dispatcher")
-	assert.False(e.pistons[1].Idle())
-	db, err := e.db.Shard(1)
-	assert.NoError(err)
-	assert.Equal(9, db.DB.Stats().MaxOpenConnections, "and the role change leaves the pinned pool alone")
 }
 
 // TestDispatchers_ZeroWorkersReplicaRegistersButNeverRanks pins how an await-only replica takes part: it
@@ -819,31 +741,6 @@ func TestDispatchers_RoleFlagsSurviveARestartUnderLoad(t *testing.T) {
 	stop.Store(true)
 	wg.Wait()
 	assert.True(e.dispatchesOn(1))
-}
-
-// TestDispatchers_OverridePromotionResizesTheCache pins that a replica promoted by setMaxOpenConns re-derives
-// what follows from dispatching, not only its role. Sized at Startup as a reader on its only shard, it holds
-// the minimum cache; once it dispatches, the cache follows the pinned pool it now claims through.
-func TestDispatchers_OverridePromotionResizesTheCache(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	e := NewEngineUnderTest(t.Name())
-	defer e.Shutdown(t.Context())
-	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.SetEngineID(readerID))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 24}))
-	assert.NoError(e.Startup(t.Context()))
-	joinFakeFleet(t, e)
-	assert.False(e.dispatchesOn(1))
-	before := e.cache.Capacity()
-
-	assert.NoError(e.setMaxOpenConns(40))
-	e.recomputePools()
-	assert.True(e.dispatchesOn(1))
-	// The cache holds twice the workers it is sized for.
-	want := 2 * min(max(64, workersPerConnBudget*40), int(e.workers.Load()))
-	assert.True(want > before, "fixture: the pinned pool must size a larger cache than a reader's (%d vs %d)", want, before)
-	assert.Equal(want, e.cache.Capacity(), "the cache follows the pinned pool of the promoted shard")
 }
 
 // twoReplicaFleet stands up a dispatcher (dispatcherID) and a reader (readerID) on one two-dispatcher shard, beside

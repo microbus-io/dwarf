@@ -3,7 +3,7 @@
 # RTT ladder with the pool DERIVED BY THE ENGINE, not pinned by the harness. Runs ON the bench VM.
 #
 # WHY THIS SCRIPT EXISTS, AND HOW IT DIFFERS FROM cell.sh. cell.sh pins every arm's pool with
-# -max-open-conns, so the engine's own sizing never runs. This one tests the SHIPPED PATH: it pins nothing,
+# -max-connections, so the engine's RTT ramp and server clamp never run. This one tests the SHIPPED PATH: it pins nothing,
 # so the engine probes the (netem-padded) RTT at Startup and sizes its own pool from its budget rule. What
 # is under test is therefore the code, not an equation - a wrong ramp, a probe that ran before netem was
 # installed, and a pool that lands on a collapse all show up here and cannot show up there.
@@ -14,8 +14,8 @@
 # each arm is what proves the padding was live when sizing happened.
 #
 # WHAT TO READ. Each arm prints the pool the engine SHOULD derive (from a copy of the table) next to the
-# distance actually measured. A mismatch between that and the artifact's config.maxOpenConns means the
-# engine sized off a different RTT than the wire showed - the failure this ordering exists to prevent.
+# distance actually measured. The artifact does not record the pool the engine derived, so that pairing is
+# the check that the padding was live when sizing happened - the failure this ordering exists to prevent.
 # Then read throughput and database CPU TOGETHER: throughput falling with CPU flat means the table
 # under-compensates; throughput falling with CPU spiking is the over-connection collapse.
 #
@@ -126,7 +126,7 @@ run_arm() { # $1=tag $2=netem knob ms (0 = none) $3=rep
   psq "$ADMIN" "DROP DATABASE IF EXISTS ${db}" >/dev/null
   psq "$ADMIN" "CREATE DATABASE ${db}" >/dev/null
 
-  # No -max-open-conns: the engine derives it. That is the whole point of this script.
+  # No -max-connections: the engine derives it. That is the whole point of this script.
   # shellcheck disable=SC2206
   "$BENCH" -dsn "${DSN%/*}/${db}?sslmode=disable" \
     -workload linear -concurrency "$CONC" \

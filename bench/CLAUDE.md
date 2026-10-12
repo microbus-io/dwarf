@@ -140,7 +140,7 @@ reduces to a binary that a short window decides by where a stall landed. Over-sa
 problems: the machine's maximum needs no target, and a mean absorbs transients rather than being flipped
 by them. Two rules for such a sweep, both learned by getting them wrong:
 
-- **Pin `-max-open-conns`.** The engine derives its pool from a Startup RTT probe, which varies run to run
+- **Pin `-max-connections`.** The engine derives its pool from a Startup RTT probe, which varies run to run
   (idle 0.157-0.182 ms on one rig) and moves the budget along its ramp. An unpinned sweep confounds pool size
   with probe noise.
 - **Set `-max-outstanding` LOW, not high, so every arm is closed-loop at the SAME backlog depth.** With a
@@ -422,8 +422,10 @@ budget the engine derives at that RTT against that server limit, for a script to
 `-linear-steps` (chain depth — under partitioning, depth changes the share of FLOWS a slow replica blocks
 without changing the share of STEPS), `-refill-interval-ms` (pin the cycle period; **mandatory** in any
 ladder that varies replica count, since the derived interval is a function of R and would otherwise
-masquerade as a partitioning cost), `-fairness-keys`, `-max-connections` (the `ShardSpec.MaxConnections` lever), `-max-open-conns`, `-task-burst`/`-task-quiet` (alternate the exec term within a
-run — the only way to see the crew shrink), `-stats-interval` (periodic readout), `-pprof` (CPU + heap
+masquerade as a partitioning cost), `-fairness-keys`, `-max-connections` (the `ShardSpec.MaxConnections`
+lever: the fleet-wide budget, so with `-replicas` above 1 it is split across the shard's dispatchers rather
+than given to each replica, and a stale `dwarf_peers` row halves it), `-task-burst`/`-task-quiet` (alternate
+the exec term within a run — the only way to see the crew shrink), `-stats-interval` (periodic readout), `-pprof` (CPU + heap
 profiles), `-backlog-gauges` (keep the engine's `dwarf_steps_pending`/oldest-age gauges).
 
 **The backlog gauges are OFF in every run unless `-backlog-gauges` is set.** Collecting them is the engine's one

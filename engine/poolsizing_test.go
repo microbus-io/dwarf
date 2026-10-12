@@ -58,7 +58,7 @@ const declaredBudget = 48
 // shareOf is one dispatcher's pool when declaredBudget splits `slots` ways. Through shardPool rather than
 // declaredBudget/slots, because the split rounds.
 func shareOf(slots int) int {
-	_, open := shardPool(declaredBudget, 0, slots)
+	_, open := shardPool(declaredBudget, slots)
 	return open
 }
 
@@ -261,28 +261,24 @@ func TestPoolSizing_StartupDerivesTheBudget(t *testing.T) {
 }
 
 // TestPoolSizing_ShardPool pins how a budget divides: by the dispatcher slots, rounding to the nearest
-// connection, floored at 2; a non-dispatcher holds the reader pool; an override pins every pool exactly and
-// is never divided. Idle always equals open.
+// connection, floored at 2; a non-dispatcher holds the reader pool. Idle always equals open.
 func TestPoolSizing_ShardPool(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
 	cases := []struct {
-		budget, override, slots int
-		idle, open              int
+		budget, slots int
+		idle, open    int
 	}{
-		{250, 0, 1, 250, 250},
-		{250, 0, 4, 63, 63}, // 62.5 rounds up
-		{24, 0, 2, 12, 12},
-		{7, 0, 2, 4, 4},  // 3.5 rounds up
-		{7, 0, 8, 2, 2},  // floor: many dispatchers still keep a usable pool
-		{48, 0, 0, 1, 2}, // a non-dispatcher holds the reader pool
-		{48, 30, 1, 30, 30},
-		{48, 30, 4, 30, 30}, // the override is per replica and never divided
-		{48, 30, 0, 30, 30}, // and it pins a reader too
+		{250, 1, 250, 250},
+		{250, 4, 63, 63}, // 62.5 rounds up
+		{24, 2, 12, 12},
+		{7, 2, 4, 4},  // 3.5 rounds up
+		{7, 8, 2, 2},  // floor: many dispatchers still keep a usable pool
+		{48, 0, 1, 2}, // a non-dispatcher holds the reader pool
 	}
 	for _, c := range cases {
-		idle, open := shardPool(c.budget, c.override, c.slots)
+		idle, open := shardPool(c.budget, c.slots)
 		assert.Equal(c.idle, idle, "idle for %+v", c)
 		assert.Equal(c.open, open, "open for %+v", c)
 	}
@@ -325,11 +321,6 @@ func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
 	delPeerRow(t, e, 1002)
 	assert.Equal(1, e.replicasOn(1))
 	assert.Equal(declaredBudget, db.DB.Stats().MaxOpenConnections, "departures restore the full budget")
-
-	// The pinned override wins over any fleet change.
-	assert.NoError(e.setMaxOpenConns(11))
-	addPeerRow(t, e, 1003)
-	assert.Equal(11, db.DB.Stats().MaxOpenConnections, "the pinned override is never divided")
 }
 
 // TestPoolSizing_IdleCoreTracksTheDerivedPool pins the half of shardPool nothing else witnesses. database/sql
@@ -480,10 +471,8 @@ func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
 
 // TestPoolSizing_CeilingFollowsLivePoolChange pins that the worker ceiling tracks a LIVE pool change.
 // The ceiling bounds how fast a completion storm drains through M connections, so it is a function of
-// the pool: a setMaxOpenConns that shrinks the pool must shrink it too. Leaving it stale would keep a
-// bound many times too permissive on exactly the storm it exists to contain - and the override path is
-// the only one that can re-derive it, because recomputePools (the fleet-change path) early-returns while
-// an override pins the pools.
+// the pool: a fleet change that splits the pool must shrink it too. Leaving it stale would keep a bound
+// twice too permissive on exactly the storm it exists to contain.
 func TestPoolSizing_CeilingFollowsLivePoolChange(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -492,25 +481,21 @@ func TestPoolSizing_CeilingFollowsLivePoolChange(t *testing.T) {
 	defer e.Shutdown(t.Context())
 	e.testConnCap = 0 // assert the real pool sizes, not the test-mode connection cap
 	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: declaredBudget}))
 	assert.NoError(e.Startup(t.Context()))
 
-	derived := int(e.workers.Load())
-	assert.True(derived > 1000, "the derived ceiling is large (got %d)", derived)
-	// The grow step is sized from the pool in place rather than from a constant.
-	db, err := e.db.Shard(1)
-	assert.NoError(err)
-	derivedOpen := db.DB.Stats().MaxOpenConnections
+	solo := int(e.workers.Load())
+	assert.True(solo > 1000, "the derived ceiling is large (got %d)", solo)
 
-	// Shrink the pool to 4: the ceiling must shrink with it.
-	assert.NoError(e.setMaxOpenConns(4))
+	// A second dispatcher halves the pool: the ceiling must follow it down.
+	addPeerRow(t, e, 1001)
+	assert.True(e.dispatchesOn(1), "fixture: two candidates both dispatch")
 	shrunk := int(e.workers.Load())
-	assert.True(shrunk < derived/8, "the ceiling followed the pool down (was %d, now %d)", derived, shrunk)
+	assert.True(shrunk < solo*3/4, "the ceiling followed the pool down (was %d, now %d)", solo, shrunk)
 
-	// And back up: a larger pool drains a storm faster, so it permits more workers.
-	assert.NoError(e.setMaxOpenConns(2 * derivedOpen))
-	grown := int(e.workers.Load())
-	assert.True(grown > derived, "the ceiling followed the pool up (derived %d, now %d)", derived, grown)
+	// And back up when the peer leaves: a larger pool drains a storm faster, so it permits more workers.
+	delPeerRow(t, e, 1001)
+	assert.Equal(solo, int(e.workers.Load()), "the ceiling followed the pool back up")
 }
 
 // TestPoolSizing_SaturationDoesNotGrowThePool pins the direction that was missing, and whose absence let
@@ -538,7 +523,7 @@ func TestPoolSizing_SaturationDoesNotGrowThePool(t *testing.T) {
 	defer e.Shutdown(ctx)
 	assert.NoError(e.SetHost(mux))
 	// A deliberately tiny pool makes the connection the binding resource: workers WILL queue on it.
-	assert.NoError(e.setMaxOpenConns(2))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 2}))
 	assert.NoError(e.Startup(t.Context()))
 	resident := int32(e.crew.Resident())
 
@@ -666,47 +651,6 @@ func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
 		"the pool must reflect the LATEST replica count (budget/2), not a stale recompute that pushed last")
 }
 
-// TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride is the same race against the OTHER writer of pool
-// sizes, and the damaging half: recomputePools reads maxOpenConns and only THEN pushes, so a setMaxOpenConns
-// landing in that window had its pinned pools silently overwritten by derived ones. The explicit override
-// just evaporated, and stayed gone until the next fleet
-// change. poolsLock spans the read through the push, so whichever of the two goes second sees a settled world:
-// the override applies last, or the recompute early-returns because the override is already set. Either way
-// the pin stands.
-func TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-
-	e := NewEngineUnderTest(t.Name())
-	defer e.Shutdown(t.Context())
-	e.testConnCap = 0 // assert the real derived pool sizes, not the test-mode connection cap
-	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
-	assert.NoError(e.Startup(t.Context()))
-
-	db, err := e.db.Shard(1)
-	if !assert.NoError(err) {
-		return
-	}
-
-	// A recompute reads a fleet of 2 (derived 24) and stalls before pushing.
-	insertPeerRows(t, e, 1001)
-	awaitPeerCount(t, e, 1, 2)
-	e.seams.InjectN(engineseams.FaultSlowPoolPush, 1)
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		e.recomputePools()
-	})
-	time.Sleep(slowPoolPushDelay / 10)
-
-	// The pool is pinned while that recompute is mid-flight.
-	assert.NoError(e.setMaxOpenConns(7))
-	wg.Wait()
-
-	assert.Equal(7, db.DB.Stats().MaxOpenConnections,
-		"the explicit override must survive a concurrent derived recompute, not be overwritten by its 48/2")
-}
-
 // TestPoolSizing_NoOpenShardsIs503 pins that pickShard returns an error instead of panicking when no shard
 // is open. It cannot mean "a shardless engine" - Startup always opens at least the default shard - so it
 // means the engine is not live: never started, or already SHUT DOWN (ShardSet.Close nils the indices).
@@ -782,37 +726,6 @@ func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
 	is503("Purge", err)
 	_, err = e2.ShardInfo(ctx)
 	is503("ShardInfo", err)
-}
-
-// TestPoolSizing_LiveOverride pins that setMaxOpenConns pushes the pinned pool to every live shard
-// immediately (the expert/benchmark path).
-func TestPoolSizing_LiveOverride(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-
-	e := NewEngineUnderTest(t.Name())
-	defer e.Shutdown(t.Context())
-	e.testConnCap = 0 // assert the real derived pool sizes, not the test-mode connection cap
-	assert.NoError(e.SetHost(noopHost{}))
-	for i := 1; i <= 2; i++ {
-		assert.NoError(e.SetShard(ShardSpec{Index: i, MaxConnections: 6}))
-	}
-	assert.NoError(e.Startup(t.Context()))
-
-	for i := 1; i <= 2; i++ {
-		db, err := e.db.Shard(i)
-		assert.NoError(err)
-		assert.Equal(6, db.DB.Stats().MaxOpenConnections, "shard %d declared pool", i)
-	}
-
-	// Live override pins exactly.
-	assert.NoError(e.setMaxOpenConns(11))
-	for i := 1; i <= 2; i++ {
-		db, _ := e.db.Shard(i)
-		assert.Equal(11, db.DB.Stats().MaxOpenConnections, "shard %d after override", i)
-	}
-
-	assert.Error(e.setMaxOpenConns(0)) // must be >= 1
 }
 
 // TestPoolSizing_WorkerCeiling pins the lease-margin ceiling: N_max = M x margin / txTime x safety,
@@ -1015,24 +928,4 @@ func TestPoolSizing_StartupSizesFromRegisteredFleet(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	assert.Equal(shareOf(2), db1.DB.Stats().MaxOpenConnections, "eng1 converges to R=2 by reading the registry")
-}
-
-// TestPoolSizing_StartupOverridePins pins that setMaxOpenConns - the test/bench override -
-// pins the pool exactly at Startup and is not divided by R (the discovery still runs so peers count this
-// replica, but the override is never second-guessed).
-func TestPoolSizing_StartupOverridePins(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-
-	e := NewEngineUnderTest(t.Name())
-	defer e.Shutdown(t.Context())
-	e.testConnCap = 0 // assert the real pool sizes, not the test-mode connection cap
-	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
-	assert.NoError(e.setMaxOpenConns(40))
-	assert.NoError(e.Startup(t.Context()))
-
-	db, err := e.db.Shard(1)
-	assert.NoError(err)
-	assert.Equal(40, db.DB.Stats().MaxOpenConnections, "an explicit override pins the pool, ignoring R")
 }

@@ -1085,3 +1085,48 @@ func TestPiston_StealTakesOnlyLongDueForeignSteps(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(8, len(got["k"]), "a long-due foreign step is taken by an idle peer")
 }
+
+// TestPiston_StealReachesPastTheNeighbourAfterTwoGraces pins the second tier against real SQL, which takes
+// three classes: with two, the neighbour IS everyone else, and the tiers coincide. One grace admits the
+// designated neighbour's class only; a class further away waits for two, so a far class whose own stealer is
+// itself degraded is still reached rather than stranded.
+func TestPiston_StealReachesPastTheNeighbourAfterTwoGraces(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	// Ordinal 0 of 3: this replica owns step_id%3==0, its neighbour's class is 1, and class 2 is the far one.
+	r.p.SetPartitionFunc(func() (int, int, bool) { return 3, 0, true })
+	// FetchSteps is driven directly, so the cadence only feeds stealGrace: 4s. Age only grows, so the
+	// neighbour's admission cannot be lost to delay; what the margin protects is the far class staying out,
+	// which holds while less than 3s passes between the first backdate and its fetch.
+	r.p.SetTallyCadence(500*time.Millisecond, 0)
+	r.p.SetSupplyCadence(500*time.Millisecond, 0)
+	r.p.SetStealAfter(8) // grace = 4s
+
+	for range 9 {
+		r.insertStep(t, 1, 5, "k", 1)
+	}
+	own, _ := r.idsByResidue(t, 3, 0)
+	neighbour, _ := r.idsByResidue(t, 3, 1)
+	far, _ := r.idsByResidue(t, 3, 2)
+	assert.True(len(own) > 0 && len(neighbour) > 0 && len(far) > 0, "the fixture needs all three classes populated")
+
+	// Due for a quarter past one grace: past the first tier, well short of the second. Backdated with the
+	// DATABASE clock, never a bound Go time.
+	_, err := r.db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), -5000)")
+	assert.NoError(err)
+	got, err := r.p.FetchSteps(ctx, 1, 5, []string{"k"}, 100)
+	assert.NoError(err)
+	assert.Equal(append(append([]int{}, own...), neighbour...), got["k"],
+		"one grace admits the neighbour's class and not the far one")
+
+	// Past two graces the far class opens too, ranked behind the nearer tiers.
+	_, err = r.db.ExecContext(ctx,
+		"UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), -10000) WHERE step_id % 3 = 2")
+	assert.NoError(err)
+	got, err = r.p.FetchSteps(ctx, 1, 5, []string{"k"}, 100)
+	assert.NoError(err)
+	assert.Equal(append(append(append([]int{}, own...), neighbour...), far...), got["k"],
+		"two graces admit anyone's class")
+}

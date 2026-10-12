@@ -10,8 +10,7 @@
 `ShardSet` owns the shard `map[int]*sequel.DB`: it opens+migrates every shard, routes by index (`Shard`), fans an
 op out over all shards (`OnEach`), applies pool sizes, and closes. Each shard arrives as a `ShardConfig` (DSN +
 resolved per-shard pool sizes) — the sizing *formula* is engine policy (see the engine doc §"Connection pool
-sizing"), not this package's concern; the uniform `SetMaxIdleConns`/`SetMaxOpenConns` remain for the engine's
-live override.
+sizing"), not this package's concern; the engine pushes each shard's size through `SetShardPool`.
 
 ## Choosing a SQL engine
 

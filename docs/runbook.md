@@ -213,6 +213,16 @@ restart; see [Resharding](resharding.md).
 already started covering for it — the steal exists exactly for this. Find the replica whose dispatch has
 stalled and restart it; the fleet is carrying the load meanwhile, at the cost of some wasted claim attempts.
 
+**If both replicas dispatching a shard are slow, nothing covers for them.** At most two replicas dispatch
+each shard, and the others do not run its steps, so with both of them slow the shard runs at their pace and
+`dwarf_steps_stolen_total` stays near zero, because no healthy replica is looking at it. The sign is
+`dwarf_steps_oldest_pending_age_seconds` climbing while the database server itself shows headroom (its own
+CPU and active sessions): the database could take more, and the work is not being picked up.
+`dwarf_shard_dispatching` names the replicas dispatching each shard; check those hosts for CPU saturation,
+memory pressure or a slow network path to the database. Fixing or replacing the host is the reliable remedy.
+A graceful restart (one that runs `Shutdown`) hands the replica's place to another working replica only when
+there is one beyond the two; with exactly two working replicas the restarted one takes its place back.
+
 ---
 
 ## The database was down

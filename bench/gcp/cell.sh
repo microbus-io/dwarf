@@ -174,7 +174,7 @@ run_one() {
   psq "$ADMIN" "CREATE DATABASE ${db}" >/dev/null
   # shellcheck disable=SC2086  # word splitting is the intended parse of EXTRA
   "$BENCH" -dsn "${DSN%/*}/${db}?sslmode=disable" "${WORKLOAD_ARGS[@]}" \
-    -max-open-conns "$pool" -concurrency "$CONC" \
+    -max-connections "$pool" -concurrency "$CONC" \
     -open-loop -arrival-rate "$rate" -max-outstanding "$MAX_OUTSTANDING" \
     -warmup "$WARMUP" -window "$WINDOW" -stats-interval 10s \
     -label "cell ${CELL} ${tag} pool ${pool} rate ${rate} gate-rtt ${GATE_RTT}ms" \

@@ -85,7 +85,7 @@ type ShardSet struct {
 	mu      sync.RWMutex
 	dbs     map[int]*sequel.DB
 	indices []int // sorted ascending
-	// testConnCap (>0 only in test mode) caps every pool push (SetMaxOpenConns, SetShardPool) so the engine's derived pool sizing
+	// testConnCap (>0 only in test mode) caps every pool push (SetShardPool) so the engine's derived pool sizing
 	// can never grow a pool past what was reserved from the global budget at Open; releaseBudget frees that
 	// reservation, called exactly once at Close (or Open's failure path). See testbudget.go.
 	testConnCap   int
@@ -210,7 +210,7 @@ func openAndMigrate(cfg Config, dsn string, sc ShardConfig) (*sequel.DB, error) 
 	}
 	idle, open := sc.MaxIdleConns, sc.MaxOpenConns
 	if cfg.TestID != "" && cfg.TestConnCap > 0 {
-		// Clamp the initial pool too, not just the engine's later SetMaxOpenConns pushes, so a shard's
+		// Clamp the initial pool too, not just the engine's later SetShardPool pushes, so a shard's
 		// migration and bootstrap never open more than the reserved budget.
 		idle = min(idle, cfg.TestConnCap)
 		open = min(open, cfg.TestConnCap)
@@ -321,34 +321,8 @@ func (s *ShardSet) OnEach(ctx context.Context, op func(ctx context.Context, db *
 	return nil
 }
 
-// SetMaxIdleConns applies the given idle-connection pool size to every open shard, clamped to the
-// test-mode cap so the engine's derived sizing can never grow a pool past the reserved budget.
-func (s *ShardSet) SetMaxIdleConns(n int) {
-	s.mu.RLock()
-	if s.testConnCap > 0 && n > s.testConnCap {
-		n = s.testConnCap
-	}
-	for _, db := range s.dbs {
-		db.SetMaxIdleConns(n)
-	}
-	s.mu.RUnlock()
-}
-
-// SetMaxOpenConns applies the given open-connection pool ceiling to every open shard, clamped to the
-// test-mode cap (see SetMaxIdleConns).
-func (s *ShardSet) SetMaxOpenConns(n int) {
-	s.mu.RLock()
-	if s.testConnCap > 0 && n > s.testConnCap {
-		n = s.testConnCap
-	}
-	for _, db := range s.dbs {
-		db.SetMaxOpenConns(n)
-	}
-	s.mu.RUnlock()
-}
-
-// SetShardPool applies idle and open pool sizes to one shard, clamped to the test-mode cap (see
-// SetMaxIdleConns). An unknown index is a no-op.
+// SetShardPool applies idle and open pool sizes to one shard, clamped to the test-mode cap so the engine's
+// derived sizing can never grow a pool past the reserved budget. An unknown index is a no-op.
 func (s *ShardSet) SetShardPool(n, idle, open int) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
