@@ -356,7 +356,7 @@ allow on PostgreSQL 16.
 
 ⚠️ **GAUGES HAVE NO BARE-NAME TOTAL — sum across the attribute sets.** Counters emit `name` alongside
 `name|k=v`; gauges emit only the attributed series (`dwarf_turnstile_available|shard=1`,
-`dwarf_steps_pending|priority=100`). Reading the bare name gets a confident **0.0**, which is what three of
+`dwarf_steps_pending|priority=100|shard=1`). Reading the bare name gets a confident **0.0**, which is what three of
 five gauge columns in this readout printed on a run executing hundreds of steps a second, and it would read
 identically on a rig. `gaugeTotal` is the helper; use it for anything new here.
 
@@ -392,9 +392,9 @@ heap** and the crew is mostly stacks.
   nothing is sampled at all.
 - **Counters carry attributes** as `name|k=v` alongside the bare-name total. Both are emitted: the total is
   what a throughput number reads off, the split is the only thing that shows one shard falling behind.
-- **Gauges every replica reports identically are MAXed, not summed** (`agreementGauges`) — cluster-wide
-  reads (`dwarf_steps_pending`, `oldest_pending_age`) and per-replica readings
-  of a shared fact (`dwarf_peer_replicas`, `dwarf_peer_blind_seconds`). Summing them multiplies by the
+- **Gauges several replicas can report for one fact are MAXed, not summed** (`agreementGauges`) — per-shard
+  readings (`dwarf_steps_dispatch_lag_seconds`, `dwarf_steps_pending`, `oldest_pending_age`) and per-replica
+  readings of a shared fact (`dwarf_peer_replicas`, `dwarf_peer_blind_seconds`). Summing them multiplies by the
   replica count, so before leaning on a multi-replica backlog-depth or oldest-age figure, check the artifact
   MAXed it.
 - **`dwarf_refill_query_duration_seconds`'s COUNT is cycles per window — of WHICHEVER LOOP emits that
@@ -426,13 +426,14 @@ masquerade as a partitioning cost), `-fairness-keys`, `-max-connections` (the `S
 lever: the fleet-wide budget, so with `-replicas` above 1 it is split across the shard's dispatchers rather
 than given to each replica, and a stale `dwarf_peers` row halves it), `-task-burst`/`-task-quiet` (alternate
 the exec term within a run — the only way to see the crew shrink), `-stats-interval` (periodic readout), `-pprof` (CPU + heap
-profiles), `-backlog-gauges` (keep the engine's `dwarf_steps_pending`/oldest-age gauges).
+profiles).
 
-**The backlog gauges are OFF in every run unless `-backlog-gauges` is set.** Collecting them is the engine's one
-collection-time query, an O(backlog) aggregate per shard, and this harness collects every 50 ms - 20 aggregates a
-second against the database being measured, ~20k due rows per count in a capped saturated run and millions in an
-uncapped one. The series' backlog is the load generator's own `outstanding` (flows created, not yet ended; open
-loop only) instead.
+**Collecting the engine's gauges costs the database nothing, however often this harness collects.** The per-band
+backlog (`dwarf_steps_pending`, `oldest_pending_age`) is an O(backlog) aggregate the shard's leader runs in the
+background every 30 s once a collection has asked for it, and the 50 ms collection reads its cache - so a window
+shorter than 30 s may have no per-band reading at all, and none is fresher than 30 s. The live per-window
+signal is `dwarf_steps_dispatch_lag_seconds`, read from the band scan; the series' backlog depth is the load
+generator's own `outstanding` (flows created, not yet ended; open loop only).
 
 `bench/gcp/cell.sh` drives one cell of a tier x RTT grid end to end - peak at the derived pool, a pool sweep
 at 2/3 of it, a confirming peak when the sweep moves the pool - and writes `cell.json` beside the artifacts.

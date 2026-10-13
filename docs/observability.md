@@ -44,14 +44,14 @@ It defaults to the global `otel.GetMeterProvider()` — the no-op provider unles
 OpenTelemetry SDK. The engine builds its instruments under the scope `github.com/microbus-io/dwarf`;
 service identity comes from the provider's Resource, not from per-metric attributes.
 
-The engine emits 34 instruments — 17 counters, 13 gauges, and 4 histograms. Counter instrument names carry **no** `_total`
+The engine emits 35 instruments — 17 counters, 14 gauges, and 4 histograms. Counter instrument names carry **no** `_total`
 suffix; a Prometheus exporter appends it at the scrape boundary, so the names below are what you query in
 PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried as `dwarf_flows_started_total`):
 
 | `dwarf_*` instrument | Type | Labels | Measures | PromQL name |
 |---|---|---|---|---|
-| `dwarf_flows_started` | counter | `workflow`, `shard` | flows started. `shard` is where the flow was **placed**, so a skew across shards means work is not spread the way the capacity weights intended | `dwarf_flows_started_total` |
-| `dwarf_flows_ended` | counter | `workflow`, `status`, `shard` | flows reaching a terminal status — completed, failed, terminated or cancelled — which is what makes `started − ended` a stable in-flight count rather than one that drifts up by every flow that did not finish cleanly | `dwarf_flows_ended_total` |
+| `dwarf_flows_started` | counter | `workflow`, `shard`, `priority` | flows started. `shard` is where the flow was **placed**, so a skew across shards means work is not spread the way the capacity weights intended | `dwarf_flows_started_total` |
+| `dwarf_flows_ended` | counter | `workflow`, `status`, `shard`, `priority` | flows reaching a terminal status — completed, failed, terminated or cancelled. All four are counted, so `started − ended` does not drift up by every flow that did not finish cleanly; see [Flows in flight](#flows-in-flight) | `dwarf_flows_ended_total` |
 | `dwarf_steps_executed` | counter | `task_name`, `status`, `shard` | steps executed, by disposition. `shard` makes this per-shard dispatch throughput — selection, the connection pool and the work split are all per shard, so a fleet-wide total hides one shard falling behind | `dwarf_steps_executed_total` |
 | `dwarf_steps_recovered` | counter | — | steps recovered because their worker was lost: a lease that expired (the task re-runs), or a completed step whose successor was never created (the step is resumed from its recorded output; the task does not re-run) | `dwarf_steps_recovered_total` |
 | `dwarf_steps_unwedged` | counter | `park_type` | wedged subgraph parks recovered by the sweep (nonzero = latent bug) | `dwarf_steps_unwedged_total` |
@@ -69,8 +69,9 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_peer_changes` | counter | `shard` | times this replica observed that shard's replica count change. Zero in a settled fleet by construction, so nonzero during a steady-state window means the fleet churned | `dwarf_peer_changes_total` |
 | `dwarf_refill_query_duration_seconds` | histogram | `shard`, `phase` | one shard's candidate-selection query | `dwarf_refill_query_duration_seconds` |
 | `dwarf_steps_queue_depth` | gauge | — | steps in the local worker cache | `dwarf_steps_queue_depth` |
-| `dwarf_steps_pending` | gauge | `priority` | due pending steps per priority band | `dwarf_steps_pending` |
-| `dwarf_steps_oldest_pending_age_seconds` | gauge | `priority` | age of the oldest due pending step | `dwarf_steps_oldest_pending_age_seconds` |
+| `dwarf_steps_pending` | gauge | `shard`, `priority` | due pending steps in each priority band of the shard, refreshed every 30 seconds | `dwarf_steps_pending` |
+| `dwarf_steps_oldest_pending_age_seconds` | gauge | `shard`, `priority` | how long the longest-due pending step in each priority band of the shard has been due, refreshed every 30 seconds | `dwarf_steps_oldest_pending_age_seconds` |
+| `dwarf_steps_dispatch_lag_seconds` | gauge | `shard` | how long the most overdue step at the priority band being served has been due on that shard, current to within a selection cycle. Under a second while dispatch keeps up | `dwarf_steps_dispatch_lag_seconds` |
 | `dwarf_peer_replicas` | gauge | `shard` | replicas this one currently sees holding connections to that shard, from which the fleet picks that shard's dispatchers | `dwarf_peer_replicas` |
 | `dwarf_shard_dispatching` | gauge | `shard` | 1 when this replica dispatches that shard (holds a share of its connection budget and runs its steps), 0 when it does not dispatch there (it holds a two-connection reader pool, or a share of the budget only until steps it already started there finish). Sum across the fleet for how many replicas dispatch each shard; a shard summing to zero runs nothing | `dwarf_shard_dispatching` |
 | `dwarf_peer_blind_seconds` | gauge | `shard` | time since that shard's peer registry was last read successfully; zero when healthy | `dwarf_peer_blind_seconds` |
@@ -86,7 +87,30 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_state_in_flight_steps` | gauge | — | tasks currently inside a task call — the denominator for the line above | `dwarf_state_in_flight_steps` |
 
 The counters increment inline at their event sites; the gauges are observable (async) and read engine state
-at collection time.
+at collection time. No gauge queries the database when it is collected, so a short scrape interval costs
+the database nothing.
+
+**Is dispatch keeping up?** `dwarf_steps_dispatch_lag_seconds` is the live answer: how long the most overdue
+step at the priority band being served has been due, per shard. A step that slept, backed off, or waited on a
+subgraph or an interrupt is measured from when it became runnable, not from when it was created. The lag covers
+only the band being served, and reads zero on a shard whose best band is worse than one another shard holds.
+Strict priority holds worse bands back by design, and that shows in `dwarf_steps_oldest_pending_age_seconds`,
+one reading per band, refreshed every 30 seconds along with `dwarf_steps_pending`. While the lead for a shard
+passes from one replica to another, those two may be missing for up to 30 seconds.
+
+### Flows in flight
+
+`dwarf_flows_started` and `dwarf_flows_ended` carry the same `shard` and `priority`, so the difference of their
+increases over a window is how many flows each band gained or shed in flight:
+
+```promql
+sum by (priority) (increase(dwarf_flows_started_total[5m]))
+  - sum by (priority) (increase(dwarf_flows_ended_total[5m]))
+```
+
+Read it as a trend, not as a level. Each replica's counters start from zero when the replica does, so a running
+total of `started − ended` drifts across restarts. It also counts flows rather than steps: a flow waiting on a
+sleep, an interrupt or a long task is in flight without being in any backlog.
 
 **Read the two in-flight state gauges as a quotient, not separately.** `bytes / steps` is the mean state a
 task carries, and that is what distinguishes the two ways a replica ends up holding a lot: a few tasks each
@@ -114,15 +138,18 @@ replica count:**
 | `dwarf_workers_resident` | **per-replica** (this replica's workers) | `sum` |
 | `dwarf_state_in_flight_bytes` | **per-replica** (this replica's in-flight tasks) | `sum` |
 | `dwarf_state_in_flight_steps` | **per-replica** (this replica's in-flight tasks) | `sum` |
-| `dwarf_steps_pending` | **cluster-wide** (queries the shared database) | `max` |
-| `dwarf_steps_oldest_pending_age_seconds` | **cluster-wide** (queries the shared database) | `max` |
+| `dwarf_steps_pending` | **per-shard** (reported by the shard's leading replica) | `max` per shard and priority, then `sum` across shards |
+| `dwarf_steps_oldest_pending_age_seconds` | **per-shard** (reported by the shard's leading replica) | `max` |
+| `dwarf_steps_dispatch_lag_seconds` | **per-shard** (reported by each replica dispatching the shard) | `max` |
 
-The cluster-wide two are computed by querying the shard databases, which every replica shares — so each
-replica reports the *same* number, and summing over three replicas shows a 1,000-step backlog as 3,000. A
-summed `oldest_pending_age` is meaningless outright. Use `max` (or `avg`); a per-replica reading of these
-is not obtainable from a shared database, and the engine does not pretend otherwise. They are also the
-*only* instruments that cost a query at collection time, which is why the cluster-wide set is kept to what
-genuinely cannot be answered another way.
+The per-shard three describe a shard's database, and only the replicas responsible for a shard report them:
+each replica dispatching the shard reports the lag, and one of them, the shard's leader, reports the per-band
+pair. More than one replica can report the same shard: two dispatchers, or an outgoing and an incoming leader
+for a moment while the lead passes. So never `sum` across replicas. Take the `max` per shard first:
+
+```promql
+sum by (priority) (max by (shard, priority) (dwarf_steps_pending))
+```
 
 `dwarf_db_phase_workers` carries a `role` label that aggregates across replicas but **not across roles**:
 `enter` and `exit` are separate populations. For the pressure a phase actually reached rather than whatever
@@ -130,7 +157,10 @@ the scrape happened to catch, take `max_over_time` of it — there is deliberate
 watermark held since process start goes constant within hours while a windowed max does not.
 
 Labels are deliberately bounded: there are no per-`fairness_key` labels (that would be unbounded
-cardinality), so fairness/priority metrics are aggregate-only.
+cardinality), so fairness metrics are aggregate-only. `priority` and `workflow` are labels on the assumption
+that a deployment uses a small, fixed set of each: every value is a separate series, multiplied by the
+other labels. A deployment that mints priorities or workflow URLs per request should drop those labels with
+a metric View in its OpenTelemetry pipeline.
 
 **Reading the two refill histograms.** They answer "is candidate selection costing me throughput, and if so
 where." Each shard's selection runs on its own cycle, against its own database, so:

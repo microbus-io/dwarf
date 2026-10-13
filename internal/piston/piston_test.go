@@ -1130,3 +1130,44 @@ func TestPiston_StealReachesPastTheNeighbourAfterTwoGraces(t *testing.T) {
 	assert.Equal(append(append(append([]int{}, own...), neighbour...), far...), got["k"],
 		"two graces admit anyone's class")
 }
+
+// TestPiston_DispatchLag pins the lag reading the band scan publishes: absent until a scan completes and while
+// idle, zero when nothing is due, measured from not_before rather than created_at, and zero for a shard whose
+// best band strict priority is holding behind another shard's better one.
+func TestPiston_DispatchLag(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+
+	_, ok := r.p.DispatchLag()
+	assert.False(ok, "no reading before a scan")
+	_, _, err := r.p.ScanBand(ctx, 1)
+	assert.NoError(err)
+	lag, ok := r.p.DispatchLag()
+	assert.True(ok)
+	assert.Equal(time.Duration(0), lag, "nothing due reads zero")
+
+	// Created now, due for 30s: a created_at-based reading would be ~0.
+	id := r.insertStep(t, 1, 5, "alpha", 1)
+	_, err = r.db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), -30000) WHERE step_id=?", id)
+	assert.NoError(err)
+	_, _, err = r.p.ScanBand(ctx, 1)
+	assert.NoError(err)
+	lag, ok = r.p.DispatchLag()
+	assert.True(ok)
+	assert.True(lag >= 29*time.Second, "measured from not_before, got %v", lag)
+
+	// Another shard holds a better band: this shard's work is held by priority, not lagging.
+	r.planner.Tally(2, 1, []planner.Tally{{Key: "urgent", Weight: 1, Count: 1}})
+	lag, ok = r.p.DispatchLag()
+	assert.True(ok)
+	assert.Equal(time.Duration(0), lag, "a shard held back by strict priority reads zero")
+	r.planner.Clear(2)
+	lag, _ = r.p.DispatchLag()
+	assert.True(lag >= 29*time.Second, "back at the served band, the lag reads again")
+
+	r.p.SetIdle(true)
+	_, ok = r.p.DispatchLag()
+	assert.False(ok, "an idle piston reports nothing")
+}

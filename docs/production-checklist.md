@@ -57,11 +57,11 @@
 - [ ] **These three page someone.** Each is documented as zero-forever in a healthy engine:
   `dwarf_steps_unwedged_total`, `dwarf_flows_orphaned_total`, `dwarf_steps_write_failed_total`.
   → [Runbook](runbook.md)
-- [ ] **`dwarf_steps_oldest_pending_age_seconds` is dashboarded** — it is the honest backlog signal, better
+- [ ] **`dwarf_steps_dispatch_lag_seconds` is dashboarded** — it is the honest backlog signal, better
   than a queue count.
-- [ ] **Cluster-wide gauges aggregate with `max`, not `sum`.** `dwarf_steps_pending` and
-  `dwarf_steps_oldest_pending_age_seconds` are computed by querying the shared database, so every replica
-  reports the same number; summing across three replicas triples your backlog and makes the age reading
+- [ ] **Per-shard gauges aggregate with `max` per shard, not `sum`.** `dwarf_steps_dispatch_lag_seconds`,
+  `dwarf_steps_pending` and `dwarf_steps_oldest_pending_age_seconds` describe a shard, and more than one
+  replica can report the same one; summing across replicas overstates the backlog and makes the age readings
   meaningless. → [Observability](observability.md)
 - [ ] **Someone knows where the runbook is** before the first alarm, not after.
 

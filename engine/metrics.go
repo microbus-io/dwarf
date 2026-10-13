@@ -18,15 +18,13 @@ package engine
 
 import (
 	"context"
-	"database/sql"
 	"maps"
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
-	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
-	"github.com/microbus-io/sequel"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -140,7 +138,7 @@ type stepExecKey struct {
 
 type flowKeyAttrs struct {
 	workflow, status string
-	shard            int
+	shard, priority  int
 }
 
 // shardAttrOpts returns the options carrying only the shard attribute.
@@ -154,7 +152,7 @@ func (m *engineMetrics) shardAttrOpts(shard int) *attrOpts {
 // observable-gauge callback. Called from initRuntime. With no provider injected it falls back to the
 // global otel.GetMeterProvider(), which is the no-op provider unless the host configures the SDK - so
 // in unit tests (and unconfigured standalone use) the instruments are no-ops and the callback is never
-// invoked, incurring no per-collection DB queries.
+// invoked, which also keeps the background backlog refresh from ever querying (see backlogLoop).
 func (e *Engine) initMetrics() error {
 	mp := e.meterProvider
 	if mp == nil {
@@ -176,8 +174,8 @@ func (e *Engine) initMetrics() error {
 	}
 	// Counter instrument names carry no _total suffix; the Prometheus exporter appends it at scrape time.
 	// Unit-denominated counters end with the unit (…_bytes), per the Prometheus naming convention.
-	m.flowsStarted = ctr("dwarf_flows_started", "Counts flows that have been started, by the shard they were placed on. The shard attribute measures PLACEMENT: a new flow's shard is a random pick weighted by each shard's declared Weight, so a skew here means the fleet's work is not spread the way the weights intended, and one shard's steps carry more than their share. Against dwarf_flows_ended{shard} it is that shard's in-flight flow count. Note a closed-loop caller makes starts and terminations equal by construction - only an open-loop arrival rate lets a shortfall here indict the CALLER rather than the engine.")
-	m.flowsEnded = ctr("dwarf_flows_ended", "Counts flows that have reached a terminal status, by the shard holding them and BY WHICH terminal status - completed, failed, terminated, or cancelled. All four are counted, which is what makes dwarf_flows_started minus this a stable in-flight count rather than one that drifts upward by every flow that did not finish cleanly. Subgraph children are counted here and as starts, so a tree nets to zero. Split by status for the failure/termination/cancellation rates; dwarf_steps_executed{status} is the step-level view of the same thing.")
+	m.flowsStarted = ctr("dwarf_flows_started", "Counts flows that have been started, by the shard they were placed on and by priority. The shard attribute measures PLACEMENT: a new flow's shard is a random pick weighted by each shard's declared Weight, so a skew here means the fleet's work is not spread the way the weights intended, and one shard's steps carry more than their share. The increase of this minus that of dwarf_flows_ended over a window is how many flows in flight were gained or lost in it, per shard and per priority; read it as a rate, since each replica's counters restart from zero with the replica. Note a closed-loop caller makes starts and terminations equal by construction - only an open-loop arrival rate lets a shortfall here indict the CALLER rather than the engine.")
+	m.flowsEnded = ctr("dwarf_flows_ended", "Counts flows that have reached a terminal status, by the shard holding them, by priority, and BY WHICH terminal status - completed, failed, terminated, or cancelled. All four are counted, so dwarf_flows_started minus this does not drift upward by every flow that did not finish cleanly. Subgraph children are counted here and as starts, so a tree nets to zero. Split by status for the failure/termination/cancellation rates; dwarf_steps_executed{status} is the step-level view of the same thing.")
 	m.stepsExecuted = ctr("dwarf_steps_executed", "Counts steps that have been executed, by the shard holding them. The shard attribute is what turns this into per-shard dispatch throughput - the quantity a per-shard piston, pool and partition all separately govern, and the one a fleet-wide total hides.")
 	m.stepsRecovered = ctr("dwarf_steps_recovered", "Counts steps reset to pending because their worker is gone - a running step whose lease expired (its task runs again), or a completed step whose transition never committed (it is replayed from its recorded completion; its task does not run again) - the crash-recovery path. A nonzero rate means workers are dying or overrunning their lease.")
 	m.stepsUnwedged = ctr("dwarf_steps_unwedged", "Counts parked steps recovered by the wedge sweep, labelled by park type. A nonzero value signals a latent bug whose effect the sweep papered over.")
@@ -254,21 +252,23 @@ func (e *Engine) initMetrics() error {
 	}
 	// The gauges split into two kinds, and the difference is NOT cosmetic - it decides how a dashboard
 	// must aggregate them across replicas:
-	//   - PER-REPLICA (read from this replica's memory): queueDepth and most of the rest. Sum across replicas.
-	//   - CLUSTER-WIDE (read by querying the SHARED shard databases): stepsPending, oldestAge.
-	//     Every replica observes the SAME number, so summing them multiplies by the replica count - a
-	//     1,000-step backlog reads as 3,000 on three replicas. Aggregate with max (or avg), never sum.
+	//   - PER-REPLICA (this replica's own state): queueDepth and most of the rest. Sum across replicas.
+	//   - PER-SHARD (a fact about the shared shard database, reported by the replicas responsible for it):
+	//     stepsPending and oldestAge from the shard's leader, dispatchLag from each of its dispatchers.
+	//     More than one replica can report the same shard - two dispatchers, or an old and a new leader
+	//     mid-handoff - so take the max per shard, never the sum.
 	// Each description says so, because that is where an operator building a panel actually reads it.
 	//
-	// These two are also the ONLY instruments that cost a query at collection time (one per shard, in
-	// observePendingByBand), so the cluster-wide set is kept to what genuinely cannot be answered any other
-	// way. Do not add per-task running concurrency: it costs a second GROUP BY per shard per scrape on every
-	// replica to produce R copies of one number, carries the least bounded label in the set (task_url), and
-	// per-downstream concurrency belongs to the host, which owns the account and tenant
-	// identity the engine cannot see - the same rule that keeps backpressure out of the engine.
+	// No gauge costs a query at collection time. The per-band pair is computed by the shard's leader in the
+	// background (backlogLoop) and read here from a cache; the lag rides the band scan the piston runs
+	// anyway. Keep it that way: a collector may scrape at any rate, and every replica runs this callback. Do
+	// not add per-task running concurrency either: it is another per-shard GROUP BY, carries the least bounded
+	// label in the set (task_url), and per-downstream concurrency belongs to the host, which owns the account
+	// and tenant identity the engine cannot see - the same rule that keeps backpressure out of the engine.
 	queueDepth := gauge("dwarf_steps_queue_depth", "Per-replica: steps waiting in this replica's local worker cache. Sum across replicas.", "")
-	stepsPending := gauge("dwarf_steps_pending", "Cluster-wide: due pending steps in each priority band, read from the shared database. Every replica reports the same value - aggregate with max, not sum.", "")
-	oldestAge := gauge("dwarf_steps_oldest_pending_age_seconds", "Cluster-wide: age of the oldest due pending step in each priority band, read from the shared database. Every replica reports the same value - aggregate with max, not sum.", "s")
+	stepsPending := gauge("dwarf_steps_pending", "Per-shard: due pending steps in each priority band of that shard, refreshed every 30s by the one replica leading the shard. Take the max per shard and priority (two replicas can briefly both report one shard while the lead passes), then sum across shards.", "")
+	oldestAge := gauge("dwarf_steps_oldest_pending_age_seconds", "Per-shard: how long the longest-due pending step in each priority band of that shard has been due, refreshed every 30s by the one replica leading the shard. It covers every band, including those strict priority is holding back; dwarf_steps_dispatch_lag_seconds is the live reading for the band being served. Aggregate with max.", "s")
+	dispatchLag := gaugeF("dwarf_steps_dispatch_lag_seconds", "Per-shard: how long the most overdue step at the priority band being served has been due on that shard, as seen by each replica dispatching the shard. It is read from the selection scan the replica runs several times a second, so it is current to within a cycle and costs no query. Under a second in a fleet that keeps up; rising means dispatch is falling behind. Zero for a shard whose best band is worse than one another shard holds, since strict priority, not dispatch, is holding that work. Aggregate with max - the max across a shard's dispatchers covers the whole shard. It sees the band being served only; dwarf_steps_oldest_pending_age_seconds covers the others.", "s")
 	// The two peer gauges are PER-REPLICA readings of a per-shard fact, and both are pulled from the Sonars
 	// rather than emitted by them - internal/peers deliberately owns no meter, so this is the one scope that
 	// has to stay in step. Neither queries anything: both are atomic reads of what the last reading published.
@@ -298,6 +298,7 @@ func (e *Engine) initMetrics() error {
 				queueDepth:       queueDepth,
 				stepsPending:     stepsPending,
 				oldestAge:        oldestAge,
+				dispatchLag:      dispatchLag,
 				peerReplicas:     peerReplicas,
 				shardDispatching: shardDispatching,
 				peerBlind:        peerBlind,
@@ -310,7 +311,7 @@ func (e *Engine) initMetrics() error {
 				inFlightSteps:    inFlightSteps,
 			})
 		},
-		queueDepth, stepsPending, oldestAge, peerReplicas, shardDispatching, peerBlind, tallyAge,
+		queueDepth, stepsPending, oldestAge, dispatchLag, peerReplicas, shardDispatching, peerBlind, tallyAge,
 		turnstileAvail, turnstileWaiting, workersResident, inFlightBytes, inFlightSteps,
 		dbPhaseWorkers,
 	)
@@ -338,6 +339,7 @@ type observableGauges struct {
 	queueDepth       metric.Int64ObservableGauge
 	stepsPending     metric.Int64ObservableGauge
 	oldestAge        metric.Int64ObservableGauge
+	dispatchLag      metric.Float64ObservableGauge
 	peerReplicas     metric.Int64ObservableGauge
 	shardDispatching metric.Int64ObservableGauge
 	peerBlind        metric.Int64ObservableGauge
@@ -352,9 +354,8 @@ type observableGauges struct {
 	inFlightSteps metric.Int64ObservableGauge
 }
 
-// observeGauges is the observable-gauge callback. It reads in-memory engine state and queries the shards
-// for the two cluster-wide backlog gauges at collection time. The per-replica gauges sum across replicas;
-// the cluster-wide ones report the same value on every replica and aggregate with max.
+// observeGauges is the observable-gauge callback. Every reading is from memory: it makes no query, so a
+// scrape is never load. The per-replica gauges sum across replicas; the per-shard ones aggregate with max.
 func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observableGauges) error {
 	// Local in-memory gauges - no DB.
 	o.ObserveInt64(g.queueDepth, int64(e.cache.Len()))
@@ -402,118 +403,37 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 		if n, ok := waitingBy[idx]; ok {
 			o.ObserveInt64(g.turnstileWaiting, int64(n), shard)
 		}
+		// Only while dispatching: a reader's piston is idle and has no reading, and a replica that just
+		// stopped dispatching must not keep reporting the lag of a shard it no longer looks at.
+		if dispatching == 1 && e.pistonsReady.Load() {
+			if p := e.pistons[idx]; p != nil {
+				if lag, ok := p.DispatchLag(); ok {
+					o.ObserveFloat64(g.dispatchLag, lag.Seconds(), shard)
+				}
+			}
+		}
 	}
 
 	// Tally age: an in-memory read of the planner's own map, unconditional because zero (no shard has
 	// reported yet) is a meaningful reading rather than an absent one.
 	o.ObserveFloat64(g.tallyAge, e.planner.TallyAge().Seconds())
 
-	// The ONLY query this callback makes: pending count + oldest age per priority band, one statement per
-	// shard. Everything above is an in-memory read, which is what keeps a scrape from being load. A benchmark
-	// collecting every 50ms turns it off: an O(backlog) aggregate at 20 Hz loads the database it measures.
-	if e.skipBacklogGauges.Load() {
-		return nil
-	}
-	pending, oldest, err := e.observePendingByBand(ctx)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	for priority, count := range pending {
-		o.ObserveInt64(g.stepsPending, int64(count), metric.WithAttributes(attribute.String("priority", strconv.Itoa(priority))))
-	}
-	for priority, sec := range oldest {
-		o.ObserveInt64(g.oldestAge, int64(sec), metric.WithAttributes(attribute.String("priority", strconv.Itoa(priority))))
+	// The per-band backlog, from the cache the shard's leader refreshes in the background. Asking for it is
+	// also what starts that refresh: nothing is queried for gauges nobody collects.
+	e.backlogWanted.Store(true)
+	e.backlogMu.Lock()
+	defer e.backlogMu.Unlock()
+	for shard, b := range e.backlogByShard {
+		if time.Since(b.at) > backlogStaleIntervals*backlogInterval {
+			continue
+		}
+		for priority, n := range b.pending {
+			attrs := metric.WithAttributes(attribute.String("shard", strconv.Itoa(shard)), attribute.String("priority", strconv.Itoa(priority)))
+			o.ObserveInt64(g.stepsPending, n, attrs)
+			o.ObserveInt64(g.oldestAge, b.oldestS[priority], attrs)
+		}
 	}
 	return nil
-}
-
-// observePendingByBand returns, across all shards, the count of due pending steps per priority band
-// and the age in seconds of the oldest due pending step per band (max across shards).
-func (e *Engine) observePendingByBand(ctx context.Context) (countByBand, oldestSecByBand map[int]int, err error) {
-	indices, pos := e.shardOrdinals()
-	pendingPerShard := make([]map[int]int, len(indices))
-	agePerShard := make([]map[int]int, len(indices))
-	err = e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
-		// THE COMMON BAND, NOT THE REFILLER'S - collection is ordered with ordinary work, not ahead of it.
-		// These are O(backlog) aggregates (a COUNT and a MIN over every due step), so at band 0 they
-		// preempt dispatch every time the metric reader ticks. Measured with a 50ms reader against a
-		// ~26,000-step backlog: 1,360 steps/s at band 0 against 1,559 at band 1. Read the DIRECTION, not
-		// the 13% - it is one pair on a rig whose RTT drifted 1.5-5.1ms across the session, and the band-0
-		// arm actually had the BETTER RTT of the two, which is what makes the sign trustworthy where the
-		// magnitude is not. A production reader ticks far slower, shrinking the tax without changing the
-		// shape.
-		//
-		// This is the band rule's second half, and it is the one that is easy to miss: a band may only be
-		// given to a source that cannot flood it, and floods are measured in COST, not in count. A handful
-		// of queries per tick is a small count and an unbounded scan.
-		//
-		// Being ordered here cannot hide a saturated engine either - a late gauge is still a correct gauge,
-		// and the reader tries again on its next tick. Contrast the Sonar, which does belong at band 0: its
-		// queries are a single-row upsert and a read of the small registry table, bounded by construction,
-		// and a Sonar that cannot beat goes BLIND, which changes how the fleet behaves rather than merely
-		// when it is observed.
-		ctx, doneTurn := e.dbTurn(ctx, shard)
-		defer doneTurn()
-		// parked=0 is what this gauge MEANS: a parked step is excluded from selection by construction, so
-		// counting one would report a backlog no worker will ever pick up. Every other due-pending query in
-		// the engine carries the predicate; this one was the lone exception. (No row is miscounted today -
-		// `parkedSubgraph` is only ever written alongside status='running' - but that is an accident of the
-		// current park kinds, not an invariant, and the next park kind that can coexist with `pending`
-		// would silently inflate the gauge.)
-		//
-		// The reason is DEFINITIONAL, not performance - do not re-justify it as an index fix. Measured on
-		// Postgres (300k terminal rows, 2k pending, the real partial index): the planner uses
-		// idx_dwarf_steps_selection either way, seeking on the leading `status` column alone, and both plans
-		// read every pending row (73 vs 76 buffers). They must: this is a GROUP BY over the whole due band,
-		// so every due row is touched by definition and no index prefix can reduce that. Adding `parked`
-		// only moves it into the Index Cond.
-		rows, err := db.QueryContext(ctx,
-			"SELECT priority, COUNT(*), DATE_DIFF_MILLIS(NOW_UTC(), MIN(created_at)) FROM dwarf_steps"+
-				" WHERE status='"+workflow.StatusPending+"' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() GROUP BY priority",
-			parkedNone,
-		)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		defer rows.Close()
-		counts := map[int]int{}
-		ages := map[int]int{}
-		for rows.Next() {
-			var priority, count int
-			var ageMs sql.NullFloat64
-			err := rows.Scan(&priority, &count, &ageMs)
-			if err != nil {
-				return errors.Trace(err)
-			}
-			counts[priority] = count
-			if ageMs.Valid {
-				ages[priority] = int(ageMs.Float64 / 1000)
-			}
-		}
-		err = rows.Err()
-		if err != nil {
-			return errors.Trace(err)
-		}
-		pendingPerShard[pos[shard]] = counts
-		agePerShard[pos[shard]] = ages
-		return nil
-	})
-	if err != nil {
-		return nil, nil, errors.Trace(err)
-	}
-	countByBand = map[int]int{}
-	oldestSecByBand = map[int]int{}
-	for i := range indices {
-		for priority, count := range pendingPerShard[i] {
-			countByBand[priority] += count
-		}
-		for priority, sec := range agePerShard[i] {
-			if sec > oldestSecByBand[priority] {
-				oldestSecByBand[priority] = sec
-			}
-		}
-	}
-	return countByBand, oldestSecByBand, nil
 }
 
 // --- Inline counter helpers (no-op until initMetrics has run). ---
@@ -521,25 +441,31 @@ func (e *Engine) observePendingByBand(ctx context.Context) (countByBand, oldestS
 // metricFlowStarted counts a flow start against the shard it was PLACED on. Every start path must call it
 // (Create, Continue and Fork), or the standard in-flight panel - started minus ended - drifts by one
 // per uncounted flow.
-func (e *Engine) metricFlowStarted(ctx context.Context, workflowURL string, shardNum int) {
+//
+// priority is an attribute on the assumption that a deployment uses a small, fixed set of priorities: each
+// value is its own series, multiplied by every workflow and shard.
+func (e *Engine) metricFlowStarted(ctx context.Context, workflowURL string, priority, shardNum int) {
 	e.flowsStartedCount.Add(1)
 	if e.metrics == nil {
 		return
 	}
-	opts := e.metrics.flowStartOpts.get(flowKeyAttrs{workflow: workflowURL, shard: shardNum}, func(k flowKeyAttrs) *attrOpts {
-		return newAttrOpts(attribute.String("workflow", k.workflow), attribute.String("shard", strconv.Itoa(k.shard)))
+	opts := e.metrics.flowStartOpts.get(flowKeyAttrs{workflow: workflowURL, shard: shardNum, priority: priority}, func(k flowKeyAttrs) *attrOpts {
+		return newAttrOpts(attribute.String("workflow", k.workflow), attribute.String("shard", strconv.Itoa(k.shard)),
+			attribute.String("priority", strconv.Itoa(k.priority)))
 	})
 	e.metrics.flowsStarted.Add(ctx, 1, opts.add...)
 }
 
-func (e *Engine) metricFlowEnded(ctx context.Context, workflowURL, status string, shardNum int) {
+// metricFlowEnded counts a flow reaching a terminal status, with the same shard and priority its start was
+// counted under, so the two subtract per attribute.
+func (e *Engine) metricFlowEnded(ctx context.Context, workflowURL, status string, priority, shardNum int) {
 	e.flowsEndedCount.Add(1)
 	if e.metrics == nil {
 		return
 	}
-	opts := e.metrics.flowEndOpts.get(flowKeyAttrs{workflow: workflowURL, status: status, shard: shardNum}, func(k flowKeyAttrs) *attrOpts {
+	opts := e.metrics.flowEndOpts.get(flowKeyAttrs{workflow: workflowURL, status: status, shard: shardNum, priority: priority}, func(k flowKeyAttrs) *attrOpts {
 		return newAttrOpts(attribute.String("workflow", k.workflow), attribute.String("status", k.status),
-			attribute.String("shard", strconv.Itoa(k.shard)))
+			attribute.String("shard", strconv.Itoa(k.shard)), attribute.String("priority", strconv.Itoa(k.priority)))
 	})
 	e.metrics.flowsEnded.Add(ctx, 1, opts.add...)
 }

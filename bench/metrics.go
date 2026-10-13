@@ -35,17 +35,16 @@ import (
 // counts: dwarf_steps_executed is the primary steps/s source, and dwarf_steps_recovered /
 // dwarf_steps_unwedged must stay zero for a run to be valid.
 func collectCounters(reader *sdkmetric.ManualReader) map[string]int64 {
-	// Collect invokes the engine's async gauge callback, which queries the shard databases with THIS
-	// ctx - unbounded, a hung database (e.g. a paused container in a fault run) wedges the sampler
-	// forever. A production OTEL PeriodicReader passes a timeout ctx; do the same.
+	// Collect invokes every registered async gauge callback with THIS ctx, and nothing bounds what a callback
+	// may wait on - unbounded, one that blocks wedges the sampler forever. A production OTEL PeriodicReader
+	// passes a timeout ctx; do the same.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var rm metricdata.ResourceMetrics
 	err := reader.Collect(ctx, &rm)
 	if err != nil {
-		// NEVER swallow this. The engine's async gauge callback queries the shard databases, so under
-		// saturation it queues for a connection like everything else and can exceed the timeout - the
-		// scrape fails exactly when it is most wanted. Silently returning nil then produces an artifact
+		// NEVER swallow this. A collection that fails or times out under saturation fails exactly when it is
+		// most wanted, and silently returning nil then produces an artifact
 		// with empty counters, `stepsPerSec` 0 and `valid: true`, which reads as a real measurement of
 		// zero throughput. Measured 2026-08-01: 2 of 9 arms of a GCP turnstile ladder at 8 s tasks with
 		// 36,000 workers against a pinned 96/96 pool.
@@ -125,9 +124,8 @@ func collectHistograms(reader *sdkmetric.ManualReader) []histSample {
 	var rm metricdata.ResourceMetrics
 	err := reader.Collect(ctx, &rm)
 	if err != nil {
-		// NEVER swallow this. The engine's async gauge callback queries the shard databases, so under
-		// saturation it queues for a connection like everything else and can exceed the timeout - the
-		// scrape fails exactly when it is most wanted. Silently returning nil then produces an artifact
+		// NEVER swallow this. A collection that fails or times out under saturation fails exactly when it is
+		// most wanted, and silently returning nil then produces an artifact
 		// with empty counters, `stepsPerSec` 0 and `valid: true`, which reads as a real measurement of
 		// zero throughput. Measured 2026-08-01: 2 of 9 arms of a GCP turnstile ladder at 8 s tasks with
 		// 36,000 workers against a pinned 96/96 pool.
@@ -251,9 +249,8 @@ func collectGauges(reader *sdkmetric.ManualReader) map[string]float64 {
 	var rm metricdata.ResourceMetrics
 	err := reader.Collect(ctx, &rm)
 	if err != nil {
-		// NEVER swallow this. The engine's async gauge callback queries the shard databases, so under
-		// saturation it queues for a connection like everything else and can exceed the timeout - the
-		// scrape fails exactly when it is most wanted. Silently returning nil then produces an artifact
+		// NEVER swallow this. A collection that fails or times out under saturation fails exactly when it is
+		// most wanted, and silently returning nil then produces an artifact
 		// with empty counters, `stepsPerSec` 0 and `valid: true`, which reads as a real measurement of
 		// zero throughput. Measured 2026-08-01: 2 of 9 arms of a GCP turnstile ladder at 8 s tasks with
 		// 36,000 workers against a pinned 96/96 pool.
@@ -306,9 +303,9 @@ func gaugePoints(m metricdata.Metrics) []gaugeKV {
 // agreementGauges are the instruments every replica reports the SAME value for, so the fleet reading is
 // their MAX and never their sum. Two kinds land here:
 //
-//   - CLUSTER-WIDE gauges, computed by querying the shared shard databases (pending, oldest age, running
-//     per task). Every replica observes one backlog, so summing multiplies it by the replica count - a
-//     1,000-step backlog reads as 3,000 on three replicas, and a summed AGE is meaningless outright.
+//   - PER-SHARD gauges, a fact about a shard's database that more than one replica can report (the lag from
+//     each of a shard's dispatchers, the per-band pending count and oldest age from its leader, briefly from
+//     two during a handoff). Summing double-counts the shard, and a summed AGE is meaningless outright.
 //   - AGREEMENT gauges, where each replica publishes its own reading of a shared fact (the peer count, how
 //     long since it could read the registry). Summing turns a fleet of R into R-squared, which is what made
 //     a two-replica run report four peers.
@@ -319,6 +316,7 @@ func gaugePoints(m metricdata.Metrics) []gaugeKV {
 var agreementGauges = map[string]bool{
 	"dwarf_steps_pending":                    true,
 	"dwarf_steps_oldest_pending_age_seconds": true,
+	"dwarf_steps_dispatch_lag_seconds":       true,
 	"dwarf_peer_replicas":                    true,
 	"dwarf_peer_blind_seconds":               true,
 }

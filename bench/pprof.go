@@ -139,7 +139,7 @@ func statsLine(elapsed time.Duration, p taskProfile, g map[string]float64, heapM
 //
 // READING THE BARE NAME GETS ZERO for anything attributed, which is not obvious and is exactly what the
 // first cut of the line above did: gauges are recorded per attribute set - dwarf_turnstile_available|shard=1,
-// dwarf_steps_pending|priority=100 - with NO bare-name total, unlike counters, which emit one alongside the
+// dwarf_steps_pending|priority=100|shard=1 - with NO bare-name total, unlike counters, which emit one alongside the
 // split. Three of the five gauge columns printed a confident 0.0 for a run that was executing hundreds of
 // steps a second. Summing is the right total for both shapes present: free turns across shards, and backlog
 // across priority bands.

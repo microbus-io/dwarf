@@ -336,3 +336,18 @@ func TestPlanner_TalliedAgreesWithSlotsUnderConcurrency(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+// TestPlanner_BandReadsTheStandingTallies pins Band: the best band any shard reports due work at, moved by a
+// Tally or a Clear without anything planning, and -1 when nothing is due anywhere.
+func TestPlanner_BandReadsTheStandingTallies(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	p := New()
+	assert.Equal(-1, p.Band(), "nothing reported")
+	p.Tally(1, 5, []Tally{{Key: "a", Weight: 1, Count: 1}})
+	p.Tally(2, 3, []Tally{{Key: "b", Weight: 1, Count: 1}})
+	p.Tally(3, 1, nil) // a shard with nothing due holds no band
+	assert.Equal(3, p.Band())
+	p.Clear(2)
+	assert.Equal(5, p.Band(), "a drained band is gone as soon as its shard reports, with no plan in between")
+}

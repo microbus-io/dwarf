@@ -481,7 +481,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 	if err != nil {
 		return errors.Trace(err)
 	}
-	descendantFlowIDs, descendantCompositeIDs, urlByFlowID, err := e.allSubgraphFlows(ctx, db, shardNum, flowID)
+	descendantFlowIDs, descendantCompositeIDs, labelByFlowID, err := e.allSubgraphFlows(ctx, db, shardNum, flowID)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -555,7 +555,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 			// its snapshot is taken now - a second scan in this transaction would reuse it and miss a grandchild
 			// spawned in between. A scan that finds new flows therefore rolls back, and the whole transaction re-runs
 			// over the larger set.
-			rescannedIDs, rescannedComposite, rescannedURLs, err := e.allSubgraphFlows(ctx, tx, shardNum, flowID)
+			rescannedIDs, rescannedComposite, rescannedLabels, err := e.allSubgraphFlows(ctx, tx, shardNum, flowID)
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -588,7 +588,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 				grew = true
 				allFlowIDs = append(allFlowIDs, fid)
 				allCompositeIDs = append(allCompositeIDs, rescannedComposite[i])
-				urlByFlowID[fid.(int)] = rescannedURLs[fid.(int)]
+				labelByFlowID[fid.(int)] = rescannedLabels[fid.(int)]
 			}
 			if grew {
 				return errTreeGrew
@@ -653,7 +653,8 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 		// window between that scan and this commit is excluded by the UPDATE's own status guard but still
 		// counted here, so a terminate racing a completion can over-count by one. That window is microseconds,
 		// so it is not worth a second round trip to close.
-		e.metricFlowEnded(ctx, urlByFlowID[fid], workflow.StatusTerminated, shardNum)
+		label := labelByFlowID[fid]
+		e.metricFlowEnded(ctx, label.workflowURL, workflow.StatusTerminated, label.priority, shardNum)
 		e.signalStop(ctx, cid, workflow.StatusTerminated)
 	}
 	return nil
@@ -726,7 +727,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	}
 	var workflowURL, currentStatus string
 	var finalStateJSON []byte
-	var surgraphFlowID, surgraphStepID int
+	var surgraphFlowID, surgraphStepID, priority int
 	var deleteOnCompletion bool
 	completed := false
 	// Test checkpoint: a breakpoint here freezes completion just before its transaction (holding no lock, so a
@@ -753,8 +754,8 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		// on the genuine status transition below, so idx_dwarf_flows_status is not churned twice per
 		// completion. `touch` always changes, so a later RowsAffected check stays meaningful.
 		//
-		// The lock grab also reads back the surgraph linkage and the disposable flag - needed for the post-tx
-		// surgraph revival and the atomic disposable delete below - and it goes out in one statement batch with
+		// The lock grab also reads back the surgraph linkage, the disposable flag and the priority - needed for
+		// the post-tx surgraph revival, the atomic disposable delete below and the ended counter - and it goes out in one statement batch with
 		// the read of the flow's completed tails, which the final state is merged from. It stays unguarded on
 		// status: the status gate is the later UPDATE, and the status read here drives the revive re-drive.
 		const lockGrab = "UPDATE dwarf_flows SET touch=1-touch"
@@ -764,19 +765,19 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 			// A pipelined batch scans with the PostgreSQL driver's own conversions, which do not turn a SMALLINT
 			// into a bool, so the flag is scanned as the integer it is stored as.
 			var disposable int
-			err := res.QueryRow().Scan(&surgraphFlowID, &surgraphStepID, &disposable, &currentStatus)
+			err := res.QueryRow().Scan(&surgraphFlowID, &surgraphStepID, &disposable, &currentStatus, &priority)
 			deleteOnCompletion = disposable != 0
 			return errors.Trace(err)
 		}
 		switch tx.DriverName() {
 		case "pgx", "sqlite":
-			batch.queue(readLocked, lockGrab+lockWhere+" RETURNING surgraph_flow_id, surgraph_step_id, delete_on_completion, status", flowID)
+			batch.queue(readLocked, lockGrab+lockWhere+" RETURNING surgraph_flow_id, surgraph_step_id, delete_on_completion, status, priority", flowID)
 		case "mssql":
-			batch.queue(readLocked, lockGrab+" OUTPUT INSERTED.surgraph_flow_id, INSERTED.surgraph_step_id, INSERTED.delete_on_completion, INSERTED.status"+lockWhere, flowID)
+			batch.queue(readLocked, lockGrab+" OUTPUT INSERTED.surgraph_flow_id, INSERTED.surgraph_step_id, INSERTED.delete_on_completion, INSERTED.status, INSERTED.priority"+lockWhere, flowID)
 		default:
 			// MySQL lacks RETURNING: lock, then read the row this transaction now holds.
 			batch.queue(execOnly, lockGrab+lockWhere, flowID)
-			batch.queue(readLocked, "SELECT surgraph_flow_id, surgraph_step_id, delete_on_completion, status FROM dwarf_flows WHERE flow_id=?", flowID)
+			batch.queue(readLocked, "SELECT surgraph_flow_id, surgraph_step_id, delete_on_completion, status, priority FROM dwarf_flows WHERE flow_id=?", flowID)
 		}
 		var tails terminalTails
 		queueCompletedTails(batch, flowID, &tails)
@@ -834,7 +835,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	}
 
 	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowID), "to", workflow.StatusCompleted)
-	e.metricFlowEnded(ctx, workflowURL, workflow.StatusCompleted, shardNum)
+	e.metricFlowEnded(ctx, workflowURL, workflow.StatusCompleted, priority, shardNum)
 	compositeID := keys.New(shardNum, flowID, flowToken)
 
 	e.signalStop(ctx, compositeID, workflow.StatusCompleted)
@@ -884,7 +885,7 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 		// the just-terminated row. The guard also subsumes the "step still live" check — a step that is no
 		// longer running/parked matches no row — and the rows-affected gate keeps Enqueue off a no-op.
 		res, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=1, subgraph_result=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=?",
+			"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=1, subgraph_result=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=?",
 			workflow.StatusPending, parkedNone, resultJSON, surgraphStepID, parkedSubgraph,
 		)
 		if err != nil {
@@ -943,7 +944,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	// while a sibling branch is still live would strand that sibling and any subgraph descendants it parked
 	// on: the interrupt/resume/terminate tree walks all skip a terminal flow, so nothing could ever release
 	// them. parentStepID>0 iff this flow is a subgraph child.
-	parentStepID, flowWorkflowURL, err := e.dynamicSubgraphParent(ctx, db, flowID)
+	parentStepID, lostLabel, err := e.dynamicSubgraphParent(ctx, db, flowID)
 	if err != nil {
 		return false, errors.Trace(err)
 	}
@@ -1051,7 +1052,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	if !failFlow {
 		return false, nil
 	}
-	e.endLostFlow(ctx, shardNum, flowID, flowToken, flowWorkflowURL, loss)
+	e.endLostFlow(ctx, shardNum, flowID, flowToken, lostLabel, loss)
 	return false, nil
 }
 
@@ -1104,8 +1105,8 @@ func (e *Engine) failFlowTx(ctx context.Context, tx sequel.Executor, shardNum, f
 // endLostFlow is failFlowTx's post-commit tail. It counts the flow ended - a subgraph child included, since every
 // flow was counted as started - and wakes any Await on it, including on a subgraph child's key (legal read-only
 // introspection), whose failure otherwise travels only to its parent's flow.Subgraph call.
-func (e *Engine) endLostFlow(ctx context.Context, shardNum, flowID int, flowToken, workflowURL string, loss flowLoss) {
-	e.metricFlowEnded(ctx, workflowURL, loss.status, shardNum)
+func (e *Engine) endLostFlow(ctx context.Context, shardNum, flowID int, flowToken string, label flowLabel, loss flowLoss) {
+	e.metricFlowEnded(ctx, label.workflowURL, loss.status, label.priority, shardNum)
 	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowID), "to", loss.status)
 	e.signalStop(ctx, keys.New(shardNum, flowID, flowToken), loss.status)
 	if loss.reDispatchParent {
@@ -1191,21 +1192,21 @@ func (e *Engine) flowLossError(ctx context.Context, tx sequel.Executor, flowID i
 }
 
 // dynamicSubgraphParent returns the caller step of the given flow when it is a subgraph child, else 0.
-// workflowURL rides this read rather than costing one of its own: failStep needs it to label the flow's
-// termination, and this is the flow row it was already fetching.
-func (e *Engine) dynamicSubgraphParent(ctx context.Context, db *sequel.DB, flowID int) (parentStepID int, workflowURL string, err error) {
+// The flow's workflow URL and priority ride this read rather than costing one of their own: failStep needs
+// them to label the flow's termination, and this is the flow row it was already fetching.
+func (e *Engine) dynamicSubgraphParent(ctx context.Context, db *sequel.DB, flowID int) (parentStepID int, label flowLabel, err error) {
 	var surgraphFlowID, surgraphStepID int
 	err = db.QueryRowContext(ctx,
-		"SELECT surgraph_flow_id, surgraph_step_id, workflow_url FROM dwarf_flows WHERE flow_id=?",
+		"SELECT surgraph_flow_id, surgraph_step_id, workflow_url, priority FROM dwarf_flows WHERE flow_id=?",
 		flowID,
-	).Scan(&surgraphFlowID, &surgraphStepID, &workflowURL)
+	).Scan(&surgraphFlowID, &surgraphStepID, &label.workflowURL, &label.priority)
 	if err != nil {
-		return 0, "", errors.Trace(err)
+		return 0, flowLabel{}, errors.Trace(err)
 	}
 	if surgraphFlowID == 0 {
-		return 0, workflowURL, nil
+		return 0, label, nil
 	}
-	return surgraphStepID, workflowURL, nil
+	return surgraphStepID, label, nil
 }
 
 // deliverSubgraphError terminalizes a subgraph child (when there is one, and it is not already terminal)
@@ -1323,7 +1324,7 @@ func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Execu
 		return false, errors.Trace(err)
 	}
 	res, err := tx.ExecContext(ctx,
-		"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=1, subgraph_error=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=?",
+		"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=1, subgraph_error=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=?",
 		workflow.StatusPending, parkedNone, string(encoded), parentStepID, parkedSubgraph,
 	)
 	if err != nil {
@@ -1338,33 +1339,34 @@ func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Execu
 // only, one round-trip regardless of depth. root_flow_id gives tree membership; surgraph_flow_id
 // gives the parent/child structure the BFS walks.
 //
-// urlByFlowID carries every scanned flow's workflow_url, keyed by flow id and covering the ROOT as well as
-// the returned descendants, so a caller terminalizing the tree can label each flow with its own workflow.
-// It rides the scan that was already happening: the column is one more in a projection, not a query.
-func (e *Engine) allSubgraphFlows(ctx context.Context, db sequel.Executor, shardNum int, flowID int) (flowIDs []any, compositeFlowIDs []string, urlByFlowID map[int]string, err error) {
+// labelByFlowID carries every scanned flow's workflow_url and priority, keyed by flow id and covering the ROOT
+// as well as the returned descendants, so a caller terminalizing the tree can count each flow under the
+// attributes its start was counted under. It rides the scan that was already happening: the columns are two
+// more in a projection, not a query.
+func (e *Engine) allSubgraphFlows(ctx context.Context, db sequel.Executor, shardNum int, flowID int) (flowIDs []any, compositeFlowIDs []string, labelByFlowID map[int]flowLabel, err error) {
 	rows, err := db.QueryContext(ctx,
-		"SELECT flow_id, flow_token, surgraph_flow_id, status, workflow_url FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)",
+		"SELECT flow_id, flow_token, surgraph_flow_id, status, workflow_url, priority FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)",
 		flowID,
 	)
 	if err != nil {
 		return nil, nil, nil, errors.Trace(err)
 	}
 	type node struct {
-		token       string
-		terminal    bool
-		workflowURL string
+		token    string
+		terminal bool
+		label    flowLabel
 	}
 	byID := map[int]node{}
 	childrenByParent := map[int][]int{}
 	for rows.Next() {
-		var id, parent int
+		var id, parent, priority int
 		var token, status, workflowURL string
-		if err := rows.Scan(&id, &token, &parent, &status, &workflowURL); err != nil {
+		if err := rows.Scan(&id, &token, &parent, &status, &workflowURL, &priority); err != nil {
 			rows.Close()
 			return nil, nil, nil, errors.Trace(err)
 		}
 		term := workflow.IsTerminalStatus(status)
-		byID[id] = node{token: token, terminal: term, workflowURL: workflowURL}
+		byID[id] = node{token: token, terminal: term, label: flowLabel{workflowURL: workflowURL, priority: priority}}
 		if parent != 0 {
 			childrenByParent[parent] = append(childrenByParent[parent], id)
 		}
@@ -1392,11 +1394,17 @@ func (e *Engine) allSubgraphFlows(ctx context.Context, db sequel.Executor, shard
 	}
 	// Every flow in the tree, root included - not just the collected descendants - because the caller
 	// terminalizes the root too and each flow carries its own workflow name.
-	urlByFlowID = make(map[int]string, len(byID))
+	labelByFlowID = make(map[int]flowLabel, len(byID))
 	for id, n := range byID {
-		urlByFlowID[id] = n.workflowURL
+		labelByFlowID[id] = n.label
 	}
-	return flowIDs, compositeFlowIDs, urlByFlowID, nil
+	return flowIDs, compositeFlowIDs, labelByFlowID, nil
+}
+
+// flowLabel is what a flow's lifecycle counters are attributed by, besides the shard and status.
+type flowLabel struct {
+	workflowURL string
+	priority    int
 }
 
 // interruptedSubgraphChain walks down from a flow through interrupted subgraph steps to find the leaf. It
@@ -1594,7 +1602,7 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 			tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE step_id IN ("+parkPlaceholders+") AND status='"+workflow.StatusInterrupted+"'", parkArgs...)
 		}
 
-		tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, resume_data=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusInterrupted+"'",
+		tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, resume_data=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusInterrupted+"'",
 			workflow.StatusPending, resumeDataJSON, leafStepID)
 
 		// Race gate against a concurrent Delete/Terminate. The step writes above are unconditional (their

@@ -22,7 +22,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -180,6 +179,14 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	assert.True(ok, "dwarf_flows_ended{status=completed} should be present")
 	assert.Equal(int64(1), ended)
 
+	// Both lifecycle counters carry the flow's priority, so started minus ended subtracts per band.
+	startedAt, ok := sumCounter(rm, "dwarf_flows_started", "priority", "100")
+	assert.True(ok, "dwarf_flows_started{priority} should be present")
+	assert.Equal(int64(1), startedAt)
+	endedAt, ok := sumCounter(rm, "dwarf_flows_ended", "priority", "100")
+	assert.True(ok, "dwarf_flows_ended{priority} should be present")
+	assert.Equal(int64(1), endedAt)
+
 	// Two steps complete (taskA, taskB), each counted under status=completed.
 	executed, ok := sumCounter(rm, "dwarf_steps_executed", "status", workflow.StatusCompleted)
 	assert.True(ok, "dwarf_steps_executed{status=completed} should be present")
@@ -206,9 +213,46 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	assert.True(gaugePresent(rm, "dwarf_steps_queue_depth"), "dwarf_steps_queue_depth gauge should be present")
 }
 
-// TestMetrics_SkipBacklogGauges pins the benchmark override: with it set, the two backlog gauges (the only
-// instruments whose collection queries the database) stop reporting, and the in-memory gauges still do.
-func TestMetrics_SkipBacklogGauges(t *testing.T) {
+// gaugeAt returns the data point of an int64 or float64 observable gauge whose attributes include every
+// key=value in attrs.
+func gaugeAt(rm metricdata.ResourceMetrics, name string, attrs map[string]string) (float64, bool) {
+	matches := func(set attribute.Set) bool {
+		for k, want := range attrs {
+			v, ok := set.Value(attribute.Key(k))
+			if !ok || v.AsString() != want {
+				return false
+			}
+		}
+		return true
+	}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			switch g := m.Data.(type) {
+			case metricdata.Gauge[int64]:
+				for _, dp := range g.DataPoints {
+					if matches(dp.Attributes) {
+						return float64(dp.Value), true
+					}
+				}
+			case metricdata.Gauge[float64]:
+				for _, dp := range g.DataPoints {
+					if matches(dp.Attributes) {
+						return dp.Value, true
+					}
+				}
+			}
+		}
+	}
+	return 0, false
+}
+
+// TestMetrics_BacklogGauges pins the backlog gauges' three properties: a collection makes no query (the
+// per-band pair is read from the cache the shard's leader refreshes, the lag from the band scan), the age is
+// measured from when a step came DUE, and a band that empties reads zero rather than vanishing.
+func TestMetrics_BacklogGauges(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -216,36 +260,176 @@ func TestMetrics_SkipBacklogGauges(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
+	entered := make(chan struct{}, 8)
+	release := make(chan struct{})
 	mux := NewHostMux()
 	g := workflow.NewGraph("B")
 	g.SetURL("A", "backloggauges/a")
 	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
 	mux.HandleGraph("backloggauges/g", g)
-	mux.HandleTask("backloggauges/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("backloggauges/a", func(ctx context.Context, f *workflow.Flow) error {
+		entered <- struct{}{}
+		<-release
+		return nil
+	})
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	assert.NoError(e.SetHost(mux))
 	assert.NoError(e.SetMeterProvider(mp))
-	assert.NoError(e.SetWorkers(0)) // nothing dispatches: the backlog stays put
+	assert.NoError(e.SetWorkers(1)) // one worker, held inside the first task: the rest stay pending
 	assert.NoError(e.Startup(t.Context()))
-	for range 3 {
-		_, err := e.Create(ctx, "backloggauges/g", nil, nil)
+	var flowKeys []string
+	for range 4 {
+		flowKey, err := e.Create(ctx, "backloggauges/g", nil, nil)
 		assert.NoError(err)
+		flowKeys = append(flowKeys, flowKey)
 	}
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first task never started")
+	}
+	db, err := e.db.Shard(1)
+	if !assert.NoError(err) {
+		return
+	}
+	// Made due 30s ago while created now: an age read from created_at stays far below that for the whole test.
+	_, err = db.ExecContext(ctx,
+		"UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), -30000) WHERE status='"+workflow.StatusPending+"'")
+	assert.NoError(err)
 
+	shard1 := map[string]string{"shard": "1"}
+	band := map[string]string{"shard": "1", "priority": "100"}
 	var rm metricdata.ResourceMetrics
 	assert.NoError(reader.Collect(ctx, &rm))
-	pending, ok := gaugeValue(rm, "dwarf_steps_pending")
-	assert.True(ok, "dwarf_steps_pending should report the backlog")
-	assert.Equal(int64(3), pending)
+	assert.True(e.backlogWanted.Load(), "a collection asks for the backlog")
+	_, ok := gaugeAt(rm, "dwarf_steps_pending", band)
+	assert.False(ok, "nothing is reported before the leader's first refresh: a collection makes no query")
 
-	assert.NoError(engineseams.SkipBacklogGauges(e, true))
+	e.refreshBacklog(ctx)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		assert.NoError(reader.Collect(ctx, &rm))
+		if lag, ok := gaugeAt(rm, "dwarf_steps_dispatch_lag_seconds", shard1); ok && lag >= 25 || !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	pending, ok := gaugeAt(rm, "dwarf_steps_pending", band)
+	assert.True(ok, "the leader reports its shard's backlog")
+	assert.Equal(float64(3), pending)
+	oldest, ok := gaugeAt(rm, "dwarf_steps_oldest_pending_age_seconds", band)
+	assert.True(ok)
+	assert.True(oldest >= 25, "the age is measured from not_before, got %v", oldest)
+	lag, ok := gaugeAt(rm, "dwarf_steps_dispatch_lag_seconds", shard1)
+	assert.True(ok, "the dispatcher reports the lag its band scan saw")
+	assert.True(lag >= 25, "the lag is measured from not_before, got %v", lag)
+
+	close(release)
+	for _, flowKey := range flowKeys {
+		outcome, err := e.Await(ctx, flowKey)
+		if assert.NoError(err) {
+			assert.Equal(workflow.StatusCompleted, outcome.Status)
+		}
+	}
+	e.refreshBacklog(ctx)
 	assert.NoError(reader.Collect(ctx, &rm))
-	assert.False(gaugePresent(rm, "dwarf_steps_pending"), "skipped: no backlog gauge")
-	assert.False(gaugePresent(rm, "dwarf_steps_oldest_pending_age_seconds"), "skipped: no oldest-age gauge")
-	assert.True(gaugePresent(rm, "dwarf_steps_queue_depth"), "in-memory gauges still report")
+	pending, ok = gaugeAt(rm, "dwarf_steps_pending", band)
+	assert.True(ok, "a band that emptied still reports, as zero")
+	assert.Equal(float64(0), pending)
+}
+
+// TestMetrics_BacklogLeaderOnly pins that the backlog aggregate runs on one replica per shard: a dispatcher
+// that is not first in the shard's dispatcher window neither queries nor reports it.
+func TestMetrics_BacklogLeaderOnly(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	assert.NoError(e.SetHost(NewHostMux()))
+	assert.NoError(e.SetMeterProvider(mp))
+	assert.NoError(e.Startup(t.Context()))
+	assert.True(e.leadsBacklog(1), "a solo dispatcher leads its shard")
+	e.refreshBacklog(ctx)
+	e.backlogMu.Lock()
+	_, cached := e.backlogByShard[1]
+	e.backlogMu.Unlock()
+	assert.True(cached)
+
+	// A peer that joined earlier ranks first, so it takes the window's first place and this replica the second.
+	before := peerCounts(e)
+	db, err := e.db.Shard(1)
+	if !assert.NoError(err) {
+		return
+	}
+	_, err = db.ExecContext(ctx,
+		"INSERT INTO dwarf_peers (engine_id, seen_at, joined_at, dispatched_at) VALUES (?, NOW_UTC(), DATE_ADD_MILLIS(NOW_UTC(), -60000), NOW_UTC())",
+		int64(1))
+	assert.NoError(err)
+	awaitPeerChange(t, e, before)
+	assert.True(e.dispatchesOn(1), "still a dispatcher")
+	assert.False(e.leadsBacklog(1), "but not the leader")
+
+	e.refreshBacklog(ctx)
+	e.backlogMu.Lock()
+	_, cached = e.backlogByShard[1]
+	e.backlogMu.Unlock()
+	assert.False(cached, "a dispatcher that does not lead the shard drops its reading, so it stops reporting")
+}
+
+// TestBacklog_ResumeStampsNotBefore pins that a step returned to pending is due from NOW, not from whenever it
+// first became due. The dispatch lag, the backlog age and the steal grace all read not_before as "due since":
+// left alone, a step resumed after days on an interrupt reads as days overdue and is stealable by every peer.
+func TestBacklog_ResumeStampsNotBefore(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	mux := NewHostMux()
+	g := workflow.NewGraph("R")
+	g.SetURL("Ask", "resumestamps/ask")
+	g.AddTransition("Ask", workflow.End)
+	assert.NoError(g.Validate())
+	mux.HandleGraph("resumestamps/g", g)
+	mux.HandleTask("resumestamps/ask", func(ctx context.Context, f *workflow.Flow) error {
+		_, err := f.Interrupt(map[string]any{"q": 1}, nil)
+		return err
+	})
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	assert.NoError(e.SetHost(mux))
+	assert.NoError(e.Startup(t.Context()))
+	flowKey, err := e.Create(ctx, "resumestamps/g", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	outcome, err := e.Await(ctx, flowKey)
+	if !assert.NoError(err) || !assert.Equal(workflow.StatusInterrupted, outcome.Status) {
+		return
+	}
+	db, err := e.db.Shard(1)
+	if !assert.NoError(err) {
+		return
+	}
+	// The interrupt waited an hour.
+	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), -3600000)")
+	assert.NoError(err)
+	assert.NoError(e.Resume(ctx, flowKey, map[string]any{"a": 1}))
+	// Nothing after the resume writes not_before, so it still holds the resume's stamp once the flow is done.
+	outcome, err = e.Await(ctx, flowKey)
+	if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, outcome.Status) {
+		return
+	}
+	var dueMs float64
+	err = db.QueryRowContext(ctx, "SELECT DATE_DIFF_MILLIS(NOW_UTC(), not_before) FROM dwarf_steps").Scan(&dueMs)
+	assert.NoError(err)
+	assert.True(dueMs < 60000, "a resumed step is due from the resume, got %vms overdue", dueMs)
 }
 
 // TestMetrics_RefillInstrumented pins the refiller's four instruments, which exist to answer a question no

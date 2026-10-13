@@ -128,6 +128,11 @@ boundary means no producer can reintroduce it.
 as a sentinel a caller can test for instead. Its readers are the piston's tests and this package's own;
 no metric reads it, so treat the key count as a test observable rather than a shipped signal.
 
+**`Band` is the production read of the served band, and it reads the TALLIES, not the last plan.** The piston's
+dispatch lag reads zero for a shard whose best band is worse than it, because strict priority, not dispatch,
+is holding that work. `LastBand` would be wrong there: it moves only when something plans, so a stalled supply
+loop would keep a band that has since drained and hide the very lag the gauge exists to show.
+
 ## Contracts a caller must hold
 
 **A caller that BOTH tallies and plans must tally first.** Planning first means planning against your own

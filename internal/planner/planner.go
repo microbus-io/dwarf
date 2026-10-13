@@ -274,6 +274,21 @@ func (p *Planner) LastBand() (band, keyCount int) {
 	return p.lastBand, p.lastKeys
 }
 
+// Band is the band a plan computed now would serve: the best one any shard currently reports due work at, or
+// -1 when none reports any. It reads the standing tallies rather than the last plan, so it moves as soon as a
+// shard reports, however long it has been since anything planned.
+func (p *Planner) Band() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	band := -1
+	for _, st := range p.shards {
+		if len(st.tallies) > 0 && (band < 0 || st.band < band) {
+			band = st.band
+		}
+	}
+	return band
+}
+
 // tallied reports whether one shard was present in the snapshot the plan was computed from - see
 // Plan.Tallied. A linear scan because entries is one element per OPEN SHARD, single digits in every
 // deployment, and sorted, so this is cheaper than any index that would have to be built to serve it.

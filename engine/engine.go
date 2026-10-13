@@ -107,7 +107,6 @@ type Engine struct {
 	timeBudgetMs           atomic.Int64
 	defaultPriority        atomic.Int32
 	refillIntervalOverride atomic.Int64 // bench override (nanoseconds): pins every piston's cycle period; <=0 = derive
-	skipBacklogGauges      atomic.Bool  // bench override: metrics collection skips observePendingByBand
 
 	// engineID is a random positive identifier minted per engine instance (fresh on every restart). It is
 	// this replica's identity in the shared dwarf_peers registry - the primary key its Sonars own a row
@@ -263,6 +262,20 @@ type Engine struct {
 	pistons      map[int]*piston.Piston
 	pistonCancel context.CancelFunc
 	pistonPool   sync.WaitGroup
+	// pistonsReady is set once every piston is in the map. The metrics callback is registered before the
+	// pistons are built, so it reads the map only after this.
+	pistonsReady atomic.Bool
+
+	// Per-band backlog gauges: the shard's leader refreshes them in the background (backlogLoop) and the
+	// metrics callback reads the cache. backlogBands remembers every band reported per shard, so one that
+	// empties reads zero rather than vanishing. backlogWanted is set by the first collection; the loop
+	// queries nothing before it.
+	backlogMu      sync.Mutex
+	backlogByShard map[int]shardBacklog
+	backlogBands   map[int]map[int]bool
+	backlogWanted  atomic.Bool
+	backlogCancel  context.CancelFunc
+	backlogWorker  sync.WaitGroup
 
 	// Recovery goroutine: runs the defense-in-depth parked-step wedge sweep on its own slow cadence,
 	// off the hot poll path.
@@ -822,7 +835,13 @@ func (e *Engine) initRuntime() error {
 	// One planner for the whole replica, one piston per shard. Reset rather than reused across a
 	// Shutdown/Startup cycle: a tally left from the previous run would claim a band nobody is serving.
 	e.planner = planner.New()
+	e.pistonsReady.Store(false)
 	e.pistons = make(map[int]*piston.Piston)
+	e.backlogMu.Lock()
+	e.backlogByShard = map[int]shardBacklog{}
+	e.backlogBands = map[int]map[int]bool{}
+	e.backlogMu.Unlock()
+	e.backlogWanted.Store(false)
 	e.linkers = make(map[int]*staterefs.Linker)
 	e.recoveryStop = make(chan struct{})
 	e.reaperStop = make(chan struct{})
@@ -917,6 +936,7 @@ func (e *Engine) initRuntime() error {
 		p.SetIdle(idle || !e.dispatchesOn(idx))
 		e.pistons[idx] = p
 	}
+	e.pistonsReady.Store(true)
 
 	// Derive each piston's cycle period now that the cache is sized and the roles are known. recomputePools
 	// re-derives it on every later role change.
@@ -983,6 +1003,13 @@ func (e *Engine) initRuntime() error {
 	})
 	e.latchWorker.Go(func() {
 		e.latchLoop(e.lifetimeCtx)
+	})
+	// On a child of the lifetime ctx, so the drain can abandon an aggregate in flight rather than wait out its
+	// timeout: the query is a pure read.
+	backlogCtx, backlogCancel := context.WithCancel(e.lifetimeCtx)
+	e.backlogCancel = backlogCancel
+	e.backlogWorker.Go(func() {
+		e.backlogLoop(backlogCtx)
 	})
 	// Peer discovery. This replica has already joined every shard's registry and the pools are sized for
 	// what it read there (Startup); from here the Sonars keep their rows fresh and re-read on their own
@@ -1054,9 +1081,13 @@ func (e *Engine) drainRuntime() {
 			e.withdrawFromFleet(e.lifetimeCtx)
 		}
 	})
-	// Unregister the observable-gauge callback first so the OTEL reader cannot invoke it (and query the
-	// shards) while/after the databases are being closed.
+	// Unregister the observable-gauge callback first, then stop the backlog refresh that feeds it - nothing
+	// reads that cache any more, and its aggregate must not run against a closing database.
 	e.closeMetrics()
+	if e.backlogCancel != nil {
+		e.backlogCancel()
+	}
+	e.backlogWorker.Wait()
 	// Closing the cache releases workers parked waiting for work, and closing the turnstiles releases
 	// those waiting for a turn; Drain then closes the crew to new goroutines and waits. All three halves
 	// are the crew's contract - see internal/workers. BOTH closes are required: a worker waiting for a

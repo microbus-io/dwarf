@@ -226,7 +226,7 @@ func (e *Engine) extendLease(ctx context.Context, db *sequel.DB, stepID, leaseSe
 // pending while parked, nothing would select or recover it.
 func (e *Engine) releaseLease(ctx context.Context, db *sequel.DB, stepID, leaseSeq int) {
 	_, err := db.ExecContext(ctx,
-		"UPDATE dwarf_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC()"+
+		"UPDATE dwarf_steps SET status=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC()"+
 			" WHERE step_id=? AND lease_seq=? AND parked=? AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusCompleted+"')",
 		workflow.StatusPending, stepID, leaseSeq, parkedNone,
 	)

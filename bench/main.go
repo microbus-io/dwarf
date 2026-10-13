@@ -123,7 +123,6 @@ func run() error {
 		linearStepsFlag = flag.Int("linear-steps", linearSteps, "linear workload chain length; sweeping it separates a slow replica's share of STEPS from its share of FLOWS (see workloads.go)")
 		fanOutWidth     = flag.Int("fanout-width", 16, "forEach branch count for the fanout, scatter and carryfanout workloads - the knob that decouples pending-step backlog from submitter concurrency (backlog ~= concurrency x width)")
 		branchDepth     = flag.Int("branch-depth", 1, "scatter workload: steps per branch (1 or 2 in the cloud plan); depth > 1 is where an element stored inline would be copied at every branch step")
-		backlogGauges   = flag.Bool("backlog-gauges", false, "keep the engine's dwarf_steps_pending / oldest-age gauges. Off by default: collecting them runs an O(backlog) aggregate per shard, and the bench collects every 50ms - 20 aggregates a second against the database being measured. The series' backlog comes from the load generator instead")
 		carryRead       = flag.Bool("carry-read", false, "carry workloads: make every task READ the carried document instead of only passing it along. Storage is identical either way, so this is the arm switch for how carried state is HELD, not how much is stored")
 	)
 	flag.Var(&dsns, "dsn", "shard DSN, repeatable; 'N=dsn' sets shard N, a bare dsn sets shard 1 (default: throwaway local SQLite)")
@@ -257,9 +256,6 @@ func run() error {
 		}
 		if *refillIntervalMs > 0 {
 			setters = append(setters, engineseams.SetRefillInterval(eng, time.Duration(*refillIntervalMs)*time.Millisecond))
-		}
-		if !*backlogGauges {
-			setters = append(setters, engineseams.SkipBacklogGauges(eng, true))
 		}
 		for _, setter := range setters {
 			if setter != nil {

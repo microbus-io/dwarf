@@ -1064,7 +1064,7 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 
 	flowKey := keys.New(shardNum, int(newFlowID), newFlowToken)
 	e.logger.DebugContext(ctx, "Flow continued and started", "workflow", newWorkflowURL)
-	e.metricFlowStarted(ctx, newWorkflowURL, shardNum)
+	e.metricFlowStarted(ctx, newWorkflowURL, newPriority, shardNum)
 	// Ring the local doorbell so this replica claims the entry step without waiting for a refiller scan. The
 	// entry step is due now and its priority is in hand, so no lookup is needed.
 	e.enqueueStepDue(ctx, shardNum, int(newStepID), newPriority)

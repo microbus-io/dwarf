@@ -131,7 +131,7 @@ func (e *Engine) recoverExpiredLeases(ctx context.Context) {
 		ctx, doneTurn := e.dbTurn(ctx, shard)
 		defer doneTurn()
 		res, err := db.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, updated_at=NOW_UTC() WHERE status='"+workflow.StatusRunning+"' AND parked=0 AND lease_expires<=NOW_UTC()",
+			"UPDATE dwarf_steps SET status=?, not_before=NOW_UTC(), updated_at=NOW_UTC() WHERE status='"+workflow.StatusRunning+"' AND parked=0 AND lease_expires<=NOW_UTC()",
 			workflow.StatusPending,
 		)
 		if err != nil {
@@ -408,7 +408,7 @@ func (e *Engine) recoverOrphanedFlows(ctx context.Context, db *sequel.DB, shard 
 			}
 			locked = true
 			res, err = tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, lease_seq=lease_seq+1, lease_expires=NOW_UTC(), updated_at=NOW_UTC()"+
+				"UPDATE dwarf_steps SET status=?, lease_seq=lease_seq+1, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC()"+
 					" WHERE flow_id=? AND status='"+workflow.StatusCompleted+"' AND advancing=1 AND lease_expires<=NOW_UTC()",
 				workflow.StatusPending, o.flowID,
 			)

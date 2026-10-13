@@ -65,16 +65,17 @@ instrument itself carries no suffix (`dwarf_steps_unwedged`).
 
 | Instrument | Read it as |
 |---|---|
-| `dwarf_steps_oldest_pending_age_seconds` | The honest backlog signal. Rising means dispatch is not keeping up. Aggregate with `max`, never `sum`. |
+| `dwarf_steps_dispatch_lag_seconds` | The honest backlog signal: how long the most overdue step at the priority band being served has been due, per shard. Rising means dispatch is not keeping up. Aggregate with `max`, never `sum`. |
+| `dwarf_steps_oldest_pending_age_seconds` | The same question per priority band, every 30 seconds. A worse band rising while the lag stays flat is strict priority doing its job, not a fault. |
 | `dwarf_steps_recovered_total` | Steps recovered because their worker was lost to a crash or an overrun. A steady trickle means tasks are overrunning their budget. |
 | `dwarf_peer_replicas` | The fleet size each replica believes in. Should equal your actual replica count. |
 | `dwarf_turnstile_available` / `_waiting` | Read as a pair. Sustained zero available with a deep wait queue means database connections are the binding constraint. |
 | `dwarf_steps_stolen_total` | Non-zero names a peer that is alive but not dispatching its share. |
 
-**One dashboard trap worth stating up front:** two of the gauges are computed by querying the shared
-database, so every replica reports the *same* number. Summing `dwarf_steps_pending` across three replicas
-shows a 1,000-step backlog as 3,000, and a summed `oldest_pending_age` is meaningless outright. The
-per-replica/cluster-wide split is tabulated in [Observability](observability.md).
+**One dashboard trap worth stating up front:** the backlog gauges describe a shard, and more than one replica
+can report the same shard, so summing them across replicas overstates the backlog and makes an age reading
+meaningless. Take the `max` per shard first. The per-replica/per-shard split is tabulated in
+[Observability](observability.md).
 
 ## Sizing and capacity
 

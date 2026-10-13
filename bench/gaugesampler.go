@@ -182,7 +182,7 @@ type gaugeWindow struct {
 // seriesPoint is one -stats-interval reading: the steps/s executed since the previous one, the backlog, and
 // the database's WAL pressure over the same interval (absent off Postgres). The backlog is the load generator's
 // own count of flows created and not yet ended (open loop only), not the engine's dwarf_steps_pending gauge:
-// that gauge is an O(backlog) query the bench turns off (-backlog-gauges).
+// that gauge is refreshed only every 30s, far coarser than a series interval.
 type seriesPoint struct {
 	T           float64 `json:"t"`
 	StepsPerSec float64 `json:"stepsPerSec"`

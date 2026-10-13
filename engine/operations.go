@@ -372,7 +372,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 		}
 	}
 	e.logger.DebugContext(ctx, "Flow created and started", "workflow", workflowURL, "task", entryPoint)
-	e.metricFlowStarted(ctx, workflowURL, shardNum)
+	e.metricFlowStarted(ctx, workflowURL, opts.Priority, shardNum)
 	// The entry step's initial-state snapshot, written by insertFlowTx above.
 	e.metricStateWriteBytes(ctx, workflowURL, "state", len(seed.stateJSON))
 	// Ring the doorbell so a replica with spare capacity claims the entry step immediately, rather than

@@ -173,7 +173,7 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	// cloned running and ends through completeFlow, which counts it in dwarf_flows_ended. Each must be
 	// counted as started too, or the in-flight panel (started - ended) drifts by one per flow.
 	for _, workflowURL := range cc.startedURLs {
-		e.metricFlowStarted(ctx, workflowURL, shardNum)
+		e.metricFlowStarted(ctx, workflowURL, cc.priority, shardNum)
 	}
 	e.enqueueStep(ctx, shardNum, cc.newLeafStepID)
 	return newFlowKey, nil

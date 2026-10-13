@@ -3333,15 +3333,16 @@ all other cloned steps to `parkedNone`), so cloned rows never inherit a stale no
 
 ## Metrics (`engine/metrics.go`)
 
-The engine emits 34 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
+The engine emits 35 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
 injects the provider; it defaults to the global `otel.GetMeterProvider()` - no-op unless the host configures the
 SDK, so unconfigured/standalone/test use pays nothing. Instruments are built once in `initMetrics` (from
 `initRuntime`, so every `Startup` gets them) from `mp.Meter("github.com/microbus-io/dwarf")` - that
 scope distinguishes dwarf's metrics; **service identity lives in the provider's Resource, not in per-metric
 attributes** (no `service.name` on data points - cardinality explosion, off-spec). The only attributes attached are
-the metric-specific labels: `workflow`, `status`, `task_name` (on `dwarf_steps_executed`), `priority`,
-`park_type`, `role` (on the db-phase pair), `shard` (on `dwarf_steps_write_retried`), and `column` (on the
-byte counters).
+the metric-specific labels: `workflow`, `status`, `task_name` (on `dwarf_steps_executed`), `priority` (on the
+flow lifecycle counters and the per-band backlog gauges), `park_type`, `role` (on the db-phase pair), `shard`,
+and `column` (on the byte counters). `priority` and `workflow` assume the host uses a bounded set of each;
+the host drops either with a metric View if it does not.
 
 **8 counters, incremented inline** at their logical event sites: `dwarf_flows_started`
 (start path), `dwarf_flows_ended` (completeFlow), `dwarf_steps_executed` (every terminal step
@@ -3524,14 +3525,37 @@ de-duplicates, so a name already ending in `_total` is not doubled), while the O
 instrument name verbatim. So the instruments are named `dwarf_flows_started` etc., and a Prometheus query
 references them as `dwarf_flows_started_total`. Do not bake `_total` into a counter's instrument name.
 
-**13 gauges, observable (async)** via a single `RegisterCallback`. The callback runs at metric-collection
-time and reads engine state, and all of that is in-memory EXCEPT one query: `dwarf_steps_pending` and
-`dwarf_steps_oldest_pending_age_seconds` (per priority band) come from `observePendingByBand`, one statement
-per shard. Keeping the query-backed set to those two is deliberate - a scrape should not be load.
+**14 gauges, observable (async)** via a single `RegisterCallback`. The callback runs at metric-collection
+time and reads engine state from memory only - **it makes no query, and must not.** A collector may scrape at
+any rate and every replica runs the callback, so a query here costs `R x shards x scrape rate`: an O(backlog)
+aggregate at the bench's 50 ms collection is 20 aggregates a second per replica per shard, against the database
+being measured. The gauges that need the database get it another way (`backlog.go`):
+
+- **`dwarf_steps_pending` / `dwarf_steps_oldest_pending_age_seconds` {shard, priority}** come from one
+  `GROUP BY priority` per shard, run every `backlogInterval` (30s, fixed) by the shard's LEADER - the first
+  replica in its dispatcher window (`leadsBacklog`) - and cached. One aggregate per shard every 30s is small
+  against a band scan reading the same rows several times a second. The loop runs nothing until a collection
+  has set `backlogWanted`, so an engine with no meter provider pays nothing. A band reported once and now empty
+  is cached as ZERO, not dropped: an absent series holds its last value on a chart until it goes stale. A failed
+  or timed-out refresh keeps the previous reading, but only for `backlogStaleIntervals` (three); past that the
+  series goes absent rather than holding a count that froze while the backlog grew. Each replica decides
+  leadership from its own registry reading on its own tick, so a handoff can leave two reporters for up to an
+  interval (the documented `max` absorbs it) or none (the series is absent for up to an interval).
+- **`dwarf_steps_dispatch_lag_seconds` {shard}** rides the band scan: `ScanBand` selects
+  `DATE_DIFF_MILLIS(NOW_UTC(), not_before)` beside the rows it already reads and the piston publishes the max
+  (`Piston.DispatchLag`), plus the time since the scan was sent, so a stalled tally loop reads as rising lag.
+  Reported by each dispatcher of the shard; the max across them covers the shard, because a class its owner is
+  not serving enters a peer's scan past the steal grace. Minimum band only - the per-band pair covers the rest -
+  and zero for a shard whose best band is worse than the band its tallies say is being served (`planner.Band`),
+  since strict priority, not dispatch, is holding that work. A healthy shard reads up to one tally period, not zero.
+- **Both ages are measured from `not_before`, not `created_at`.** A step that slept or backed off has been
+  waiting only since it came due; from `created_at` an hour-long sleep reads as an hour of backlog the moment
+  it wakes. `created_at` stays the fairness ordering key in the scan. This holds only because every write that
+  returns a step to `pending` stamps `not_before` (`internal/migrations/CLAUDE.md`).
 
 **Two gauges are deliberately absent and should not be added without a new argument.**
-`dwarf_task_concurrency_running` {task_url} costs a SECOND query per shard per scrape - on every replica, to
-produce R copies of one cluster-wide number - carries the least bounded label in the set, and asks a
+`dwarf_task_concurrency_running` {task_url} costs another per-shard aggregate, carries the least bounded
+label in the set, and asks a
 question that belongs to the host: per-downstream concurrency turns on the account/tenant identity the
 engine structurally cannot see, which is the same rule that keeps backpressure out of the engine (see
 "Backpressure is the task's or host's job"). `dwarf_steps_fairness_keys` would be a per-replica sample of the
@@ -3570,13 +3594,13 @@ goroutines for long tasks - so held state x crew size is a memory ceiling nothin
 
 **The gauges are of two kinds and they aggregate differently - do not paper over this.** `queue_depth`,
 the db-phase count and the two `state_in_flight` gauges are genuinely **per-replica** (read from this
-replica's memory): sum them. The two query-backed ones are **cluster-wide** by construction - they are
-computed by querying the SHARED shard databases, so every replica observes the *same* number. Summing them
-multiplies by the replica count (a 1,000-step backlog reads as 3,000 on three replicas; a summed
-`oldest_pending_age` is meaningless outright), so they aggregate with `max`/`avg`. A per-replica reading of
-them is not obtainable from a shared database, and the engine does not pretend otherwise: each instrument's
-*description* states its kind, because that is what an operator building a panel actually reads. The
-callback is `Unregister`ed first thing in `drainRuntime` so the OTEL reader can't query a closing database.
+replica's memory): sum them. The three backlog gauges are **per-shard**: a fact about a shard's database,
+reported only by the replicas responsible for that shard, and possibly by more than one of them (two
+dispatchers; an old and a new leader mid-handoff). Summing them double-counts a shard, so they aggregate with
+`max` per shard - and `dwarf_steps_pending` is then summed across shards. Each instrument's *description*
+states its kind, because that is what an operator building a panel actually reads. The callback is
+`Unregister`ed first thing in `drainRuntime`, and the backlog loop is cancelled right after it, so neither
+touches a closing database.
 
 **There is no `_peak` companion to `dwarf_db_phase_workers`, and adding one back is a step backwards.** A
 high-water mark held since process start goes CONSTANT within hours on a long-lived replica, answering
@@ -3606,6 +3630,11 @@ AND each subgraph flow on the path down to a fork step inside a subgraph, since 
 `completeFlow` (`TestMetrics_StartedAndEndedBalanceAcrossTrees`). Subgraph flows are counted too - the start
 path and `completeFlow` run for them - so no `surgraph_flow_id` filter; the `workflow` label lets dashboards
 slice root-vs-subgraph. `TestMetrics_EmittedOnRun` pins emission with an in-memory SDK `ManualReader`.
+Both lifecycle counters carry the flow's `priority`, which is immutable for the flow's life, so the panel
+subtracts per band. **Every end path must label with it too**, and each reads it from a flow-row read it
+already makes rather than a query of its own: `completeFlow`'s lock grab, `dynamicSubgraphParent` (failStep),
+`allSubgraphFlows`' tree scan (terminate), and `processStep`'s flow read (the cohort-fail path). An end counted
+under a different priority than its start leaves both bands drifting.
 
 > Observability note: the per-priority/per-task gauges are aggregate-only by design - no
 > per-`fairness_key` labels (unbounded cardinality).
@@ -3851,7 +3880,8 @@ race a close and panic a worker mid-`processStep`. `drainRuntime`:
 close(drainStop)                             // a worker asleep in a persist backoff releases its lease and exits
 close(reconcileStop); reconcileWorker.Wait() // in-memory only: nothing in flight to wait for
 arm withdrawal timer                         // gives up dispatcher slots if the drain outlasts a read cadence
-closeMetrics()                               // the gauge callback must not query a closing database
+closeMetrics()                               // no collection may run against a closing engine
+backlogCancel(); backlogWorker.Wait()        // nor the backlog refresh against a closing database
 cache.Close(); turnstiles.Close()            // BOTH: a worker parks on one or waits on the other
 crew.Drain(); withdrawal.Wait()
 close(recoveryStop); recoveryWorker.Wait()

@@ -212,6 +212,28 @@ peer: `dwarf_steps_stolen` floods and `CheckpointStole` fires for steals that ne
 exactly the dishonesty counting-after-the-trim exists to prevent. Pinned for both queries by
 `TestPiston_PartitionPairIsValidated`.
 
+**The band scan also publishes the dispatch lag (`DispatchLag`), and it must stay a passenger.** It is one more
+expression - `DATE_DIFF_MILLIS(NOW_UTC(), not_before)` - over rows the window already reads, maxed per key and
+then across keys, so the engine's lag gauge costs no query. Four constraints keep it honest:
+
+- **`not_before`, not `created_at`.** The lag is how long a step has been DUE; `created_at` stays the fairness
+  ordering. `not_before` is carried in the selection index, so the scan stays index-only. It means "due since"
+  only because every write that returns a step to `pending` stamps it (`internal/migrations/CLAUDE.md`).
+- **Max under the `rn <= capacity` cut, not over the whole key.** A window `MIN(not_before) OVER (PARTITION BY
+  fairness_key)` would see past the cut, but it is a second window pass over every due row - the same cost
+  that rules out counting with `COUNT(*) OVER`. The miss is a step past the first `capacity` of its key, by age, whose own
+  sleep made it due earlier than all of them: the reading is a lower bound there.
+- **Grows between scans, cleared on idle.** The reading carries when its statement was sent, and `DispatchLag`
+  adds the time since, so a tally loop that stops coming round shows as rising lag rather than a frozen value.
+  `SetIdle` and the tally loop's own withdrawal clear it, for the same reason they clear the tally: a scan in
+  flight when the piston went idle would otherwise leave a reading that resumes stale.
+- **Zero for a shard held back by strict priority.** The scan's band is this shard's best; when another shard
+  holds a better one, the planner gives this shard no slots and its due steps age by design. Reported as lag,
+  every multi-shard fleet with mixed priorities would page on it. So the reading carries its band and
+  `DispatchLag` compares it with `planner.Band()` - the standing tallies, not the last plan, which a stalled
+  supply loop would hold at a band that has since drained; the held-back work shows in the per-band backlog
+  age instead. Because the reading grows between scans, a healthy shard reads up to one tally period, not zero.
+
 ## Stealing — the answer to a peer that is SLOW rather than dead
 
 A dead replica stops advancing `dispatched_at`, drops out of the dispatcher divisor within the dispatch

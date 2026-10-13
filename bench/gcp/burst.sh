@@ -43,8 +43,8 @@
 #      count, halves the derived pool and craters throughput (~180 vs ~7,500 steps/s) - and this campaign's
 #      whole signal is the worker count, which a halved pool also depresses.
 #   4. ARMS WHOSE METRIC COLLECTION FAILED ARE DROPPED AND NAMED. A failed end-of-window scrape reads as
-#      `stepsPerSec: 0` with `valid: true`, and the engine's gauge callback queries the shard databases -
-#      so it fails exactly under the load this campaign creates.
+#      `stepsPerSec: 0` with `valid: true`, and a collection that times out does so exactly under the load
+#      this campaign creates.
 #
 # Usage:
 #   DSN=postgres://... ./burst.sh
@@ -233,8 +233,8 @@ for path in sorted(glob.glob(os.path.join(out, "r-*.json"))):
     tag = re.match(r"r-(.+)\.json", os.path.basename(path)).group(1)
     doc = json.load(open(path))
     for r in doc.get("results", []):
-        # A failed end-of-window scrape reads as stepsPerSec 0 with the gauges missing, and the engine's
-        # gauge callback queries the shard databases - so it fails exactly under this campaign's load.
+        # A failed end-of-window scrape reads as stepsPerSec 0 with the gauges missing, and a collection
+        # that times out does so exactly under this campaign's load.
         # Drop such an arm and NAME it: averaging a zero into a mean is how one reads as a real result.
         if not doc.get("valid", True) or not r.get("engineCounters") or not (r.get("gaugesAfter") or {}):
             dropped.append(tag)

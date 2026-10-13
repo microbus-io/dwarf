@@ -116,9 +116,11 @@ it. This is a workflow bug, not an infrastructure one; restarting replicas will 
 
 ## Backlog is growing
 
-**Confirm it is real.** `dwarf_steps_oldest_pending_age_seconds` is the honest signal — aggregate it with
-`max` across replicas, never `sum`. A rising *count* with a flat *age* is just more work arriving; a rising
-age means dispatch is genuinely falling behind.
+**Confirm it is real.** `dwarf_steps_dispatch_lag_seconds` is the honest signal — aggregate it with `max`
+across replicas, never `sum`. A rising *count* with a flat lag is just more work arriving; a rising lag means
+dispatch is genuinely falling behind. The lag covers only the priority band being served: a worse band aging
+in `dwarf_steps_oldest_pending_age_seconds` while the lag stays flat is strict priority serving the better
+band first, as designed.
 
 **Then find which of four things is binding.**
 
@@ -216,8 +218,8 @@ stalled and restart it; the fleet is carrying the load meanwhile, at the cost of
 **If both replicas dispatching a shard are slow, nothing covers for them.** At most two replicas dispatch
 each shard, and the others do not run its steps, so with both of them slow the shard runs at their pace and
 `dwarf_steps_stolen_total` stays near zero, because no healthy replica is looking at it. The sign is
-`dwarf_steps_oldest_pending_age_seconds` climbing while the database server itself shows headroom (its own
-CPU and active sessions): the database could take more, and the work is not being picked up.
+`dwarf_steps_dispatch_lag_seconds` climbing for that shard while the database server itself shows headroom
+(its own CPU and active sessions): the database could take more, and the work is not being picked up.
 `dwarf_shard_dispatching` names the replicas dispatching each shard; check those hosts for CPU saturation,
 memory pressure or a slow network path to the database. Fixing or replacing the host is the reliable remedy.
 A graceful restart (one that runs `Shutdown`) hands the replica's place to another working replica only when

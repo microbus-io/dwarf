@@ -154,6 +154,17 @@ type Piston struct {
 	// "since I last looked" is the reader's business.
 	tallyTurns  atomic.Uint64
 	supplyTurns atomic.Uint64
+	// lag is what the last completed band scan read of its oldest due step - see DispatchLag. Nil until a
+	// scan completes, and again once the piston has gone idle.
+	lag atomic.Pointer[lagReading]
+}
+
+// lagReading is one band scan's view of how long its most overdue step had been due.
+type lagReading struct {
+	dueMs float64   // meaningful only when due
+	due   bool      // whether the scan found anything due at all
+	band  int       // the band the scan tallied
+	at    time.Time // when the scan's statement was sent, the instant its NOW_UTC() approximates
 }
 
 // New returns a piston for one shard over an already-open database handle. The planner and cache are
@@ -219,6 +230,7 @@ func (p *Piston) SetIdle(idle bool) {
 	if idle {
 		p.planner.Clear(p.shard)
 		p.cache.Refill(p.shard, nil, pipeline.NoBand)
+		p.lag.Store(nil)
 	}
 }
 
@@ -287,6 +299,28 @@ func (p *Piston) Liveness() (turns uint64, busy, idle bool) {
 	busy = p.tallier.WorkingFor() > p.tallier.Period() || p.supplier.WorkingFor() > p.supplier.Period()
 	turns = min(p.tallyTurns.Load(), p.supplyTurns.Load())
 	return turns, busy, p.idle.Load()
+}
+
+// DispatchLag is how long the most overdue step this piston can see at the band being served has been due,
+// as of now: what the last completed band scan read, plus the time since it read it. ok is false until a scan
+// has completed, and while the piston is idle.
+//
+// It covers what the scan covers - the shard's best due band, this replica's residue class and foreign steps
+// due past the steal grace - so the maximum across a shard's dispatchers is the shard's figure. It reads zero
+// when nothing is due, and when the shard's best band is worse than the band the planner would serve: that
+// work is held back by strict priority, not waiting on dispatch.
+func (p *Piston) DispatchLag() (lag time.Duration, ok bool) {
+	r := p.lag.Load()
+	if r == nil || p.idle.Load() {
+		return 0, false
+	}
+	if !r.due {
+		return 0, true
+	}
+	if served := p.planner.Band(); served >= 0 && r.band > served {
+		return 0, true
+	}
+	return time.Duration(r.dueMs*float64(time.Millisecond)) + time.Since(r.at), true
 }
 
 // SetTallyCadence and SetSupplyCadence pace the two loops SEPARATELY, and there is deliberately no setter
@@ -473,6 +507,7 @@ func (p *Piston) runTallier(ctx context.Context) {
 		if p.idle.Load() {
 			if !withdrawn {
 				p.planner.Clear(p.shard)
+				p.lag.Store(nil)
 				withdrawn = true
 			}
 			if !p.sleep(ctx, idlePoll) {
@@ -823,13 +858,18 @@ func (p *Piston) ScanBand(ctx context.Context, shard int) (band int, tallies []p
 	// access pays nothing here.
 	pass := turnstile.WaitTurn(ctx)
 	defer pass.Return()
+	// due_ms rides the rows the window already reads, so the dispatch lag costs this scan one expression and
+	// no query of its own. It is measured from not_before, not created_at: a step that slept for an hour has
+	// been WAITING only since it came due.
+	sent := time.Now()
 	rows, err := p.db.QueryContext(ctx,
 		"SELECT fairness_key, MAX(rn) AS cnt,"+
 			" MAX(CASE WHEN rn=1 THEN age_ms ELSE NULL END) AS age_ms,"+
 			" MAX(CASE WHEN rn=1 THEN weight ELSE NULL END) AS weight,"+
-			" MAX(priority) AS priority FROM ("+
+			" MAX(priority) AS priority, MAX(due_ms) AS due_ms FROM ("+
 			"SELECT fairness_key, priority,"+
 			" DATE_DIFF_MILLIS(NOW_UTC(), created_at) AS age_ms,"+
+			" DATE_DIFF_MILLIS(NOW_UTC(), not_before) AS due_ms,"+
 			" fairness_weight AS weight,"+
 			" ROW_NUMBER() OVER (PARTITION BY fairness_key ORDER BY created_at, step_id) AS rn"+
 			" FROM dwarf_steps"+
@@ -845,18 +885,24 @@ func (p *Piston) ScanBand(ctx context.Context, shard int) (band int, tallies []p
 	}
 	defer rows.Close()
 	band = pipeline.NoBand
+	reading := lagReading{at: sent}
 	for rows.Next() {
 		var t planner.Tally
 		var priority int
-		if err := rows.Scan(&t.Key, &t.Count, &t.AgeMs, &t.Weight, &priority); err != nil {
+		var dueMs float64
+		if err := rows.Scan(&t.Key, &t.Count, &t.AgeMs, &t.Weight, &priority, &dueMs); err != nil {
 			return 0, nil, errors.Trace(err)
 		}
 		band = priority
 		tallies = append(tallies, t)
+		reading.due = true
+		reading.band = priority
+		reading.dueMs = max(reading.dueMs, dueMs)
 	}
 	if err := rows.Err(); err != nil {
 		return 0, nil, errors.Trace(err)
 	}
+	p.lag.Store(&reading)
 	return band, tallies, nil
 }
 

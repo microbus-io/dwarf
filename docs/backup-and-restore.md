@@ -70,7 +70,7 @@ Expect, and do not be alarmed by:
 
 - **A burst of `dwarf_steps_recovered_total`** as expired leases re-dispatch. This is the designed path.
 - **A backlog spike**, since everything that was in flight becomes runnable at once.
-  `dwarf_steps_oldest_pending_age_seconds` will climb and then drain.
+  `dwarf_steps_dispatch_lag_seconds` will climb and then drain.
 - **Phantom peers**, but only from a backup taken less than about 40 seconds before the restore. The
   replica registry is restored with the rest of the database, and a restored entry is as old as the backup:
   a replica stops counting 40 seconds after its last heartbeat, so entries from an older backup count for

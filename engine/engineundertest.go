@@ -85,6 +85,5 @@ func init() {
 	engineseams.DB = func(eng any) *database.ShardSet { return &eng.(*Engine).db }
 	engineseams.Seams = func(eng any) *seamster.Seamster { return eng.(*Engine).seams }
 	engineseams.SetRefillInterval = func(eng any, d time.Duration) error { return eng.(*Engine).setRefillInterval(d) }
-	engineseams.SkipBacklogGauges = func(eng any, skip bool) error { eng.(*Engine).skipBacklogGauges.Store(skip); return nil }
 	engineseams.ShardBudget = func(rttMs float64, serverMax int) int { return shardBudget(ShardSpec{}, rttMs, serverMax, "pgx") }
 }
