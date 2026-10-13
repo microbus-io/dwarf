@@ -232,22 +232,56 @@ over dead tuples is that fragmentation persists while latency recovers.
   climbed steadily to 395ms and never recovered. Vacuum is the cure, not the contention.
 - **Aggressive autovacuum** (`scale_factor=0.02`, `cost_delay=0`): 5,702 steps/s with a 115-second p99. Neither
   direction away from the defaults helps.
-- **`fillfactor` below 100, to get HOT updates:** made no difference to throughput at 70 or 90, and the HOT
-  ratio moved only 25.7% -> 29.8%. A local sweep (linear workload, ~1,000 steps/s, 60s per setting) read
+- **`fillfactor` below 100 on `dwarf_steps`, to get HOT updates:** made no difference to throughput at 70 or 90,
+  and the HOT ratio moved only 25.7% -> 29.8%. A local sweep (linear workload, ~1,000 steps/s, 60s per setting) read
   30.7 / 30.8 / 31.0 / 31.0% HOT on `dwarf_steps` at 100 / 90 / 80 / 70. It cannot work by construction: HOT
   requires that no indexed column changes, and about 70% of the engine's roughly 5.6 updates per step write
   `status`, which leads three indexes. On a linear step (claim, completion, successor link) only the link is
   HOT-eligible, which caps the ratio near 1/3, and HOT pruning already leaves the link room on the page without
   a lower fillfactor. A higher ratio needs the claim and completion to stop writing an indexed column - a schema
-  change, not a storage setting. `dwarf_flows` already sits at ~90% HOT at every fillfactor: the per-step
-  `touch`/`step_id` writes are HOT, and the remaining ~10% are status transitions, which move
-  `idx_dwarf_flows_status`.
+  change, not a storage setting. `dwarf_flows` is the opposite case - its per-step writes are all HOT-eligible,
+  so whether they are HOT is decided by page room, which fillfactor does control (next section).
 - **It is not client-side.** Active backends held at 72-99 before, during and after the stall (the pool caps
   them), and row-lock waits (`Lock:transactionid`, `Lock:tuple`) read zero in every sample.
 
 Narrowing `selection`'s predicate to `status = 'pending'` would attack the mechanism directly, because it
 makes a claim a pure delete. It is rejected for the reason given in the `idx_dwarf_steps_due` row above: the
 expired-lease sweep reads `running` rows from this index as an index-only scan.
+
+### `dwarf_flows` stays HOT only while its pages have room, and the row's width decides that (PostgreSQL)
+
+Every step rewrites its flow's row (the `touch`/`step_id` writes in the transition, plus `completeFlow`), and
+none of those writes changes an indexed column, so all of them are HOT-eligible: the only `dwarf_flows` updates
+that can never be HOT are the status transitions that move `idx_dwarf_flows_status`, a small fraction of a
+flow's writes. Whether an eligible update IS HOT depends on one thing: room on the row's page for the new
+version once the page's dead versions are pruned. The flow row carries the graph JSON inline, so the row is
+large (~1-2 KB for an ordinary graph), only a handful fit on a page, and the room left after packing - and how
+fast pruning can reclaim it while each flow rewrites its row many times in quick succession - is what decides.
+
+**At the default fillfactor this is a cliff in row width, and not a monotonic one.** A width change of a few
+dozen bytes - one added column, or a slightly larger graph - can flip the per-step writes from HOT to non-HOT,
+and a wider row can land back on the good side. The page arithmetic does not predict which side a width falls
+on; it has to be measured. When it flips, every per-step write takes a new heap page and an index entry: the
+heap grows many-fold for the same live rows, every `dwarf_flows` write slows, and the occasional slow
+completion holds a connection long enough to exhaust the pool. **The signature is a tail, not a mean:** the
+same statements per step and the same throughput, but more pool waits and a heavier `Create` p99, with
+`pg_stat_user_tables.n_tup_hot_upd / n_tup_upd` on `dwarf_flows` well below its ~90% ceiling and the table far
+larger than `n_live_tup` explains.
+
+**What bounds it:** PostgreSQL compresses or moves a row's large values out of line once the row passes ~2 KB
+(`TOAST_TUPLE_THRESHOLD`, a compile-time constant), and an update that does not change a TOASTed value keeps its
+pointer. So no `dwarf_flows` row is ever wider than ~2 KB inline, whatever the graph's size, and a large graph
+costs a per-step write nothing. The exposed range is the inline one, up to ~2 KB. `toast_tuple_target` does not
+move the threshold down: lowering it leaves a sub-2 KB row's graph inline.
+
+**`fillfactor=80` on `dwarf_flows` holds the per-step writes HOT across that whole inline range** - verified at
+widths spanning ~1.1 KB to the ~2 KB TOAST threshold, including widths that fall off the cliff at the default.
+`fillfactor=90` does not: it left the ratio on the bad side. That makes 80 a width-independent setting, unlike
+`dwarf_steps`, where fillfactor cannot help (see above). It costs heap space (pages are left 20% empty at
+insert), which is far less than the bloat of falling off the cliff. `1.sql` creates `dwarf_flows` with it on
+pgx; do not drop it as a no-op on the strength of a graph that happens to land on the good side. Any column
+added to `dwarf_flows` moves the row's width; re-check the HOT ratio on PostgreSQL rather than assume the
+per-step writes stay HOT.
 
 ### `List` gets no indexes of its own, and its `ORDER BY` is not a bug
 
