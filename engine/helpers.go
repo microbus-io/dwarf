@@ -50,7 +50,10 @@ type graphCacheKey struct {
 //
 // Every field must be frozen for the flow's life, and nothing may mutate one after the parse: concurrent
 // dispatches of many flows read the same entry. The per-flow key relies on a flow_id not being reused while
-// its entry lives.
+// its entry lives, which is why it carries no flow token: no supported database reuses one. PostgreSQL
+// sequences and SQL Server identities never do, SQLite's AUTOINCREMENT does only after a rolled-back insert
+// (Create seeds the cache after its commit), and the InnoDB counter that is recomputed as MAX(id)+1 on restart
+// is MySQL 5.7 / MariaDB before 10.2.4, neither of which runs the migrations or the refiller's window functions.
 type cachedGraph struct {
 	graph       *workflow.Graph
 	fanIn       *faninmap.Map
