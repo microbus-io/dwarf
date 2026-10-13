@@ -195,6 +195,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 	if host.CPUCores > 0 {
 		host.StepsPerCore = float64(deltas["dwarf_steps_executed"]) / sec / host.CPUCores
 	}
+	host.perStep(deltas["dwarf_steps_executed"])
 	return stepResult{
 		Concurrency:    k,
 		WindowSec:      sec,
@@ -400,6 +401,7 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 	if host.CPUCores > 0 {
 		host.StepsPerCore = float64(deltas["dwarf_steps_executed"]) / sec / host.CPUCores
 	}
+	host.perStep(deltas["dwarf_steps_executed"])
 	return stepResult{
 		Concurrency:    creators,
 		WindowSec:      sec,

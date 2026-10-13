@@ -398,6 +398,8 @@ func run() error {
 				k, res.FlowsPerSec, res.StepsPerSec, res.MBPerSec, res.P50ms, res.P95ms, res.P99ms,
 				res.Host.CPUCores, res.Host.CPUPct, res.Host.StepsPerCore,
 				res.Host.NetRxMBps, res.Host.NetTxMBps, res.Errors)
+			fmt.Printf("  alloc %.1f KB/step, %.0f mallocs/step, %.1f GC/s, GC %.1f%% of CPU\n",
+				res.Host.AllocBytesPerStep/1024, res.Host.MallocsPerStep, res.Host.GCPerSec, res.Host.GCCPUPct)
 			if len(dsns) > 1 {
 				fmt.Println(perShardLine(res, dsns))
 			}

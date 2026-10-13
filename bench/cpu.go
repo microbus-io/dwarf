@@ -19,6 +19,7 @@ package main
 import (
 	"os"
 	"runtime"
+	"runtime/metrics"
 	"strconv"
 	"strings"
 	"syscall"
@@ -47,6 +48,11 @@ type hostSample struct {
 	// differenced. See hostUsage.
 	heapAlloc uint64
 	heapSys   uint64
+	// Counters, differenced across the window: what the window allocated and how often it collected.
+	totalAlloc uint64
+	mallocs    uint64
+	numGC      uint32
+	gcCPUSec   float64
 }
 
 // hostUsage is the delta between two hostSamples, normalized to rates.
@@ -73,6 +79,27 @@ type hostUsage struct {
 	// survived. HeapSys is the one to compare against the VM, being what was taken from the OS.
 	HeapAllocMB float64 `json:"heapAllocMB"`
 	HeapSysMB   float64 `json:"heapSysMB"`
+	// AllocBytesPerStep and MallocsPerStep price the garbage one executed step leaves behind, the input
+	// that sets how often the collector runs; GCPerSec is that frequency, and GCCPUPct the share of the
+	// process's CPU the collector took (background marking, assists and sweeping). Every GC cycle scans
+	// every goroutine stack, so on a many-core host these move throughput through stack-scan contention
+	// before they show as CPU. Per-step figures are filled in by the caller, which knows the step count,
+	// and include the load generator's own allocations.
+	AllocBytesPerStep float64 `json:"allocBytesPerStep,omitzero"`
+	MallocsPerStep    float64 `json:"mallocsPerStep,omitzero"`
+	GCPerSec          float64 `json:"gcPerSec"`
+	GCCPUPct          float64 `json:"gcCPUPct"`
+	allocBytes        uint64
+	mallocCount       uint64
+}
+
+// perStep fills the per-step allocation figures from the window's executed-step count.
+func (u *hostUsage) perStep(steps int64) {
+	if steps <= 0 {
+		return
+	}
+	u.AllocBytesPerStep = float64(u.allocBytes) / float64(steps)
+	u.MallocsPerStep = float64(u.mallocCount) / float64(steps)
 }
 
 // sampleHost reads the process CPU clock (portable via getrusage) and the host's network counters
@@ -89,6 +116,12 @@ func sampleHost() hostSample {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 	s.heapAlloc, s.heapSys = ms.HeapAlloc, ms.HeapSys
+	s.totalAlloc, s.mallocs, s.numGC = ms.TotalAlloc, ms.Mallocs, ms.NumGC
+	gcCPU := []metrics.Sample{{Name: "/cpu/classes/gc/total:cpu-seconds"}}
+	metrics.Read(gcCPU)
+	if gcCPU[0].Value.Kind() == metrics.KindFloat64 {
+		s.gcCPUSec = gcCPU[0].Value.Float64()
+	}
 	return s
 }
 
@@ -98,7 +131,12 @@ func usageSince(before, after hostSample) hostUsage {
 	if secs <= 0 {
 		return hostUsage{NumCPU: runtime.NumCPU()}
 	}
-	cores := float64(after.cpuNano-before.cpuNano) / 1e9 / secs
+	cpuSec := float64(after.cpuNano-before.cpuNano) / 1e9
+	cores := cpuSec / secs
+	gcCPUPct := 0.0
+	if cpuSec > 0 {
+		gcCPUPct = (after.gcCPUSec - before.gcCPUSec) / cpuSec * 100
+	}
 	return hostUsage{
 		CPUCores:    cores,
 		CPUPct:      cores / float64(runtime.NumCPU()) * 100,
@@ -107,6 +145,10 @@ func usageSince(before, after hostSample) hostUsage {
 		NumCPU:      runtime.NumCPU(),
 		HeapAllocMB: float64(after.heapAlloc) / (1 << 20),
 		HeapSysMB:   float64(after.heapSys) / (1 << 20),
+		GCPerSec:    float64(after.numGC-before.numGC) / secs,
+		GCCPUPct:    gcCPUPct,
+		allocBytes:  after.totalAlloc - before.totalAlloc,
+		mallocCount: after.mallocs - before.mallocs,
 	}
 }
 
