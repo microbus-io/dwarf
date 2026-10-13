@@ -627,9 +627,17 @@ func retireOn(crew *Crew) *fakeClock {
 // verdict this round was meant to give it - which shows up much later as a count short by one. So: stop the
 // supply (feed's stop waits, so nothing more can arrive), let the crew drain and park, and only then move
 // time. Supply resumes afterwards because a parked worker reaches its check only when something wakes it.
+//
+// Growth is held off until the returned stop, by pinning Max to Min. A peer spawned after the jump opens its
+// window at the jumped instant, so the still clock never gives it a verdict and the crew rests one high. The
+// wake supply is enough to spawn one: a crew down to its last few workers can have all of them holding a
+// candidate at once, which leaves nobody idle - the growth trigger, working as designed. Lowering Max
+// retires nothing, so the shrink under test is untouched.
 func round(t *testing.T, crew *Crew, c *candidates.Cache, clk *fakeClock, stop func()) func() {
 	t.Helper()
 	stop()
+	ceiling := crew.Max()
+	crew.SetMax(crew.Min())
 	settled := 0
 	if !eventually(func() bool {
 		if crew.Idle() != crew.Resident() {
@@ -644,7 +652,11 @@ func round(t *testing.T, crew *Crew, c *candidates.Cache, clk *fakeClock, stop f
 		t.Fatalf("crew never quiesced: %d idle of %d resident", crew.Idle(), crew.Resident())
 	}
 	clk.Advance(2 * time.Minute)
-	return feed(c, 1)
+	stopWake := feed(c, 1)
+	return sync.OnceFunc(func() {
+		stopWake()
+		crew.SetMax(ceiling)
+	})
 }
 
 // settles waits for the crew to stop changing size and returns where it came to REST.
@@ -885,8 +897,8 @@ func TestCrew_TheCoinFlipCanDeclineRetirement(t *testing.T) {
 // changed world before anyone decides again.
 //
 // The clock makes a round discrete - exactly one verdict per worker per Advance - and the injected coin
-// makes the proportion exact rather than statistical, so this asserts counts and not tendencies. Growth is
-// kept out by feeding one candidate at a time: no pop can leave idle at zero.
+// makes the proportion exact rather than statistical, so this asserts counts and not tendencies. round
+// keeps growth out.
 func TestCrew_TheCoinFlipShrinksOnlyPartOfTheSurplus(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
