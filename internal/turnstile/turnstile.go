@@ -226,6 +226,20 @@ func (t *Turnstile) WaitTurn(ctx context.Context, claim Claim) (Pass, bool) {
 	}
 }
 
+// TryWaitTurn issues a pass only if one is free right now, never waiting. It takes one under exactly the
+// condition WaitTurn's fast path does - a free pass with nobody queued - so it cannot barge past a waiter,
+// and it presents no claim because it never joins the queue. ok is false when no pass was issued: none
+// free, somebody already waiting, or the turnstile closed.
+func (t *Turnstile) TryWaitTurn() (Pass, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed || t.avail <= 0 || t.q.Len() > 0 {
+		return Pass{}, false
+	}
+	t.avail--
+	return Pass{t: t, tok: &token{}}, true
+}
+
 // grantLocked hands free passes to the best waiters. A grant TRANSFERS the pass - the count falls and the
 // waiter proceeds holding it - rather than waking a caller to go and look for one. That is what makes the
 // ordering exact: the queue decides who proceeds, so a caller arriving at the same moment cannot take the

@@ -72,8 +72,8 @@ only logarithmically. Measured on a 16-vCPU shard at 600 flows/s with `-task-del
 ceiling of 141,000 and a workload needing ~48,000 concurrent. Eight times the task duration bought 4.6x the
 crew and *less* throughput.
 
-**Saturation stops growth WITHOUT the trigger ever asking about it, and that is why `Gate` has one method.**
-A worker blocked in `Acquire` holds no candidate, so it counts *idle*, so the next check declines. The
+**Saturation stops growth WITHOUT the trigger ever asking about it, and that is why `Gate` has no capacity
+query.** A worker blocked in `Acquire` holds no candidate, so it counts *idle*, so the next check declines. The
 overshoot is exactly **one** goroutine per saturation episode — and that one is first in line for the next
 permit, so it is not even waste. `TestCrew_SaturationDoesNotGrowThePool` pins the bound at 3 residents (two
 holding both permits, plus the reserve) and fails at `Max` against a build that reads saturation as a reason
@@ -298,4 +298,13 @@ steady load is not.
 **The gate.** Sized, closed, and given meaning by the owner. The crew never asks what it bounds — in the
 engine it is a multiple of that shard's connection pool, ordered by band and then by how long the asking job has been at the database,
 and the release point is "as soon as the first database call is done". All of those are engine facts the crew would be
-wrong to encode, which is why `Gate` is one blocking method and no accessor.
+wrong to encode, which is why `Gate` is a blocking acquire, its non-blocking twin, and no accessor.
+
+**A worker passes over a shard with no free permit.** Routing spreads workers by the work each shard holds,
+which cannot see that one shard's permits are all taken while another's sit free. So the take loop tries the
+routed shard with `TryAcquire`, and on a miss moves its reservation with `Cache.Reroute` to the next shard with
+work (up to `maxReroutes` of them), blocking in `Acquire` only when every shard it tried is full - and then
+on the shard it was first routed to, so that under full saturation the queue forms where routing ranked
+best, not on the last and worst-ranked shard tried. That keeps both
+properties the blocking acquire exists for: a worker trying gates holds no candidate and counts idle, and
+saturation - every shard full - still ends in a block, so growth still stops on its own.

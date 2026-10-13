@@ -86,13 +86,24 @@ type ProcessFunc func(ctx context.Context, shard, stepID int, release func()) er
 // the resource - gets it to the handler without the crew knowing any of it exists. A gate with nothing to
 // add returns the context unchanged.
 //
-// One method, and no capacity query, is the whole interface on purpose. The crew never asks whether the
-// gate has room; it lets a worker BLOCK and reads that instead, because a worker waiting for a permit holds
-// no candidate and so counts idle - which stops growth at its own next check. Saturation therefore needs no
-// reporting, and a gate that meters more than one thing needs no say in how it is summarised.
+// TryAcquire is Acquire without the wait: acquired is false, with nothing held, when the shard has no permit
+// to give right now. The crew uses it to move a worker to another shard with work rather than queue it
+// behind one that is full; ok is false only when the gate closes.
+//
+// No capacity query is the interface on purpose. The crew never asks whether the gate has room; it lets a
+// worker BLOCK and reads that instead, because a worker waiting for a permit holds no candidate and so counts
+// idle - which stops growth at its own next check. Saturation therefore needs no reporting, and a gate that
+// meters more than one thing needs no say in how it is summarised. TryAcquire keeps that: it is an attempt
+// to take a permit, not a question about how many are left.
 type Gate interface {
 	Acquire(ctx context.Context, shard int) (gated context.Context, release func(), ok bool)
+	TryAcquire(ctx context.Context, shard int) (gated context.Context, release func(), acquired, ok bool)
 }
+
+// maxReroutes bounds how many other shards a worker tries before it waits on the one it holds a reservation
+// for. Each try is a lock and a map walk, and a fleet whose every shard is out of permits gains nothing from
+// a longer walk.
+const maxReroutes = 8
 
 // Crew is a grow-on-demand set of goroutines draining one candidate cache through one gate.
 //
@@ -228,10 +239,11 @@ func (c *Crew) Min() int { return int(c.min.Load()) }
 func (c *Crew) Idle() int { return int(c.idle.Load()) }
 
 // SetLogger sets the logger. Nil restores the discarding default.
-// SetGateWaitObserver registers a callback invoked with how long each successful Acquire blocked. It
-// is optional and unset by default (the crew emits no metrics - instrument names are a public surface, so
-// they belong to the owner), and it is called on EVERY acquire including the uncontended ones, so an
-// observer that counts sees acquires and one that sums sees the mean.
+// SetGateWaitObserver registers a callback invoked with how long each worker took to get a permit, against
+// the shard it got one on - including any time spent trying shards that had none to give. It is optional
+// and unset by default (the crew emits no metrics - instrument names are a public surface, so they belong to
+// the owner), and it is called on EVERY acquire including the uncontended ones, so an observer that counts
+// sees acquires and one that sums sees the mean.
 //
 // It exists because the gate's own free-permit count is instantaneous: a reservation saturated for a whole
 // window without ever being sampled empty is indistinguishable from an idle one. The wait is the durable
@@ -431,7 +443,29 @@ func (c *Crew) work(ctx context.Context) {
 			return // the cache closed
 		}
 		gateStart := c.now()
-		gated, release, ok := c.gate.Acquire(ctx, shard)
+		// A shard with no free permit is passed over for another with work, rather than queued for: the
+		// candidates were routed by how much work each shard holds, which cannot see that one shard's
+		// permits are all taken while another's sit free. Only when every shard tried is full does the
+		// worker wait, and it waits where it was routed - the best-ranked shard, not the last one tried,
+		// which under full saturation would pile the queue onto the worst band.
+		routed := shard
+		gated, release, acquired, ok := c.gate.TryAcquire(ctx, shard)
+		var tried [maxReroutes]int
+		for n := 0; ok && !acquired && n < maxReroutes; n++ {
+			next, moved := c.cache.Reroute(shard, tried[:n])
+			if !moved {
+				break
+			}
+			tried[n], shard = shard, next
+			gated, release, acquired, ok = c.gate.TryAcquire(ctx, shard)
+		}
+		if ok && !acquired {
+			if shard != routed {
+				c.cache.MoveReservation(shard, routed)
+				shard = routed
+			}
+			gated, release, ok = c.gate.Acquire(ctx, shard)
+		}
 		if !ok {
 			// The gate closed: draining. This leaves the reservation WaitForWork took, which is harmless only
 			// because the owner closes the cache before the gate - a gate closed alone would leave the shard

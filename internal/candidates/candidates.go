@@ -21,6 +21,7 @@ package candidates
 
 import (
 	"math"
+	"slices"
 	"sort"
 	"sync"
 )
@@ -223,7 +224,7 @@ func (c *Cache) Pop() (j Job, ok bool, needRefill bool) {
 		c.cond.Wait()
 		c.waiting--
 	}
-	best, _ := c.bestPartition(false)
+	best, _ := c.bestPartition(false, nil)
 	if best == nil {
 		c.mu.Unlock()
 		return Job{}, false, false
@@ -247,12 +248,12 @@ func (c *Cache) Pop() (j Job, ok bool, needRefill bool) {
 //
 // routing restricts the choice to partitions with an unreserved candidate, which is how WaitForWork routes a
 // worker, so a better-banded partition whose every candidate already has a worker on its way is passed over
-// for a worse band on another shard.
-func (c *Cache) bestPartition(routing bool) (*partition, int) {
+// for a worse band on another shard. skip, when set, names shards not to choose.
+func (c *Cache) bestPartition(routing bool, skip func(shard int) bool) (*partition, int) {
 	var best *partition
 	bestShard := 0
 	for shard, p := range c.parts {
-		if len(p.items) == 0 || (routing && p.unreserved() <= 0) {
+		if len(p.items) == 0 || (routing && p.unreserved() <= 0) || (skip != nil && skip(shard)) {
 			continue
 		}
 		if best == nil {
@@ -301,7 +302,7 @@ func (c *Cache) WaitForWork() (shard int, ok bool) {
 	if c.closed {
 		return 0, false
 	}
-	p, shard := c.bestPartition(true)
+	p, shard := c.bestPartition(true, nil)
 	p.reserved++
 	return shard, true
 }
@@ -343,6 +344,51 @@ func (c *Cache) TryPopFrom(shard int) (j Job, ok bool, needRefill bool) {
 	return j, true, len(p.items) <= p.lowWater()
 }
 
+// Reroute moves the reservation a WaitForWork made on from to the best other partition with an unreserved
+// candidate, skipping the shards in tried, and reports that shard. It is for a caller that could not get
+// started on from - in the engine, a shard with no free turn - and has somewhere else to go. ok is false
+// when there is nowhere else, or the cache closed; the reservation then stays on from.
+//
+// A better band left behind is not an inversion: it is on another shard, whose resource had nothing free
+// for this caller to use.
+func (c *Cache) Reroute(from int, tried []int) (shard int, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return from, false
+	}
+	best, shard := c.bestPartition(true, func(s int) bool { return s == from || slices.Contains(tried, s) })
+	if best == nil {
+		return from, false
+	}
+	c.moveReservationLocked(from, best)
+	return shard, true
+}
+
+// MoveReservation moves a reservation from one shard to another, for a caller that rerouted and then found
+// nowhere better to start and goes back to wait where it was first routed.
+func (c *Cache) MoveReservation(from, to int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || from == to {
+		return
+	}
+	p := c.parts[to]
+	if p == nil {
+		p = &partition{}
+		c.parts[to] = p
+	}
+	c.moveReservationLocked(from, p)
+}
+
+// moveReservationLocked releases a reservation on from and takes one on to. Callers hold c.mu.
+func (c *Cache) moveReservationLocked(from int, to *partition) {
+	if p := c.parts[from]; p != nil && p.reserved > 0 {
+		p.reserved--
+	}
+	to.reserved++
+}
+
 // PeekShard reports which shard WaitForWork would route to right now, without blocking, reserving or
 // removing anything. ok is false when no partition holds an unreserved candidate or the cache is closed.
 //
@@ -353,7 +399,7 @@ func (c *Cache) PeekShard() (shard int, ok bool) {
 	if c.closed {
 		return 0, false
 	}
-	p, shard := c.bestPartition(true)
+	p, shard := c.bestPartition(true, nil)
 	return shard, p != nil
 }
 

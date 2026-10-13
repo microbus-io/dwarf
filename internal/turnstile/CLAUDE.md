@@ -302,11 +302,16 @@ is free. Two things that were not obvious and are worth not undoing:
 - **The pass token is split out of the queue entry** so a caller that never queues does not allocate a
   whole place in line: 64 B/op → 1 B/op, and 73ns → 65ns before the clock change.
 
+## `TryWaitTurn` takes a pass only where `WaitTurn` would without queueing
+
+It issues a pass only when one is free AND nobody is queued - the fast path's exact condition - so it can
+never barge past a waiter, which is the whole ordering. It presents no claim because it never joins the
+queue. Its one caller is `Gate.TryAcquire`, which lets the engine's crew move a worker to another shard with
+work instead of queueing it behind a shard whose turns are all taken (`engine/CLAUDE.md` §"Turn-taking on
+the database").
+
 ## Deliberately absent
 
-- **No `TryWaitTurn`.** It is the missing piece of a cross-resource head-of-line mitigation (see
-  `engine/CLAUDE.md` §"Turn-taking on the database"), and the same rule applies: add it with the caller that
-  uses it, or it is untested surface on a type whose whole job is a bound.
 - **No aging, weighting or anti-starvation term.** The age ordering already makes the common band
   starvation-free, and a band that starves is a band that was given to the wrong caller. A control loop
   here would have to clear the bar every control loop in this engine has had to.

@@ -61,8 +61,7 @@ func cohortLockStripe(shard, spawnStepID int) int {
 
 // claimRow receives the columns processStep's claim reads back: the step's in claimCols order, then the
 // flow's. The claim scans here and processStep copies the values into its locals, because a local whose
-// address goes into a Scan escapes to the heap - one allocation per column on every step, ~36 of them,
-// where this is one.
+// address goes into a Scan escapes to the heap - one allocation per column on every step, where this is one.
 type claimRow struct {
 	stepDepth                                  int
 	taskName, stepToken                        string

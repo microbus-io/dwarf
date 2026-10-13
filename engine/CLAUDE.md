@@ -3218,15 +3218,20 @@ the cache and the refill interval obey: `Startup` and `recomputePools`. `Resize`
 moves the available count by the **delta**, never to the new ceiling, or an in-flight holder's turn would be
 handed out twice.
 
-**Known watch-item: head-of-line blocking across shards.** If shard S's turns are exhausted, a worker blocks
-on S while shard T sits with work and free turns — the one place this design can idle capacity it already
-has. It is self-balancing with many workers, so this is a watch-item rather than a blocker, and it is
-roughly no worse than an ungated crew (those workers would instead be queued on S's connections). It has a
-second facet that is easy to miss: a worker blocked in `Acquire` counts *idle* to the crew, which is right
-same-shard and wrong across shards — so while S is exhausted, `considerGrowth` declines to spawn for T even
-when T has both work and free turns. The cheap mitigation, if it ever binds, is a non-blocking acquire plus
-a re-peek for a shard with capacity; that variant does not exist today, and **do not add it speculatively —
-add it with the re-peek that uses it.**
+**Head-of-line blocking across shards is closed in two steps, and a replica dispatching several shards
+needs both.** Left alone, every worker that peeks at once routes to the same shard and queues at its gate
+while another shard sits with work and free turns - and a worker queued at a gate counts *idle*, so
+`considerGrowth` declines to spawn for the other shard either. The two steps:
+
+- **Routing reserves a candidate** (`internal/candidates`): workers spread across shards by the work no
+  routed worker is already on its way to take, rather than all choosing the deepest.
+- **A full shard is passed over** (`internal/workers`): the take loop tries the routed shard's gate without
+  waiting (`Gate.TryAcquire`), and on a miss moves its reservation to the next shard with work
+  (`Cache.Reroute`), waiting only when every shard it tried is full. Routing by candidates cannot see that
+  one shard's turns are all taken.
+
+The signature of either step missing is a shard's turnstile reporting free turns and waiters in the same
+window: workers are queued on one shard while another's turns sit unused.
 
 **New-flow placement is weighted by `ShardSpec.Weight` (`pickShard`, default 1).** Placement is the engine's
 only load-balancing moment - flows are shard-pinned for life (subgraph affinity, thread continuations, forks)

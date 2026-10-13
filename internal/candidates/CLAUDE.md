@@ -46,10 +46,8 @@ reservation lives exactly as long as its worker waits at that shard's gate.
 
 **Without it, every worker that peeks at once picks the same partition.** The peek is deterministic, so they
 all queue at one shard's gate while the other shards' candidates wait for nobody - and a worker queued at a
-gate counts idle, so the crew does not grow to cover the rest. Measured on one engine dispatching 4 shards
-(c4a-48, 2 turns per connection): each shard's turnstile peaked at ~1,900 waiters out of a ~2,100-worker crew
-and also at every turn free, averaging ~180 free turns and ~150-290 waiters at once; one replica dispatching
-one shard read ~4 free and ~0 waiting. Reproduced locally at 4 shards in one process.
+gate counts idle, so the crew does not grow to cover the rest. It bites only where one replica dispatches
+several shards; a replica dispatching one has nowhere else to send a worker.
 
 - **A Refill does NOT reset the count.** The workers it counts are still queued and will pop from the new
   batch, so a reset would forget them and the next peeks would route up to that many more to the same
@@ -63,6 +61,9 @@ one shard read ~4 free and ~0 waiting. Reproduced locally at 4 shards in one pro
   rather than queueing at a gate for a candidate that is already spoken for. Only new candidates (`Refill`,
   `Offer`) can make one routable, so those stay the only wake sites.
 - `Pop` ignores reservations; it is the single-call form and nothing in the engine mixes it with the pair.
+- **`Reroute` moves a reservation** to the best other routable shard, for a worker that could not get started
+  where it was routed (in the engine, a shard with no free turn). It routes nobody when nothing else is
+  routable, leaving the reservation where it was.
 
 All four selection paths share `bestPartition`, so the lowest-floor rule exists in exactly one place; two
 copies of it would drift, and the drift would be invisible (both would still dispatch *something*).

@@ -89,10 +89,10 @@ func newAttrOpts(attrs ...attribute.KeyValue) *attrOpts {
 // call, which is what every call cost before the memo.
 const measureOptsCap = 4096
 
-// measureOpts memoizes attrOpts per attribute tuple. Built per call, they are ~7% of the bytes the engine
-// allocates per step (measured on one replica dispatching 4 shards on 48 cores), and garbage is what sets the
-// collector's cadence. Reads are one atomic load of an immutable map, so no recorder takes a lock; a miss
-// clones the map under the mutex, once per tuple, and a full memo is not locked at all.
+// measureOpts memoizes attrOpts per attribute tuple, so the hot-path recorders allocate nothing per call:
+// garbage per step is what sets the collector's cadence. Reads are one atomic load of an immutable map, so no
+// recorder takes a lock; a miss clones the map under the mutex, once per tuple, and a full memo is not locked
+// at all.
 type measureOpts[K comparable] struct {
 	mutex sync.Mutex
 	known atomic.Pointer[map[K]*attrOpts]
@@ -207,7 +207,7 @@ func (e *Engine) initMetrics() error {
 	// this answers is which of those a deployment is in.
 	gateWait, err := meter.Float64Histogram("dwarf_turnstile_gate_wait_seconds",
 		metric.WithUnit("s"),
-		metric.WithDescription("Time a worker spent waiting for its FIRST turn - the one taken before it picks a candidate up, per shard. It is the queue in front of dispatch, and the only turn a worker waits for while holding no work, which is also what stops the crew growing into a saturated shard. Observed on every successful acquire, INCLUDING the ones whose pop then lost the race and took nothing, so count is admissions rather than dispatches and sum/count is the mean wait. Read against dwarf_turnstile_wait_seconds: this one rising alone means work is being ADMITTED more slowly, both rising means the shard's connections are the constraint."),
+		metric.WithDescription("Time a worker spent waiting for its FIRST turn - the one taken before it picks a candidate up, per shard. It is the queue in front of dispatch, and the only turn a worker waits for while holding no work, which is also what stops the crew growing into a saturated shard. A worker that finds its shard's turns all taken tries other shards with work first, so a sample is recorded against the shard that gave the turn and includes that search; a shard passed over records nothing. Observed on every successful acquire, INCLUDING the ones whose pop then lost the race and took nothing, so count is admissions rather than dispatches and sum/count is the mean wait. Read against dwarf_turnstile_wait_seconds: this one rising alone means work is being ADMITTED more slowly, both rising means the shard's connections are the constraint."),
 		metric.WithExplicitBucketBoundaries(0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5))
 	if err != nil {
 		errs = append(errs, errors.Trace(err))

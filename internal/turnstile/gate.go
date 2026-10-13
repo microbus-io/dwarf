@@ -65,3 +65,24 @@ func (g *Gate) Acquire(ctx context.Context, shard int) (context.Context, func(),
 	}
 	return gated, pass.Return, true
 }
+
+// TryAcquire is Acquire without the wait: it takes the shard's turn only if one is free with nobody queued
+// for it, and otherwise returns at once with acquired false, holding nothing. It lets a caller that has
+// somewhere else to go - another shard with work - go there instead of queueing behind a shard whose turns
+// are all taken.
+//
+// ok is false only when the set has CLOSED, as for Acquire. A shard with no turnstile admits, as WaitTurn
+// does.
+func (g *Gate) TryAcquire(ctx context.Context, shard int) (gated context.Context, release func(), acquired, ok bool) {
+	if g.set.Closed() {
+		return ctx, func() {}, false, false
+	}
+	pass := Pass{}
+	if ts := g.set.Turnstile(shard); ts != nil {
+		var got bool
+		if pass, got = ts.TryWaitTurn(); !got {
+			return ctx, func() {}, false, !g.set.Closed()
+		}
+	}
+	return g.set.ContextWithPriority(ctx, shard, g.priority), pass.Return, true, true
+}

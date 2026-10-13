@@ -192,3 +192,69 @@ func TestCandidateCache_ShrunkPartitionRecoversThroughFailedPops(t *testing.T) {
 	assert.Equal(1, routeNow(c), "the failed pops released their reservations")
 	c.Close()
 }
+
+// TestCandidateCache_RerouteMovesTheReservation pins Reroute: the reservation leaves the shard the worker could
+// not start on and lands on the best other routable one, skipping shards already tried; with nowhere else to
+// go it stays put.
+func TestCandidateCache_RerouteMovesTheReservation(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	c := &Cache{}
+	c.Init(64)
+	c.Refill(1, jobs(1, 1, 1), 10)
+	c.Refill(2, jobs(2, 100, 1), 10)
+	c.Refill(3, jobs(3, 200, 1), 10)
+
+	shard, _ := c.WaitForWork()
+	assert.Equal(1, shard)
+	next, ok := c.Reroute(1, nil)
+	assert.True(ok)
+	assert.Equal(2, next, "the best other routable shard")
+	next, ok = c.Reroute(2, []int{1})
+	assert.True(ok)
+	assert.Equal(3, next, "a shard already tried is skipped")
+	_, ok = c.Reroute(3, []int{1, 2})
+	assert.False(ok, "nowhere left to go")
+
+	// The reservation sits on shard 3 alone, so shards 1 and 2 are routable again and 3 is not.
+	assert.Equal(1, routeNow(c))
+	assert.Equal(2, routeNow(c))
+	c.Close()
+}
+
+// TestCandidateCache_RerouteLeavesTheCallersSliceAlone pins that Reroute does not write into spare capacity of
+// the slice it is handed - the crew passes a slice of a fixed array it keeps filling.
+func TestCandidateCache_RerouteLeavesTheCallersSliceAlone(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	c := &Cache{}
+	c.Init(64)
+	c.Refill(1, jobs(1, 1, 1), 10)
+	c.Refill(2, jobs(2, 100, 1), 10)
+	shard, _ := c.WaitForWork()
+	var tried [4]int
+	c.Reroute(shard, tried[:0])
+	assert.Equal([4]int{}, tried)
+	c.Close()
+}
+
+// TestCandidateCache_MoveReservation pins the move back: the reservation leaves one shard and lands on the
+// other, so the routing of later workers sees it where it now is.
+func TestCandidateCache_MoveReservation(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	c := &Cache{}
+	c.Init(64)
+	c.Refill(1, jobs(1, 1, 1), 10)
+	c.Refill(2, jobs(2, 100, 1), 10)
+	shard, _ := c.WaitForWork()
+	assert.Equal(1, shard)
+	next, _ := c.Reroute(1, nil)
+	assert.Equal(2, next)
+	c.MoveReservation(2, 1)
+	assert.Equal(2, routeNow(c), "shard 1's one candidate is reserved again, shard 2's is free")
+	c.Close()
+}
