@@ -333,6 +333,7 @@ fresh database, averaged over a 16-minute window. The full conditions are in the
 | 1 × 8 | 2 × 2 vCPU | 4,041 |
 | 1 × 16 | 2 × 4 vCPU | 7,675 |
 | 1 × 32 | 1 × 16 vCPU | 17,938 |
+| 4 × 32 | 1 × 48 vCPU | 66,843 |
 | 4 × 32 | 4 × 16 vCPU | 69,382 |
 | 4 × 32 | 8 × 8 vCPU | 74,879 |
 
@@ -342,6 +343,10 @@ How to read it:
   32-vCPU database at ~16,000 steps/s: its settled rate less room to catch up after a failover or a spike.
 - **Give each shard two engine replicas at half its vCPU.** Each runs at about a third of its CPU and can
   carry the shard alone. Replicas beyond two per shard add standby capacity, not database throughput.
+- **Or serve several shards from a larger host, with `GOMAXPROCS` capped.** Plan the engine at about one
+  core per 3,300 steps/s its shards can deliver at most, and set `GOMAXPROCS` to that plus your in-process
+  tasks' share rather than the host's full core count: Go's garbage collection costs a larger share of CPU
+  the more cores it may use. Run at least two such hosts so one can fail.
 - **Shard past 32 vCPU.** A 64-vCPU database bought +22% for 1.9 times the price; four 32-vCPU shards ran
   3.9–4.2 times one.
 - **Disk IOPS scale with disk size on most managed databases.** A 100 GB disk (~3,000 IOPS) throttles a

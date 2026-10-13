@@ -25,8 +25,9 @@
   paused for ~40 s, standby replicas took over, and every flow completed.
 - **Keep the engine near its database.** A step makes about five round trips, so distance costs throughput;
   the engine opens more connections as distance grows, which recovers most of it out to 1 ms.
-- **Prefer more, smaller engine hosts.** One engine serves up to two shards at full speed; past that, add
-  replicas. On a 48 vCPU host the engine spends up to 40% more CPU per step than on 8 or 16 vCPU hosts.
+- **One large engine host can serve several shards.** One 48 vCPU engine ran four 32 vCPU shards at their
+  databases' pace on 20 of its cores. Size its CPU from what the shards can deliver, and on a large host cap
+  `GOMAXPROCS` to that: garbage collection takes about twice the share of CPU on 48 vCPU as on 2–16.
 
 [Sizing a deployment](#sizing-a-deployment) turns these into a recipe.
 
@@ -146,14 +147,19 @@ The same shard counts, served by a single replica:
 |---|---|---|---|---|
 | 2 | 16 vCPU | 32,564 | 10.3 of 16 cores | saturated |
 | 2 | 48 vCPU | 34,049 | 14.8 of 48 cores | saturated |
-| 4 | 48 vCPU | **58,719 (×3.27)** | 20.1 of 48 cores | below saturation |
+| 4 | 48 vCPU | **66,843 (×3.73)** | 20.0 of 48 cores | slowest saturated |
 
 - **One engine serves two shards at full speed**, even on a 16 vCPU host, with a third of its CPU to
   spare.
-- **At four shards one engine is the limit.** It delivered 58,719 steps/s while the databases ran below
-  saturation and the host had more than half its CPU free. It started near 67,000 and settled about 17%
-  lower over the window. Four replicas on the same four shards ran 69,382, and eight ran 74,879. Beyond
-  two shards per replica, add replicas rather than a bigger host.
+- **One engine runs four shards at their databases' pace.** It delivered 66,843 steps/s, steady from
+  minute to minute, with 28 of its 48 cores idle. Four replicas on four shards ran 69,382 and eight ran 74,879,
+  each on its own set of instances; the gap is within the spread between instances of one size.
+- **The slowest database set every shard's pace in this run.** All four ran at 16,700 steps/s, because
+  the load generator places flows evenly and caps flows in flight across all shards: the slowest shard's
+  flows stay in flight longest and fill that shared cap. Shards whose databases ran faster sat with free
+  capacity. The same holds for any caller that limits its own concurrency across shards.
+
+*(The four-shard row measured 2026-10-12; the two-shard rows 2026-10-10, on an earlier engine build.)*
 
 ## Replicas: availability without a throughput cost
 
@@ -207,13 +213,18 @@ The same rule scales down: two engines at half the database's vCPU (see
 | 4 vCPU | 2 replicas on a 16 vCPU database | 2,950–3,000 | 10–11% |
 | 8 vCPU | 8 replicas on 4 shards | 3,250–3,600 | 11–15% |
 | 16 vCPU | 1 or 2 shards per replica | 3,150–3,300 | 11–12% |
-| 48 vCPU | 1 replica on 2 and 4 shards | 2,300–2,950 | 20–22% |
+| 48 vCPU | 1 replica on 4 shards | 3,350 | 21% |
 
-- **The database is the limit at the sizes we recommend.** An engine host from 2 to 16 vCPU runs at about a
-  third of its CPU while its database is saturated.
-- **A large host costs more per step.** On a 48 vCPU host the engine's garbage collection takes about
-  twice the share it takes on 2 to 16 vCPU, at the same load: one replica serving two shards spent 14.8
-  cores on a 48 vCPU host and 10.3 on a 16 vCPU host for the same throughput.
+- **The database is the limit.** An engine host from 2 to 16 vCPU runs at about a third of its CPU while
+  its database is saturated, and a 48 vCPU host serving four shards at under half.
+- **Steps per core hardly depend on the host's size; garbage collection's share does.** On a 48 vCPU host
+  the engine's garbage collection takes about twice the share of CPU it takes on 2 to 16 vCPU. Go sizes
+  its runtime to every core it may use, and the collector's cost grows with that count, so on a large
+  host set `GOMAXPROCS` to the cores the engine needs rather than the whole host (see
+  [Sizing a deployment](#sizing-a-deployment)). Raising `GOGC` above its default of 100 makes the
+  collector run less often at the price of memory: on an earlier build, `GOGC=400` on a 48 vCPU host cut
+  garbage collection from about a fifth of the engine's CPU to about a twentieth. It has not been
+  measured on the current build.
 
 These figures are the engine's own cost. Your tasks run on the same hosts and need their own headroom.
 
@@ -373,7 +384,11 @@ The budget of 250 connections per shard is measured, not guessed.
    worth, a 16 vCPU database (~7,000 settled) or an 8 vCPU database (~3,600) costs less, at a higher price
    per step.
 2. **Engine replicas.** Two per shard at half the database's vCPU: `2S` replicas of 8 vCPU for 32 vCPU
-   shards. Each runs at about a third of its CPU and can carry its shard alone.
+   shards. Each runs at about a third of its CPU and can carry its shard alone. A larger host can serve
+   several shards instead: give its engine about one core per 3,300 steps/s its shards can deliver at
+   most - four 32 vCPU shards, ~20–24 cores - and set `GOMAXPROCS` to that plus whatever your tasks use
+   in the same process, rather than leaving it at the host's full count. Run at least two such hosts, so
+   one can fail.
 3. **Your tasks.** Add the CPU and memory your tasks use on the engine hosts. The engine itself holds ~15 KB
    per flow in flight; with long tasks, flows in flight = flows/s × flow duration.
 4. **Distance.** Put the engine in its database's zone. Up to 1 ms the budget compensates; past it, plan for
@@ -425,7 +440,8 @@ to 512 GB. Until then, earlier measurements on 8 vCPU databases with 500 GB disk
 
 ## Known gaps
 
-- **One engine process caps below four saturated shards** (~59,000 steps/s on a 48 vCPU host). Add replicas.
+- **A capped `GOMAXPROCS` on a large host** is not measured: how much engine CPU it saves, and where the cap
+  starts to cost throughput.
 - **Only PostgreSQL on Google Cloud is measured here.** MySQL and SQL Server ceilings at the default budget
   are not, nor other clouds or regions.
 - **Mixed task durations on one engine** (fast lookups beside minute-long calls) are not measured; each run
