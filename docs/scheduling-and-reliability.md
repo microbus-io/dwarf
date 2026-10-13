@@ -27,7 +27,9 @@ window. Priority is also never preemptive, so anything already running continues
 effects are bounded by the snapshot cycle, not by the size of the backlog: strict ordering is what you get
 between arrivals separated by more than a cycle or two, which is the normal case.
 There is no aging — a steady stream of high-priority flows will starve lower bands by design, so reserve
-the top bands for genuinely urgent work.
+the top bands for genuinely urgent work. To see it happening, chart `dwarf_steps_oldest_pending_age_seconds`
+by `priority`: a lower band whose age climbs while `dwarf_steps_dispatch_lag_seconds` stays low is being held
+back by better-priority work, not by a slow engine ([Operations](operations.md#alerting-on-lag)).
 
 Step order *within* a flow is dictated by the graph, not by priority.
 

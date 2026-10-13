@@ -122,6 +122,20 @@ dispatch is genuinely falling behind. The lag covers only the priority band bein
 in `dwarf_steps_oldest_pending_age_seconds` while the lag stays flat is strict priority serving the better
 band first, as designed.
 
+**See where it is.** Break the lag down by shard,
+`max by (shard) (dwarf_steps_dispatch_lag_seconds)`, and the shape points at the cause:
+
+- **Every shard rising together:** capacity. The database or the engine is saturated — 1 or 2 below.
+- **One shard rising:** that shard's database (its `dwarf_turnstile_waiting` deep, its CPU high — see
+  [One shard is slow or unreachable](#one-shard-is-slow-or-unreachable)), or the replicas dispatching it
+  (`dwarf_shard_dispatching` names them; see 4 below and the slow-dispatchers note under the same heading).
+- **A shard with no lag series at all:** nobody dispatches it, so nothing on it runs.
+  `sum by (shard) (dwarf_shard_dispatching)` reads zero for it. Check that replicas with workers are running
+  and can reach that database (`dwarf_peer_blind_seconds`).
+- **The lag flat, a worse band aging** in `max by (priority) (dwarf_steps_oldest_pending_age_seconds)`:
+  higher-priority work is using the capacity, as designed. If that band has a deadline, the fix is capacity or
+  fewer flows at the better bands, not the engine.
+
 **Then find which of four things is binding.**
 
 **1. The database is saturated.** `dwarf_turnstile_available` sits at zero with `dwarf_turnstile_waiting`

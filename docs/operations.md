@@ -77,6 +77,38 @@ can report the same shard, so summing them across replicas overstates the backlo
 meaningless. Take the `max` per shard first. The per-replica/per-shard split is tabulated in
 [Observability](observability.md).
 
+### Alerting on lag
+
+Three rules cover dispatch falling behind. The thresholds are starting points; set them from what your
+workflows can tolerate.
+
+```promql
+# Dispatch is falling behind on a shard. A shard that keeps up reads under a second.
+max by (shard) (dwarf_steps_dispatch_lag_seconds) > 30            # for: 5m
+
+# A shard has nobody dispatching it, so nothing on it runs and it reports no lag at all.
+sum by (shard) (dwarf_shard_dispatching) == 0                       # for: 2m
+
+# A priority band that must not starve has waited too long. Add one per band you care about.
+max by (priority) (dwarf_steps_oldest_pending_age_seconds{priority="100"}) > 600   # for: 15m
+```
+
+- **The lag counts from when a step became runnable**, not from when it was created. A step that sleeps, backs
+  off, waits on a subgraph or waits for a `Resume` does not raise it, so a long-running workflow does not need
+  a looser threshold.
+- **It covers only the band being served**, and reads zero on a shard whose best band is waiting behind a
+  better one elsewhere. Strict priority holding back worse bands is by design. Alert on those bands through
+  `dwarf_steps_oldest_pending_age_seconds`, and only for bands that carry a deadline.
+- **Do not alert on the per-band series being absent.** `dwarf_steps_pending` and
+  `dwarf_steps_oldest_pending_age_seconds` are refreshed every 30 seconds by one replica per shard. They are
+  missing for up to 30 seconds after startup or while that duty passes between replicas, and they go absent if
+  the refresh keeps failing for 90 seconds. The lag and `dwarf_shard_dispatching` are the liveness signals.
+- **For trend, not paging:**
+  `sum by (priority) (increase(dwarf_flows_started_total[15m])) - sum by (priority) (increase(dwarf_flows_ended_total[15m]))`
+  staying positive means flows are arriving faster than they finish, per band, before any lag shows.
+
+When a rule fires, [Backlog is growing](runbook.md#backlog-is-growing) walks through finding the cause.
+
 ## Sizing and capacity
 
 Sizing is measured rather than guessed, and the numbers live with the measurements:
