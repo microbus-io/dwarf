@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"log/slog"
 	"maps"
 	"net/http"
 	"strconv"
@@ -35,7 +36,6 @@ import (
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -57,6 +57,58 @@ const (
 func cohortLockStripe(shard, spawnStepID int) int {
 	h := (uint64(spawnStepID) ^ uint64(shard)*0x9E3779B97F4A7C15) * 0x9E3779B97F4A7C15
 	return int(h >> (64 - cohortLockStripesLog2))
+}
+
+// claimRow receives the columns processStep's claim reads back: the step's in claimCols order, then the
+// flow's. The claim scans here and processStep copies the values into its locals, because a local whose
+// address goes into a Scan escapes to the heap - one allocation per column on every step, ~36 of them,
+// where this is one.
+type claimRow struct {
+	stepDepth                                  int
+	taskName, stepToken                        string
+	stateJSON, priorChangesJSON, stateRefsJSON []byte
+	attempt, lineageID, flowID, timeBudgetMs   int
+	interruptDone                              bool
+	resumeDataJSON                             []byte
+	subgraphDone                               bool
+	subgraphResultJSON                         []byte
+	subgraphErrorStr                           string
+	stepCreatedAt                              time.Time
+	leaseSeq, fanOutOrdinal                    int
+	stepCancelling, replaying                  bool
+	replayGoto                                 string
+	replaySleepLeftMs                          float64
+	replayOnError                              bool
+	flowToken, flowStatus, workflowURL         string
+	baggageJSON                                []byte
+	traceParent                                string
+	flowCreatedAt, flowUpdatedAt               time.Time
+	flowPriority                               int
+	flowFairnessKey                            string
+	flowFairnessWeight                         float64
+	flowTimeBudgetMs                           int
+	flowCancelReason, graphHash                string
+	dest                                       [claimStepCols + claimFlowCols]any
+}
+
+const (
+	claimStepCols = 23
+	claimFlowCols = 13
+)
+
+// destinations points dest at the fields and returns the step's and the flow's scan destinations, which
+// share one backing array so a claim reading both scans dest whole.
+func (r *claimRow) destinations() (step, flow []any) {
+	r.dest = [claimStepCols + claimFlowCols]any{
+		&r.stepDepth, &r.taskName, &r.stepToken, &r.stateJSON, &r.priorChangesJSON, &r.stateRefsJSON, &r.attempt,
+		&r.lineageID, &r.flowID, &r.timeBudgetMs, &r.interruptDone, &r.resumeDataJSON, &r.subgraphDone,
+		&r.subgraphResultJSON, &r.subgraphErrorStr, &r.stepCreatedAt, &r.leaseSeq, &r.fanOutOrdinal,
+		&r.stepCancelling, &r.replaying, &r.replayGoto, &r.replaySleepLeftMs, &r.replayOnError,
+		&r.flowToken, &r.flowStatus, &r.workflowURL, &r.baggageJSON, &r.traceParent, &r.flowCreatedAt,
+		&r.flowUpdatedAt, &r.flowPriority, &r.flowFairnessKey, &r.flowFairnessWeight, &r.flowTimeBudgetMs,
+		&r.flowCancelReason, &r.graphHash,
+	}
+	return r.dest[:claimStepCols], r.dest[claimStepCols:]
 }
 
 // processStep acquires a step, executes its task, and enqueues the next step if applicable.
@@ -190,10 +242,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	var flowFairnessWeight float64
 	var flowTimeBudgetMs int
 	var flowCancelReason, graphHash string
-	flowDest := []any{&flowToken, &flowStatus, &workflowURL, &baggageJSON, &traceParent, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight, &flowTimeBudgetMs, &flowCancelReason, &graphHash}
 	flowRead := true
-	// The step columns every dialect's claim reads back, in claimCols order.
-	stepDest := []any{&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq, &fanOutOrdinal, &stepCancelling, &replaying, &replayGoto, &replaySleepLeftMs, &replayOnError}
+	row := new(claimRow)
+	stepDest, flowDest := row.destinations()
 
 	switch db.DriverName() {
 	case "pgx":
@@ -206,7 +257,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		err = db.QueryRowContext(ctx,
 			claimSQLPostgres,
 			workflow.StatusRunning, leaseMarginMs, e.engineID, stepID, parkedNone,
-		).Scan(append(stepDest, flowDest...)...)
+		).Scan(row.dest[:]...)
 		if err == sql.ErrNoRows {
 			n, err = 0, nil
 		} else if err == nil {
@@ -267,6 +318,14 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	if err != nil {
 		return errors.Trace(err)
 	}
+	stepDepth, taskName, stepToken = row.stepDepth, row.taskName, row.stepToken
+	stateJSON, priorChangesJSON, stateRefsJSON = row.stateJSON, row.priorChangesJSON, row.stateRefsJSON
+	attempt, lineageID, flowID, timeBudgetMs = row.attempt, row.lineageID, row.flowID, row.timeBudgetMs
+	interruptDone, resumeDataJSON = row.interruptDone, row.resumeDataJSON
+	subgraphDone, subgraphResultJSON, subgraphErrorStr = row.subgraphDone, row.subgraphResultJSON, row.subgraphErrorStr
+	stepCreatedAt, leaseSeq, fanOutOrdinal = row.stepCreatedAt, row.leaseSeq, row.fanOutOrdinal
+	stepCancelling, replaying, replayGoto = row.stepCancelling, row.replaying, row.replayGoto
+	replaySleepLeftMs, replayOnError = row.replaySleepLeftMs, row.replayOnError
 	if n == 0 {
 		// A lost claim is routine, not an error: the candidate cache holds hints, not ownership, so the row
 		// may have been claimed by a peer or left the claimable state between selection and claim. Counted
@@ -304,6 +363,10 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			return errors.Trace(err)
 		}
 	}
+	flowToken, flowStatus, workflowURL, baggageJSON = row.flowToken, row.flowStatus, row.workflowURL, row.baggageJSON
+	traceParent, flowCreatedAt, flowUpdatedAt = row.traceParent, row.flowCreatedAt, row.flowUpdatedAt
+	flowPriority, flowFairnessKey, flowFairnessWeight = row.flowPriority, row.flowFairnessKey, row.flowFairnessWeight
+	flowTimeBudgetMs, flowCancelReason, graphHash = row.flowTimeBudgetMs, row.flowCancelReason, row.graphHash
 	// The flow's frozen budget seeds the steps this dispatch creates and bounds the subgraph LoadGraph. The
 	// fallback is pure defense; createWithGraphTx always stores a concrete value.
 	if flowTimeBudgetMs <= 0 {
@@ -441,7 +504,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 
 	// Execute the task. The step's time_budget_ms bounds the executor call's context deadline; the
 	// surrounding DB work keeps using the undeadlined ctx so persistence is never cut short.
-	if !replaying {
+	// The Debug lines on the per-step path are guarded because their arguments are boxed into interfaces, and
+	// so allocated, before the logger can decline them.
+	if !replaying && e.logger.Enabled(ctx, slog.LevelDebug) {
 		e.logger.DebugContext(ctx, "Executing task", "task", taskName, "workflow", workflowURL)
 	}
 	dispatchURL := dispatchURLOf(graph, taskName)
@@ -556,8 +621,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// not only the ones that waited: count is then completions and sum/count the mean, so the exit side
 	// becoming the constraint shows up as a shift in the distribution - where the free-turn gauge, being
 	// instantaneous, can miss a reservation that was saturated all window without being sampled empty.
-	e.metrics.turnWait.Record(ctx, time.Since(turnWaitStart).Seconds(),
-		metric.WithAttributes(attribute.String("shard", strconv.Itoa(shardNum))))
+	e.metrics.turnWait.Record(ctx, time.Since(turnWaitStart).Seconds(), e.metrics.shardAttrOpts(shardNum).rec...)
 
 	if execErr == nil && !replaying && e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultExecuteTask, taskName)) {
 		execErr = errors.New("injected fault: "+engineseams.FaultExecuteTask+" "+taskName, http.StatusInternalServerError)
@@ -983,14 +1047,21 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		errorTarget = tr.To
 		sleepDur = 0
 	}
+	debugLog := e.logger.Enabled(ctx, slog.LevelDebug)
 	if replaying {
 		// The task ran once, on the worker that recorded this completion, and dwarf_steps_executed counted it there.
-		e.logger.DebugContext(ctx, "Task replayed", "task", taskName, "workflow", workflowURL)
+		if debugLog {
+			e.logger.DebugContext(ctx, "Task replayed", "task", taskName, "workflow", workflowURL)
+		}
 	} else if errorRouted {
-		e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "workflow", workflowURL)
+		if debugLog {
+			e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "workflow", workflowURL)
+		}
 		e.metricStepExecuted(ctx, taskName, "error_routed", shardNum)
 	} else {
-		e.logger.DebugContext(ctx, "Task completed", "task", taskName, "workflow", workflowURL)
+		if debugLog {
+			e.logger.DebugContext(ctx, "Task completed", "task", taskName, "workflow", workflowURL)
+		}
 		e.metricStepExecuted(ctx, taskName, workflow.StatusCompleted, shardNum)
 	}
 	// A successor inherits a Cancel mark only from a source that was not itself covered: a covered source has

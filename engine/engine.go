@@ -48,7 +48,6 @@ import (
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/seamster"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -954,8 +953,7 @@ func (e *Engine) initRuntime() error {
 	// The crew measures how long entry blocked; the instrument is named here, because instrument names are
 	// a public surface and belong with the owner rather than with a package that gates anything.
 	e.crew.SetGateWaitObserver(func(shard int, waited time.Duration) {
-		e.metrics.gateWait.Record(e.lifetimeCtx, waited.Seconds(),
-			metric.WithAttributes(attribute.String("shard", strconv.Itoa(shard))))
+		e.metrics.gateWait.Record(e.lifetimeCtx, waited.Seconds(), e.metrics.shardAttrOpts(shard).rec...)
 	})
 	e.crew.SetLogger(e.logger)
 	e.crew.SetMax(maxWorkers)

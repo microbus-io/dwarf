@@ -18,9 +18,6 @@ package engine
 
 import (
 	"time"
-
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 )
 
 // The two database phases a worker passes through, named here only so the instrumentation below can label
@@ -62,8 +59,7 @@ func (e *Engine) enterDBPhase(role string) func() {
 		closed = true
 		e.dbPhaseWorkers[idx].Add(-1)
 		if e.metrics != nil && e.metrics.dbPhaseSeconds != nil {
-			e.metrics.dbPhaseSeconds.Record(e.lifetimeCtx, time.Since(start).Seconds(),
-				metric.WithAttributes(attribute.String("role", role)))
+			e.metrics.dbPhaseSeconds.Record(e.lifetimeCtx, time.Since(start).Seconds(), e.metrics.dbPhaseOpts[idx].rec...)
 		}
 	}
 }

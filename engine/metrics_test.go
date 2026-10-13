@@ -738,3 +738,25 @@ func TestMetrics_StartedAndEndedBalanceAcrossTrees(t *testing.T) {
 		balanced(t)
 	})
 }
+
+func TestMeasureOpts_MemoizesUpToTheCap(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	var memo measureOpts[int]
+	build := func(k int) *attrOpts { return newAttrOpts(attribute.Int("k", k)) }
+
+	first := memo.get(1, build)
+	assert.True(first == memo.get(1, build), "a memoized tuple must return the same options")
+
+	for k := 2; k <= measureOptsCap; k++ {
+		memo.get(k, build)
+	}
+	assert.Equal(measureOptsCap, len(*memo.known.Load()))
+
+	// Past the cap a new tuple is built per call and never stored, while the tuples already held still hit.
+	over := measureOptsCap + 1
+	assert.False(memo.get(over, build) == memo.get(over, build), "a tuple past the cap must not be memoized")
+	assert.Equal(measureOptsCap, len(*memo.known.Load()))
+	assert.True(first == memo.get(1, build))
+}

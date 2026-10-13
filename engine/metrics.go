@@ -19,7 +19,10 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"maps"
 	"strconv"
+	"sync"
+	"sync/atomic"
 
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -58,6 +61,93 @@ type engineMetrics struct {
 	peerChanges         metric.Int64Counter
 
 	reg metric.Registration // the observable-gauge callback registration, unregistered at Shutdown
+
+	// Memoized attribute options for the hot-path recorders, one memo per attribute shape.
+	dbPhaseOpts   [2]*attrOpts // by enterDBPhase's role index
+	shardOpts     measureOpts[int]
+	stateOpts     measureOpts[stateBytesKey]
+	stepExecOpts  measureOpts[stepExecKey]
+	flowStartOpts measureOpts[flowKeyAttrs]
+	flowEndOpts   measureOpts[flowKeyAttrs]
+}
+
+// attrOpts is one attribute set, prebuilt as the option slices the instruments take. Passing a stored slice
+// rather than building metric.WithAttributes per call avoids both the attribute.Set (copied and sorted on
+// every call) and the variadic option slice, which escapes through the instrument interface.
+type attrOpts struct {
+	add []metric.AddOption
+	rec []metric.RecordOption
+}
+
+func newAttrOpts(attrs ...attribute.KeyValue) *attrOpts {
+	opt := metric.WithAttributeSet(attribute.NewSet(attrs...))
+	return &attrOpts{add: []metric.AddOption{opt}, rec: []metric.RecordOption{opt}}
+}
+
+// measureOptsCap bounds each memo. The attribute values come from the host's graphs (workflow URLs, task
+// names), so a host minting them per flow could grow a memo without limit; past the cap a tuple is built per
+// call, which is what every call cost before the memo.
+const measureOptsCap = 4096
+
+// measureOpts memoizes attrOpts per attribute tuple. Built per call, they are ~7% of the bytes the engine
+// allocates per step (measured on one replica dispatching 4 shards on 48 cores), and garbage is what sets the
+// collector's cadence. Reads are one atomic load of an immutable map, so no recorder takes a lock; a miss
+// clones the map under the mutex, once per tuple, and a full memo is not locked at all.
+type measureOpts[K comparable] struct {
+	mutex sync.Mutex
+	known atomic.Pointer[map[K]*attrOpts]
+}
+
+// get returns k's options, building them with build on a miss. build must not capture, so passing it costs
+// no allocation.
+func (c *measureOpts[K]) get(k K, build func(K) *attrOpts) *attrOpts {
+	m := c.known.Load()
+	if m != nil {
+		if o, ok := (*m)[k]; ok {
+			return o
+		}
+	}
+	o := build(k)
+	if m != nil && len(*m) >= measureOptsCap {
+		return o
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	m = c.known.Load()
+	if m == nil {
+		fresh := map[K]*attrOpts{k: o}
+		c.known.Store(&fresh)
+		return o
+	}
+	if existing, ok := (*m)[k]; ok {
+		return existing
+	}
+	if len(*m) >= measureOptsCap {
+		return o
+	}
+	grown := maps.Clone(*m)
+	grown[k] = o
+	c.known.Store(&grown)
+	return o
+}
+
+type stateBytesKey struct{ workflow, column string }
+
+type stepExecKey struct {
+	task, status string
+	shard        int
+}
+
+type flowKeyAttrs struct {
+	workflow, status string
+	shard            int
+}
+
+// shardAttrOpts returns the options carrying only the shard attribute.
+func (m *engineMetrics) shardAttrOpts(shard int) *attrOpts {
+	return m.shardOpts.get(shard, func(shard int) *attrOpts {
+		return newAttrOpts(attribute.String("shard", strconv.Itoa(shard)))
+	})
 }
 
 // initMetrics creates the engine's instruments from the resolved MeterProvider and registers the
@@ -228,6 +318,8 @@ func (e *Engine) initMetrics() error {
 		errs = append(errs, errors.Trace(err))
 	}
 	m.reg = reg
+	m.dbPhaseOpts[0] = newAttrOpts(attribute.String("role", phaseEnter))
+	m.dbPhaseOpts[1] = newAttrOpts(attribute.String("role", phaseExit))
 
 	e.metrics = m
 	return errors.Join(errs...)
@@ -434,8 +526,10 @@ func (e *Engine) metricFlowStarted(ctx context.Context, workflowURL string, shar
 	if e.metrics == nil {
 		return
 	}
-	e.metrics.flowsStarted.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("workflow", workflowURL), attribute.String("shard", strconv.Itoa(shardNum))))
+	opts := e.metrics.flowStartOpts.get(flowKeyAttrs{workflow: workflowURL, shard: shardNum}, func(k flowKeyAttrs) *attrOpts {
+		return newAttrOpts(attribute.String("workflow", k.workflow), attribute.String("shard", strconv.Itoa(k.shard)))
+	})
+	e.metrics.flowsStarted.Add(ctx, 1, opts.add...)
 }
 
 func (e *Engine) metricFlowEnded(ctx context.Context, workflowURL, status string, shardNum int) {
@@ -443,9 +537,11 @@ func (e *Engine) metricFlowEnded(ctx context.Context, workflowURL, status string
 	if e.metrics == nil {
 		return
 	}
-	e.metrics.flowsEnded.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("workflow", workflowURL), attribute.String("status", status),
-		attribute.String("shard", strconv.Itoa(shardNum))))
+	opts := e.metrics.flowEndOpts.get(flowKeyAttrs{workflow: workflowURL, status: status, shard: shardNum}, func(k flowKeyAttrs) *attrOpts {
+		return newAttrOpts(attribute.String("workflow", k.workflow), attribute.String("status", k.status),
+			attribute.String("shard", strconv.Itoa(k.shard)))
+	})
+	e.metrics.flowsEnded.Add(ctx, 1, opts.add...)
 }
 
 // The `column` attribute on the byte counters is the dwarf_steps column the bytes moved through -
@@ -457,16 +553,21 @@ func (e *Engine) metricStateWriteBytes(ctx context.Context, workflowURL, column 
 	if e.metrics == nil || n <= 0 {
 		return
 	}
-	e.metrics.stateWriteBytes.Add(ctx, int64(n), metric.WithAttributes(
-		attribute.String("workflow", workflowURL), attribute.String("column", column)))
+	e.metrics.stateWriteBytes.Add(ctx, int64(n), e.metrics.stateBytesAttrOpts(workflowURL, column).add...)
+}
+
+// stateBytesAttrOpts returns the options shared by the two byte counters.
+func (m *engineMetrics) stateBytesAttrOpts(workflowURL, column string) *attrOpts {
+	return m.stateOpts.get(stateBytesKey{workflow: workflowURL, column: column}, func(k stateBytesKey) *attrOpts {
+		return newAttrOpts(attribute.String("workflow", k.workflow), attribute.String("column", k.column))
+	})
 }
 
 func (e *Engine) metricStateReadBytes(ctx context.Context, workflowURL, column string, n int) {
 	if e.metrics == nil || n <= 0 {
 		return
 	}
-	e.metrics.stateReadBytes.Add(ctx, int64(n), metric.WithAttributes(
-		attribute.String("workflow", workflowURL), attribute.String("column", column)))
+	e.metrics.stateReadBytes.Add(ctx, int64(n), e.metrics.stateBytesAttrOpts(workflowURL, column).add...)
 }
 
 // metricStepOffered counts a candidate the doorbell admitted to the local cache.
@@ -485,9 +586,11 @@ func (e *Engine) metricStepExecuted(ctx context.Context, taskName, status string
 	// metric which keys by task_url (the downstream endpoint). The shard is the third axis and the one that
 	// makes per-shard dispatch rate readable: a piston, a pool and a residue class are all per shard, so a
 	// fleet-wide total cannot show one shard falling behind the others.
-	e.metrics.stepsExecuted.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("task_name", taskName), attribute.String("status", status),
-		attribute.String("shard", strconv.Itoa(shardNum))))
+	opts := e.metrics.stepExecOpts.get(stepExecKey{task: taskName, status: status, shard: shardNum}, func(k stepExecKey) *attrOpts {
+		return newAttrOpts(attribute.String("task_name", k.task), attribute.String("status", k.status),
+			attribute.String("shard", strconv.Itoa(k.shard)))
+	})
+	e.metrics.stepsExecuted.Add(ctx, 1, opts.add...)
 }
 
 // metricPeerCountChanged records that one shard's observed replica count moved. Deliberately driven from
