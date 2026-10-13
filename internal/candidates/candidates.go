@@ -67,6 +67,18 @@ type partition struct {
 	// band is the priority band this partition is serving for the current window - set by the Refill that
 	// planned it, or by an Offer into an empty partition. FROZEN until the next Refill: see floor.
 	band int
+	// reserved is how many workers WaitForWork has routed here that have not yet reached their TryPopFrom -
+	// in the engine, the workers queued at this shard's gate. Routing ranks by what is left once they are
+	// served (unreserved), so workers peeking at the same instant spread across shards instead of all
+	// choosing the deepest. A Refill leaves it alone: those workers are still on their way and will pop
+	// from the new batch.
+	reserved int
+}
+
+// unreserved is how many of this partition's candidates no routed worker is already on its way to take.
+// Negative when a Refill shrank the partition below its reservations.
+func (p *partition) unreserved() int {
+	return len(p.items) - p.reserved
 }
 
 // floor is the band this partition is serving for the current window, or math.MaxInt when it is empty.
@@ -109,6 +121,17 @@ func (c *Cache) Capacity() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.size
+}
+
+// anyUnreserved reports whether some partition holds a candidate no routed worker is on its way to take.
+// Callers hold c.mu.
+func (c *Cache) anyUnreserved() bool {
+	for _, p := range c.parts {
+		if p.unreserved() > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // totalLen is the current number of buffered candidates across all partitions. Callers hold c.mu.
@@ -188,7 +211,8 @@ func (c *Cache) Resize(workers int) {
 // Pop removes and returns the front candidate of the best partition, blocking until one is available
 // or the cache closes. Partition selection is lowest floor; ties break by depth (deepest first -
 // round-robin would hand every shard an equal share of workers regardless of backlog), then by lower
-// shard index for determinism.
+// shard index for determinism. It neither makes nor releases reservations: it is the single-call form,
+// and routing a worker ahead of its pop is what reservations are for.
 //
 // needRefill signals that the POPPED partition has drained to its low-water mark, so the caller
 // should nudge that shard's refiller (the popped job's Shard names it) and draining overlaps refill.
@@ -199,7 +223,7 @@ func (c *Cache) Pop() (j Job, ok bool, needRefill bool) {
 		c.cond.Wait()
 		c.waiting--
 	}
-	best, _ := c.bestPartition()
+	best, _ := c.bestPartition(false)
 	if best == nil {
 		c.mu.Unlock()
 		return Job{}, false, false
@@ -217,14 +241,18 @@ func (c *Cache) Pop() (j Job, ok bool, needRefill bool) {
 	return j, true, needRefill
 }
 
-// bestPartition returns the partition Pop would drain and its shard, or nil when every partition is empty.
-// Callers hold c.mu. Selection is lowest floor; ties break by depth (deepest first - round-robin would hand
-// every shard an equal share of workers regardless of backlog), then by lower shard index for determinism.
-func (c *Cache) bestPartition() (*partition, int) {
+// bestPartition returns the partition to drain and its shard, or nil when none qualifies. Callers hold c.mu.
+// Selection is lowest floor; ties break by unreserved depth (deepest first - round-robin would hand every
+// shard an equal share of workers regardless of backlog), then by lower shard index for determinism.
+//
+// routing restricts the choice to partitions with an unreserved candidate, which is how WaitForWork routes a
+// worker, so a better-banded partition whose every candidate already has a worker on its way is passed over
+// for a worse band on another shard.
+func (c *Cache) bestPartition(routing bool) (*partition, int) {
 	var best *partition
 	bestShard := 0
 	for shard, p := range c.parts {
-		if len(p.items) == 0 {
+		if len(p.items) == 0 || (routing && p.unreserved() <= 0) {
 			continue
 		}
 		if best == nil {
@@ -232,21 +260,28 @@ func (c *Cache) bestPartition() (*partition, int) {
 			continue
 		}
 		bf, pf := best.floor(), p.floor()
+		bd, pd := best.unreserved(), p.unreserved()
 		switch {
 		case pf < bf:
 			best, bestShard = p, shard
-		case pf == bf && len(p.items) > len(best.items):
+		case pf == bf && pd > bd:
 			best, bestShard = p, shard
-		case pf == bf && len(p.items) == len(best.items) && shard < bestShard:
+		case pf == bf && pd == bd && shard < bestShard:
 			best, bestShard = p, shard
 		}
 	}
 	return best, bestShard
 }
 
-// WaitForWork blocks until some partition holds a candidate, and reports which shard Pop would drain. ok is
-// false ONLY when the cache CLOSES, so a worker parked here distinguishes "drained" from "nothing yet"
-// without a second signal - the same contract Pop has always had.
+// WaitForWork blocks until some partition holds a candidate no routed worker is already on its way to take,
+// routes the caller to the best such partition, and reserves one of its candidates for it. ok is false ONLY
+// when the cache CLOSES, so a worker parked here distinguishes "drained" from "nothing yet" without a second
+// signal - the same contract Pop has always had.
+//
+// The reservation is released by the caller's TryPopFrom on that shard, whether it takes a candidate or
+// finds the partition empty, so every WaitForWork must be followed by exactly one TryPopFrom. A caller that
+// stops in between leaves its reservation behind; the crew does so only when its gate closes, which happens
+// with this cache already closed.
 //
 // It exists so a worker can park holding NOTHING. A worker that took a permit and then blocked waiting for
 // work would hoard admission capacity it is not using, so the order must be park, then acquire, then take
@@ -258,7 +293,7 @@ func (c *Cache) bestPartition() (*partition, int) {
 func (c *Cache) WaitForWork() (shard int, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for c.totalLen() == 0 && !c.closed {
+	for !c.anyUnreserved() && !c.closed {
 		c.waiting++
 		c.cond.Wait()
 		c.waiting--
@@ -266,7 +301,8 @@ func (c *Cache) WaitForWork() (shard int, ok bool) {
 	if c.closed {
 		return 0, false
 	}
-	_, shard = c.bestPartition()
+	p, shard := c.bestPartition(true)
+	p.reserved++
 	return shard, true
 }
 
@@ -278,6 +314,10 @@ func (c *Cache) WaitForWork() (shard int, ok bool) {
 // instead of looping would erode the crew under exactly the contention that caused the race - on a signal
 // that says nothing about whether that worker was surplus.
 //
+// It releases the reservation WaitForWork made, and does so on BOTH outcomes: a worker that took its candidate
+// leaves the unreserved depth others route by unchanged, and one that found the partition empty must not
+// keep it looking spoken for. Floored at zero for a caller that never reserved.
+//
 // needRefill signals that this partition has drained to its low-water mark, exactly as Pop's does.
 func (c *Cache) TryPopFrom(shard int) (j Job, ok bool, needRefill bool) {
 	c.mu.Lock()
@@ -286,6 +326,9 @@ func (c *Cache) TryPopFrom(shard int) (j Job, ok bool, needRefill bool) {
 		return Job{}, false, false
 	}
 	p := c.parts[shard]
+	if p != nil && p.reserved > 0 {
+		p.reserved--
+	}
 	if p == nil || len(p.items) == 0 {
 		return Job{}, false, false
 	}
@@ -300,25 +343,22 @@ func (c *Cache) TryPopFrom(shard int) (j Job, ok bool, needRefill bool) {
 	return j, true, len(p.items) <= p.lowWater()
 }
 
-// PeekShard reports which shard Pop would drain right now, without blocking and without removing anything.
-// ok is false when every partition is empty or the cache is closed.
+// PeekShard reports which shard WaitForWork would route to right now, without blocking, reserving or
+// removing anything. ok is false when no partition holds an unreserved candidate or the cache is closed.
 //
-// It is the non-blocking twin of WaitForWork, and exists for the demand side's growth decision: "is there
-// work waiting, and on which shard" is one question, and answering it with two calls would let the two
-// halves disagree. A HINT either way - the answer can be stale before the caller acts on it, which there
-// costs one goroutine that parks harmlessly.
+// A HINT - the answer can be stale before the caller acts on it.
 func (c *Cache) PeekShard() (shard int, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
 		return 0, false
 	}
-	p, shard := c.bestPartition()
+	p, shard := c.bestPartition(true)
 	return shard, p != nil
 }
 
 // Refill replaces one shard's partition with batch at the given priority floor and wakes up to ONE WAITER
-// PER ADMITTED CANDIDATE - never all of them, since a wake beyond the batch cannot be given anything to do.
+// PER UNRESERVED CANDIDATE - never all of them, since a wake beyond those cannot be given anything to do.
 // The floor is stamped onto every batch job, which is what keeps the partition's floor exact.
 //
 // The replacement is WHOLESALE, and the empty case must not be short-circuited. An empty batch is the
@@ -364,8 +404,8 @@ func (c *Cache) Refill(shard int, batch []Job, floor int) (discarded int) {
 	p.items = batch
 	p.lastFill = len(batch)
 	// Read under the lock; a waiter Signal has already picked cannot leave Wait until we release, so this
-	// cannot undercount the ones about to go.
-	wake := min(len(batch), c.waiting)
+	// cannot undercount the ones about to go. Only unreserved candidates can be routed to a woken waiter.
+	wake := min(max(0, p.unreserved()), c.waiting)
 	c.mu.Unlock()
 	// ONE WAKE PER CANDIDATE, not a broadcast. A refill admits at most the cache's capacity, so a broadcast
 	// wakes the WHOLE parked crew to hand out that many jobs and the rest contend on the single mutex and
@@ -373,9 +413,9 @@ func (c *Cache) Refill(shard int, batch []Job, floor int) (discarded int) {
 	// Signal loop IS wake-N.
 	//
 	// Under-waking cannot strand a candidate, which is what makes the bound safe: a waiter only parks when it
-	// finds the cache EMPTY, so a woken worker that loses its race re-checks and keeps going rather than
-	// parking on top of work. The floor on parallelism is therefore whoever is already awake, and this adds
-	// one worker per candidate on top of that.
+	// finds no unreserved candidate, so a woken worker that loses its race re-checks and keeps going rather
+	// than parking on top of work it could take. The floor on parallelism is therefore whoever is already
+	// awake, and this adds one worker per unreserved candidate on top of that.
 	for range wake {
 		c.cond.Signal()
 	}

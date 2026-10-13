@@ -102,9 +102,10 @@ settled with zero parked workers and the next arrival had nobody to wake.
 
 Spawning whenever a take leaves nobody idle makes `idle == 0` **transient**. There is always a parked worker
 for `WaitForWork` to wake, the arrival is noticed, and the cascade takes over — the woken worker pops, finds
-nobody idle, and spawns the next. The cost is one worker that parks when the cache happens to be empty,
-which *is* the reserve. `TestCrew_WorkArrivingWhileFullyCommittedStillGrows` pins it and hangs against the
-work-waiting rule (verified: it stalls at its 2 residents with 8 candidates unserved).
+nobody idle, and spawns the next. The cost is one worker that parks when the cache holds nothing it could
+take (every candidate already has a worker on its way), which *is* the reserve.
+`TestCrew_WorkArrivingWhileFullyCommittedStillGrows` pins it and hangs against the work-waiting rule
+(verified: it stalls at its 2 residents with 8 candidates unserved).
 
 **Do NOT restore a "work is waiting" condition.** It looks free — the trigger runs after a *successful* pop,
 so work demonstrably existed, and it only asks whether *more* remains — but that question is exactly what
@@ -176,8 +177,8 @@ wake and the pop. Top-of-loop costs nothing and misses neither. **No test here d
 placements**, so do not read the suite's silence as licence to move it.
 
 **A worker reaches its verdict only by WAKING, which couples the shrink rule to `Cache.Refill`'s wake
-protocol.** Refill wakes one waiter per candidate rather than broadcasting, so a batch far smaller than the
-crew leaves most of it parked on any given refill. That is survivable *only* because waiters are woken
+protocol.** Refill wakes one waiter per UNRESERVED candidate rather than broadcasting, so a batch far smaller
+than the crew leaves most of it parked on any given refill. That is survivable *only* because waiters are woken
 oldest-first: the surplus comes round periodically and still gets its verdict — once per `parked/batch`
 refills instead of every one, a few seconds at the derived cycle against a two-minute window.
 
@@ -186,9 +187,11 @@ is the reason it matters — a **LIFO** handoff would starve cold workers of the
 would never shrink. It is pinned in `internal/candidates` rather than assumed here; read that package's
 notes before touching the wake protocol, and do not "simplify" its FIFO test away.
 
-The one state neither placement covers is a worker parked in a cache that never wakes it again. That is
-accepted, not overlooked: such a crew costs nothing but its stacks, and it shrinks on the first work that
-arrives. Do **not** add a timer to cover it — a cadence here is what the `control-loops-must-be-simple` bar
+The one state neither placement covers is a worker parked in a cache that never wakes it again - which
+includes a saturated stretch in which every refill's candidates are already reserved by workers queued at the
+gates, so a refill wakes nobody (a woken worker that finds nothing unreserved re-parks inside `WaitForWork`
+and never reaches the check). That is accepted, not overlooked: such a crew costs nothing but its stacks,
+and it shrinks on the first work that arrives. Do **not** add a timer to cover it — a cadence here is what the `control-loops-must-be-simple` bar
 exists to keep out, and it would buy a shrink nobody is waiting on.
 
 ### `Min`, and why `resident` MUST decrement

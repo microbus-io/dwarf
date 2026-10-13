@@ -23,8 +23,8 @@ not the cache's.** `Pop` (park until something is available, then remove it) is 
 the engine's workers use the pair, because they must take a permit *between* the two
 halves: parking while holding a permit would hoard admission capacity, and popping before holding one would
 strand a candidate inside a worker that cannot proceed with it. So `WaitForWork` blocks and reports only
-**which shard** `Pop` would drain, and `TryPopFrom(shard)` removes from that partition without blocking.
-`PeekShard` is the non-blocking twin of the first, for the growth decision.
+**which shard** to drain, and `TryPopFrom(shard)` removes from that partition without blocking.
+`PeekShard` is the non-blocking twin of the first.
 
 Two consequences to keep straight:
 
@@ -36,12 +36,40 @@ Two consequences to keep straight:
   race for a shutdown and exit. In the crew that would silently erode the worker set under exactly the
   contention that caused the race.
 
+## Routing reserves a candidate, and the pop releases it
+
+`WaitForWork` routes by **unreserved** depth - a partition's candidates minus the workers already routed
+there that have not yet reached their `TryPopFrom` - and reserves one for its caller. `TryPopFrom` releases
+it on both outcomes: a successful pop moves the candidate and the reservation together, so the depth others
+route by does not change; a failed one must not leave the partition looking spoken for. In the engine a
+reservation lives exactly as long as its worker waits at that shard's gate.
+
+**Without it, every worker that peeks at once picks the same partition.** The peek is deterministic, so they
+all queue at one shard's gate while the other shards' candidates wait for nobody - and a worker queued at a
+gate counts idle, so the crew does not grow to cover the rest. Measured on one engine dispatching 4 shards
+(c4a-48, 2 turns per connection): each shard's turnstile peaked at ~1,900 waiters out of a ~2,100-worker crew
+and also at every turn free, averaging ~180 free turns and ~150-290 waiters at once; one replica dispatching
+one shard read ~4 free and ~0 waiting. Reproduced locally at 4 shards in one process.
+
+- **A Refill does NOT reset the count.** The workers it counts are still queued and will pop from the new
+  batch, so a reset would forget them and the next peeks would route up to that many more to the same
+  shard - re-forming the herd every cycle under saturation, where the queues are deepest. A Refill that
+  shrinks a partition below its reservations makes it read negative, which routes nobody new there; each
+  failed pop then brings the count back down.
+- **A fully reserved partition is passed over even when its band is better.** Its every candidate has a
+  worker on the way, so an extra one could only queue behind them; the worse band it goes to is on another
+  shard, where it competes with nothing the better band needs.
+- **A waiter parks when nothing is UNRESERVED**, not only when the cache is empty, so a surplus worker parks
+  rather than queueing at a gate for a candidate that is already spoken for. Only new candidates (`Refill`,
+  `Offer`) can make one routable, so those stay the only wake sites.
+- `Pop` ignores reservations; it is the single-call form and nothing in the engine mixes it with the pair.
+
 All four selection paths share `bestPartition`, so the lowest-floor rule exists in exactly one place; two
 copies of it would drift, and the drift would be invisible (both would still dispatch *something*).
 
 ## Waking: ONE SIGNAL PER CANDIDATE, never a broadcast
 
-`Refill` wakes `min(len(batch), waiting)` waiters one at a time; `Offer` signals once for its single
+`Refill` wakes `min(unreserved, waiting)` waiters one at a time; `Offer` signals once for its single
 candidate; **`Close` broadcasts, and must** — every waiter has to leave.
 
 A refill admits at most the cache's capacity, so a broadcast wakes the whole parked crew to hand out that
@@ -66,8 +94,9 @@ candidate` therefore sits at 1.05-1.10 under *both* protocols — it is the cont
 gap attributable to overhead, not the instrument that exposes the herd. Only the clock sees it.
 
 **Under-waking cannot strand a candidate**, which is what makes the bound safe. A waiter parks only when it
-finds the cache EMPTY, and `WaitForWork`/`Pop` re-check `totalLen()` in a loop — so a woken worker that
-loses its race does not park on top of work, it goes round again. The floor on progress is therefore ONE
+finds nothing it could take (`Pop`: an empty cache; `WaitForWork`: no unreserved candidate), and both
+re-check in a loop — so a woken worker that loses its race does not park on top of work, it goes round
+again. The floor on progress is therefore ONE
 worker, not one per candidate. The cap is read under the lock, where a waiter `Signal` has already picked
 cannot yet leave `Wait`, so it cannot undercount the ones on their way out.
 

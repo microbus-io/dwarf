@@ -51,8 +51,8 @@ func parked(c *Cache) int {
 // TestCandidateCache_OneRefillStrandsNoCandidate pins the safety of waking FEWER waiters than there are
 // parked: a single refill, with nothing after it to rescue a straggler, must still serve every candidate.
 //
-// What makes that safe is that a waiter parks only on an EMPTY cache and both wait sites re-check totalLen
-// in a loop, so a woken worker that loses its race goes round again rather than parking on top of work: the
+// What makes that safe is that a waiter parks only when it finds nothing it could take (Pop: an empty cache;
+// WaitForWork: no unreserved candidate) and both wait sites re-check in a loop, so a woken worker that loses its race goes round again rather than parking on top of work: the
 // floor on progress is ONE worker, not one per candidate. What this test catches is a refill that wakes
 // NOBODY. It does not isolate the re-check loop - verified, by turning both of them into a single if, which
 // the whole suite survives - because that same greedy drain covers for it here.

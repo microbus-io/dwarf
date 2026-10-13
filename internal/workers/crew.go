@@ -433,7 +433,10 @@ func (c *Crew) work(ctx context.Context) {
 		gateStart := c.now()
 		gated, release, ok := c.gate.Acquire(ctx, shard)
 		if !ok {
-			return // the gate closed: draining
+			// The gate closed: draining. This leaves the reservation WaitForWork took, which is harmless only
+			// because the owner closes the cache before the gate - a gate closed alone would leave the shard
+			// reading spoken for.
+			return
 		}
 		if f := c.gateWait.Load(); f != nil {
 			(*f)(shard, c.now().Sub(gateStart))
