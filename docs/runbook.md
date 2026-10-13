@@ -7,8 +7,8 @@
 
 **Before anything else: check whether it is already being handled.** Most faults are absorbed. A database
 outage shorter than a step's lease produces latency and no errors at all; a dead replica's work is
-re-dispatched within the flow's time budget plus about a minute and a half (a step it had finished but not
-yet advanced, within about ten minutes). If the symptom is "things are slow" rather than "a counter
+re-dispatched within the flow's time budget plus about a minute and a half, including a step it had finished
+but not yet advanced. If the symptom is "things are slow" rather than "a counter
 fired," start at [Backlog is growing](#backlog-is-growing) and resist restarting
 replicas — a restart discards in-flight work that was about to complete and adds a phantom replica to the
 registry.

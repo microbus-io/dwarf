@@ -176,7 +176,7 @@ without fragmentation or excessive write amplification.
 | Index | Columns | Purpose |
 |---|---|---|
 | PK | `(flow_id)` | Row lookups by flow ID |
-| `idx_dwarf_flows_status` | `(status, updated_at)` | **The orphan sweep** (`recoverOrphanedFlows`: `status='running' AND updated_at < NOW-5m`) - a textbook range seek on this exact prefix, and the query the index is *for*. Also the `OlderThan`/`NewerThan` age range. It is **not** an index for `List` (see below). Its running band does not churn per step: intra-flow flow-row writes flip the non-indexed `touch` column, not `updated_at`, so a running flow's entry moves only on a genuine status transition (see the `updated_at`/`touch` catalog rows) |
+| `idx_dwarf_flows_status` | `(status, updated_at)` | The `OlderThan`/`NewerThan` age range (a range seek on this exact prefix), and the orphan sweep's `status='running'` equality (`recoverOrphanedFlows`). It is **not** an index for `List` (see below). Its running band does not churn per step: intra-flow flow-row writes flip the non-indexed `touch` column, not `updated_at`, so a running flow's entry moves only on a genuine status transition (see the `updated_at`/`touch` catalog rows) |
 | `idx_dwarf_flows_workflow_url` | `(workflow_url)` | `List` by workflow URL |
 | `idx_dwarf_flows_thread` | `(thread_id, flow_id)` | `Continue` (latest in thread) and `List` by thread |
 | `idx_dwarf_flows_surgraph` | `(surgraph_flow_id)`, partial `WHERE surgraph_flow_id > 0` on pgx/sqlite/mssql | Walking the subgraph chain |

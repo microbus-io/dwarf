@@ -28,8 +28,8 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestRecoveryTick_Defaults pins the cadence the crash-recovery bound is published against: lease recovery every
-// minute, the heavy repairs every five, matching their 5-minute age guards.
+// TestRecoveryTick_Defaults pins the cadence the crash-recovery bound is published against: lease recovery and the
+// orphan-flow repair every minute, the park detectors every five, matching their 5-minute age guards.
 func TestRecoveryTick_Defaults(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -37,10 +37,9 @@ func TestRecoveryTick_Defaults(t *testing.T) {
 	assert.Equal(time.Minute, e.recoveryInterval)
 	assert.Equal(5*time.Minute, heavyRepairEvery*e.recoveryInterval)
 	assert.Equal(e.parkWedgeThreshold, heavyRepairEvery*e.recoveryInterval)
-	assert.Equal(e.orphanFlowThreshold, heavyRepairEvery*e.recoveryInterval)
 }
 
-// TestRecoveryTick_LightPassRecoversLeases pins that a pass without the heavy repairs still resets expired leases.
+// TestRecoveryTick_LightPassRecoversLeases pins that a pass without the park detectors still resets expired leases.
 // The light pass is what runs on four ticks of five, so without this a crashed worker's step would wait for the
 // heavy cadence again.
 func TestRecoveryTick_LightPassRecoversLeases(t *testing.T) {

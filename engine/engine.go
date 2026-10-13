@@ -314,9 +314,9 @@ type Engine struct {
 	leaseMargin         time.Duration // added to a step's budget when sizing the crash-recovery lease (30s)
 	latchSweepInterval  time.Duration // Await latch detector cadence - the bound on cross-replica wake (50ms)
 	awaitDefaultBudget  time.Duration // how long Await blocks when the caller's ctx carries no deadline (15m)
-	recoveryInterval    time.Duration // recovery sweep tick; the heavy repairs run every heavyRepairEvery-th; read once at Startup (1m)
+	recoveryInterval    time.Duration // recovery sweep tick; the park detectors run every heavyRepairEvery-th; read once at Startup (1m)
 	parkWedgeThreshold  time.Duration // min age before a parked step is treated as wedged (5m)
-	orphanFlowThreshold time.Duration // min age before a stranded running flow is repaired or reported orphaned (5m)
+	orphanFlowThreshold time.Duration // quiet time before a stranded flow with no step to replay is reported orphaned (5m)
 	deletionGrace       time.Duration // DeleteOnCompletion linger window before reap (1m)
 	reapInterval        time.Duration // reaper goroutine tick; read once at Startup (1m)
 	// persistBackoff is the outcome-write retry schedule, short and exponential because the errors it

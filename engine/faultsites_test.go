@@ -49,7 +49,7 @@ func orphanShapeCount(t *testing.T, e *Engine, shard int) int {
 // transition transaction exhausts its lock-contention retries - contention is the one failure persist hands to the
 // defer rather than retrying in place - and the defer's own completed->pending reset then fails too
 // (engineseams.FaultRecoveryResetErr). A is left `completed` with advancing=1 on a `running` flow and no worker holds it: the
-// shape a worker that died in that window leaves. Once the age guard and A's lease lapse, the orphan sweep rewinds
+// shape a worker that died in that window leaves. Once A's lease lapses, the orphan sweep rewinds
 // it, dispatch replays it, and the flow completes - with A's task having run exactly once.
 func TestFaultSite_RecoveryResetErr(t *testing.T) {
 	t.Parallel()
@@ -70,7 +70,7 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
-	awaitStartupRecoverySweep(t, e) // it reads orphanFlowThreshold, which is written below
+	awaitStartupRecoverySweep(t, e) // it runs the orphan repair this test drives itself
 
 	// InjectN(8) is one full round of Transact's retries (transactMaxAttempts), so the transition gives up with a
 	// contention error; the reset fault fires once on the defer that follows.
@@ -94,11 +94,9 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 
 	db, err := e.db.Shard(shard)
 	assert.NoError(err)
-	e.orphanFlowThreshold = 0
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -1000) WHERE flow_id=?", flowID)
 	assert.NoError(err)
-	time.Sleep(5 * time.Millisecond) // past the millisecond A was last touched in
-	e.recoverOrphanedFlows(ctx, db, shard)
+	e.recoverOrphanedFlows(ctx, db, shard, true)
 
 	awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()

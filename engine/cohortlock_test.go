@@ -186,7 +186,7 @@ func TestCohortStripe_QueuedArrivalsKeepTheirLeases(t *testing.T) {
 	e.SetHost(mux)
 	e.leaseMargin = 200 * time.Millisecond // waiters tick every 100ms
 	assert.NoError(e.Startup(t.Context()))
-	awaitStartupRecoverySweep(t, e) // it reads orphanFlowThreshold, which is written below
+	awaitStartupRecoverySweep(t, e) // it runs the orphan repair this test drives itself
 
 	fk, err := e.Create(ctx, "queue/g", nil, nil)
 	assert.NoError(err)
@@ -208,14 +208,13 @@ func TestCohortStripe_QueuedArrivalsKeepTheirLeases(t *testing.T) {
 	var seqBefore int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT SUM(lease_seq) FROM dwarf_steps WHERE flow_id=? AND task_name IN ('B1', 'B2')", flowID).Scan(&seqBefore))
 
-	e.orphanFlowThreshold = 0
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -1000) WHERE flow_id=?", flowID)
 	assert.NoError(err)
 	// The waiters' ticks must push both leases back into the future before the sweep looks.
 	assert.True(enginetest.WaitUntil(t, 10*time.Second, func() bool {
 		return enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND task_name IN ('B1', 'B2') AND lease_expires > NOW_UTC()", flowID) == 2
 	}), "the queued waiters never extended their leases")
-	e.recoverOrphanedFlows(ctx, db, shard)
+	e.recoverOrphanedFlows(ctx, db, shard, true)
 	var seqAfter int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT SUM(lease_seq) FROM dwarf_steps WHERE flow_id=? AND task_name IN ('B1', 'B2')", flowID).Scan(&seqAfter))
 	assert.Equal(seqBefore, seqAfter, "the sweep took back a waiter that was keeping its lease")

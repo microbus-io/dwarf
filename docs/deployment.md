@@ -390,9 +390,9 @@ are picked up by the surviving replicas within seconds. Steps that aren't idempo
 should be written defensively: the engine guarantees at-least-once dispatch, not exactly-once.
 
 One crash window is repaired differently. A replica that dies after recording a step as completed but
-before inserting the step that follows it leaves the flow `running` with nothing left to dispatch. Once
-the flow has been idle for 5 minutes and the step's lease has lapsed, the recovery sweep, which looks for
-this every 5 minutes, hands the step back, and dispatch creates its successor from the recorded output, without running the task again. These
+before inserting the step that follows it leaves the flow `running` with nothing left to dispatch. Once the
+step's lease has lapsed, the next recovery sweep hands the step back - on the same `TimeBudget` + 30 s + 1 minute
+bound - and dispatch creates its successor from the recorded output, without running the task again. These
 recoveries count in `dwarf_steps_recovered`. A flow the engine cannot repair this way counts in
 `dwarf_flows_orphaned` and needs manual recovery, described in the
 [Runbook](runbook.md#dwarf_flows_orphaned-is-non-zero).

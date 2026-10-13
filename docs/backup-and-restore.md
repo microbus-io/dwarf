@@ -38,8 +38,8 @@ Three consequences, all of which follow from flows being durable and leases bein
 **Every step that was running at backup time re-dispatches immediately.** Leases in the restored data are
 all in the past, so they read as expired. Expect a burst of `dwarf_steps_recovered_total` and a
 corresponding burst of duplicate side effects the moment the fleet comes up. A step caught between completing
-and creating its successor does not re-run: a few minutes later the recovery sweep resumes it from its recorded
-output.
+and creating its successor does not re-run: the recovery sweep resumes it from its recorded output as the fleet
+comes up.
 
 **Work that completed after the backup point is rewound.** Those flows return to whatever state they were in
 and run forward again from there. A flow that finished, and whose completion your application already acted

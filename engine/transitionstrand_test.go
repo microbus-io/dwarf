@@ -117,20 +117,15 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 	db2, err := e2.db.Shard(shard)
 	assert.NoError(err)
 
-	// Under its guards the sweep leaves the flow alone: A was touched moments ago and still holds its lease.
-	e2.recoverOrphanedFlows(ctx, db2, shard)
-	assert.True(stranded(e2), "the sweep rewound a step inside its age guard")
-
-	// Lift the age guard; the lease still holds A for its dead worker, so the sweep still waits.
-	e2.orphanFlowThreshold = 0
-	time.Sleep(5 * time.Millisecond) // past the millisecond A was last touched in
-	e2.recoverOrphanedFlows(ctx, db2, shard)
+	// The lease still holds A for its dead worker, so the sweep waits.
+	e2.recoverOrphanedFlows(ctx, db2, shard, true)
 	assert.True(stranded(e2), "the sweep rewound a step whose lease was unexpired")
 
-	// Lapse the lease, as time would. The sweep rewinds A, A is replayed, B runs, and the flow completes.
+	// Lapse the lease, as time would. A LIGHT pass - the one that runs every tick - rewinds A at once, with the age
+	// threshold at its default, since A's lease is the only wait. A is replayed, B runs, and the flow completes.
 	_, err = db2.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -1000) WHERE flow_id=?", flowID)
 	assert.NoError(err)
-	e2.recoverOrphanedFlows(ctx, db2, shard)
+	e2.runRecoverySweep(ctx, false)
 	awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	out, err := e2.Await(awaitCtx, fk)
@@ -173,15 +168,13 @@ func slowWorkerReplay(t *testing.T, mux *HostMux, flowURL string, initial any, b
 	assert.NoError(db.QueryRowContext(ctx, "SELECT lease_seq FROM dwarf_steps WHERE flow_id=? AND task_name='A' AND status='"+
 		workflow.StatusCompleted+"' AND advancing=1", flowID).Scan(&stalledSeq), "the completion write did not set advancing")
 
-	e.orphanFlowThreshold = 0
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -1000) WHERE flow_id=?", flowID)
 	assert.NoError(err)
 	if beforeSweep != nil {
 		beforeSweep(db, flowID)
 	}
-	time.Sleep(5 * time.Millisecond) // past the millisecond A was last touched in
 	swept = time.Now()
-	e.recoverOrphanedFlows(ctx, db, shard)
+	e.recoverOrphanedFlows(ctx, db, shard, true)
 	assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND task_name='A' AND lease_seq>?", flowID, stalledSeq),
 		"the sweep did not take A back")
 

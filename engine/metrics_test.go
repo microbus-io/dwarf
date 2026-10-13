@@ -643,7 +643,7 @@ func TestOrphanDetection_EmitsMetric(t *testing.T) {
 		"UPDATE dwarf_steps SET advancing=0, updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE flow_id=?", pastMs, flowID)
 	assert.NoError(err)
 
-	eng.recoverOrphanedFlows(ctx, db, shard)
+	eng.recoverOrphanedFlows(ctx, db, shard, true)
 
 	var rm metricdata.ResourceMetrics
 	if !assert.NoError(reader.Collect(ctx, &rm)) {

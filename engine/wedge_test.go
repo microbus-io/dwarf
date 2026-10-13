@@ -478,7 +478,10 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 		pastMs, orphanFlowID)
 	assert.NoError(err)
 
-	e.recoverOrphanedFlows(ctx, db, shard)
+	// A light pass repairs but never raises the alarm; the heavy pass does.
+	e.recoverOrphanedFlows(ctx, db, shard, false)
+	assert.Len(capture.seen(), 0, "a light pass raised the orphan alarm")
+	e.recoverOrphanedFlows(ctx, db, shard, true)
 
 	seen := capture.seen()
 	assert.Len(seen, 1, "exactly one flow should be flagged as orphaned")
@@ -489,14 +492,14 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 	}
 }
 
-// TestOrphanDetection_IgnoresCompletedSuccessorWindow pins that a healthy flow mid-transition
+// TestOrphanDetection_IgnoresCompletedSuccessorWindow pins that a healthy flow mid-transition, which
 // momentarily has all-terminal steps (processStep commits step->completed in a standalone UPDATE, then a
-// separate tx inserts the successor). Because the touch-column refactor froze dwarf_flows.updated_at at
-// go-running time, the old flow-level age guard was permanently satisfied for any flow older than the
-// threshold, so this transient window was logged as an orphan on every sweep that sampled it. The step-level
-// staleness guard fixes it: the just-completed step's updated_at is fresh, so the flow is NOT flagged. This
-// forges exactly that window - a `running` flow, backdated flow row, but a RECENTLY-updated completed step -
-// and asserts silence. (It is the forged orphan of the test above minus the step backdate.)
+// separate tx inserts the successor), is neither repaired nor flagged. dwarf_flows.updated_at is frozen at
+// go-running time, so it cannot tell this window from a strand; what does is the step. This forges the window
+// - a `running` flow with a backdated flow row and a RECENTLY completed step - twice: first as it is, the step
+// flagged advancing and still under its lease, which the scan skips; then with the flag cleared, the shape no
+// known path leaves, which the alarm's age guard must still hold off because the step is fresh. (It is the
+// forged orphan of the test above minus the step backdate.)
 func TestOrphanDetection_IgnoresCompletedSuccessorWindow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -542,7 +545,17 @@ func TestOrphanDetection_IgnoresCompletedSuccessorWindow(t *testing.T) {
 		workflow.StatusRunning, pastMs, flowID)
 	assert.NoError(err)
 
-	e.recoverOrphanedFlows(ctx, db, shard)
-
+	var seqBefore int
+	assert.NoError(db.QueryRowContext(ctx, "SELECT lease_seq FROM dwarf_steps WHERE flow_id=?", flowID).Scan(&seqBefore))
+	e.recoverOrphanedFlows(ctx, db, shard, true)
 	assert.Len(capture.seen(), 0, "a flow whose step was just completed is mid-transition, not orphaned - it must not be flagged")
+	var unmoved int
+	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status='"+
+		workflow.StatusCompleted+"' AND lease_seq=?", flowID, seqBefore).Scan(&unmoved))
+	assert.Equal(1, unmoved, "a flow mid-transition was rewound")
+
+	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET advancing=0 WHERE flow_id=?", flowID)
+	assert.NoError(err)
+	e.recoverOrphanedFlows(ctx, db, shard, true)
+	assert.Len(capture.seen(), 0, "a stranded flow whose step was touched inside orphanFlowThreshold must not be flagged yet")
 }
