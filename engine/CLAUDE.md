@@ -4272,6 +4272,48 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
    latent bug let a step wedge) and logs at error level (silent under the default discard logger, surfaced once a
    host injects one).
 
+### A long read holds back vacuum, and on `dwarf_steps` the slowdown feeds itself
+
+A trap to recognize, not a mechanism: the engine's background reads carry no deadline, by decision.
+
+**What happens:**
+- **Every claim leaves an index entry behind.** The `pending -> running -> terminal` updates change `status`, an
+  indexed column, so none is HOT, and each step leaves an entry in the selection index's pending range and its
+  running range.
+- **An entry becomes removable only once it is dead to EVERY open snapshot.** That holds for marking it LP_DEAD
+  during a scan (nbtree README) and for vacuum. So while any statement in the database holds an old snapshot -
+  a long read counts, not only an open write transaction - the entries for steps that moved on pile up at the
+  HEAD of each fairness key's range, ahead of the live rows.
+- **Every background read then slows down, and each one holds back cleanup in turn.** The band scan, the fetch
+  and the sweeps all step over those entries with a heap visit each, and each visit grows more expensive as the
+  hint bits and commit-log pages it needs go cold. The slow reads then hold their own snapshots, so the loop can
+  outlive whatever started it.
+- **When it ends, the WAL floods.** Pruning, vacuum and hint-bit setting dirty a backlog of pages, each the first
+  touch since a checkpoint, so each writes a full-page image. Checkpoints balloon, WAL segments run out of
+  recycled files, and commits queue behind segment creation.
+- **Many fairness keys are hit hardest.** The fetch's per-key cap is the HEAVIEST key's demand, so a light key
+  never reaches its `LIMIT` and the fetch walks every planned key's whole range. A smaller `LIMIT` does not help,
+  since the dead entries come first, and neither does a `created_at <= now` bound, which trims only the tail.
+
+**The engine recovers on its own** once the long statement ends, losing throughput meanwhile and nothing else.
+
+**Why no deadline on background reads (decided):**
+- Every value is an assumption about database size. The band scan costs O(due rows at the band) and the orphan
+  sweep O(running flows), so a bound that fits one deployment fails every attempt on a larger one.
+- A failed tally clears the shard from planning, so a scan that can never finish stops that shard's supply and
+  the backlog never drains - a wedge where today there is a slowdown.
+- Even the fetch, normally bounded by keys x per-key cap, fails every attempt while something outside the engine
+  holds the horizon.
+- A fuse (bound only N attempts in a row) removes the wedge but turns a too-small bound into permanent wasted
+  work.
+- Revisit only with evidence of what starts the loop.
+
+**To diagnose:** read the oldest snapshot holder in `pg_stat_activity` - `backend_xmin` age, `xact_start`,
+`query_start`, the query - and the "dead but not yet removable" counts in autovacuum's log. A long read of the
+engine's own, an operator session, a host query or a replication slot can each start it. The server-side bounds
+(`statement_timeout`, `idle_in_transaction_session_timeout`) are the operator's to set, sized by someone who knows
+the database.
+
 ### Per-Function Crash Analysis
 
 - **Create** - one transaction: insert flow (`running`) -> insert entry step (`pending`) -> set the flow's
