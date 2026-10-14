@@ -31,10 +31,11 @@ input for large elements, `D/(1+D)` for mid-size ones. Task outputs (`changes`) 
 - **A refs column the reader cannot decode is an error, never "no refs".** `Parse` returns one, and dispatch
   fails the step with it (the same path as a ref it cannot resolve). Degrading to no refs instead runs the task
   with every field the column points at missing, and the next mint makes that loss permanent - silent data loss.
-  That is exactly what a replica predating item refs does on meeting one (its `Parse` degraded), so a release
-  that changes what the refs column can hold needs every replica upgraded together - a maintenance window, said
-  so in the release notes. A mixed fleet whose replicas all hold this rule fails steps loudly rather than losing
-  fields.
+  That is exactly what a replica predating item refs does on meeting one (its `Parse` degraded), so the item-refs
+  release needs every replica upgraded together - a maintenance window, said so in the release notes. A later
+  change to what the column can hold is a new payload format: flows created at it carry a higher `payload_ver`,
+  an older replica defers or refuses them before it gets as far as `Parse`, and a newer one keeps minting the old
+  form into older flows (`engine/CLAUDE.md`, "Payload format versions").
   Pinned by `TestStateRefs_UnreadableRefsFailTheStep`.
 - **The item ref is minted INSIDE `Mint`** (`mintItem`), after the array's own fate is decided, because it
   points at whichever anchor holds the array's bytes - carried from an earlier step, or opened here. Pointing at

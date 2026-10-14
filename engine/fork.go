@@ -60,15 +60,18 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	defer doneTurn()
 
 	// Resolve the fork step, its owning flow, and that flow's token (needed to walk the surgraph chain).
-	var leafFlowID int
+	var leafFlowID, leafFlowPayloadVer int
 	var forkStepState, forkStepRefs, forkStepReduced []byte
 	var leafFlowToken string
 	err = db.QueryRowContext(ctx,
-		"SELECT s.flow_id, s.state, s.state_refs, s.state_reduced, f.flow_token FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.step_token=?",
+		"SELECT s.flow_id, s.state, s.state_refs, s.state_reduced, f.payload_ver, f.flow_token FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.step_token=?",
 		forkStepID, forkStepToken,
-	).Scan(&leafFlowID, &forkStepState, &forkStepRefs, &forkStepReduced, &leafFlowToken)
+	).Scan(&leafFlowID, &forkStepState, &forkStepRefs, &forkStepReduced, &leafFlowPayloadVer, &leafFlowToken)
 	if err == sql.ErrNoRows {
 		return "", errors.New("step not found", http.StatusNotFound)
+	}
+	if err == nil {
+		err = checkPayloadVer(leafFlowPayloadVer)
 	}
 	if err != nil {
 		return "", errors.Trace(err)
@@ -257,11 +260,16 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 
 	var status, workflowURL, workflowName, traceParent, cancelReason, graphHash string
 	var graphJSON, baggageJSON []byte
-	var deleteOnCompletion, originStepID int
+	var deleteOnCompletion, originStepID, originPayloadVer int
 	err := tx.QueryRowContext(ctx,
-		"SELECT status, workflow_url, workflow_name, graph, graph_hash, baggage, trace_parent, delete_on_completion, step_id, cancel_reason FROM dwarf_flows WHERE flow_id=?",
+		"SELECT status, workflow_url, workflow_name, graph, graph_hash, baggage, trace_parent, delete_on_completion, step_id, cancel_reason, payload_ver FROM dwarf_flows WHERE flow_id=?",
 		originFlowID,
-	).Scan(&status, &workflowURL, &workflowName, &graphJSON, &graphHash, &baggageJSON, &traceParent, &deleteOnCompletion, &originStepID, &cancelReason)
+	).Scan(&status, &workflowURL, &workflowName, &graphJSON, &graphHash, &baggageJSON, &traceParent, &deleteOnCompletion, &originStepID, &cancelReason, &originPayloadVer)
+	if err == nil {
+		// Each flow of the tree has its own format (a subgraph child is created in its creator's), and the clone
+		// copies its rows, so it keeps the origin's.
+		err = checkPayloadVer(originPayloadVer)
+	}
 	if err != nil {
 		return 0, nil, errors.Trace(err)
 	}
@@ -290,9 +298,9 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	// reason that explains it, rather than a cancellation nobody gave a reason for. cancel_watermark is
 	// deliberately NOT copied: the fork is not under cancellation, so none of its steps may pass one on.
 	newFlowID64, err := tx.InsertReturnID(ctx, "flow_id",
-		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, baggage, status, surgraph_flow_id, surgraph_step_id, forked_from_step, trace_parent, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, cancel_reason)"+
-			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		newFlowToken, workflowURL, workflowName, graphJSON, graphHash, baggageJSON, newStatus, newSurgFlowID, newSurgStepID, forkedFromStep, newTrace, deleteOnCompletion, flowPriority, flowFairnessKey, flowFairnessWeight, flowBudget, e.engineID, cancelReason,
+		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, baggage, status, surgraph_flow_id, surgraph_step_id, forked_from_step, trace_parent, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, cancel_reason, payload_ver)"+
+			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		newFlowToken, workflowURL, workflowName, graphJSON, graphHash, baggageJSON, newStatus, newSurgFlowID, newSurgStepID, forkedFromStep, newTrace, deleteOnCompletion, flowPriority, flowFairnessKey, flowFairnessWeight, flowBudget, e.engineID, cancelReason, originPayloadVer,
 	)
 	if err != nil {
 		return 0, nil, errors.Trace(err)

@@ -206,14 +206,17 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	defer doneTurn()
 	var taskName, statusStr, errMsg string
 	var stateJSON, changesJSON, stateRefsJSON, interruptJSON []byte
-	var stepDepth, attempt, predID, succID int
+	var stepDepth, attempt, predID, succID, ver int
 	var createdAt, updatedAt time.Time
 	err = db.QueryRowContext(ctx,
-		"SELECT step_depth, task_name, attempt, state, changes, state_refs, interrupt_payload, status, error, created_at, updated_at, predecessor_id, successor_id FROM dwarf_steps WHERE step_id=? AND step_token=?",
+		"SELECT s.step_depth, s.task_name, s.attempt, s.state, s.changes, s.state_refs, s.interrupt_payload, s.status, s.error, s.created_at, s.updated_at, s.predecessor_id, s.successor_id, f.payload_ver FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.step_token=?",
 		stepID, stepToken,
-	).Scan(&stepDepth, &taskName, &attempt, &stateJSON, &changesJSON, &stateRefsJSON, &interruptJSON, &statusStr, &errMsg, &createdAt, &updatedAt, &predID, &succID)
+	).Scan(&stepDepth, &taskName, &attempt, &stateJSON, &changesJSON, &stateRefsJSON, &interruptJSON, &statusStr, &errMsg, &createdAt, &updatedAt, &predID, &succID, &ver)
 	if err == sql.ErrNoRows {
 		return nil, errors.New("step not found", http.StatusNotFound)
+	}
+	if err == nil {
+		err = checkPayloadVer(ver)
 	}
 	if err != nil {
 		return nil, errors.Trace(err)

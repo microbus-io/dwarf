@@ -205,9 +205,9 @@ func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, ne
 	// statement batch on PostgreSQL.
 	batch := newTxBatch(ctx, tx)
 	queueInsertID(batch, "flow_id", func(id int64) { newFlowID = id },
-		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, baggage, trace_parent, status, surgraph_flow_id, surgraph_step_id, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, started_at)"+
-			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC())",
-		s.flowToken, s.workflowURL, s.workflowName, s.graphJSON, s.graphHash, s.baggageJSON, s.traceParent, workflow.StatusRunning, s.surgraphFlowID, s.surgraphStepID, s.deleteOnCompletion, s.priority, s.fairnessKey, s.fairnessWeight, s.timeBudgetMs, s.engineID,
+		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, baggage, trace_parent, status, surgraph_flow_id, surgraph_step_id, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, payload_ver, started_at)"+
+			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC())",
+		s.flowToken, s.workflowURL, s.workflowName, s.graphJSON, s.graphHash, s.baggageJSON, s.traceParent, workflow.StatusRunning, s.surgraphFlowID, s.surgraphStepID, s.deleteOnCompletion, s.priority, s.fairnessKey, s.fairnessWeight, s.timeBudgetMs, s.engineID, payloadVer,
 	)
 	flowID, flowArgs, err := batch.insertedID(lastFlowIDSQL, func() any { return newFlowID })
 	if err != nil {
@@ -420,10 +420,11 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 	// cancel_reason is the one column both Terminate and Cancel write their reason into. Which FlowOutcome
 	// field it surfaces as is decided below, by status.
 	var flowCancelReason string
+	var flowPayloadVer int
 	err = db.QueryRowContext(ctx,
-		"SELECT status, final_state, error, cancel_reason FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
+		"SELECT status, final_state, error, cancel_reason, payload_ver FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
 		flowID, flowToken,
-	).Scan(&flowStatus, &finalStateJSON, &flowErrorMsg, &flowCancelReason)
+	).Scan(&flowStatus, &finalStateJSON, &flowErrorMsg, &flowCancelReason, &flowPayloadVer)
 	if err == sql.ErrNoRows {
 		return nil, errors.New("flow not found", http.StatusNotFound)
 	}
@@ -463,6 +464,11 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 			return nil, errors.Trace(err)
 		}
 		if err == nil {
+			// A terminal flow's final_state is plain JSON, readable in any format; an interrupted one's state is
+			// read from its step rows.
+			if err := checkPayloadVer(flowPayloadVer); err != nil {
+				return nil, errors.Trace(err)
+			}
 			stepState, _ := workflow.NewState(stepStateJSON)
 			// The ref encoding is a storage detail, never API-visible: a caller sees the state the step
 			// actually saw. resolveStateRefs mutates the map in place, so it gets the live map.

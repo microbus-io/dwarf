@@ -78,6 +78,7 @@ type claimRow struct {
 	replayGoto                                 string
 	replaySleepLeftMs                          float64
 	replayOnError                              bool
+	payloadDeferrals                           int
 	flowToken, flowStatus, workflowURL         string
 	baggageJSON                                []byte
 	traceParent                                string
@@ -87,12 +88,13 @@ type claimRow struct {
 	flowFairnessWeight                         float64
 	flowTimeBudgetMs                           int
 	flowCancelReason, graphHash                string
+	flowPayloadVer                             int
 	dest                                       [claimStepCols + claimFlowCols]any
 }
 
 const (
-	claimStepCols = 23
-	claimFlowCols = 13
+	claimStepCols = 24
+	claimFlowCols = 14
 )
 
 // destinations points dest at the fields and returns the step's and the flow's scan destinations, which
@@ -102,10 +104,10 @@ func (r *claimRow) destinations() (step, flow []any) {
 		&r.stepDepth, &r.taskName, &r.stepToken, &r.stateJSON, &r.priorChangesJSON, &r.stateRefsJSON, &r.attempt,
 		&r.lineageID, &r.flowID, &r.timeBudgetMs, &r.interruptDone, &r.resumeDataJSON, &r.subgraphDone,
 		&r.subgraphResultJSON, &r.subgraphErrorStr, &r.stepCreatedAt, &r.leaseSeq, &r.fanOutOrdinal,
-		&r.stepCancelling, &r.replaying, &r.replayGoto, &r.replaySleepLeftMs, &r.replayOnError,
+		&r.stepCancelling, &r.replaying, &r.replayGoto, &r.replaySleepLeftMs, &r.replayOnError, &r.payloadDeferrals,
 		&r.flowToken, &r.flowStatus, &r.workflowURL, &r.baggageJSON, &r.traceParent, &r.flowCreatedAt,
 		&r.flowUpdatedAt, &r.flowPriority, &r.flowFairnessKey, &r.flowFairnessWeight, &r.flowTimeBudgetMs,
-		&r.flowCancelReason, &r.graphHash,
+		&r.flowCancelReason, &r.graphHash, &r.flowPayloadVer,
 	}
 	return r.dest[:claimStepCols], r.dest[claimStepCols:]
 }
@@ -357,7 +359,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		return db.QueryRowContext(ctx, "SELECT "+cols+" FROM dwarf_flows WHERE flow_id=?", flowID).Scan(dest...)
 	}
 	if flowRead {
-		err = readFlow("flow_token, status, workflow_url, baggage, trace_parent, created_at, updated_at, priority, fairness_key, fairness_weight, time_budget_ms, cancel_reason, graph_hash", flowDest...)
+		err = readFlow("flow_token, status, workflow_url, baggage, trace_parent, created_at, updated_at, priority, fairness_key, fairness_weight, time_budget_ms, cancel_reason, graph_hash, payload_ver", flowDest...)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -384,6 +386,13 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		)
 		reapPass.Return()
 		return errors.Trace(err)
+	}
+
+	// A flow a newer build created is in a format this replica does not read, and so is every row of it. Defer the
+	// step, before anything decodes it, for a replica that can. Past this check, every row the step reaches - its
+	// own, its anchors, its cohort, the flow's tails - is readable here.
+	if row.flowPayloadVer > payloadVer {
+		return errors.Trace(e.deferNewerPayload(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, row.flowPayloadVer, row.payloadDeferrals))
 	}
 
 	// The graph is frozen at flow creation, so a cached parse makes its JSON - the largest payload on the flow
@@ -2225,7 +2234,7 @@ func claimSet(alias string) string {
 var claimReadCols = []string{"step_depth", "task_name", "step_token", "state", "changes", "state_refs", "attempt",
 	"lineage_id", "flow_id", "time_budget_ms", "interrupt_done", "resume_data", "subgraph_done", "subgraph_result",
 	"subgraph_error", "created_at", "lease_seq", "fan_out_ordinal", "cancelling", "advancing", "advance_goto",
-	"advance_sleep_until", "advance_on_error"}
+	"advance_sleep_until", "advance_on_error", "payload_deferrals"}
 
 // claimCols is claimReadCols as a select list, each qualified by prefix ("s.", "INSERTED." or ""). A recorded
 // sleep is read as what remains of it, on the database clock.
@@ -2253,5 +2262,5 @@ var (
 		" FROM dwarf_flows f" +
 		" WHERE s.step_id=? AND " + claimEligible("s.") + " AND f.flow_id=s.flow_id" +
 		" RETURNING " + claimCols("s.") + "," +
-		" f.flow_token, f.status, f.workflow_url, f.baggage, f.trace_parent, f.created_at, f.updated_at, f.priority, f.fairness_key, f.fairness_weight, f.time_budget_ms, f.cancel_reason, f.graph_hash"
+		" f.flow_token, f.status, f.workflow_url, f.baggage, f.trace_parent, f.created_at, f.updated_at, f.priority, f.fairness_key, f.fairness_weight, f.time_budget_ms, f.cancel_reason, f.graph_hash, f.payload_ver"
 )

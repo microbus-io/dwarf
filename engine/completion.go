@@ -94,10 +94,12 @@ func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, flowI
 }
 
 // completedTailsSQL selects a flow's completed tail steps (successor_id=0) for its final state; anyTailsSQL is the
-// fallback when it finds none.
+// fallback when it finds none. Each carries the flow's payload_ver, because the final state is computed for flows
+// this replica did not check at a claim (Terminate, the wedge sweep, a failStep past the deferral bound); the join
+// puts the check on a read it makes anyway. Snapshot, Step and Fork check on their own reads.
 const (
-	completedTailsSQL = "SELECT state, changes, state_refs, lineage_id FROM dwarf_steps WHERE flow_id=? AND successor_id=0 AND status='" + workflow.StatusCompleted + "' ORDER BY step_id"
-	anyTailsSQL       = "SELECT state, changes, state_refs, lineage_id FROM dwarf_steps WHERE flow_id=? AND successor_id=0 ORDER BY step_id"
+	completedTailsSQL = "SELECT s.state, s.changes, s.state_refs, s.lineage_id, f.payload_ver FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.flow_id=? AND s.successor_id=0 AND s.status='" + workflow.StatusCompleted + "' ORDER BY s.step_id"
+	anyTailsSQL       = "SELECT s.state, s.changes, s.state_refs, s.lineage_id, f.payload_ver FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.flow_id=? AND s.successor_id=0 ORDER BY s.step_id"
 )
 
 // terminalTails is a flow's tail steps as read for its final state: the first tail's state is the merge base,
@@ -113,9 +115,12 @@ type terminalTails struct {
 // scan reads one tail row.
 func (t *terminalTails) scan(row interface{ Scan(dest ...any) error }) error {
 	var stateJSON, changesJSON, refsJSON []byte
-	var lineageID int
-	if err := row.Scan(&stateJSON, &changesJSON, &refsJSON, &lineageID); err != nil {
+	var lineageID, flowPayloadVer int
+	if err := row.Scan(&stateJSON, &changesJSON, &refsJSON, &lineageID, &flowPayloadVer); err != nil {
 		return errors.Trace(err)
+	}
+	if err := checkPayloadVer(flowPayloadVer); err != nil {
+		return err
 	}
 	if !t.found {
 		t.found = true

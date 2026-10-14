@@ -1848,6 +1848,97 @@ storage assertions against a real database) and `fixtures/staterefsflow_test.go`
 "you were supposed to clear the PDF" from folklore into something the engine says out loud. Nearly free, and its
 firing rate is itself evidence for how much refs are needed.
 
+### Payload format versions (`payload_ver`, `payloadver.go`)
+
+`dwarf_flows.payload_ver` is the format of every payload column of every step row of the flow (`state`, `changes`,
+`state_refs`, `state_reduced`), and `payloadVer` is the newest format this build reads - and the one it creates
+flows in. It is what tells **"newer than me"** (a newer replica will read it: wait) from **"corrupt"** (none will:
+`Parse` and friends fail as they always did).
+
+**The version is the FLOW's, fixed at creation, and every writer writes into a flow in the flow's format.** That
+is the whole design, and it is what makes the read side one check. A step reads far beyond its own row - its
+anchors through refs, its cohort at the fan-in, the flow's tails at completion - and every one of those rows
+belongs to the same flow (anchors never cross a flow; a cohort is one flow). So "this replica reads the flow's
+format" is decided once, at the claim, and holds for everything the dispatch reaches afterwards.
+
+- **Stamped at creation, never raised.** `insertFlowTx` (`Create`, `Continue`, subgraph spawn) stamps `payloadVer`;
+  Fork's clone copies its origin's, since it copies the rows. **Do not let a newer replica raise a live flow's
+  version when it writes**: an older replica that passed the claim check could then meet the newer rows mid-
+  transition - at the fan-in, the anchor resolve, the tails - and none of those can wait. **Do not move the version
+  onto the step either**: a step's version says nothing about its anchors or its siblings, so every read site needs
+  its own check, and the fan-in's must run after a pure arrival's terminal bail or it rolls back a cohort bump the
+  bail must commit.
+- **Separate flows are separate formats.** A subgraph child, a `Continue` turn and a Fork clone of a subgraph
+  each carry their own. What crosses between flows - `in`, `final_state`, `subgraph_result`, `Continue`'s
+  initial state - is plain JSON, readable in any format, so a v1 parent may run a v2 child.
+- **Dispatch defers; the other readers refuse.** The claim reads the flow's `payload_ver` (the joined flow row
+  on Postgres, the flow read on the other dialects - free on both), and a newer flow sends the step to
+  `deferNewerPayload`: back to `pending` with a doubling backoff (1s to 1min), fenced on `lease_seq` and guarded
+  to `running`, before anything decodes it. The reads of a flow's steps that are not one of its dispatches -
+  `Snapshot` (interrupted), `Step`, `Fork` and the final-state tails (Terminate, the wedge sweep, a `failStep` past
+  the bound) - cannot wait and return a `permanentError` via `checkPayloadVer`. Fork checks twice: the fork step's
+  flow at the leaf read in `forkFlow`, before the leaf is decoded, and every cloned flow in `cloneOneFlow`, since a
+  tree can mix formats. Permanent is load-bearing: `terminalFinalState` and `failFlowTx` take it as `{}`, so a
+  newer flow can still be stopped. The tails query joins the flow row for its version rather than paying a read.
+- **Nothing routes a deferred step to a newer replica.** It keeps its `step_id`, so it stays in this replica's
+  residue class, and stealing never fires because its owner keeps taking it. It moves only when the fleet does:
+  the old replica leaves `dwarf_peers` and the classes re-divide. So the bound is sized to a rolling upgrade
+  (`maxPayloadDeferrals` 65, at least an hour), not to a number of re-claims. Past it the step fails naming the
+  format. A fixed schedule, not a setting: too long only delays a broken rollout's failures, too short fails a
+  step a newer replica could have run, and every replica would have to agree on the value.
+- **Deferrals are not attempts.** `attempt` reaches the task as `flow.Attempt()`; counting deferrals there would
+  show a task attempts that never ran and trip its own give-up policy. Hence `dwarf_steps.payload_deferrals`,
+  which Fork does not copy. It counts over the step's whole life, never reset: a step that runs between two
+  rollouts (a `flow.Retry`, a resumed interrupt) has less of the hour left in the second.
+- **Do not filter on `payload_ver` in the claim predicate.** An unclaimable step never reaches the deferral, so
+  the bound never fires and the step strands silently. Claim-then-defer costs one claim per backoff, during a
+  rollout only.
+- **Do not create flows in the fleet's oldest format instead** (peers advertising what they read in
+  `dwarf_peers`, writers holding back to it). It would let a rollout run with no waiting at all, but every format
+  change would then have to keep its predecessor's writer alive for as long as an un-upgraded peer might exist,
+  fleet-wide; the per-flow rule keeps an old writer alive only for the flows created before the change.
+- **Do not put the version inside a payload column** (`state_refs` included). Those are keyed by state field
+  names, which are unconstrained, so a version key collides with a field of the same name.
+
+**Introducing payload format 2 (or any next version) - the checklist.** The mechanism above is built and tested
+at version 1; the release that first needs it does all of this:
+
+1. **Decide whether the change needs a version at all.** It does if a build at the current version would misread a
+   row holding the new form - read it as something else, drop it, or fail on it. A change every existing reader
+   already handles (a column it ignores, a form it already parses) does not.
+2. **Bump `payloadVer`.** New flows are created at the new version from then on.
+3. **Gate every writer of the new form on the FLOW's version**, not on `payloadVer`: a build at version N keeps
+   writing version-M rows (M < N) into flows created at M, for as long as such flows exist - and an interrupted
+   flow can rest for months. The writers and where each gets the flow's version:
+   - **everything a dispatch writes** - the completion, retry and interrupt writes, successors, fan-in rows,
+     `fireFanInDirect` - from the claim (`claimRow.flowPayloadVer`);
+   - **Fork's leaf rewrite** (`mergedLeafState`, `forkLeafReduced`, computed in `forkFlow`) from the leaf read
+     there;
+   - **Fork's ref remap** in `cloneOneFlow`, which re-marshals every kept step's `state_refs` with this build's
+     encoder, from that function's per-flow read - a respelled ref form would otherwise land in a clone stamped
+     with the old version;
+   - **a new flow** (`insertFlowTx`) is always written in `payloadVer`, so its first rows need no gate.
+
+   Emit the old form below the new version. For an additive form this is one
+   condition per mint site; a change to the meaning of an existing encoding needs both writers kept.
+4. **Keep every reader able to read every version it may meet**: N reads 1..N. A reader never needs the version to
+   decode an older row if the new form is additive; otherwise branch on the flow's version.
+5. **Test at both versions**: a flow created at N-1 runs to completion on an N build, writing only N-1 forms (pin
+   it by reading the rows back), and an N-1 build defers an N flow (`TestPayloadVer_NewerFlowIsDeferredUnrun`
+   simulates that by raising the column).
+6. **Say in the release notes** what a mixed fleet does: steps of flows created at N wait, up to an hour, for a
+   replica of the new build, and a rollback below N stalls, then fails, those flows.
+
+**Protection starts one release late.** A build predating the column ignores it, so the first version that can
+defer anything is a release after the one that shipped the column. The item-refs release is in that window and
+needs every replica upgraded together.
+
+Pinned by `engine/payloadver_test.go`: the deferral (task unrun, `attempt` untouched, backed off, then run once a
+reader is in place), the bound (failing with an empty final state), `Snapshot`/`Step`/`Fork` refusing (a newer
+subgraph in the tree included), `Terminate` still stopping the flow, Create stamping and Fork copying the version,
+and the schedule's arithmetic. The deferral write's `lease_seq` fence and `running` guard are not pinned
+separately; they are the same predicate as the retry rewind's.
+
 ### Execution-DAG edges (`predecessor_id` / `successor_id`)
 
 `lineage_id` is a cohort-counting device, not a DAG: a `forEach` source applies one `childLineageID` to every branch,
