@@ -4018,8 +4018,8 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
 
 ### Background Recovery
 
-1. **`recoverExpiredLeases`** (`wedge.go`) - resets `running` steps whose lease expired to `pending`, one UPDATE
-   per shard. It rings no doorbell: a reset step is due and `pending`, so its shard's next piston cycle selects it
+1. **`recoverExpiredLeases`** (`wedge.go`) - resets `running` steps whose lease expired to `pending`: a plain SELECT
+   of the expired ids per shard, then a by-id UPDATE that repeats the predicate. It rings no doorbell: a reset step is due and `pending`, so its shard's next piston cycle selects it
    like any other. Runs on `recoveryLoop` with everything else here - there is no timer goroutine.
 2. **Terminal flow check** in `processStep` - after loading flow data, if the flow is `terminated`/`cancelled`/`failed`/
    `completed`, sets the step to that status and returns. Catches races where the flow went terminal before the step

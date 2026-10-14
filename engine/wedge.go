@@ -110,9 +110,17 @@ func (e *Engine) runRecoverySweep(ctx context.Context, heavy bool) {
 // latency this cadence governs is how long a DEAD worker's step waits past its own lease.
 //
 // THE TICK IS THE COST OF A CRASH: worst case is `budget + leaseMargin + recoveryInterval` - 2m + 30s + 1m at the
-// defaults, and ~3x the lease at a 2s budget. The path runs only when a replica died without draining. This
-// UPDATE reads every `running` non-parked row (`lease_expires` is not a seekable key in the selection index), and
+// defaults, and ~3x the lease at a 2s budget. The path runs only when a replica died without draining. The
+// SELECT reads every `running` non-parked row (`lease_expires` is not a seekable key in the selection index), and
 // every dispatcher of the shard runs it, so its cost is O(in-flight) per dispatcher per tick - small at a minute.
+//
+// Find the ids with a plain SELECT, then reset them by id. A single `UPDATE ... WHERE lease_expires<=NOW` must
+// row-lock every row its WHERE re-checks, so it can queue behind every in-flight claim and completion; that form
+// measured 1.2-2.9s per pass while matching nothing (PG 18, ~2,000 flows in flight). A plain SELECT reads past those locks (Postgres, MySQL, and SQL
+// Server under READ_COMMITTED_SNAPSHOT), and the by-id UPDATE locks only the rows it resets. The UPDATE repeats
+// the whole predicate, so a step completed or re-claimed between the two statements is left alone. The SELECT
+// carries no LIMIT: SQL Server's LIMIT_OFFSET needs an ORDER BY, which on step_id invites a primary-key walk
+// over every step ever written; the expired set is bounded by the in-flight count anyway.
 // Do not derive the tick from the engine's TimeBudget, which bounds nothing because FlowOptions.TimeBudget is per
 // flow; size the bound for ONE surviving sweeper (the crash removed one of them); and do not give this its own
 // timer, an early wake, or a wake sized from a per-sweep `MIN(lease_expires)` query. Do not replace the tick with
@@ -123,6 +131,9 @@ func (e *Engine) runRecoverySweep(ctx context.Context, heavy bool) {
 // A failed UPDATE is logged and left for the next sweep. The sweep is idempotent and unconditional, so a
 // transient DB error costs one deferred pass and needs no retry or backoff of its own.
 func (e *Engine) recoverExpiredLeases(ctx context.Context) {
+	// leaseRecoveryBatch caps each UPDATE's literal `IN (...)` list. One batch covers any realistic pass.
+	const leaseRecoveryBatch = 1024
+	const expired = "status='" + workflow.StatusRunning + "' AND parked=0 AND lease_expires<=NOW_UTC()"
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		if !e.dispatchesOn(shard) {
 			return nil // see recoveryLoop
@@ -131,16 +142,41 @@ func (e *Engine) recoverExpiredLeases(ctx context.Context) {
 		// connections like any other caller instead of taking them from work already under way.
 		ctx, doneTurn := e.dbTurn(ctx, shard)
 		defer doneTurn()
-		res, err := db.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, not_before=NOW_UTC(), updated_at=NOW_UTC() WHERE status='"+workflow.StatusRunning+"' AND parked=0 AND lease_expires<=NOW_UTC()",
-			workflow.StatusPending,
-		)
+		rows, err := db.QueryContext(ctx, "SELECT step_id FROM dwarf_steps WHERE "+expired)
 		if err != nil {
-			e.logger.ErrorContext(ctx, "Lease recovery sweep", "shard", shard, "error", err)
+			e.logger.ErrorContext(ctx, "Lease recovery sweep: selecting expired steps", "shard", shard, "error", err)
 			return nil
 		}
-		if recovered, _ := res.RowsAffected(); recovered > 0 {
-			e.metricStepsRecovered(ctx, int(recovered))
+		var stepIDs []int
+		for rows.Next() {
+			var id int
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				e.logger.ErrorContext(ctx, "Lease recovery sweep: scanning expired step id", "shard", shard, "error", err)
+				return nil
+			}
+			stepIDs = append(stepIDs, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			e.logger.ErrorContext(ctx, "Lease recovery sweep: iterating expired steps", "shard", shard, "error", err)
+			return nil
+		}
+		for len(stepIDs) > 0 {
+			batch := stepIDs[:min(len(stepIDs), leaseRecoveryBatch)]
+			stepIDs = stepIDs[len(batch):]
+			// ids are trusted integers embedded as literals to dodge the per-driver bind-param ceiling.
+			res, err := db.ExecContext(ctx,
+				"UPDATE dwarf_steps SET status=?, not_before=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN ("+intCSV(batch)+") AND "+expired,
+				workflow.StatusPending,
+			)
+			if err != nil {
+				e.logger.ErrorContext(ctx, "Lease recovery sweep", "shard", shard, "error", err)
+				return nil
+			}
+			if recovered, _ := res.RowsAffected(); recovered > 0 {
+				e.metricStepsRecovered(ctx, int(recovered))
+			}
 		}
 		return nil
 	})
