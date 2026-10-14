@@ -100,6 +100,8 @@ func run() error {
 		openLoop         = flag.Bool("open-loop", false, "open-loop load: creators fire flows without awaiting completion, so the backlog grows past the goroutine count (closed-loop caps in-flight flows at -concurrency, keeping a linear backlog inside the cache and never stressing the refiller)")
 		maxOutstanding   = flag.Int("max-outstanding", 100000, "open-loop only: cap on in-flight (created minus ended) flows, the backpressure bound that keeps the backlog from OOMing the DB")
 		arrivalRate      = flag.Float64("arrival-rate", 0, "open-loop only: cap flow creation at this many/sec, fractional allowed (0 = flat-out to saturation)")
+		drain            = flag.Duration("drain", 5*time.Minute, "open-loop only: after each window stop creating and wait up to this long for the outstanding flows to end, then account for every flow the step created - completed, ended otherwise, unfinished, missing - in the artifact. Runs after the window is collected, so it never touches the window's numbers; an unfinished, failed or missing flow invalidates the run (0 = off)")
+		stallTimeout     = flag.Duration("stall-timeout", 5*time.Minute, "open-loop only: end the step and mark the run invalid when no task starts and no flow ends for this long while flows are outstanding. Must exceed the longest task (0 = off)")
 		arrivalStop      = flag.Duration("arrival-stop", 0, "open-loop only: stop admitting flows this far into the measurement window while the engine keeps running, so the remainder measures a DRAIN under abated load (0 = keep offering for the whole window). The window mean spans both phases, so read the shape from -stats-interval, not the mean")
 		concurrency      = flag.String("concurrency", "8,16,32,64,128", "comma-separated closed-loop submitter counts to sweep")
 		window           = flag.Duration("window", 60*time.Second, "measurement window per concurrency step")
@@ -202,6 +204,12 @@ func run() error {
 	// The window functions read this rather than take two more parameters; runStep already carries ten, and
 	// the readout is a property of the RUN rather than of any one window.
 	tracing.every, tracing.profile = *statsEvery, profile
+	guard.drain, guard.stall = *drain, *stallTimeout
+	if *stallTimeout > 0 && *taskDelay+*taskJitter >= *stallTimeout {
+		// A task longer than the timeout is silence the watchdog would read as a hang.
+		return fmt.Errorf("-stall-timeout %s must exceed the longest task (-task-delay + -task-jitter = %s)",
+			*stallTimeout, *taskDelay+*taskJitter)
+	}
 	regHost := &benchHost{
 		graphs:       map[string]*workflow.Graph{},
 		tasks:        map[string]func(context.Context, *workflow.Flow) error{},
@@ -311,18 +319,20 @@ func run() error {
 			"taskQuietMs": taskQuiet.Milliseconds(),
 			// The workload's own shape knobs. Without them a -fanout-width or -linear-steps sweep produces
 			// artifacts that are byte-identical in configuration and wildly different in what they measured.
-			"fanOutWidth":    *fanOutWidth,
-			"branchDepth":    *branchDepth,
-			"linearSteps":    *linearStepsFlag,
-			"carryRead":      *carryRead,
-			"workers":        *workers,
-			"maxConnections": *maxConns,
-			"weights":        weights,
-			"replicas":       *replicas,
-			"replicaWorkers": *replicaWorkers,
-			"shards":         dsns.redacted(),
-			"windowSec":      window.Seconds(),
-			"warmupSec":      warmup.Seconds(),
+			"fanOutWidth":     *fanOutWidth,
+			"branchDepth":     *branchDepth,
+			"linearSteps":     *linearStepsFlag,
+			"carryRead":       *carryRead,
+			"workers":         *workers,
+			"maxConnections":  *maxConns,
+			"weights":         weights,
+			"replicas":        *replicas,
+			"replicaWorkers":  *replicaWorkers,
+			"shards":          dsns.redacted(),
+			"windowSec":       window.Seconds(),
+			"warmupSec":       warmup.Seconds(),
+			"drainSec":        drain.Seconds(),
+			"stallTimeoutSec": stallTimeout.Seconds(),
 		},
 		Environment: environment(),
 		Valid:       true,
@@ -429,14 +439,23 @@ func run() error {
 		return err
 	}
 	fmt.Println("artifact:", path)
+	if slices.ContainsFunc(art.Results, func(r stepResult) bool { return r.Stalled != "" }) {
+		// The deferred engine shutdowns would wait on the very thing that hung. The artifact is written;
+		// exit without them.
+		fmt.Println("exiting without engine shutdown after a stall")
+		os.Exit(3)
+	}
 	return nil
 }
 
 // windowInvalidity says why one measurement window is not a measurement, or "" when it is. Every window -
 // a sweep step or a volume probe - goes through it. rate is the commanded flows/s (0 = closed-loop or flat out).
 func windowInvalidity(res stepResult, rate float64, maxOutstanding int) string {
-	// A MISSING collection must invalidate the run, and this check has to come first. Every counter test
-	// below reads a map, and an EMPTY map answers 0 to all of them - so a window whose closing collection
+	if res.Stalled != "" {
+		return "stalled: " + res.Stalled
+	}
+	// A MISSING collection must invalidate the run, and this check has to come before the counter tests. Each
+	// of them reads a map, and an EMPTY map answers 0 to all of them - so a window whose closing collection
 	// produced nothing passes every reliability check and is written out as `valid: true` with
 	// stepsPerSec = 0, a plausible-looking measurement of zero throughput. Measured on a GCP turnstile ladder,
 	// 2 of 9 arms, which then reported its BEST turn multiple as its worst purely by averaging those zeros in.
@@ -450,6 +469,10 @@ func windowInvalidity(res stepResult, rate float64, maxOutstanding int) string {
 	if res.EngineCounters["dwarf_steps_recovered"] != 0 || res.EngineCounters["dwarf_steps_unwedged"] != 0 || res.Errors != 0 {
 		return fmt.Sprintf("errors=%d recovered=%d unwedged=%d",
 			res.Errors, res.EngineCounters["dwarf_steps_recovered"], res.EngineCounters["dwarf_steps_unwedged"])
+	}
+	if d := res.Drain; d != nil && (d.Unfinished != 0 || len(d.EndedOther) != 0 || d.missing() != 0) {
+		return fmt.Sprintf("drain: of %d flows created, %d completed, %d unfinished after %.0fs, %d missing, ended otherwise %v",
+			d.Created, d.Completed, d.Unfinished, d.Sec, d.missing(), d.EndedOther)
 	}
 	if rate > 0 && res.ThrottledMs > 0 {
 		// The -max-outstanding fuse bound while a rate was COMMANDED, so the window measured the cap and not

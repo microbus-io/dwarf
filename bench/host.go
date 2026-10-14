@@ -54,11 +54,17 @@ func (h *benchHost) LoadGraph(ctx context.Context, workflowURL string) (*workflo
 	return h.graphs[workflowURL], nil // nil is a clean 404 at Create
 }
 
+// tasksStarted counts task executions entered, across every replica's host. The open-loop watchdog reads it
+// as the engine's pulse: with long tasks no flow ends for a task's whole duration, but the next task starting
+// is still progress.
+var tasksStarted atomic.Int64
+
 func (h *benchHost) ExecuteTask(ctx context.Context, taskURL string, f *workflow.Flow) error {
 	task := h.tasks[taskURL]
 	if task == nil {
 		return errors.New("unknown task %q", taskURL)
 	}
+	tasksStarted.Add(1)
 	delay := h.profile.delayAt(time.Now())
 	if h.taskJitter > 0 {
 		delay += time.Duration(rand.Int64N(int64(h.taskJitter)))

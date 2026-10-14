@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -108,6 +109,70 @@ type stepResult struct {
 	// Host is what the throughput COST this engine host - CPU cores and network bandwidth over the
 	// measurement window. StepsPerCore is the engine-sizing headline: steps/s driven per engine CPU core.
 	Host hostUsage `json:"host"`
+	// Stalled says why the open-loop watchdog ended this step early (no task started and no flow ended for
+	// -stall-timeout while flows were outstanding), or is empty. A stalled step's numbers cover a cut-short
+	// window and the artifact is invalid.
+	Stalled string `json:"stalled,omitzero"`
+	// Drain is the open-loop step's end-of-run accounting (-drain): every flow created in the step, warmup
+	// included, followed to its end. Nil when the drain is off or the step stalled.
+	Drain *drainResult `json:"drain,omitzero"`
+}
+
+// guard holds the open-loop run guards, set once at startup from -drain and -stall-timeout. Package-level for
+// the reason tracing is: runStepOpenLoop's signature already carries fifteen parameters and none of these.
+var guard struct {
+	drain time.Duration
+	stall time.Duration
+}
+
+// drainResult is what became of every flow an open-loop step created. "Nothing lost" is otherwise an inference
+// from window counters (no errors, executed = offered) that says nothing about the ~2,000 flows still in flight
+// when the window closes; this follows them to their end.
+type drainResult struct {
+	OutstandingAtWindowEnd int64   `json:"outstandingAtWindowEnd"`
+	Sec                    float64 `json:"sec"`     // how long the drain took, or the bound when it gave up
+	Created                int64   `json:"created"` // flows created in the step, warmup included
+	// Completed and EndedOther count flows that ended over the whole step, by terminal status. With the drain
+	// on, a sweep's previous step drained to zero before this one began, so these are this step's flows.
+	Completed  int64            `json:"completed"`
+	EndedOther map[string]int64 `json:"endedOther,omitempty"` // failed / terminated / cancelled
+	Unfinished int64            `json:"unfinished"`           // still outstanding when the drain gave up
+	// StepsRecovered counts steps lease recovery reset over the whole step. Not a loss - execution is
+	// at-least-once - but it means a worker died or overran its lease.
+	StepsRecovered int64 `json:"stepsRecovered"`
+}
+
+// missing is the flows created in the step that neither ended nor are still outstanding: vanished. Always 0
+// unless something is badly wrong; reported so the check is arithmetic, not trust.
+func (d *drainResult) missing() int64 {
+	other := int64(0)
+	for _, n := range d.EndedOther {
+		other += n
+	}
+	return d.Created - d.Completed - other - d.Unfinished
+}
+
+// endedByStatus splits a counter delta's dwarf_flows_ended series by their status attribute.
+func endedByStatus(deltas map[string]int64) (completed int64, other map[string]int64) {
+	other = map[string]int64{}
+	for key, n := range deltas {
+		name, attrs, ok := strings.Cut(key, "|")
+		if !ok || name != "dwarf_flows_ended" {
+			continue
+		}
+		for attr := range strings.SplitSeq(attrs, "|") {
+			status, ok := strings.CutPrefix(attr, "status=")
+			if !ok {
+				continue
+			}
+			if status == workflow.StatusCompleted {
+				completed += n
+			} else {
+				other[status] += n
+			}
+		}
+	}
+	return completed, other
 }
 
 // runStep drives the fleet closed-loop at concurrency K: K submitters each Run one flow and immediately
@@ -276,6 +341,61 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 	)
 	// outstanding = created - (ended - baseEnded). Read cheaply from the engine atomics.
 	outstanding := func() int64 { return created.Load() - (ended() - baseEnded) }
+	var stepStart map[string]int64
+	if guard.drain > 0 {
+		stepStart = collectAllCounters(readers)
+	}
+
+	// The progress watchdog ends the step when nothing moves: no task started and no flow ended for
+	// -stall-timeout while flows are outstanding. Without it a hung engine holds the run until something
+	// outside kills it - W's OOM-bound scatter arm sat ~34 minutes. It cannot catch a process too starved of
+	// memory to schedule its own goroutines, which is why the rig scripts carry a watchdog of their own.
+	stalled := make(chan struct{})
+	var stallWhy string // written before stalled is closed, read only after
+	watchCtx, stopWatch := context.WithCancel(ctx)
+	defer stopWatch()
+	if guard.stall > 0 {
+		go func() {
+			lastTasks, lastEnded, lastMove := tasksStarted.Load(), ended(), time.Now()
+			tick := time.NewTicker(time.Second)
+			defer tick.Stop()
+			for {
+				select {
+				case <-watchCtx.Done():
+					return
+				case <-tick.C:
+				}
+				tasks, done := tasksStarted.Load(), ended()
+				if tasks != lastTasks || done != lastEnded || outstanding() <= 0 {
+					lastTasks, lastEnded, lastMove = tasks, done, time.Now()
+					continue
+				}
+				if time.Since(lastMove) >= guard.stall {
+					stallWhy = fmt.Sprintf("no task started and no flow ended for %s with %d flows outstanding",
+						guard.stall, outstanding())
+					close(stalled)
+					return
+				}
+			}
+		}()
+	}
+	// pause sleeps for d, or until the watchdog fires.
+	pause := func(d time.Duration) {
+		t := time.NewTimer(d)
+		defer t.Stop()
+		select {
+		case <-t.C:
+		case <-stalled:
+		}
+	}
+	isStalled := func() bool {
+		select {
+		case <-stalled:
+			return true
+		default:
+			return false
+		}
+	}
 
 	// Sampled completion latency: a bounded pool, cancelled at stop so a still-pending sample never
 	// blocks the drain. One in `sampleEvery` created flows is measured, counted across ALL creators. Do not
@@ -360,7 +480,7 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 		})
 	}
 
-	time.Sleep(warmup)
+	pause(warmup)
 	before := collectAllCounters(readers)
 	histBefore := collectAllHistograms(readers)
 	gaugesBefore := collectAllGauges(readers)
@@ -378,7 +498,7 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 		t := time.AfterFunc(arrivalStop, func() { halted.Store(true) })
 		defer t.Stop()
 	}
-	time.Sleep(window)
+	pause(window)
 	measuring.Store(false)
 	elapsed := time.Since(windowStart)
 	gauges := gaugeS.close()
@@ -391,9 +511,20 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 	waitAfter := wait.snapshot()
 	bytesAfter := bytesWritten.Load()
 	stop.Store(true)
+	stopWatch()
 	cancelAwaits()
-	creatorsWG.Wait()
-	awaitWG.Wait()
+	var drain *drainResult
+	if isStalled() {
+		// A creator stuck in Create on a hung engine never returns, so do not wait for one. main.go exits
+		// without the engines' graceful shutdown for the same reason.
+		fmt.Println("STALLED:", stallWhy)
+	} else {
+		creatorsWG.Wait()
+		awaitWG.Wait()
+		if guard.drain > 0 {
+			drain = drainOutstanding(readers, stepStart, created.Load(), outstanding, guard.drain)
+		}
+	}
 
 	deltas := counterDeltas(before, after)
 	sec := elapsed.Seconds()
@@ -427,5 +558,36 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 		DB:             dbs.windowDelta(dbBefore, dbAfter),
 		WaitProfile:    waitDelta(waitBefore, waitAfter),
 		Host:           host,
+		Stalled:        stallReason(isStalled(), stallWhy),
+		Drain:          drain,
 	}
+}
+
+func stallReason(stalled bool, why string) string {
+	if !stalled {
+		return ""
+	}
+	return why
+}
+
+// drainOutstanding waits, up to bound, for the step's outstanding flows to end, then accounts for every flow
+// the step created. It runs after the measurement window has been collected, so it never touches the window's
+// numbers; with creation stopped, a healthy engine drains ~2,000 flows in seconds at small payloads and in a
+// minute or two at 1 MB.
+func drainOutstanding(readers []*sdkmetric.ManualReader, stepStart map[string]int64, created int64,
+	outstanding func() int64, bound time.Duration) *drainResult {
+
+	d := &drainResult{OutstandingAtWindowEnd: max(0, outstanding()), Created: created}
+	start := time.Now()
+	for outstanding() > 0 && time.Since(start) < bound {
+		time.Sleep(200 * time.Millisecond)
+	}
+	d.Sec = time.Since(start).Seconds()
+	d.Unfinished = max(0, outstanding())
+	deltas := counterDeltas(stepStart, collectAllCounters(readers))
+	d.Completed, d.EndedOther = endedByStatus(deltas)
+	d.StepsRecovered = deltas["dwarf_steps_recovered"]
+	fmt.Printf("drain: %d flows outstanding at window end, %.1fs; created %d, completed %d, other %v, unfinished %d, missing %d, steps recovered %d\n",
+		d.OutstandingAtWindowEnd, d.Sec, d.Created, d.Completed, d.EndedOther, d.Unfinished, d.missing(), d.StepsRecovered)
+	return d
 }
