@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -65,7 +66,7 @@ func TestTimeBudget_FrozenAtCreate(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("Task", "timebudget/task")
 	g.AddTransition("Task", workflow.End)
@@ -106,7 +107,7 @@ func TestTimeBudget_LeaseSizedFromRow(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Blocker")
 	g.SetURL("Task", "timebudget/blocker")
 	g.AddTransition("Task", workflow.End)
@@ -161,7 +162,7 @@ func TestTimeBudget_InheritedBySubgraph(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("RunInner", "timebudget/run-inner")
 	parent.AddTransition("RunInner", workflow.End)

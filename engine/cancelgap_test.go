@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -38,7 +39,7 @@ func TestCancelInTransitionGap(t *testing.T) {
 	ctx := context.Background()
 
 	var bRan atomic.Int32
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("CancelGap")
 	g.SetURL("A", "cgap/a")
 	g.SetURL("B", "cgap/b")
@@ -82,7 +83,7 @@ func TestCancelInTransitionGap_WideFanOut(t *testing.T) {
 	ctx := context.Background()
 
 	var workRan atomic.Int32
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("CancelGapWide")
 	g.SetURL("Seed", "cgapw/seed")
 	g.SetURL("Work", "cgapw/work")
@@ -131,7 +132,7 @@ func TestCancelMarkSparesAHandlerInsertedAfterTheWatermark(t *testing.T) {
 	aStarted, aGo := make(chan struct{}), make(chan struct{})
 	hStarted, hGo := make(chan struct{}), make(chan struct{})
 	var bRan atomic.Int32
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("CancelMarkWindow")
 	g.SetURL("A", "cmark/a")
 	g.SetURL("B", "cmark/b")
@@ -204,7 +205,7 @@ func TestCancelOncePerFlow(t *testing.T) {
 
 	aStarted, aGo := make(chan struct{}), make(chan struct{})
 	cStarted, cGo := make(chan struct{}), make(chan struct{})
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("CancelOnce")
 	g.SetURL("A", "conce/a")
 	g.SetURL("H", "conce/h")

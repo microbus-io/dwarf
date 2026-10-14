@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -40,7 +41,7 @@ func TestReviveVsTerminate_Deterministic(t *testing.T) {
 	ctx := context.Background()
 
 	var callRuns int
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("Call", "rvc/call")
 	parent.AddTransition("Call", workflow.End)

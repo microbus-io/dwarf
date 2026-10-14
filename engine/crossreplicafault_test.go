@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
@@ -45,8 +46,8 @@ func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
 	ctx := context.Background()
 
 	// A one-step graph. The awaiter (0 workers) must never execute it; the worker does.
-	buildMux := func(onRun func()) *HostMux {
-		p := NewHostMux()
+	buildMux := func(onRun func()) *hosts.Mux {
+		p := hosts.NewMux()
 		g := workflow.NewGraph("Wake")
 		g.SetURL("W", "xrwake/w")
 		g.AddTransition("W", workflow.End)
@@ -110,8 +111,8 @@ func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
 	dir := t.TempDir() // a file DB so the flow survives replica A's shutdown
 
 	var runs atomic.Int64
-	buildMux := func() *HostMux {
-		p := NewHostMux()
+	buildMux := func() *hosts.Mux {
+		p := hosts.NewMux()
 		g := workflow.NewGraph("XRRec")
 		g.SetURL("A", "xrrec/a")
 		g.AddTransition("A", workflow.End)

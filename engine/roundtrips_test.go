@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -42,7 +43,7 @@ func TestRoundTrips_LinearStep(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.SetWorkers(1))
 	assert.NoError(e.Startup(t.Context()))
@@ -103,7 +104,7 @@ func TestRoundTrips_FanInCycle(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.SetWorkers(1))
 	assert.NoError(e.Startup(t.Context()))
@@ -164,7 +165,7 @@ func TestRoundTrips_OneStepFlow(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.SetWorkers(1))
 	assert.NoError(e.Startup(t.Context()))

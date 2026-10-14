@@ -30,26 +30,27 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
-// baggageRecordingHost wraps a HostMux and records the baggage seen on ctx at each LoadGraph and
+// baggageRecordingHost wraps a hosts.Mux and records the baggage seen on ctx at each LoadGraph and
 // ExecuteTask call, then delegates to the mux.
 type baggageRecordingHost struct {
-	*engine.HostMux
+	*hosts.Mux
 	onLoad func(ctx context.Context, name string)
 	onTask func(ctx context.Context, taskName string)
 }
 
 func (h *baggageRecordingHost) LoadGraph(ctx context.Context, name string) (*workflow.Graph, error) {
 	h.onLoad(ctx, name)
-	return h.HostMux.LoadGraph(ctx, name)
+	return h.Mux.LoadGraph(ctx, name)
 }
 
 func (h *baggageRecordingHost) ExecuteTask(ctx context.Context, taskName string, f *workflow.Flow) error {
 	h.onTask(ctx, taskName)
-	return h.HostMux.ExecuteTask(ctx, taskName, f)
+	return h.Mux.ExecuteTask(ctx, taskName, f)
 }
 
 func TestBaggageflow(t *testing.T) {
@@ -57,7 +58,7 @@ func TestBaggageflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 
 	// Parent: A -> runInner -> END; Inner: X -> END.
 	parent := workflow.NewGraph("Parent")
@@ -97,7 +98,7 @@ func TestBaggageflow(t *testing.T) {
 		return m
 	}
 	host := &baggageRecordingHost{
-		HostMux: mux,
+		Mux: mux,
 		onLoad: func(ctx context.Context, name string) {
 			mu.Lock()
 			seenLoad[name] = bagOf(ctx)

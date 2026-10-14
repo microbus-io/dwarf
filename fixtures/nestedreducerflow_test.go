@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -49,7 +50,7 @@ func TestNestedreducerflow(t *testing.T) {
 
 	const url = "nestedreducerflow.verify:428/"
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)

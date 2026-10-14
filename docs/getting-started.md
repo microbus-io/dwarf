@@ -27,7 +27,7 @@ That's the whole contract. The engine never learns *how* a task is reached — w
 
 ## Your first flow (test harness)
 
-The fastest way to see dwarf run is the in-process test harness. `engine.HostMux` implements the `Host`
+The fastest way to see dwarf run is the in-process test harness. `hosts.Mux` implements the `Host`
 interface against in-memory registries, and `engine.NewEngineUnderTest(name)` builds an engine against an
 isolated, auto-dropped SQLite database.
 
@@ -40,14 +40,14 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf"
-	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
 func TestGreeting(t *testing.T) {
 	ctx := context.Background()
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 
 	// 1. Define a two-task graph: Greet -> Shout -> END.
 	g := workflow.NewGraph("Welcome")
@@ -87,7 +87,7 @@ func TestGreeting(t *testing.T) {
 ## Wiring a real engine
 
 In production you point the engine at a real database with `SetShard` and manage its lifecycle explicitly.
-If your tasks are Go functions in the same process, `HostMux` can stay as the host; if they run elsewhere,
+If your tasks are Go functions in the same process, `hosts.Mux` can stay as the host; if they run elsewhere,
 behind HTTP, a message bus or an RPC framework, replace it with your own `Host`, which need only implement the
 two required methods:
 

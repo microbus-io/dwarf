@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -43,7 +44,7 @@ func TestForkCohort_MultiStepBranchCountsBranchesNotMembers(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("ForkCohort")
 	g.SetURL("Seed", "fkc/seed")
 	g.SetURL("Cell", "fkc/cell")
@@ -142,7 +143,7 @@ func TestForkCohort_RewindMidBranchExcludesWholeBranch(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("ForkCohortMid")
 	g.SetURL("Seed", "fkm/seed")
 	g.SetURL("Cell", "fkm/cell")
@@ -225,7 +226,7 @@ func TestForkCohort_RewindMidBranchExcludesWholeBranch(t *testing.T) {
 // is reachable only THROUGH those Chunks (its predecessor is the inner cohort's last completer). A recompute
 // that filtered children on `lineage_id == spawn` therefore dead-ended the outer walk at the inner spawn and
 // never saw the rest of the branch.
-func nestedForkGraph(t *testing.T, mux *engine.HostMux, brokenChunk string) *workflow.Graph {
+func nestedForkGraph(t *testing.T, mux *hosts.Mux, brokenChunk string) *workflow.Graph {
 	t.Helper()
 	assert := testarossa.For(t)
 	g := workflow.NewGraph("NestedFork")
@@ -269,7 +270,7 @@ func TestForkCohort_NestedRewindExcludesTheWholeOuterBranch(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	nestedForkGraph(t, mux, "")
 
 	eng := engine.NewEngineUnderTest(t.Name())
@@ -322,7 +323,7 @@ func TestForkCohort_NestedFailureInAKeptBranchStillFailsTheFork(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	nestedForkGraph(t, mux, "b1") // a chunk of the "b" cell fails, with no onError
 
 	eng := engine.NewEngineUnderTest(t.Name())

@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -52,9 +53,9 @@ func TestStaterefs_CarriedRefAcrossFanInWhenSpawnOnlyCarries(t *testing.T) {
 		}
 	}
 
-	newEngine := func(t *testing.T) (*engine.Engine, *engine.HostMux) {
+	newEngine := func(t *testing.T) (*engine.Engine, *hosts.Mux) {
 		assert := testarossa.For(t)
-		mux := engine.NewHostMux()
+		mux := hosts.NewMux()
 		eng := engine.NewEngineUnderTest(t.Name())
 		eng.SetHost(mux)
 		assert.NoError(eng.Startup(t.Context()))

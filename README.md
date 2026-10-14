@@ -26,9 +26,9 @@ g.SetURL("Hello", "http://example/hello") // task "Hello" dispatches to this URL
 g.AddTransition("Hello", workflow.End)
 
 // Wire URLs to what serves them. The engine knows graphs and tasks only by URL: the graph's URL
-// resolves to the graph, and each task's URL to the handler that runs it. HostMux is an in-process
+// resolves to the graph, and each task's URL to the handler that runs it. hosts.Mux is an in-process
 // router; a production host maps the same URLs onto its own registry or transport.
-mux := engine.NewHostMux()
+mux := hosts.NewMux()
 mux.HandleGraph("http://example/greet", g)
 mux.HandleTask("http://example/hello", func(ctx context.Context, f *workflow.Flow) error {
     f.SetString("greeting", "hello "+f.GetString("name"))
@@ -38,7 +38,7 @@ mux.HandleTask("http://example/hello", func(ctx context.Context, f *workflow.Flo
 // Start an engine that reaches graphs and tasks through the mux.
 eng := dwarf.NewEngineUnderTest(t.Name()) // SQLite in-memory, auto-dropped
 defer eng.Shutdown(ctx)
-eng.SetHost(mux) // HostMux implements the Host interface
+eng.SetHost(mux) // hosts.Mux implements the Host interface
 eng.Startup(ctx)
 
 // Run a flow of the graph by its URL, with initial state, and wait for its outcome.
@@ -87,6 +87,7 @@ Requires Go 1.26+.
 | `github.com/microbus-io/dwarf` | Thin convenience: `NewEngine()`, `NewEngineUnderTest()` | The host process, and its tests |
 | `github.com/microbus-io/dwarf/engine` | The engine: lifecycle, operations, config, the `Host` interface | The host process only |
 | `github.com/microbus-io/dwarf/workflow` | Pure types: `Graph`, `Flow`, `FlowOptions`, reducers, error helpers | Any code that defines tasks or graphs |
+| `github.com/microbus-io/dwarf/hosts` | Ready-made `Host` implementations: `Mux`, an in-process router by URL | The host process, and its tests |
 
 The split matters: `dwarf/workflow` is a lightweight type package. Code that *defines* tasks and graphs
 imports only `dwarf/workflow`, never the engine, so the engine's heavy dependencies (SQL drivers, the
@@ -110,7 +111,7 @@ type Host interface {
 ```
 
 A standalone host backs `LoadGraph` with an in-memory registry / file / database, and `ExecuteTask`
-with a local function table or an RPC client. A bus-based host (for example a microservice mesh) bridges
+with a local function table or an RPC client. `hosts.Mux` is that host ready-made, for graphs and tasks that live in-process. A bus-based host (for example a microservice mesh) bridges
 them to its transport. The engine never learns how tasks are reached.
 
 ## Production wiring
@@ -169,7 +170,7 @@ Full guides live in [`docs/`](docs/), split by who they are written for — star
 - [Detecting completion](docs/detecting-completion.md) — `Await` vs. orchestration, and how to deliver reliably
 - [Fan-out & subgraphs](docs/fan-out-and-subgraphs.md) — parallelism, dynamic `forEach`, calling sub-workflows
 - [Scheduling & reliability](docs/scheduling-and-reliability.md) — priority, fairness, retries, recovery
-- [Testing](docs/testing.md) — `NewEngineUnderTest` and `HostMux`
+- [Testing](docs/testing.md) — `NewEngineUnderTest` and `hosts.Mux`
 
 **Running it in production:**
 

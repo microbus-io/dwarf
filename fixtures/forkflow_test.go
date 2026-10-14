@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -80,7 +81,7 @@ func TestForkflow_LinearWithOverride(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	var bRuns atomic.Int32
 
 	g := workflow.NewGraph("Linear")
@@ -143,7 +144,7 @@ func TestForkflow_RecoverFailedStep(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 
 	g := workflow.NewGraph("Recoverable")
 	g.SetURL("A", "forkflow2.verify:428/a")
@@ -198,7 +199,7 @@ func TestForkflow_ContinueExcludesFork(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 
 	g := workflow.NewGraph("Threaded")
 	g.SetURL("A", "forkflow3.verify:428/a")
@@ -249,7 +250,7 @@ func TestForkflow_FanoutForkOfFork(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	var mu sync.Mutex
 	overrides := map[int]bool{} // indices forced to succeed via override carry "fix<idx>"=true
 
@@ -315,8 +316,8 @@ func TestForkflow_FanoutForkOfFork(t *testing.T) {
 
 // subgraphForkMux builds a parent (A -> RunSub -> C) that calls a child subgraph (X -> Y), counting
 // child executions so a re-run is observable.
-func subgraphForkMux(childRuns *int32) *engine.HostMux {
-	mux := engine.NewHostMux()
+func subgraphForkMux(childRuns *int32) *hosts.Mux {
+	mux := hosts.NewMux()
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("A", "forksub.verify:428/a")
@@ -513,8 +514,8 @@ func findStepKeyDeep(steps []workflow.FlowStep, task string) string {
 // nestedSubgraphMux builds a 3-level nested tree: Outer(A -> CallL1 -> Z), CallL1 -> Middle(B -> CallL2
 // -> Y), CallL2 -> Inner(C). Every task records its observed remaining time budget so a Fork's resolved
 // FlowOptions can be checked at every nesting level.
-func nestedSubgraphMux(rec *budgetRec) *engine.HostMux {
-	mux := engine.NewHostMux()
+func nestedSubgraphMux(rec *budgetRec) *hosts.Mux {
+	mux := hosts.NewMux()
 
 	l0 := workflow.NewGraph("Outer")
 	l0.SetURL("A", "forknest.verify:428/a")

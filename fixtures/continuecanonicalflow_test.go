@@ -29,6 +29,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -45,7 +46,7 @@ func TestContinuecanonicalflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 
 	graph := workflow.NewGraph("Tagging")
 	graph.SetURL("Tag", "continuecanonical.verify:428/tag")

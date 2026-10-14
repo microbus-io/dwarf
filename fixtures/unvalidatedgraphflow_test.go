@@ -33,14 +33,15 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
 
-// nilGraphHost wraps a HostMux but returns (nil, nil) from LoadGraph - a host that neither finds nor
+// nilGraphHost wraps a hosts.Mux but returns (nil, nil) from LoadGraph - a host that neither finds nor
 // errors on a graph. Create must treat that as a 404, never dereference the nil graph.
-type nilGraphHost struct{ *engine.HostMux }
+type nilGraphHost struct{ *hosts.Mux }
 
 func (nilGraphHost) LoadGraph(ctx context.Context, url string) (*workflow.Graph, error) {
 	return nil, nil
@@ -54,7 +55,7 @@ func TestUnvalidatedGraphflow(t *testing.T) {
 	// empty forEach fires the fan-in and runs the downstream task rather than silently completing early.
 	t.Run("engine_validates_so_empty_foreach_fires_fanin", func(t *testing.T) {
 		assert := testarossa.For(t)
-		mux := engine.NewHostMux()
+		mux := hosts.NewMux()
 
 		var workRuns, joinRuns, afterRuns atomic.Int64
 		g := workflow.NewGraph("Unvalidated")
@@ -95,7 +96,7 @@ func TestUnvalidatedGraphflow(t *testing.T) {
 		assert := testarossa.For(t)
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
-		eng.SetHost(nilGraphHost{engine.NewHostMux()})
+		eng.SetHost(nilGraphHost{hosts.NewMux()})
 		assert.NoError(eng.Startup(t.Context()))
 
 		_, err := eng.Create(ctx, "anything", nil, nil)
@@ -108,7 +109,7 @@ func TestUnvalidatedGraphflow(t *testing.T) {
 	// A structurally invalid graph (a node unreachable from the entry point) is rejected at Create.
 	t.Run("structurally_invalid_graph_rejected_at_create", func(t *testing.T) {
 		assert := testarossa.For(t)
-		mux := engine.NewHostMux()
+		mux := hosts.NewMux()
 		g := workflow.NewGraph("Invalid")
 		g.SetURL("Entry", "invalid.verify:428/entry")
 		g.SetURL("Orphan", "invalid.verify:428/orphan") // has a URL but nothing transitions to it

@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -37,7 +38,7 @@ func TestDeletecascadeflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)

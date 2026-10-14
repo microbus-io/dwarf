@@ -17,13 +17,13 @@ interrupts, retries — with no database to set up and no transport to stand up.
   them. It logs to stderr at Error for CI clues (`DWARF_TEST_LOG_LEVEL` overrides — `info`/`debug` for the
   flow-status play-by-play, `silent`/`off` to quiet it); a benchmark or fuzz target silences it outright with
   `SetLogger(slog.New(slog.DiscardHandler))`, since per-iteration logging would swamp the measurement.
-- **`engine.HostMux`** is an in-memory implementation of the `Host` interface. Register graphs and task
+- **`hosts.Mux`** is an in-memory implementation of the `Host` interface. Register graphs and task
   functions on it, then register it with `SetHost(mux)` — its `LoadGraph`/`ExecuteTask` look them up by URL.
 
 ```go
 func TestCheckout(t *testing.T) {
     ctx := context.Background()
-    mux := engine.NewHostMux()
+    mux := hosts.NewMux()
 
     g := workflow.NewGraph("Checkout")
     g.SetURL("Reserve", "inventory.reserve")
@@ -53,7 +53,7 @@ func TestCheckout(t *testing.T) {
 }
 ```
 
-`HostMux.HandleGraph(name, graph)` registers a graph; `HandleTask(url, handler)` registers a task by its
+`Mux.HandleGraph(name, graph)` registers a graph; `HandleTask(url, handler)` registers a task by its
 URL (the address bound with `SetURL`). The handler signature is the same `func(ctx, *workflow.Flow) error`
 you write in production.
 
@@ -107,7 +107,7 @@ mux.HandleTask("flaky", func(ctx context.Context, f *workflow.Flow) error {
 })
 ```
 
-Because `HostMux` returns synchronously, it produces a far tighter, more adversarial timing environment
+Because `hosts.Mux` returns synchronously, it produces a far tighter, more adversarial timing environment
 than a real network — which makes it excellent at surfacing concurrency bugs in retries, fan-in, and
 crash recovery.
 
@@ -121,7 +121,7 @@ To test cross-replica behavior, stand up two engines against the same test datab
 is — they coordinate through the database, so there is no relay to wire between them:
 
 ```go
-mux1, mux2 := engine.NewHostMux(), engine.NewHostMux()
+mux1, mux2 := hosts.NewMux(), hosts.NewMux()
 // register the same graphs/tasks on both...
 eng1 := engine.NewEngineUnderTest(t.Name()) // one name → one shared isolated database
 defer eng1.Shutdown(ctx)

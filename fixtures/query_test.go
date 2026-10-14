@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -36,7 +37,7 @@ func TestQuery_WorkflowName(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	alpha := workflow.NewGraph("AlphaFlow")
 	alpha.SetURL("A", "q.verify:0/a")
 	alpha.AddTransition("A", workflow.End)
@@ -108,7 +109,7 @@ func TestQuery_StatusFilter(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("StatusFlow")
 	g.SetURL("A", "qs.verify:0/a")
 	g.AddTransition("A", workflow.End)
@@ -156,7 +157,7 @@ func TestQuery_SearchEscapesWildcards(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	// Display names: only "Under_Score" contains a LIKE metacharacter. URLs and task names carry none, and
 	// flow tokens are hex, so the underscore appears in exactly one searched column across all flows.
 	plain := workflow.NewGraph("PlainName")

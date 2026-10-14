@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -58,7 +59,7 @@ func TestTracing_SpansEmittedOnRun(t *testing.T) {
 	sr := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("taskA", "tracingflow.verify:428/task-a")

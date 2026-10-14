@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -49,7 +50,7 @@ func TestPersist_TransientWriteErrorIsAbsorbedWithoutReExecution(t *testing.T) {
 	// A one-task flow whose task counts its executions - the number the whole design turns on, since an
 	// execution is where side effects fire.
 	var runs atomic.Int32
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Persist")
 	g.SetURL("A", "p/transient/a")
 	g.AddTransition("A", workflow.End)
@@ -86,7 +87,7 @@ func TestPersist_CompletionWriteContentionIsAbsorbedWithoutReExecution(t *testin
 	assert := testarossa.For(t)
 
 	var runs atomic.Int32
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Persist")
 	g.SetURL("A", "p/contention/a")
 	g.AddTransition("A", workflow.End)
@@ -131,7 +132,7 @@ func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testi
 	assert := testarossa.For(t)
 
 	var runs atomic.Int32
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Persist")
 	g.SetURL("A", "p/permanent/a")
 	g.AddTransition("A", workflow.End)
@@ -194,7 +195,7 @@ func TestPersist_LeaseExtensionStatusGuard(t *testing.T) {
 	setup := func(t *testing.T, status string) (*Engine, *sequel.DB) {
 		assert := testarossa.For(t)
 		e := NewEngineUnderTest(t.Name())
-		e.SetHost(NewHostMux())
+		e.SetHost(hosts.NewMux())
 		e.persistBackoff = shortPersistBackoff
 		assert.NoError(e.Startup(t.Context()))
 		db, err := e.db.Shard(1)
@@ -286,7 +287,7 @@ func TestPersist_DrainReleasesTheLeaseInsteadOfSleepingItOut(t *testing.T) {
 	assert := testarossa.For(t)
 
 	var runs atomic.Int32
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Drain")
 	g.SetURL("A", "p/drain/a")
 	g.AddTransition("A", workflow.End)

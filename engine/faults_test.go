@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/candidates"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
@@ -36,7 +37,7 @@ import (
 // boundedRun is Create+Await with a ceiling, so a wedge fails the test instead of hanging.
 // linear2 registers a two-node graph A->B->END whose tasks succeed, so a fault on A's transition (which
 // inserts B) can be exercised. okTasks records how many times each node ran.
-func linear2(mux *HostMux, prefix string, calls map[string]*int) {
+func linear2(mux *hosts.Mux, prefix string, calls map[string]*int) {
 	g := workflow.NewGraph("Lin")
 	g.SetURL("A", prefix+"/a")
 	g.SetURL("B", prefix+"/b")
@@ -162,7 +163,7 @@ func expireLease(t *testing.T, e *Engine, flowKey, taskName string) {
 func TestFault_ExecuteTask(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	mux.HandleTask("fexec/work", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	mux.HandleTask("fexec/rescue", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("rescued", "yes")
@@ -205,7 +206,7 @@ func TestFault_ExecuteTask(t *testing.T) {
 func TestFault_PanicExecuteTask(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	mux.HandleTask("fpanic/boom", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	g := workflow.NewGraph("Boom")
 	g.SetURL("Boom", "fpanic/boom")
@@ -231,7 +232,7 @@ func TestFault_LoadGraph(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("G")
 	g.SetURL("A", "floadg/a")
 	g.AddTransition("A", workflow.End)
@@ -259,7 +260,7 @@ func TestFault_LoadGraph(t *testing.T) {
 func TestFault_TransitionCommit(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	calls := map[string]*int{"a": new(int), "b": new(int)}
 	linear2(mux, "ftrans", calls)
 
@@ -284,7 +285,7 @@ func TestFault_TransitionCommit(t *testing.T) {
 func TestFault_Contention(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	calls := map[string]*int{"a": new(int), "b": new(int)}
 	linear2(mux, "fcont", calls)
 
@@ -306,7 +307,7 @@ func TestFault_Contention(t *testing.T) {
 func TestFault_CompleteFlowCommit(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "fcfc/a")
 	g.AddTransition("A", workflow.End)
@@ -333,7 +334,7 @@ func TestFault_LeaseStaleWrite(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "flease/a")
 	g.AddTransition("A", workflow.End)
@@ -377,7 +378,7 @@ func TestFault_LeaseStaleWrite(t *testing.T) {
 func TestFault_DropSignalStop(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "fsig/a")
 	g.AddTransition("A", workflow.End)
@@ -401,7 +402,7 @@ func TestFault_DropDoorbell(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "fdoor/a")
 	g.AddTransition("A", workflow.End)
@@ -429,7 +430,7 @@ func TestFault_SubgraphReviveLost(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("Call", "fsub/call")
 	parent.AddTransition("Call", workflow.End)
@@ -486,7 +487,7 @@ func TestFault_ReapMidTree(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "freap/a")
 	g.AddTransition("A", workflow.End)
@@ -522,7 +523,7 @@ func TestFault_ReapMidTree(t *testing.T) {
 func TestFault_RefillScanErr(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "frefill/a")
 	g.AddTransition("A", workflow.End)
@@ -555,7 +556,7 @@ func TestFault_RefillScanErrPreservesCache(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	e.SetHost(NewHostMux())
+	e.SetHost(hosts.NewMux())
 	assert.NoError(e.SetWorkers(0)) // no workers, so nothing drains the cache underneath the assertion
 	assert.NoError(e.Startup(t.Context()))
 

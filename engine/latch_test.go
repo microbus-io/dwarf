@@ -22,6 +22,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -65,7 +66,7 @@ func TestLatchResolve_ReportsStoppedFlowsOnly(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	release := make(chan struct{})
 
 	done := workflow.NewGraph("Done")
@@ -132,7 +133,7 @@ func TestLatchResolve_ChunksWithoutDroppingKeys(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Done")
 	g.SetURL("Done", "latchchunk.verify:0/done")
 	g.AddTransition("Done", workflow.End)
@@ -188,7 +189,7 @@ func TestLatchResolve_RecentStopScanIsOnlyAnOptimization(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Done")
 	g.SetURL("Done", "latchrecent.verify:0/done")
 	g.AddTransition("Done", workflow.End)

@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
@@ -43,7 +44,7 @@ func TestCompleteFlow_TransientReviveErrorIsRetriedNotLost(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("Call", "csr/call")
 	parent.AddTransition("Call", workflow.End)

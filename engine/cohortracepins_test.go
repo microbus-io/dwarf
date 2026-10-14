@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -60,7 +61,7 @@ func newCohortRaceRig(t *testing.T, prefix string) *cohortRaceRig {
 		jRuns:    &atomic.Int32{},
 	}
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("CohortRace")
 	g.SetURL("A", prefix+"/a")
 	g.SetURL("X", prefix+"/x")

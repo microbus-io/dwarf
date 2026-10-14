@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -137,7 +138,7 @@ func TestSetDefaultPriority_RejectsNonPositive(t *testing.T) {
 	assert.NoError(e.SetDefaultPriority(100))
 
 	// The guard rejects rather than clamps: the accepted value is the one the engine dispatches with.
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Prio")
 	g.SetURL("A", "prio/a")
 	g.AddTransition("A", workflow.End)

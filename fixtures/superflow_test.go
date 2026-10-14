@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -46,11 +47,11 @@ func (v *visitCounter) get(name string) int {
 	return v.m[name]
 }
 
-func superflowSetup(t *testing.T, numShards int) (*engine.Engine, *engine.HostMux, *visitCounter) {
+func superflowSetup(t *testing.T, numShards int) (*engine.Engine, *hosts.Mux, *visitCounter) {
 	t.Helper()
 	assert := testarossa.For(t)
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 
 	// Main graph: A -> B -> forEach(items) -> C -> {onError -> ErrorHandler} -> D -> {when} -> superSubCall or E -> {goto} -> Z
 	superGraph := workflow.NewGraph("Super")

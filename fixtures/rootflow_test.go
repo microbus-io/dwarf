@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -50,7 +51,7 @@ func TestRootFlowID_CreateAndSubgraph(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("P", "rootid.verify:0/p")
 	parent.AddTransition("P", workflow.End)
@@ -110,7 +111,7 @@ func TestRootFlowID_ForkIsItsOwnRoot(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Lin")
 	g.SetURL("A", "rootidfork.verify:0/a")
 	g.SetURL("B", "rootidfork.verify:0/b")
@@ -162,7 +163,7 @@ func TestRootFlowID_ContinueStartsFreshRoot(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Turn")
 	g.SetURL("T", "rootidcont.verify:0/t")
 	g.AddTransition("T", workflow.End)

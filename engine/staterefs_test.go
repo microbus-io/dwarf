@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
@@ -89,7 +90,7 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -143,7 +144,7 @@ func TestStateRefs_CarryAcrossFanOut(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -226,7 +227,7 @@ func TestStateRefs_ReducedFieldIsResolvedAndReanchored(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -287,7 +288,7 @@ func TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -377,7 +378,7 @@ func TestStateRefs_UnreadableRefsFailTheStep(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	registerGate(mux, "badrefs")
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
@@ -410,7 +411,7 @@ func TestStateRefs_FoldedFieldIsStoredInline(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -447,7 +448,7 @@ func TestStateRefs_EmptyForEachFoldsAReffedBase(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -500,7 +501,7 @@ func TestStateRefs_DeletesAndNullsOfCarriedFields(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 

@@ -16,7 +16,7 @@ limitations under the License.
 
 /*
 Fan-in across replicas. Two engines share one database (a shared in-memory SQLite DSN), each with its
-own HostMux and workers, wired as peers both ways. Every flow fans out A -> {B, C, D} and converges
+own hosts.Mux and workers, wired as peers both ways. Every flow fans out A -> {B, C, D} and converges
 on a reducer'd fan-in E, so the fan-out siblings are claimed by whichever replica wins each step and the
 merge runs on whichever replica completes the cohort last. This pins that the reducer merge and exit-step
 scan are correct when a cohort's branches execute on different replicas. Distribution is asserted
@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -44,8 +45,8 @@ func TestFanInReplicaflow(t *testing.T) {
 
 	// buildMux registers the same fan-out/fan-in graph and handlers on a mux, so either replica
 	// executes any step identically. Each branch writes only its delta; the reducers fold at fan-in.
-	buildMux := func() *engine.HostMux {
-		p := engine.NewHostMux()
+	buildMux := func() *hosts.Mux {
+		p := hosts.NewMux()
 		g := workflow.NewGraph("FanInReplica")
 		g.SetURL("A", base+"/a")
 		g.SetURL("B", base+"/b")

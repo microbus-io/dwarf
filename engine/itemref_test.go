@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -62,7 +63,7 @@ func TestItemRefs_BranchPointsIntoTheArray(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -141,7 +142,7 @@ func TestItemRefs_NestedFanOut(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -209,7 +210,7 @@ func TestItemRefs_FailedFanOut(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -256,7 +257,7 @@ func TestItemRefs_InnerFanInStripsASharedAs(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -308,7 +309,7 @@ func TestItemRefs_TwoDimensionalArray(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 

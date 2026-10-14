@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -38,7 +39,7 @@ func TestFanIn_GotoLoopBranchKeepsInteriorDAGEdges(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)

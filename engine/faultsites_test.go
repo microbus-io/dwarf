@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -55,7 +56,7 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Pair")
 	g.SetURL("A", "ftbreset/a")
 	g.SetURL("B", "ftbreset/b")
@@ -116,7 +117,7 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 func TestFaultSite_SubgraphSpawnErr(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("Call", "ftbspawn/call")
 	parent.AddTransition("Call", workflow.End)
@@ -228,7 +229,7 @@ func createInterruptedFlow(t *testing.T, e *Engine, url string) string {
 
 // registerGate registers a one-node graph whose entry task interrupts on first dispatch and completes on
 // resume, so a test has a stable `interrupted` flow to Cancel/Resume.
-func registerGate(mux *HostMux, prefix string) {
+func registerGate(mux *hosts.Mux, prefix string) {
 	g := workflow.NewGraph("Gate")
 	g.SetURL("Gate", prefix+"/gate")
 	g.AddTransition("Gate", workflow.End)
@@ -248,7 +249,7 @@ func TestFaultSite_TerminateCommit(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	registerGate(mux, "ftbcancel")
 
 	e := NewEngineUnderTest(t.Name())
@@ -279,7 +280,7 @@ func TestFaultSite_ResumeCommit(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	registerGate(mux, "ftbresume")
 
 	e := NewEngineUnderTest(t.Name())
@@ -357,7 +358,7 @@ func TestFaultSite_DeliverFailureErr(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("Call", "ftbdeliver/call")
 	parent.AddTransition("Call", workflow.End)
@@ -429,7 +430,7 @@ func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	root := workflow.NewGraph("Root")
 	root.SetURL("Call1", "ftbdeep/call1")
 	root.AddTransition("Call1", workflow.End)
@@ -502,7 +503,7 @@ func TestFaultSite_ReapSelectErr(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "ftbreapsel/a")
 	g.AddTransition("A", workflow.End)
@@ -537,7 +538,7 @@ func TestFaultSite_ReapSelectErr(t *testing.T) {
 func TestFaultSite_RetryRewindErr(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("RetryRewind")
 	g.SetURL("Work", "ftbretry/work")
 	g.AddTransition("Work", workflow.End)
@@ -570,7 +571,7 @@ func TestFaultSite_RetryRewindErr(t *testing.T) {
 func TestFaultSite_InterruptWriteRetried(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Gate")
 	g.SetURL("Gate", "ftbintr/gate")
 	g.AddTransition("Gate", workflow.End)
@@ -636,7 +637,7 @@ func TestFaultSite_InitRuntimeFailureLeavesTheFleet(t *testing.T) {
 func TestFaultSite_FailFlowFinalStateErr(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	trunk := workflow.NewGraph("Trunk")
 	trunk.SetURL("Boom", "ftbfinal/boom")
 	trunk.AddTransition("Boom", workflow.End)

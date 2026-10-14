@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -76,7 +77,7 @@ func TestLeaseFence_FailStep(t *testing.T) {
 		assert := testarossa.For(t)
 		e := NewEngineUnderTest(t.Name())
 		defer e.Shutdown(ctx)
-		e.SetHost(NewHostMux())
+		e.SetHost(hosts.NewMux())
 		assert.NoError(e.Startup(t.Context()))
 		setup(t, e, 5) // the owner holds generation 5
 
@@ -94,7 +95,7 @@ func TestLeaseFence_FailStep(t *testing.T) {
 		assert := testarossa.For(t)
 		e := NewEngineUnderTest(t.Name())
 		defer e.Shutdown(ctx)
-		e.SetHost(NewHostMux())
+		e.SetHost(hosts.NewMux())
 		assert.NoError(e.Startup(t.Context()))
 		setup(t, e, 5)
 
@@ -170,7 +171,7 @@ func TestLeaseFence_CompletionNoDuplicateSuccessor(t *testing.T) {
 	aStarted := make(chan struct{}, 1)
 	aRelease := make(chan struct{})
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("LF-B")
 	g.SetURL("A", "lfb/a")
 	g.SetURL("B", "lfb/b")
@@ -237,7 +238,7 @@ func TestLeaseFence_CohortNoDoubleArrival(t *testing.T) {
 	xStarted := make(chan struct{}, 1)
 	xRelease := make(chan struct{})
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("LF-C")
 	g.SetURL("A", "lfc/a")
 	g.SetURL("X", "lfc/x")
@@ -319,7 +320,7 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 
 	var aCalls atomic.Int64
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("LF-RR")
 	g.SetURL("A", "lfrr/a")
 	g.SetURL("B", "lfrr/b")
@@ -422,7 +423,7 @@ func TestLeaseFence_RetryRewindFenced(t *testing.T) {
 	aStarted := make(chan struct{}, 1)
 	aRelease := make(chan struct{})
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("LF-Retry")
 	g.SetURL("A", "lfr/a")
 	g.AddTransition("A", workflow.End)
@@ -495,7 +496,7 @@ func TestLeaseFence_SubgraphParkFenced(t *testing.T) {
 	aStarted := make(chan struct{}, 1)
 	aRelease := make(chan struct{})
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	parent := workflow.NewGraph("LF-SubPark")
 	parent.SetURL("A", "lfs/a")
 	parent.AddTransition("A", workflow.End)
@@ -581,7 +582,7 @@ func TestLeaseRecovery_EndToEnd(t *testing.T) {
 	aStarted := make(chan struct{}, 1)
 	aRelease := make(chan struct{})
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("LR")
 	g.SetURL("A", "lr/a")
 	g.AddTransition("A", workflow.End)
@@ -656,7 +657,7 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 	setup := func(t *testing.T, flowStatus, stepStatus string) (*Engine, *sequel.DB) {
 		assert := testarossa.For(t)
 		e := NewEngineUnderTest(t.Name())
-		e.SetHost(NewHostMux())
+		e.SetHost(hosts.NewMux())
 		assert.NoError(e.Startup(t.Context()))
 		db, err := e.db.Shard(1)
 		assert.NoError(err)

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -34,7 +35,7 @@ import (
 // steps are excluded from lease recovery), so if the child completes and runs that revive before a later
 // park lands, the caller is stranded permanently and its fan-in never fires. This is a functional check that
 // the fan-out-sibling subgraph path completes; note it does NOT deterministically reproduce the strand
-// in-process (the HostMux dispatch is too synchronous for the child to win the race) - the deterministic
+// in-process (the hosts.Mux dispatch is too synchronous for the child to win the race) - the deterministic
 // repro is transport-timing-specific (observed over a real bus transport), tracked separately. The bounded
 // per-flow rendezvous below makes a stranded flow fail, named, rather than hang.
 func TestFanoutSubgraphflow(t *testing.T) {
@@ -42,7 +43,7 @@ func TestFanoutSubgraphflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 
 	// Parent: Entry fans out to {A, B, Sub}, all converging at the Join fan-in, then END.
 	parent := workflow.NewGraph("Parent")

@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -428,7 +429,7 @@ func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	release := make(chan struct{})
 	var running atomic.Int32
 	g := workflow.NewGraph("Grow")
@@ -509,7 +510,7 @@ func TestPoolSizing_SaturationDoesNotGrowThePool(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Sat")
 	g.SetURL("A", "sat/a")
 	g.AddTransition("A", workflow.End)
@@ -665,7 +666,7 @@ func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
 	// (1) Never started. No SetShard either, so this is the default-shard path - the one that indexed the
 	// empty slice.
 	e := NewEngine()
-	e.SetHost(NewHostMux())
+	e.SetHost(hosts.NewMux())
 	_, err := e.pickShard()
 	if assert.Error(err) {
 		assert.Equal(http.StatusServiceUnavailable, errors.StatusCode(err))
@@ -674,7 +675,7 @@ func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
 	assert.Error(err)
 
 	// (2) Started, then shut down - the shutdown race, reached through the public API.
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "shutdownrace/a")
 	g.AddTransition("A", workflow.End)

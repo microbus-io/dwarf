@@ -21,6 +21,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -35,7 +36,7 @@ func TestInsertFlowTx_ConcurrentCreates(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.SetWorkers(0)) // the entry steps stay as created
 	assert.NoError(e.Startup(t.Context()))

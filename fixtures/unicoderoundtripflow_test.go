@@ -34,6 +34,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -54,7 +55,7 @@ func TestUnicoderoundtripflow(t *testing.T) {
 	// Quotes and backslashes ride along so JSON escaping stays honest through the round trip.
 	const uniEscaped = `quote " backslash \ slash / ünïcödé`
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)

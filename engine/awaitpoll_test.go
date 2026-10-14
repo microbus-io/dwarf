@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -44,7 +45,7 @@ func TestAwait_WakesWhenNoSignalIsDelivered(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	release := make(chan struct{})
 	var once sync.Once
 	rel := func() { once.Do(func() { close(release) }) }
@@ -135,7 +136,7 @@ func TestAwait_DefaultBudgetIsADeadlineError(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	release := make(chan struct{})
 
 	g := workflow.NewGraph("AwaitPoll")
@@ -181,7 +182,7 @@ func TestPoll_RunningThenStopped(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	release := make(chan struct{})
 	var once sync.Once
 	rel := func() { once.Do(func() { close(release) }) }
@@ -246,7 +247,7 @@ func TestAwait_IgnoresANonSettledWake(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	release := make(chan struct{})
 	var once sync.Once
 	rel := func() { once.Do(func() { close(release) }) }

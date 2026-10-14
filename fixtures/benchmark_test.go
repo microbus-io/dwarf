@@ -48,6 +48,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 )
 
@@ -95,7 +96,7 @@ func setShards(eng *engine.Engine, numShards int) error {
 func benchEngine(b *testing.B, numShards int) (*engine.Engine, string) {
 	b.Helper()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	const prefix = "bench.verify:428"
 	g := workflow.NewGraph("Bench")
 	prev := ""

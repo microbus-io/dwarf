@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -47,7 +48,7 @@ func TestCompleteFlowVsTerminate_BothOrders(t *testing.T) {
 	t.Parallel()
 	newEngine := func(t *testing.T, prefix string) (*engine.Engine, string) {
 		assert := testarossa.For(t)
-		mux := engine.NewHostMux()
+		mux := hosts.NewMux()
 		g := workflow.NewGraph("Solo")
 		g.SetURL("A", prefix+"/a")
 		g.AddTransition("A", workflow.End)
@@ -117,7 +118,7 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 	newGate := func(t *testing.T, prefix string) (*engine.Engine, chan struct{}) {
 		assert := testarossa.For(t)
 		gateBlock := make(chan struct{})
-		mux := engine.NewHostMux()
+		mux := hosts.NewMux()
 		g := workflow.NewGraph("Gate")
 		g.SetURL("Gate", prefix+"/gate")
 		g.AddTransition("Gate", workflow.End)
@@ -239,7 +240,7 @@ func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(yGate) }) }
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	// Parent: one subgraph caller. Its Call step is the shared ancestor both child branches interrupt up to.
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("Call", "cip/call")

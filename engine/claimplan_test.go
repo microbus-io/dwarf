@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -41,7 +42,7 @@ func TestClaim_NoPartialIndexPlan(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("C")
 	g.SetURL("A", "claimplan/a")
 	g.AddTransition("A", workflow.End)

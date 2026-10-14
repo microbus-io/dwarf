@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -37,7 +38,7 @@ func TestFanIn_ReducerErrorFailsTheFlow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("ReducerError")
 	g.SetURL("Split", "reducererror.verify:429/split")
 	g.SetURL("Work", "reducererror.verify:429/work")
@@ -97,7 +98,7 @@ func TestTerminate_ReducerErrorDoesNotBlockTerminate(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("TerminateReducerError")
 	g.SetURL("Split", "reducererror.verify:429/split")
 	g.SetURL("Work", "reducererror.verify:429/work-or-wait")
@@ -150,7 +151,7 @@ func TestContinue_ReducerErrorIs400(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("ContinueReducerError")
 	g.SetURL("Turn", "reducererror.verify:429/turn")
 	g.SetReducer("total", workflow.ReducerAdd)
@@ -188,7 +189,7 @@ func TestHandOff_ReducerErrorFailsTheStep(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("HandOffReducerError")
 	g.SetURL("Work", "handofferror.verify:429/work")
 	g.SetURL("Next", "handofferror.verify:429/next")

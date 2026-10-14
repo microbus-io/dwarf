@@ -24,17 +24,19 @@ limitations under the License.
 // database (via sequel).
 //
 // This root package is a thin convenience: NewEngine returns an *engine.Engine. The real API lives in
-// two sub-packages:
+// three sub-packages:
 //
 //   - github.com/microbus-io/dwarf/engine - the engine: Startup/Shutdown, the Create/Run/Await
 //     operations, configuration, and the Host interface. Import this only in the process that
 //     hosts the engine.
 //   - github.com/microbus-io/dwarf/workflow - the pure types: Graph, Flow, FlowOptions, FlowOutcome,
 //     and reducers. Import this in code that defines tasks and graphs; it has no heavy dependencies.
+//   - github.com/microbus-io/dwarf/hosts - ready-made Host implementations, such as Mux, which routes
+//     graphs and tasks by URL to Go values registered in-process. It depends only on workflow.
 //
 // A 30-second taste, using the in-process test harness:
 //
-//	mux := engine.NewHostMux()
+//	mux := hosts.NewMux()
 //	g := workflow.NewGraph("Greet")
 //	g.SetURL("Hello", "http://example/hello") // task "Hello" dispatches to this URL
 //	g.AddTransition("Hello", workflow.End)

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
@@ -41,8 +42,8 @@ func peerFleet(t *testing.T, name string) (creator, eng1, eng2 *engine.Engine, r
 	assert := testarossa.For(t)
 	ran = map[string]*atomic.Int64{"0": {}, "1": {}, "2": {}}
 
-	buildMux := func(replica string) *engine.HostMux {
-		p := engine.NewHostMux()
+	buildMux := func(replica string) *hosts.Mux {
+		p := hosts.NewMux()
 		g := workflow.NewGraph("Pair")
 		g.SetURL("A", name+"/a")
 		g.SetURL("B", name+"/b")

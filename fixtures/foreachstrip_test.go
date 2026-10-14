@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -41,7 +42,7 @@ func TestForEachStrip_ScopedToItsOwnCohort(t *testing.T) {
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -94,7 +95,7 @@ func TestForEachStrip_NestedOuterSurvivesInnerFanIn(t *testing.T) {
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -169,7 +170,7 @@ func TestForEachStrip_FailedFanOutStillStrips(t *testing.T) {
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -221,7 +222,7 @@ func TestFailedFanOut_KeepsEveryBranchesIntermediateOutput(t *testing.T) {
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 

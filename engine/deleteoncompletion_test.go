@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -84,7 +85,7 @@ func TestDeleteOnCompletion_ReaperDeletesOnSuccess(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "doc/a")
 	g.AddTransition("A", workflow.End)
@@ -116,7 +117,7 @@ func TestDeleteOnCompletion_OutcomeObservableThenReaped(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "doc/aw-a")
 	g.AddTransition("A", workflow.End)
@@ -160,7 +161,7 @@ func TestDeleteOnCompletion_RunReturnsOutcome(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "doc/run-a")
 	g.AddTransition("A", workflow.End)
@@ -192,7 +193,7 @@ func TestPurge_ReaperRemovesTree(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("Run", "pr/run")
 	parent.AddTransition("Run", workflow.End)
@@ -239,7 +240,7 @@ func TestDeleteOnCompletion_KeepsFailedFlow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Failing")
 	g.SetURL("A", "doc/fail-a")
 	g.AddTransition("A", workflow.End)
@@ -271,7 +272,7 @@ func TestDeleteOnCompletion_ReaperCascadesSubgraph(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("A", "doc/sg-a")
 	parent.SetURL("RunInner", "doc/sg-run-inner")
@@ -326,7 +327,7 @@ func TestDeleteOnCompletion_OutcomeObservableUnderConcurrency(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "doc/conc-a")
 	g.AddTransition("A", workflow.End)

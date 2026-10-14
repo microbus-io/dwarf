@@ -26,6 +26,7 @@ import (
 	"testing"
 	"weak"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/lru"
 	"github.com/microbus-io/dwarf/workflow"
@@ -42,7 +43,7 @@ func TestCreate_SeedsGraphCache(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	registerGate(mux, "seedcache")
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
@@ -88,7 +89,7 @@ func TestGraphCache_FlowsShareOneParse(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	registerGate(mux, "sharecache")
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
@@ -147,7 +148,7 @@ func TestGraphCache_DispatchMissInterns(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	registerGate(mux, "misscache")
 	creator := NewEngineUnderTest(t.Name())
 	defer creator.Shutdown(ctx)
@@ -207,7 +208,7 @@ func TestGraphCache_HashHitReadsNoGraph(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	registerGate(mux, "hashcache")
 	creator := NewEngineUnderTest(t.Name())
 	defer creator.Shutdown(ctx)

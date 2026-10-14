@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/sequel"
@@ -218,7 +219,7 @@ func TestDispatchers_ReaderReplicaHoldsTheReaderPoolAndRunsNothing(t *testing.T)
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Reader")
 	g.SetURL("A", "reader/a")
 	g.AddTransition("A", workflow.End)
@@ -277,7 +278,7 @@ func TestDispatchers_DemotedReplicaHoldsItsPoolUntilInFlightStepsFinish(t *testi
 	const flows = 5
 	release := make(chan struct{})
 	var runs atomic.Int32
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Demote")
 	g.SetURL("Slow", "demote/slow")
 	g.AddTransition("Slow", workflow.End)
@@ -365,7 +366,7 @@ func TestDispatchers_PromotionWhileHeldClearsTheHold(t *testing.T) {
 
 	release := make(chan struct{})
 	started := make(chan struct{})
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Repromote")
 	g.SetURL("Slow", "repromote/slow")
 	g.AddTransition("Slow", workflow.End)
@@ -632,7 +633,7 @@ func TestDispatchers_SweepsSkipShardsThisReplicaOnlyReads(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Sweep")
 	g.SetURL("A", "sweep/a")
 	g.AddTransition("A", workflow.End)
@@ -674,7 +675,7 @@ func TestDispatchers_DrainGivesUpTheSlotBeforeWaiting(t *testing.T) {
 
 	started := make(chan struct{})
 	release := make(chan struct{})
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Drain")
 	g.SetURL("A", "drain/a")
 	g.AddTransition("A", workflow.End)
@@ -786,8 +787,8 @@ func TestDispatchers_ResumeOnAReaderRunsOnADispatcher(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	var dispRan, readRan atomic.Int32
-	build := func(ran *atomic.Int32) *HostMux {
-		p := NewHostMux()
+	build := func(ran *atomic.Int32) *hosts.Mux {
+		p := hosts.NewMux()
 		g := workflow.NewGraph("ResumeOnReader")
 		g.SetURL("Gate", "ronr/gate")
 		g.SetURL("B", "ronr/b")
@@ -829,8 +830,8 @@ func TestDispatchers_DrainingDispatcherHandsItsSlotToAPeer(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	started, release := make(chan struct{}), make(chan struct{})
-	build := func() *HostMux {
-		p := NewHostMux()
+	build := func() *hosts.Mux {
+		p := hosts.NewMux()
 		g := workflow.NewGraph("Drain")
 		g.SetURL("A", "dslot/a")
 		g.AddTransition("A", workflow.End)
@@ -873,7 +874,7 @@ func TestDispatchers_RecoverySweepSkipsShardsThisReplicaOnlyReads(t *testing.T) 
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	started, release := make(chan struct{}), make(chan struct{})
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Lease")
 	g.SetURL("A", "rsweep/a")
 	g.AddTransition("A", workflow.End)

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -53,7 +54,7 @@ func TestFanInNoCohort_FailsInsteadOfHotLooping(t *testing.T) {
 	release := make(chan struct{})
 	var workRuns atomic.Int32
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("NoCohort")
 	g.SetURL("Spawn", "nocohort/spawn")
 	g.SetURL("Work", "nocohort/work")

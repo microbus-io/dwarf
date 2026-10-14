@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -65,7 +66,7 @@ func TestFaultComposition_FanOutBranch(t *testing.T) {
 	assert := testarossa.For(t)
 	var aCalls, xCalls, yCalls, jCalls atomic.Int64
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("FC-Fan")
 	g.SetURL("A", "fcfan/a")
 	g.SetURL("X", "fcfan/x")
@@ -137,7 +138,7 @@ func TestFaultComposition_SubgraphChild(t *testing.T) {
 	assert := testarossa.For(t)
 	var xCalls, yCalls atomic.Int64
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	parent := workflow.NewGraph("FC-Parent")
 	parent.SetURL("Call", "fcsub/call")
 	parent.AddTransition("Call", workflow.End)
@@ -210,7 +211,7 @@ func TestFaultComposition_CompoundWakeLoss(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("FC-Wake")
 	g.SetURL("A", "fcwake/a")
 	g.AddTransition("A", workflow.End)
@@ -263,7 +264,7 @@ func TestFaultComposition_DeepSubgraphReviveLoss(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 
 	root := workflow.NewGraph("FC-Root")
 	root.SetURL("Call", "fcdeep/root-call")

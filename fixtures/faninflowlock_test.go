@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -65,7 +66,7 @@ func TestFanInFlowLock_NonFinalArrivalTakesNoFlowRowWrite(t *testing.T) {
 
 		e := engine.NewEngineUnderTest(t.Name())
 		defer e.Shutdown(ctx)
-		mux := engine.NewHostMux()
+		mux := hosts.NewMux()
 		e.SetHost(mux)
 		e.SetWorkers(1) // determinism: one worker, so no sibling races and no contention retries
 		assert.NoError(e.Startup(t.Context()))

@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -35,7 +36,7 @@ func TestReducerDeleteflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 
 	mux.HandleTask("reducerdelete.verify:428/spawn", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	mux.HandleTask("reducerdelete.verify:428/deleter", func(ctx context.Context, f *workflow.Flow) error {

@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -48,7 +49,7 @@ func TestConcurrentContinueflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 
 	// block gates the Increment task: armed only after turn 1 completes, so the single winning
 	// continuation turn parks `running` until the test releases it - keeping it non-completable during the

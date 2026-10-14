@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -46,7 +47,7 @@ func TestForkOfForkflow(t *testing.T) {
 	setPass := func(k string) { mu.Lock(); pass[k] = true; mu.Unlock() }
 	getPass := func(k string) bool { mu.Lock(); defer mu.Unlock(); return pass[k] }
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("ForkOfFork")
 	g.SetURL("A", "forkoffork.verify:428/a")
 	g.SetURL("X", "forkoffork.verify:428/x")

@@ -14,7 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engine
+// Package hosts provides ready-made implementations of the engine's Host interface: the seam through which
+// the engine fetches workflow graphs and dispatches tasks.
+//
+// It depends only on the workflow package, not on the engine or its database drivers.
+package hosts
 
 import (
 	"context"
@@ -25,21 +29,21 @@ import (
 	"github.com/microbus-io/errors"
 )
 
-// HostMux is a Host that routes graph fetches and task dispatches, by URL, to graphs and Go functions
+// Mux is an engine.Host that routes graph fetches and task dispatches, by URL, to graphs and Go functions
 // registered on it. It suits tests, and an application whose tasks run in-process, with no transport
 // between the engine and its tasks. Pass it to Engine.SetHost.
 //
 // A multi-replica test needs nothing else from it: replicas coordinate through the database they share,
 // so several engines pointed at one test database ARE a fleet, with no relay between them to stand up.
-type HostMux struct {
+type Mux struct {
 	mu     sync.RWMutex
 	graphs map[string]*workflow.Graph
 	tasks  map[string]func(ctx context.Context, flow *workflow.Flow) error
 }
 
-// NewHostMux creates a HostMux with no graphs or tasks registered.
-func NewHostMux() *HostMux {
-	return &HostMux{
+// NewMux creates a Mux with no graphs or tasks registered.
+func NewMux() *Mux {
+	return &Mux{
 		graphs: make(map[string]*workflow.Graph),
 		tasks:  make(map[string]func(ctx context.Context, flow *workflow.Flow) error),
 	}
@@ -47,7 +51,7 @@ func NewHostMux() *HostMux {
 
 // HandleGraph registers a workflow graph under the given name.
 // The name should match the workflow URL passed to Engine.Create or Engine.Run.
-func (p *HostMux) HandleGraph(name string, graph *workflow.Graph) {
+func (p *Mux) HandleGraph(name string, graph *workflow.Graph) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.graphs[name] = graph
@@ -56,14 +60,14 @@ func (p *HostMux) HandleGraph(name string, graph *workflow.Graph) {
 // HandleTask registers a task handler under the given name.
 // The name should match the task URL registered via graph.SetURL. The handler reads the flow's baggage,
 // if any, with workflow.BaggageFrom(ctx).
-func (p *HostMux) HandleTask(name string, handler func(ctx context.Context, flow *workflow.Flow) error) {
+func (p *Mux) HandleTask(name string, handler func(ctx context.Context, flow *workflow.Flow) error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.tasks[name] = handler
 }
 
-// LoadGraph implements Host.
-func (p *HostMux) LoadGraph(ctx context.Context, workflowURL string) (*workflow.Graph, error) {
+// LoadGraph implements engine.Host.
+func (p *Mux) LoadGraph(ctx context.Context, workflowURL string) (*workflow.Graph, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	g, ok := p.graphs[workflowURL]
@@ -73,8 +77,8 @@ func (p *HostMux) LoadGraph(ctx context.Context, workflowURL string) (*workflow.
 	return g, nil
 }
 
-// ExecuteTask implements Host.
-func (p *HostMux) ExecuteTask(ctx context.Context, taskURL string, flow *workflow.Flow) error {
+// ExecuteTask implements engine.Host.
+func (p *Mux) ExecuteTask(ctx context.Context, taskURL string, flow *workflow.Flow) error {
 	p.mu.RLock()
 	h, ok := p.tasks[taskURL]
 	p.mu.RUnlock()

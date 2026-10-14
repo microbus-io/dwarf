@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -47,7 +48,7 @@ func TestRecoveryTick_LightPassRecoversLeases(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("One")
 	g.SetURL("A", "ticklight/a")
 	g.AddTransition("A", workflow.End)
@@ -107,7 +108,7 @@ func TestRecoveryTick_ExpiredLeaseRecoveredOnTheTick(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("One")
 	g.SetURL("A", "tickloop/a")
 	g.AddTransition("A", workflow.End)

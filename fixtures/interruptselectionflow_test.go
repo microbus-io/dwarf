@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -85,7 +86,7 @@ func TestInterruptSnapshotMatchesResume(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("SnapResume")
 	g.SetURL("Src", "snapresume.verify:428/src")
 	g.SetURL("A", "snapresume.verify:428/a")
@@ -177,7 +178,7 @@ func TestInterruptParallelSubgraphResume(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 
 	parent := workflow.NewGraph("PSParent")
 	parent.SetURL("Seed", "psub.verify:428/seed")

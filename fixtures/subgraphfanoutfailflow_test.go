@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -30,16 +31,16 @@ func TestSubgraphFanOutFailflow(t *testing.T) {
 	ctx := context.Background()
 
 	// Inner child: succeeds for most items, fails for the poisoned one.
-	newEngine := func(t *testing.T) (*engine.Engine, *engine.HostMux) {
+	newEngine := func(t *testing.T) (*engine.Engine, *hosts.Mux) {
 		assert := testarossa.For(t)
-		mux := engine.NewHostMux()
+		mux := hosts.NewMux()
 		eng := engine.NewEngineUnderTest(t.Name())
 		eng.SetHost(mux)
 		assert.NoError(eng.Startup(t.Context()))
 		return eng, mux
 	}
 
-	buildInner := func(mux *engine.HostMux) {
+	buildInner := func(mux *hosts.Mux) {
 		inner := workflow.NewGraph("Inner")
 		inner.SetURL("Do", "sgfof.verify:900/do")
 		inner.AddTransitionChain("Do", workflow.End)

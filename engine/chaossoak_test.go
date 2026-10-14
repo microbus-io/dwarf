@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -60,7 +61,7 @@ func TestChaosSoak(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	registerChaosGraphs(t, mux)
 
 	eng := NewEngineUnderTest(t.Name())
@@ -231,7 +232,7 @@ func chaosEnqueue(ctx context.Context, eng *Engine, flowKey string) {
 }
 
 // registerChaosGraphs registers the three workload shapes and their tasks on the mux.
-func registerChaosGraphs(t *testing.T, mux *HostMux) {
+func registerChaosGraphs(t *testing.T, mux *hosts.Mux) {
 	t.Helper()
 	assert := testarossa.For(t)
 
@@ -347,7 +348,7 @@ func TestChaosSoak_Faults(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	registerChaosGraphs(t, mux)
 
 	eng := NewEngineUnderTest(t.Name())

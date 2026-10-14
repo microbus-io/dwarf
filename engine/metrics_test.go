@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -133,7 +134,7 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("G")
 	g.SetURL("taskA", "metricsflow.verify:428/a")
 	g.SetURL("taskB", "metricsflow.verify:428/b")
@@ -262,7 +263,7 @@ func TestMetrics_BacklogGauges(t *testing.T) {
 
 	entered := make(chan struct{}, 8)
 	release := make(chan struct{})
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("B")
 	g.SetURL("A", "backloggauges/a")
 	g.AddTransition("A", workflow.End)
@@ -352,7 +353,7 @@ func TestMetrics_BacklogLeaderOnly(t *testing.T) {
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	assert.NoError(e.SetHost(NewHostMux()))
+	assert.NoError(e.SetHost(hosts.NewMux()))
 	assert.NoError(e.SetMeterProvider(mp))
 	assert.NoError(e.Startup(t.Context()))
 	assert.True(e.leadsBacklog(1), "a solo dispatcher leads its shard")
@@ -391,7 +392,7 @@ func TestBacklog_ResumeStampsNotBefore(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("R")
 	g.SetURL("Ask", "resumestamps/ask")
 	g.AddTransition("Ask", workflow.End)
@@ -451,7 +452,7 @@ func TestMetrics_RefillInstrumented(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("R")
 	g.SetURL("A", "refillmetrics/a")
 	g.AddTransition("A", workflow.End)
@@ -530,7 +531,7 @@ func TestMetrics_ForkCountsAsStarted(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Forked")
 	g.SetURL("A", "forkmetric.verify:428/a")
 	g.AddTransition("A", workflow.End)
@@ -598,7 +599,7 @@ func TestOrphanDetection_EmitsMetric(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Orphan")
 	g.SetURL("A", "orphanmetric.verify:428/a")
 	g.AddTransition("A", workflow.End)
@@ -676,7 +677,7 @@ func TestMetrics_InFlightStateGauges(t *testing.T) {
 
 	started := make(chan struct{})
 	release := make(chan struct{})
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("H")
 	g.SetURL("A", "inflightstate.verify:428/a")
 	g.AddTransition("A", workflow.End)
@@ -766,7 +767,7 @@ func TestMetrics_EndedCountsEveryTerminalStatus(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 
 	// A graph whose only task fails, with no onError, so the flow fails.
 	failing := workflow.NewGraph("Failing")
@@ -841,7 +842,7 @@ func TestMetrics_StartedAndEndedBalanceAcrossTrees(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("Call", "treemetrics.verify:429/call")
 	parent.AddTransition("Call", workflow.End)

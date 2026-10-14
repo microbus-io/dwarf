@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -46,7 +47,7 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Gate")
 	g.SetURL("Gate", "rld/gate")
 	g.AddTransition("Gate", workflow.End)
@@ -139,7 +140,7 @@ func TestReaperDeletesRunningDescendant(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("Call", "rdd/call")
 	parent.AddTransition("Call", workflow.End)
@@ -208,7 +209,7 @@ func TestTerminateVsTransition_Deterministic(t *testing.T) {
 	ctx := context.Background()
 
 	var bRan int
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Lin")
 	g.SetURL("A", "cvt/a")
 	g.SetURL("B", "cvt/b")
@@ -276,12 +277,12 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 
 	type rig struct {
 		e        *Engine
-		mux      *HostMux
+		mux      *hosts.Mux
 		release  chan struct{}
 		xEntered chan struct{}
 	}
 	newRig := func(t *testing.T) (*rig, func()) {
-		r := &rig{mux: NewHostMux(), release: make(chan struct{}), xEntered: make(chan struct{}, 8)}
+		r := &rig{mux: hosts.NewMux(), release: make(chan struct{}), xEntered: make(chan struct{}, 8)}
 		// Leaf tasks block so a flow that escaped termination would stay running; released at cleanup.
 		r.mux.HandleTask("cvs/x", func(ctx context.Context, f *workflow.Flow) error {
 			r.xEntered <- struct{}{}
@@ -609,7 +610,7 @@ func TestRetryRewindVsTerminate_Deterministic(t *testing.T) {
 	ctx := context.Background()
 
 	var aRuns int
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Solo")
 	g.SetURL("A", "rrc/a")
 	g.AddTransition("A", workflow.End)
@@ -658,7 +659,7 @@ func TestRetryRewindVsTerminate_Deterministic(t *testing.T) {
 func TestDeleteVsResume_ResumeWinsInsideTerminate(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Gate")
 	g.SetURL("Gate", "dvrin/gate")
 	g.AddTransition("Gate", workflow.End)

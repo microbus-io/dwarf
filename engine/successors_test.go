@@ -22,6 +22,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -37,7 +38,7 @@ func TestSuccessorBatch_WideFanOutKeepsBranchOrder(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -120,7 +121,7 @@ func TestSuccessorBatch_LoneSuccessorLinks(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 

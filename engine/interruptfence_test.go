@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
@@ -45,7 +46,7 @@ func TestFault_InterruptStaleWriteRollback(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("Call", "fisw/call")
@@ -130,7 +131,7 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 	setup := func(t *testing.T, leafStatus string) (*Engine, *sequel.DB) {
 		assert := testarossa.For(t)
 		e := NewEngineUnderTest(t.Name())
-		e.SetHost(NewHostMux())
+		e.SetHost(hosts.NewMux())
 		assert.NoError(e.Startup(t.Context()))
 		db, err := e.db.Shard(1)
 		assert.NoError(err)

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
@@ -63,8 +64,8 @@ func stealFleet(t *testing.T, name string, crippledWorkers int, crippledDelay ti
 	assert := testarossa.For(t)
 	ran = map[string]*atomic.Int64{"creator": {}, "healthy": {}, "crippled": {}}
 
-	build := func(replica string) *engine.HostMux {
-		p := engine.NewHostMux()
+	build := func(replica string) *hosts.Mux {
+		p := hosts.NewMux()
 		g := workflow.NewGraph("Chain")
 		g.SetURL("A", name+"/a")
 		g.SetURL("B", name+"/b")

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -53,7 +54,7 @@ func TestCompleteSurgraph_vs_TerminateRoot_BothOrders(t *testing.T) {
 		assert := testarossa.For(t)
 		callResumed = make(chan struct{}, 1)
 		callBlock = make(chan struct{})
-		mux := engine.NewHostMux()
+		mux := hosts.NewMux()
 
 		parent := workflow.NewGraph("Parent")
 		parent.SetURL("Call", prefix+"/call")

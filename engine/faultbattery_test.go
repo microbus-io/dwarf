@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -41,7 +42,7 @@ import (
 // constant, not an increment), so a task that runs twice under recovery still yields a byte-identical
 // final_state. calls counts how many times each node ran, so a test can distinguish a re-dispatch (task ran
 // twice) from a transparent in-tx retry (task ran once).
-func stateLinear(mux *HostMux, prefix string, calls map[string]*int) {
+func stateLinear(mux *hosts.Mux, prefix string, calls map[string]*int) {
 	g := workflow.NewGraph("Lin")
 	g.SetURL("A", prefix+"/a")
 	g.SetURL("B", prefix+"/b")
@@ -102,7 +103,7 @@ func newFaultBatteryEngine(t *testing.T, prefix string, cfg func(*Engine)) (*Eng
 	assert := testarossa.For(t)
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	calls := map[string]*int{"a": new(int), "b": new(int)}
 	stateLinear(mux, prefix, calls)
 	e := NewEngineUnderTest(t.Name())

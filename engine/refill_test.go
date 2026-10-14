@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/pipeline"
 
@@ -41,7 +42,7 @@ func TestRefillDecoupled_MultiShardDrains(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Chain")
 	g.SetURL("A", "msd/nop")
 	g.SetURL("B", "msd/nop")
@@ -84,7 +85,7 @@ func TestRefillInterval_OneCyclePerPistonNoTrigger(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("One")
 	g.SetURL("Do", "notrigger/nop")
 	g.AddTransition("Do", workflow.End)
@@ -119,7 +120,7 @@ func TestRefillInterval_OverridePinsAndRestores(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
-	assert.NoError(e.SetHost(NewHostMux()))
+	assert.NoError(e.SetHost(hosts.NewMux()))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.NoError(e.Startup(t.Context()))
 
@@ -272,7 +273,7 @@ func TestRefillInterval_DeepBacklogLiveness(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("One")
 	g.SetURL("Do", "refillfloorliveness.verify:428/nop")
 	g.AddTransition("Do", workflow.End)
@@ -312,7 +313,7 @@ func TestRefillScan_BoundedPerFairnessKey(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Scan")
 	g.SetURL("A", "scan/a")
 	g.AddTransition("A", workflow.End)

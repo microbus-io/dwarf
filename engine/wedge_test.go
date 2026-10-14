@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -71,7 +72,7 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	release := make(chan struct{})
 
 	parent := workflow.NewGraph("Parent")
@@ -169,7 +170,7 @@ func TestWedgeSweep_SubgraphCallerWithNoChildFails(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	release := make(chan struct{})
 
 	parent := workflow.NewGraph("Parent")
@@ -259,7 +260,7 @@ func TestWedgeSweep_OrphanedSubgraphChildTerminated(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	release := make(chan struct{})
 
 	// Orphan scenario: parent spawns a child whose entry task interrupts, so the child rests interrupted.
@@ -399,7 +400,7 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 	assert := testarossa.For(t)
 
 	capture := &orphanLogCapture{}
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	release := make(chan struct{})
 
 	solo := workflow.NewGraph("Solo")
@@ -506,7 +507,7 @@ func TestOrphanDetection_IgnoresCompletedSuccessorWindow(t *testing.T) {
 	assert := testarossa.For(t)
 
 	capture := &orphanLogCapture{}
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 
 	solo := workflow.NewGraph("Solo")
 	solo.SetURL("A", "orphanwin.verify:0/a")

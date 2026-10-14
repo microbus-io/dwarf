@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -30,7 +31,7 @@ func TestContinueflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 
 	graph := workflow.NewGraph("Counting")
 	graph.SetURL("Increment", "continueflow.verify:428/increment")
@@ -83,7 +84,7 @@ func TestContinueInheritsThreadPolicy(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Policy")
 	g.SetURL("T", "continuepolicy.verify:428/t")
 	g.AddTransition("T", workflow.End)
@@ -128,7 +129,7 @@ func TestCreateWithThreadKeyJoinsThread(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Join")
 	g.SetURL("T", "threadjoin.verify:428/t")
 	g.AddTransition("T", workflow.End)

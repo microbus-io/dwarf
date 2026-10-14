@@ -16,7 +16,7 @@ limitations under the License.
 
 /*
 Two-replica contention. Two engines share one database (a shared in-memory
-SQLite DSN), each with its own HostMux and workers, wired as peers both ways. This pins the
+SQLite DSN), each with its own hosts.Mux and workers, wired as peers both ways. This pins the
 claim-CAS exactly-once guarantee under real cross-replica contention: every step of every flow runs
 exactly once no matter which replica claims it. A second subtest proves the cross-replica Await wake is
 prompt - within the latch detector's cadence - rather than dragging out to the caller's own deadline.
@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -47,8 +48,8 @@ func TestTwoReplicaflow(t *testing.T) {
 
 	// buildMux registers the same 3-step graph and handlers (closing over the shared counters) on a
 	// mux, so either replica executes identically.
-	buildMux := func() *engine.HostMux {
-		p := engine.NewHostMux()
+	buildMux := func() *hosts.Mux {
+		p := hosts.NewMux()
 		g := workflow.NewGraph("Chain")
 		g.SetURL("A", "tworeplica.verify:428/a")
 		g.SetURL("B", "tworeplica.verify:428/b")
@@ -129,8 +130,8 @@ func TestTwoReplicaflow(t *testing.T) {
 		// `awaiter` can only learn of the stop by reading the flow row - and the detector is the only thing
 		// that reads it on the awaiter's behalf, so a sub-2s return is a direct measurement of the detector
 		// working. Nothing else could return this Await short of its own 30s deadline.
-		pa := engine.NewHostMux() // pure awaiter
-		pb := engine.NewHostMux() // executor
+		pa := hosts.NewMux() // pure awaiter
+		pb := hosts.NewMux() // executor
 		wg := workflow.NewGraph("Wake")
 		wg.SetURL("W", "tworeplicawake.verify:428/w")
 		wg.AddTransition("W", workflow.End)

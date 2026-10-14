@@ -27,6 +27,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -36,7 +37,7 @@ func TestSearchLiteralflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 
 	// Three flows whose workflow URLs contain LIKE metacharacters or their literal look-alikes. The graph
 	// display name and task URL are neutral (no search-term substrings) so only the workflow_url matches.

@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -51,7 +52,7 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Strand")
 	g.SetURL("A", "strand/a")
 	g.SetURL("B", "strand/b")
@@ -145,7 +146,7 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 // the stall is held, the worker that replays A may reach the same checkpoint and stall too; the release frees both,
 // and whichever commits first, the stalled worker's transition is fenced. It returns the engine (shut down by the
 // test's cleanup), the flow, and when the sweep ran.
-func slowWorkerReplay(t *testing.T, mux *HostMux, flowURL string, initial any, beforeSweep func(db *sequel.DB, flowID int)) (e *Engine, shard, flowID int, swept time.Time) {
+func slowWorkerReplay(t *testing.T, mux *hosts.Mux, flowURL string, initial any, beforeSweep func(db *sequel.DB, flowID int)) (e *Engine, shard, flowID int, swept time.Time) {
 	t.Helper()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -224,7 +225,7 @@ func TestOrphanSweep_ReplaysSlowWorkersStep(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			assert := testarossa.For(t)
 
-			mux := NewHostMux()
+			mux := hosts.NewMux()
 			g := workflow.NewGraph("Slow")
 			for _, n := range []string{"A", "B", "C", "D"} {
 				g.SetURL(n, "slowstrand/"+strings.ToLower(n))
@@ -295,7 +296,7 @@ func TestOrphanSweep_ReplaysSlowWorkersStep(t *testing.T) {
 func TestOrphanSweep_ReplaysSlowWorkersStep_OtherTransitions(t *testing.T) {
 	t.Run("fan_in_direct", func(t *testing.T) {
 		assert := testarossa.For(t)
-		mux := NewHostMux()
+		mux := hosts.NewMux()
 		g := workflow.NewGraph("SlowFanIn")
 		g.SetURL("A", "slowfanin/a")
 		g.SetURL("B", "slowfanin/b")
@@ -319,7 +320,7 @@ func TestOrphanSweep_ReplaysSlowWorkersStep_OtherTransitions(t *testing.T) {
 	})
 	t.Run("flow_completion", func(t *testing.T) {
 		assert := testarossa.For(t)
-		mux := NewHostMux()
+		mux := hosts.NewMux()
 		g := workflow.NewGraph("SlowEnd")
 		g.SetURL("A", "slowend/a")
 		g.AddTransition("A", workflow.End)
@@ -348,7 +349,7 @@ func TestBumpCohortArrivals_Fence(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("Bump")
 	g.SetURL("A", "bump/a")
 	g.SetURL("B1", "bump/b1")

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -54,7 +55,7 @@ func TestStepDepth_SubgraphContinuesFromCaller(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 
 	parent := workflow.NewGraph("DepthParent")
 	parent.SetURL("A", "depthsub.verify:428/a")
@@ -113,7 +114,7 @@ func TestStepDepth_FanInIsMaxCohortDepthPlus1(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 
 	g := workflow.NewGraph("DepthFanIn")
 	g.SetURL("Seed", "depthfanin.verify:428/seed")

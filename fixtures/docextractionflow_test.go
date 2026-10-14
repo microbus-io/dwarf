@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -34,7 +35,7 @@ func TestDocextractionflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 
 	graph := workflow.NewGraph("DocExtraction")
 	graph.SetURL("ScanPDF", "docextractionflow.verify:428/scan-pdf")

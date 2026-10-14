@@ -32,6 +32,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -42,7 +43,7 @@ func TestDisposableflow(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("RunSub", "disposable.verify:428/run-sub")

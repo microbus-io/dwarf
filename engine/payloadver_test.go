@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -33,7 +34,7 @@ import (
 )
 
 // registerCountedGate is registerGate with a count of the task's runs and the attempt its last run saw.
-func registerCountedGate(mux *HostMux, prefix string, runs, lastAttempt *atomic.Int32) {
+func registerCountedGate(mux *hosts.Mux, prefix string, runs, lastAttempt *atomic.Int32) {
 	g := workflow.NewGraph("Gate")
 	g.SetURL("Gate", prefix+"/gate")
 	g.AddTransition("Gate", workflow.End)
@@ -78,7 +79,7 @@ func TestPayloadVer_NewerFlowIsDeferredUnrun(t *testing.T) {
 	assert := testarossa.For(t)
 
 	var runs, lastAttempt atomic.Int32
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	registerCountedGate(mux, "newerpayload", &runs, &lastAttempt)
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
@@ -137,7 +138,7 @@ func TestPayloadVer_DeferralBoundFailsTheStep(t *testing.T) {
 	assert := testarossa.For(t)
 
 	var runs, lastAttempt atomic.Int32
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	registerCountedGate(mux, "payloadbound", &runs, &lastAttempt)
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
@@ -177,7 +178,7 @@ func TestPayloadVer_ReadersRefuseNewerFlows(t *testing.T) {
 	assert := testarossa.For(t)
 
 	var runs, lastAttempt atomic.Int32
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	registerCountedGate(mux, "payloadreads", &runs, &lastAttempt)
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
@@ -222,7 +223,7 @@ func TestPayloadVer_ForkRefusesANewerFlow(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("ForkNewer")
 	g.SetURL("A", "forknewer/a")
 	g.AddTransition("A", workflow.End)
@@ -260,7 +261,7 @@ func TestPayloadVer_ForkRefusesANewerSubgraph(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	parent := workflow.NewGraph("ForkNewerParent")
 	parent.SetURL("Call", "forknewersub/call")
 	parent.SetURL("Done", "forknewersub/done")
@@ -312,7 +313,7 @@ func TestPayloadVer_CreateStampsForkCopies(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	mux := NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("ForkCopies")
 	g.SetURL("A", "forkcopies/a")
 	g.AddTransition("A", workflow.End)

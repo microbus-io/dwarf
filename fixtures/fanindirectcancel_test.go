@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -48,7 +49,7 @@ func TestFanInDirectTerminate_NoExtendTerminatedFlow(t *testing.T) {
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 	g := workflow.NewGraph("FIDC")
 	g.SetURL("Spawn", "fidc/spawn")
 	g.SetURL("Work", "fidc/work")

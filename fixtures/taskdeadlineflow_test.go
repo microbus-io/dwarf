@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -42,7 +43,7 @@ func TestTaskdeadlineflow(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 
 	graph := workflow.NewGraph("Flow")
 	graph.SetURL("Work", "taskdeadlineflow.verify:428/work")

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -79,7 +80,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 
 	// holder is a one-node flow whose task holds the engine's only worker until released, so a second flow's
 	// entry step is guaranteed to still be pending - not yet claimed - when Cancel lands on it.

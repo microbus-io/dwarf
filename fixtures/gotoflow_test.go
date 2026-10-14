@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -30,7 +31,7 @@ func TestGotoflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 
 	graph := workflow.NewGraph("Goto")
 	graph.SetURL("TaskA", "gotoflow.verify:428/task-a")
@@ -88,7 +89,7 @@ func TestGotoflow_BadGoto(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	mux := engine.NewHostMux()
+	mux := hosts.NewMux()
 
 	graph := workflow.NewGraph("BadGoto")
 	graph.SetURL("BadGotoer", "gotoflow.verify:428/bad-gotoer")

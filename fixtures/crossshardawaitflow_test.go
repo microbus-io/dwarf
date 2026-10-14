@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -57,7 +58,7 @@ func TestCrossShardReplicaAwait(t *testing.T) {
 	graph.AddTransition("Work", workflow.End)
 
 	// eng1: pure awaiter, zero workers. Its handler must never run.
-	mux1 := engine.NewHostMux()
+	mux1 := hosts.NewMux()
 	mux1.HandleGraph("crossshardawait.verify:428/flow", graph)
 	mux1.HandleTask("crossshardawait.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		t.Error("eng1 has zero workers and must never execute the task")
@@ -65,7 +66,7 @@ func TestCrossShardReplicaAwait(t *testing.T) {
 	})
 
 	// eng2: the executor, stamping which flow it ran so the outcome cannot come from anywhere else.
-	mux2 := engine.NewHostMux()
+	mux2 := hosts.NewMux()
 	mux2.HandleGraph("crossshardawait.verify:428/flow", graph)
 	mux2.HandleTask("crossshardawait.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("ranOn", "eng2")

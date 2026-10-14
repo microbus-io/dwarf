@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -47,7 +48,7 @@ func TestRestartSurvival(t *testing.T) {
 	// mkEngine builds an engine bound to a file DSN under dir (so two engines resolve to the same on-disk DB)
 	// with its own worker count. Not test mode: SetShard uses the DSN directly and migrations run at Startup
 	// (idempotent, so engine 2 re-opening the migrated DB is a no-op).
-	mkEngine := func(t *testing.T, mux *engine.HostMux, dir string, workers int) *engine.Engine {
+	mkEngine := func(t *testing.T, mux *hosts.Mux, dir string, workers int) *engine.Engine {
 		assert := testarossa.For(t)
 		e := engine.NewEngine()
 		e.SetHost(mux)
@@ -80,7 +81,7 @@ func TestRestartSurvival(t *testing.T) {
 		dir := t.TempDir()
 		var aCalls atomic.Int64
 
-		mux := engine.NewHostMux()
+		mux := hosts.NewMux()
 		g := workflow.NewGraph("R1")
 		g.SetURL("A", "r1/a")
 		g.AddTransition("A", workflow.End)
@@ -113,7 +114,7 @@ func TestRestartSurvival(t *testing.T) {
 		dir := t.TempDir()
 		var aCalls, bCalls atomic.Int64
 
-		mux := engine.NewHostMux()
+		mux := hosts.NewMux()
 		g := workflow.NewGraph("R2")
 		g.SetURL("A", "r2/a")
 		g.SetURL("B", "r2/b")
@@ -161,7 +162,7 @@ func TestRestartSurvival(t *testing.T) {
 		dir := t.TempDir()
 		var caCalls, cbCalls, parentDone atomic.Int64
 
-		mux := engine.NewHostMux()
+		mux := hosts.NewMux()
 		parent := workflow.NewGraph("R3P")
 		parent.SetURL("P0", "r3/p0")
 		parent.AddTransition("P0", workflow.End)
@@ -220,7 +221,7 @@ func TestRestartSurvival(t *testing.T) {
 		dir := t.TempDir()
 		var gateCalls, doneCalls atomic.Int64
 
-		mux := engine.NewHostMux()
+		mux := hosts.NewMux()
 		g := workflow.NewGraph("R4")
 		g.SetURL("Gate", "r4/gate")
 		g.SetURL("Done", "r4/done")
