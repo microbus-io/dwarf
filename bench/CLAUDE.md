@@ -170,6 +170,17 @@ does **not** save you here — it spreads the damage evenly rather than removing
 **cooldown** between arms, and an **RTT gate** that probes host→database latency *while idle* and waits for
 it to come back under a threshold before starting. An arm that starts degraded is not a measurement.
 
+**The same degraded state slows the WAL flush, comes and goes mid-arm, and outlives the database.** On Docker
+Desktop a saturated local arm can run at roughly half speed for a minute or more and then recover by itself,
+with nothing changed. Its signature: both phases wait on `LWLock:WALWrite` at the same commits per WAL sync,
+and the slow phase completes about half the syncs per second - each flush takes twice as long - while RTT is up
+with it. Autovacuum and checkpoints do not line up with its edges. It is not state the engine or the database
+holds: it carries across separate bench processes and freshly created databases, landing on whichever build
+happens to run. Nothing in dwarf moves it, so design around it: the RTT gate catches an arm that STARTS degraded
+but not one that degrades or recovers inside the window, so read `-stats-interval` lines rather than the window
+mean, compare arms by database time per step rather than steps/s, and never read a local throughput difference
+between two single arms as a property of either build.
+
 **The RTT to gate on is the HOST's, and it must be one long-lived connection.** A `docker exec psql` probe
 measures the unix socket *inside* the container (~0.1 ms) and is blind to the port-forward the engine
 actually traverses; a fresh connection per sample measures the handshake instead of the path. Take the
