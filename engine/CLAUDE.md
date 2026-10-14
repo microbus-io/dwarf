@@ -1051,7 +1051,9 @@ dominated:
 
 **Lease recovery costs a tick of latency after a crash.** Worst-case recovery of a claimed step is
 `budget + leaseMargin + recoveryInterval` - 2m + 30s + 1m at the defaults, ~3x the lease at a 2s budget. The path
-runs only when a replica dies without draining - a graceful shutdown releases its leases. One ticker serves two
+runs when a step's lease lapses with nobody to release it: a replica that died without draining, and also a LIVE
+one - when the database is unreachable for both the outcome write and `failStep`, `persist` leaves the step for
+lease recovery (see "Persisting a step's outcome"), and a release on drain that fails leaves the same. One ticker serves two
 rates: `recoverExpiredLeases` and the orphan-flow repair (Background Recovery #3) every tick (1m), the park
 detectors every `heavyRepairEvery`-th (5m), since they carry 5-minute age guards and running them more often finds
 nothing. The tick's cost is two scans. The orphan repair probes every running flow (see Background Recovery #3).
@@ -1067,7 +1069,8 @@ stale. A stale row is weak evidence in both directions: a database outage longer
 live peers (their beats resume up to a beat after the readings do), and when every dispatcher of a shard dies
 at once the survivors taking the slot do not yet know their role. Closing those gaps takes a settle delay, role
 prediction, per-incident lease timers and a dedupe set - far more code than the ~minute it saves over this
-tick, on a crash-only path.
+tick. And neither a peer-triggered sweep nor one run only at a replica's startup reaches a lease a LIVE replica
+left behind (above): that replica never restarts and its row never goes stale.
 
 If the tick must be shortened further, three constraints hold:
 

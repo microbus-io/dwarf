@@ -107,17 +107,21 @@ func (e *Engine) runRecoverySweep(ctx context.Context, heavy bool) {
 //
 // It is not a dispatch mechanism and rings no doorbell. A step it resets to `pending` is due, so its
 // shard's next piston cycle (~67ms at the derived interval) selects it like any other, and the only
-// latency this cadence governs is how long a DEAD worker's step waits past its own lease.
+// latency this cadence governs is how long an abandoned step waits past its own lease.
 //
 // THE TICK IS THE COST OF A CRASH: worst case is `budget + leaseMargin + recoveryInterval` - 2m + 30s + 1m at the
-// defaults, and ~3x the lease at a 2s budget. The path runs only when a replica died without draining. The
-// SELECT reads every `running` non-parked row (`lease_expires` is not a seekable key in the selection index), and
-// every dispatcher of the shard runs it, so its cost is O(in-flight) per dispatcher per tick - small at a minute.
+// defaults, and ~3x the lease at a 2s budget. The path runs when a replica died without draining, and also on a
+// live one: persist leaves a step for lease recovery when the database is unreachable for both the outcome write
+// and failStep, and a release on drain can fail the same way. A sweep run only at startup, or triggered by a
+// peer's stale registry row, never reaches those. The SELECT reads every `running` non-parked row
+// (`lease_expires` is not a seekable key in the selection index), and every dispatcher of the shard runs it, so
+// its cost is O(in-flight) per dispatcher per tick - small at a minute.
 //
 // Find the ids with a plain SELECT, then reset them by id. A single `UPDATE ... WHERE lease_expires<=NOW` must
 // row-lock every row its WHERE re-checks, so it can queue behind every in-flight claim and completion; that form
-// measured 1.2-2.9s per pass while matching nothing (PG 18, ~2,000 flows in flight). A plain SELECT reads past those locks (Postgres, MySQL, and SQL
-// Server under READ_COMMITTED_SNAPSHOT), and the by-id UPDATE locks only the rows it resets. The UPDATE repeats
+// measured 1.2-2.9s per pass while matching nothing (PG 18, ~2,000 flows in flight). A plain SELECT reads past
+// those locks (Postgres, MySQL, and SQL Server under READ_COMMITTED_SNAPSHOT), and the by-id UPDATE locks only
+// the rows it resets. The UPDATE repeats
 // the whole predicate, so a step completed or re-claimed between the two statements is left alone. The SELECT
 // carries no LIMIT: SQL Server's LIMIT_OFFSET needs an ORDER BY, which on step_id invites a primary-key walk
 // over every step ever written; the expired set is bounded by the in-flight count anyway.
