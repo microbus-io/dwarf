@@ -2,8 +2,8 @@
 
 > **For operators** sizing a deployment. This page answers how much one database serves, what adding
 > shards and engine replicas does, and what the engine itself costs. Every number was measured, and the
-> configuration that produced it is stated beside it. Two sections, workload shape and database volume,
-> quote earlier measurements while they are being remeasured; each says so.
+> configuration that produced it is stated beside it. The database volume section quotes measurements from
+> July 2026 while it is being remeasured, and says so.
 
 ## The short version
 
@@ -51,8 +51,9 @@
 nothing, so each brings its own write capacity ([measured below](#what-limits-one-database)).
 
 **Absolute numbers belong to the instance that produced them; ratios travel.** Cloud instances of the
-same spec differ by up to ~20%. The runs below span several sessions, each on its own set of instances, and
-a comparison is read within one session unless a section says otherwise.
+same spec differ by up to ~20%. The runs below span several sessions, engine builds and rig setups, each
+session on its own set of instances. A comparison is made within one session, on one build and one setup,
+unless a section says otherwise, and each section dates its runs.
 
 ## One database
 
@@ -94,7 +95,7 @@ larger disk did not help either: the same 64 vCPU instance ran 28,491 steps/s on
 ## What limits one database
 
 A saturated database is limited by its **write-ahead log (WAL)**, not by CPU or disk. On a saturated 32 vCPU
-shard, ~140 backends wait on the WAL write lock at once. An earlier, deeper look at a 16 vCPU instance
+shard, ~140 backends wait on the WAL write lock at once. A deeper look at a 16 vCPU instance (July 2026)
 showed why buying around it does not work: the ceiling is a stack of locks.
 
 | connections | steps/s | `LWLock/WALWrite` waiters | `LWLock/BufferContent` | on CPU | `IO/WALSync` |
@@ -117,8 +118,7 @@ Same total connections, measured directly:
 | 2 databases, **one** server | 6,916 | ×1.03 |
 | 2 databases, **two** servers | 13,995 | **×2.08** |
 
-*(Measured July 2026 on 16 vCPU instances, on an earlier engine build; these are properties of PostgreSQL,
-not of the engine.)*
+*(Measured July 2026 on 16 vCPU instances; these are properties of PostgreSQL, not of the engine.)*
 
 ## Shards: throughput adds up
 
@@ -159,7 +159,7 @@ The same shard counts, served by a single replica:
   flows stay in flight longest and fill that shared cap. Shards whose databases ran faster sat with free
   capacity. The same holds for any caller that limits its own concurrency across shards.
 
-*(The four-shard row measured 2026-10-12; the two-shard rows 2026-10-10, on an earlier engine build.)*
+*(The four-shard row measured 2026-10-12; the two-shard rows 2026-10-10, in a separate session.)*
 
 ## Replicas: availability without a throughput cost
 
@@ -222,9 +222,9 @@ The same rule scales down: two engines at half the database's vCPU (see
   its runtime to every core it may use, and the collector's cost grows with that count, so on a large
   host set `GOMAXPROCS` to the cores the engine needs rather than the whole host (see
   [Sizing a deployment](#sizing-a-deployment)). Raising `GOGC` above its default of 100 makes the
-  collector run less often at the price of memory: on an earlier build, `GOGC=400` on a 48 vCPU host cut
+  collector run less often at the price of memory: in July 2026, `GOGC=400` on a 48 vCPU host cut
   garbage collection from about a fifth of the engine's CPU to about a twentieth. It has not been
-  measured on the current build.
+  remeasured since.
 
 These figures are the engine's own cost. Your tasks run on the same hosts and need their own headroom.
 
@@ -261,7 +261,7 @@ instance's saturated mean (18,900 steps/s), every rate drained and the series st
   clears only as fast as the spare capacity allows ([Failover](#failover)). Planning at ~90% of the
   settled rate leaves room for that.
 
-*(Measured 2026-10-08 on one 32 vCPU instance, on an earlier engine build with the same connection budget.)*
+*(Measured 2026-10-08 on one 32 vCPU instance, with the same connection budget.)*
 
 ## Long tasks
 
@@ -357,8 +357,7 @@ rising linearly to 500 at 1 ms** and beyond (clamped to half the server's `max_c
 - **Past 1 ms, co-locate.** Each further millisecond costs about five per step, and the budget does not keep
   growing. A cross-zone hop on Google Cloud is ~1.1 ms; keep the engine in its database's zone.
 
-*(Measured 2026-10-07/08 with network delay added on the engine host, on an earlier engine build with the
-same connection budget.)*
+*(Measured 2026-10-07/08 with network delay added on the engine host, with the same connection budget.)*
 
 ## How the connection budget was chosen
 
@@ -367,7 +366,7 @@ The budget of 250 connections per shard is measured, not guessed.
 - **More connections keep helping, and do not collapse.** On a 16 vCPU database at 0.25 ms, pinned pools of
   59, 88, 192 and 384 connections ran 5,478, 6,647, 7,802 and **8,185** steps/s. The gain comes from
   group commit: more committers per WAL flush (22 → 70). The run at 384 was the steadiest of the set.
-- **A budget of 125-250 connections beat the engine's earlier, smaller per-vCPU pool at every size:**
+- **A budget of 125-250 connections beat a smaller pool sized per vCPU at every size:**
   +42% at 4 vCPU, +7% at 8, +15% at 16, +10% at 32 and +10% at 64 vCPU. A 4 vCPU database ran stable at
   250 connections, so one constant serves every size.
 - **A constant, clamped to the server.** Half of `max_connections` is the ceiling, so a small or tightly
@@ -390,7 +389,8 @@ The budget of 250 connections per shard is measured, not guessed.
    in the same process, rather than leaving it at the host's full count. Run at least two such hosts, so
    one can fail.
 3. **Your tasks.** Add the CPU and memory your tasks use on the engine hosts. The engine itself holds ~15 KB
-   per flow in flight; with long tasks, flows in flight = flows/s × flow duration.
+   per flow in flight, plus the state of each step it is running - large payloads need far more
+   ([below](#workload-shape-and-payload)); with long tasks, flows in flight = flows/s × flow duration.
 4. **Distance.** Put the engine in its database's zone. Up to 1 ms the budget compensates; past it, plan for
    less per shard.
 5. **Disk.** Size each database's disk for IOPS, not only capacity (see [method notes](#method-notes)).
@@ -400,21 +400,63 @@ The budget of 250 connections per shard is measured, not guessed.
 
 ## Workload shape and payload
 
-*Being remeasured on the current build: linear, fan-out and scatter workflows at payloads from 0 to 1 MB per
-task, with stored and write-ahead-log bytes per task byte. Until then, earlier measurements:*
+Three workflow shapes on one 32 vCPU database, at payloads from 0 to 1 MB. Every flow has 10 steps:
 
-- **Bytes are a separate ceiling.** Rewriting an incompressible 1 MB / 8 MB payload at every step sustained
-  **46 / 60 MB/s per database** on a 100 GB disk and **~88 MB/s** on 500 GB; two shards scaled it ×1.77–1.82.
-- **Fan-out costs the database, not the engine.** On the engine, a fan-out step costs ~16% more CPU than a
-  linear one (~3,600 vs ~4,200 steps/s per core). On one saturated database, a width-16 fan-out ran ~3,500
-  steps/s against linear's ~5,000: the extra rows and the fan-in write are database work.
+- **Linear:** a chain of 10 tasks, each writing a fresh payload of the given size to the flow's state.
+- **Fan-out:** a task splits into 8 parallel branches that join again. Every step, branches included, writes a
+  fresh payload: the same per-step write as linear, so the two differ only in shape.
+- **Scatter:** the first task writes an array of 8 elements of the given size. Each of the 8 branches reads its
+  own element and writes nothing, and the join does nothing. This is the shape of a document split into pages.
 
-*(Measured July and October 2026 on earlier engine builds, 16 vCPU databases.)*
+Payloads are incompressible. One run per cell, saturated, 16-minute window.
+
+| Payload | Linear, steps/s | Fan-out, steps/s | Scatter, steps/s |
+|---|---|---|---|
+| none | 20,352 | 20,961 | — |
+| 1 KB | 15,901 | 16,093 | 19,443 |
+| 4 KB | 15,635 | 15,945 | 14,990 |
+| 64 KB | 3,445 | 2,958 | 2,392 |
+| 256 KB | — | — | 655 |
+| 1 MB | 271 | 249 | ran out of engine memory (below) |
+
+*These runs come from one session of their own (see [how these numbers were measured](#how-these-numbers-were-measured)).
+The no-payload rows run ~13% above the [headline](#one-database) for the same workload, so compare rows within
+this table.*
+
+- **A small payload costs about a fifth of throughput.** Going from no payload to 1 KB cost 22%. From 1 KB to
+  4 KB cost almost nothing more.
+- **From ~64 KB up, bytes are the ceiling.** Linear wrote ~226 MB/s of payload at 64 KB and ~284 MB/s at
+  1 MB, and fan-out ~194 and ~261 MB/s. Scatter writes each array once, so its rate is lower: ~125 MB/s at
+  64 KB and ~137 MB/s at 256 KB.
+- **Little is written beyond the payload.** At 64 KB and 1 MB, the write-ahead log grew by 1.2–1.3 times the
+  payload, and stored data by about 1.15 times.
+- **Shape matters little.** Fan-out ran within 2% of linear up to 4 KB, and 8–14% below it at 64 KB and 1 MB.
+- **Scatter branches read only their own element.** At 1 KB per element, the engine read about the same
+  ~2.2 KB per branch with 64 branches as with 8. Widening the fan-out from 8 to 64 branches cost 20% of
+  steps/s (15,592 vs 19,443).
+- **Deeper scatter branches cost nothing extra.** 4 branches two steps deep ran 19,033 steps/s at 1 KB.
+- **Many fairness keys cost nothing on fan-out.** Spreading flows over 512 fairness keys instead of one ran
+  22,454 steps/s against 20,961.
+- **The database is the limit at every payload.** The engine host stayed at 25–41% of its CPU in every run.
+
+**Size engine memory for large payloads.** A step's state is held in the engine's memory while the step runs,
+and nothing limits that memory by payload size.
+- **Scatter at 1 MB per element ran out of memory.** With 8 branches and 2,000 flows in flight, the engine's
+  heap reached ~40–50 GB within a minute of the window. It stopped making progress and was killed by the
+  operating system on its 64 GB host.
+- **At 256 KB per element** the heap peaked at ~18 GB.
+- **Linear and fan-out at 1 MB** ran within the host's memory.
+
+For workloads that carry hundreds of kilobytes or more per step, plan engine memory from flows in flight times
+the state each holds. Use a high-memory machine type (an 8 vCPU standard host has 32 GB), or admit fewer flows
+at once.
+
+*(Measured 2026-10-13/14.)*
 
 ## Database volume
 
-*Being remeasured on the current build: throughput as a 32 vCPU database grows to ~200 million step rows and
-to 512 GB. Until then, earlier measurements on 8 vCPU databases with 500 GB disks:*
+*Being remeasured: throughput as a 32 vCPU database grows to ~200 million step rows and to 512 GB. Until
+then, measurements on 8 vCPU databases with 500 GB disks:*
 
 - **Growth costs a one-time settling of ~15–20%, then nothing more.** Filling to **100 million step rows**,
   the time a step holds a connection rose 7.3 → ~8.7 ms by ~10 million rows and then stayed flat. Filling to
@@ -425,7 +467,7 @@ to 512 GB. Until then, earlier measurements on 8 vCPU databases with 500 GB disk
 - **For capacity planning, derate a fresh database's ceiling by ~20%** for a mature deployment.
   Retention (`Purge`, `DeleteOnCompletion`) caps volume.
 
-*(Measured July 2026 on an earlier engine build.)*
+*(Measured July 2026.)*
 
 ## Method notes
 
@@ -447,6 +489,10 @@ to 512 GB. Until then, earlier measurements on 8 vCPU databases with 500 GB disk
 - **Mixed task durations on one engine** (fast lookups beside minute-long calls) are not measured; each run
   used one duration.
 - **State size** beyond 1 MB per task, up to the database column's own limit, is not measured.
+- **Payload results are single runs**, and the byte ceiling across shards is not remeasured. In July 2026,
+  two shards scaled it ×1.77–1.82.
+- **Many fairness keys on a linear workflow** are being remeasured. The one run so far was disturbed by an
+  unrelated database stall.
 - **Replicas spread across zones**, with unequal distance to the database, are not measured.
 - **Sustained create-and-purge**: hours of retention churn and recovery after a long-task burst are not
   measured.

@@ -177,7 +177,9 @@ Reading it:
   dominates, so few caller bytes move per second; a larger payload spreads that fixed cost over more bytes, so
   the rate climbs — by roughly 20–50× from 4 KB to 1 MB on every dialect. SQLite is the only one clearly
   flattening by 1 MB (74 → 83 MB/s), which is its single writer reaching its limit; PostgreSQL was still
-  climbing at the largest size measured, so its ceiling lies above this range.
+  climbing at the largest size measured, so its ceiling lies above this range. On a 32 vCPU cloud database,
+  with every step rewriting its payload, PostgreSQL reached ~280 MB/s at 1 MB (see
+  [Cloud benchmarks](benchmark-cloud.md#workload-shape-and-payload)).
 - **The dialect ranking flips compared with small state.** SQLite led on tiny-state flow rate, but at 1 MB
   **PostgreSQL is well ahead (~212 MB/s)**, then SQL Server (~101), MariaDB (~92), and SQLite (~83). For large
   payloads what matters is how well the database parallelizes big writes: PostgreSQL and MySQL spread them
