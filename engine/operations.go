@@ -122,9 +122,9 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 	// subgraph-spawn path, which is already holding a turn when it calls in. A turn taken while holding one
 	// is the nesting the enclosure rule forbids: with as many turns as connections, holders waiting on a
 	// second turn deadlock against each other.
-	ctx, doneTurn := e.dbTurn(ctx, shardNum)
+	ctx, doneTurn := e.opTurn(ctx, shardNum, "create")
+	defer doneTurn()
 	flowKey, err = e.createWithGraph(ctx, shardNum, workflowURL, graph, state, threadID, threadToken, "", opts, 0, 0, 0, 0, nil)
-	doneTurn()
 	return flowKey, errors.Trace(err)
 }
 
@@ -411,7 +411,7 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
 	// calls has to know about turns. Its age is stamped here, so it queues behind work already running
 	// and ahead of anything arriving after it.
-	ctx, doneTurn := e.dbTurn(ctx, shardNum)
+	ctx, doneTurn := e.opTurn(ctx, shardNum, "snapshot")
 	defer doneTurn()
 
 	var flowStatus string
@@ -703,7 +703,7 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
 	// calls has to know about turns. Its age is stamped here, so it queues behind work already running
 	// and ahead of anything arriving after it.
-	ctx, doneTurn := e.dbTurn(ctx, shardNum)
+	ctx, doneTurn := e.opTurn(ctx, shardNum, "terminate")
 	defer doneTurn()
 
 	var flowStatus string
@@ -766,7 +766,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 		return errors.Trace(err)
 	}
 
-	ctx, doneTurn := e.dbTurn(ctx, shardNum)
+	ctx, doneTurn := e.opTurn(ctx, shardNum, "cancel")
 	defer doneTurn()
 
 	var surgraphFlowID, watermark int
@@ -858,7 +858,7 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
 	// calls has to know about turns. Its age is stamped here, so it queues behind work already running
 	// and ahead of anything arriving after it.
-	ctx, doneTurn := e.dbTurn(ctx, shardNum)
+	ctx, doneTurn := e.opTurn(ctx, shardNum, "delete")
 	defer doneTurn()
 
 	// Test checkpoint: a breakpoint here freezes Delete just before it reads the flow's status (holding no lock,

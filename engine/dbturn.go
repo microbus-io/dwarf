@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"time"
 
 	"github.com/microbus-io/dwarf/internal/turnstile"
 )
@@ -60,6 +61,19 @@ import (
 // is nothing for it to be ordered against.
 func (e *Engine) dbTurn(ctx context.Context, shardNum int) (context.Context, func()) {
 	return e.dbTurnAt(ctx, shardNum, priorityCommon)
+}
+
+// opTurn is dbTurn for an API operation's entry point. Its release also records how long the operation held
+// the shard - the wait for the turn plus the database work under it - as dwarf_operation_seconds. A turn
+// taken elsewhere in an operation (a thread resolve before the main one) stays a plain dbTurn, so each
+// operation records one sample per shard it works on.
+func (e *Engine) opTurn(ctx context.Context, shardNum int, op string) (context.Context, func()) {
+	start := time.Now()
+	turnCtx, doneTurn := e.dbTurn(ctx, shardNum)
+	return turnCtx, func() {
+		doneTurn()
+		e.metricOperation(ctx, op, shardNum, time.Since(start))
+	}
 }
 
 // heldTurnKey carries the turn its holder is currently on, so a CALLEE that has to park on something other

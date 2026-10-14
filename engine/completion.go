@@ -1528,7 +1528,7 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
 	// calls has to know about turns. Its age is stamped here, so it queues behind work already running
 	// and ahead of anything arriving after it.
-	ctx, doneTurn := e.dbTurn(ctx, shardNum)
+	ctx, doneTurn := e.opTurn(ctx, shardNum, "resume")
 	defer doneTurn()
 
 	var flowStatus string

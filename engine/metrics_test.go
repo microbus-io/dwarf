@@ -94,6 +94,37 @@ func histCount(rm metricdata.ResourceMetrics, name string, attrs map[string]stri
 	return 0, false
 }
 
+// histSum returns the total of a float64 Histogram metric's sample sums, filtered to points carrying ALL of
+// the given attributes (nil = no filter).
+func histSum(rm metricdata.ResourceMetrics, name string, attrs map[string]string) (float64, bool) {
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			hist, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok {
+				return 0, false
+			}
+			var total float64
+			matched := false
+		points:
+			for _, dp := range hist.DataPoints {
+				for k, want := range attrs {
+					v, ok := dp.Attributes.Value(attribute.Key(k))
+					if !ok || v.String() != want {
+						continue points
+					}
+				}
+				total += dp.Sum
+				matched = true
+			}
+			return total, matched
+		}
+	}
+	return 0, false
+}
+
 // gaugeValue returns the single data point of an int64 observable gauge. It takes the LAST point rather
 // than summing, because an observable gauge reports a level, not an accumulation.
 func gaugeValue(rm metricdata.ResourceMetrics, name string) (int64, bool) {
@@ -944,4 +975,179 @@ func TestMeasureOpts_MemoizesUpToTheCap(t *testing.T) {
 	assert.False(memo.get(over, build) == memo.get(over, build), "a tuple past the cap must not be memoized")
 	assert.Equal(measureOptsCap, len(*memo.known.Load()))
 	assert.True(first == memo.get(1, build))
+}
+
+// slowGraphHost delays LoadGraph for one workflow URL, so a test can tell whether Create's graph load is inside
+// a timing.
+type slowGraphHost struct {
+	*hosts.Mux
+	url   string
+	delay time.Duration
+}
+
+func (h slowGraphHost) LoadGraph(ctx context.Context, workflowURL string) (*workflow.Graph, error) {
+	if workflowURL == h.url {
+		time.Sleep(h.delay)
+	}
+	return h.Mux.LoadGraph(ctx, workflowURL)
+}
+
+// TestMetrics_OperationSeconds pins dwarf_operation_seconds: every operation records under its own op label and
+// the shard it worked on, timed over the shard's share of the call only - a slow graph load stays out of
+// create's sample, and Await's park stays out while its reads count as snapshot.
+func TestMetrics_OperationSeconds(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	const slow = 500 * time.Millisecond
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("Timed")
+	g.SetURL("A", "opmetric.verify:428/a")
+	g.AddTransition("A", workflow.End)
+	assert.NoError(g.Validate())
+	mux.HandleGraph("opmetric.verify:428/g", g)
+	// The task outlasts the samples, so Run's await parks for it between its two reads.
+	mux.HandleTask("opmetric.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
+		time.Sleep(slow)
+		return nil
+	})
+	ask := workflow.NewGraph("Ask")
+	ask.SetURL("Ask", "opmetric.verify:428/ask")
+	ask.AddTransition("Ask", workflow.End)
+	assert.NoError(ask.Validate())
+	mux.HandleGraph("opmetric.verify:428/askg", ask)
+	mux.HandleTask("opmetric.verify:428/ask", func(ctx context.Context, f *workflow.Flow) error {
+		_, err := f.Interrupt(nil, nil)
+		return err
+	})
+
+	eng := NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
+	eng.SetHost(slowGraphHost{Mux: mux, url: "opmetric.verify:428/g", delay: slow})
+	eng.SetMeterProvider(mp)
+	assert.NoError(eng.Startup(t.Context()))
+
+	flowKey, outcome, err := eng.Run(ctx, "opmetric.verify:428/g", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	assert.Equal(workflow.StatusCompleted, outcome.Status)
+	hist, err := eng.History(ctx, flowKey)
+	if !assert.NoError(err) || !assert.True(len(hist) > 0) {
+		return
+	}
+	_, err = eng.Step(ctx, hist[0].StepKey)
+	assert.NoError(err)
+	_, _, err = eng.Fingerprint(ctx, flowKey)
+	assert.NoError(err)
+	_, err = eng.Fork(ctx, hist[0].StepKey, nil)
+	assert.NoError(err)
+	_, err = eng.Continue(ctx, flowKey, nil)
+	assert.NoError(err)
+	_, _, err = eng.List(ctx, workflow.Query{})
+	assert.NoError(err)
+	_, err = eng.ShardInfo(ctx)
+	assert.NoError(err)
+	assert.NoError(eng.Delete(ctx, flowKey))
+	_, err = eng.Purge(ctx, workflow.Query{Status: workflow.StatusTerminated})
+	assert.NoError(err)
+
+	// Three interrupted flows: one each to resume, terminate and cancel.
+	var parked []string
+	for range 3 {
+		k, err := eng.Create(ctx, "opmetric.verify:428/askg", nil, nil)
+		if !assert.NoError(err) {
+			return
+		}
+		out, err := eng.Await(ctx, k)
+		if !assert.NoError(err) || !assert.Equal(workflow.StatusInterrupted, out.Status) {
+			return
+		}
+		parked = append(parked, k)
+	}
+	assert.NoError(eng.Resume(ctx, parked[0], nil))
+	assert.NoError(eng.Terminate(ctx, parked[1], "test"))
+	assert.NoError(eng.Cancel(ctx, parked[2], "test"))
+
+	var rm metricdata.ResourceMetrics
+	if !assert.NoError(reader.Collect(ctx, &rm)) {
+		return
+	}
+	once := []string{"history", "step", "fingerprint", "fork", "continue", "list", "shard_info", "delete", "purge",
+		"resume", "terminate", "cancel"}
+	for _, op := range once {
+		n, ok := histCount(rm, "dwarf_operation_seconds", map[string]string{"op": op, "shard": "1"})
+		assert.True(ok, "op=%s should be recorded on shard 1", op)
+		assert.Equal(uint64(1), n, "op=%s records one sample per call per shard", op)
+	}
+	n, _ := histCount(rm, "dwarf_operation_seconds", map[string]string{"op": "create", "shard": "1"})
+	assert.Equal(uint64(4), n, "Run's create half and the three Creates")
+	n, _ = histCount(rm, "dwarf_operation_seconds", map[string]string{"op": "snapshot", "shard": "1"})
+	assert.True(n >= 2, "Await reads the flow before and after it parks, and those reads are snapshots")
+
+	// Run's create half paid the graph delay outside its turn, and its await parked for the task outside any
+	// turn, so neither shows up in the samples.
+	sum, _ := histSum(rm, "dwarf_operation_seconds", map[string]string{"op": "create"})
+	assert.True(sum < slow.Seconds(), "create's samples must exclude the host's graph load, got %fs", sum)
+	sum, _ = histSum(rm, "dwarf_operation_seconds", map[string]string{"op": "snapshot"})
+	assert.True(sum < slow.Seconds(), "snapshot's samples must exclude Await's park, got %fs", sum)
+}
+
+// TestOperation_HonorsDeadlineOnAFullShard pins that a caller's deadline bounds an operation queued at a shard
+// with no free turn: Create returns an error at the deadline rather than waiting for a turn, and the time it
+// spent waiting is still recorded against that shard.
+func TestOperation_HonorsDeadlineOnAFullShard(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("Blocked")
+	g.SetURL("A", "opdeadline.verify:428/a")
+	g.AddTransition("A", workflow.End)
+	assert.NoError(g.Validate())
+	mux.HandleGraph("opdeadline.verify:428/g", g)
+	mux.HandleTask("opdeadline.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	eng := NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
+	eng.SetHost(mux)
+	eng.SetMeterProvider(mp)
+	if !assert.NoError(eng.Startup(t.Context())) {
+		return
+	}
+
+	// Shrink the shard's turnstile to nothing rather than taking its free turns: a background caller holding a
+	// turn at that moment would hand it on to the queued Create when it returns. With no size, every return
+	// lands below zero and nothing is granted.
+	ts := eng.turnstiles.Turnstile(1)
+	size := ts.Size()
+	assert.True(size > 0, "the shard has turns")
+	ts.Resize(0)
+	defer ts.Resize(size)
+
+	const deadline = 200 * time.Millisecond
+	dctx, cancel := context.WithTimeout(ctx, deadline)
+	defer cancel()
+	start := time.Now()
+	_, err := eng.Create(dctx, "opdeadline.verify:428/g", nil, nil)
+	elapsed := time.Since(start)
+	assert.Error(err, "a Create that cannot get a turn before its deadline must fail")
+	assert.True(errors.Is(err, context.DeadlineExceeded), "the failure is the caller's deadline, got %v", err)
+	assert.True(elapsed < 5*deadline, "Create must return at the caller's deadline, took %v", elapsed)
+
+	var rm metricdata.ResourceMetrics
+	if !assert.NoError(reader.Collect(ctx, &rm)) {
+		return
+	}
+	sum, ok := histSum(rm, "dwarf_operation_seconds", map[string]string{"op": "create", "shard": "1"})
+	assert.True(ok, "the queued create is recorded")
+	assert.True(sum >= deadline.Seconds()*0.9, "its sample covers the wait at the turnstile, got %fs", sum)
 }

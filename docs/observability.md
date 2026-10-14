@@ -44,7 +44,7 @@ It defaults to the global `otel.GetMeterProvider()` — the no-op provider unles
 OpenTelemetry SDK. The engine builds its instruments under the scope `github.com/microbus-io/dwarf`;
 service identity comes from the provider's Resource, not from per-metric attributes.
 
-The engine emits 35 instruments — 17 counters, 14 gauges, and 4 histograms. Counter instrument names carry **no** `_total`
+The engine emits 36 instruments — 17 counters, 14 gauges, and 5 histograms. Counter instrument names carry **no** `_total`
 suffix; a Prometheus exporter appends it at the scrape boundary, so the names below are what you query in
 PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried as `dwarf_flows_started_total`):
 
@@ -82,6 +82,7 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_turnstile_waiting` | gauge | `shard` | callers queued for a turn on that shard. Unlike the free count this has no ceiling, so it is the one that shows how DEEP a queue has become rather than merely that it is full; read the pair together | `dwarf_turnstile_waiting` |
 | `dwarf_db_phase_seconds` | histogram | `role` | wall clock a worker spent INSIDE a database phase — `enter` is dispatch up to the task call, `exit` is the task call to the end of the step. It is the phase's true residence, which neither the turn waits (the queue in FRONT of each call) nor the sum of query times (which misses connection wait and the Go-side work between them) can supply | `dwarf_db_phase_seconds` |
 | `dwarf_db_phase_workers` | gauge | `role` | worker goroutines inside a database phase right now. This is what sets connection-pool pressure, and nothing else reports it: `dwarf_workers_resident` counts every worker that exists, and a worker parked in a task call still holds its step | `dwarf_db_phase_workers` |
+| `dwarf_operation_seconds` | histogram | `op`, `shard` | time an API operation spent on a shard: the wait for its turn plus its database work. `op` is one of `create`, `continue`, `fork`, `resume`, `terminate`, `cancel`, `delete`, `snapshot`, `fingerprint`, `history`, `step`, `list`, `purge`, `shard_info`. Work outside the shard is not counted (`Create`'s graph load, the wait in `Await`, `Poll` and `Run`, whose reads of the flow record as `snapshot`). `List`, `Purge` and `ShardInfo` record one sample per shard they touch. Compare one `op` across shards that are up to find a slow one; a shard that refuses connections fails fast and reads as fast | `dwarf_operation_seconds` |
 | `dwarf_workers_resident` | gauge | — | worker goroutines that exist. It grows on demand under load and falls again as workers that have been mostly idle retire, never below the connection-derived floor. Rising and settling back is that working; wide oscillation at steady load is not | `dwarf_workers_resident` |
 | `dwarf_state_in_flight_bytes` | gauge | — | state payload this replica is holding across host calls right now, summed over the tasks currently inside a task call | `dwarf_state_in_flight_bytes` |
 | `dwarf_state_in_flight_steps` | gauge | — | tasks currently inside a task call — the denominator for the line above | `dwarf_state_in_flight_steps` |
@@ -223,7 +224,7 @@ workflows shows up in the same pipeline: per-operation spans (nested under the a
 logs, and nine `sequel_*` instruments — all under the scope `github.com/microbus-io/sequel`. The logger is
 forwarded only when you explicitly set one, so an unconfigured engine stays silent here too.
 
-**These are not dwarf's instruments and are not part of the 34 above**, but you will see them on the same
+**These are not dwarf's instruments and are not part of the 36 above**, but you will see them on the same
 scrape, and two of them answer questions no `dwarf_*` metric can:
 
 | `sequel_*` instrument | Type | Labels | Measures |

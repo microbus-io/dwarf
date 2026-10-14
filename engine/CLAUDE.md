@@ -3336,7 +3336,13 @@ one. **Do not steer placement by observed shard load** (the planner's tallies, a
 pick). Built and measured locally on two shards weighted 3:1: comparing due-step counts per unit of weight
 placed 94/6 instead of 75/25 and starved the lighter shard (p99 3x), because a tally count is capped at the
 cache capacity, so a deep shard reads shallow; and any load-steered pick shifts load in the direction that
-changes its own reading, so it oscillates. A slow shard is the operator's to weight down. `Cordoned` shards are excluded from
+changes its own reading, so it oscillates. **Steering by `Create` latency fails the same way, fuse or
+not.** Latency cannot say why a shard is slow - a fault, more load than its peers, or a pinned backlog it is
+working through - and demoting it is right for only the first. And the harm it would prevent (a slow shard
+holding a bounded caller's slots) exists only for callers with bounded concurrency, which the engine cannot
+see, so no threshold, step or hold time has a derivation. Near saturation a 20% speed gap reads as ~3x
+latency, and one 10-point shift between two shards flips which one reads slow. A slow shard is the
+operator's to weight down; `dwarf_operation_seconds{op,shard}` is what lets them see it. `Cordoned` shards are excluded from
 placement entirely (everything resident proceeds - execution, subgraph children, `Continue`, `Fork`); all
 shards cordoned is a loud 503 at `Create`. Pinned by `engine/poolsizing_test.go`.
 
@@ -3427,15 +3433,15 @@ all other cloned steps to `parkedNone`), so cloned rows never inherit a stale no
 
 ## Metrics (`engine/metrics.go`)
 
-The engine emits 35 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
+The engine emits 36 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
 injects the provider; it defaults to the global `otel.GetMeterProvider()` - no-op unless the host configures the
 SDK, so unconfigured/standalone/test use pays nothing. Instruments are built once in `initMetrics` (from
 `initRuntime`, so every `Startup` gets them) from `mp.Meter("github.com/microbus-io/dwarf")` - that
 scope distinguishes dwarf's metrics; **service identity lives in the provider's Resource, not in per-metric
 attributes** (no `service.name` on data points - cardinality explosion, off-spec). The only attributes attached are
 the metric-specific labels: `workflow`, `status`, `task_name` (on `dwarf_steps_executed`), `priority` (on the
-flow lifecycle counters and the per-band backlog gauges), `park_type`, `role` (on the db-phase pair), `shard`,
-and `column` (on the byte counters). `priority` and `workflow` assume the host uses a bounded set of each;
+flow lifecycle counters and the per-band backlog gauges), `park_type`, `role` (on the db-phase pair), `op` (on
+`dwarf_operation_seconds`), `shard`, and `column` (on the byte counters). `priority` and `workflow` assume the host uses a bounded set of each;
 the host drops either with a metric View if it does not.
 
 **8 counters, incremented inline** at their logical event sites: `dwarf_flows_started`

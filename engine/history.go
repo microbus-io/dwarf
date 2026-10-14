@@ -51,7 +51,7 @@ func (e *Engine) history(ctx context.Context, flowKey string) ([]workflow.FlowSt
 	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
 	// calls has to know about turns. Its age is stamped here, so it queues behind work already running
 	// and ahead of anything arriving after it.
-	ctx, doneTurn := e.dbTurn(ctx, shardNum)
+	ctx, doneTurn := e.opTurn(ctx, shardNum, "history")
 	defer doneTurn()
 	// delete_after_ms=0 excludes a flow scheduled for deletion: History is the full step detail a disposable
 	// flow is discarding, so it 404s during the grace window (Snapshot/Await still serve the outcome).
@@ -202,7 +202,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
 	// calls has to know about turns. Its age is stamped here, so it queues behind work already running
 	// and ahead of anything arriving after it.
-	ctx, doneTurn := e.dbTurn(ctx, shardNum)
+	ctx, doneTurn := e.opTurn(ctx, shardNum, "step")
 	defer doneTurn()
 	var taskName, statusStr, errMsg string
 	var stateJSON, changesJSON, stateRefsJSON, interruptJSON []byte
@@ -462,7 +462,7 @@ func (e *Engine) fingerprint(ctx context.Context, flowKey string) (string, strin
 	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
 	// calls has to know about turns. Its age is stamped here, so it queues behind work already running
 	// and ahead of anything arriving after it.
-	ctx, doneTurn := e.dbTurn(ctx, shardNum)
+	ctx, doneTurn := e.opTurn(ctx, shardNum, "fingerprint")
 	defer doneTurn()
 	var status string
 	err = db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&status)
@@ -546,7 +546,7 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 		}
 		// A turn on each shard it reads, so this queues for that shard's connections like any other caller
 		// instead of taking them from work already under way.
-		ctx, doneTurn := e.dbTurn(ctx, shardIdx)
+		ctx, doneTurn := e.opTurn(ctx, shardIdx, "list")
 		defer doneTurn()
 		// Exclude flows scheduled for deletion (delete_after_ms>0): they are logically gone, awaiting the reaper.
 		conditions := []string{whereSQL, "f.delete_after_ms=0"}
@@ -812,7 +812,7 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 		}
 		// A turn on each shard it reads, so this queues for that shard's connections like any other caller
 		// instead of taking them from work already under way.
-		ctx, doneTurn := e.dbTurn(ctx, shardIdx)
+		ctx, doneTurn := e.opTurn(ctx, shardIdx, "purge")
 		defer doneTurn()
 		where := whereSQL
 		args := append([]any(nil), baseArgs...)
@@ -893,7 +893,7 @@ func (e *Engine) shardInfo(ctx context.Context) ([]ShardSummary, error) {
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
 		// This pass takes a turn on the shard it is about to read, so a background sweep queues for its
 		// connections like any other caller instead of taking them from work already under way.
-		ctx, doneTurn := e.dbTurn(ctx, shardIdx)
+		ctx, doneTurn := e.opTurn(ctx, shardIdx, "shard_info")
 		defer doneTurn()
 		r := &results[pos[shardIdx]]
 		r.Index = shardIdx
@@ -925,7 +925,7 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
 	// calls has to know about turns. Its age is stamped here, so it queues behind work already running
 	// and ahead of anything arriving after it.
-	ctx, doneTurn := e.dbTurn(ctx, shardNum)
+	ctx, doneTurn := e.opTurn(ctx, shardNum, "continue")
 	defer doneTurn()
 
 	// The caller's raw Go value is the only reducer input that does not arrive decoded from the database, so

@@ -56,6 +56,7 @@ type engineMetrics struct {
 	turnWait            metric.Float64Histogram
 	gateWait            metric.Float64Histogram
 	dbPhaseSeconds      metric.Float64Histogram
+	operationSeconds    metric.Float64Histogram
 	peerChanges         metric.Int64Counter
 
 	reg metric.Registration // the observable-gauge callback registration, unregistered at Shutdown
@@ -67,6 +68,7 @@ type engineMetrics struct {
 	stepExecOpts  measureOpts[stepExecKey]
 	flowStartOpts measureOpts[flowKeyAttrs]
 	flowEndOpts   measureOpts[flowKeyAttrs]
+	operationOpts measureOpts[operationKey]
 }
 
 // attrOpts is one attribute set, prebuilt as the option slices the instruments take. Passing a stored slice
@@ -134,6 +136,11 @@ type stateBytesKey struct{ workflow, column string }
 type stepExecKey struct {
 	task, status string
 	shard        int
+}
+
+type operationKey struct {
+	op    string
+	shard int
 }
 
 type flowKeyAttrs struct {
@@ -224,7 +231,18 @@ func (e *Engine) initMetrics() error {
 	if err != nil {
 		errs = append(errs, errors.Trace(err))
 	}
+	// Timed from the request for the operation's turn to its release, never the whole call: what falls outside
+	// the turn - Create's graph load, Await's park - is the host's time or the flow's, and recording it would
+	// make every shard look slow together, which is the one comparison this instrument is for.
+	operationSeconds, err := meter.Float64Histogram("dwarf_operation_seconds",
+		metric.WithUnit("s"),
+		metric.WithDescription("Time an API operation spent on a shard, by operation (op) and shard: the wait for its turn at the shard's turnstile plus its database work, from requesting the turn to releasing it. Work outside the shard is not counted - Create's graph load is the host's, and Await, Poll and Run's wait for the flow to stop is the flow's; their reads of the flow are recorded as snapshot. An operation that spans every shard (List, Purge, ShardInfo) records one sample per shard it touched. This is the latency a caller pays on each shard, so it is the instrument that finds a SLOW SHARD: compare one op's p90 across shards. A caller with bounded concurrency stalls on that shard's calls and then has fewer left for the others, so one slow shard slows the whole fleet. To tell why, read the slow shard's turnstile: free turns (dwarf_turnstile_available) while the operation is slow rule out queueing, so its database is slow per query; no free turns means calls are queueing, which a slow database causes as surely as extra load does, so read dwarf_turnstile_waiting and dwarf_turnstile_wait_seconds against the shard's own history and the server's own metrics to tell which."),
+		metric.WithExplicitBucketBoundaries(0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10))
+	if err != nil {
+		errs = append(errs, errors.Trace(err))
+	}
 	m.dbPhaseSeconds = dbPhaseSeconds
+	m.operationSeconds = operationSeconds
 	m.turnWait = turnWait
 	m.gateWait = gateWait
 	m.stepsOffered = ctr("dwarf_steps_offered", "Counts steps admitted to this replica's candidate cache by the DOORBELL rather than selected by a refill cycle - a step whose predecessor just completed, taking the slot it vacated. Read against dwarf_refill_candidates_selected it is the share of dispatch that came from step origination instead of from the weighted fairness plan; a high share is normal under load (a cycle supplies only ~1.05-1.5x ahead of consumption, so partitions drain to empty between cycles) and is what keeps a sequential chain from paying a cycle per hop.")
@@ -517,6 +535,18 @@ func (e *Engine) metricStepExecuted(ctx context.Context, taskName, status string
 			attribute.String("shard", strconv.Itoa(k.shard)))
 	})
 	e.metrics.stepsExecuted.Add(ctx, 1, opts.add...)
+}
+
+// metricOperation records one API operation's time on a shard (dwarf_operation_seconds). opTurn is its only
+// caller, and passes the caller's ctx so an exemplar links to the caller's trace.
+func (e *Engine) metricOperation(ctx context.Context, op string, shardNum int, d time.Duration) {
+	if e.metrics == nil || e.metrics.operationSeconds == nil {
+		return
+	}
+	opts := e.metrics.operationOpts.get(operationKey{op: op, shard: shardNum}, func(k operationKey) *attrOpts {
+		return newAttrOpts(attribute.String("op", k.op), attribute.String("shard", strconv.Itoa(k.shard)))
+	})
+	e.metrics.operationSeconds.Record(ctx, d.Seconds(), opts.rec...)
 }
 
 // metricPeerCountChanged records that one shard's observed replica count moved. Deliberately driven from

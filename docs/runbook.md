@@ -210,20 +210,48 @@ wrong stable id is worse than the random default.
 
 **Confirm.** `eng.ShardInfo(ctx)` is the right first call and **keeps working when a shard is down** — it
 returns a row per shard with that shard's error recorded on it, rather than failing as a whole, so it tells
-you *which* shard is unhappy. Then `dwarf_refill_query_duration_seconds` split by `shard` — one shard's tail
-dragging while its peers stay flat is the shard, not the engine. `dwarf_peer_blind_seconds` non-zero for a
-shard means replicas cannot read its registry at all.
+you *which* shard is unhappy. For a shard that is up but slow, compare one operation's latency across shards:
+
+```promql
+histogram_quantile(0.9, sum by (shard, le) (rate(dwarf_operation_seconds_bucket{op="create"}[5m])))
+```
+
+One shard's line well above its peers' is the shard, not the engine. `dwarf_operation_seconds` times only
+the shard's part of each call (the wait for a turn at the shard plus the database work), so a slow graph
+loader or a long `Await` does not show up as a slow shard. It compares shards that are up: one refusing
+connections fails fast and reads as fast, which is what `ShardInfo` is for. To tell why a shard is slow, read
+its turnstile. Free turns (`dwarf_turnstile_available`) while its operations are slow rule out queueing: its
+database is slow per query (look at the server: CPU, I/O, a noisy neighbour, a long checkpoint). No free
+turns means calls are queueing for its connections, which a slow database causes as surely as extra load
+does, so compare `dwarf_turnstile_waiting` and `dwarf_turnstile_wait_seconds` with that shard's own history
+and look at the server before concluding it is overloaded. `dwarf_refill_query_duration_seconds` split by
+`shard` is the same comparison for dispatch. `dwarf_peer_blind_seconds` non-zero for a shard means replicas
+cannot read its registry at all.
 
 **Understand the blast radius.** Dwarf is **not** shard-fault-tolerant: `List` and
 `Purge` fail as a whole if any shard errors. Flows resident on a healthy shard keep executing
 normally; flows on the failed shard are unreachable until it returns. Each shard's selection runs on its own
-cycle, so a slow shard slows its own dispatch, not its peers'.
+cycle, so a slow shard does not slow its peers' **dispatch**.
 
-**Respond.** Recover the database. There is no drain-and-migrate path that is faster than fixing the server,
-and flows cannot be moved between shards. If the shard is healthy but should stop taking *new* work — you are
-retiring it, or it is overloaded — cordon it instead: `ShardSpec.Cordoned` excludes a shard from new-flow
-placement while everything already resident keeps running. That is a configuration change requiring a
-restart; see [Resharding](resharding.md).
+**It can still slow the whole fleet through your callers.** New flows are placed by `Weight` whatever each
+shard's latency, so a slow shard keeps receiving its full share of `Create` calls and each of them takes the
+slow shard's time. A caller with a fixed number of concurrent creators, a request limit, or a cap on flows in
+flight then has those slots held on the slow shard and fewer left for the healthy ones: they run out of new
+work even though they have room. If throughput fell on every shard and `dwarf_turnstile_available` shows the
+healthy shards with free turns and nobody waiting, this is the cause.
+
+**Respond.** For a shard that is down, recover the database. There is no drain-and-migrate path that is
+faster than fixing the server, and flows cannot be moved between shards. For a shard that is up but slow:
+
+- **Weight it down** (`ShardSpec.Weight`) if it is slow because it is smaller than its peers, so it receives
+  the share of new flows it can carry.
+- **Cordon it** (`ShardSpec.Cordoned`) to stop new-flow placement on it entirely while everything resident
+  keeps running. Its resident flows' `Continue` turns, subgraph children and forks still land on it.
+- **Size your callers for the slow case.** Give each `Create` a context deadline (a call queued at a shard
+  with no free turn returns at the deadline, and a retry that does not join a thread is placed afresh), and
+  size creator concurrency for the latency of the slowest shard rather than the average.
+
+Weight and cordon are configuration changes requiring a restart; see [Resharding](resharding.md).
 
 **If a peer is alive but not serving its share** (`dwarf_steps_stolen_total` climbing), other replicas have
 already started covering for it — the steal exists exactly for this. Find the replica whose dispatch has
