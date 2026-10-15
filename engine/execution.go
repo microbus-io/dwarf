@@ -170,8 +170,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			// recovery; every reset that follows an execution has leaseSeq>0 and is fenced.
 			// A parked step is not this worker's to rewind: it is waiting on its child, and a rewind would leave
 			// it pending AND parked, which nothing selects or recovers.
-			resetSQL := "UPDATE dwarf_steps SET status=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=? AND parked=?"
-			resetArgs := []any{workflow.StatusPending, stepID, fromStatus, parkedNone}
+			resetSQL := "UPDATE dwarf_steps SET status=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='" + fromStatus + "' AND parked=?"
+			resetArgs := []any{workflow.StatusPending, stepID, parkedNone}
 			if leaseSeq > 0 {
 				resetSQL += " AND lease_seq=?"
 				resetArgs = append(resetArgs, leaseSeq)

@@ -241,6 +241,35 @@ func TestCandidateCache_OfferedAreNotChargedAsRefillerWaste(t *testing.T) {
 	assert.Expect(c.parts[1].offered, 0)
 }
 
+// TestCandidateCache_ResizeTrimsOfferedFromTheCount pins that a Resize trim retires the offered candidates it
+// cuts. They sit at the tail, which is what the trim removes; left counted, the next Refill subtracts them from a
+// partition that no longer holds them and reports a negative discard.
+func TestCandidateCache_ResizeTrimsOfferedFromTheCount(t *testing.T) {
+	assert := testarossa.For(t)
+
+	var c Cache
+	c.Init(4) // size 8
+	c.Refill(1, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}}, 100)
+	for i := range 4 {
+		assert.True(c.Offer(Job{StepID: 50 + i, Shard: 1}, 100))
+	}
+
+	c.Resize(1) // size 2: the trim keeps the two planned candidates and cuts all four offered ones
+	assert.Expect(len(c.parts[1].items), 2)
+	assert.Expect(c.parts[1].offered, 0)
+	assert.Expect(c.Refill(1, nil, 100), 2) // both survivors were the refiller's own selection
+
+	// A trim that keeps some offered candidates keeps exactly those in the count.
+	c.Resize(4) // size 8
+	c.Refill(1, []Job{{StepID: 3, Shard: 1}}, 100)
+	for i := range 3 {
+		assert.True(c.Offer(Job{StepID: 60 + i, Shard: 1}, 100))
+	}
+	c.Resize(1) // size 2: one planned, one offered survive
+	assert.Expect(c.parts[1].offered, 1)
+	assert.Expect(c.Refill(1, nil, 100), 1)
+}
+
 // TestCandidateCache_OfferIsPerPartition pins that the empty check is against the job's OWN shard, so a
 // busy shard neither blocks nor pollutes an idle one - and that the global bound does not gate it, since
 // that bound is a sum over all partitions and would let one busy shard silence every other shard's
@@ -364,8 +393,7 @@ func TestCandidateCache_ResizeTrimsAndRebounds(t *testing.T) {
 	assert.Equal(16, c.Len())
 
 	// Shrink to a 2-worker replica: capacity 4, trimmed proportionally (12:4 -> 3:1). The trimmed
-	// candidates stay `pending` in the database and are simply re-selected - the same thing an Offer's
-	// head-insert already does when it pushes one past the bound.
+	// candidates stay `pending` in the database and are simply re-selected, as a Refill's discards are.
 	c.Resize(2)
 	assert.Equal(4, c.Capacity())
 	assert.Equal(4, c.Len())

@@ -192,6 +192,8 @@ func (c *Cache) Resize(workers int) {
 	for _, s := range shards {
 		p := c.parts[s]
 		if len(p.items) > targets[s] {
+			// The trim cuts the tail, which is where the offered items sit.
+			p.offered = max(0, p.offered-(len(p.items)-targets[s]))
 			p.items = p.items[:targets[s]]
 			if len(p.items) == 0 {
 				p.items = nil
