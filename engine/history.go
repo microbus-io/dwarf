@@ -465,7 +465,8 @@ func (e *Engine) fingerprint(ctx context.Context, flowKey string) (string, strin
 	ctx, doneTurn := e.opTurn(ctx, shardNum, "fingerprint")
 	defer doneTurn()
 	var status string
-	err = db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&status)
+	var rootFlowID int
+	err = db.QueryRowContext(ctx, "SELECT status, root_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&status, &rootFlowID)
 	if err == sql.ErrNoRows {
 		return "", "", errors.New("flow not found", http.StatusNotFound)
 	}
@@ -473,30 +474,47 @@ func (e *Engine) fingerprint(ctx context.Context, flowKey string) (string, strin
 		return "", "", errors.Trace(err)
 	}
 
-	flowIDs := []any{flowID}
-	descendants, err := e.allDescendantSubgraphFlows(ctx, db, flowID)
-	if err != nil {
-		return "", "", errors.Trace(err)
+	// The digest covers the steps of the flow and every subgraph flow beneath it. A root's subtree is its whole
+	// tree, named by root_flow_id. A subgraph child's is found by the descendant walk, and its flow ids go out in
+	// chunks, each contributing its own count and latest update; they are sorted so an unchanged subtree chunks
+	// the same way twice.
+	type chunk struct {
+		where string
+		args  []any
 	}
-	for _, id := range descendants {
-		flowIDs = append(flowIDs, id)
+	var chunks []chunk
+	if rootFlowID == flowID {
+		chunks = append(chunks, chunk{"flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id=?)", []any{flowID}})
+	} else {
+		descendants, err := e.allDescendantSubgraphFlows(ctx, db, flowID)
+		if err != nil {
+			return "", "", errors.Trace(err)
+		}
+		flowIDs := append([]int{flowID}, descendants...)
+		slices.Sort(flowIDs)
+		for ids := range slices.Chunk(flowIDs, inListChunk) {
+			ph, args := inList(ids)
+			chunks = append(chunks, chunk{"flow_id IN (" + ph + ")", args})
+		}
 	}
-
-	ph := strings.Repeat("?,", len(flowIDs)-1) + "?"
-	var count int
-	// MAX(updated_at) is an untyped aggregate expression; SQLite returns it as a
-	// string (no column affinity) while other dialects return a time value. Scan
-	// into any and hash its string form — the fingerprint only needs a stable,
-	// change-detecting digest, not a parsed timestamp.
-	var maxUpdated any
-	err = db.QueryRowContext(ctx, "SELECT COUNT(*), MAX(updated_at) FROM dwarf_steps WHERE flow_id IN ("+ph+")", flowIDs...).Scan(&count, &maxUpdated)
-	if err != nil {
-		return "", "", errors.Trace(err)
+	digest := fmt.Appendf(nil, "%s", status)
+	for _, c := range chunks {
+		var count int
+		// MAX(updated_at) is an untyped aggregate expression; SQLite returns it as a
+		// string (no column affinity) while other dialects return a time value. Scan
+		// into any and hash its string form — the fingerprint only needs a stable,
+		// change-detecting digest, not a parsed timestamp.
+		var maxUpdated any
+		err = db.QueryRowContext(ctx, "SELECT COUNT(*), MAX(updated_at) FROM dwarf_steps WHERE "+c.where, c.args...).Scan(&count, &maxUpdated)
+		if err != nil {
+			return "", "", errors.Trace(err)
+		}
+		if b, ok := maxUpdated.([]byte); ok {
+			maxUpdated = string(b)
+		}
+		digest = fmt.Appendf(digest, "|%d|%v", count, maxUpdated)
 	}
-	if b, ok := maxUpdated.([]byte); ok {
-		maxUpdated = string(b)
-	}
-	sum := sha256.Sum256(fmt.Appendf(nil, "%s|%d|%v", status, count, maxUpdated))
+	sum := sha256.Sum256(digest)
 	return hex.EncodeToString(sum[:]), status, nil
 }
 

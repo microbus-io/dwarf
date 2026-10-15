@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -797,26 +798,31 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 		return errors.Trace(err)
 	}
 	allFlowIDs := append([]any{flowID}, descendantFlowIDs...)
-	flowPlaceholders := strings.Repeat("?,", len(allFlowIDs)-1) + "?"
 
 	reason = strings.TrimSpace(reason)
-	reasonArgs := append([]any{reason}, allFlowIDs...)
 	// The watermark is read by a statement AFTER the one that takes the flow rows' locks. On Postgres an UPDATE's
 	// subquery reads the snapshot taken before the statement waited for its row lock, so a single statement would
 	// miss a successor that a transition committed while holding that lock - and that successor could then run to
-	// completion before the mark below, unmarked, and pass nothing on.
+	// completion before the mark below, unmarked, and pass nothing on. Every lock is taken before any watermark is
+	// read. The flow-id lists are chunked: a tree can hold more flows than a statement can bind.
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
-		tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ("+terminalStatusesSQL+")",
-			allFlowIDs...,
-		)
-		tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET cancel_reason=?,"+
-				" cancel_watermark=(SELECT COALESCE(MAX(s.step_id), 0) FROM dwarf_steps s WHERE s.flow_id=dwarf_flows.flow_id),"+
-				" touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ("+terminalStatusesSQL+")"+
-				" AND cancel_watermark=0",
-			reasonArgs...,
-		)
+		for chunk := range slices.Chunk(allFlowIDs, inListChunk) {
+			ph, ids := inList(chunk)
+			tx.ExecContext(ctx,
+				"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id IN ("+ph+") AND status NOT IN ("+terminalStatusesSQL+")",
+				ids...,
+			)
+		}
+		for chunk := range slices.Chunk(allFlowIDs, inListChunk) {
+			ph, ids := inList(chunk)
+			tx.ExecContext(ctx,
+				"UPDATE dwarf_flows SET cancel_reason=?,"+
+					" cancel_watermark=(SELECT COALESCE(MAX(s.step_id), 0) FROM dwarf_steps s WHERE s.flow_id=dwarf_flows.flow_id),"+
+					" touch=1-touch WHERE flow_id IN ("+ph+") AND status NOT IN ("+terminalStatusesSQL+")"+
+					" AND cancel_watermark=0",
+				append([]any{reason}, ids...)...,
+			)
+		}
 		return nil
 	})
 	if err != nil {
@@ -827,14 +833,21 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	// watermark committed, and its insert already decided its mark - inherited if its source was reached by
 	// this Cancel, not if its source was covered. Unbounded, the mark would catch the onError handler of a
 	// step preempted in the window between that commit and this statement, and deliver the cancellation a
-	// second time to the handler written to catch it.
-	_, err = db.ExecContext(ctx,
-		"UPDATE dwarf_steps SET cancelling=1 WHERE flow_id IN ("+flowPlaceholders+")"+
-			" AND status IN ('"+workflow.StatusPending+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')"+
-			" AND step_id <= (SELECT f.cancel_watermark FROM dwarf_flows f WHERE f.flow_id=dwarf_steps.flow_id)",
-		allFlowIDs...,
-	)
-	return errors.Trace(err)
+	// second time to the handler written to catch it. A chunk holds whole flows, so each flow is marked by one
+	// statement.
+	for chunk := range slices.Chunk(allFlowIDs, inListChunk) {
+		ph, ids := inList(chunk)
+		_, err = db.ExecContext(ctx,
+			"UPDATE dwarf_steps SET cancelling=1 WHERE flow_id IN ("+ph+")"+
+				" AND status IN ('"+workflow.StatusPending+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')"+
+				" AND step_id <= (SELECT f.cancel_watermark FROM dwarf_flows f WHERE f.flow_id=dwarf_steps.flow_id)",
+			ids...,
+		)
+		if err != nil {
+			return errors.Trace(err)
+		}
+	}
+	return nil
 }
 
 // deleteFlow schedules a flow (and its subgraph subtree) for deletion by the reaper - it does NOT delete rows

@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"slices"
-	"strings"
 
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -699,31 +698,42 @@ type sweptMember struct {
 func (e *Engine) collectDAGSubtree(ctx context.Context, db sequel.Executor, flowID, startStepID int) ([]sweptMember, error) {
 	visited := map[int]bool{startStepID: true}
 	var collected []sweptMember
-	frontier := []any{startStepID}
+	frontier := []int{startStepID}
 	for len(frontier) > 0 {
-		ph := strings.Repeat("?,", len(frontier)-1) + "?"
-		args := append([]any{flowID}, frontier...)
-		query := "SELECT step_id, lineage_id, status FROM dwarf_steps WHERE flow_id=? AND (" +
-			"step_id IN (SELECT successor_id FROM dwarf_steps WHERE step_id IN (" + ph + ") AND successor_id<>0)" +
-			" OR predecessor_id IN (" + ph + "))"
-		args = append(args, frontier...)
-		rows, err := db.QueryContext(ctx, query, args...)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		var nextFrontier []any
-		for rows.Next() {
-			var sid, lid int
-			var status string
-			rows.Scan(&sid, &lid, &status)
-			if visited[sid] {
-				continue
+		var nextFrontier []int
+		// Chunked: the frontier past a spawn is the whole cohort, and the query binds it twice.
+		for chunk := range slices.Chunk(frontier, inListChunk) {
+			ph, ids := inList(chunk)
+			args := append([]any{flowID}, ids...)
+			args = append(args, ids...)
+			rows, err := db.QueryContext(ctx,
+				"SELECT step_id, lineage_id, status FROM dwarf_steps WHERE flow_id=? AND ("+
+					"step_id IN (SELECT successor_id FROM dwarf_steps WHERE step_id IN ("+ph+") AND successor_id<>0)"+
+					" OR predecessor_id IN ("+ph+"))",
+				args...)
+			if err != nil {
+				return nil, errors.Trace(err)
 			}
-			visited[sid] = true
-			collected = append(collected, sweptMember{stepID: sid, lineageID: lid, status: status})
-			nextFrontier = append(nextFrontier, sid)
+			for rows.Next() {
+				var sid, lid int
+				var status string
+				if err := rows.Scan(&sid, &lid, &status); err != nil {
+					rows.Close()
+					return nil, errors.Trace(err)
+				}
+				if visited[sid] {
+					continue
+				}
+				visited[sid] = true
+				collected = append(collected, sweptMember{stepID: sid, lineageID: lid, status: status})
+				nextFrontier = append(nextFrontier, sid)
+			}
+			err = rows.Err()
+			rows.Close()
+			if err != nil {
+				return nil, errors.Trace(err)
+			}
 		}
-		rows.Close()
 		frontier = nextFrontier
 	}
 	return collected, nil
@@ -786,32 +796,40 @@ func (e *Engine) deleteSubgraphFlowsRootedAt(ctx context.Context, tx sequel.Exec
 	if len(rootChildren) == 0 {
 		return nil
 	}
+	// The id lists are chunked: a caller step's subtree can hold more flows than a statement can bind.
 	allIDs := append([]int{}, rootChildren...)
-	current := make([]any, 0, len(rootChildren))
-	for _, id := range rootChildren {
-		current = append(current, id)
-	}
+	current := rootChildren
 	for len(current) > 0 {
-		ph := strings.Repeat("?,", len(current)-1) + "?"
-		nestedRows, err := tx.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE surgraph_flow_id IN ("+ph+")", current...)
-		if err != nil {
-			return errors.Trace(err)
+		var next []int
+		for chunk := range slices.Chunk(current, inListChunk) {
+			ph, ids := inList(chunk)
+			nestedRows, err := tx.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE surgraph_flow_id IN ("+ph+")", ids...)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			for nestedRows.Next() {
+				var id int
+				if err := nestedRows.Scan(&id); err != nil {
+					nestedRows.Close()
+					return errors.Trace(err)
+				}
+				next = append(next, id)
+			}
+			err = nestedRows.Err()
+			nestedRows.Close()
+			if err != nil {
+				return errors.Trace(err)
+			}
 		}
-		current = nil
-		for nestedRows.Next() {
-			var id int
-			nestedRows.Scan(&id)
-			allIDs = append(allIDs, id)
-			current = append(current, id)
+		allIDs = append(allIDs, next...)
+		current = next
+	}
+	// Every step before any flow, the order the lifecycle deletes take.
+	for _, table := range []string{"dwarf_steps", "dwarf_flows"} {
+		for chunk := range slices.Chunk(allIDs, inListChunk) {
+			ph, ids := inList(chunk)
+			tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE flow_id IN ("+ph+")", ids...)
 		}
-		nestedRows.Close()
 	}
-	args := make([]any, 0, len(allIDs))
-	for _, id := range allIDs {
-		args = append(args, id)
-	}
-	ph := strings.Repeat("?,", len(allIDs)-1) + "?"
-	tx.ExecContext(ctx, "DELETE FROM dwarf_steps WHERE flow_id IN ("+ph+")", args...)
-	tx.ExecContext(ctx, "DELETE FROM dwarf_flows WHERE flow_id IN ("+ph+")", args...)
 	return nil
 }

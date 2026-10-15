@@ -22,6 +22,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -509,13 +510,15 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 			if commitFault != "" && e.seams.IsFault(commitFault) {
 				return errors.New("injected fault: " + commitFault)
 			}
-			flowPlaceholders := strings.Repeat("?,", len(allFlowIDs)-1) + "?"
-			stepArgs := append([]any{workflow.StatusTerminated, parkedNone}, allFlowIDs...)
+			// The flow-id lists are chunked: a tree can hold more flows than a statement can bind.
 			terminateSteps := func() {
-				tx.ExecContext(ctx,
-					"UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusInterrupted+"', '"+workflow.StatusRunning+"')",
-					stepArgs...,
-				)
+				for chunk := range slices.Chunk(allFlowIDs, inListChunk) {
+					ph, ids := inList(chunk)
+					tx.ExecContext(ctx,
+						"UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE flow_id IN ("+ph+") AND status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusInterrupted+"', '"+workflow.StatusRunning+"')",
+						append([]any{workflow.StatusTerminated, parkedNone}, ids...)...,
+					)
+				}
 			}
 			// Write-first (the step-terminate UPDATE) per the flow-terminating-transaction rule, and steps before
 			// flows, the order Resume and handleInterrupt take the same rows in. The second step UPDATE below takes
@@ -527,14 +530,20 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 			// a step, so once these rows are held no step can be added to these flows - but one that committed
 			// between the UPDATE above and this lock exists now and was not covered by it. The second UPDATE
 			// catches it, so no step of the tree is left running, and none can go on to spawn a subgraph.
-			lockRes, err := tx.ExecContext(ctx,
-				"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ("+terminalStatusesSQL+")",
-				allFlowIDs...,
-			)
-			if err != nil {
-				return errors.Trace(err)
+			var locked int64
+			for chunk := range slices.Chunk(allFlowIDs, inListChunk) {
+				ph, ids := inList(chunk)
+				lockRes, err := tx.ExecContext(ctx,
+					"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id IN ("+ph+") AND status NOT IN ("+terminalStatusesSQL+")",
+					ids...,
+				)
+				if err != nil {
+					return errors.Trace(err)
+				}
+				n, _ := lockRes.RowsAffected()
+				locked += n
 			}
-			if n, _ := lockRes.RowsAffected(); n == 0 {
+			if locked == 0 {
 				settled = true
 				return errTreeSettled
 			}
@@ -598,7 +607,6 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 			if grew {
 				return errTreeGrew
 			}
-			flowPlaceholders = strings.Repeat("?,", len(allFlowIDs)-1) + "?"
 
 			finalStates := make([][]byte, len(allFlowIDs))
 			for i, fid := range allFlowIDs {
@@ -609,26 +617,30 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 				finalStates[i] = fs
 			}
 
-			var caseClause strings.Builder
-			caseClause.WriteString("CASE")
-			var flowArgs []any
-			for i, fid := range allFlowIDs {
-				caseClause.WriteString(" WHEN flow_id=? THEN ?")
-				flowArgs = append(flowArgs, fid, finalStates[i])
-			}
-			caseClause.WriteString(" END")
+			// One UPDATE per flow, each binding its own final state, sent as one batch. A single UPDATE choosing
+			// the state by a CASE binds two parameters per flow and overruns SQL Server's ceiling at ~700 flows.
 			// cancel_reason is the one reason column both Terminate and Cancel write into; the two are told apart
 			// by status at the Go API level (FlowOutcome's TerminateReason vs CancelReason, in snapshot()).
-			flowArgs = append(flowArgs, workflow.StatusTerminated, reason)
-			flowArgs = append(flowArgs, allFlowIDs...)
-			res, err := tx.ExecContext(ctx,
-				"UPDATE dwarf_flows SET final_state="+caseClause.String()+", status=?, cancel_reason=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ("+terminalStatusesSQL+")",
-				flowArgs...,
-			)
-			if err != nil {
-				return errors.Trace(err)
+			batch := newTxBatch(ctx, tx)
+			var ended int64
+			for i, fid := range allFlowIDs {
+				batch.queue(func(res *sequel.BatchResults) error {
+					r, err := res.Exec()
+					if err != nil {
+						return errors.Trace(err)
+					}
+					n, _ := r.RowsAffected()
+					ended += n
+					return nil
+				},
+					"UPDATE dwarf_flows SET final_state=?, status=?, cancel_reason=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
+					finalStates[i], workflow.StatusTerminated, reason, fid,
+				)
 			}
-			if n, _ := res.RowsAffected(); n == 0 {
+			if err := batch.flush(); err != nil {
+				return err
+			}
+			if ended == 0 {
 				settled = true
 				return errTreeSettled
 			}

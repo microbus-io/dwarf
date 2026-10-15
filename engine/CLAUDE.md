@@ -236,7 +236,7 @@ interrupted steps remain.
 **Terminate** - Aborts a created, running, or interrupted flow, forcefully and unconditionally: in-flight work is
 abandoned immediately, with no chance for any task to react. Walks **down** (`allSubgraphFlows`) the hierarchy,
 atomically terminates all steps across all flows, computes `final_state` per flow, and sets every flow to
-`terminated` via CASE - all in one transaction (`terminateSubtree`). Inside it, the steps are terminated, the flow
+`terminated` with its own UPDATE, batched - all in one transaction (`terminateSubtree`). Inside it, the steps are terminated, the flow
 rows locked, the steps terminated again, and the tree scanned once more; a scan that finds a flow the set missed
 rolls the transaction back and re-runs it over the larger set. So neither a step created mid-terminate nor a
 subgraph spawned since the first scan escapes (see the orphaned-child sweep under "Background Recovery"). Must be addressed by the **root** flow key

@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1551,12 +1552,10 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 					// The exit steps are targeted by primary key, collected from the cohort read, so the write locks
 					// only those rows: a (flow_id, lineage_id, task_name IN ...) predicate has no supporting index
 					// and scan-locked dwarf_steps, deadlocking concurrent fan-ins on SQL Server.
-					if len(exits) > 0 {
-						args := append([]any{}, fanInArgs...)
-						for _, id := range exits {
-							args = append(args, id)
-						}
-						batch.queue(execOnly, "UPDATE dwarf_steps SET successor_id="+fanInID+" WHERE step_id IN ("+strings.Repeat("?,", len(exits)-1)+"?)", args...)
+					// Chunked, since a forEach has as many exits as branches; the chunks share the batch.
+					for chunk := range slices.Chunk(exits, inListChunk) {
+						ph, ids := inList(chunk)
+						batch.queue(execOnly, "UPDATE dwarf_steps SET successor_id="+fanInID+" WHERE step_id IN ("+ph+")", append(append([]any{}, fanInArgs...), ids...)...)
 					}
 				} else if fullyResolved && failures > 0 {
 					// The cohort resolves as a loss, and is a cancellation only if every failure in it was one.

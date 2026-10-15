@@ -274,22 +274,14 @@ func innerFanInIDs(graph *workflow.Graph, members []cohortMember) []int {
 
 // cohortParts reads the state of the given inner fan-in steps and returns, keyed by step_id, what each one's
 // cohort added (projectReduced), along with the bytes it read. Each row is projected as it is read and then
-// dropped, so a wide cohort holds the parts rather than every inner fan-in's full state. The id list goes out in
-// chunks padded to a power of two, so the statement text takes one of a few arities rather than one per width.
+// dropped, so a wide cohort holds the parts rather than every inner fan-in's full state.
 func cohortParts(ctx context.Context, db sequel.Executor, stepIDs []int, reducers map[string]workflow.Reducer) (map[int]workflow.Changes, int, error) {
 	parts := make(map[int]workflow.Changes, len(stepIDs))
 	read := 0
-	for chunk := range slices.Chunk(stepIDs, 512) {
-		arity := 1
-		for arity < len(chunk) {
-			arity *= 2
-		}
-		args := make([]any, arity)
-		for i := range args {
-			args[i] = chunk[min(i, len(chunk)-1)]
-		}
+	for chunk := range slices.Chunk(stepIDs, inListChunk) {
+		ph, args := inList(chunk)
 		rows, err := db.QueryContext(ctx,
-			"SELECT step_id, state, state_reduced FROM dwarf_steps WHERE step_id IN ("+strings.Repeat("?,", arity-1)+"?)",
+			"SELECT step_id, state, state_reduced FROM dwarf_steps WHERE step_id IN ("+ph+")",
 			args...)
 		if err != nil {
 			return nil, 0, errors.Trace(err)

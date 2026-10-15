@@ -369,6 +369,17 @@ existence probe** (`SELECT 1 … LIMIT_OFFSET(1, 0)`) where the ordering is sema
 suffices). An `ORDER BY` on such a probe looks removable and is not: stripping it passes on four dialects
 and fails only on mssql. Do not strip an `ORDER BY` from a `LIMIT_OFFSET` query. (If a cheap order is wanted, `step_id` - the PK - is the natural choice.)
 
+### A bound `IN (...)` list whose length the workload sets is chunked
+
+SQL Server rejects a statement with more than **2,100 parameters**, the tightest ceiling of the four dialects (SQLite's
+is 32,766, Postgres's 65,535), and the failure is a hard error that fails the operation every time. Any list sized by a
+cohort, a subgraph tree or a fan-out goes out with `slices.Chunk(ids, inListChunk)` and `inList` (`engine/inlist.go`):
+512 ids per statement, padded to a power of two so the statement text takes few arities. Count every bind: a
+`CASE WHEN id=? THEN ?` per row binds two per id and overruns at ~700, so bind a per-row value in a per-row statement
+instead. Only SQL Server shows the overrun, so `fixtures/wideflow_test.go` is the pin there. A list bounded by
+construction (a surgraph chain, a step's DAG neighbours) needs no chunking; `intCSV` inlines trusted integers and binds
+nothing, for a list already capped at `purgeCap`.
+
 ### MySQL Column Defaults
 
 In `-- DRIVER: mysql` schema sections, `TEXT`/`BLOB`/`JSON` columns cannot take a bare literal `DEFAULT` (MySQL error
