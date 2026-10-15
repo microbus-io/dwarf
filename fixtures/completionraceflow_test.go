@@ -27,18 +27,17 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestCompletionRaceflow is a regression test for the flow-completion lock-contention wedge. It drives a
-// burst of flows that complete near-simultaneously on a shared SQLite database, which stresses completeFlow:
-// before the fix that transaction was read-first (computeFinalState's SELECTs, then the flow-status UPDATE),
-// so two concurrent completions could both hold SHARED locks and deadlock on the upgrade to write. Under
-// that contention completeFlow exhausts its retries and errors; because the terminal step was already marked
-// completed, the lease recovery (which only resets running rows) cannot re-dispatch it, and the flow is
-// stranded forever 'running' with every step terminal - an orphan flow. The make-completeFlow-write-first fix
-// removes the deadlock. Each flow is a subgraph caller with a trivial child purely to double the completion
-// rate (caller flow plus child flow both finish in the burst); the bug is not subgraph-specific. The drain
+// TestCompletionRaceflow pins the flow-completion lock-contention wedge. It drives a burst of flows that
+// complete near-simultaneously on a shared SQLite database, which stresses completeFlow: a read-first
+// completion transaction (computeFinalState's SELECTs, then the flow-status UPDATE) lets two concurrent
+// completions both hold SHARED locks and deadlock on the upgrade to write. Under that contention completeFlow
+// exhausts its retries and errors; because the terminal step was already marked completed, the lease recovery
+// (which only resets running rows) cannot re-dispatch it, and the flow is stranded forever 'running' with
+// every step terminal - an orphan flow. completeFlow's write-first order is what removes the deadlock.
+// Each flow is a subgraph caller with a trivial child purely to double the completion rate (caller flow plus child flow both finish in the burst); the bug is not subgraph-specific. The drain
 // bound is on PROGRESS, not wall clock (see it below), which is what makes a stranded flow fail while
-// letting a slow build take as long as it needs. Without the fix this strands a flow on roughly one run in
-// five; with it, all drain in well under a second (~20s under -race, which is why the bound cannot be a
+// letting a slow build take as long as it needs. A read-first completion strands a flow on roughly one run in
+// five; write-first, all drain in well under a second (~20s under -race, which is why the bound cannot be a
 // wall clock).
 func TestCompletionRaceflow(t *testing.T) {
 	t.Parallel()

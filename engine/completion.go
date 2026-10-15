@@ -654,10 +654,11 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 		e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, fid), "to", workflow.StatusTerminated)
 		// Counted per flow, alongside the signal and on the same set, because every one of these was started
 		// (createWithGraph counts subgraph children too) and the in-flight panel is started minus ended.
-		// The set is the flows that were non-terminal when the tree was scanned; one that terminalized in the
-		// window between that scan and this commit is excluded by the UPDATE's own status guard but still
-		// counted here, so a terminate racing a completion can over-count by one. That window is microseconds,
-		// so it is not worth a second round trip to close.
+		// The set is the flows the in-transaction rescan found live under the flow-row lock, plus the root,
+		// which the rescan keeps regardless. A root that terminalized between the first scan and the lock is
+		// excluded by the UPDATE's own status guard but still counted here, so a terminate racing the root's
+		// completion can over-count by one. That window is microseconds, so it is not worth a round trip to
+		// close.
 		label := labelByFlowID[fid]
 		e.metricFlowEnded(ctx, label.workflowURL, workflow.StatusTerminated, label.priority, shardNum)
 		e.signalStop(ctx, cid, workflow.StatusTerminated)
@@ -698,11 +699,11 @@ func (e *Engine) cohortSpawnChain(ctx context.Context, db sequel.Executor, linea
 // ONE cohort spawned by spawnTask. They are a branch's private context and have no meaning once that cohort is
 // behind the flow: with the Replace reducer one arbitrary branch's element would otherwise ride forward.
 //
-// Scoping to the spawning task is load-bearing in both directions. Stripping every forEach in the graph (a) made
-// the three names of every `as` globally reserved, silently deleting a same-named field a task wrote, and (b)
-// broke nesting: at an INNER fan-in it also deleted the OUTER cohort's bookkeeping, so a step still inside the
-// outer branch could no longer see which element it was working on. The names are reserved only WITHIN their own
-// cohort; a workflow wanting the element past that cohort's fan-in forwards it under a different key.
+// Scoping to the spawning task is load-bearing in both directions. Do not strip every forEach in the graph: that
+// (a) makes the three names of every `as` globally reserved, silently deleting a same-named field a task wrote,
+// and (b) breaks nesting - at an INNER fan-in it would also delete the OUTER cohort's bookkeeping, so a step
+// still inside the outer branch could no longer see which element it was working on. The names are reserved
+// only WITHIN their own cohort; a workflow wanting the element past that cohort's fan-in forwards it under a different key.
 //
 // Applied at both places a cohort's state leaves the cohort: fanInRow (the convergence) and
 // computeFinalState (a fan-out that never converged), so the two cannot drift on what a fan-out's state means.
@@ -1236,8 +1237,8 @@ func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, childFl
 	reDispatchParent := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		reDispatchParent = false
-		// childFlowID==0 is the "caller parked, child flow gone" wedge: a worker committed the park and
-		// then died before inserting the child, or the child was deleted. There is no child to terminalize
+		// childFlowID==0 is the "caller parked, child flow gone" wedge, which only a bug or a hand-deleted
+		// child row leaves (the park and the child's insert commit together). There is no child to terminalize
 		// - the only recovery is to fail the CALLER, which the parent re-arm below does (it writes the
 		// error onto the parked step, so the re-dispatched flow.Subgraph returns it and the task fails
 		// through its normal disposition). Everything child-related must therefore be skipped, not merely

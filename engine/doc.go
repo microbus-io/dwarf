@@ -37,8 +37,8 @@ limitations under the License.
 //
 // Each Set* method returns an error. The live ones (SetTimeBudget, SetDefaultPriority) take effect
 // immediately on a running engine; the construction-time-only ones (SetShard, SetWorkers, SetHost,
-// SetEngineID, SetLogger, SetDebugLogger, SetMeterProvider, SetTracerProvider) return an error if called
-// after Startup.
+// SetEngineID, SetStateCacheSize, SetLogger, SetDebugLogger, SetMeterProvider, SetTracerProvider) return an
+// error if called after Startup.
 //
 // Tuning derives from what the engine observes, plus two optional per-shard levers. Each shard's connection
 // budget follows the round-trip time measured at Startup and the server's own connection limit, unless
@@ -115,8 +115,8 @@ limitations under the License.
 // single cap fits both that and a small control flow. Bounding resource use is therefore the host's job — it
 // holds the caller identity and tenancy the engine cannot see. A host enforces quotas where it has that
 // context: reject an over-large initial state or Baggage before Create, cap forEach input arrays in author
-// space, and bound its own retention (Purge deletes at most 4096 roots per call, so a retention job loops).
-// For a pass-through host that adds no policy of its own, this obligation flows through to the application
-// using that host. (Deep subgraph nesting is bounded storage, not a crash vector: Fork clones the tree
-// iteratively, so nesting depth costs no goroutine stack.)
+// space, and bound its own retention (Purge marks a bounded batch of about 4096 roots per call, so a
+// retention job loops until it returns 0). For a pass-through host that adds no policy of its own, this
+// obligation flows through to the application using that host. (Deep subgraph nesting is bounded storage,
+// not a crash vector: Fork clones the tree iteratively, so nesting depth costs no goroutine stack.)
 package engine

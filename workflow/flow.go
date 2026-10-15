@@ -196,7 +196,7 @@ func (f *Flow) CreatedAt() time.Time {
 	return f.createdAt
 }
 
-// UpdatedAt returns the wall-clock time of the flow row's last status transition. Useful for
+// UpdatedAt returns the wall-clock time of the flow's last status change. Useful for
 // tasks that want to gate on "how long since the flow last advanced." Zero when called outside
 // a dispatched task or when the orchestrator has not populated it.
 func (f *Flow) UpdatedAt() time.Time {
@@ -455,13 +455,13 @@ Semantically a function call: only the explicit in argument crosses the boundary
 out crosses back. The parent's state does NOT auto-cross either direction. in is any JSON-marshalable value (a
 struct or a map[string]any) and becomes the child's initial state field-by-field; a nil in means "no arguments"
 (the child starts with empty state). A caller that wants the parent's full state to cross can pass flow.Snapshot() as
-in. The out argument is a pointer (a *struct or *map[string]any) into which the child's final_state is unmarshaled
+in. The out argument is a pointer (a *struct or *map[string]any) into which the child's final state is unmarshaled
 by JSON tag; pass nil to ignore the result. Using a typed struct reads only the fields you declare, with type safety.
 
 On the first call (child not yet run) it arms the subgraph park with the child workflow URL and in and returns
 yield=true; the task must return immediately.
 
-On re-entry after the child terminates it unmarshals the child's final_state into out, returns yield=false, and sets
+On re-entry after the child terminates it unmarshals the child's final state into out, returns yield=false, and sets
 err if the child failed. Does not re-arm on re-entry. Like Interrupt, it returns an error without arming if in cannot
 be marshalled or this step already parked.
 

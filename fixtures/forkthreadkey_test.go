@@ -130,14 +130,14 @@ func TestFork_SubgraphChildGetsThreadTokenAndStepID(t *testing.T) {
 		return
 	}
 
-	// The core of the fix: neither column may take its schema default on a cloned non-root flow.
-	assert.NotEqual("", threadToken)    // was '' - the permanent, API-visible defect
-	assert.NotEqual(0, childStepID)     // was 0 - flow no longer points at its current step
+	// The core of the pin: neither column may take its schema default on a cloned non-root flow.
+	assert.NotEqual("", threadToken)    // '' is a permanent, API-visible defect
+	assert.NotEqual(0, childStepID)     // 0 leaves the flow not pointing at its current step
 	assert.Equal(childFlowID, threadID) // a subgraph flow is its own thread
 	assert.Equal(childFlowToken, threadToken)
 
-	// End-to-end: the ThreadKey List builds for the child must resolve, not 404. Before the fix its token
-	// half was empty, so queryClauses' `WHERE flow_id=? AND flow_token=?` matched no row.
+	// End-to-end: the ThreadKey List builds for the child must resolve, not 404. A key with an empty token
+	// half matches no row in queryClauses' `WHERE flow_id=? AND flow_token=?`.
 	childThreadKey := keys.New(shardNum, threadID, threadToken)
 	byThread, _, err := eng.List(ctx, workflow.Query{ThreadKey: childThreadKey, IncludeSubgraphs: true})
 	if !assert.NoError(err) {

@@ -125,7 +125,7 @@ func (r *cohortRaceRig) arrivals(t *testing.T) (arrivals, size int) {
 
 // awaitArrivals waits for the spawn's arrival count to reach n, i.e. for the arrival's transaction to commit.
 func (r *cohortRaceRig) awaitArrivals(t *testing.T, n int) {
-	if !enginetest.WaitUntil(t, 10*time.Second*enginetest.TimeoutScale(), func() bool { got, _ := r.arrivals(t); return got == n }) {
+	if !enginetest.WaitUntil(t, 10*time.Second, func() bool { got, _ := r.arrivals(t); return got == n }) {
 		got, _ := r.arrivals(t)
 		t.Fatalf("cohort_arrivals never reached %d (at %d)", n, got)
 	}

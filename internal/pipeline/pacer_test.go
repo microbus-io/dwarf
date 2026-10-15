@@ -121,7 +121,7 @@ func seed(c *candidates.Cache, ids ...int) {
 func drain(c *candidates.Cache) []candidates.Job {
 	out := make([]candidates.Job, 0, c.Len())
 	for c.Len() > 0 {
-		j, ok, _ := c.Pop()
+		j, ok := c.Pop()
 		if !ok {
 			break
 		}

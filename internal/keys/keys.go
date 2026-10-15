@@ -77,7 +77,7 @@ func CorrelationID(shardNum, flowID int) string {
 	return strconv.Itoa(shardNum) + "-" + strconv.Itoa(flowID)
 }
 
-// RandomIdentifier generates a random hex string of the given byte length. It mints the unguessable
+// RandomIdentifier generates a random hex string of n characters (4n bits of entropy). It mints the unguessable
 // token segment of flow and step keys.
 func RandomIdentifier(n int) string {
 	b := make([]byte, n/2+1)

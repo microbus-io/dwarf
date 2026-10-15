@@ -60,7 +60,7 @@ import (
 	"go.opentelemetry.io/otel/metric/noop"
 )
 
-// refillBuckets are the explicit bucket boundaries for both histograms, in SECONDS. The OTEL defaults are
+// refillBuckets are the explicit bucket boundaries for the refill-duration histogram, in SECONDS. The OTEL defaults are
 // tuned for millisecond-valued instruments and would file every one of these samples in the first bucket.
 //
 // The LOW end is the load-bearing part, and it must not be raised. A warm same-zone band scan measures

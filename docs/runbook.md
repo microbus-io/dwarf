@@ -143,8 +143,8 @@ deep, and database CPU is high. This is the expected shape at capacity — the e
 overwhelming the server. Add database capacity, or add a shard ([Resharding](resharding.md)). Adding engine
 replicas will **not** help: they share the same per-database connection budget.
 
-**2. The engine is saturated.** Engine CPU is high and the database is not. Plan for roughly 2,600 steps/s
-per engine core. Add replicas.
+**2. The engine is saturated.** Engine CPU is high and the database is not. Plan for roughly 3,000 steps/s
+per engine core ([benchmark](benchmark-cloud.md#the-engine-is-cheap)). Add replicas.
 
 **3. Neither is busy — the query planner has gone stale.** This is the one that looks like nothing is wrong:
 engine CPU low, database backends idle, backlog climbing anyway. Check

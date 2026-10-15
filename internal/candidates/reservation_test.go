@@ -114,10 +114,10 @@ func TestCandidateCache_PopReleasesTheReservation(t *testing.T) {
 	// Taken: the candidate and the reservation leave together.
 	c.Refill(1, jobs(1, 1, 2), 10)
 	shard, _ := c.WaitForWork()
-	_, ok, _ := c.TryPopFrom(shard)
+	_, ok := c.TryPopFrom(shard)
 	assert.True(ok)
 	assert.Equal(1, routeNow(c), "the remaining candidate is still routable")
-	_, ok, _ = c.TryPopFrom(1)
+	_, ok = c.TryPopFrom(1)
 	assert.True(ok)
 
 	// Lost: the partition emptied while the worker waited; the reservation must go anyway.
@@ -125,7 +125,7 @@ func TestCandidateCache_PopReleasesTheReservation(t *testing.T) {
 	shard = routeNow(c)
 	assert.Equal(1, shard, "the taken candidate's reservation must have been released")
 	c.Refill(1, nil, 10)
-	_, ok, _ = c.TryPopFrom(shard)
+	_, ok = c.TryPopFrom(shard)
 	assert.False(ok)
 	c.Refill(1, jobs(1, 20, 1), 10)
 	assert.Equal(1, routeNow(c), "a failed pop must release its reservation")

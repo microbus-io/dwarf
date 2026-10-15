@@ -69,8 +69,8 @@ close, and the receive follows it — and it matters, because that lock is the o
 
 ## The claim rides the CONTEXT, and the composition is left at the call site
 
-Nothing here wraps `sequel.DB`. A wrapper was designed and dropped, and the reason is a fact about the
-driver rather than a matter of taste: **a query returns while still holding its connection.**
+Nothing here wraps `sequel.DB`, and do not add a wrapper: the reason is a fact about the driver rather than
+a matter of taste: **a query returns while still holding its connection.**
 `sequel.Rows` embeds `*sql.Rows` and `sequel.Row` embeds `*sql.Row`, so the connection goes back to the
 pool at `Close`, or at the `Scan` of a `QueryRow` — both of which happen in the *caller*, after the
 wrapped call has returned. A wrapper therefore cannot hold the pass for as long as the connection is

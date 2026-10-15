@@ -48,7 +48,7 @@ func TestSetters_ConstructionTimeOnly(t *testing.T) {
 		e.SetShard(ShardSpec{Index: 2, DSN: "file:other.sqlite"}), // shard set is immutable after Startup
 		e.SetWorkers(8),
 		e.SetEngineID(12345),         // id is registered at Startup and baked into signal-echo suppression
-		e.SetStateCacheSize(1 << 20), // each shard's cache is sized at Startup
+		e.SetStateCacheSize(1 << 20), // the replica's one cache is sized at Startup
 		e.SetHost(noopHost{}),
 		e.SetLogger(nil),
 		e.SetDebugLogger(),

@@ -60,25 +60,23 @@ func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
 		return p
 	}
 
-	dsn := "file:xrwake%d?mode=memory&cache=shared"
 	muxAwaiter := buildMux(func() { t.Error("the 0-worker awaiter must never execute the task") })
 	var workerRuns atomic.Int64
 	muxWorker := buildMux(func() { workerRuns.Add(1) })
 
-	awaiter := NewEngine()
+	// Both replicas share one isolated database by being built under the same test name.
+	awaiter := NewEngineUnderTest(t.Name())
+	defer awaiter.Shutdown(ctx)
 	awaiter.SetHost(muxAwaiter)
-	assert.NoError(awaiter.SetShard(ShardSpec{Index: 1, DSN: dsn}))
 	assert.NoError(awaiter.SetWorkers(0))
 
-	worker := NewEngine()
+	worker := NewEngineUnderTest(t.Name())
+	defer worker.Shutdown(ctx)
 	worker.SetHost(muxWorker)
-	assert.NoError(worker.SetShard(ShardSpec{Index: 1, DSN: dsn}))
 	assert.NoError(worker.SetWorkers(2))
 
 	assert.NoError(awaiter.Startup(ctx))
-	t.Cleanup(func() { awaiter.Shutdown(ctx) })
 	assert.NoError(worker.Startup(ctx))
-	t.Cleanup(func() { worker.Shutdown(ctx) })
 
 	// Break the worker's terminal wake for the rest of the test: every signalStop on the worker delivers
 	// nothing, so the awaiter can learn the outcome only by reading the flow row. Nothing crosses between the
@@ -131,6 +129,7 @@ func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
 	// Replica A: claims and executes the step, but its completion write is fenced (stale lease_seq), so the
 	// step stays `running`. A short budget makes the lease expire quickly for B to recover.
 	repA := NewEngine()
+	defer repA.Shutdown(ctx)
 	repA.SetHost(buildMux())
 	assert.NoError(repA.SetShard(ShardSpec{Index: 1, DSN: dsn}))
 	assert.NoError(repA.SetWorkers(2))
@@ -141,7 +140,6 @@ func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
 	repA.seams.Inject(engineseams.Join(engineseams.FaultLeaseStaleWrite, "A"))
 	fk, err := repA.Create(ctx, "xrrec/g", nil, nil)
 	if !assert.NoError(err) {
-		repA.Shutdown(ctx)
 		return
 	}
 
@@ -156,11 +154,11 @@ func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
 
 	// Replica B joins on the same DB. Its lease recovery is what will re-drive the step.
 	repB := NewEngine()
+	defer repB.Shutdown(ctx)
 	repB.SetHost(buildMux())
 	assert.NoError(repB.SetShard(ShardSpec{Index: 1, DSN: dsn}))
 	assert.NoError(repB.SetWorkers(2))
 	assert.NoError(repB.Startup(ctx))
-	t.Cleanup(func() { repB.Shutdown(ctx) })
 
 	// While A's lease is still valid (just claimed), the flow is stranded `running` - B cannot yet recover a
 	// live lease, so this read is stable.

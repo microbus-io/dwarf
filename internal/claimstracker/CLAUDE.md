@@ -18,7 +18,7 @@ predicate, in the SQL). Neither mechanism helps with the other's case. Do not tr
 
 ## Strictly advisory — the CAS is still the only grant
 
-A missed entry costs one wasted round trip (the behavior that predates this package). A stale one costs a
+A missed entry costs one wasted round trip (a claim CAS that loses). A stale one costs a
 skipped candidate that the next pass re-selects. Neither is a correctness question, which is what keeps
 this from becoming a distributed lock. Same posture as the candidate cache holding *hints, not
 ownership*.
@@ -40,9 +40,9 @@ So the window sits **above the cycle interval and far below `leaseMargin` (30s)*
 is the safety argument: a reservation can only ever DELAY this replica's dispatch of a step by a bounded
 window, never prevent it, and it can never be why a lease-recovered step fails to re-dispatch.
 
-## The two-generation roll, and the sweep it replaces
+## The two-generation roll, not a sweep
 
-The naive shape is one map plus a per-entry timestamp and a sweep. That fails under a **pinned** worker
+Do not use one map plus a per-entry timestamp and a sweep. That fails under a **pinned** worker
 pool at high throughput (`SetWorkers(512)` at thousands of steps/s): the live population outgrows any
 size gate, and the sweep walks the whole map on every claim, under one lock.
 

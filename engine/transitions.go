@@ -90,7 +90,7 @@ func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workfl
 	var candidates []nextStep
 	for _, tr := range graph.Transitions() {
 		if tr.From != currentTask || tr.Kind != "" {
-			continue // a switch from this node returned above; goto and error transitions are not evaluated here
+			continue // a switch from this task returned above; goto and error transitions are not evaluated here
 		}
 		taken := false
 		if tr.When == "" {

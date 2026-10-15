@@ -306,7 +306,8 @@ status. A workflow's own failure is not an error: it is the outcome's `Status` (
 | 404 | The key names no flow or step (including one already deleted), or `LoadGraph` found no graph | No |
 | 408 | `Await` or `Run` returned before the flow stopped; the flow keeps running | Await again |
 | 409 | The flow is in the wrong state for the operation, or a concurrent operation got there first | Re-read the flow, then decide |
-| 503 | The engine is not started, is shutting down, or every shard is cordoned | Yes |
+| 501 | The flow's data is in a newer format than this replica reads: replicas of a newer release wrote it | Yes, on a replica of the newer release |
+| 503 | The engine is not started, is shutting down, or every shard is cordoned; or a `Terminate` did not settle because the flow's tree kept spawning subgraphs | Yes |
 | 500 | A database error or an engine fault | Yes, if transient |
 
 A 408 also satisfies `errors.Is(err, context.DeadlineExceeded)`, or wraps the caller's own context error
@@ -328,6 +329,10 @@ Each operation adds these to the 503 and 500 every call can return:
 | `Fork` | malformed key, overrides not JSON-marshalable | unknown step | | the flow is not terminal, is scheduled for deletion, or holds an unresolved interrupt off the fork path |
 | `Continue` | malformed key, a subgraph child's key, `additionalState` not JSON-marshalable | unknown flow | | the thread's latest flow is not completed, including when a concurrent `Continue` won |
 | `Delete` | malformed key, a subgraph child's key | unknown flow | | the flow is running, including when a `Resume` won the race |
+
+A 501 comes from the operations that read a flow's step data: `Step`, `Fork`, and `Snapshot`, `Await`,
+`Poll` and `Run` on an interrupted flow. The 503 from a `Terminate` that did not settle can also come from
+`Delete` and `Purge`, which terminate an interrupted flow first.
 
 Stopping or deleting what is already stopped or deleted is not an error. `Cancel` and `Terminate` on a flow
 that has ended, and `Delete` on a flow already scheduled for deletion, return nil and change nothing, so a

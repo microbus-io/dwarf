@@ -3,30 +3,31 @@
 > Load when: changing the traversal, what counts as a fan-out source, or where the map is built and
 > cached.
 > Coupled with: `workflow/CLAUDE.md` (`Graph.Validate`, which rejects the shapes this traversal is
-> allowed to assume away) and `engine/CLAUDE.md` §"Fan-Out and Fan-In" (the empty-`forEach` shortcut that
-> is this map's only consumer).
+> allowed to assume away) and `engine/CLAUDE.md` §"Fan-Out and Fan-In" (the direct fan-in that consumes
+> this map).
 
 ## It is a derived VIEW, not part of the graph
 
-`workflow.Graph` carries only the author's definition — nodes, transitions, fan-in flags. This mapping is
+`workflow.Graph` carries only the author's definition — tasks, transitions, fan-in flags. This mapping is
 an engine-side lookup computed from that definition, and keeping it out of the graph is what stops it
 from leaking into the public API and into every flow's frozen graph JSON.
 
 **It is never persisted.** The map is a pure, deterministic `O(V+E)` function of the graph structure, so
 freezing it onto the flow row would store something rederivable, and — worse — would pin a stale copy for
-the life of every flow already running when the traversal changes. The engine computes it once per flow
-at dispatch and caches it beside the parsed graph, which is the same lifetime the parse already has.
+the life of every flow already running when the traversal changes. The engine computes it once per parsed
+graph per replica (`faninmap.New` beside the parse, in the graph cache's shared layer), so it has the same
+lifetime the parse already has.
 
 **`Graph.Validate` computes the same mapping and throws it away.** That is deliberate, not waste:
 `Validate` is *pure* (it needs the mapping only to reject branches of one fan-out converging on different
-fan-in nodes) and storing its result on the graph would make the author's definition carry engine state.
+fan-in tasks) and storing its result on the graph would make the author's definition carry engine state.
 Two cheap traversals of a small structure, on two paths that run at completely different times, beat one
 shared mutable field.
 
 ## The traversal assumes a VALIDATED graph, and that assumption is load-bearing
 
 `Validate` runs at `Create` and rejects the malformed shapes — a fan-out whose branches converge on
-different fan-in nodes, a fan-in reached from outside any cohort, a graph with no explicit `END` edge —
+different fan-in tasks, a fan-in reached from outside any cohort, a graph with no explicit `END` edge —
 so this package only *builds* the mapping and guards none of them.
 
 The consequence to hold in mind: **a graph frozen onto a flow before a validator fix is replayed from the
@@ -45,8 +46,10 @@ the fan-in and everything after it. Pinned by `TestFanInMap_OverrideEdgeIsTheOnl
 
 ## What consumes it
 
-One thing: routing an **empty** `forEach` cohort straight to its convergence node. A non-empty cohort
-reaches its fan-in through ordinary cohort accounting and never asks. So `For` returning `""` means "this
-source converges nowhere", and the engine's empty-cohort path treats that as complete-the-flow — an arm
-that is effectively unreachable for any graph `Validate` accepted, and is a defensive fallback rather
-than documented behavior.
+The engine's **direct fan-in** (`fireFanInDirect`): a fan-out source whose fan-in converges at once on the
+source's own state, with no cohort spawned. Two shapes reach it - an **empty** `forEach`, and a source that
+routes STRAIGHT to its own fan-in task by a `Goto`, `onError`, `when` or `switch` edge. A cohort that is
+spawned reaches its fan-in through ordinary cohort accounting and never asks. So `For` returning `""` means
+"this source converges nowhere", and the engine's empty-cohort path treats that as complete-the-flow — an arm
+that is effectively unreachable for any graph `Validate` accepted, and is a defensive fallback rather than
+documented behavior.

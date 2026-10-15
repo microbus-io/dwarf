@@ -32,7 +32,7 @@ type FlowSummary struct {
 	CancelReason string    `json:"cancelReason,omitzero"`
 	CreatedAt    time.Time `json:"createdAt,omitzero"`
 	// Use StartedAt for duration metrics; CreatedAt for when the flow first appeared. StartedAt is
-	// when this attempt began dispatching, distinct from CreatedAt, when the row was first created.
+	// when this attempt began dispatching, distinct from CreatedAt, when the flow was first created.
 	StartedAt time.Time `json:"startedAt,omitzero"`
 	UpdatedAt time.Time `json:"updatedAt,omitzero"`
 	// Priority is the flow's scheduling priority (>= 1, lower runs first), resolved at Create.

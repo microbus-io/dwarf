@@ -43,14 +43,13 @@ Each parked caller holds one buffered slot. `Release` sends a status into it; `C
 into it. Because the slot holds one thing, **a delivered status leaves no room for the closure** — a
 caller whose key was reported just before shutdown is told the answer it asked for.
 
-The first cut used a separate `done` channel that `Close` closed, with the parked caller selecting over
-both. That is wrong in a way worth recording: **a `select` over two ready channels picks at random**, so
-a caller released microseconds before shutdown got `ErrClosed` about half the time and its real status
-the other half. Non-determinism, not a policy.
+**Do not give `Close` a separate `done` channel for the parked caller to select over beside the slot.**
+**A `select` over two ready channels picks at random**, so a caller released microseconds before shutdown
+gets `ErrClosed` about half the time and its real status the other half. Non-determinism, not a policy.
 
-It was also **untestable**, which is how the flaw surfaced. Breaking the defensive branch (making the
-close path always answer `ErrClosed`) did not fail the test written for it, because the parked goroutine
-consumes its status the instant `Release` delivers it and the window never opens. If you find yourself
+That shape is also **untestable**: breaking its defensive branch (making the close path always answer
+`ErrClosed`) fails no test, because the parked goroutine consumes its status the instant `Release` delivers
+it and the window never opens. If you find yourself
 writing a test that repeats an operation N times hoping to catch an interleaving, the mechanism — not the
 test — is what needs fixing.
 

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -72,6 +73,10 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 	mux.HandleTask("strand/b", func(ctx context.Context, f *workflow.Flow) error { runsB.Add(1); return nil })
 
 	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	var releaseOnce sync.Once
+	releaseA := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseA() // below the Shutdown defer, so an early exit frees the held worker before the drain waits on it
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -95,7 +100,7 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStepID))
 	aDone := engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(aStepID))
 	aDoneBase := e.seams.Visits(aDone)
-	close(release)
+	releaseA()
 
 	stranded := func(e *Engine) bool {
 		return enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND task_name='A' AND status='"+
@@ -144,15 +149,13 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 // A's lease and runs the orphan sweep, which must take A back by bumping its lease generation; beforeSweep, if set,
 // runs just before the sweep. Then it releases the stalled worker and awaits the flow, which must complete. While
 // the stall is held, the worker that replays A may reach the same checkpoint and stall too; the release frees both,
-// and whichever commits first, the stalled worker's transition is fenced. It returns the engine (shut down by the
-// test's cleanup), the flow, and when the sweep ran.
-func slowWorkerReplay(t *testing.T, mux *hosts.Mux, flowURL string, initial any, beforeSweep func(db *sequel.DB, flowID int)) (e *Engine, shard, flowID int, swept time.Time) {
+// and whichever commits first, the stalled worker's transition is fenced. e is an engine built by the caller (who
+// owns its Shutdown) and not yet started. It returns the flow and when the sweep ran.
+func slowWorkerReplay(t *testing.T, e *Engine, mux *hosts.Mux, flowURL string, initial any, beforeSweep func(db *sequel.DB, flowID int)) (shard, flowID int, swept time.Time) {
 	t.Helper()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	e = NewEngineUnderTest(strings.ReplaceAll(t.Name(), "/", "_")) // the name keys the test database
-	t.Cleanup(func() { e.Shutdown(ctx) })
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 	awaitStartupRecoverySweep(t, e)
@@ -195,7 +198,7 @@ func slowWorkerReplay(t *testing.T, mux *hosts.Mux, flowURL string, initial any,
 	}
 	// The flow can complete before the stalled worker returns; a double advance would land by the time it does.
 	enginetest.AwaitVisitCount(t, e.seams, aDoneBase+2, 15*time.Second, aDone)
-	return e, shard, flowID, swept
+	return shard, flowID, swept
 }
 
 // TestOrphanSweep_ReplaysSlowWorkersStep pins that the sweep's rewind of a step whose worker was slow rather than
@@ -262,7 +265,9 @@ func TestOrphanSweep_ReplaysSlowWorkersStep(t *testing.T) {
 					assert.NoError(err)
 				}
 			}
-			e, shard, flowID, swept := slowWorkerReplay(t, mux, "slowstrand/g", nil, beforeSweep)
+			e := NewEngineUnderTest(strings.ReplaceAll(t.Name(), "/", "_")) // the name keys the test database
+			defer e.Shutdown(context.Background())
+			shard, flowID, swept := slowWorkerReplay(t, e, mux, "slowstrand/g", nil, beforeSweep)
 			if tc.name == "sleep" {
 				// The 200ms settle inside slowWorkerReplay is part of the elapsed time.
 				waited := time.Since(swept)
@@ -311,7 +316,9 @@ func TestOrphanSweep_ReplaysSlowWorkersStep_OtherTransitions(t *testing.T) {
 		mux.HandleTask("slowfanin/b", func(ctx context.Context, f *workflow.Flow) error { runsB.Add(1); return nil })
 		mux.HandleTask("slowfanin/j", func(ctx context.Context, f *workflow.Flow) error { runsJ.Add(1); return nil })
 
-		e, shard, flowID, _ := slowWorkerReplay(t, mux, "slowfanin/g", map[string]any{"items": []any{}}, nil)
+		e := NewEngineUnderTest(strings.ReplaceAll(t.Name(), "/", "_")) // the name keys the test database
+		defer e.Shutdown(context.Background())
+		shard, flowID, _ := slowWorkerReplay(t, e, mux, "slowfanin/g", map[string]any{"items": []any{}}, nil)
 		assert.Equal(int32(1), runsA.Load(), "A ran again instead of being replayed")
 		assert.Equal(int32(0), runsB.Load())
 		assert.Equal(int32(1), runsJ.Load(), "the fan-in ran other than once")
@@ -328,7 +335,9 @@ func TestOrphanSweep_ReplaysSlowWorkersStep_OtherTransitions(t *testing.T) {
 		var runsA atomic.Int32
 		mux.HandleTask("slowend/a", func(ctx context.Context, f *workflow.Flow) error { runsA.Add(1); f.Set("done", true); return nil })
 
-		e, shard, flowID, _ := slowWorkerReplay(t, mux, "slowend/g", nil, nil)
+		e := NewEngineUnderTest(strings.ReplaceAll(t.Name(), "/", "_")) // the name keys the test database
+		defer e.Shutdown(context.Background())
+		shard, flowID, _ := slowWorkerReplay(t, e, mux, "slowend/g", nil, nil)
 		assert.Equal(int32(1), runsA.Load(), "A ran again instead of being replayed")
 		assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=?", flowID))
 		// The stalled worker's completion, unfenced, may win and complete the flow while A sits rewound: A is then

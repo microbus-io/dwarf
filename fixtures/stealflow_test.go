@@ -58,8 +58,9 @@ import (
 // steal fires only once a foreign step has been DUE longer than the grace (four cycle periods, ~533ms at
 // the derived test interval), and a single worker chewing through 40 no-op steps against in-memory SQLite
 // finishes well inside that - so with instant tasks the crippled class never ages and the test is a
-// coin-flip on scheduling. A delay makes the backlog build for a reason the test controls.
-func stealFleet(t *testing.T, name string, crippledWorkers int, crippledDelay time.Duration) (creator, healthy, crippled *engine.Engine, ran map[string]*atomic.Int64) {
+// coin-flip on scheduling. A delay makes the backlog build for a reason the test controls. The caller defers
+// the returned shutdown, which shuts all three down.
+func stealFleet(t *testing.T, name string, crippledWorkers int, crippledDelay time.Duration) (creator, healthy, crippled *engine.Engine, ran map[string]*atomic.Int64, shutdown func()) {
 	t.Helper()
 	assert := testarossa.For(t)
 	ran = map[string]*atomic.Int64{"creator": {}, "healthy": {}, "crippled": {}}
@@ -101,11 +102,16 @@ func stealFleet(t *testing.T, name string, crippledWorkers int, crippledDelay ti
 	assert.NoError(creator.SetWorkers(0))
 
 	ctx := context.Background()
-	for _, e := range []*engine.Engine{healthy, crippled, creator} {
-		assert.NoError(e.Startup(ctx))
-		t.Cleanup(func() { e.Shutdown(ctx) })
+	fleet := []*engine.Engine{healthy, crippled, creator}
+	shutdown = func() {
+		for _, e := range fleet {
+			e.Shutdown(ctx)
+		}
 	}
-	return creator, healthy, crippled, ran
+	for _, e := range fleet {
+		assert.NoError(e.Startup(ctx))
+	}
+	return creator, healthy, crippled, ran, shutdown
 }
 
 // awaitSteal reports whether a replica took work from outside its own residue class, arming the waiter
@@ -138,7 +144,8 @@ func TestStealCapacityPoisonflow(t *testing.T) {
 	t.Parallel()
 	const name = "stealcap.verify:428"
 	assert := testarossa.For(t)
-	creator, healthy, _, ran := stealFleet(t, name, 1, 150*time.Millisecond)
+	creator, healthy, _, ran, shutdown := stealFleet(t, name, 1, 150*time.Millisecond)
+	defer shutdown()
 
 	// Warm both dispatchers so the crippled one genuinely holds a class before the load arrives.
 	drainFlows(t, 30*time.Second, creator, name, 4)
@@ -165,7 +172,8 @@ func TestStealLatencyPoisonflow(t *testing.T) {
 	t.Parallel()
 	const name = "stealrtt.verify:428"
 	assert := testarossa.For(t)
-	creator, healthy, crippled, ran := stealFleet(t, name, 4, 0)
+	creator, healthy, crippled, ran, shutdown := stealFleet(t, name, 4, 0)
+	defer shutdown()
 
 	drainFlows(t, 30*time.Second, creator, name, 4)
 
@@ -218,7 +226,8 @@ func TestStealHoldsOffAHealthyFleetflow(t *testing.T) {
 	t.Parallel()
 	const name = "stealhealthy.verify:428"
 	assert := testarossa.For(t)
-	creator, healthy, crippled, ran := stealFleet(t, name, 4, 0)
+	creator, healthy, crippled, ran, shutdown := stealFleet(t, name, 4, 0)
+	defer shutdown()
 
 	// The cache holds 2 x 4 workers, so ~100 due steps per residue class is far past "this class can fill
 	// its own batch". Created up front, and not awaited until the measurement is over.

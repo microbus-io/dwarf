@@ -134,7 +134,7 @@ func (r *rig) idsByResidue(t *testing.T, replicas, ordinal int) (own, foreign []
 func drain(c *candidates.Cache) []int {
 	out := make([]int, 0, c.Len())
 	for c.Len() > 0 {
-		j, ok, _ := c.Pop()
+		j, ok := c.Pop()
 		if !ok {
 			break
 		}
@@ -940,10 +940,10 @@ func TestPiston_FailingFetchesReportNoLiveness(t *testing.T) {
 // TestPiston_StealPredicateIsAlwaysRelaxed pins that there is no gate: the residue class is relaxed on
 // every query, and only the AGE terms decide whether a foreign step is admitted at all.
 //
-// Nothing arms this. An earlier design gated the relaxation on a flag armed when the previous scan's own
-// class came up short, and the flag's meaning depended on which clause that scan had run - so it meant one
-// thing after a strict scan and another after a relaxed one. The fill order in rankByResidue asks the same
-// question exactly and currently instead, which is why the flag is gone.
+// Nothing arms this. Do not gate the relaxation on a flag armed when the previous scan's own class came up
+// short: the flag's meaning depends on which clause that scan ran, so it means one thing after a strict scan
+// and another after a relaxed one. The fill order in rankByResidue asks the same question exactly and
+// currently instead.
 func TestPiston_StealPredicateIsAlwaysRelaxed(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)

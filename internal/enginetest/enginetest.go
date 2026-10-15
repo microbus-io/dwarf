@@ -168,10 +168,11 @@ func BoundedRun(t *testing.T, e Engine, url string) *workflow.FlowOutcome {
 	return out
 }
 
-// BoundedAwait awaits a flow with a 30s ctx bound so a wedge fails the test instead of hanging.
+// BoundedAwait awaits a flow with a 30s ctx bound (scaled under -race) so a wedge fails the test instead of
+// hanging.
 func BoundedAwait(t *testing.T, e Engine, flowKey string) (*workflow.FlowOutcome, error) {
 	t.Helper()
-	awaitCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	awaitCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second*testTimeoutScale)
 	defer cancel()
 	return e.Await(awaitCtx, flowKey)
 }

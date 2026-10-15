@@ -182,7 +182,7 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	return newFlowKey, nil
 }
 
-// forkClone carries cross-recursion state for a Fork clone.
+// forkClone carries the state shared across the flows of one Fork clone.
 type forkClone struct {
 	leafFlowID      int
 	leafStepID      int
@@ -478,29 +478,29 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	// `lineage_id` is a cohort-COUNTING device, not a DAG: every step of a per-element sub-pipeline inherits
 	// the spawn's childLineageID, so a branch of depth D contributes D members to the lineage. The live
 	// engine bumps `cohort_arrivals` once per BRANCH (when the branch's exit step transitions to the fan-in),
-	// so `arrivals <= size` always holds. Counting members instead - as this once did - breaks that on any
-	// multi-step branch: `Seed --forEach(3)--> Cell --> Enrich --> Join` has 6 members for size 3, so a fork
-	// wrote arrivals=5, size=3 and violated the pinned invariant `cohort_arrivals <= cohort_size`
-	// (`invariants_test.go`, asserted across the chaos-soak and race suites). The existing fork fixture hid
-	// it because its branch is exactly ONE step - the degenerate case where members == branches.
+	// so `arrivals <= size` always holds. Do not count members: that breaks it on any multi-step branch -
+	// `Seed --forEach(3)--> Cell --> Enrich --> Join` has 6 members for size 3, so a fork writes arrivals=5,
+	// size=3 against the pinned invariant `cohort_arrivals <= cohort_size` (`invariants_test.go`, asserted
+	// across the chaos-soak and race suites). A fixture whose branches are ONE step cannot see it: there
+	// members == branches.
 	//
 	// A branch is the sub-DAG rooted at a direct child of the spawn (predecessor_id = spawn) that shares the
 	// spawn's cohort lineage. Fork requires a TERMINAL origin, so every kept step is settled: a branch has
 	// arrived unless it is the one being rewound (that branch re-runs, and its post-rewind steps were pruned
-	// anyway), and it counts a failure if any of its steps failed. Excluding the whole rewound BRANCH - not
-	// merely the rewind step - is the other half of the fix: with `rewind = Enrich1`, its sibling `Cell1` sat
-	// in the same branch and was still counted as an arrival.
+	// anyway), and it counts a failure if any of its steps failed. Exclude the whole rewound BRANCH, not merely
+	// the rewind step: with `rewind = Enrich1`, its sibling `Cell1` sits in the same branch and must not count
+	// as an arrival.
 	//
 	// MEMBERSHIP IS THE LINEAGE CHAIN, NOT THE LINEAGE ID. A NESTED fan-out re-lineages its own children
 	// (`childLineageID = stepID`), so in `Seed -forEach-> Cell -forEach-> Chunk -> JoinChunk -> JoinCell` the
-	// Chunk steps carry `lineage_id = Cell`, not `Seed`. Testing `c.lineageID == s.oldID` - as this once did -
-	// therefore DEAD-ENDS the outer walk at the inner spawn: the Chunks are filtered out, and JoinChunk (which
-	// does carry the outer lineage) is only reachable THROUGH them, since its predecessor is the inner cohort's
-	// last completer. Everything past the inner cohort in that branch became invisible, with two consequences:
-	// a rewind at or past the inner frame was never seen, so the branch was counted as ARRIVED and its re-run
-	// pushed `cohort_arrivals` past `cohort_size`; and a failure inside a kept branch's inner cohort was never
-	// seen, so the clone lost `cohort_failures` and a fork that had to re-fail COMPLETED instead - silently
-	// absorbing an unrecovered branch failure, which inverts the whole point of the partial-recovery fork.
+	// Chunk steps carry `lineage_id = Cell`, not `Seed`. Do not test `c.lineageID == s.oldID`: it DEAD-ENDS
+	// the outer walk at the inner spawn - the Chunks are filtered out, and JoinChunk (which does carry the
+	// outer lineage) is only reachable THROUGH them, since its predecessor is the inner cohort's last
+	// completer. Everything past the inner cohort in that branch becomes invisible, with two consequences: a
+	// rewind at or past the inner frame is never seen, so the branch counts as ARRIVED and its re-run pushes
+	// `cohort_arrivals` past `cohort_size`; and a failure inside a kept branch's inner cohort is never seen, so
+	// the clone loses `cohort_failures` and a fork that must re-fail COMPLETES instead - silently absorbing an
+	// unrecovered branch failure, which inverts the whole point of the partial-recovery fork.
 	//
 	// So a step belongs to spawn S's cohort - at ANY nesting depth - iff walking its lineage chain upward
 	// reaches S. That descends through nested cohorts and still stops cleanly at the outer fan-in, whose lineage
@@ -720,8 +720,8 @@ func (e *Engine) collectDAGSubtree(ctx context.Context, db sequel.Executor, flow
 
 // allDescendantSubgraphFlows returns every subgraph flow descended from flowID (any status), recursively.
 // It fetches the whole tree (root + all descendants) in one scan via the denormalized root_flow_id, then
-// derives flowID's descendants in memory from the surgraph_flow_id parent links - the same set the former
-// level-by-level recursion produced, but one round-trip regardless of tree depth. root_flow_id gives tree
+// derives flowID's descendants in memory from the surgraph_flow_id parent links - the same set a
+// level-by-level walk would find, but in one round trip regardless of tree depth. root_flow_id gives tree
 // *membership*; the surgraph link still gives the parent/child *structure* the BFS walks.
 func (e *Engine) allDescendantSubgraphFlows(ctx context.Context, db sequel.Executor, flowID int) ([]int, error) {
 	rows, err := db.QueryContext(ctx,

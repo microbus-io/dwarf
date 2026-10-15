@@ -1,7 +1,7 @@
 # Dwarf `internal/peers` — one shard's replica registry
 
-> Load when: changing the Sonar's lifecycle, the four statements, the two windows, the blindness rules, or
-> the prune.
+> Load when: changing the Sonar's lifecycle, its seven statements (register's UPDATE and INSERT, the beat, the
+> read, `Withdraw`, `Leave`, the prune), the two windows, or the blindness rules.
 > Coupled with: `internal/migrations/CLAUDE.md` (the `dwarf_peers` columns these statements touch) and
 > `engine/CLAUDE.md` §"Peer discovery" and §"Connection pool sizing" (what the published values are used
 > for).
@@ -38,10 +38,10 @@ registration repair exists (below) and why it cannot be left to the beat.
 way out — its context is cancelled by then, so the DELETE would fail — and `Run` having returned is itself
 the guarantee that no beat follows.
 
-**The API is nineteen calls, and keeping it that small is a standing constraint.** Seven inputs (`New`,
+**The API is twenty calls, and keeping it that small is a standing constraint.** Seven inputs (`New`,
 `SetProfile`, `SetCut`, `SetEvidence`, `SetTurnFunc`, `SetLogger`, `SetSeams`), five lifecycle calls (`Join`,
-`Run`, `Withdraw`, `Leave`, `SetDraining`), six published facts (`Replicas`, `Rank`, `InCut`, `Draining`,
-`Partition`, `BlindFor`), and one knob (`SetCadence`). `SetCut` earns its place because the cut needs the
+`Run`, `Withdraw`, `Leave`, `SetDraining`), seven published facts (`Replicas`, `Rank`, `Standing`, `InCut`,
+`Draining`, `Partition`, `BlindFor`), and one knob (`SetCadence`). `SetCut` earns its place because the cut needs the
 shard's index and the slot rule, which are the owner's, while applying it has to happen here: the hold that
 makes entering the cut wait a reading needs the previous raw reading, which only the Sonar has.
 
@@ -390,7 +390,7 @@ it is the other two:
 - **Convergence.** There is **no nudge entry point**, deliberately: polling this often converges faster than
   a fleet-membership broadcast, which is what lets an owner drop the broadcast entirely rather than keep a
   delivery path correctness would then rest on. That argument is a function of this constant. Lengthen it
-  and the trade re-opens — either accept slower convergence or add a tenth call to the API.
+  and the trade re-opens — either accept slower convergence or add a nudge call to the API.
 
 Lengthening it is legitimate (a 1s interval cuts the load 4x and widens every derived grace), but decide it
 against those two, not against detection.
@@ -489,11 +489,10 @@ one shape co-running tests break, because they can only make the loop turn slowe
 oversubscription then pushes a healthy loop past the grace and the failure reports the machine. The same
 starvation resets `healthySince`, so both of that test's real properties ride on its goroutine being
 scheduled. An OUTCOME assertion tolerates parallelism (it just waits longer); this does not - the same rule
-`fixtures/CLAUDE.md` applies to its reaction-latency fixtures. The evidence is thinner than the rule and worth saying so: it
-survives `-count=10 -race` alone, was seen failing ONCE under the full parallel `-race` suite, and has not
-reproduced in 9 subsequent reps of that command. The change follows from the shape of the assertion - an
-upper bound against 24 parallel siblings, several driving their own real-clock loops - rather than from a
-reproduction.
+`fixtures/CLAUDE.md` applies to its reaction-latency fixtures. The rule rests on the shape of the assertion -
+an upper bound against two dozen parallel siblings, several driving their own real-clock loops - more than on a
+reproduction: the test passes `-count=10 -race` alone, and a failure under the full parallel `-race` suite is
+rare.
 
 **Those two are the only tests a slow database can race, and both rules below were learned by it happening.**
 Every threshold in this package is a multiple of the scan interval, so shortening that interval shortens the
@@ -504,9 +503,9 @@ grace the assertions are measured against:
   Measured on an idle Postgres: one `SELECT engine_id FROM dwarf_peers` moved `BlindFor` from **2µs to
   2-8ms** — already a third of a 20ms budget, and past it on a loaded box. The same query is microseconds
   on SQLite, which is why this only ever fails on a real database.
-- **Do not shorten the cadence below a round trip plus scheduler jitter** (both now sit at 100-250ms). At
-  20ms the grace was 40ms, which a co-running suite eats outright — and the test then correctly reports a
-  cadence the machine, not the code, failed to keep.
+- **Do not shorten the cadence below a round trip plus scheduler jitter** (the test cadences sit at
+  100-250ms). At a 20ms cadence the grace is 40ms, which a co-running suite eats outright — and the test then
+  correctly reports a cadence the machine, not the code, failed to keep.
 
 Prefer stating a fact as an **order** rather than a duration where it can be: "`lastGood` is newer than the
 call" is the same fact as "the read landed" with no wall-clock budget attached.

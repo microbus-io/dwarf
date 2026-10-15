@@ -84,8 +84,8 @@ func TestCompleteFlow_TransientReviveErrorIsRetriedNotLost(t *testing.T) {
 		return
 	}
 
-	// With the fix the retry re-drives the revive within a backoff, so the tree completes promptly. Without it
-	// the parent strands running+parkedSubgraph and only the ~10m wedge sweep would recover it - so this wait
+	// The retry re-drives the revive within a backoff, so the tree completes promptly. Without that, the
+	// parent strands running+parkedSubgraph and only the ~10m wedge sweep would recover it - so this wait
 	// times out, which is the failure this test pins. A minute is far inside that, and wide enough for a loaded
 	// server.
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)

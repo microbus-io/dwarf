@@ -40,8 +40,8 @@ limitations under the License.
 //
 // A task receives a *Flow: the engine pre-populates it with the step's input state, the task reads
 // inputs and writes outputs with the typed accessors (Get/Set and friends), and may emit control signals
-// - Retry, Sleep, Goto, Interrupt (human-in-the-loop), or Subgraph (call another workflow). A fan-out branch
-// writes only its own contribution to a reducer-managed field; anywhere else a write replaces the field.
+// - Retry, Sleep, Goto, Interrupt (human-in-the-loop), or Subgraph (call another workflow). A write to a
+// field with a reducer is a contribution, combined with what the field holds; Overwrite and Del replace it.
 //
 //	func charge(ctx context.Context, f *workflow.Flow) error {
 //		amount := f.GetFloat("amount")

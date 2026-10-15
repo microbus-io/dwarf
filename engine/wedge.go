@@ -82,7 +82,7 @@ func (e *Engine) runRecoverySweep(ctx context.Context, heavy bool) {
 	e.recoverExpiredLeases(ctx)
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		if !e.dispatchesOn(shard) {
-			return nil // see recoveryLoop
+			return nil // one sweeper per shard suffices, and a reader's pool must not carry the scans
 		}
 		// This pass takes a turn on the shard it is about to read, so a background sweep queues for its
 		// connections like any other caller instead of taking them from work already under way.
@@ -140,7 +140,7 @@ func (e *Engine) recoverExpiredLeases(ctx context.Context) {
 	const expired = "status='" + workflow.StatusRunning + "' AND parked=0 AND lease_expires<=NOW_UTC()"
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		if !e.dispatchesOn(shard) {
-			return nil // see recoveryLoop
+			return nil // one sweeper per shard suffices, and a reader's pool must not carry the scans
 		}
 		// This pass takes a turn on the shard it is about to read, so a background sweep queues for its
 		// connections like any other caller instead of taking them from work already under way.

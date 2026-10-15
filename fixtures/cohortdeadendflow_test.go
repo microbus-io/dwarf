@@ -50,8 +50,8 @@ func TestCohortDeadEndFlow(t *testing.T) {
 	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
-	// A sibling that runs to completion while the dead-end branch is being disposed of. If the old bug were
-	// present, the dead end would complete the flow and Run would return before this fired.
+	// A sibling that runs to completion while the dead-end branch is being disposed of. A dead end that
+	// completes the flow makes Run return before this fires.
 	var slowSiblingFinished int32
 	var joinRan int32
 
@@ -93,8 +93,8 @@ func TestCohortDeadEndFlow(t *testing.T) {
 		map[string]any{"items": []int{0, 1}}, nil)
 	assert.NoError(err)
 
-	// The dead-end branch must fail the flow, not complete it. Before the fix, the item-0 branch completed the
-	// whole flow (StatusCompleted) the instant it dead-ended.
+	// The dead-end branch must fail the flow, not complete it. The failure mode pinned: the item-0 branch
+	// completes the whole flow (StatusCompleted) the instant it dead-ends.
 	assert.Equal(workflow.StatusFailed, outcome.Status)
 	assert.True(strings.Contains(outcome.Error, "fan-in"),
 		"the failure must name the missing fan-in convergence, got %q", outcome.Error)

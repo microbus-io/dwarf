@@ -60,8 +60,8 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 		}
 	}
 	opts = e.resolveFlowOptions(opts)
-	// The create-time GraphLoader sees the baggage on ctx in the same JSON-decoded shape (numbers as
-	// float64) every dispatch will - NewState round-trips the raw Go value through JSON.
+	// The create-time LoadGraph sees the baggage on ctx in the same shape every dispatch will: a State built by
+	// NewState, which marshals the host's Go value to per-field JSON as a dispatch's read of the column does.
 	loaderBaggage, _ := workflow.NewState(opts.Baggage)
 	loaderCtx := workflow.ContextWithBaggage(ctx, loaderBaggage)
 	var graph *workflow.Graph
@@ -82,7 +82,7 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 	}
 	// Validate at create (documented behavior): reject a structurally invalid graph up front. Validation is
 	// pure - the fan-in convergence it checks is computed into a local map and not stored on the graph. The
-	// engine derives that map per flow at dispatch (internal/faninmap), so only the author's definition is
+	// engine derives that map once per graph per replica (internal/faninmap), so only the author's definition is
 	// serialized into the flow's graph JSON below.
 	if verr := graph.Validate(); verr != nil {
 		return "", errors.New("invalid workflow graph %s: %v", workflowURL, verr, http.StatusBadRequest)

@@ -33,7 +33,7 @@ import (
 // to terminated in the fork, not copied verbatim. Copied verbatim it would (a) be re-dispatched by lease
 // recovery in the running fork and (b) as a cohort member wedge the fork's fan-in. The state is a race the
 // cohort accounting normally prevents (a flow does not terminalize with a live sibling), so it is injected
-// directly: run a single-node flow to completion, insert a running straggler off the fork path, then fork.
+// directly: run a single-task flow to completion, insert a running straggler off the fork path, then fork.
 func TestForkStraggler_NormalizedToTerminated(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -45,7 +45,7 @@ func TestForkStraggler_NormalizedToTerminated(t *testing.T) {
 	g.AddTransition("A", workflow.End)
 	mux.HandleGraph("sl/g", g)
 	mux.HandleTask("sl/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	// B is only ever the injected straggler; it must never be dispatched (the fix terminates its clone). Register
+	// B is only ever the injected straggler; it must never be dispatched (Fork terminates its clone). Register
 	// a no-op so an accidental dispatch would not fail the fork step instead of surfacing the real defect.
 	mux.HandleTask("sl/b", func(ctx context.Context, f *workflow.Flow) error { return nil })
 

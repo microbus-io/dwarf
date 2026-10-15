@@ -89,7 +89,9 @@ f.SetString("payload", base64.StdEncoding.EncodeToString(raw))  // correct
 ```
 
 Nothing else about strings is constrained — tabs, newlines, other control characters, and emoji all
-round-trip fine. (Invalid UTF-8 needs no rule: `encoding/json` replaces it with `U+FFFD` on the way in.)
+round-trip fine. Invalid UTF-8 in a Go string is replaced with `U+FFFD` when it is stored. Bytes that arrive
+already encoded as JSON - a `json.RawMessage` passed to `Set`, or the state a remote host returns for a task -
+are kept as given, so they must be valid UTF-8: PostgreSQL rejects invalid UTF-8 just as it rejects a NUL.
 
 ### Large integers: exact in storage, rounded by untyped reads
 
@@ -440,9 +442,11 @@ duplicate it, and keeps the surrounding logic free to be retried without restric
 ### One thing you cannot rely on
 
 **A task's `flow.Set` writes are discarded when it returns an error.** Both failure paths agree: the
-`onError` handler receives the step's *input* state plus the error, never anything the failing attempt
-wrote. So you cannot record "I already did the side effect" by writing it into state and then returning an
-error — the record is dropped. Use an external store, as above.
+`onError` handler receives the step's input state plus the error, never anything the failing run wrote.
+What the step's *earlier* runs wrote - before a `Retry`, or before an `Interrupt` or `Subgraph` call the task
+was dispatched again from - is kept, and the handler sees it. So within one run you cannot record "I already
+did the side effect" by writing it into state and then returning an error — the record is dropped. Use an
+external store, as above.
 
 ## Timestamps
 

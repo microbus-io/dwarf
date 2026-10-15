@@ -52,8 +52,7 @@ type FlowOptions struct {
 	// flow. The engine never interprets it: it is set once here, stored on the flow, inherited by
 	// subgraphs and Continue, and delivered to every Host LoadGraph/ExecuteTask call via the dispatch
 	// context - read it with BaggageFrom(ctx). Any JSON-marshalable object (a struct or map); the host
-	// receives it back as a workflow.State (the JSON-decoded form, numbers as float64), exactly like flow
-	// state. A non-object value is delivered as an empty State.
+	// receives it back as a workflow.State, exactly like flow state. A non-object value is delivered as an empty State.
 	Baggage any `json:"baggage,omitzero"`
 	// ThreadKey places the new flow into an existing thread (multi-turn conversation) instead of starting
 	// its own. It is any FlowKey in that thread; the engine reads its thread id and routes the new flow to

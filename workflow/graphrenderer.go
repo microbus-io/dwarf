@@ -79,7 +79,9 @@ func (r *GraphRenderer) WithLeftRight() *GraphRenderer {
 	return r
 }
 
-// WithLinks enables click directives on every task node.
+// WithLinks makes every task node clickable, emitting a Mermaid click directive that navigates to
+// "?<paramName>=<taskName>", with the task name query-escaped - so a host page can turn the diagram into a
+// task inspector by reading that query parameter. Empty (the default) emits no click directives.
 func (r *GraphRenderer) WithLinks(paramName string) *GraphRenderer {
 	r.linkParam = paramName
 	return r

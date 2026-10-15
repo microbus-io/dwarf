@@ -463,6 +463,9 @@ the artifacts carry database CPU.
 `bench/charts_cloud.py` draws `docs/benchmark-cloud.md`'s charts and `bench/charts.py` the local dialect charts in
 `docs/benchmark.md`. A cloud chart drawn from many runs or from CPU profiles keeps its numbers as a table in the
 script, because no single artifact holds them; the rest read their artifacts under `bench/results/`.
+**`bench/results/` is gitignored**, so those charts can be redrawn only on the machine that holds the run's
+local results - a clean checkout cannot rebuild them (`charts_cloud.py` skips a chart whose artifacts are
+missing, with a note).
 
 Test-only knobs the bench CANNOT reach: the engine's seams are enabled only under `testing.Testing()`, so
 arming one from `internal/engineseams` in a bench binary does nothing, and fault injection and `sequel`'s

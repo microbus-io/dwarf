@@ -227,7 +227,7 @@ func createInterruptedFlow(t *testing.T, e *Engine, url string) string {
 	return fk
 }
 
-// registerGate registers a one-node graph whose entry task interrupts on first dispatch and completes on
+// registerGate registers a one-task graph whose entry task interrupts on first dispatch and completes on
 // resume, so a test has a stable `interrupted` flow to Cancel/Resume.
 func registerGate(mux *hosts.Mux, prefix string) {
 	g := workflow.NewGraph("Gate")

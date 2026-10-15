@@ -44,10 +44,10 @@ func unseededEngine(name string) *engine.Engine {
 // boundary (final_state, Continue, Fork, Snapshot, History) is materialized.
 //
 // The shape is the doc-extraction one that motivated the design: a document is fanned out over its pages and
-// each page over its chunks, so the payload would otherwise be re-serialized into ~N*D step rows. The engine's
-// old concession to this - deleting the forEach source array from each branch's state - was removed precisely
-// because it fixed one field by hand while every other carried field paid the same cost. Refs own it now, and
-// they own it without lying to the branch: a branch still sees the array its own element came from.
+// each page over its chunks, so the payload would otherwise be re-serialized into ~N*D step rows. Deleting the
+// forEach source array from each branch's state is not the answer: it fixes one field by hand while every
+// other carried field pays the same cost. Refs own it, and they own it without lying to the branch: a branch
+// still sees the array its own element came from.
 
 func TestStaterefsflow(t *testing.T) {
 	t.Parallel()
@@ -91,8 +91,8 @@ func TestStaterefsflow(t *testing.T) {
 		if got := len(f.GetString("pdf")); got != docLen {
 			return errors.New("branch sees a %d-byte document, want %d", got, docLen)
 		}
-		// The branch can still see the ARRAY its own element came from - the engine no longer strips it, and
-		// refs de-duplicate it instead of deleting it. The count varies by turn, so assert presence, not size.
+		// The branch can still see the ARRAY its own element came from - the engine does not strip it; refs
+		// de-duplicate it instead. The count varies by turn, so assert presence, not size.
 		if len(f.GetStrings("pages")) == 0 {
 			return errors.New("branch cannot see the forEach source array it was spawned from")
 		}

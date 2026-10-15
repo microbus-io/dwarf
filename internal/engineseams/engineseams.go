@@ -69,7 +69,7 @@ func Join(parts ...string) string {
 
 // --- Fault injection ---
 const (
-	// Scoped by task name (the graph node name passed to ExecuteTask):
+	// Scoped by task name (the task's name in the graph, not the URL ExecuteTask receives):
 	FaultExecuteTask      = "executeTask"      // ExecuteTask returns a synthetic error (as if the task failed)
 	FaultPanicExecuteTask = "panicExecuteTask" // ExecuteTask panics (exercises host-call panic isolation)
 

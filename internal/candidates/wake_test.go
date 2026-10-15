@@ -83,7 +83,7 @@ func TestCandidateCache_OneRefillStrandsNoCandidate(t *testing.T) {
 				if !ok {
 					return
 				}
-				if _, ok, _ := c.TryPopFrom(shard); ok {
+				if _, ok := c.TryPopFrom(shard); ok {
 					total.Add(1)
 				}
 			}
@@ -142,7 +142,7 @@ func TestCandidateCache_WakesGoInArrivalOrder(t *testing.T) {
 				if !ok {
 					return
 				}
-				if _, ok, _ := c.TryPopFrom(shard); ok {
+				if _, ok := c.TryPopFrom(shard); ok {
 					mu.Lock()
 					order = append(order, w)
 					mu.Unlock()
@@ -204,7 +204,7 @@ func TestCandidateCache_WakesRotateAcrossTheParkedCrew(t *testing.T) {
 				if !ok {
 					return
 				}
-				if _, ok, _ := c.TryPopFrom(shard); ok {
+				if _, ok := c.TryPopFrom(shard); ok {
 					woken[w].Add(1)
 					total.Add(1)
 				}
@@ -270,7 +270,7 @@ func BenchmarkCache_RefillWake(b *testing.B) {
 							return
 						}
 						takes.Add(1) // one trip round the loop, whether or not it won anything
-						if _, ok, _ := c.TryPopFrom(shard); ok {
+						if _, ok := c.TryPopFrom(shard); ok {
 							served.Add(1)
 						}
 					}

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Provisions the dwarf cloud-benchmark stack on GCP (see _BENCH.md phase 2):
+# Provisions the dwarf cloud-benchmark stack on GCP:
 # a dedicated VPC with private-services access, one Cloud SQL for PostgreSQL
 # instance reachable via PRIVATE IP ONLY (never the Auth Proxy - it would
 # pollute the RTT measurement), and one Compute Engine VM to run the bench

@@ -66,8 +66,9 @@ func flowRows(t *testing.T, e *Engine, fk string) (*sequel.DB, int, int) {
 // setFlowPayloadVer stands in for a flow created by a build of another format.
 func setFlowPayloadVer(t *testing.T, db *sequel.DB, flowID, ver int) {
 	t.Helper()
+	assert := testarossa.For(t)
 	_, err := db.ExecContext(t.Context(), "UPDATE dwarf_flows SET payload_ver=? WHERE flow_id=?", ver, flowID)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 }
 
 // TestPayloadVer_NewerFlowIsDeferredUnrun pins the dispatch half: a step of a flow in a format newer than this build

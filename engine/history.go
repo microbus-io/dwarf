@@ -236,8 +236,8 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 		return nil, errors.Trace(err)
 	}
 	// Materialize the step's carried-by-reference fields: the ref encoding is internal storage, never an
-	// API-visible one, so Step reports the input the task actually saw (the ref encoding is internal storage, never API-visible). resolveStateRefs
-	// mutates the state map in place.
+	// API-visible one, so Step reports the input the task actually saw. resolveStateRefs mutates the state map
+	// in place.
 	refs, err := staterefs.Parse(stateRefsJSON)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -793,7 +793,8 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 	}
 	indices, pos := e.shardOrdinals()
 
-	// Purge selects root flows only and deletes each matched root's whole subgraph subtree (below).
+	// Purge selects root flows only and marks each matched root for deletion; the reaper removes its whole
+	// subgraph subtree.
 	joinSQL, whereSQL, baseArgs, restrictShardNum, err := e.queryClauses(ctx, query, "f.surgraph_flow_id=0")
 	if err != nil {
 		return 0, errors.Trace(err)

@@ -29,7 +29,7 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// oneTaskHost serves a single-node graph for any workflow URL and no-ops the task, for tests that need a
+// oneTaskHost serves a single-task graph for any workflow URL and no-ops the task, for tests that need a
 // flow to actually run (unlike enginetest.NoopHost, whose nil graph 404s Create).
 type oneTaskHost struct{}
 

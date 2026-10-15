@@ -269,9 +269,11 @@ graph LR
     _start(( )):::term --> t0
 ```
 
-**An error voids the task's changes.** Anything the failing task wrote with `f.Set` before returning its
-error is discarded — the handler does not see it, and it never reaches the flow's final state. (Same on the
-unhandled path: a failing task's writes are dropped there too.) This mirrors Go's own convention, and it is
+**An error voids the task's changes.** Anything the failing task wrote with `f.Set` in the run that returned
+the error is discarded — the handler does not see it, and it never reaches the flow's final state. (Same on
+the unhandled path: a failing task's writes are dropped there too.) What the step's earlier runs wrote -
+before a `Retry`, or before an `Interrupt` or `Subgraph` call the task was dispatched again from - is kept,
+and the handler sees it. This mirrors Go's own convention, and it is
 forced by at-least-once execution: if a worker loses its lease mid-task, the task re-runs and *recomputes*
 its changes, so a half-written attempt is not a fact you can build on.
 

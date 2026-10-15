@@ -13,9 +13,8 @@
 #     1s      1,020     1,157
 #     8s        637     5,298        <- 8x the task time bought 4.6x the crew and LESS throughput
 #
-# Those three arms are preserved as ladder_r600 / delay1s_r600 / delay8s_r600 in
-# bench/results/14-vertical-20260727/, each with its own per-arm database CPU, so this script compares
-# against recorded artifacts rather than remembered numbers.
+# Those three arms are the BASELINE table in the report below, so this script compares against
+# recorded numbers rather than remembered ones.
 #
 # WHAT IT IS FOR NOW. The engine gates DATABASE work per shard and grows workers on idleness rather
 # than on "every worker is in a task", so the crew is free to grow for long tasks while the database
@@ -184,9 +183,8 @@ import glob, json, os, re, statistics, sys
 
 out, rate = sys.argv[1], float(sys.argv[2])
 
-# The recorded arms this campaign exists to beat (bench/results/14-vertical-20260727/), keyed by the
-# delay they ran at. Absolute numbers only transfer because the rig is the same shape; the shape of
-# the result - do the long-task arms reach the short-task arm - is what the conclusion rests on.
+# The recorded arms this script exists to beat, keyed by the delay they ran at. Absolute numbers only
+# transfer because the rig is the same shape; the shape of the result - do the long-task arms reach the short-task arm - is what the conclusion rests on.
 BASELINE = {"0": 6005.0, "1s": 1020.0, "8s": 637.0}
 
 arms = {}

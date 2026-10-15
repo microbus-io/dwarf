@@ -33,18 +33,18 @@ import (
 )
 
 // TestFanInNoCohort_FailsInsteadOfHotLooping pins the runtime guard for a step that arrives at a fan-in
-// with no cohort to arrive at (its lineage_id is 0). Graph.Validate now rejects the edges that produce
-// this, but a graph frozen onto a flow BEFORE that fix is replayed from the flow row on every dispatch and
-// never re-validated - so the guard is the only thing standing between such a flow and an unbounded hot
-// loop.
+// with no cohort to arrive at (its lineage_id is 0). Graph.Validate rejects the edges that produce this,
+// but a graph frozen onto a flow is replayed from the flow row on every dispatch and never re-validated - so
+// for a flow frozen by a build whose validator accepted them, the guard is the only thing standing between
+// it and an unbounded hot loop.
 //
 // Without the guard: cohort_arrivals is bumped on step_id=0 (zero rows, no error), the follow-up SELECT of
 // that step returns sql.ErrNoRows, the transition transaction aborts, the recovery defer rewinds the
 // just-completed step to pending, it re-dispatches, and the task RE-RUNS - side effects and all - forever.
-// The reviewer measured 2,735 failed transitions in 2 seconds.
+// Measured: 2,735 failed transitions in 2 seconds.
 //
 // The test forges the state that shape produces (a cohort branch whose lineage_id is cleared to 0) rather
-// than a graph the validator would now reject, so it exercises the runtime path exactly.
+// than a graph the validator rejects, so it exercises the runtime path exactly.
 func TestFanInNoCohort_FailsInsteadOfHotLooping(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -107,7 +107,7 @@ func TestFanInNoCohort_FailsInsteadOfHotLooping(t *testing.T) {
 	}
 
 	// Forge it: the branch loses its cohort. Its next task is the fan-in, so on completion it arrives at a
-	// cohort whose spawn step is id 0 - the shape a pre-fix graph produced from a trunk step.
+	// cohort whose spawn step is id 0 - the shape an unvalidated trunk-to-fan-in edge produces.
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET lineage_id=0 WHERE flow_id=? AND task_name=?",
 		flowID, "Work")
 	assert.NoError(err)

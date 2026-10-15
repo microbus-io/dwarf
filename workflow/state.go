@@ -59,7 +59,7 @@ type State struct {
 //
 // A single argument is normalized into a state map. A []byte or json.RawMessage is treated as raw JSON and
 // must be an object (an empty/nil slice or a JSON "null" yields an empty State; any other non-object is an
-// error - see UnmarshalJSON) - this is the one-liner for reading a state column back from the database:
+// error - see UnmarshalJSON) - this is the one-liner for turning a stored JSON object back into a State:
 // state, _ := NewState(stateJSON). A nil argument, including a nil map, pointer or slice, yields an empty State. A
 // State is already normalized, so it is shallow-copied. Any other value - a map, a struct, or any
 // JSON-marshalable value - is marshalled once and split into its top-level fields, each held as JSON just as
@@ -214,11 +214,8 @@ func decodeValue(raw json.RawMessage) (any, error) {
 //	    if ok, _ := state.Get(name, &v); ok { ... }
 //	}
 //
-// There is deliberately NO name/value iterator. Yielding values means materializing every one of them, and
-// a field held as raw JSON is decoded to be yielded - so a loop that reads two fields out of forty would pay
-// the decode for all forty, which is the exact cost this type is built to avoid. Iterating names is free;
-// make the reads explicit. Parse into a map[string]any is the escape hatch when a whole materialized copy
-// really is wanted, and it says so at the call site because the caller writes the target.
+// A field's value is decoded only when it is read, so a loop pays for the fields it reads and no others.
+// To decode every field at once, Parse into a map[string]any.
 //
 // Collect a slice with slices.Collect(state.Names()) if one is needed. Do not mutate the State during
 // iteration.
@@ -249,10 +246,9 @@ func (s State) GetJSON(name string) json.RawMessage {
 }
 
 // SetJSON stores a field's value as pre-encoded JSON. It is the unchecked twin of Set: the bytes must be a
-// single well-formed JSON value and are NOT validated, which is why it returns nothing - a method with no
-// error return cannot be reporting one. Use it for bytes you produced or read back from storage; pass
-// anything else through Set, which validates and can tell you. The State keeps data itself rather than a
-// copy, so the caller must not modify it afterwards.
+// single well-formed JSON value and are NOT validated. Use it for bytes you produced or read back from
+// storage; pass anything else through Set, which validates them and returns an error for invalid JSON. The
+// State keeps data itself rather than a copy, so the caller must not modify it afterwards.
 //
 // json.RawMessage rather than []byte is deliberate and is the same distinction Set draws: a []byte is binary
 // data and belongs in a base64 string, a json.RawMessage is JSON. The type says which, so the compiler
@@ -454,7 +450,7 @@ func (s State) ApplyAll(cs []Changes, reducers map[string]Reducer) error {
 				if err != nil {
 					return errors.New("reducer '%s' for field %q: %w", string(r), k, err)
 				}
-				if base == nil && (r == ReducerAppend || r == ReducerUnion) {
+				if base == nil && r == ReducerUnion {
 					// Onto nothing, a single value would start a typed list ([]string) that a later member's
 					// decoded []any cannot extend; Apply per member never sees it, re-encoding in between.
 					base = []any{}
@@ -600,7 +596,7 @@ func (s State) MarshalJSON() ([]byte, error) {
 //
 // The input must be a JSON object: it must begin with '{' and end with '}' (surrounding whitespace is
 // ignored). Two inputs are tolerated as an empty State instead: an empty/nil payload, and a JSON "null" -
-// matching how an absent or NULL column reads (and a nil value marshaled to "null"). Anything else - a JSON
+// matching an absent or NULL stored value (and a nil value marshaled to "null"). Anything else - a JSON
 // array, number, string, or malformed bytes - is an error. The result is always initialized, so the
 // mutating methods (Set/Apply), which do not allocate, are safe to call afterward.
 func (s *State) UnmarshalJSON(data []byte) error {

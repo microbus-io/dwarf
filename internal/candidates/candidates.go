@@ -55,10 +55,6 @@ type Cache struct {
 // stored rather than read off the head - see floor for why that is frozen.
 type partition struct {
 	items []Job
-	// lastFill is the depth of the last wholesale Refill; the partition's low-water mark is half of
-	// it. Partition sizes are dynamic (each refiller's slice of the global plan), so a global
-	// constant would over-trigger small partitions and under-trigger large ones.
-	lastFill int
 	// offered is how many of the CURRENTLY resident items arrived by Offer rather than by Refill. Refill
 	// subtracts it from the discard count so the refiller's waste signal is not charged for candidates it
 	// never selected. Exact because of the layout: a Refill replaces items wholesale and offers only ever
@@ -101,11 +97,6 @@ func (p *partition) floor() int {
 		return math.MaxInt
 	}
 	return p.band
-}
-
-// lowWater is the pop-below-this-requests-a-refill threshold, half the last wholesale refill.
-func (p *partition) lowWater() int {
-	return max(1, p.lastFill/2)
 }
 
 // Init sizes the cache to twice the worker count and resets it for reuse.
@@ -214,10 +205,7 @@ func (c *Cache) Resize(workers int) {
 // round-robin would hand every shard an equal share of workers regardless of backlog), then by lower
 // shard index for determinism. It neither makes nor releases reservations: it is the single-call form,
 // and routing a worker ahead of its pop is what reservations are for.
-//
-// needRefill signals that the POPPED partition has drained to its low-water mark, so the caller
-// should nudge that shard's refiller (the popped job's Shard names it) and draining overlaps refill.
-func (c *Cache) Pop() (j Job, ok bool, needRefill bool) {
+func (c *Cache) Pop() (j Job, ok bool) {
 	c.mu.Lock()
 	for c.totalLen() == 0 && !c.closed {
 		c.waiting++
@@ -227,7 +215,7 @@ func (c *Cache) Pop() (j Job, ok bool, needRefill bool) {
 	best, _ := c.bestPartition(false, nil)
 	if best == nil {
 		c.mu.Unlock()
-		return Job{}, false, false
+		return Job{}, false
 	}
 	j = best.items[0]
 	if len(best.items) <= best.offered {
@@ -237,9 +225,8 @@ func (c *Cache) Pop() (j Job, ok bool, needRefill bool) {
 	if len(best.items) == 0 {
 		best.items = nil
 	}
-	needRefill = len(best.items) <= best.lowWater()
 	c.mu.Unlock()
-	return j, true, needRefill
+	return j, true
 }
 
 // bestPartition returns the partition to drain and its shard, or nil when none qualifies. Callers hold c.mu.
@@ -277,7 +264,7 @@ func (c *Cache) bestPartition(routing bool, skip func(shard int) bool) (*partiti
 // WaitForWork blocks until some partition holds a candidate no routed worker is already on its way to take,
 // routes the caller to the best such partition, and reserves one of its candidates for it. ok is false ONLY
 // when the cache CLOSES, so a worker parked here distinguishes "drained" from "nothing yet" without a second
-// signal - the same contract Pop has always had.
+// signal - the same contract Pop has.
 //
 // The reservation is released by the caller's TryPopFrom on that shard, whether it takes a candidate or
 // finds the partition empty, so every WaitForWork must be followed by exactly one TryPopFrom. A caller that
@@ -318,20 +305,18 @@ func (c *Cache) WaitForWork() (shard int, ok bool) {
 // It releases the reservation WaitForWork made, and does so on BOTH outcomes: a worker that took its candidate
 // leaves the unreserved depth others route by unchanged, and one that found the partition empty must not
 // keep it looking spoken for. Floored at zero for a caller that never reserved.
-//
-// needRefill signals that this partition has drained to its low-water mark, exactly as Pop's does.
-func (c *Cache) TryPopFrom(shard int) (j Job, ok bool, needRefill bool) {
+func (c *Cache) TryPopFrom(shard int) (j Job, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
-		return Job{}, false, false
+		return Job{}, false
 	}
 	p := c.parts[shard]
 	if p != nil && p.reserved > 0 {
 		p.reserved--
 	}
 	if p == nil || len(p.items) == 0 {
-		return Job{}, false, false
+		return Job{}, false
 	}
 	j = p.items[0]
 	if len(p.items) <= p.offered {
@@ -341,7 +326,7 @@ func (c *Cache) TryPopFrom(shard int) (j Job, ok bool, needRefill bool) {
 	if len(p.items) == 0 {
 		p.items = nil
 	}
-	return j, true, len(p.items) <= p.lowWater()
+	return j, true
 }
 
 // Reroute moves the reservation a WaitForWork made on from to the best other partition with an unreserved
@@ -409,9 +394,9 @@ func (c *Cache) PeekShard() (shard int, ok bool) {
 //
 // The replacement is WHOLESALE, and the empty case must not be short-circuited. An empty batch is the
 // scan's statement that nothing is due on that shard, so every candidate still cached there is a dead hint
-// a worker would pop and burn a claim-CAS round trip on. An early return on len(batch)==0 - what this once
-// did - keeps the whole dead batch, and nothing breaks loudly: the cache self-corrects within a cycle, so
-// it reads as wasted work rather than a wedge, which is why the bug was invisible.
+// a worker would pop and burn a claim-CAS round trip on. Do not return early on len(batch)==0: that keeps
+// the whole dead batch, and nothing breaks loudly - the cache self-corrects within a cycle, so it reads as
+// wasted work rather than a wedge.
 //
 // The caller must NOT route a FAILED scan here. An error means "unknown", not "nothing is due", and
 // replacing a healthy partition with nothing on a transient blip idles its workers in Pop.
@@ -448,7 +433,6 @@ func (c *Cache) Refill(shard int, batch []Job, floor int) (discarded int) {
 	// simply drains within a cycle. Trimming here would make the bound strict for the first time, and nothing
 	// needs it to be.
 	p.items = batch
-	p.lastFill = len(batch)
 	// Read under the lock; a waiter Signal has already picked cannot leave Wait until we release, so this
 	// cannot undercount the ones about to go. Only unreserved candidates can be routed to a woken waiter.
 	wake := min(max(0, p.unreserved()), c.waiting)
@@ -481,8 +465,8 @@ func (c *Cache) Refill(shard int, batch []Job, floor int) (discarded int) {
 //     work sits cached right here, a strict-priority inversion rather than the soft staleness the design
 //     accepts. Note the direction: a BETTER band is harmless and simply appends.
 //   - Otherwise admit while a slot has been freed (totalLen < size), at the TAIL so nothing the plan chose
-//     is reordered. A better band is deliberately not head-inserted; preempting was built, measured as
-//     nothing, and removed.
+//     is reordered. A better band is deliberately not head-inserted: preempting measured no latency gain
+//     and costs a fairness bypass.
 //
 // Admissions are counted (partition.offered) so Refill's discard count stays the refiller's own waste.
 func (c *Cache) Offer(j Job, priority int) (admitted bool) {

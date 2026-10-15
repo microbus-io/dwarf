@@ -32,11 +32,12 @@ and calls `Startup` itself.
   `SetLogger(slog.New(slog.DiscardHandler))` (`fixtures/benchmark_test.go`) - per-iteration logging otherwise
   dominates the measurement / floods the fuzz output. `SetLogger` before `Startup` takes over entirely.
 
-The `testHashedID` switches the open path into test mode: `openDatabaseShard`
+The `testHashedID` switches the open path into test mode: `resolveShardDSN` (`internal/database`)
 resolves the base DSN in three tiers - an explicitly-set DSN wins; else `SEQUEL_TESTING_DSN` (the same variable
 sequel reads, so one knob redirects the whole suite at a real server); else the SQLite in-memory default
 **`file:dwarf_%d?mode=memory&cache=shared`** - substitutes `%d` with the shard index, then routes through
-`sequel.CreateTestingDatabase`, which keys an isolated, auto-dropped database on `(driver, baseDSN, testID)`.
+`sequel.CreateTestingDatabase` (from `openShard`), which keys an isolated, auto-dropped database on
+`(driver, baseDSN, testID)`.
 
 **Per-shard isolation comes from the DSN's `%d`, not from the testID.** The default DSN carries `%d`, so shard *i*
 opens base `file:dwarf_i?…` - a distinct base per shard, so `CreateTestingDatabase`'s key already differs per shard
@@ -47,8 +48,10 @@ resolving to the same DSN rather than silently folding them.
 
 The testID is hashed to a bounded 16 hex chars (SQL identifier limits: Postgres 63 / MySQL 64) before it reaches
 `CreateTestingDatabase`, so an arbitrarily long Go subtest name still yields a valid database name. The hash is
-deterministic, so two engines in the **same** test (both keyed by `t.Name()`) resolve to the *same* isolated
-databases - which is how an in-test multi-replica fixture gives its peer engines shared state.
+salted with a per-PROCESS nonce (`database.TestID`), so concurrent `go test` runs of one package never derive the
+same database name and drop it out from under each other. Within one process it is deterministic, so two engines
+in the **same** test (both keyed by `t.Name()`) resolve to the *same* isolated databases - which is how an in-test
+multi-replica fixture gives its peer engines shared state.
 
 ### Running the suite against a real server
 
@@ -69,7 +72,8 @@ tests fail at teardown, dropping the test database) and is not one.
 Worth doing before shipping anything dialect-sensitive: SQLite serializes writes and has the weakest planner, so it
 hides exactly the bugs the others catch - MySQL's `RowsAffected` counting *changed* rather than *matched* rows, its
 gap locks under `REPEATABLE READ`, SQL Server's filtered-index/parameterization rules and its `OUTPUT INSERTED`
-claim path, and Postgres's real MVCC lock ordering. Expect the run to be slower there: SQL Server takes ~3x SQLite.
+claim path, and Postgres's real MVCC lock ordering. Expect the run to be slower there: `fixtures` takes ~3-9x
+SQLite's time on Postgres and MySQL and ~25x on SQL Server (below).
 
 #### Per-test engine + parallel execution (connection-budget control)
 
@@ -133,8 +137,8 @@ cooperate.
 
 **Under `-race`, the engine's shared wait helpers stretch their "don't hang" ceilings.** `-race` slows execution
 ~10x, and with the whole suite parallel that compounds with CPU oversubscription, so a recovery that finishes in
-seconds serially can exceed a 15s ceiling. `enginetest.BoundedRun` and `enginetest.AwaitFlowStatus` multiply their
-timeouts by `testTimeoutScale` - a build-tagged constant that is **5 under `-race`, 1 otherwise**
+seconds serially can exceed a 15s ceiling. The `enginetest` wait helpers (`BoundedRun`, `BoundedAwait`,
+`AwaitFlowStatus`, `AwaitVisits`, `WaitUntil`) multiply their timeouts by `testTimeoutScale` - a build-tagged constant that is **5 under `-race`, 1 otherwise**
 (`internal/enginetest/timeoutscale_*.go`).
 The ceilings guard against a genuine hang, not a timing contract, so stretching them under `-race` keeps every test
 parallel without masking a real wedge (a wedged flow never completes and still trips even the stretched ceiling).

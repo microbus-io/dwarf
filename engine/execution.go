@@ -583,6 +583,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		flowCancelReason, rerr = readCancelReason(ctx, db, flowID)
 		reasonPass.Return()
 		if rerr != nil {
+			e.inFlightStateBytes.Add(-heldBytes)
+			e.inFlightStateSteps.Add(-1)
 			return errors.Trace(rerr)
 		}
 		execErr = cancelmarker.New(flowCancelReason)
@@ -766,7 +768,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		}
 		// Same create-time guarantees for a subgraph child: reject a nil or structurally invalid child graph
 		// (failing the caller step like any LoadGraph error). Validation is pure; the child's fan-in map is
-		// derived per flow at dispatch (internal/faninmap), not frozen into its JSON.
+		// derived once per graph per replica (internal/faninmap), not frozen into its JSON.
 		if subgraphGraph == nil {
 			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken,
 				errors.New("subgraph graph not found: %s", subgraphURL, http.StatusNotFound), taskName)
@@ -900,7 +902,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	}
 
 	// The completion write records the Goto target in advance_goto, a column as wide as task_name. A longer target
-	// names no node, so it fails here with the error the transition would have given it, rather than as a column
+	// names no task, so it fails here with the error the transition would have given it, rather than as a column
 	// overflow on the completion write (retried, then classified as a payload fault).
 	if gotoTarget := resultFlow.GotoRequested(); len(gotoTarget) > maxGotoTargetLen {
 		err = errors.New("task '%s' requested goto to '%s' but no goto transition exists from this task", stripProto(taskName), stripProto(gotoTarget))
@@ -1149,7 +1151,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// (fanInOfSource == ""). Only a TRUNK source (lineage_id == 0) may complete the flow; a fan-out source
 		// that is itself a cohort MEMBER (a nested fan-out) would terminalize the flow while its outer siblings
 		// are still running. (Unreachable for a validated graph - Validate requires a fan-out source to converge
-		// on a SetFanIn node, and rejects a route to END that leaves the outer frame unpopped - so this is
+		// on a SetFanIn task, and rejects a route to END that leaves the outer frame unpopped - so this is
 		// defense in depth for a graph frozen before those checks.)
 		if lineageID != 0 {
 			reason := "has no fan-in task to converge on"
@@ -1171,7 +1173,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// whether the dead end came from a `when` guard that evaluated false or a `switch`/`goto` with no
 		// live target. Completing the flow here would terminalize it while sibling branches are still running
 		// and skip the fan-in entirely, silently dropping every downstream task and the siblings' work. Fail
-		// the branch loudly instead: every branch of a fan-out must reach a fan-in node. This mirrors the
+		// the branch loudly instead: every branch of a fan-out must reach a fan-in task. This mirrors the
 		// fan-in-from-outside-a-cohort guard below, and a fan-in step is always trunk (its lineage_id is its
 		// spawn source's OWN lineage, 0 for a top-level cohort), so a legitimate `<fan-in> -> END` still
 		// completes here.
@@ -1205,7 +1207,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	}
 
 	// A fan-in arrival must have a cohort to arrive at. cohortSpawnID is the dispatched step's lineage_id,
-	// which is 0 for any step OUTSIDE a fan-out cohort - so a trunk step routed into a fan-in node would
+	// which is 0 for any step OUTSIDE a fan-out cohort - so a trunk step routed into a fan-in task would
 	// bump cohort_arrivals on step_id=0 (zero rows, no error) and then SELECT that step: sql.ErrNoRows,
 	// which aborts the transition transaction. The recovery defer then rewinds the just-completed step to
 	// pending, it is replayed, and it fails identically. An unbounded hot loop that hammers the database and never
@@ -1213,7 +1215,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	//
 	// A fan-out source routing to its OWN fan-in is legal and was already handled above (fireFanInDirect) -
 	// it never reaches here. What remains is a step with no cohort of its own reaching a fan-in: a trunk
-	// non-source step routed into a fan-in node (validateLineage rejects it, so a graph validated today
+	// non-source step routed into a fan-in task (validateLineage rejects it, so a graph validated today
 	// cannot produce it; the guard covers a graph frozen onto a flow BEFORE that check, replayed unvalidated
 	// on every dispatch). Failing the step is the honest outcome - the flow terminates with a clear error
 	// instead of hot-looping forever.
@@ -2204,7 +2206,7 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 // terminated, or re-claimed by a peer - so no child is created for it.
 var errCallerGone = errors.New("subgraph caller is no longer running")
 
-// dispatchURLOf resolves a graph node name to its dispatch URL.
+// dispatchURLOf resolves a task name in the graph to its dispatch URL.
 func dispatchURLOf(graph *workflow.Graph, name string) string {
 	if name == workflow.End {
 		return name

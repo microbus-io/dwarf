@@ -32,13 +32,12 @@ import (
 
 // TestForkCohort_MultiStepBranchCountsBranchesNotMembers pins Fork's cohort recompute against the
 // lineage-is-not-a-DAG trap: every step of a per-element sub-pipeline inherits the spawn's lineage_id, so a
-// cohort of 3 branches x 2 steps has SIX lineage members. Counting members (which the recompute once did)
-// writes cohort_arrivals=5 against cohort_size=3 on the clone - an overshoot the pinned invariant forbids,
-// and a fan-in that is already "fully arrived" before the rewound branch has re-run.
+// cohort of 3 branches x 2 steps has SIX lineage members. Counting members writes cohort_arrivals=5 against
+// cohort_size=3 on the clone - an overshoot the pinned invariant forbids, and a fan-in that is already "fully arrived" before the rewound branch has re-run.
 //
 // The graph is Seed -forEach(cells)-> Cell -> Enrich -> J, one branch failing; the fork rewinds that branch's
-// Cell with an override that makes it pass. The single-step branch of the existing fork fixtures is exactly
-// the degenerate case (members == branches) where the bug is invisible.
+// Cell with an override that makes it pass. The single-step branch of the other fork fixtures is exactly
+// the degenerate case (members == branches) where a member count is indistinguishable from a branch count.
 func TestForkCohort_MultiStepBranchCountsBranchesNotMembers(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -105,15 +104,10 @@ func TestForkCohort_MultiStepBranchCountsBranchesNotMembers(t *testing.T) {
 		return
 	}
 	assert.Equal(workflow.StatusCompleted, forkOutcome.Status)
-	// All three branches contributed to the fan-in merge, so the fork recovered the whole cohort. The order
-	// is not asserted: fan_out_ordinal is stamped on a branch's FIRST step, so the exit steps of a multi-step
-	// branch fold in step_id order, which the clone renumbers.
-	enriched, _ := stateVal(forkOutcome.State, "enriched").([]any)
-	got := map[any]bool{}
-	for _, v := range enriched {
-		got[v] = true
-	}
-	assert.Equal(map[any]bool{"a!": true, "b!": true, "c!": true}, got)
+	// All three branches contributed to the fan-in merge, so the fork recovered the whole cohort, in input
+	// order: every step of a branch carries the branch's fan_out_ordinal and the clone copies it, so the
+	// exit steps fold by branch, not by the step_ids the clone renumbers.
+	assert.Equal([]any{"a!", "b!", "c!"}, stateVal(forkOutcome.State, "enriched"))
 
 	_, forkID, _, err := keys.ParseFlowKey(forkKey)
 	if !assert.NoError(err) {
@@ -134,7 +128,7 @@ func TestForkCohort_MultiStepBranchCountsBranchesNotMembers(t *testing.T) {
 	enginetest.AssertInvariants(t, eng)
 }
 
-// TestForkCohort_RewindMidBranchExcludesWholeBranch is the other half of the branch-vs-member fix: the
+// TestForkCohort_RewindMidBranchExcludesWholeBranch is the other half of counting branches, not members: the
 // recompute must exclude the whole BRANCH being rewound, not merely the rewind STEP. Forking at Enrich
 // rewinds that branch from its second step, so its already-completed Cell is still a kept lineage member -
 // and counting members would score that Cell as an arrival of a branch that has not arrived.
@@ -220,12 +214,12 @@ func TestForkCohort_RewindMidBranchExcludesWholeBranch(t *testing.T) {
 }
 
 // nestedForkGraph builds Seed -forEach(cells)-> Cell -forEach(chunks)-> Chunk -> JoinChunk -> JoinCell, the
-// shape where a fan-out branch contains a fan-out of its own. It is the shape the cohort recompute was blind
-// to: a NESTED fan-out re-lineages its children (childLineageID = the inner spawn), so the Chunk steps carry
-// lineage_id = Cell, not Seed - while JoinChunk, inserted with the inner spawn's OWN lineage, carries Seed and
-// is reachable only THROUGH those Chunks (its predecessor is the inner cohort's last completer). A recompute
-// that filtered children on `lineage_id == spawn` therefore dead-ended the outer walk at the inner spawn and
-// never saw the rest of the branch.
+// shape where a fan-out branch contains a fan-out of its own. It is the shape a lineage-filtered cohort
+// recompute is blind to: a NESTED fan-out re-lineages its children (childLineageID = the inner spawn), so the
+// Chunk steps carry lineage_id = Cell, not Seed - while JoinChunk, inserted with the inner spawn's OWN lineage,
+// carries Seed and is reachable only THROUGH those Chunks (its predecessor is the inner cohort's last
+// completer). A recompute that filters children on `lineage_id == spawn` therefore dead-ends the outer walk at
+// the inner spawn and never sees the rest of the branch.
 func nestedForkGraph(t *testing.T, mux *hosts.Mux, brokenChunk string) *workflow.Graph {
 	t.Helper()
 	assert := testarossa.For(t)
@@ -261,10 +255,10 @@ func nestedForkGraph(t *testing.T, mux *hosts.Mux, brokenChunk string) *workflow
 }
 
 // TestForkCohort_NestedRewindExcludesTheWholeOuterBranch pins the first consequence of the dead-end: a rewind at
-// or past the INNER frame was invisible to the outer walk, so the outer branch was counted as ARRIVED. The clone
-// was written cohort_arrivals == cohort_size, and when the re-run branch actually re-arrived the bump pushed
-// arrivals PAST size - the very `cohort_arrivals <= cohort_size` invariant the branch-counting fix exists to
-// hold, breaking one nesting level deeper.
+// or past the INNER frame is invisible to the outer walk, so the outer branch is counted as ARRIVED. The clone is
+// written cohort_arrivals == cohort_size, and when the re-run branch actually re-arrives the bump pushes
+// arrivals PAST size - the very `cohort_arrivals <= cohort_size` invariant that counting branches exists to
+// hold, broken one nesting level deeper.
 func TestForkCohort_NestedRewindExcludesTheWholeOuterBranch(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -314,9 +308,9 @@ func TestForkCohort_NestedRewindExcludesTheWholeOuterBranch(t *testing.T) {
 }
 
 // TestForkCohort_NestedFailureInAKeptBranchStillFailsTheFork pins the worse consequence, and the one that
-// inverts Fork's contract. A branch failure lives INSIDE a kept branch's inner cohort, so the dead-ended outer
-// walk never saw it: the clone was written cohort_failures = 0 where the origin had 1, the outer cohort then
-// resolved with zero failures, and the fork COMPLETED - silently reporting success for a flow whose failed
+// inverts Fork's contract. A branch failure lives INSIDE a kept branch's inner cohort, so a dead-ended outer
+// walk never sees it: the clone is written cohort_failures = 0 where the origin had 1, the outer cohort then
+// resolves with zero failures, and the fork COMPLETES - silently reporting success for a flow whose failed
 // branch was never recovered, with that branch's output missing from the merge.
 func TestForkCohort_NestedFailureInAKeptBranchStillFailsTheFork(t *testing.T) {
 	t.Parallel()

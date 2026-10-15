@@ -29,8 +29,8 @@ import (
 )
 
 // TestCreate_RejectsNegativeOptions pins that Create rejects a negative Priority, FairnessWeight, or
-// TimeBudget with a 400 rather than silently coercing it to the engine default (the pre-fix behavior, which
-// hid a caller bug). 0 still means "use the default" for all three, so a zero-valued FlowOptions and a nil
+// TimeBudget with a 400 rather than silently coercing it to the engine default, which would hide a caller
+// bug. 0 still means "use the default" for all three, so a zero-valued FlowOptions and a nil
 // FlowOptions both create fine.
 func TestCreate_RejectsNegativeOptions(t *testing.T) {
 	t.Parallel()
@@ -63,7 +63,7 @@ func TestCreate_RejectsNegativeOptions(t *testing.T) {
 	assert.Error(err)
 	assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
 
-	// Negative time budget -> 400. Silently coerced to the engine default before the fix.
+	// Negative time budget -> 400, not silently coerced to the engine default.
 	_, err = e.Create(ctx, "fopt/g", nil, &workflow.FlowOptions{TimeBudget: -time.Second})
 	assert.Error(err)
 	assert.Equal(http.StatusBadRequest, errors.StatusCode(err))

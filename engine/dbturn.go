@@ -48,7 +48,8 @@ import (
 // NOTHING THAT TAKES A CONNECTION IS EXEMPT, and the caller that looks like it should be is the reason to
 // say so out loud. The peer Sonars must not be throttled by it: a Sonar that cannot beat reads as BLIND,
 // which makes its replica stop partitioning, so throttling the registry would let load reshape the fleet.
-// (The observable-gauge callback is ordered in the common band on purpose: a late gauge is still correct.)
+// (The backlog loop that feeds the gauges is ordered in the common band on purpose: a late gauge is still
+// correct. The gauge callback itself makes no query.)
 //
 // The answer for the Sonars is the REFILLER'S BAND (dbTurnAt with priorityRefill), not an exemption. Exempting a caller
 // does not put it outside the contest, it ranks it ABOVE every band - a bypasser takes a connection

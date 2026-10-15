@@ -98,7 +98,7 @@ Four things the shape has to get right:
   planner's `TallyAge`) is the signal that distinguishes a rotting tally from a fresh one.
 - **A turn in flight counts, but only once it has outrun the cycle period.** Same O(backlog) argument — a
   piston in the middle of a long scan is plainly still serving — but "in flight" alone is the wrong
-  predicate and shipped as a bug. A cycle whose scan fails *instantly* is also briefly in its queries
+  predicate. A cycle whose scan fails *instantly* is also briefly in its queries
   (building the error, recording the phase, logging it), measured at **~1.2% of samples**, and a reader
   sampling every 50ms catches that within seconds. It then keeps a piston that serves nothing looking alive
   indefinitely — the precise stranding the evidence exists to prevent. A scan shorter than the period will
@@ -452,12 +452,11 @@ allowed**. The missing throughput was the slow database, not the steal. Do not b
 evidence that names a cost the grace does not already bound.
 
 **`FetchSteps` orders each key oldest-first, never on a recomputed age.** Both shapes get it by
-construction — `(created_at, step_id)` is the lateral's `ORDER BY` and the window's ranking alike. An
-earlier cut selected `DATE_DIFF_MILLIS(NOW_UTC(), created_at)` and re-sorted each key in Go by age
-descending — the same ordering read backwards through millisecond-truncated arithmetic, agreeing only
-incidentally (anything created inside one millisecond fell through to the `step_id` tiebreak, which is also
-what its test exercised). The age was a leftover from the engine's version, where it fed a cross-shard merge
-that does not exist here: the planner has already assigned the slots. Note the ordering is per key only —
+construction — `(created_at, step_id)` is the lateral's `ORDER BY` and the window's ranking alike. Do not
+select `DATE_DIFF_MILLIS(NOW_UTC(), created_at)` and re-sort each key in Go by age descending: that is the same
+ordering read backwards through millisecond-truncated arithmetic, agreeing only incidentally (anything created
+inside one millisecond falls through to the `step_id` tiebreak, which is also all a test of it exercises). An
+age would only serve a cross-shard merge, and none exists here: the planner has already assigned the slots. Note the ordering is per key only —
 rows are grouped by key, not sorted across them, which is all `assemble` reads.
 
 ## `FetchSteps` passes its keys as ONE bind, and that is a correctness bound
@@ -533,7 +532,7 @@ this mistake.) CI runs `mysql:8`, so a lateral would pass every pipeline and fai
 production dialect — the ambiguity `internal/staterefs` names when it says a value keyed on this driver name
 cannot tell the two engines apart, except here it is not moot.
 
-*No `JSON_TABLE` either*, and this one shipped as a bug before it was caught. MySQL 8 gives the extracted
+*No `JSON_TABLE` either*, and this one is a bug, not a preference. MySQL 8 gives the extracted
 column the **server's** default collation while `dwarf_steps.fairness_key` carries the **database's**, so the
 join predicate raises `Error 1267: Illegal mix of collations` — measured on MySQL 8.4 with a
 `utf8mb4_0900_ai_ci` server against a `utf8mb4_general_ci` database. **MariaDB cannot reproduce it** (it has
@@ -544,7 +543,8 @@ supported-version floor down, since nothing needs `JSON_TABLE`.
 
 One bind per key is sound *here specifically*: MySQL's ceiling is 65,535 placeholders against a key count
 bounded by the cache capacity (twice the worker count, a few thousand on a large pool) — better than 20x of
-margin. The overflow this file exists to fix is SQL Server's hard 2,100, which no other dialect approaches.
+margin. The overflow the one-bind shape exists to avoid is SQL Server's hard 2,100, which no other dialect
+approaches.
 Pinned by `TestFetchQuery_BindCountIsFixed`, which asserts the mysql exception explicitly rather than skipping
 it.
 
@@ -575,9 +575,9 @@ fails loudly.
 **The `shard` attribute must be a STRING, matching the engine's.** The owner emits `shard` on its own
 instruments too, and an OTLP-native backend distinguishes attribute *types*, so the same key at two types
 is two different attributes there — which breaks any query grouping this package's instruments against the
-engine's. That join is a real one: the refiller's cost read against the turnstile's queue. This shipped as
-`attribute.Int` here while the engine used `attribute.String`, and it went unnoticed because Prometheus
-renders both as the same label string and hides the split entirely. A test cannot catch it from inside this
+engine's. That join is a real one: the refiller's cost read against the turnstile's queue. An
+`attribute.Int` here beside the engine's `attribute.String` goes unnoticed on Prometheus, which renders both as
+the same label string and hides the split entirely. A test cannot catch it from inside this
 package — the conflict only exists across the two — so it is a rule rather than an assertion.
 
 **`refillBuckets`' LOW end is load-bearing and must not be raised.** A warm same-zone band scan measures
@@ -586,14 +586,15 @@ plan flips to a sequential scan — the flip the `phase` label exists to expose.
 0.0005 file the healthy case in the first bucket and hide exactly that. The values are a public surface in their own right: a histogram whose boundaries changed
 under a dashboard is a silent regression, so treat them as fixed rather than as a tuning knob.
 
-## Two seams, and why each is the exception
+## Two faults and three checkpoints, and why each is the exception
 
 `SetSeams` takes the **owner's** `*seamster.Seamster` — one catalogue of fault names per application,
 armed in one place, however many modules consult it — for the same reason `SetMeter` takes a `Meter`. Nil
 restores an inert one, which is the default, so an unwired piston consults nothing and a disabled Seamster
 makes every consult a bool read.
 
-Two faults are consulted, **`FaultScanErr`** in `ScanBand` and **`FaultFetchErr`** in `FetchSteps`. It earns its place because it perturbs
+Two faults are consulted, **`FaultScanErr`** in `ScanBand` and **`FaultFetchErr`** in `FetchSteps`.
+`FaultScanErr` earns its place because it perturbs
 the **database query**, which is the boundary a test cannot otherwise reach — the pipeline's scan-error
 policy (clear this shard from planning, leave its cache partition *alone*) is only reachable by making a
 real scan fail, and the two halves are asymmetric, so neither can be inferred from the other. The name is
@@ -618,7 +619,7 @@ resolve a tally that predates the work under test. A caller needing "a scan has 
 waits on this first and only then on `CheckpointCycleDone` — which is what `enginetest.AwaitShardCycles`
 does. Gated on the scan succeeding, since a failed one clears the shard rather than reporting it.
 
-The other is **`CheckpointCycleDone`**, in `Run`, once per cycle that PUSHED. It earns
+The third is **`CheckpointCycleDone`**, in `Run`, once per cycle that PUSHED. It earns
 its place on the same boundary rule read from the other side — it publishes the one fact about a cycle that
 is invisible from outside the process and cannot be waited out on a clock. **Each piston turns on its own
 cadence, so "every shard has reconciled its partition against the plan" is not a function of elapsed time**:

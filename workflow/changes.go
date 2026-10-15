@@ -231,7 +231,7 @@ func fold(r Reducer, name string, base, inc json.RawMessage, contributed bool) (
 	if err != nil {
 		return nil, errors.New("reducer '%s' for field %q: %w", string(r), name, err)
 	}
-	if _, isList := baseVal.([]any); contributed && baseVal != nil && !isList && (r == ReducerAppend || r == ReducerUnion) {
+	if _, isList := baseVal.([]any); contributed && baseVal != nil && !isList && r == ReducerUnion {
 		baseVal = []any{baseVal}
 	}
 	incVal, err := decodeValue(inc)

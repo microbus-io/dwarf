@@ -202,9 +202,6 @@ func (e *Engine) resolveStoppedFlows(ctx context.Context, flowKeys []string) (ma
 			for rows.Next() {
 				var flowID int
 				var flowToken, status string
-				// TRIM BOTH. status and flow_token are CHAR(16), which Postgres blank-pads on read, so an
-				// untrimmed status matches none of the non-stopped constants and every running flow reads as
-				// done - releasing its waiter on every sweep, on a row that has not settled at all.
 				if err := rows.Scan(&flowID, &flowToken, &status); err != nil {
 					fail(err)
 					complete = false

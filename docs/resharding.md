@@ -18,8 +18,8 @@ Three rules follow, and they are the whole of this page:
 2. **The index-to-connection-string map must be identical on every replica.** A flow created on a shard a
    peer does not know about is *unroutable* there — that replica answers "not found," and a caller may
    legitimately act on that.
-3. **Nothing rebalances.** There is no mechanism to move an existing flow to a different shard, and none is
-   planned. Growth changes where *new* flows land, never where existing ones live.
+3. **Nothing rebalances.** A flow stays on the shard it was created on for its whole life. Growth changes
+   where *new* flows land, never where existing ones live.
 
 **Indexes are sparse.** They must be unique and at least 1, but need not be contiguous — shards 1, 2 and 99
 are a valid set. This exists precisely so a retired shard's index can be dropped without renumbering the
@@ -41,21 +41,27 @@ eng.SetShard(engine.ShardSpec{
 })
 ```
 
-Roll the fleet. Each replica opens and migrates shard 4 at startup and can route flow keys to it, but the
-weighted placement skips it entirely, so nothing is created there yet. At the end of this phase the
+Roll the fleet. Each replica opens and migrates shard 4 at startup and can route flow keys to it, but
+placement skips a cordoned shard entirely, so nothing is created there yet. At the end of this phase the
 fleet is uniform and no flow exists that any replica cannot reach.
 
-**Phase 2 — activate it.** Flip `Cordoned` to `false` and roll again. New flows now distribute across all
-four shards in proportion to their `Weight` (evenly, unless you set one).
+**Phase 2 — activate it.** Flip `Cordoned` to `false` and roll again. Shard 4 now takes new flows, under
+the placement rule below.
 
 **Do not collapse this into one step.** A single rolling restart leaves a window in which upgraded replicas
 place flows on shard 4 while replicas still on the old configuration cannot route to them. Work still
 executes — the replicas that know shard 4 dispatch it — but callers hitting an old replica get "not found"
 for flows that exist. That is precisely the failure the two-phase order avoids.
 
-**Weight unequal shards.** New flows spread evenly by default, so a new server larger than the existing
-ones gets no more than its equal share unless you give it a larger `Weight`. Nothing measures a shard's
-capacity for you - the weights you declare are trusted.
+**How new flows are placed.** With every `Weight` left at its default of 1, a replica places a new flow on one
+of the non-cordoned shards it dispatches, chosen at random, so the flow's first step runs at once; a replica
+that dispatches no shard places across every non-cordoned shard. Where flows land then follows where they are
+created: a fleet whose creates all come through one replica fills that replica's shards. **Any `Weight` other
+than 1**, on any non-cordoned shard, switches every replica to weighted placement over all non-cordoned
+shards, in proportion to their weights - a weight of 1.0001 counts. So declare weights to give a new server
+larger than the existing ones more than an even share, or to spread creates evenly whatever replica they
+arrive on (equal weights other than 1 do that). Nothing measures a shard's capacity for you - the weights you
+declare are trusted.
 
 **Expect the new shard to fill slowly.** It only receives *new* flows. The existing imbalance persists until
 the old shards' flows complete and age out under your retention policy.

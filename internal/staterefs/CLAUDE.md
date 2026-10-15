@@ -31,9 +31,7 @@ input for large elements, `D/(1+D)` for mid-size ones. Task outputs (`changes`) 
 - **A refs column the reader cannot decode is an error, never "no refs".** `Parse` returns one, and dispatch
   fails the step with it (the same path as a ref it cannot resolve). Degrading to no refs instead runs the task
   with every field the column points at missing, and the next mint makes that loss permanent - silent data loss.
-  That is exactly what a replica predating item refs does on meeting one (its `Parse` degraded), so the item-refs
-  release needs every replica upgraded together - a maintenance window, said so in the release notes. A later
-  change to what the column can hold is a new payload format: flows created at it carry a higher `payload_ver`,
+  A change to what the column can hold is a new payload format: flows created at it carry a higher `payload_ver`,
   an older replica defers or refuses them before it gets as far as `Parse`, and a newer one keeps minting the old
   form into older flows (`engine/CLAUDE.md`, "Payload format versions").
   Pinned by `TestStateRefs_UnreadableRefsFailTheStep`.
@@ -52,7 +50,7 @@ input for large elements, `D/(1+D)` for mid-size ones. Task outputs (`changes`) 
   is nothing to amortize over N; the array as a whole already got the `budget/N` treatment.
 - **It is free on the read side.** The anchor is the one the branch already fetches for the array, so it adds
   no anchor to the IN-list and no round trip.
-- **The split cache (`Linker.splits`) is required, not an optimization.** A plain ref is spliced without being
+- **The split cache (`cachedField.splits`) is required, not an optimization.** A plain ref is spliced without being
   decoded, so a branch never scans the array; extracting an element does. Without a cached split every branch
   scans the whole array for its one element - O(N) per branch, **O(N²) per cohort**. The splitter returns
   sub-slices of the cached bytes (no copy), safe to share for the same reason invariant 6 is. **Do not swap it
@@ -93,9 +91,13 @@ field), which is what makes the write-side win free of round-trips.
 ## Policy prices the ANCHOR, not the field
 
 `Resolve` fetches whole payload columns, so the cost is one row per *distinct anchor* (and, on a cache miss,
-one round-trip for all of them together) while any number of fields in an already-fetched row are free. From
-the measured constants (`db = k·L + s`, k ≈ 11-12, s ≈ 4.4ms; byte ceiling 46-60 MB/s), same-zone **one
-round-trip costs about what ~23KB of avoided writes buys** (`budget`). Three tiers follow:
+one round-trip for all of them together) while any number of fields in an already-fetched row are free.
+`budget` (23KB) is **the write saving one extra resolve round trip must buy**. The break-even it stands for is
+the round-trip time times the database's byte-throughput ceiling: a round trip occupies a connection for one
+RTT, and writing B bytes costs the database B/ceiling. The number of round trips a step makes does not enter it.
+At the byte ceilings `docs/benchmark-cloud.md` measures (~194-284 MB/s) and a same-zone RTT of ~0.5 ms that
+break-even is ~100-140KB, so 23KB opens anchors more eagerly than the round trip alone justifies. Moving it is
+a measurement question, not arithmetic: pair any change with a bench arm. Three tiers follow:
 
 - **Free** — a field whose anchor is already in the fetch set. Every field a step could newly anchor lives in
   that *one* step's row, so all candidates share a single prospective anchor: once any one opens it, the rest
@@ -111,7 +113,7 @@ round-trip costs about what ~23KB of avoided writes buys** (`budget`). Three tie
   the sum is never taken across anchors. At n=1 the candidacy floor equals the bar, so a sum adds nothing.
 
 **The linear `threshold` sits at `floor` (1KB), not near `budget`, because the minting replica SEEDS its
-cache.** The 23KB break-even prices a resolve that misses. A completed step's successor is offered to the
+cache.** `budget` prices a resolve that misses. A completed step's successor is offered to the
 replica that minted it (the doorbell), and the engine calls `Seed` before ringing it, so that replica's resolve
 of the predecessor is a cache hit. The read is paid only on a miss:
 - the doorbell declines the successor (the partition is at its bound, or the band is worse) and a scan picks it
@@ -128,9 +130,8 @@ the row wide, so each non-HOT update (the claim and the completion both move `st
 the completion pushes the row past 2KB and TOAST moves a third copy.
 
 - **`Seed` needs the anchor's own payload committed** - the completion write, which precedes `Mint`. The
-  engine seeds after the transition commits because that is where the successors exist, ahead of the
-  doorbell. An entry left by a transition that rolled back still matches the row (a replay re-records the
-  same bytes); it is merely unused.
+  engine seeds only after the transition commits, because that is where the successors exist, ahead of the
+  doorbell; a transition that rolled back left no successor and seeds nothing.
 - **It seeds plain refs at the dispatched step only.** An inherited ref points at an earlier anchor, and an
   item ref is served from its array's entry (`element` splits the cached bytes). The engine seeds from the
   linear mint; where a forEach branch's mint anchors what the linear one inlined (a nested forEach sharing
@@ -259,7 +260,7 @@ cohort**, against **1.0 and 0.94** in two runs with it (and ~1.0 closed-loop eit
 runs the first branch ahead of its siblings and warms the cache). It is a cold-cache stampede, not eviction;
 a bigger cache would not have fixed it.
 
-The shape is load-bearing in four ways:
+The shape is load-bearing in five ways:
 - **Only the dispatch resolve waits** (`ResolveShared`, `engine/staterefs.go` `resolveDispatchRefs`). Every
   other resolve - the fan-in, the terminal merge, `Fork` - may run inside a transaction holding a
   connection and the flow row's lock, and must not wait on another goroutine: parked fan-ins could drain the
@@ -388,16 +389,3 @@ refs that, so measured on Postgres at 64K/6 steps its `state` column is **0.0 K/
 K/flow** of `changes`, versus `carry`'s 64.1 K/flow of `state` and 0.1 K/flow of `changes`. The 5x between
 them is that `state` genuinely produces five payloads and `carry` produces one. Refs remove the CARRY
 multiplier; write volume for actually-new data is irreducible.
-
-## Open follow-ups
-
-- **Whether `maxAnchors` ever binds** is unmeasured (how many large fields are concurrently live in a
-  realistic workflow). The engine's byte counters are the instrument.
-- **Whether the resolve cache keeps an item-ref'd array resident across a cohort under real load** is
-  unmeasured (the concurrent-miss stampede at dispatch is handled; eviction is the remaining question). Item refs add
-  no anchor, but a cohort leans on the array's anchor staying cached - and in a nested fan-out one root anchor
-  backs the whole tree of dispatches. A cohort's branches spread over the shard's dispatchers (`step_id % R`),
-  and the cache is per replica, so the healthy reading is about one miss **per replica** per cohort - min(R, N)
-  reads of the array, and up to R cached copies of it across the fleet - not one per branch. Check it on
-  `dwarf_state_read_bytes`, with engine memory alongside, using a forEach over a large array whose branches are
-  1-3 steps deep.

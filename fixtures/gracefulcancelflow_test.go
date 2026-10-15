@@ -82,7 +82,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 
 	mux := hosts.NewMux()
 
-	// holder is a one-node flow whose task holds the engine's only worker until released, so a second flow's
+	// holder is a one-task flow whose task holds the engine's only worker until released, so a second flow's
 	// entry step is guaranteed to still be pending - not yet claimed - when Cancel lands on it.
 	mux.HandleGraph("gracefulcancelflow.verify:428/holder", func() *workflow.Graph {
 		g := workflow.NewGraph("Holder")

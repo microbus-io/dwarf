@@ -280,7 +280,7 @@ func TestFaultComposition_DeepSubgraphReviveLoss(t *testing.T) {
 		mux.HandleGraph(lvl.url, g)
 		mux.HandleTask(lvl.task, subgraphTask(lvl.child))
 	}
-	// l3 is the leaf child - a plain one-node flow, no further nesting.
+	// l3 is the leaf child - a plain one-task flow, no further nesting.
 	l3 := workflow.NewGraph("FC-L3")
 	l3.SetURL("Leaf", "fcdeep/l3-leaf")
 	l3.AddTransition("Leaf", workflow.End)

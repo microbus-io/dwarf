@@ -83,8 +83,8 @@ never both: `contributions`, combined through the field's reducer, and `overwrit
 
 **A delete is an overwrite with a null value, and a materialized state holds no deletes.** `State.Apply` enacts
 it. `Changes.Set` turns a nil on a plain field into such a delete and drops a nil on a reduced one. A null
-CONTRIBUTION is still read - from `ChangesOf` of plain input, from a remote host, and from a row stored before
-overwrites existed: it deletes a field with no reducer and is the reducer's IDENTITY on a reduced field. That
+CONTRIBUTION can still arrive - from `ChangesOf` of plain input and from a remote host: it deletes a field with
+no reducer and is the reducer's IDENTITY on a reduced field. That
 identity is what lets a task that collected nothing into a nil slice write it safely - at the JSON level a nil
 slice and a bare nil cannot be told apart. `isCleared` therefore still recognizes both null spellings (a Go-nil
 `json.RawMessage` and the bytes `null`).
@@ -107,11 +107,8 @@ may be deleted in a branch; it folds in branch order. Pinned by `fixtures/reduce
   failure), and the engine re-checks a returned result (`checkChanges`), because a remote host can send `x!!`.
   Graph-declared names cannot contain `!`. A plain state - input, a step's `state`, `final_state` - may still
   hold such a name as data.
-- **A row with no `!` key reads as all contributions.** That is right for every row written since writes to
-  a reduced field became contributions. It is WRONG for a v0.11.0 row: there a write to a reduced field outside
-  a fan-out branch was the field's whole value, so read as a contribution it counts the history twice. A v0.11.0
-  database therefore has to be drained of in-flight flows before the upgrade (release notes). If both spellings
-  of a field appear, the overwrite wins.
+- **A row with no `!` key reads as all contributions.** If both spellings of a field appear, the overwrite
+  wins.
 - **Every reader of a `changes` column decodes it as `Changes`** (`changesOf` in the engine). A plain `State`
   decode reads `name!` as a field of its own. The state-refs anchor lookup is the one exception, reading the raw
   object and trying `field!` before `field`: an anchored field is one the step replaced, so it is under one of
@@ -155,9 +152,8 @@ only the RTT-matched reps leaves everything inside noise.
 
 Every field is held as JSON; there is no per-field choice between a decoded Go value and JSON. **Do not add a
 decoded slot beside the JSON one.** A per-field either-or representation measures the same - the
-carried-payload win is captured once carried fields are not decoded, and an A/B between the two came out
-neutral on every axis (RTT-matched: heap +3.9%, throughput +2.7%, both noise) - so uniformity is chosen for
-what it removes:
+carried-payload win is captured once carried fields are not decoded, and an RTT-matched A/B between the two
+came out within noise on heap and throughput - so uniformity is chosen for what it removes:
 
 - **Every extra null spelling is one more for a cleared-check to miss.** A null value already has two: a Go
   nil `json.RawMessage` and the bytes `null` (a `Set(k, nil)`, or a value read back from a column).
@@ -174,6 +170,11 @@ store.** JSON has one number type, so a value stored as an `int` and read into a
 `float64`. A typed getter (`GetInt`, ...) or `Get` with a typed target returns the type asked for; only an
 untyped read is float64-domain. This is a deliberate trade of that intuition for the memory above, and it
 is why some tests assert `float64` where a reader might expect `int`.
+
+**`State.Names` yields names only; do not add a name/value iterator.** Yielding values means materializing
+every one, and a field held as JSON is decoded to be yielded, so a loop that reads two fields out of forty pays
+the decode for all forty - the cost this type exists to avoid. Iterating names is free and the reads stay
+explicit; `Parse` into a `map[string]any` is the escape hatch, visible at the call site.
 
 ### The constraints that hold this up
 
@@ -200,17 +201,18 @@ is why some tests assert `float64` where a reader might expect `int`.
    accumulated bytes - roughly 500x the element encodes at width 1,000. The replace path (the default, and
    the overwhelming majority of fields) moves bytes and pays none of this.
    **`append` and `concat` are not decoded at all: they splice bytes** (`appendRaw`/`concatRaw`, used by
-   `ApplyAll` and `Changes`' fold). They are the reducers a long history or transcript sits under, and every step that adds a message pays the fold twice (the
-   carrier's `Set` and the successor base). Measured (M1 Pro, chat-message objects): decoding ran ~100 MB/s -
-   0.97 ms and 600 KB allocated per fold at a 100 KB history, 9.5 ms at 1 MB - against 17 µs and 0.10 ms
-   spliced, 4 allocations whatever the size (`BenchmarkFold_*`). `ApplyAll` collects the pieces and joins them
-   once, so a wide fan-in stays linear. The splice keeps every element's bytes as given, so an integer beyond
-   2^53 survives an append exactly, which the decoding fold rounded. Pinned by
-   `TestAppendRaw_EqualsTheDecodingFold` and `TestConcatRaw_EqualsTheDecodingFold` (every input shape, escapes
-   and the database's re-spelled whitespace included). `concat` splices between the quotes, which is exact
-   because JSON escapes are self-contained - except a UTF-16 surrogate pair escaped across two writes, which
-   the decoding fold turned into two U+FFFD and the splice reunites; Go's encoder never escapes that way.
-   `union` and `merge` must compare decoded values, so they decode.
+   `ApplyAll` and `Changes`' fold). They are the reducers a long history or transcript sits under, and every
+   step that adds a message pays the fold twice (the carrier's `Set` and the successor base). **Do not fold
+   them by decoding:** a decoding fold costs time and allocation in proportion to the accumulated history on
+   every fold, while the splice costs a fixed handful of allocations whatever the size (`BenchmarkFold_*`
+   measures both). `ApplyAll` collects the pieces and joins them once, so a wide fan-in stays linear. The
+   splice keeps every element's bytes as given, so an integer beyond 2^53 survives an append exactly, where a
+   decoding fold would round it. Pinned by `TestAppendRaw_EqualsTheDecodingFold` and
+   `TestConcatRaw_EqualsTheDecodingFold` (every input shape, escapes and the database's re-spelled whitespace
+   included). `concat` splices between the quotes, which is exact because JSON escapes are self-contained -
+   except a UTF-16 surrogate pair escaped across two writes, which a decoding fold turns into two U+FFFD and
+   the splice reunites; Go's encoder never escapes that way. `union` and `merge` must compare decoded values,
+   so they decode.
    `Apply` is `ApplyAll` of one member, so there is one fold to keep correct. Pinned by
    `TestState_ApplyAllMatchesPerMember`, which asserts the one-pass and per-member results are
    byte-identical, so the optimization can never quietly change a fan-in outcome. **On a reducer error the
@@ -228,15 +230,15 @@ is why some tests assert `float64` where a reader might expect `int`.
 **Stored bytes are NOT canonical, and nothing compares them.** `Set` keeps what `json.Marshal` writes (a
 map's keys sorted, a struct's in declaration order), a `json.RawMessage` and `SetJSON` keep the caller's
 bytes as given, and a column read keeps the database's spelling (JSONB/JSON re-space and reorder). Every
-comparison that exists decodes first - `union` over decoded values. A
-byte-comparing `union` (the standing plan in the root `CLAUDE.md` landmine) therefore cannot assume canonical
-input: it must canonicalize what it compares, or every write path above must be made canonical first.
+comparison that exists decodes first - `union` over decoded values. A byte-comparing `union` (raw elements
+compared instead of decoded ones) therefore cannot assume canonical input: it must canonicalize what it
+compares, or every write path above must be made canonical first.
 
 **A blob payload cannot measure any of this.** A JSON string decodes to a Go string of about the same size,
 so an opaque payload expands ~1x and a measurement taken with one reads flat however state is represented.
 Structured data is where the expansion lives: 800 small records (50.3KB of JSON) occupy 340.7KB decoded -
 **6.8x** - because every element costs an interface, a boxed float64 and a map entry. Element count drives
-it, not byte count. See `bench/CLAUDE.md`.
+it, not byte count. See the carry payload's comment in `bench/workloads.go`.
 
 ### Numbers are float64-domain; two unstorable values are a KNOWN, UNGUARDED punt
 
@@ -278,7 +280,9 @@ exposure to revisit, not a non-issue:
   flow on the recommended production database: the write that carries it is the step's own **completion
   UPDATE** (`execution.go`), which, left to lease recovery, would leave the step `running` with `error=""`
   and re-execute the task forever (reproduced against real Postgres). **Workaround: base64-encode binary
-  data.** (Invalid UTF-8 needs no guard - `encoding/json` coerces it to `U+FFFD` on marshal.) `persist.go`'s
+  data.** (Invalid UTF-8 in a Go string is coerced to `U+FFFD` on marshal; bytes stored as given - a
+  `json.RawMessage` passed to `Set`, a remote host's `changes` - keep it, and the `append`/`concat` splice
+  carries it forward, so Postgres rejects it the same way.) `persist.go`'s
   "ask the database" classifier turns that rejected payload write into a clean step failure instead, and
   `sanitizeErrorMessage` strips control bytes from the *error-text* write so the failure itself can land - so
   a NUL is a clean failure at write time on Postgres and silently stored on the others: not benign.

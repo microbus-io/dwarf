@@ -181,8 +181,8 @@ func (e *Engine) initMetrics() error {
 	}
 	// Counter instrument names carry no _total suffix; the Prometheus exporter appends it at scrape time.
 	// Unit-denominated counters end with the unit (…_bytes), per the Prometheus naming convention.
-	m.flowsStarted = ctr("dwarf_flows_started", "Counts flows that have been started, by the shard they were placed on and by priority. The shard attribute measures PLACEMENT: a new flow's shard is a random pick weighted by each shard's declared Weight, so a skew here means the fleet's work is not spread the way the weights intended, and one shard's steps carry more than their share. The increase of this minus that of dwarf_flows_ended over a window is how many flows in flight were gained or lost in it, per shard and per priority; read it as a rate, since each replica's counters restart from zero with the replica. Note a closed-loop caller makes starts and terminations equal by construction - only an open-loop arrival rate lets a shortfall here indict the CALLER rather than the engine.")
-	m.flowsEnded = ctr("dwarf_flows_ended", "Counts flows that have reached a terminal status, by the shard holding them, by priority, and BY WHICH terminal status - completed, failed, terminated, or cancelled. All four are counted, so dwarf_flows_started minus this does not drift upward by every flow that did not finish cleanly. Subgraph children are counted here and as starts, so a tree nets to zero. Split by status for the failure/termination/cancellation rates; dwarf_steps_executed{status} is the step-level view of the same thing.")
+	m.flowsStarted = ctr("dwarf_flows_started", "Counts flows that have been started, by workflow, by the shard they were placed on, and by priority. The shard attribute measures PLACEMENT: a replica places a new flow on a shard it dispatches, or by each shard's declared Weight once any weight other than 1 is set, so a skew here means the fleet's work is not spread the way the Create calls or the weights intended, and one shard's steps carry more than their share. The increase of this minus that of dwarf_flows_ended over a window is how many flows in flight were gained or lost in it, per shard and per priority; read it as a rate, since each replica's counters restart from zero with the replica. Note a closed-loop caller makes starts and terminations equal by construction - only an open-loop arrival rate lets a shortfall here indict the CALLER rather than the engine.")
+	m.flowsEnded = ctr("dwarf_flows_ended", "Counts flows that have reached a terminal status, by workflow, by the shard holding them, by priority, and BY WHICH terminal status - completed, failed, terminated, or cancelled. All four are counted, so dwarf_flows_started minus this does not drift upward by every flow that did not finish cleanly. Subgraph children are counted here and as starts, so a tree nets to zero. Split by status for the failure/termination/cancellation rates; dwarf_steps_executed{status} is the step-level view of the same thing.")
 	m.stepsExecuted = ctr("dwarf_steps_executed", "Counts steps that have been executed, by the shard holding them. The shard attribute is what turns this into per-shard dispatch throughput - the quantity a per-shard piston, pool and partition all separately govern, and the one a fleet-wide total hides.")
 	m.stepsRecovered = ctr("dwarf_steps_recovered", "Counts steps reset to pending because their worker is gone - a running step whose lease expired (its task runs again), or a completed step whose transition never committed (it is replayed from its recorded completion; its task does not run again) - the crash-recovery path. A nonzero rate means workers are dying or overrunning their lease.")
 	m.stepsUnwedged = ctr("dwarf_steps_unwedged", "Counts parked steps recovered by the wedge sweep, labelled by park type. A nonzero value signals a latent bug whose effect the sweep papered over.")
@@ -200,7 +200,7 @@ func (e *Engine) initMetrics() error {
 	// byte-throughput ceiling (disk/WAL), which binds separately from its steps ceiling. Reads/writes by
 	// the introspection APIs (List/History/Snapshot) and flow-row writes (final_state) are not counted.
 	m.stateWriteBytes = bytesCtr("dwarf_state_write_bytes", "Counts payload bytes written to step rows on the execution path, labelled by workflow and by column (state, changes, interrupt_payload).")
-	m.stateReadBytes = bytesCtr("dwarf_state_read_bytes", "Counts payload bytes read from step rows on the execution path, labelled by workflow and by column (state, changes, resume_data, subgraph_result).")
+	m.stateReadBytes = bytesCtr("dwarf_state_read_bytes", "Counts payload bytes read from step rows on the execution path, labelled by workflow and by column (state, changes, resume_data, subgraph_result, and state_ref for a large field stored once and read back from the step holding it).")
 
 	// The piston-owned instruments (the three dwarf_refill_* plus dwarf_steps_stolen) are NOT built here.
 	// They belong to the pistons, which own the cycle they measure, and are resolved from the meter this
@@ -245,7 +245,7 @@ func (e *Engine) initMetrics() error {
 	m.operationSeconds = operationSeconds
 	m.turnWait = turnWait
 	m.gateWait = gateWait
-	m.stepsOffered = ctr("dwarf_steps_offered", "Counts steps admitted to this replica's candidate cache by the DOORBELL rather than selected by a refill cycle - a step whose predecessor just completed, taking the slot it vacated. Read against dwarf_refill_candidates_selected it is the share of dispatch that came from step origination instead of from the weighted fairness plan; a high share is normal under load (a cycle supplies only ~1.05-1.5x ahead of consumption, so partitions drain to empty between cycles) and is what keeps a sequential chain from paying a cycle per hop.")
+	m.stepsOffered = ctr("dwarf_steps_offered", "Counts steps admitted to this replica's candidate cache by the DOORBELL rather than selected by a refill cycle - a step whose predecessor just completed, taking the slot it vacated. Read against dwarf_refill_candidates_selected it is the share of dispatch that came from step origination instead of from the weighted fairness plan; a high share is normal under load (a partition that drains to empty between cycles admits the next step at once) and is what keeps a sequential chain from paying a cycle per hop.")
 	m.stepsClaimPreempted = ctr("dwarf_steps_claim_preempted", "Counts popped candidates skipped without a claim attempt because a sibling worker in this replica already had one in flight for that step - round trips SAVED, the counterpart to dwarf_steps_claim_lost. The refiller re-selects a step whose claim is uncommitted (the selection predicate reads committed state), so this rises with the scan rate rather than with the replica count. Compare the two: a healthy engine converts what would have been lost claims into skips.")
 	m.peerChanges = ctr("dwarf_peer_changes", "Counts times a shard's observed replica count MOVED, by shard. In a settled fleet this must be ZERO for the whole run: every increment past the initial join re-divides that shard's connection pool and re-seats every replica's residue class of step ids, so a nonzero rate means the fleet is churning and the two divisors are chasing it. The usual cause is not a real join or departure but a stale registry row - a replica that died without deleting its row inflates the count until it ages out, and a crash-loop with random ids accumulates them faster than that.")
 	m.stepsClaimLost = ctr("dwarf_steps_claim_lost", "Counts claim attempts whose CAS matched no row - the step was already claimed by a peer, or left the claimable state (terminated, cancelled, resumed, parked) between selection and claim. The lease-contention signal: measured against dwarf_steps_executed it is the share of dispatch round trips that produced no work, and it rises with the replica count when replicas select overlapping candidates. Not an error - the step is simply someone else's - but a high ratio means the fleet is paying for round trips it cannot use.")
@@ -490,8 +490,9 @@ func (e *Engine) metricFlowEnded(ctx context.Context, workflowURL, status string
 
 // The `column` attribute on the byte counters is the dwarf_steps column the bytes moved through -
 // "state" (snapshots), "changes" (task output deltas), "resume_data", "interrupt_payload",
-// "subgraph_result" - bounded cardinality, and lets a chart split task data from engine snapshots from
-// human-in-the-loop payloads. Sum across the attribute for the total.
+// "subgraph_result", and on reads "state_ref" (the anchor rows a state-refs resolve scans) - bounded
+// cardinality, and lets a chart split task data from engine snapshots from human-in-the-loop payloads. Sum
+// across the attribute for the total.
 
 func (e *Engine) metricStateWriteBytes(ctx context.Context, workflowURL, column string, n int) {
 	if e.metrics == nil || n <= 0 {
@@ -526,8 +527,8 @@ func (e *Engine) metricStepExecuted(ctx context.Context, taskName, status string
 	if e.metrics == nil {
 		return
 	}
-	// Step disposition keys by node name (graph topology - "which node"), unlike the concurrency/saturation
-	// metric which keys by task_url (the downstream endpoint). The shard is the third axis and the one that
+	// Step disposition keys by task name (graph topology - "which task"), not by task_url (the downstream
+	// endpoint, which several task names may share). The shard is the third axis and the one that
 	// makes per-shard dispatch rate readable: a piston, a pool and a residue class are all per shard, so a
 	// fleet-wide total cannot show one shard falling behind the others.
 	opts := e.metrics.stepExecOpts.get(stepExecKey{task: taskName, status: status, shard: shardNum}, func(k stepExecKey) *attrOpts {

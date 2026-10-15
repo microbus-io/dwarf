@@ -161,12 +161,11 @@ func (s *ShardSet) Open(ctx context.Context, cfg Config) error {
 // resolveShardDSN resolves one shard's DSN.
 //
 // In PRODUCTION the operator's DSN is used exactly as given - no formatting, no substitution. A DSN is a
-// credential-bearing string and percent-encoding in it is routine (`p%40ss` for a password `p@ss`), so
-// running it through fmt.Sprintf - which interprets EVERY `%` as a verb, not just `%d` - silently
-// corrupted it: `%40s` parsed as "width 40, verb s", swallowed the shard index there, and left the real
-// `%d` with no argument (`%!d(MISSING)`). The driver then failed with an opaque parse error naming
-// neither the shard nor the cause. Shards are declared one by one with their own DSN, so a template was
-// never needed here.
+// credential-bearing string and percent-encoding in it is routine (`p%40ss` for a password `p@ss`). Do not
+// run it through fmt.Sprintf: it interprets EVERY `%` as a verb, not just `%d`, so `%40s` parses as "width
+// 40, verb s", swallows the shard index there, and leaves the real `%d` with no argument
+// (`%!d(MISSING)`) - and the driver fails with an opaque parse error naming neither the shard nor the
+// cause. Shards are declared one by one with their own DSN, so production needs no template.
 //
 // In TEST MODE the DSN is a template by design - one base is shared across shards and `%d` is what makes
 // each shard's database distinct (the per-shard isolation the fixtures rely on).

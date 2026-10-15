@@ -20,12 +20,11 @@ package workflow
 // Returned by Snapshot, Await, and Run. Side-channel fields are populated only for the matching
 // Status; for example InterruptPayload is populated only when Status is "interrupted".
 type FlowOutcome struct {
-	// Status is the flow's current lifecycle status: created, running, interrupted, completed, failed,
-	// terminated, or cancelled.
+	// Status is the flow's current lifecycle status: running, interrupted, completed, failed, terminated, or
+	// cancelled.
 	Status string `json:"status,omitzero"`
-	// State is the flow's accumulated state. For terminal statuses this is the final_state; for an
-	// interrupted flow it is the merged snapshot of the interrupted step. For a running flow it is
-	// deliberately empty - the live in-flight merged state is not reconstructed.
+	// State is the flow's accumulated state. For terminal statuses this is the flow's final state; for an
+	// interrupted flow it is the merged snapshot of the interrupted step. For a running flow it is empty.
 	State State `json:"state,omitzero"`
 	// Error is the task error string. Populated when Status is "failed".
 	Error string `json:"error,omitzero"`

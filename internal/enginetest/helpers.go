@@ -40,10 +40,11 @@ func (NoopHost) ExecuteTask(ctx context.Context, name string, flow *workflow.Flo
 
 // WaitUntil polls cond until it returns true or timeout elapses, returning cond's final value. A generic
 // timing helper with no engine dependency; the cadence (5ms) is fine-grained enough for test observation
-// without busy-spinning.
+// without busy-spinning. The timeout is a "did it hang" ceiling and stretches under -race like the other
+// helpers' ceilings, so pass it unscaled.
 func WaitUntil(t *testing.T, timeout time.Duration, cond func() bool) bool {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(timeout * testTimeoutScale)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return true

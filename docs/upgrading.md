@@ -153,7 +153,7 @@ the new flow's initial state. You lose the original's progress and history conti
 not a resume.
 
 Which is why the compatibility obligation above is a hard requirement rather than a preference: **keeping
-the old task name routable is the only cheap option.** Plan the retirement, or plan the migration.
+the old task URL routable is the only cheap option.** Plan the retirement, or plan the migration.
 
 ## Rolling back across a migration
 

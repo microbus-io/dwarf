@@ -170,8 +170,8 @@ concern, which is precisely why `Cycle` has none to spend on one.
 
 ## The error policy, and its asymmetry
 
-This is the part most likely to be "simplified" into a bug. The split put the two halves in different
-types, so neither can be read without the other.
+This is the part most likely to be "simplified" into a bug. The two halves live in different types, so
+neither can be read without the other.
 
 | Outcome | Owner | Planner | Cache |
 |---|---|---|---|
@@ -182,8 +182,7 @@ types, so neither can be read without the other.
 | Plan gave no slots | Supplier | (already tallied) | **`Refill(nil, NoBand)`** — cleared |
 | **Fetch failed** | Supplier | **untouched** | **untouched** |
 
-**A failed scan clears the shard but spares the cache — and after the split those are two different
-loops.** Clearing is necessary because a stale claim on the best band makes every peer find none of its own
+**A failed scan clears the shard but spares the cache — and those are two different loops.** Clearing is necessary because a stale claim on the best band makes every peer find none of its own
 keys there and dispatch nothing. Sparing the cache is necessary because the failure means *unknown*, not
 "nothing is due" — wholesale-replacing a healthy partition with nothing because the database blipped would
 idle this shard's workers for a cycle, throwing away the last good information anyone had.

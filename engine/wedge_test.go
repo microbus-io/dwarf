@@ -162,9 +162,9 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 // way out. It must fail the caller: the parent re-arm writes the error onto the parked step, the
 // re-dispatched flow.Subgraph returns it, and the task fails through its normal disposition.
 //
-// Before the fix the sweep detected this correctly and then rolled back every time (computeFinalState
-// SELECTed `WHERE flow_id=0` -> sql.ErrNoRows), so dwarf_steps_unwedged never moved and the flow hung
-// forever - only Delete got it out.
+// The failure mode pinned: a sweep that detects this correctly and then rolls back every time
+// (computeFinalState SELECTing `WHERE flow_id=0` -> sql.ErrNoRows) never moves dwarf_steps_unwedged, and the
+// flow hangs forever - only Delete gets it out.
 func TestWedgeSweep_SubgraphCallerWithNoChildFails(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

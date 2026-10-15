@@ -84,7 +84,7 @@ func (f *RawFlow) SetUpdatedAt(updatedAt time.Time) {
 	f.updatedAt = updatedAt
 }
 
-// SetStepCreatedAt records the step row's createdAt, preserved across retries. Called by the
+// SetStepCreatedAt records when the step was created, preserved across retries. Called by the
 // orchestrator before dispatching a task so Retry can measure its giveUpAfter horizon and the task
 // can read it via Flow.StepCreatedAt().
 func (f *RawFlow) SetStepCreatedAt(stepCreatedAt time.Time) {

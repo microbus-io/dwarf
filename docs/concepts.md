@@ -51,7 +51,7 @@ A flow's key is a composite string of the form `{shard}-{flowID}-{token}`. You p
 ## Step
 
 A **step** is one task execution within a flow. Each step captures an immutable **input snapshot**
-(`state`), the **output delta** the task produced (`changes`), and metadata (status, error, timings,
+(`state`), the **writes** the task made (`changes`), and metadata (status, error, timings,
 attempt count). Steps are numbered by depth; parallel fan-out siblings share a depth. The next step's
 input is `merge(state, changes)`. This immutability is what makes checkpointing, forking, and crash
 recovery possible — every step is a durable, replayable record.
@@ -100,18 +100,18 @@ and [Fan-out & subgraphs](fan-out-and-subgraphs.md).
 Every step has three JSON facets:
 
 - **state** — the input snapshot, set when the step is created and (normally) immutable.
-- **changes** — the output delta the task wrote.
+- **changes** — what the task wrote.
 - **interrupt payload** — what a task passed to `Interrupt`, surfaced to the awaiting caller.
 
 A task receives `merge(state, changes-so-far)` as its working state. It mutates the flow; the engine
-records the diff as that step's `changes`. The next step's `state` is the merge of the current step's
+records what it wrote as that step's `changes`. The next step's `state` is the merge of the current step's
 state and changes. Because each step's snapshot is frozen, you can fork from any step, replay history,
 or recover a crashed flow without ambiguity about "what did this task see?".
 
 ## How it fits together
 
 > You define a **graph** of **tasks**. The engine creates a **flow** for each execution, runs one **step**
-> per task, persisting **state** between them and merging parallel branches with **reducers**. Related
+> per task, persisting **state** between them and combining writes to a field with **reducers**. Related
 > flows form a **thread**.
 
 Next: [Building graphs](graphs.md).

@@ -154,8 +154,7 @@ sum by (priority) (max by (shard, priority) (dwarf_steps_pending))
 
 `dwarf_db_phase_workers` carries a `role` label that aggregates across replicas but **not across roles**:
 `enter` and `exit` are separate populations. For the pressure a phase actually reached rather than whatever
-the scrape happened to catch, take `max_over_time` of it — there is deliberately no peak instrument, since a
-watermark held since process start goes constant within hours while a windowed max does not.
+the scrape happened to catch, take `max_over_time` of it.
 
 Labels are deliberately bounded: there are no per-`fairness_key` labels (that would be unbounded
 cardinality), so fairness metrics are aggregate-only. `priority` and `workflow` are labels on the assumption
@@ -262,7 +261,7 @@ and want these split per shard, give each server's database a distinct name; `dw
 All three observability knobs — `SetLogger`, `SetMeterProvider`, `SetTracerProvider` — are
 **construction-time**: set them before `Startup`. The engine resolves the providers and wires them into the
 worker hot path and the shard DBs once at startup, so a call after `Startup` is rejected with a 409 (it
-keeps the hot-path reads lock-free). Hot-swapping a provider on a live engine is not supported.
+keeps the hot-path reads lock-free).
 
 ## Putting it together
 

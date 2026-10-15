@@ -107,7 +107,7 @@
   `GetInt` and `when` expressions are exact, but an untyped read rounds. And **binary data base64-encoded** —
   a `NUL` byte is rejected by PostgreSQL and accepted by everything else.
   → [Writing tasks](tasks.md#large-integers-exact-in-storage-rounded-by-untyped-reads)
-- [ ] **Every non-default fan-in field has an explicit reducer.** There is no inference from a field's name —
+- [ ] **Every field whose writes should combine has an explicit reducer.** There is no inference from a field's name —
   an unwired `sumTotal` silently takes `replace`, not `add`. → [Building graphs](graphs.md)
 - [ ] **Flow lifetimes are bounded in author space** if you need them bounded. The engine imposes no flow
   deadline, and `interrupted` flows wait indefinitely. → [Writing tasks](tasks.md#timestamps)

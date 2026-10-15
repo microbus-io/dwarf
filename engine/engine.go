@@ -55,12 +55,16 @@ import (
 // ShardSummary is the health/size summary of a single database shard.
 type ShardSummary struct {
 	// Index is the shard's index, as declared in its ShardSpec.
-	Index int    `json:"index,omitzero"`
+	Index int `json:"index,omitzero"`
+	// Error is the failure of a trivial query to the shard, empty when the shard answered. When it is set,
+	// Steps and Flows are not counted and read zero.
 	Error string `json:"error,omitzero"`
 	// Latency is the round trip of a trivial query to the shard.
 	Latency time.Duration `json:"latency,omitzero"`
-	Steps   int           `json:"steps,omitzero"`
-	Flows   int           `json:"flows,omitzero"`
+	// Steps is the total number of step records held on the shard, of every flow and every status.
+	Steps int `json:"steps,omitzero"`
+	// Flows is the total number of flows held on the shard, of every status, subgraph flows included.
+	Flows int `json:"flows,omitzero"`
 }
 
 const (
@@ -114,8 +118,8 @@ type Engine struct {
 	// (claimer) as forensic provenance, deliberately unindexed.
 	engineID int64
 
-	// stateCacheBytes is the SetStateCacheSize override of the resolve-cache budget, split across the shards'
-	// Linkers at Startup; 0 derives it from the process's memory limit (stateCacheBudget).
+	// stateCacheBytes is the SetStateCacheSize override of the budget of the replica's one resolve cache,
+	// which every shard's Linker reads through; 0 derives it from the process's memory limit (stateCacheBudget).
 	stateCacheBytes int64
 
 	// flowsStartedCount / flowsEndedCount are cheap in-memory lifecycle counts, incremented
@@ -200,7 +204,7 @@ type Engine struct {
 	db database.ShardSet
 	// testConnCap caps each shard's pool (and reserves that much global connection budget) in test mode,
 	// so parallel per-test engines against one server stay under its max_connections. Seeded from
-	// testConnCapDefault; 0 disables it. Only ever consulted when testHashedID != "".
+	// defaultTestConnCap; 0 disables it. Only ever consulted when testHashedID != "".
 	testConnCap int
 	// testHashedID is the hashed test database id when the engine is in test mode (NewEngineUnderTest,
 	// keyed by the test name it was given), empty in production. It becomes Config.TestID at Open, wrapping
@@ -399,9 +403,9 @@ type ShardSpec struct {
 	Index int
 	// DSN is the connection string of the shard's database (dialect auto-detected), used EXACTLY as
 	// given - the engine never formats or rewrites it, so a percent-encoded credential (a password
-	// "p@ss" written "p%40ss") survives intact. Each shard is declared with its own DSN; there is no
-	// template. An empty DSN is only valid in test mode, where the DSN IS a template (a "%d" is replaced
-	// with the shard index, which is what gives each shard its own isolated test database).
+	// "p@ss" written "p%40ss") survives intact. Each shard is declared with its own complete DSN. An empty
+	// DSN is only valid in test mode, where the DSN is a template (a "%d" is replaced with the shard index,
+	// which is what gives each shard its own isolated test database).
 	DSN string
 	// MaxConnections is the shard's connection budget: the connections the replicas that dispatch the
 	// shard (up to two of them) share. Every other replica holds a reader pool of its own there - one
@@ -414,8 +418,15 @@ type ShardSpec struct {
 	// set it explicitly when shards share a server. Declare the SAME value for a shard on every replica, as
 	// with the shard set itself.
 	MaxConnections int
-	// Weight is the shard's share of new-flow placement, relative to the other shards. Left at 0, it is 1,
-	// so flows are spread evenly. Give a larger database a larger weight in a mixed fleet.
+	// Weight is the shard's share of new-flow placement, relative to the other shards. Left at 0, it is 1.
+	//
+	// While every non-cordoned shard's weight is 1, a replica places a new flow on one of the shards it
+	// dispatches (over all non-cordoned shards only when it dispatches none), so flows spread by where the
+	// Create calls arrive: a single replica creating every flow fills only its own shards. Any weight other
+	// than 1 on any non-cordoned shard switches every replica to weighted placement over all non-cordoned
+	// shards, in proportion to their weights; a flow placed on a shard its creating replica does not
+	// dispatch waits for that shard's dispatcher to pick it up. Give a larger database a larger weight in a
+	// mixed fleet.
 	Weight float64
 	// Cordoned excludes the shard from new-flow placement. Everything already resident proceeds
 	// normally: existing flows keep executing, and subgraph children, thread continuations (Continue),
@@ -479,6 +490,9 @@ func (e *Engine) SetWorkers(n int) error {
 	if n < 0 {
 		return errors.New("workers must be >= 0", http.StatusBadRequest)
 	}
+	if n > math.MaxInt32 {
+		return errors.New("workers must fit in an int32", http.StatusBadRequest)
+	}
 	e.workers.Store(int32(n))
 	e.workersSet.Store(true)
 	return nil
@@ -536,8 +550,8 @@ func (e *Engine) SetStateCacheSize(bytes int64) error {
 // override it via FlowOptions.TimeBudget. Live: read fresh on each Create (existing flows keep the budget
 // frozen at their own Create). It must be positive.
 //
-// The lower bound is not cosmetic. The budget is the ExecuteTask call's context deadline and, via the step
-// row, the size of the crash-recovery lease - so a non-positive default hands every new flow a deadline
+// The lower bound is not cosmetic. The budget is the ExecuteTask call's context deadline and part of the
+// size of the step's crash-recovery lease - so a non-positive default hands every new flow a deadline
 // that has already passed, failing every task instantly, engine-wide and silently. Unlike Priority and
 // FairnessWeight, 0 cannot mean "unset" here: this setter IS the default. The floor is a millisecond
 // rather than a nanosecond because the budget is persisted in MILLISECONDS: a positive duration below
@@ -811,7 +825,7 @@ func (e *Engine) Startup(ctx context.Context) error {
 	}
 	// The candidate cache (and every refill scan) is sized from the aggregate connection budget: dispatch is
 	// database-bound, so 8 x conns keeps the pool supplied for short tasks. The resident set is a smaller
-	// floor the crew grows from on demand. Both are floored at the historical 64 for the zero-config case.
+	// floor the crew grows from on demand. Both are floored at 64 for the zero-config case.
 	e.workersDispatch = max(64, workersPerConnBudget*totalConns)
 	e.workersResident = max(64, residentWorkersPerConn*totalConns)
 	e.recomputeWorkerCeiling(ctx)
@@ -830,6 +844,9 @@ func (e *Engine) Startup(ctx context.Context) error {
 // Shutdown stops all worker goroutines and closes database connections. Idempotent: a call on an engine
 // that is not running (never started, or already shut down) is a no-op, so it is safe to defer and to call
 // more than once.
+//
+// Shutdown does not consult ctx: it waits for the steps in flight to finish (each task is bounded by its
+// time budget), and a deadline or cancellation on ctx does not make it return sooner.
 func (e *Engine) Shutdown(ctx context.Context) error {
 	if !e.started.CompareAndSwap(true, false) {
 		return nil
@@ -944,10 +961,11 @@ func (e *Engine) initRuntime() error {
 		// Sonar publishes, and that Sonar stamps this replica as SERVING the shard only when the piston says
 		// it is turning. Both are pure reads of live state, so neither captures anything that could go stale.
 		p.SetPartitionFunc(func() (int, int, bool) { return e.partitionOn(idx) })
-		// A cycle's two queries run in the one band above the common one. It is the piston's alone because
-		// it is the only caller that cannot flood it - it cycles on a derived period and takes two turns per
-		// cycle - and it needs to be there because candidate supply runs only 1.04-1.47x ahead of
-		// consumption: a cycle that queued behind the dispatch it feeds would starve the workers it fills for.
+		// A cycle's two queries run in the one band above the common one, which the piston shares only with
+		// this shard's Sonar (below). Both are bounded by construction - the piston cycles on a derived period
+		// and takes two turns per cycle, the Sonar beats on a fixed cadence - so neither can flood the band. The
+		// piston needs to be there because a cycle that queued behind the dispatch it feeds would starve the
+		// workers it fills for.
 		p.SetContextFunc(func(ctx context.Context) context.Context {
 			return e.turnstiles.ContextWithPriority(ctx, idx, priorityRefill)
 		})
@@ -1010,8 +1028,8 @@ func (e *Engine) initRuntime() error {
 	})
 	e.crew.SetLogger(e.logger)
 	e.crew.SetMax(maxWorkers)
-	// Start the resident set; the rest of the ceiling is spawned on demand whenever nobody is idle, work is
-	// waiting and a turn is free - the long-task case, where the resident set alone would cap throughput
+	// Start the resident set; the rest of the ceiling is spawned on demand whenever a worker's take of a
+	// candidate leaves nobody idle - the long-task case, where the resident set alone would cap throughput
 	// because nobody is left to dispatch.
 	//
 	// NOT cancelable, deliberately: no worker can observe the lifetime ctx's cancellation (it lands after
@@ -1342,7 +1360,7 @@ func (e *Engine) Step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 // flows and the results are grouped by shard, so the concatenation is not in one descending time order -
 // shard 2's newest flow follows shard 1's oldest returned one. There is no cross-shard order to give: the
 // flow ids are per-shard sequences (a shard with fewer flows has lower ids, so they do not compare), and
-// created_at would compare different database servers' clocks. A single-shard engine - the default - is
+// creation times would compare different database servers' clocks. A single-shard engine - the default - is
 // globally newest-first. A caller that needs one ordered view across shards sorts the page itself, choosing
 // what to trust; a UI that must not show interleaving artifacts can page one shard at a time with
 // Query.Shard.
@@ -1393,6 +1411,9 @@ func (e *Engine) ShardInfo(ctx context.Context) ([]ShardSummary, error) {
 // takes, and there is no notification the engine could time out on instead. A ctx without one is honored
 // for a long fixed budget and then times out, which is a guard against blocking forever, not a wait to
 // design around. A caller whose own deadline is shorter than the flow wants Poll, not Await.
+//
+// A wait that runs out - the ctx's deadline or that fallback budget - returns a 408 error that satisfies
+// errors.Is(err, context.DeadlineExceeded).
 func (e *Engine) Await(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
@@ -1422,7 +1443,9 @@ func (e *Engine) Poll(ctx context.Context, flowKey string) (*workflow.FlowOutcom
 // exists. An await failure - most commonly the caller's ctx expiring before the flow stops - leaves the
 // flow running (it is durable and not bound to this call) and returns its flowKey with a nil outcome and
 // the error, so the caller keeps a handle to Await/Snapshot/Terminate it later. Run never terminates the flow
-// on the caller's behalf; a caller that wants the flow torn down on timeout calls Terminate explicitly.
+// on the caller's behalf; a caller that wants the flow torn down on timeout calls Terminate explicitly. As
+// with Await, a wait that runs out returns a 408 error that satisfies errors.Is(err,
+// context.DeadlineExceeded).
 func (e *Engine) Run(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, outcome *workflow.FlowOutcome, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return "", nil, errors.Trace(err)

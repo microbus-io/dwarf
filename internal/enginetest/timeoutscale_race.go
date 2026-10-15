@@ -18,8 +18,8 @@ limitations under the License.
 
 package enginetest
 
-// testTimeoutScale stretches the "don't hang" ceilings in the shared wait helpers (BoundedRun,
-// AwaitFlowStatus) by 5x under -race, which slows execution ~10x and, with the whole suite parallel,
+// testTimeoutScale stretches the "don't hang" ceilings in the shared wait helpers (BoundedRun, BoundedAwait,
+// AwaitFlowStatus, AwaitVisits, WaitUntil) by 5x under -race, which slows execution ~10x and, with the whole suite parallel,
 // compounds with CPU oversubscription. The ceilings guard against a genuine hang, not a timing contract, so
 // stretching them keeps every test parallel under -race without masking a real wedge (a wedged flow never
 // completes and still trips even the stretched ceiling).

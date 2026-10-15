@@ -50,68 +50,18 @@ func TestCandidateCache_RefillPopFIFOAndFloorReset(t *testing.T) {
 	assert.Expect(c.Len(), 3)
 	assert.Expect(c.parts[1].floor(), 5)
 
-	j, ok, _ := c.Pop()
+	j, ok := c.Pop()
 	assert.True(ok)
 	assert.Expect(j, Job{StepID: 1, Shard: 1, Priority: 5})
-	j, ok, _ = c.Pop()
+	j, ok = c.Pop()
 	assert.True(ok)
 	assert.Expect(j, Job{StepID: 2, Shard: 1, Priority: 5})
-	j, ok, _ = c.Pop()
+	j, ok = c.Pop()
 	assert.True(ok)
 	assert.Expect(j, Job{StepID: 3, Shard: 1, Priority: 5})
 
 	assert.Expect(c.Len(), 0)
 	assert.Expect(c.parts[1].floor(), math.MaxInt)
-}
-
-func TestCandidateCache_NeedRefillAtLowWater(t *testing.T) {
-	assert := testarossa.For(t)
-
-	var c Cache
-	c.Init(4) // capacity 8
-	batch := make([]Job, 8)
-	for i := range batch {
-		batch[i] = Job{StepID: i + 1, Shard: 1}
-	}
-	c.Refill(1, batch, 5) // lastFill 8, low water 4
-
-	_, _, need := c.Pop() // 7 remain, 7 > 4
-	assert.False(need)
-	_, _, need = c.Pop() // 6 remain
-	assert.False(need)
-	_, _, need = c.Pop() // 5 remain
-	assert.False(need)
-	_, _, need = c.Pop() // 4 remain, 4 <= 4
-	assert.True(need)
-	_, _, need = c.Pop() // 3 remain
-	assert.True(need)
-}
-
-// TestCandidateCache_LowWaterIsPerPartition pins that the low-water mark follows each partition's own
-// last-refill depth, not a global constant: partition sizes are dynamic (each refiller's slice of the
-// global plan), so a global threshold would over-trigger small partitions and under-trigger large ones.
-func TestCandidateCache_LowWaterIsPerPartition(t *testing.T) {
-	assert := testarossa.For(t)
-
-	var c Cache
-	c.Init(8) // capacity 16
-	big := make([]Job, 8)
-	for i := range big {
-		big[i] = Job{StepID: 100 + i, Shard: 1}
-	}
-	c.Refill(1, big, 5) // low water 4
-	small := []Job{{StepID: 201, Shard: 2}, {StepID: 202, Shard: 2}, {StepID: 203, Shard: 2}, {StepID: 204, Shard: 2}}
-	c.Refill(2, small, 3) // low water 2
-
-	// Shard 2 has the better floor, so its candidates pop first; its refill request fires when IT
-	// drains to its own low water (4 -> 2), regardless of shard 1's depth.
-	j, _, need := c.Pop()
-	assert.Expect(j.Shard, 2)
-	assert.False(need, "3 remain > low water 2")
-	j, _, need = c.Pop()
-	assert.Expect(j.Shard, 2)
-	assert.True(need, "2 remain <= low water 2")
-	_ = j
 }
 
 func TestCandidateCache_PopBlocksThenRefillWakes(t *testing.T) {
@@ -121,7 +71,7 @@ func TestCandidateCache_PopBlocksThenRefillWakes(t *testing.T) {
 	c.Init(2)
 	done := make(chan Job, 1)
 	go func() {
-		j, _, _ := c.Pop()
+		j, _ := c.Pop()
 		done <- j
 	}()
 
@@ -149,7 +99,7 @@ func TestCandidateCache_CloseUnblocksBlockedPop(t *testing.T) {
 	c.Init(2)
 	done := make(chan bool, 1)
 	go func() {
-		_, ok, _ := c.Pop()
+		_, ok := c.Pop()
 		done <- ok
 	}()
 	select {
@@ -181,18 +131,18 @@ func TestCandidateCache_PopPicksLowestFloorPartition(t *testing.T) {
 	c.Refill(2, []Job{{StepID: 21, Shard: 2}}, 3)
 
 	// Shard 2's floor (3) beats shard 1's (5) despite shard 1 being deeper.
-	j, _, _ := c.Pop()
+	j, _ := c.Pop()
 	assert.Expect(j, Job{StepID: 21, Shard: 2, Priority: 3})
 
 	// Equal floors: the deeper partition wins.
 	c.Refill(2, []Job{{StepID: 22, Shard: 2}}, 5)
-	j, _, _ = c.Pop()
+	j, _ = c.Pop()
 	assert.Expect(j, Job{StepID: 11, Shard: 1, Priority: 5})
 
 	// Equal floors, equal depth: the lower shard wins (determinism).
-	j, _, _ = c.Pop()
+	j, _ = c.Pop()
 	assert.Expect(j.Shard, 1)
-	j, _, _ = c.Pop()
+	j, _ = c.Pop()
 	assert.Expect(j.Shard, 2)
 }
 
@@ -216,7 +166,7 @@ func TestCandidateCache_OfferTakesAVacatedSlot(t *testing.T) {
 
 	want := []int{1, 2, 50, 51}
 	for _, id := range want {
-		j, ok, _ := c.Pop()
+		j, ok := c.Pop()
 		if assert.True(ok) {
 			assert.Expect(j.StepID, id)
 		}
@@ -248,7 +198,7 @@ func TestCandidateCache_OfferDeclinesAWorseBand(t *testing.T) {
 	// own admission bar with it, so an offered band-100 step would be taken or refused on pop timing.
 	for _, id := range []int{1, 98, 99} {
 		assert.Expect(c.parts[1].floor(), 100)
-		j, ok, _ := c.Pop()
+		j, ok := c.Pop()
 		if assert.True(ok) {
 			assert.Expect(j.StepID, id)
 		}
@@ -284,9 +234,9 @@ func TestCandidateCache_OfferedAreNotChargedAsRefillerWaste(t *testing.T) {
 	// Popping an offered candidate retires it from the count, so a later replace does not over-credit.
 	c.Refill(1, []Job{{StepID: 3, Shard: 1}}, 100)
 	assert.True(c.Offer(Job{StepID: 52, Shard: 1}, 100))
-	j, _, _ := c.Pop() // the planned one
+	j, _ := c.Pop() // the planned one
 	assert.Expect(j.StepID, 3)
-	j, _, _ = c.Pop() // the offered one
+	j, _ = c.Pop() // the offered one
 	assert.Expect(j.StepID, 52)
 	assert.Expect(c.parts[1].offered, 0)
 }
@@ -356,7 +306,7 @@ func TestCandidateCache_RefillReportsDiscarded(t *testing.T) {
 	assert.Equal(0, c.Refill(1, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}, {StepID: 3, Shard: 1}}, 5))
 
 	// One popped, so the replace discards the two that were left.
-	_, ok, _ := c.Pop()
+	_, ok := c.Pop()
 	assert.True(ok)
 	assert.Equal(2, c.Refill(1, []Job{{StepID: 4, Shard: 1}}, 5))
 

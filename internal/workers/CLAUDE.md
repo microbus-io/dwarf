@@ -96,9 +96,9 @@ worker is committed to a long call, nobody pops**, so work arriving *after* that
 all. Measured on that shape, 130 candidates against a 96-worker resident set, the crew stalls at 96 with 34
 unserved and permits and ceiling both to spare.
 
-That stall needed a periodic check only while `idle == 0` could be a **resting** state, which it was when
-growth also required work to be waiting: the worker taking the *last* candidate spawned nothing, so the crew
-settled with zero parked workers and the next arrival had nobody to wake.
+A periodic check is needed only where `idle == 0` can be a **resting** state, and it is one if growth also
+requires work to be waiting: the worker taking the *last* candidate spawns nothing, so the crew settles with
+zero parked workers and the next arrival has nobody to wake.
 
 Spawning whenever a take leaves nobody idle makes `idle == 0` **transient**. There is always a parked worker
 for `WaitForWork` to wake, the arrival is noticed, and the cascade takes over — the woken worker pops, finds
@@ -191,8 +191,8 @@ The one state neither placement covers is a worker parked in a cache that never 
 includes a saturated stretch in which every refill's candidates are already reserved by workers queued at the
 gates, so a refill wakes nobody (a woken worker that finds nothing unreserved re-parks inside `WaitForWork`
 and never reaches the check). That is accepted, not overlooked: such a crew costs nothing but its stacks,
-and it shrinks on the first work that arrives. Do **not** add a timer to cover it — a cadence here is what the `control-loops-must-be-simple` bar
-exists to keep out, and it would buy a shrink nobody is waiting on.
+and it shrinks on the first work that arrives. Do **not** add a timer to cover it: an adaptive mechanism here
+must be a fuse with one edge, not a cadence-driven loop, and a timer would buy a shrink nobody is waiting on.
 
 ### `Min`, and why `resident` MUST decrement
 
@@ -234,7 +234,7 @@ coin a fixed cycle, the proportion that dies is a count, not a tendency. Togethe
 `TestCrew_TheCoinFlipShrinksOnlyPartOfTheSurplus` possible at all: it asserts 16 → 12 → 9 exactly, which is
 the coin's whole purpose and is unobservable against a real RNG.
 
-**Two traps, both found by mutation testing, both now guarded by helpers:**
+**Two traps, both found by mutation testing, both guarded by helpers:**
 
 - **A worker inside the busy bracket when the clock jumps banks the WHOLE jump as busy time**, reads a
   fraction of 1, and silently skips its verdict — surfacing much later as a count short by one. So `round`
@@ -242,8 +242,8 @@ the coin's whole purpose and is unobservable against a real RNG.
   is the one place that advances without quiescing — there, banking the jump *is* the reading under test.)
 - **A broken build descends PAST the right answer.** Drop the `Min` guard and the crew slides through it to
   zero; stop resetting a worker's window and every pass becomes a fresh verdict, so the crew slides to `Min`.
-  Both *visit* the correct count in transit, so `eventually(Resident() == n)` passes against either — as it
-  did, until mutation testing caught it. Assertions therefore use `settles`, which waits for the size to stop
+  Both *visit* the correct count in transit, so `eventually(Resident() == n)` passes against either.
+  Assertions therefore use `settles`, which waits for the size to stop
   moving and returns where it came to **rest**. Do not weaken one back to a transient observation.
 
 ## Shutdown: the CACHE **and the GATE** are the stop signals, not `ctx`
@@ -282,9 +282,9 @@ before any goroutine exists and only read by `spawn` thereafter.
 ## What stays outside
 
 **Sizing.** Both numbers are the caller's: the resident set (what it wants running unconditionally, which
-is also `Min`) and `Max` (the ceiling growth may reach). In the engine those are the connection-derived
-dispatch count and the lease-margin ceiling; `SetMax` is live because the engine re-derives its ceiling on
-every fleet change, while `Min` is fixed at `Start` — the engine does not re-push a resident count, because
+is also `Min`) and `Max` (the ceiling growth may reach). In the engine those are `workersResident` (a
+per-connection multiple, floored) and the lease-margin ceiling; `SetMax` is live because the engine
+re-derives its ceiling on every fleet change, while `Min` is fixed at `Start` — the engine does not re-push a resident count, because
 the shrink rule already brings the crew down to what a smaller budget can use.
 
 **Metrics.** The crew emits none. `Resident`/`Idle`/`Min`/`Max` are exposed so an owner can build a gauge

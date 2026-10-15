@@ -51,11 +51,10 @@ There is a known faster shape with **identical semantics**: an Efraimidis-Spirak
 whole is weighted sampling with replacement plus exhaustion. A Fenwick tree over the weights gives
 O(K + C·log K).
 
-**It is deliberately NOT built yet, because it cannot honestly be justified until it is measured** - the same
+**It is deliberately NOT built, because it cannot honestly be justified until it is measured** - the same
 bar every other refiller tuning change in this codebase was held to, and the one three adaptive designs
-failed. What was missing was the measurement itself: `Result.Planning` was computed by the pipeline and then
-dropped, so planning cost was observable only as `cycleDuration` minus the two query phases. The piston now
-records it (`phase="planning"`). Get a real cardinality profile off that before touching the lottery.
+failed. The piston records planning cost directly (`dwarf_refill_query_duration_seconds{phase="planning"}`);
+get a real cardinality profile off that before touching the lottery.
 
 **`slice` must be deterministic, and this is the subtle one.** Each shard runs it independently and they
 must agree on who owns which slot *without exchanging a word*. Same plan + same snapshot must produce the
@@ -154,9 +153,9 @@ mutated, which is what lets `snapshot` hand out pointers and hold the lock for t
 across the planning itself, which would re-couple the very cycles this design decouples. So a caller must
 neither mutate nor reuse a slice it has passed. The sharp case is passing the **same backing array twice**:
 the second call's weight normalization writes into an array the first call's snapshot may still be handing
-to an unlocked `Plan`. Latent today — every producer allocates fresh per cycle — but it is the contract, not
-a coincidence, and the godoc says so rather than only forbidding caller-side mutation (which read as though
-the planner did none of its own).
+to an unlocked `Plan`. Every producer allocates fresh per cycle, so nothing hits it - but it is the contract,
+not a coincidence, and the godoc says so rather than only forbidding caller-side mutation (which would read
+as though the planner did none of its own).
 
 ## What this package deliberately does not do
 

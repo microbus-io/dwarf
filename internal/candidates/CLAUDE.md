@@ -58,8 +58,11 @@ several shards; a replica dispatching one has nowhere else to send a worker.
   worker on the way, so an extra one could only queue behind them; the worse band it goes to is on another
   shard, where it competes with nothing the better band needs.
 - **A waiter parks when nothing is UNRESERVED**, not only when the cache is empty, so a surplus worker parks
-  rather than queueing at a gate for a candidate that is already spoken for. Only new candidates (`Refill`,
-  `Offer`) can make one routable, so those stay the only wake sites.
+  rather than queueing at a gate for a candidate that is already spoken for. `Refill` and `Offer` (new
+  candidates) are the only wake sites. A moved reservation (`Reroute`, `MoveReservation`) also makes a
+  candidate routable again, on the shard it leaves, and wakes nobody - which is harmless: the mover leaves only
+  a shard whose gate it just found full, so a woken waiter would queue at that same gate. The candidate goes to
+  the next worker that comes round, or to a waiter the next `Refill`/`Offer` wakes.
 - `Pop` ignores reservations; it is the single-call form and nothing in the engine mixes it with the pair.
 - **`Reroute` moves a reservation** to the best other routable shard, for a worker that could not get started
   where it was routed (in the engine, a shard with no free turn). It routes nobody when nothing else is
@@ -159,12 +162,6 @@ partition's band-3 work. Understating costs latency; overstating costs ordering.
 Jobs carry `Priority`, assigned by the cache itself — callers never set it — but the floor does not derive
 from it; it rides along so a popped candidate is self-describing (the worker logs it).
 
-**Low water is per partition** — half the partition's *last-refill depth* (`lastFill`), not a global
-constant: partition sizes are dynamic (each refiller's slice of the global plan), so a global threshold
-over-triggers small partitions and under-triggers large ones. `Pop`/`TryPopFrom` report it as
-`needRefill` for the popped partition, but the engine has no consumer for it: the crew discards it, because
-the supply side runs on its own cadence and is never nudged.
-
 **`Refill` is a wholesale replace of ONE partition, and that includes an EMPTY batch** — it empties the
 partition, exactly as draining the last item through `Pop` does. An empty batch is the scan's statement
 that *nothing is due on that shard*, so every still-cached candidate there is a step that is no longer
@@ -213,8 +210,8 @@ fixtures gain the MOST from it:
 | `completionraceflow` (500 flows, 2 shards, cache 8) | 2.9s | 6.0s | **2.05x** |
 | `soakflow` (high volume) | 7.3s | 13.4s | **1.84x** |
 
-The reason is in the engine's own supply numbers: a cycle runs only 1.04-1.47x ahead of consumption, so
-under load the cache is SHALLOW and partitions drain to empty between cycles constantly. Load does not
+The reason is that a partition holds one cycle's buffer, not a backlog, so under load it drains to empty
+between cycles constantly. Load does not
 suppress the empty-partition case; it manufactures it. Do not remove this on the theory that production
 partitions are always full - they are not, and the measurement above is the arm to re-run before believing
 otherwise.

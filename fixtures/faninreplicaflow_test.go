@@ -98,7 +98,7 @@ func TestFanInReplicaflow(t *testing.T) {
 	mux2 := buildMux()
 
 	// Both engines share one isolated database via a common test-DB key (each built with
-	// NewEngineUnderTest(t), which keys by t.Name()), so pointing SEQUEL_TESTING_DSN at a real server
+	// NewEngineUnderTest(t.Name()), which keys by that name), so pointing SEQUEL_TESTING_DSN at a real server
 	// exercises this cross-replica cohort on that dialect's actual row-locking/MVCC; the default is a
 	// shared in-memory SQLite database.
 	eng1 := engine.NewEngineUnderTest(t.Name())
@@ -110,9 +110,7 @@ func TestFanInReplicaflow(t *testing.T) {
 	eng2.SetHost(mux2)
 	assert.NoError(eng2.SetWorkers(4))
 	assert.NoError(eng1.Startup(ctx))
-	t.Cleanup(func() { eng1.Shutdown(ctx) })
 	assert.NoError(eng2.Startup(ctx))
-	t.Cleanup(func() { eng2.Shutdown(ctx) })
 
 	const flows = 50
 	engines := []*engine.Engine{eng1, eng2}

@@ -180,7 +180,7 @@ func TestCrossShardPriorityflow(t *testing.T) {
 	//
 	// The margin covers FOUR legitimate sources of interleave, and the fourth is why it is a third of the
 	// backlog rather than half. A worker mid-step finishes it (priority is not preemptive); each partition
-	// may pioneer one candidate; dispatch jitter; and - since the per-shard refill trigger was removed -
+	// may pioneer one candidate; dispatch jitter; and - there being no per-shard refill trigger -
 	// everything PAST those pioneers waits for the next cycle boundary rather than for a nudge, up to a
 	// full interval (~67ms). Three shards draining 20ms tasks get through roughly ten more low steps in
 	// that window, which is precisely the "strict within one or two intervals" property the design states

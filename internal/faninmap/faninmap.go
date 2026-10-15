@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package faninmap derives the fan-out -> fan-in convergence map of a workflow graph: which node a given
+// Package faninmap derives the fan-out -> fan-in convergence map of a workflow graph: which task a given
 // fan-out source's branches converge on.
 //
 //	fanIn := faninmap.New(graph)
@@ -38,7 +38,7 @@ type Map struct {
 }
 
 // New computes the fan-in map of a validated graph by walking its lineage: each branch of a fan-out pushes a
-// frame identifying its source, and reaching a fan-in node pops the nearest frame and records that source ->
+// frame identifying its source, and reaching a fan-in task pops the nearest frame and records that source ->
 // fan-in mapping. Mirrors the lineage bookkeeping workflow.Graph.Validate performs to check convergence, but
 // keeps only the resulting map.
 func New(g *workflow.Graph) *Map {
@@ -46,7 +46,7 @@ func New(g *workflow.Graph) *Map {
 	transitions := g.Transitions()
 	entry := g.EntryPoint()
 
-	// stacks records, per reached node, the fan-out frames still open on the path to it.
+	// stacks records, per reached task, the fan-out frames still open on the path to it.
 	stacks := map[string][]string{entry: nil}
 	queue := []string{entry}
 	stackCopy := func(s []string) []string {
@@ -97,7 +97,7 @@ func New(g *workflow.Graph) *Map {
 			if tr.To == workflow.End {
 				continue
 			}
-			// On a validated graph every path to a node carries the same lineage, so the first visit wins.
+			// On a validated graph every path to a task carries the same lineage, so the first visit wins.
 			if _, seen := stacks[tr.To]; seen {
 				continue
 			}
@@ -108,7 +108,7 @@ func New(g *workflow.Graph) *Map {
 	return &Map{m: fanOutToFanIn}
 }
 
-// For returns the fan-in node that pops the frame pushed by the fan-out at source, or "" if source is not a
+// For returns the fan-in task that pops the frame pushed by the fan-out at source, or "" if source is not a
 // fan-out with a downstream fan-in.
 func (fim *Map) For(source string) string {
 	return fim.m[source]

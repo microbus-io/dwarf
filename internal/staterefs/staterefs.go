@@ -185,11 +185,13 @@ const (
 	// the PostgreSQL TOAST threshold (~2KB) a field kept inline is stored twice - in this step's changes and
 	// the successor's state - and every non-HOT update of the wide row re-logs it, ~4x the field in WAL.
 	threshold = 1024
-	// budget is one round-trip's worth of avoided writes, from the measured constants
-	// (docs/benchmark-cloud.md): per-step DB time is k*L + s (k ~ 11-12 round-trips, s ~ 4.4ms) and the byte
-	// ceiling is 46-60 MB/s, so same-zone (L ~ 0.5ms) one extra round-trip costs about what ~23KB of avoided
-	// writes buys. Divided by the fan-out width, it is the bar for opening an anchor whose cost is amortized
-	// over N branches - see openThreshold.
+	// budget is the write saving one extra resolve round trip must buy. The break-even is the round-trip
+	// time times the database's byte-throughput ceiling: a round trip occupies a connection for L, and writing
+	// B bytes costs the database B/ceiling. At the ceilings docs/benchmark-cloud.md measures (~194-284 MB/s)
+	// and a same-zone L of ~0.5ms that is ~100-140KB, so 23KB opens anchors more eagerly than the round trip
+	// alone justifies. Moving it is a measurement question, not arithmetic: pair any change with a bench arm.
+	// Divided by the fan-out width, it is the bar for opening an anchor whose cost is amortized over N
+	// branches - see openThreshold.
 	budget = 23 * 1024
 	// minField is the absolute floor no width scaling may cross. A ref replaces a field's bytes with a refs
 	// entry (~20-25 bytes stored: two JEntries, the key, an integer), so a field smaller than a few times
@@ -519,7 +521,7 @@ func mintItem(raw map[string]json.RawMessage, refs Refs, item Item) {
 		return
 	}
 	field := src.field(item.Source)
-	if strings.Contains(field, "[") || len(raw[item.Key]) < minItem {
+	if len(raw[item.Key]) < minItem {
 		return
 	}
 	path := append(slices.Clone(src.Path), item.Index)
@@ -693,7 +695,7 @@ func (l *Linker) resolve(ctx context.Context, state workflow.State, refs Refs, w
 // map, Flatten splices them into a state document without decoding at all.
 //
 // shared makes concurrent misses on one field read it once (see ResolveShared). Such a fetch reads the
-// fields no other fetch is reading, then waits for the rest and takes them from the cache; one whose wait
+// fields no other fetch is reading, then waits for the rest and takes them from the flight; one whose wait
 // did not deliver - the other read failed - reads for itself. So it makes zero, one or two Loader calls.
 func (l *Linker) fetch(ctx context.Context, refs Refs, want map[string]bool, load Loader, shared bool) (map[string]json.RawMessage, error) {
 	values := make(map[string]json.RawMessage, len(refs))

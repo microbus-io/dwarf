@@ -96,7 +96,7 @@ func (t *Transition) UnmarshalJSON(data []byte) error {
 }
 
 // Graph is the definition of a workflow. It describes the tasks, transitions between them,
-// and reducers for merging state during fan-in.
+// and reducers for how writes to a field combine.
 type Graph struct {
 	name        string
 	entryPoint  string
@@ -305,9 +305,11 @@ func (g *Graph) AddTransitionForEach(from, to string, forEach string, as string)
 // The error is delivered to the handler in the state field "onErr" (a structured error: message, status
 // code, trace id, properties; the stack frames are stripped).
 //
-// AN ERROR VOIDS THE TASK'S CHANGES. Whatever the failing task wrote with Set before it returned the error
-// is discarded - the handler does not see it, and it never reaches the flow's final state. (The same is true
-// when no handler is declared and the flow fails.) This mirrors Go's own convention that an error voids the
+// AN ERROR VOIDS THE TASK'S CHANGES. Whatever the failing task wrote with Set in the run that returned the
+// error is discarded - the handler does not see it, and it never reaches the flow's final state. (The same is
+// true when no handler is declared and the flow fails.) What the step's earlier runs wrote - before a Retry,
+// or before an Interrupt or Subgraph call the task was dispatched again from - is kept, and the handler sees
+// it. This mirrors Go's own convention that an error voids the
 // other results, and it is forced by at-least-once execution: a task whose worker loses its lease mid-body
 // re-runs and RECOMPUTES its changes, so what a failing attempt wrote before it died is not a fact anything
 // can be built on. To hand the handler something deliberately, put it in the error (it rides through in
@@ -451,19 +453,19 @@ func (g *Graph) Validate() error {
 	taskSet[End] = true
 	for _, t := range g.tasks {
 		if taskSet[t.Name] {
-			return errors.New("duplicate task '%s' in graph '%s'", t.Name, g.name)
+			return errors.New("duplicate task '%s' in graph '%s'", stripProto(t.Name), g.name)
 		}
 		taskSet[t.Name] = true
 		if t.URL == "" {
-			return errors.New("task '%s' in graph '%s' has no URL", t.Name, g.name)
+			return errors.New("task '%s' in graph '%s' has no URL", stripProto(t.Name), g.name)
 		}
 	}
 	if !taskSet[g.entryPoint] {
-		return errors.New("entry point '%s' is not a registered task in graph '%s'", g.entryPoint, g.name)
+		return errors.New("entry point '%s' is not a registered task in graph '%s'", stripProto(g.entryPoint), g.name)
 	}
 	for fanInName := range g.fanInTasks {
 		if !taskSet[fanInName] {
-			return errors.New("SetFanIn references unknown task '%s' in graph '%s'", fanInName, g.name)
+			return errors.New("SetFanIn references unknown task '%s' in graph '%s'", stripProto(fanInName), g.name)
 		}
 		if fanInName == End {
 			return errors.New("SetFanIn cannot mark END in graph '%s'", g.name)
@@ -472,13 +474,13 @@ func (g *Graph) Validate() error {
 	onErrorFrom := make(map[string]bool, len(g.tasks))
 	for _, tr := range g.transitions {
 		if tr.From == End {
-			return errors.New("transition out of END to '%s' in graph '%s'; END is terminal and has no outgoing transitions", tr.To, g.name)
+			return errors.New("transition out of END to '%s' in graph '%s'; END is terminal and has no outgoing transitions", stripProto(tr.To), g.name)
 		}
 		if !taskSet[tr.From] {
-			return errors.New("transition from unknown task '%s' to '%s' in graph '%s'", tr.From, tr.To, g.name)
+			return errors.New("transition from unknown task '%s' to '%s' in graph '%s'", stripProto(tr.From), stripProto(tr.To), g.name)
 		}
 		if !taskSet[tr.To] {
-			return errors.New("transition from '%s' to unknown task '%s' in graph '%s'", tr.From, tr.To, g.name)
+			return errors.New("transition from '%s' to unknown task '%s' in graph '%s'", stripProto(tr.From), stripProto(tr.To), g.name)
 		}
 		switch tr.Kind {
 		case "", TransitionSwitch, TransitionGoto, TransitionError:
@@ -489,7 +491,7 @@ func (g *Graph) Validate() error {
 			return errors.New("%s transition from '%s' to '%s' in graph '%s' cannot have 'forEach'; only an ordinary transition fans out", tr.Kind, stripProto(tr.From), stripProto(tr.To), g.name)
 		}
 		if tr.As != "" && tr.ForEach == "" {
-			return errors.New("transition from '%s' to '%s' in graph '%s' has 'as' without 'forEach'", tr.From, tr.To, g.name)
+			return errors.New("transition from '%s' to '%s' in graph '%s' has 'as' without 'forEach'", stripProto(tr.From), stripProto(tr.To), g.name)
 		}
 		if tr.When != "" && (tr.Kind == TransitionGoto || tr.Kind == TransitionError) {
 			return errors.New("%s transition from '%s' to '%s' in graph '%s' cannot have a 'when' expression; it is taken whenever its trigger fires", tr.Kind, stripProto(tr.From), stripProto(tr.To), g.name)

@@ -53,8 +53,8 @@ func TestCheckout(t *testing.T) {
 }
 ```
 
-`Mux.HandleGraph(name, graph)` registers a graph; `HandleTask(url, handler)` registers a task by its
-URL (the address bound with `SetURL`). The handler signature is the same `func(ctx, *workflow.Flow) error`
+`Mux.HandleGraph(workflowURL, graph)` registers a graph under the URL you pass to `Create` or `Run`;
+`HandleTask(taskURL, handler)` registers a task under the URL bound with `SetURL`. The handler signature is the same `func(ctx, *workflow.Flow) error`
 you write in production.
 
 ## Configuring the test engine

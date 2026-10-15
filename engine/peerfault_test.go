@@ -166,7 +166,6 @@ func TestPeerFault_BeatFailureEvictsFromTheDispatchers(t *testing.T) {
 	assert.NoError(peer.SetHost(noopHost{}))
 	assert.NoError(peer.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.NoError(peer.Startup(ctx))
-	t.Cleanup(func() { peer.Shutdown(ctx) })
 
 	// Both dispatching: two divisors, and each holds an ordinal in the other's view.
 	awaitPartition(t, worker, 1, 2, -1)

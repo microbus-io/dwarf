@@ -49,8 +49,9 @@ func stepColumn(t *testing.T, e *Engine, taskName, column string) []string {
 // decoded is a stored JSON column decoded, so dialects that re-space what they store compare equal.
 func decoded(t *testing.T, column string) any {
 	t.Helper()
+	assert := testarossa.For(t)
 	var v any
-	testarossa.For(t).NoError(json.Unmarshal([]byte(column), &v))
+	assert.NoError(json.Unmarshal([]byte(column), &v))
 	return v
 }
 

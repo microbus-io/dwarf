@@ -599,7 +599,7 @@ func TestPoolSizing_AllCordoned(t *testing.T) {
 // and skips). poolsLock spans read-of-R through push, so the last writer wins with the value it read.
 //
 // The interleaving is forced, not raced: a fault freezes the first recompute in exactly that window. With
-// the lock, the second recompute blocks on it and applies AFTER - which is the fix working. The two counts
+// the lock, the second recompute blocks on it and applies AFTER. The two counts
 // the race needs are staged through the registry itself, waiting for each to be OBSERVED before the
 // recompute that must read it.
 func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
@@ -685,7 +685,7 @@ func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
 	e2 := NewEngineUnderTest(t.Name())
 	defer e2.Shutdown(ctx)
 	e2.SetHost(mux)
-	// Startup registers a t.Cleanup Shutdown; shutting down early here is idempotent.
+	// Shutdown is idempotent, so shutting down early here leaves the deferred one a no-op.
 	assert.NoError(e2.Startup(t.Context()))
 	flowKey, err := e2.Create(ctx, "shutdownrace/g", nil, nil)
 	assert.NoError(err) // sanity: it works while live
@@ -696,11 +696,11 @@ func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
 		assert.Equal(http.StatusServiceUnavailable, errors.StatusCode(err))
 	}
 
-	// Every public operation must now say 503 - "the engine is not available" - and NOT the lies it used to
-	// tell. The key-addressed ops all route through ShardSet.Shard, which answers "flow not found" (404) when
-	// no shard is open: a stopped engine told the caller its flow did not exist. The cross-shard ops were
-	// worse - List/Purge/ShardInfo fanned out over an empty index set and returned SUCCESS with an empty
-	// result ("you have no flows"). Both are indistinguishable from the truth, and a caller can act on them.
+	// Every public operation must now say 503 - "the engine is not available". The key-addressed ops all route
+	// through ShardSet.Shard, which answers "flow not found" (404) when no shard is open, so an unguarded op
+	// tells the caller its flow does not exist. The cross-shard ops are worse - List/Purge/ShardInfo fan out
+	// over an empty index set and return SUCCESS with an empty result ("you have no flows"). Both are
+	// indistinguishable from the truth, and a caller can act on them.
 	is503 := func(label string, err error) {
 		if assert.Error(err, "%s must fail on a stopped engine", label) {
 			assert.Equal(http.StatusServiceUnavailable, errors.StatusCode(err), "%s", label)
@@ -721,9 +721,9 @@ func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
 	is503("History", err)
 	_, err = e2.Await(ctx, flowKey)
 	is503("Await", err)
-	_, _, err = e2.List(ctx, workflow.Query{}) // used to return an EMPTY LIST and no error
+	_, _, err = e2.List(ctx, workflow.Query{}) // unguarded, it returns an EMPTY LIST and no error
 	is503("List", err)
-	_, err = e2.Purge(ctx, workflow.Query{}) // used to return 0 marked and no error
+	_, err = e2.Purge(ctx, workflow.Query{}) // unguarded, it returns 0 marked and no error
 	is503("Purge", err)
 	_, err = e2.ShardInfo(ctx)
 	is503("ShardInfo", err)
@@ -883,12 +883,11 @@ func TestPoolSizing_StartupSizesSoloFull(t *testing.T) {
 	assert.Equal(declaredBudget, db.DB.Stats().MaxOpenConnections, "the full derived pool is in place the moment Startup returns")
 }
 
-// TestPoolSizing_StartupSizesFromRegisteredFleet is the real replacement for the old grace window: a
-// replica joining an already-registered fleet sizes for the full R at Startup, so it NEVER over-connects
-// on a partial count. eng2 reads eng1's row from the shared registry during its own Startup and opens at
-// the R=2 share immediately - the property the async grace window used to approximate, now exact because
-// the count comes from the database, not from waiting on signals. It also pins that the count propagates
-// with no signal wiring at all (noopHost): eng1 converges to R=2 purely via its heartbeat recount.
+// TestPoolSizing_StartupSizesFromRegisteredFleet pins that a replica joining an already-registered fleet
+// sizes for the full R at Startup, so it NEVER over-connects on a partial count. eng2 reads eng1's row from
+// the shared registry during its own Startup and opens at the R=2 share immediately - exact because the
+// count comes from the database, not from waiting on signals. It also pins that the count propagates with
+// no signal wiring at all (noopHost): eng1 converges to R=2 purely via its heartbeat recount.
 func TestPoolSizing_StartupSizesFromRegisteredFleet(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -901,7 +900,6 @@ func TestPoolSizing_StartupSizesFromRegisteredFleet(t *testing.T) {
 	assert.NoError(eng1.SetHost(noopHost{}))
 	assert.NoError(eng1.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.NoError(eng1.Startup(ctx))
-	t.Cleanup(func() { eng1.Shutdown(ctx) })
 
 	db1, err := eng1.db.Shard(1)
 	assert.NoError(err)
@@ -916,7 +914,6 @@ func TestPoolSizing_StartupSizesFromRegisteredFleet(t *testing.T) {
 	assert.NoError(eng2.SetHost(noopHost{}))
 	assert.NoError(eng2.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.NoError(eng2.Startup(ctx))
-	t.Cleanup(func() { eng2.Shutdown(ctx) })
 
 	db2, err := eng2.db.Shard(1)
 	assert.NoError(err)

@@ -475,7 +475,7 @@ func (c *Crew) work(ctx context.Context) {
 		if f := c.gateWait.Load(); f != nil {
 			(*f)(shard, c.now().Sub(gateStart))
 		}
-		j, ok, _ := c.cache.TryPopFrom(shard)
+		j, ok := c.cache.TryPopFrom(shard)
 		if !ok {
 			// Another worker took the peeked entry, or the partition drained while we waited. CONTINUE,
 			// never return: leaving here would shrink the crew under exactly the contention that caused the
@@ -486,8 +486,6 @@ func (c *Crew) work(ctx context.Context) {
 			continue
 		}
 		c.idle.Add(-1)
-		// The needRefill signal TryPopFrom also returns has no consumer here - the supply side runs on its
-		// own cadence and is not nudged.
 		c.considerGrowth()
 		// The permit's lifetime crosses the callback boundary - the crew acquires, the handler releases -
 		// so every early return inside the handler, and every caught panic, is a path that would otherwise

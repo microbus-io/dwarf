@@ -209,12 +209,12 @@ func TestForEachStrip_FailedFanOutStillStrips(t *testing.T) {
 // the same terminal state a successful convergence would have - specifically, that it keeps the intermediate
 // output of EVERY surviving branch, not just the first.
 //
-// The hole this closes: a branch's intermediate output lives in the NEXT step's `state`, not in any tail's
-// `changes`. The terminal merge used to base on the FIRST tail's `state` and fold in only the tails' `changes`, so
-// in `forEach -> Cell -> Enrich -> Join` branch 0's Cell output rode in via the base while branches 1..N-1's was
-// silently dropped. The converged path (fanInRow) merges EVERY cohort member's changes and has no such
-// hole, so the two paths disagreed on what a fan-out's terminal state means. The failed path now runs the same
-// merge: spawn base + every completed member's changes, in fan_out_ordinal order.
+// The hole this guards: a branch's intermediate output lives in the NEXT step's `state`, not in any tail's
+// `changes`. A terminal merge that bases on the FIRST tail's `state` and folds in only the tails' `changes` keeps
+// branch 0's Cell output in `forEach -> Cell -> Enrich -> Join` (it rides in via the base) and silently drops
+// branches 1..N-1's. The converged path (fanInRow) merges EVERY cohort member's changes, so the failed path must
+// run the same merge - spawn base + every completed member's changes, in fan_out_ordinal order - or the two
+// paths disagree on what a fan-out's terminal state means.
 func TestFailedFanOut_KeepsEveryBranchesIntermediateOutput(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

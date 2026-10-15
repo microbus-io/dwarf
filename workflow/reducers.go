@@ -61,9 +61,10 @@ func (r Reducer) isKnown() bool {
 // Replace (and the empty Reducer) is handled by State.Apply itself, not here: it needs no base, and a null
 // incoming there is a delete, which Reduce has no way to express.
 
-// Reduce folds incoming onto base using the strategy named by r, and is how State.Apply dispatches a field to
-// its reducer. The empty and Replace cases are resolved by State.Apply itself (a null there is a delete, which
-// this cannot express) and reach here only defensively.
+// Reduce folds incoming onto base using the strategy named by r, on Go values. State.Apply folds stored JSON
+// fields to the same result as Reduce over their decoded values ([]any, map[string]any, float64, string, bool).
+// Over other Go types the two can differ: under append, a typed slice such as []int added to a []any base is
+// one element, where a JSON array is spread. The empty and Replace reducers return incoming.
 func (r Reducer) Reduce(base any, incoming any) (any, error) {
 	switch r {
 	case ReducerAppend:

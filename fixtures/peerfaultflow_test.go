@@ -37,7 +37,9 @@ import (
 // into its own candidate cache, and the doorbell is deliberately not partitioned, so a chain created on a
 // working replica walks hop by hop on that replica and never consults a residue class at all. Work created
 // by a replica with no workers can only be found by SCANNING, which is the path the partition governs.
-func peerFleet(t *testing.T, name string) (creator, eng1, eng2 *engine.Engine, ran map[string]*atomic.Int64) {
+//
+// The caller defers the returned shutdown, which shuts all three down.
+func peerFleet(t *testing.T, name string) (creator, eng1, eng2 *engine.Engine, ran map[string]*atomic.Int64, shutdown func()) {
 	t.Helper()
 	assert := testarossa.For(t)
 	ran = map[string]*atomic.Int64{"0": {}, "1": {}, "2": {}}
@@ -73,11 +75,16 @@ func peerFleet(t *testing.T, name string) (creator, eng1, eng2 *engine.Engine, r
 	assert.NoError(creator.SetWorkers(0))
 
 	ctx := context.Background()
-	for _, e := range []*engine.Engine{eng1, eng2, creator} {
-		assert.NoError(e.Startup(ctx))
-		t.Cleanup(func() { e.Shutdown(ctx) })
+	fleet := []*engine.Engine{eng1, eng2, creator}
+	shutdown = func() {
+		for _, e := range fleet {
+			e.Shutdown(ctx)
+		}
 	}
-	return creator, eng1, eng2, ran
+	for _, e := range fleet {
+		assert.NoError(e.Startup(ctx))
+	}
+	return creator, eng1, eng2, ran, shutdown
 }
 
 // createFlows creates n flows on one replica and returns their keys, without waiting for any of them.
@@ -138,7 +145,8 @@ func drainFlows(t *testing.T, budget time.Duration, from *engine.Engine, name st
 func TestPeerRegistryBlindflow(t *testing.T) {
 	t.Parallel()
 	const name = "peerblind.verify:428"
-	creator, eng1, eng2, ran := peerFleet(t, name)
+	creator, eng1, eng2, ran, shutdown := peerFleet(t, name)
+	defer shutdown()
 	assert := testarossa.For(t)
 
 	// Warm the fleet so both dispatchers have a good reading behind them, then take the registry away from
@@ -174,7 +182,8 @@ func TestPeerRegistryBlindflow(t *testing.T) {
 // from co-running fixtures. An outcome assertion tolerates parallelism; this one does not.
 func TestPeerStalledDispatcherflow(t *testing.T) {
 	const name = "peerstall.verify:428"
-	creator, eng1, eng2, ran := peerFleet(t, name)
+	creator, eng1, eng2, ran, shutdown := peerFleet(t, name)
+	defer shutdown()
 	assert := testarossa.For(t)
 
 	// Both dispatching first, so eng2 really is holding a residue class before it stalls.

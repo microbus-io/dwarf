@@ -118,16 +118,16 @@ which is a race between the parallel ops. Pinned by `TestOnEach_ErrorNamesTheFai
 attempt was rejected: real outages mostly manifest as hangs, not errors; classifying "shard down" vs transient/data
 errors is driver-specific and brittle; and a helper that *claims* partial tolerance only in a narrow subset of failure
 modes lies to operators about resilience. `OnEach` is invoked once per shard with the resolved DB and the shard
-index; any non-nil return fails the whole call. Each caller retries on its next natural cycle (`recoverExpiredLeases` next
-tick, `scanBandKeys` next refill), so a transient hiccup heals within one cycle and a persistent outage degrades
-loudly.
+index; any non-nil return fails the whole call. Each caller retries on its next natural cycle (`recoverExpiredLeases`
+and the reaper on their next tick, the latch detector on its next sweep), so a transient hiccup heals within one cycle
+and a persistent outage degrades loudly. (The pistons do not use `OnEach`: each runs against its own shard.)
 
-**DSN format & test-mode resolution.** Each shard carries its own DSN (`Config.Shards`, index -> DSN).
+**DSN format & test-mode resolution.** Each shard carries its own DSN (`Config.Shards`, index -> `ShardConfig`).
 
-**In production the DSN is used EXACTLY as given - never formatted, never rewritten.** It was once run through
-`fmt.Sprintf` to substitute a `%d`, which interprets *every* `%` as a verb: a percent-encoded credential (a password
-`p@ss` written `p%40ss` - entirely routine) was silently corrupted (`%40s` parsed as "width 40, verb s", swallowing
-the shard index, leaving a real `%d` as `%!d(MISSING)`), and the driver then failed with an opaque parse error naming
+**In production the DSN is used EXACTLY as given - never formatted, never rewritten.** Do not run it through
+`fmt.Sprintf` to substitute a `%d`: that interprets *every* `%` as a verb, so a percent-encoded credential (a password
+`p@ss` written `p%40ss` - entirely routine) is silently corrupted (`%40s` parses as "width 40, verb s", swallowing
+the shard index, leaving a real `%d` as `%!d(MISSING)`), and the driver then fails with an opaque parse error naming
 neither the shard nor the cause. Shards are declared one at a time with their own DSN, so no template is needed.
 
 **In test mode the DSN IS a template**, and that is where `%d` lives: one base is shared across shards and the index

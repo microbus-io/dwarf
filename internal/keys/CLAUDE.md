@@ -32,10 +32,11 @@ a standalone lookup*: every gate is `WHERE flow_id=? AND flow_token=?` (and `ste
 across the codebase; the only token-only `WHERE`s are in tests. So the token has no birthday/collision surface (the
 unique id disambiguates rows) — it only has to resist *targeted* guessing of one specific row's token. Targeted
 online guessing of 64 bits of `crypto/rand`, even at an implausible sustained 1M attempts/sec against one `flow_id`,
-is ~300,000 years expected; offline is impossible (no oracle). Widening to 128-bit (a periodically-suggested review
-item) buys no security against any realistic threat — the capability-URL leak channels (email, logs, referrer) are
+is ~300,000 years expected; offline is impossible (no oracle). Widening to 128-bit (periodically
+suggested) buys no security against any realistic threat — the capability-URL leak channels (email, logs, referrer) are
 unaffected by token width and want short-TTL/single-use, a host concern — while doubling the visible random tail on
 every printed key. So keep 64-bit; revisit only if a concrete driver appears (a future token-only lookup, or an
 offline-exposed capability URL).
 
-**If it is ever widened, the `CHAR(16)` columns must grow in lockstep and `RandomIdentifier`'s argument with them.**
+**If it is ever widened, the 16-character token columns (`VARCHAR(16)`, `NVARCHAR(16)` on SQL Server; SQLite's
+`TEXT` is unbounded) must grow in lockstep and `RandomIdentifier`'s argument with them.**

@@ -118,11 +118,12 @@ const (
 	// looked at, so a band may only be given to a source that cannot flood it. Within a band, order is by
 	// how long the job asking has been at the database (time in the host call does not count).
 	//
-	// priorityRefill is the only band above the common one, and it is reserved for the piston because the
-	// piston is the one caller bounded by construction - it cycles on a derived period and takes two turns
-	// per cycle per shard, so it cannot starve what sits below it. It is ahead of everything else because
-	// candidate supply runs only 1.04-1.47x ahead of consumption: a refill cycle that queues behind the
-	// dispatch it feeds starves the workers it is filling for.
+	// priorityRefill is the only band above the common one, and it is reserved for the piston and the peer
+	// Sonars because they are the callers bounded by construction - the piston cycles on a derived period
+	// and takes two turns per cycle per shard, a Sonar beats and reads on a fixed cadence - so neither can
+	// starve what sits below it. The piston is ahead of everything else because a refill cycle that queues
+	// behind the dispatch it feeds starves the workers it is filling for; the Sonars are there because a
+	// throttled beat reads as blindness and reshapes the fleet (see dbTurn).
 	//
 	// Everything else shares priorityCommon and is separated by age alone. That is deliberate rather than
 	// unfinished: age ordering is starvation-free (every claim eventually becomes the oldest), while any

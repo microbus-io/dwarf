@@ -63,7 +63,7 @@ func TestCrossReplicaAwait(t *testing.T) {
 	})
 
 	// Both replicas share one isolated database via a common test-DB key (each built with
-	// NewEngineUnderTest(t), which keys by t.Name()), so the suite exercises this cross-replica wake on
+	// NewEngineUnderTest(t.Name()), which keys by that name), so the suite exercises this cross-replica wake on
 	// whatever dialect SEQUEL_TESTING_DSN names (in-memory SQLite by default), not SQLite only.
 	eng1 := engine.NewEngineUnderTest(t.Name())
 	defer eng1.Shutdown(ctx)
@@ -75,10 +75,8 @@ func TestCrossReplicaAwait(t *testing.T) {
 	eng2.SetWorkers(2)
 	err := eng1.Startup(ctx)
 	assert.NoError(err)
-	t.Cleanup(func() { eng1.Shutdown(ctx) })
 	err = eng2.Startup(ctx)
 	assert.NoError(err)
-	t.Cleanup(func() { eng2.Shutdown(ctx) })
 
 	// Create (auto-starts) on the awaiter replica. eng1 has no workers, so eng2 (reached via the relayed
 	// Enqueue doorbell, or its own poll) is the only replica that can run the step.

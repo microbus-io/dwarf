@@ -139,9 +139,9 @@ func (c *Cache[K, V]) LoadOrStoreWeighted(key K, value V, weight int64) (V, bool
 	return value, false
 }
 
-// AddWeight adds delta to the weight of the entry under key, if present, marking it most-recently-used, and
-// evicts the least-recently-used entries until the cache fits its bounds. An entry made heavier than the
-// whole weight bound is removed.
+// AddWeight adds delta to the weight of the entry under key, if present, marking it most-recently-used (and,
+// for an idle TTL, used now), and evicts the least-recently-used entries until the cache fits its bounds. An
+// entry made heavier than the whole weight bound is removed.
 func (c *Cache[K, V]) AddWeight(key K, delta int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -156,6 +156,9 @@ func (c *Cache[K, V]) AddWeight(key K, delta int64) {
 	}
 	ent.weight += delta
 	c.weight += delta
+	if c.idle {
+		ent.lastUsed = time.Now()
+	}
 	c.ll.MoveToFront(el)
 	c.evict()
 }

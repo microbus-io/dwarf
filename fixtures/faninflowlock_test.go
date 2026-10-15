@@ -34,7 +34,7 @@ import (
 // proportional to its width.
 //
 // This is a PERFORMANCE invariant with no correctness shadow, which is exactly why it needs its own pin.
-// Every arrival used to grab the flow row write-first, serializing an entire cohort on one row - measured at
+// An arrival that grabs the flow row write-first serializes an entire cohort on one row - measured at
 // fan-out width 64 against Postgres: 20 of 43 active backends queued on that single statement, each holding a
 // pool connection - to perform two writes that carry no information (the grab itself, and a step_id rewrite of
 // 0 over the 0 a fan-out already carries). Deferring the grab to the arrival that actually resolves the cohort
@@ -47,8 +47,8 @@ import (
 // arrival: the fan-out SOURCE (a push transition, which writes cohort_size and is not a pure arrival) and the
 // LAST arrival (which resolves the cohort and so inserts the fan-in step - a write the terminal-status guard
 // must sit in front of). Each takes the grab plus the closing step_id advance, so a healthy flow of ANY cohort
-// width counts 4. Under the old always-grab behavior it would be 2+2N - so the width-4 and width-16 runs would
-// disagree (10 vs 34), which is the regression this test exists to catch.
+// width counts 4. A per-arrival grab makes it 2+2N - so the width-4 and width-16 runs would disagree (10 vs
+// 34), which is the regression this test exists to catch.
 //
 // Single worker, no injected faults: a Transact contention retry re-runs the closure and would legitimately
 // re-count, so the exact-count form of this assertion requires a contention-free run.

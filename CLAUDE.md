@@ -4,14 +4,17 @@
 
 Dwarf is a standalone workflow-orchestration engine (`github.com/microbus-io/dwarf`). It executes workflow graphs by
 dispatching tasks through an injected executor, managing state between steps, and handling fan-out/fan-in, interrupts,
-retries, subgraphs, and failure recovery. It depends only on `sequel` (SQL), plus the pure-types sub-package
-`dwarf/workflow`.
+retries, subgraphs, and failure recovery. Its storage is `sequel` (SQL); beside it the module depends on `boolexp`
+(transition `when` expressions), `errors`, `seamster` (test-only fault and checkpoint seams, inert in production),
+the OpenTelemetry API, and `golang.org/x/sync`. The pure types live in the sub-package `dwarf/workflow`.
 
 This document captures the engine's internal design rationale - the *why* behind the mechanics, which godoc does not
-record. The engine is library code: it reaches tasks, fetches graphs, signals peers, and reports stops through a
-single **injected `Host` interface** (plus separately injected observability providers) rather than a built-in
-transport. A host application (for example a microservice) wires that interface to its own transport, identity, and
-observability. Where this doc refers to "the host" or "the adapter," it means that wrapping layer.
+record. The engine is library code: it fetches graphs and reaches tasks through a single **injected `Host`
+interface** with exactly two methods, `LoadGraph` and `ExecuteTask` (plus separately injected observability
+providers), rather than a built-in transport. Everything between replicas - work discovery, `Await` wakes, fleet
+membership - goes through the shared database; the engine sends nothing to its peers. A host application (for
+example a microservice) wires that interface to its own transport, identity, and observability. Where this doc
+refers to "the host" or "the adapter," it means that wrapping layer.
 
 ## Documentation conventions
 
@@ -101,8 +104,8 @@ matching one before working there:**
 - **`internal/keys/CLAUDE.md`** - the flow/step key *format* (`{shard}-{id}-{token}`), token entropy (why 64-bit),
   and the token-free `CorrelationID` derivation. (The engine-side enforcement/posture stays in `engine/CLAUDE.md`.)
 - **`internal/workers/CLAUDE.md`** - the demand side: the grow-on-demand goroutine `Crew` (not "pool" -
-  that word is the database connection pools), the idleness-plus-gate growth trigger (and why it needs both
-  an edge and a cadence), and the two-phase drain.
+  that word is the database connection pools), the growth trigger (one edge plus a standing reserve of one idle
+  worker, and why no timer), the busy-fraction shrink rule, and the two-phase drain.
 - **`internal/candidates/CLAUDE.md`** - the bounded hint-cache mechanism; its driving refiller algorithm is in
   `engine/CLAUDE.md`. (`internal/lru` is a textbook LRU+TTL, bounded by count or by weight - godoc only, no
   design doc.)

@@ -111,8 +111,9 @@ func sampleHost() hostSample {
 		s.cpuNano = ru.Utime.Nano() + ru.Stime.Nano()
 	}
 	s.rxBytes, s.txBytes = readNetCounters()
-	// Stops the world briefly, which is why this is sampled at the window EDGES and never on a tick:
-	// twice per measurement window is unmeasurable against it, a periodic sampler would not be.
+	// Stops the world briefly. These are the window-EDGE readings the deltas are taken between; the gauge
+	// sampler already reads MemStats on every tick for its heap series, so two more per window add nothing
+	// measurable.
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 	s.heapAlloc, s.heapSys = ms.HeapAlloc, ms.HeapSys

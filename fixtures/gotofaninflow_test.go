@@ -31,10 +31,10 @@ import (
 // array I would fan out on is empty, Goto the fan-in" shape. The source is the spawn, so the fan-in converges
 // on the source's own state exactly as an empty cohort would; the shape is handled, not rejected.
 //
-// Before the fix, the source's Goto edge left it mis-attributed: a TRUNK source failed the not-in-a-cohort
-// guard ("routed to fan-in ... but is not part of a fan-out cohort"), and a NESTED source bumped its OUTER
-// cohort's arrival counter while inserting no step - silently dropping the branch and letting the outer fan-in
-// fire early, yet reporting the flow completed.
+// The failure mode pinned is a source mis-attributed by its Goto edge: a TRUNK source fails the
+// not-in-a-cohort guard ("routed to fan-in ... but is not part of a fan-out cohort"), and a NESTED source bumps
+// its OUTER cohort's arrival counter while inserting no step - silently dropping the branch and letting the
+// outer fan-in fire early, yet reporting the flow completed.
 func TestGotoFanInFlow(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -82,7 +82,7 @@ func TestGotoFanInFlow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "gotofaninflow.verify:645/goto-fan-in",
 			map[string]any{"items": []string{}}, nil)
 		assert.NoError(err)
-		// The trunk source Goto's the fan-in; the flow converges and completes. Before the fix this FAILED the
+		// The trunk source Goto's the fan-in; the flow converges and completes rather than failing the
 		// not-in-a-cohort guard.
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(true, stateVal(outcome.State, "joined"), "the fan-in must run")
@@ -162,9 +162,9 @@ func TestGotoFanInFlow_NestedStaysInOuterCohort(t *testing.T) {
 		map[string]any{"cells": []string{"a", "b", "c"}}, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
-	// All three cells must reach the outer fan-in. Before the fix, a Goto'ing cell bumped the outer cohort's
-	// arrival counter without inserting its inner fan-in step, so a cell was dropped and the outer fan-in could
-	// fire early - the result would be missing one or more cells while the flow still reported completed.
+	// All three cells must reach the outer fan-in. A Goto'ing cell that bumps the outer cohort's arrival counter
+	// without inserting its inner fan-in step drops a cell and lets the outer fan-in fire early - the result
+	// misses one or more cells while the flow still reports completed.
 	got := toStringSlice(stateVal(outcome.State, "cellsSeen"))
 	sort.Strings(got)
 	assert.Equal([]string{"a", "b", "c"}, got, "every nested cell must converge on the outer fan-in")

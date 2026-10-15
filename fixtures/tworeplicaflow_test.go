@@ -72,7 +72,7 @@ func TestTwoReplicaflow(t *testing.T) {
 	mux2 := buildMux()
 
 	// Both replicas share one isolated database via a common test-DB key (each built with
-	// NewEngineUnderTest(t), which keys by t.Name()), so the suite runs this contention on whatever
+	// NewEngineUnderTest(t.Name()), which keys by that name), so the suite runs this contention on whatever
 	// dialect SEQUEL_TESTING_DSN names (in-memory SQLite by default).
 	eng1 := engine.NewEngineUnderTest(t.Name())
 	defer eng1.Shutdown(ctx)
@@ -83,9 +83,7 @@ func TestTwoReplicaflow(t *testing.T) {
 	eng2.SetHost(mux2)
 	assert.NoError(eng2.SetWorkers(4))
 	assert.NoError(eng1.Startup(ctx))
-	t.Cleanup(func() { eng1.Shutdown(ctx) })
 	assert.NoError(eng2.Startup(ctx))
-	t.Cleanup(func() { eng2.Shutdown(ctx) })
 
 	t.Run("exactly_once_under_contention", func(t *testing.T) {
 		assert := testarossa.For(t)
@@ -160,9 +158,7 @@ func TestTwoReplicaflow(t *testing.T) {
 		worker.SetHost(pb)
 		assert.NoError(worker.SetWorkers(2))
 		assert.NoError(awaiter.Startup(ctx))
-		t.Cleanup(func() { awaiter.Shutdown(ctx) })
 		assert.NoError(worker.Startup(ctx))
-		t.Cleanup(func() { worker.Shutdown(ctx) })
 
 		k, err := awaiter.Create(ctx, "tworeplicawake.verify:428/g", nil, nil)
 		if !assert.NoError(err) {

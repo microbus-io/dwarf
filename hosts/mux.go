@@ -49,21 +49,19 @@ func NewMux() *Mux {
 	}
 }
 
-// HandleGraph registers a workflow graph under the given name.
-// The name should match the workflow URL passed to Engine.Create or Engine.Run.
-func (p *Mux) HandleGraph(name string, graph *workflow.Graph) {
+// HandleGraph registers a workflow graph under workflowURL, the URL passed to Engine.Create or Engine.Run.
+func (p *Mux) HandleGraph(workflowURL string, graph *workflow.Graph) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.graphs[name] = graph
+	p.graphs[workflowURL] = graph
 }
 
-// HandleTask registers a task handler under the given name.
-// The name should match the task URL registered via graph.SetURL. The handler reads the flow's baggage,
-// if any, with workflow.BaggageFrom(ctx).
-func (p *Mux) HandleTask(name string, handler func(ctx context.Context, flow *workflow.Flow) error) {
+// HandleTask registers a task handler under taskURL, the URL a graph binds to a task with SetURL. The
+// handler reads the flow's baggage, if any, with workflow.BaggageFrom(ctx).
+func (p *Mux) HandleTask(taskURL string, handler func(ctx context.Context, flow *workflow.Flow) error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.tasks[name] = handler
+	p.tasks[taskURL] = handler
 }
 
 // LoadGraph implements engine.Host.
