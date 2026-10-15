@@ -97,6 +97,7 @@ func run() error {
 		// per-shard rates the run summary prints, is the operator's lever and the bench's.
 		weightsFlag      = flag.String("weights", "", "ShardSpec.Weight per shard as comma-separated N=w (e.g. '1=1,2=0.8'); unlisted shards weigh 1")
 		refillIntervalMs = flag.Int("refill-interval-ms", 0, "pin each shard's refill cycle period in ms (0 = derived from the pool); the scan-rate sweep knob")
+		stateCacheMB     = flag.Int64("state-cache-mb", 0, "Engine.SetStateCacheSize in MiB for every replica: the memory each keeps for large state fields (0 = derived: a quarter of GOMEMLIMIT, else of the cgroup limit or physical memory, else 1 GiB)")
 		openLoop         = flag.Bool("open-loop", false, "open-loop load: creators fire flows without awaiting completion, so the backlog grows past the goroutine count (closed-loop caps in-flight flows at -concurrency, keeping a linear backlog inside the cache and never stressing the refiller)")
 		maxOutstanding   = flag.Int("max-outstanding", 100000, "open-loop only: cap on in-flight (created minus ended) flows, the backpressure bound that keeps the backlog from OOMing the DB")
 		arrivalRate      = flag.Float64("arrival-rate", 0, "open-loop only: cap flow creation at this many/sec, fractional allowed (0 = flat-out to saturation)")
@@ -265,6 +266,9 @@ func run() error {
 		if *refillIntervalMs > 0 {
 			setters = append(setters, engineseams.SetRefillInterval(eng, time.Duration(*refillIntervalMs)*time.Millisecond))
 		}
+		if *stateCacheMB > 0 {
+			setters = append(setters, eng.SetStateCacheSize(*stateCacheMB<<20))
+		}
 		for _, setter := range setters {
 			if setter != nil {
 				return setter
@@ -325,6 +329,7 @@ func run() error {
 			"carryRead":       *carryRead,
 			"workers":         *workers,
 			"maxConnections":  *maxConns,
+			"stateCacheMB":    *stateCacheMB,
 			"weights":         weights,
 			"replicas":        *replicas,
 			"replicaWorkers":  *replicaWorkers,
@@ -495,6 +500,10 @@ func environment() map[string]any {
 		"goos":      runtime.GOOS,
 		"goarch":    runtime.GOARCH,
 		"numCPU":    runtime.NumCPU(),
+		// The memory settings a payload arm's heap depends on: the engine's state cache defaults to a quarter
+		// of the soft limit, and GOGC sets how far past its live size the heap runs.
+		"GOGC":       os.Getenv("GOGC"),
+		"goMemLimit": goMemLimit(),
 	}
 	// The commit the binary was built from, so every artifact names the build it measured. `go build` stamps
 	// it; `go run` and a build outside the work tree do not, and vcs.modified=true means a dirty tree.
@@ -506,6 +515,14 @@ func environment() map[string]any {
 		}
 	}
 	return env
+}
+
+// goMemLimit returns the runtime's soft memory limit in bytes, or 0 when none is set (GOMEMLIMIT unset).
+func goMemLimit() int64 {
+	if limit := debug.SetMemoryLimit(-1); limit < math.MaxInt64 {
+		return limit
+	}
+	return 0
 }
 
 // shardFlags collects repeatable -dsn flags: "N=dsn" registers shard N, a bare DSN registers shard 1.
