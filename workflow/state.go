@@ -129,22 +129,29 @@ func NewState(data ...any) (State, error) {
 // own, so a later mutation of the caller's value cannot change what was stored. Returns an error only if
 // value cannot be marshalled (a NaN, an +Inf, a channel) or is a json.RawMessage that is not valid JSON.
 func (s State) Set(name string, value any) error {
-	// A json.RawMessage is already JSON and is stored as-is, validated but not decoded. A []byte is NOT -
-	// it is binary data and marshals to a base64 string, which is what a caller storing a blob wants. The
-	// two are distinguished by TYPE, so a call site cannot pick the wrong one by accident.
-	if raw, ok := value.(json.RawMessage); ok {
-		if !json.Valid(raw) {
-			return errors.New("workflow: state field %q: value is not valid JSON", name)
-		}
-		s.d[name] = bytes.Clone(raw)
-		return nil
-	}
-	b, err := json.Marshal(value)
+	raw, err := marshalField(name, value)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	s.d[name] = b
+	s.d[name] = raw
 	return nil
+}
+
+// marshalField encodes a value as Set stores it. A json.RawMessage is already JSON and is kept as-is, validated
+// but not decoded. A []byte is NOT - it is binary data and marshals to a base64 string, which is what a caller
+// storing a blob wants. The two are distinguished by TYPE, so a call site cannot pick the wrong one by accident.
+func marshalField(name string, value any) (json.RawMessage, error) {
+	if raw, ok := value.(json.RawMessage); ok {
+		if !json.Valid(raw) {
+			return nil, errors.New("workflow: state field %q: value is not valid JSON", name)
+		}
+		return bytes.Clone(raw), nil
+	}
+	b, err := json.Marshal(value)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return b, nil
 }
 
 // SetString stores a string field (normalized through JSON, like Set).

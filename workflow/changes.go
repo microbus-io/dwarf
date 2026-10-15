@@ -134,29 +134,28 @@ func (c Changes) IsDeleted(name string) bool {
 // nothing. On a reduced field a nil contributes nothing. It returns an error if the value cannot be marshalled,
 // if the reducer cannot combine it, or if name ends with OverwriteSuffix; on an error the Changes are unchanged.
 func (c Changes) Set(name string, value any, reducers map[string]Reducer) error {
-	if strings.HasSuffix(name, OverwriteSuffix) {
-		return errors.New("workflow: state field %q cannot be written: the name ends with %q", name, OverwriteSuffix)
-	}
-	one, _ := NewState()
-	if err := one.Set(name, value); err != nil {
+	raw, err := marshalWrite(name, value)
+	if err != nil {
 		return errors.Trace(err)
 	}
-	return c.contribute(name, one.d[name], reducers)
+	return c.contribute(name, raw, reducers)
+}
+
+// marshalWrite encodes a value written to a field of these Changes, rejecting a name that ends with
+// OverwriteSuffix.
+func marshalWrite(name string, value any) (json.RawMessage, error) {
+	if strings.HasSuffix(name, OverwriteSuffix) {
+		return nil, errors.New("workflow: state field %q cannot be written: the name ends with %q", name, OverwriteSuffix)
+	}
+	return marshalField(name, value)
 }
 
 // Overwrite records that the field is replaced by value, whatever its reducer; a nil value deletes it. It
 // returns an error if the value cannot be marshalled or name ends with OverwriteSuffix.
 func (c Changes) Overwrite(name string, value any) error {
-	if strings.HasSuffix(name, OverwriteSuffix) {
-		return errors.New("workflow: state field %q cannot be written: the name ends with %q", name, OverwriteSuffix)
-	}
-	raw := json.RawMessage("null")
-	if value != nil {
-		one, _ := NewState()
-		if err := one.Set(name, value); err != nil {
-			return errors.Trace(err)
-		}
-		raw = one.d[name]
+	raw, err := marshalWrite(name, value)
+	if err != nil {
+		return errors.Trace(err)
 	}
 	delete(c.contributions.d, name)
 	c.overwrites.d[name] = raw
@@ -182,12 +181,13 @@ func (c Changes) Compose(later Changes, reducers map[string]Reducer) error {
 // contribute folds one contribution, given as JSON, onto the Changes.
 func (c Changes) contribute(name string, v json.RawMessage, reducers map[string]Reducer) error {
 	r := reducers[name]
-	plain := r == "" || r == ReducerReplace
+	if r == "" || r == ReducerReplace {
+		c.setPlain(name, v)
+		return nil
+	}
 	if prev, ok := c.overwrites.d[name]; ok {
 		// An overwrite is sticky: a later write folds onto the overwritten value, which stays an overwrite.
 		switch {
-		case plain:
-			c.overwrites.d[name] = orNull(v)
 		case isCleared(v):
 			// The reducer's identity.
 		default:
@@ -200,12 +200,6 @@ func (c Changes) contribute(name string, v json.RawMessage, reducers map[string]
 		return nil
 	}
 	switch {
-	case plain && isCleared(v):
-		// A delete of a plain field is an overwrite with nothing.
-		delete(c.contributions.d, name)
-		c.overwrites.d[name] = json.RawMessage("null")
-	case plain:
-		c.contributions.d[name] = v
 	case isCleared(v):
 		// The reducer's identity.
 	default:
@@ -216,6 +210,20 @@ func (c Changes) contribute(name string, v json.RawMessage, reducers map[string]
 		c.contributions.d[name] = folded
 	}
 	return nil
+}
+
+// setPlain records a write to a field with no reducer: v replaces the field, and a null deletes it, which is an
+// overwrite with nothing. A field already overwritten stays overwritten.
+func (c Changes) setPlain(name string, v json.RawMessage) {
+	switch _, overwritten := c.overwrites.d[name]; {
+	case overwritten:
+		c.overwrites.d[name] = orNull(v)
+	case isCleared(v):
+		delete(c.contributions.d, name)
+		c.overwrites.d[name] = json.RawMessage("null")
+	default:
+		c.contributions.d[name] = v
+	}
 }
 
 // fold combines inc onto base through r. When base is a contribution (contributed), a bare value stored by an

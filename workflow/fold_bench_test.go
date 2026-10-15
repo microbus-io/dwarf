@@ -81,3 +81,20 @@ func BenchmarkFold_FlowSet(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkFlow_SetPlain measures a task's two writes to fields with no reducer - the common case, which needs
+// no fold.
+func BenchmarkFlow_SetPlain(b *testing.B) {
+	base, _ := NewState("orderID", "o-1", "amount", 42)
+	b.ReportAllocs()
+	for b.Loop() {
+		f := NewRawFlow()
+		f.SetRawState(base)
+		if err := f.Set("status", "charged"); err != nil {
+			b.Fatal(err)
+		}
+		if err := f.Set("receipt", map[string]any{"id": "r-1", "amount": 42}); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

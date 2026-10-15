@@ -270,6 +270,23 @@ func (f *Flow) write(name string, one Changes) error {
 // It returns an error if the value cannot be marshalled to JSON (a NaN, an +Inf, a channel), if the reducer
 // cannot combine it with the field's value (a string under ReducerAdd), or if name ends with OverwriteSuffix.
 func (f *Flow) Set(name string, value any) error {
+	if r := f.reducers[name]; r == "" || r == ReducerReplace {
+		// No reducer, so nothing to fold: the bytes go straight into the view and the changes.
+		raw, err := marshalWrite(name, value)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if f.changes.IsZero() {
+			f.changes = NewChanges()
+		}
+		f.changes.setPlain(name, raw)
+		if isCleared(raw) {
+			delete(f.state.d, name)
+		} else {
+			f.state.d[name] = raw
+		}
+		return nil
+	}
 	one := NewChanges()
 	if err := one.Set(name, value, f.reducers); err != nil {
 		return errors.Trace(err)
