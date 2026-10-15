@@ -17,7 +17,9 @@ limitations under the License.
 package main
 
 import (
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/microbus-io/testarossa"
 )
@@ -68,4 +70,37 @@ func TestWindowInvalidity_DrainAndStall(t *testing.T) {
 		res.Drain = &d
 		assert.Contains(windowInvalidity(res, 0, 0), "drain", "%+v", d)
 	}
+}
+
+// TestDrainOutstanding_GivesUpOnSilenceNotOnTime pins that the drain waits out a slow backlog for as long as it
+// keeps draining, and counts as unfinished only what is left once nothing has ended for the quiet period.
+func TestDrainOutstanding_GivesUpOnSilenceNotOnTime(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	// Ten flows ending one every 250ms take ~2.5s, five times the quiet period: all of them are waited out.
+	var left atomic.Int64
+	left.Store(10)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for left.Load() > 0 {
+			select {
+			case <-stop:
+				return
+			case <-time.After(250 * time.Millisecond):
+				left.Add(-1)
+			}
+		}
+	}()
+	d := drainOutstanding(nil, map[string]int64{}, 10, left.Load, 500*time.Millisecond)
+	assert.Equal(int64(0), d.Unfinished)
+	assert.True(d.Sec > 2, "the drain must outlast the quiet period while flows keep ending, took %.1fs", d.Sec)
+	assert.True(d.FlowsPerSec > 0)
+
+	// A backlog that stops draining is given up on after the quiet period, with what is left unfinished.
+	start := time.Now()
+	d = drainOutstanding(nil, map[string]int64{}, 3, func() int64 { return 3 }, 500*time.Millisecond)
+	assert.Equal(int64(3), d.Unfinished)
+	assert.True(time.Since(start) < 2*time.Second)
 }

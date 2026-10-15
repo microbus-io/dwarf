@@ -102,7 +102,7 @@ func run() error {
 		openLoop         = flag.Bool("open-loop", false, "open-loop load: creators fire flows without awaiting completion, so the backlog grows past the goroutine count (closed-loop caps in-flight flows at -concurrency, keeping a linear backlog inside the cache and never stressing the refiller)")
 		maxOutstanding   = flag.Int("max-outstanding", 100000, "open-loop only: cap on in-flight (created minus ended) flows, the backpressure bound that keeps the backlog from OOMing the DB")
 		arrivalRate      = flag.Float64("arrival-rate", 0, "open-loop only: cap flow creation at this many/sec, fractional allowed (0 = flat-out to saturation)")
-		drain            = flag.Duration("drain", 5*time.Minute, "open-loop only: after each window stop creating and wait up to this long for the outstanding flows to end, then account for every flow the step created - completed, ended otherwise, unfinished, missing - in the artifact. Runs after the window is collected, so it never touches the window's numbers; an unfinished, failed or missing flow invalidates the run (0 = off)")
+		drain            = flag.Duration("drain", 5*time.Minute, "open-loop only: after each window stop creating and wait for the outstanding flows to end, giving up once none has ended for this long, then account for every flow the step created - completed, ended otherwise, unfinished, missing - in the artifact. Runs after the window is collected, so it never touches the window's numbers; an unfinished, failed or missing flow invalidates the run. Must exceed the longest task (0 = off)")
 		stallTimeout     = flag.Duration("stall-timeout", 5*time.Minute, "open-loop only: end the step and mark the run invalid when no task starts and no flow ends for this long while flows are outstanding. Must exceed the longest task (0 = off)")
 		arrivalStop      = flag.Duration("arrival-stop", 0, "open-loop only: stop admitting flows this far into the measurement window while the engine keeps running, so the remainder measures a DRAIN under abated load (0 = keep offering for the whole window). The window mean spans both phases, so read the shape from -stats-interval, not the mean")
 		concurrency      = flag.String("concurrency", "8,16,32,64,128", "comma-separated closed-loop submitter counts to sweep")
@@ -224,6 +224,11 @@ func run() error {
 		// A task longer than the timeout is silence the watchdog would read as a hang.
 		return fmt.Errorf("-stall-timeout %s must exceed the longest task (%s plus -task-jitter %s)",
 			*stallTimeout, longestTask, *taskJitter)
+	}
+	if *drain > 0 && longestTask+*taskJitter >= *drain {
+		// The same silence, read by the drain as flows that will never end.
+		return fmt.Errorf("-drain %s must exceed the longest task (%s plus -task-jitter %s)",
+			*drain, longestTask, *taskJitter)
 	}
 	regHost := &benchHost{
 		graphs:       map[string]*workflow.Graph{},
@@ -496,8 +501,8 @@ func windowInvalidity(res stepResult, rate float64, maxOutstanding int) string {
 			res.Errors, res.EngineCounters["dwarf_steps_recovered"], res.EngineCounters["dwarf_steps_unwedged"])
 	}
 	if d := res.Drain; d != nil && (d.Unfinished != 0 || len(d.EndedOther) != 0 || d.missing() != 0) {
-		return fmt.Sprintf("drain: of %d flows created, %d completed, %d unfinished after %.0fs, %d missing, ended otherwise %v",
-			d.Created, d.Completed, d.Unfinished, d.Sec, d.missing(), d.EndedOther)
+		return fmt.Sprintf("drain: of %d flows created, %d completed, %d unfinished after %.0fs (none ended for the last %s), %d missing, ended otherwise %v",
+			d.Created, d.Completed, d.Unfinished, d.Sec, guard.drain, d.missing(), d.EndedOther)
 	}
 	if rate > 0 && res.ThrottledMs > 0 {
 		// The -max-outstanding fuse bound while a rate was COMMANDED, so the window measured the cap and not

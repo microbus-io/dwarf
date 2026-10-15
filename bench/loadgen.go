@@ -130,8 +130,9 @@ var guard struct {
 // when the window closes; this follows them to their end.
 type drainResult struct {
 	OutstandingAtWindowEnd int64   `json:"outstandingAtWindowEnd"`
-	Sec                    float64 `json:"sec"`     // how long the drain took, or the bound when it gave up
-	Created                int64   `json:"created"` // flows created in the step, warmup included
+	Sec                    float64 `json:"sec"`         // how long the drain took, up to the point it gave up
+	FlowsPerSec            float64 `json:"flowsPerSec"` // the rate it ended flows at, with creation stopped
+	Created                int64   `json:"created"`     // flows created in the step, warmup included
 	// Completed and EndedOther count flows that ended over the whole step, by terminal status. With the drain
 	// on, a sweep's previous step drained to zero before this one began, so these are this step's flows.
 	Completed  int64            `json:"completed"`
@@ -570,20 +571,30 @@ func stallReason(stalled bool, why string) string {
 	return why
 }
 
-// drainOutstanding waits, up to bound, for the step's outstanding flows to end, then accounts for every flow
-// the step created. It runs after the measurement window has been collected, so it never touches the window's
+// drainOutstanding waits for the step's outstanding flows to end, giving up once none has ended for quiet, then
+// accounts for every flow the step created. It runs after the measurement window has been collected, so it never touches the window's
 // numbers; with creation stopped, a healthy engine drains ~2,000 flows in seconds at small payloads and in a
 // minute or two at 1 MB.
 func drainOutstanding(readers []*sdkmetric.ManualReader, stepStart map[string]int64, created int64,
-	outstanding func() int64, bound time.Duration) *drainResult {
+	outstanding func() int64, quiet time.Duration) *drainResult {
 
 	d := &drainResult{OutstandingAtWindowEnd: max(0, outstanding()), Created: created}
+	// Give up on silence, never on a wall-clock bound: a healthy saturated backlog drains for as long as it
+	// takes, and only one that stopped draining counts as unfinished. A bound invalidates every slow cell -
+	// 20,000 outstanding 10-step flows need 300s even at ~667 steps/s, and a 1MB cell runs at ~270.
 	start := time.Now()
-	for outstanding() > 0 && time.Since(start) < bound {
+	left, progressed := d.OutstandingAtWindowEnd, start
+	for left > 0 && time.Since(progressed) < quiet {
 		time.Sleep(200 * time.Millisecond)
+		if n := max(0, outstanding()); n < left {
+			left, progressed = n, time.Now()
+		}
 	}
 	d.Sec = time.Since(start).Seconds()
-	d.Unfinished = max(0, outstanding())
+	d.Unfinished = left
+	if d.Sec > 0 {
+		d.FlowsPerSec = float64(d.OutstandingAtWindowEnd-d.Unfinished) / d.Sec
+	}
 	deltas := counterDeltas(stepStart, collectAllCounters(readers))
 	d.Completed, d.EndedOther = endedByStatus(deltas)
 	d.StepsRecovered = deltas["dwarf_steps_recovered"]
