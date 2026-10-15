@@ -1388,7 +1388,8 @@ func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 // them shortly after. Marked flows are excluded from List/History immediately. Interrupted flows are
 // terminated first, as Delete does, with the reason "purged"; running flows are skipped. Returns the count of roots marked. A call
 // marks at most min(Query.Limit, 4096) roots, divided per shard exactly as in List (up to ceil(n/shards) per
-// shard), so a multi-shard call can mark slightly more; iterate until it returns 0 to mark everything.
+// shard), so a multi-shard call can mark slightly more; iterate until it returns 0 to mark everything. The
+// query takes any filter List does; one that sets none (only Shard or Limit, or nothing) is a 400.
 func (e *Engine) Purge(ctx context.Context, query workflow.Query) (int, error) {
 	if err := e.ensureStarted(); err != nil {
 		return 0, errors.Trace(err)

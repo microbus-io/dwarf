@@ -324,7 +324,7 @@ Each operation adds these to the 503 and 500 every call can return:
 | `Snapshot`, `Fingerprint` | malformed key | unknown flow | | |
 | `History` | malformed key | unknown flow, or one scheduled for deletion | | |
 | `Step` | malformed key | unknown step | | |
-| `List`, `Purge` | malformed `ThreadKey`, invalid status or shard; `List` with a malformed cursor; `Purge` with no filter or with `IncludeSubgraphs` | unknown `ThreadKey` | | |
+| `List`, `Purge` | malformed `ThreadKey`, invalid status or shard; `List` with a malformed cursor; `Purge` with no filter (`Shard` and `Limit` are not filters) or with `IncludeSubgraphs` | unknown `ThreadKey` | | |
 | `Resume` | malformed key, a subgraph child's key, data not JSON-marshalable | unknown flow | | the flow is not interrupted, including when a `Delete` or `Terminate` won the race |
 | `Cancel`, `Terminate` | malformed key, a subgraph child's key | unknown flow | | |
 | `Fork` | malformed key, overrides not JSON-marshalable | unknown step | | the flow is not terminal, is scheduled for deletion, or holds an unresolved interrupt off the fork path |

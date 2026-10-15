@@ -787,8 +787,12 @@ func intCSV(ids []int) string {
 }
 
 func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
-	if query.Status == "" && query.WorkflowURL == "" && query.WorkflowName == "" && query.OlderThan == 0 {
-		return 0, errors.New("purge requires at least one filter (status, workflowURL, workflowName, or olderThan)", http.StatusBadRequest)
+	// Shard and Limit bound a purge but select every flow they reach, so neither counts as a filter.
+	narrowed := query.Status != "" || query.WorkflowURL != "" || query.WorkflowName != "" || query.ThreadKey != "" ||
+		query.TaskName != "" || query.FairnessKey != "" || query.Priority != 0 || query.OlderThan != 0 ||
+		query.NewerThan != 0 || query.Search != ""
+	if !narrowed {
+		return 0, errors.New("purge requires at least one filter; Shard and Limit do not narrow it", http.StatusBadRequest)
 	}
 	// A subgraph child cannot be purged independently - it is removed as part of its root's subtree. Reject
 	// IncludeSubgraphs rather than silently ignoring it, so a caller is not surprised the flag did nothing.
