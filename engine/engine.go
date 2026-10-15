@@ -1102,6 +1102,14 @@ func (e *Engine) drainRuntime() {
 		close(e.reconcileStop)
 	}
 	e.reconcileWorker.Wait()
+	// Idle every piston. Nothing it pushes can reach a worker from here on (the cache closes below), and an idle
+	// piston's Liveness stops the beat stamping dispatched_at, so peers drop this replica from the work divisor
+	// within the dispatch window and select its residue class themselves, instead of leaving those steps to the
+	// steal grace for as long as an in-flight task holds the drain open. The reconcile loop that re-derives the
+	// mode has stopped, so it holds.
+	for _, p := range e.pistons {
+		p.SetIdle(true)
+	}
 	// Give up every dispatcher slot if the drain turns out to be LONG. A draining replica takes on no new
 	// work, but its row stays fresh until it leaves the fleet at the very end, and a fresh row keeps its rank
 	// - so a drain waiting on a long task would leave each shard it dispatched one dispatcher short for the

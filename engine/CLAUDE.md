@@ -3429,6 +3429,7 @@ race a close and panic a worker mid-`processStep`. `drainRuntime`:
 ```
 close(drainStop)                             // a worker asleep in a persist backoff releases its lease and exits
 close(reconcileStop); reconcileWorker.Wait() // in-memory only: nothing in flight to wait for
+SetIdle(true) on every piston                // stops the dispatch evidence, so peers take this replica's residue class
 arm withdrawal timer                         // gives up dispatcher slots if the drain outlasts a read cadence
 closeMetrics()                               // no collection may run against a closing engine
 backlogCancel(); backlogWorker.Wait()        // nor the backlog refresh against a closing database
@@ -3455,6 +3456,13 @@ commits, while `piston.Run` and `Sonar.Run` end on ctx alone. Neither needs a se
 pure read and a beat is one idempotent UPDATE, so abandoning either mid-flight strands nothing.
 
 `leaveFleet` runs on `context.Background()` rather than the lifetime ctx, which is cancelled moments later.
+
+**The pistons idle at the top of the drain, and are cancelled only near its end.** Their output goes nowhere
+once the cache closes, and a turning piston keeps the beat stamping `dispatched_at`, which keeps this replica in
+every peer's work divisor: its residue class would reach a worker only through a peer's steal, after the steal
+grace, for as long as an in-flight task holds the drain open. Idle, its `Liveness` stops the stamp and the class
+passes within the dispatch window. Idling must follow the reconcile loop's stop, which is the only thing that
+re-derives the mode. Pinned by `TestDispatchers_DrainStopsClaimingDispatch`.
 
 A `cache.Refill` into an already-closed cache is a no-op. Dedicated stop signals, and no wake channels at all,
 keep the drain free of ordering hazards.

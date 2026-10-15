@@ -722,6 +722,72 @@ func TestDispatchers_DrainGivesUpTheSlotBeforeWaiting(t *testing.T) {
 	t.Fatal("the draining replica never withdrew from the ranking while its task was in flight")
 }
 
+// TestDispatchers_DrainStopsClaimingDispatch pins that a draining replica stops proving it dispatches, so its
+// peers stop counting it in the work divisor and take over its residue class, rather than leaving that class's
+// steps to wait out the steal grace for as long as an in-flight task holds the drain open. Its pistons idle at
+// the start of the drain - nothing they push can reach a worker any more - and the beat then stops stamping
+// dispatched_at, which ages past a couple of beats while the task is still running.
+func TestDispatchers_DrainStopsClaimingDispatch(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("Drain")
+	g.SetURL("A", "drainidle/a")
+	g.AddTransition("A", workflow.End)
+	mux.HandleGraph("drainidle/g", g)
+	mux.HandleTask("drainidle/a", func(ctx context.Context, f *workflow.Flow) error {
+		close(started)
+		<-release
+		return nil
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	_, err = e.Create(ctx, "drainidle/g", nil, nil)
+	assert.NoError(err)
+	<-started
+	dispatchAge := func() float64 {
+		var ms float64
+		if err := db.QueryRowContext(ctx, "SELECT DATE_DIFF_MILLIS(NOW_UTC(), dispatched_at) FROM dwarf_peers WHERE engine_id=?", e.engineID).Scan(&ms); err != nil {
+			return -1
+		}
+		return ms
+	}
+	// The beat stamps dispatched_at every second while the replica dispatches; wait for the first stamp.
+	deadline := time.Now().Add(10 * time.Second)
+	for age := dispatchAge(); age < 0 || age > 1500; age = dispatchAge() {
+		if time.Now().After(deadline) {
+			t.Fatal("the replica never stamped dispatched_at")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	var wg sync.WaitGroup
+	wg.Go(func() { e.Shutdown(ctx) })
+	defer func() {
+		close(release)
+		wg.Wait()
+	}()
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if dispatchAge() > 2500 {
+			for _, p := range e.pistons {
+				assert.True(p.Idle())
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("the draining replica kept stamping dispatched_at while its task was in flight")
+}
+
 // TestDispatchers_RoleFlagsSurviveARestartUnderLoad pins that the role flags are published, not assigned in
 // place: a host still serving through a Shutdown/Startup restart reads them from Create while Startup
 // builds the next run's set, and an in-place map assignment under that read is a fatal throw. Meaningful
