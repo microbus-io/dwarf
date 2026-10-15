@@ -136,7 +136,7 @@ band first, as designed.
   higher-priority work is using the capacity, as designed. If that band has a deadline, the fix is capacity or
   fewer flows at the better bands, not the engine.
 
-**Then find which of four things is binding.**
+**Then find which of five things is binding.**
 
 **1. The database is saturated.** `dwarf_turnstile_available` sits at zero with `dwarf_turnstile_waiting`
 deep, and database CPU is high. This is the expected shape at capacity — the engine queues rather than
@@ -169,6 +169,38 @@ ALTER TABLE dwarf_steps SET (autovacuum_analyze_scale_factor = 0.01,
 **4. Work is stranded on a peer that is alive but not dispatching.** `dwarf_steps_stolen_total` is non-zero.
 See [One shard is slow or unreachable](#one-shard-is-slow-or-unreachable) — the same diagnosis applies to a
 replica that has stopped serving its share.
+
+**5. A long query is holding back cleanup (PostgreSQL).** Throughput is down, but not stopped, and
+`dwarf_refill_query_duration_seconds` climbs in every `phase` over minutes. `ANALYZE` does not help. While any
+query or transaction on the database holds an old snapshot, PostgreSQL cannot clean up the engine's queue
+table behind it. The engine's background queries then step over more and more leftover entries, and each one
+gets slower. Autovacuum's log reports dead rows that are "not yet removable".
+
+Find the oldest snapshot holder:
+
+```sql
+SELECT pid, usename, application_name, state,
+       age(backend_xmin) AS xmin_age,
+       now() - xact_start AS xact_age,
+       left(query, 200) AS query
+FROM pg_stat_activity
+WHERE backend_xmin IS NOT NULL
+ORDER BY age(backend_xmin) DESC
+LIMIT 5;
+```
+
+A replication slot can hold the horizon too; check `age(xmin)` in `pg_replication_slots`, and
+`hot_standby_feedback` on any read replica.
+
+**Respond:**
+- **If the holder is not the engine's** (a report, an ad hoc session, an idle transaction someone left open), end
+  it with `pg_cancel_backend(pid)`, or `pg_terminate_backend(pid)` if it is idle in a transaction.
+- **If it is one of the engine's own connections,** leave it. The engine recovers on its own once the
+  slowdown passes; it loses throughput meanwhile and nothing else.
+- **Expect a burst of WAL writes as cleanup catches up.** Throughput can dip briefly before it returns to normal.
+- **Do not set a statement or transaction timeout** to prevent a recurrence. See the
+  [production checklist](production-checklist.md#database). Keep long-running queries off the shard databases
+  instead.
 
 ---
 

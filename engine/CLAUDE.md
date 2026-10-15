@@ -4310,9 +4310,11 @@ A trap to recognize, not a mechanism: the engine's background reads carry no dea
 
 **To diagnose:** read the oldest snapshot holder in `pg_stat_activity` - `backend_xmin` age, `xact_start`,
 `query_start`, the query - and the "dead but not yet removable" counts in autovacuum's log. A long read of the
-engine's own, an operator session, a host query or a replication slot can each start it. The server-side bounds
-(`statement_timeout`, `idle_in_transaction_session_timeout`) are the operator's to set, sized by someone who knows
-the database.
+engine's own, an operator session, a host query or a replication slot can each start it. **Server-side bounds
+(`statement_timeout`, `idle_in_transaction_session_timeout`, `transaction_timeout`) on the engine's database, role
+or DSN are the same deadline set out of the engine's sight, and the docs warn against them:** no value can
+anticipate how deep the backlog will grow, so a timeout reproduces the tally wedge above. An idle-in-transaction
+timeout also kills transactions that sit idle while a busy replica is slow.
 
 ### Per-Function Crash Analysis
 

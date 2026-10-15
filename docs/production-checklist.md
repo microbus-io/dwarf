@@ -22,6 +22,17 @@
 - [ ] **`ANALYZE`/autovacuum tuned for `dwarf_steps`.** It is a high-churn queue table whose row counts swing
   by orders of magnitude, and stale statistics can flip the selection query from an index scan to a
   sequential one. → [Runbook](runbook.md#backlog-is-growing)
+- [ ] **No statement, transaction or idle-in-transaction timeout** on the engine's database, its role or its
+  connection string. That means PostgreSQL's `statement_timeout`, `transaction_timeout` and
+  `idle_in_transaction_session_timeout`, and MySQL's `max_execution_time`. General database guidance often
+  recommends them; leave them unset here.
+  - Some of the engine's background queries grow with the backlog, so no value is safe for every backlog. A
+    timeout that cuts them off can stop a database's work from being dispatched at all.
+  - An idle-in-transaction timeout ends transactions while the engine is busiest, and the work is retried.
+- [ ] **Long-running queries stay off the shard databases:** analytics, reporting, ad hoc sessions. While a query
+  runs for minutes, PostgreSQL cannot clean up the engine's queue table behind it, and dispatch slows until it
+  ends. A read replica with `hot_standby_feedback` on holds cleanup back the same way, and so does a lagging
+  replication slot. → [Runbook](runbook.md#backlog-is-growing)
 
 ## Engine configuration
 
