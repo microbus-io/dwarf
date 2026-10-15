@@ -1820,7 +1820,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 		// that window, since the lost branch never marked its caller step interrupted. sequel's QueryRow
 		// reports the transaction's error like every other statement method, so the check below catches it and
 		// the write is retried. Observed on SQL Server, where two parallel subgraph callers interrupting at once deadlock:
-		// moving a step running->interrupted deletes keys from the three status-filtered dwarf_steps indexes,
+		// moving a step running->interrupted deletes keys from the status-filtered dwarf_steps indexes,
 		// so even disjoint row sets cycle. Never let this error go unchecked, and never decide the fence ahead
 		// of it.
 		var curLeaseSeq int
@@ -2219,7 +2219,7 @@ func dispatchURLOf(graph *workflow.Graph, name string) string {
 // claimEligible is the claim's test that the step is still claimable - pending, unparked, due, lease lapsed -
 // wrapped in CASE so that no index can serve it, leaving the primary key on step_id as the claim's only index
 // path. Written as plain conjuncts, the test implies status='pending', which makes every partial index on
-// pending rows (idx_dwarf_steps_due, _selection, _status) a candidate, and a scan of one of them filtered on
+// pending rows (idx_dwarf_steps_due, _selection) a candidate, and a scan of one of them filtered on
 // step_id walks the whole backlog. Measured on Postgres: after an ANALYZE taken at a small backlog, both the
 // generic and the custom plan claimed through a partial index on pending rows, every claim cost O(backlog),
 // and a 5,000 steps/s run fell to ~800 steps/s with its backlog at the cap until an ANALYZE taken at a large

@@ -35,7 +35,7 @@ import (
 // step, so the stop checkpoint scoped to (root key, interrupted) counts exactly the propagations that have
 // landed. A wall-clock poll cannot stand in for it here: the path from Create to two children interrupting is a
 // dozen round trips, and on SQL Server two parallel subgraph callers interrupting at once genuinely DEADLOCK
-// (moving a step running->interrupted deletes keys from three status-filtered indexes), so the write is rolled
+// (moving a step running->interrupted deletes keys from the status-filtered indexes), so the write is rolled
 // back and retried by Transact. That is correct engine behaviour and it is not fast - measured under a loaded
 // parallel suite, ZERO of the two had landed inside a 5s bound on a run whose remaining assertions all passed.
 //

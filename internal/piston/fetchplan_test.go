@@ -72,7 +72,7 @@ func TestFetchQuery_PostgresPlan(t *testing.T) {
 		sized = explain(tx, stmt)
 		// Leave the due index as the only one that can serve the predicate, so the question is what it is
 		// allowed to seek.
-		if _, err := tx.ExecContext(ctx, "DROP INDEX idx_dwarf_steps_selection, idx_dwarf_steps_status"); err != nil {
+		if _, err := tx.ExecContext(ctx, "DROP INDEX idx_dwarf_steps_selection"); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
