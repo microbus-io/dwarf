@@ -72,13 +72,13 @@ func TestOpenThreshold(t *testing.T) {
 	assert.Equal(minField, openThreshold(10000, 1)) // floors at minField, never 0
 
 	// The dialect factor divides the bar, and applies only at a fan-out.
-	assert.Equal(1, New("pgx").inflation(1))
-	assert.Equal(postgresInflation, New("pgx").inflation(64))
-	assert.Equal(1, New("sqlite").inflation(64))
-	assert.Equal(1, New("mysql").inflation(64))
+	assert.Equal(1, New("pgx", 1, NewCache(testCacheBytes)).inflation(1))
+	assert.Equal(postgresInflation, New("pgx", 1, NewCache(testCacheBytes)).inflation(64))
+	assert.Equal(1, New("sqlite", 1, NewCache(testCacheBytes)).inflation(64))
+	assert.Equal(1, New("mysql", 1, NewCache(testCacheBytes)).inflation(64))
 	assert.Equal(openThreshold(64, 1)/postgresInflation, openThreshold(64, postgresInflation))
 	// Linear is untouched by the dialect on every driver - that is where estimate accuracy would decide cases.
-	assert.Equal(threshold, openThreshold(1, New("pgx").inflation(1)))
+	assert.Equal(threshold, openThreshold(1, New("pgx", 1, NewCache(testCacheBytes)).inflation(1)))
 
 	// Monotone in N: more branches never raise the bar.
 	for n := 1; n < 64; n++ {
@@ -119,7 +119,7 @@ func TestLinker_MintTiers(t *testing.T) {
 	mint := func(t *testing.T, state workflow.State, changes workflow.State, inherited Refs, successors int) (workflow.State, Refs) {
 		t.Helper()
 		assert := testarossa.For(t)
-		stateJSON, refsJSON, err := New("sqlite").Mint(state, workflow.ChangesOf(changes), inherited, anchor, successors, nil, nil)
+		stateJSON, refsJSON, err := New("sqlite", 1, NewCache(testCacheBytes)).Mint(state, workflow.ChangesOf(changes), inherited, anchor, successors, nil, nil)
 		assert.NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)
@@ -239,7 +239,7 @@ func TestLinker_MintTiers(t *testing.T) {
 		// dangle. Even a huge element stays inline. (The same inlineOnly set carries a cohort member's contribution
 		// past the fan-in's mint, whose bytes are likewise not in the anchor's row.)
 		state := mustState(map[string]any{"item": blob(50000), "doc": blob(50000)})
-		stateJSON, refsJSON, err := New("sqlite").Mint(state, workflow.ChangesOf(mustState(map[string]any{})), nil, anchor, 32, map[string]bool{"item": true}, nil)
+		stateJSON, refsJSON, err := New("sqlite", 1, NewCache(testCacheBytes)).Mint(state, workflow.ChangesOf(mustState(map[string]any{})), nil, anchor, 32, map[string]bool{"item": true}, nil)
 		assert.NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)
@@ -265,7 +265,7 @@ func TestLinker_MintTiers(t *testing.T) {
 
 		// PostgreSQL: jsonb stores this array ~4.7x larger than its text length, which the dialect factor
 		// corrects for, so the array refs.
-		stateJSON, refsJSON, err := New("pgx").Mint(state, workflow.ChangesOf(mustState(map[string]any{})), nil, anchor, 64, noRef, nil)
+		stateJSON, refsJSON, err := New("pgx", 1, NewCache(testCacheBytes)).Mint(state, workflow.ChangesOf(mustState(map[string]any{})), nil, anchor, 64, noRef, nil)
 		assert.NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)

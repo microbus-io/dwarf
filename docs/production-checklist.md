@@ -47,6 +47,9 @@
   leaves a stale registry row per restart, and one that ranked as a shard's dispatcher holds that slot until it
   ages out, leaving the shard fewer replicas running it. Must be unique among
   concurrently-live replicas. → [Upgrading](upgrading.md#deploying-your-own-application)
+- [ ] **`GOMEMLIMIT` set on engine hosts**, a little below the memory the process may use. The engine keeps a
+  quarter of it for large state fields, and without it Go's garbage collector can let the heap reach about twice
+  its live size. → [Deployment](deployment.md)
 - [ ] **Logger, meter provider and tracer provider injected.** All three default to no-ops, so an engine with
   nothing injected is silent — including its error logs. → [Observability](observability.md)
 - [ ] **Two engine replicas per shard, each at half the database's vCPU** (two 8-vCPU replicas per 32-vCPU

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/microbus-io/dwarf/internal/memlimit"
 	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -31,8 +32,8 @@ import (
 // size policy live in internal/staterefs. This file is the engine's side of it: the three things the Linker
 // deliberately does not own, because each is engine state rather than ref policy.
 //
-//   - WHICH Linker. One per shard (built in initRuntime), because a step id is only unique within a shard
-//     and the resolve cache is keyed on it.
+//   - WHICH Linker. One per shard (built in initRuntime), because a step id is only unique within a shard;
+//     all of them share the replica's one stateCache, which keys each field by shard.
 //   - HOW an anchor is read. anchorLoader turns a shard handle - which may be a transaction, since anchors
 //     never cross a flow and a flow never crosses a shard - into the Loader the Linker calls once per
 //     resolve.
@@ -42,6 +43,24 @@ import (
 //
 // The wrappers below are thin on purpose: they exist so the call sites in execution.go / completion.go do
 // not each repeat the linker pick, the loader build and the metric emit.
+
+// stateCacheFallback is the resolve-cache budget when the process's memory cannot be detected (no
+// GOMEMLIMIT, not Linux).
+const stateCacheFallback = 1 << 30
+
+// stateCacheBudget is the engine's resolve-cache budget, shared by every shard's Linker, and where it came from:
+// the SetStateCacheSize override, else a quarter of the detected memory limit, else stateCacheFallback.
+// A quarter, because the collector's headroom can double a full cache, and the rest of the heap - the
+// crew's carriers, row buffers, the host's own memory - needs the remainder.
+func (e *Engine) stateCacheBudget() (int64, string) {
+	if e.stateCacheBytes > 0 {
+		return e.stateCacheBytes, "SetStateCacheSize"
+	}
+	if limit, source := memlimit.Detect(); limit > 0 {
+		return limit / 4, source
+	}
+	return stateCacheFallback, "fallback"
+}
 
 // linkerFor returns the Linker serving a shard. Every shard opened at Startup has one, so a nil return
 // means the shard set changed under us - impossible while running, since the set is construction-time only.

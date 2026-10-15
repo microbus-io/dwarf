@@ -114,6 +114,10 @@ type Engine struct {
 	// (claimer) as forensic provenance, deliberately unindexed.
 	engineID int64
 
+	// stateCacheBytes is the SetStateCacheSize override of the resolve-cache budget, split across the shards'
+	// Linkers at Startup; 0 derives it from the process's memory limit (stateCacheBudget).
+	stateCacheBytes int64
+
 	// flowsStartedCount / flowsEndedCount are cheap in-memory lifecycle counts, incremented
 	// alongside the dwarf_flows_started / dwarf_flows_ended OTEL counters but WITHOUT needing a
 	// configured meter (the default provider is a no-op). They let an embedder read in-flight work
@@ -300,8 +304,10 @@ type Engine struct {
 	sharedGraphs *lru.Cache[sharedGraphKey, *cachedGraph]
 	// State-ref linkers, one per shard: they decide which state fields a successor step stores by reference
 	// rather than by value, and resolve those references back. Per shard because a step id is only unique
-	// within one, and because a shard's own cache of resolved bytes should not be evicted by another's.
-	linkers map[int]*staterefs.Linker
+	// within one. They share stateCache, one budget of resolved bytes for the whole replica, so it goes to
+	// the shards this replica dispatches rather than being split among shards it may never run.
+	linkers    map[int]*staterefs.Linker
+	stateCache *staterefs.Cache
 
 	// Lifecycle
 	started        atomic.Bool
@@ -499,6 +505,30 @@ func (e *Engine) SetEngineID(id int64) error {
 		return errors.New("engine id must be positive", http.StatusBadRequest)
 	}
 	e.engineID = id
+	return nil
+}
+
+// SetStateCacheSize sets how much memory, in bytes, the engine may use to keep large state fields it has
+// written or read, so the steps that read them next take them from memory rather than from the database. One
+// cache serves all of the engine's shards; a field larger than the whole size is not kept. Each field counts
+// as at least 4 KB, at most 65,536 are kept, and a field unread for 5 minutes is dropped.
+//
+// The default is a quarter of the memory this process may use: GOMEMLIMIT when it is set; otherwise, on
+// Linux, the tightest of the process's cgroup memory limits and physical memory. When none of these can be
+// read, the default is 1 GiB. Several engines in one process each take their own share, so set the size
+// explicitly there. Go's garbage collector lets the heap grow to about twice its live size before collecting,
+// so a full cache can occupy up to twice its size unless GOMEMLIMIT is set - setting GOMEMLIMIT is the
+// recommended way to bound the whole process.
+//
+// A smaller size costs database reads, not correctness. Construction-time only.
+func (e *Engine) SetStateCacheSize(bytes int64) error {
+	if e.started.Load() {
+		return errSetAfterStartup("state cache size")
+	}
+	if bytes <= 0 {
+		return errors.New("state cache size must be positive", http.StatusBadRequest)
+	}
+	e.stateCacheBytes = bytes
 	return nil
 }
 
@@ -884,6 +914,9 @@ func (e *Engine) initRuntime() error {
 		e.unwindRuntime()
 		return errors.New("injected fault: " + engineseams.FaultInitRuntime)
 	}
+	cacheBudget, cacheSource := e.stateCacheBudget()
+	e.stateCache = staterefs.NewCache(cacheBudget)
+	e.logger.InfoContext(e.lifetimeCtx, "State cache sized", "bytes", cacheBudget, "source", cacheSource)
 	for _, idx := range e.db.Indices() {
 		// A shard without a piston has no supply cycle, so nothing on it is ever dispatched while the replica
 		// goes on advertising itself as alive there - a half-supplied engine reporting success. Startup
@@ -898,7 +931,7 @@ func (e *Engine) initRuntime() error {
 		// One state-ref Linker per shard, built from the same handle: it needs the shard's driver name (the
 		// only dialect-dependent term in the size policy) and it caches resolved payload bytes under step
 		// ids, which are unique only within a shard.
-		e.linkers[idx] = staterefs.New(db.DriverName())
+		e.linkers[idx] = staterefs.New(db.DriverName(), idx, e.stateCache)
 		p, perr := piston.New(idx, db, e.planner, &e.cache)
 		if perr != nil {
 			e.unwindRuntime()

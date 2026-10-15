@@ -20,6 +20,7 @@ import (
 	"context"
 	"math"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,7 +47,8 @@ func TestSetters_ConstructionTimeOnly(t *testing.T) {
 	for _, err := range []error{
 		e.SetShard(ShardSpec{Index: 2, DSN: "file:other.sqlite"}), // shard set is immutable after Startup
 		e.SetWorkers(8),
-		e.SetEngineID(12345), // id is registered at Startup and baked into signal-echo suppression
+		e.SetEngineID(12345),         // id is registered at Startup and baked into signal-echo suppression
+		e.SetStateCacheSize(1 << 20), // each shard's cache is sized at Startup
 		e.SetHost(noopHost{}),
 		e.SetLogger(nil),
 		e.SetDebugLogger(),
@@ -159,4 +161,53 @@ func TestSetDefaultPriority_RejectsNonPositive(t *testing.T) {
 		return
 	}
 	assert.Equal(workflow.StatusCompleted, out.Status)
+}
+
+// TestSetStateCacheSize_SharedByShards pins the setter's contract: a non-positive size is rejected, and the
+// size is one budget for every shard - a field that fits it is kept whichever shard it is on, and a field on
+// one shard can push out another shard's.
+func TestSetStateCacheSize_SharedByShards(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.SetStateCacheSize(0)))
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.SetStateCacheSize(-1)))
+
+	assert.NoError(e.SetHost(noopHost{}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 2}))
+	assert.NoError(e.SetStateCacheSize(8 << 20))
+	assert.NoError(e.Startup(t.Context()))
+
+	total, source := e.stateCacheBudget()
+	assert.Equal(int64(8<<20), total)
+	assert.Equal("SetStateCacheSize", source)
+
+	seed := func(shard int, size int) int64 {
+		state, _ := workflow.NewState()
+		state.SetJSON("doc", []byte(`"`+strings.Repeat("x", size-2)+`"`))
+		e.linkerFor(shard).Seed(9, state, []byte(`{"doc":9}`))
+		return e.stateCache.Bytes()
+	}
+	assert.True(seed(1, 5<<20) > 5<<20, "5 MiB fits the 8 MiB the shards share")
+	held := seed(2, 5<<20)
+	assert.True(held > 5<<20 && held < 6<<20, "shard 2's 5 MiB field pushes out shard 1's: one budget, not two")
+	assert.Equal(held, seed(1, 9<<20), "a field larger than the whole cache is not kept")
+}
+
+// TestStateCacheBudget_Default pins the default without an override: a quarter of the detected memory
+// limit, else the fallback.
+func TestStateCacheBudget_Default(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	total, source := NewEngine().stateCacheBudget()
+	if source == "fallback" {
+		assert.Equal(int64(stateCacheFallback), total)
+	} else {
+		assert.True(total > 0)
+		assert.NotEqual("SetStateCacheSize", source)
+	}
 }

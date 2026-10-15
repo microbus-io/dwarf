@@ -1775,9 +1775,10 @@ The doc-extraction shape (a document fanned out over pages, then chunks) measure
 — read it before changing any of them.** Three things stay the engine's, because each is engine state rather than
 ref policy, and they are what `engine/staterefs.go` holds:
 
-- **Which Linker.** One per shard, built in `initRuntime` from the shard's own handle. A `step_id` is only unique
-  within a shard, so the resolve cache's key is too; the driver (the policy's one dialect-dependent term) is a
-  property of that handle as well.
+- **Which Linker.** One per shard, built in `initRuntime` from the shard's own handle; the driver (the policy's
+  one dialect-dependent term) is a property of that handle. Every Linker reads through the replica's one
+  `stateCache`, keyed by shard because a `step_id` is only unique within one (`internal/staterefs/CLAUDE.md`,
+  "One Linker per shard, one Cache per replica").
 - **How an anchor is read.** `anchorLoader` turns a shard handle into the `staterefs.Loader` the Linker calls once
   per resolve. It **may be a transaction**, and at the populated fan-in (`fanInRow`) it is: anchors never cross a flow and a
   flow never crosses a shard, so resolution is always a same-connection read and those paths resolve

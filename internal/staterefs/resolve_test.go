@@ -28,6 +28,10 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
+// testCacheBytes sizes a test Linker's resolve cache: far above anything a test caches unless the test is
+// about the bound.
+const testCacheBytes = 1 << 20
+
 // fakeAnchors is a Loader over an in-memory anchor table that COUNTS its calls and records the id sets it
 // was asked for. Both are assertions in their own right: the size policy prices a whole anchor row, which is
 // only sound if k anchors cost one call rather than k.
@@ -76,7 +80,7 @@ func TestLinker_ResolveReadsBothColumns(t *testing.T) {
 	state := newState()
 	refs := Refs{"fromState": {Anchor: 7}, "fromChanges": {Anchor: 7}, "shadowed": {Anchor: 7}}
 
-	_, err := New("sqlite").Resolve(ctx, state, refs, nil, anchors.load)
+	_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, state, refs, nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal("initial input", stateVal(state, "fromState"), "a field whose bytes are only in the anchor's state column must resolve")
 	assert.Equal("task output", stateVal(state, "fromChanges"))
@@ -97,7 +101,7 @@ func TestLinker_ResolveReadsAnOverwriteBySuffix(t *testing.T) {
 		},
 	}}
 	state := newState()
-	_, err := New("sqlite").Resolve(ctx, state, Refs{"doc": {Anchor: 7}, "doc!": {Anchor: 7}}, nil, anchors.load)
+	_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, state, Refs{"doc": {Anchor: 7}, "doc!": {Anchor: 7}}, nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal("overwritten doc", stateVal(state, "doc"))
 	assert.Equal("the input doc", stateVal(state, "doc!"))
@@ -118,7 +122,7 @@ func TestLinker_ResolveOneRoundTripPerBatch(t *testing.T) {
 	}}
 	state := newState()
 
-	_, err := New("sqlite").Resolve(ctx, state, Refs{"a": {Anchor: 7}, "b": {Anchor: 7}, "c": {Anchor: 9}}, nil, anchors.load)
+	_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, state, Refs{"a": {Anchor: 7}, "b": {Anchor: 7}, "c": {Anchor: 9}}, nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal(1, len(anchors.calls), "three fields across two anchors must cost ONE load, not three")
 	assert.Equal(2, len(anchors.calls[0]), "the batch asks for each DISTINCT anchor once")
@@ -138,7 +142,7 @@ func TestLinker_ResolveCachesBytesNotValues(t *testing.T) {
 	anchors := &fakeAnchors{rows: map[int]Anchor{
 		7: {Changes: cols(map[string]any{"doc": map[string]any{"page": "one"}})},
 	}}
-	linker := New("sqlite")
+	linker := New("sqlite", 1, NewCache(testCacheBytes))
 
 	first := newState()
 	_, err := linker.Resolve(ctx, first, Refs{"doc": {Anchor: 7}}, nil, anchors.load)
@@ -169,12 +173,12 @@ func TestLinker_ResolveAssertsOneHop(t *testing.T) {
 		7: {Refs: Refs{"doc": {Anchor: 3}}}, // holds no bytes for `doc` - it points onward
 		3: {Changes: cols(map[string]any{"doc": "the payload"})},
 	}}
-	_, err := New("sqlite").Resolve(ctx, newState(), Refs{"doc": {Anchor: 7}}, nil, anchors.load)
+	_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, newState(), Refs{"doc": {Anchor: 7}}, nil, anchors.load)
 	assert.Error(err)
 	assert.Contains(err.Error(), "one-hop")
 
 	// A ref at an anchor that does not exist at all is likewise an error, never a silently absent field.
-	_, err = New("sqlite").Resolve(ctx, newState(), Refs{"doc": {Anchor: 404}}, nil, anchors.load)
+	_, err = New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, newState(), Refs{"doc": {Anchor: 404}}, nil, anchors.load)
 	assert.Error(err)
 }
 
@@ -193,14 +197,14 @@ func TestLinker_ResolveWantSelects(t *testing.T) {
 	state := newState()
 	refs := Refs{"reduced": {Anchor: 7}, "carried": {Anchor: 7}}
 
-	err := New("sqlite").ResolveReduced(ctx, state, refs, map[string]workflow.Reducer{"reduced": workflow.ReducerAppend}, anchors.load)
+	err := New("sqlite", 1, NewCache(testCacheBytes)).ResolveReduced(ctx, state, refs, map[string]workflow.Reducer{"reduced": workflow.ReducerAppend}, anchors.load)
 	assert.NoError(err)
 	assert.Equal("R", stateVal(state, "reduced"), "a field a reducer folds must be materialized, or the fold loses its base")
 	assert.False(state.Has("carried"), "a merely-carried ref must cross the fan-in as a ref")
 
 	// No reducer registered for any ref'd field: nothing to fold, so nothing is read at all.
 	anchors.calls = nil
-	err = New("sqlite").ResolveReduced(ctx, newState(), refs, map[string]workflow.Reducer{"other": workflow.ReducerAdd}, anchors.load)
+	err = New("sqlite", 1, NewCache(testCacheBytes)).ResolveReduced(ctx, newState(), refs, map[string]workflow.Reducer{"other": workflow.ReducerAdd}, anchors.load)
 	assert.NoError(err)
 	assert.Equal(0, len(anchors.calls))
 }
@@ -216,7 +220,7 @@ func TestLinker_FlattenSplicesWithoutDecoding(t *testing.T) {
 	anchors := &fakeAnchors{rows: map[int]Anchor{
 		7: {Changes: cols(map[string]any{"doc": []any{1, 2, 3}})},
 	}}
-	flat, err := New("sqlite").Flatten(ctx, []byte(`{"kept":"inline"}`), Refs{"doc": {Anchor: 7}}, anchors.load)
+	flat, err := New("sqlite", 1, NewCache(testCacheBytes)).Flatten(ctx, []byte(`{"kept":"inline"}`), Refs{"doc": {Anchor: 7}}, anchors.load)
 	assert.NoError(err)
 
 	var got map[string]any
@@ -225,7 +229,7 @@ func TestLinker_FlattenSplicesWithoutDecoding(t *testing.T) {
 	assert.Equal([]any{1.0, 2.0, 3.0}, got["doc"], "the ref'd field is spliced back in")
 
 	// With no refs the input document is returned untouched - the overwhelmingly common case allocates nothing.
-	same, err := New("sqlite").Flatten(ctx, []byte(`{"kept":"inline"}`), nil, anchors.load)
+	same, err := New("sqlite", 1, NewCache(testCacheBytes)).Flatten(ctx, []byte(`{"kept":"inline"}`), nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal(`{"kept":"inline"}`, string(same))
 }
@@ -286,17 +290,29 @@ func TestLinker_ConcurrentMissesReadOnce(t *testing.T) {
 		return errs
 	}
 
-	for _, err := range resolveAll(New("sqlite"), 8, true) {
+	for _, err := range resolveAll(New("sqlite", 1, NewCache(testCacheBytes)), 8, true) {
 		assert.NoError(err)
 	}
 	assert.Equal(1, reads, "eight concurrent misses on one anchor read it once")
+
+	// The read reaches its waiters even when the cache cannot keep the field: they take it from the read itself.
+	mu.Lock()
+	reads = 0
+	mu.Unlock()
+	release = make(chan struct{})
+	tiny := New("sqlite", 1, NewCache(1))
+	for _, err := range resolveAll(tiny, 8, true) {
+		assert.NoError(err)
+	}
+	assert.Equal(1, reads, "a field too large to cache is still read once for concurrent misses")
+	assert.Equal(int64(0), tiny.cacheBytes())
 
 	// Resolve reads for itself: a caller inside a transaction must not wait on another goroutine.
 	mu.Lock()
 	reads = 0
 	mu.Unlock()
 	release = make(chan struct{})
-	for _, err := range resolveAll(New("sqlite"), 8, false) {
+	for _, err := range resolveAll(New("sqlite", 1, NewCache(testCacheBytes)), 8, false) {
 		assert.NoError(err)
 	}
 	assert.Equal(8, reads, "Resolve never waits on a concurrent read")
@@ -307,7 +323,7 @@ func TestLinker_ConcurrentMissesReadOnce(t *testing.T) {
 	mu.Unlock()
 	release = make(chan struct{})
 	failed := 0
-	for _, err := range resolveAll(New("sqlite"), 8, true) {
+	for _, err := range resolveAll(New("sqlite", 1, NewCache(testCacheBytes)), 8, true) {
 		if err != nil {
 			failed++
 		}
@@ -324,7 +340,7 @@ func TestLinker_SeedServesTheMintedAnchor(t *testing.T) {
 	ctx := context.Background()
 	const anchor = 42
 
-	linker := New("sqlite")
+	linker := New("sqlite", 1, NewCache(testCacheBytes))
 	merged := mustState(map[string]any{
 		"doc":     blob(2048),
 		"pages":   []any{blob(600), blob(600)},

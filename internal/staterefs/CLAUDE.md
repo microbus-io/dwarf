@@ -70,10 +70,9 @@ input for large elements, `D/(1+D)` for mid-size ones. Task outputs (`changes`) 
 - **Nested fan-outs.** An inner forEach over a separately computed array (the doc -> pages -> chunks shape) is an
   ordinary one-level item ref into the step that computed it, and the outer element rides into the inner
   branches as the outer branch's item ref. An inner forEach over the outer element itself extends the path (above).
-  `element` walks the path level by level, caching each level's split under the path to it (`data`, then
-  `data[3]`), so each inner array is split once per cohort. A split can outlive the `cache` entry for its
-  array's bytes: after that entry is evicted and re-fetched, the old split still pins the previous copy until it
-  too ages out of the LRU. That costs memory, never correctness, and is accepted.
+  `element` walks the path level by level, keeping each level's split in the array's cache entry under the
+  path to it (`data`, then `data[3]`), so each inner array is split once per cohort. Why the split lives
+  in the entry is in "The resolve cache is sized in bytes" below.
 - **Fidelity depends on how the element was stored.** Resolving from the array's stored bytes returns an integer
   beyond 2^53 exactly; an element stored INLINE (below `minItem`, or from an inline array) was decoded to `any`
   in transition evaluation and re-encoded by `Set`, so it still rounds. Nothing byte-compares elements, so the
@@ -118,7 +117,7 @@ of the predecessor is a cache hit. The read is paid only on a miss:
 - the doorbell declines the successor (the partition is at its bound, or the band is worse) and a scan picks it
   up - possibly on the other dispatcher, whose residue class it may be in;
 - the successor sleeps (a sleeping step is never offered), or it waits past the entry's eviction from the
-  4,096-entry LRU or its 15-minute TTL;
+  LRU or its 5-minute idle expiry;
 - another replica claims it (a steal, a restart, a demoted dispatcher);
 - a flow's final-state flatten resolves its tails' refs, and on a miss it reads them inside `completeFlow`'s
   flow-row-locked transaction.
@@ -270,20 +269,81 @@ The shape is load-bearing in four ways:
   serial read.
 - **A fetch reads the fields it claimed BEFORE waiting on the ones another fetch claimed.** Two fetches that
   each claimed a field the other needs therefore both make progress; waiting first would deadlock them.
-- **`release` runs (deferred) whether the read succeeded or not**, and a waiter that then finds nothing cached
-  reads the row itself, unclaimed. A failed read errors only its own fetch. Pinned, with the read-once
-  property and `Resolve` never waiting, by `TestLinker_ConcurrentMissesReadOnce`.
+- **Waiters take the field from the flight, not from the cache.** `release` puts the reader's entry on the
+  `flight` before closing it. Handing it over through the cache instead fails whenever the cache does not keep
+  the field - larger than the whole cache, or evicted before a waiter looks, both routine under a byte
+  budget - and every waiter then reads the row itself: N reads of the array per cohort.
+- **`release` runs (deferred) whether the read succeeded or not**, and a waiter left without an entry reads the
+  row itself, unclaimed. A failed read errors only its own fetch. Pinned, with the read-once property (also
+  for a field too large to cache) and `Resolve` never waiting, by `TestLinker_ConcurrentMissesReadOnce`.
 
-## One Linker per shard
+## The resolve cache is sized in bytes
 
-A `step_id` is a per-shard auto-increment, so the resolve cache's key is only unique within a shard — that is
-why the key carries no shard number: the Linker *is* the shard scope. It also isolates cache pressure, which
-matters because in a fan-out every branch resolves the SAME anchor set, so an eviction between sibling
-dispatches turns one miss plus N-1 hits into many misses. Whether that eviction actually binds is an open
-empirical question; the per-shard split removes one way to provoke it.
+The replica's cache (one `Cache`, shared by every shard's Linker, below) is an LRU of `cachedField` entries
+with three bounds: bytes (the budget the engine passes to `NewCache`), entries (`cacheEntries`, 65,536), and
+idleness (an entry unread for `cacheIdle`, 5 minutes, expires).
+Each entry is charged `max(len, minCharge)` plus `entryOverhead`, and each split it holds adds its element
+slices. The budget is `SetStateCacheSize`, else a quarter of the process's memory limit (`internal/memlimit`),
+else 1 GiB (`engine/staterefs.go` `stateCacheBudget`).
 
-The driver is bound at construction for the same reason — it is a property of the shard's handle, and it is
-the only dialect-dependent term in the policy.
+- **Bytes are the primary bound; never bound it by entry count alone.** An entry is a whole ref'd field: a 1 MB
+  payload, or a scatter's whole array. A count bound alone lets the heap grow with the payload size times the
+  count, and a cache that fills in about a minute at saturation holds that whole amount whatever the workload
+  has in flight. Under a count bound, the in-flight state gauge (`dwarf_state_in_flight_bytes`) reads megabytes
+  while the heap is tens of gigabytes, so an in-flight cap would never fire. The cache is where the memory is.
+- **The count cap and the 4 KB minimum charge are for the small fields, which are the many.** The linear
+  threshold sits at 1 KB, a fan-out's bar falls to tens of bytes, and `Seed` caches every anchored field, so a
+  budget of gigabytes in bytes alone would hold millions of entries, each a handful of objects the garbage
+  collector marks every cycle. The minimum charge holds a quarter as many 1 KB fields; the cap bounds the count
+  outright. `entryOverhead` only keeps the byte count honest. Whether the GC cost of many small entries matters
+  at all is unmeasured. Pinned by `TestLinker_SmallFieldsChargedTheMinimum`.
+- **Expiry is by idleness, not age.** A carried ref is resolved again at every dispatch of its flow, so a field
+  stays cached as long as its flow keeps moving, however long the flow lives; an idle one leaves after 5
+  minutes. In idle mode the LRU list is also in order of last use, so `lru.evict` drops expired entries from the
+  back on every store - a burst's leftovers do not wait for byte pressure to be freed (only for the next store).
+- **A split lives inside its array's entry; never cache splits separately.** A split's elements are
+  sub-slices of the array's bytes (`splitArray`, no copy), so a split cached on its own keeps an evicted array
+  alive: the array then sits in memory twice (the evicted copy pinned by its split, the re-read copy in the
+  cache), outside any bound the byte cache can enforce. In the entry, eviction frees both. `split` adds each
+  split's element slices (`elemSize` each, plus `splitOverhead`) to the entry with `lru.AddWeight`. Pinned by
+  `TestLinker_SplitChargedToItsArray`.
+- **A split's charge is ADDED, never set.** It goes to whatever entry is under the key; if the entry it split
+  was evicted and the field re-stored, the new entry is overcharged for a split it may not hold, and the excess
+  leaves with it. Setting an absolute weight instead lets a stale entry with few splits overwrite a fresh
+  entry's larger charge - an undercharge that lasts until eviction. Splitting runs outside the entry's lock, so
+  a nested field's arrays split in parallel; the first split stored for a path is kept and charged.
+- **`store` keeps an existing entry** (`lru.LoadOrStoreWeighted`). A field's bytes are immutable, so a second
+  store - `Seed` after a read, a second ref to the same field in one `loadInto`, a concurrent `Resolve` - would
+  only throw away the first entry's splits. Byte spellings can differ (`Seed` stores Go-marshalled bytes, a
+  Postgres read returns `jsonb`'s), which is harmless because both are the same value. Pinned by
+  `TestLinker_ArrayAndElementShareOneEntry`.
+- **A field larger than the whole budget is not cached.** `store` still returns the entry, so the resolve
+  that read it serves and splits from it, and `ResolveShared` hands the same entry to its waiters through the
+  flight (above). A later resolve reads it again. An array whose split pushes its entry past the budget is
+  dropped by `AddWeight` the same way. Pinned by `TestLinker_FieldLargerThanCacheIsNotCached`.
+- **The quarter of memory is a ceiling, not a target.** The cache fills only with fields that flowed, and hits
+  need only the fields of flows still in progress. The garbage collector can let a full cache's heap reach
+  about twice its size, which is why the default is a quarter and why the docs recommend `GOMEMLIMIT`. Pinned
+  by `TestLinker_CacheBoundedByBytes`; `TestLinker_SplitsRaceEviction` drives splits, stores and evictions
+  concurrently under `-race`.
+
+## One Linker per shard, one Cache per replica
+
+A Linker serves one shard: it holds the shard's driver (the only dialect-dependent term in the policy, a
+property of the shard's handle) and the shard's single-flight `loading` map. Every Linker of a replica reads
+through one `Cache`, under one budget. A `step_id` is a per-shard auto-increment, so the cache key carries the
+shard (`Linker.key`); without it, step 7 of shard 1 would be served for step 7 of shard 2.
+
+- **Do not split the budget per shard, evenly or by `ShardSpec.Weight`.** The cache fills only where this
+  replica runs steps (`Seed` at completion, resolves at dispatch, fan-in and flatten), and a shard has at most
+  two dispatchers, so a replica in a multi-shard fleet dispatches only some of its shards - every replica ran
+  exactly 2 of 4 in the measured 4-shard, 4-replica layout. A fixed split strands the shares of the shards it
+  does not run and caps the ones it does at a slice. One budget goes where the work is and follows the
+  dispatch roles as they move.
+- **What sharing gives up is isolation:** a busy shard can evict another shard's fields. Under LRU those are
+  the least recently read, which is the right thing to evict whoever owns them. The case it does not cover
+  is a shard of large payloads cycling the cache faster than a small-payload shard re-reads its fields;
+  whether that happens is unmeasured. Pinned by `TestLinker_ShardsShareOneCache`.
 
 ## Rejected alternatives, so they are not re-proposed
 

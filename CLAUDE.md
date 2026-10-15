@@ -104,7 +104,10 @@ matching one before working there:**
   that word is the database connection pools), the idleness-plus-gate growth trigger (and why it needs both
   an edge and a cadence), and the two-phase drain.
 - **`internal/candidates/CLAUDE.md`** - the bounded hint-cache mechanism; its driving refiller algorithm is in
-  `engine/CLAUDE.md`. (`internal/lru` is a textbook LRU+TTL - godoc only, no design doc.)
+  `engine/CLAUDE.md`. (`internal/lru` is a textbook LRU+TTL, bounded by count or by weight - godoc only, no
+  design doc.)
+- **`internal/memlimit/CLAUDE.md`** - the process's memory limit, for memory-bound defaults: why `GOMEMLIMIT`
+  comes first and why the cgroup read walks the process's own cgroup and every ancestor.
 - **`internal/staterefs/CLAUDE.md`** - storing a large carried state field once: the anchor-cost size policy
   (why fan-out width is the primary axis), the one-hop and both-column invariants, and why the Loader is a
   per-call batched callback rather than a bound connection. (The engine-side integration - flow-boundary

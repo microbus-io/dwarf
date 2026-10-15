@@ -439,17 +439,20 @@ this table.*
   22,454 steps/s against 20,961.
 - **The database is the limit at every payload.** The engine host stayed at 25–41% of its CPU in every run.
 
-**Size engine memory for large payloads.** A step's state is held in the engine's memory while the step runs,
-and nothing limits that memory by payload size.
-- **Scatter at 1 MB per element ran out of memory.** With 8 branches and 2,000 flows in flight, the engine's
-  heap reached ~40–50 GB within a minute of the window. It stopped making progress and was killed by the
-  operating system on its 64 GB host.
-- **At 256 KB per element** the heap peaked at ~18 GB.
-- **Linear and fan-out at 1 MB** ran within the host's memory.
+**Engine memory with large payloads.** The engine keeps recently written and read large state fields in memory,
+so the steps that read them next do not go back to the database. In these runs that cache held a fixed number
+of fields whatever their size, and it, not the work in progress, was most of the engine's memory:
+- **Scatter at 1 MB per element ran out of memory.** Each flow's 8 MB array was one cached field. The heap
+  reached ~40–50 GB within a minute of the window, and the operating system killed the engine on its 64 GB
+  host.
+- **At 256 KB per element** the heap ranged ~10–21 GB, and ~8 GB of it was the cache.
+- **Linear and fan-out at 1 MB** ran at ~5–11 GB.
+- **State inside running tasks** never exceeded 25 MB.
 
-For workloads that carry hundreds of kilobytes or more per step, plan engine memory from flows in flight times
-the state each holds. Use a high-memory machine type (an 8 vCPU standard host has 32 GB), or admit fewer flows
-at once.
+The cache is sized in bytes: by default a quarter of the memory the engine's process may use, `GOMEMLIMIT`
+when it is set ([`SetStateCacheSize`](deployment.md) chooses another size). Go's garbage collector can let the
+heap reach about twice what it holds, so **set `GOMEMLIMIT`** on engine hosts that carry large payloads; it
+bounds the whole process. These runs predate the byte-sized cache and have not been rerun on it.
 
 *(Measured 2026-10-13/14.)*
 

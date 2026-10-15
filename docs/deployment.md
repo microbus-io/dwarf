@@ -12,15 +12,21 @@ configuration, and running multiple replicas.
 All configuration is set with `Set*` methods, each returning an `error`. They split by whether the knob can
 change on a running engine: the **live** ones (`SetTimeBudget`,
 `SetDefaultPriority`) take effect immediately, even after `Startup`; the **construction-time-only** ones
-(`SetShard`, `SetWorkers`, and the dependency-injection setters below) are rejected if called
+(`SetShard`, `SetWorkers`, `SetStateCacheSize`, and the dependency-injection setters below) are rejected if called
 after `Startup`.
 
 | Method | Default | Purpose |
 |---|---|---|
 | `SetShard(spec)` | one default shard | Registers one shard: `ShardSpec{Index, DSN, MaxConnections, Weight, Cordoned}`; call once per shard |
 | `SetWorkers(n)` | derived | Expert override: pins the worker *maximum* (deterministic tests, benchmarks, memory-bounded hosts). Normally unset — derived from the crash-recovery lease margin and the round-trip time measured at startup, so it holds for any task duration; the pool grows into it only on demand |
+| `SetStateCacheSize(bytes)` | ¼ of memory | Memory the engine may use to keep large state fields for the steps that read them next, one cache for all its shards. The default is a quarter of `GOMEMLIMIT` when set; otherwise, on Linux, of the tightest of the process's cgroup memory limits and physical memory; otherwise 1 GiB |
 | `SetTimeBudget(d)` | 2m | Per-step `ExecuteTask` deadline |
 | `SetDefaultPriority(p)` | 100 | Priority for flows that don't set one |
+
+**Set `GOMEMLIMIT` on engine hosts**, a little below the memory the process may use (about 90% of its
+container's limit). The engine sizes its state cache from it, and the Go runtime collects harder as the heap
+nears it. Without it, a full cache can take
+up to twice its size, since Go's garbage collector lets the heap reach about twice its live size.
 
 A shard needs only its `Index` and `DSN`. The engine sizes its connection pool on its own (see
 [Connection pool](#connection-pool)); `MaxConnections` overrides that size, and `Weight` sets the shard's
