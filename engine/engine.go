@@ -527,7 +527,7 @@ func (e *Engine) SetEngineID(id int64) error {
 // cache serves all of the engine's shards; a field larger than the whole size is not kept. Each field counts
 // as at least 4 KB, at most 65,536 are kept, and a field unread for 5 minutes is dropped.
 //
-// The default is a quarter of the memory this process may use: GOMEMLIMIT when it is set; otherwise, on
+// The default is a tenth of the memory this process may use: GOMEMLIMIT when it is set; otherwise, on
 // Linux, the tightest of the process's cgroup memory limits and physical memory. When none of these can be
 // read, the default is 1 GiB. Several engines in one process each take their own share, so set the size
 // explicitly there. Go's garbage collector lets the heap grow to about twice its live size before collecting,

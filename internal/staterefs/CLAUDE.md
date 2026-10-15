@@ -284,7 +284,7 @@ The replica's cache (one `Cache`, shared by every shard's Linker, below) is an L
 with three bounds: bytes (the budget the engine passes to `NewCache`), entries (`cacheEntries`, 65,536), and
 idleness (an entry unread for `cacheIdle`, 5 minutes, expires).
 Each entry is charged `max(len, minCharge)` plus `entryOverhead`, and each split it holds adds its element
-slices. The budget is `SetStateCacheSize`, else a quarter of the process's memory limit (`internal/memlimit`),
+slices. The budget is `SetStateCacheSize`, else a tenth of the process's memory limit (`internal/memlimit`),
 else 1 GiB (`engine/staterefs.go` `stateCacheBudget`).
 
 - **Bytes are the primary bound; never bound it by entry count alone.** An entry is a whole ref'd field: a 1 MB
@@ -322,11 +322,13 @@ else 1 GiB (`engine/staterefs.go` `stateCacheBudget`).
   that read it serves and splits from it, and `ResolveShared` hands the same entry to its waiters through the
   flight (above). A later resolve reads it again. An array whose split pushes its entry past the budget is
   dropped by `AddWeight` the same way. Pinned by `TestLinker_FieldLargerThanCacheIsNotCached`.
-- **The quarter of memory is a ceiling, not a target.** The cache fills only with fields that flowed, and hits
-  need only the fields of flows still in progress. The garbage collector can let a full cache's heap reach
-  about twice its size, which is why the default is a quarter and why the docs recommend `GOMEMLIMIT`. Pinned
-  by `TestLinker_CacheBoundedByBytes`; `TestLinker_SplitsRaceEviction` drives splits, stores and evictions
-  concurrently under `-race`.
+- **Keep the default small: a tenth of memory, not more.** Hits need only the fields of flows still in
+  progress. Above that, a larger cache holds finished flows' fields until they go 5 minutes unread, and the
+  garbage collector can let the heap reach about twice the cache. Below it, a miss re-reads the field: a cost
+  in database reads, small next to the write bytes that bind a large-payload workload. Measured: a cache an
+  order of magnitude below its default at 256 KB scatter cost a few percent of throughput and cut the heap
+  several-fold. The docs recommend `GOMEMLIMIT` for the rest. Pinned by `TestLinker_CacheBoundedByBytes`;
+  `TestLinker_SplitsRaceEviction` drives splits, stores and evictions concurrently under `-race`.
 
 ## One Linker per shard, one Cache per replica
 

@@ -449,7 +449,7 @@ of fields whatever their size, and it, not the work in progress, was most of the
 - **Linear and fan-out at 1 MB** ran at ~5–11 GB.
 - **State inside running tasks** never exceeded 25 MB.
 
-The cache is sized in bytes: by default a quarter of the memory the engine's process may use, `GOMEMLIMIT`
+The cache is sized in bytes: by default a tenth of the memory the engine's process may use, `GOMEMLIMIT`
 when it is set ([`SetStateCacheSize`](deployment.md) chooses another size). Go's garbage collector can let the
 heap reach about twice what it holds, so **set `GOMEMLIMIT`** on engine hosts that carry large payloads; it
 bounds the whole process. These runs predate the byte-sized cache and have not been rerun on it.

@@ -97,7 +97,7 @@ func run() error {
 		// per-shard rates the run summary prints, is the operator's lever and the bench's.
 		weightsFlag      = flag.String("weights", "", "ShardSpec.Weight per shard as comma-separated N=w (e.g. '1=1,2=0.8'); unlisted shards weigh 1")
 		refillIntervalMs = flag.Int("refill-interval-ms", 0, "pin each shard's refill cycle period in ms (0 = derived from the pool); the scan-rate sweep knob")
-		stateCacheMB     = flag.Int64("state-cache-mb", 0, "Engine.SetStateCacheSize in MiB for every replica: the memory each keeps for large state fields (0 = derived: a quarter of GOMEMLIMIT, else of the cgroup limit or physical memory, else 1 GiB)")
+		stateCacheMB     = flag.Int64("state-cache-mb", 0, "Engine.SetStateCacheSize in MiB for every replica: the memory each keeps for large state fields (0 = derived: a tenth of GOMEMLIMIT, else of the cgroup limit or physical memory, else 1 GiB)")
 		openLoop         = flag.Bool("open-loop", false, "open-loop load: creators fire flows without awaiting completion, so the backlog grows past the goroutine count (closed-loop caps in-flight flows at -concurrency, keeping a linear backlog inside the cache and never stressing the refiller)")
 		maxOutstanding   = flag.Int("max-outstanding", 100000, "open-loop only: cap on in-flight (created minus ended) flows, the backpressure bound that keeps the backlog from OOMing the DB")
 		arrivalRate      = flag.Float64("arrival-rate", 0, "open-loop only: cap flow creation at this many/sec, fractional allowed (0 = flat-out to saturation)")
@@ -500,7 +500,7 @@ func environment() map[string]any {
 		"goos":      runtime.GOOS,
 		"goarch":    runtime.GOARCH,
 		"numCPU":    runtime.NumCPU(),
-		// The memory settings a payload arm's heap depends on: the engine's state cache defaults to a quarter
+		// The memory settings a payload arm's heap depends on: the engine's state cache defaults to a tenth
 		// of the soft limit, and GOGC sets how far past its live size the heap runs.
 		"GOGC":       os.Getenv("GOGC"),
 		"goMemLimit": goMemLimit(),

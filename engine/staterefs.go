@@ -49,15 +49,17 @@ import (
 const stateCacheFallback = 1 << 30
 
 // stateCacheBudget is the engine's resolve-cache budget, shared by every shard's Linker, and where it came from:
-// the SetStateCacheSize override, else a quarter of the detected memory limit, else stateCacheFallback.
-// A quarter, because the collector's headroom can double a full cache, and the rest of the heap - the
-// crew's carriers, row buffers, the host's own memory - needs the remainder.
+// the SetStateCacheSize override, else a tenth of the detected memory limit, else stateCacheFallback.
+// A tenth, because the cache only needs the fields of flows in flight, and below that a miss costs a re-read,
+// cheap next to the write bytes that bind a large-payload workload. Meanwhile the collector's headroom can
+// double a full cache, and the rest of the heap - the crew's carriers, row buffers, the host's own memory -
+// needs the remainder.
 func (e *Engine) stateCacheBudget() (int64, string) {
 	if e.stateCacheBytes > 0 {
 		return e.stateCacheBytes, "SetStateCacheSize"
 	}
 	if limit, source := memlimit.Detect(); limit > 0 {
-		return limit / 4, source
+		return limit / 10, source
 	}
 	return stateCacheFallback, "fallback"
 }

@@ -19,7 +19,7 @@ after `Startup`.
 |---|---|---|
 | `SetShard(spec)` | one default shard | Registers one shard: `ShardSpec{Index, DSN, MaxConnections, Weight, Cordoned}`; call once per shard |
 | `SetWorkers(n)` | derived | Expert override: pins the worker *maximum* (deterministic tests, benchmarks, memory-bounded hosts). Normally unset — derived from the crash-recovery lease margin and the round-trip time measured at startup, so it holds for any task duration; the pool grows into it only on demand |
-| `SetStateCacheSize(bytes)` | ¼ of memory | Memory the engine may use to keep large state fields for the steps that read them next, one cache for all its shards. The default is a quarter of `GOMEMLIMIT` when set; otherwise, on Linux, of the tightest of the process's cgroup memory limits and physical memory; otherwise 1 GiB |
+| `SetStateCacheSize(bytes)` | 10% of memory | Memory the engine may use to keep large state fields for the steps that read them next, one cache for all its shards. The default is a tenth of `GOMEMLIMIT` when set; otherwise, on Linux, of the tightest of the process's cgroup memory limits and physical memory; otherwise 1 GiB |
 | `SetTimeBudget(d)` | 2m | Per-step `ExecuteTask` deadline |
 | `SetDefaultPriority(p)` | 100 | Priority for flows that don't set one |
 

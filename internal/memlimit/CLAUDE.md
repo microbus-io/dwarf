@@ -12,7 +12,7 @@
   `/sys/fs/cgroup/memory.max`: that file is the limit only when the process's cgroup is the namespace root (a
   container in its own cgroup namespace). A systemd service's `MemoryMax=`, a pod's limit on a parent of its
   container, and a container sharing the host's cgroup namespace all put the limit elsewhere, and missing it
-  sizes the cache from physical memory - a 64 GB host limited to 8 GB would get a 16 GB cache. The path comes
+  sizes the cache from physical memory - a 64 GB host limited to 8 GB would get a 6.4 GB cache. The path comes
   from `/proc/self/cgroup`; a path that does not exist under the mount (v1 shows the host's path inside a
   container) is walked up until it does.
 - **Values of 2^62 and up are "unlimited".** cgroup v1 reports an unlimited cgroup as a page-aligned number just
