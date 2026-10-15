@@ -926,10 +926,7 @@ func (e *Engine) shardInfo(ctx context.Context) ([]ShardSummary, error) {
 		r.Latency = time.Since(start)
 		if err != nil {
 			r.Error = err.Error()
-			return nil
 		}
-		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps").Scan(&r.Steps)
-		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows").Scan(&r.Flows)
 		return nil
 	})
 	return results, nil

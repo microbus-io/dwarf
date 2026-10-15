@@ -44,7 +44,7 @@ type soakSample struct {
 	Goroutines   int     `json:"goroutines"`
 	HeapAllocMB  float64 `json:"heapAllocMB"`
 	HeapSysMB    float64 `json:"heapSysMB"`
-	Steps        int     `json:"steps"`        // live dwarf_steps rows across shards (ShardInfo)
+	Steps        int     `json:"steps"`        // live dwarf_steps rows across shards (rowCounts)
 	Flows        int     `json:"flows"`        // live dwarf_flows rows across shards
 	Unwedged     int64   `json:"unwedged"`     // alarm: must stay 0
 	Orphaned     int64   `json:"orphaned"`     // alarm: must stay 0
@@ -319,7 +319,7 @@ func runContinueChain(ctx context.Context, eng *engine.Engine) error {
 }
 
 // soakSampleNow reads the current drift indicators: goroutines and heap from the Go runtime, live row
-// counts from ShardInfo, and the alarm/watch counter deltas since the soak began.
+// counts (rowCounts), and the alarm/watch counter deltas since the soak began.
 func soakSampleNow(ctx context.Context, eng *engine.Engine, readers []*sdkmetric.ManualReader,
 	dbs *dbStatsSampler, base map[string]int64, start time.Time) soakSample {
 
@@ -328,15 +328,7 @@ func soakSampleNow(ctx context.Context, eng *engine.Engine, readers []*sdkmetric
 	cur := collectAllCounters(readers)
 	dbst := dbs.sample(ctx)
 
-	var steps, flows int
-	sctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	if infos, err := eng.ShardInfo(sctx); err == nil {
-		for _, s := range infos {
-			steps += s.Steps
-			flows += s.Flows
-		}
-	}
-	cancel()
+	steps, flows := rowCounts(ctx, eng)
 
 	return soakSample{
 		TSec:          time.Since(start).Seconds(),

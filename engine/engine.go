@@ -52,19 +52,14 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// ShardSummary is the health/size summary of a single database shard.
+// ShardSummary is the health of a single database shard: whether it answers, and how fast.
 type ShardSummary struct {
 	// Index is the shard's index, as declared in its ShardSpec.
 	Index int `json:"index,omitzero"`
-	// Error is the failure of a trivial query to the shard, empty when the shard answered. When it is set,
-	// Steps and Flows are not counted and read zero.
+	// Error is the failure of a trivial query to the shard, empty when the shard answered.
 	Error string `json:"error,omitzero"`
 	// Latency is the round trip of a trivial query to the shard.
 	Latency time.Duration `json:"latency,omitzero"`
-	// Steps is the total number of step records held on the shard, of every flow and every status.
-	Steps int `json:"steps,omitzero"`
-	// Flows is the total number of flows held on the shard, of every status, subgraph flows included.
-	Flows int `json:"flows,omitzero"`
 }
 
 const (
@@ -1397,7 +1392,9 @@ func (e *Engine) Purge(ctx context.Context, query workflow.Query) (int, error) {
 	return e.purge(ctx, query)
 }
 
-// ShardInfo returns health and size summaries for all shards.
+// ShardInfo reports, for every shard, whether it answers a trivial query and how fast. It returns a row per
+// shard even when some are down, with the failure recorded on that shard's row, so it is the call to make when a
+// shard is suspect. It reads no table, so it costs the same however large the shards grow.
 func (e *Engine) ShardInfo(ctx context.Context) ([]ShardSummary, error) {
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)

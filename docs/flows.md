@@ -292,7 +292,7 @@ before the reaper removes it — so a fire-and-forget caller can still `Run` it 
 ## Operational
 
 ```go
-summaries, err := eng.ShardInfo(ctx)    // per-shard health and size
+summaries, err := eng.ShardInfo(ctx)    // per-shard health: reachability and latency
 ```
 
 ## Errors

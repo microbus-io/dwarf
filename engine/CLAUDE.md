@@ -519,7 +519,9 @@ current non-terminal outcome (`Stopped()` false) so the caller can answer within
 
 **Delete / Purge** - Operator-driven retention (see "Data Retention").
 
-**ShardInfo** - Per-shard health/size summary.
+**ShardInfo** - Per-shard health: a trivial query's latency and error. It reads no table, so it stays safe to call
+in an incident on a database of any size. Do not add row counts back: a `COUNT(*)` is a full scan on Postgres that
+holds a snapshot for its whole run, feeding the vacuum slowdown below, on the call the runbook makes first.
 
 **There is no inbound peer entry point** - see "THE ENGINE SENDS NOTHING TO ITS PEERS" at the top of this file.
 

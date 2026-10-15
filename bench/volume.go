@@ -24,7 +24,9 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/sequel"
 )
 
 // The volume mode fills a database to a target dwarf_steps row count WITHOUT deleting anything, probing
@@ -287,18 +289,28 @@ func drainRunning(ctx context.Context, eng *engine.Engine) {
 	fmt.Println("drain: flows still running after 10m; the next window opens on a backlog")
 }
 
-// rowCounts sums live step/flow rows across shards via ShardInfo (dialect-agnostic, unlike the catalog
-// queries the disk sampler uses).
+// rowCounts counts the live step and flow rows across every shard, exactly, with a COUNT(*) on each table:
+// dialect-agnostic, unlike the catalog queries the disk sampler uses. It is a full scan of both tables per
+// shard, which the bench can afford against databases it owns; it returns zeros if any shard fails to count.
 func rowCounts(ctx context.Context, eng *engine.Engine) (steps, flows int) {
 	sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	infos, err := eng.ShardInfo(sctx)
+	var mu sync.Mutex
+	err := engineseams.DB(eng).OnEach(sctx, func(ctx context.Context, db *sequel.DB, _ int) error {
+		var s, f int
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps").Scan(&s); err != nil {
+			return err
+		}
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows").Scan(&f); err != nil {
+			return err
+		}
+		mu.Lock()
+		steps, flows = steps+s, flows+f
+		mu.Unlock()
+		return nil
+	})
 	if err != nil {
 		return 0, 0
-	}
-	for _, s := range infos {
-		steps += s.Steps
-		flows += s.Flows
 	}
 	return steps, flows
 }

@@ -15,10 +15,10 @@ limitations under the License.
 */
 
 /*
-ShardInfo returns a per-shard operational summary (one entry per shard, 1-indexed,
-each reporting reachability plus flow/step counts). This covers the admin endpoint
-across a multi-shard engine: every shard is reachable, and the flow counts sum to
-the number created and distribute across more than one shard.
+ShardInfo returns a per-shard health summary (one entry per shard, 1-indexed, each
+reporting whether the shard answered). This covers it across a multi-shard engine -
+every shard is reachable - and, through List with Query.Shard, that the flows created
+are all accounted for and spread over more than one shard.
 */
 package fixtures
 
@@ -65,7 +65,7 @@ func TestShardinfoflow(t *testing.T) {
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 	}
 
-	t.Run("reports_every_shard_and_counts_sum", func(t *testing.T) {
+	t.Run("reports_every_shard", func(t *testing.T) {
 		assert := testarossa.For(t)
 
 		shards, err := eng.ShardInfo(ctx)
@@ -73,18 +73,26 @@ func TestShardinfoflow(t *testing.T) {
 			return
 		}
 		assert.Equal(numShards, len(shards))
-
-		totalFlows := 0
-		nonEmptyShards := 0
 		for i, s := range shards {
 			// Shards are 1-indexed and returned in order.
 			assert.Equal(i+1, s.Index)
 			assert.Equal("", s.Error, "shard %d unreachable", s.Index)
-			totalFlows += s.Flows
-			if s.Flows > 0 {
+		}
+	})
+
+	t.Run("flows_spread_across_shards", func(t *testing.T) {
+		assert := testarossa.For(t)
+
+		totalFlows := 0
+		nonEmptyShards := 0
+		for i := 1; i <= numShards; i++ {
+			flows, _, err := eng.List(ctx, workflow.Query{Shard: i, Limit: total})
+			if !assert.NoError(err) {
+				return
+			}
+			totalFlows += len(flows)
+			if len(flows) > 0 {
 				nonEmptyShards++
-				// A shard holding flows must also hold their steps.
-				assert.True(s.Steps > 0, "shard %d has flows but no steps", s.Index)
 			}
 		}
 		// Every created flow is accounted for across the shards.
