@@ -7,7 +7,7 @@
 
 ## The short version
 
-- **One 32 vCPU PostgreSQL database runs ~18,000 steps/s**, about 1.5 billion steps a day, at the
+- **One 32 vCPU PostgreSQL database runs ~19,000 steps/s**, about 1.6 billion steps a day, at the
   engine's shipped defaults.
 - **Plan at ~90% of that and latency stays low.** Offered loads up to 99% of saturation all drained, with a
   p99 flow latency of 0.6-1.3 s for a 10-step flow.
@@ -57,8 +57,12 @@ unless a section says otherwise, and each section dates its runs.
 
 ## One database
 
-On one 32 vCPU database, one engine replica ran **17,938 steps/s** over the 16-minute window: 1,794
-flows/s, about 1.5 billion steps a day. A second instance, already used for four other runs, ran 17,507.
+On one 32 vCPU database, one engine replica ran **19,154–19,868 steps/s** over the 16-minute window: three runs
+on two instances, about 1,950 flows/s and 1.6 billion steps a day. Each run starts near 21,000 steps/s and
+settles to 18,400–19,200 within the window ([minute by minute](#minute-by-minute)). *(Measured 2026-10-14.)*
+
+Earlier engines measured 17,507–19,234 on other instances (2026-10-08/09). The spread between instances of one
+size is larger than the difference between engines.
 
 ## Database size, with its engine pairing
 
@@ -237,6 +241,11 @@ These figures are the engine's own cost. Your tasks run on the same hosts and ne
 Every run starts near 19,000 steps/s per shard and settles **8–13% lower** within its window. The
 settling is the same per shard with one, two or four shards and with one, two, four or eight replicas,
 so it belongs to the database, not to the engine or the fleet's shape. Plan capacity on the settled rate.
+
+On the current engine (2026-10-14, three runs on two instances) a run starts near 21,000 and settles 7–9% lower,
+to ~19,000, between minutes 3 and 7. The step does not come from the write-ahead log's size: with Cloud SQL's
+`max_wal_size` raised from its 1.5 GB default to 16 GB, the run settled the same way, and its mean was within
+run-to-run noise (20,269 against 19,579 and 19,868 at the default).
 
 ## Planning headroom and latency
 
@@ -417,15 +426,32 @@ Payloads are incompressible. One run per cell, saturated, 16-minute window.
 | 4 KB | 15,635 | 15,945 | 14,990 |
 | 64 KB | 3,445 | 2,958 | 2,392 |
 | 256 KB | — | — | 655 |
-| 1 MB | 271 | 249 | ran out of engine memory (below) |
+| 1 MB | 271 | 249 | 176 |
 
-*These runs come from one session of their own (see [how these numbers were measured](#how-these-numbers-were-measured)).
-The no-payload rows run ~13% above the [headline](#one-database) for the same workload, so compare rows within
-this table.*
+*These runs come from one session of their own (see [how these numbers were measured](#how-these-numbers-were-measured)),
+except scatter at 1 MB, measured 2026-10-14 in a later session. The no-payload rows run ~13% above the
+[headline](#one-database) for the same workload, so compare rows within this table.*
 
-- **A small payload costs about a fifth of throughput.** Going from no payload to 1 KB cost 22%. From 1 KB to
-  4 KB cost almost nothing more.
-- **From ~64 KB up, bytes are the ceiling.** Linear wrote ~226 MB/s of payload at 64 KB and ~284 MB/s at
+**Small payloads, on the current engine.** The 1 KB and 4 KB rows above were measured on an earlier engine, which
+wrote small fields more often than it needed to. Remeasured `linear` in one session (2026-10-14):
+
+| Payload | steps/s | vs no payload | Last 5 minutes |
+|---|---|---|---|
+| none | 19,154 | — | 18,400 |
+| 1 KB | 17,543 | −8% | 17,100 |
+| 2 KB | 17,021 | −11% | 16,500 |
+| 4 KB | 15,387 | −20% | 14,800 |
+
+**Throughput falls with payload in two regimes:**
+
+- **Up to a few KB per step, rows are the limit.** 1 KB costs 8%, and each further KB about 4%.
+- **From ~64 KB up, bytes are the limit:** about 230–280 MB/s of payload per 32 vCPU database. Plan large-payload
+  throughput as steps/s ≈ 250 MB/s ÷ payload per step: 64 KB gives ~3,900 (3,445 measured), 1 MB gives ~240
+  (271 measured).
+
+Across the shapes:
+
+- **The byte ceiling by shape.** Linear wrote ~226 MB/s of payload at 64 KB and ~284 MB/s at
   1 MB, and fan-out ~194 and ~261 MB/s. Scatter writes each array once, so its rate is lower: ~125 MB/s at
   64 KB and ~137 MB/s at 256 KB.
 - **Little is written beyond the payload.** At 64 KB and 1 MB, the write-ahead log grew by 1.2–1.3 times the
@@ -440,21 +466,27 @@ this table.*
 - **The database is the limit at every payload.** The engine host stayed at 25–41% of its CPU in every run.
 
 **Engine memory with large payloads.** The engine keeps recently written and read large state fields in memory,
-so the steps that read them next do not go back to the database. In these runs that cache held a fixed number
-of fields whatever their size, and it, not the work in progress, was most of the engine's memory:
-- **Scatter at 1 MB per element ran out of memory.** Each flow's 8 MB array was one cached field. The heap
-  reached ~40–50 GB within a minute of the window, and the operating system killed the engine on its 64 GB
-  host.
-- **At 256 KB per element** the heap ranged ~10–21 GB, and ~8 GB of it was the cache.
-- **Linear and fan-out at 1 MB** ran at ~5–11 GB.
-- **State inside running tasks** never exceeded 25 MB.
+so the steps that read them next do not go back to the database. That cache, not the work in progress, is most
+of the engine's memory with large payloads. State inside running tasks never exceeded 25 MB.
 
-The cache is sized in bytes: by default a tenth of the memory the engine's process may use, `GOMEMLIMIT`
-when it is set ([`SetStateCacheSize`](deployment.md) chooses another size). Go's garbage collector can let the
-heap reach about twice what it holds, so **set `GOMEMLIMIT`** on engine hosts that carry large payloads; it
-bounds the whole process. These runs predate the byte-sized cache and have not been rerun on it.
+The cache is sized in bytes: by default a tenth of the memory the engine's process may use, `GOMEMLIMIT` when it
+is set ([`SetStateCacheSize`](deployment.md) chooses another size). Scatter on one 32 vCPU database and a 64 GB
+engine host, with the cache at several sizes:
 
-*(Measured 2026-10-13/14.)*
+| Workload | Cache | steps/s | Engine heap, mean | Engine heap, peak |
+|---|---|---|---|---|
+| 8 × 1 MB | ~15.5 GB (a quarter of memory) | 176 | 32.8 GB | 50.1 GB |
+| 8 × 1 MB, `GOMEMLIMIT=48GiB` | 12 GB (a quarter of the limit) | 178 | 27.0 GB | 44.1 GB |
+| 8 × 256 KB | ~15.5 GB (a quarter of memory) | 670 | 26.6 GB | 36.9 GB |
+| 8 × 256 KB | 1 GB | 649 | 3.7 GB | 7.0 GB |
+
+- **A cache smaller than the work in flight costs little.** At 256 KB, a 1 GB cache instead of 15.5 GB cost 3%
+  of throughput and cut the heap about seven-fold. A miss reads the field from the database again, which is
+  cheap next to the payload writes that set the pace. The default is a tenth of memory for that reason.
+- **Set `GOMEMLIMIT` on engine hosts that carry large payloads.** Go's garbage collector lets the heap reach about
+  twice what it holds; the limit bounds the whole process, and the cache is sized from it.
+
+*(Measured 2026-10-14.)*
 
 ## Database volume
 
@@ -494,13 +526,11 @@ then, measurements on 8 vCPU databases with 500 GB disks:*
 - **State size** beyond 1 MB per task, up to the database column's own limit, is not measured.
 - **Payload results are single runs**, and the byte ceiling across shards is not remeasured. In July 2026,
   two shards scaled it ×1.77–1.82.
-- **Many fairness keys on a linear workflow** are being remeasured. The one run so far was disturbed by an
-  unrelated database stall.
+- **Many fairness keys on a linear workflow** are not yet measured cleanly. Both runs at 512 keys hit a slowdown
+  of several minutes in one of the engine's own background queries; the fix is in progress.
 - **Replicas spread across zones**, with unequal distance to the database, are not measured.
 - **Sustained create-and-purge**: hours of retention churn and recovery after a long-task burst are not
   measured.
-- **Cloud SQL's default `max_wal_size`** made saturated databases checkpoint every few seconds; whether raising
-  it lifts the ceiling or removes the within-run settling is being measured.
 
 ## Reproducing
 

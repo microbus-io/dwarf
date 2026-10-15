@@ -340,7 +340,7 @@ fresh database, averaged over a 16-minute window. The full conditions are in the
 |---|---|---|
 | 1 × 8 | 2 × 2 vCPU | 4,041 |
 | 1 × 16 | 2 × 4 vCPU | 7,675 |
-| 1 × 32 | 1 × 16 vCPU | 17,938 |
+| 1 × 32 | 1 × 16 vCPU | 19,154–19,868 |
 | 4 × 32 | 1 × 48 vCPU | 66,843 |
 | 4 × 32 | 4 × 16 vCPU | 69,382 |
 | 4 × 32 | 8 × 8 vCPU | 74,879 |
