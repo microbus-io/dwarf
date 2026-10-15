@@ -2,7 +2,7 @@
 
 > Load when: changing the window's length, how entries expire, or the key.
 > Coupled with: `engine/CLAUDE.md` §"Candidate de-duplication" (the cross-peer half — the partition
-> predicate — plus the three metrics that price candidate waste, and the measured numbers).
+> predicate — plus the three metrics that price candidate waste, and the re-offer call sites).
 
 ## Why it exists at all: no SQL filter can see this
 
