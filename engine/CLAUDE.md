@@ -1207,9 +1207,8 @@ that is a pure function of stored data; a database error from the same computati
 same values and hits the same error, and `failFlowTx` falls back. (An unknown reducer name never gets this far:
 `Graph.Validate` rejects it at `Create`.) Pinned by `TestFanIn_ReducerErrorFailsTheFlow`, which also asserts neither
 write metric moves. `mergeCohortState`'s member fold - a failed fan-out's final state - is wrapped the same way, and
-a path that terminalizes a flow whatever it holds - `terminateSubtree` (Terminate, Delete, Purge, the orphan sweep) and the wedge sweep's
-`deliverSubgraphError` - reads the final state through `terminalFinalState`, which takes a `permanentError` as
-`{}`; propagating it would leave the flow impossible to stop (`TestTerminate_ReducerErrorDoesNotBlockTerminate`).
+a path that terminalizes a flow whatever it holds - `terminateSubtree` (Terminate, Delete, Purge, the orphan
+sweep) - reads the final state through `terminalFinalState`, which takes a `permanentError` as `{}`; propagating it would leave the flow impossible to stop (`TestTerminate_ReducerErrorDoesNotBlockTerminate`).
 
 **Escalation is counter-based (`cohort_failures`), not status-based, and happens *before* `fanInRow`.**
 `fanInRow` itself never marks the flow terminal - but it is only reached when the cohort resolves with
@@ -1687,11 +1686,12 @@ state on Postgres).
 The rule is: **retry the WRITE, never the task.** Re-dispatching is the one recovery that re-fires side effects,
 and it must not be used for failures the task had nothing to do with. So **every post-execution write of a
 step's outcome runs through `persist`** (`persistStepYielding`, or `persistYielding` + `settlePersist` where the
-caller acts only on a landed write): the completion write, the transition, `fireFanInDirect`, flow completion,
-the `flow.Retry` rewind, the subgraph spawn and `handleInterrupt`. `failStep` is the exception by design: it is
+caller acts only on a landed write): the completion write, the Cancel-covered reroute's follow-up write, the
+transition, `fireFanInDirect`, flow completion, the `flow.Retry` rewind, the subgraph spawn and `handleInterrupt`. `failStep` is the exception by design: it is
 the classifier's own clean, payload-free write (below), so it must not route back through the classifier. A new
 outcome write added outside `persist` reopens the loop above. A test fails the rewind
-through it with `FaultRetryRewindErr`, as `FaultPersistErr` does the completion write.
+through it with `FaultRetryRewindErr` and the reroute write with `FaultRerouteWriteErr`, as `FaultPersistErr` does
+the completion write.
 
 - **In-place retry, holding the lease.** A short exponential (1s/2s/4s). The errors this exists for - a failover, a
   dropped connection, a momentary connection-limit rejection - clear in **seconds**, so a blip is absorbed with
@@ -2804,8 +2804,9 @@ park for work                       <- holding NOTHING
 
 **A pass must ENCLOSE the connection, AND NOTHING ELSE.** A cursor holds its connection until closed, so the
 turn is held until the reading is done, and a transaction takes one turn for the whole `Transact`. It is handed
-BACK across any wait that is not the database - `yieldTurn` does that around the subgraph `LoadGraph`, the
-persist retry backoff, and the cohort stripe lock. The stripe is the sharpest: its whole purpose is that a
+BACK across any wait that is not the database - `yieldTurn` does that around the persist retry backoff and the
+cohort stripe lock, and `yieldTurnAway` around the subgraph `LoadGraph`, which as a host call also moves the claim
+forward by its duration, as `ExecuteTask`'s does. The stripe is the sharpest: its whole purpose is that a
 losing sibling waits holding no connection, and a turn is that occupancy one level up. Callers holding
 connections without turns and callers holding turns without connections deadlock each other, which is why
 nothing wraps `sequel.DB` - the call site is what knows when the connection is released.
@@ -3680,17 +3681,13 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
      non-terminal child** (`surgraph_step_id = step_id`, status created/running/interrupted) is wedged - the child
      reached terminal but the revive was lost, or the child was deleted. The sweep re-drives the release on the
      latest child (`flow_id DESC`): `completeSurgraphFlow` for a completed child, `deliverSubgraphError` for a
-     failed/terminated/cancelled/absent one. **The absent-child case (`childFlowID == 0`)** cannot be reached by a
-     crash - the park and the child's insert commit in one transaction - so it is defense against a bug or a
-     hand-deleted row. A parked caller carries no lease, so nothing else would recover it, and the case must skip
-     every child-directed write: aiming them at
-     id `0` made `computeFinalState` SELECT `WHERE flow_id=0`, hit `sql.ErrNoRows`, and roll the recovery back on
-     every sweep, so the flow hung forever. There is no child to terminalize; the recovery IS failing the caller,
-     which the parent re-arm does. Pinned by `TestWedgeSweep_SubgraphCallerWithNoChildFails`.
-     `deliverSubgraphError` is **flow-first (write-first)**, not steps-first: it lock-grabs the child flow row
-     (`touch=1-touch`, guarded non-terminal) before `computeFinalState` reads, so it can never be the read-first
-     half of a SQLite SHARED-lock upgrade deadlock. With no child flow, its first statement is the parent-step
-     re-arm - itself a write. (A fan-out has several caller steps, each its own `surgraph_step_id`, checked
+     failed/terminated/cancelled/absent one. `deliverSubgraphError` only re-arms the caller with the error, and
+     its one statement is that write, so it is write-first. It is never handed a live child: the sweep skips a
+     latest child that is non-terminal again (a spawn that landed after its scan), so there is no child to
+     terminalize. **The absent-child case** cannot be reached by a crash - the park and the child's insert commit
+     in one transaction - so it is defense against a bug or a hand-deleted row; a parked caller carries no lease,
+     so nothing else would recover it, and the recovery IS failing the caller. Pinned by
+     `TestWedgeSweep_SubgraphCallerWithNoChildFails`. (A fan-out has several caller steps, each its own `surgraph_step_id`, checked
      independently; `flow.Retry` leaves older terminal children whose latest sibling is still active - handled by
      the `NOT EXISTS` + latest-child logic.)
    - **orphaned subgraph child** (`recoverOrphanedSubgraphChildren`) - the **mirror image** of the above: a

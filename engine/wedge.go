@@ -247,13 +247,16 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 			// The child flow is gone (e.g. deleted/purged): fail the caller so the flow can terminate.
 			e.logger.ErrorContext(ctx, "Wedge sweep: parked subgraph caller has no child flow; failing it",
 				"shard", shard, "step", w.stepID, "flow", keys.CorrelationID(shard, w.flowID))
-			if rerr := e.deliverSubgraphError(ctx, shard, 0, w.stepID, errors.New("subgraph flow not found (wedge recovery)")); rerr != nil {
+			if rerr := e.deliverSubgraphError(ctx, shard, w.stepID, errors.New("subgraph flow not found (wedge recovery)")); rerr != nil {
 				e.logger.ErrorContext(ctx, "Wedge sweep: failing orphaned subgraph caller", "shard", shard, "step", w.stepID, "error", rerr)
 				continue
 			}
 			e.metricStepUnwedged(ctx, "subgraph")
 		case err != nil:
 			e.logger.ErrorContext(ctx, "Wedge sweep: reading child flow", "shard", shard, "step", w.stepID, "error", err)
+		case !workflow.IsTerminalStatus(childStatus):
+			// The scan found no live child, so a live one now is a spawn that landed since - the caller was
+			// revived and parked again. It is not wedged.
 		default:
 			e.logger.ErrorContext(ctx, "Wedge sweep: reviving wedged subgraph caller",
 				"shard", shard, "step", w.stepID, "childFlow", keys.CorrelationID(shard, childFlowID), "childStatus", childStatus)
@@ -263,7 +266,7 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 				rerr = e.completeSurgraphFlow(ctx, shard, w.flowID, w.stepID, childFinalState)
 			case workflow.StatusCancelled:
 				// Delivered as the cancellation itself, as the live path does, so the caller can recognize it.
-				rerr = e.deliverSubgraphError(ctx, shard, childFlowID, w.stepID, cancelmarker.New(strings.TrimSpace(childCancelReason)))
+				rerr = e.deliverSubgraphError(ctx, shard, w.stepID, cancelmarker.New(strings.TrimSpace(childCancelReason)))
 			default:
 				// failed / terminated: deliver the child's error (or a synthesized one) to the caller. The stored
 				// message is passed as an argument, never as the pattern, which would read any % in it as a verb.
@@ -271,7 +274,7 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 				if msg == "" {
 					msg = "subgraph " + childStatus
 				}
-				rerr = e.deliverSubgraphError(ctx, shard, childFlowID, w.stepID, errors.New("%s", msg))
+				rerr = e.deliverSubgraphError(ctx, shard, w.stepID, errors.New("%s", msg))
 			}
 			if rerr != nil {
 				e.logger.ErrorContext(ctx, "Wedge sweep: reviving subgraph caller", "shard", shard, "step", w.stepID, "error", rerr)
@@ -293,9 +296,11 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 // child fails via cohort accounting after every branch settles, never eagerly while a sibling is live. This is
 // defense in depth for a bug that would. The sweep tears the
 // orphan down by terminating its subtree, sharing the parent's terminal fate. In steady state a parent goes
-// terminal only after its live subgraphs resolve, so a non-terminal child under a terminal parent older than
-// minAge is genuinely orphaned; the age guard excludes the sub-second window in which a just-terminalized
-// parent's sibling child is still being cleaned up by the normal completion/error path. An interrupted parent is
+// terminal only after its live subgraphs resolve, so a non-terminal child under a parent terminal for longer
+// than minAge is genuinely orphaned; the age guard excludes the sub-second window in which a just-terminalized
+// parent's sibling child is still being cleaned up by the normal completion/error path. The guard reads the
+// PARENT's updated_at, which its terminal write stamps: the child's own is frozen at its last status change,
+// so a child running longer than minAge would pass it the instant its parent went terminal. An interrupted parent is
 // deliberately excluded (not terminal): a Resume of the root revives the interrupted branch, and a sibling child
 // running under it is healthy.
 func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel.DB, shard int, minAge time.Duration) {
@@ -305,7 +310,7 @@ func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel
 			" WHERE c.surgraph_flow_id>0 AND c.status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')"+
 			// `<=`, so minAge=0 means "no age guard" - see recoverWedgedSubgraphParks for why a strict `<`
 			// silently skips a row stamped inside the sweep's own millisecond.
-			" AND c.updated_at <= DATE_ADD_MILLIS(NOW_UTC(), ?)"+
+			" AND p.updated_at <= DATE_ADD_MILLIS(NOW_UTC(), ?)"+
 			" AND p.status IN ("+terminalStatusesSQL+")",
 		-minAge.Milliseconds(),
 	)

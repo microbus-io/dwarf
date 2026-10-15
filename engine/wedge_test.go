@@ -254,7 +254,9 @@ func TestWedgeSweep_SubgraphCallerWithNoChildFails(t *testing.T) {
 // before the child was inserted, so the teardown missed it. The child rests interrupted with no path out
 // (root-key ops 409 on the terminal root, the child's own key is read-only, and recoverWedgedSubgraphParks is
 // blind because the caller step is terminated, not running+parked). recoverOrphanedSubgraphChildren must
-// terminate it, while leaving a healthy subgraph child (running under a still-running parent) untouched.
+// terminate it, while leaving a healthy subgraph child (running under a still-running parent) untouched. Its age
+// guard is anchored on the PARENT's terminal write: a child whose own row has been still for longer than the guard
+// is spared while its parent has only just gone terminal, and swept once the parent has been terminal that long.
 func TestWedgeSweep_OrphanedSubgraphChildTerminated(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -367,8 +369,21 @@ func TestWedgeSweep_OrphanedSubgraphChildTerminated(t *testing.T) {
 		return
 	}
 
-	// Recover (minAge=0 bypasses the age gate).
-	e.recoverOrphanedSubgraphChildren(ctx, db, shard, 0)
+	// Every child has been still for ten minutes, far past the guard; the orphan's parent went terminal just now.
+	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=DATE_ADD_MILLIS(NOW_UTC(), -600000) WHERE flow_id IN (?, ?, ?)",
+		childFlowID, healthyChildID, healthyParentID)
+	assert.NoError(err)
+	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=NOW_UTC() WHERE flow_id=?", parentFlowID)
+	assert.NoError(err)
+	e.recoverOrphanedSubgraphChildren(ctx, db, shard, time.Minute)
+	var sparedStatus string
+	assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=?", childFlowID).Scan(&sparedStatus))
+	assert.Equal(workflow.StatusInterrupted, strings.TrimSpace(sparedStatus), "a parent terminal for less than the guard spares the child")
+
+	// Once the parent has been terminal for longer than the guard, the child is swept.
+	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=DATE_ADD_MILLIS(NOW_UTC(), -600000) WHERE flow_id=?", parentFlowID)
+	assert.NoError(err)
+	e.recoverOrphanedSubgraphChildren(ctx, db, shard, time.Minute)
 
 	// The orphaned child is terminated with the recovery reason, and its interrupted step is terminated too.
 	var childStatus, childReason string

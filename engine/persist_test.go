@@ -29,6 +29,7 @@ import (
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 // shortPersistBackoff is the retry schedule tests use so they do not sit out the production 1+2+4 seconds.
@@ -274,6 +275,128 @@ func TestPersist_LeaseExtensionStatusGuard(t *testing.T) {
 		assert.False(errors.Is(err, errPersistFenced), "a long lease needing no extension must not read as fenced")
 		assert.True(writeCalls > 1, "the retry loop must run for a step we still own, got %d write(s)", writeCalls)
 		assert.True(leaseMsOut(t, db) > 900000, "a long lease must be kept, not cut back to the extension")
+	})
+}
+
+// TestPersist_PermanentErrorOnARetryStopsTheLadder pins that a permanentError ends the retry ladder wherever it
+// appears, not only on the first attempt: a write that fails transiently and then deterministically returns at
+// once, rather than sleeping out the remaining backoffs to recompute the same failure.
+func TestPersist_PermanentErrorOnARetryStopsTheLadder(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(hosts.NewMux())
+	e.persistBackoff = shortPersistBackoff
+	assert.NoError(e.Startup(t.Context()))
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	// A running step this worker holds under generation 5, out of the engine's own reach (see
+	// TestPersist_LeaseExtensionStatusGuard), so the lease extension finds it ours and the ladder starts.
+	_, err = db.ExecContext(ctx,
+		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, thread_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"ftok", "u", "W", []byte("{}"), "", workflow.StatusRunning, 1, 1, 1000,
+	)
+	assert.NoError(err)
+	_, err = db.ExecContext(ctx,
+		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, lease_seq, not_before, lease_expires)"+
+			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 999000), DATE_ADD_MILLIS(NOW_UTC(), 999000))",
+		1, 1, "stok", "T", "u", workflow.StatusRunning, 1000, 5,
+	)
+	assert.NoError(err)
+
+	var writeCalls int
+	err = e.persist(ctx, db, 1, 1, 5, func() error {
+		writeCalls++
+		if writeCalls == 1 {
+			return errors.New("injected transient write error")
+		}
+		return errors.Trace(&permanentError{errors.New("injected deterministic failure")})
+	}, nil)
+	assert.True(isPermanentError(err), "the permanent error is returned as such, got: %v", err)
+	assert.Equal(2, writeCalls, "the ladder stops at the permanent error instead of retrying it")
+}
+
+// TestPersist_CancelRerouteWriteIsPersisted pins that the follow-up write of a step Cancel covered while its task
+// ran - the one recording its route to the onError handler - goes through persist like the completion write. A
+// blip is retried in place (dwarf_steps_write_retried), and a write that never lands fails the step through the
+// classifier (dwarf_steps_write_failed) instead of being replayed forever; the task runs once either way.
+func TestPersist_CancelRerouteWriteIsPersisted(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	run := func(t *testing.T, faults int) (*workflow.FlowOutcome, int32, int32, metricdata.ResourceMetrics) {
+		assert := testarossa.For(t)
+		var workRuns, handlerRuns atomic.Int32
+		started := make(chan struct{})
+		release := make(chan struct{})
+		mux := hosts.NewMux()
+		g := workflow.NewGraph("Reroute")
+		g.SetURL("Work", "p/reroute/work")
+		g.SetURL("Handler", "p/reroute/handler")
+		g.AddTransition("Work", workflow.End)
+		g.AddTransitionOnError("Work", "Handler")
+		g.AddTransition("Handler", workflow.End)
+		mux.HandleGraph("p/reroute/wf", g)
+		mux.HandleTask("p/reroute/work", func(ctx context.Context, f *workflow.Flow) error {
+			if workRuns.Add(1) == 1 {
+				close(started)
+			}
+			<-release
+			return nil
+		})
+		mux.HandleTask("p/reroute/handler", func(ctx context.Context, f *workflow.Flow) error {
+			handlerRuns.Add(1)
+			return nil
+		})
+
+		e := NewEngineUnderTest(t.Name())
+		defer e.Shutdown(ctx)
+		e.SetHost(mux)
+		e.persistBackoff = shortPersistBackoff
+		reader := withManualReader(e)
+		assert.NoError(e.Startup(t.Context()))
+		e.seams.InjectN(engineseams.Join(engineseams.FaultRerouteWriteErr, "Work"), faults)
+
+		fk, err := e.Create(ctx, "p/reroute/wf", nil, nil)
+		if !assert.NoError(err) {
+			t.FailNow()
+		}
+		<-started
+		assert.NoError(e.Cancel(ctx, fk, "stop"))
+		close(release)
+		awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		out, err := e.Await(awaitCtx, fk)
+		if !assert.NoError(err) || !assert.NotNil(out) {
+			t.FailNow()
+		}
+		var rm metricdata.ResourceMetrics
+		assert.NoError(reader.Collect(ctx, &rm))
+		return out, workRuns.Load(), handlerRuns.Load(), rm
+	}
+
+	t.Run("blip_is_retried_in_place", func(t *testing.T) {
+		assert := testarossa.For(t)
+		out, workRuns, handlerRuns, rm := run(t, 1)
+		assert.Equal(workflow.StatusCompleted, out.Status, "the handler caught the cancellation")
+		assert.Equal(int32(1), workRuns)
+		assert.Equal(int32(1), handlerRuns)
+		retried, _ := sumCounter(rm, "dwarf_steps_write_retried", "", "")
+		assert.Equal(int64(1), retried, "the failed write was retried by persist")
+	})
+
+	t.Run("write_that_never_lands_fails_the_step", func(t *testing.T) {
+		assert := testarossa.For(t)
+		out, workRuns, handlerRuns, rm := run(t, 1000)
+		assert.Equal(workflow.StatusFailed, out.Status, "the classifier fails the step rather than replaying it")
+		assert.Contains(out.Error, engineseams.FaultRerouteWriteErr)
+		assert.Equal(int32(1), workRuns)
+		assert.Equal(int32(0), handlerRuns)
+		failed, _ := sumCounter(rm, "dwarf_steps_write_failed", "", "")
+		assert.Equal(int64(1), failed)
 	})
 }
 

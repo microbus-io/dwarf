@@ -183,6 +183,9 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 		if errors.Is(err, errLeaseFenced) {
 			return errPersistFenced
 		}
+		if isPermanentError(err) {
+			return err
+		}
 		if sequel.IsLockContentionError(err) {
 			return errors.Trace(err)
 		}

@@ -174,6 +174,10 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			return
 		}
 		if db, derr := e.db.Shard(shardNum); derr == nil {
+			// Its own turn: every turn this dispatch took has been handed back by now (the persist pass's
+			// defer runs before this one), and the reset is a database call like any other.
+			ctx, doneTurn := e.dbTurn(ctx, shardNum)
+			defer doneTurn()
 			// Fence the reset on our lease generation so a zombie (lease already re-granted to a peer)
 			// cannot rewind the peer's freshly-claimed step. leaseSeq==0 means we failed before capturing
 			// it (a claim/read error microseconds after claiming, before any ExecuteTask ran) - there a
@@ -759,8 +763,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			var e2 error
 			// The host call holds no connection and is unbounded, so the turn goes back for its duration -
 			// otherwise one slow LoadGraph per worker parks the shard's turns on something that is not the
-			// database at all.
-			yieldTurn(ctx, &persistPass, func() {
+			// database at all - and, like ExecuteTask's, its duration does not age the claim.
+			yieldTurnAway(&ctx, &persistPass, func() {
 				subgraphGraph, e2 = e.host.LoadGraph(loadCtx, subgraphURL)
 			})
 			return e2
@@ -1053,12 +1057,24 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		if err := successorBase.Apply(accumulatedChanges, reducers); err != nil {
 			return errors.Trace(e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName))
 		}
-		// The route is recorded with the changes, so a replay of this step routes to the handler too.
-		if _, uerr := db.ExecContext(ctx,
-			"UPDATE dwarf_steps SET changes=?, advance_sleep_until=NOW_UTC(), advance_on_error=1 WHERE step_id=? AND lease_seq=?",
-			changesJSON, stepID, leaseSeq,
-		); uerr != nil {
-			return errors.Trace(uerr)
+		// The route is recorded with the changes, so a replay of this step routes to the handler too. It is part
+		// of the step's recorded outcome, so it goes through persist like the completion write above.
+		err = e.persistYielding(ctx, db, shardNum, stepID, leaseSeq, &persistPass, func() error {
+			return retryContention(ctx, func() error {
+				// engineseams.FaultRerouteWriteErr makes this write fail with a NON-contention error, consumed per
+				// attempt: InjectN(1) is a blip persist absorbs in place, InjectN(large) a failure it classifies.
+				if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultRerouteWriteErr, taskName)) {
+					return errors.New("injected fault: " + engineseams.FaultRerouteWriteErr + " " + taskName)
+				}
+				_, uerr := db.ExecContext(ctx,
+					"UPDATE dwarf_steps SET changes=?, advance_sleep_until=NOW_UTC(), advance_on_error=1 WHERE step_id=? AND lease_seq=?",
+					changesJSON, stepID, leaseSeq,
+				)
+				return errors.Trace(uerr)
+			})
+		})
+		if landed, err := e.settlePersist(ctx, err, shardNum, stepID, leaseSeq, flowID, flowToken, taskName); !landed {
+			return err
 		}
 		errorRouted = true
 		errorTarget = tr.To

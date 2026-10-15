@@ -1242,62 +1242,26 @@ func (e *Engine) dynamicSubgraphParent(ctx context.Context, db *sequel.DB, flowI
 	return surgraphStepID, label, nil
 }
 
-// deliverSubgraphError terminalizes a subgraph child (when there is one, and it is not already terminal)
-// and re-arms its parked caller step with the error, so the caller's flow.Subgraph call re-dispatches,
-// returns that error, and the caller step fails through its normal disposition (or routes via onError).
+// deliverSubgraphError re-arms a parked caller step with the error, so the caller's flow.Subgraph call
+// re-dispatches, returns that error, and the caller step fails through its normal disposition (or routes via
+// onError).
 //
 // Used only by the parked-step wedge sweep - the live failure path is cohort accounting
-// (deliverFlowFailureToParent from failStep / processStep). Both call sites therefore pass a child that
-// is already terminal, or none at all:
+// (deliverFlowFailureToParent from failStep / processStep) - and the sweep calls it only for a caller whose
+// latest child is already terminal or gone, so there is no child to terminalize here:
 //
-//   - childFlowID != 0: the child went terminal but the revive was lost. The child writes are no-ops
-//     under the status guard; the point is the parent re-arm.
-//   - childFlowID == 0: the child flow is GONE. The caller's park and the child's insert commit in one
-//     transaction, so only a bug or a hand-deleted row leaves this. Nothing to terminalize - failing the
-//     caller is the only way out, and it is what the parent re-arm does.
-func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, childFlowID int, parentStepID int, taskErr error) error {
+//   - a terminal child: it went terminal but the revive was lost, and the re-arm is the whole recovery;
+//   - no child: the child flow is GONE. The caller's park and the child's insert commit in one transaction,
+//     so only a bug or a hand-deleted row leaves this, and failing the caller is the only way out.
+func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, parentStepID int, taskErr error) error {
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	errMsg := sanitizeErrorMessage(taskErr.Error())
 	reDispatchParent := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
-		reDispatchParent = false
-		// childFlowID==0 is the "caller parked, child flow gone" wedge, which only a bug or a hand-deleted
-		// child row leaves (the park and the child's insert commit together). There is no child to terminalize
-		// - the only recovery is to fail the CALLER, which the parent re-arm below does (it writes the
-		// error onto the parked step, so the re-dispatched flow.Subgraph returns it and the task fails
-		// through its normal disposition). Everything child-related must therefore be skipped, not merely
-		// aimed at id 0: computeFinalState(0) SELECTs `WHERE flow_id=0`, gets sql.ErrNoRows, and rolls the
-		// whole transaction back - so the sweep's designated last-resort recovery could never succeed and
-		// the flow hung forever.
-		if childFlowID != 0 {
-			// Write-first per the flow-terminating-transaction rule: take the child flow row's write lock
-			// (the non-indexed `touch` flip) BEFORE computeFinalState reads, so this transaction can never
-			// be the read-first half of a SHARED-lock upgrade deadlock on SQLite. The status guard means a
-			// zero-row match is the ordinary case here - the wedge sweep calls this precisely to deliver an
-			// already-terminal child's error - and then there is nothing to terminalize.
-			res, err := tx.ExecContext(ctx, lockFlowRowSQL(), childFlowID)
-			if err != nil {
-				return errors.Trace(err)
-			}
-			if n, _ := res.RowsAffected(); n > 0 {
-				childFinalState, err := e.terminalFinalState(ctx, tx, shardNum, childFlowID)
-				if err != nil {
-					return errors.Trace(err)
-				}
-				_, err = tx.ExecContext(ctx,
-					"UPDATE dwarf_flows SET status=?, error=?, final_state=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
-					workflow.StatusFailed, errMsg, childFinalState, childFlowID,
-				)
-				if err != nil {
-					return errors.Trace(err)
-				}
-			}
-		}
-		// The parent re-arm. With no child flow this is the transaction's first statement and is itself a
-		// write (the parked caller step), so write-first holds on that path too.
+		// The parent re-arm is the transaction's first statement and is itself a write (the parked caller
+		// step), so it is write-first.
 		var derr error
 		reDispatchParent, derr = e.deliverFlowFailureToParent(ctx, tx, parentStepID, taskErr)
 		return errors.Trace(derr)

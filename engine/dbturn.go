@@ -118,8 +118,9 @@ func (e *Engine) dbTurnAt(ctx context.Context, shardNum, priority int) (context.
 }
 
 // yieldTurn hands the turn back for the duration of fn and takes a fresh one afterwards. fn is a wait that
-// is NOT the database - a host call, a lock, a sleep - and holding a turn across one bounds every other
-// caller on something that is not the resource being metered.
+// is NOT the database - a lock, a sleep - and holding a turn across one bounds every other caller on
+// something that is not the resource being metered. The claim is re-taken unchanged; a host call takes
+// yieldTurnAway instead.
 //
 // The pass is passed by POINTER and replaced in place, so a caller's deferred return must be written as a
 // closure (`defer func() { pass.Return() }()`); a plain `defer pass.Return()` binds the receiver at defer
@@ -128,12 +129,26 @@ func (e *Engine) dbTurnAt(ctx context.Context, shardNum, priority int) (context.
 // It re-takes unconditionally, including when the turnstile has closed - a closed one yields a no-op pass,
 // so the work still finishes, which is the same drain contract every other site has.
 //
-// The re-take is DEFERRED so it also runs when fn panics. One of these wraps a host call inside
-// errors.CatchPanic, so a panicking host would otherwise unwind past the re-take and leave the caller
-// holding a spent pass: no leak and no double release (both are no-ops), but every database call on the
-// failure disposition would then run unordered, which is the one thing this whole path is for.
+// The re-take is DEFERRED so it also runs when fn panics. A panic caught further up would otherwise unwind
+// past the re-take and leave the caller holding a spent pass: no leak and no double release (both are
+// no-ops), but every database call on the failure disposition would then run unordered, which is the one
+// thing this whole path is for.
 func yieldTurn(ctx context.Context, pass *turnstile.Pass, fn func()) {
 	pass.Return()
 	defer func() { *pass = turnstile.WaitTurn(ctx) }()
+	fn()
+}
+
+// yieldTurnAway is yieldTurn for a host call: the claim on *ctx is moved forward by the call's duration
+// (turnstile.Away) before the turn is re-taken, so the job ranks by its time at the database, exactly as it
+// does after ExecuteTask. *ctx is replaced in place so the caller's later turns take the moved claim too, and
+// the move is deferred with the re-take so a panicking fn gets both.
+func yieldTurnAway(ctx *context.Context, pass *turnstile.Pass, fn func()) {
+	pass.Return()
+	start := time.Now()
+	defer func() {
+		*ctx = turnstile.Away(*ctx, time.Since(start))
+		*pass = turnstile.WaitTurn(*ctx)
+	}()
 	fn()
 }
