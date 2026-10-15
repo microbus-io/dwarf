@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"sync"
 
 	"github.com/microbus-io/dwarf/workflow"
 )
@@ -138,11 +139,16 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 	nop := func(ctx context.Context, f *workflow.Flow) error { return nil }
 	h.tasks["bench/nop"] = nop
 
+	// The payloads below are built on first use, not here. Every workload is registered whatever the run
+	// picks, and a payload built eagerly is resident for the whole run: at -payload 250MB that is a 500MB
+	// fresh buffer (x -fanout-width), the 250MB state payload and ~2GB of unused carry records, which would
+	// read as engine memory in exactly the run that measures it.
+	fresh := sync.OnceValue(func() *freshBytes { return newFreshBytes(payloadBytes, max(1, fanOutWidth)) })
+
 	// write: the linear and fanout task. -payload 0 makes it a no-op, the dispatch-cost floor.
-	fresh := newFreshBytes(payloadBytes, max(1, fanOutWidth))
 	h.tasks["bench/write"] = func(ctx context.Context, f *workflow.Flow) error {
 		if payloadBytes > 0 {
-			f.SetString("data", fresh.next())
+			f.SetString("data", fresh().next())
 			h.bytesWritten.Add(int64(payloadBytes))
 		}
 		return nil
@@ -178,7 +184,7 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 	// element and checks it arrived whole. The check is what makes a storage number trustworthy here, as in
 	// carry: an element that went missing would otherwise read as an excellent byte saving.
 	h.tasks["bench/scatter-split"] = func(ctx context.Context, f *workflow.Flow) error {
-		f.Set("items", fresh.nextN(fanOutWidth))
+		f.Set("items", fresh().nextN(fanOutWidth))
 		h.bytesWritten.Add(int64(fanOutWidth * payloadBytes))
 		return nil
 	}
@@ -210,15 +216,17 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 	if statePayload == 0 {
 		statePayload = defaultStatePayload
 	}
-	const alnum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	payloadB := make([]byte, statePayload)
-	for i := range payloadB {
-		payloadB[i] = alnum[rand.IntN(len(alnum))]
-	}
-	payload := string(payloadB)
+	payload := sync.OnceValue(func() string {
+		const alnum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+		b := make([]byte, statePayload)
+		for i := range b {
+			b[i] = alnum[rand.IntN(len(alnum))]
+		}
+		return string(b)
+	})
 	h.tasks["bench/state"] = func(ctx context.Context, f *workflow.Flow) error {
-		f.SetString("data", payload)
-		h.bytesWritten.Add(int64(len(payload)))
+		f.SetString("data", payload())
+		h.bytesWritten.Add(int64(statePayload))
 		return nil
 	}
 	state := workflow.NewGraph("State")
@@ -240,15 +248,19 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 	// a 64KB string expands ~1x, while 800 small records (50KB of JSON) expand to 341KB in Go - 6.8x, since
 	// every element costs an interface, a boxed float64 and a map entry. Real carried documents - pages,
 	// rows, chunks - are the second shape. Element count, not byte count, is what drives it.
-	records := make([]map[string]any, 0, 1+statePayload/80)
-	for i := 0; len(records)*80 < statePayload; i++ {
-		records = append(records, map[string]any{
-			"id":    i,
-			"name":  payload[(i*37)%max(1, len(payload)-24):][:24],
-			"score": float64(i) * 1.5,
-			"ok":    i%2 == 0,
-		})
-	}
+	records := sync.OnceValue(func() []map[string]any {
+		payload := payload()
+		records := make([]map[string]any, 0, 1+statePayload/80)
+		for i := 0; len(records)*80 < statePayload; i++ {
+			records = append(records, map[string]any{
+				"id":    i,
+				"name":  payload[(i*37)%max(1, len(payload)-24):][:24],
+				"score": float64(i) * 1.5,
+				"ok":    i%2 == 0,
+			})
+		}
+		return records
+	})
 
 	// carry: the payload is written ONCE - as the flow's initial state, so the ENTRY step's state column
 	// anchors it - and thereafter only carried. Every task writes a small counter and leaves the document
@@ -281,8 +293,8 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 			if _, err := f.Get("doc", &doc); err != nil {
 				return fmt.Errorf("carry: reading the carried document: %w", err)
 			}
-			if len(doc) != len(records) {
-				return fmt.Errorf("carry: carried document has %d records, want %d", len(doc), len(records))
+			if len(doc) != len(records()) {
+				return fmt.Errorf("carry: carried document has %d records, want %d", len(doc), len(records()))
 			}
 		}
 		f.SetInt("steps", 1)
@@ -369,13 +381,13 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 		// no task having produced it, and so appears in no `changes` anywhere.
 		"carry": {
 			graphURL:     "bench/carry",
-			initialState: func() map[string]any { return map[string]any{"doc": records} },
+			initialState: func() map[string]any { return map[string]any{"doc": records()} },
 			stepsPerFlow: chainSteps,
 		},
 		"carryfanout": {
 			graphURL: "bench/carryfanout",
 			initialState: func() map[string]any {
-				return map[string]any{"doc": records, "items": fanoutItems}
+				return map[string]any{"doc": records(), "items": fanoutItems}
 			},
 			stepsPerFlow: 2*fanOutWidth + 2,
 		},
