@@ -2818,11 +2818,6 @@ throttling the registry would let load reshape the fleet; it beats on a fixed ca
 the band either. Band 0 rather than an exemption: a bypasser ranks above every band and drops out of the
 population the turn count bounds (`dbturn.go`).
 
-**Everything else shares one band and is separated by age alone. That is a decision, not an unfinished
-state.** Age ordering cannot starve — every claim eventually becomes the oldest — while a second band given
-to any caller that can arrive faster than it is served starves the band below it. That is the shape of the
-measured 3x collapse under completions-first precedence (below), reached through a different door.
-
 **Everything else shares one band and is separated by age alone - a decision, not an unfinished state.**
 Age ordering cannot starve, while a second band for any caller that can arrive faster than it is served starves
 the band below (completions given precedence measured a 3x short-task collapse). So if completions are
