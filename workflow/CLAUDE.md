@@ -335,11 +335,12 @@ trip the Go runtime's concurrent-map-write detector, which is a **`throw`, not a
 around `ExecuteTask` (the host-call panic isolation) **cannot recover it**, so one task fanning out
 internally with an errgroup and writing results straight back to the `Flow` takes down the whole replica and
 every unrelated in-flight flow on it. The godoc on `Flow` (and the package doc) says so, with the
-collect-then-write-from-one-goroutine pattern spelled out. **The zero `Flow` is writable:** every write path
-(`write`, `Set`'s plain path) and `Flow.UnmarshalJSON` call `ready`, which creates both maps, since the setters
-write to both and a nil map panics. A write path that skips it panics on the zero value while its siblings work
-(`TestFlow_ZeroValueTakesEveryWrite`). Parallelizing across *steps* (a `forEach`
+collect-then-write-from-one-goroutine pattern spelled out. Parallelizing across *steps* (a `forEach`
 transition, one `Flow` per branch) is the first-class answer.
+
+**The zero `Flow` is writable.** Every write path (`write`, `Set`'s plain path) and `Flow.UnmarshalJSON` call
+`ready`, which creates both maps, since the setters write to both and a nil map panics. A write path that skips
+it panics on the zero value while its siblings work (`TestFlow_ZeroValueTakesEveryWrite`).
 
 ### Task-Initiated Control Signals
 
