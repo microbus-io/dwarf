@@ -962,6 +962,9 @@ func (e *Engine) failAndReturn(ctx context.Context, shardNum int, stepID int, le
 // re-granted to a peer - its fenced step UPDATE matched zero rows, so it wrote nothing and the caller must
 // abandon quietly rather than fail a flow the peer is healthily re-executing (see "Lease fencing").
 func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSeq int, flowID int, flowToken string, taskErr error, taskName string) (fenced bool, err error) {
+	if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultFailStepErr, taskName)) {
+		return false, errors.New("injected fault: " + engineseams.FaultFailStepErr)
+	}
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return false, errors.Trace(err)

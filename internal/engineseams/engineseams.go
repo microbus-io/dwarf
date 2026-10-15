@@ -112,6 +112,7 @@ const (
 	FaultForkCommit          = "forkCommit"          // the Fork clone transaction errors
 	FaultInitRuntime         = "initRuntime"         // Startup's runtime initialization fails, after the shards are open and the fleet joined
 	FaultFailFlowFinalState  = "failFlowFinalState"  // failing a flow cannot compute its final state, so it terminalizes with an empty one
+	FaultFailStepErr         = "failStepErr"         // scoped by task name: failStep errors before it writes anything, as if the database were unreachable
 )
 
 // --- Execution checkpoints ---
@@ -131,6 +132,7 @@ const (
 	CheckpointBeforeReviveWrite         = "beforeReviveWrite"         // the subgraph-completion path, just before its transaction's caller-revive write
 	CheckpointBeforeRecoveryReset       = "beforeRecoveryReset"       // the post-execution recovery path, just before its fenced step-reset transaction
 	CheckpointClaimedDispatchDone       = "claimedDispatchDone"       // step execution returned after winning its claim, recovery reset included; fired bare and targeted by (shard, step id)
+	CheckpointLeaseRecoverySelected     = "leaseRecoverySelected"     // lease recovery, after it selected expired steps and before its by-id reset; reached only when it found some
 
 	// A COUNTING checkpoint (read with Visits, never a rendezvous), scoped by flow id so concurrent flows
 	// count independently. No test arms Wait/Break on it, so Checkpoint just increments and returns; both the

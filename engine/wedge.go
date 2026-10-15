@@ -122,7 +122,8 @@ func (e *Engine) runRecoverySweep(ctx context.Context, heavy bool) {
 // measured 1.2-2.9s per pass while matching nothing (PG 18, ~2,000 flows in flight). A plain SELECT reads past
 // those locks (Postgres, MySQL, and SQL Server under READ_COMMITTED_SNAPSHOT), and the by-id UPDATE locks only
 // the rows it resets. The UPDATE repeats
-// the whole predicate, so a step completed or re-claimed between the two statements is left alone. The SELECT
+// the whole predicate, so a step completed or re-claimed between the two statements is left alone (pinned by
+// TestLeaseRecovery_StepCompletedBetweenSelectAndResetIsLeftAlone). The SELECT
 // carries no LIMIT: SQL Server's LIMIT_OFFSET needs an ORDER BY, which on step_id invites a primary-key walk
 // over every step ever written; the expired set is bounded by the in-flight count anyway.
 // Do not derive the tick from the engine's TimeBudget, which bounds nothing because FlowOptions.TimeBudget is per
@@ -135,8 +136,6 @@ func (e *Engine) runRecoverySweep(ctx context.Context, heavy bool) {
 // A failed UPDATE is logged and left for the next sweep. The sweep is idempotent and unconditional, so a
 // transient DB error costs one deferred pass and needs no retry or backoff of its own.
 func (e *Engine) recoverExpiredLeases(ctx context.Context) {
-	// leaseRecoveryBatch caps each UPDATE's literal `IN (...)` list. One batch covers any realistic pass.
-	const leaseRecoveryBatch = 1024
 	const expired = "status='" + workflow.StatusRunning + "' AND parked=0 AND lease_expires<=NOW_UTC()"
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		if !e.dispatchesOn(shard) {
@@ -166,8 +165,12 @@ func (e *Engine) recoverExpiredLeases(ctx context.Context) {
 			e.logger.ErrorContext(ctx, "Lease recovery sweep: iterating expired steps", "shard", shard, "error", err)
 			return nil
 		}
+		if len(stepIDs) > 0 {
+			e.seams.Checkpoint(ctx, engineseams.CheckpointLeaseRecoverySelected)
+		}
+		// e.leaseRecoveryBatch caps each UPDATE's literal `IN (...)` list. One batch covers any realistic pass.
 		for len(stepIDs) > 0 {
-			batch := stepIDs[:min(len(stepIDs), leaseRecoveryBatch)]
+			batch := stepIDs[:min(len(stepIDs), e.leaseRecoveryBatch)]
 			stepIDs = stepIDs[len(batch):]
 			// ids are trusted integers embedded as literals to dodge the per-driver bind-param ceiling.
 			res, err := db.ExecContext(ctx,
