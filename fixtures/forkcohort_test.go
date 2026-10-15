@@ -19,6 +19,7 @@ package fixtures
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
@@ -367,4 +368,63 @@ func TestForkCohort_NestedFailureInAKeptBranchStillFailsTheFork(t *testing.T) {
 	assert.Equal(workflow.StatusFailed, forkOutcome.Status,
 		"a failure inside a KEPT branch's nested cohort must survive the clone and re-fail the fork")
 	enginetest.AssertInvariants(t, eng)
+}
+
+// TestForkCohort_SourceEdgeIntoItsOwnFanIn pins Fork's recount against a fan-out source that also has a
+// direct edge into its own fan-in: Split fans out to Work AND Join. The live run counts that edge in
+// cohort_size and records its arrival on the spawn itself, so it is an arrival that no branch head carries.
+// A recount that only walks branches leaves the clone one arrival short, and the fork never converges.
+func TestForkCohort_SourceEdgeIntoItsOwnFanIn(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("ForkCohortDirect")
+	g.SetURL("Split", "fkcd/split")
+	g.SetURL("Work", "fkcd/work")
+	g.SetURL("Join", "fkcd/join")
+	g.SetFanIn("Join")
+	g.AddTransitionFanOut("Split", "Work", "Join")
+	g.AddTransitionChain("Work", "Join", workflow.End)
+	assert.NoError(g.Validate())
+	mux.HandleGraph("fkcd/g", g)
+
+	mux.HandleTask("fkcd/split", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("fkcd/work", func(ctx context.Context, f *workflow.Flow) error {
+		if !f.GetBool("fixed") {
+			return errors.New("work is broken")
+		}
+		return nil
+	})
+	mux.HandleTask("fkcd/join", func(ctx context.Context, f *workflow.Flow) error {
+		f.SetBool("joined", true)
+		return nil
+	})
+
+	eng := engine.NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
+	eng.SetHost(mux)
+	assert.NoError(eng.Startup(t.Context()))
+
+	originKey, outcome, err := eng.Run(ctx, "fkcd/g", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	assert.Equal(workflow.StatusFailed, outcome.Status)
+
+	workKey := stepKeyByTask(t, eng, originKey, "Work")
+	assert.NotEqual("", workKey)
+	forkKey, err := eng.Fork(ctx, workKey, map[string]any{"fixed": true})
+	if !assert.NoError(err) {
+		return
+	}
+	awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	forkOutcome, err := eng.Await(awaitCtx, forkKey)
+	if !assert.NoError(err) {
+		return
+	}
+	assert.Equal(workflow.StatusCompleted, forkOutcome.Status)
+	assert.Equal(true, stateVal(forkOutcome.State, "joined"))
 }

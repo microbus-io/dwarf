@@ -386,7 +386,9 @@ cohort-**counting** device, not a DAG - every step of a per-element sub-pipeline
 3-branch cohort of 2-step branches has 6 members, and counting members overshoots `cohort_size`. The walk starts
 at each direct child of the spawn that shares its lineage and descends the branch's sub-DAG; one arrival per
 surviving branch, one failure if any step in it failed. The whole rewound *branch* is excluded, not just the
-rewind *step* (a mid-branch rewind keeps its earlier completed steps, and they are not arrivals).
+rewind *step* (a mid-branch rewind keeps its earlier completed steps, and they are not arrivals). A source with a
+direct edge into its own fan-in also arrives on itself as it spawns; no branch carries that arrival, so the
+recount adds `cohort_size` minus the heads, or the clone never converges.
 
 *Membership is the lineage CHAIN, not the lineage id.* A **nested** fan-out re-lineages its own children
 (`childLineageID = stepID`), so in `Seed -forEach-> Cell -forEach-> Chunk -> JoinChunk -> JoinCell` the `Chunk`

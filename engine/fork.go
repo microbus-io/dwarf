@@ -507,6 +507,11 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	// is the spawn's OWN lineage and so never reaches S. Every spawn in a kept step's chain is itself kept (a
 	// lineage ancestor is a DAG ancestor, and pruning removes only descendants of the rewind step), so this is a
 	// pure in-memory walk over rows already loaded - no extra query, at any depth.
+	//
+	// NOT EVERY ARRIVAL IS A BRANCH. A source that fans out to its own fan-in as well (`Split -> Work` plus
+	// `Split -> Join`) counts that edge in cohort_size and bumps cohort_arrivals on itself as it spawns, so no
+	// branch head carries it. Those self-arrivals are cohort_size minus the heads; recount only the branches
+	// and the clone sits one short of cohort_size forever. A rewound spawn re-spawns, so it gets none.
 	childrenByPred := map[int][]stepMeta{}
 	lineageOf := make(map[int]int, len(keep))
 	for _, s := range keep {
@@ -532,11 +537,12 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 			memo[lineageID] = v
 			return v
 		}
-		arrivals, failures, cancellations := 0, 0, 0
+		arrivals, failures, cancellations, heads := 0, 0, 0, 0
 		for _, head := range childrenByPred[s.oldID] {
 			if head.lineageID != s.oldID {
 				continue // not a member of this spawn's cohort (e.g. a nested cohort's own frame)
 			}
+			heads++
 			// Walk this branch's sub-DAG, descending THROUGH any nested cohort and stopping at the fan-in.
 			branchFailed, branchCancelled, branchRewound := false, false, false
 			stack := []stepMeta{head}
@@ -572,6 +578,9 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 			if branchCancelled && !branchFailed {
 				cancellations++
 			}
+		}
+		if s.oldID != rewind {
+			arrivals += max(0, s.cohortSize-heads)
 		}
 		_, err = tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_arrivals=?, cohort_failures=?, cohort_cancellations=? WHERE step_id=?", arrivals, failures, cancellations, idMap[s.oldID])
 		if err != nil {
