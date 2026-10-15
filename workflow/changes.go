@@ -227,14 +227,14 @@ func fold(r Reducer, name string, base, inc json.RawMessage, contributed bool) (
 	case ReducerConcat:
 		return concatRaw(name, base, []json.RawMessage{inc})
 	}
-	baseVal, err := decodeValue(base)
+	baseVal, err := decodeValue(r, base)
 	if err != nil {
 		return nil, errors.New("reducer '%s' for field %q: %w", string(r), name, err)
 	}
 	if _, isList := baseVal.([]any); contributed && baseVal != nil && !isList && r == ReducerUnion {
 		baseVal = []any{baseVal}
 	}
-	incVal, err := decodeValue(inc)
+	incVal, err := decodeValue(r, inc)
 	if err != nil {
 		return nil, errors.New("reducer '%s' for field %q: %w", string(r), name, err)
 	}

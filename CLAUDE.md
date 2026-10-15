@@ -158,8 +158,9 @@ matching one before working there:**
   `changes` column with `changesOf` / `Changes.UnmarshalJSON`, never as a plain `State`. A null contribution
   means "nothing", so `isCleared` must recognize both null spellings. (`workflow/CLAUDE.md`)
 - **Integers beyond ±2^53 and NULs in strings are unguarded, by decision.** An untyped read rounds such an
-  integer, and so does a fold through `union`/`merge`/`add`/`min`/`max`; Postgres `JSONB` rejects a NUL. Do not
-  add a write-side guard or `UseNumber` without revisiting the punt. (`workflow/CLAUDE.md`)
+  integer; Postgres `JSONB` rejects a NUL. Do not add a write-side guard or a read-side `UseNumber` without
+  revisiting the punt. A fold's decode is internal - its Go values never leave the reducer and go back out as
+  JSON - so it decodes numbers as `json.Number` and stays exact; a new fold site must too. (`workflow/CLAUDE.md`)
 - **Write-first transactions:** every flow-terminating transaction must UPDATE first, or the flow strands as a
   `running` orphan. (`engine/CLAUDE.md`)
 - **Lease fencing:** every post-execution write to the *dispatched* step must carry `AND lease_seq=?` (the

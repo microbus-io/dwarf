@@ -17,6 +17,8 @@ limitations under the License.
 package workflow
 
 import (
+	"encoding/json"
+	"math/big"
 	"reflect"
 	"time"
 
@@ -62,7 +64,8 @@ func (r Reducer) isKnown() bool {
 // incoming there is a delete, which Reduce has no way to express.
 
 // Reduce folds incoming onto base using the strategy named by r, on Go values. State.Apply folds stored JSON
-// fields to the same result as Reduce over their decoded values ([]any, map[string]any, float64, string, bool).
+// fields to the same result as Reduce over their decoded values ([]any, map[string]any, json.Number, string,
+// bool; a merge's maps hold json.RawMessage values).
 // Over other Go types the two can differ: under append, a typed slice such as []int added to a []any base is
 // one element, where a JSON array is spread. The empty and Replace reducers return incoming.
 func (r Reducer) Reduce(base any, incoming any) (any, error) {
@@ -234,7 +237,7 @@ func numericApply[T realNumber](op numericOp, a, b T) T {
 }
 
 // combineNumeric folds two numbers with a native operation in their own type - no float64 detour, so an
-// int64 past 2^53 stays exact. base and incoming must be the same Go type (a fold across types would have
+// int64 past 2^53 stays exact. Two json.Number values fold as numberApply does. base and incoming must be the same Go type (a fold across types would have
 // to promote to float64 and lose integer precision); a mismatch is an error. A nil base seeds from
 // incoming.
 func combineNumeric(name string, op numericOp, base any, incoming any) (any, error) {
@@ -251,6 +254,8 @@ func combineNumeric(name string, op numericOp, base any, incoming any) (any, err
 		return nil, errors.New("%s reducer: base (%T) and incoming (%T) must be the same type", name, base, incoming)
 	}
 	switch b := base.(type) {
+	case json.Number:
+		return numberApply(name, op, b, incoming.(json.Number))
 	case time.Duration:
 		return numericApply(op, b, incoming.(time.Duration)), nil
 	case int:
@@ -282,8 +287,60 @@ func combineNumeric(name string, op numericOp, base any, incoming any) (any, err
 	}
 }
 
-// isNumeric reports whether v is any Go integer or floating-point kind.
+// numberApply folds two JSON numbers. Integers fold exactly, in arbitrary precision. Anything else folds in
+// float64, as a reader decoding it into any would see it. min and max return the winning literal itself.
+func numberApply(name string, op numericOp, a, b json.Number) (json.Number, error) {
+	x, xInt := new(big.Int).SetString(string(a), 10)
+	y, yInt := new(big.Int).SetString(string(b), 10)
+	if xInt && yInt {
+		switch op {
+		case opAdd:
+			return json.Number(x.Add(x, y).String()), nil
+		case opMin:
+			if y.Cmp(x) < 0 {
+				return b, nil
+			}
+			return a, nil
+		default:
+			if y.Cmp(x) > 0 {
+				return b, nil
+			}
+			return a, nil
+		}
+	}
+	fa, err := a.Float64()
+	if err != nil {
+		return "", errors.New("%s reducer: %w", name, err)
+	}
+	fb, err := b.Float64()
+	if err != nil {
+		return "", errors.New("%s reducer: %w", name, err)
+	}
+	switch op {
+	case opAdd:
+		sum, err := json.Marshal(fa + fb)
+		if err != nil {
+			return "", errors.New("%s reducer: %w", name, err)
+		}
+		return json.Number(sum), nil
+	case opMin:
+		if fb < fa {
+			return b, nil
+		}
+		return a, nil
+	default:
+		if fb > fa {
+			return b, nil
+		}
+		return a, nil
+	}
+}
+
+// isNumeric reports whether v is any Go integer or floating-point kind, or a json.Number.
 func isNumeric(v any) bool {
+	if _, ok := v.(json.Number); ok {
+		return true
+	}
 	switch reflect.ValueOf(v).Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
 		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,

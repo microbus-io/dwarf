@@ -179,8 +179,9 @@ explicit; `Parse` into a `map[string]any` is the escape hatch, visible at the ca
 ### The constraints that hold this up
 
 1. **JSON storage normalizes the Go TYPE - not byte order.** `Set` stores a value as its `json.Marshal`
-   output, so a struct contributed by a caller comes back from any untyped read (and from `decodeValue`,
-   which feeds the reducers) as `map[string]any`/`float64`, exactly as a column read does. That matters
+   output, so a struct contributed by a caller comes back from any untyped read as `map[string]any`/`float64`,
+   exactly as a column read does (and from `decodeValue`, which feeds the reducers, with numbers as
+   `json.Number`). That matters
    because `union` dedupes with `reflect.DeepEqual`, and `DeepEqual` between a struct and its decoded twin is
    **false** - the mechanism behind the `Continue`-`additionalState` bug. Key ORDER is not part of it: a
    deliberately unsorted spelling dedupes correctly against a sorted one. Pinned by
@@ -206,13 +207,12 @@ explicit; `Parse` into a `map[string]any` is the escape hatch, visible at the ca
    them by decoding:** a decoding fold costs time and allocation in proportion to the accumulated history on
    every fold, while the splice costs a fixed handful of allocations whatever the size (`BenchmarkFold_*`
    measures both). `ApplyAll` collects the pieces and joins them once, so a wide fan-in stays linear. The
-   splice keeps every element's bytes as given, so an integer beyond 2^53 survives an append exactly, where a
-   decoding fold would round it. Pinned by `TestAppendRaw_EqualsTheDecodingFold` and
+   splice keeps every element's bytes as given. Pinned by `TestAppendRaw_EqualsTheDecodingFold` and
    `TestConcatRaw_EqualsTheDecodingFold` (every input shape, escapes and the database's re-spelled whitespace
    included). `concat` splices between the quotes, which is exact because JSON escapes are self-contained -
    except a UTF-16 surrogate pair escaped across two writes, which a decoding fold turns into two U+FFFD and
-   the splice reunites; Go's encoder never escapes that way. `union` and `merge` must compare decoded values,
-   so they decode.
+   the splice reunites; Go's encoder never escapes that way. `union` must compare decoded values, so it
+   decodes; `merge` decodes only its top level, into `json.RawMessage` entries.
    `Apply` is `ApplyAll` of one member, so there is one fold to keep correct. Pinned by
    `TestState_ApplyAllMatchesPerMember`, which asserts the one-pass and per-member results are
    byte-identical, so the optimization can never quietly change a fan-in outcome. **On a reducer error the
@@ -263,14 +263,17 @@ exposure to revisit, not a non-issue:
   (`1e300` is fine). **Workaround: carry a large id as a string** (the `id_str` pattern 64-bit-id APIs
   already publish).
 
-  **A CARRIED field is stored exactly; a FOLDED one is not.** Raw field storage means a carried field is never
-  decoded, so it round-trips byte-exact into the next step's `state`, `final_state`, a `Fork` and a
-  `Continue`; and because a read does not memoize, even reading one leaves storage exact. Verified: carried
-  `{"id":1234567890123456789}` marshals back identically before and after a read. **Do not decode carried
-  fields at dispatch:** that stores `...800` from the first hop onward. The decoding reducers are the
-  exception: `union`, `merge`, `add`, `min` and `max` decode into `any`, fold, and store the re-encoded,
-  rounded result - and `union`'s dedupe then compares rounded values, so two distinct large ids can collapse
-  into one. `append` and `concat` splice bytes and stay exact.
+  **Storage is exact, carried and folded alike.** Raw field storage means a carried field is never decoded,
+  so it round-trips byte-exact into the next step's `state`, `final_state`, a `Fork` and a `Continue`; and
+  because a read does not memoize, even reading one leaves storage exact. **Do not decode carried fields at
+  dispatch:** that stores `...800` from the first hop onward. A fold is the one place that decodes and writes
+  back, so it decodes numbers as `json.Number` (`decodeValue`, and the cohort record in
+  `engine/cohortfold.go`) and never reaches a reader: `add`/`min`/`max` fold integers in arbitrary precision
+  (`numberApply`; a fraction or exponent folds in float64, as an untyped reader sees it), `min`/`max` keep the
+  winning literal, and `merge` keeps each entry's bytes. **`union` compares numbers by literal**: `1` and `1.0`
+  are distinct elements. Go's encoder writes an integral value one way, so this differs from float64
+  equality only for a value a non-Go writer spelled differently. Pinned by `TestState_FoldsKeepNumbersExact`
+  and the large-integer cases of `TestCohortFold_ProjectionEqualsContributions`.
 
   Two consequences worth holding. **The rounding is per-READER, not per-field**: a plain `Get` into an `any`
   (and `Parse` into a map) rounds, while `GetInt` does not - it unmarshals

@@ -17,12 +17,29 @@ limitations under the License.
 package engine
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
+
+// exactValue decodes a field's JSON with every number kept as its literal, so two values that differ past 2^53
+// compare unequal.
+func exactValue(t *testing.T, raw json.RawMessage) any {
+	t.Helper()
+	if len(raw) == 0 {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
 
 // TestCohortFold_ProjectionEqualsContributions pins, for every reducer, that an inner fan-in's projected part
 // folds into the outer cohort exactly as the inner cohort's contributions would have one by one. The outer
@@ -55,6 +72,12 @@ func TestCohortFold_ProjectionEqualsContributions(t *testing.T) {
 		{workflow.ReducerConcat, nil, nil, []any{nil, nil}, nil},
 		{workflow.ReducerMerge, nil, nil, []any{nil}, nil},
 		{workflow.ReducerAdd, nil, nil, []any{nil}, nil},
+		// Integers past 2^53 fold exactly, and union tells them apart.
+		{workflow.ReducerAdd, int64(9007199254740993), int64(2), []any{int64(2), int64(4)}, int64(100)},
+		{workflow.ReducerMax, 1, int64(1234567890123456789), []any{int64(1234567890123456788), 2}, 3},
+		{workflow.ReducerMin, int64(1234567890123456791), int64(1234567890123456790), []any{int64(1234567890123456789)}, int64(1234567890123456792)},
+		{workflow.ReducerUnion, []any{int64(9007199254740993)}, []any{int64(9007199254740992)}, []any{[]any{int64(9007199254740995)}, []any{int64(9007199254740993)}}, []any{int64(9007199254740997)}},
+		{workflow.ReducerMerge, map[string]any{"s": int64(1234567890123456789)}, map[string]any{"c": int64(1234567890123456791)}, []any{map[string]any{"a": int64(1234567890123456793)}}, map[string]any{"j": 1}},
 	}
 	// A sibling branch's write per reducer. Under union it repeats an element the inner cohort adds.
 	siblings := map[workflow.Reducer]any{
@@ -120,12 +143,7 @@ func TestCohortFold_ProjectionEqualsContributions(t *testing.T) {
 				nested := outerBase.Clone()
 				assert.NoError(nested.ApplyAll([]workflow.Changes{sibling, spawn, contribution}, reducers))
 
-				var want, got any
-				_, err = flat.Get("f", &want)
-				assert.NoError(err)
-				_, err = nested.Get("f", &got)
-				assert.NoError(err)
-				assert.Equal(want, got)
+				assert.Equal(exactValue(t, flat.GetJSON("f")), exactValue(t, nested.GetJSON("f")))
 				assert.Equal(flat.Has("f"), nested.Has("f"))
 
 				// A Fork's leaf freezes the record against the original state and then replaces that state with an
@@ -142,10 +160,7 @@ func TestCohortFold_ProjectionEqualsContributions(t *testing.T) {
 				assert.True(ok)
 				forked := outerBase.Clone()
 				assert.NoError(forked.ApplyAll([]workflow.Changes{sibling, spawn, contribution}, reducers))
-				got = nil
-				_, err = forked.Get("f", &got)
-				assert.NoError(err)
-				assert.Equal(want, got)
+				assert.Equal(exactValue(t, flat.GetJSON("f")), exactValue(t, forked.GetJSON("f")))
 				assert.Equal(flat.Has("f"), forked.Has("f"))
 			})
 		}

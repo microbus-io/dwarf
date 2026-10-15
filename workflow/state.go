@@ -190,14 +190,25 @@ func (s State) Clear() {
 	clear(s.d)
 }
 
-// decodeValue turns a stored field into a Go value. An absent or cleared field decodes to nil, which is
-// what a reducer expects for "no accumulated value yet".
-func decodeValue(raw json.RawMessage) (any, error) {
+// decodeValue turns a stored field into the Go value reducer r folds. An absent or cleared field decodes to nil,
+// which is what a reducer expects for "no accumulated value yet". Numbers decode as json.Number, so a fold writes
+// back every number it did not compute as the literal it read; merge looks only one level down and compares
+// nothing, so it keeps each entry's bytes.
+func decodeValue(r Reducer, raw json.RawMessage) (any, error) {
 	if isCleared(raw) {
 		return nil, nil
 	}
+	if r == ReducerMerge {
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return nil, errors.Trace(err)
+		}
+		return m, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
 	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
+	if err := dec.Decode(&v); err != nil {
 		return nil, errors.Trace(err)
 	}
 	return v, nil
@@ -446,7 +457,7 @@ func (s State) ApplyAll(cs []Changes, reducers map[string]Reducer) error {
 				continue
 			}
 			if !decoded[k] {
-				base, err := decodeValue(s.d[k])
+				base, err := decodeValue(r, s.d[k])
 				if err != nil {
 					return errors.New("reducer '%s' for field %q: %w", string(r), k, err)
 				}
@@ -457,7 +468,7 @@ func (s State) ApplyAll(cs []Changes, reducers map[string]Reducer) error {
 				}
 				acc[k], decoded[k] = base, true
 			}
-			inc, err := decodeValue(v)
+			inc, err := decodeValue(r, v)
 			if err != nil {
 				return errors.New("reducer '%s' for field %q: %w", string(r), k, err)
 			}

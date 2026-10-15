@@ -17,6 +17,7 @@ limitations under the License.
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"maps"
@@ -106,14 +107,17 @@ func foldCohort(base workflow.State, contributions []workflow.Changes, reducers 
 			rec[k] = &reduced{Keys: []string{}}
 		default:
 			// A sum loses its split and a minimum loses its base, so the cohort's part cannot be read back out of
-			// the folded value. It is kept instead: one number or bool.
+			// the folded value. It is kept instead: one number or bool. Numbers decode as json.Number, so the
+			// record holds them exactly, as the state's own fold does.
 			var acc any
 			for _, c := range contributions {
 				if !c.Contributions().Has(k) {
 					continue
 				}
 				var inc any
-				if err := json.Unmarshal(c.Contributions().GetJSON(k), &inc); err != nil {
+				dec := json.NewDecoder(bytes.NewReader(c.Contributions().GetJSON(k)))
+				dec.UseNumber()
+				if err := dec.Decode(&inc); err != nil {
 					return nil, errors.New("reducer '%s' for field %q: %w", string(r), k, err)
 				}
 				var err error

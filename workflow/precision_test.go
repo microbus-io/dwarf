@@ -17,6 +17,7 @@ limitations under the License.
 package workflow
 
 import (
+	"encoding/json"
 	"math"
 	"testing"
 
@@ -90,4 +91,63 @@ func TestFlow_PayloadIsValidatedCopiedAndUniform(t *testing.T) {
 		_, injected := stateVal(got, "injected"), got.Has("injected")
 		assert.False(injected)
 	})
+}
+
+// TestState_FoldsKeepNumbersExact pins that a reduced field's fold writes back every number it did not compute
+// as the literal it read, and computes integers exactly, so an id past 2^53 survives every hand-off. Each case
+// runs through all three fold paths: Apply, ApplyAll over two contributions, and two writes in one task.
+func TestState_FoldsKeepNumbersExact(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		reducer Reducer
+		base    string
+		first   string
+		second  string
+		want    string
+	}{
+		{"merge keeps a carried key's bytes", ReducerMerge, `{"a":{"id":1234567890123456789}}`, `{"b":1}`, `{"c":{"id":1234567890123456791}}`, `{"a":{"id":1234567890123456789},"b":1,"c":{"id":1234567890123456791}}`},
+		{"union keeps distinct large ids", ReducerUnion, `[9007199254740993]`, `[9007199254740992]`, `[9007199254740995]`, `[9007199254740993,9007199254740992,9007199254740995]`},
+		{"union dedupes an equal large id", ReducerUnion, `[9007199254740993]`, `[9007199254740993]`, `[{"id":1234567890123456789}]`, `[9007199254740993,{"id":1234567890123456789}]`},
+		{"add sums integers exactly", ReducerAdd, `9007199254740993`, `1`, `1`, `9007199254740995`},
+		{"add sums floats as float64", ReducerAdd, `0.1`, `0.2`, `0`, `0.30000000000000004`},
+		{"add mixes an integer and a float", ReducerAdd, `1`, `0.5`, `1`, `2.5`},
+		{"max keeps the larger literal", ReducerMax, `1234567890123456789`, `1`, `1234567890123456788`, `1234567890123456789`},
+		{"min keeps the smaller literal", ReducerMin, `1234567890123456790`, `1234567890123456789`, `1234567890123456791`, `1234567890123456789`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := testarossa.For(t)
+			reducers := map[string]Reducer{"f": tc.reducer}
+			newState := func() State {
+				s, err := NewState([]byte(`{"f":` + tc.base + `}`))
+				assert.NoError(err)
+				return s
+			}
+			contribution := func(v string) Changes {
+				s, err := NewState([]byte(`{"f":` + v + `}`))
+				assert.NoError(err)
+				return ChangesOf(s)
+			}
+
+			applied := newState()
+			assert.NoError(applied.Apply(contribution(tc.first), reducers))
+			assert.NoError(applied.Apply(contribution(tc.second), reducers))
+			assert.Equal(tc.want, string(applied.GetJSON("f")), "Apply")
+
+			all := newState()
+			assert.NoError(all.ApplyAll([]Changes{contribution(tc.first), contribution(tc.second)}, reducers))
+			assert.Equal(tc.want, string(all.GetJSON("f")), "ApplyAll")
+
+			f := NewRawFlow()
+			f.SetRawState(newState())
+			f.SetReducers(reducers)
+			assert.NoError(f.Set("f", json.RawMessage(tc.first)))
+			assert.NoError(f.Set("f", json.RawMessage(tc.second)))
+			inTask := newState()
+			assert.NoError(inTask.Apply(f.RawChanges(), reducers))
+			assert.Equal(tc.want, string(inTask.GetJSON("f")), "two writes in one task")
+		})
+	}
 }
