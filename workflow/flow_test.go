@@ -532,6 +532,39 @@ func TestFlow_DecodedWithoutChangesTakesWrites(t *testing.T) {
 	}
 }
 
+// TestFlow_ZeroValueTakesEveryWrite pins that every writer works on a zero Flow and records the write in both
+// the view and the changes - not only the ones that happened to initialize it.
+func TestFlow_ZeroValueTakesEveryWrite(t *testing.T) {
+	assert := testarossa.For(t)
+
+	writes := map[string]func(f *Flow) error{
+		"Set":       func(f *Flow) error { return f.Set("x", 1) },
+		"SetString": func(f *Flow) error { f.SetString("x", "v"); return nil },
+		"Overwrite": func(f *Flow) error { return f.Overwrite("x", 1) },
+		"SetChanges": func(f *Flow) error {
+			return f.SetChanges(struct {
+				X int `json:"x"`
+			}{1})
+		},
+		"reduced Set": func(f *Flow) error {
+			f.reducers = map[string]Reducer{"x": ReducerAppend}
+			return f.Set("x", []any{1})
+		},
+	}
+	for name, write := range writes {
+		var f Flow
+		if assert.NoError(write(&f), name) {
+			assert.True(f.Has("x"), name)
+			assert.True(f.changes.Mentions("x"), name)
+		}
+	}
+
+	var f Flow
+	f.Del("x")
+	assert.False(f.Has("x"))
+	assert.True(f.changes.IsDeleted("x"))
+}
+
 // TestFlow_SetChangesResolvesNamesLikeEncodingJSON pins that when an embedded struct and the outer struct
 // declare the same JSON name, the shallower field is the one recorded - as encoding/json marshals it - whatever
 // the declaration order; and that a ",string" field is recorded in the quoted form Parse reads back.

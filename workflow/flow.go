@@ -108,7 +108,7 @@ type Flow struct {
 	stepKey string
 }
 
-// NewFlow creates a new Flow with initialized state.
+// NewFlow creates a new Flow with initialized state. The zero Flow is ready to use as well.
 func NewFlow() *Flow {
 	state, _ := NewState()
 	return &Flow{
@@ -239,14 +239,22 @@ func (f *Flow) StepKey() string {
 // write is a contribution: Set adds to the field rather than replacing it, and two Sets in one task both count.
 // Overwrite and Del replace instead.
 
-// write applies a one-field Changes to the view and composes it into changes, leaving both untouched on error.
-func (f *Flow) write(name string, one Changes) error {
-	prev, had := f.state.d[name]
-	if err := f.state.Apply(one, f.reducers); err != nil {
-		return errors.Trace(err)
+// ready makes a zero Flow writable: every write goes into both state and changes.
+func (f *Flow) ready() {
+	if f.state.IsZero() {
+		f.state, _ = NewState()
 	}
 	if f.changes.IsZero() {
 		f.changes = NewChanges()
+	}
+}
+
+// write applies a one-field Changes to the view and composes it into changes, leaving both untouched on error.
+func (f *Flow) write(name string, one Changes) error {
+	f.ready()
+	prev, had := f.state.d[name]
+	if err := f.state.Apply(one, f.reducers); err != nil {
+		return errors.Trace(err)
 	}
 	if err := f.changes.Compose(one, f.reducers); err != nil {
 		if had {
@@ -276,9 +284,7 @@ func (f *Flow) Set(name string, value any) error {
 		if err != nil {
 			return errors.Trace(err)
 		}
-		if f.changes.IsZero() {
-			f.changes = NewChanges()
-		}
+		f.ready()
 		f.changes.setPlain(name, raw)
 		if isCleared(raw) {
 			delete(f.state.d, name)
@@ -386,12 +392,6 @@ func (f *Flow) SetChanges(source any) error {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil || fields == nil {
 		return errors.New("SetChanges: source must marshal to a JSON object")
-	}
-	if f.changes.IsZero() {
-		f.changes = NewChanges()
-	}
-	if f.state.IsZero() {
-		f.state, _ = NewState()
 	}
 	for name, value := range fields {
 		if err := f.Set(name, value); err != nil {
@@ -668,13 +668,7 @@ func (f *Flow) UnmarshalJSON(data []byte) error {
 	f.stepKey = wire.StepKey
 	f.state = wire.State
 	f.changes = wire.Changes
-	// Either may be absent from the wire; the setters write to both, so neither may stay nil.
-	if f.state.IsZero() {
-		f.state, _ = NewState()
-	}
-	if f.changes.IsZero() {
-		f.changes = NewChanges()
-	}
+	f.ready() // either may be absent from the wire
 	f.reducers = wire.Reducers
 	f.gotoNext = wire.Goto
 	f.retry = wire.Retry
