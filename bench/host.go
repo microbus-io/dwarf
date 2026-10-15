@@ -44,6 +44,9 @@ type benchHost struct {
 	// complete at the same instant, piling onto the shared cohort-arrival row at once. Spreading arrivals
 	// is how a contention hypothesis about that row is tested causally.
 	taskJitter time.Duration
+	// delayDist, when set, replaces the profile's delay with one class sampled per invocation, so tasks of
+	// several durations share one crew. Jitter still adds on top.
+	delayDist delayDist
 
 	// bytesWritten counts the state payload bytes tasks wrote, for MB-throughput accounting. A shared
 	// pointer so every replica's host accumulates into one fleet total.
@@ -66,6 +69,9 @@ func (h *benchHost) ExecuteTask(ctx context.Context, taskURL string, f *workflow
 	}
 	tasksStarted.Add(1)
 	delay := h.profile.delayAt(time.Now())
+	if len(h.delayDist) > 0 {
+		delay = h.delayDist.sample(rand.Float64())
+	}
 	if h.taskJitter > 0 {
 		delay += time.Duration(rand.Int64N(int64(h.taskJitter)))
 	}

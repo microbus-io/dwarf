@@ -115,7 +115,7 @@ func statsHeader() string {
 		"walMB/s", "c/sync", "walWait", "active")
 }
 
-func statsLine(elapsed time.Duration, p taskProfile, g map[string]float64, heapMB float64, pt *seriesPoint) string {
+func statsLine(elapsed, delay time.Duration, g map[string]float64, heapMB float64, pt *seriesPoint) string {
 	rate, out, wal, cps, wait, active := "-", "-", "-", "-", "-", "-"
 	if pt != nil {
 		rate = fmt.Sprintf("%.0f", pt.StepsPerSec)
@@ -128,7 +128,7 @@ func statsLine(elapsed time.Duration, p taskProfile, g map[string]float64, heapM
 		}
 	}
 	return fmt.Sprintf("%-7.0f %8s %8d %7.0f %8d %8.0f %9.0f %9.1f %9s %8s %7s %7s %7s",
-		elapsed.Seconds(), rate, p.delayAt(time.Now()).Milliseconds(),
+		elapsed.Seconds(), rate, delay.Milliseconds(),
 		gaugeTotal(g, "dwarf_workers_resident"), runtime.NumGoroutine(), heapMB,
 		gaugeTotal(g, "dwarf_turnstile_available"),
 		gaugeTotal(g, "dwarf_state_in_flight_bytes")/(1<<20),
@@ -162,6 +162,7 @@ func gaugeTotal(g map[string]float64, name string) float64 {
 var tracing struct {
 	every   time.Duration
 	profile taskProfile
+	dist    delayDist
 }
 
 // statsTrace is the gauge sampler's callback for the periodic line, or nil when the readout is off. It
@@ -172,6 +173,10 @@ func statsTrace() func(time.Duration, map[string]float64, float64, *seriesPoint)
 	}
 	fmt.Println(statsHeader())
 	return func(elapsed time.Duration, g map[string]float64, heapMB float64, pt *seriesPoint) {
-		fmt.Println(statsLine(elapsed, tracing.profile, g, heapMB, pt))
+		delay := tracing.profile.delayAt(time.Now())
+		if len(tracing.dist) > 0 {
+			delay = tracing.dist.mean() // a sampled class has no per-line value; the mean says which mix ran
+		}
+		fmt.Println(statsLine(elapsed, delay, g, heapMB, pt))
 	}
 }

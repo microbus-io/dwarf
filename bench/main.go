@@ -87,6 +87,7 @@ func run() error {
 		pprofDir     = flag.String("pprof", "", "write a CPU profile for the whole run and a heap profile at the end into this directory. Run ONE arm at a time when attributing, since the CPU profile spans every -concurrency step")
 		statsEvery   = flag.Duration("stats-interval", 0, "print a stats line this often during each measurement window (0 = off). The crew column is what a burst arm is for")
 		taskJitter   = flag.Duration("task-jitter", 0, "additional uniform random [0,d) per-task sleep - de-synchronizes fan-out siblings so a cohort's branches do not all complete at once")
+		taskDist     = flag.String("task-delay-dist", "", "per-task sleep drawn per invocation from weighted classes, e.g. '0.80:5ms,0.15:200ms,0.05:8s' (weights sum to 1): several task durations on one crew. Replaces -task-delay; -task-jitter still adds on top")
 		// 0 on either override means "let the engine derive it" - the self-tuned path a production host
 		// takes, and the only way to measure the derivation itself (workers from the lease margin, the
 		// pool from the shard's budget). A sweep pins them; a validation run must not.
@@ -202,20 +203,34 @@ func run() error {
 	// every replica in the SAME phase of the cycle. Anchoring per host would stagger them and blur the
 	// transition the burst exists to make sharp.
 	profile := taskProfile{delay: *taskDelay, on: *taskBurst, off: *taskQuiet, start: time.Now()}
+	dist, err := parseDelayDist(*taskDist)
+	if err != nil {
+		return err
+	}
+	longestTask := *taskDelay
+	if len(dist) > 0 {
+		// A sampled class has no burst or quiet half to belong to, and a -task-delay beside it would be
+		// silently ignored.
+		if *taskDelay > 0 || *taskBurst > 0 || *taskQuiet > 0 {
+			return fmt.Errorf("-task-delay-dist replaces -task-delay, -task-burst and -task-quiet")
+		}
+		longestTask = dist.longest()
+	}
 	// The window functions read this rather than take two more parameters; runStep already carries ten, and
 	// the readout is a property of the RUN rather than of any one window.
-	tracing.every, tracing.profile = *statsEvery, profile
+	tracing.every, tracing.profile, tracing.dist = *statsEvery, profile, dist
 	guard.drain, guard.stall = *drain, *stallTimeout
-	if *stallTimeout > 0 && *taskDelay+*taskJitter >= *stallTimeout {
+	if *stallTimeout > 0 && longestTask+*taskJitter >= *stallTimeout {
 		// A task longer than the timeout is silence the watchdog would read as a hang.
-		return fmt.Errorf("-stall-timeout %s must exceed the longest task (-task-delay + -task-jitter = %s)",
-			*stallTimeout, *taskDelay+*taskJitter)
+		return fmt.Errorf("-stall-timeout %s must exceed the longest task (%s plus -task-jitter %s)",
+			*stallTimeout, longestTask, *taskJitter)
 	}
 	regHost := &benchHost{
 		graphs:       map[string]*workflow.Graph{},
 		tasks:        map[string]func(context.Context, *workflow.Flow) error{},
 		profile:      profile,
 		taskJitter:   *taskJitter,
+		delayDist:    dist,
 		bytesWritten: sharedBytes,
 	}
 	workloads := registerWorkloads(regHost, *payload, *fanOutWidth, *linearStepsFlag, *branchDepth, *carryRead)
@@ -242,6 +257,7 @@ func run() error {
 			tasks:        regHost.tasks,
 			profile:      profile,
 			taskJitter:   *taskJitter,
+			delayDist:    dist,
 			bytesWritten: sharedBytes,
 		}
 		hosts[i] = host
@@ -321,6 +337,10 @@ func run() error {
 			// cannot be compared with one where it alternated, and the two measure different things.
 			"taskBurstMs": taskBurst.Milliseconds(),
 			"taskQuietMs": taskQuiet.Milliseconds(),
+			// The spec as given, and its mean: two dist arms with the same mean are the comparison M makes
+			// against a single-duration arm.
+			"taskDelayDist":   *taskDist,
+			"taskDelayMeanMs": dist.mean().Milliseconds(),
 			// The workload's own shape knobs. Without them a -fanout-width or -linear-steps sweep produces
 			// artifacts that are byte-identical in configuration and wildly different in what they measured.
 			"fanOutWidth":     *fanOutWidth,

@@ -436,7 +436,9 @@ ladder that varies replica count, since the derived interval is a function of R 
 masquerade as a partitioning cost), `-fairness-keys`, `-max-connections` (the `ShardSpec.MaxConnections`
 lever: the fleet-wide budget, so with `-replicas` above 1 it is split across the shard's dispatchers rather
 than given to each replica, and a stale `dwarf_peers` row halves it), `-task-burst`/`-task-quiet` (alternate
-the exec term within a run — the only way to see the crew shrink), `-state-cache-mb` (`SetStateCacheSize` for
+the exec term within a run — the only way to see the crew shrink), `-task-delay-dist "0.80:5ms,0.15:200ms,0.05:8s"`
+(task durations drawn per invocation from weighted classes, so several durations share one crew; replaces
+`-task-delay`), `-state-cache-mb` (`SetStateCacheSize` for
 every replica; 0 derives it from `GOMEMLIMIT` or the host's memory - the artifact's `environment` records
 `goMemLimit` and `GOGC`, which a payload arm's heap depends on as much as on the flag), `-stats-interval`
 (periodic readout), `-pprof` (CPU + heap profiles).
