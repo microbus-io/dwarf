@@ -235,13 +235,9 @@ func TestPoll_RunningThenStopped(t *testing.T) {
 	}
 }
 
-// TestAwait_IgnoresANonSettledWake pins the invariant the loop-free await rests on: a release means the flow
-// has SETTLED, so the caller reads the row once and returns what it finds without re-checking. Wake it for a
-// status the flow is merely passing through and that read lands on a still-running flow, which Await would
-// then hand back as the outcome - a completed-looking answer for work that has not happened.
-//
-// signalStop is what guards this, by dropping a non-stopped status instead of delivering it. The assertion is
-// therefore that a `running` wake changes NOTHING: the caller stays parked, and only the real stop returns it.
+// TestAwait_IgnoresANonSettledWake pins that a release means the flow reached a STOP: signalStop drops a
+// non-stopped status instead of delivering it, so a `running` wake changes NOTHING - the caller stays parked,
+// and only the real stop returns it.
 func TestAwait_IgnoresANonSettledWake(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -251,7 +247,6 @@ func TestAwait_IgnoresANonSettledWake(t *testing.T) {
 	release := make(chan struct{})
 	var once sync.Once
 	rel := func() { once.Do(func() { close(release) }) }
-	defer rel()
 
 	g := workflow.NewGraph("NonSettled")
 	g.SetURL("Block", "nonsettled.verify:0/block")
@@ -267,6 +262,7 @@ func TestAwait_IgnoresANonSettledWake(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
+	defer rel() // below the Shutdown defer, so it unwinds first and the drain never waits on the held task
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -310,6 +306,86 @@ func TestAwait_IgnoresANonSettledWake(t *testing.T) {
 	}
 
 	// The real stop must still return it, or the guard would be indistinguishable from a broken wake path.
+	rel()
+	select {
+	case r := <-done:
+		assert.NoError(r.err)
+		if assert.NotNil(r.out) {
+			assert.Equal(workflow.StatusCompleted, r.out.Status)
+		}
+	case <-time.After(10 * time.Second):
+		assert.True(false, "Await never returned after the flow actually stopped")
+	}
+}
+
+// TestAwait_StaleStopReparks pins that a release whose stop the flow has already left re-parks the caller
+// rather than answering it. An interrupted flow can be Resumed between its signalStop and the woken caller's
+// read, so the read finds it running while the caller's ctx is still live; reporting that as a timeout hands a
+// 408 to a caller that asked for none. Delivering an `interrupted` release to a parked Await while the flow
+// runs is that shape exactly: Await must stay parked until the flow really stops.
+func TestAwait_StaleStopReparks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	mux := hosts.NewMux()
+	release := make(chan struct{})
+	var once sync.Once
+	rel := func() { once.Do(func() { close(release) }) }
+
+	g := workflow.NewGraph("StaleStop")
+	g.SetURL("Block", "stalestop.verify:0/block")
+	g.AddTransition("Block", workflow.End)
+	mux.HandleGraph("stalestop.verify:0/g", g)
+	mux.HandleTask("stalestop.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	defer rel() // below the Shutdown defer, so it unwinds first and the drain never waits on the held task
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+
+	flowKey, err := e.Create(ctx, "stalestop.verify:0/g", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+
+	type result struct {
+		out *workflow.FlowOutcome
+		err error
+	}
+	done := make(chan result, 1)
+	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	go func() {
+		out, aerr := e.awaitStopped(awaitCtx, flowKey)
+		done <- result{out, aerr}
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && e.latches.Waiting(flowKey) == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !assert.True(e.latches.Waiting(flowKey) > 0, "Await never parked") {
+		return
+	}
+
+	// A real stop status, as a flow that interrupted and was then resumed would have signalled.
+	e.signalStop(ctx, flowKey, workflow.StatusInterrupted)
+
+	select {
+	case r := <-done:
+		assert.True(false, "a stale stop returned Await early with %v (outcome %+v)", r.err, r.out)
+		return
+	case <-time.After(500 * time.Millisecond):
+	}
+
 	rel()
 	select {
 	case r := <-done:

@@ -2129,12 +2129,14 @@ correlation-id→key lookup (see "Tracing"); subgraph-child keys are read-only f
 ### Await
 
 `Await` blocks until a flow stops (no longer `created`/`pending`/`running`); it returns on `completed`/`failed`/
-`terminated`/`cancelled`/`interrupted`. Its shape is **read, park, read - at most twice, and never in a loop**:
-snapshot and
-return if the flow has already stopped; otherwise park on the **latch board** (`internal/latch`, held as
-`e.latches`) until it settles, then snapshot once more to build the outcome.
+`terminated`/`cancelled`/`interrupted`. Its shape is **read, then park and read until a read sees a stop**:
+snapshot and return if the flow has already stopped; otherwise park on the **latch board** (`internal/latch`,
+held as `e.latches`) until it settles, then snapshot to build the outcome. **The park repeats only when that
+read finds the flow running again** - an interrupted flow Resumed between its release and the read - and the
+caller's ctx is still live. Each iteration is one real stop, never a timer, so it is not a poll; returning the
+running flow instead hands the caller a false 408 (pinned by `TestAwait_StaleStopReparks`).
 
-**Each of those two reads earns its place, and the second is not a re-check.**
+**Each read earns its place, and the post-release read is not a re-check.**
 
 - **The first** is what lets an already-settled flow answer AT ONCE. Parking instead would be *correct* - the
   detector reports the current state of every parked key, so a stop that landed before the caller arrived is
@@ -2142,12 +2144,11 @@ return if the flow has already stopped; otherwise park on the **latch board** (`
   wait of up to one full `latchSweepInterval`. Measured: removing this read **doubled** the `engine` package's
   test time (≈8-11s → ≈17-20s), while `Run` was unaffected (a `Run` caller parks long before its flow stops).
   Keep it.
-- **The second** runs only after a release, and a release is a promise that the row has **settled** - reached a
-  stop, or stopped resolving. That invariant is what lets `await` read without a loop, and `signalStop`
-  **enforces** it by dropping any non-stopped status rather than delivering it. Do not wake a caller for a
-  status a flow is merely passing through: with no loop, the caller would hand a running flow back as an
-  outcome. (Nothing needs such a wake anyway - nobody is parked on an `interrupted` flow, since that is a stop,
-  and nobody can be parked on a key `Fork` has not returned yet.)
+- **The post-release read** runs only after a release, and a release is a promise that the row **reached a
+  stop** (or stopped resolving). `signalStop` **enforces** it by dropping any non-stopped status rather than
+  delivering it. Do not wake a caller for a status a flow is merely passing through: every such wake would cost
+  the caller a read and a re-park for nothing. (Nothing needs such a wake anyway - nobody is parked on an
+  `interrupted` flow, since that is a stop, and nobody can be parked on a key `Fork` has not returned yet.)
 
 **Registering AFTER the first read is safe only because the board is polled.** An event-based wake must be
 armed before the event fires, so an event-based `await` would have to register *first* and read second. The
