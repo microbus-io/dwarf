@@ -104,13 +104,14 @@ const (
 )
 
 // terminalTails is a flow's tail steps as read for its final state: the first tail's state is the merge base,
-// and every tail's changes fold onto it. Rows are decoded as they are read.
+// and every tail's changes fold onto it. Rows are kept as read and decoded only by a merge that uses them: when
+// the first tail is a cohort member, the final state is rebuilt from its cohort and the tails go unused.
 type terminalTails struct {
 	found       bool
-	baseState   workflow.State
-	baseRefs    staterefs.Refs
+	baseState   []byte
+	baseRefs    []byte
 	baseLineage int
-	changes     []workflow.Changes
+	changes     [][]byte
 }
 
 // scan reads one tail row.
@@ -125,17 +126,9 @@ func (t *terminalTails) scan(row interface{ Scan(dest ...any) error }) error {
 	}
 	if !t.found {
 		t.found = true
-		baseState, err := workflow.NewState(stateJSON)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		baseRefs, err := staterefs.Parse(refsJSON)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		t.baseState, t.baseRefs, t.baseLineage = baseState, baseRefs, lineageID
+		t.baseState, t.baseRefs, t.baseLineage = stateJSON, refsJSON, lineageID
 	}
-	t.changes = append(t.changes, changesOf(changesJSON))
+	t.changes = append(t.changes, changesJSON)
 	return nil
 }
 
@@ -172,38 +165,52 @@ func readTerminalTails(ctx context.Context, db sequel.Executor, query string, fl
 	return errors.Trace(rows.Err())
 }
 
-// mergeTerminalSteps computes a flow's terminal state from the execution-DAG tail, given its completed tails; when
-// there are none, it reads and merges every tail instead. The tails' changes fold onto the first tail's state
-// through the reducers, as a linear transition's do; a tail that is a cohort member is rebuilt from its cohort
-// by computeFinalStateFrom instead.
-// It also returns the merge base tail's lineage_id, so the caller can strip exactly the forEach bookkeeping of
-// the cohorts that tail is inside - and nothing else.
-func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, shardNum, flowID int, completed *terminalTails, workflowURL string, reducers map[string]workflow.Reducer) (workflow.State, int, error) {
-	t := completed
-	if !t.found {
-		t = &terminalTails{}
-		if err := readTerminalTails(ctx, db, anyTailsSQL, flowID, t); err != nil {
-			return workflow.State{}, 0, errors.Trace(err)
-		}
+// terminalTailsOf returns a flow's tails for its terminal state: its completed tails when it has any, and every
+// tail otherwise.
+func terminalTailsOf(ctx context.Context, db sequel.Executor, flowID int, completed *terminalTails) (*terminalTails, error) {
+	if completed.found {
+		return completed, nil
 	}
+	t := &terminalTails{}
+	if err := readTerminalTails(ctx, db, anyTailsSQL, flowID, t); err != nil {
+		return nil, errors.Trace(err)
+	}
+	return t, nil
+}
+
+// mergeTerminalSteps computes a flow's terminal state from the execution-DAG tail: the tails' changes fold onto
+// the first tail's state through the reducers, as a linear transition's do. A flow with no tails has an empty
+// state.
+func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, shardNum int, t *terminalTails, workflowURL string, reducers map[string]workflow.Reducer) (workflow.State, error) {
 	if !t.found {
-		return workflow.State{}, 0, nil
+		return workflow.State{}, nil
+	}
+	base, err := workflow.NewState(t.baseState)
+	if err != nil {
+		return workflow.State{}, errors.Trace(err)
+	}
+	baseRefs, err := staterefs.Parse(t.baseRefs)
+	if err != nil {
+		return workflow.State{}, errors.Trace(err)
+	}
+	changes := make([]workflow.Changes, len(t.changes))
+	for i, c := range t.changes {
+		changes[i] = changesOf(c)
 	}
 	// FLATTEN: final_state is a flow-boundary value (a dwarf_flows column that Continue feeds into the next
 	// turn, and that outlives this flow's steps - DeleteOnCompletion may reap them). A ref that escaped the
 	// flow would dangle, so the terminal merge always materializes, whatever it costs on this one row.
 	// It is not a regression either: a large field surviving to the end is copied into final_state today.
 	// resolveStateRefs mutates the state map in place, so it gets the live map.
-	if _, err := e.resolveStateRefs(ctx, db, shardNum, t.baseState, t.baseRefs, nil, workflowURL); err != nil {
-		return workflow.State{}, 0, errors.Trace(err)
+	if _, err := e.resolveStateRefs(ctx, db, shardNum, base, baseRefs, nil, workflowURL); err != nil {
+		return workflow.State{}, errors.Trace(err)
 	}
 	// A tail's changes are its delta onto its input, folded through the reducers like any hand-off. A value a
 	// reducer cannot combine is a pure function of stored data, so it is permanent.
-	merged := t.baseState
-	if err := merged.ApplyAll(t.changes, reducers); err != nil {
-		return workflow.State{}, 0, errors.Trace(&permanentError{err})
+	if err := base.ApplyAll(changes, reducers); err != nil {
+		return workflow.State{}, errors.Trace(&permanentError{err})
 	}
-	return merged, t.baseLineage, nil
+	return base, nil
 }
 
 // flowGraph returns a flow's parsed graph and workflow URL, from the graph cache when the flow has been
@@ -259,13 +266,15 @@ func (e *Engine) computeFinalStateFrom(ctx context.Context, db sequel.Executor, 
 		return nil, "", errors.Trace(err)
 	}
 
-	merged, baseLineageID, err := e.mergeTerminalSteps(ctx, db, shardNum, flowID, completed, workflowURL, graph.Reducers())
+	tails, err := terminalTailsOf(ctx, db, flowID, completed)
 	if err != nil {
 		return nil, "", errors.Trace(err)
 	}
 
-	// The tails are COHORT MEMBERS (lineage_id != 0), which means a fan-out resolved with failures and so never
-	// reached its fan-in. Rebuild the state the way the convergence would have, rather than from the tail rows.
+	// When the tails are COHORT MEMBERS (lineage_id != 0), a fan-out resolved with failures and so never reached
+	// its fan-in. Rebuild the state the way the convergence would have, rather than from the tail rows - and
+	// decide that from the first tail's lineage alone, before decoding, resolving or folding any tail: on a wide
+	// failed fan-out that is every branch's row and the forEach array, under Terminate's and failStep's locks.
 	//
 	// mergeTerminalSteps bases on the FIRST tail's `state` and folds in every tail's `changes` - and that loses
 	// the intermediate output of every branch but one. In a multi-step branch (`forEach -> Cell -> Enrich -> J`),
@@ -280,15 +289,18 @@ func (e *Engine) computeFinalStateFrom(ctx context.Context, db sequel.Executor, 
 	// The rebuild starts at the OUTERMOST cohort on the tail's lineage chain, whose spawn is on the trunk. The
 	// tail may sit deep inside a nested fan-out whose inner cohort failed, and rebuilding only that inner cohort
 	// would drop everything outside it - the flow's base state and every other branch at every level.
-	spawns, outermost, err := e.cohortSpawnChain(ctx, db, baseLineageID)
+	spawns, outermost, err := e.cohortSpawnChain(ctx, db, tails.baseLineage)
 	if err != nil {
 		return nil, "", errors.Trace(err)
 	}
+	var merged workflow.State
 	if outermost != 0 {
 		merged, err = e.mergeCohortState(ctx, db, shardNum, flowID, outermost, graph, workflowURL)
-		if err != nil {
-			return nil, "", errors.Trace(err)
-		}
+	} else {
+		merged, err = e.mergeTerminalSteps(ctx, db, shardNum, tails, workflowURL, graph.Reducers())
+	}
+	if err != nil {
+		return nil, "", errors.Trace(err)
 	}
 
 	// Drop per-branch forEach bookkeeping, exactly as fanInRow does when a cohort converges - and, like
