@@ -65,7 +65,7 @@ func TestOpenThreshold(t *testing.T) {
 	assert.True(openThreshold(64, 1) < threshold)
 
 	// ... and KEEPS falling past floor, down to minField. Clamping at the floor instead made
-	// the 1/N term dead code for every fan-out wider than budget/floor = 23, which is what let
+	// the 1/N term dead code for every fan-out wider than budget/floor = 24, which is what let
 	// a forEach source array stay inline in all N branches - the quadratic case this policy exists to stop.
 	assert.Equal(budget/100, openThreshold(100, 1))
 	assert.True(openThreshold(100, 1) < floor)

@@ -92,18 +92,30 @@ field), which is what makes the write-side win free of round-trips.
 
 `Resolve` fetches whole payload columns, so the cost is one row per *distinct anchor* (and, on a cache miss,
 one round-trip for all of them together) while any number of fields in an already-fetched row are free.
-`budget` (23KB) is **the write saving one extra resolve round trip must buy**. The break-even it stands for is
-the round-trip time times the database's byte-throughput ceiling: a round trip occupies a connection for one
-RTT, and writing B bytes costs the database B/ceiling. The number of round trips a step makes does not enter it.
-At the byte ceilings `docs/benchmark-cloud.md` measures (~194-284 MB/s) and a same-zone RTT of ~0.5 ms that
-break-even is ~100-140KB, so 23KB opens anchors more eagerly than the round trip alone justifies. Moving it is
-a measurement question, not arithmetic: pair any change with a bench arm. Three tiers follow:
+`budget` (24KB) is **the write saving a fan-out's extra resolve round trips must buy**. The break-even is
+`misses x RTT x ceiling`: a round trip occupies a connection for one RTT, and writing B bytes costs the database
+B/ceiling. The number of round trips a step makes does not enter it. Each input:
+
+- **misses ~ dispatchers - 1.** The transition seeds the resolve cache from the linear mint at the fan-out's
+  width, so branches on the minting replica are served from it; every other dispatching replica pays one miss,
+  shared by its branches through `ResolveShared`.
+- **RTT ~0.5 ms** same-zone; cross-zone and managed databases run 1-2 ms.
+- **ceiling: a fraction of the payload ceiling.** `docs/benchmark-cloud.md`'s 194-284 MB/s is payload at 64KB
+  and up, where values are TOASTed out of line. The fields the fan-out bar decides are small (0.4-2KB at N=64)
+  and sit inline in the row, where every non-HOT claim and completion re-logs them, so each byte costs several
+  times the WAL a TOASTed one does.
+
+At two dispatchers that is ~35-55KB, and 24KB sits at the eager end of it on purpose: too eager costs about one
+read per fan-out on a non-minting replica, too reluctant costs N inline copies in WAL. **Do not tune it per
+deployment, and do not spend a bench arm on it.** The inputs swing the break-even by more than any correction
+would (one dispatcher puts it near zero, 1 ms RTT near 100KB), and the band it moves is narrow: at N=64, 24KB
+against 40KB is a 384 B bar against a 640 B one. Three tiers follow:
 
 - **Free** — a field whose anchor is already in the fetch set. Every field a step could newly anchor lives in
   that *one* step's row, so all candidates share a single prospective anchor: once any one opens it, the rest
   ride along at zero extra read cost, subject only to `floor` (~1KB).
 - **Fan-out** — the bar is `min(threshold, budget/N)`, because the cache collapses N resolves into one miss
-  while the write saving is paid N times: at N=100 even a few hundred bytes pays. Up to N=23 that is the
+  while the write saving is paid N times: at N=100 even a few hundred bytes pays. Up to N=24 that is the
   linear bar. **Fan-out width is the primary axis, not a refinement** — a ~100x swing in the correct
   threshold, on a quantity the caller knows exactly at mint time.
 - **Linear** — one field clears `threshold`.
@@ -142,7 +154,7 @@ the completion pushes the row past 2KB and TOAST moves a third copy.
   and pin the seed itself separately (`TestStateRefs_LinearSuccessorIsServedFromTheSeed`).
 
 **Do not clamp `openThreshold` at `floor`.** Clamping there made the `1/N` term dead code for every fan-out
-wider than `budget/floor` = 23: the bar sat at a flat 1024 at width 24 and at width 10,000 alike, so a forEach
+wider than `budget/floor` = 24: the bar sat at a flat 1024 at width 25 and at width 10,000 alike, so a forEach
 source array stayed inline in all N branches — N copies of an N-element array, quadratic and worse under
 nesting. The clamp is `minField`, which is the break-even against a refs entry's own ~26 stored bytes.
 

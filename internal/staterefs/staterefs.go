@@ -185,14 +185,10 @@ const (
 	// the PostgreSQL TOAST threshold (~2KB) a field kept inline is stored twice - in this step's changes and
 	// the successor's state - and every non-HOT update of the wide row re-logs it, ~4x the field in WAL.
 	threshold = 1024
-	// budget is the write saving one extra resolve round trip must buy. The break-even is the round-trip
-	// time times the database's byte-throughput ceiling: a round trip occupies a connection for L, and writing
-	// B bytes costs the database B/ceiling. At the ceilings docs/benchmark-cloud.md measures (~194-284 MB/s)
-	// and a same-zone L of ~0.5ms that is ~100-140KB, so 23KB opens anchors more eagerly than the round trip
-	// alone justifies. Moving it is a measurement question, not arithmetic: pair any change with a bench arm.
-	// Divided by the fan-out width, it is the bar for opening an anchor whose cost is amortized over N
-	// branches - see openThreshold.
-	budget = 23 * 1024
+	// budget is the write saving a fan-out's extra resolve round trips must buy, an estimate at the eager end
+	// of its range on purpose. Divided by the fan-out width, it is the bar for opening an anchor whose cost is
+	// amortized over N branches - see openThreshold.
+	budget = 24 * 1024
 	// minField is the absolute floor no width scaling may cross. A ref replaces a field's bytes with a refs
 	// entry (~20-25 bytes stored: two JEntries, the key, an integer), so a field smaller than a few times
 	// that LOSES bytes on every branch. It is deliberately NOT adjusted by the dialect factor below: both
@@ -363,11 +359,11 @@ func candidateFloor(successors int) int {
 //     successor usually resolves on the replica that minted the ref, from the cache Seed filled.
 //   - FAN-OUT (n>1): the resolve cache collapses N resolves into one miss plus N-1 hits (every branch
 //     resolves the SAME anchor set), while savings are S*N. Break-even becomes S*N >= budget, so the bar
-//     falls as 1/N once that is below threshold (N > 23) - at N=100 even a few hundred bytes pays for itself.
+//     falls as 1/N once that is below threshold (N > 24) - at N=100 even a few hundred bytes pays for itself.
 //     A narrower fan-out takes the linear bar.
 //
 // The clamp is minField, NOT floor. Clamping at the floor made the 1/N term dead code for every fan-out
-// wider than budget/floor = 23: the bar sat at a flat 1024 at width 24 and at width 10,000 alike, so the
+// wider than budget/floor = 24: the bar sat at a flat 1024 at width 25 and at width 10,000 alike, so the
 // "at N=100 even a few hundred bytes pays" case above could never actually fire. A forEach's branch count
 // IS its source array's element count, so an un-ref'd array costs N copies of an N-element array -
 // quadratic, and worse again under nesting - which is what that dead clamp was silently buying.
