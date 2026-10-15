@@ -148,40 +148,16 @@ matching one before working there:**
 
 - **Timestamps:** never bind a Go `time.Time` into SQL; write with `NOW_UTC()`/`DATE_ADD_MILLIS`. (`internal/migrations/CLAUDE.md`)
 - **MySQL JSON compare:** `json_col = '{}'` never matches on MySQL - use a per-driver `CAST(... AS CHAR)`. (`internal/migrations/CLAUDE.md`)
-- **Stored JSON bytes are NOT canonical, and nothing compares them.** `Set` and `NewState` store what
-  `json.Marshal` writes (struct fields in declaration order, nested ones too), a `json.RawMessage` or `SetJSON`
-  value and a column read keep their bytes as given, and Postgres `JSONB` re-spells a value on read. Nothing
-  depends on the bytes: `union` dedupes with `reflect.DeepEqual` over *decoded* values (order-independent for
-  maps), `Fingerprint` hashes `status|count|max(updated_at)`, and no
-  query compares one payload column with another. What storing every value as JSON does buy is **Go TYPE
-  normalization**: a caller's struct decodes as the same `map[string]any`/`float64` as its twin read from a
-  column, and `DeepEqual` between a struct and its decoded twin is false - so never hand a reducer a caller's
-  Go value that has not been marshalled. `append` and `concat` fold by SPLICING bytes (`appendRaw`,
-  `concatRaw`), which compare nothing and so need no canonical form. A **byte-comparing reducer** (`union` deduping raw elements instead of
-  decoding them) would have to canonicalize what it compares; the stored bytes do not give it that.
+- **Stored JSON bytes are not canonical, and nothing compares them.** Every comparison decodes first (`union`
+  dedupes decoded values; `Fingerprint` hashes `status|count|max(updated_at)`). What JSON storage buys is Go
+  TYPE normalization, so never hand a reducer a caller's Go value that has not been marshalled.
   (`workflow/CLAUDE.md`)
-- **A step's `changes` is `workflow.Changes`, and an overwrite is its field name with a `!` suffix:**
-  `{"log": ["m"], "summary!": "trimmed", "scratch!": null}` contributes to `log`, replaces `summary` and deletes
-  `scratch`. Decode a `changes` column with `changesOf` (engine) / `Changes.UnmarshalJSON`, never as a plain
-  `State`, which reads `summary!` as a field of its own. `State.Apply` enacts overwrites, so a materialized state
-  holds no deletes. A null CONTRIBUTION still means "nothing" - it deletes a field with no reducer and is the
-  reducer's identity on a reduced field - so `isCleared` must recognize both null spellings (a Go-nil
-  `json.RawMessage` and the bytes `null`). A task may not write a name ending in `!`, nor overwrite a reduced
-  field inside a fan-out branch (`checkChanges`). Reducers are read from the graph, never stored.
-  (`workflow/CLAUDE.md`)
-- **Two problem values are KNOWN and currently UNGUARDED - a deliberate, backlogged punt.** Nothing checks
-  storability on the write side, by decision, not oversight. (1) An integer-shaped value beyond **±2^53**.
-  **STORAGE IS EXACT** - raw-field storage means a carried field is never decoded, so it round-trips
-  byte-exact into the next step's `state`, `final_state`, a `Fork` and a `Continue`, and reading one does not
-  memoize the rounded form. The exposure is **per-READER, not per-field**: a read into an `any`
-  (`Get` into an `any`, `Parse` into a map) rounds, while **`GetInt` does not** - it unmarshals straight
-  into an `int`, exact at any int64 magnitude - and neither does a `when` expression, which compares a
-  >2^53 id as an integer rather than through a float64. Carry a large id as a string only if it must
-  survive an untyped reader. (2) A **NUL** (`U+0000`) in a string - Postgres `JSONB`
-  rejects it (`SQLSTATE 22P05`) while the other dialects accept it, so it passes SQLite tests and fails on the
-  recommended production DB; base64-encode binary data. Do not add a guard (nor "fix" the integer with
-  `UseNumber`) without revisiting the punt - a write-side guard must run on the **raw caller bytes** before
-  any decode, and must not re-check the engine's own derived merges. (`workflow/CLAUDE.md`)
+- **A step's `changes` is `workflow.Changes`; an overwrite is its field name with a `!` suffix.** Decode a
+  `changes` column with `changesOf` / `Changes.UnmarshalJSON`, never as a plain `State`. A null contribution
+  means "nothing", so `isCleared` must recognize both null spellings. (`workflow/CLAUDE.md`)
+- **Integers beyond ±2^53 and NULs in strings are unguarded, by decision.** An untyped read rounds such an
+  integer, and so does a fold through `union`/`merge`/`add`/`min`/`max`; Postgres `JSONB` rejects a NUL. Do not
+  add a write-side guard or `UseNumber` without revisiting the punt. (`workflow/CLAUDE.md`)
 - **Write-first transactions:** every flow-terminating transaction must UPDATE first, or the flow strands as a
   `running` orphan. (`engine/CLAUDE.md`)
 - **Lease fencing:** every post-execution write to the *dispatched* step must carry `AND lease_seq=?` (the
@@ -221,16 +197,10 @@ maintains a state map that evolves as tasks execute. Statuses: `created` -> `run
 delta (`changes`), and metadata (status, error, timing). Steps are numbered by `step_depth`; parallel fan-out
 siblings share a `step_depth`. Once terminal (`completed`/`failed`/`terminated`/`cancelled`), a step is immutable.
 
-**Reducer** - How writes to a state field combine. On a reduced field every write is a delta, folded through the
-field's reducer at every hand-off - a step's successor, a fan-in (in branch order), the final state, `Continue` -
-so a task writes only its contribution and a read returns the combined value; `Overwrite`/`Del` replace instead,
-and are not allowed on a reduced field inside a fan-out branch. Ten are defined (`workflow/reducers.go`): `replace` (last write wins,
-default), `append` (concatenate arrays), `union` (concatenate arrays, deduplicated), `add` (sum numbers), `min`/`max`
-(smaller/larger number), `and`/`or` (logical fold of booleans), `concat` (concatenate strings), and `merge` (combine
-objects, new key wins). A field with no registered reducer uses `replace`; every non-default field is wired
-explicitly with `graph.SetReducer(name, reducer)`. There is **no** inference from a field's name - a `sum*`/`list*`/
-`set*` prefix means nothing, so an unwired field silently takes `replace` instead of the reducer its name implies.
-`Graph.Validate` rejects a reducer name outside the ten, and a value a reducer cannot fold fails the flow.
+**Reducer** - How writes to a state field combine: `replace` (the default), `append`, `union`, `add`, `min`, `max`,
+`and`, `or`, `concat`, `merge` (`workflow/reducers.go`). On a reduced field every write is a contribution, folded at
+every hand-off; `Overwrite`/`Del` replace instead (`workflow/CLAUDE.md`). Each non-default field is wired with
+`graph.SetReducer`; nothing is inferred from a field's name, so an unwired `sum*` field silently takes `replace`.
 
 **Thread** - A chain of flows linked by `Continue`. Each flow has a `thread_id` grouping it with others in the same
 multi-turn conversation; defaults to `flow_id` (each flow its own thread). `Continue` inherits the thread's

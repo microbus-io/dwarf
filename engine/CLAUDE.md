@@ -87,7 +87,8 @@ one probe succeeds) for zero engine-side policy and no shared-state machinery to
 
 ### Host-supplied payloads are NOT precision-checked (a KNOWN, backlogged punt)
 
-An integer-shaped number beyond ±2^53 (stored exactly, rounded only by a reader decoding into an `any`) and a NUL
+An integer-shaped number beyond ±2^53 (stored exactly when carried, rounded by a reader decoding into an `any` and
+by a fold through a decoding reducer) and a NUL
 (`U+0000`) in a string (rejected by Postgres `JSONB`) are a known, deliberately unguarded punt - the root
 `CLAUDE.md` landmine and `workflow/CLAUDE.md` hold the rationale and workarounds. No ingress (`Create`/`Run`,
 `resume`, `Fork`'s overrides, `Continue`'s `additionalState`) returns a 400 for either; `workflow.NewState`

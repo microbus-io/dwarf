@@ -263,12 +263,14 @@ exposure to revisit, not a non-issue:
   (`1e300` is fine). **Workaround: carry a large id as a string** (the `id_str` pattern 64-bit-id APIs
   already publish).
 
-  **What is STORED does not round.** Raw field storage means a carried field is never decoded, so it
-  round-trips byte-exact into the next step's `state`, `final_state`, a `Fork` and a `Continue`; and because
-  a read does not memoize, even reading one leaves storage exact. Verified: carried
+  **A CARRIED field is stored exactly; a FOLDED one is not.** Raw field storage means a carried field is never
+  decoded, so it round-trips byte-exact into the next step's `state`, `final_state`, a `Fork` and a
+  `Continue`; and because a read does not memoize, even reading one leaves storage exact. Verified: carried
   `{"id":1234567890123456789}` marshals back identically before and after a read. **Do not decode carried
-  fields at dispatch:** that stores `...800` from the first hop onward. So the damage is confined to the Go
-  value a reader receives, and does not propagate.
+  fields at dispatch:** that stores `...800` from the first hop onward. The decoding reducers are the
+  exception: `union`, `merge`, `add`, `min` and `max` decode into `any`, fold, and store the re-encoded,
+  rounded result - and `union`'s dedupe then compares rounded values, so two distinct large ids can collapse
+  into one. `append` and `concat` splice bytes and stay exact.
 
   Two consequences worth holding. **The rounding is per-READER, not per-field**: a plain `Get` into an `any`
   (and `Parse` into a map) rounds, while `GetInt` does not - it unmarshals
