@@ -132,6 +132,17 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// so closing it explicitly at the boundary AND deferring costs nothing.
 	closeEntryPhase := e.enterDBPhase(phaseEnter)
 	defer closeEntryPhase()
+	// claimed is set once this dispatch wins its claim. The checkpoint's defer is registered before the
+	// recovery defer so it runs after it: a test waiting for a dispatch to return sees its recovery reset too.
+	var claimed bool
+	if e.seams.Enabled() { // Enabled gates the assembled name in production
+		defer func() {
+			if claimed {
+				e.seams.Checkpoint(ctx, engineseams.CheckpointClaimedDispatchDone)
+				e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shardNum), strconv.Itoa(stepID)))
+			}
+		}()
+	}
 	// stepMarkedComplete is set once the step is flipped to `completed` below, before its forward
 	// progress (transitions / fan-in / flow completion) is committed in a separate transaction. If
 	// that later commit fails, the recovery defer rolls the step back so it re-dispatches.
@@ -347,12 +358,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	if flowID == 0 {
 		return nil
 	}
-	if e.seams.Enabled() { // Enabled gates the assembled name in production
-		defer func() {
-			e.seams.Checkpoint(ctx, engineseams.CheckpointClaimedDispatchDone)
-			e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shardNum), strconv.Itoa(stepID)))
-		}()
-	}
+	claimed = true
 
 	readFlow := func(cols string, dest ...any) error {
 		flowPass := turnstile.WaitTurn(ctx)

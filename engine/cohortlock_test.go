@@ -57,7 +57,9 @@ func TestCohortStripe_FIFOAcrossTicks(t *testing.T) {
 	assert.True(s.lock(time.Hour, nil)) // uncontended: no tick, no wait
 
 	const n = 5
-	var ticks atomic.Int32
+	// ticked receives once from each waiter, at its second tick: every waiter has then left its wait and come
+	// back to the queue at least twice while the stripe was held.
+	ticked := make(chan struct{}, n)
 	var order []int
 	var orderMu sync.Mutex
 	var wg sync.WaitGroup
@@ -65,7 +67,14 @@ func TestCohortStripe_FIFOAcrossTicks(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			assert.True(s.lock(2*time.Millisecond, func() bool { ticks.Add(1); return true }))
+			var ticks int
+			assert.True(s.lock(2*time.Millisecond, func() bool {
+				ticks++
+				if ticks == 2 {
+					ticked <- struct{}{}
+				}
+				return true
+			}))
 			orderMu.Lock()
 			order = append(order, i)
 			orderMu.Unlock()
@@ -73,8 +82,13 @@ func TestCohortStripe_FIFOAcrossTicks(t *testing.T) {
 		}()
 		waitQueued(t, &s, i+1) // fix the arrival order
 	}
-	time.Sleep(50 * time.Millisecond) // every waiter ticks many times while held
-	assert.True(ticks.Load() >= 2*n, "waiters did not tick while queued (%d ticks)", ticks.Load())
+	for range n {
+		select {
+		case <-ticked:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a queued waiter never ticked twice while the stripe was held")
+		}
+	}
 	s.unlock()
 	wg.Wait()
 	assert.Equal([]int{0, 1, 2, 3, 4}, order, "a ticking waiter lost its place")

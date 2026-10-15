@@ -29,6 +29,8 @@ import (
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 // fakeFleet is six peer ids, and readerID and dispatcherID are the two engine ids whose places against them in
@@ -226,11 +228,13 @@ func TestDispatchers_ReaderReplicaHoldsTheReaderPoolAndRunsNothing(t *testing.T)
 	assert.NoError(g.Validate())
 	mux.HandleGraph("reader/g", g)
 	mux.HandleTask("reader/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	reader := sdkmetric.NewManualReader()
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.testConnCap = 0 // assert the real derived pool sizes, not the test-mode connection cap
 	assert.NoError(e.SetHost(mux))
+	assert.NoError(e.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
 	assert.NoError(e.SetEngineID(readerID))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 24}))
 	assert.NoError(e.Startup(t.Context()))
@@ -247,10 +251,14 @@ func TestDispatchers_ReaderReplicaHoldsTheReaderPoolAndRunsNothing(t *testing.T)
 	assert.True(e.pistons[1].Idle(), "a reader's piston idles")
 	assert.Equal(readerOpenConns, db.DB.Stats().MaxOpenConnections, "a reader holds the reader pool")
 
+	// Create rings the doorbell before it returns, and with the piston idle the doorbell is the only way this
+	// replica could run the step. So the offer count, not a wait, is what shows nothing will run here.
 	fk, err := e.Create(ctx, "reader/g", nil, nil)
 	assert.NoError(err)
-	assert.Equal(0, e.cache.Len(), "a reader does not offer the step to its own cache")
-	time.Sleep(300 * time.Millisecond)
+	var rm metricdata.ResourceMetrics
+	assert.NoError(reader.Collect(ctx, &rm))
+	offered, _ := sumCounter(rm, "dwarf_steps_offered", "", "")
+	assert.Equal(int64(0), offered, "a reader does not offer the step to its own cache")
 	snap, err := e.Snapshot(ctx, fk)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusRunning, snap.Status, "nobody real dispatches the shard, so nothing ran")

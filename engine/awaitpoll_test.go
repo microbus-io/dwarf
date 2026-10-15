@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -86,25 +87,21 @@ func TestAwait_WakesWhenNoSignalIsDelivered(t *testing.T) {
 		err error
 	}
 	done := make(chan result, 1)
+	parked := e.seams.Waiter(engineseams.Join(engineseams.CheckpointAwaitParked, flowKey)) // armed before the goroutine that trips it
 	go func() {
 		out, aerr := e.await(ctx, flowKey)
 		done <- result{out, aerr}
 	}()
 
-	// Wait until Await has parked on the latch (so its first snapshot has already run against the running
-	// flow). Only after this can a terminal commit exercise a wake path rather than being caught by that
+	// Wait until Await has parked on the latch, which it does only after its first snapshot read the running
+	// flow. Only after this can a terminal commit exercise a wake path rather than being caught by that
 	// first snapshot.
-	waiterReady := func() bool {
-		return e.latches.Waiting(flowKey) > 0
-	}
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && !waiterReady() {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if !assert.True(waiterReady(), "Await never registered a waiter") {
+	select {
+	case <-parked:
+	case <-time.After(30 * time.Second):
+		assert.True(false, "Await never parked")
 		return
 	}
-	time.Sleep(50 * time.Millisecond) // let the first snapshot (running) complete and the select block
 
 	// Forge the terminal commit WITHOUT signalStop - the exact state the crash window leaves.
 	_, err = db.ExecContext(ctx,

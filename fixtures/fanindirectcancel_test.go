@@ -18,12 +18,14 @@ package fixtures
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -107,28 +109,20 @@ func TestFanInDirectTerminate_NoExtendTerminatedFlow(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	var stepIDBefore int
+	var stepIDBefore, spawnStepID int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&stepIDBefore))
+	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='Spawn'", flowID).Scan(&spawnStepID))
 
 	// Release the spawn task: it completes, then processStep reaches fireFanInDirect against the terminated flow.
 	close(release)
 
-	// Wait until the spawn step has been marked completed (line before fireFanInDirect), then a settle window so
-	// a broken guard would have inserted the fan-in step within it (matches the leasefence tests' 1s settle).
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		var st string
-		assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE flow_id=? AND task_name='Spawn'", flowID).Scan(&st))
-		if st == workflow.StatusCompleted {
-			break
-		}
-		if time.Now().After(deadline) {
-			assert.True(false, "spawn step never completed after release")
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	time.Sleep(1 * time.Second)
+	// fireFanInDirect runs inside the spawn step's dispatch, so once that dispatch returns, a broken guard has
+	// already inserted the fan-in step.
+	spawnDone := engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shardNum), strconv.Itoa(spawnStepID))
+	enginetest.AwaitVisitCount(t, engineseams.Seams(e), 1, 15*time.Second, spawnDone)
+	var spawnStatus string
+	assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE step_id=?", spawnStepID).Scan(&spawnStatus))
+	assert.Equal(workflow.StatusCompleted, spawnStatus) // the worker got past the completion write to fireFanInDirect
 
 	// The guard held: no pending fan-in step was inserted, and the flow's step_id was not overwritten.
 	var joinSteps int

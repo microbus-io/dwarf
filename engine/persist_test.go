@@ -24,6 +24,7 @@ import (
 
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -170,8 +171,10 @@ func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testi
 	assert.Equal(workflow.StatusFailed, status)
 	assert.NotEqual("", errMsg, "the step records why it could not be persisted")
 
-	// Give lease recovery a chance to prove it has nothing to recover.
-	time.Sleep(200 * time.Millisecond)
+	// Run lease recovery, then let every shard's piston scan and push twice: had either re-offered the step, a
+	// worker would have run it again by then.
+	e.recoverExpiredLeases(ctx)
+	enginetest.AwaitShardCycles(t, e, 2)
 	assert.Equal(int32(1), runs.Load(), "nothing re-dispatches a terminalized step")
 }
 

@@ -130,7 +130,7 @@ const (
 	CheckpointBeforeDeleteWrite         = "beforeDeleteWrite"         // Delete, just before its transaction's delete-stamp/interrupted-CAS write
 	CheckpointBeforeReviveWrite         = "beforeReviveWrite"         // the subgraph-completion path, just before its transaction's caller-revive write
 	CheckpointBeforeRecoveryReset       = "beforeRecoveryReset"       // the post-execution recovery path, just before its fenced step-reset transaction
-	CheckpointClaimedDispatchDone       = "claimedDispatchDone"       // step execution returned after winning its claim; fired bare and targeted by (shard, step id)
+	CheckpointClaimedDispatchDone       = "claimedDispatchDone"       // step execution returned after winning its claim, recovery reset included; fired bare and targeted by (shard, step id)
 
 	// A COUNTING checkpoint (read with Visits, never a rendezvous), scoped by flow id so concurrent flows
 	// count independently. No test arms Wait/Break on it, so Checkpoint just increments and returns; both the

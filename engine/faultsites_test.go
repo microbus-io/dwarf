@@ -23,6 +23,7 @@ package engine
 import (
 	"context"
 	"math"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -88,13 +89,18 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 			enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=?", flowID) == 1 &&
 			orphanShapeCount(t, e, shard) == 1
 	}
-	assert.True(enginetest.WaitUntil(t, 10*time.Second, stranded), "expected A completed and flagged, alone on a running flow")
-	time.Sleep(200 * time.Millisecond) // nothing else will move it: lease recovery never touches a completed step
-	assert.True(stranded(), "the stranded shape healed without the sweep")
-	assert.Equal(int32(1), runsA.Load())
-
 	db, err := e.db.Shard(shard)
 	assert.NoError(err)
+	// The failed reset is the last thing A's dispatch does. Once it has returned, let every shard's piston scan
+	// and push twice: nothing else may move the step, since lease recovery never touches a completed one.
+	var aStepID int
+	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStepID))
+	enginetest.AwaitVisitCount(t, e.seams, 1, 15*time.Second,
+		engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(aStepID)))
+	enginetest.AwaitShardCycles(t, e, 2)
+	assert.True(stranded(), "expected A completed and flagged, alone on a running flow, until the sweep runs")
+	assert.Equal(int32(1), runsA.Load())
+
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -1000) WHERE flow_id=?", flowID)
 	assert.NoError(err)
 	e.recoverOrphanedFlows(ctx, db, shard, true)

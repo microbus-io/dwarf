@@ -108,13 +108,20 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 		err error
 	}
 	awaitCh := make(chan outcome, 1)
+	parked := e.seams.Waiter(engineseams.Join(engineseams.CheckpointAwaitParked, child)) // armed before the goroutine that trips it
 	go func() {
 		o, err := e.Await(awaitCtx, child)
 		awaitCh <- outcome{o, err}
 	}()
 
-	// Let the Await goroutine register its waiter and block on the still-running child.
-	time.Sleep(100 * time.Millisecond)
+	// The Await must be ON the board before the child fails: one that parks later is answered by its own read,
+	// and the latch detector under test never runs.
+	select {
+	case <-parked:
+	case <-time.After(30 * time.Second):
+		assert.True(false, "the Await never parked on the child")
+		return
+	}
 
 	// Drop the child's terminal wake: with engineseams.FaultDropSignalStop armed, the child's failStep signalStop delivers
 	// nothing. The fault fires once and is consumed on the child's (first) stop, so the root's later wake is

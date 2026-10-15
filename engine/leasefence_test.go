@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -108,6 +109,29 @@ func TestLeaseFence_FailStep(t *testing.T) {
 		assert.Equal(workflow.StatusFailed, flowStatus)
 		assert.Equal(workflow.StatusFailed, stepStatus)
 	})
+}
+
+// awaitDispatchesReturned blocks until the named task's step in the flow has returned from n claimed
+// dispatches in all, the zombie's among them. The zombie's fenced writes happen inside its dispatch, so once
+// it returns, a broken fence has already left its mark. The count is absolute, not counted from the release:
+// the peer's dispatch of the same step can still be returning after the flow it drove has completed.
+func awaitDispatchesReturned(t *testing.T, eng *Engine, flowKey, taskName string, n int) {
+	t.Helper()
+	shard, flowID, _, err := keys.ParseFlowKey(flowKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := eng.db.Shard(shard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stepID int
+	err = db.QueryRowContext(t.Context(), "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name=?", flowID, taskName).Scan(&stepID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(stepID))
+	enginetest.AwaitVisitCount(t, eng.seams, n, 15*time.Second, done)
 }
 
 // zombieDispatch drives the real dispatch path into the late-error healthy-flow-kill lease-loss race and returns once a peer
@@ -215,9 +239,7 @@ func TestLeaseFence_CompletionNoDuplicateSuccessor(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	// Give the released zombie ample time to attempt (and, if the fence were broken, complete) its write.
-	// A broken fence inserts a second B within milliseconds; the settle window makes the absence meaningful.
-	time.Sleep(1 * time.Second)
+	awaitDispatchesReturned(t, eng, flowKey, "A", 2) // the owner's and the released zombie's
 	var bSteps int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND task_name='B'", flowID).Scan(&bSteps))
 	assert.Equal(1, bSteps)               // exactly one successor, not a zombie-inserted duplicate
@@ -290,7 +312,7 @@ func TestLeaseFence_CohortNoDoubleArrival(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	time.Sleep(1 * time.Second) // let the released zombie attempt its fenced write
+	awaitDispatchesReturned(t, eng, flowKey, "X", 2) // the owner's and the released zombie's
 	var arrivals, size, jSteps int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT cohort_arrivals, cohort_size FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&arrivals, &size))
 	assert.Equal(2, size)     // two branches spawned
@@ -395,9 +417,8 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	// Release the zombie: its reset carries the stale generation N and must match zero rows.
 	eng.seams.Resume(engineseams.CheckpointBeforeRecoveryReset)
 
-	// A broken fence would rewind A completed->pending within milliseconds and re-dispatch it after the flow
-	// already completed; the settle window makes the fence's zero-row match observable.
-	time.Sleep(1 * time.Second)
+	// A broken fence would rewind A completed->pending inside the zombie's dispatch.
+	awaitDispatchesReturned(t, eng, flowKey, "A", 2) // the peer's replay and the released zombie's
 
 	var afterStatus string
 	var afterSeq int
@@ -472,9 +493,7 @@ func TestLeaseFence_RetryRewindFenced(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	// A broken fence rewinds the completed step to pending within milliseconds; the settle window makes the
-	// absence of that rewind meaningful.
-	time.Sleep(1 * time.Second)
+	awaitDispatchesReturned(t, eng, flowKey, "A", 3) // the peer's two (retry, then completion) and the released zombie's
 	var aStatus string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStatus))
 	assert.Equal(workflow.StatusCompleted, aStatus) // still completed, not rewound to pending
@@ -553,8 +572,7 @@ func TestLeaseFence_SubgraphParkFenced(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	// A broken fence parks the completed caller and spawns a duplicate child within milliseconds; settle first.
-	time.Sleep(1 * time.Second)
+	awaitDispatchesReturned(t, eng, flowKey, "A", 3) // the peer's two (park, then revive) and the released zombie's
 	var children int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE root_flow_id=? AND surgraph_flow_id<>0", flowID).Scan(&children))
 	assert.Equal(1, children) // exactly one subgraph child, not a zombie-spawned duplicate
