@@ -272,6 +272,37 @@ func TestDispatchers_ReaderReplicaHoldsTheReaderPoolAndRunsNothing(t *testing.T)
 	}
 }
 
+// TestDispatchers_PromotedReaderTakesADispatcherSizedCache pins that a reader promoted to dispatcher gets the
+// cache its new pool calls for. A reader's worker maximum is the fallback 64, and the cache is capped by the
+// worker maximum, so a recompute that resizes the cache before re-deriving the maximum leaves the promoted
+// replica on a reader-sized cache - and no later recompute corrects it, since the role no longer changes.
+func TestDispatchers_PromotedReaderTakesADispatcherSizedCache(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.testConnCap = 0
+	assert.NoError(e.SetHost(hosts.NewMux()))
+	assert.NoError(e.SetEngineID(readerID))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 24}))
+	assert.NoError(e.Startup(t.Context()))
+	solo := e.cache.Capacity()
+
+	joinFakeFleet(t, e)
+	if !assert.False(e.dispatchesOn(1), "fixture: readerID must rank below the cut") {
+		return
+	}
+	assert.True(e.cache.Capacity() < solo, "a reader's cache is smaller than a dispatcher's")
+
+	leaveFakeFleet(t, e)
+	assert.True(e.dispatchesOn(1))
+	assert.Equal(solo, e.cache.Capacity(), "promoted alone, the cache is sized as it was solo")
+	e.recomputePools()
+	assert.Equal(solo, e.cache.Capacity())
+}
+
 // TestDispatchers_DemotedReplicaHoldsItsPoolUntilInFlightStepsFinish pins the demotion path for a replica
 // with work under way: it stops dispatching at once, but keeps a dispatcher's share of the pool and
 // turnstile - the budget divided among the dispatchers and itself - until the steps it already claimed have

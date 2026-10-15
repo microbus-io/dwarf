@@ -659,17 +659,19 @@ func (e *Engine) recomputePools() {
 	// spent too little of its own recent wall clock holding a candidate retires on a coin flip, so the surplus
 	// this smaller budget creates finds itself idle and goes, down to the floor Start was given. Pushing a new
 	// resident count here would be a second, coarser actuator on a quantity that already self-corrects - and
-	// one that would have to serialize against a shrink in flight. The cache and the ceiling below do not
+	// one that would have to serialize against a shrink in flight. The ceiling and the cache below do not
 	// self-correct, which is why they are re-derived and this is not.
+	//
+	// The ceiling comes FIRST, as in Startup: the cache is capped by it, and a replica that dispatched nothing
+	// holds the 64 fallback, so a promotion that resized the cache first would take a reader-sized cache - for
+	// good, since the next recompute sees no role change and returns early. Reuses the sizing/rtts already
+	// locked-and-cloned above rather than paying for another lock/clone pass over the same maps.
+	e.recomputeWorkerCeilingWith(e.lifetimeCtx, sizing, rtts, observed)
 	dispatch := max(64, workersPerConnBudget*postSplitConns)
 	e.cache.Resize(min(dispatch, int(e.workers.Load())))
-	// The refill scan floor is measured against the cache's capacity, so it follows the same split -
-	// the same rule the dispatch count and worker ceiling obey just above. Reuses the sizing/rtts already
-	// locked-and-cloned above rather than paying for a second (and, below, a third) lock/clone pass over
-	// the same maps.
+	// The refill scan floor is measured against the cache's capacity, so it follows the cache.
 	e.recomputeRefillIntervalsWith(sizing, roles)
 	e.logger.Info("Derived pools recomputed", "slots", observed, "dispatch", dispatch)
-	e.recomputeWorkerCeilingWith(e.lifetimeCtx, sizing, rtts, observed)
 }
 
 // applyRole starts or stops this replica dispatching one shard: the doorbell's gate and the piston's idle
