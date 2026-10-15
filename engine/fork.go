@@ -602,9 +602,11 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 			cc.newLeafStepID = newRewindID
 		} else {
 			// Ancestor caller: re-park so completeSurgraphFlow revives it when the re-run child completes.
+			// Its changes are cleared: the revived run re-executes the task from the top, so keeping the
+			// origin's changes as prior changes would fold every post-Subgraph contribution twice.
 			_, err = tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=0, subgraph_result=?, subgraph_error='', successor_id=0, error='', not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
-				workflow.StatusRunning, parkedSubgraph, emptyJSON, newRewindID,
+				"UPDATE dwarf_steps SET status=?, parked=?, changes=?, subgraph_done=0, subgraph_result=?, subgraph_error='', successor_id=0, error='', not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
+				workflow.StatusRunning, parkedSubgraph, emptyJSON, emptyJSON, newRewindID,
 			)
 		}
 		if err != nil {

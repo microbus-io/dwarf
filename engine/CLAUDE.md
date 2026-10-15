@@ -418,8 +418,11 @@ are exempt - they are reset/re-parked, so forking *at* an interrupted step is fi
 *Chain rewind.* The leaf fork step is reset (merged overrides, cleared output/park/cohort) and **held `created`
 until the full id mapping is in place, then flipped to `pending`** - so a crash mid-clone leaves an inert flow that
 never dispatches (the clone is also one transaction, so a crash rolls back). Each **ancestor caller** up the
-surgraph chain is **re-parked** (`running`/`parkedSubgraph`, `subgraph_done=0`); when the re-run child re-completes,
-`completeSurgraphFlow` revives the caller and execution bubbles back to the root. Chain flows are set `running`;
+surgraph chain is **re-parked** (`running`/`parkedSubgraph`, `subgraph_done=0`, `changes='{}'`); when the re-run
+child re-completes, `completeSurgraphFlow` revives the caller and execution bubbles back to the root. **Clear the
+caller's `changes`**: the revived run re-executes the task from the top with `changes` as its prior changes, so
+keeping the origin's would fold every post-`Subgraph` contribution twice. The fork's caller is therefore one run,
+not the origin's runs plus one (pinned by `TestForkflow_InsideSubgraphCallerFoldsOnce`). Chain flows are set `running`;
 off-path prefix subgraphs keep their `completed` status.
 
 *Scheduling, identity, threading.* Scheduling (priority/fairness/time-budget) is inherited from the **root's

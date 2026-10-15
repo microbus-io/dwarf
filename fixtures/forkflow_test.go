@@ -626,3 +626,85 @@ func TestForkflow_NestedSubgraphBudgetInherited(t *testing.T) {
 		assert.True(b > 55*time.Second && b < 90*time.Second, "task %s inherited budget %s not ~75s", task, b)
 	}
 }
+
+// TestForkflow_InsideSubgraphCallerFoldsOnce forks at the deepest step of a two-level subgraph tree whose
+// callers contribute to reduced fields after Subgraph returns. Each re-parked caller re-runs once in the
+// fork, so its post-Subgraph contributions must count once: the fork's folded values match a fresh run
+// with the override, not the origin's writes plus the re-run's.
+func TestForkflow_InsideSubgraphCallerFoldsOnce(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	mux := hosts.NewMux()
+
+	outer := workflow.NewGraph("Outer")
+	outer.SetURL("CallMiddle", "forkfold.verify:428/call-middle")
+	outer.AddTransitionChain("CallMiddle", workflow.End)
+	outer.SetReducer("log", workflow.ReducerAppend)
+	outer.SetReducer("total", workflow.ReducerAdd)
+	mux.HandleGraph("forkfold.verify:428/outer", outer)
+
+	middle := workflow.NewGraph("Middle")
+	middle.SetURL("CallInner", "forkfold.verify:428/call-inner")
+	middle.AddTransitionChain("CallInner", workflow.End)
+	middle.SetReducer("log", workflow.ReducerAppend)
+	middle.SetReducer("total", workflow.ReducerAdd)
+	mux.HandleGraph("forkfold.verify:428/middle", middle)
+
+	inner := workflow.NewGraph("Inner")
+	inner.SetURL("X", "forkfold.verify:428/x")
+	inner.AddTransitionChain("X", workflow.End)
+	mux.HandleGraph("forkfold.verify:428/inner", inner)
+
+	mux.HandleTask("forkfold.verify:428/x", func(ctx context.Context, f *workflow.Flow) error {
+		f.SetString("tag", f.GetString("seed"))
+		return nil
+	})
+	mux.HandleTask("forkfold.verify:428/call-inner", func(ctx context.Context, f *workflow.Flow) error {
+		var out map[string]any
+		yield, err := f.Subgraph("forkfold.verify:428/inner", map[string]any{"seed": f.GetString("seed")}, &out)
+		if yield || err != nil {
+			return err
+		}
+		f.Set("log", []any{"middle:" + out["tag"].(string)})
+		f.Set("total", 1)
+		return nil
+	})
+	mux.HandleTask("forkfold.verify:428/call-middle", func(ctx context.Context, f *workflow.Flow) error {
+		var out map[string]any
+		yield, err := f.Subgraph("forkfold.verify:428/middle", map[string]any{"seed": f.GetString("seed")}, &out)
+		if yield || err != nil {
+			return err
+		}
+		f.Set("log", out["log"])
+		f.Set("log", []any{"outer"})
+		f.Set("total", out["total"])
+		f.Set("total", 1)
+		return nil
+	})
+
+	eng := engine.NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
+	eng.SetHost(mux)
+	assert.NoError(eng.Startup(t.Context()))
+
+	originKey, outcome, err := eng.Run(ctx, "forkfold.verify:428/outer", map[string]any{"seed": "one"}, nil)
+	assert.NoError(err)
+	assert.Equal(workflow.StatusCompleted, outcome.Status)
+	assert.Equal([]any{"middle:one", "outer"}, stateVal(outcome.State, "log"))
+	assert.Equal(2.0, stateVal(outcome.State, "total"))
+
+	hist, err := eng.History(ctx, originKey)
+	assert.NoError(err)
+	xKey := findStepKeyDeep(hist, "X")
+	assert.NotEqual("", xKey)
+
+	forkKey, err := eng.Fork(ctx, xKey, map[string]any{"seed": "two"})
+	assert.NoError(err)
+	forkOutcome, err := eng.Await(ctx, forkKey)
+	assert.NoError(err)
+	assert.Equal(workflow.StatusCompleted, forkOutcome.Status)
+	assert.Equal([]any{"middle:two", "outer"}, stateVal(forkOutcome.State, "log"))
+	assert.Equal(2.0, stateVal(forkOutcome.State, "total"))
+}

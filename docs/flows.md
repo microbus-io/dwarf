@@ -221,7 +221,8 @@ are an edit for repairing a run, not a task's contribution - and a `nil` overrid
 `Terminate` forcefully, unconditionally aborts a running or interrupted flow (and its subgraph hierarchy) -
 in-flight work is abandoned immediately, not awaited. `Fork`'s step may be
 **any recorded step**, including one inside a subgraph; the clone re-runs from that step and bubbles back up
-to the root. The fork inherits the origin flow's scheduling and baggage, and does
+to the root. Each step that called a subgraph on the way up runs its task again from the top, and that run's
+writes take the place of the original's. The fork inherits the origin flow's scheduling and baggage, and does
 not auto-delete. Because the fork is an ordinary new flow, recover a partially-failed fan-out by forking one
 failed branch at a time. A branch lost to a `Cancel` is recovered the same way: the fork re-runs only the step you
 chose and keeps every other branch as it was, so while a cancelled branch remains, the fork ends `cancelled`,
