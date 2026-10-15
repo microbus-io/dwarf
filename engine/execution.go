@@ -1626,6 +1626,14 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		return nil
 	}
 
+	// The doorbell below offers the first successor to this replica, so whatever it refs at this step is served
+	// from the cache on its dispatch rather than read back. Seeding from the linear mint usually covers a forEach
+	// branch's array ref too (both mint at the same width); where a branch anchors what the linear mint inlined,
+	// the branch's resolve simply misses.
+	if len(normalNexts) > 0 && len(newStepIDs) > 0 && !e.seams.IsFault(engineseams.FaultSkipRefSeed) {
+		e.linkerFor(shardNum).Seed(stepID, childInputState, linearRefsJSON)
+	}
+
 	// A sleeping successor is left to the piston: its not_before is in the future, so it is invisible to
 	// selection until it comes due and then visible to the very next cycle.
 	if sleepDur == 0 && len(newStepIDs) > 0 {

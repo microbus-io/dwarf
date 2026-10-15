@@ -56,7 +56,7 @@ func TestStaterefs_CarriedRefAcrossFanInWhenSpawnOnlyCarries(t *testing.T) {
 	newEngine := func(t *testing.T) (*engine.Engine, *hosts.Mux) {
 		assert := testarossa.For(t)
 		mux := hosts.NewMux()
-		eng := engine.NewEngineUnderTest(t.Name())
+		eng := unseededEngine(t.Name())
 		eng.SetHost(mux)
 		assert.NoError(eng.Startup(t.Context()))
 		return eng, mux

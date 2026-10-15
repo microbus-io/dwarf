@@ -19,7 +19,7 @@ map records `{"<field>": <anchor step_id>}` — the step that physically holds t
 
 A forEach's source array is ref'd once and shared by every branch, but each branch's element (`<as>`) is one
 element of that same array. Stored inline it is a **second copy of the array's bytes**, spread across the
-branches, and an element below the linear bar (4096) is copied again at **every step of its branch** - `S + D·S`
+branches, and an element below the linear bar (1024) is copied again at **every step of its branch** - `S + D·S`
 for a depth-D branch. An item ref stores the array once: `"<anchor> <field>[<index>]"`, e.g.
 `{"pages": 1234, "page": "1234 pages[5]"}`. The saving is arithmetic, not empirical: 50% of a fan-out's carried
 input for large elements, `D/(1+D)` for mid-size ones. Task outputs (`changes`) are irreducible.
@@ -101,13 +101,45 @@ round-trip costs about what ~23KB of avoided writes buys** (`budget`). Three tie
 - **Free** — a field whose anchor is already in the fetch set. Every field a step could newly anchor lives in
   that *one* step's row, so all candidates share a single prospective anchor: once any one opens it, the rest
   ride along at zero extra read cost, subject only to `floor` (~1KB).
-- **Fan-out** — the bar scales as `budget/N`, because the cache collapses N resolves into one miss while the
-  write saving is paid N times. Linear break-even sits near 23KB (the depth cancels: cost ~D resolves, saving
-  S·D), but at N=100 even a few hundred bytes pays. **Fan-out width is the primary axis, not a refinement** —
-  a ~100x swing in the correct threshold, on a quantity the caller knows exactly at mint time.
-- **Linear** — one field clears `threshold`, **or the per-anchor sum does**. Summing is legitimate *only*
-  because candidates are co-located in one row; four 1KB fields at four *different* anchors would mean four
-  whole-row overfetches for the same bytes, and the sum is never taken across anchors.
+- **Fan-out** — the bar is `min(threshold, budget/N)`, because the cache collapses N resolves into one miss
+  while the write saving is paid N times: at N=100 even a few hundred bytes pays. Up to N=23 that is the
+  linear bar. **Fan-out width is the primary axis, not a refinement** — a ~100x swing in the correct
+  threshold, on a quantity the caller knows exactly at mint time.
+- **Linear** — one field clears `threshold`.
+- **Per-anchor sum** — at a fan-out a field is a candidate below the bar (`candidateFloor` is `floor/N`), and
+  the candidates' SUM opens the anchor. Summing is legitimate *only* because candidates are co-located in one
+  row; four fields at four *different* anchors would mean four whole-row overfetches for the same bytes, and
+  the sum is never taken across anchors. At n=1 the candidacy floor equals the bar, so a sum adds nothing.
+
+**The linear `threshold` sits at `floor` (1KB), not near `budget`, because the minting replica SEEDS its
+cache.** The 23KB break-even prices a resolve that misses. A completed step's successor is offered to the
+replica that minted it (the doorbell), and the engine calls `Seed` before ringing it, so that replica's resolve
+of the predecessor is a cache hit. The read is paid only on a miss:
+- the doorbell declines the successor (the partition is at its bound, or the band is worse) and a scan picks it
+  up - possibly on the other dispatcher, whose residue class it may be in;
+- the successor sleeps (a sleeping step is never offered), or it waits past the entry's eviction from the
+  4,096-entry LRU or its 15-minute TTL;
+- another replica claims it (a steal, a restart, a demoted dispatcher);
+- a flow's final-state flatten resolves its tails' refs, and on a miss it reads them inside `completeFlow`'s
+  flow-row-locked transaction.
+
+The write side gains even when the read misses. On PostgreSQL a field below the ~2KB TOAST threshold kept
+inline is stored twice, once in the predecessor's `changes` and once in the successor's `state`. It also keeps
+the row wide, so each non-HOT update (the claim and the completion both move `status`) re-logs it, and at ~1KB
+the completion pushes the row past 2KB and TOAST moves a third copy.
+
+- **`Seed` needs the anchor's own payload committed** - the completion write, which precedes `Mint`. The
+  engine seeds after the transition commits because that is where the successors exist, ahead of the
+  doorbell. An entry left by a transition that rolled back still matches the row (a replay re-records the
+  same bytes); it is merely unused.
+- **It seeds plain refs at the dispatched step only.** An inherited ref points at an earlier anchor, and an
+  item ref is served from its array's entry (`element` splits the cached bytes). The engine seeds from the
+  linear mint; where a forEach branch's mint anchors what the linear one inlined (a nested forEach sharing
+  `as` can push the linear mint past `maxAnchors`), the branch's resolve misses.
+- **The seed hides the read path from a single-engine test.** Every resolve hits, so a regression in
+  `loadInto` passes every integration test. The engine's and the fixtures' state-refs tests therefore run
+  with `FaultSkipRefSeed` armed (`unseeded`, `unseededEngine`); keep new state-refs integration tests on them,
+  and pin the seed itself separately (`TestStateRefs_LinearSuccessorIsServedFromTheSeed`).
 
 **Do not clamp `openThreshold` at `floor`.** Clamping there made the `1/N` term dead code for every fan-out
 wider than `budget/floor` = 23: the bar sat at a flat 1024 at width 24 and at width 10,000 alike, so a forEach
@@ -120,8 +152,8 @@ gated to `n>1`.** Marshalled-JSON-text length understates what `jsonb` stores: m
 (1.00x); SQL Server `VARBINARY(MAX)` and SQLite `TEXT` cannot inflate at all. String-heavy state therefore
 refs ~5x more eagerly than its true cost warrants. A structural estimator was considered and rejected because
 at a fan-out the bar is already tiny (73 bytes at N=64, 18 at N=256), so a 5x error moves nothing across it —
-whereas the linear bar of 4096 is exactly where estimate accuracy would decide cases, so the factor never
-applies there. MySQL and MariaDB share the driver name `mysql` and have genuinely different JSON engines, but
+whereas the linear bar is exactly where estimate accuracy would decide cases, so the factor never
+applies there. A narrow fan-out on PostgreSQL takes `threshold/5` (~200 bytes). MySQL and MariaDB share the driver name `mysql` and have genuinely different JSON engines, but
 both measure ~1x, so the ambiguity is moot and no server-version probe is needed.
 
 ## Invariants that cost bugs to find

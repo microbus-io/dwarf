@@ -98,6 +98,7 @@ const (
 	FaultInterruptChainWrite = "interruptChainWrite" // the interrupt path's combined chain update fails and applies nothing (deadlock victim)
 	FaultDropSignalStop      = "dropSignalStop"      // the flow-stop signal delivers nothing (lost terminal wake)
 	FaultDropDoorbell        = "dropDoorbell"        // the local work doorbell is dropped (the step waits for a refiller scan)
+	FaultSkipRefSeed         = "skipRefSeed"         // a transition does not seed the ref cache, so its successors resolve their refs from the database
 	FaultRecoveryResetErr    = "recoveryResetErr"    // the post-execution recovery reset write errors
 	FaultReapMidTree         = "reapMidTree"         // the reaper errors after deleting steps, before flows
 	FaultReapSelectErr       = "reapSelectErr"       // the reaper's due-root SELECT errors

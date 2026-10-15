@@ -242,7 +242,13 @@ over dead tuples is that fragmentation persists while latency recovers.
   HOT-eligible, which caps the ratio near 1/3, and HOT pruning already leaves the link room on the page without
   a lower fillfactor. A higher ratio needs the claim and completion to stop writing an indexed column - a schema
   change, not a storage setting. `dwarf_flows` is the opposite case - its per-step writes are all HOT-eligible,
-  so whether they are HOT is decided by page room, which fillfactor does control (next section).
+  so whether they are HOT is decided by page room, which fillfactor does control (next section). The one place
+  it shows on `dwarf_steps` is a row kept wide and inline by a sub-KB state field: fillfactor 80 then moves
+  more of the non-HOT updates onto the same page and trims WAL per step a little. Nothing above or below that band.
+- **`SET STORAGE MAIN` on `state`/`changes`, to keep a value inline instead of TOASTing it:** raises WAL per
+  step sharply. A row held inline at 2-8 KB leaves no room on its page, so HOT all but stops and nearly every
+  claim and completion re-logs the whole wide tuple onto a new page. fillfactor 80 does not
+  rescue it. Past ~2 KB, an out-of-line TOAST value is what keeps the updated row narrow.
 - **It is not client-side.** Active backends held at 72-99 before, during and after the stall (the pool caps
   them), and row-lock waits (`Lock:transactionid`, `Lock:tuple`) read zero in every sample.
 

@@ -175,8 +175,12 @@ const (
 	// place in the resolve IN-list) is not worth it below this, and a small field costs little to copy. At
 	// a fan-out it is divided by the branch count - see candidateFloor.
 	floor = 1024
-	// threshold is the bar for OPENING a new anchor for a single (linear) successor.
-	threshold = 4096
+	// threshold is the bar for OPENING a new anchor for a single (linear) successor. It sits at the floor, far
+	// below budget, because the round trip budget prices is usually not paid on a linear hop: the successor is
+	// offered to the replica that minted it, and Seed has its resolve cache holding the anchored bytes. Below
+	// the PostgreSQL TOAST threshold (~2KB) a field kept inline is stored twice - in this step's changes and
+	// the successor's state - and every non-HOT update of the wide row re-logs it, ~4x the field in WAL.
+	threshold = 1024
 	// budget is one round-trip's worth of avoided writes, from the measured constants
 	// (docs/benchmark-cloud.md): per-step DB time is k*L + s (k ~ 11-12 round-trips, s ~ 4.4ms) and the byte
 	// ceiling is 46-60 MB/s, so same-zone (L ~ 0.5ms) one extra round-trip costs about what ~23KB of avoided
@@ -195,8 +199,8 @@ const (
 	// for one large string. This is an approximation with a known failure direction (string-heavy state refs
 	// ~5x more eagerly than its true cost warrants), not a calibrated model: a structural estimator was
 	// considered and rejected because at a fan-out the bar is already tiny (73 bytes at N=64, 18 at N=256),
-	// so a 5x error moves nothing across it. That is also why it applies ONLY at n>1 - the linear bar of
-	// 4096 is where estimate accuracy would genuinely decide cases.
+	// so a 5x error moves nothing across it. That is also why it applies ONLY at n>1 - the linear bar is
+	// where estimate accuracy would genuinely decide cases.
 	postgresInflation = 5
 	// minItem is the bar for storing a forEach element as an item ref: about three times the item ref's own
 	// stored entry, which is a little larger than a plain ref's (the array's field name and the index ride
@@ -285,11 +289,12 @@ func candidateFloor(successors int) int {
 // openThreshold is the size bar for opening a NEW anchor, given how many successor steps are about to carry
 // this state. Fan-out width is the primary axis, not a refinement:
 //
-//   - LINEAR (n=1): cost is ~D resolves down the chain and savings are S*D - the depth cancels, so
-//     break-even sits near budget. Refs barely pay for a pure linear carry, which is why the bar stays high.
+//   - LINEAR (n=1): the bar is threshold. A resolve that misses would put break-even near budget, but the
+//     successor usually resolves on the replica that minted the ref, from the cache Seed filled.
 //   - FAN-OUT (n>1): the resolve cache collapses N resolves into one miss plus N-1 hits (every branch
 //     resolves the SAME anchor set), while savings are S*N. Break-even becomes S*N >= budget, so the bar
-//     falls as 1/N - at N=100 even a few hundred bytes pays for itself.
+//     falls as 1/N once that is below threshold (N > 23) - at N=100 even a few hundred bytes pays for itself.
+//     A narrower fan-out takes the linear bar.
 //
 // The clamp is minField, NOT floor. Clamping at the floor made the 1/N term dead code for every fan-out
 // wider than budget/floor = 23: the bar sat at a flat 1024 at width 24 and at width 10,000 alike, so the
@@ -376,9 +381,9 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.Changes, inherited
 	}
 
 	// Does this step's row earn an anchor? Every candidate shares the same prospective anchor (this step), so
-	// the SUM is the right test: four 1KB fields justify one round-trip exactly as one 4KB field does. Summing
-	// is legitimate only BECAUSE they are co-located - four 1KB fields at four different anchors would mean
-	// four whole-row overfetches for the same 4KB, a far worse trade, and that is never what is summed here.
+	// the SUM is the right test: four small fields justify one round-trip exactly as one field their size does.
+	// Summing is legitimate only BECAUSE they are co-located - four fields at four different anchors would mean
+	// four whole-row overfetches for the same bytes, a far worse trade, and that is never what is summed here.
 	sum := 0
 	for _, c := range candidates {
 		sum += c.size
@@ -562,6 +567,31 @@ func (l *Linker) Resolve(ctx context.Context, state workflow.State, refs Refs, w
 // must use Resolve, which never waits on another goroutine while holding its connection and locks.
 func (l *Linker) ResolveShared(ctx context.Context, state workflow.State, refs Refs, load Loader) (int, error) {
 	return l.resolve(ctx, state, refs, nil, load, true)
+}
+
+// Seed caches the bytes of every field a Mint anchored at anchorID, so a successor resolving them is served
+// without a read. merged is the state Mint was given and refsJSON the refs it returned; only the plain refs
+// pointing at anchorID are taken, since an inherited ref points at an earlier anchor and an item ref is
+// served from its array's entry.
+//
+// Call it only once the anchor step's own payload has committed, and before its successors are offered for
+// dispatch.
+func (l *Linker) Seed(anchorID int, merged workflow.State, refsJSON []byte) {
+	if len(refsJSON) <= 2 { // "{}"
+		return
+	}
+	refs, err := Parse(refsJSON)
+	if err != nil {
+		return
+	}
+	for field, ref := range refs {
+		if ref.Anchor != anchorID || len(ref.Path) > 0 {
+			continue
+		}
+		if value := merged.GetJSON(field); len(value) > 0 {
+			l.cache.Store(cacheKey{anchorID, ref.field(field)}, value)
+		}
+	}
 }
 
 func (l *Linker) resolve(ctx context.Context, state workflow.State, refs Refs, want map[string]bool, load Loader, shared bool) (int, error) {

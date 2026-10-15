@@ -61,7 +61,7 @@ func TestItemRefs_BranchPointsIntoTheArray(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t.Name())
+	e := unseeded(NewEngineUnderTest(t.Name()))
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
@@ -140,7 +140,7 @@ func TestItemRefs_NestedFanOut(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t.Name())
+	e := unseeded(NewEngineUnderTest(t.Name()))
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
@@ -208,7 +208,7 @@ func TestItemRefs_FailedFanOut(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t.Name())
+	e := unseeded(NewEngineUnderTest(t.Name()))
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
@@ -255,7 +255,7 @@ func TestItemRefs_InnerFanInStripsASharedAs(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t.Name())
+	e := unseeded(NewEngineUnderTest(t.Name()))
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
@@ -307,7 +307,7 @@ func TestItemRefs_TwoDimensionalArray(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t.Name())
+	e := unseeded(NewEngineUnderTest(t.Name()))
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)

@@ -23,10 +23,20 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
+
+// unseededEngine is an engine that resolves every ref from the database. The minting replica seeds its resolve
+// cache, so a single-engine test would otherwise never exercise the read path a successor on another replica
+// takes.
+func unseededEngine(name string) *engine.Engine {
+	eng := engine.NewEngineUnderTest(name)
+	engineseams.Seams(eng).InjectN(engineseams.FaultSkipRefSeed, 1<<20)
+	return eng
+}
 
 // TestStaterefsflow is the end-to-end contract of state refs: a large carried field is stored ONCE and
 // referenced by every step that merely carries it - and NOTHING a workflow author or an API caller can observe
@@ -38,13 +48,14 @@ import (
 // old concession to this - deleting the forEach source array from each branch's state - was removed precisely
 // because it fixed one field by hand while every other carried field paid the same cost. Refs own it now, and
 // they own it without lying to the branch: a branch still sees the array its own element came from.
+
 func TestStaterefsflow(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	mux := hosts.NewMux()
-	eng := engine.NewEngineUnderTest(t.Name())
+	eng := unseededEngine(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
@@ -262,7 +273,7 @@ func TestStaterefs_SingleFieldEntirelyByReference(t *testing.T) {
 	ctx := context.Background()
 
 	mux := hosts.NewMux()
-	eng := engine.NewEngineUnderTest(t.Name())
+	eng := unseededEngine(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))

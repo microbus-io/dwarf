@@ -48,9 +48,9 @@ func blob(n int) string {
 }
 
 // TestOpenThreshold pins the anchor-cost model's central claim: the bar for opening a new anchor is
-// set by the FAN-OUT WIDTH, not by the field alone. A linear successor must clear the full threshold (refs
-// barely pay for a pure linear carry - cost is ~D resolves and savings are S*D, so the depth cancels), while a
-// wide fan-out amortizes one cache-missed resolve over N branches and so refs far smaller fields.
+// set by the FAN-OUT WIDTH, not by the field alone. A linear successor clears the linear threshold (its resolve
+// is served by the cache the minting replica seeds), while a wide fan-out amortizes one cache-missed resolve
+// over N branches and so refs far smaller fields.
 func TestOpenThreshold(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -59,9 +59,10 @@ func TestOpenThreshold(t *testing.T) {
 	assert.Equal(threshold, openThreshold(1, 1))
 	assert.Equal(threshold, openThreshold(0, 1)) // degenerate n is clamped to 1
 
-	// Fan-out: the bar falls as budget/N ...
-	assert.Equal(budget/8, openThreshold(8, 1))
-	assert.True(openThreshold(8, 1) < threshold)
+	// Fan-out: the bar is never above the linear one, and falls as budget/N once that is lower ...
+	assert.Equal(threshold, openThreshold(8, 1))
+	assert.Equal(budget/64, openThreshold(64, 1))
+	assert.True(openThreshold(64, 1) < threshold)
 
 	// ... and KEEPS falling past floor, down to minField. Clamping at the floor instead made
 	// the 1/N term dead code for every fan-out wider than budget/floor = 23, which is what let
@@ -127,12 +128,23 @@ func TestLinker_MintTiers(t *testing.T) {
 
 	t.Run("linear_below_threshold_is_inlined", func(t *testing.T) {
 		assert := testarossa.For(t)
-		// 2KB clears the floor but not the linear bar (4KB): one round-trip is worth ~23KB of avoided writes,
-		// and a linear chain's depth cancels out of the trade, so this does NOT earn an anchor.
+		// Just under the linear bar (1KB): too small to be worth a refs entry and a place in the resolve
+		// IN-list for one successor.
+		state := mustState(map[string]any{"doc": blob(1000)})
+		stored, refs := mint(t, state, state, nil, 1)
+		assert.Equal(0, len(refs), "a field under the linear bar must not open an anchor for a single successor")
+		assert.True(stored.Has("doc"))
+	})
+
+	t.Run("linear_2kb_opens_the_anchor", func(t *testing.T) {
+		assert := testarossa.For(t)
+		// Kept inline, a 2KB field is stored twice - in this step's changes and in the successor's state - and
+		// on PostgreSQL it keeps the row wide or pushes it into TOAST, so every update of the row re-logs it.
+		// The resolve it costs instead is served by the cache the minting replica seeds.
 		state := mustState(map[string]any{"doc": blob(2048)})
 		stored, refs := mint(t, state, state, nil, 1)
-		assert.Equal(0, len(refs), "a 2KB field must not open an anchor for a single successor")
-		assert.True(stored.Has("doc"))
+		assert.Equal(anchor, refs["doc"].Anchor)
+		assert.False(stored.Has("doc"))
 	})
 
 	t.Run("linear_above_threshold_opens_the_anchor", func(t *testing.T) {
@@ -146,11 +158,13 @@ func TestLinker_MintTiers(t *testing.T) {
 
 	t.Run("fanout_lowers_the_bar", func(t *testing.T) {
 		assert := testarossa.For(t)
-		// The SAME 2KB field that stayed inline for one successor is ref'd across a 16-way fan-out: the bar is
-		// budget/16 (~1.4KB), because one cache-missed resolve now serves 16 branches while the write saving is
-		// paid 16 times. This is the case the whole design exists for.
-		state := mustState(map[string]any{"doc": blob(2048)})
-		stored, refs := mint(t, state, state, nil, 16)
+		// The SAME 500-byte field that stays inline for one successor is ref'd across a 64-way fan-out: the bar
+		// is budget/64 (~370 bytes), because one cache-missed resolve now serves 64 branches while the write
+		// saving is paid 64 times. This is the case the whole design exists for.
+		state := mustState(map[string]any{"doc": blob(500)})
+		_, linearRefs := mint(t, state, state, nil, 1)
+		assert.Equal(0, len(linearRefs))
+		stored, refs := mint(t, state, state, nil, 64)
 		assert.Equal(anchor, refs["doc"].Anchor, "a wide fan-out must ref a field a linear successor would inline")
 		assert.False(stored.Has("doc"))
 	})
@@ -174,14 +188,14 @@ func TestLinker_MintTiers(t *testing.T) {
 
 	t.Run("per_anchor_sum_opens_the_anchor", func(t *testing.T) {
 		assert := testarossa.For(t)
-		// No single field clears the 4KB linear bar, but they are all CO-LOCATED in this one step's row, so
-		// they share one prospective anchor and one round-trip. Summing is legitimate precisely because of
-		// that: four 1.5KB fields at four DIFFERENT anchors would mean four whole-row overfetches for the same
-		// bytes, and the sum is never taken across anchors.
+		// At a 4-way fan-out a field is a candidate from 256 bytes, but no single 400-byte field clears the
+		// 1KB bar. They are all CO-LOCATED in this one step's row, so they share one prospective anchor and one
+		// round-trip. Summing is legitimate precisely because of that: three fields at three DIFFERENT anchors
+		// would mean three whole-row overfetches for the same bytes, and the sum is never taken across anchors.
 		state := mustState(map[string]any{
-			"a": blob(1500), "b": blob(1500), "c": blob(1500),
+			"a": blob(400), "b": blob(400), "c": blob(400),
 		})
-		stored, refs := mint(t, state, state, nil, 1)
+		stored, refs := mint(t, state, state, nil, 4)
 		assert.Equal(3, len(refs), "co-located fields summing past the bar open the anchor together")
 		assert.Equal(0, stored.Len())
 	})

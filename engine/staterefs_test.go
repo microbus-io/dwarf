@@ -25,12 +25,20 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
+
+// unseeded makes an engine resolve every ref from the database. The minting replica seeds its resolve cache, so
+// a single-engine test would otherwise never exercise the read path a successor on another replica takes.
+func unseeded(e *Engine) *Engine {
+	e.seams.InjectN(engineseams.FaultSkipRefSeed, 1<<20)
+	return e
+}
 
 // blob returns a JSON string value of roughly n encoded bytes.
 func blob(n int) string {
@@ -88,7 +96,7 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t.Name())
+	e := unseeded(NewEngineUnderTest(t.Name()))
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
@@ -142,7 +150,7 @@ func TestStateRefs_CarryAcrossFanOut(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t.Name())
+	e := unseeded(NewEngineUnderTest(t.Name()))
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
@@ -225,7 +233,7 @@ func TestStateRefs_ReducedFieldIsResolvedAndReanchored(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t.Name())
+	e := unseeded(NewEngineUnderTest(t.Name()))
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
@@ -286,7 +294,7 @@ func TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t.Name())
+	e := unseeded(NewEngineUnderTest(t.Name()))
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
@@ -380,7 +388,7 @@ func TestStateRefs_UnreadableRefsFailTheStep(t *testing.T) {
 
 	mux := hosts.NewMux()
 	registerGate(mux, "badrefs")
-	e := NewEngineUnderTest(t.Name())
+	e := unseeded(NewEngineUnderTest(t.Name()))
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
@@ -409,7 +417,7 @@ func TestStateRefs_FoldedFieldIsStoredInline(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t.Name())
+	e := unseeded(NewEngineUnderTest(t.Name()))
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
@@ -446,7 +454,7 @@ func TestStateRefs_EmptyForEachFoldsAReffedBase(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t.Name())
+	e := unseeded(NewEngineUnderTest(t.Name()))
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
@@ -499,7 +507,7 @@ func TestStateRefs_DeletesAndNullsOfCarriedFields(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t.Name())
+	e := unseeded(NewEngineUnderTest(t.Name()))
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)

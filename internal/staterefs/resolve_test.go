@@ -314,3 +314,53 @@ func TestLinker_ConcurrentMissesReadOnce(t *testing.T) {
 	}
 	assert.Equal(1, failed, "only the fetch whose read failed sees the error")
 }
+
+// TestLinker_SeedServesTheMintedAnchor pins the write-side half of the cache: after Seed, a successor resolving
+// what Mint anchored at the dispatched step reads nothing, including an item ref into an anchored array. A ref
+// Mint carried from an earlier anchor is not seeded - this step's state is not where its bytes live.
+func TestLinker_SeedServesTheMintedAnchor(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	const anchor = 42
+
+	linker := New("sqlite")
+	merged := mustState(map[string]any{
+		"doc":     blob(2048),
+		"pages":   []any{blob(600), blob(600)},
+		"carried": blob(4096), // materialized at dispatch from anchor 7
+		"small":   "s",
+	})
+	changes := workflow.ChangesOf(mustState(map[string]any{"doc": blob(2048), "pages": []any{blob(600), blob(600)}}))
+	_, refsJSON, err := linker.Mint(merged, changes, Refs{"carried": {Anchor: 7}}, anchor, 1, nil, nil)
+	assert.NoError(err)
+	refs := mustParse(refsJSON)
+	assert.Equal(anchor, refs["doc"].Anchor)
+	assert.Equal(anchor, refs["pages"].Anchor)
+	assert.Equal(7, refs["carried"].Anchor)
+
+	linker.Seed(anchor, merged, refsJSON)
+
+	anchors := &fakeAnchors{rows: map[int]Anchor{}}
+	state := newState()
+	_, err = linker.Resolve(ctx, state, Refs{"doc": {Anchor: anchor}, "pages": {Anchor: anchor}}, nil, anchors.load)
+	assert.NoError(err)
+	assert.Len(anchors.calls, 0, "a seeded anchor must be served without a read")
+	assert.Equal(blob(2048), state.GetString("doc"))
+
+	item := newState()
+	_, err = linker.Resolve(ctx, item, Refs{"page": {Anchor: anchor, Field: "pages", Path: []int{1}}}, nil, anchors.load)
+	assert.NoError(err)
+	assert.Len(anchors.calls, 0, "an item ref into a seeded array must be served without a read")
+	assert.Equal(blob(600), item.GetString("page"))
+
+	// The carried ref's anchor was not seeded: resolving it goes to the Loader.
+	anchors.rows[7] = Anchor{State: cols(map[string]any{"carried": blob(4096)})}
+	_, err = linker.Resolve(ctx, newState(), Refs{"carried": {Anchor: 7}}, nil, anchors.load)
+	assert.NoError(err)
+	assert.Len(anchors.calls, 1)
+
+	// Nothing to seed is a no-op, malformed refs included.
+	linker.Seed(anchor, merged, []byte("{}"))
+	linker.Seed(anchor, merged, []byte("not json"))
+}
