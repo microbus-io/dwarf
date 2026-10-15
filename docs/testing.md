@@ -47,9 +47,15 @@ func TestCheckout(t *testing.T) {
     eng.Startup(ctx)
 
     _, out, err := eng.Run(ctx, "checkout", map[string]any{"sku": "ABC"}, nil)
-    testarossa.NoError(t, err)
-    testarossa.Equal(t, workflow.StatusCompleted, out.Status)
-    testarossa.Equal(t, "r-123", out.State.GetString("receipt"))
+    if err != nil {
+        t.Fatal(err)
+    }
+    if out.Status != workflow.StatusCompleted {
+        t.Fatalf("status %s", out.Status)
+    }
+    if receipt := out.State.GetString("receipt"); receipt != "r-123" {
+        t.Errorf("receipt %q", receipt)
+    }
 }
 ```
 
@@ -85,12 +91,16 @@ The harness drives every engine feature. A few patterns:
 ```go
 flowKey, _ := eng.Create(ctx, "approval", state, nil)
 out, _ := eng.Await(ctx, flowKey)
-testarossa.Equal(t, workflow.StatusInterrupted, out.Status)
+if out.Status != workflow.StatusInterrupted {
+	t.Fatalf("status %s", out.Status)
+}
 // out.InterruptPayload holds what the task asked for
 
 eng.Resume(ctx, flowKey, map[string]any{"approved": true})
 out, _ = eng.Await(ctx, flowKey)
-testarossa.Equal(t, workflow.StatusCompleted, out.Status)
+if out.Status != workflow.StatusCompleted {
+	t.Fatalf("status %s", out.Status)
+}
 ```
 
 **Transient failures.** A task that returns `nil` after arming `flow.Retry` re-runs after backoff; assert

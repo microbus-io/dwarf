@@ -42,7 +42,6 @@ import (
 	"github.com/microbus-io/dwarf"
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
-	"github.com/microbus-io/testarossa"
 )
 
 func TestGreeting(t *testing.T) {
@@ -75,9 +74,15 @@ func TestGreeting(t *testing.T) {
 
 	// 4. Run a flow to completion.
 	_, out, err := eng.Run(ctx, "welcome", map[string]any{"name": "ada"}, nil)
-	testarossa.NoError(t, err)
-	testarossa.Equal(t, workflow.StatusCompleted, out.Status)
-	testarossa.Equal(t, "HELLO ADA", out.State.GetString("message"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != workflow.StatusCompleted {
+		t.Fatalf("status %s", out.Status)
+	}
+	if msg := out.State.GetString("message"); msg != "HELLO ADA" {
+		t.Errorf("message %q", msg)
+	}
 }
 ```
 

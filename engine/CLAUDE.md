@@ -3984,7 +3984,10 @@ The crew's worker-loop `CatchPanic` stays as **defense-in-depth** for panics in 
 path (transition evaluation, fan-in, etc.) outside any host call. **Nothing else contains a panic**: the
 piston and its pipeline loops, the planner, the peer Sonars, and the engine's background loops (reaper,
 recovery sweeps, backlog gauge, latch poll) run without a recover, so a panic in any of them takes down the
-replica. `fixtures/panicflow_test.go` pins both task-panic
+replica. **That is deliberate; do not add a catch there.** Those loops call no `Host` method - the only host code
+the engine runs is the three wrapped call sites above - so a panic in them is an engine bug, and a crash is what
+gets it found and fixed; a caught-and-logged panic in a loop that retries every cycle would hide it.
+`fixtures/panicflow_test.go` pins both task-panic
 outcomes (no `onError` → flow `failed`; with `onError` → routed to the handler and `completed`), using a bounded
 `Await` that would time out if the panic had wedged the step instead of failing it.
 

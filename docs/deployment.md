@@ -166,8 +166,10 @@ Rules:
 - The shard set is fixed for the engine's life: shards are opened and migrated at `Startup`, and
   `SetShard` is rejected after. Each flow key encodes its shard, so changing the set requires a
   coordinated restart of every replica (a maintenance window), not a live/piecemeal change.
-- New top-level flows are placed across shards in proportion to their `Weight` (default 1, so evenly).
-  In a fleet of unequal databases, give a larger one a larger weight; cordoned shards are skipped.
+- New top-level flows go to non-cordoned shards. With every `Weight` at its default of 1, a replica places a
+  new flow on a shard it dispatches, so flows land where they are created; any weight other than 1 switches
+  every replica to placement over all non-cordoned shards in proportion to their weights. In a fleet of
+  unequal databases, give a larger one a larger weight (see [Resharding](resharding.md)).
   Subgraph flows, thread continuations and forks all stay on their originating shard.
 
 ```go
