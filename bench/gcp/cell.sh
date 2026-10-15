@@ -100,10 +100,18 @@ DB_HOST="$(printf '%s' "$DSN" | sed -E 's|^[^@]*@||; s|[:/].*$||')"
 DEV="$(ip route get "$DB_HOST" | sed -nE 's/.* dev ([^ ]+).*/\1/p' | head -1)"
 [[ -n "$DEV" ]] || { echo "ABORT: could not resolve the interface toward ${DB_HOST}" >&2; exit 1; }
 clear_netem() { sudo "$TC" qdisc del dev "$DEV" root 2>/dev/null || true; }
-# ANY exit must leave the interface clean, and an interrupt must END the cell: a handler that only cleared
-# netem would let the next run start at the base RTT under the target RTT's label.
-trap clear_netem EXIT
-trap 'clear_netem; exit 130' INT TERM
+# RUN_DB names the database of the run in progress, so an abort can drop it. A leftover database degrades
+# every later arm on the instance: four of them roughly halved the next arm's throughput.
+RUN_DB=""
+drop_run_db() {
+  [[ -n "$RUN_DB" ]] || return 0
+  psq "$ADMIN" "DROP DATABASE IF EXISTS ${RUN_DB} WITH (FORCE)" >/dev/null 2>&1 || echo "WARNING: could not drop ${RUN_DB}" >&2
+  RUN_DB=""
+}
+# ANY exit must leave the interface clean and the run's database gone, and an interrupt must END the cell: a
+# handler that only cleared netem would let the next run start at the base RTT under the target RTT's label.
+trap 'clear_netem; drop_run_db' EXIT
+trap 'clear_netem; drop_run_db; exit 130' INT TERM
 
 ADMIN="${DSN%/*}/postgres?sslmode=disable"
 psq() { psql "$1" -X -q -At -c "$2"; }
@@ -171,6 +179,7 @@ run_one() {
   echo "-- ${tag}  pool ${pool}  rate ${rate:-0} flows/s"
   rtt_gate
   psq "$ADMIN" "DROP DATABASE IF EXISTS ${db} WITH (FORCE)" >/dev/null
+  RUN_DB="$db"
   psq "$ADMIN" "CREATE DATABASE ${db}" >/dev/null
   # shellcheck disable=SC2086  # word splitting is the intended parse of EXTRA
   "$BENCH" -dsn "${DSN%/*}/${db}?sslmode=disable" "${WORKLOAD_ARGS[@]}" \
@@ -182,6 +191,7 @@ run_one() {
   left=$(psq "${DSN%/*}/${db}?sslmode=disable" "SELECT COUNT(*) FROM dwarf_peers" 2>/dev/null || echo "?")
   [[ "$left" == "0" ]] || echo "   WARNING: left ${left} dwarf_peers row(s) after shutdown"
   psq "$ADMIN" "DROP DATABASE IF EXISTS ${db} WITH (FORCE)" >/dev/null
+  RUN_DB=""
   sleep "${COOLDOWN%s}"
 }
 

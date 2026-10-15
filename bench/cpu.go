@@ -52,7 +52,11 @@ type hostSample struct {
 	totalAlloc uint64
 	mallocs    uint64
 	numGC      uint32
+	// gcCPUSec and usedCPUSec come from the runtime's own CPU classes, never paired with cpuNano: the runtime
+	// documents its classes as an estimate that is not comparable with the OS's CPU time (measured: 19.0 s of
+	// used CPU where getrusage counted 9.0 s, which doubled the GC share).
 	gcCPUSec   float64
+	usedCPUSec float64 // total minus idle
 }
 
 // hostUsage is the delta between two hostSamples, normalized to rates.
@@ -118,10 +122,15 @@ func sampleHost() hostSample {
 	runtime.ReadMemStats(&ms)
 	s.heapAlloc, s.heapSys = ms.HeapAlloc, ms.HeapSys
 	s.totalAlloc, s.mallocs, s.numGC = ms.TotalAlloc, ms.Mallocs, ms.NumGC
-	gcCPU := []metrics.Sample{{Name: "/cpu/classes/gc/total:cpu-seconds"}}
-	metrics.Read(gcCPU)
-	if gcCPU[0].Value.Kind() == metrics.KindFloat64 {
-		s.gcCPUSec = gcCPU[0].Value.Float64()
+	cpu := []metrics.Sample{
+		{Name: "/cpu/classes/gc/total:cpu-seconds"},
+		{Name: "/cpu/classes/total:cpu-seconds"},
+		{Name: "/cpu/classes/idle:cpu-seconds"},
+	}
+	metrics.Read(cpu)
+	if cpu[0].Value.Kind() == metrics.KindFloat64 && cpu[1].Value.Kind() == metrics.KindFloat64 && cpu[2].Value.Kind() == metrics.KindFloat64 {
+		s.gcCPUSec = cpu[0].Value.Float64()
+		s.usedCPUSec = cpu[1].Value.Float64() - cpu[2].Value.Float64()
 	}
 	return s
 }
@@ -135,8 +144,8 @@ func usageSince(before, after hostSample) hostUsage {
 	cpuSec := float64(after.cpuNano-before.cpuNano) / 1e9
 	cores := cpuSec / secs
 	gcCPUPct := 0.0
-	if cpuSec > 0 {
-		gcCPUPct = (after.gcCPUSec - before.gcCPUSec) / cpuSec * 100
+	if used := after.usedCPUSec - before.usedCPUSec; used > 0 {
+		gcCPUPct = (after.gcCPUSec - before.gcCPUSec) / used * 100
 	}
 	return hostUsage{
 		CPUCores:    cores,
