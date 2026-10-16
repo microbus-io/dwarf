@@ -139,14 +139,18 @@ func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSample
 			report.Invalidity = window + ": " + why
 		}
 	}
-	// probeThroughput takes the saturated window, then the 2/3 one at the rate the first measured.
-	probeThroughput := func(cp *volumeCheckpoint) {
+	// probeThroughput takes the saturated window, then the 2/3 one at the rate the first measured. It reports
+	// whether a window stalled, and stops there: every drain and window after it would wait on hung engines.
+	probeThroughput := func(cp *volumeCheckpoint) (stalled bool) {
 		if probe == nil {
-			return
+			return false
 		}
 		sat, why := probe(0)
 		invalid(fmt.Sprintf("saturated probe at %d step rows", cp.StepRows), why)
 		cp.Saturated = &sat
+		if sat.Stalled != "" {
+			return true
+		}
 		// A saturated window ends with a backlog of created-but-unfinished flows, which would otherwise drain
 		// into the next window and be counted as its throughput. The fill resumes on a drained database for
 		// the same reason.
@@ -155,6 +159,9 @@ func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSample
 			twoThirds, why := probe(rate)
 			invalid(fmt.Sprintf("2/3 probe at %d step rows", cp.StepRows), why)
 			cp.TwoThirds = &twoThirds
+			if twoThirds.Stalled != "" {
+				return true
+			}
 			drainRunning(ctx, engines[0])
 		}
 		fmt.Printf("probe at %d step rows: saturated %.0f steps/s (p99 %.0fms)", cp.StepRows, sat.StepsPerSec, sat.P99ms)
@@ -162,16 +169,27 @@ func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSample
 			fmt.Printf(", 2/3 %.0f steps/s (p50 %.0fms, p99 %.0fms)", cp.TwoThirds.StepsPerSec, cp.TwoThirds.P50ms, cp.TwoThirds.P99ms)
 		}
 		fmt.Println()
+		return false
 	}
 
 	start := time.Now()
+	// abandon ends the run at a stalled probe. The fill is paused around every probe, so no submitter is running.
+	abandon := func(cp volumeCheckpoint) *volumeReport {
+		report.Checkpoints = append(report.Checkpoints, cp)
+		report.DurationSec = time.Since(start).Seconds()
+		report.FlowsSubmitted = flows.Load()
+		report.Errors = errCount.Load()
+		return report
+	}
 	lastRows, lastT := 0, start
 	if probe != nil {
 		// The empty-database baseline every later checkpoint is read against. The fill rate to the first
 		// checkpoint starts after it, so it is not charged with the probe's windows, drains or rows.
 		steps, flowRows := rowCounts(ctx, engines[0])
 		cp := volumeCheckpoint{StepRows: steps, FlowRows: flowRows}
-		probeThroughput(&cp)
+		if probeThroughput(&cp) {
+			return abandon(cp)
+		}
 		report.Checkpoints = append(report.Checkpoints, cp)
 		lastRows, _ = rowCounts(ctx, engines[0])
 		lastT = time.Now()
@@ -205,7 +223,9 @@ func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSample
 			cp.HistoryMs, cp.ListFirstMs, cp.ListDeepMs, cp.StepsDiskMB, cp.FlowsDiskMB)
 		if probe != nil {
 			pause()
-			probeThroughput(&cp)
+			if probeThroughput(&cp) {
+				return abandon(cp)
+			}
 			if steps < targetSteps {
 				fill()
 			}

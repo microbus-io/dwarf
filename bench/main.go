@@ -443,6 +443,9 @@ func run() error {
 				art.Valid = false
 				art.Invalidity = fmt.Sprintf("at concurrency %d: %s", k, why)
 			}
+			if stalledRun.Load() {
+				break // the next step would start on the engines that just hung
+			}
 		}
 	}
 	art.EndedAt = time.Now().UTC()
@@ -469,7 +472,7 @@ func run() error {
 		return err
 	}
 	fmt.Println("artifact:", path)
-	if slices.ContainsFunc(art.Results, func(r stepResult) bool { return r.Stalled != "" }) {
+	if stalledRun.Load() {
 		// The deferred engine shutdowns would wait on the very thing that hung. The artifact is written;
 		// exit without them.
 		fmt.Println("exiting without engine shutdown after a stall")
@@ -492,9 +495,12 @@ func windowInvalidity(res stepResult, rate float64, maxOutstanding int) string {
 	// The signature is gaugesBefore present with gaugesAfter absent: the closing collection raced engine
 	// teardown. len, not nil: the collectors always return a non-nil map, and `omitempty` is what turns an
 	// EMPTY one into `null` in the artifact - so nil-checking here would never fire.
-	if len(res.EngineCounters) == 0 || len(res.GaugesAfter) == 0 {
-		return fmt.Sprintf("end-of-window metric collection failed (counters=%d gaugesAfter=%d) - "+
-			"every derived rate in this window is meaningless", len(res.EngineCounters), len(res.GaugesAfter))
+	// A collection that failed on ANY replica comes back nil (collectAllCounters), so a fleet total missing a
+	// replica reads as missing here rather than as an under-count - and a delta against a failed opening
+	// collection is empty, not the raw totals.
+	if len(res.EngineCounters) == 0 || len(res.GaugesBefore) == 0 || len(res.GaugesAfter) == 0 {
+		return fmt.Sprintf("metric collection failed (counters=%d gaugesBefore=%d gaugesAfter=%d) - "+
+			"every derived rate in this window is meaningless", len(res.EngineCounters), len(res.GaugesBefore), len(res.GaugesAfter))
 	}
 	if res.EngineCounters["dwarf_steps_recovered"] != 0 || res.EngineCounters["dwarf_steps_unwedged"] != 0 || res.Errors != 0 {
 		return fmt.Sprintf("errors=%d recovered=%d unwedged=%d",

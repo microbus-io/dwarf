@@ -125,6 +125,11 @@ var guard struct {
 	stall time.Duration
 }
 
+// stalledRun is set by any window the watchdog ends, so the run stops at the first stall whatever mode it is in:
+// every window after one starts on hung engines, and main exits without their shutdown, which would wait on
+// whatever hung.
+var stalledRun atomic.Bool
+
 // drainResult is what became of every flow an open-loop step created. "Nothing lost" is otherwise an inference
 // from window counters (no errors, executed = offered) that says nothing about the ~2,000 flows still in flight
 // when the window closes; this follows them to their end.
@@ -519,6 +524,7 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 		// A creator stuck in Create on a hung engine never returns, so do not wait for one. main.go exits
 		// without the engines' graceful shutdown for the same reason.
 		fmt.Println("STALLED:", stallWhy)
+		stalledRun.Store(true)
 	} else {
 		creatorsWG.Wait()
 		awaitWG.Wait()

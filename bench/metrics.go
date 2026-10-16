@@ -326,11 +326,17 @@ var agreementGauges = map[string]bool{
 // pool-wait totals (each replica owns distinct pools, so the fleet total is their sum) and merely
 // approximate for point-in-time gauges like open-connection counts, which is acceptable: those are
 // recorded for context, not arithmetic.
+//
+// It returns nil when any replica's collection failed: a fleet reading missing a replica is not a reading.
 func collectAllGauges(readers []*sdkmetric.ManualReader) map[string]float64 {
 	out := map[string]float64{}
 	seen := map[string]bool{}
 	for _, r := range readers {
-		for key, v := range collectGauges(r) {
+		g := collectGauges(r)
+		if g == nil {
+			return nil
+		}
+		for key, v := range g {
 			// The key carries its attributes (`name|k=v`), so recover the instrument name to classify it.
 			name, _, _ := strings.Cut(key, "|")
 			if agreementGauges[name] {
@@ -347,20 +353,29 @@ func collectAllGauges(readers []*sdkmetric.ManualReader) map[string]float64 {
 }
 
 // collectAllCounters sums collectCounters across every replica's reader, so a fleet total (e.g. total
-// dwarf_steps_executed, or total unwedged) reads as one map regardless of replica count.
+// dwarf_steps_executed, or total unwedged) reads as one map regardless of replica count. It returns nil when any
+// replica's collection failed: summing the others under-counts, or goes negative against a full opening total.
 func collectAllCounters(readers []*sdkmetric.ManualReader) map[string]int64 {
 	out := map[string]int64{}
 	for _, r := range readers {
-		for name, v := range collectCounters(r) {
+		c := collectCounters(r)
+		if c == nil {
+			return nil
+		}
+		for name, v := range c {
 			out[name] += v
 		}
 	}
 	return out
 }
 
-// counterDeltas subtracts the before snapshot from the after snapshot.
+// counterDeltas subtracts the before snapshot from the after snapshot. Either one nil - a failed collection -
+// gives no deltas, never the other snapshot's raw totals.
 func counterDeltas(before, after map[string]int64) map[string]int64 {
 	out := map[string]int64{}
+	if before == nil || after == nil {
+		return out
+	}
 	for name, v := range after {
 		if d := v - before[name]; d != 0 {
 			out[name] = d

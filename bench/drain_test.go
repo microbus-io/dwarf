@@ -17,9 +17,12 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
 	"github.com/microbus-io/testarossa"
 )
@@ -49,6 +52,7 @@ func TestWindowInvalidity_DrainAndStall(t *testing.T) {
 	healthy := func() stepResult {
 		return stepResult{
 			EngineCounters: map[string]int64{"dwarf_steps_executed": 1},
+			GaugesBefore:   map[string]float64{"g": 1},
 			GaugesAfter:    map[string]float64{"g": 1},
 		}
 	}
@@ -56,6 +60,14 @@ func TestWindowInvalidity_DrainAndStall(t *testing.T) {
 	res := healthy()
 	res.Drain = &drainResult{Created: 50, Completed: 50}
 	assert.Equal("", windowInvalidity(res, 0, 0))
+
+	// A failed collection at either window edge leaves its snapshot empty.
+	res = healthy()
+	res.GaugesBefore = nil
+	assert.Contains(windowInvalidity(res, 0, 0), "collection failed")
+	res = healthy()
+	res.EngineCounters = map[string]int64{}
+	assert.Contains(windowInvalidity(res, 0, 0), "collection failed")
 
 	res = healthy()
 	res.Stalled = "no task started"
@@ -103,4 +115,27 @@ func TestDrainOutstanding_GivesUpOnSilenceNotOnTime(t *testing.T) {
 	d = drainOutstanding(nil, map[string]int64{}, 3, func() int64 { return 3 }, 500*time.Millisecond)
 	assert.Equal(int64(3), d.Unfinished)
 	assert.True(time.Since(start) < 2*time.Second)
+}
+
+// TestCollectAll_OneFailedReplicaFailsTheCollection pins that a collection missing one replica reads as failed,
+// not as the other replicas' sum: an under-count, or a negative delta against a full opening total, would pass
+// every check as a real measurement.
+func TestCollectAll_OneFailedReplicaFailsTheCollection(t *testing.T) {
+	assert := testarossa.For(t)
+
+	healthy := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(healthy))
+	defer mp.Shutdown(context.Background())
+	c, err := mp.Meter("test").Int64Counter("dwarf_steps_executed")
+	assert.NoError(err)
+	c.Add(context.Background(), 5)
+	failed := sdkmetric.NewManualReader() // never registered, so its Collect errors
+
+	assert.Equal(int64(5), collectAllCounters([]*sdkmetric.ManualReader{healthy})["dwarf_steps_executed"])
+	assert.Nil(collectAllCounters([]*sdkmetric.ManualReader{healthy, failed}))
+	assert.Nil(collectAllGauges([]*sdkmetric.ManualReader{healthy, failed}))
+
+	// A delta against a failed snapshot is no deltas, never the other snapshot's raw totals.
+	assert.Len(counterDeltas(nil, map[string]int64{"x": 7}), 0)
+	assert.Len(counterDeltas(map[string]int64{"x": 7}, nil), 0)
 }
