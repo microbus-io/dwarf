@@ -1084,12 +1084,12 @@ fan-out's state means:
 
 - `fanInRow` - the cohort **converged**; the merged fan-in snapshot is stripped, scoped to the **spawn's own
   task** (`tr.From == spawnTaskName`).
-- `computeFinalState` - the cohort **failed** and so never reached its fan-in. The terminal state is the merge of
-  the tail steps, and a completed sibling of a failed cohort *is* a tail (its `successor_id` was never pointed at a
-  fan-in that never fired), so the merge base is a branch-local snapshot carrying that branch's bookkeeping. Without
-  the strip, a failed fan-out's `final_state` reports an arbitrary branch's element as the flow's own. The cohorts
-  to strip are read from **the merge base tail's own lineage chain** (`cohortSpawnChain` walks `lineage_id` upward,
-  one PK lookup per nesting level), never from the graph at large.
+- `computeFinalState` - the cohort **failed** and so never reached its fan-in, so the engine folds it as the fan-in
+  would have (`mergeCohortState`) and strips **that cohort's** names, the outermost on the tail's lineage chain
+  (`outermostSpawn`). Every inner cohort that never converged is folded and stripped of its own names the same way,
+  one level down (`simulatedFanInPart`, below). **Do not strip the inner cohorts' names from the final state:** the
+  rebuild's base is trunk state, which never held them, so the strip hits a trunk field that shares an inner `as`
+  name (`pageCount` under `forEach ... as "page"`) - a field a convergence keeps.
 
 **The strip is scoped to the cohort being closed, and BOTH halves of that scoping are load-bearing.** Stripping
 "every `forEach` in the graph" breaks two things at once:
@@ -1624,13 +1624,20 @@ scan covers `Cell` *and* `Enrich`, for every branch. Reducer order matters (`app
 commutative), which is why the scan is ordered by the branch's position in the spawn loop rather than by completion
 order. Pinned by `TestFailedFanOut_KeepsEveryBranchesIntermediateOutput`.
 
-**Nested, the rebuild starts at the OUTERMOST cohort on the tail's lineage chain** (`cohortSpawnChain`), whose
+**Nested, the rebuild starts at the OUTERMOST cohort on the tail's lineage chain** (`outermostSpawn`), whose
 spawn is on the trunk. Do not rebuild from the tail's own cohort: the first completed tail can sit deep inside
 an inner cohort that failed, and that cohort alone is not the flow's state - its base and every other branch at
 every level are outside it. Members contribute as at a convergence (`cohortContributions`): an inner fan-in
 brings its projected part whatever its status, and a completed member that spawned an inner cohort which never
-converged (`cohort_arrivals < cohort_size` or `cohort_failures > 0`) is followed by that cohort's contributions,
-rebuilt the same way - one query per such cohort, on this terminal path only.
+converged (`cohort_arrivals < cohort_size` or `cohort_failures > 0`) is followed by **the part its fan-in would have
+carried** (`simulatedFanInPart`): the same base as `fanInRow` (`fanInBase`), the same fold (`foldCohort`), the strip
+of that cohort's own names, and the same projection a real fan-in's row gives (`projectReduced`). Only the fan-in
+task is missing. **Do not hand the inner members' raw contributions to the outer fold instead:** a member's write to
+its own cohort's `as` name then survives where a convergence projects it as a delete. That costs, per such cohort, a read of
+the inner spawn's row, one read of its members, and any anchor reads its reduced fields' refs need - on this
+terminal path only. Pinned by
+`TestForEachStrip_FailedNestedFanOutMatchesConvergence` (three levels, failed at the innermost and the middle
+level, with and without a write to an inner `as` name; it fails against either shortcut above).
 
 `computeFinalState` also reads the DAG, not `step_depth`. The terminal state is the merge of the tail steps -
 completed steps with `successor_id = 0` (`mergeTerminalSteps`) - for a flow that is *not* a failed fan-out. **Do not

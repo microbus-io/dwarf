@@ -18,10 +18,16 @@ package fixtures
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
+	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -276,4 +282,333 @@ func TestFailedFanOut_KeepsEveryBranchesIntermediateOutput(t *testing.T) {
 	// The per-branch bookkeeping still does not ride forward, and the source array still does.
 	assert.False(outcome.State.Has("item"))
 	assert.True(outcome.State.Has("items"))
+}
+
+// TestForEachStrip_FailedNestedFanOutMatchesConvergence pins that a nested fan-out which FAILED reports the
+// final_state its fan-ins would have built, at every level. Each cohort that never converged is folded as its fan-in
+// would have folded it, stripped of its OWN bookkeeping only, and handed to the next cohort out as that fan-in's
+// part would have been.
+//
+// The shape is chapters -> pages -> lines, and the trunk carries `pageCount` and `lineCount` of its own - names
+// the inner cohorts also inject. Two traps:
+//   - Stripping every cohort's names from the final state deletes the TRUNK's `pageCount`/`lineCount` on a failure,
+//     while a convergence keeps them: the inner names were only ever stripped from the inner folds.
+//   - Handing a never-converged cohort's raw contributions to the outer fold keeps a Line's own write to `lineCount`,
+//     which a convergence turns into a delete: the inner fan-in strips it, and its part projects the absence.
+//
+// The successful branches' appends land either way - a failure voids only the failed task's own writes.
+func TestForEachStrip_FailedNestedFanOutMatchesConvergence(t *testing.T) {
+	t.Parallel()
+
+	run := func(t *testing.T, failAt string, lineWritesOwn bool) *workflow.FlowOutcome {
+		ctx := context.Background()
+		assert := testarossa.For(t)
+		e := engine.NewEngineUnderTest(t.Name())
+		defer e.Shutdown(ctx)
+		mux := hosts.NewMux()
+		e.SetHost(mux)
+		assert.NoError(e.Startup(t.Context()))
+
+		g := bookGraph(map[string]workflow.Reducer{"collection": workflow.ReducerAppend})
+		assert.NoError(g.Validate())
+		mux.HandleGraph("book/wf", g)
+
+		nop := func(ctx context.Context, f *workflow.Flow) error { return nil }
+		mux.HandleTask("book/Seed", nop)
+		mux.HandleTask("book/JoinLines", nop)
+		mux.HandleTask("book/JoinPages", nop)
+		mux.HandleTask("book/JoinChapters", nop)
+		mux.HandleTask("book/Chapter", func(ctx context.Context, f *workflow.Flow) error {
+			f.Set("pages", []string{"p1", "p2"})
+			return nil
+		})
+		mux.HandleTask("book/Page", func(ctx context.Context, f *workflow.Flow) error {
+			if failAt == "page" && f.GetString("chapter") == "c2" && f.GetString("page") == "p2" {
+				return errors.New("page failed")
+			}
+			f.Set("lines", []string{"l1", "l2"})
+			return nil
+		})
+		mux.HandleTask("book/Line", func(ctx context.Context, f *workflow.Flow) error {
+			at := f.GetString("chapter") + "/" + f.GetString("page") + "/" + f.GetString("line")
+			f.Set("collection", []string{at})
+			if lineWritesOwn {
+				f.Set("lineCount", 1)
+			}
+			if failAt == "line" && at == "c2/p2/l2" {
+				return errors.New("line failed")
+			}
+			return nil
+		})
+
+		_, out, err := e.Run(ctx, "book/wf", map[string]any{
+			"chapters": []string{"c1", "c2"}, "pageCount": 635, "lineCount": 9000,
+		}, nil)
+		if !assert.NoError(err) || !assert.NotNil(out) {
+			t.FailNow()
+		}
+		return out
+	}
+
+	all := []string{
+		"c1/p1/l1", "c1/p1/l2", "c1/p2/l1", "c1/p2/l2",
+		"c2/p1/l1", "c2/p1/l2", "c2/p2/l1", "c2/p2/l2",
+	}
+	for _, tc := range []struct {
+		failAt     string
+		status     string
+		collection []string
+	}{
+		{"", workflow.StatusCompleted, all},
+		{"line", workflow.StatusFailed, all[:7]},
+		{"page", workflow.StatusFailed, all[:6]},
+	} {
+		for _, writesOwn := range []bool{false, true} {
+			name := "converged"
+			if tc.failAt != "" {
+				name = tc.failAt + "_failed"
+			}
+			if writesOwn {
+				name += "_line_writes_lineCount"
+			}
+			t.Run(name, func(t *testing.T) {
+				assert := testarossa.For(t)
+				out := run(t, tc.failAt, writesOwn)
+				assert.Equal(tc.status, out.Status, out.Error)
+				assert.Equal(tc.collection, out.State.GetStrings("collection"), "every completed branch's append lands, in input order")
+				assert.Equal(635, out.State.GetInt("pageCount"), "a trunk field sharing an inner `as` name survives")
+				if writesOwn {
+					assert.False(out.State.Has("lineCount"), "a Line's own write to lineCount projects as a delete, as at its fan-in")
+				} else {
+					assert.Equal(9000, out.State.GetInt("lineCount"), "a trunk field sharing an inner `as` name survives")
+				}
+				for _, k := range []string{"chapter", "chapterIndex", "chapterCount", "page", "pageIndex", "line", "lineIndex"} {
+					assert.False(out.State.Has(k), "no cohort's bookkeeping reaches final_state: %s", k)
+				}
+			})
+		}
+	}
+}
+
+// bookGraph is the three-level fan-out the nested final-state tests run: chapters -> pages -> lines, each level
+// converging on its own fan-in, with every field in reducers wired to its reducer.
+func bookGraph(reducers map[string]workflow.Reducer) *workflow.Graph {
+	g := workflow.NewGraph("Book")
+	for _, n := range []string{"Seed", "Chapter", "Page", "Line", "JoinLines", "JoinPages", "JoinChapters"} {
+		g.SetURL(n, "book/"+n)
+	}
+	for field, r := range reducers {
+		g.SetReducer(field, r)
+	}
+	g.AddTransitionForEach("Seed", "Chapter", "chapters", "chapter")
+	g.AddTransitionForEach("Chapter", "Page", "pages", "page")
+	g.AddTransitionForEach("Page", "Line", "lines", "line")
+	g.AddTransition("Line", "JoinLines")
+	g.SetFanIn("JoinLines")
+	g.AddTransition("JoinLines", "JoinPages")
+	g.SetFanIn("JoinPages")
+	g.AddTransition("JoinPages", "JoinChapters")
+	g.SetFanIn("JoinChapters")
+	g.AddTransition("JoinChapters", workflow.End)
+	return g
+}
+
+// TestForEachStrip_FailedNestedFanOutMatchesConvergenceForEveryReducer compares two runs of one nested fan-out:
+// in one a Line fails, in the other the same Line completes having written nothing, and the fan-in tasks write
+// nothing in either. Their final states must be identical - every reducer kind folded through a simulated inner
+// fan-in must give what a real one gives. It also carries a trunk field that shares the middle cohort's `as` name
+// (`pageCount`), writes the outer and middle cohorts' bookkeeping names from a Line, deletes a trunk field, and
+// carries large fields by ref ("refs": a large trunk field, a large append base,
+// and a large field each Chapter writes, which its inner cohorts carry as a ref).
+func TestForEachStrip_FailedNestedFanOutMatchesConvergenceForEveryReducer(t *testing.T) {
+	t.Parallel()
+	big := strings.Repeat("x", 9000)
+
+	run := func(t *testing.T, fail, refs bool) *workflow.FlowOutcome {
+		ctx := context.Background()
+		assert := testarossa.For(t)
+		e := engine.NewEngineUnderTest(t.Name())
+		defer e.Shutdown(ctx)
+		mux := hosts.NewMux()
+		e.SetHost(mux)
+		assert.NoError(e.Startup(t.Context()))
+
+		g := bookGraph(map[string]workflow.Reducer{
+			"app": workflow.ReducerAppend, "uni": workflow.ReducerUnion, "cat": workflow.ReducerConcat,
+			"sum": workflow.ReducerAdd, "lo": workflow.ReducerMin, "hi": workflow.ReducerMax,
+			"all": workflow.ReducerAnd, "any": workflow.ReducerOr, "obj": workflow.ReducerMerge,
+			"bigapp": workflow.ReducerAppend,
+		})
+		assert.NoError(g.Validate())
+		mux.HandleGraph("book/wf", g)
+		nop := func(ctx context.Context, f *workflow.Flow) error { return nil }
+		for _, n := range []string{"JoinLines", "JoinPages", "JoinChapters"} {
+			mux.HandleTask("book/"+n, nop)
+		}
+		mux.HandleTask("book/Seed", func(ctx context.Context, f *workflow.Flow) error {
+			if refs {
+				f.Set("bigapp", []string{big})
+			}
+			f.Set("app", []string{"seed"})
+			return nil
+		})
+		mux.HandleTask("book/Chapter", func(ctx context.Context, f *workflow.Flow) error {
+			f.Set("pages", []string{"p1", "p2"})
+			f.Set("app", []string{"ch-" + f.GetString("chapter")})
+			f.Set("sum", 100)
+			if refs {
+				f.Set("chbig", big+f.GetString("chapter"))
+			}
+			return nil
+		})
+		mux.HandleTask("book/Page", func(ctx context.Context, f *workflow.Flow) error {
+			f.Set("lines", []string{"l1", "l2", "l3"})
+			f.Set("app", []string{"pg-" + f.GetString("chapter") + f.GetString("page")})
+			f.Set("cat", "P")
+			f.Set("obj", map[string]any{"pg" + f.GetString("page"): 1})
+			return nil
+		})
+		mux.HandleTask("book/Line", func(ctx context.Context, f *workflow.Flow) error {
+			at := f.GetString("chapter") + "/" + f.GetString("page") + "/" + f.GetString("line")
+			bad := at == "c2/p2/l2"
+			if bad && !fail {
+				return nil // the converged twin of the failing branch: it contributes nothing either
+			}
+			f.Set("app", []string{at})
+			if refs {
+				f.Set("bigapp", []string{at})
+			}
+			f.Set("uni", []string{f.GetString("line"), "x"})
+			f.Set("cat", at+";")
+			f.Set("sum", 1)
+			f.Set("lo", len(at))
+			f.Set("hi", len(at)+f.GetInt("lineIndex"))
+			f.Set("all", f.GetString("line") != "l3")
+			f.Set("any", false)
+			f.Set("obj", map[string]any{at: f.GetInt("lineIndex")})
+			f.Set("plain", at)
+			f.Set("pageIndex", 77)
+			f.Set("chapter", "written-by-a-line")
+			if f.GetString("line") == "l1" {
+				f.Del("scratch")
+			}
+			if bad {
+				return errors.New("line failed")
+			}
+			return nil
+		})
+
+		initial := map[string]any{
+			"chapters": []string{"c1", "c2"}, "pageCount": 635, "scratch": "keep", "sum": 5, "lo": 1000, "hi": 0,
+			"all": true, "any": true, "obj": map[string]any{"trunk": true}, "uni": []string{"x"}, "cat": "T:",
+		}
+		if refs {
+			initial["doc"] = big
+		}
+		_, out, err := e.Run(ctx, "book/wf", initial, nil)
+		if !assert.NoError(err) || !assert.NotNil(out) {
+			t.FailNow()
+		}
+		return out
+	}
+
+	for _, refs := range []bool{false, true} {
+		name := "inline"
+		if refs {
+			name = "refs"
+		}
+		t.Run(name, func(t *testing.T) {
+			assert := testarossa.For(t)
+			var converged, failed *workflow.FlowOutcome
+			t.Run("converged", func(t *testing.T) { converged = run(t, false, refs) })
+			t.Run("failed", func(t *testing.T) { failed = run(t, true, refs) })
+			if converged == nil || failed == nil {
+				t.FailNow()
+			}
+			assert.Equal(workflow.StatusCompleted, converged.Status, converged.Error)
+			assert.Equal(workflow.StatusFailed, failed.Status)
+			// Decoded before comparing: stored JSON bytes are not canonical, so only the values are.
+			decode := func(s workflow.State) any {
+				raw, err := json.Marshal(s)
+				assert.NoError(err)
+				var v any
+				assert.NoError(json.Unmarshal(raw, &v))
+				return v
+			}
+			assert.Equal(decode(converged.State), decode(failed.State), "a failed nested fan-out's final_state is what its fan-ins would have built")
+		})
+	}
+}
+
+// TestForEachStrip_TerminatedNestedFanOutKeepsCompletedBranches pins the other way a nested cohort is left
+// unconverged: a Terminate while one of its branches is still running, so the cohort has arrived short of its
+// size with no failure. The final state is the same simulated fold - every completed Line's append, the trunk's
+// own `pageCount`, and the Lines' own writes to `lineCount` projected as a delete.
+func TestForEachStrip_TerminatedNestedFanOutKeepsCompletedBranches(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	mux := hosts.NewMux()
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+
+	g := bookGraph(map[string]workflow.Reducer{"collection": workflow.ReducerAppend})
+	assert.NoError(g.Validate())
+	mux.HandleGraph("book/wf", g)
+	nop := func(ctx context.Context, f *workflow.Flow) error { return nil }
+	for _, n := range []string{"Seed", "JoinLines", "JoinPages", "JoinChapters"} {
+		mux.HandleTask("book/"+n, nop)
+	}
+	mux.HandleTask("book/Chapter", func(ctx context.Context, f *workflow.Flow) error {
+		f.Set("pages", []string{"p1", "p2"})
+		return nil
+	})
+	mux.HandleTask("book/Page", func(ctx context.Context, f *workflow.Flow) error {
+		f.Set("lines", []string{"l1", "l2"})
+		return nil
+	})
+	hold := make(chan struct{})
+	var release sync.Once
+	defer release.Do(func() { close(hold) }) // after the Shutdown defer, so it unwinds first
+	mux.HandleTask("book/Line", func(ctx context.Context, f *workflow.Flow) error {
+		at := f.GetString("chapter") + "/" + f.GetString("page") + "/" + f.GetString("line")
+		if at == "c2/p2/l2" {
+			select {
+			case <-hold:
+			case <-ctx.Done():
+			}
+			return nil
+		}
+		f.Set("collection", []string{at})
+		f.Set("lineCount", 1)
+		return nil
+	})
+
+	flowKey, err := e.Create(ctx, "book/wf", map[string]any{"chapters": []string{"c1", "c2"}, "pageCount": 635, "lineCount": 9000}, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	// Every Line but the held one has committed its completion.
+	shard, _, _, err := keys.ParseFlowKey(flowKey)
+	assert.NoError(err)
+	assert.True(enginetest.WaitUntil(t, 30*time.Second, func() bool {
+		return enginetest.CountRows(t, e, shard,
+			"SELECT COUNT(*) FROM dwarf_steps WHERE task_name='Line' AND status='"+workflow.StatusCompleted+"'") == 7
+	}), "seven Lines never completed")
+
+	assert.NoError(e.Terminate(ctx, flowKey, "stop"))
+	release.Do(func() { close(hold) })
+	out, err := e.Snapshot(ctx, flowKey)
+	if !assert.NoError(err) {
+		return
+	}
+	assert.Equal(workflow.StatusTerminated, out.Status)
+	assert.Equal([]string{
+		"c1/p1/l1", "c1/p1/l2", "c1/p2/l1", "c1/p2/l2", "c2/p1/l1", "c2/p1/l2", "c2/p2/l1",
+	}, out.State.GetStrings("collection"))
+	assert.Equal(635, out.State.GetInt("pageCount"))
+	assert.False(out.State.Has("lineCount"), "the Lines' own writes to lineCount project as a delete, as at their fan-in")
 }

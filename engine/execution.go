@@ -2077,6 +2077,37 @@ func queueCohortRead(b *txBatch, flowID, cohortSpawnID int, c *cohortRead) {
 	}, "SELECT step_id, task_name, status, changes, step_depth, successor_id FROM dwarf_steps WHERE flow_id=? AND lineage_id=? ORDER BY fan_out_ordinal, step_depth, step_id", flowID, cohortSpawnID)
 }
 
+// fanInBase is a fan-in's accumulator base: the spawn's changes folded onto its state, the value every branch
+// was handed. fanInRow builds its fold on it, and computeFinalState builds the fold of a cohort that never
+// converged on it too (simulatedFanInPart), so the two cannot disagree on where a cohort starts. It drops
+// identity nulls from spawnChanges in place, as fanInRow's mint needs.
+//
+// Only the ref'd fields a reducer will FOLD are materialized - a combining reducer (append/add/union/...) needs
+// its accumulated base, and folding a delta onto an absent base would silently lose everything so far. A
+// merely-carried ref is left alone, still pointing at its original anchor: resolving it would materialize the
+// payload and re-anchor it at EVERY fan-in, giving back the win in exactly the fan-out graphs refs exist for. A
+// reduced field the spawn OVERWROTE needs no base: its write replaces it, so reading the old value would be a
+// wasted anchor read inside the transaction.
+func (e *Engine) fanInBase(ctx context.Context, tx sequel.Executor, shardNum int, spawnState workflow.State, spawnChanges workflow.Changes, spawnRefs staterefs.Refs, reducers map[string]workflow.Reducer, workflowURL string) (workflow.State, error) {
+	dropIdentityNulls(spawnChanges, reducers)
+	folded := reducers
+	if spawnChanges.Overwrites().Len() > 0 {
+		folded = maps.Clone(folded)
+		for k := range spawnChanges.Overwrites().Names() {
+			delete(folded, k)
+		}
+	}
+	// resolveReducedRefs mutates the state map in place, so it gets the live map.
+	if err := e.resolveReducedRefs(ctx, tx, shardNum, spawnState, spawnRefs, folded, workflowURL); err != nil {
+		return workflow.State{}, errors.Trace(err)
+	}
+	merged := spawnState.Clone()
+	if err := merged.Apply(spawnChanges, reducers); err != nil {
+		return workflow.State{}, errors.Trace(&permanentError{err})
+	}
+	return merged, nil
+}
+
 // fanInRow folds a resolved cohort, as read by queueCohortRead, into its fan-in step's row. It returns the row,
 // the fan-in's step_depth, the cohort-exit steps whose successor_id must point at the fan-in step, and the state
 // bytes it moved (read: spawn snapshot + every cohort member's changes; written: the merged fan-in snapshot),
@@ -2088,35 +2119,15 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 		return row, 0, nil, bytes, errors.Trace(&permanentError{err})
 	}
 	spawnChanges := changesOf(c.spawnChangesJSON)
-	// Materialize only the ref'd fields a reducer will FOLD - a combining reducer (append/add/union/...) needs
-	// its accumulated base, and folding a delta onto an absent base would silently lose everything so far. A
-	// merely-carried ref is left alone and re-emitted onto the fan-in step below, still pointing at its
-	// original anchor: resolving it here would materialize the payload and re-anchor it at EVERY fan-in,
-	// giving back the win in exactly the fan-out graphs this design exists for. A reduced field the spawn
-	// OVERWROTE needs no base: its write replaces it below, so reading the old value would be a wasted anchor
-	// read inside this transaction. resolveReducedRefs mutates the state map in place, so it gets the live map.
 	spawnRefs, err := staterefs.Parse(c.spawnRefsJSON)
 	if err != nil {
 		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(err)
 	}
 	reducers := graph.Reducers()
-	dropIdentityNulls(spawnChanges, reducers)
-	folded := reducers
-	if spawnChanges.Overwrites().Len() > 0 {
-		folded = maps.Clone(folded)
-		for k := range spawnChanges.Overwrites().Names() {
-			delete(folded, k)
-		}
-	}
-	err = e.resolveReducedRefs(ctx, tx, shardNum, spawnState, spawnRefs, folded, workflowURL)
+	// The members' contributions fold onto this base in branch order.
+	merged, err := e.fanInBase(ctx, tx, shardNum, spawnState, spawnChanges, spawnRefs, reducers, workflowURL)
 	if err != nil {
 		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(err)
-	}
-	// The fan-in accumulator's base: the spawn's changes folded onto its state - the value every branch was
-	// handed - and the members' contributions fold onto it in branch order.
-	merged := spawnState.Clone()
-	if err := merged.Apply(spawnChanges, reducers); err != nil {
-		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(&permanentError{err})
 	}
 	// Fields a cohort MEMBER contributed. Their bytes are in that member's `changes` - not in the spawn's row -
 	// and a reducer's COMBINED output exists in no row at all, so neither can be anchored at the spawn. They are
