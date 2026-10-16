@@ -440,7 +440,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// something reads it - a step's state is a full input snapshot, so most fields on most steps are carried
 	// rather than read, and decoding them would cost several times their byte length for the whole duration
 	// of the host call.
-	state, _ := workflow.NewState(stateJSON)
+	state, err := workflow.NewState(stateJSON)
 	// Materialize any field this step carries BY REFERENCE (see staterefs.go). Resolving here, once, is what
 	// keeps the ref encoding out of everything downstream: the carrier, `when` evaluation, forEach expansion,
 	// the transport to a remote task, and the transition machinery all work on literals and never learn refs
@@ -448,9 +448,12 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// fields arrived as refs (and so must be carried, never re-anchored against this step). resolveStateRefs
 	// mutates the state map in place, so it gets the live backing map.
 	//
-	// Refs this replica cannot read fail the step, like a ref it cannot resolve: running the task without the
-	// fields they point at would lose them silently.
-	inheritedRefs, err := staterefs.Parse(stateRefsJSON)
+	// A state or refs column this replica cannot read fails the step, like a ref it cannot resolve: running the
+	// task on empty input, or without the fields the refs point at, would lose them silently.
+	var inheritedRefs staterefs.Refs
+	if err == nil {
+		inheritedRefs, err = staterefs.Parse(stateRefsJSON)
+	}
 	var refBytes int
 	if err == nil {
 		// No turn here: the resolve takes one only around an anchor read, so a step with no refs, a cache hit
@@ -1935,7 +1938,10 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		tx.QueryRowContext(ctx, "SELECT state, changes, state_refs FROM dwarf_steps WHERE step_id=?", stepID).Scan(&ourStateJSON, &ourChangesJSON, &ourRefsJSON)
 		txBytes.stateRead = len(ourStateJSON)
 		txBytes.changesRead = len(ourChangesJSON)
-		ourState, _ := workflow.NewState(ourStateJSON)
+		ourState, serr := workflow.NewState(ourStateJSON)
+		if serr != nil {
+			return errors.Trace(&permanentError{serr})
+		}
 		ourChanges := changesOf(ourChangesJSON)
 		ourRefs, rerr := staterefs.Parse(ourRefsJSON)
 		if rerr != nil {
@@ -2077,7 +2083,10 @@ func queueCohortRead(b *txBatch, flowID, cohortSpawnID int, c *cohortRead) {
 // which the caller emits after its transaction commits.
 func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nextStepDepth, cohortSpawnID int, c *cohortRead, fanInTaskName string, graph *workflow.Graph, workflowURL string) (row successorRow, depth int, exitStepIDs []int, bytes stateByteCount, err error) {
 	bytes = stateByteCount{stateRead: len(c.spawnStateJSON), changesRead: len(c.spawnChangesJSON) + c.changesRead}
-	spawnState, _ := workflow.NewState(c.spawnStateJSON)
+	spawnState, err := workflow.NewState(c.spawnStateJSON)
+	if err != nil {
+		return row, 0, nil, bytes, errors.Trace(&permanentError{err})
+	}
 	spawnChanges := changesOf(c.spawnChangesJSON)
 	// Materialize only the ref'd fields a reducer will FOLD - a combining reducer (append/add/union/...) needs
 	// its accumulated base, and folding a delta onto an absent base would silently lose everything so far. A

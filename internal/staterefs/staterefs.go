@@ -661,8 +661,13 @@ func (l *Linker) Seed(anchorID int, merged workflow.State, refsJSON []byte) {
 }
 
 func (l *Linker) resolve(ctx context.Context, state workflow.State, refs Refs, want map[string]bool, load Loader, shared bool) (int, error) {
-	if state.IsZero() || len(refs) == 0 {
+	if len(refs) == 0 {
 		return 0, nil
+	}
+	if state.IsZero() {
+		// Refs with nowhere to resolve into are a state that failed to load; resolving nothing would run the
+		// caller on input missing every field they point at.
+		return 0, errors.New("state refs given with no state to resolve them into")
 	}
 	values, err := l.fetch(ctx, refs, want, load, shared)
 	if err != nil {

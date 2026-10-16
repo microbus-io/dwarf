@@ -27,6 +27,7 @@ import (
 
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
@@ -139,6 +140,64 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 	assert.Error(err)
 	_, err = e.resolveStateRefs(ctx, db, 1, newState(), staterefs.Refs{"x": {Anchor: 999}}, nil, "u")
 	assert.Error(err)
+
+	// An anchor whose column does not decode says so, rather than reading as a field it does not hold.
+	_, err = db.ExecContext(ctx,
+		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, state, changes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		1, 2, "s2", "Broken", "u", workflow.StatusCompleted, 60000, []byte(`[1]`), []byte(`{}`),
+	)
+	assert.NoError(err)
+	_, err = e.resolveStateRefs(ctx, db, 1, newState(), staterefs.Refs{"x": {Anchor: 2}}, nil, "u")
+	if assert.Error(err) {
+		assert.Contains(err.Error(), "unreadable state")
+	}
+}
+
+// TestStateRefs_UnreadableStateFailsTheStep pins that a step whose state column does not decode fails, rather
+// than running its task on empty input and losing every field for good. B parks, its state is rewritten to a
+// JSON value that is not an object, and the Resume's dispatch fails the flow without running the task again.
+func TestStateRefs_UnreadableStateFailsTheStep(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	var bRuns atomic.Int32
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("Unreadable")
+	g.SetURL("B", "unreadable/b")
+	g.AddTransition("B", workflow.End)
+	mux.HandleGraph("unreadable/g", g)
+	mux.HandleTask("unreadable/b", func(ctx context.Context, f *workflow.Flow) error {
+		bRuns.Add(1)
+		yield, err := f.Interrupt(nil, nil)
+		if yield || err != nil {
+			return err
+		}
+		return nil
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+
+	flowKey, err := e.Create(ctx, "unreadable/g", map[string]any{"doc": "keep"}, nil)
+	assert.NoError(err)
+	enginetest.AwaitFlowStatus(t, e, flowKey, workflow.StatusInterrupted, 10*time.Second)
+	bIDs := stepIDsByTask(t, e, "B")
+	assert.Len(bIDs, 1)
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET state=? WHERE step_id=?", []byte(`[1]`), bIDs[0])
+	assert.NoError(err)
+
+	assert.NoError(e.Resume(ctx, flowKey, nil))
+	enginetest.AwaitFlowStatus(t, e, flowKey, workflow.StatusFailed, 10*time.Second)
+	assert.Equal(int32(1), bRuns.Load(), "the task must not run on input it could not read")
+	outcome, err := e.Snapshot(ctx, flowKey)
+	if assert.NoError(err) {
+		assert.Contains(outcome.Error, "JSON object", "the step failed on its unreadable state")
+	}
 }
 
 // TestStateRefs_CarryAcrossFanOut is the end-to-end shape the design exists for, asserted on what is actually

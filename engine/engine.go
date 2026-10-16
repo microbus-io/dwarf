@@ -909,6 +909,11 @@ func (e *Engine) initRuntime() error {
 	e.latchStop = make(chan struct{})
 	e.started.Store(true)
 
+	// The state cache exists before the gauge callback that reads it is registered.
+	cacheBudget, cacheSource := e.stateCacheBudget()
+	e.stateCache = staterefs.NewCache(cacheBudget)
+	e.logger.InfoContext(e.lifetimeCtx, "State cache sized", "bytes", cacheBudget, "source", cacheSource)
+
 	// Create the dwarf_* instruments and register the observable-gauge callback before workers start
 	// emitting. Falls back to the global (no-op) provider when none was injected.
 	err := e.initMetrics()
@@ -928,9 +933,6 @@ func (e *Engine) initRuntime() error {
 		e.unwindRuntime()
 		return errors.New("injected fault: " + engineseams.FaultInitRuntime)
 	}
-	cacheBudget, cacheSource := e.stateCacheBudget()
-	e.stateCache = staterefs.NewCache(cacheBudget)
-	e.logger.InfoContext(e.lifetimeCtx, "State cache sized", "bytes", cacheBudget, "source", cacheSource)
 	for _, idx := range e.db.Indices() {
 		// A shard without a piston has no supply cycle, so nothing on it is ever dispatched while the replica
 		// goes on advertising itself as alive there - a half-supplied engine reporting success. Startup

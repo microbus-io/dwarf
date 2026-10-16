@@ -235,8 +235,8 @@ func TestLinker_FlattenSplicesWithoutDecoding(t *testing.T) {
 }
 
 // newState is an initialized empty State - the destination a Resolve writes into. The ZERO State is
-// deliberately not that: it allocates nothing, so Resolve declines it rather than silently resolving into
-// a value the caller cannot see.
+// deliberately not that: it allocates nothing, so Resolve refuses it with an error rather than silently
+// resolving into a value the caller cannot see.
 func newState() workflow.State {
 	s, _ := workflow.NewState()
 	return s
@@ -379,4 +379,19 @@ func TestLinker_SeedServesTheMintedAnchor(t *testing.T) {
 	// Nothing to seed is a no-op, malformed refs included.
 	linker.Seed(anchor, merged, []byte("{}"))
 	linker.Seed(anchor, merged, []byte("not json"))
+}
+
+// TestLinker_ResolveRefusesAZeroState pins that refs with no state to resolve into are an error: a state that
+// failed to load would otherwise run its caller on input missing every field the refs point at.
+func TestLinker_ResolveRefusesAZeroState(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	load := func(ctx context.Context, ids []int) (map[int]Anchor, error) {
+		return map[int]Anchor{7: {State: map[string]json.RawMessage{"doc": json.RawMessage(`"d"`)}}}, nil
+	}
+	_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(context.Background(), workflow.State{}, Refs{"doc": {Anchor: 7}}, nil, load)
+	assert.Error(err)
+	n, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(context.Background(), workflow.State{}, nil, nil, load)
+	assert.NoError(err, "a zero state with no refs has nothing to resolve")
+	assert.Equal(0, n)
 }

@@ -86,6 +86,7 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_workers_resident` | gauge | — | worker goroutines that exist. It grows on demand under load and falls again as workers that have been mostly idle retire, never below the connection-derived floor. Rising and settling back is that working; wide oscillation at steady load is not | `dwarf_workers_resident` |
 | `dwarf_state_in_flight_bytes` | gauge | — | state payload this replica is holding across host calls right now, summed over the tasks currently inside a task call | `dwarf_state_in_flight_bytes` |
 | `dwarf_state_in_flight_steps` | gauge | — | tasks currently inside a task call — the denominator for the line above | `dwarf_state_in_flight_steps` |
+| `dwarf_state_cache_bytes` | gauge | — | memory the state cache is charged for right now. The cache is bounded by `SetStateCacheSize` and by 65,536 fields, so it is full when this is pinned at that size, or well below it once 65,536 small fields are held (about 285 MB at the 4 KB minimum per field) | `dwarf_state_cache_bytes` |
 
 The counters increment inline at their event sites; the gauges are observable (async) and read engine state
 at collection time. No gauge queries the database when it is collected, so a short scrape interval costs
@@ -139,6 +140,7 @@ replica count:**
 | `dwarf_workers_resident` | **per-replica** (this replica's workers) | `sum` |
 | `dwarf_state_in_flight_bytes` | **per-replica** (this replica's in-flight tasks) | `sum` |
 | `dwarf_state_in_flight_steps` | **per-replica** (this replica's in-flight tasks) | `sum` |
+| `dwarf_state_cache_bytes` | **per-replica** (this replica's state cache) | `sum` |
 | `dwarf_steps_pending` | **per-shard** (reported by the shard's leading replica) | `max` per shard and priority, then `sum` across shards |
 | `dwarf_steps_oldest_pending_age_seconds` | **per-shard** (reported by the shard's leading replica) | `max` |
 | `dwarf_steps_dispatch_lag_seconds` | **per-shard** (reported by each replica dispatching the shard) | `max` |

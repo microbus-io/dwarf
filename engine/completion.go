@@ -355,7 +355,10 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 	if err != nil {
 		return workflow.State{}, errors.Trace(err)
 	}
-	spawnState, _ := workflow.NewState(spawnStateJSON)
+	spawnState, err := workflow.NewState(spawnStateJSON)
+	if err != nil {
+		return workflow.State{}, errors.Trace(&permanentError{err})
+	}
 	spawnChanges := changesOf(spawnChangesJSON)
 	// FLATTEN: final_state is a flow-boundary value, so everything the spawn carried by reference is materialized
 	// here - unlike the fan-in, which may pass a carried ref through. resolveStateRefs mutates the map in place.

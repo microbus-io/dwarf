@@ -17,6 +17,7 @@ limitations under the License.
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"strings"
@@ -70,6 +71,15 @@ func (e *Engine) linkerFor(shardNum int) *staterefs.Linker {
 	return e.linkers[shardNum]
 }
 
+// decodeAnchorColumn decodes an anchor's state or changes column into its fields. An empty column holds none, as
+// for a State.
+func decodeAnchorColumn(data []byte, fields *map[string]json.RawMessage) error {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil
+	}
+	return json.Unmarshal(data, fields)
+}
+
 // anchorLoader adapts a shard handle to the Linker's Loader: one query for every anchor at once, which is
 // what the policy's "an anchor's other fields are free" tier is priced on.
 //
@@ -114,8 +124,15 @@ func anchorLoader(db sequel.Executor, readBytes *int) staterefs.Loader {
 				return nil, errors.Trace(err)
 			}
 			anchor := staterefs.Anchor{Refs: refs}
-			json.Unmarshal(stateJSON, &anchor.State)
-			json.Unmarshal(changesJSON, &anchor.Changes)
+			// An unreadable column must say so: left undecoded, every field in it reads as "not found".
+			// It is a pure function of stored data, so it is permanent: a persisted write must not retry it, and a
+			// path that terminalizes a flow whatever its state holds must not be stopped by it.
+			if err := decodeAnchorColumn(stateJSON, &anchor.State); err != nil {
+				return nil, errors.Trace(&permanentError{errors.New("anchor step %d: unreadable state: %v", anchorID, err)})
+			}
+			if err := decodeAnchorColumn(changesJSON, &anchor.Changes); err != nil {
+				return nil, errors.Trace(&permanentError{errors.New("anchor step %d: unreadable changes: %v", anchorID, err)})
+			}
 			fetched[anchorID] = anchor
 		}
 		if err := rows.Err(); err != nil {
