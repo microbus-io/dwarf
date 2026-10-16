@@ -62,7 +62,8 @@ type FlowStep struct {
 	// State is the step's input: the state the task received.
 	State State `json:"state,omitzero"`
 	// Changes is what the task wrote. A field it overwrote holds its new value, and a field it deleted
-	// holds null.
+	// holds null. On a field with a reducer, a contribution is the task's own addition, not the field's new
+	// value; the next step's State holds that.
 	Changes State `json:"changes,omitzero"`
 	// InterruptPayload is the payload the task passed to Flow.Interrupt, if it interrupted.
 	InterruptPayload State `json:"interruptPayload,omitzero"`
