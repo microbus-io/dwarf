@@ -27,6 +27,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -112,7 +113,7 @@ func TestCrossShardReplicaAwait(t *testing.T) {
 
 	// Await them all at once from the replica that ran none of them. Concurrent by design: one sweep has
 	// to resolve keys belonging to several shards, which is the case a serial await would never produce.
-	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	var group sync.WaitGroup
 	var lock sync.Mutex

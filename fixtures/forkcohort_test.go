@@ -419,7 +419,7 @@ func TestForkCohort_SourceEdgeIntoItsOwnFanIn(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	forkOutcome, err := eng.Await(awaitCtx, forkKey)
 	if !assert.NoError(err) {

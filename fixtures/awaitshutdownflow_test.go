@@ -24,6 +24,7 @@ import (
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -76,7 +77,7 @@ func TestAwaitShutdownflow(t *testing.T) {
 		err error
 	}
 	done := make(chan awaitResult, 1)
-	awaitCtx, cancelAwait := context.WithTimeout(ctx, 30*time.Second)
+	awaitCtx, cancelAwait := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 	defer cancelAwait()
 	// Armed BEFORE the goroutine that triggers it, which is the only ordering that works here: the waiter
 	// has to be registered before the statement that drives the engine to the checkpoint.

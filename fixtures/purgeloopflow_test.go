@@ -33,6 +33,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -183,7 +184,7 @@ func TestPurgeLoopflow(t *testing.T) {
 
 	// Release the blocking task and let it finish so the engine drains cleanly on cleanup.
 	releaseTask()
-	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	outcome, err = eng.Await(awaitCtx, blockKey)
 	if assert.NoError(err) {

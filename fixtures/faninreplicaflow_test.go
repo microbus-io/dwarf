@@ -32,6 +32,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -134,7 +135,7 @@ func TestFanInReplicaflow(t *testing.T) {
 	isSibling := map[string]bool{"B": true, "C": true, "D": true}
 
 	for i, k := range keys {
-		awaitCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		awaitCtx, cancel := context.WithTimeout(ctx, 60*time.Second*enginetest.TimeoutScale())
 		out, err := creators[i].Await(awaitCtx, k)
 		cancel()
 		if !assert.NoError(err) {

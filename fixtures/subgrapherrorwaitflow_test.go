@@ -105,7 +105,7 @@ func TestSubgraphErrorWaitflow(t *testing.T) {
 	// Register an Await on the child key while the child is still running: it must block, then be woken by the
 	// failure's signalStop. The ctx is generous so it never gates the outcome; the wake bound below is what the
 	// test asserts on.
-	awaitCtx, cancelAwait := context.WithTimeout(ctx, 30*time.Second)
+	awaitCtx, cancelAwait := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 	defer cancelAwait()
 	awaitCh := make(chan outcome, 1)
 	parked := engineseams.Seams(eng).Waiter(engineseams.Join(engineseams.CheckpointAwaitParked, child)) // armed before the goroutine that trips it

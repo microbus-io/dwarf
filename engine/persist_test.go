@@ -107,7 +107,7 @@ func TestPersist_CompletionWriteContentionIsAbsorbedWithoutReExecution(t *testin
 	assert.NoError(e.Startup(t.Context()))
 	e.seams.InjectN(engineseams.Join(engineseams.FaultCompletionContention, "A"), 3) // three lost deadlocks, then the write lands
 
-	runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	runCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	_, outcome, err := e.Run(runCtx, "p/contention/wf", nil, nil)
 	if assert.NoError(err) && assert.NotNil(outcome) {
@@ -367,7 +367,7 @@ func TestPersist_CancelRerouteWriteIsPersisted(t *testing.T) {
 		<-started
 		assert.NoError(e.Cancel(ctx, fk, "stop"))
 		close(release)
-		awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 		defer cancel()
 		out, err := e.Await(awaitCtx, fk)
 		if !assert.NoError(err) || !assert.NotNil(out) {

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -154,7 +155,7 @@ func TestSetDefaultPriority_RejectsNonPositive(t *testing.T) {
 	assert.NoError(e2.SetDefaultPriority(7))
 	assert.NoError(e2.Startup(t.Context()))
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute) // bounds only a hang
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*enginetest.TimeoutScale()) // bounds only a hang
 	defer cancel()
 	_, out, err := e2.Run(ctx, "prio/g", nil, nil)
 	if !assert.NoError(err, "a flow at the default priority must dispatch") {

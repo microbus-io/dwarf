@@ -105,7 +105,7 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 	assert.NoError(err)
 	e.recoverOrphanedFlows(ctx, db, shard, true)
 
-	awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	out, err := e.Await(awaitCtx, fk)
 	if assert.NoError(err) {
@@ -221,7 +221,7 @@ func TestFaultSite_SubgraphSpawnErr(t *testing.T) {
 func createInterruptedFlow(t *testing.T, e *Engine, url string) string {
 	t.Helper()
 	assert := testarossa.For(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	fk, err := e.Create(ctx, url, nil, nil)
 	assert.NoError(err)
@@ -597,7 +597,7 @@ func TestFaultSite_InterruptWriteRetried(t *testing.T) {
 
 	e.seams.Inject(engineseams.FaultInterruptChainWrite)
 	defer e.seams.Withdraw(engineseams.FaultInterruptChainWrite)
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	fk, err := e.Create(ctx, "ftbintr/g", nil, nil)
 	assert.NoError(err)
@@ -705,7 +705,7 @@ func TestFaultSite_FailFlowFinalStateErr(t *testing.T) {
 					}
 				}()
 			}
-			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second*enginetest.TimeoutScale())
 			defer cancel()
 			_, out, err := e.Run(ctx, tc.url, map[string]any{"carried": 1, "items": []string{"good", "bad"}}, nil)
 			if !assert.NoError(err) || !assert.NotNil(out) {

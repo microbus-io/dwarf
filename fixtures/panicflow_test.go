@@ -29,6 +29,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -87,7 +88,7 @@ func TestPanicflow(t *testing.T) {
 
 		// A bounded Await: if the panic wedged the step, this would block until the deadline rather than
 		// returning a prompt terminal outcome.
-		awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second*enginetest.TimeoutScale())
 		defer cancel()
 
 		_, outcome, err := eng.Run(awaitCtx, "panicflow.verify:0/bare", nil, nil)
@@ -101,7 +102,7 @@ func TestPanicflow(t *testing.T) {
 	t.Run("panic_with_onError_routes_to_handler", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second*enginetest.TimeoutScale())
 		defer cancel()
 
 		_, outcome, err := eng.Run(awaitCtx, "panicflow.verify:0/handled", nil, nil)
@@ -115,7 +116,7 @@ func TestPanicflow(t *testing.T) {
 	t.Run("mistyped_getter_fails_the_step_and_routes_to_onError", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second*enginetest.TimeoutScale())
 		defer cancel()
 
 		_, outcome, err := eng.Run(awaitCtx, "panicflow.verify:0/mistyped",

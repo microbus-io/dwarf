@@ -120,7 +120,7 @@ func TestCrossShardPriorityflow(t *testing.T) {
 		highKeys = append(highKeys, k)
 	}
 
-	deadline, cancel := context.WithTimeout(ctx, 60*time.Second)
+	deadline, cancel := context.WithTimeout(ctx, 60*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	for _, k := range highKeys {
 		outcome, err := eng.Await(deadline, k)

@@ -190,7 +190,7 @@ func TestChaosSoak(t *testing.T) {
 		}
 	}
 	for _, k := range all {
-		awaitCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		awaitCtx, cancel := context.WithTimeout(ctx, 60*time.Second*enginetest.TimeoutScale())
 		_, err := eng.Await(awaitCtx, k)
 		cancel()
 		if err != nil && errors.StatusCode(err) == 0 {
@@ -549,7 +549,7 @@ func TestChaosSoak_Faults(t *testing.T) {
 		}
 	}
 	for _, k := range all {
-		awaitCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		awaitCtx, cancel := context.WithTimeout(ctx, 60*time.Second*enginetest.TimeoutScale())
 		_, err := eng.Await(awaitCtx, k)
 		cancel()
 		if err != nil && errors.StatusCode(err) == 0 {

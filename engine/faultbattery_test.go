@@ -122,7 +122,7 @@ func newFaultBatteryEngine(t *testing.T, prefix string, cfg func(*Engine)) (*Eng
 func batteryRun(t *testing.T, e *Engine, url string) (string, *workflow.FlowOutcome) {
 	t.Helper()
 	assert := testarossa.For(t)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*enginetest.TimeoutScale())
 	defer cancel()
 	fk, out, err := e.Run(ctx, url, nil, nil)
 	if !assert.NoError(err) || !assert.NotNil(out) {

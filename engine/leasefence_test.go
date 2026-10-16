@@ -172,7 +172,7 @@ func zombieDispatch(t *testing.T, eng *Engine, flowURL, blockTaskName string, ta
 	// so a free worker re-claims it (bumping lease_seq) and re-runs the task to completion.
 	expireLease(t, eng, flowKey, blockTaskName)
 
-	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	outcome, err = eng.Await(awaitCtx, flowKey)
 	if !assert.NoError(err) {
@@ -399,7 +399,7 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	}
 	eng.recoverExpiredLeases(ctx) // ring the doorbell so a free worker re-claims the now-pending A
 
-	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	outcome, err := eng.Await(awaitCtx, flowKey)
 	if !assert.NoError(err) || !assert.NotNil(outcome) {

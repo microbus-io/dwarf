@@ -26,6 +26,7 @@ import (
 
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -118,7 +119,7 @@ func TestPayloadVer_NewerFlowIsDeferredUnrun(t *testing.T) {
 	setFlowPayloadVer(t, db, flowID, payloadVer)
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=NOW_UTC() WHERE step_id=?", stepID)
 	assert.NoError(err)
-	awaitCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	awaitCtx, cancel := context.WithTimeout(ctx, 15*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	out, err := e.Await(awaitCtx, fk)
 	assert.NoError(err)
@@ -158,7 +159,7 @@ func TestPayloadVer_DeferralBoundFailsTheStep(t *testing.T) {
 	assert.NoError(err)
 
 	assert.NoError(e.Resume(ctx, fk, nil))
-	awaitCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	awaitCtx, cancel := context.WithTimeout(ctx, 15*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	out, err = e.Await(awaitCtx, fk)
 	assert.NoError(err)

@@ -31,6 +31,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -104,7 +105,7 @@ func TestTwoReplicaflow(t *testing.T) {
 
 		// Await each flow (on its creating replica); either replica may have executed any given step.
 		for i, k := range keys {
-			awaitCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			awaitCtx, cancel := context.WithTimeout(ctx, 60*time.Second*enginetest.TimeoutScale())
 			out, err := creators[i].Await(awaitCtx, k)
 			cancel()
 			if assert.NoError(err) {
@@ -166,7 +167,7 @@ func TestTwoReplicaflow(t *testing.T) {
 		}
 
 		start := time.Now()
-		awaitCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		awaitCtx, cancel := context.WithTimeout(ctx, 15*time.Second*enginetest.TimeoutScale())
 		out, err := awaiter.Await(awaitCtx, k)
 		cancel()
 		elapsed := time.Since(start)

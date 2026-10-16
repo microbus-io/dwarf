@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
@@ -384,7 +385,7 @@ func TestBoard_SweepsWhileCallersComeAndGo(t *testing.T) {
 	var group sync.WaitGroup
 	for i := range 32 {
 		group.Go(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second*enginetest.TimeoutScale())
 			defer cancel()
 			// Half the callers are resolvable and half are not, so departures and releases interleave.
 			key := fmt.Sprintf("1-%d-x", i)

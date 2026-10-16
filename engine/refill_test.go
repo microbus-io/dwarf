@@ -23,6 +23,7 @@ import (
 
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/pipeline"
 
 	"github.com/microbus-io/dwarf/workflow"
@@ -63,7 +64,7 @@ func TestRefillDecoupled_MultiShardDrains(t *testing.T) {
 		assert.NoError(err)
 		keys[i] = k
 	}
-	deadline, cancel := context.WithTimeout(ctx, 30*time.Second)
+	deadline, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	shardsSeen := map[string]bool{}
 	for _, k := range keys {
@@ -103,7 +104,7 @@ func TestRefillInterval_OneCyclePerPistonNoTrigger(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	deadline, cancel := context.WithTimeout(ctx, 20*time.Second)
+	deadline, cancel := context.WithTimeout(ctx, 20*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	outcome, err := e.Await(deadline, k)
 	if assert.NoError(err) {
@@ -293,7 +294,7 @@ func TestRefillInterval_DeepBacklogLiveness(t *testing.T) {
 		assert.NoError(err)
 		keys[i] = k
 	}
-	deadline, cancel := context.WithTimeout(ctx, 20*time.Second)
+	deadline, cancel := context.WithTimeout(ctx, 20*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	for _, k := range keys {
 		outcome, err := e.Await(deadline, k)

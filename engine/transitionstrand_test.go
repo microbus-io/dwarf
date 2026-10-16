@@ -132,7 +132,7 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 	_, err = db2.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -1000) WHERE flow_id=?", flowID)
 	assert.NoError(err)
 	e2.runRecoverySweep(ctx, false)
-	awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	out, err := e2.Await(awaitCtx, fk)
 	if assert.NoError(err) {
@@ -190,7 +190,7 @@ func slowWorkerReplay(t *testing.T, e *Engine, mux *hosts.Mux, flowURL string, i
 	aDoneBase := e.seams.Visits(aDone)
 
 	e.seams.Resume(engineseams.CheckpointBeforeTransitionTx)
-	awaitCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	awaitCtx, cancel := context.WithTimeout(ctx, 15*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	out, err := e.Await(awaitCtx, fk)
 	if assert.NoError(err) {
@@ -431,7 +431,7 @@ func TestBumpCohortArrivals_Fence(t *testing.T) {
 	assert.NoError(err)
 
 	close(release)
-	awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	out, err := e.Await(awaitCtx, fk)
 	if assert.NoError(err) {

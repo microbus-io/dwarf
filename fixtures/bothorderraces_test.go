@@ -140,7 +140,7 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 
 	createInterrupted := func(t *testing.T, e *engine.Engine, url string) string {
 		assert := testarossa.For(t)
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second*enginetest.TimeoutScale())
 		defer cancel()
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)

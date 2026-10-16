@@ -115,7 +115,7 @@ func TestFanInNoCohort_FailsInsteadOfHotLooping(t *testing.T) {
 
 	// The step must FAIL, not hot-loop. A bounded Await is the assertion: before the guard this never
 	// returned, because the flow never left `running`.
-	awaitCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	awaitCtx, cancel := context.WithTimeout(ctx, 20*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	out, err := e.Await(awaitCtx, flowKey)
 	if !assert.NoError(err, "the flow must terminate, not hot-loop") {

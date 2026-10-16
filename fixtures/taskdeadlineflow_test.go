@@ -25,6 +25,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -74,7 +75,7 @@ func TestTaskdeadlineflow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	start := time.Now()
-	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	_, outcome, err := eng.Run(timeoutCtx, "taskdeadlineflow.verify:428/flow", nil, nil)
 	elapsed := time.Since(start)

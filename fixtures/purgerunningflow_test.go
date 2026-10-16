@@ -23,6 +23,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -87,7 +88,7 @@ func TestPurgerunningflow(t *testing.T) {
 
 	// Release the task so the flow completes and the engine can drain on cleanup.
 	close(release)
-	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	outcome, err := eng.Await(timeoutCtx, flowKey)
 	if assert.NoError(err) {

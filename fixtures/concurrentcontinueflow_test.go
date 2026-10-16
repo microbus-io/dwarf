@@ -39,6 +39,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -131,7 +132,7 @@ func TestConcurrentContinueflow(t *testing.T) {
 
 	// Release the winner; it derives from turn 1's final_state (counter=1) and completes at counter=2.
 	releaseTask()
-	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 	out, err := eng.Await(awaitCtx, winner)
 	cancel()
 	if assert.NoError(err) {

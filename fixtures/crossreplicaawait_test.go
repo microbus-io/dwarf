@@ -24,6 +24,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -87,7 +88,7 @@ func TestCrossReplicaAwait(t *testing.T) {
 
 	// Await on eng1. eng1 fires no local status-change notification for this flow (it never runs it), so
 	// returning here requires eng2's cross-replica NotifyStatusChange to have woken the waiter.
-	timeoutCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	timeoutCtx, cancel := context.WithTimeout(ctx, 15*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	outcome, err := eng1.Await(timeoutCtx, flowKey)
 	if !assert.NoError(err) {

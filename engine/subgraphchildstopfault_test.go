@@ -101,7 +101,7 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 	assert.True(child != "", "expected the inner task to capture the child flow key")
 
 	// Register an Await on the child key while the child is still running, so it blocks and then must be woken.
-	awaitCtx, cancelAwait := context.WithTimeout(ctx, 30*time.Second)
+	awaitCtx, cancelAwait := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 	defer cancelAwait()
 	type outcome struct {
 		out *workflow.FlowOutcome

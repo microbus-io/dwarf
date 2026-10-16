@@ -90,7 +90,7 @@ func TestRecoveryTick_LightPassRecoversLeases(t *testing.T) {
 		"SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusRunning+"' AND lease_expires<=NOW_UTC()", flowID),
 		"a light pass left the expired lease in place")
 
-	awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	out, err := e.Await(awaitCtx, fk)
 	if assert.NoError(err) {

@@ -112,7 +112,7 @@ func createFlows(t *testing.T, from *engine.Engine, name string, n int) []string
 func awaitFlows(t *testing.T, budget time.Duration, from *engine.Engine, keys []string) {
 	t.Helper()
 	assert := testarossa.For(t)
-	awaitCtx, cancel := context.WithTimeout(context.Background(), budget)
+	awaitCtx, cancel := context.WithTimeout(context.Background(), budget*enginetest.TimeoutScale())
 	defer cancel()
 	for _, k := range keys {
 		out, err := from.Await(awaitCtx, k)

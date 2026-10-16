@@ -23,6 +23,7 @@ import (
 
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/turnstile"
 	"github.com/microbus-io/dwarf/workflow"
@@ -116,7 +117,7 @@ func TestRecoveryReset_TakesATurn(t *testing.T) {
 	assert.Equal(0, freeSamples, "the reset must hold a turn while it waits to run")
 	eng.seams.Resume(engineseams.CheckpointBeforeRecoveryReset)
 
-	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	out, err := eng.Await(awaitCtx, flowKey)
 	if assert.NoError(err) && assert.NotNil(out) {

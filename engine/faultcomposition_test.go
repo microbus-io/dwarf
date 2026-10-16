@@ -234,7 +234,7 @@ func TestFaultComposition_CompoundWakeLoss(t *testing.T) {
 	// dropped), never the fast wake.
 	outCh := make(chan *workflow.FlowOutcome, 1)
 	go func() {
-		awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second*enginetest.TimeoutScale())
 		defer cancel()
 		out, _ := e.Await(awaitCtx, fk)
 		outCh <- out

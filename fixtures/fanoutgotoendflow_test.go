@@ -23,6 +23,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -81,7 +82,7 @@ func TestFanoutgotoendflow(t *testing.T) {
 	t.Run("goto_end_terminates_the_loop", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		runCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		runCtx, cancel := context.WithTimeout(ctx, 20*time.Second*enginetest.TimeoutScale())
 		defer cancel()
 		flowKey, outcome, err := eng.Run(runCtx, "fanoutgotoendflow.verify:428/fan-out-goto-end", nil, nil)
 		// Guarded, because the regression this pins is a flow that never terminates: Run then returns a NIL

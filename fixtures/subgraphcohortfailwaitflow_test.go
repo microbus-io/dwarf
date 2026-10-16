@@ -26,6 +26,7 @@ import (
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -135,7 +136,7 @@ func TestSubgraphCohortFailWaitflow(t *testing.T) {
 	}
 
 	// Register an Await on the child key while the child is still running (Slow is blocked).
-	awaitCtx, cancelAwait := context.WithTimeout(ctx, 30*time.Second)
+	awaitCtx, cancelAwait := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 	defer cancelAwait()
 	awaitCh := make(chan outcome, 1)
 	parked := engineseams.Seams(eng).Waiter(engineseams.Join(engineseams.CheckpointAwaitParked, child)) // armed before the goroutine that trips it

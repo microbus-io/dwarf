@@ -25,6 +25,7 @@ import (
 
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -273,7 +274,7 @@ func TestAwait_IgnoresANonSettledWake(t *testing.T) {
 		err error
 	}
 	done := make(chan result, 1)
-	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	go func() {
 		out, aerr := e.await(awaitCtx, flowKey)
@@ -358,7 +359,7 @@ func TestAwait_StaleStopReparks(t *testing.T) {
 		err error
 	}
 	done := make(chan result, 1)
-	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	go func() {
 		out, aerr := e.awaitStopped(awaitCtx, flowKey)
