@@ -23,6 +23,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
@@ -376,6 +377,70 @@ func TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue(t *testing.T) {
 func newState() workflow.State {
 	s, _ := workflow.NewState()
 	return s
+}
+
+// TestStateRefs_DispatchResolveTakesATurnOnlyToRead pins where the dispatch resolve takes its turn: around the
+// anchor read and nowhere else. With every turn on the shard taken, a cold resolve waits for one before it reads,
+// and a resolve the cache can answer returns at once - it touches no connection, so it must not queue.
+func TestStateRefs_DispatchResolveTakesATurnOnlyToRead(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(hosts.NewMux())
+	assert.NoError(e.Startup(t.Context()))
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	_, err = db.ExecContext(ctx,
+		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, thread_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"ftok", "u", "W", []byte("{}"), "", workflow.StatusRunning, 1, 1, 60000,
+	)
+	assert.NoError(err)
+	_, err = db.ExecContext(ctx,
+		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		1, 1, "s1", "Anchor", "u", workflow.StatusCompleted, 60000, []byte(`{"doc":"D"}`),
+	)
+	assert.NoError(err)
+	refs := staterefs.Refs{"doc": {Anchor: 1}}
+
+	// A dispatch's context carries its claim, so a turn it asks for is really waited on.
+	ctx = e.turnstiles.ContextWithPriority(ctx, 1, priorityCommon)
+	size := e.turnstiles.Turnstile(1).Size()
+	e.turnstiles.Resize(1, 0)
+	defer e.turnstiles.Resize(1, size)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.resolveDispatchRefs(ctx, db, 1, newState(), refs, "u")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("a cold resolve read the anchor without a turn (error: %v)", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	e.turnstiles.Resize(1, size)
+	select {
+	case err := <-done:
+		assert.NoError(err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the cold resolve never finished once a turn was free")
+	}
+
+	// The field is cached now: with every turn taken again, the resolve answers without queueing.
+	e.turnstiles.Resize(1, 0)
+	warmCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	state := newState()
+	start := time.Now()
+	_, err = e.resolveDispatchRefs(warmCtx, db, 1, state, refs, "u")
+	assert.NoError(err)
+	assert.True(time.Since(start) < time.Second, "a cache hit must not queue for a turn, took %v", time.Since(start))
+	var doc string
+	_, _ = state.Get("doc", &doc)
+	assert.Equal("D", doc)
 }
 
 // TestStateRefs_UnreadableRefsFailTheStep pins the reader's posture toward a refs column it cannot decode - a

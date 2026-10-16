@@ -147,9 +147,19 @@ func (e *Engine) resolveStateRefs(ctx context.Context, db sequel.Executor, shard
 // resolveDispatchRefs is resolveStateRefs for a step about to be dispatched, which holds no transaction: a
 // field a concurrent dispatch on this shard is already reading is taken from that read rather than read
 // again (staterefs.ResolveShared). A fan-out's branches dispatch together and miss on the same anchor at once.
+//
+// The caller holds no turn; the loader takes one around its query and scan, the only part that holds a
+// connection. A cache hit or a wait on another dispatch's read never reaches the loader, so neither queues at
+// the turnstile or parks a turn. Do not take the turn around the whole resolve: a cohort's branches dispatch
+// together, and with more of them than the shard has turns, every turn sits idle behind one anchor read.
 func (e *Engine) resolveDispatchRefs(ctx context.Context, db sequel.Executor, shardNum int, state workflow.State, refs staterefs.Refs, workflowURL string) (int, error) {
 	var readBytes int
-	materialized, err := e.linkerFor(shardNum).ResolveShared(ctx, state, refs, anchorLoader(db, &readBytes))
+	load := anchorLoader(db, &readBytes)
+	materialized, err := e.linkerFor(shardNum).ResolveShared(ctx, state, refs, func(ctx context.Context, anchorIDs []int) (map[int]staterefs.Anchor, error) {
+		ctx, doneTurn := e.dbTurn(ctx, shardNum)
+		defer doneTurn()
+		return load(ctx, anchorIDs)
+	})
 	if readBytes > 0 {
 		e.metricStateReadBytes(ctx, workflowURL, "state_ref", readBytes)
 	}

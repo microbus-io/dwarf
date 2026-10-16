@@ -453,15 +453,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	inheritedRefs, err := staterefs.Parse(stateRefsJSON)
 	var refBytes int
 	if err == nil {
-		// A turn of its own, and only when this step actually carries a ref: resolving reads anchor rows, but
-		// with nothing to resolve it touches no connection, so a step with no refs must not queue for a turn it
-		// would not use. Most steps carry none.
-		var refsPass turnstile.Pass
-		if len(inheritedRefs) > 0 {
-			refsPass = turnstile.WaitTurn(ctx)
-		}
+		// No turn here: the resolve takes one only around an anchor read, so a step with no refs, a cache hit
+		// and a wait on another dispatch's read touch no connection and queue for nothing.
 		refBytes, err = e.resolveDispatchRefs(ctx, db, shardNum, state, inheritedRefs, workflowURL)
-		refsPass.Return()
 	}
 	if err != nil {
 		// Its own turn, for the reason above: still the entry phase, so nothing covers this transaction.
