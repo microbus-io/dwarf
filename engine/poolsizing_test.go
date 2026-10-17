@@ -739,17 +739,17 @@ func TestPoolSizing_WorkerCeiling(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	// Same-zone (RTT 0.3ms): txTime = 7*0.3 + 3 = 5.1ms. M=48 -> 48 * 30000/5.1 * 0.25 = 70,588.
-	assert.Equal(70588, workerCeiling(48, 0.3, "sqlite"))
-	// The small-tier pool scales the ceiling down proportionally: M=6 -> 8,823.
-	assert.Equal(8823, workerCeiling(6, 0.3, "sqlite"))
-	// Cross-zone (RTT 1.1ms): txTime = 10.7ms - roughly halves the ceiling at the same pool.
-	assert.Equal(33644, workerCeiling(48, 1.1, "sqlite"))
-	// A high-latency link is dominated by the round trips: RTT 5ms -> txTime 38ms.
-	assert.Equal(9473, workerCeiling(48, 5, "sqlite"))
-	// MySQL and SQL Server make one more: txTime = 8*0.3 + 3 = 5.4ms -> 66,666.
-	assert.Equal(66666, workerCeiling(48, 0.3, "mysql"))
-	assert.Equal(66666, workerCeiling(48, 0.3, "mssql"))
+	// Same-zone (RTT 0.3ms): txTime = 6*0.3 + 3 = 4.8ms. M=48 -> 48 * 30000/4.8 * 0.25 = 75,000.
+	assert.Equal(75000, workerCeiling(48, 0.3, "sqlite"))
+	// The small-tier pool scales the ceiling down proportionally: M=6 -> 9,375.
+	assert.Equal(9375, workerCeiling(6, 0.3, "sqlite"))
+	// Cross-zone (RTT 1.1ms): txTime = 9.6ms - roughly halves the ceiling at the same pool.
+	assert.Equal(37499, workerCeiling(48, 1.1, "sqlite"))
+	// A high-latency link is dominated by the round trips: RTT 5ms -> txTime 33ms.
+	assert.Equal(10909, workerCeiling(48, 5, "sqlite"))
+	// MySQL and SQL Server make one more: txTime = 7*0.3 + 3 = 5.1ms -> 70,588.
+	assert.Equal(70588, workerCeiling(48, 0.3, "mysql"))
+	assert.Equal(70588, workerCeiling(48, 0.3, "mssql"))
 	// PostgreSQL pipelines the transition: txTime = 4*0.3 + 3 = 4.2ms -> 85,714, and at RTT 5ms 23ms -> 15,652.
 	assert.Equal(85714, workerCeiling(48, 0.3, "pgx"))
 	assert.Equal(15652, workerCeiling(48, 5, "pgx"))

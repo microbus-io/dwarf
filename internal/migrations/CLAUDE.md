@@ -46,7 +46,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `graph_hash` | Hex SHA-256 (64 chars) of the `graph` bytes as `Create` stored them (`graphHashOf`), carried verbatim by `Continue` and `Fork` - never recomputed from a copied column, whose bytes Postgres and MySQL re-spell. Keys the replica's shared graph-parse layer with `workflow_url`, so a dispatch that misses the per-flow cache finds the parse without reading `graph`; returned by the claim's flow read (the joined row on Postgres). `NOT NULL` with no default: every insert binds it. Never a fast or truncated hash - a collision runs a flow on another flow's graph. See the graph-cache bullets in `engine/CLAUDE.md` |
 | `baggage` | JSON of the opaque `baggage` map captured at `Create` and passed to every `LoadGraph`/`ExecuteTask` call. Flow-scoped and frozen at `Create`; the engine does not interpret it |
 | `status` | Flow lifecycle: `created`/`running`/`interrupted`/`completed`/`failed`/`terminated`/`cancelled`. `created` is internal/transient only (Fork's clone holds its new root `created` until the clone is mapped) - a flow is never externally observed in `created`; Create inserts it `running` |
-| `step_id` | The flow's current step; `0` during fan-out (multiple steps active at one depth) |
+| `step_id` | The step the flow STOPPED at: the step that completed or lost it, or its interrupted step; `0` while it runs, and for a stop with no single step (Terminate of a running flow, a failed cohort resolved by a completing arrival). Written only by writes the row takes anyway - never per step (`engine/CLAUDE.md`). Read by `List`'s join for `TaskName` |
 | `surgraph_flow_id` | Parent (surgraph) flow id if this is a subgraph flow; `0` otherwise |
 | `surgraph_step_id` | PK of the parent's parked surgraph step - the **sole** link from a subgraph child to the step that launched it, so completion/interrupt/resume bind to that exact step even with parallel parked surgraph steps at one depth. Do not link by the caller's step depth: it is ambiguous across parallel callers at one depth |
 | `root_flow_id` | Denormalized **tree-membership** index: the `flow_id` of the root of this flow's subgraph tree, so the whole tree (root + all subgraph descendants) is reachable in one query (`WHERE root_flow_id=?`) instead of a recursive `surgraph_flow_id` walk. Write-once at creation, immutable: a top-level flow (`Create`/`Run`/`Continue`/`Fork`) is its **own** root (`root_flow_id = its own flow_id`, so the root's own row matches the scan); a subgraph child **inherits** the parent's. Single-shard by construction (subgraph parent-shard affinity). It augments, does **not** replace, `surgraph_flow_id`/`surgraph_step_id`: it answers *which flows are in the tree* (membership/set), not *who is whose parent* (structure) - ordered/structural walks (`surgraphChain`, `interruptedSubgraphChain`) still use the surgraph links. See "Denormalized root pointer" |
@@ -268,18 +268,19 @@ expired-lease sweep reads `running` rows from this index as an index-only scan.
 
 ### `dwarf_flows` stays HOT only while its pages have room, and the row's width decides that (PostgreSQL)
 
-Every step rewrites its flow's row (the transition's `step_id` advance, plus `completeFlow`), and
-none of those writes changes an indexed column, so all of them are HOT-eligible: the only `dwarf_flows` updates
-that can never be HOT are the status transitions that move `idx_dwarf_flows_status`, a small fraction of a
-flow's writes. Whether an eligible update IS HOT depends on one thing: room on the row's page for the new
-version once the page's dead versions are pruned. The flow row carries the graph JSON inline, so the row is
-large (~1-2 KB for an ordinary graph), only a handful fit on a page, and the room left after packing - and how
-fast pruning can reclaim it while each flow rewrites its row many times in quick succession - is what decides.
+A flow's row is written a few times per flow, never per step: `Create`'s fix-up, the interrupt and Resume
+writes, and its terminal write. The lock grabs are locking reads and `step_id` records only the step a flow
+stopped at (`engine/CLAUDE.md`). **Keep it that way:** a per-step write to this row is a row version per step
+and puts it on the cliff below. The status transitions move `idx_dwarf_flows_status` and can never be HOT; the
+rest can. Whether an eligible update IS HOT depends on one thing: room on the row's page for the new version
+once the page's dead versions are pruned. The flow row carries the graph JSON inline, so the row is large (~1-2
+KB for an ordinary graph), only a handful fit on a page, and the room left after packing - and how fast pruning
+can reclaim it while flows rewrite their rows - is what decides.
 
 **At the default fillfactor this is a cliff in row width, and not a monotonic one.** A width change of a few
-dozen bytes - one added column, or a slightly larger graph - can flip the per-step writes from HOT to non-HOT,
+dozen bytes - one added column, or a slightly larger graph - can flip the flow-row writes from HOT to non-HOT,
 and a wider row can land back on the good side. The page arithmetic does not predict which side a width falls
-on; it has to be measured. When it flips, every per-step write takes a new heap page and an index entry: the
+on; it has to be measured. When it flips, every such write takes a new heap page and an index entry: the
 heap grows many-fold for the same live rows, every `dwarf_flows` write slows, and the occasional slow
 completion holds a connection long enough to exhaust the pool. **The signature is a tail, not a mean:** the
 same statements per step and the same throughput, but more pool waits and a heavier `Create` p99, with
@@ -289,17 +290,17 @@ larger than `n_live_tup` explains.
 **What bounds it:** PostgreSQL compresses or moves a row's large values out of line once the row passes ~2 KB
 (`TOAST_TUPLE_THRESHOLD`, a compile-time constant), and an update that does not change a TOASTed value keeps its
 pointer. So no `dwarf_flows` row is ever wider than ~2 KB inline, whatever the graph's size, and a large graph
-costs a per-step write nothing. The exposed range is the inline one, up to ~2 KB. `toast_tuple_target` does not
+costs a write nothing. The exposed range is the inline one, up to ~2 KB. `toast_tuple_target` does not
 move the threshold down: lowering it leaves a sub-2 KB row's graph inline.
 
-**`fillfactor=80` on `dwarf_flows` holds the per-step writes HOT across that whole inline range** - verified at
+**`fillfactor=80` on `dwarf_flows` holds its writes HOT across that whole inline range** - verified at
 widths spanning ~1.1 KB to the ~2 KB TOAST threshold, including widths that fall off the cliff at the default.
 `fillfactor=90` does not: it left the ratio on the bad side. That makes 80 a width-independent setting, unlike
 `dwarf_steps`, where fillfactor cannot help (see above). It costs heap space (pages are left 20% empty at
 insert), which is far less than the bloat of falling off the cliff. `1.sql` creates `dwarf_flows` with it on
 pgx; do not drop it as a no-op on the strength of a graph that happens to land on the good side. Any column
-added to `dwarf_flows` moves the row's width; re-check the HOT ratio on PostgreSQL rather than assume the
-per-step writes stay HOT.
+added to `dwarf_flows` moves the row's width; re-check the HOT ratio on PostgreSQL rather than assume its
+writes stay HOT.
 
 ### `List` gets no indexes of its own, and its `ORDER BY` is not a bug
 

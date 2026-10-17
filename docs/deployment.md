@@ -280,7 +280,7 @@ their completion transactions all queue for the shard's connections. A completio
 its remaining lease margin has its step re-claimed by a peer — correct, but the task runs a second time,
 which for a two-minute LLM call is real money. So the engine derives the largest pool that keeps such a
 storm inside the margin: `N_max = M × margin ÷ txTime × safety`, where `txTime ≈ k·L + 3 ms` is the
-post-task database phase, `k` its round trips (4 on PostgreSQL, 7 on SQLite, 8 on MySQL and SQL Server),
+post-task database phase, `k` its round trips (4 on PostgreSQL, 6 on SQLite, 7 on MySQL and SQL Server),
 and `L` the round-trip time it measures with a few `SELECT 1`s at startup.
 The worst shard's number wins.
 

@@ -1218,7 +1218,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				taskName)
 		}
 		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, &persistPass, func() error {
-			return e.completeFlowSequential(ctx, shardNum, flowID, flowToken, workflowURL)
+			return e.completeFlowSequential(ctx, shardNum, flowID, stepID, flowToken, workflowURL)
 		})
 	}
 
@@ -1238,7 +1238,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				taskName)
 		}
 		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, &persistPass, func() error {
-			return e.completeFlowSequential(ctx, shardNum, flowID, flowToken, workflowURL)
+			return e.completeFlowSequential(ctx, shardNum, flowID, stepID, flowToken, workflowURL)
 		})
 	}
 
@@ -1368,11 +1368,10 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			flowRowLocked := false
 
 			// A NON-FINAL cohort arrival is the one disposition that neither extends nor terminalizes the flow:
-			// it inserts no successor, advances no step_id, and its entire durable effect is the cohort_arrivals
-			// bump on the SPAWN step below. Grabbing the flow row for it serializes EVERY sibling of a cohort on
-			// one row - measured at fan-out width 64: 20 of 43 active backends queued on this exact statement,
-			// each holding a pool connection - to perform two writes that carry no information: the grab itself,
-			// and a step_id rewrite of 0 over 0 (step_id is 0 throughout a fan-out). So the grab is DEFERRED to
+			// it inserts no successor, and its entire durable effect is the cohort_arrivals bump on the SPAWN step
+			// below. Grabbing the flow row for it serializes EVERY sibling of a cohort on one row - measured at
+			// fan-out width 64: 20 of 43 active backends queued on this exact statement, each holding a pool
+			// connection - for a lock that guards nothing it writes. So the grab is DEFERRED to
 			// the arrival that resolves the cohort, which is the only one that inserts a fan-in step or fails the
 			// flow. failStep/propagateCohortFailure, the failure-side twin of this path, bumps the same counters
 			// steps-first with no flow-row lock at all.
@@ -1483,7 +1482,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			}
 			succ.queue(batch, &newStepIDs)
 
-			// The own-row write and the flow advance take the new step's id. successor_id is the FIRST successor,
+			// The own-row write takes the new step's id. successor_id is the FIRST successor,
 			// which History's step navigation follows, and no last-id function names the first row of a multi-row
 			// INSERT, so only a lone successor can be named in SQL.
 			successor, successorArgs := "", []any(nil)
@@ -1597,7 +1596,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 					fanIn := succ
 					fanIn.stepDepth, fanIn.lineageID, fanIn.rows = depth, spawnLineageID, []successorRow{row}
 					fanIn.queue(batch, &newStepIDs)
-					// The cohort-exit -> fan-in edges and the flow advance below take the fan-in step's id.
+					// The cohort-exit -> fan-in edges take the fan-in step's id.
 					fanInID, fanInArgs, err = batch.insertedID(lastStepIDSQL, func() any { return newStepIDs[len(newStepIDs)-1] })
 					if err != nil {
 						return err
@@ -1627,7 +1626,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 						var parentStepID int
 						tx.QueryRowContext(ctx, "SELECT surgraph_step_id FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&parentStepID)
 						var lerr error
-						loss, lerr = e.failFlowTx(ctx, tx, shardNum, flowID, flowCancelled, nil, parentStepID)
+						loss, lerr = e.failFlowTx(ctx, tx, shardNum, flowID, flowCancelled, nil, parentStepID, 0)
 						if lerr != nil {
 							return errors.Trace(lerr)
 						}
@@ -1635,24 +1634,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				}
 			}
 
-			// The flow advances to its only new step - the fan-in step, or a lone successor; with several, or none, no
-			// one step is. Gated on holding the flow row (a queued grab either takes it or ends the transaction): an
-			// unresolved pure arrival never takes the grab, and its write here would be step_id=0 over the 0 a fan-out
-			// already carries - pure WAL amplification on the flow's hottest row (two extra tuple
-			// versions per sibling; 126 per 64-wide cohort) plus the lock hold that serializes the cohort.
-			if loss.status == "" && (!pureArrival || flowRowLocked) {
-				if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
-					e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
-				}
-				target, targetArgs := "0", []any(nil)
-				switch {
-				case fanInID != "" && len(normalNexts) == 0:
-					target, targetArgs = fanInID, fanInArgs
-				case fanInID == "" && len(normalNexts) == 1:
-					target, targetArgs = successor, successorArgs
-				}
-				batch.queue(execOnly, "UPDATE dwarf_flows SET step_id="+target+", touch=1-touch WHERE flow_id=?", append(append([]any{}, targetArgs...), flowID)...)
-			}
+			// The flow row's step_id is not advanced here: it records only the step a flow STOPPED at, written by the
+			// terminal and interrupt writes. A per-step advance is a row version on the flow's hottest row every step.
 			return batch.flush()
 		})
 		if errors.Is(err, errTransitionFlowTerminal) {
@@ -1993,10 +1976,21 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 			)
 		}
 
+		// Each chain flow records the step it stopped at - the leaf in the leaf's flow, the parked caller in each
+		// ancestor (allStepIDs is aligned with chainFlowIDs) - unless it is already interrupted, where the first
+		// interrupt keeps its record. step_id is assigned BEFORE status: MySQL evaluates SET assignments left to
+		// right, so a CASE placed after status=? would read the new status.
 		flowPlaceholders := strings.Repeat("?,", len(chainFlowIDs)-1) + "?"
-		flowArgs := append([]any{workflow.StatusInterrupted}, chainFlowIDs...)
+		stoppedAt := "CASE flow_id" + strings.Repeat(" WHEN ? THEN ?", len(chainFlowIDs)) + " ELSE step_id END"
+		var flowArgs []any
+		for i, chainFlowID := range chainFlowIDs {
+			flowArgs = append(flowArgs, chainFlowID, allStepIDs[i])
+		}
+		flowArgs = append(flowArgs, workflow.StatusInterrupted)
+		flowArgs = append(flowArgs, chainFlowIDs...)
 		tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET status=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')",
+			"UPDATE dwarf_flows SET step_id=CASE WHEN status='"+workflow.StatusRunning+"' THEN "+stoppedAt+" ELSE step_id END, status=?, updated_at=NOW_UTC(), touch=1-touch"+
+				" WHERE flow_id IN ("+flowPlaceholders+") AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')",
 			flowArgs...,
 		)
 		return nil
@@ -2092,7 +2086,6 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		if n, _ := stepRes.RowsAffected(); n == 0 {
 			return errLeaseFenced
 		}
-		tx.ExecContext(ctx, "UPDATE dwarf_flows SET step_id=?, touch=1-touch WHERE flow_id=?", int(fanInStepID), flowID)
 		return nil
 	})
 	if err != nil {

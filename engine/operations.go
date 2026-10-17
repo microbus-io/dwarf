@@ -197,12 +197,12 @@ type flowSeed struct {
 }
 
 // insertFlowTx inserts the flow row (already `running`) and its entry step (`pending`, immediately
-// claimable), then fixes thread_id/step_id/root_flow_id - the shared write-half of every creation path,
+// claimable), then fixes thread_id/root_flow_id - the shared write-half of every creation path,
 // run inside the caller's transaction. Returns the new flow and step ids. createWithGraph wraps it in a
 // bare transaction; continueFlow wraps it in a transaction that first locks the thread and re-checks the
 // latest turn, so both share exactly one copy of the insert SQL.
 func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, newStepID int64, err error) {
-	// The three writes form a chain - the step takes the flow's id, the fix-up both ids - which insertedID makes one
+	// The three writes form a chain - the step and the fix-up take the flow's id - which insertedID makes one
 	// statement batch on PostgreSQL.
 	batch := newTxBatch(ctx, tx)
 	queueInsertID(batch, "flow_id", func(id int64) { newFlowID = id },
@@ -224,10 +224,6 @@ func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, ne
 			" VALUES ("+flowID+", ?, ?, ?, ?, ?, ?, ?, NOW_UTC(), NOW_UTC(), ?, ?, ?, ?)",
 		append(append([]any{}, flowArgs...), s.callerStepDepth+1, s.stepToken, s.entryPoint, s.entryURL, s.stateJSON, workflow.StatusPending, s.timeBudgetMs, s.priority, s.fairnessKey, s.fairnessWeight, s.engineID)...,
 	)
-	stepID, stepArgs, err := batch.insertedID(lastStepIDSQL, func() any { return newStepID })
-	if err != nil {
-		return 0, 0, err
-	}
 
 	// A top-level flow starts its own thread; a Continue joins the thread it continues. root_flow_id is the
 	// denormalized tree-membership index: a top-level flow is its own root; a subgraph child inherits the
@@ -243,14 +239,14 @@ func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, ne
 		rootID, rootArgs = flowID, flowArgs
 	}
 	args := append(append([]any{}, threadArgs...), threadToken)
-	args = append(append(args, stepArgs...), rootArgs...)
+	args = append(args, rootArgs...)
 	args = append(args, flowArgs...)
 	flowKey := flowID
 	if tx.DriverName() == "pgx" {
 		flowKey = "(SELECT " + flowID + ")" // currval, evaluated once so the primary key is used
 	}
 	batch.queue(execOnly,
-		"UPDATE dwarf_flows SET thread_id="+threadID+", thread_token=?, step_id="+stepID+", root_flow_id="+rootID+", updated_at=NOW_UTC(), touch=1-touch WHERE flow_id="+flowKey,
+		"UPDATE dwarf_flows SET thread_id="+threadID+", thread_token=?, root_flow_id="+rootID+", updated_at=NOW_UTC(), touch=1-touch WHERE flow_id="+flowKey,
 		args...,
 	)
 	if err := batch.flush(); err != nil {

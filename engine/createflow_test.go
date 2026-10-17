@@ -29,7 +29,7 @@ import (
 // TestInsertFlowTx_ConcurrentCreates pins flow creation, whose writes after an INSERT name the new row in SQL on
 // PostgreSQL rather than by a bind. Flows are created concurrently, so inserts from different sessions interleave:
 // an id that is not the session's own would point a flow at another flow's rows. Every new top-level flow must be
-// its own thread and root, and its step_id must be its own entry step.
+// its own thread and root, own exactly one entry step, and record no stopped step while it has not stopped.
 func TestInsertFlowTx_ConcurrentCreates(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
@@ -63,8 +63,8 @@ func TestInsertFlowTx_ConcurrentCreates(t *testing.T) {
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows").Scan(&created))
 	assert.Equal(flows, created)
 	assert.NoError(db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM dwarf_flows f LEFT JOIN dwarf_steps s ON s.step_id=f.step_id"+
-			" WHERE s.flow_id IS NULL OR s.flow_id<>f.flow_id OR s.task_name<>'Entry'"+
-			" OR f.thread_id<>f.flow_id OR f.root_flow_id<>f.flow_id").Scan(&strays))
-	assert.Zero(strays, "every flow is its own thread and root, and points at its own entry step")
+		"SELECT COUNT(*) FROM dwarf_flows f"+
+			" WHERE f.thread_id<>f.flow_id OR f.root_flow_id<>f.flow_id OR f.step_id<>0"+
+			" OR (SELECT COUNT(*) FROM dwarf_steps s WHERE s.flow_id=f.flow_id AND s.task_name='Entry')<>1").Scan(&strays))
+	assert.Zero(strays, "every flow is its own thread and root, owns its own entry step, and has not stopped")
 }

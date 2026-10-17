@@ -624,23 +624,22 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 
 	if isRoot {
 		_, err = tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET status=?, step_id=?, started_at=NOW_UTC(), updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=?",
-			workflow.StatusRunning, idMap[rewind], newFlowID,
+			"UPDATE dwarf_flows SET status=?, step_id=0, started_at=NOW_UTC(), updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=?",
+			workflow.StatusRunning, newFlowID,
 		)
 		if err != nil {
 			return 0, nil, errors.Trace(err)
 		}
 	} else {
-		// Point the non-root flow at its current step, mirroring insertFlowTx (which leaves no creation path
-		// with step_id=0): the rewound caller on the rewind chain, else the origin's own current step for an
-		// off-path completed-prefix subgraph.
-		currentStep := idMap[originStepID]
+		// step_id is the step a flow stopped at: none for a flow on the rewind chain, which runs again, and the
+		// origin's own, remapped, for an off-path completed-prefix subgraph.
+		stoppedStep := idMap[originStepID]
 		if rewind != 0 {
-			currentStep = idMap[rewind]
+			stoppedStep = 0
 		}
 		_, err = tx.ExecContext(ctx,
 			"UPDATE dwarf_flows SET step_id=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=?",
-			currentStep, newFlowID,
+			stoppedStep, newFlowID,
 		)
 		if err != nil {
 			return 0, nil, errors.Trace(err)

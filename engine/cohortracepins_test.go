@@ -131,8 +131,9 @@ func (r *cohortRaceRig) awaitArrivals(t *testing.T, n int) {
 	}
 }
 
-// flowRow is everything a transition could write to the flow row. touch is included because the lock-grab the
-// terminal guard rides on flips it; an unchanged touch is what proves no flow-row write committed.
+// flowRow is everything a transition could write to the flow row. touch is included because the lock grab the
+// terminal guard rides on flips it where the grab is an UPDATE; an unchanged touch is what proves no flow-row write
+// committed.
 type flowRow struct {
 	status, finalState string
 	stepID, touch      int

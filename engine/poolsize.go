@@ -177,10 +177,9 @@ half of the completion cost.
 
 It is counted, not fitted, and it differs by driver:
   - PostgreSQL 4: the completion write (RETURNING), BEGIN, the transition's one pipelined batch, COMMIT.
-  - SQLite 7: the completion write (RETURNING), BEGIN, lock grab, successor INSERT, fenced own-row write, flow
-    advance, COMMIT.
-  - SQL Server 8: as SQLite, plus the SET XACT_ABORT ON that sequel issues at the start of every transaction.
-  - MySQL 8: as SQLite, but the completion write is an UPDATE and a SELECT, for want of RETURNING. Each statement
+  - SQLite 6: the completion write (RETURNING), BEGIN, lock grab, successor INSERT, fenced own-row write, COMMIT.
+  - SQL Server 7: as SQLite, plus the SET XACT_ABORT ON that sequel issues at the start of every transaction.
+  - MySQL 7: as SQLite, but the completion write is an UPDATE and a SELECT, for want of RETURNING. Each statement
     counts once, as with interpolateParams=true in the DSN; without it the driver prepares every parameterized
     statement in a round trip of its own.
 
@@ -193,9 +192,9 @@ func completionRoundTrips(driver string) int {
 	case "pgx":
 		return 4
 	case "mysql", "mssql":
-		return 8
+		return 7
 	}
-	return 7
+	return 6
 }
 
 // workerCeiling is the largest worker count that keeps a synchronized completion storm inside the

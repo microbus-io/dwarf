@@ -220,7 +220,7 @@ schedule), never the engine's.
 flow has several interrupted steps, Snapshot picks the **same one the next `Resume` will resolve** - the
 earliest-`updated_at` (`step_id` tiebreak), *not* by `step_depth` - so a Snapshot reports exactly the
 interrupt the next Resume acts on. For a `running` flow it returns the status with an **empty `State`** -
-dwarf does not reconstruct live in-flight merged state (including the fan-out `step_id=0` case). Exposing a
+dwarf does not reconstruct live in-flight merged state (a fan-out included). Exposing a
 live fan-out snapshot is a deliberately-deferred decision; confirm against product intent before implementing.
 
 **Resume** - Continues a flow paused by `flow.Interrupt`. Walks up the surgraph chain (`surgraphChain`) and down the
@@ -945,11 +945,11 @@ not parallelism:
   InitPlan; compared directly, the volatile function cannot be an index key (measured on a 100k-row table: a
   sequential scan against a primary-key index scan). `SET` and `VALUES` take it bare.
 - **The transition** queues the lock grab, the successor INSERTs (flushed every 64 rows, so a wide fan-out holds
-  only one batch's branch states in memory), the fenced own-row write and, last, the flow advance.
+  only one batch's branch states in memory) and the fenced own-row write. It writes nothing to the flow row.
   - A **lone successor** (every linear and goto step, every step inside a forEach branch) is named by
     `insertedID`, so on PostgreSQL the transition is BEGIN, one batch, COMMIT. Pinned by
     `TestSuccessorBatch_LoneSuccessorLinks` (concurrent flows, every link checked against `predecessor_id`, every
-    flow's `step_id` against its own last step).
+    flow stopped at its own last step).
   - **Several successors** are flushed and their ids read first: `successor_id` is the FIRST branch, which
     History's step navigation follows, and no dialect's last-id names the first row of a multi-row INSERT (MySQL's
     reports the first, the others the last). Do not replace the read with a lookup by `step_token`: the column is
@@ -962,12 +962,19 @@ not parallelism:
   - Never close batch results with a `defer`: on a driver that does not pipeline, `Close` runs every statement
     not read yet - every successor INSERT of a bailed transition, under the flow-row lock - while the rollback
     after an early return abandons them unrun.
-  - The flow advance is written once, last, to the only new step - the fan-in step or a lone successor - or 0.
-    It waits for a fan-in arrival because the arrival may insert the step the flow advances to.
+- **The flow row records only the step a flow STOPPED at** (`dwarf_flows.step_id`), set by writes the flow row
+  takes anyway: the completion and loss writes (`completeFlow`, `failFlowTx`) record the step that ended the flow
+  (0 for a completing arrival that resolves a failed cohort, which is not the loss); the interrupt write records
+  each chain flow's interrupted step, the FIRST interrupt winning; Resume clears it on the flow it sets running and
+  re-points a flow left interrupted at its earliest interrupted step (the one `Snapshot` reports); Terminate leaves
+  it. A running flow records 0. `List`'s `TaskName` and its filter read it. **Do not advance it per step:** on
+  PostgreSQL every UPDATE writes a full new copy of the row, and the flow row is ~1.2 KB with the graph held inline
+  (TOAST moves a value out of line only past a ~2 KB row), so a per-step advance is a row version per step on the
+  flow's hottest row - for a pointer `List` shows and that is stale by the time anyone reads it.
 - **A fan-in arrival flushes the transition first**: the cohort bump runs alone, on no open batch, because whether
   the cohort resolved is decided from it. The ARRIVAL THAT RESOLVES the cohort then sends [the deferred flow-row
   grab + the spawn read + the cohort-members read (`queueCohortRead`)], folds them in Go (`fanInRow`), and queues
-  [the fan-in INSERT + the cohort-exit `successor_id` write] ahead of the flow advance, naming the fan-in step by
+  [the fan-in INSERT + the cohort-exit `successor_id` write], naming the fan-in step by
   `insertedID`. A pure resolving arrival is BEGIN, bump, two batches, COMMIT: 5 round trips on PostgreSQL. The
   deferred grab's terminal bail **returns nil, committing the bump**, which is sound because everything batched
   with the grab is a read (`TestTerminateVsLastCohortArrival_Deterministic` pins arrivals == size); those reads
@@ -997,9 +1004,9 @@ not parallelism:
   merge, so it cannot join the batch; the fallback read of any tails, and a ref resolution, follow only when
   needed.
 - **Creating a flow** (`insertFlowTx`, shared by `Create`, `Continue` and a subgraph spawn) is [flow INSERT,
-  entry-step INSERT naming the flow by `insertedID`, the flow's thread/step/root fix-up naming both ids]: BEGIN,
-  one batch, COMMIT on PostgreSQL. Pinned by `TestInsertFlowTx_ConcurrentCreates` (every new flow's thread, root
-  and step ids point at its own rows).
+  entry-step INSERT naming the flow by `insertedID`, the flow's thread/root fix-up naming it too]: BEGIN,
+  one batch, COMMIT on PostgreSQL. Pinned by `TestInsertFlowTx_ConcurrentCreates` (every new flow's thread and
+  root ids point at its own row, and its entry step belongs to it).
 - **A batch reader scans with the PostgreSQL driver's own type conversions** when the batch is pipelined, and
   they are stricter than `database/sql`'s: **scan a column into the Go type it is stored as.** A `SMALLINT` flag
   (`delete_on_completion`, `cancelling`, `advancing`, ...) does not scan into a `bool` - it scans into an `int`.
@@ -1017,7 +1024,7 @@ a `sequel.Executor`). It applies to `computeFinalState` and code inside `failSte
 ### Fan-Out and Fan-In
 
 **Static fan-out** occurs when multiple transitions match from one task. All targets run in parallel, sharing a
-`step_depth`. The flow's `step_id` is `0` during fan-out.
+`step_depth`.
 
 **Dynamic fan-out** uses `forEach` on a transition to iterate a state array and spawn one task instance per element,
 each receiving the element under the `as` key. An **empty array** spawns no branches but does **not** stop the flow:
@@ -2313,7 +2320,7 @@ engine policy — below.
 **THE CEILING EQUATION, AND WHY THE POOL IS ONLY HALF OF IT.** A saturated shard serves
 `M / (k·RTT + s)` steps/s: `M` connections divided by how long one step OCCUPIES one. `k` is the round
 trips a step makes (a code-path property, counted per driver: a linear step is 5 on PostgreSQL, whose claim
-returns the flow row and whose transition is one pipelined batch, 9 on SQLite, 10 on SQL Server, and 11 on MySQL, whose claim is two statements -
+returns the flow row and whose transition is one pipelined batch, 8 on SQLite, 9 on SQL Server, and 10 on MySQL, whose claim is two statements -
 `completionRoundTrips` plus the claim and the flow read), `s` is the per-step time that is not a round trip
 (server execution, WAL, queueing at the pool). Three consequences that govern engine changes:
 
@@ -3379,8 +3386,8 @@ so it builds on the latest *undeleted* turn - the copy is safe even if the sourc
 (it names a specific doomed flow, unlike `Continue`'s search); `Resume` 409s and `Terminate` is a nil no-op
 (terminal); `Delete` is idempotent-success.
 
-Both share filter clauses with `List`. The `Query.TaskName` filter joins `dwarf_steps` and matches the current
-step's `task_name` (excludes fan-out flows, `step_id=0`). `Query.OlderThan`/`NewerThan` are database-anchored
+Both share filter clauses with `List`. The `Query.TaskName` filter joins `dwarf_steps` and matches the `task_name`
+of the step the flow stopped at, so it matches no running flow. `Query.OlderThan`/`NewerThan` are database-anchored
 (`f.updated_at < DATE_ADD_MILLIS(NOW_UTC(), -ms)` etc.) and compose. `Query.FairnessKey` filters on the
 engine-native `f.fairness_key` (the host typically sets it to the tenant, so "list tenant X" is "list
 `fairness_key = X`"); `Query.Priority` narrows to one scheduling band. Empty key / zero priority disable their
@@ -3540,7 +3547,7 @@ ordering:
   which walk the *same* surgraph chain, so the two never lock that chain's flow+step rows in opposite order (a
   flow-first `handleInterrupt` forms a deadlock cycle with `Resume` - see below).
 
-`Create` inserts the flow row (already `running`), then the entry step, then fixes the flow's thread/step/root ids -
+`Create` inserts the flow row (already `running`), then the entry step, then fixes the flow's thread/root ids -
 flow-row-first in statement order, but into a **brand-new** flow whose rows no concurrent transaction can reach until commit, so it
 honors no existing-row lock order and cannot cycle. `Fork` performs its entire tree clone (an iterative worklist) in one
 transaction (so a crash mid-clone rolls back), and the leaf fork step is held `created` until the mapping is complete.

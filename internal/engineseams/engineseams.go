@@ -153,7 +153,7 @@ const (
 	// Counts are per flow and cumulative across the flow's whole life (Visits never resets), so a test reads
 	// the delta it cares about. A Transact contention retry re-runs the closure and legitimately re-counts, so
 	// a test asserting an exact count must be single-worker and contention-free.
-	CheckpointFlowRowWrite = "flowRowWrite" // a dwarf_flows UPDATE issued by the transition transaction
+	CheckpointFlowRowWrite = "flowRowWrite" // a dwarf_flows lock grab issued by the transition transaction
 
 	// Lifecycle rendezvous (fired at an event, used with Wait - not a freeze site): lets a test wait for
 	// exact engine progress instead of polling status / sleeping. signalStop fires it BOTH unscoped and scoped

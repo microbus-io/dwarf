@@ -188,5 +188,5 @@ func TestSuccessorBatch_LoneSuccessorLinks(t *testing.T) {
 	assert.NoError(db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM dwarf_flows f LEFT JOIN dwarf_steps s ON s.step_id=f.step_id"+
 			" WHERE s.flow_id IS NULL OR s.flow_id<>f.flow_id OR s.task_name<>?", "S"+strconv.Itoa(steps-1)).Scan(&strays))
-	assert.Zero(strays, "every flow advanced to its own last step")
+	assert.Zero(strays, "every flow stopped at its own last step")
 }

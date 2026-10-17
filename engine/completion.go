@@ -88,9 +88,9 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 // updated_at to AFTER completeFlow's transaction, inflating the step's recorded task duration (History and the
 // FlowRenderer read updated_at - started_at) by the cost of completing the flow. It would also be a
 // post-execution step write with neither a status guard nor a lease_seq fence.
-func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, flowID int, flowToken string, workflowURL string) error {
+func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, flowID int, stepID int, flowToken string, workflowURL string) error {
 	e.logger.DebugContext(ctx, "Flow completed", "workflow", workflowURL)
-	_, err := e.completeFlow(ctx, shardNum, flowID, flowToken)
+	_, err := e.completeFlow(ctx, shardNum, flowID, stepID, flowToken)
 	return errors.Trace(err)
 }
 
@@ -786,8 +786,9 @@ func stripForEachBookkeeping(state workflow.State, graph *workflow.Graph, spawnT
 	return names
 }
 
-// completeFlow transitions a flow to completed and propagates to surgraph.
-func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flowToken string) (bool, error) {
+// completeFlow transitions a flow to completed and propagates to surgraph. stepID is the step that completed it,
+// recorded as the step the flow stopped at.
+func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, stepID int, flowToken string) (bool, error) {
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return false, errors.Trace(err)
@@ -868,8 +869,8 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 			deleteAfterMs = int(e.deletionGrace.Milliseconds())
 		}
 		res, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET status=?, final_state=?, delete_after_ms=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
-			workflow.StatusCompleted, finalStateJSON, deleteAfterMs, flowID,
+			"UPDATE dwarf_flows SET status=?, final_state=?, delete_after_ms=?, step_id=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
+			workflow.StatusCompleted, finalStateJSON, deleteAfterMs, stepID, flowID,
 		)
 		if err != nil {
 			return errors.Trace(err)
@@ -1103,7 +1104,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 		}
 		if failFlow {
 			var err error
-			loss, err = e.failFlowTx(ctx, tx, shardNum, flowID, flowCancelled, taskErr, parentStepID)
+			loss, err = e.failFlowTx(ctx, tx, shardNum, flowID, flowCancelled, taskErr, parentStepID, stepID)
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -1137,8 +1138,10 @@ type flowLoss struct {
 // failFlowTx terminalizes a flow as a loss inside tx: it records the flow's final state, status and error and, for
 // a subgraph child (parentStepID != 0), delivers the failure to the parked caller step. It is shared by failStep
 // and by a completing last arrival that resolves a cohort carrying failures, so the two cannot disagree on what a
-// lost flow looks like. lastLoss is the resolving step's own error, or nil for a completing arrival.
-func (e *Engine) failFlowTx(ctx context.Context, tx sequel.Executor, shardNum, flowID int, cancelled bool, lastLoss error, parentStepID int) (flowLoss, error) {
+// lost flow looks like. lastLoss is the resolving step's own error, or nil for a completing arrival. stoppedStepID
+// is the step recorded as the one the flow stopped at: the failing step, or 0 for a completing arrival, which is not
+// the loss.
+func (e *Engine) failFlowTx(ctx context.Context, tx sequel.Executor, shardNum, flowID int, cancelled bool, lastLoss error, parentStepID int, stoppedStepID int) (flowLoss, error) {
 	loss := flowLoss{status: workflow.StatusFailed, parentStepID: parentStepID}
 	if cancelled {
 		loss.status = workflow.StatusCancelled
@@ -1161,8 +1164,8 @@ func (e *Engine) failFlowTx(ctx context.Context, tx sequel.Executor, shardNum, f
 		finalStateJSON = []byte("{}")
 	}
 	tx.ExecContext(ctx,
-		"UPDATE dwarf_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
-		finalStateJSON, loss.status, flowErrorText(cancelled, lossErr), flowID,
+		"UPDATE dwarf_flows SET final_state=?, status=?, error=?, step_id=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
+		finalStateJSON, loss.status, flowErrorText(cancelled, lossErr), stoppedStepID, flowID,
 	)
 	if parentStepID != 0 {
 		loss.reDispatchParent, err = e.deliverFlowFailureToParent(ctx, tx, parentStepID, lossErr)
@@ -1661,8 +1664,14 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 
 		for _, chainFlowID := range chainFlowIDs {
 			tx.ExecContext(ctx,
-				"UPDATE dwarf_flows SET status=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"' AND (SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"')=0",
+				"UPDATE dwarf_flows SET status=?, step_id=0, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"' AND (SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"')=0",
 				workflow.StatusRunning, chainFlowID, chainFlowID,
+			)
+			// A flow still interrupted by another step now records that one - the step Snapshot reports and the
+			// next Resume acts on - rather than the step just resumed.
+			tx.ExecContext(ctx,
+				"UPDATE dwarf_flows SET step_id=(SELECT step_id FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"' ORDER BY updated_at, step_id LIMIT_OFFSET(1, 0)), touch=1-touch WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'",
+				chainFlowID, chainFlowID,
 			)
 		}
 		return nil
