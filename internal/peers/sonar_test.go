@@ -811,6 +811,37 @@ func TestPeers_BeatRidesTheReadCadenceWhenEvidenceFlips(t *testing.T) {
 	assert.True(r.row(t, selfID).dispatchAgeMs < staleAge)
 }
 
+// TestPeers_FailedBeatIsDueOnTheNextPass pins that a beat that failed is tried again on the very next pass, not
+// a whole beat interval later. After an outage past the fresh window, the pass that first reaches the database
+// must refresh this replica's row before it reads it: waiting out the cadence left the replica reading its own
+// row stale, and stepping down from its cut, for up to a beat after every peer was back.
+func TestPeers_FailedBeatIsDueOnTheNextPass(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	sm := seamster.New(true)
+	r.s.SetSeams(sm)
+	assert.NoError(r.s.register(ctx))
+	r.s.pass(ctx)
+
+	// The outage: the row ages past the fresh window, and the beat that comes due fails.
+	_, err := r.db.ExecContext(ctx, "UPDATE dwarf_peers SET seen_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE engine_id=?", -60000, selfID)
+	assert.NoError(err)
+	sm.Inject(FaultBeatErr)
+	r.clk.advance(r.s.beat)
+	due := r.s.nextBeat
+	r.s.pass(ctx)
+	assert.True(r.row(t, selfID).seenAgeMs > 50000, "the failed beat wrote nothing")
+	assert.Equal(due, r.s.nextBeat, "a failed beat leaves the beat due")
+
+	// The database answers again: one read interval later, well inside a beat, the pass beats first.
+	r.clk.advance(r.s.scan)
+	r.s.pass(ctx)
+	assert.True(r.row(t, selfID).seenAgeMs < 5000, "the next pass refreshed the row")
+	assert.Equal(r.clk.now().Add(r.s.beat), r.s.nextBeat, "and the cadence restarts from the beat that landed")
+}
+
 // TestPeers_ReadIsUnfiltered pins that the read returns the whole table, stale rows included. The freshness
 // decisions are this package's, not SQL's: that is what lets every window change without touching a
 // statement, gives the hygiene delete its candidates from the same reading everything else is derived from,

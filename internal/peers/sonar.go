@@ -706,6 +706,10 @@ func (s *Sonar) register(ctx context.Context) error {
 
 // pass is one cycle: beat if a beat is due or the dispatch evidence has changed, then read and publish.
 //
+// A beat that fails is due again on the next pass. After an outage past the fresh window, the first pass that
+// reaches the database then refreshes this replica's row before reading it, so the replica does not read its
+// own row stale and step down until the next scheduled beat.
+//
 // The beat rides the READ's cadence when the evidence bit flips, which is what keeps a starting replica out
 // of its own fleet's dispatcher count for at most a scan interval rather than a whole beat interval - its
 // first turn lands milliseconds after Run starts, long before the next beat would. The same early publish
@@ -727,13 +731,14 @@ func (s *Sonar) pass(ctx context.Context) {
 	s.rowMu.Lock()
 	draining := s.draining.Load()
 	beat := !now.Before(s.nextBeat) || dispatched != s.beatDispatched || draining != s.beatDraining
+	landed := false
 	if beat {
-		s.publishBeat(ctx, dispatched, draining)
+		landed = s.publishBeat(ctx, dispatched, draining)
 	}
 	s.rowMu.Unlock()
-	if beat {
-		// Only a beat may advance the published turn count: a pass that looked at the evidence without
-		// publishing it must leave it for the next beat to carry.
+	if landed {
+		// Only a beat that landed may advance the published turn count: a pass that looked at the evidence
+		// without publishing it, or whose beat failed, must leave it for the next beat to carry.
 		s.lastTurns = turns
 		s.beatDispatched = dispatched
 		s.beatDraining = draining
@@ -764,14 +769,15 @@ func (s *Sonar) dispatchEvidence() (turns uint64, dispatched bool) {
 // It is an UPDATE and NOTHING ELSE - it never creates the row. That is what lets Leave be final: a straggler
 // beat matches nothing instead of resurrecting a replica that has gone.
 //
-// A failed write is not retried. Retrying a broken registry write turns a database blip into a write storm,
-// and the next beat is one interval away regardless.
-func (s *Sonar) publishBeat(ctx context.Context, dispatched, draining bool) {
+// It reports whether the write landed. A failed write is not retried here: the pass that follows tries again,
+// so a write that keeps failing is attempted once per read, never in a loop. An immediate retry would turn a
+// database blip into a write storm.
+func (s *Sonar) publishBeat(ctx context.Context, dispatched, draining bool) bool {
 	// FaultBeatErr drops the write, so this replica stops refreshing its own row while everything else about
 	// it goes on working. That is what a replica which can no longer prove its liveness looks like from a
 	// PEER's side, and a test can occupy that side no other way short of killing a process.
 	if s.faulted(FaultBeatErr) {
-		return
+		return false
 	}
 	// The dispatch assignment is composed into the statement rather than bound through a CASE: a conditional
 	// assignment is two plain statement shapes here, where CASE WHEN ? would lean on how each driver binds a
@@ -790,6 +796,7 @@ func (s *Sonar) publishBeat(ctx context.Context, dispatched, draining bool) {
 	if err != nil && ctx.Err() == nil {
 		s.logger.Load().ErrorContext(ctx, "Peer heartbeat", "shard", s.shard, "error", err)
 	}
+	return err == nil
 }
 
 // read returns every row in the shard's registry, engine_id-ascending, with both ages computed by the

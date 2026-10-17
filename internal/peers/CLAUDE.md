@@ -494,6 +494,12 @@ absent from its own fleet's dispatcher count; the flip bounds that to a scan int
 interval. The same early publish applies when a replica *stops* serving — the direction that strands work.
 Pinned by `TestPeers_BeatRidesTheReadCadenceWhenEvidenceFlips`.
 
+A beat that FAILED rides the read's cadence too: it stays due, so the pass that first reaches the database after
+an outage refreshes this replica's row before reading it. Do not schedule the next beat from a failed one: the
+replica then reads its own row stale - and steps down from its cut - for up to a beat after every peer is back.
+A write that keeps failing is therefore attempted once per read, never retried in a loop. Pinned by
+`TestPeers_FailedBeatIsDueOnTheNextPass`.
+
 ## `Join` — announce before you consume
 
 A joining replica sizes its own pool for the fleet it is joining, but its peers go on holding pools sized
