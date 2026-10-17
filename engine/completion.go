@@ -1316,7 +1316,7 @@ func (e *Engine) flowLossError(ctx context.Context, tx sequel.Executor, flowID i
 		// recount), and a live flow never fails from one: its Terminate already ended it.
 		var terminated int
 		tx.QueryRowContext(ctx,
-			"SELECT 1 FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusTerminated+"' LIMIT_OFFSET(1, 0)",
+			"SELECT 1 FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusTerminated+"' ORDER BY step_id LIMIT_OFFSET(1, 0)", // ORDER BY: SQL Server's OFFSET/FETCH requires one
 			flowID,
 		).Scan(&terminated)
 		if terminated == 1 {

@@ -3572,6 +3572,11 @@ ordering:
 flow-row-first in statement order, but into a **brand-new** flow whose rows no concurrent transaction can reach until commit, so it
 honors no existing-row lock order and cannot cycle. `Fork` performs its entire tree clone (an iterative worklist) in one
 transaction (so a crash mid-clone rolls back), and the leaf fork step is held `created` until the mapping is complete.
+**Fork's transaction opens with `lockFlowRows` on the origin root, because the clone reads before it writes.** On
+SQLite a read-first transaction cannot upgrade against a concurrent writer and gets `SQLITE_BUSY` at once on every
+`Transact` retry - measured as ~1 Fork in 8 failing under the bench soak, and pinned by
+`fixtures/forkconcurrentflow_test.go`. Every other `Transact` in the engine already opens with a write; a new one
+that reads first needs the same.
 
 **The two disciplines still cross in one place on row-locking engines, and that is tolerated, not eliminated.**
 On MySQL `REPEATABLE READ` and SQL Server without RCSI, a flow-row-first transaction and a steps-first one can

@@ -156,6 +156,15 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 		if e.seams.IsFault(engineseams.FaultForkCommit) {
 			return errors.New("injected fault: " + engineseams.FaultForkCommit)
 		}
+		// Write-first. The clone reads the origin before its first write, and on SQLite a transaction that reads
+		// first holds a SHARED lock it must upgrade at that write: against a concurrent writer the upgrade cannot
+		// wait, so SQLite returns SQLITE_BUSY at once whatever the busy timeout, and every Transact retry is
+		// read-first again (measured: ~1 Fork in 8 failed under the bench soak). Locking the origin root first
+		// makes the first statement a write there; on the server dialects it is a locking read, which also holds
+		// off a Delete or Purge of the origin while it is cloned.
+		if _, err := lockFlowRows(ctx, tx, "flow_id=?", rootFlowID); err != nil {
+			return err
+		}
 		id, cloneErr := e.cloneTree(ctx, tx, cc, rootFlowID)
 		if cloneErr != nil {
 			return errors.Trace(cloneErr)

@@ -484,10 +484,16 @@ func TestForkCohort_TerminatedBranchIsALoss(t *testing.T) {
 	}
 	shard, _, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
-	assert.True(enginetest.WaitUntil(t, 30*time.Second, func() bool {
+	// Everything but c2/p2/l2's branch must have converged before the Terminate: every Line but the held one, the
+	// three Line cohorts that do not wait on it, and c1's page cohort. Seven completed Lines alone is not that state
+	// - their fan-ins can still be pending under load, and a Terminate there stops c1's branch too.
+	completed := func(task string) int {
 		return enginetest.CountRows(t, e, shard,
-			"SELECT COUNT(*) FROM dwarf_steps WHERE task_name='Line' AND status='"+workflow.StatusCompleted+"'") == 7
-	}), "seven Lines never completed")
+			"SELECT COUNT(*) FROM dwarf_steps WHERE task_name='"+task+"' AND status='"+workflow.StatusCompleted+"'")
+	}
+	assert.True(enginetest.WaitUntil(t, 30*time.Second, func() bool {
+		return completed("Line") == 7 && completed("JoinLines") == 3 && completed("JoinPages") == 1
+	}), "the origin never converged everywhere but c2/p2/l2")
 	assert.NoError(e.Terminate(ctx, flowKey, "stop"))
 	release.Do(func() { close(hold) })
 
