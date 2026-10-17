@@ -242,7 +242,7 @@ Every run starts near 19,000 steps/s per shard and settles **8–13% lower** wit
 settling is the same per shard with one, two or four shards and with one, two, four or eight replicas,
 so it belongs to the database, not to the engine or the fleet's shape. Plan capacity on the settled rate.
 
-On the current engine (2026-10-14, three runs on two instances) a run starts near 21,000 and settles 7–9% lower,
+On the build measured 2026-10-14 (three runs on two instances), a run starts near 21,000 and settles 7–9% lower,
 to ~19,000, between minutes 3 and 7. The step does not come from the write-ahead log's size: with Cloud SQL's
 `max_wal_size` raised from its 1.5 GB default to 16 GB, the run settled the same way, and its mean was within
 run-to-run noise (20,269 against 19,579 and 19,868 at the default).
@@ -432,8 +432,8 @@ Payloads are incompressible. One run per cell, saturated, 16-minute window.
 except scatter at 1 MB, measured 2026-10-14 in a later session. The no-payload rows run ~13% above the
 [headline](#one-database) for the same workload, so compare rows within this table.*
 
-**Small payloads, on the current engine.** The 1 KB and 4 KB rows above were measured on an earlier engine, which
-wrote small fields more often than it needed to. Remeasured `linear` in one session (2026-10-14):
+**Small payloads, measured 2026-10-14.** For 1 KB and 4 KB, read this table rather than the rows above, which
+come from an earlier build. `linear`, one session:
 
 | Payload | steps/s | vs no payload | Last 5 minutes |
 |---|---|---|---|
@@ -527,7 +527,7 @@ then, measurements on 8 vCPU databases with 500 GB disks:*
 - **Payload results are single runs**, and the byte ceiling across shards is not remeasured. In July 2026,
   two shards scaled it ×1.77–1.82.
 - **Many fairness keys on a linear workflow** are not yet measured cleanly. Both runs at 512 keys hit a slowdown
-  of several minutes in one of the engine's own background queries; the fix is in progress.
+  of several minutes in one of the engine's own background queries.
 - **Replicas spread across zones**, with unequal distance to the database, are not measured.
 - **Sustained create-and-purge**: hours of retention churn and recovery after a long-task burst are not
   measured.

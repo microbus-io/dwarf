@@ -378,8 +378,9 @@ func (s *Sonar) SetEvidence(fn EvidenceFunc) {
 // the owner can see.
 //
 // Shortening it shortens what derives from it - Join's wait and the blindness grace - and nothing else, so
-// a short-cadence Sonar still applies the same windows to the same rows. Not safe to call once anything is
-// being driven; set it before Join.
+// a short-cadence Sonar still applies the same windows to the same rows. The cut-entry stagger, counted in
+// readings, takes more of them (beat/scan per stale row ahead), so it still waits a beat per row. Not safe to
+// call once anything is being driven; set it before Join.
 func (s *Sonar) SetCadence(d time.Duration) {
 	if d <= 0 {
 		d = scanInterval

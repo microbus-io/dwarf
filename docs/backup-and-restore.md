@@ -71,11 +71,16 @@ Expect, and do not be alarmed by:
 - **A burst of `dwarf_steps_recovered_total`** as expired leases re-dispatch. This is the designed path.
 - **A backlog spike**, since everything that was in flight becomes runnable at once.
   `dwarf_steps_dispatch_lag_seconds` will climb and then drain.
-- **Phantom peers**, but only from a backup taken less than about 40 seconds before the restore. The
-  replica registry is restored with the rest of the database, and a restored entry is as old as the backup:
-  a replica stops counting 40 seconds after its last heartbeat, so entries from an older backup count for
-  nothing. Within that window, replicas that no longer exist are counted until their entries age out,
-  shrinking every live replica's connection pool meanwhile. See the
+- **Phantom peers.** The replica registry is restored with the rest of the database, and a restored entry
+  is as old as the backup. A replica stops counting 40 seconds after its last heartbeat, so entries from an
+  older backup shrink no connection pool. They still slow handoffs: a replica taking over a shard's dispatching
+  waits about a second for each stale entry that joined before it, and unless replica identities are pinned
+  with `SetEngineID`, every restored entry did. With k restored entries, each handoff during the fleet's
+  start-up takes about k seconds, until the engine deletes the entries after five minutes of healthy registry
+  reads. From a backup taken less than 40 seconds before the restore, the entries also count as live replicas
+  until they age out, shrinking every live replica's connection pool meanwhile. **To avoid both, clear the
+  registry before starting the fleet:** with the fleet still stopped, run `DELETE FROM dwarf_peers;` on every
+  shard. Each replica registers itself again as it starts. See the
   [Runbook](runbook.md#throughput-collapsed-after-a-restart-or-crash) if it does not resolve on its own.
 
 What should **not** happen: `dwarf_steps_write_failed_total`, `dwarf_steps_unwedged_total` or

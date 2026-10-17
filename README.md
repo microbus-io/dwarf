@@ -51,14 +51,15 @@ fmt.Println(out.State.GetString("greeting")) // hello ada
 - **Durable by construction.** Every step is checkpointed to SQL. A crashed worker's in-flight step is
   recovered by lease expiry; a flow can be inspected, resumed, forked, or continued days later.
 - **Parallelism that merges cleanly.** Static and dynamic (`forEach`) fan-out run branches concurrently;
-  fan-in merges their state with per-field reducers (append, add, union, merge, …).
+  per-field reducers (append, add, union, merge, …) fold every write into the field's value, so the
+  branches' results combine at the fan-in instead of overwriting each other.
 - **Human-in-the-loop.** A task can `Interrupt` to park the flow for external input and `Resume` later —
   approvals, manual review, async callbacks.
 - **Fair and prioritized.** Two-level scheduling: strict priority bands across the cluster, weighted
   fairness within a band so one tenant can't starve another.
 - **Scales horizontally.** Run many replicas against sharded databases; they coordinate entirely through
   the databases they already share, with no message bus to run between them.
-- **OTEL-native observability.** Structured logs (`slog`), 36 `dwarf_*` instruments, and distributed tracing,
+- **OTEL-native observability.** Structured logs (`slog`), 37 `dwarf_*` instruments, and distributed tracing,
   all through standard providers you inject.
 - **Four SQL dialects.** PostgreSQL, MySQL/MariaDB, SQL Server, and SQLite (testing / single-instance).
 - **Free, and cheap at scale.** Apache 2.0 — no license tier, no vendor, no per-operation pricing. One

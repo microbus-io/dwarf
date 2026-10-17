@@ -337,9 +337,9 @@ else 1 GiB (`engine/staterefs.go` `stateCacheBudget`).
 - **Keep the default small: a tenth of memory, not more.** Hits need only the fields of flows still in
   progress. Above that, a larger cache holds finished flows' fields until they go 5 minutes unread, and the
   garbage collector can let the heap reach about twice the cache. Below it, a miss re-reads the field: a cost
-  in database reads, small next to the write bytes that bind a large-payload workload. Measured: a cache an
-  order of magnitude below its default at 256 KB scatter cost a few percent of throughput and cut the heap
-  several-fold. The docs recommend `GOMEMLIMIT` for the rest. Pinned by `TestLinker_CacheBoundedByBytes`;
+  in database reads, small next to the write bytes that bind a large-payload workload. Measured at 256 KB scatter: a
+  1 GB cache, against the 15.5 GB a quarter of memory gave on that rig (and about 6x below the tenth's ~6 GB),
+  cost a few percent of throughput and cut the heap several-fold. The docs recommend `GOMEMLIMIT` for the rest. Pinned by `TestLinker_CacheBoundedByBytes`;
   `TestLinker_SplitsRaceEviction` drives splits, stores and evictions concurrently under `-race`.
 
 ## One Linker per shard, one Cache per replica

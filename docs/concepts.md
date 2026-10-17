@@ -52,10 +52,12 @@ A flow's key is a composite string of the form `{shard}-{flowID}-{token}`. You p
 
 A **step** is one task execution within a flow. Each step captures an immutable **input snapshot**
 (`state`), the **writes** the task made (`changes`), and metadata (status, error, timings,
-attempt count). Steps are numbered by depth; parallel fan-out siblings share a depth. The next step's
-input is this step's input with its writes applied, each through its field's reducer, so a step's record shows
-what it read and what it wrote, and the next step's `state` shows the result. This immutability is what makes checkpointing, forking, and crash
-recovery possible — every step is a durable, replayable record.
+attempt count). Steps are numbered by depth; parallel fan-out siblings share a depth. A step's record shows
+what it read and what it wrote; the result, its input with its writes applied through each field's reducer, is
+what follows it. In a linear chain that is the next step's `state` (a `forEach` branch's also holds its
+element). After a fan-out branch's last step, it is the fan-in's `state`, which combines every branch's writes,
+and after the last step of the flow, it is the final state. This immutability is what makes checkpointing,
+forking, and crash recovery possible — every step is a durable, replayable record.
 
 The full step-by-step record is available with `History`; one step with `Step`.
 

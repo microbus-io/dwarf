@@ -935,7 +935,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// The write also reads back the step's Cancel mark - the one post-dispatch cancellation check. It rides a
 	// write every completion makes anyway, via RETURNING/OUTPUT, so on those dialects an uncancelled flow pays
 	// nothing for it. MySQL lacks both and reads the mark with a follow-up SELECT: one extra round trip per
-	// completed step, accepted as it is at the claim, rather than returning it through LAST_INSERT_ID(expr).
+	// completed step, accepted as it is at the claim, rather than returning it through LAST_INSERT_ID(expr): a
+	// one-off idiom for a dialect that is not the recommended one.
 	// That SELECT is race-free only because the row is already terminal when it runs - Cancel never marks a
 	// terminal row, so the value it reads is the one this UPDATE saw. The status always moves running ->
 	// completed, which keeps RowsAffected an honest fence on MySQL (it counts CHANGED rows): a covered step is

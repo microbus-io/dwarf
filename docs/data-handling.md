@@ -198,10 +198,12 @@ fan-out's source array in an entry task, and bound your retention sweeps.
 
 Two values are known not to survive storage, and both fail silently rather than loudly:
 
-- **An integer beyond ±2^53, read untyped.** Storage itself is exact — the value round-trips byte-for-byte
-  through steps, `final_state`, `Fork` and `Continue` — and typed accessors like `GetInt`, and a `when`
-  expression comparing it, are exact too. But a read into an untyped `any` (`Get` into an `any`, `Parse`
-  into a map) comes back **rounded**, with no error anywhere. Carry large ids as strings if that applies.
+- **An integer beyond ±2^53, read untyped.** Storage itself is exact — the value round-trips through steps,
+  `final_state`, `Fork` and `Continue` — and typed accessors like `GetInt`, and a `when` expression comparing
+  it, are exact too. But a read into an untyped `any` (`Get` into an `any`, `Parse` into a map) comes back
+  **rounded**, with no error anywhere. On MySQL, storage is exact only within 64 bits: an integer above
+  2^64-1 or below -2^63, including an `add` sum that grows past it, is stored as a floating-point number.
+  Carry large ids as strings if that applies.
 - **A `NUL` byte (`U+0000`) in a string.** PostgreSQL rejects it; other dialects accept it. Base64-encode
   binary data. On PostgreSQL this surfaces as `dwarf_steps_write_failed_total` — see the
   [Runbook](runbook.md#dwarf_steps_write_failed-is-non-zero).

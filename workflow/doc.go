@@ -33,8 +33,9 @@ limitations under the License.
 // Transitions can be unconditional, conditional (AddTransitionWhen / AddTransitionSwitch), static
 // fan-out across named tasks (AddTransitionFanOut), dynamic fan-out over an array (AddTransitionForEach),
 // an error handler (AddTransitionOnError), or an explicit jump target (AddTransitionGoto). The linear
-// AddTransitionChain wires a run of tasks. Parallel branches converge at a task marked with SetFanIn,
-// where per-field reducers (SetReducer, see the Reducer constants) merge their changes.
+// AddTransitionChain wires a run of tasks. Parallel branches converge at a task marked with SetFanIn. A
+// per-field reducer (SetReducer, see the Reducer constants) makes every write to its field a contribution,
+// folded into the field's value at every step, so the branches' writes combine at the fan-in.
 //
 // # Running a task
 //

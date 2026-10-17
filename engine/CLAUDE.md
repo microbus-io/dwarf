@@ -752,9 +752,10 @@ so a dwarf shard on Limitless is double-sharded, and its distributed planner is 
 assume; `EXPLAIN` on the actual target.**
 
 **Phase 3 (`piston.FetchSteps`) is dialect-split, and the split is not optional:** a lateral `LIMIT`/`TOP` per
-key on pgx and mssql (256x fewer rows read), the window shape on mysql (MariaDB has no lateral) and sqlite. Do not
-fetch with a UNION-ALL branch per key (SQLite's 500-term compound wall; 121s on a 500k-key backlog). The dialect
-table, the measurements and the MySQL collation trap are in `internal/piston/CLAUDE.md`.
+key on pgx and mssql (256x faster, reading 32 rows where the window reads 400,000), the window shape on mysql
+(MariaDB has no lateral) and sqlite. Do not fetch with a UNION-ALL branch per key (SQLite's 500-term compound
+wall; 121s on a 500k-key backlog). The dialect table, the measurements and the MySQL collation trap are in
+`internal/piston/CLAUDE.md`.
 
 **The work doorbell is PURELY LOCAL - it reaches this replica's candidate cache and nothing else.** A
 broadcast to peers is ruled out by the standing rule at the top of this file; beyond buying no latency (every
@@ -2541,7 +2542,9 @@ fast crashloop accumulates orphans faster than the fresh window ages them out, i
 **`SetEngineID(id int64)`** lets a host pin a value stable across restarts (a StatefulSet ordinal, `os.Hostname()`),
 so a restart re-upserts its one row. Construction-time only; rejects `id <= 0` (0 is the no-engine sentinel). The
 host owns uniqueness among live replicas - a collision counts two replicas as one (under-count -> over-size, the
-dangerous direction) - so it is opt-in, and a wrong stable id is worse than the random default.
+dangerous direction) - so it is opt-in, and a wrong stable id is worse than the random default. A host bundling
+several engines in one process keeps the random default on purpose, and clears its leftover rows with a clean
+`Shutdown` (which deletes the row) and a fresh database per run, not with a pinned identity.
 
 ### Dispatchers: a shard's budget divides by a bounded count, not by the fleet (`poolsize.go`)
 
@@ -2701,7 +2704,10 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
   row ages out, and the shard runs on `X-1` meanwhile. With `X >= 2` that is slower, not stopped; **all `X`
   crashing together stops the shard for up to the window**. Ranking only rows with fresh dispatch evidence would
   shorten it, but a reader never
-  stamps that evidence, so it could never be promoted - the fix is not free.
+  stamps that evidence, so it could never be promoted - the fix is not free. **On top of the window, the
+  promotion waits a beat per stale row ahead of the promoted replica** (the cut-entry stagger,
+  `internal/peers/CLAUDE.md`), so a zone loss or a kill-style roll that leaves k stale rows makes each handoff
+  take about k beats until the prune removes them - up to about five minutes.
 
 ### Worker sizing: the lease-margin ceiling, with a grow-on-demand pool (`poolsize.go`, `engine.go`)
 
@@ -2762,9 +2768,10 @@ The worker count is split into two numbers, because they answer different questi
 - **The pool grows on demand** (`internal/workers`): a worker that takes a candidate and finds **nobody
   idle** adds one, keeping a standing reserve of one. The turnstile's turn is what makes so easy a trigger
   safe - by BLOCKING, not by being consulted: a worker waiting for a turn holds no candidate, so it counts idle
-  and the next check declines. `internal/workers/CLAUDE.md` holds the two traps not to re-introduce (gating
-  growth on every worker being inside `ExecuteTask`, which grows only logarithmically, and a caller-maintained
-  idleness counter, which reads saturation as idleness) with their measurements. Both directions are pinned:
+  and the next check declines. Two traps not to re-introduce, each with its measurement: gating growth on
+  every worker being inside `ExecuteTask`, which grows only logarithmically (`internal/workers/CLAUDE.md`), and
+  a caller-maintained idleness counter, which reads saturation as idleness (the `idle` field in
+  `internal/workers/crew.go`). Both directions are pinned:
   `TestPoolSizing_PoolGrowsForLongTasks` and `TestPoolSizing_SaturationDoesNotGrowThePool`. Shutdown is the
   crew's two-phase `Drain`, and the engine's half is closing the CACHE **and the TURNSTILES** first: a worker
   with nothing to run is parked on one of them, and closing the cache alone leaves `Drain` waiting forever.
@@ -2947,7 +2954,7 @@ all other cloned steps to `parkedNone`), so cloned rows never inherit a stale no
 
 ## Metrics (`engine/metrics.go`)
 
-The engine emits 36 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
+The engine emits 37 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
 injects the provider; it defaults to the global `otel.GetMeterProvider()` - no-op unless the host configures the
 SDK, so unconfigured/standalone/test use pays nothing. Instruments are built once in `initMetrics` (from
 `initRuntime`, so every `Startup` gets them) from `mp.Meter("github.com/microbus-io/dwarf")` - that
@@ -3074,7 +3081,7 @@ de-duplicates, so a name already ending in `_total` is not doubled), while the O
 instrument name verbatim. So the instruments are named `dwarf_flows_started` etc., and a Prometheus query
 references them as `dwarf_flows_started_total`. Do not bake `_total` into a counter's instrument name.
 
-**14 gauges, observable (async)** via a single `RegisterCallback`. The callback runs at metric-collection
+**15 gauges, observable (async)** via a single `RegisterCallback`. The callback runs at metric-collection
 time and reads engine state from memory only - **it makes no query, and must not.** A collector may scrape at
 any rate and every replica runs the callback, so a query here costs `R x shards x scrape rate`: an O(backlog)
 aggregate at the bench's 50 ms collection is 20 aggregates a second per replica per shard, against the database
@@ -3399,11 +3406,14 @@ only at the worker loop):
 
 The crew's worker-loop `CatchPanic` stays as **defense-in-depth** for panics in *engine* code on the worker
 path (transition evaluation, fan-in, etc.) outside any host call. **Nothing else contains a panic**: the
-piston and its pipeline loops, the planner, the peer Sonars, and the engine's background loops (reaper,
-recovery sweeps, backlog gauge, latch poll) run without a recover, so a panic in any of them takes down the
-replica. **That is deliberate; do not add a catch there.** Those loops call no `Host` method - the only host code
+piston and its pipeline loops, the planner, the peer Sonars, and the engine's background loops (reconcile,
+reaper, recovery sweeps, backlog gauge, latch poll) run without a recover, so a panic in any of them takes down the
+replica. **That is deliberate; do not add a catch there.** Those loops call no `Host` method - the only `Host` code
 the engine runs is the three wrapped call sites above - so a panic in them is an engine bug, and a crash is what
-gets it found and fixed; a caught-and-logged panic in a loop that retries every cycle would hide it.
+gets it found and fixed; a caught-and-logged panic in a loop that retries every cycle would hide it. The one
+exception is the injected observability providers: the logger's `slog.Handler` and the meter and tracer providers
+are host code, and they run on those goroutines too (a Sonar's log line, a piston's histogram record, a recovery
+sweep's span). A panic there is not caught either - a host that injects a panicking handler owns that crash.
 `fixtures/panicflow_test.go` pins both task-panic
 outcomes (no `onError` → flow `failed`; with `onError` → routed to the handler and `completed`), using a bounded
 `Await` that would time out if the panic had wedged the step instead of failing it.

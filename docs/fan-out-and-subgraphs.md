@@ -73,7 +73,8 @@ g.SetReducer("subtotal", workflow.ReducerAdd)    // summed across branches
 g.SetReducer("seenSkus", workflow.ReducerUnion)  // deduplicated union
 ```
 
-Inside a branch, write only your **delta**:
+On a field with a reducer, every write is a contribution, in a branch or anywhere else in the flow, so write
+only your own **delta**, never the value you read:
 
 ```go
 func process(ctx context.Context, f *workflow.Flow) error {

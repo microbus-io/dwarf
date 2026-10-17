@@ -46,8 +46,10 @@ const (
 	sustainedDrainPerConn = 120
 	// refillIntervalCap bounds priority latency, and is the only thing that does. A better band arriving
 	// here does not preempt - Offer appends it at the tail - so it becomes servable when a cycle plans it,
-	// and peers plan it a cycle after that. Priority ORDER is never inverted regardless, since every cycle
-	// plans the global minimum band; what this bounds is when better work starts, not whether it wins.
+	// and peers plan it a cycle after that. What this bounds is when better work starts. It does not make
+	// cross-shard order strict: peers plan a stale global minimum until the arriving shard's next tally, and a
+	// cached partition keeps its frozen band until its own shard's next push, so order across shards is strict
+	// only within a cycle or two.
 	refillIntervalCap = 1 * time.Second
 	// supplyGapDivisor turns the supply loop's derived period into its quiet-time fuse.
 	//
@@ -74,6 +76,12 @@ const (
 //
 // Capacity is 2 x workersPerConnBudget x the pool, so the pool cancels and T lands near 67ms whatever the
 // budget - which is why no measure of the database's own size enters it.
+//
+// The cancellation does not hold everywhere, and two gaps are known. workersDispatch's max(64, ...) floor keeps
+// the capacity from shrinking with a small pool, so a small deployment derives a longer period than 67ms. And
+// sustainedDrainPerConn was measured on pools of up to ~100 connections; at the 250-connection budget a
+// connection drains far less (16 vCPU: ~8,500 steps/s over 200), so the derived period over-supplies there. The
+// expected cost is scans and discarded candidates rather than throughput, but it is unmeasured.
 //
 // It stays a formula rather than the ~67ms it evaluates to at the reference config, because bufferShare
 // tracks the cache-sizing constants: a change to worker or cache sizing rescales the period with it,

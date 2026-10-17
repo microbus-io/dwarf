@@ -62,8 +62,11 @@ Three alternatives were weighed against this rule and lost; do not re-propose th
   `Set` placed before `Interrupt`/`Subgraph`, but it loses the attempt log (one entry per `Retry`) and a task can
   no longer see what its earlier runs wrote. The ordering rule is documented instead (`docs/tasks.md`).
 
-**The carrier (`flow.go`): every write is a one-field `Changes`, composed into `changes` and applied to the
-view** (`Changes.Compose`, `State.Apply`), through the graph's reducers. The engine hands the carrier those
+**The carrier (`flow.go`): every write lands in both `changes` and the view.** A `Set` on a field with no
+reducer folds nothing, so its encoded bytes go into both directly (`Changes.setPlain`, the rule `contribute`
+applies to such a field); every other write - a reduced field's `Set`, `Overwrite`, `Del` - is a one-field
+`Changes`, composed into `changes` and applied to the view (`Changes.Compose`, `State.Apply`) through the
+graph's reducers. The engine hands the carrier those
 reducers at every dispatch (`RawFlow.SetReducers`, the `reducers` wire field); nothing stores them, and the
 reducers a remote host returns are never read back. `Changes` holds each field it writes in one of two maps,
 never both: `contributions`, combined through the field's reducer, and `overwrites` - `Overwrite(k, v)`, and
@@ -240,13 +243,15 @@ Structured data is where the expansion lives: 800 small records (50.3KB of JSON)
 **6.8x** - because every element costs an interface, a boxed float64 and a map entry. Element count drives
 it, not byte count. See the carry payload's comment in `bench/workloads.go`.
 
-### Numbers are float64-domain; two unstorable values are a KNOWN, UNGUARDED punt
+### Untyped reads are float64-domain; two unstorable values are a KNOWN, UNGUARDED punt
 
-**Invariant: every number the engine itself produces round-trips exactly through a `float64`.** State,
-baggage and payloads are `State` values held as JSON, and `encoding/json` decodes a JSON number into a
-**`float64`** whenever the target is an `any` - exact for integers only up to **2^53**. This is what lets every
-untyped reader - `Get` into an `any`, `Parse` into a map - treat numbers as `float64` without qualification, and it holds by construction for every value
-dwarf derives (a `ReducerAdd`/`min`/`max` sum stores and round-trips fine even past 2^53). Do **not** "fix"
+**Invariant: an untyped reader sees every number as a `float64`; storage keeps the literal.** State, baggage
+and payloads are `State` values held as JSON, and `encoding/json` decodes a JSON number into a **`float64`**
+whenever the target is an `any` - exact for integers only up to **2^53**. So every untyped reader - `Get` into an
+`any`, `Parse` into a map - treats numbers as `float64` without qualification, while the stored bytes keep the
+literal that was written (see "Storage is exact" below). That includes a value dwarf derives: an `add` fold of
+integers is exact at any magnitude, so a sum past 2^53 is stored exactly and reads rounded through an untyped
+reader (exactly through `GetInt`, within int64). Do **not** "fix"
 the read side with `UseNumber`: it changes the Go type every state-map reader sees
 (`outcome.State["x"].(float64)` stops matching for an integral value; JSON has one number type, so no scheme
 preserves the writer's Go type through the database), needs a reflect-walker for caller-supplied targets, and
@@ -263,9 +268,13 @@ exposure to revisit, not a non-issue:
   (`1e300` is fine). **Workaround: carry a large id as a string** (the `id_str` pattern 64-bit-id APIs
   already publish).
 
-  **Storage is exact, carried and folded alike.** Raw field storage means a carried field is never decoded,
-  so it round-trips byte-exact into the next step's `state`, `final_state`, a `Fork` and a `Continue`; and
-  because a read does not memoize, even reading one leaves storage exact. **Do not decode carried fields at
+  **Storage is exact, carried and folded alike - except on MySQL beyond 64 bits.** Raw field storage means a
+  carried field is never decoded, so it round-trips exactly into the next step's `state`, `final_state`, a
+  `Fork` and a `Continue`; and because a read does not memoize, even reading one leaves storage exact. The one
+  exception is the database itself: **MySQL's `JSON` stores an integer outside its 64-bit range (above 2^64-1 or
+  below -2^63) as a double** (`12345678901234567890123` -> `1.2345678901234568e22`), and an exact `add` fold can
+  produce such a sum. Postgres respells a literal but keeps its value; SQLite and SQL Server keep the bytes.
+  **Do not decode carried fields at
   dispatch:** that stores `...800` from the first hop onward. A fold is the one place that decodes and writes
   back, so it decodes numbers as `json.Number` (`decodeValue`, and the cohort record in
   `engine/cohortfold.go`) and never reaches a reader: `add`/`min`/`max` fold integers in arbitrary precision

@@ -44,7 +44,7 @@ It defaults to the global `otel.GetMeterProvider()` — the no-op provider unles
 OpenTelemetry SDK. The engine builds its instruments under the scope `github.com/microbus-io/dwarf`;
 service identity comes from the provider's Resource, not from per-metric attributes.
 
-The engine emits 36 instruments — 17 counters, 14 gauges, and 5 histograms. Counter instrument names carry **no** `_total`
+The engine emits 37 instruments — 17 counters, 15 gauges, and 5 histograms. Counter instrument names carry **no** `_total`
 suffix; a Prometheus exporter appends it at the scrape boundary, so the names below are what you query in
 PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried as `dwarf_flows_started_total`):
 
@@ -225,7 +225,7 @@ workflows shows up in the same pipeline: per-operation spans (nested under the a
 logs, and nine `sequel_*` instruments — all under the scope `github.com/microbus-io/sequel`. The logger is
 forwarded only when you explicitly set one, so an unconfigured engine stays silent here too.
 
-**These are not dwarf's instruments and are not part of the 36 above**, but you will see them on the same
+**These are not dwarf's instruments and are not part of the 37 above**, but you will see them on the same
 scrape, and two of them answer questions no `dwarf_*` metric can:
 
 | `sequel_*` instrument | Type | Labels | Measures |

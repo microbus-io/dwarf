@@ -115,7 +115,9 @@ func (e *Engine) runRecoverySweep(ctx context.Context, heavy bool) {
 // and failStep, and a release on drain can fail the same way. A sweep run only at startup, or triggered by a
 // peer's stale registry row, never reaches those. The SELECT reads every `running` non-parked row
 // (`lease_expires` is not a seekable key in the selection index), and every dispatcher of the shard runs it, so
-// its cost is O(in-flight) per dispatcher per tick - small at a minute.
+// its cost is O(in-flight) per dispatcher per tick - small at a minute. Making it O(expired) would need a
+// `lease_expires` index on running rows, maintained on every claim and completion of the hottest table; not
+// worth it at this rate.
 //
 // Find the ids with a plain SELECT, then reset them by id. A single `UPDATE ... WHERE lease_expires<=NOW` must
 // row-lock every row its WHERE re-checks, so it can queue behind every in-flight claim and completion; that form
@@ -126,9 +128,18 @@ func (e *Engine) runRecoverySweep(ctx context.Context, heavy bool) {
 // TestLeaseRecovery_StepCompletedBetweenSelectAndResetIsLeftAlone). The SELECT
 // carries no LIMIT: SQL Server's LIMIT_OFFSET needs an ORDER BY, which on step_id invites a primary-key walk
 // over every step ever written; the expired set is bounded by the in-flight count anyway.
-// Do not derive the tick from the engine's TimeBudget, which bounds nothing because FlowOptions.TimeBudget is per
-// flow; size the bound for ONE surviving sweeper (the crash removed one of them); and do not give this its own
-// timer, an early wake, or a wake sized from a per-sweep `MIN(lease_expires)` query. Do not replace the tick with
+// If the tick must be shortened, three constraints hold:
+//   - Derive it from leaseMargin, never from the engine's TimeBudget. FlowOptions.TimeBudget is per flow and each
+//     lease comes from its own step row, so an engine-wide budget bounds nothing - a 2s flow on a 2m-default engine
+//     waits the tick regardless. leaseMargin is the term every lease shares: a leaseMargin/2 tick bounds recovery
+//     at lease + 15s, at most 1.5x the lease, for every budget.
+//   - Size the bound for ONE surviving sweeper. Several dispatchers sweeping a shard lower the expected wait to
+//     about tick/(dispatchers+1), but the crash being recovered removed one, and the floor is two. Do not stagger
+//     or coordinate sweepers to win that average back: that is a peer signal.
+//   - Measure the running-row scan first, at a realistic in-flight count and the full dispatcher count.
+//
+// Do not give this its own timer, an early wake, or a wake sized from a per-sweep `MIN(lease_expires)` query. Do
+// not replace the tick with
 // repairs triggered by a peer's stale registry row either: a stale row is weak evidence of a crash in both
 // directions (a database outage stales live peers; the replicas taking over a dead dispatcher's slot do not yet
 // know their role), and closing those gaps costs far more than the minute it saves.

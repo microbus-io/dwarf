@@ -233,11 +233,12 @@ func (f *Flow) StepKey() string {
 
 // --- State mutation ---
 
-// A task's output is its changes; state is the in-task working view. Every setter records a one-field Changes
-// and writes it to BOTH: composed into changes (which is what the orchestrator persists) and applied to state (so
-// a later read in the same task sees the field's combined value). On a field the graph declares a reducer for, a
-// write is a contribution: Set adds to the field rather than replacing it, and two Sets in one task both count.
-// Overwrite and Del replace instead.
+// A task's output is its changes; state is the in-task working view. Every setter writes BOTH: changes (which is
+// what the orchestrator persists) and state (so a later read in the same task sees the field's combined value). A
+// Set on a field with no reducer folds nothing, so its encoded bytes go into both directly (setPlain); every other
+// write is a one-field Changes, composed into changes and applied to state. On a field the graph declares a
+// reducer for, a write is a contribution: Set adds to the field rather than replacing it, and two Sets in one task
+// both count. Overwrite and Del replace instead.
 
 // ready makes a zero Flow writable: every write goes into both state and changes.
 func (f *Flow) ready() {
