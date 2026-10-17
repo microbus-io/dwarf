@@ -118,7 +118,10 @@ func (h histSample) key() string {
 // This exists because collectCounters extracts only Sum[int64] and silently drops everything else, so the
 // gauges and histograms never reached a results file. Any hypothesis about the refiller was therefore
 // untestable from a recorded run, no matter how many times the run was repeated.
-func collectHistograms(reader *sdkmetric.ManualReader) []histSample {
+//
+// ok is false when the collection failed. No samples is a legitimate reading (nothing recorded yet), so the
+// slice alone cannot say which happened.
+func collectHistograms(reader *sdkmetric.ManualReader) (samples []histSample, ok bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var rm metricdata.ResourceMetrics
@@ -130,7 +133,7 @@ func collectHistograms(reader *sdkmetric.ManualReader) []histSample {
 		// zero throughput. Measured 2026-08-01: 2 of 9 arms of a GCP turnstile ladder at 8 s tasks with
 		// 36,000 workers against a pinned 96/96 pool.
 		fmt.Fprintf(os.Stderr, "WARNING: metric collection failed (%v) - this arm will be marked invalid\n", err)
-		return nil
+		return nil, false
 	}
 	var out []histSample
 	for _, sm := range rm.ScopeMetrics {
@@ -160,18 +163,25 @@ func collectHistograms(reader *sdkmetric.ManualReader) []histSample {
 			}
 		}
 	}
-	return out
+	return out, true
 }
 
 // collectAllHistograms merges collectHistograms across every replica's reader, summing the samples that
 // share an (instrument, attributes) key. A shard's scan latency is a property of the SHARD, and every
 // replica scans all of them, so per-replica rows would just be repeated draws from one distribution;
 // summing gives the fleet's view of that shard with more samples behind it.
-func collectAllHistograms(readers []*sdkmetric.ManualReader) []histSample {
+//
+// ok is false when any replica's collection failed: the others' sum is an under-count, which a window would
+// otherwise carry as the fleet's distribution.
+func collectAllHistograms(readers []*sdkmetric.ManualReader) (samples []histSample, ok bool) {
 	var order []string
 	byKey := map[string]histSample{}
 	for _, r := range readers {
-		for _, s := range collectHistograms(r) {
+		hs, collected := collectHistograms(r)
+		if !collected {
+			return nil, false
+		}
+		for _, s := range hs {
 			k := s.key()
 			prev, seen := byKey[k]
 			if !seen {
@@ -186,7 +196,7 @@ func collectAllHistograms(readers []*sdkmetric.ManualReader) []histSample {
 	for _, k := range order {
 		out = append(out, byKey[k])
 	}
-	return out
+	return out, true
 }
 
 // addHist sums two samples of the same instrument+attributes (identical bucket boundaries by construction -

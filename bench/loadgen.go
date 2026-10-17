@@ -83,6 +83,9 @@ type stepResult struct {
 	// separates "one shard is slow" from "the cross-shard fan-out wait is expensive" from "the refiller is
 	// not the constraint at all". Recorded as buckets, so percentiles are recoverable after the run.
 	EngineHists []histSample `json:"engineHistograms,omitempty"`
+	// HistsMissing says a histogram collection at either window edge failed on some replica, so EngineHists
+	// is not the fleet's. Histograms are collected separately from the counters and can fail alone.
+	HistsMissing bool `json:"histogramsMissing,omitzero"`
 	// GaugesBefore/GaugesAfter snapshot the observable gauges at the window edges. The pair worth the
 	// field: sequel_pool_wait_count / sequel_pool_wait_duration_seconds are cumulative sql.DBStats
 	// totals, so their window delta is the pool-wait the engine paid inside the window - the signal
@@ -109,26 +112,104 @@ type stepResult struct {
 	// Host is what the throughput COST this engine host - CPU cores and network bandwidth over the
 	// measurement window. StepsPerCore is the engine-sizing headline: steps/s driven per engine CPU core.
 	Host hostUsage `json:"host"`
-	// Stalled says why the open-loop watchdog ended this step early (no task started and no flow ended for
-	// -stall-timeout while flows were outstanding), or is empty. A stalled step's numbers cover a cut-short
+	// Stalled says why the watchdog ended this step early (no task started and no flow ended for
+	// -stall-timeout while flows were in flight), or is empty. A stalled step's numbers cover a cut-short
 	// window and the artifact is invalid.
 	Stalled string `json:"stalled,omitzero"`
+	// Invalidity is why this window is not a measurement (windowInvalidity), recorded on the window itself for a
+	// volume probe, whose artifact holds many windows and names only the first invalid one.
+	Invalidity string `json:"invalidity,omitzero"`
 	// Drain is the open-loop step's end-of-run accounting (-drain): every flow created in the step, warmup
 	// included, followed to its end. Nil when the drain is off or the step stalled.
 	Drain *drainResult `json:"drain,omitzero"`
 }
 
-// guard holds the open-loop run guards, set once at startup from -drain and -stall-timeout. Package-level for
-// the reason tracing is: runStepOpenLoop's signature already carries fifteen parameters and none of these.
+// guard holds the run guards, set once at startup from -drain and -stall-timeout. Package-level for the reason
+// tracing is: runStepOpenLoop's signature already carries fifteen parameters and none of these.
 var guard struct {
 	drain time.Duration
 	stall time.Duration
 }
 
-// stalledRun is set by any window the watchdog ends, so the run stops at the first stall whatever mode it is in:
-// every window after one starts on hung engines, and main exits without their shutdown, which would wait on
-// whatever hung.
+// stalledRun is set by any watchdog that fires and by a drain that gives up, so the run stops at the first stall
+// whatever mode it is in: every window after one starts on hung engines, and main exits without their shutdown,
+// which would wait on whatever hung.
 var stalledRun atomic.Bool
+
+// progressWatch ends a phase when nothing moves: no task started and no flow ended for -stall-timeout while
+// busy reports work in flight. Every mode runs one - sweep windows open- and closed-loop, the volume fill and
+// soak - because a hung engine otherwise holds the run until something outside kills it (an OOM-bound
+// scatter arm sat ~34 minutes). It cannot catch a process too starved of memory to schedule its own
+// goroutines, which is why the rig scripts carry a watchdog of their own.
+type progressWatch struct {
+	stalled chan struct{}
+	why     string // written before stalled is closed, read only after
+	cancel  context.CancelFunc
+}
+
+// watchProgress starts a watchdog over the engines' ended flows and the hosts' started tasks. With
+// -stall-timeout 0 it never fires.
+func watchProgress(ctx context.Context, engines []*engine.Engine, busy func() int64) *progressWatch {
+	w := &progressWatch{stalled: make(chan struct{})}
+	wctx, cancel := context.WithCancel(ctx)
+	w.cancel = cancel
+	if guard.stall <= 0 {
+		return w
+	}
+	ended := func() int64 {
+		var n int64
+		for _, e := range engines {
+			n += e.FlowsEnded()
+		}
+		return n
+	}
+	go func() {
+		lastTasks, lastEnded, lastMove := tasksStarted.Load(), ended(), time.Now()
+		tick := time.NewTicker(time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-wctx.Done():
+				return
+			case <-tick.C:
+			}
+			tasks, done := tasksStarted.Load(), ended()
+			if tasks != lastTasks || done != lastEnded || busy() <= 0 {
+				lastTasks, lastEnded, lastMove = tasks, done, time.Now()
+				continue
+			}
+			if time.Since(lastMove) >= guard.stall {
+				w.why = fmt.Sprintf("no task started and no flow ended for %s with %d flows in flight", guard.stall, busy())
+				stalledRun.Store(true)
+				close(w.stalled)
+				return
+			}
+		}
+	}()
+	return w
+}
+
+// pause sleeps for d, or until the watchdog fires.
+func (w *progressWatch) pause(d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-w.stalled:
+	}
+}
+
+// reason says why the watchdog fired, or "" while it has not.
+func (w *progressWatch) reason() string {
+	select {
+	case <-w.stalled:
+		return w.why
+	default:
+		return ""
+	}
+}
+
+func (w *progressWatch) stop() { w.cancel() }
 
 // drainResult is what became of every flow an open-loop step created. "Nothing lost" is otherwise an inference
 // from window counters (no errors, executed = offered) that says nothing about the ~2,000 flows still in flight
@@ -203,12 +284,15 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 	var (
 		measuring  atomic.Bool
 		stop       atomic.Bool
+		inFlight   atomic.Int64
 		flows      atomic.Int64
 		errCount   atomic.Int64
 		latMu      sync.Mutex
 		latencies  []time.Duration
 		submitters sync.WaitGroup
 	)
+	watch := watchProgress(ctx, engines, inFlight.Load)
+	defer watch.stop()
 
 	for i := range k {
 		eng := engines[i%len(engines)]
@@ -216,7 +300,9 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 			for !stop.Load() {
 				w := pick()
 				start := time.Now()
+				inFlight.Add(1)
 				_, outcome, err := eng.Run(ctx, w.graphURL, w.initialState(), flowOpts())
+				inFlight.Add(-1)
 				elapsed := time.Since(start)
 				if !measuring.Load() {
 					continue
@@ -233,9 +319,9 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 		})
 	}
 
-	time.Sleep(warmup)
+	watch.pause(warmup)
 	before := collectAllCounters(readers)
-	histBefore := collectAllHistograms(readers)
+	histBefore, histBeforeOK := collectAllHistograms(readers)
 	gaugesBefore := collectAllGauges(readers)
 	gaugeS := startGaugeSamplerTracing(readers, tracing.every, statsTrace(), newWALProbe(dbs, wait), nil)
 	pgssBefore := pgss.snapshot(ctx)
@@ -245,20 +331,27 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 	hostBefore := sampleHost()
 	windowStart := time.Now()
 	measuring.Store(true)
-	time.Sleep(window)
+	watch.pause(window)
 	measuring.Store(false)
 	elapsed := time.Since(windowStart)
 	gauges := gaugeS.close()
 	hostAfter := sampleHost()
 	after := collectAllCounters(readers)
-	histAfter := collectAllHistograms(readers)
+	histAfter, histAfterOK := collectAllHistograms(readers)
 	gaugesAfter := collectAllGauges(readers)
 	pgssAfter := pgss.snapshot(ctx)
 	dbAfter := dbs.sample(ctx)
 	waitAfter := wait.snapshot()
 	bytesAfter := bytesWritten.Load()
 	stop.Store(true)
-	submitters.Wait()
+	watch.stop()
+	stallWhy := watch.reason()
+	if stallWhy != "" {
+		// A submitter stuck in Run on a hung engine never returns, so do not wait for one.
+		fmt.Println("STALLED:", stallWhy)
+	} else {
+		submitters.Wait()
+	}
 
 	deltas := counterDeltas(before, after)
 	sec := elapsed.Seconds()
@@ -281,6 +374,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 		Goroutines:     runtime.NumGoroutine(),
 		EngineCounters: deltas,
 		EngineHists:    histogramDeltas(histBefore, histAfter),
+		HistsMissing:   !histBeforeOK || !histAfterOK,
 		GaugesBefore:   gaugesBefore,
 		Gauges:         gauges,
 		GaugesAfter:    gaugesAfter,
@@ -288,6 +382,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 		DB:             dbs.windowDelta(dbBefore, dbAfter),
 		WaitProfile:    waitDelta(waitBefore, waitAfter),
 		Host:           host,
+		Stalled:        stallWhy,
 	}
 }
 
@@ -352,56 +447,8 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 		stepStart = collectAllCounters(readers)
 	}
 
-	// The progress watchdog ends the step when nothing moves: no task started and no flow ended for
-	// -stall-timeout while flows are outstanding. Without it a hung engine holds the run until something
-	// outside kills it - W's OOM-bound scatter arm sat ~34 minutes. It cannot catch a process too starved of
-	// memory to schedule its own goroutines, which is why the rig scripts carry a watchdog of their own.
-	stalled := make(chan struct{})
-	var stallWhy string // written before stalled is closed, read only after
-	watchCtx, stopWatch := context.WithCancel(ctx)
-	defer stopWatch()
-	if guard.stall > 0 {
-		go func() {
-			lastTasks, lastEnded, lastMove := tasksStarted.Load(), ended(), time.Now()
-			tick := time.NewTicker(time.Second)
-			defer tick.Stop()
-			for {
-				select {
-				case <-watchCtx.Done():
-					return
-				case <-tick.C:
-				}
-				tasks, done := tasksStarted.Load(), ended()
-				if tasks != lastTasks || done != lastEnded || outstanding() <= 0 {
-					lastTasks, lastEnded, lastMove = tasks, done, time.Now()
-					continue
-				}
-				if time.Since(lastMove) >= guard.stall {
-					stallWhy = fmt.Sprintf("no task started and no flow ended for %s with %d flows outstanding",
-						guard.stall, outstanding())
-					close(stalled)
-					return
-				}
-			}
-		}()
-	}
-	// pause sleeps for d, or until the watchdog fires.
-	pause := func(d time.Duration) {
-		t := time.NewTimer(d)
-		defer t.Stop()
-		select {
-		case <-t.C:
-		case <-stalled:
-		}
-	}
-	isStalled := func() bool {
-		select {
-		case <-stalled:
-			return true
-		default:
-			return false
-		}
-	}
+	watch := watchProgress(ctx, engines, outstanding)
+	defer watch.stop()
 
 	// Sampled completion latency: a bounded pool, cancelled at stop so a still-pending sample never
 	// blocks the drain. One in `sampleEvery` created flows is measured, counted across ALL creators. Do not
@@ -486,9 +533,9 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 		})
 	}
 
-	pause(warmup)
+	watch.pause(warmup)
 	before := collectAllCounters(readers)
-	histBefore := collectAllHistograms(readers)
+	histBefore, histBeforeOK := collectAllHistograms(readers)
 	gaugesBefore := collectAllGauges(readers)
 	gaugeS := startGaugeSamplerTracing(readers, tracing.every, statsTrace(), newWALProbe(dbs, wait), outstanding)
 	pgssBefore := pgss.snapshot(ctx)
@@ -504,32 +551,39 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 		t := time.AfterFunc(arrivalStop, func() { halted.Store(true) })
 		defer t.Stop()
 	}
-	pause(window)
+	watch.pause(window)
 	measuring.Store(false)
 	elapsed := time.Since(windowStart)
 	gauges := gaugeS.close()
 	hostAfter := sampleHost()
 	after := collectAllCounters(readers)
-	histAfter := collectAllHistograms(readers)
+	histAfter, histAfterOK := collectAllHistograms(readers)
 	gaugesAfter := collectAllGauges(readers)
 	pgssAfter := pgss.snapshot(ctx)
 	dbAfter := dbs.sample(ctx)
 	waitAfter := wait.snapshot()
 	bytesAfter := bytesWritten.Load()
 	stop.Store(true)
-	stopWatch()
+	watch.stop()
 	cancelAwaits()
+	stallWhy := watch.reason()
 	var drain *drainResult
-	if isStalled() {
+	if stallWhy != "" {
 		// A creator stuck in Create on a hung engine never returns, so do not wait for one. main.go exits
 		// without the engines' graceful shutdown for the same reason.
 		fmt.Println("STALLED:", stallWhy)
-		stalledRun.Store(true)
 	} else {
 		creatorsWG.Wait()
 		awaitWG.Wait()
 		if guard.drain > 0 {
-			drain = drainOutstanding(readers, stepStart, created.Load(), outstanding, guard.drain)
+			drain = drainOutstanding(readers, stepStart, created.Load(), outstanding, tasksStarted.Load, guard.drain)
+			if drain.Unfinished > 0 {
+				// The drain gives up only when no task started and no flow ended for -drain: the watchdog's own
+				// definition of a hang, met after the watchdog stopped. The next window would start on the hung
+				// engines, so it ends the run as a stall does.
+				fmt.Println("STALLED in the drain:", drain.Unfinished, "flows unfinished")
+				stalledRun.Store(true)
+			}
 		}
 	}
 
@@ -558,6 +612,7 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 		Goroutines:     runtime.NumGoroutine(),
 		EngineCounters: deltas,
 		EngineHists:    histogramDeltas(histBefore, histAfter),
+		HistsMissing:   !histBeforeOK || !histAfterOK,
 		GaugesBefore:   gaugesBefore,
 		Gauges:         gauges,
 		GaugesAfter:    gaugesAfter,
@@ -565,35 +620,33 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 		DB:             dbs.windowDelta(dbBefore, dbAfter),
 		WaitProfile:    waitDelta(waitBefore, waitAfter),
 		Host:           host,
-		Stalled:        stallReason(isStalled(), stallWhy),
+		Stalled:        stallWhy,
 		Drain:          drain,
 	}
 }
 
-func stallReason(stalled bool, why string) string {
-	if !stalled {
-		return ""
-	}
-	return why
-}
-
-// drainOutstanding waits for the step's outstanding flows to end, giving up once none has ended for quiet, then
-// accounts for every flow the step created. It runs after the measurement window has been collected, so it never touches the window's
-// numbers; with creation stopped, a healthy engine drains ~2,000 flows in seconds at small payloads and in a
-// minute or two at 1 MB.
+// drainOutstanding waits for the step's outstanding flows to end, giving up once no task has started and no flow
+// has ended for quiet, then accounts for every flow the step created. It runs after the measurement window has
+// been collected, so it never touches the window's numbers; with creation stopped, a healthy engine drains ~2,000
+// flows in seconds at small payloads and in a minute or two at 1 MB. tasks is the hosts' started-task count.
 func drainOutstanding(readers []*sdkmetric.ManualReader, stepStart map[string]int64, created int64,
-	outstanding func() int64, quiet time.Duration) *drainResult {
+	outstanding, tasks func() int64, quiet time.Duration) *drainResult {
 
 	d := &drainResult{OutstandingAtWindowEnd: max(0, outstanding()), Created: created}
 	// Give up on silence, never on a wall-clock bound: a healthy saturated backlog drains for as long as it
 	// takes, and only one that stopped draining counts as unfinished. A bound invalidates every slow cell -
 	// 20,000 outstanding 10-step flows need 300s even at ~667 steps/s, and a 1MB cell runs at ~270.
+	//
+	// A task starting is progress too, as it is to the watchdog. Flow ends alone go quiet for as long as a whole
+	// flow's remaining length: 10-step flows of 60s tasks in lockstep end nothing for 10 minutes while their
+	// tasks keep starting, and a -drain checked against one task would give up on them.
 	start := time.Now()
-	left, progressed := d.OutstandingAtWindowEnd, start
+	left, pulse, progressed := d.OutstandingAtWindowEnd, tasks(), start
 	for left > 0 && time.Since(progressed) < quiet {
 		time.Sleep(200 * time.Millisecond)
-		if n := max(0, outstanding()); n < left {
-			left, progressed = n, time.Now()
+		n, p := max(0, outstanding()), tasks()
+		if n < left || p != pulse {
+			left, pulse, progressed = min(left, n), p, time.Now()
 		}
 	}
 	d.Sec = time.Since(start).Seconds()

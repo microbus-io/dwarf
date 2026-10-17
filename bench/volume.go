@@ -27,6 +27,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/sequel"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
 // The volume mode fills a database to a target dwarf_steps row count WITHOUT deleting anything, probing
@@ -64,6 +65,9 @@ type volumeCheckpoint struct {
 	ListPagesWalked int     `json:"listPagesWalked"`
 	StepsDiskMB     float64 `json:"stepsDiskMB"`
 	FlowsDiskMB     float64 `json:"flowsDiskMB"`
+	// RowCountError is why the exact row count failed at this checkpoint; StepRows is then the estimate that
+	// triggered it and FlowRows is 0.
+	RowCountError string `json:"rowCountError,omitzero"`
 	// Saturated and TwoThirds are the -volume-probe windows taken at this checkpoint, nil without it.
 	Saturated *stepResult `json:"saturated,omitempty"`
 	TwoThirds *stepResult `json:"twoThirds,omitempty"`
@@ -89,6 +93,12 @@ type volumeReport struct {
 
 // runVolume fills to targetSteps rows, probing every checkpointEvery rows, then measures retention.
 //
+// Between checkpoints the fill tracks its progress from the executed-steps counter: every step row a sweep
+// workload creates executes once, so the rows at the last exact count plus the steps executed since is the
+// table's size less the steps still pending. The exact COUNT(*) runs only at a checkpoint. Polled every 5s it
+// is a full scan of both tables that holds a snapshot for its whole run, and at a size where it outlasts its
+// timeout the fill never sees a checkpoint at all.
+//
 // probe, when non-nil, runs one open-loop measurement window at a commanded flow rate (0 = flat out) and
 // reports why it was not a measurement, if it was not; the fill is paused around it, so the probe measures
 // the database at its current size and not a fill and a probe competing for it.
@@ -96,17 +106,21 @@ type volumeReport struct {
 // probeStepsPerFlow is the probe workload's steps per flow: the 2/3 window's commanded flow rate is 2/3 of the
 // saturated window's EXECUTED steps/s in flows, never of its flowsPerSec, which is the admission rate and runs
 // ahead of what was served.
-func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSampler, pick func() *workload,
-	k, targetSteps, checkpointEvery int, probe func(rate float64) (stepResult, string), probeStepsPerFlow int) *volumeReport {
+func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric.ManualReader, dbs *dbStatsSampler,
+	pick func() *workload, k, targetSteps, checkpointEvery int, probe func(rate float64) (stepResult, string),
+	probeStepsPerFlow int) *volumeReport {
 
 	var (
 		stop       atomic.Bool
+		inFlight   atomic.Int64
 		flows      atomic.Int64
 		errCount   atomic.Int64
 		recentKey  atomic.Value // string: a completed flow key, for the History probe
 		submitters sync.WaitGroup
 	)
 	recentKey.Store("")
+	watch := watchProgress(ctx, engines, inFlight.Load)
+	defer watch.stop()
 
 	fill := func() {
 		stop.Store(false)
@@ -116,7 +130,9 @@ func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSample
 				for !stop.Load() {
 					w := pick()
 					// No FlowOptions: nothing is marked for deletion, so rows accumulate - that is the point.
+					inFlight.Add(1)
 					key, out, err := eng.Run(ctx, w.graphURL, w.initialState(), nil)
+					inFlight.Add(-1)
 					if err != nil || out.Status != workflow.StatusCompleted {
 						errCount.Add(1)
 						continue
@@ -129,15 +145,55 @@ func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSample
 			})
 		}
 	}
-	pause := func() {
+	// pause stops the fill and waits for its submitters, and reports false when the watchdog fires first: a
+	// submitter stuck in Run on a hung engine never returns.
+	pause := func() bool {
 		stop.Store(true)
-		submitters.Wait()
+		done := make(chan struct{})
+		go func() {
+			submitters.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+			return true
+		case <-watch.stalled:
+			return false
+		}
 	}
 	report := &volumeReport{TargetStepRows: targetSteps, Concurrency: k}
 	invalid := func(window string, why string) {
 		if why != "" && report.Invalidity == "" {
 			report.Invalidity = window + ": " + why
 		}
+	}
+	// executed is the fleet's executed-step count, or -1 when the collection failed.
+	executed := func() int64 {
+		c := collectAllCounters(readers)
+		if c == nil {
+			return -1
+		}
+		return c["dwarf_steps_executed"]
+	}
+	// exactRows takes the exact count and rebases the estimate on it. On a failed count it keeps the old base,
+	// records the failure and returns the estimate.
+	var baseRows, baseExec int64
+	estimate := func() int64 {
+		if n := executed(); n >= 0 {
+			return baseRows + n - baseExec
+		}
+		return -1
+	}
+	exactRows := func(at string) (steps, flowRows int, err error) {
+		steps, flowRows, err = rowCounts(ctx, engines[0])
+		if err != nil {
+			invalid("row count "+at, err.Error())
+			return int(max(0, estimate())), 0, err
+		}
+		if n := executed(); n >= 0 {
+			baseRows, baseExec = int64(steps), n
+		}
+		return steps, flowRows, nil
 	}
 	// probeThroughput takes the saturated window, then the 2/3 one at the rate the first measured. It reports
 	// whether a window stalled, and stops there: every drain and window after it would wait on hung engines.
@@ -148,7 +204,7 @@ func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSample
 		sat, why := probe(0)
 		invalid(fmt.Sprintf("saturated probe at %d step rows", cp.StepRows), why)
 		cp.Saturated = &sat
-		if sat.Stalled != "" {
+		if stalledRun.Load() { // the window's watchdog fired, or its drain gave up
 			return true
 		}
 		// A saturated window ends with a backlog of created-but-unfinished flows, which would otherwise drain
@@ -159,7 +215,7 @@ func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSample
 			twoThirds, why := probe(rate)
 			invalid(fmt.Sprintf("2/3 probe at %d step rows", cp.StepRows), why)
 			cp.TwoThirds = &twoThirds
-			if twoThirds.Stalled != "" {
+			if stalledRun.Load() {
 				return true
 			}
 			drainRunning(ctx, engines[0])
@@ -173,25 +229,32 @@ func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSample
 	}
 
 	start := time.Now()
-	// abandon ends the run at a stalled probe. The fill is paused around every probe, so no submitter is running.
-	abandon := func(cp volumeCheckpoint) *volumeReport {
-		report.Checkpoints = append(report.Checkpoints, cp)
+	// abandon ends the run at a stall: a probe's, or the fill's own watchdog. Neither waits for the fill's
+	// submitters, which may be stuck on the hung engine.
+	abandon := func(cp *volumeCheckpoint) *volumeReport {
+		if cp != nil {
+			report.Checkpoints = append(report.Checkpoints, *cp)
+		}
+		if why := watch.reason(); why != "" {
+			fmt.Println("STALLED:", why)
+			invalid("fill", "stalled: "+why)
+		}
 		report.DurationSec = time.Since(start).Seconds()
 		report.FlowsSubmitted = flows.Load()
 		report.Errors = errCount.Load()
 		return report
 	}
-	lastRows, lastT := 0, start
+	steps, flowRows, _ := exactRows("at the start")
+	lastRows, lastT := steps, start
 	if probe != nil {
 		// The empty-database baseline every later checkpoint is read against. The fill rate to the first
 		// checkpoint starts after it, so it is not charged with the probe's windows, drains or rows.
-		steps, flowRows := rowCounts(ctx, engines[0])
 		cp := volumeCheckpoint{StepRows: steps, FlowRows: flowRows}
 		if probeThroughput(&cp) {
-			return abandon(cp)
+			return abandon(&cp)
 		}
 		report.Checkpoints = append(report.Checkpoints, cp)
-		lastRows, _ = rowCounts(ctx, engines[0])
+		lastRows, _, _ = exactRows("after the baseline probe")
 		lastT = time.Now()
 	}
 	fill()
@@ -202,17 +265,24 @@ func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSample
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
-		<-ticker.C
-		steps, flowRows := rowCounts(ctx, engines[0])
-		if steps < next && steps < targetSteps {
-			continue
+		select {
+		case <-ticker.C:
+		case <-watch.stalled:
+			return abandon(nil)
+		}
+		if est := estimate(); est < 0 || (est < int64(next) && est < int64(targetSteps)) {
+			continue // a failed collection is retried on the next tick
 		}
 		now := time.Now()
+		steps, flowRows, cerr := exactRows(fmt.Sprintf("near %d step rows", next))
 		cp := volumeCheckpoint{
 			TSec:            now.Sub(start).Seconds(),
 			StepRows:        steps,
 			FlowRows:        flowRows,
 			FillStepsPerSec: float64(steps-lastRows) / now.Sub(lastT).Seconds(),
+		}
+		if cerr != nil {
+			cp.RowCountError = cerr.Error()
 		}
 		cp.HistoryMs, cp.ListFirstMs, cp.ListDeepMs, cp.ListPagesWalked = probeReads(ctx, engines[0], recentKey.Load().(string))
 		st := dbs.sample(ctx)
@@ -222,16 +292,18 @@ func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSample
 			cp.TSec, cp.StepRows, cp.FlowRows, cp.FillStepsPerSec,
 			cp.HistoryMs, cp.ListFirstMs, cp.ListDeepMs, cp.StepsDiskMB, cp.FlowsDiskMB)
 		if probe != nil {
-			pause()
+			if !pause() {
+				return abandon(&cp)
+			}
 			if probeThroughput(&cp) {
-				return abandon(cp)
+				return abandon(&cp)
 			}
 			if steps < targetSteps {
 				fill()
 			}
 			// The probe windows add rows too (they count toward the fill, as the plan expects), but the fill
 			// rate to the NEXT checkpoint must not be charged with the probe's time or rows.
-			steps, _ = rowCounts(ctx, engines[0])
+			steps, _, _ = exactRows(fmt.Sprintf("after the probe at %d step rows", cp.StepRows))
 			now = time.Now()
 		}
 		report.Checkpoints = append(report.Checkpoints, cp)
@@ -245,14 +317,21 @@ func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSample
 		}
 	}
 
-	pause()
+	if !pause() {
+		return abandon(nil)
+	}
+	watch.stop()
 	report.DurationSec = time.Since(start).Seconds()
 	report.FlowsSubmitted = flows.Load()
 	report.Errors = errCount.Load()
 
 	// Retention at size, in two separately-measured halves: Purge only STAMPS delete_after_ms (bounded by
-	// purgeCap, 4096 roots per call), and the reaper's own ticker does the set-based delete afterwards.
-	before, _ := rowCounts(ctx, engines[0])
+	// purgeCap, 4096 roots per call), and the reaper's own ticker does the set-based delete afterwards. A
+	// failed row count invalidates the reap rate, which is a difference of two of them.
+	before, _, err := rowCounts(ctx, engines[0])
+	if err != nil {
+		invalid("row count before the purge", err.Error())
+	}
 	pctx, pcancel := context.WithTimeout(ctx, 2*time.Minute)
 	markStart := time.Now()
 	marked, err := engines[0].Purge(pctx, workflow.Query{Status: workflow.StatusCompleted, Limit: 4096})
@@ -270,7 +349,10 @@ func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSample
 	stable := 0
 	for time.Since(reapStart) < 5*time.Minute {
 		time.Sleep(15 * time.Second)
-		cur, _ := rowCounts(ctx, engines[0])
+		cur, _, err := rowCounts(ctx, engines[0])
+		if err != nil {
+			continue
+		}
 		if cur < prev {
 			stable = 0
 		} else if prev-cur == 0 && cur < before {
@@ -281,7 +363,10 @@ func runVolume(ctx context.Context, engines []*engine.Engine, dbs *dbStatsSample
 		}
 		prev = cur
 	}
-	after, _ := rowCounts(ctx, engines[0])
+	after, _, err := rowCounts(ctx, engines[0])
+	if err != nil {
+		invalid("row count after the reap", err.Error())
+	}
 	report.ReapedRows = before - after
 	report.ReapSec = time.Since(reapStart).Seconds()
 	if report.ReapSec > 0 {
@@ -311,12 +396,13 @@ func drainRunning(ctx context.Context, eng *engine.Engine) {
 
 // rowCounts counts the live step and flow rows across every shard, exactly, with a COUNT(*) on each table:
 // dialect-agnostic, unlike the catalog queries the disk sampler uses. It is a full scan of both tables per
-// shard, which the bench can afford against databases it owns; it returns zeros if any shard fails to count.
-func rowCounts(ctx context.Context, eng *engine.Engine) (steps, flows int) {
+// shard, which the bench can afford against databases it owns, but not on a poll. It fails if any shard fails
+// to count: a zero would read as an empty database.
+func rowCounts(ctx context.Context, eng *engine.Engine) (steps, flows int, err error) {
 	sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	var mu sync.Mutex
-	err := engineseams.DB(eng).OnEach(sctx, func(ctx context.Context, db *sequel.DB, _ int) error {
+	err = engineseams.DB(eng).OnEach(sctx, func(ctx context.Context, db *sequel.DB, _ int) error {
 		var s, f int
 		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps").Scan(&s); err != nil {
 			return err
@@ -330,9 +416,9 @@ func rowCounts(ctx context.Context, eng *engine.Engine) (steps, flows int) {
 		return nil
 	})
 	if err != nil {
-		return 0, 0
+		return 0, 0, err
 	}
-	return steps, flows
+	return steps, flows, nil
 }
 
 // probeReads times the read paths at the current volume: History on one real flow, the first List page,

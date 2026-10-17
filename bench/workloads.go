@@ -34,6 +34,17 @@ type workload struct {
 	// throughput in steps/s into flows/s; an open-loop window's own flowsPerSec is the ADMISSION rate, which
 	// runs ahead of completion by up to -max-outstanding flows and is no measure of what was served.
 	stepsPerFlow int
+	// build builds the payload the workload's tasks write or carry, nil for none. It runs once, before any
+	// window (prepare): built by the first task instead, it blocks every concurrent writer on the build -
+	// ~10-20s for the 4GB a -payload 250MB -fanout-width 8 run needs, inside a short warmup's window.
+	build func()
+}
+
+// prepare builds the workload's payload ahead of the run that uses it.
+func (w *workload) prepare() {
+	if w != nil && w.build != nil {
+		w.build()
+	}
 }
 
 const (
@@ -139,11 +150,16 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 	nop := func(ctx context.Context, f *workflow.Flow) error { return nil }
 	h.tasks["bench/nop"] = nop
 
-	// The payloads below are built on first use, not here. Every workload is registered whatever the run
-	// picks, and a payload built eagerly is resident for the whole run: at -payload 250MB that is a 500MB
-	// fresh buffer (x -fanout-width), the 250MB state payload and ~2GB of unused carry records, which would
-	// read as engine memory in exactly the run that measures it.
+	// The payloads below are built for the workloads the run picks (workload.prepare), not here. Every
+	// workload is registered whatever the run picks, and a payload built eagerly is resident for the whole
+	// run: at -payload 250MB that is a 500MB fresh buffer (x -fanout-width), the 250MB state payload and ~2GB
+	// of unused carry records, which would read as engine memory in exactly the run that measures it.
 	fresh := sync.OnceValue(func() *freshBytes { return newFreshBytes(payloadBytes, max(1, fanOutWidth)) })
+	buildFresh := func() {
+		if payloadBytes > 0 {
+			fresh()
+		}
+	}
 
 	// write: the linear and fanout task. -payload 0 makes it a no-op, the dispatch-cost floor.
 	h.tasks["bench/write"] = func(ctx context.Context, f *workflow.Flow) error {
@@ -360,21 +376,25 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 			graphURL:     "bench/linear",
 			initialState: func() map[string]any { return nil },
 			stepsPerFlow: chainSteps,
+			build:        buildFresh,
 		},
 		"fanout": {
 			graphURL:     "bench/fanout",
 			initialState: func() map[string]any { return map[string]any{"items": fanoutItems} },
 			stepsPerFlow: fanOutWidth + 2,
+			build:        buildFresh,
 		},
 		"scatter": {
 			graphURL:     "bench/scatter",
 			initialState: func() map[string]any { return nil },
 			stepsPerFlow: fanOutWidth*branchDepth + 2,
+			build:        buildFresh,
 		},
 		"state": {
 			graphURL:     "bench/state",
 			initialState: func() map[string]any { return nil },
 			stepsPerFlow: stateSteps,
+			build:        func() { payload() },
 		},
 		// The document rides in as INITIAL STATE rather than being written by a first task, which is what
 		// makes the entry step its anchor - the case where a payload lives in a step's `state` column with
@@ -383,6 +403,7 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 			graphURL:     "bench/carry",
 			initialState: func() map[string]any { return map[string]any{"doc": records()} },
 			stepsPerFlow: chainSteps,
+			build:        func() { records() },
 		},
 		"carryfanout": {
 			graphURL: "bench/carryfanout",
@@ -390,15 +411,19 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 				return map[string]any{"doc": records(), "items": fanoutItems}
 			},
 			stepsPerFlow: 2*fanOutWidth + 2,
+			build:        func() { records() },
 		},
 	}
 }
 
-// chooseWorkload resolves the -workload flag to a per-flow picker. "mixed" draws 70% linear / 20% fanout /
-// 10% state per flow; any other name is a fixed pick.
+// chooseWorkload resolves the -workload flag to a per-flow picker, and prepares every workload it can pick.
+// "mixed" draws 70% linear / 20% fanout / 10% state per flow; any other name is a fixed pick.
 func chooseWorkload(workloads map[string]*workload, name string) (func() *workload, error) {
 	if name == "mixed" {
 		linear, fanout, state := workloads["linear"], workloads["fanout"], workloads["state"]
+		linear.prepare()
+		fanout.prepare()
+		state.prepare()
 		return func() *workload {
 			r := rand.IntN(10)
 			switch {
@@ -415,5 +440,6 @@ func chooseWorkload(workloads map[string]*workload, name string) (func() *worklo
 	if w == nil {
 		return nil, fmt.Errorf("unknown workload %q (linear, fanout, scatter, state, carry, carryfanout, llm, mixed)", name)
 	}
+	w.prepare()
 	return func() *workload { return w }, nil
 }

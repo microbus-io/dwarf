@@ -420,7 +420,39 @@ heap** and the crew is mostly stacks.
   hardware whose RTT differed by 0.036ms. Decompose against `pg_stat_statements` and the pool-wait gauges
   before calling a shard slow. Note the pgss/dbstats/RTT samplers watch `dsns[0]` only, so a multi-shard run
   has no server-side counterpart for shards 2+.
-- **`valid: false`** means a recovery/unwedge counter fired; the run is not comparable.
+- **`valid: false`** means the run is not comparable, and `invalidity` names the first reason: a recovery or
+  unwedge counter fired, a flow errored, a window stalled, the drain left a flow unfinished, failed or
+  missing, a metric collection failed on any replica, or `-max-outstanding` bound under a commanded rate.
+  Each sweep window and volume probe also carries its own `invalidity`, so a chart can drop one window
+  without dropping the run.
+
+## Run guards: the watchdog and the drain
+
+**Every mode runs the stall watchdog** (`watchProgress`): sweep windows open- and closed-loop, the volume fill
+and soak. It fires when no task has started and no flow has ended for `-stall-timeout` while work is in
+flight, and that ends the RUN, not the window: the artifact is written, and the process exits 3 without the
+engines' shutdown, which would wait on whatever hung. A phase that waits on its submitters must not wait once
+it has fired, since a submitter stuck in `Create` or `Run` on a hung engine never returns.
+
+**Silence is measured between task starts as well as flow ends**, by the watchdog and the drain alike. Flow
+ends alone go quiet for a whole flow's remaining length - 10-step flows of 60s tasks in lockstep end nothing
+for 10 minutes while their tasks keep starting - so a guard reading only flow ends invalidates healthy
+long-task runs. Counted this way, the longest gap a healthy run shows is one task, which is the bound the flag
+checks hold `-stall-timeout` and `-drain` to.
+
+**The drain gives up on silence, never on a wall-clock bound**, and giving up is a stall. A bound invalidates
+every slow cell: 20,000 outstanding 10-step flows need 300s even at ~667 steps/s. And since its silence is
+the watchdog's own definition of a hang, met after the watchdog stopped, a drain that gives up ends the run
+too - the next window would start on the hung engines.
+
+**A collection that failed on any replica is a failed collection**, never the other replicas' sum. Counters
+and gauges come back nil, histograms report `histogramsMissing`, a gauge-sampler tick is left out of the means
+(`gaugeSamplesFailed`), and a soak sample says `collectionFailed`: its alarms are differences against the
+soak's opening collection, so a missing reading at either end reads as zero alarms.
+
+**The volume fill tracks its progress from the executed-steps counter**, and takes the exact `COUNT(*)` only
+at a checkpoint. Polled, the count is a full scan of both tables that holds a snapshot for its whole run, and
+at a size where it outlasts its timeout the fill never reaches a checkpoint at all.
 
 ## Flags worth knowing
 

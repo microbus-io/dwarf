@@ -305,14 +305,17 @@ def chart_r7(root, out):
         return
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.8))
     for doc, colour in zip(sorted(vols, key=lambda d: d.get("label", "")), [S1, S2, S3, S4, S5]):
-        cps = [cp for cp in doc["volume"]["checkpoints"] if cp.get("saturated")]
+        # A probe window that was not a measurement carries its own invalidity; a failed collection reads 0 steps/s.
+        def measured(w):
+            return w and not w.get("invalidity")
+        cps = [cp for cp in doc["volume"]["checkpoints"] if measured(cp.get("saturated"))]
         payload = doc.get("config", {}).get("payloadBytes", 0)
         # The bytes axis is the database size; the rows axis is the step-row count.
         bytes_axis = doc.get("config", {}).get("workload") == "state" or payload > 0
         xs = [(cp["stepsDiskMB"] + cp["flowsDiskMB"]) / 1024 if bytes_axis else cp["stepRows"] for cp in cps]
         label = doc.get("label") or ("bytes" if bytes_axis else "rows")
         axes[0].plot(xs, [cp["saturated"]["stepsPerSec"] for cp in cps], color=colour, lw=2, marker="o", label=label)
-        axes[1].plot(xs, [cp["twoThirds"]["p99Ms"] if cp.get("twoThirds") else None for cp in cps],
+        axes[1].plot(xs, [cp["twoThirds"]["p99Ms"] if measured(cp.get("twoThirds")) else None for cp in cps],
                      color=colour, lw=2, marker="o", label=label)
     axes[0].set_title("Saturated throughput as the database grows")
     axes[0].set_ylabel("steps / second")

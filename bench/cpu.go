@@ -89,6 +89,11 @@ type hostUsage struct {
 	// every goroutine stack, so on a many-core host these move throughput through stack-scan contention
 	// before they show as CPU. Per-step figures are filled in by the caller, which knows the step count,
 	// and include the load generator's own allocations.
+	//
+	// GCCPUPct spans GC to GC, not the window: the runtime updates its CPU classes only when a collection
+	// completes, so the share covers the last GC before the window opened to the last one before it closed.
+	// A window in which no GC completed has no share at all and reads -1, not a share of 0 - a low-allocation
+	// long-task arm can hold one.
 	AllocBytesPerStep float64 `json:"allocBytesPerStep,omitzero"`
 	MallocsPerStep    float64 `json:"mallocsPerStep,omitzero"`
 	GCPerSec          float64 `json:"gcPerSec"`
@@ -143,8 +148,8 @@ func usageSince(before, after hostSample) hostUsage {
 	}
 	cpuSec := float64(after.cpuNano-before.cpuNano) / 1e9
 	cores := cpuSec / secs
-	gcCPUPct := 0.0
-	if used := after.usedCPUSec - before.usedCPUSec; used > 0 {
+	gcCPUPct := -1.0
+	if used := after.usedCPUSec - before.usedCPUSec; used > 0 && after.numGC > before.numGC {
 		gcCPUPct = (after.gcCPUSec - before.gcCPUSec) / used * 100
 	}
 	return hostUsage{

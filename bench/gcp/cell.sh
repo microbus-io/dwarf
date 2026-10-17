@@ -108,10 +108,20 @@ drop_run_db() {
   psq "$ADMIN" "DROP DATABASE IF EXISTS ${RUN_DB} WITH (FORCE)" >/dev/null 2>&1 || echo "WARNING: could not drop ${RUN_DB}" >&2
   RUN_DB=""
 }
+# BENCH_PID is the bench run in progress. bash runs a trap only once the foreground command returns, so the
+# bench runs in the background and the script waits on it: `wait` returns at once on a trapped signal, and the
+# trap ends the run rather than letting it finish its warmup, window and drain first.
+BENCH_PID=""
+stop_bench() {
+  [[ -n "$BENCH_PID" ]] || return 0
+  kill -TERM "$BENCH_PID" 2>/dev/null || true
+  wait "$BENCH_PID" 2>/dev/null || true
+  BENCH_PID=""
+}
 # ANY exit must leave the interface clean and the run's database gone, and an interrupt must END the cell: a
 # handler that only cleared netem would let the next run start at the base RTT under the target RTT's label.
-trap 'clear_netem; drop_run_db' EXIT
-trap 'clear_netem; drop_run_db; exit 130' INT TERM
+trap 'stop_bench; clear_netem; drop_run_db' EXIT
+trap 'stop_bench; clear_netem; drop_run_db; exit 130' INT TERM
 
 ADMIN="${DSN%/*}/postgres?sslmode=disable"
 psq() { psql "$1" -X -q -At -c "$2"; }
@@ -187,7 +197,10 @@ run_one() {
     -open-loop -arrival-rate "$rate" -max-outstanding "$MAX_OUTSTANDING" \
     -warmup "$WARMUP" -window "$WINDOW" -stats-interval 10s \
     -label "cell ${CELL} ${tag} pool ${pool} rate ${rate} gate-rtt ${GATE_RTT}ms" \
-    -out "${OUT}/${tag}.json" ${EXTRA:-} > "${OUT}/${tag}.log" 2>&1 || echo "   bench exited nonzero; see ${OUT}/${tag}.log"
+    -out "${OUT}/${tag}.json" ${EXTRA:-} > "${OUT}/${tag}.log" 2>&1 &
+  BENCH_PID=$!
+  wait "$BENCH_PID" || echo "   bench exited nonzero; see ${OUT}/${tag}.log"
+  BENCH_PID=""
   left=$(psq "${DSN%/*}/${db}?sslmode=disable" "SELECT COUNT(*) FROM dwarf_peers" 2>/dev/null || echo "?")
   [[ "$left" == "0" ]] || echo "   WARNING: left ${left} dwarf_peers row(s) after shutdown"
   psq "$ADMIN" "DROP DATABASE IF EXISTS ${db} WITH (FORCE)" >/dev/null

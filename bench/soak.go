@@ -57,6 +57,10 @@ type soakSample struct {
 	DBConnections int     `json:"dbConnections,omitzero"`
 	StepsDiskMB   float64 `json:"stepsDiskMB,omitzero"`
 	FlowsDiskMB   float64 `json:"flowsDiskMB,omitzero"`
+	// CollectionFailed says a reading in this sample failed - the counters (now or at the soak's start) or the
+	// row count - so its alarms read 0 for want of a reading, not because nothing fired. On the final sample
+	// it invalidates the soak.
+	CollectionFailed bool `json:"collectionFailed,omitzero"`
 }
 
 // soakReport is the soak's artifact section.
@@ -67,7 +71,9 @@ type soakReport struct {
 	OpErrors      map[string]int64 `json:"opErrors"` // per operation-type error count
 	Purged        int64            `json:"purged"`   // roots removed by the periodic retention sweep
 	Samples       []soakSample     `json:"samples"`
-	FinalCounters map[string]int64 `json:"finalCounters"` // all dwarf_* deltas over the soak
+	FinalCounters map[string]int64 `json:"finalCounters"` // all dwarf_* deltas over the soak; nil if a collection failed
+	// Stalled says why the watchdog ended the soak early, or is empty.
+	Stalled string `json:"stalled,omitzero"`
 }
 
 // runSoak runs the soak for dur with k concurrent submitters round-robined across the replicas, sampling
@@ -79,6 +85,7 @@ func runSoak(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 
 	var (
 		stop       atomic.Bool
+		inFlight   atomic.Int64
 		opMu       sync.Mutex
 		ops        = map[string]int64{}
 		opErrs     = map[string]int64{}
@@ -86,6 +93,7 @@ func runSoak(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 		submitters sync.WaitGroup
 	)
 	record := func(name string, err error) {
+		inFlight.Add(-1)
 		opMu.Lock()
 		if err != nil {
 			opErrs[name]++
@@ -104,6 +112,7 @@ func runSoak(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 		eng := engines[i%len(engines)]
 		submitters.Go(func() {
 			for !stop.Load() {
+				inFlight.Add(1) // record takes it back
 				switch r := rand.IntN(100); {
 				case r < 74:
 					record("disposable", runDisposable(ctx, eng, pick))
@@ -143,6 +152,8 @@ func runSoak(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 		}
 	})
 
+	watch := watchProgress(ctx, engines, inFlight.Load)
+	defer watch.stop()
 	report := &soakReport{Concurrency: k}
 	base := collectAllCounters(readers)
 	start := time.Now()
@@ -166,21 +177,31 @@ loop:
 			takeSample()
 		case <-deadline:
 			break loop
+		case <-watch.stalled:
+			break loop
 		}
 	}
 	sampler.Stop()
 
 	stop.Store(true)
 	close(stopCh)
-	submitters.Wait()
-	sweeper.Wait()
+	watch.stop()
+	if report.Stalled = watch.reason(); report.Stalled != "" {
+		// A submitter or the sweeper stuck on a hung engine may never return, so do not wait for either.
+		fmt.Println("STALLED:", report.Stalled)
+	} else {
+		submitters.Wait()
+		sweeper.Wait()
+	}
 
 	takeSample() // final reading after the load drains
 	report.DurationSec = time.Since(start).Seconds()
 	report.Purged = purged.Load()
 	report.Ops = ops
 	report.OpErrors = opErrs
-	report.FinalCounters = counterDeltas(base, collectAllCounters(readers))
+	if final := collectAllCounters(readers); base != nil && final != nil {
+		report.FinalCounters = counterDeltas(base, final)
+	}
 	return report
 }
 
@@ -328,22 +349,23 @@ func soakSampleNow(ctx context.Context, eng *engine.Engine, readers []*sdkmetric
 	cur := collectAllCounters(readers)
 	dbst := dbs.sample(ctx)
 
-	steps, flows := rowCounts(ctx, eng)
+	steps, flows, rerr := rowCounts(ctx, eng)
 
 	return soakSample{
-		TSec:          time.Since(start).Seconds(),
-		Goroutines:    runtime.NumGoroutine(),
-		HeapAllocMB:   float64(ms.HeapAlloc) / (1 << 20),
-		HeapSysMB:     float64(ms.HeapSys) / (1 << 20),
-		Steps:         steps,
-		Flows:         flows,
-		Unwedged:      cur["dwarf_steps_unwedged"] - base["dwarf_steps_unwedged"],
-		Orphaned:      cur["dwarf_flows_orphaned"] - base["dwarf_flows_orphaned"],
-		WriteFailed:   cur["dwarf_steps_write_failed"] - base["dwarf_steps_write_failed"],
-		Recovered:     cur["dwarf_steps_recovered"] - base["dwarf_steps_recovered"],
-		WriteRetried:  cur["dwarf_steps_write_retried"] - base["dwarf_steps_write_retried"],
-		DBConnections: dbst.Connections,
-		StepsDiskMB:   float64(dbst.StepsBytes) / (1 << 20),
-		FlowsDiskMB:   float64(dbst.FlowsBytes) / (1 << 20),
+		TSec:             time.Since(start).Seconds(),
+		Goroutines:       runtime.NumGoroutine(),
+		HeapAllocMB:      float64(ms.HeapAlloc) / (1 << 20),
+		HeapSysMB:        float64(ms.HeapSys) / (1 << 20),
+		Steps:            steps,
+		Flows:            flows,
+		Unwedged:         cur["dwarf_steps_unwedged"] - base["dwarf_steps_unwedged"],
+		Orphaned:         cur["dwarf_flows_orphaned"] - base["dwarf_flows_orphaned"],
+		WriteFailed:      cur["dwarf_steps_write_failed"] - base["dwarf_steps_write_failed"],
+		Recovered:        cur["dwarf_steps_recovered"] - base["dwarf_steps_recovered"],
+		WriteRetried:     cur["dwarf_steps_write_retried"] - base["dwarf_steps_write_retried"],
+		DBConnections:    dbst.Connections,
+		StepsDiskMB:      float64(dbst.StepsBytes) / (1 << 20),
+		FlowsDiskMB:      float64(dbst.FlowsBytes) / (1 << 20),
+		CollectionFailed: base == nil || cur == nil || rerr != nil,
 	}
 }

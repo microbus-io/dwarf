@@ -57,7 +57,7 @@ func (h *benchHost) LoadGraph(ctx context.Context, workflowURL string) (*workflo
 	return h.graphs[workflowURL], nil // nil is a clean 404 at Create
 }
 
-// tasksStarted counts task executions entered, across every replica's host. The open-loop watchdog reads it
+// tasksStarted counts task executions entered, across every replica's host. The watchdog and the drain read it
 // as the engine's pulse: with long tasks no flow ends for a task's whole duration, but the next task starting
 // is still progress.
 var tasksStarted atomic.Int64

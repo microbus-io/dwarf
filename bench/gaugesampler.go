@@ -68,6 +68,7 @@ type gaugeSampler struct {
 	sums     map[string]float64
 	peaks    map[string]float64
 	n        int
+	failed   int // ticks whose collection failed, left out of n and the means
 	heapSum  float64
 	heapPeak float64
 }
@@ -120,18 +121,23 @@ func (s *gaugeSampler) run(readers []*sdkmetric.ManualReader) {
 			runtime.ReadMemStats(&ms)
 			heap := float64(ms.HeapAlloc) / (1 << 20)
 
+			// A failed collection is nil. Counted as a tick it would average zeros into every mean.
 			s.mu.Lock()
-			for k, v := range g {
-				s.sums[k] += v
-				if v > s.peaks[k] {
-					s.peaks[k] = v
+			if g == nil {
+				s.failed++
+			} else {
+				for k, v := range g {
+					s.sums[k] += v
+					if v > s.peaks[k] {
+						s.peaks[k] = v
+					}
 				}
+				s.heapSum += heap
+				if heap > s.heapPeak {
+					s.heapPeak = heap
+				}
+				s.n++
 			}
-			s.heapSum += heap
-			if heap > s.heapPeak {
-				s.heapPeak = heap
-			}
-			s.n++
 			s.mu.Unlock()
 
 			if s.traceEvery > 0 {
@@ -174,6 +180,7 @@ type gaugeWindow struct {
 	Mean       map[string]float64 `json:"gaugesMean,omitempty"`
 	Peak       map[string]float64 `json:"gaugesPeak,omitempty"`
 	Samples    int                `json:"gaugeSamples,omitzero"`
+	Failed     int                `json:"gaugeSamplesFailed,omitzero"` // ticks whose collection failed, not in Samples
 	HeapMeanMB float64            `json:"heapMeanMB,omitzero"`
 	HeapPeakMB float64            `json:"heapPeakMB,omitzero"`
 	Series     []seriesPoint      `json:"series,omitempty"` // one point per -stats-interval
@@ -266,7 +273,7 @@ func (s *gaugeSampler) close() gaugeWindow {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.n == 0 {
-		return gaugeWindow{}
+		return gaugeWindow{Failed: s.failed}
 	}
 	mean := make(map[string]float64, len(s.sums))
 	for k, sum := range s.sums {
@@ -280,6 +287,7 @@ func (s *gaugeSampler) close() gaugeWindow {
 		Mean:       mean,
 		Peak:       peak,
 		Samples:    s.n,
+		Failed:     s.failed,
 		HeapMeanMB: s.heapSum / float64(s.n),
 		HeapPeakMB: s.heapPeak,
 		Series:     s.series,

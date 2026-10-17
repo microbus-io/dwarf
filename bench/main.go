@@ -102,8 +102,8 @@ func run() error {
 		openLoop         = flag.Bool("open-loop", false, "open-loop load: creators fire flows without awaiting completion, so the backlog grows past the goroutine count (closed-loop caps in-flight flows at -concurrency, keeping a linear backlog inside the cache and never stressing the refiller)")
 		maxOutstanding   = flag.Int("max-outstanding", 100000, "open-loop only: cap on in-flight (created minus ended) flows, the backpressure bound that keeps the backlog from OOMing the DB")
 		arrivalRate      = flag.Float64("arrival-rate", 0, "open-loop only: cap flow creation at this many/sec, fractional allowed (0 = flat-out to saturation)")
-		drain            = flag.Duration("drain", 5*time.Minute, "open-loop only: after each window stop creating and wait for the outstanding flows to end, giving up once none has ended for this long, then account for every flow the step created - completed, ended otherwise, unfinished, missing - in the artifact. Runs after the window is collected, so it never touches the window's numbers; an unfinished, failed or missing flow invalidates the run. Must exceed the longest task (0 = off)")
-		stallTimeout     = flag.Duration("stall-timeout", 5*time.Minute, "open-loop only: end the step and mark the run invalid when no task starts and no flow ends for this long while flows are outstanding. Must exceed the longest task (0 = off)")
+		drain            = flag.Duration("drain", 5*time.Minute, "open-loop only: after each window stop creating and wait for the outstanding flows to end, giving up once no task has started and no flow has ended for this long, then account for every flow the step created - completed, ended otherwise, unfinished, missing - in the artifact. Runs after the window is collected, so it never touches the window's numbers; an unfinished, failed or missing flow invalidates the run, and a drain that gives up ends it as a stall. Must exceed the longest task (0 = off)")
+		stallTimeout     = flag.Duration("stall-timeout", 5*time.Minute, "end the run, mark it invalid and exit 3 when no task starts and no flow ends for this long while flows are in flight - in a sweep window, the volume fill or a soak. Must exceed the longest task (0 = off)")
 		arrivalStop      = flag.Duration("arrival-stop", 0, "open-loop only: stop admitting flows this far into the measurement window while the engine keeps running, so the remainder measures a DRAIN under abated load (0 = keep offering for the whole window). The window mean spans both phases, so read the shape from -stats-interval, not the mean")
 		concurrency      = flag.String("concurrency", "8,16,32,64,128", "comma-separated closed-loop submitter counts to sweep")
 		window           = flag.Duration("window", 60*time.Second, "measurement window per concurrency step")
@@ -226,7 +226,8 @@ func run() error {
 			*stallTimeout, longestTask, *taskJitter)
 	}
 	if *drain > 0 && longestTask+*taskJitter >= *drain {
-		// The same silence, read by the drain as flows that will never end.
+		// The same silence, read by the drain as flows that will never end. The drain counts a task start as
+		// progress, as the watchdog does, so the longest gap it can see in a healthy run is one task.
 		return fmt.Errorf("-drain %s must exceed the longest task (%s plus -task-jitter %s)",
 			*drain, longestTask, *taskJitter)
 	}
@@ -388,12 +389,14 @@ func run() error {
 			probePick := func() *workload { return probeWL }
 			art.Config["volumeProbeSec"] = volumeProbe.Seconds()
 			art.Config["volumeProbeWorkload"] = *volumeProbeWL
+			probeWL.prepare()
 			probe = func(rate float64) (stepResult, string) {
 				res := runStepOpenLoop(ctx, engines, readers, pgss, waits, dbs, sharedBytes, probePick, ks[0], *fairnessKeys, *maxOutstanding, rate, *warmup, *volumeProbe, 0)
-				return res, windowInvalidity(res, rate, *maxOutstanding)
+				res.Invalidity = windowInvalidity(res, rate, *maxOutstanding)
+				return res, res.Invalidity
 			}
 		}
-		report := runVolume(ctx, engines, dbs, pick, ks[0], *volume, every, probe, probeSPF)
+		report := runVolume(ctx, engines, readers, dbs, pick, ks[0], *volume, every, probe, probeSPF)
 		art.Volume = report
 		if report.Errors != 0 {
 			art.Valid = false
@@ -406,6 +409,7 @@ func run() error {
 		art.Config["soakSec"] = soak.Seconds()
 		art.Config["soakSampleSec"] = soakSample.Seconds()
 		fmt.Printf("soak: %s at concurrency %d across %d replica(s), sampling every %s\n", *soak, ks[0], *replicas, *soakSample)
+		workloads["linear"].prepare() // the continue and fork chains run it whatever -workload picks
 		report := runSoak(ctx, engines, readers, dbs, pick, ks[0], *soak, *soakSample)
 		art.Soak = report
 		final := report.Samples[len(report.Samples)-1]
@@ -414,7 +418,16 @@ func run() error {
 			totalErrs += n
 		}
 		fmt.Printf("soak ops: %v  errors: %v  purged: %d\n", report.Ops, report.OpErrors, report.Purged)
-		if final.Unwedged != 0 || final.Orphaned != 0 || final.WriteFailed != 0 || totalErrs != 0 {
+		switch {
+		case report.Stalled != "":
+			art.Valid = false
+			art.Invalidity = "soak: stalled: " + report.Stalled
+		case final.CollectionFailed || report.FinalCounters == nil:
+			// Every alarm is a difference against the soak's opening collection, so a missing reading at either
+			// end reads as zero alarms.
+			art.Valid = false
+			art.Invalidity = "soak: metric collection or row count failed in the final sample - the alarms read 0 for want of a reading"
+		case final.Unwedged != 0 || final.Orphaned != 0 || final.WriteFailed != 0 || totalErrs != 0:
 			art.Valid = false
 			art.Invalidity = fmt.Sprintf("soak: opErrors=%d unwedged=%d orphaned=%d writeFailed=%d",
 				totalErrs, final.Unwedged, final.Orphaned, final.WriteFailed)
@@ -429,19 +442,24 @@ func run() error {
 			} else {
 				res = runStep(ctx, engines, readers, pgss, waits, dbs, sharedBytes, pick, k, *fairnessKeys, *warmup, *window)
 			}
+			res.Invalidity = windowInvalidity(res, *arrivalRate, *maxOutstanding)
 			art.Results = append(art.Results, res)
 			fmt.Printf("%-6d %10.1f %10.1f %10.2f %8.1f %8.1f %8.1f %7.2f %7.1f %9.0f %8.1f %8.1f %7d\n",
 				k, res.FlowsPerSec, res.StepsPerSec, res.MBPerSec, res.P50ms, res.P95ms, res.P99ms,
 				res.Host.CPUCores, res.Host.CPUPct, res.Host.StepsPerCore,
 				res.Host.NetRxMBps, res.Host.NetTxMBps, res.Errors)
-			fmt.Printf("  alloc %.1f KB/step, %.0f mallocs/step, %.1f GC/s, GC %.1f%% of CPU\n",
-				res.Host.AllocBytesPerStep/1024, res.Host.MallocsPerStep, res.Host.GCPerSec, res.Host.GCCPUPct)
+			gcShare := "no GC in the window"
+			if res.Host.GCCPUPct >= 0 {
+				gcShare = fmt.Sprintf("GC %.1f%% of CPU", res.Host.GCCPUPct)
+			}
+			fmt.Printf("  alloc %.1f KB/step, %.0f mallocs/step, %.1f GC/s, %s\n",
+				res.Host.AllocBytesPerStep/1024, res.Host.MallocsPerStep, res.Host.GCPerSec, gcShare)
 			if len(dsns) > 1 {
 				fmt.Println(perShardLine(res, dsns))
 			}
-			if why := windowInvalidity(res, *arrivalRate, *maxOutstanding); why != "" {
+			if res.Invalidity != "" && art.Valid {
 				art.Valid = false
-				art.Invalidity = fmt.Sprintf("at concurrency %d: %s", k, why)
+				art.Invalidity = fmt.Sprintf("at concurrency %d: %s", k, res.Invalidity)
 			}
 			if stalledRun.Load() {
 				break // the next step would start on the engines that just hung
@@ -493,14 +511,16 @@ func windowInvalidity(res stepResult, rate float64, maxOutstanding int) string {
 	// stepsPerSec = 0, a plausible-looking measurement of zero throughput. Measured on a GCP turnstile ladder,
 	// 2 of 9 arms, which then reported its BEST turn multiple as its worst purely by averaging those zeros in.
 	// The signature is gaugesBefore present with gaugesAfter absent: the closing collection raced engine
-	// teardown. len, not nil: the collectors always return a non-nil map, and `omitempty` is what turns an
-	// EMPTY one into `null` in the artifact - so nil-checking here would never fire.
-	// A collection that failed on ANY replica comes back nil (collectAllCounters), so a fleet total missing a
-	// replica reads as missing here rather than as an under-count - and a delta against a failed opening
-	// collection is empty, not the raw totals.
-	if len(res.EngineCounters) == 0 || len(res.GaugesBefore) == 0 || len(res.GaugesAfter) == 0 {
-		return fmt.Sprintf("metric collection failed (counters=%d gaugesBefore=%d gaugesAfter=%d) - "+
-			"every derived rate in this window is meaningless", len(res.EngineCounters), len(res.GaugesBefore), len(res.GaugesAfter))
+	// teardown. len, not nil: a failed gauge collection is nil but a counter delta against one is an empty
+	// map, so len is the one test that covers both.
+	// A collection that failed on ANY replica comes back nil (collectAllCounters, collectAllGauges), so a fleet
+	// total missing a replica reads as missing here rather than as an under-count - and a delta against a
+	// failed opening collection is empty, not the raw totals. Histograms are collected separately and can fail
+	// alone; an empty set is a legitimate reading, so they report the failure as HistsMissing.
+	if len(res.EngineCounters) == 0 || len(res.GaugesBefore) == 0 || len(res.GaugesAfter) == 0 || res.HistsMissing {
+		return fmt.Sprintf("metric collection failed (counters=%d gaugesBefore=%d gaugesAfter=%d histogramsMissing=%v) - "+
+			"every derived rate in this window is meaningless",
+			len(res.EngineCounters), len(res.GaugesBefore), len(res.GaugesAfter), res.HistsMissing)
 	}
 	if res.EngineCounters["dwarf_steps_recovered"] != 0 || res.EngineCounters["dwarf_steps_unwedged"] != 0 || res.Errors != 0 {
 		return fmt.Sprintf("errors=%d recovered=%d unwedged=%d",
