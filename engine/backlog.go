@@ -111,6 +111,15 @@ func (e *Engine) refreshBacklog(ctx context.Context) {
 	})
 }
 
+// backlogSQL is the per-band backlog aggregate. parked=0 is what the gauge MEANS: a parked step is excluded from
+// selection, so counting one would report a backlog no worker will ever pick up. The age is measured from
+// not_before - a step that slept for an hour has been waiting only since it came due - which also makes
+// MIN(not_before) a seek on idx_dwarf_steps_due per band. step_id>0 is always true and is the conjunct that
+// index's partial predicate carries besides the status: without it this query cannot use the index.
+const backlogSQL = "SELECT priority, COUNT(*), DATE_DIFF_MILLIS(NOW_UTC(), MIN(not_before)) FROM dwarf_steps" +
+	" WHERE status='" + workflow.StatusPending + "' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()" +
+	" AND step_id>0 GROUP BY priority"
+
 // queryBacklog counts one shard's due pending steps per priority band and how long each band's longest-due
 // step has been due.
 //
@@ -126,15 +135,7 @@ func (e *Engine) queryBacklog(ctx context.Context, db *sequel.DB, shard int) (sh
 	// correct one.
 	ctx, doneTurn := e.dbTurn(ctx, shard)
 	defer doneTurn()
-	// parked=0 is what the gauge MEANS: a parked step is excluded from selection, so counting one would report
-	// a backlog no worker will ever pick up. The age is measured from not_before - a step that slept for an
-	// hour has been waiting only since it came due - which also makes MIN(not_before) a seek on
-	// idx_dwarf_steps_due per band.
-	rows, err := db.QueryContext(ctx,
-		"SELECT priority, COUNT(*), DATE_DIFF_MILLIS(NOW_UTC(), MIN(not_before)) FROM dwarf_steps"+
-			" WHERE status='"+workflow.StatusPending+"' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() GROUP BY priority",
-		parkedNone,
-	)
+	rows, err := db.QueryContext(ctx, backlogSQL, parkedNone)
 	if err != nil {
 		return shardBacklog{}, errors.Trace(err)
 	}

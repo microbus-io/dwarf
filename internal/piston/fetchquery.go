@@ -24,22 +24,28 @@ import (
 	"github.com/microbus-io/errors"
 )
 
-// dueSteps is the predicate every branch below opens with: a step that is pending, not parked, past its
-// not_before and holding no live lease. Inlined status, never bound - a bound status defeats the selection
-// index's filter on the dialects that have one.
-const dueSteps = "status='" + workflow.StatusPending + "' AND parked=0" +
+// dueNow is a step that is pending, not parked, past its not_before and holding no live lease. Inlined status,
+// never bound - a bound status defeats the selection index's filter on the dialects that have one.
+const dueNow = "status='" + workflow.StatusPending + "' AND parked=0" +
 	" AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"
 
-// dueStepsOrdered is dueSteps for the lateral fetch, with the due-ness test wrapped in CASE so that no index
-// can seek it. The lateral's early stop needs idx_dwarf_steps_selection, which seeks (parked, priority,
-// fairness_key) and returns each key's run already ordered by (created_at, step_id). idx_dwarf_steps_due can
-// seek (parked, priority, not_before), and after an ANALYZE taken at a small backlog the planner prices that
-// range as selective and picks it - then reads every due row at the band and sorts them, O(backlog) per key.
-// Measured on a local Postgres 18 at saturation: 9 ms per fetch on the selection index, 190-210 ms on the due
-// index. Without the range seek the due index offers less than the selection index on every column, so no
-// statistics make it the cheaper plan. The band scan keeps the plain form: it wants the due index.
-const dueStepsOrdered = "status='" + workflow.StatusPending + "' AND parked=0" +
-	" AND CASE WHEN not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() THEN 1 ELSE 0 END=1"
+// dueIndexGuard is the conjunct idx_dwarf_steps_due's partial predicate carries besides the status: always true
+// (step ids start at 1), and stated only by a query that may use that index. A database uses a partial index
+// only for a query whose own predicate implies the index's, so the lateral fetch, which states dueNow without
+// it, cannot be planned onto the due index under any statistics.
+//
+// That is the point. The lateral's early stop needs idx_dwarf_steps_selection, which seeks (parked, priority,
+// fairness_key) and returns each key's run already ordered by (created_at, step_id). The due index seeks
+// (parked, priority) too, and when its estimates are small - a fresh database, statistics taken at a small
+// backlog - the planner takes it, filters each key row by row and sorts: O(backlog) per key. Measured on a
+// rig: one such fetch, a custom plan at 503 keys, ran 1,224 s. Steering the plan (a CASE around a column, a
+// plan-cache mode) only removes the cases it names; parked and priority lead both indexes, so wrapping them
+// blinds the selection index too.
+const dueIndexGuard = " AND step_id>0"
+
+// dueSteps is dueNow for the queries that want the due index: the band scan and its MIN(priority) probe, and
+// the window-shaped fetches, whose cost is the band's due rows however they are found.
+const dueSteps = dueNow + dueIndexGuard
 
 // fetchQuery builds one dialect's per-key fetch: the statement, and the bind arguments in the order their
 // placeholders appear in it. Every branch projects (fairness_key, step_id), in that order, so the caller's
@@ -90,7 +96,7 @@ func fetchQuery(driverName string, band int, keys []string, perKey int, part str
 			" FROM unnest(CAST(? AS TEXT[])) AS k(fairness_key)" +
 			" CROSS JOIN LATERAL (" +
 			"SELECT step_id FROM dwarf_steps" +
-			" WHERE " + dueStepsOrdered +
+			" WHERE " + dueNow +
 			" AND priority=? AND fairness_key=k.fairness_key" +
 			part +
 			" ORDER BY created_at, step_id LIMIT ?" +
@@ -141,7 +147,7 @@ func fetchQuery(driverName string, band int, keys []string, perKey int, part str
 			" FROM OPENJSON(?) WITH (fairness_key NVARCHAR(256) '$') AS k" +
 			" CROSS APPLY (" +
 			"SELECT TOP (?) step_id FROM dwarf_steps" +
-			" WHERE " + dueStepsOrdered +
+			" WHERE " + dueNow +
 			" AND priority=? AND fairness_key=k.fairness_key" +
 			part +
 			" ORDER BY created_at, step_id" +

@@ -48,7 +48,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/microbus-io/dwarf/internal/candidates"
 	"github.com/microbus-io/dwarf/internal/pipeline"
 	"github.com/microbus-io/dwarf/internal/planner"
@@ -863,24 +862,7 @@ func (p *Piston) ScanBand(ctx context.Context, shard int) (band int, tallies []p
 	// no query of its own. It is measured from not_before, not created_at: a step that slept for an hour has
 	// been WAITING only since it came due.
 	sent := time.Now()
-	rows, err := p.db.QueryContext(ctx,
-		"SELECT fairness_key, MAX(rn) AS cnt,"+
-			" MAX(CASE WHEN rn=1 THEN age_ms ELSE NULL END) AS age_ms,"+
-			" MAX(CASE WHEN rn=1 THEN weight ELSE NULL END) AS weight,"+
-			" MAX(priority) AS priority, MAX(due_ms) AS due_ms FROM ("+
-			"SELECT fairness_key, priority,"+
-			" DATE_DIFF_MILLIS(NOW_UTC(), created_at) AS age_ms,"+
-			" DATE_DIFF_MILLIS(NOW_UTC(), not_before) AS due_ms,"+
-			" fairness_weight AS weight,"+
-			" ROW_NUMBER() OVER (PARTITION BY fairness_key ORDER BY created_at, step_id) AS rn"+
-			" FROM dwarf_steps"+
-			" WHERE "+dueSteps+
-			part+
-			" AND priority=(SELECT MIN(priority) FROM dwarf_steps"+
-			" WHERE "+dueSteps+")"+
-			") t WHERE rn<=? GROUP BY fairness_key",
-		args...,
-	)
+	rows, err := p.db.QueryContext(ctx, bandScanQuery(part), args...)
 	if err != nil {
 		return 0, nil, errors.Trace(err)
 	}
@@ -905,6 +887,27 @@ func (p *Piston) ScanBand(ctx context.Context, shard int) (band int, tallies []p
 	}
 	p.lag.Store(&reading)
 	return band, tallies, nil
+}
+
+// bandScanQuery is ScanBand's statement, with the partition predicate part spliced in after the due-ness test.
+// Both halves state dueSteps, the guard included, because both want idx_dwarf_steps_due: the rows by an
+// equality on the band and a range on not_before, the MIN(priority) probe by a top-1 walk of the same order.
+func bandScanQuery(part string) string {
+	return "SELECT fairness_key, MAX(rn) AS cnt," +
+		" MAX(CASE WHEN rn=1 THEN age_ms ELSE NULL END) AS age_ms," +
+		" MAX(CASE WHEN rn=1 THEN weight ELSE NULL END) AS weight," +
+		" MAX(priority) AS priority, MAX(due_ms) AS due_ms FROM (" +
+		"SELECT fairness_key, priority," +
+		" DATE_DIFF_MILLIS(NOW_UTC(), created_at) AS age_ms," +
+		" DATE_DIFF_MILLIS(NOW_UTC(), not_before) AS due_ms," +
+		" fairness_weight AS weight," +
+		" ROW_NUMBER() OVER (PARTITION BY fairness_key ORDER BY created_at, step_id) AS rn" +
+		" FROM dwarf_steps" +
+		" WHERE " + dueSteps +
+		part +
+		" AND priority=(SELECT MIN(priority) FROM dwarf_steps" +
+		" WHERE " + dueSteps + ")" +
+		") t WHERE rn<=? GROUP BY fairness_key"
 }
 
 // FetchSteps implements pipeline.StepSource. It loads, per chosen fairness key, up to perKey of this shard's
@@ -950,14 +953,6 @@ func (p *Piston) FetchSteps(ctx context.Context, shard, band int, keys []string,
 	stmt, args, err := fetchQuery(p.db.DriverName(), band, keys, perKey*overFetch, part, partArgs)
 	if err != nil {
 		return nil, errors.Trace(err)
-	}
-	if p.db.DriverName() == "pgx" {
-		// An unnamed statement, planned with its actual values on every execution. pgx's default prepares a
-		// named statement per connection, and after five executions Postgres may keep a generic plan made
-		// without the values: one that does not know the key count or the band, and that seeks the due index on
-		// (parked, priority) and walks every due row at the band for each key (the ScanBand-shaped cost the
-		// lateral exists to avoid). CacheDescribe keeps it one round trip.
-		args = append([]any{pgx.QueryExecModeCacheDescribe}, args...)
 	}
 	// The turn must outlive the ROWS, not just the call, so this is deferred before the query - same
 	// ordering argument as in ScanBand.

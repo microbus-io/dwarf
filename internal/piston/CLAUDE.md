@@ -504,34 +504,42 @@ in 439-633 of the slow statements a saturated run logged, and none once the keys
 text literal and cast it to `text[]`** to keep the argument a plain string: the cast is not folded at plan time,
 so the estimate stays at 100. Pinned by `TestFetchQuery_PostgresPlan`.
 
-### The lateral fetch must not be able to range-seek due-ness
+### The lateral fetch cannot use the due index (`dueIndexGuard`)
 
-`dueStepsOrdered` wraps `not_before`/`lease_expires` in CASE, so `idx_dwarf_steps_due` cannot seek them. The
-lateral's early stop needs `idx_dwarf_steps_selection` (equality on parked, priority, fairness_key, then rows
-already in `(created_at, step_id)` order); after an ANALYZE taken at a small backlog the planner priced the due
-index's `not_before` range as selective, took it, and read every due row at the band and sorted them: 190-210 ms
-per fetch against 9 ms, measured locally on PG 18 at saturation. Without the range the due index offers less
-than the selection index on every column. The band scan keeps the plain predicate - it is what the due index is
-for. Pinned by `TestFetchQuery_PostgresPlan`, whose control (plain conjuncts) must seek `not_before`.
+`idx_dwarf_steps_due`'s partial predicate is `status = 'pending' AND step_id > 0`. The second conjunct is always
+true (ids start at 1); it exists so that only a query stating it can use the index, because a database uses a
+partial index only for a query whose own predicate implies the index's. The band scan, its `MIN(priority)` probe,
+the window-shaped fetches (`dueSteps`) and the engine's backlog aggregate state it. The pgx and mssql lateral
+fetch (`dueNow`) does not, so no plan - generic or custom, under any statistics - can put the fetch on the due
+index.
 
-### On pgx the fetch is planned with its values on every execution
+Why it has to be the index and not the plan: the lateral's early stop needs `idx_dwarf_steps_selection`, which
+seeks `(parked, priority, fairness_key)` and returns each key's run already in `(created_at, step_id)` order. The
+due index seeks `(parked, priority)` too, and when its estimates are small the planner takes it, filters each key
+row by row and sorts: O(backlog) per key. Measured on a rig (PG 16, 512 keys, saturated): a CUSTOM plan made
+1 m 50 s into a fresh database's warmup, `rows=1` at cost 8.4, ran **1,224 s** and held the vacuum horizon the
+whole time (`_WORK.md` #30's loop: a later good-plan fetch took 69 s, the lease-recovery sweep 57 s). The plan
+could not be reproduced locally on PG 16 or 18 from any table contents, so a fix that steers the plan cannot be
+tested against the failure; this one can. The rules that keep it working:
 
-`FetchSteps` runs the fetch as an unnamed statement (`pgx.QueryExecModeCacheDescribe` as the first query
-argument; pgx consumes it through `database/sql` and sequel, which pass arguments through untouched). pgx's
-default prepares a named statement per connection, and after five executions Postgres may keep a GENERIC plan,
-made without the values, if it costs no more than the custom ones. Statistics taken at a small backlog make it
-look nearly free, and the plan it picks seeks `idx_dwarf_steps_due` on `(parked, priority)` alone, filters each
-key row by row and sorts: O(keys x backlog). Measured on a rig: one such fetch ran 509 s and held the vacuum
-horizon for all of it (`_WORK.md` #30). `CacheDescribe` stays one round trip; the cost is a plan per fetch, a few
-per second per shard. Pinned by `TestFetchSteps_PostgresPlansEveryExecution` (no named statement for the fetch
-after seven executions; a default-mode control leaves one).
+- **A new query that wants the due index states `step_id>0`.** Without it the query silently falls back to the
+  selection index or a scan - correct results, the sleeper-heavy cost the due index exists to avoid.
+- **Never state the guard in the lateral fetch.** That reopens the 1,224 s plan.
+- **Never add the guard to the selection index's predicate** to make the band scan cheaper: the fetch, which does
+  not state it, would lose the selection index too.
+- **Do not steer the plan instead.** A CASE around `parked` or `priority` blinds the selection index as well
+  (both lead both indexes: PG 18's skip scan steps over the wrapped column and puts a Sort under the `LIMIT`;
+  PG 16 seeks on `status` alone). A plan-cache mode or `enable_sort = off` only removes the cases it names, and
+  neither could be shown to matter in a local test.
 
-**Do not answer this with the CASE wrap the due-ness test uses.** That works because `not_before` is a column
-only the due index has. `parked` and `priority` lead BOTH indexes, so wrapping either one blinds the selection
-index too: on PG 18 its skip scan steps over the wrapped column and the plan puts a Sort on
-`(created_at, step_id)` under the `LIMIT`, losing the early stop (measured with `EXPLAIN (GENERIC_PLAN)`), and a
-server without skip scan (PG 16 and earlier) seeks on `status` alone. Nor set `plan_cache_mode` session-wide: it
-re-plans every hot-path statement to fix one background read.
+**The cost, measured** (PG 18, 400k due rows at one band, 32 keys, warm, six runs each): the dense band scan
+reads its rows off the selection index, where the guard is checked per row - **~71 -> ~80 ms (+12%)**. The
+sleeper shape (396k asleep, 4k due), where the band scan seeks the due index, and the backlog aggregate in both
+shapes are unchanged; the fetch is unchanged against the CASE-wrapped predicate it replaces. The band scan is a
+resource tax rather than a supply bound (`engine/CLAUDE.md`, Metrics), so the 12% is database CPU, not throughput.
+Pinned by `TestFetchQuery_PostgresPlan` (with the selection index dropped the fetch must not touch the due index;
+the same statement with the guard must), `TestScanBand_CanSeekTheDueIndex` (pgx, sqlite) and
+`engine/TestBacklogSQL_UsesTheDueIndex`; SQL Server was checked once by hand through its plan cache.
 
 ### The lateral join is NOT available on two of the four dialects
 

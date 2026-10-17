@@ -18,6 +18,7 @@ package piston
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -32,9 +33,10 @@ import (
 //
 //   - The planner knows how many keys there are. A custom plan sizes unnest's output from the bound array,
 //     where a JSON set-returning function is estimated at 100 rows whatever it holds.
-//   - idx_dwarf_steps_due cannot range-seek the due-ness test. With it the only index left and sequential
-//     scans priced out, the fetch must not put not_before in any Index Cond; the control - the same
-//     statement with the plain due-ness conjuncts - must, which is what keeps this able to fail.
+//   - idx_dwarf_steps_due cannot serve the fetch at all. With it the only index left and sequential scans
+//     priced out, the fetch must still not use it, because its partial predicate carries a conjunct
+//     (dueIndexGuard) the fetch does not state; the control - the same statement with the guard - must use
+//     it, which is what keeps this able to fail.
 //
 // Everything that changes the schema runs in a transaction that is rolled back.
 func TestFetchQuery_PostgresPlan(t *testing.T) {
@@ -79,7 +81,7 @@ func TestFetchQuery_PostgresPlan(t *testing.T) {
 			return err
 		}
 		fetchPlan = explain(tx, stmt)
-		controlPlan = explain(tx, strings.Replace(stmt, dueStepsOrdered, dueSteps, 1))
+		controlPlan = explain(tx, strings.Replace(stmt, dueNow, dueSteps, 1))
 		return errRollback
 	})
 	if !errors.Is(err, errRollback) {
@@ -88,51 +90,65 @@ func TestFetchQuery_PostgresPlan(t *testing.T) {
 
 	assert.True(regexp.MustCompile(`Function Scan on unnest k .*rows=3 `).MatchString(sized),
 		"the key list must be sized from the bound array:\n%s", sized)
-	seeksDue := regexp.MustCompile(`Index Cond: .*not_before`)
-	assert.False(seeksDue.MatchString(fetchPlan), "the fetch must not range-seek due-ness:\n%s", fetchPlan)
-	assert.True(seeksDue.MatchString(controlPlan), "control: plain conjuncts should let the due index seek:\n%s", controlPlan)
+	assert.False(strings.Contains(fetchPlan, "idx_dwarf_steps_due"), "the fetch must not use the due index:\n%s", fetchPlan)
+	assert.True(strings.Contains(controlPlan, "idx_dwarf_steps_due"), "control: with the guard the due index serves it:\n%s", controlPlan)
 }
 
-// TestFetchSteps_PostgresPlansEveryExecution pins that the Postgres fetch runs as an unnamed statement, so
-// Postgres plans it with its actual values on every execution and never caches a generic plan for it. A
-// generic plan does not know the key count or the band; after an ANALYZE taken at a small backlog it seeks the
-// due index on (parked, priority) and walks every due row at the band for each key (measured on a rig: a
-// 509-second fetch). Prepared statements are per session, so the pool is held to one connection and the
-// fetch runs past the five executions after which Postgres considers a generic plan. The control runs the
-// same statement in pgx's default mode, which must leave a named statement - proving the check can see one.
-func TestFetchSteps_PostgresPlansEveryExecution(t *testing.T) {
+// TestScanBand_CanSeekTheDueIndex pins the other half of dueIndexGuard: the queries that want
+// idx_dwarf_steps_due still reach it. With the selection index dropped and sequential scans priced out, the
+// band scan - its rows and its MIN(priority) probe - must seek the due index on not_before, on every dialect
+// whose due index is partial. A query that lost the guard would fall back to a scan here.
+func TestScanBand_CanSeekTheDueIndex(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	r := newRig(t)
-	if r.db.DriverName() != "pgx" {
-		t.Skip("named statements and generic plans are Postgres's")
+	stmt := bandScanQuery("")
+	var explain, priceOutScans string
+	switch r.db.DriverName() {
+	case "pgx":
+		explain, priceOutScans = "EXPLAIN ", "SET LOCAL enable_seqscan = off"
+	case "sqlite":
+		explain = "EXPLAIN QUERY PLAN "
+	default:
+		t.Skip("the plan shapes pinned here are Postgres's and SQLite's")
 	}
-	r.db.SetMaxOpenConns(1)
-	r.db.SetMaxIdleConns(1)
-	r.insertStep(t, 1, 5, "alpha", 1)
-	r.insertStep(t, 2, 5, "beta", 1)
-
-	named := func() int {
-		var n int
-		err := r.db.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM pg_prepared_statements WHERE statement LIKE '%CROSS JOIN LATERAL%'"+
-				" AND statement NOT LIKE '%pg_prepared_statements%'").Scan(&n)
+	errRollback := errors.New("rollback")
+	var plan strings.Builder
+	err := r.db.Transact(ctx, func(tx *sequel.Tx) error {
+		if _, err := tx.ExecContext(ctx, "DROP INDEX idx_dwarf_steps_selection"); err != nil {
+			return err
+		}
+		if priceOutScans != "" {
+			if _, err := tx.ExecContext(ctx, priceOutScans); err != nil {
+				return err
+			}
+		}
+		rows, err := tx.QueryContext(ctx, explain+stmt, 8)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		cols, _ := rows.Columns()
+		for rows.Next() {
+			vals := make([]any, len(cols))
+			ptrs := make([]any, len(cols))
+			for i := range vals {
+				ptrs[i] = &vals[i]
+			}
+			if err := rows.Scan(ptrs...); err != nil {
+				return err
+			}
+			plan.WriteString(fmt.Sprint(vals...) + "\n")
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		return errRollback
+	})
+	if !errors.Is(err, errRollback) {
 		assert.NoError(err)
-		return n
 	}
-	for range 7 {
-		got, err := r.p.FetchSteps(ctx, 1, 5, []string{"alpha", "beta"}, 2)
-		assert.NoError(err)
-		assert.Len(got, 2)
-	}
-	assert.Zero(named(), "the fetch must not leave a named statement, whose plan Postgres may make generic")
-
-	stmt, args, err := fetchQuery("pgx", 5, []string{"alpha", "beta"}, 2, "", nil)
-	assert.NoError(err)
-	rows, err := r.db.QueryContext(ctx, stmt, args...)
-	if assert.NoError(err) {
-		rows.Close()
-	}
-	assert.Equal(1, named(), "control: the default mode prepares a named statement")
+	seeks := regexp.MustCompile(`idx_dwarf_steps_due[^\n]*\n?[^\n]*not_before`)
+	assert.True(seeks.MatchString(plan.String()), "the band scan must seek the due index on not_before:\n%s", plan.String())
 }

@@ -5,7 +5,6 @@ go 1.26.3
 tool github.com/microbus-io/copyrighter
 
 require (
-	github.com/jackc/pgx/v5 v5.11.0
 	github.com/microbus-io/boolexp v1.3.0
 	github.com/microbus-io/errors v1.0.1
 	github.com/microbus-io/seamster v0.4.0
@@ -33,6 +32,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
+	github.com/jackc/pgx/v5 v5.11.0 // indirect
 	github.com/jackc/puddle/v2 v2.2.3 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/microbus-io/copyrighter v1.4.0 // indirect
