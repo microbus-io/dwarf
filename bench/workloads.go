@@ -60,6 +60,8 @@ const (
 	// defaultStatePayload is what `state` and `carry` write when -payload is 0. Those two exist to move a
 	// payload, so 0 cannot mean "none" for them the way it does for linear, fanout and scatter.
 	defaultStatePayload = 64 * 1024
+	// defaultLoopMessage is the size of the message each `loop`/`loopreplace` step adds when -payload is 0.
+	defaultLoopMessage = 1024
 )
 
 // effectivePayload is the payload size a workload writes for a -payload value.
@@ -68,6 +70,10 @@ func effectivePayload(workload string, payloadBytes int) int {
 	case "state", "carry", "carryfanout":
 		if payloadBytes == 0 {
 			return defaultStatePayload
+		}
+	case "loop", "loopreplace":
+		if payloadBytes == 0 {
+			return defaultLoopMessage
 		}
 	}
 	return payloadBytes
@@ -127,6 +133,10 @@ func (f *freshBytes) nextN(n int) []string {
 //   - state:  a 5-step chain where every task rewrites a payload of -payload bytes - MB/s throughput.
 //   - carry:  the same payload written ONCE and then only carried - the state-ref shape (see below).
 //   - carryfanout: that payload carried across a fan-out's branches - the N x D case.
+//   - loop: an agent loop - a -linear-steps chain where every step adds one message of -payload bytes to
+//     `messages`, wired to ReducerAppend: each task writes only its message.
+//   - loopreplace: the same loop with no reducer on `messages`: each task writes the whole history plus its
+//     message, as a loop written before reducers does.
 //   - mixed:  chosen per flow by the load generator (70% linear / 20% fanout / 10% state).
 //
 // fanOutWidth is the forEach branch count, and it is the ONLY knob that decouples the pending-step
@@ -344,6 +354,60 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 	carryFanOut.AddTransitionChain("Work", "Enrich", "Join", workflow.End)
 	h.graphs["bench/carryfanout"] = carryFanOut
 
+	// loop / loopreplace: an agent loop, one message added per step - the shape where a carried history grows
+	// with the flow. The two differ only in how the task writes: `loop` contributes its message to an append
+	// field, `loopreplace` rewrites the whole history. Read dwarf_state_write_bytes{column} per flow against
+	// -linear-steps: a history stored again at every step grows with the square of the chain length.
+	//
+	// Every task checks the history it was handed is whole and in order (each message carries its index), so a
+	// message dropped or duplicated fails the run rather than reading as a byte saving.
+	loopMessage := payloadBytes
+	if loopMessage == 0 {
+		loopMessage = defaultLoopMessage
+	}
+	loopFresh := sync.OnceValue(func() *freshBytes { return newFreshBytes(loopMessage, 1) })
+	type loopMsg struct {
+		N       int    `json:"n"`
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	loopTask := func(appendMode bool) func(context.Context, *workflow.Flow) error {
+		return func(ctx context.Context, f *workflow.Flow) error {
+			var history []loopMsg
+			if _, err := f.Get("messages", &history); err != nil {
+				return fmt.Errorf("loop: reading the history at %s: %w", f.StepKey(), err)
+			}
+			for i, m := range history {
+				if m.N != i {
+					return fmt.Errorf("loop: message %d of %d at %s carries index %d - a lost or repeated message, not a saving", i, len(history), f.StepKey(), m.N)
+				}
+			}
+			msg := loopMsg{N: len(history), Role: "assistant", Content: loopFresh().next()}
+			h.bytesWritten.Add(int64(loopMessage))
+			if appendMode {
+				return f.Set("messages", []loopMsg{msg})
+			}
+			return f.Set("messages", append(history, msg))
+		}
+	}
+	h.tasks["bench/loop"] = loopTask(true)
+	h.tasks["bench/loopreplace"] = loopTask(false)
+	for _, mode := range []string{"loop", "loopreplace"} {
+		g := workflow.NewGraph("Loop")
+		loopNames := make([]string, 0, chainSteps+1)
+		for i := range chainSteps {
+			n := fmt.Sprintf("L%d", i)
+			g.SetURL(n, "bench/"+mode)
+			loopNames = append(loopNames, n)
+		}
+		loopNames = append(loopNames, workflow.End)
+		g.AddTransitionChain(loopNames...)
+		if mode == "loop" {
+			g.SetReducer("messages", workflow.ReducerAppend)
+		}
+		h.graphs["bench/"+mode] = g
+	}
+
 	// llm: ONE step per flow, so a flow's wall time is exactly the -task-delay. The multi-step workloads
 	// above multiply the delay by their chain length, which makes a minutes-long task unmeasurable in any
 	// sane window. This is the shape that validates the derived worker ceiling: the pool must grow past
@@ -405,6 +469,18 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 			stepsPerFlow: chainSteps,
 			build:        func() { records() },
 		},
+		"loop": {
+			graphURL:     "bench/loop",
+			initialState: func() map[string]any { return nil },
+			stepsPerFlow: chainSteps,
+			build:        func() { loopFresh() },
+		},
+		"loopreplace": {
+			graphURL:     "bench/loopreplace",
+			initialState: func() map[string]any { return nil },
+			stepsPerFlow: chainSteps,
+			build:        func() { loopFresh() },
+		},
 		"carryfanout": {
 			graphURL: "bench/carryfanout",
 			initialState: func() map[string]any {
@@ -438,7 +514,7 @@ func chooseWorkload(workloads map[string]*workload, name string) (func() *worklo
 	}
 	w := workloads[name]
 	if w == nil {
-		return nil, fmt.Errorf("unknown workload %q (linear, fanout, scatter, state, carry, carryfanout, llm, mixed)", name)
+		return nil, fmt.Errorf("unknown workload %q (linear, fanout, scatter, state, carry, carryfanout, loop, loopreplace, llm, mixed)", name)
 	}
 	w.prepare()
 	return func() *workload { return w }, nil

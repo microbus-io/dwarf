@@ -79,7 +79,7 @@ func main() {
 func run() error {
 	var (
 		dsns         shardFlags
-		workloadName = flag.String("workload", "linear", "workload: linear, fanout, scatter, state, carry, carryfanout, llm, mixed")
+		workloadName = flag.String("workload", "linear", "workload: linear, fanout, scatter, state, carry, carryfanout, loop, loopreplace, llm, mixed")
 		payload      = flag.Int("payload", 0, "payload size in bytes: fresh bytes written by every `linear`/`fanout` task, the size of each `scatter` element, rewritten every step by `state`, written once and then carried by `carry`/`carryfanout`. 0 = no payload for linear/fanout/scatter, 64KB for state/carry")
 		taskDelay    = flag.Duration("task-delay", 0, "per-task sleep simulating remote executor latency (the exec term)")
 		taskBurst    = flag.Duration("task-burst", 0, "bursty profile: apply -task-delay for this long, then drop it to zero for -task-quiet, repeating. 0 (with -task-quiet) keeps -task-delay constant for the whole run. A constant delay cannot see a crew that only shrinks once load FALLS - see taskProfile")
