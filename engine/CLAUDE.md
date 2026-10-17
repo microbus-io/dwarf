@@ -962,12 +962,12 @@ not parallelism:
   - Never close batch results with a `defer`: on a driver that does not pipeline, `Close` runs every statement
     not read yet - every successor INSERT of a bailed transition, under the flow-row lock - while the rollback
     after an early return abandons them unrun.
-- **The flow row records only the step a flow STOPPED at** (`dwarf_flows.step_id`), set by writes the flow row
+- **The flow row records only the step a flow STOPPED at** (`dwarf_flows.stopped_step_id`), set by writes the flow row
   takes anyway: the completion and loss writes (`completeFlow`, `failFlowTx`) record the step that ended the flow
   (0 for a completing arrival that resolves a failed cohort, which is not the loss); the interrupt write records
   each chain flow's interrupted step, the FIRST interrupt winning; Resume clears it on the flow it sets running and
   re-points a flow left interrupted at its earliest interrupted step (the one `Snapshot` reports); Terminate leaves
-  it. A running flow records 0. `List`'s `TaskName` and its filter read it. **Do not advance it per step:** on
+  it. A running flow records 0. `FlowSummary.StoppedTaskName` and `Query.StoppedTaskName` read it. **Do not advance it per step:** on
   PostgreSQL every UPDATE writes a full new copy of the row, and the flow row is ~1.2 KB with the graph held inline
   (TOAST moves a value out of line only past a ~2 KB row), so a per-step advance is a row version per step on the
   flow's hottest row - for a pointer `List` shows and that is stale by the time anyone reads it.
@@ -3386,7 +3386,7 @@ so it builds on the latest *undeleted* turn - the copy is safe even if the sourc
 (it names a specific doomed flow, unlike `Continue`'s search); `Resume` 409s and `Terminate` is a nil no-op
 (terminal); `Delete` is idempotent-success.
 
-Both share filter clauses with `List`. The `Query.TaskName` filter joins `dwarf_steps` and matches the `task_name`
+Both share filter clauses with `List`. The `Query.StoppedTaskName` filter joins `dwarf_steps` and matches the `task_name`
 of the step the flow stopped at, so it matches no running flow. `Query.OlderThan`/`NewerThan` are database-anchored
 (`f.updated_at < DATE_ADD_MILLIS(NOW_UTC(), -ms)` etc.) and compose. `Query.FairnessKey` filters on the
 engine-native `f.fairness_key` (the host typically sets it to the tenant, so "list tenant X" is "list
@@ -3530,8 +3530,8 @@ ordering:
 
 - **Flow-row-first (write-first).** Every flow-*advancing* / flow-*terminating* transaction takes the
   `dwarf_flows` row's write lock as its **first** statement, before touching steps: `processStep`'s transition
-  transaction (insert next steps + update the flow's `step_id`, `execution.go`), `completeFlow`, and
-  `fireFanInDirect`. The one exception is a **pure cohort arrival** (no successor, no `step_id` advance): its first
+  transaction (insert next steps, `execution.go`), `completeFlow`, and
+  `fireFanInDirect`. The one exception is a **pure cohort arrival** (no successor): its first
   write is the cohort bump on the spawn step row, and only the arrival that resolves the cohort grabs the flow row,
   after the bump - still write-first, and grabbing for every arrival would serialize the whole cohort on one row
   (the rationale is at `pureArrival` in `execution.go`). This is mandatory, not stylistic - see "Write-ordering & lock contention" above for the
@@ -3693,8 +3693,8 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
    permanently satisfied for any flow running past 5m.
 
    The scan probes every running flow through `idx_dwarf_steps_flow_id`, so it costs running flows x their steps,
-   not the size of `dwarf_steps`. If it ever needs to be cheaper, a stranded linear flow's `step_id` points at the
-   flagged step: one primary-key probe per running flow.
+   not the size of `dwarf_steps`. The flow row offers no shortcut to the flagged step: `stopped_step_id` is 0 while a
+   flow runs.
 4. **Parked-step wedge sweep** (`recoverWedgedSubgraphParks` + `recoverOrphanedSubgraphChildren`, `wedge.go`,
    called inline from `runRecoverySweep`) - defense in depth for the `parkedSubgraph` park, whose releasing
    condition could in principle never fire (a parked step is invisible to selection, and `parkedSubgraph` is

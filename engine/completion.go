@@ -869,7 +869,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, ste
 			deleteAfterMs = int(e.deletionGrace.Milliseconds())
 		}
 		res, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET status=?, final_state=?, delete_after_ms=?, step_id=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
+			"UPDATE dwarf_flows SET status=?, final_state=?, delete_after_ms=?, stopped_step_id=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
 			workflow.StatusCompleted, finalStateJSON, deleteAfterMs, stepID, flowID,
 		)
 		if err != nil {
@@ -1164,7 +1164,7 @@ func (e *Engine) failFlowTx(ctx context.Context, tx sequel.Executor, shardNum, f
 		finalStateJSON = []byte("{}")
 	}
 	tx.ExecContext(ctx,
-		"UPDATE dwarf_flows SET final_state=?, status=?, error=?, step_id=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
+		"UPDATE dwarf_flows SET final_state=?, status=?, error=?, stopped_step_id=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
 		finalStateJSON, loss.status, flowErrorText(cancelled, lossErr), stoppedStepID, flowID,
 	)
 	if parentStepID != 0 {
@@ -1664,13 +1664,13 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 
 		for _, chainFlowID := range chainFlowIDs {
 			tx.ExecContext(ctx,
-				"UPDATE dwarf_flows SET status=?, step_id=0, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"' AND (SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"')=0",
+				"UPDATE dwarf_flows SET status=?, stopped_step_id=0, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"' AND (SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"')=0",
 				workflow.StatusRunning, chainFlowID, chainFlowID,
 			)
 			// A flow still interrupted by another step now records that one - the step Snapshot reports and the
 			// next Resume acts on - rather than the step just resumed.
 			tx.ExecContext(ctx,
-				"UPDATE dwarf_flows SET step_id=(SELECT step_id FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"' ORDER BY updated_at, step_id LIMIT_OFFSET(1, 0)), touch=1-touch WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'",
+				"UPDATE dwarf_flows SET stopped_step_id=(SELECT step_id FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"' ORDER BY updated_at, step_id LIMIT_OFFSET(1, 0)), touch=1-touch WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'",
 				chainFlowID, chainFlowID,
 			)
 		}

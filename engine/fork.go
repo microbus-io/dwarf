@@ -259,11 +259,11 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 
 	var status, workflowURL, workflowName, traceParent, cancelReason, graphHash string
 	var graphJSON, baggageJSON []byte
-	var deleteOnCompletion, originStepID, originPayloadVer int
+	var deleteOnCompletion, originStoppedStepID, originPayloadVer int
 	err := tx.QueryRowContext(ctx,
-		"SELECT status, workflow_url, workflow_name, graph, graph_hash, baggage, trace_parent, delete_on_completion, step_id, cancel_reason, payload_ver FROM dwarf_flows WHERE flow_id=?",
+		"SELECT status, workflow_url, workflow_name, graph, graph_hash, baggage, trace_parent, delete_on_completion, stopped_step_id, cancel_reason, payload_ver FROM dwarf_flows WHERE flow_id=?",
 		originFlowID,
-	).Scan(&status, &workflowURL, &workflowName, &graphJSON, &graphHash, &baggageJSON, &traceParent, &deleteOnCompletion, &originStepID, &cancelReason, &originPayloadVer)
+	).Scan(&status, &workflowURL, &workflowName, &graphJSON, &graphHash, &baggageJSON, &traceParent, &deleteOnCompletion, &originStoppedStepID, &cancelReason, &originPayloadVer)
 	if err == nil {
 		// Each flow of the tree has its own format (a subgraph child is created in its creator's), and the clone
 		// copies its rows, so it keeps the origin's.
@@ -624,21 +624,21 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 
 	if isRoot {
 		_, err = tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET status=?, step_id=0, started_at=NOW_UTC(), updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=?",
+			"UPDATE dwarf_flows SET status=?, stopped_step_id=0, started_at=NOW_UTC(), updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=?",
 			workflow.StatusRunning, newFlowID,
 		)
 		if err != nil {
 			return 0, nil, errors.Trace(err)
 		}
 	} else {
-		// step_id is the step a flow stopped at: none for a flow on the rewind chain, which runs again, and the
+		// stopped_step_id is the step a flow stopped at: none for a flow on the rewind chain, which runs again, and the
 		// origin's own, remapped, for an off-path completed-prefix subgraph.
-		stoppedStep := idMap[originStepID]
+		stoppedStep := idMap[originStoppedStepID]
 		if rewind != 0 {
 			stoppedStep = 0
 		}
 		_, err = tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET step_id=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=?",
+			"UPDATE dwarf_flows SET stopped_step_id=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=?",
 			stoppedStep, newFlowID,
 		)
 		if err != nil {

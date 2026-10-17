@@ -25,9 +25,9 @@ type FlowSummary struct {
 	WorkflowURL  string `json:"workflowURL,omitzero"`
 	WorkflowName string `json:"workflowName,omitzero"`
 	Status       string `json:"status,omitzero"`
-	// TaskName is the task the flow stopped at: the step that completed, failed or cancelled it, or the step it
-	// is interrupted at. It is empty while the flow is running, and for a stop with no single step.
-	TaskName        string `json:"taskName,omitzero"`
+	// StoppedTaskName is the task the flow stopped at: the step that completed, failed or cancelled it, or the
+	// step it is interrupted at. It is empty while the flow is running, and for a stop with no single step.
+	StoppedTaskName string `json:"stoppedTaskName,omitzero"`
 	Error           string `json:"error,omitzero"`
 	TerminateReason string `json:"terminateReason,omitzero"`
 	// CancelReason is the reason string passed to Cancel(flowKey, reason). Populated when Status is "cancelled".

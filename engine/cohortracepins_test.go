@@ -143,7 +143,7 @@ func (r *cohortRaceRig) flowRow(t *testing.T) flowRow {
 	assert := testarossa.For(t)
 	var row flowRow
 	assert.NoError(r.db.QueryRowContext(context.Background(),
-		"SELECT status, final_state, step_id, touch FROM dwarf_flows WHERE flow_id=?", r.flowID).Scan(&row.status, &row.finalState, &row.stepID, &row.touch))
+		"SELECT status, final_state, stopped_step_id, touch FROM dwarf_flows WHERE flow_id=?", r.flowID).Scan(&row.status, &row.finalState, &row.stepID, &row.touch))
 	return row
 }
 

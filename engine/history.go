@@ -601,7 +601,7 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 			lr.summary.TraceID = traceIDFromParent(traceParent)
 			lr.summary.FlowKey = keys.New(shardIdx, lr.flowID, flowToken)
 			lr.summary.ThreadKey = keys.New(shardIdx, threadID, threadToken)
-			lr.summary.TaskName = taskName.String
+			lr.summary.StoppedTaskName = taskName.String
 			lr.summary.Error = strings.TrimSpace(flowError)
 			// cancel_reason is the shared reason column both Terminate and Cancel write into;
 			// splitTerminateCancelReason is the one place that maps it onto the two reason fields, shared
@@ -752,9 +752,9 @@ func (e *Engine) queryClauses(ctx context.Context, query workflow.Query, subgrap
 		args = append(args, resolvedThreadID)
 		restrictShardNum = threadShardNum
 	}
-	if query.TaskName != "" {
+	if query.StoppedTaskName != "" {
 		conditions = append(conditions, "s.task_name=?")
-		args = append(args, query.TaskName)
+		args = append(args, query.StoppedTaskName)
 	}
 	if query.FairnessKey != "" {
 		conditions = append(conditions, "f.fairness_key=?")
@@ -773,7 +773,7 @@ func (e *Engine) queryClauses(ctx context.Context, query workflow.Query, subgrap
 		args = append(args, -int64(query.NewerThan/time.Millisecond))
 	}
 
-	joinSQL := " LEFT JOIN dwarf_steps s ON f.step_id = s.step_id"
+	joinSQL := " LEFT JOIN dwarf_steps s ON f.stopped_step_id = s.step_id"
 	whereSQL := strings.Join(conditions, " AND ")
 	return joinSQL, whereSQL, args, restrictShardNum, nil
 }
@@ -794,7 +794,7 @@ func intCSV(ids []int) string {
 func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 	// Shard and Limit bound a purge but select every flow they reach, so neither counts as a filter.
 	narrowed := query.Status != "" || query.WorkflowURL != "" || query.WorkflowName != "" || query.ThreadKey != "" ||
-		query.TaskName != "" || query.FairnessKey != "" || query.Priority != 0 || query.OlderThan != 0 ||
+		query.StoppedTaskName != "" || query.FairnessKey != "" || query.Priority != 0 || query.OlderThan != 0 ||
 		query.NewerThan != 0 || query.Search != ""
 	if !narrowed {
 		return 0, errors.New("purge requires at least one filter; Shard and Limit do not narrow it", http.StatusBadRequest)

@@ -110,7 +110,7 @@ func TestFanInDirectTerminate_NoExtendTerminatedFlow(t *testing.T) {
 		return
 	}
 	var stepIDBefore, spawnStepID int
-	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&stepIDBefore))
+	assert.NoError(db.QueryRowContext(ctx, "SELECT stopped_step_id FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&stepIDBefore))
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='Spawn'", flowID).Scan(&spawnStepID))
 
 	// Release the spawn task: it completes, then processStep reaches fireFanInDirect against the terminated flow.
@@ -130,7 +130,7 @@ func TestFanInDirectTerminate_NoExtendTerminatedFlow(t *testing.T) {
 	assert.Equal(0, joinSteps)
 
 	var stepIDAfter int
-	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&stepIDAfter))
+	assert.NoError(db.QueryRowContext(ctx, "SELECT stopped_step_id FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&stepIDAfter))
 	assert.Equal(stepIDBefore, stepIDAfter)
 
 	// The flow stays terminated (terminal, immutable); the completed spawn step is a harmless tail on it.

@@ -1634,7 +1634,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				}
 			}
 
-			// The flow row's step_id is not advanced here: it records only the step a flow STOPPED at, written by the
+			// The flow row is not written here: its stopped_step_id records only the step a flow STOPPED at, written by the
 			// terminal and interrupt writes. A per-step advance is a row version on the flow's hottest row every step.
 			return batch.flush()
 		})
@@ -1978,10 +1978,10 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 
 		// Each chain flow records the step it stopped at - the leaf in the leaf's flow, the parked caller in each
 		// ancestor (allStepIDs is aligned with chainFlowIDs) - unless it is already interrupted, where the first
-		// interrupt keeps its record. step_id is assigned BEFORE status: MySQL evaluates SET assignments left to
+		// interrupt keeps its record. stopped_step_id is assigned BEFORE status: MySQL evaluates SET assignments left to
 		// right, so a CASE placed after status=? would read the new status.
 		flowPlaceholders := strings.Repeat("?,", len(chainFlowIDs)-1) + "?"
-		stoppedAt := "CASE flow_id" + strings.Repeat(" WHEN ? THEN ?", len(chainFlowIDs)) + " ELSE step_id END"
+		stoppedAt := "CASE flow_id" + strings.Repeat(" WHEN ? THEN ?", len(chainFlowIDs)) + " ELSE stopped_step_id END"
 		var flowArgs []any
 		for i, chainFlowID := range chainFlowIDs {
 			flowArgs = append(flowArgs, chainFlowID, allStepIDs[i])
@@ -1989,7 +1989,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 		flowArgs = append(flowArgs, workflow.StatusInterrupted)
 		flowArgs = append(flowArgs, chainFlowIDs...)
 		tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET step_id=CASE WHEN status='"+workflow.StatusRunning+"' THEN "+stoppedAt+" ELSE step_id END, status=?, updated_at=NOW_UTC(), touch=1-touch"+
+			"UPDATE dwarf_flows SET stopped_step_id=CASE WHEN status='"+workflow.StatusRunning+"' THEN "+stoppedAt+" ELSE stopped_step_id END, status=?, updated_at=NOW_UTC(), touch=1-touch"+
 				" WHERE flow_id IN ("+flowPlaceholders+") AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')",
 			flowArgs...,
 		)

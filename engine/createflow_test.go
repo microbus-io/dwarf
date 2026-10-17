@@ -64,7 +64,7 @@ func TestInsertFlowTx_ConcurrentCreates(t *testing.T) {
 	assert.Equal(flows, created)
 	assert.NoError(db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM dwarf_flows f"+
-			" WHERE f.thread_id<>f.flow_id OR f.root_flow_id<>f.flow_id OR f.step_id<>0"+
+			" WHERE f.thread_id<>f.flow_id OR f.root_flow_id<>f.flow_id OR f.stopped_step_id<>0"+
 			" OR (SELECT COUNT(*) FROM dwarf_steps s WHERE s.flow_id=f.flow_id AND s.task_name='Entry')<>1").Scan(&strays))
 	assert.Zero(strays, "every flow is its own thread and root, owns its own entry step, and has not stopped")
 }

@@ -28,7 +28,7 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// listedTask returns the TaskName List reports for flowKey.
+// listedTask returns the StoppedTaskName List reports for flowKey.
 func listedTask(t *testing.T, eng *engine.Engine, flowKey string) string {
 	assert := testarossa.For(t)
 	flows, _, err := eng.List(context.Background(), workflow.Query{ThreadKey: flowKey})
@@ -37,7 +37,7 @@ func listedTask(t *testing.T, eng *engine.Engine, flowKey string) string {
 	}
 	for _, f := range flows {
 		if f.FlowKey == flowKey {
-			return f.TaskName
+			return f.StoppedTaskName
 		}
 	}
 	assert.True(false, "flow not listed")
@@ -181,7 +181,7 @@ func TestStoppedTask_Linear(t *testing.T) {
 		assert.Equal(workflow.StatusFailed, out.Status)
 		assert.Equal("Second", listedTask(t, eng, flowKey))
 
-		flows, _, err := eng.List(ctx, workflow.Query{WorkflowURL: "stoppedtask.verify:428/linear", Status: workflow.StatusFailed, TaskName: "Second"})
+		flows, _, err := eng.List(ctx, workflow.Query{WorkflowURL: "stoppedtask.verify:428/linear", Status: workflow.StatusFailed, StoppedTaskName: "Second"})
 		assert.NoError(err)
 		if assert.Len(flows, 1) {
 			assert.Equal(flowKey, flows[0].FlowKey)

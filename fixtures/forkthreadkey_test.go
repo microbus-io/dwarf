@@ -123,7 +123,7 @@ func TestFork_SubgraphChildGetsThreadTokenAndStepID(t *testing.T) {
 	var childFlowID, threadID, childStepID int
 	var childFlowToken, threadToken string
 	err = db.QueryRowContext(ctx,
-		"SELECT flow_id, flow_token, thread_id, thread_token, step_id FROM dwarf_flows WHERE root_flow_id=? AND surgraph_flow_id<>0",
+		"SELECT flow_id, flow_token, thread_id, thread_token, stopped_step_id FROM dwarf_flows WHERE root_flow_id=? AND surgraph_flow_id<>0",
 		forkRootID,
 	).Scan(&childFlowID, &childFlowToken, &threadID, &threadToken, &childStepID)
 	if !assert.NoError(err) {

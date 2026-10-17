@@ -27,9 +27,9 @@ type Query struct {
 	// disables the filter; composes with WorkflowURL.
 	WorkflowName string `json:"workflowName,omitzero"`
 	ThreadKey    string `json:"threadKey,omitzero"`
-	// TaskName filters to flows that stopped at the named task: the step that completed, failed or cancelled the
-	// flow, or the step it is interrupted at. It matches no running flow.
-	TaskName string `json:"taskName,omitzero"`
+	// StoppedTaskName filters to flows that stopped at the named task: the step that completed, failed or
+	// cancelled the flow, or the step it is interrupted at. It matches no running flow.
+	StoppedTaskName string `json:"stoppedTaskName,omitzero"`
 	// FairnessKey filters to flows with this scheduling fairness key. The host typically sets the
 	// fairness key to the tenant, so this is how "list flows for tenant X" is expressed. Empty
 	// disables the filter.

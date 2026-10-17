@@ -75,7 +75,7 @@ func TestListflow(t *testing.T) {
 		for _, fs := range flows {
 			assert.Equal("listflow.verify:428/list", fs.WorkflowURL)
 			assert.Equal(workflow.StatusCompleted, fs.Status)
-			assert.Equal("Only", fs.TaskName)
+			assert.Equal("Only", fs.StoppedTaskName)
 			assert.True(created[fs.FlowKey])
 			assert.False(fs.CreatedAt.IsZero())
 		}
