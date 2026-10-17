@@ -1294,6 +1294,22 @@ func TestStripProto(t *testing.T) {
 	assert.Equal("b://c", stripProto("a://b://c"))
 }
 
+// TestGraph_ValidateUnreachableStripsProto pins that the reachability error names its tasks as every other
+// Validate message does, without the scheme.
+func TestGraph_ValidateUnreachableStripsProto(t *testing.T) {
+	assert := testarossa.For(t)
+
+	g := NewGraph("Unreachable")
+	g.SetURL("https://svc/a", "svc/a")
+	g.SetURL("https://svc/b", "svc/b")
+	g.AddTransition("https://svc/a", End)
+	g.AddTransition("https://svc/b", End) // nothing reaches it
+	err := g.Validate()
+	if assert.Error(err) {
+		assert.Contains(err.Error(), "task 'svc/b' is not reachable from entry point 'svc/a'")
+	}
+}
+
 // validateLineage memoizes IsFanOutSource rather than re-implementing the fan-out predicate, because the
 // engine ROUTES on IsFanOutSource (internal/faninmap, processStep): a validator that disagreed with the
 // router about what fans out would bless a graph the engine then mis-executes. This pins the agreement

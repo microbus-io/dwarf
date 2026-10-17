@@ -185,13 +185,15 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, sha
 	if !t.found {
 		return workflow.State{}, nil
 	}
+	// A tail this replica cannot read is a pure function of stored data, so it is permanent: a path that stops
+	// the flow whatever it holds then falls back to an empty final state rather than failing the stop.
 	base, err := workflow.NewState(t.baseState)
 	if err != nil {
-		return workflow.State{}, errors.Trace(err)
+		return workflow.State{}, errors.Trace(&permanentError{err})
 	}
 	baseRefs, err := staterefs.Parse(t.baseRefs)
 	if err != nil {
-		return workflow.State{}, errors.Trace(err)
+		return workflow.State{}, errors.Trace(&permanentError{err})
 	}
 	changes := make([]workflow.Changes, len(t.changes))
 	for i, c := range t.changes {
@@ -352,10 +354,10 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 	// FLATTEN: final_state is a flow-boundary value, so everything the spawn carried by reference is materialized
 	// here - unlike the fan-in, which may pass a carried ref through. resolveStateRefs mutates the map in place.
 	spawnRefs, err := staterefs.Parse(spawnRefsJSON)
-	if err == nil {
-		_, err = e.resolveStateRefs(ctx, db, shardNum, spawnState, spawnRefs, nil, workflowURL)
-	}
 	if err != nil {
+		return workflow.State{}, errors.Trace(&permanentError{err})
+	}
+	if _, err := e.resolveStateRefs(ctx, db, shardNum, spawnState, spawnRefs, nil, workflowURL); err != nil {
 		return workflow.State{}, errors.Trace(err)
 	}
 	// The failed cohort's terminal state is built the SAME way convergence would (fanInRow): the spawn's
@@ -400,7 +402,7 @@ func (e *Engine) simulatedFanInPart(ctx context.Context, db sequel.Executor, sha
 	}
 	refs, err := staterefs.Parse(refsJSON)
 	if err != nil {
-		return workflow.Changes{}, errors.Trace(err)
+		return workflow.Changes{}, errors.Trace(&permanentError{err})
 	}
 	state, err := workflow.NewState(stateJSON)
 	if err != nil {

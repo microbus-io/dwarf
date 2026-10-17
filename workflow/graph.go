@@ -558,7 +558,7 @@ func (g *Graph) Validate() error {
 	}
 	for _, t := range g.tasks {
 		if !reachable[t.Name] {
-			return errors.New("task '%s' is not reachable from entry point '%s' in graph '%s'", t.Name, g.entryPoint, g.name)
+			return errors.New("task '%s' is not reachable from entry point '%s' in graph '%s'", stripProto(t.Name), stripProto(g.entryPoint), g.name)
 		}
 	}
 

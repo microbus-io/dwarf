@@ -244,6 +244,63 @@ func TestStateRefs_UnreadableInterruptedStateFailsSnapshot(t *testing.T) {
 	assert.Nil(outcome)
 }
 
+// TestStateRefs_UnreadableSideColumnFailsTheStep pins that a resume payload or baggage this replica cannot read
+// fails the step rather than reaching the task as empty: discarded, the decode handed the task an empty State and
+// nothing said so.
+func TestStateRefs_UnreadableSideColumnFailsTheStep(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	var runs atomic.Int32
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("UnreadableSide")
+	g.SetURL("B", "unreadableside/b")
+	g.AddTransition("B", workflow.End)
+	mux.HandleGraph("unreadableside/g", g)
+	mux.HandleTask("unreadableside/b", func(ctx context.Context, f *workflow.Flow) error {
+		runs.Add(1)
+		_, err := f.Interrupt(nil, nil)
+		return err
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+
+	for _, column := range []string{"resume data", "baggage"} {
+		runs.Store(0)
+		flowKey, err := e.Create(ctx, "unreadableside/g", nil, nil)
+		assert.NoError(err)
+		enginetest.AwaitFlowStatus(t, e, flowKey, workflow.StatusInterrupted, 10*time.Second)
+		_, flowID, _, err := keys.ParseFlowKey(flowKey)
+		assert.NoError(err)
+		switch column {
+		case "resume data":
+			// What Resume does, with a payload no reader can decode: the leaf pending with its answer, the flow running.
+			_, err = db.ExecContext(ctx,
+				"UPDATE dwarf_steps SET resume_data=?, status='"+workflow.StatusPending+"' WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'",
+				[]byte(`[1]`), flowID)
+			assert.NoError(err)
+			_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET status='"+workflow.StatusRunning+"' WHERE flow_id=?", flowID)
+			assert.NoError(err)
+		case "baggage":
+			_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET baggage=? WHERE flow_id=?", []byte(`[1]`), flowID)
+			assert.NoError(err)
+			assert.NoError(e.Resume(ctx, flowKey, nil))
+		}
+		enginetest.AwaitFlowStatus(t, e, flowKey, workflow.StatusFailed, 10*time.Second)
+		assert.Equal(int32(1), runs.Load(), "%s: the task must not run on a payload it could not read", column)
+		outcome, err := e.Snapshot(ctx, flowKey)
+		if assert.NoError(err) {
+			assert.Contains(outcome.Error, "unreadable "+column)
+		}
+	}
+}
+
 // TestStateRefs_CarryAcrossFanOut is the end-to-end shape the design exists for, asserted on what is actually
 // STORED. A large document is fanned out over N branches: the payload must be written ONCE (at the anchor) and
 // every branch's step row must carry a ref instead of a copy - while each branch's task still sees the whole

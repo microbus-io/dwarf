@@ -497,18 +497,36 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	flow.SetFlowKey(keys.New(shardNum, flowID, flowToken))
 	flow.SetStepKey(keys.New(shardNum, stepID, stepToken))
 
+	// A side column this replica cannot read fails the step, as an unreadable state does: the task would
+	// otherwise run on an empty resume payload, child result or baggage, and nothing would say so. A "null"
+	// baggage column (from a nil FlowOptions.Baggage) and an empty one both decode to an empty State,
+	// delivered as "no baggage".
+	var sideErr error
 	if interruptDone {
-		resumeData, _ := workflow.NewState(resumeDataJSON)
+		resumeData, derr := workflow.NewState(resumeDataJSON)
+		if derr != nil {
+			sideErr = errors.New("unreadable resume data: %v", derr)
+		}
 		flow.SetInterruptResolution(resumeData)
 	}
-	if subgraphDone {
-		subgraphResult, _ := workflow.NewState(subgraphResultJSON)
+	if subgraphDone && sideErr == nil {
+		subgraphResult, derr := workflow.NewState(subgraphResultJSON)
+		if derr != nil {
+			sideErr = errors.New("unreadable subgraph result: %v", derr)
+		}
 		flow.SetSubgraphResolution(subgraphResult, subgraphErrorStr)
 	}
-
-	// Parse baggage for the task executor. A "null" column (from a nil FlowOptions.Baggage) and an empty
-	// column both yield an empty State, delivered as "no baggage".
-	baggage, _ := workflow.NewState(baggageJSON)
+	baggage, derr := workflow.NewState(baggageJSON)
+	if derr != nil && sideErr == nil {
+		sideErr = errors.New("unreadable baggage: %v", derr)
+	}
+	if sideErr != nil {
+		// Its own turn: still the entry phase, as for an unreadable state above.
+		fctx, doneTurn := e.dbTurn(ctx, shardNum)
+		err = e.failAndReturn(fctx, shardNum, stepID, leaseSeq, flowID, flowToken, sideErr, taskName)
+		doneTurn()
+		return errors.Trace(err)
+	}
 
 	// A replay's carrier already holds the task's output: the claim read the step's changes as priorChanges, so
 	// they are the carrier's changes and are merged into its state exactly as the task left them. Only the control
@@ -1064,11 +1082,24 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultRerouteWriteErr, taskName)) {
 					return errors.New("injected fault: " + engineseams.FaultRerouteWriteErr + " " + taskName)
 				}
-				_, uerr := db.ExecContext(ctx,
+				// engineseams.FaultRerouteStaleWrite makes it carry a stale lease generation, as a zombie's would.
+				writeSeq := leaseSeq
+				if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultRerouteStaleWrite, taskName)) {
+					writeSeq = leaseSeq - 1
+				}
+				res, uerr := db.ExecContext(ctx,
 					"UPDATE dwarf_steps SET changes=?, advance_sleep_until=NOW_UTC(), advance_on_error=1 WHERE step_id=? AND lease_seq=?",
-					changesJSON, stepID, leaseSeq,
+					changesJSON, stepID, writeSeq,
 				)
-				return errors.Trace(uerr)
+				if uerr != nil {
+					return errors.Trace(uerr)
+				}
+				// A zero-row match is a peer's re-claim: abandon quietly, before the route is counted or built.
+				// advance_on_error moves 0 -> 1 on every row it matches, so RowsAffected is honest on MySQL.
+				if n, _ := res.RowsAffected(); n == 0 {
+					return errLeaseFenced
+				}
+				return nil
 			})
 		})
 		if landed, err := e.settlePersist(ctx, err, shardNum, stepID, leaseSeq, flowID, flowToken, taskName); !landed {
@@ -1946,7 +1977,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		ourChanges := changesOf(ourChangesJSON)
 		ourRefs, rerr := staterefs.Parse(ourRefsJSON)
 		if rerr != nil {
-			return errors.Trace(rerr)
+			return errors.Trace(&permanentError{rerr})
 		}
 		// With no members there is nothing more to fold: the fan-in's state is this step's changes folded onto its
 		// state, exactly as fanInRow builds its base and as a linear transition does. So it mints as a linear
@@ -2122,7 +2153,7 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 	spawnChanges := changesOf(c.spawnChangesJSON)
 	spawnRefs, err := staterefs.Parse(c.spawnRefsJSON)
 	if err != nil {
-		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(err)
+		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(&permanentError{err})
 	}
 	reducers := graph.Reducers()
 	// The members' contributions fold onto this base in branch order.

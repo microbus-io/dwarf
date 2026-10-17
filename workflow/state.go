@@ -19,6 +19,7 @@ package workflow
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"iter"
 	"maps"
 	"time"
@@ -217,6 +218,11 @@ func decodeValue(r Reducer, raw json.RawMessage) (any, error) {
 	var v any
 	if err := dec.Decode(&v); err != nil {
 		return nil, errors.Trace(err)
+	}
+	// A Decoder stops after the first value, where Unmarshal rejects anything after it. SetJSON does not
+	// validate, so without this a field holding `[1] [2]` would fold as `[1]` and hide the bad bytes.
+	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
+		return nil, errors.New("workflow: invalid JSON: data after the first value")
 	}
 	return v, nil
 }

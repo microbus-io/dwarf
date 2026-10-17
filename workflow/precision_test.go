@@ -93,6 +93,29 @@ func TestFlow_PayloadIsValidatedCopiedAndUniform(t *testing.T) {
 	})
 }
 
+// TestState_FoldRejectsTrailingData pins that a fold rejects a value with more JSON after it. SetJSON does not
+// validate, and a fold decodes with a Decoder, which stops after the first value: without the check, a base or
+// a contribution of `[1] [2]` would fold as `[1]` and hide the bad bytes.
+func TestState_FoldRejectsTrailingData(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	reducers := map[string]Reducer{"f": ReducerUnion}
+
+	base, err := NewState()
+	assert.NoError(err)
+	base.SetJSON("f", json.RawMessage(`[1] [2]`))
+	good, err := NewState([]byte(`{"f":[3]}`))
+	assert.NoError(err)
+	assert.Error(base.Apply(ChangesOf(good), reducers), "a base with trailing data")
+
+	base, err = NewState([]byte(`{"f":[1]}`))
+	assert.NoError(err)
+	bad, err := NewState()
+	assert.NoError(err)
+	bad.SetJSON("f", json.RawMessage(`[3] [4]`))
+	assert.Error(base.Apply(ChangesOf(bad), reducers), "a contribution with trailing data")
+}
+
 // TestState_FoldsKeepNumbersExact pins that a reduced field's fold writes back every number it did not compute
 // as the literal it read, and computes integers exactly, so an id past 2^53 survives every hand-off. Each case
 // runs through all three fold paths: Apply, ApplyAll over two contributions, and two writes in one task.

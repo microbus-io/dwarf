@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -141,6 +142,56 @@ func TestTerminate_ReducerErrorDoesNotBlockTerminate(t *testing.T) {
 	outcome, err = eng.Snapshot(ctx, flowKey)
 	if assert.NoError(err) {
 		assert.Equal(workflow.StatusTerminated, outcome.Status)
+	}
+}
+
+// TestTerminate_UnreadableTailDoesNotBlockTerminate pins that a flow whose final state cannot be read can still
+// be stopped. An interrupted tail whose state or refs column does not decode fails the final-state merge on every
+// attempt; Terminate terminalizes the flow with an empty final state rather than returning that error forever.
+func TestTerminate_UnreadableTailDoesNotBlockTerminate(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("TerminateUnreadable")
+	g.SetURL("A", "reducererror.verify:429/a")
+	g.SetURL("B", "reducererror.verify:429/b")
+	g.AddTransitionChain("A", "B", workflow.End)
+	mux.HandleGraph("reducererror.verify:429/unreadable", g)
+	mux.HandleTask("reducererror.verify:429/a", func(ctx context.Context, f *workflow.Flow) error {
+		return nil
+	})
+	mux.HandleTask("reducererror.verify:429/b", func(ctx context.Context, f *workflow.Flow) error {
+		_, err := f.Interrupt(nil, nil)
+		return err
+	})
+
+	eng := NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
+	eng.SetHost(mux)
+	assert.NoError(eng.Startup(t.Context()))
+	db, err := eng.db.Shard(1)
+	assert.NoError(err)
+
+	for _, column := range []string{"state", "state_refs"} {
+		flowKey, outcome, err := eng.Run(ctx, "reducererror.verify:429/unreadable", nil, nil)
+		if !assert.NoError(err) || !assert.NotNil(outcome) {
+			return
+		}
+		assert.Equal(workflow.StatusInterrupted, outcome.Status)
+		_, flowID, _, err := keys.ParseFlowKey(flowKey)
+		assert.NoError(err)
+		_, err = db.ExecContext(ctx,
+			"UPDATE dwarf_steps SET "+column+"=? WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'",
+			[]byte(`[1]`), flowID)
+		assert.NoError(err)
+
+		assert.NoError(eng.Terminate(ctx, flowKey, "stop"), column)
+		outcome, err = eng.Snapshot(ctx, flowKey)
+		if assert.NoError(err, column) {
+			assert.Equal(workflow.StatusTerminated, outcome.Status, column)
+		}
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"maps"
 	"slices"
 	"strings"
@@ -119,6 +120,10 @@ func foldCohort(base workflow.State, contributions []workflow.Changes, reducers 
 				dec.UseNumber()
 				if err := dec.Decode(&inc); err != nil {
 					return nil, errors.New("reducer '%s' for field %q: %w", string(r), k, err)
+				}
+				// Unlike Unmarshal, a Decoder stops after the first value; anything after it is bad bytes.
+				if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
+					return nil, errors.New("reducer '%s' for field %q: invalid JSON: data after the first value", string(r), k)
 				}
 				var err error
 				if acc, err = r.Reduce(acc, inc); err != nil {
@@ -298,7 +303,11 @@ func cohortParts(ctx context.Context, db sequel.Executor, stepIDs []int, reducer
 				return nil, 0, errors.Trace(err)
 			}
 			read += len(stateJSON) + len(reducedJSON)
-			state, _ := workflow.NewState(stateJSON)
+			state, err := workflow.NewState(stateJSON)
+			if err != nil {
+				rows.Close()
+				return nil, 0, errors.Trace(&permanentError{err})
+			}
 			var rec map[string]*reduced
 			if err := json.Unmarshal(reducedJSON, &rec); err != nil {
 				rows.Close()

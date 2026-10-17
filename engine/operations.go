@@ -536,7 +536,8 @@ func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 	// reached a stop (or stopped resolving), never merely "look again" - do not release on a non-settled
 	// status, which `signalStop` guards. But an interrupted flow can be Resumed between the release and the
 	// read, so the read can find it running again; then the caller parks again rather than reporting a
-	// timeout on a live ctx. That is a re-park per real stop, not a poll.
+	// timeout on a live ctx. That is a re-park per release, not a poll. A sweep that read the row before a
+	// Resume can release the re-parked caller once more for the same stop - one more read, bounded.
 	//
 	// Registering AFTER the first read is safe for the same reason parking at all is: the board is POLLED,
 	// so a stop landing in the gap is reported by the next sweep rather than being an event the caller
@@ -571,10 +572,22 @@ func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 			// error, while `Poll` returns it as-is so the caller can re-poll.
 			return outcome, nil
 		}
-		outcome, err = e.snapshot(ctx, flowKey)
-		if err != nil {
-			return nil, err
+		// Test rendezvous: released, about to read. Holding a caller here is how a test makes the read straddle
+		// its deadline.
+		if e.seams.Enabled() { // Enabled gates the assembled name in production
+			e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointAwaitReleased, flowKey))
 		}
+		next, err := e.snapshot(ctx, flowKey)
+		if err != nil {
+			// The caller's deadline, as at the first read. The read takes a turn, so a release landing just
+			// before the deadline on a saturated shard can straddle it; hand back the outcome in hand, as an
+			// expired wait does.
+			if ctx.Err() != nil {
+				return outcome, nil
+			}
+			return nil, errors.Trace(err)
+		}
+		outcome = next
 		if isStoppedStatus(outcome.Status) || ctx.Err() != nil {
 			return outcome, nil
 		}

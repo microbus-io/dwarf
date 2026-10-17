@@ -2143,8 +2143,12 @@ correlation-id→key lookup (see "Tracing"); subgraph-child keys are read-only f
 snapshot and return if the flow has already stopped; otherwise park on the **latch board** (`internal/latch`,
 held as `e.latches`) until it settles, then snapshot to build the outcome. **The park repeats only when that
 read finds the flow running again** - an interrupted flow Resumed between its release and the read - and the
-caller's ctx is still live. Each iteration is one real stop, never a timer, so it is not a poll; returning the
-running flow instead hands the caller a false 408 (pinned by `TestAwait_StaleStopReparks`).
+caller's ctx is still live. Each iteration follows a release, never a timer, so it is not a poll (a sweep that
+read the row before a Resume can release the re-parked caller once more for the same stop - bounded); returning
+the running flow instead hands the caller a false 408 (pinned by `TestAwait_StaleStopReparks`). **Both reads map
+an error caused by the caller's own deadline to the not-stopped outcome**, never return it raw: each takes a turn,
+so a read can straddle the deadline on a saturated shard, and a raw error breaks `Poll`'s re-pollable answer and
+`Await`'s 408 (pinned by `TestAwait_ReadAfterReleasePastTheDeadline`).
 
 **Each read earns its place, and the post-release read is not a re-check.**
 

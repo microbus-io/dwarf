@@ -86,6 +86,7 @@ const (
 	FaultSubgraphSpawnErr     = "subgraphSpawnErr"     // the subgraph spawn errors before its transaction, with the caller step not yet parked
 	FaultRetryRewindErr       = "retryRewindErr"       // the flow.Retry rewind returns a non-contention database error (consumed per attempt)
 	FaultRerouteWriteErr      = "rerouteWriteErr"      // the Cancel-covered reroute's follow-up write returns a non-contention database error (consumed per attempt)
+	FaultRerouteStaleWrite    = "rerouteStaleWrite"    // the Cancel-covered reroute's follow-up write carries a stale lease_seq (zombie)
 
 	// Scoped by workflow URL of the subgraph child:
 	FaultSubgraphSpawnCommitLost = "subgraphSpawnCommitLost" // the subgraph spawn commits but reports an error, as if its acknowledgement were lost
@@ -179,6 +180,11 @@ const (
 	// are deliberately one call there (the gap is the race Close is careful not to leave). Wired only when
 	// the seams are enabled, so a production board carries no hook at all.
 	CheckpointAwaitParked = "awaitParked" // Board.Latch(), an Await is on the board and about to block
+
+	// Fired scoped by flow key when a parked Await has been released and is about to read the flow. A Break
+	// here holds the caller between the release and the read, so a test can expire the caller's ctx inside
+	// that window.
+	CheckpointAwaitReleased = "awaitReleased" // await(), released from the board, before the read that builds the outcome
 
 	// Lifecycle rendezvous, fired at the END of a recovery pass - every detector in it has read the database
 	// by then. recoveryLoop sweeps ON ENTRY (Startup), so that first pass runs CONCURRENTLY with the test body,

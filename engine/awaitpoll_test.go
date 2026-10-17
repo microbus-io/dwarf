@@ -396,6 +396,96 @@ func TestAwait_StaleStopReparks(t *testing.T) {
 	}
 }
 
+// TestAwait_ReadAfterReleasePastTheDeadline pins that the read after a release maps an error caused by the
+// caller's own deadline the way the first read does. That read takes a turn, so on a saturated shard a release
+// landing just before the deadline can straddle it; returning the raw ctx error then breaks Poll's re-pollable
+// answer and Await's 408. The caller is held between the release and the read while its ctx ends, which makes
+// the straddle exact.
+func TestAwait_ReadAfterReleasePastTheDeadline(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	mux := hosts.NewMux()
+	release := make(chan struct{})
+	var once sync.Once
+	rel := func() { once.Do(func() { close(release) }) }
+
+	g := workflow.NewGraph("ReleaseDeadline")
+	g.SetURL("Block", "releasedeadline.verify:0/block")
+	g.AddTransition("Block", workflow.End)
+	mux.HandleGraph("releasedeadline.verify:0/g", g)
+	mux.HandleTask("releasedeadline.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	defer rel() // below the Shutdown defer, so it unwinds first and the drain never waits on the held task
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+
+	flowKey, err := e.Create(ctx, "releasedeadline.verify:0/g", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+
+	for _, poll := range []bool{true, false} {
+		type result struct {
+			out *workflow.FlowOutcome
+			err error
+		}
+		done := make(chan result, 1)
+		awaitCtx, cancel := context.WithCancel(ctx)
+		released := engineseams.Join(engineseams.CheckpointAwaitReleased, flowKey)
+		e.seams.Break(released)
+		parked := e.seams.Waiter(engineseams.Join(engineseams.CheckpointAwaitParked, flowKey))
+		go func() {
+			var out *workflow.FlowOutcome
+			var aerr error
+			if poll {
+				out, aerr = e.await(awaitCtx, flowKey)
+			} else {
+				out, aerr = e.awaitStopped(awaitCtx, flowKey)
+			}
+			done <- result{out, aerr}
+		}()
+		select {
+		case <-parked:
+		case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
+			assert.True(false, "Await never parked")
+			cancel()
+			return
+		}
+
+		// A real stop status while the flow runs: the caller is released, then held before its read.
+		e.signalStop(ctx, flowKey, workflow.StatusInterrupted)
+		assert.True(e.seams.WaitTimeout(ctx, released, 10*time.Second*enginetest.TimeoutScale()), "Await was never released")
+		cancel() // the caller's deadline ends inside the window; the held checkpoint returns on it
+		e.seams.Resume(released)
+
+		select {
+		case r := <-done:
+			if poll {
+				assert.NoError(r.err)
+				if assert.NotNil(r.out) {
+					assert.Equal(workflow.StatusRunning, r.out.Status)
+				}
+			} else {
+				assert.Nil(r.out)
+				assert.Equal(http.StatusRequestTimeout, errors.StatusCode(r.err))
+			}
+		case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
+			assert.True(false, "Await never returned after its ctx ended")
+			return
+		}
+	}
+}
+
 // stateVal reads a field as an untyped value. It lives here rather than on State because Get already is
 // this, with a type the caller chooses; a one-line untyped read is a test convenience, not API.
 func stateVal(s workflow.State, name string) any {

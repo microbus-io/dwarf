@@ -319,6 +319,65 @@ func TestPersist_PermanentErrorOnARetryStopsTheLadder(t *testing.T) {
 	assert.Equal(2, writeCalls, "the ladder stops at the permanent error instead of retrying it")
 }
 
+// TestPersist_FencedRerouteWriteAbandons pins that a zombie whose Cancel-covered reroute write matches no row
+// abandons there, as every other fenced write does: it neither counts an error route nor builds the transition to
+// the handler. Ignoring the zero-row match, it counted dwarf_steps_executed{error_routed} for a route a peer owns.
+func TestPersist_FencedRerouteWriteAbandons(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	var handlerRuns atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("FencedReroute")
+	g.SetURL("Work", "p/fencedreroute/work")
+	g.SetURL("Handler", "p/fencedreroute/handler")
+	g.AddTransition("Work", workflow.End)
+	g.AddTransitionOnError("Work", "Handler")
+	g.AddTransition("Handler", workflow.End)
+	mux.HandleGraph("p/fencedreroute/wf", g)
+	mux.HandleTask("p/fencedreroute/work", func(ctx context.Context, f *workflow.Flow) error {
+		close(started)
+		<-release
+		return nil
+	})
+	mux.HandleTask("p/fencedreroute/handler", func(ctx context.Context, f *workflow.Flow) error {
+		handlerRuns.Add(1)
+		return nil
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	reader := withManualReader(e)
+	assert.NoError(e.Startup(t.Context()))
+	e.seams.Inject(engineseams.Join(engineseams.FaultRerouteStaleWrite, "Work"))
+
+	fk, err := e.Create(ctx, "p/fencedreroute/wf", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	<-started
+	dispatched := e.seams.Waiter(engineseams.CheckpointClaimedDispatchDone) // Work's is the dispatch in flight
+	assert.NoError(e.Cancel(ctx, fk, "stop"))
+	close(release)
+	select {
+	case <-dispatched:
+	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
+		assert.True(false, "the Work dispatch never returned")
+		return
+	}
+
+	var rm metricdata.ResourceMetrics
+	assert.NoError(reader.Collect(ctx, &rm))
+	routed, _ := sumCounter(rm, "dwarf_steps_executed", "status", "error_routed")
+	assert.Equal(int64(0), routed, "a fenced reroute counts no error route")
+	assert.Equal(int32(0), handlerRuns.Load(), "a fenced reroute builds no transition")
+	assert.NoError(e.Terminate(ctx, fk, "done"))
+}
+
 // TestPersist_CancelRerouteWriteIsPersisted pins that the follow-up write of a step Cancel covered while its task
 // ran - the one recording its route to the onError handler - goes through persist like the completion write. A
 // blip is retried in place (dwarf_steps_write_retried), and a write that never lands fails the step through the
