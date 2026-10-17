@@ -94,6 +94,7 @@ const (
 
 	// Process-wide, consumed per attempt (InjectN sets how many attempts fail):
 	FaultCompleteSurgraphErr = "completeSurgraphErr" // the subgraph-completion write returns a non-contention database error
+	FaultCancelReasonReadErr = "cancelReasonReadErr" // a Cancel-preempted step's re-read of the cancel reason returns a non-contention database error
 
 	// Process-wide (no scope):
 	FaultInterruptStaleWrite = "interruptStaleWrite" // the interrupt path's in-transaction lease-generation read is forced to mismatch (zombie)
@@ -135,6 +136,7 @@ const (
 	CheckpointBeforeRecoveryReset       = "beforeRecoveryReset"       // the post-execution recovery path, just before its fenced step-reset transaction
 	CheckpointClaimedDispatchDone       = "claimedDispatchDone"       // step execution returned after winning its claim, recovery reset included; fired bare and targeted by (shard, step id)
 	CheckpointLeaseRecoverySelected     = "leaseRecoverySelected"     // lease recovery, after it selected expired steps and before its by-id reset; reached only when it found some
+	CheckpointWedgeSweepSelected        = "wedgeSweepSelected"        // the wedged-park sweep, after it selected parked callers with no live child and before it reads each one's latest child; reached only when it found some
 
 	// A COUNTING checkpoint (read with Visits, never a rendezvous), scoped by flow id so concurrent flows
 	// count independently. No test arms Wait/Break on it, so Checkpoint just increments and returns; both the

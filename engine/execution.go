@@ -607,6 +607,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		reasonPass := turnstile.WaitTurn(ctx)
 		var rerr error
 		flowCancelReason, rerr = readCancelReason(ctx, db, flowID)
+		if e.seams.IsFault(engineseams.FaultCancelReasonReadErr) {
+			rerr = errors.New("injected fault: " + engineseams.FaultCancelReasonReadErr)
+		}
 		reasonPass.Return()
 		if rerr != nil {
 			e.inFlightStateBytes.Add(-heldBytes)

@@ -24,6 +24,7 @@ import (
 
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -254,4 +255,64 @@ func TestCancelOncePerFlow(t *testing.T) {
 	}
 	assert.Equal(workflow.StatusCompleted, outcome.Status, "the second Cancel must not reach the recovered flow")
 	assert.True(outcome.State.GetBool("carriedOn"))
+}
+
+// TestCancelPreempt_ReasonReadErrorReleasesTheInFlightGauges pins that a Cancel-preempted step whose re-read of the
+// cancel reason fails takes its bytes and step back out of the held-state gauges. The gauges count from before the
+// read, and a return that skipped the decrement left them high for the life of the process.
+func TestCancelPreempt_ReasonReadErrorReleasesTheInFlightGauges(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	var bRan atomic.Int32
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("CancelReasonRead")
+	g.SetURL("A", "creason/a")
+	g.SetURL("B", "creason/b")
+	g.AddTransition("A", "B")
+	g.AddTransition("B", workflow.End)
+	mux.HandleGraph("creason/g", g)
+	// A's sleep holds B pending, so the Cancel marks B before it is claimed: its claim is the preempt.
+	mux.HandleTask("creason/a", func(ctx context.Context, f *workflow.Flow) error {
+		f.Sleep(2 * time.Second)
+		return nil
+	})
+	mux.HandleTask("creason/b", func(ctx context.Context, f *workflow.Flow) error { bRan.Add(1); return nil })
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+	e.seams.InjectN(engineseams.FaultCancelReasonReadErr, 1)
+
+	aDone := e.seams.Waiter(engineseams.CheckpointClaimedDispatchDone)
+	fk, err := e.Create(ctx, "creason/g", map[string]any{"doc": "held"}, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	select {
+	case <-aDone:
+	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
+		t.Fatal("A was never dispatched")
+	}
+	bDone := e.seams.Waiter(engineseams.CheckpointClaimedDispatchDone)
+	assert.NoError(e.Cancel(ctx, fk, "stop"))
+	select {
+	case <-bDone:
+	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
+		t.Fatal("B was never dispatched")
+	}
+
+	assert.Equal(int64(0), e.inFlightStateSteps.Load(), "the failed dispatch still counts a step in flight")
+	assert.Equal(int64(0), e.inFlightStateBytes.Load(), "the failed dispatch still counts its state bytes")
+	assert.Equal(int32(0), bRan.Load(), "a preempted step runs no task")
+	// The read failed, so the dispatch returned before preempting: B is left running, for lease recovery.
+	var status string
+	if bIDs := stepIDsByTask(t, e, "B"); assert.Len(bIDs, 1) {
+		db, err := e.db.Shard(1)
+		assert.NoError(err)
+		assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE step_id=?", bIDs[0]).Scan(&status))
+		assert.Equal(workflow.StatusRunning, status)
+	}
 }

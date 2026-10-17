@@ -81,6 +81,20 @@ func TestSetShard_RejectsBadSpecs(t *testing.T) {
 	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.Startup(t.Context()))) // no host
 }
 
+// TestSetWorkers_RejectsOutOfRange pins SetWorkers' bounds. The count is stored as an int32, so a value past it
+// wrapped negative: the engine started and never dispatched.
+func TestSetWorkers_RejectsOutOfRange(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	e := NewEngine()
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.SetWorkers(-1)))
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.SetWorkers(math.MaxInt32+1)))
+	assert.NoError(e.SetWorkers(math.MaxInt32))
+	assert.Equal(int32(math.MaxInt32), e.workers.Load())
+	assert.NoError(e.SetWorkers(0))
+}
+
 // TestOperations_UnmarshalableInputIs400 pins that Resume's data and Fork's overrides are rejected as bad
 // input before any lookup, like Create's initial state - not dropped, and not a 500.
 func TestOperations_UnmarshalableInputIs400(t *testing.T) {

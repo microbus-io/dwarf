@@ -242,6 +242,9 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 		e.logger.ErrorContext(ctx, "Wedge sweep: iterating parked subgraph steps", "shard", shard, "error", err)
 		return
 	}
+	if len(hits) > 0 {
+		e.seams.Checkpoint(ctx, engineseams.CheckpointWedgeSweepSelected)
+	}
 
 	for _, w := range hits {
 		// The latest child for this caller step decides the disposition; older children are completed

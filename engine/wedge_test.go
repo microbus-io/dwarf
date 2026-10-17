@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -247,6 +249,118 @@ func TestWedgeSweep_SubgraphCallerWithNoChildFails(t *testing.T) {
 	assert.Equal(workflow.StatusFailed, out.Status, "the caller step fails when its subgraph is gone")
 	assert.True(strings.Contains(out.Error, "subgraph flow not found"),
 		"the failure names the missing subgraph (got %q)", out.Error)
+}
+
+// TestWedgeSweep_ChildLiveAgainIsLeftAlone pins the sweep's skip of a caller whose latest child is live again by
+// the time it is read: a spawn that landed between the sweep's scan and its per-caller read. The caller is not
+// wedged, so the sweep must leave it parked. Handed to the terminal-child branch instead, it delivered
+// "subgraph running" as an error and failed the caller under its live child.
+func TestWedgeSweep_ChildLiveAgainIsLeftAlone(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	mux := hosts.NewMux()
+	started := make(chan struct{})
+	release := make(chan struct{})
+
+	parent := workflow.NewGraph("Parent")
+	parent.SetURL("P", "wedgelive.verify:0/p")
+	parent.AddTransition("P", workflow.End)
+	mux.HandleGraph("wedgelive.verify:0/parent", parent)
+	child := workflow.NewGraph("Child")
+	child.SetURL("K", "wedgelive.verify:0/k")
+	child.AddTransition("K", workflow.End)
+	mux.HandleGraph("wedgelive.verify:0/child", child)
+
+	mux.HandleTask("wedgelive.verify:0/p", func(ctx context.Context, f *workflow.Flow) error {
+		var out map[string]any
+		_, err := f.Subgraph("wedgelive.verify:0/child", nil, &out)
+		return err
+	})
+	// The child holds, so the caller stays parked on it while the test stages the window.
+	mux.HandleTask("wedgelive.verify:0/k", func(ctx context.Context, f *workflow.Flow) error {
+		close(started)
+		<-release
+		return nil
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+	var releaseOnce sync.Once
+	releaseChild := func() { releaseOnce.Do(func() { close(release) }) }
+	// Below the Shutdown defer, so it unwinds first; the test also releases the child itself, so it runs once.
+	defer releaseChild()
+	awaitStartupRecoverySweep(t, e) // the Break below must catch only the sweep this test drives
+
+	flowKey, err := e.Create(ctx, "wedgelive.verify:0/parent", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	select {
+	case <-started: // the caller's park and the child's insert commit together, so the caller is parked
+	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
+		t.Fatal("subgraph child never started")
+	}
+	shard, parentFlowID, _, err := keys.ParseFlowKey(flowKey)
+	if !assert.NoError(err) {
+		return
+	}
+	db, err := e.db.Shard(shard)
+	if !assert.NoError(err) {
+		return
+	}
+	var callerStepID, childFlowID int
+	err = db.QueryRowContext(ctx, "SELECT surgraph_step_id, flow_id FROM dwarf_flows WHERE surgraph_flow_id=?", parentFlowID).
+		Scan(&callerStepID, &childFlowID)
+	if !assert.NoError(err) {
+		return
+	}
+
+	// The scan must see no live child, so the child reads terminal while the sweep selects.
+	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET status=? WHERE flow_id=?", workflow.StatusCompleted, childFlowID)
+	assert.NoError(err)
+	e.seams.Break(engineseams.CheckpointWedgeSweepSelected)
+	swept := make(chan struct{})
+	go func() {
+		defer close(swept)
+		e.recoverWedgedSubgraphParks(ctx, db, shard, 0)
+	}()
+	if !assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointWedgeSweepSelected, 30*time.Second*enginetest.TimeoutScale()),
+		"the sweep never selected the caller") {
+		e.seams.Resume(engineseams.CheckpointWedgeSweepSelected)
+		return
+	}
+	// Between the scan and the read, the latest child is live again, as a spawn landing in the window leaves it.
+	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET status=? WHERE flow_id=?", workflow.StatusRunning, childFlowID)
+	assert.NoError(err)
+	e.seams.Resume(engineseams.CheckpointWedgeSweepSelected)
+	select {
+	case <-swept:
+	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
+		t.Fatal("the sweep never finished")
+	}
+
+	// The caller is untouched: still parked, nothing delivered to it.
+	var status, subgraphErr string
+	var parked, subgraphDone int
+	err = db.QueryRowContext(ctx, "SELECT status, parked, subgraph_done, subgraph_error FROM dwarf_steps WHERE step_id=?", callerStepID).
+		Scan(&status, &parked, &subgraphDone, &subgraphErr)
+	if assert.NoError(err) {
+		assert.Equal(workflow.StatusRunning, status)
+		assert.Equal(parkedSubgraph, parked)
+		assert.Equal(0, subgraphDone)
+		assert.Equal("", subgraphErr)
+	}
+
+	// And the flow finishes normally once its child does.
+	releaseChild()
+	out, err := e.Await(ctx, flowKey)
+	if assert.NoError(err) {
+		assert.Equal(workflow.StatusCompleted, out.Status)
+	}
 }
 
 // TestWedgeSweep_OrphanedSubgraphChildTerminated forges the zombie a Terminate racing a subgraph spawn leaves -
