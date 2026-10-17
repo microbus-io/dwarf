@@ -386,8 +386,8 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	// fork - a surprise duplicate execution - and (b) as a cohort member count as neither an arrival nor a
 	// failure, wedging the fork's fan-in forever. Normalize it to terminated (it never got a chance to react -
 	// no onError delivery happens here, matching the forceful, non-catchable shape of the race that produced
-	// it): the keep-meta update makes the cohort recompute below count it as an arrival (so the fan-in still
-	// converges), and the cloned rows are frozen after the inserts.
+	// it): the keep-meta update makes the cohort recompute below count its branch as a loss, like any branch a
+	// Terminate stopped, and the cloned rows are frozen after the inserts.
 	var stragglers []int
 	for i := range keep {
 		s := &keep[i]
@@ -555,8 +555,14 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 				// cohort_failures - and the branch's loss is a cancellation only if nothing in it failed, the
 				// same rule the live counters apply when a nested cohort resolves. Counted any other way, the
 				// clone re-derives a fan-in that converges, or resolves cancelled, where the original failed.
+				//
+				// A terminated step is a loss too, and not a cancellation: a Terminate stopped the branch before
+				// it completed, and nothing in the fork runs it again. Counted as an arrival, the fan-in converges
+				// on whatever the branch finished and silently lacks the rest, at any depth - an inner cohort the
+				// branch had started has no fan-in row to carry its work. To re-run such a branch, fork at or
+				// before its fan-out.
 				switch n.status {
-				case workflow.StatusFailed:
+				case workflow.StatusFailed, workflow.StatusTerminated:
 					branchFailed = true
 				case workflow.StatusCancelled:
 					branchCancelled = true

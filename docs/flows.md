@@ -227,7 +227,9 @@ writes take the place of the original's. The fork inherits the origin flow's sch
 not auto-delete. Because the fork is an ordinary new flow, recover a partially-failed fan-out by forking one
 failed branch at a time. A branch lost to a `Cancel` is recovered the same way: the fork re-runs only the step you
 chose and keeps every other branch as it was, so while a cancelled branch remains, the fork ends `cancelled`,
-with the original `CancelReason`.
+with the original `CancelReason`. A branch that `Terminate` stopped before it completed is a loss too, so a fork
+that keeps it ends `failed`. To re-run it, fork at or before the fan-out step: everything after the step you
+choose re-runs, every branch of that fan-out included.
 
 To re-run a terminal flow from the beginning, fork it at its first step. `History` lists steps in execution
 order, so the first entry is the flow's entry step, and the fork starts from the original's initial state with

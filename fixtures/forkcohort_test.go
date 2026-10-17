@@ -18,6 +18,7 @@ package fixtures
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -427,4 +428,112 @@ func TestForkCohort_SourceEdgeIntoItsOwnFanIn(t *testing.T) {
 	}
 	assert.Equal(workflow.StatusCompleted, forkOutcome.Status)
 	assert.Equal(true, stateVal(forkOutcome.State, "joined"))
+}
+
+// TestForkCohort_TerminatedBranchIsALoss pins that Fork counts a branch a Terminate stopped as a loss, not an
+// arrival. The origin is a three-level fan-out terminated while c2/p2/l2 runs, so Chapter c2's page cohort never
+// converged. Counted as an arrival, a fork at a c1 Line re-ran that Line and then COMPLETED on c1's four lines,
+// silently dropping c2's three: c2's cohort had no fan-in row to carry them. As a loss, that fork fails, saying
+// why. Forking at Chapter c2 - the fan-out the Terminate interrupted - re-runs its whole cohort and completes with
+// every line.
+func TestForkCohort_TerminatedBranchIsALoss(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	mux := hosts.NewMux()
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+
+	g := bookGraph(map[string]workflow.Reducer{"collection": workflow.ReducerAppend})
+	assert.NoError(g.Validate())
+	mux.HandleGraph("book/wf", g)
+	nop := func(ctx context.Context, f *workflow.Flow) error { return nil }
+	for _, n := range []string{"Seed", "JoinLines", "JoinPages", "JoinChapters"} {
+		mux.HandleTask("book/"+n, nop)
+	}
+	mux.HandleTask("book/Chapter", func(ctx context.Context, f *workflow.Flow) error {
+		f.Set("pages", []string{"p1", "p2"})
+		return nil
+	})
+	mux.HandleTask("book/Page", func(ctx context.Context, f *workflow.Flow) error {
+		f.Set("lines", []string{"l1", "l2"})
+		return nil
+	})
+	hold := make(chan struct{})
+	var release sync.Once
+	defer release.Do(func() { close(hold) }) // after the Shutdown defer, so it unwinds first
+	mux.HandleTask("book/Line", func(ctx context.Context, f *workflow.Flow) error {
+		at := f.GetString("chapter") + "/" + f.GetString("page") + "/" + f.GetString("line")
+		if at == "c2/p2/l2" {
+			select {
+			case <-hold: // the origin's run is held; once released, every run of it completes
+			case <-ctx.Done():
+				return nil
+			}
+		}
+		f.Set("collection", []string{at})
+		return nil
+	})
+
+	flowKey, err := e.Create(ctx, "book/wf", map[string]any{"chapters": []string{"c1", "c2"}}, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	shard, _, _, err := keys.ParseFlowKey(flowKey)
+	assert.NoError(err)
+	assert.True(enginetest.WaitUntil(t, 30*time.Second, func() bool {
+		return enginetest.CountRows(t, e, shard,
+			"SELECT COUNT(*) FROM dwarf_steps WHERE task_name='Line' AND status='"+workflow.StatusCompleted+"'") == 7
+	}), "seven Lines never completed")
+	assert.NoError(e.Terminate(ctx, flowKey, "stop"))
+	release.Do(func() { close(hold) })
+
+	// stepAt finds the origin step of a task whose state names the given chapter, and for a Line its page and line.
+	hist, err := e.History(ctx, flowKey)
+	if !assert.NoError(err) {
+		return
+	}
+	stepAt := func(task, chapter, page, line string) string {
+		for _, h := range hist {
+			if h.TaskName != task {
+				continue
+			}
+			s, err := e.Step(ctx, h.StepKey)
+			if !assert.NoError(err) {
+				return ""
+			}
+			if s.State.GetString("chapter") == chapter && s.State.GetString("page") == page && s.State.GetString("line") == line {
+				return h.StepKey
+			}
+		}
+		t.Fatalf("no %s step at %s/%s/%s", task, chapter, page, line)
+		return ""
+	}
+
+	// Forked at a c1 Line, c2's branch stays terminated: a loss, so the fork fails rather than completing short.
+	forkKey, err := e.Fork(ctx, stepAt("Line", "c1", "p1", "l1"), nil)
+	if !assert.NoError(err) {
+		return
+	}
+	out, err := enginetest.BoundedAwait(t, e, forkKey)
+	if assert.NoError(err) {
+		assert.Equal(workflow.StatusFailed, out.Status, "a terminated branch is not a completed one")
+		assert.Contains(out.Error, "terminated before it completed")
+	}
+
+	// Forked at Chapter c2, the fan-out the Terminate interrupted, every unfinished branch re-runs.
+	forkKey, err = e.Fork(ctx, stepAt("Chapter", "c2", "", ""), nil)
+	if !assert.NoError(err) {
+		return
+	}
+	out, err = enginetest.BoundedAwait(t, e, forkKey)
+	if assert.NoError(err) {
+		assert.Equal(workflow.StatusCompleted, out.Status)
+		assert.Equal([]string{
+			"c1/p1/l1", "c1/p1/l2", "c1/p2/l1", "c1/p2/l2", "c2/p1/l1", "c2/p1/l2", "c2/p2/l1", "c2/p2/l2",
+		}, out.State.GetStrings("collection"))
+	}
 }

@@ -342,7 +342,7 @@ counts, beside `cohort_failures`, the losses that were cancellations; `propagate
 failure. A trunk step decides from its own error (`workflow.IsCancelled`). **A `cancelled` step counts as a
 loss everywhere a `failed` one does** (`cohort_failures`, Fork's branch recompute), and Fork rebuilds
 `cohort_cancellations` by the same rule the counters apply: a branch is a cancellation if it holds cancelled
-steps and no failed one. Get that wrong and a fork resolves `cancelled`, or converges, where the original failed.
+steps and no failed or terminated one. Get that wrong and a fork resolves `cancelled`, or converges, where the original failed.
 
 *`flowLossError` picks the error a resolving flow delivers to its surgraph caller.* It runs inside
 `failFlowTx`, the one in-transaction flow-fail that `failStep` and the cohort-fail branch in `processStep` both
@@ -386,7 +386,7 @@ fails the fork with no special escalation). *Branches, not lineage members:* `li
 cohort-**counting** device, not a DAG - every step of a per-element sub-pipeline inherits the spawn's lineage, so a
 3-branch cohort of 2-step branches has 6 members, and counting members overshoots `cohort_size`. The walk starts
 at each direct child of the spawn that shares its lineage and descends the branch's sub-DAG; one arrival per
-surviving branch, one failure if any step in it failed. The whole rewound *branch* is excluded, not just the
+surviving branch, one failure if any step in it failed, was cancelled or was terminated. The whole rewound *branch* is excluded, not just the
 rewind *step* (a mid-branch rewind keeps its earlier completed steps, and they are not arrivals). A source with a
 direct edge into its own fan-in also arrives on itself as it spawns; no branch carries that arrival, so the
 recount adds `cohort_size` minus the heads, or the clone never converges.
@@ -437,7 +437,12 @@ the origin's `thread_id` (so it groups in `List`) but does **not** notify or aut
 fork-of-fork is the partial-recovery path: fork one failed branch at a time; the first fork re-fails cleanly via
 cohort accounting (no limbo) until every failed branch is fixed. **A branch lost to a graceful `Cancel` is kept
 exactly like a failed one** - Fork has one rewind point, so it re-runs the chosen step and inherits every sibling's
-recorded loss - and a fork whose only remaining losses are cancelled branches resolves `cancelled`. Each cloned
+recorded loss - and a fork whose only remaining losses are cancelled branches resolves `cancelled`. **A branch a
+`Terminate` stopped is a loss too, never an arrival**: nothing in the fork runs it again, and counted as an
+arrival the fan-in converges on what the branch finished and silently lacks the rest, at any depth - an inner
+cohort the branch had started has no fan-in row to carry its work. A fork that fails on one names it
+(`flowLossError`'s fallback, since no step failed); re-running it means forking at or before its fan-out.
+Pinned by `TestForkCohort_TerminatedBranchIsALoss`. Each cloned
 flow therefore copies its origin's `cancel_reason`, so such a fork reports the reason for the cancellation it
 inherited rather than a reasonless one - but NOT its `cancel_watermark` (see **Cancel**). Re-running every lost
 branch in one fork would need multiple rewind points

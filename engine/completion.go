@@ -1262,7 +1262,18 @@ func (e *Engine) flowLossError(ctx context.Context, tx sequel.Executor, flowID i
 	).Scan(&sample)
 	sample = strings.TrimSpace(sample)
 	if sample == "" {
-		sample = "cohort failed"
+		// No step failed. In a fork, a branch a Terminate stopped in the origin is a loss of its own (Fork's
+		// recount), and a live flow never fails from one: its Terminate already ended it.
+		var terminated int
+		tx.QueryRowContext(ctx,
+			"SELECT 1 FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusTerminated+"' LIMIT_OFFSET(1, 0)",
+			flowID,
+		).Scan(&terminated)
+		if terminated == 1 {
+			sample = "a fan-out branch was terminated before it completed; fork at or before the fan-out to re-run it"
+		} else {
+			sample = "cohort failed"
+		}
 	}
 	return errors.New("%s", sample)
 }
