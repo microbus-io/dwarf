@@ -200,6 +200,50 @@ func TestStateRefs_UnreadableStateFailsTheStep(t *testing.T) {
 	}
 }
 
+// TestStateRefs_UnreadableInterruptedStateFailsSnapshot pins that Snapshot of an interrupted flow returns an
+// error for a step state it cannot read. Discarded, the decode left a nil map that folding the step's changes
+// onto panicked in the caller's goroutine, and with no changes it reported an empty State as the flow's.
+func TestStateRefs_UnreadableInterruptedStateFailsSnapshot(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("UnreadableSnapshot")
+	g.SetURL("B", "unreadablesnap/b")
+	g.AddTransition("B", workflow.End)
+	mux.HandleGraph("unreadablesnap/g", g)
+	mux.HandleTask("unreadablesnap/b", func(ctx context.Context, f *workflow.Flow) error {
+		// A change before the interrupt, so Snapshot has something to fold onto the state.
+		if err := f.Set("seen", true); err != nil {
+			return err
+		}
+		_, err := f.Interrupt(nil, nil)
+		return err
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+
+	flowKey, err := e.Create(ctx, "unreadablesnap/g", map[string]any{"doc": "keep"}, nil)
+	assert.NoError(err)
+	enginetest.AwaitFlowStatus(t, e, flowKey, workflow.StatusInterrupted, 10*time.Second)
+	bIDs := stepIDsByTask(t, e, "B")
+	assert.Len(bIDs, 1)
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET state=? WHERE step_id=?", []byte(`[1]`), bIDs[0])
+	assert.NoError(err)
+
+	outcome, err := e.Snapshot(ctx, flowKey)
+	if assert.Error(err) {
+		assert.Contains(err.Error(), "JSON object")
+	}
+	assert.Nil(outcome)
+}
+
 // TestStateRefs_CarryAcrossFanOut is the end-to-end shape the design exists for, asserted on what is actually
 // STORED. A large document is fanned out over N branches: the payload must be written ONCE (at the anchor) and
 // every branch's step row must carry a ref instead of a copy - while each branch's task still sees the whole

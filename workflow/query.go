@@ -37,10 +37,11 @@ type Query struct {
 	// (valid priorities are >= 1).
 	Priority int `json:"priority,omitzero"`
 	// OlderThan filters to flows last updated longer ago than this duration.
-	// Zero disables the filter.
+	// Zero disables the filter; a negative value is rejected.
 	OlderThan time.Duration `json:"olderThan,omitzero"`
 	// NewerThan filters to flows last updated within this duration of now.
-	// Zero disables the filter. Composes with OlderThan to express "between X and Y ago."
+	// Zero disables the filter; a negative value is rejected. Composes with OlderThan to express "between X
+	// and Y ago."
 	NewerThan time.Duration `json:"newerThan,omitzero"`
 	// IncludeSubgraphs adds subgraph-child flows to the results alongside roots. They are excluded by default -
 	// a subgraph child is an internal execution detail most callers never want in a list. Pair it with

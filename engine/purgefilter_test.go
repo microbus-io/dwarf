@@ -79,3 +79,41 @@ func TestPurge_EveryListFilterNarrows(t *testing.T) {
 		assert.NoError(err, "%+v", q)
 	}
 }
+
+// TestPurge_NegativeDurationIsRejected pins that a negative OlderThan or NewerThan is a 400 on both List and
+// Purge. It adds no condition, so it would pass Purge's filter guard and purge every flow.
+func TestPurge_NegativeDurationIsRejected(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("Negative")
+	g.SetURL("Work", "pn/work")
+	g.AddTransition("Work", workflow.End)
+	mux.HandleGraph("pn/g", g)
+	mux.HandleTask("pn/work", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+
+	flowKey, outcome, err := e.Run(ctx, "pn/g", nil, nil)
+	assert.NoError(err)
+	assert.Equal(workflow.StatusCompleted, outcome.Status)
+
+	for _, q := range []workflow.Query{
+		{OlderThan: -time.Nanosecond}, {NewerThan: -time.Nanosecond}, {OlderThan: time.Hour, NewerThan: -time.Hour},
+	} {
+		_, err := e.Purge(ctx, q)
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "Purge %+v", q)
+		_, _, err = e.List(ctx, q)
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "List %+v", q)
+	}
+	summaries, _, err := e.List(ctx, workflow.Query{WorkflowURL: "pn/g"})
+	assert.NoError(err)
+	if assert.Len(summaries, 1) {
+		assert.Equal(flowKey, summaries[0].FlowKey, "nothing was marked")
+	}
+}

@@ -439,14 +439,17 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 		Status: flowStatus,
 	}
 
+	// A column that does not decode is an error, never an empty State: the caller would read it as the flow's
+	// whole outcome.
+	var decodeErr error
 	switch flowStatus {
 	case workflow.StatusCompleted:
-		out.State, _ = workflow.NewState(finalStateJSON)
+		out.State, decodeErr = workflow.NewState(finalStateJSON)
 	case workflow.StatusFailed:
-		out.State, _ = workflow.NewState(finalStateJSON)
+		out.State, decodeErr = workflow.NewState(finalStateJSON)
 		out.Error = flowErrorMsg
 	case workflow.StatusTerminated, workflow.StatusCancelled:
-		out.State, _ = workflow.NewState(finalStateJSON)
+		out.State, decodeErr = workflow.NewState(finalStateJSON)
 		out.TerminateReason, out.CancelReason = splitTerminateCancelReason(flowStatus, flowCancelReason)
 	case workflow.StatusInterrupted:
 		// For interrupted, query the leaf step's state and interrupt payload
@@ -470,7 +473,10 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 			if err := checkPayloadVer(flowPayloadVer); err != nil {
 				return nil, errors.Trace(err)
 			}
-			stepState, _ := workflow.NewState(stepStateJSON)
+			stepState, err := workflow.NewState(stepStateJSON)
+			if err != nil {
+				return nil, errors.Trace(err)
+			}
 			// The ref encoding is a storage detail, never API-visible: a caller sees the state the step
 			// actually saw. resolveStateRefs mutates the map in place, so it gets the live map.
 			stepRefs, rerr := staterefs.Parse(stepRefsJSON)
@@ -489,10 +495,13 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 				return nil, errors.Trace(err)
 			}
 			out.State = stepState
-			out.InterruptPayload, _ = workflow.NewState(interruptPayloadJSON)
+			out.InterruptPayload, decodeErr = workflow.NewState(interruptPayloadJSON)
 		}
 	case workflow.StatusRunning, workflow.StatusCreated:
 		out.State = workflow.State{}
+	}
+	if decodeErr != nil {
+		return nil, errors.Trace(decodeErr)
 	}
 
 	return out, nil

@@ -701,6 +701,11 @@ func (e *Engine) queryClauses(ctx context.Context, query workflow.Query, subgrap
 		return "", "", nil, 0, errors.New("invalid shard", http.StatusBadRequest)
 	}
 	restrictShardNum := query.Shard
+	// A negative duration would otherwise add no condition, and Purge's guard counts it as a filter: it would
+	// purge every flow (a time.Until on a past time yields one).
+	if query.OlderThan < 0 || query.NewerThan < 0 {
+		return "", "", nil, 0, errors.New("OlderThan and NewerThan cannot be negative", http.StatusBadRequest)
+	}
 
 	conditions := []string{subgraphCond}
 	var args []any
