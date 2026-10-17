@@ -185,7 +185,8 @@ explicit; `Parse` into a `map[string]any` is the escape hatch, visible at the ca
    output, so a struct contributed by a caller comes back from any untyped read as `map[string]any`/`float64`,
    exactly as a column read does (and from `decodeValue`, which feeds the reducers, with numbers as
    `json.Number`). That matters
-   because `union` dedupes with `reflect.DeepEqual`, and `DeepEqual` between a struct and its decoded twin is
+   because `union` dedupes with `reflect.DeepEqual` (on `unionKey`, which changes only numbers), and `DeepEqual`
+   between a struct and its decoded twin is
    **false** - the mechanism behind the `Continue`-`additionalState` bug. Key ORDER is not part of it: a
    deliberately unsorted spelling dedupes correctly against a sorted one. Pinned by
    `TestState_SetNormalizesGoType`. Any value path that hands a reducer a caller's Go value without going
@@ -233,7 +234,8 @@ explicit; `Parse` into a `map[string]any` is the escape hatch, visible at the ca
 **Stored bytes are NOT canonical, and nothing compares them.** `Set` keeps what `json.Marshal` writes (a
 map's keys sorted, a struct's in declaration order), a `json.RawMessage` and `SetJSON` keep the caller's
 bytes as given, and a column read keeps the database's spelling (JSONB/JSON re-space and reorder). Every
-comparison that exists decodes first - `union` over decoded values. A byte-comparing `union` (raw elements
+comparison that exists decodes first - `union` over decoded values, with every number compared by value
+(`unionKey`), since the database respells numbers too. A byte-comparing `union` (raw elements
 compared instead of decoded ones) therefore cannot assume canonical input: it must canonicalize what it
 compares, or every write path above must be made canonical first.
 
@@ -275,13 +277,16 @@ exposure to revisit, not a non-issue:
   below -2^63) as a double** (`12345678901234567890123` -> `1.2345678901234568e22`), and an exact `add` fold can
   produce such a sum. Postgres respells a literal but keeps its value; SQLite and SQL Server keep the bytes.
   **Do not decode carried fields at
-  dispatch:** that stores `...800` from the first hop onward. A fold is the one place that decodes and writes
+  dispatch:** that stores `...800` from the first hop onward. A forEach decodes nothing either: it splits its source
+  into raw elements (`engine/transitions.go`). A fold is the one place that decodes and writes
   back, so it decodes numbers as `json.Number` (`decodeValue`, and the cohort record in
   `engine/cohortfold.go`) and never reaches a reader: `add`/`min`/`max` fold integers in arbitrary precision
   (`numberApply`; a fraction or exponent folds in float64, as an untyped reader sees it), `min`/`max` keep the
-  winning literal, and `merge` keeps each entry's bytes. **`union` compares numbers by literal**: `1` and `1.0`
-  are distinct elements. Go's encoder writes an integral value one way, so this differs from float64
-  equality only for a value a non-Go writer spelled differently. Pinned by `TestState_FoldsKeepNumbersExact`
+  winning literal, and `merge` keeps each entry's bytes. **`union` compares numbers by value, never by literal**
+  (`unionKey`): an integer literal by its exact integer, any other number by its float64, so `1`, `1.0` and `1e0`
+  are one element while two ids past 2^53 stay two. Do not compare literals: the database is a non-Go writer -
+  Postgres JSONB writes `1e-7` back as `0.0000001` and `1e+21` in full, MySQL `1e+21` as `1e21` - so the same
+  value arriving once from a column and once from a task would land twice. Pinned by `TestState_FoldsKeepNumbersExact`
   and the large-integer cases of `TestCohortFold_ProjectionEqualsContributions`.
 
   Two consequences worth holding. **The rounding is per-READER, not per-field**: a plain `Get` into an `any`

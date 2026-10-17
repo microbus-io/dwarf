@@ -151,7 +151,7 @@ matching one before working there:**
 - **Timestamps:** never bind a Go `time.Time` into SQL; write with `NOW_UTC()`/`DATE_ADD_MILLIS`. (`internal/migrations/CLAUDE.md`)
 - **MySQL JSON compare:** `json_col = '{}'` never matches on MySQL - use a per-driver `CAST(... AS CHAR)`. (`internal/migrations/CLAUDE.md`)
 - **Stored JSON bytes are not canonical, and nothing compares them.** Every comparison decodes first (`union`
-  dedupes decoded values; `Fingerprint` hashes `status|count|max(updated_at)`). What JSON storage buys is Go
+  dedupes decoded values, numbers by value; `Fingerprint` hashes `status|count|max(updated_at)`). What JSON storage buys is Go
   TYPE normalization, so never hand a reducer a caller's Go value that has not been marshalled.
   (`workflow/CLAUDE.md`)
 - **A step's `changes` is `workflow.Changes`; an overwrite is its field name with a `!` suffix.** Decode a
@@ -160,7 +160,8 @@ matching one before working there:**
 - **Integers beyond ±2^53 and NULs in strings are unguarded, by decision.** An untyped read rounds such an
   integer; Postgres `JSONB` rejects a NUL. Do not add a write-side guard or a read-side `UseNumber` without
   revisiting the punt. A fold's decode is internal - its Go values never leave the reducer and go back out as
-  JSON - so it decodes numbers as `json.Number` and stays exact; a new fold site must too. (`workflow/CLAUDE.md`)
+  JSON - so it decodes numbers as `json.Number` and stays exact; a new fold site must too. Engine code that passes
+  stored values on (a forEach's elements) moves their bytes, never decoded values. (`workflow/CLAUDE.md`)
 - **Write-first transactions:** every flow-terminating transaction must UPDATE first, or the flow strands as a
   `running` orphan. (`engine/CLAUDE.md`)
 - **Lease fencing:** every post-execution write to the *dispatched* step must carry `AND lease_seq=?` (the

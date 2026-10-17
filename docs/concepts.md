@@ -80,7 +80,7 @@ A **reducer** decides how writes to a state field combine:
 | append | `ReducerAppend` | Concatenate arrays |
 | add | `ReducerAdd` | Sum numbers |
 | min / max | `ReducerMin` / `ReducerMax` | Smaller / larger number |
-| union | `ReducerUnion` | Merge arrays, deduplicate |
+| union | `ReducerUnion` | Merge arrays, deduplicate (equal numbers match however they are written, so `1` and `1.0` are one element) |
 | merge | `ReducerMerge` | Merge objects, new key wins |
 | and / or | `ReducerAnd` / `ReducerOr` | Logical AND / OR of booleans |
 | concat | `ReducerConcat` | Concatenate strings |

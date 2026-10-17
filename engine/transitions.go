@@ -17,6 +17,7 @@ limitations under the License.
 package engine
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/microbus-io/boolexp"
@@ -27,7 +28,7 @@ import (
 // nextStep describes a step to be created during transition evaluation.
 type nextStep struct {
 	taskName    string
-	item        any
+	item        json.RawMessage // the forEach element as stored, so a branch is handed its exact bytes
 	itemKey     string
 	forEachKey  string
 	cohortIndex int
@@ -111,25 +112,18 @@ func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workfl
 		}
 
 		if tr.ForEach != "" {
-			// Reading the source array materializes it - a forEach has to see the elements to spawn one
-			// branch each, so this is the one field on the step that is genuinely needed as a Go value.
-			// An absent or cleared source yields no elements (like an empty array), which routes straight to
-			// the fan-in; any non-array is an error.
-			var val any
-			present, gerr := state.Get(tr.ForEach, &val)
+			// A forEach has to see the elements to spawn one branch each, but not their values: each element
+			// is split out as the JSON it is stored as and handed to its branch as those bytes. Decoded into
+			// Go values it would come back through float64, rounding an integer past 2^53 - a pair of ids
+			// would reach their branches as one. An absent or cleared source yields no elements (like an
+			// empty array), which routes straight to the fan-in; any non-array is an error.
+			var items []json.RawMessage
+			present, gerr := state.Get(tr.ForEach, &items)
 			if gerr != nil {
-				return nil, errors.Trace(gerr)
+				return nil, errors.New("forEach field '%s' is not an array", tr.ForEach)
 			}
 			if !present {
 				continue
-			}
-			var items []any
-			switch v := val.(type) {
-			case nil:
-			case []any:
-				items = v
-			default:
-				return nil, errors.New("forEach field '%s' is not an array", tr.ForEach)
 			}
 			itemKey := tr.As
 			if itemKey == "" {

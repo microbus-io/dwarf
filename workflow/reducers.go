@@ -18,8 +18,11 @@ package workflow
 
 import (
 	"encoding/json"
+	"math"
 	"math/big"
 	"reflect"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/microbus-io/errors"
@@ -36,7 +39,7 @@ const (
 	ReducerAdd     Reducer = "add"     // Sum numeric values
 	ReducerMin     Reducer = "min"     // Smaller of two numeric values
 	ReducerMax     Reducer = "max"     // Larger of two numeric values
-	ReducerUnion   Reducer = "union"   // Merge arrays, deduplicate
+	ReducerUnion   Reducer = "union"   // Merge arrays, deduplicate (numbers compare by value)
 	ReducerMerge   Reducer = "merge"   // Merge objects, new key wins
 	ReducerAnd     Reducer = "and"     // Logical AND of booleans
 	ReducerOr      Reducer = "or"      // Logical OR of booleans
@@ -112,9 +115,9 @@ func doAppend(base any, incoming any) (any, error) {
 	return appendInto("append", base, incoming, false)
 }
 
-// doUnion appends incoming onto base's slice like doAppend, but skips any element already present
-// (compared by reflect.DeepEqual), yielding a set-like slice. base's own elements are preserved as-is;
-// only newly added elements are deduplicated, against everything accumulated so far.
+// doUnion appends incoming onto base's slice like doAppend, but skips any element already present, yielding a
+// set-like slice. Elements compare by value (unionKey): equal numbers match however they are spelled. base's own
+// elements are preserved as-is; only newly added elements are deduplicated, against everything accumulated so far.
 func doUnion(base any, incoming any) (any, error) {
 	return appendInto("union", base, incoming, true)
 }
@@ -153,19 +156,26 @@ func appendInto(name string, base any, incoming any, dedupe bool) (any, error) {
 		capHint += baseVal.Len()
 	}
 	out := reflect.MakeSlice(reflect.SliceOf(elemType), 0, capHint)
+	// keys holds each element's unionKey, computed once, so the quadratic dedupe compares prepared values.
+	var keys []any
 	if hasBase {
 		for i := range baseVal.Len() {
 			out = reflect.Append(out, baseVal.Index(i))
+			if dedupe {
+				keys = append(keys, unionKey(baseVal.Index(i).Interface()))
+			}
 		}
 	}
 
 	add := func(v reflect.Value) {
 		if dedupe {
-			for i := range out.Len() {
-				if reflect.DeepEqual(out.Index(i).Interface(), v.Interface()) {
+			key := unionKey(v.Interface())
+			for _, k := range keys {
+				if reflect.DeepEqual(k, key) {
 					return
 				}
 			}
+			keys = append(keys, key)
 		}
 		out = reflect.Append(out, v)
 	}
@@ -191,6 +201,56 @@ func appendInto(name string, base any, incoming any, dedupe bool) (any, error) {
 		return out.Interface(), nil
 	}
 	return nil, errors.New("%s reducer: incoming %T is neither a slice of %s nor a single %s", name, incoming, elemType, elemType)
+}
+
+// unionNumber is a number's value in unionKey: a distinct type, so the number 1 never matches the string "1".
+type unionNumber string
+
+// unionKey is what union compares an element by: the element with every number in it, at any depth, replaced by
+// its value. A fold decodes numbers as json.Number, and comparing those by literal would let the database's
+// respelling split one value in two - Postgres writes 1e-7 back as 0.0000001 and 1e+21 in full - while Go writes
+// a float64 past 1e21 or under 1e-6 in exponent form. Other values compare as decoded.
+func unionKey(v any) any {
+	switch v := v.(type) {
+	case json.Number:
+		return unionNumber(numberValueKey(string(v)))
+	case float64:
+		return unionNumber(numberValueKey(strconv.FormatFloat(v, 'g', -1, 64)))
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for k, e := range v {
+			out[k] = unionKey(e)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, e := range v {
+			out[i] = unionKey(e)
+		}
+		return out
+	}
+	return v
+}
+
+// numberValueKey spells a JSON number by its value: an integer literal as its exact integer, so ids past 2^53 stay
+// distinct; any other number by its float64 - as that float's exact integer when it is whole, so 1, 1.0 and 1e0
+// match, and 1e21 matches its spelling in full - or else in Go's shortest form. A literal that does not parse as a
+// finite float64 keeps its literal.
+func numberValueKey(lit string) string {
+	if !strings.ContainsAny(lit, ".eE") {
+		if i, ok := new(big.Int).SetString(lit, 10); ok {
+			return i.String()
+		}
+	}
+	f, err := strconv.ParseFloat(lit, 64)
+	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
+		return lit
+	}
+	if f == math.Trunc(f) {
+		i, _ := new(big.Float).SetFloat64(f).Int(nil)
+		return i.String()
+	}
+	return strconv.FormatFloat(f, 'g', -1, 64)
 }
 
 // doAdd returns the numeric sum base + incoming. A nil base seeds from incoming.
