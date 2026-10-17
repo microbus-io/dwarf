@@ -94,7 +94,7 @@ func TestAwaitShutdownflow(t *testing.T) {
 	// board with the very ErrClosed the assertions below are looking for.
 	select {
 	case <-parked:
-	case <-time.After(30 * time.Second):
+	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
 		assert.True(false, "the Await never parked on the board, so there was no blocked waiter to release")
 		return
 	}
@@ -120,7 +120,7 @@ func TestAwaitShutdownflow(t *testing.T) {
 			assert.Contains(res.err.Error(), "shutting down")
 		}
 		assert.True(time.Since(shutDone) < 2*time.Second, "Await did not return promptly after Shutdown: %v", time.Since(shutDone))
-	case <-time.After(10 * time.Second):
+	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 		assert.True(false, "Await never returned after Shutdown")
 		return
 	}

@@ -91,7 +91,7 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 	// Wait until the child captured its key and is blocked (still running).
 	select {
 	case <-captured:
-	case <-time.After(10 * time.Second):
+	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 		assert.True(false, "inner (child) task never ran")
 		return
 	}
@@ -118,7 +118,7 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 	// and the latch detector under test never runs.
 	select {
 	case <-parked:
-	case <-time.After(30 * time.Second):
+	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
 		assert.True(false, "the Await never parked on the child")
 		return
 	}
@@ -139,7 +139,7 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 			assert.Equal(workflow.StatusFailed, aw.out.Status)
 			assert.Equal("child boom", aw.out.Error)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 		assert.True(false, "Await(childKey) not woken after a dropped signalStop — the latch detector did not recover it")
 		return
 	}
@@ -147,7 +147,7 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 	// The root flow fails too (the child error surfaces through flow.Subgraph); its wake was not dropped.
 	select {
 	case <-rootDone:
-	case <-time.After(10 * time.Second):
+	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 		assert.True(false, "root Run never returned")
 		return
 	}

@@ -23,6 +23,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -62,7 +63,7 @@ func TestDeleteRunningflow(t *testing.T) {
 	// Wait until the task is executing, so the flow is definitively `running`.
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(5 * time.Second * enginetest.TimeoutScale()):
 		assert.True(false, "task never started")
 		return
 	}

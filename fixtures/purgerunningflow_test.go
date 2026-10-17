@@ -69,7 +69,7 @@ func TestPurgerunningflow(t *testing.T) {
 	// Wait until the task is actually running.
 	select {
 	case <-running:
-	case <-time.After(10 * time.Second):
+	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 		close(release)
 		assert.True(false, "task never started")
 		return

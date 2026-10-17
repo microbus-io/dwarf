@@ -532,10 +532,6 @@ func (e *Engine) checkFleetFits(shard int, sz shardSizing) {
 // clear the parallel register + read + probe, which are a couple of statements per shard.
 const startupBootstrapConns = 4
 
-// slowPoolPushDelay is how long the engineseams.FaultSlowPoolPush seam stalls a recompute between reading the roles
-// and pushing the derived sizes. Test-only (the fault is inert in production); a var so it stays adjustable.
-var slowPoolPushDelay = 200 * time.Millisecond
-
 // recomputePools re-derives every shard's role and connection pool from that shard's OWN registry reading
 // and pushes the sizes to the open shards (sequel's pool setters are hot/atomic), then re-derives the worker
 // ceiling, which is a function of those pools. Called by the reconcile loop on the Sonars' cadence.
@@ -587,12 +583,12 @@ func (e *Engine) recomputePools() {
 		return
 	}
 	e.lastAppliedSlots = observed
-	// The window poolsLock closes: the roles have been read, the sizes are not yet pushed. A test stalls one
-	// recompute here to hold a stale reading while a peer's fresher one races past (see TestPoolSizing_-
-	// ConcurrentRecomputeAppliesLatestR). Deliberately a FAULT, not a checkpoint: a breakpoint would freeze
-	// the racing recompute at this same site too, and the test needs it to run through.
+	// The window poolsLock closes: the roles have been read, the sizes are not yet pushed. A test holds one
+	// recompute here on a stale reading while a fresher one tries to run (see TestPoolSizing_-
+	// ConcurrentRecomputeAppliesLatestR). The fault picks which recompute reaches the checkpoint, so a Break
+	// there holds that one alone and the racing recompute is free to run into the lock.
 	if e.seams.IsFault(engineseams.FaultSlowPoolPush) {
-		time.Sleep(slowPoolPushDelay)
+		e.seams.Checkpoint(e.lifetimeCtx, engineseams.CheckpointPoolPushHeld)
 	}
 	postSplitConns := 0
 	for _, idx := range e.db.Indices() {

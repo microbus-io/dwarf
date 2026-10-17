@@ -77,7 +77,7 @@ func TestRecoveryTick_LightPassRecoversLeases(t *testing.T) {
 	assert.NoError(err)
 	select {
 	case <-entered:
-	case <-time.After(10 * time.Second):
+	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 		t.Fatal("A was never dispatched")
 	}
 	db, err := e.db.Shard(shard)
@@ -137,7 +137,7 @@ func TestRecoveryTick_ExpiredLeaseRecoveredOnTheTick(t *testing.T) {
 	assert.NoError(err)
 	select {
 	case <-entered:
-	case <-time.After(10 * time.Second):
+	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 		t.Fatal("A was never dispatched")
 	}
 	db, err := e.db.Shard(shard)

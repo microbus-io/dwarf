@@ -248,7 +248,7 @@ func TestFaultComposition_CompoundWakeLoss(t *testing.T) {
 		if assert.NotNil(out) {
 			assert.Equal(workflow.StatusCompleted, out.Status)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 		assert.True(false, "Await did not return despite both backstops")
 		return
 	}
@@ -310,7 +310,7 @@ func TestFaultComposition_DeepSubgraphReviveLoss(t *testing.T) {
 	// after the leaf's completion commits; the minute bounds only a hang.
 	select {
 	case <-stopped:
-	case <-time.After(time.Minute):
+	case <-time.After(time.Minute * enginetest.TimeoutScale()):
 		t.Fatal("the leaf child never completed")
 	}
 	assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE surgraph_flow_id<>0 AND status='"+workflow.StatusCompleted+"'"))

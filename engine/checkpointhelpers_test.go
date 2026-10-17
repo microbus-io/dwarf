@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 )
 
 const (
@@ -50,7 +51,7 @@ func awaitStartupRecoverySweep(t testing.TB, e *Engine) {
 	// it leaves generous room for a loaded server and for -race.
 	select {
 	case <-swept:
-	case <-time.After(time.Minute):
+	case <-time.After(time.Minute * enginetest.TimeoutScale()):
 		t.Fatal("engine never completed its startup recovery sweep")
 	}
 }

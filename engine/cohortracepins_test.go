@@ -108,7 +108,7 @@ func newCohortRaceRig(t *testing.T, prefix string) *cohortRaceRig {
 	for _, started := range []chan struct{}{xStarted, yStarted} {
 		select {
 		case <-started:
-		case <-time.After(10 * time.Second):
+		case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 			t.Fatal("a branch never started")
 		}
 	}

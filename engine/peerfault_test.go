@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 )
@@ -42,6 +43,19 @@ func awaitPoolSize(t *testing.T, db *sequel.DB, want int) int {
 		time.Sleep(time.Millisecond)
 	}
 	return db.DB.Stats().MaxOpenConnections
+}
+
+// awaitBlind waits until a shard's Sonar has gone d without a good reading, so the negative assertions that
+// follow are made against a replica that is observably blind, not one a fixed sleep hoped had read by then.
+func awaitBlind(t *testing.T, e *Engine, shard int, d time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second * enginetest.TimeoutScale())
+	for e.sonarFor(shard).BlindFor() < d {
+		if time.Now().After(deadline) {
+			t.Fatalf("shard %d's Sonar was never blind for %s", shard, d)
+		}
+		time.Sleep(testPeerCadence / 5)
+	}
 }
 
 // TestPeerFault_BlindHoldsThePoolsAndFailsOpen pins the two directions a blind replica must move in, which
@@ -83,7 +97,7 @@ func TestPeerFault_BlindHoldsThePoolsAndFailsOpen(t *testing.T) {
 		_, derr := sdb.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id=5001")
 		return derr
 	}))
-	time.Sleep(10 * testPeerCadence)
+	awaitBlind(t, e, 1, 10*testPeerCadence)
 	assert.Equal(2, e.replicasOn(1), "a failed reading publishes nothing")
 	assert.Equal(shareOf(2), db.DB.Stats().MaxOpenConnections, "so the pools stay where the last good reading put them")
 

@@ -124,7 +124,7 @@ func TestCompleteSurgraph_vs_TerminateRoot_BothOrders(t *testing.T) {
 		engineseams.Seams(e).Resume(engineseams.CheckpointBeforeCompleteFlowWrite)
 		select {
 		case <-callResumed:
-		case <-time.After(10 * time.Second):
+		case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 			assert.True(false, "caller never revived after the child completed")
 			return
 		}

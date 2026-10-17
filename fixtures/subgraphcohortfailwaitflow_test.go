@@ -150,7 +150,7 @@ func TestSubgraphCohortFailWaitflow(t *testing.T) {
 	// wake path under test never runs - silently, with every assertion below still passing.
 	select {
 	case <-parked:
-	case <-time.After(30 * time.Second):
+	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
 		assert.True(false, "the Await never parked on the child, so no blocked waiter was there to be woken")
 		return
 	}
@@ -179,7 +179,7 @@ func TestSubgraphCohortFailWaitflow(t *testing.T) {
 		if assert.NotNil(ro.out) {
 			assert.Equal(workflow.StatusFailed, ro.out.Status)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 		assert.True(false, "parent flow did not stop")
 		return
 	}

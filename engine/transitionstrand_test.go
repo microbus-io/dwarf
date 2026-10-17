@@ -87,7 +87,7 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(5 * time.Second * enginetest.TimeoutScale()):
 		t.Fatal("A never started")
 	}
 	db, err := e.db.Shard(shard)

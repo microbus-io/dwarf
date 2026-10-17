@@ -86,7 +86,7 @@ func TestLeaseRecovery_StepCompletedBetweenSelectAndResetIsLeftAlone(t *testing.
 	assert.NoError(err)
 	select {
 	case <-started:
-	case <-time.After(15 * time.Second):
+	case <-time.After(15 * time.Second * enginetest.TimeoutScale()):
 		t.Fatal("A never started")
 	}
 	shard, flowID, _, err := keys.ParseFlowKey(fk)
@@ -221,7 +221,7 @@ func TestLeaseRecovery_ResetsPastOneBatch(t *testing.T) {
 	for range flows {
 		select {
 		case <-started:
-		case <-time.After(15 * time.Second):
+		case <-time.After(15 * time.Second * enginetest.TimeoutScale()):
 			t.Fatal("a step never started")
 		}
 	}

@@ -177,7 +177,7 @@ func TestCancelMarkSparesAHandlerInsertedAfterTheWatermark(t *testing.T) {
 	close(aGo)
 	select {
 	case <-hStarted:
-	case <-time.After(10 * time.Second):
+	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 		t.Fatal("the handler never started")
 	}
 
@@ -242,7 +242,7 @@ func TestCancelOncePerFlow(t *testing.T) {
 	close(aGo) // A finishes covered and routes to H, which recovers the flow into C
 	select {
 	case <-cStarted:
-	case <-time.After(10 * time.Second):
+	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 		t.Fatal("the recovered flow never reached C")
 	}
 

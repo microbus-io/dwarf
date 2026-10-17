@@ -585,7 +585,7 @@ func TestStateRefs_DispatchResolveTakesATurnOnlyToRead(t *testing.T) {
 	select {
 	case err := <-done:
 		assert.NoError(err)
-	case <-time.After(10 * time.Second):
+	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 		t.Fatal("the cold resolve never finished once a turn was free")
 	}
 

@@ -95,7 +95,7 @@ func TestFanInDirectTerminate_NoExtendTerminatedFlow(t *testing.T) {
 	// Wait until the spawn task is executing (step definitively `running`).
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(5 * time.Second * enginetest.TimeoutScale()):
 		assert.True(false, "spawn task never started")
 		return
 	}

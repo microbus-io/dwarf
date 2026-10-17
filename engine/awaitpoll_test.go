@@ -99,7 +99,7 @@ func TestAwait_WakesWhenNoSignalIsDelivered(t *testing.T) {
 	// first snapshot.
 	select {
 	case <-parked:
-	case <-time.After(30 * time.Second):
+	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
 		assert.True(false, "Await never parked")
 		return
 	}
@@ -118,7 +118,7 @@ func TestAwait_WakesWhenNoSignalIsDelivered(t *testing.T) {
 			ok, _ := stateVal(r.out.State, "ok").(bool)
 			assert.True(ok, "final_state should surface through the poll-fallback wake")
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(3 * time.Second * enginetest.TimeoutScale()):
 		assert.True(false, "Await hung past a stop nothing announced; the latch detector did not notice it")
 		return
 	}
@@ -311,7 +311,7 @@ func TestAwait_IgnoresANonSettledWake(t *testing.T) {
 		if assert.NotNil(r.out) {
 			assert.Equal(workflow.StatusCompleted, r.out.Status)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 		assert.True(false, "Await never returned after the flow actually stopped")
 	}
 }
@@ -361,27 +361,31 @@ func TestAwait_StaleStopReparks(t *testing.T) {
 	done := make(chan result, 1)
 	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 	defer cancel()
+	parkedName := engineseams.Join(engineseams.CheckpointAwaitParked, flowKey)
+	parked := e.seams.Waiter(parkedName) // armed before the goroutine that trips it
 	go func() {
 		out, aerr := e.awaitStopped(awaitCtx, flowKey)
 		done <- result{out, aerr}
 	}()
-
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && e.latches.Waiting(flowKey) == 0 {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if !assert.True(e.latches.Waiting(flowKey) > 0, "Await never parked") {
+	select {
+	case <-parked:
+	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
+		assert.True(false, "Await never parked")
 		return
 	}
 
-	// A real stop status, as a flow that interrupted and was then resumed would have signalled.
+	// A real stop status, as a flow that interrupted and was then resumed would have signalled. Parking again
+	// is the proof Await read the flow running and did not return on the stale stop.
+	reparked := e.seams.Waiter(parkedName)
 	e.signalStop(ctx, flowKey, workflow.StatusInterrupted)
-
 	select {
+	case <-reparked:
 	case r := <-done:
 		assert.True(false, "a stale stop returned Await early with %v (outcome %+v)", r.err, r.out)
 		return
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
+		assert.True(false, "Await never parked again after the stale stop")
+		return
 	}
 
 	rel()
@@ -391,7 +395,7 @@ func TestAwait_StaleStopReparks(t *testing.T) {
 		if assert.NotNil(r.out) {
 			assert.Equal(workflow.StatusCompleted, r.out.Status)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
 		assert.True(false, "Await never returned after the flow actually stopped")
 	}
 }

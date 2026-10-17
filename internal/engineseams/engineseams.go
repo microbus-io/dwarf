@@ -108,7 +108,7 @@ const (
 	FaultRefillScanErr       = piston.FaultScanErr   // the piston's priority-band scan errors (its name, so there is one catalogue)
 	FaultPeerReadErr         = peers.FaultReadErr    // a shard's peer-registry reading fails: this replica goes BLIND on that shard (their names, so there is one catalogue)
 	FaultPeerBeatErr         = peers.FaultBeatErr    // a shard's peer-registry beat writes nothing: this replica stops proving its liveness THERE, while running on
-	FaultSlowPoolPush        = "slowPoolPush"        // recomputePools stalls between reading the roles and pushing the derived sizes
+	FaultSlowPoolPush        = "slowPoolPush"        // recomputePools reaches CheckpointPoolPushHeld between reading the roles and pushing the derived sizes
 	FaultDeliverFailureErr   = "deliverFailureErr"   // deliverFlowFailureToParent drops the parked-caller re-dispatch (lost delivery); unscoped, or scoped by the parked caller's task name for per-level control
 	FaultTerminateCommit     = "terminateCommit"     // the Terminate transaction errors
 	FaultResumeCommit        = "resumeCommit"        // the Resume transaction errors
@@ -136,6 +136,7 @@ const (
 	CheckpointBeforeRecoveryReset       = "beforeRecoveryReset"       // the post-execution recovery path, just before its fenced step-reset transaction
 	CheckpointClaimedDispatchDone       = "claimedDispatchDone"       // step execution returned after winning its claim, recovery reset included; fired bare and targeted by (shard, step id)
 	CheckpointLeaseRecoverySelected     = "leaseRecoverySelected"     // lease recovery, after it selected expired steps and before its by-id reset; reached only when it found some
+	CheckpointPoolPushHeld              = "poolPushHeld"              // recomputePools, inside poolsLock between reading the roles and pushing the sizes; reached only by the recompute FaultSlowPoolPush picks
 	CheckpointWedgeSweepSelected        = "wedgeSweepSelected"        // the wedged-park sweep, after it selected parked callers with no live child and before it reads each one's latest child; reached only when it found some
 
 	// A COUNTING checkpoint (read with Visits, never a rendezvous), scoped by flow id so concurrent flows

@@ -20,13 +20,13 @@ import (
 	"context"
 	"net/http"
 	"slices"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -598,10 +598,10 @@ func TestPoolSizing_AllCordoned(t *testing.T) {
 // over-connecting the shard's server, and sticky until the next fleet change (the dedupe sees R unchanged
 // and skips). poolsLock spans read-of-R through push, so the last writer wins with the value it read.
 //
-// The interleaving is forced, not raced: a fault freezes the first recompute in exactly that window. With
-// the lock, the second recompute blocks on it and applies AFTER. The two counts
-// the race needs are staged through the registry itself, waiting for each to be OBSERVED before the
-// recompute that must read it.
+// The interleaving is forced, not raced. The fault is armed before the peer leaves, so whichever recompute
+// first reads the fleet of 1 - usually the reconcile loop's - is held at CheckpointPoolPushHeld, inside the
+// window, until the peer is back and observed. The next recompute must then wait on the lock and apply the
+// half share after the held one's stale push.
 func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -619,36 +619,44 @@ func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
 	}
 	assert.Equal(declaredBudget, db.DB.Stats().MaxOpenConnections, "full budget while alone (R=1)")
 
-	// Stall the first recompute (one-shot) after it has read a fleet of 1, before it pushes the full budget.
 	insertPeerRows(t, e, 1001)
 	awaitPeerCount(t, e, 1, 2)
-	e.recomputePools()
-	assert.Equal(shareOf(2), db.DB.Stats().MaxOpenConnections, "half share with a peer")
+	assert.Equal(shareOf(2), awaitPoolSize(t, db, shareOf(2)), "half share with a peer")
+
+	// Hold the first recompute that reads the peer gone (one-shot), before it pushes the full budget.
+	e.seams.Break(engineseams.CheckpointPoolPushHeld)
+	resumed := false
+	resume := func() {
+		if !resumed {
+			resumed = true
+			e.seams.Resume(engineseams.CheckpointPoolPushHeld)
+		}
+	}
+	defer resume()
+	e.seams.InjectN(engineseams.FaultSlowPoolPush, 1)
 	assert.NoError(e.db.OnEach(t.Context(), func(ctx context.Context, sdb *sequel.DB, shard int) error {
 		_, derr := sdb.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id=1001")
 		return derr
 	}))
-	awaitPeerCount(t, e, 1, 1)
-	e.seams.InjectN(engineseams.FaultSlowPoolPush, 1)
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		e.recomputePools()
-	})
-	time.Sleep(slowPoolPushDelay / 10) // the first recompute is now inside the window, holding a stale 1
+	if !assert.True(e.seams.WaitTimeout(t.Context(), engineseams.CheckpointPoolPushHeld, 30*time.Second*enginetest.TimeoutScale()),
+		"no recompute reached the window with the stale fleet of 1") {
+		return
+	}
+	// The window is inside poolsLock: nothing else can apply a pool size while the stale reading is held.
+	if !assert.False(e.poolsLock.TryLock(), "poolsLock must span reading the roles through the push") {
+		e.poolsLock.Unlock()
+	}
 
-	// A second recompute runs while the first is stalled, and is NOT stalled: it sees 2 and wants the half
-	// share. Unserialized, it pushes that immediately and the first then overwrites it with the stale full
-	// budget. Serialized, it cannot start until the first's push is done, so the half share lands last.
+	// The peer is back, and every recompute from here reads 2. Serialized, they wait for the held push and
+	// then apply the half share over it. Unserialized, one pushes the half share now and the held one then
+	// overwrites it with the stale full budget, which the dedupe then keeps.
 	insertPeerRows(t, e, 1001)
 	awaitPeerCount(t, e, 1, 2)
-	wg.Go(func() {
-		e.recomputePools()
-	})
-	wg.Wait()
+	resume()
 
-	// The fleet is 2, so the pool must be the half share - not the full budget applied last.
+	// The fleet is 2, so the pool must settle at the half share - not the full budget applied last.
 	assert.Equal(2, e.replicasOn(1))
-	assert.Equal(shareOf(2), db.DB.Stats().MaxOpenConnections,
+	assert.Equal(shareOf(2), awaitPoolSize(t, db, shareOf(2)),
 		"the pool must reflect the LATEST replica count (budget/2), not a stale recompute that pushed last")
 }
 

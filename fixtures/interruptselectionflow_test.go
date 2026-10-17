@@ -25,6 +25,7 @@ import (
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -56,7 +57,7 @@ func awaitPropagatedInterrupts(t *testing.T, eng *engine.Engine, flowKey string,
 		}
 		select {
 		case <-reached:
-		case <-time.After(time.Minute):
+		case <-time.After(time.Minute * enginetest.TimeoutScale()):
 			t.Fatalf("only %d of %d interrupts propagated to the root flow", got, want)
 		}
 	}

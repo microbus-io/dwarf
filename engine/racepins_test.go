@@ -100,7 +100,7 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 	case resumeErr := <-resumeDone:
 		assert.Error(resumeErr)
 		assert.Equal(409, errors.StatusCode(resumeErr)) // honest 409, not a silent success
-	case <-time.After(10 * time.Second):
+	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 		assert.True(false, "Resume did not return after release")
 		return
 	}
@@ -374,7 +374,7 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		r.e.seams.Resume(engineseams.CheckpointBeforeSubgraphSpawn)
 		select {
 		case <-abandoned:
-		case <-time.After(10 * time.Second):
+		case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 			assert.True(false, "the spawn was never abandoned")
 		}
 		assert.Zero(countFlows(t, r.e, fk, "cvs/child"), "a spawn after Terminate must create no child")
@@ -477,7 +477,7 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		r.e.seams.Resume(engineseams.CheckpointBeforeSubgraphSpawn)
 		select {
 		case <-entered:
-		case <-time.After(10 * time.Second):
+		case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 			assert.True(false, "the middle flow's task never ran")
 		}
 
@@ -509,7 +509,7 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		assert.NoError(err)
 		select {
 		case <-r.xEntered: // the child exists and its task is running
-		case <-time.After(10 * time.Second):
+		case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 			assert.True(false, "the child never ran")
 			return
 		}
@@ -583,7 +583,7 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		if claimed {
 			select {
 			case <-abandoned:
-			case <-time.After(10 * time.Second):
+			case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 				assert.True(false, "the spawn under a terminated flow was never abandoned")
 			}
 		}

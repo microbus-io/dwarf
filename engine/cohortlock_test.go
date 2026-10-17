@@ -85,7 +85,7 @@ func TestCohortStripe_FIFOAcrossTicks(t *testing.T) {
 	for range n {
 		select {
 		case <-ticked:
-		case <-time.After(5 * time.Second):
+		case <-time.After(5 * time.Second * enginetest.TimeoutScale()):
 			t.Fatal("a queued waiter never ticked twice while the stripe was held")
 		}
 	}
@@ -161,7 +161,7 @@ func TestCohortStripe_TickPanic(t *testing.T) {
 	select {
 	case got := <-follower:
 		assert.True(got)
-	case <-time.After(5 * time.Second):
+	case <-time.After(5 * time.Second * enginetest.TimeoutScale()):
 		t.Fatal("the stripe was handed to the panicked waiter")
 	}
 	s.unlock()

@@ -75,7 +75,7 @@ func TestRetryCancelRaceflow(t *testing.T) {
 	// Wait until the task is executing, so the step is definitively `running`.
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(5 * time.Second * enginetest.TimeoutScale()):
 		assert.True(false, "task never started")
 		return
 	}

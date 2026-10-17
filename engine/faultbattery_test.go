@@ -207,7 +207,7 @@ func TestFault_RecoveryLeavesCleanWorld(t *testing.T) {
 		assert.NoError(err)
 		select {
 		case <-firstDone:
-		case <-time.After(10 * time.Second):
+		case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 			t.Fatal("A's first dispatch never returned")
 		}
 		// Lapse the FENCED generation's lease, and only that one. Do not shorten the lease instead: the re-run's

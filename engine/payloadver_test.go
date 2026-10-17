@@ -99,7 +99,7 @@ func TestPayloadVer_NewerFlowIsDeferredUnrun(t *testing.T) {
 	assert.NoError(e.Resume(ctx, fk, nil))
 	select {
 	case <-dispatched:
-	case <-time.After(10 * time.Second):
+	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 		t.Fatal("the resumed step was never dispatched")
 	}
 

@@ -92,7 +92,7 @@ func TestShardedflow(t *testing.T) {
 			&workflow.FlowOptions{Priority: 1})
 		select {
 		case <-holderRunning:
-		case <-time.After(time.Minute):
+		case <-time.After(time.Minute * enginetest.TimeoutScale()):
 			t.Fatal("the holder flow never reached its task, so the worker was never occupied")
 		}
 

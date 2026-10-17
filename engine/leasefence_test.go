@@ -163,7 +163,7 @@ func zombieDispatch(t *testing.T, eng *Engine, flowURL, blockTaskName string, ta
 
 	select {
 	case <-started:
-	case <-time.After(15 * time.Second):
+	case <-time.After(15 * time.Second * enginetest.TimeoutScale()):
 		unblock() // the caller has not deferred it yet, and a dispatch starting late would block Shutdown
 		t.Fatalf("%s's first dispatch never started", blockTaskName)
 	}
@@ -655,7 +655,8 @@ func TestLeaseRecovery_EndToEnd(t *testing.T) {
 	assert.Equal(0, attempt)
 
 	// The task ran exactly twice: the crashed (leaked) attempt plus the recovery re-execution - never a third.
-	time.Sleep(200 * time.Millisecond)
+	// Once the re-execution's dispatch has returned, A is completed, so no claim can run it again.
+	awaitDispatchesReturned(t, eng, flowKey, "A", 1)
 	assert.Equal(int64(2), aCalls.Load())
 }
 

@@ -93,7 +93,7 @@ func TestPriorityflow(t *testing.T) {
 
 		select {
 		case <-holderRunning:
-		case <-time.After(time.Minute):
+		case <-time.After(time.Minute * enginetest.TimeoutScale()):
 			t.Fatal("the holder flow never reached its task, so the worker was never occupied")
 		}
 

@@ -101,7 +101,7 @@ func TestFanInNoCohort_FailsInsteadOfHotLooping(t *testing.T) {
 
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(5 * time.Second * enginetest.TimeoutScale()):
 		assert.True(false, "branch task never started")
 		return
 	}

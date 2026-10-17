@@ -321,7 +321,7 @@ func TestMetrics_BacklogGauges(t *testing.T) {
 	}
 	select {
 	case <-entered:
-	case <-time.After(10 * time.Second):
+	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 		t.Fatal("the first task never started")
 	}
 	db, err := e.db.Shard(1)
@@ -739,7 +739,7 @@ func TestMetrics_InFlightStateGauges(t *testing.T) {
 
 	select {
 	case <-started:
-	case <-time.After(30 * time.Second):
+	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
 		t.Fatal("task never started")
 	}
 
@@ -763,7 +763,7 @@ func TestMetrics_InFlightStateGauges(t *testing.T) {
 			return
 		}
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-	case <-time.After(30 * time.Second):
+	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
 		t.Fatal("flow never completed")
 	}
 
