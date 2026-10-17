@@ -1397,25 +1397,24 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 
 			// Write-first: queueGrab takes the flow row's lock before any step is written (except the deferred grab
 			// of a cohort arrival, below), guarded on non-terminal status, so a transition racing a Terminate or
-			// failStep inserts nothing into a terminal flow. The grab flips the non-indexed `touch` column, which
-			// always changes value, so RowsAffected reflects the WHERE match on every driver. It is batched with what
-			// follows it, so its guard is read only after those statements ran: a terminal flow matches no row, and
-			// its reader returns bail and leaves flowRowLocked false.
+			// failStep inserts nothing into a terminal flow. It is batched with what follows it, so its guard is read
+			// only after those statements ran: a terminal flow matches no row, and its reader returns bail and leaves
+			// flowRowLocked false.
 			queueGrab := func(bail error) {
 				if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
 					e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
 				}
 				batch.queue(func(res *sequel.BatchResults) error {
-					grab, err := res.Exec()
+					n, err := lockedFlowRows(tx.DriverName(), res)
 					if err != nil {
-						return errors.Trace(err)
+						return err
 					}
-					if n, _ := grab.RowsAffected(); n == 0 {
+					if n == 0 {
 						return bail
 					}
 					flowRowLocked = true
 					return nil
-				}, lockFlowRowSQL(), flowID)
+				}, lockFlowRowsSQL(tx.DriverName(), liveFlowWhere), flowID)
 			}
 			// A transition on a terminal flow rolls back what was batched with the grab, which leaves it the same
 			// clean no-op as a bail before any write.
@@ -1729,11 +1728,83 @@ var errLeaseFenced = errors.New("dispatch lease fenced")
 // the same clean no-op as a bail before any write, so the transaction's caller maps it to nil.
 var errTransitionFlowTerminal = errors.New("flow terminal at transition")
 
-// lockFlowRowSQL takes the flow row's lock, flipping the non-indexed touch column, and affects no row when the
-// flow is terminal.
-func lockFlowRowSQL() string {
-	return "UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status NOT IN (" + terminalStatusesSQL + ")"
+// lockFlowRowsSQL takes the write lock on the dwarf_flows rows that match where and changes nothing else. Read its
+// result with lockFlowRows, or lockedFlowRows in a batch: a locking read counts the rows it returns, the UPDATE
+// its rows affected.
+//
+// On PostgreSQL and MySQL it is a locking read. An UPDATE writes a new row version even when it changes nothing,
+// and the flow row is locked on every step: on PostgreSQL those versions fill its pages faster than they are
+// pruned, so the step's real write to the row (the step_id advance) stops being HOT. FOR NO KEY UPDATE is the lock
+// a non-key UPDATE takes, so it conflicts with exactly what the UPDATE did.
+//
+// SQLite and SQL Server flip the non-indexed touch column. SQLite must take its write lock up front: a read takes
+// a SHARED lock, and two readers deadlock on the upgrade. On SQL Server a locking read is UPDLOCK, whose reads
+// under READ_COMMITTED_SNAPSHOT are unverified.
+func lockFlowRowsSQL(driverName string, where string) string {
+	switch driverName {
+	case "pgx":
+		return "SELECT 1 FROM dwarf_flows WHERE " + where + " FOR NO KEY UPDATE"
+	case "mysql":
+		return "SELECT 1 FROM dwarf_flows WHERE " + where + " FOR UPDATE"
+	}
+	return "UPDATE dwarf_flows SET touch=1-touch WHERE " + where
 }
+
+// locksByReading reports whether lockFlowRowsSQL is a locking read on the driver.
+func locksByReading(driverName string) bool {
+	return driverName == "pgx" || driverName == "mysql"
+}
+
+// lockFlowRows takes the write lock on the dwarf_flows rows that match where and returns how many it locked.
+func lockFlowRows(ctx context.Context, tx *sequel.Tx, where string, args ...any) (int64, error) {
+	query := lockFlowRowsSQL(tx.DriverName(), where)
+	if !locksByReading(tx.DriverName()) {
+		res, err := tx.ExecContext(ctx, query, args...)
+		if err != nil {
+			return 0, errors.Trace(err)
+		}
+		n, _ := res.RowsAffected()
+		return n, nil
+	}
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return 0, errors.Trace(err)
+	}
+	defer rows.Close()
+	var n int64
+	for rows.Next() {
+		n++
+	}
+	return n, errors.Trace(rows.Err())
+}
+
+// lockedFlowRows reads a lockFlowRowsSQL statement queued on a batch and returns how many rows it locked.
+func lockedFlowRows(driverName string, res *sequel.BatchResults) (int64, error) {
+	if !locksByReading(driverName) {
+		result, err := res.Exec()
+		if err != nil {
+			return 0, errors.Trace(err)
+		}
+		n, _ := result.RowsAffected()
+		return n, nil
+	}
+	rows, err := res.Query()
+	if err != nil {
+		return 0, errors.Trace(err)
+	}
+	var n int64
+	for rows.Next() {
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, errors.Trace(err)
+	}
+	return n, errors.Trace(rows.Close())
+}
+
+// liveFlowWhere matches the flow row by flow_id while it is not terminal.
+var liveFlowWhere = "flow_id=? AND status NOT IN (" + terminalStatusesSQL + ")"
 
 // maxGotoTargetLen is the width of dwarf_steps.advance_goto, which matches task_name's.
 const maxGotoTargetLen = 512
@@ -1959,13 +2030,12 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		// Write-first, guarded on non-terminal status - the same lock-grab the transition tx uses. If a
 		// concurrent Terminate/failStep terminalized this flow, the guard yields zero rows and this becomes a
 		// clean no-op; without it we would insert a pending fan-in step and overwrite step_id on a terminal
-		// flow (orphan work reaped only later by the claim-time terminal-flow guard). `touch` always changes
-		// value, so RowsAffected reflects the WHERE match on every driver.
-		flowRes, flowErr := tx.ExecContext(ctx, lockFlowRowSQL(), flowID)
+		// flow (orphan work reaped only later by the claim-time terminal-flow guard).
+		locked, flowErr := lockFlowRows(ctx, tx, liveFlowWhere, flowID)
 		if flowErr != nil {
-			return errors.Trace(flowErr)
+			return flowErr
 		}
-		if n, _ := flowRes.RowsAffected(); n == 0 {
+		if locked == 0 {
 			return nil
 		}
 

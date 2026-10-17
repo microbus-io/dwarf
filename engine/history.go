@@ -985,9 +985,9 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	// branching a thread that is meant to be linear. The lock serializes them: the winner inserts its new
 	// (running) turn; every other concurrent Continue then reads THAT running turn as the latest and is
 	// rejected with 409 (a next turn is already in flight). This makes the outcome deterministic - exactly
-	// one Continue succeeds per race - rather than timing-dependent. touch is the non-indexed lock-grab
-	// column, so the anchor's updated_at stays frozen at its own last status transition; and because
-	// interrupt/terminate/resume never lock a thread SIBLING's rows, this anchor lock cannot cycle with them.
+	// one Continue succeeds per race - rather than timing-dependent. The lock writes no updated_at, so the
+	// anchor's stays frozen at its own last status transition; and because interrupt/terminate/resume never
+	// lock a thread SIBLING's rows, this anchor lock cannot cycle with them.
 	newFlowToken := keys.RandomIdentifier(16)
 	newStepToken := keys.RandomIdentifier(16)
 	var newFlowID, newStepID int64
@@ -995,8 +995,8 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	var newWorkflowURL string
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		// Write-first: grab the thread anchor's row lock to serialize concurrent Continues on this thread.
-		if _, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=?", threadID); err != nil {
-			return errors.Trace(err)
+		if _, err := lockFlowRows(ctx, tx, "flow_id=?", threadID); err != nil {
+			return err
 		}
 
 		// The new turn inherits the latest completed turn's full policy (scheduling, baggage).

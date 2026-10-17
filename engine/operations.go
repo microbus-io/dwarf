@@ -838,10 +838,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		for chunk := range slices.Chunk(allFlowIDs, inListChunk) {
 			ph, ids := inList(chunk)
-			tx.ExecContext(ctx,
-				"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id IN ("+ph+") AND status NOT IN ("+terminalStatusesSQL+")",
-				ids...,
-			)
+			lockFlowRows(ctx, tx, "flow_id IN ("+ph+") AND status NOT IN ("+terminalStatusesSQL+")", ids...)
 		}
 		for chunk := range slices.Chunk(allFlowIDs, inListChunk) {
 			ph, ids := inList(chunk)

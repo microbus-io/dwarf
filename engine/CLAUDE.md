@@ -482,16 +482,15 @@ second copy, since `DeepEqual` of a struct and its decoded `map[string]any` twin
 
 *Concurrent Continue is serialized by a thread-anchor lock, so exactly one wins.* The latest-turn read
 (`find latest non-fork flow`), the completed-check, and the new-turn insert run in **one transaction**
-(`continueFlow`), opened **write-first on the thread anchor row** (`UPDATE dwarf_flows SET touch=1-touch WHERE
-flow_id=threadID` - the same lock-grab idiom as the flow-advancing transactions). Without the lock, two
+(`continueFlow`), opened **write-first on the thread anchor row** (`lockFlowRows` on `flow_id=threadID` - the same
+lock grab as the flow-advancing transactions). Without the lock, two
 concurrent `Continue`s on one thread can both read turn N as the latest completed turn and both insert a
 successor, **silently branching a thread that is meant to be linear** - a benign-but-wrong TOCTOU hole between
 check and insert (no corruption; the invariant sweep stays clean, but the thread's continuation base becomes
 ambiguous for the *next* Continue). The anchor lock closes it deterministically: the winner inserts its new
 `running` turn; every other concurrent Continue then reads **that** running turn as the latest, fails the
 completed-check, and returns **409**. So the outcome is "exactly one succeeds per race," not timing-dependent.
-`touch` is the non-indexed lock-grab column, so the anchor's `updated_at` stays frozen (it is a terminal flow),
-and because interrupt/terminate/resume never lock a thread *sibling*'s rows, this anchor lock cannot cycle with
+The grab writes no `updated_at`, so the anchor's stays frozen (it is a terminal flow), and because interrupt/terminate/resume never lock a thread *sibling*'s rows, this anchor lock cannot cycle with
 them. Determinism caveat: it also requires the winner's turn to still be `running` when the losers re-check - it
 is, because the new turn is inserted `running` and only completes after its entry task runs; a test proving the
 "exactly one" contract must keep that entry task from completing during the race (see
@@ -992,8 +991,8 @@ not parallelism:
   transition one round trip on PostgreSQL without giving that up. Any shape that reorders the transition's locks
   needs a concurrency test (`completionraceflow`, `soakflow` reproduce the wedge write-first prevents) and a
   lock-order check, not reasoning.
-- **`completeFlow`'s lock grab returns the row it locked** (`RETURNING`/`OUTPUT`; MySQL reads it with a follow-up
-  `SELECT`), and goes out in one batch with the read of the flow's completed tails (`queueCompletedTails`), which
+- **`completeFlow`'s lock grab returns the row it locked** (a locking read on PostgreSQL and MySQL,
+  `RETURNING`/`OUTPUT` on the `touch` flip elsewhere), and goes out in one batch with the read of the flow's completed tails (`queueCompletedTails`), which
   the final state is merged from: BEGIN, one batch, the final-state UPDATE, COMMIT. The UPDATE depends on the Go
   merge, so it cannot join the batch; the fallback read of any tails, and a ref resolution, follow only when
   needed.
@@ -2263,19 +2262,23 @@ is already local and free, at the price of a write per await.
 
 - **Write-first transactions** - `processStep`'s transition transaction does an `UPDATE dwarf_flows` as its first
   operation to immediately acquire a write lock (a pure cohort arrival defers that grab, and its cohort bump is the
-  first write instead - see "Transactions"). On MySQL/Postgres this serializes concurrent workers (like `SELECT ... FOR UPDATE`). On SQLite with
+  first write instead - see "Transactions"). On MySQL/Postgres this serializes concurrent workers. On SQLite with
   `cache=shared`, starting with a write avoids the deadlock where two read-first deferred transactions both hold
-  SHARED locks and neither can upgrade. **The write-first `UPDATE dwarf_flows` flips the non-indexed `touch` column
-  (`touch=1-touch`), not `updated_at`.** The lock acquisition is identical, but `updated_at` sits in
-  `idx_dwarf_flows_status (status, updated_at)`, so bumping it on every step transition would move a running flow's
-  index entry twice per step (the flow row is written twice per transition tx - the open lock-grab and the closing
-  `step_id` advance). Flipping `touch` (indexed by nothing) takes the lock, keeps `updated_at` = the
-  flow's last genuine *status* transition, and confines `idx_dwarf_flows_status` churn to actual status changes; on
-  Postgres the grab becomes HOT-eligible. `touch=1-touch` (not a `SET col=col` self-assign) is deliberate: it always
-  changes the value, so the terminal-status `RowsAffected()==0` guard on the open UPDATE
-  (`WHERE ... status NOT IN (terminal)`) still fires correctly on MySQL, which counts *changed* rows. Every
-  `UPDATE dwarf_flows` flips `touch`; the status-transition writes flip it alongside `updated_at=NOW_UTC()`, the
-  intra-flow-progress writes flip only it. (This applies to `dwarf_flows` only - `dwarf_steps` has no such per-step
+  SHARED locks and neither can upgrade. **Every lock-only grab of a flow row goes through `lockFlowRows`** (or
+  `lockedFlowRows` in a batch), which returns the rows it locked, so a guarded grab
+  (`WHERE ... status NOT IN (terminal)`) bails on zero. **On PostgreSQL and MySQL the grab is a locking read**
+  (`FOR NO KEY UPDATE` / `FOR UPDATE`), not an UPDATE: an UPDATE writes a new row version even when it changes
+  nothing, and the flow row is grabbed on every step, so the grab would double the versions competing for room on
+  the row's page and push the `step_id` advance off HOT (see the fillfactor section in
+  `internal/migrations/CLAUDE.md`). `FOR NO KEY UPDATE` is the lock a non-key UPDATE takes, so it conflicts with
+  exactly what the UPDATE did. **On SQLite and SQL Server it flips the non-indexed `touch` column**
+  (`touch=1-touch`): SQLite needs a write to take its lock, and SQL Server's `UPDLOCK` read is unverified under
+  `READ_COMMITTED_SNAPSHOT`. Never bump `updated_at` to take a lock: it sits in
+  `idx_dwarf_flows_status (status, updated_at)`, so it would move a running flow's index entry on every step, and
+  it must stay the flow's last genuine *status* transition. `touch=1-touch` (not a `SET col=col` self-assign) is
+  deliberate: it always changes the value, so `RowsAffected()` counts the match on MySQL, which counts *changed*
+  rows. Every `UPDATE dwarf_flows` flips `touch`; the status-transition writes flip it alongside
+  `updated_at=NOW_UTC()`. (This applies to `dwarf_flows` only - `dwarf_steps` has no such per-step
   churn: a step row is short-lived and its `updated_at` moves track its own `pending→running→terminal` transitions,
   which are genuine and unavoidable.) **Every flow-terminating transaction must be write-first for the same
   reason**, and the failure mode is worse than a transient error: the terminal step is marked `completed` by
@@ -3363,11 +3366,10 @@ The mutual exclusion is not automatic - `resume`'s step writes (leaf `→pending
 `resume` would re-park + reset the leaf, match 0 rows on its `→running` flow update (the flow is now
 `terminated`), and still return success - a resume that did not take effect reported as if it had, leaving a
 transient terminated-flow-with-non-terminal-steps until the reaper mops it. So `resume`'s transaction carries a
-dedicated **gate write** on the root flow (`UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=<root> AND
-status='interrupted'`) after its step writes: a zero-row match means `Delete`/`Terminate` terminalized the root
-first, so the whole transaction rolls back (undoing the step writes) and `resume` returns 409. `touch` flips
-unconditionally, so `RowsAffected` reflects the status match on every driver (MySQL included), and the write is
-placed *after* the step writes to preserve `resume`'s steps-first lock order (shared with `Terminate`). This gate is
+dedicated **gate lock** on the root flow (`lockFlowRows` on `flow_id=<root> AND status='interrupted'`) after its
+step writes: a zero-row match means `Delete`/`Terminate` terminalized the root first, so the whole transaction
+rolls back (undoing the step writes) and `resume` returns 409. The lock is placed *after* the step writes to
+preserve `resume`'s steps-first lock order (shared with `Terminate`). This gate is
 distinct from the `→running` chain-flow update, which legitimately matches 0 rows when a *sibling* interrupt
 still holds the flow (fan-out resume-one-at-a-time), so it cannot serve as the race gate.
 
@@ -3679,8 +3681,8 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
    **The alarm keeps an age guard** (`orphanFlowThreshold`, 5m): a stranded flow with no flagged step is counted
    only once no step of it has been touched for that long, so a transient all-terminal state nobody has named is
    not reported as a bug. It is raised only on the heavy pass (every `heavyRepairEvery`-th tick), so an
-   unrepairable flow is counted every 5 minutes per dispatcher, not every minute. **Anchor that guard on `dwarf_steps.updated_at`, never on the flow row**: the `touch`
-   column keeps `dwarf_flows.updated_at` frozen at go-`running` time, so it tracks no per-step progress and is
+   unrepairable flow is counted every 5 minutes per dispatcher, not every minute. **Anchor that guard on `dwarf_steps.updated_at`, never on the flow row**: no
+   per-step write moves `dwarf_flows.updated_at`, which stays at go-`running` time, so it tracks no per-step progress and is
    permanently satisfied for any flow running past 5m.
 
    The scan probes every running flow through `idx_dwarf_steps_flow_id`, so it costs running flows x their steps,

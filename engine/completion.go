@@ -592,14 +592,10 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 			var locked int64
 			for chunk := range slices.Chunk(allFlowIDs, inListChunk) {
 				ph, ids := inList(chunk)
-				lockRes, err := tx.ExecContext(ctx,
-					"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id IN ("+ph+") AND status NOT IN ("+terminalStatusesSQL+")",
-					ids...,
-				)
+				n, err := lockFlowRows(ctx, tx, "flow_id IN ("+ph+") AND status NOT IN ("+terminalStatusesSQL+")", ids...)
 				if err != nil {
-					return errors.Trace(err)
+					return err
 				}
-				n, _ := lockRes.RowsAffected()
 				locked += n
 			}
 			if locked == 0 {
@@ -607,16 +603,12 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 				return errTreeSettled
 			}
 			if onlyIfInterrupted {
-				// The root's row is locked now, so its status cannot move under this check. touch flips, so the
-				// count is honest on MySQL too.
-				gateRes, err := tx.ExecContext(ctx,
-					"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'",
-					flowID,
-				)
+				// The root's row is locked now, so its status cannot move under this check.
+				n, err := lockFlowRows(ctx, tx, "flow_id=? AND status='"+workflow.StatusInterrupted+"'", flowID)
 				if err != nil {
-					return errors.Trace(err)
+					return err
 				}
-				if n, _ := gateRes.RowsAffected(); n == 0 {
+				if n == 0 {
 					return errRootNotInterrupted
 				}
 			}
@@ -825,14 +817,15 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		// already marked completed by processStep, the lease recovery (which only resets running rows)
 		// cannot re-dispatch it, leaving the flow stranded 'running' with all steps terminal (an orphan
 		// flow). Mirrors the transition transaction and fireFanInDirect, which write first for the same reason.
-		// Lock-grab flips the non-indexed `touch`, not `updated_at`: the flow's `updated_at` moves only
-		// on the genuine status transition below, so idx_dwarf_flows_status is not churned twice per
-		// completion. `touch` always changes, so a later RowsAffected check stays meaningful.
+		// The grab takes the lock the way lockFlowRowsSQL does: a locking read on PostgreSQL and MySQL, a flip of
+		// the non-indexed `touch` elsewhere, never `updated_at`, which moves only on the genuine status transition
+		// below, so idx_dwarf_flows_status is not churned twice per completion.
 		//
 		// The lock grab also reads back the surgraph linkage, the disposable flag and the priority - needed for
 		// the post-tx surgraph revival, the atomic disposable delete below and the ended counter - and it goes out in one statement batch with
 		// the read of the flow's completed tails, which the final state is merged from. It stays unguarded on
 		// status: the status gate is the later UPDATE, and the status read here drives the revive re-drive.
+		const lockedCols = "surgraph_flow_id, surgraph_step_id, delete_on_completion, status, priority"
 		const lockGrab = "UPDATE dwarf_flows SET touch=1-touch"
 		const lockWhere = " WHERE flow_id=?"
 		batch := newTxBatch(ctx, tx)
@@ -845,14 +838,14 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 			return errors.Trace(err)
 		}
 		switch tx.DriverName() {
-		case "pgx", "sqlite":
-			batch.queue(readLocked, lockGrab+lockWhere+" RETURNING surgraph_flow_id, surgraph_step_id, delete_on_completion, status, priority", flowID)
+		case "pgx":
+			batch.queue(readLocked, "SELECT "+lockedCols+" FROM dwarf_flows"+lockWhere+" FOR NO KEY UPDATE", flowID)
+		case "mysql":
+			batch.queue(readLocked, "SELECT "+lockedCols+" FROM dwarf_flows"+lockWhere+" FOR UPDATE", flowID)
 		case "mssql":
 			batch.queue(readLocked, lockGrab+" OUTPUT INSERTED.surgraph_flow_id, INSERTED.surgraph_step_id, INSERTED.delete_on_completion, INSERTED.status, INSERTED.priority"+lockWhere, flowID)
 		default:
-			// MySQL lacks RETURNING: lock, then read the row this transaction now holds.
-			batch.queue(execOnly, lockGrab+lockWhere, flowID)
-			batch.queue(readLocked, "SELECT surgraph_flow_id, surgraph_step_id, delete_on_completion, status, priority FROM dwarf_flows WHERE flow_id=?", flowID)
+			batch.queue(readLocked, lockGrab+lockWhere+" RETURNING "+lockedCols, flowID)
 		}
 		var tails terminalTails
 		queueCompletedTails(batch, flowID, &tails)
@@ -1653,16 +1646,15 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 		// would let resume re-park ancestors and reset the leaf, then match 0 rows on the flow update below,
 		// and still return success - a resume that did not take effect reported as if it had, leaving a
 		// transient terminated-flow-with-non-terminal-steps until the reaper mops it. The root flow row is the
-		// serialization point: this guarded write takes its lock and confirms it is still interrupted (touch
-		// flips unconditionally, so RowsAffected reflects the status match on every driver, MySQL included).
+		// serialization point: this guarded lock takes the row and confirms it is still interrupted.
 		// A zero-row match means Delete/Terminate won - roll the whole transaction back and 409, mutually
 		// exclusive with Delete's own WHERE status='interrupted'. flowID is always the root here
 		// (subgraph-child keys were rejected above), which is exactly the row Delete/Terminate terminalize.
-		res, gerr := tx.ExecContext(ctx, "UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'", flowID)
+		n, gerr := lockFlowRows(ctx, tx, "flow_id=? AND status='"+workflow.StatusInterrupted+"'", flowID)
 		if gerr != nil {
-			return errors.Trace(gerr)
+			return gerr
 		}
-		if n, _ := res.RowsAffected(); n == 0 {
+		if n == 0 {
 			lost = true
 			return errResumeLost
 		}

@@ -460,18 +460,15 @@ func (e *Engine) recoverOrphanedFlows(ctx context.Context, db *sequel.DB, shard 
 		var locked bool
 		err := db.Transact(ctx, func(tx *sequel.Tx) error {
 			rewound, held, locked = 0, 0, false
-			res, err := tx.ExecContext(ctx,
-				"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status='"+workflow.StatusRunning+"'",
-				o.flowID,
-			)
+			n, err := lockFlowRows(ctx, tx, "flow_id=? AND status='"+workflow.StatusRunning+"'", o.flowID)
 			if err != nil {
-				return errors.Trace(err)
+				return err
 			}
-			if n, _ := res.RowsAffected(); n == 0 {
+			if n == 0 {
 				return nil // terminalized since the scan
 			}
 			locked = true
-			res, err = tx.ExecContext(ctx,
+			res, err := tx.ExecContext(ctx,
 				"UPDATE dwarf_steps SET status=?, lease_seq=lease_seq+1, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC()"+
 					" WHERE flow_id=? AND status='"+workflow.StatusCompleted+"' AND advancing=1 AND lease_expires<=NOW_UTC()",
 				workflow.StatusPending, o.flowID,
