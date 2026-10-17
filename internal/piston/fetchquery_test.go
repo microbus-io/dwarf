@@ -40,6 +40,7 @@ var fetchDrivers = []string{"pgx", "mysql", "mssql", "sqlite", "unknown"}
 // its band while supplying nothing, every cycle, for as long as the cardinality holds.
 func TestFetchQuery_BindCountIsFixed(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	for _, driver := range fetchDrivers {
 		few := make([]string, 1)
 		many := make([]string, 5000)
@@ -50,20 +51,20 @@ func TestFetchQuery_BindCountIsFixed(t *testing.T) {
 			many[i] = "k" + strconv.Itoa(i)
 		}
 		_, fewArgs, err := fetchQuery(driver, 3, few, 4, "", nil)
-		testarossa.NoError(t, err, driver)
+		assert.NoError(err, driver)
 		_, manyArgs, err := fetchQuery(driver, 3, many, 4, "", nil)
-		testarossa.NoError(t, err, driver)
+		assert.NoError(err, driver)
 		if driver == "mysql" {
 			// mysql alone still binds one per key - it cannot use the json key list without tripping a
 			// cross-collation comparison, and its 65,535 ceiling is ~20x above any reachable key count.
 			// Asserted rather than exempted so the exception stays deliberate.
-			testarossa.True(t, len(manyArgs) == len(many)+2,
+			assert.True(len(manyArgs) == len(many)+2,
 				"%s: expected one bind per key plus band and cap, got %d", driver, len(manyArgs))
 			continue
 		}
-		testarossa.Equal(t, len(fewArgs), len(manyArgs),
+		assert.Equal(len(fewArgs), len(manyArgs),
 			"%s: bind count must not scale with the key count", driver)
-		testarossa.True(t, len(manyArgs) <= 5,
+		assert.True(len(manyArgs) <= 5,
 			"%s: %d binds at 5000 keys", driver, len(manyArgs))
 	}
 }
@@ -76,6 +77,7 @@ func TestFetchQuery_BindCountIsFixed(t *testing.T) {
 // partitioning strictly, six while stealing.
 func TestFetchQuery_PlaceholdersMatchArgs(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	parts := []struct {
 		name string
 		sql  string
@@ -93,8 +95,8 @@ func TestFetchQuery_PlaceholdersMatchArgs(t *testing.T) {
 	for _, driver := range fetchDrivers {
 		for _, part := range parts {
 			stmt, args, err := fetchQuery(driver, 3, []string{"a", "b"}, 4, part.sql, part.args)
-			testarossa.NoError(t, err, driver)
-			testarossa.Equal(t, strings.Count(stmt, "?"), len(args),
+			assert.NoError(err, driver)
+			assert.Equal(strings.Count(stmt, "?"), len(args),
 				"%s/%s: %d placeholders against %d args", driver, part.name, strings.Count(stmt, "?"), len(args))
 		}
 	}
@@ -105,15 +107,16 @@ func TestFetchQuery_PlaceholdersMatchArgs(t *testing.T) {
 // an int and fails at runtime on that dialect only - which no SQLite-only test run would ever reach.
 func TestFetchQuery_ProjectionIsUniform(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	for _, driver := range fetchDrivers {
 		stmt, _, err := fetchQuery(driver, 3, []string{"a"}, 4, "", nil)
-		testarossa.NoError(t, err, driver)
+		assert.NoError(err, driver)
 		upper := strings.ToUpper(stmt)
-		testarossa.True(t, strings.HasPrefix(upper, "SELECT "), driver)
+		assert.True(strings.HasPrefix(upper, "SELECT "), driver)
 		head := upper[len("SELECT "):]
 		key := strings.Index(head, "FAIRNESS_KEY")
 		step := strings.Index(head, "STEP_ID")
-		testarossa.True(t, key >= 0 && step >= 0, "%s: projection names both columns", driver)
-		testarossa.True(t, key < step, "%s: fairness_key must be projected before step_id", driver)
+		assert.True(key >= 0 && step >= 0, "%s: projection names both columns", driver)
+		assert.True(key < step, "%s: fairness_key must be projected before step_id", driver)
 	}
 }

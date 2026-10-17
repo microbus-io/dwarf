@@ -3484,7 +3484,8 @@ once the cache closes, and a turning piston keeps the beat stamping `dispatched_
 every peer's work divisor: its residue class would reach a worker only through a peer's steal, after the steal
 grace, for as long as an in-flight task holds the drain open. Idle, its `Liveness` stops the stamp and the class
 passes within the dispatch window. Idling must follow the reconcile loop's stop, which is the only thing that
-re-derives the mode. Pinned by `TestDispatchers_DrainStopsClaimingDispatch`.
+re-derives the mode. Pinned by `TestDispatchers_DrainStopsClaimingDispatch` and, from the peer's side with its
+steal switched off, `TestDispatchers_DrainingReplicasClassPassesToAPeer`.
 
 A `cache.Refill` into an already-closed cache is a no-op. Dedicated stop signals, and no wake channels at all,
 keep the drain free of ordering hazards.

@@ -243,6 +243,7 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 
 	// The queue-depth observable gauge always emits a point at collection time.
 	assert.True(gaugePresent(rm, "dwarf_steps_queue_depth"), "dwarf_steps_queue_depth gauge should be present")
+	assert.True(gaugePresent(rm, "dwarf_state_cache_bytes"), "dwarf_state_cache_bytes gauge should be present")
 }
 
 // gaugeAt returns the data point of an int64 or float64 observable gauge whose attributes include every

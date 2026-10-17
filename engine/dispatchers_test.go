@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/sequel"
@@ -817,6 +818,107 @@ func TestDispatchers_DrainStopsClaimingDispatch(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("the draining replica kept stamping dispatched_at while its task was in flight")
+}
+
+// TestDispatchers_DrainingReplicasClassPassesToAPeer pins the other half of the drain's handoff: while an
+// in-flight task holds a dispatcher's drain open, its peer takes over its residue class through the partition
+// alone, not by stealing. The peer's steal is switched off, so work in the drainer's class completes only if the
+// drainer has dropped out of the work divisor; a drainer that kept proving it dispatches would leave that class
+// unserved until its task finished. The work is created on an await-only replica, so no doorbell carries it to
+// a dispatcher and the partition is genuinely in the path.
+func TestDispatchers_DrainingReplicasClassPassesToAPeer(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	rel := func() { once.Do(func() { close(release) }) }
+	mk := func(workers int) *Engine {
+		mux := hosts.NewMux()
+		g := workflow.NewGraph("DrainHandoff")
+		g.SetURL("W", "drainhandoff/w")
+		g.AddTransition("W", workflow.End)
+		mux.HandleGraph("drainhandoff/g", g)
+		mux.HandleTask("drainhandoff/w", func(ctx context.Context, f *workflow.Flow) error {
+			if f.GetString("hold") == "yes" {
+				close(started)
+				<-release
+			}
+			return nil
+		})
+		e := NewEngineUnderTest(t.Name())
+		assert.NoError(e.SetHost(mux))
+		if workers >= 0 {
+			assert.NoError(e.SetWorkers(workers))
+		}
+		return e
+	}
+	drainer, peer, creator := mk(-1), mk(-1), mk(0)
+	defer creator.Shutdown(ctx)
+	defer peer.Shutdown(ctx)
+	assert.NoError(drainer.Startup(t.Context()))
+	assert.NoError(peer.Startup(t.Context()))
+	assert.NoError(creator.Startup(t.Context()))
+	for _, p := range peer.pistons {
+		p.SetStealAfter(0) // the class can reach the peer only through the partition
+	}
+
+	// Both dispatchers partition the shard between them before the drain starts, or the peer would be serving
+	// every class already and the test would prove nothing.
+	deadline := time.Now().Add(30 * time.Second * enginetest.TimeoutScale())
+	var drainerOrd int
+	for {
+		r, ord, ok := drainer.partitionOn(1)
+		pr, _, pok := peer.partitionOn(1)
+		if ok && pok && r == 2 && pr == 2 {
+			drainerOrd = ord
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the two dispatchers never partitioned the shard")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	_, err := drainer.Create(ctx, "drainhandoff/g", map[string]any{"hold": "yes"}, nil)
+	assert.NoError(err)
+	<-started
+	var wg sync.WaitGroup
+	wg.Go(func() { drainer.Shutdown(ctx) })
+	defer func() {
+		rel()
+		wg.Wait()
+	}()
+
+	db, err := creator.db.Shard(1)
+	assert.NoError(err)
+	var flowKeys []string
+	for range 16 {
+		fk, err := creator.Create(ctx, "drainhandoff/g", nil, nil)
+		if !assert.NoError(err) {
+			return
+		}
+		flowKeys = append(flowKeys, fk)
+	}
+	for _, fk := range flowKeys {
+		out, err := enginetest.BoundedAwait(t, creator, fk)
+		if assert.NoError(err, "a flow waited past the bound while the drain was held open") && assert.NotNil(out) {
+			assert.Equal(workflow.StatusCompleted, out.Status)
+		}
+	}
+	// The handoff was in the path only if some of that work fell in the drainer's class.
+	var inDrainerClass int
+	assert.NoError(db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dwarf_steps WHERE task_name='W' AND step_id % 2 = ? AND state NOT LIKE '%hold%'",
+		drainerOrd).Scan(&inDrainerClass))
+	assert.True(inDrainerClass > 0, "none of the work fell in the drainer's residue class")
+	select {
+	case <-release:
+		t.Fatal("the drain was released before the work finished")
+	default:
+	}
 }
 
 // TestDispatchers_RoleFlagsSurviveARestartUnderLoad pins that the role flags are published, not assigned in
