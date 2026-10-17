@@ -267,6 +267,12 @@ type Sonar struct {
 	// reading is held against THIS, not against what was published, so a promotion waits one reading rather
 	// than for the gaps to stop - see observe.
 	lastRaw standing
+	// eligible counts the consecutive readings that have put this replica in a cut it is not yet in. Entry waits
+	// on it - see observe.
+	eligible int
+	// staleLogged reports whether this replica's own row read stale on the last reading, so the step-down is
+	// logged once.
+	staleLogged bool
 	// lastPass is when the last pass STARTED, which is what the next one is paced from - see untilNextPass.
 	lastPass time.Time
 	// lastErr is the most recent read's error, kept so Join can report synchronously what the loop only logs.
@@ -467,7 +473,9 @@ func (s *Sonar) Standing() Standing {
 // latest reading. It is false for a replica that is not working, and true only if the previous reading also
 // put the replica in the cut: leaving is believed at once, entering waits a reading - so a handoff between two
 // replicas goes leave-then-enter, and no replica enters on the reading that ends a blind spell, which every
-// peer may have seen as a fleet of one.
+// peer may have seen as a fleet of one. Entering also waits a beat for each peer ahead of this replica whose
+// row reads stale, counted in successful readings (a failed read earns nothing). It is false while this replica's
+// own row is not fresh. The first reading after New is the one exception to the wait: it keeps the cut New seeds.
 func (s *Sonar) InCut() bool {
 	return s.standing.Load().inCut
 }
@@ -856,12 +864,15 @@ func (s *Sonar) observe(ctx context.Context, rows []peer, err error) {
 		s.logger.Load().InfoContext(ctx, "Peer registry readable again", "shard", s.shard)
 	}
 	s.lastGood.Store(now.UnixNano())
-	if gapped || s.healthySince.IsZero() {
-		s.healthySince = now
-	}
 
 	working := s.profile.Load().Working
 	v := classify(rows, s.engineID, working, s.windows())
+	// An own row that is not fresh interrupts the healthy run like a gap: with beats failing fleet-wide while
+	// reads succeed, every peer ages past the straggler age with no gap at all, and a patience that ran on
+	// through that would have every replica delete every other's row.
+	if gapped || !v.selfFresh || s.healthySince.IsZero() {
+		s.healthySince = now
+	}
 	// The dispatch pair is published as observed, with no hysteresis: under-counting only makes replicas
 	// select overlapping candidates, so there is nothing here worth debouncing, and delaying a REMOVAL would
 	// keep a residue class assigned to a replica that has stopped serving it.
@@ -869,12 +880,10 @@ func (s *Sonar) observe(ctx context.Context, rows []peer, err error) {
 
 	// A FALL is not believed on the strength of the reading that ended a blind spell, while a RISE always is.
 	// The asymmetry is the whole point: a rise shrinks pools, which is safe, whereas a fall grows every pool
-	// derived from the count. The case that matters is not one peer dying but a CORRELATED stall - a spell of
-	// database trouble stalls every replica's beat and every replica's read at once; it clears, and the first
-	// reading afterward shows a registry in which every row is stale, so every replica would compute a tiny
-	// count and grow to the full per-database budget simultaneously, against a database that is already sick.
-	// Skipping one reading is enough, because a beat is far shorter than the read cadence: by the next one
-	// every live peer has refreshed its row and the count is real again. Held against the previous raw
+	// derived from the count. A gap that aged no row out is over by the next reading. One that did - a stall
+	// past the fresh window - shows a partial roster for a few readings more while peers' beats land, spread
+	// over a beat; there, entry is staggered (below), so the replicas sizing for the fallen count are those
+	// already in a cut and the few at the top of the order. Held against the previous raw
 	// reading, like the cut below and for the same reason; and published before the standing, so a reader
 	// that sees the pool divisor fall never sees a replica count from an older reading.
 	replicas := v.replicas
@@ -895,7 +904,22 @@ func (s *Sonar) observe(ctx context.Context, rows []peer, err error) {
 	// reading gapped. A reader on a sick database would then never be promoted, and a shard whose dispatchers
 	// left would run nothing. Against the raw reading, two consecutive readings that agree are believed
 	// whether or not either was gapped. Pinned by TestPeers_CutEntryThroughSustainedGaps.
-	raw := standing{rank: v.rank, candidates: v.candidates, draining: v.draining, replicas: v.replicas, inCut: working && s.inCut(v.rank, v.candidates)}
+	// A REPLICA WHOSE OWN ROW IS NOT FRESH DOES NOT DISPATCH, entering or staying. Its beats are not landing, so its
+	// peers have already dropped it from their order and promoted around it: a slot it held or took would be one
+	// nobody counts. While beats fail fleet-wide, every replica reads its own row stale, so nobody dispatches -
+	// which is what a full disk or a read-only failover allows anyway, rather than a shard keeping whichever
+	// dispatcher its rows' aging happened to leave in the window, sizing for a fleet of one. A replica alone on a
+	// shard stops too: it cannot tell itself from a fleet whose beats all fail. It is part of the raw verdict, so
+	// coming back takes the two agreeing readings any entry does.
+	raw := standing{rank: v.rank, candidates: v.candidates, draining: v.draining, replicas: v.replicas, inCut: working && v.selfFresh && s.inCut(v.rank, v.candidates)}
+	if stale := !v.selfFresh; stale != s.staleLogged {
+		s.staleLogged = stale
+		if stale {
+			s.logger.Load().WarnContext(ctx, "Own peer row stale; not dispatching until its beats land", "shard", s.shard)
+		} else {
+			s.logger.Load().InfoContext(ctx, "Own peer row fresh again", "shard", s.shard)
+		}
+	}
 	next := raw
 	// ENTERING THE CUT ALWAYS TAKES TWO AGREEING READINGS, not only after a gap. A change in the fleet moves
 	// the cut for replicas other than the one that joined or left - a window over a shared order shifts every
@@ -904,7 +928,22 @@ func (s *Sonar) observe(ctx context.Context, rows []peer, err error) {
 	// first: the handoff errs toward a dispatcher too few for a cadence rather than one too many. The one
 	// exception is a Sonar's FIRST reading, which enters on its own: New seeds lastRaw in the cut so a
 	// joining replica does not lose a cadence, and Join's announce-then-wait already orders that handoff.
+	// ENTRY IS STAGGERED BY THE STALE ROWS AHEAD, a beat's worth of readings each. A replica sees itself in a cut
+	// it does not belong to whenever rows ahead of it in the order read stale - after a stall, until every peer's
+	// beat lands again (spread over a beat or more) - and then most of a fleet would claim a dispatcher's share at
+	// once. The stale rows are still in the registry (the prune waits a healthy run), so their count is large
+	// exactly when the verdict is suspect and zero in the steady state. As peers beat again, rows ahead turn
+	// fresh and the replica falls out of the cut before its wait runs out. The wait is counted in READINGS, not
+	// time: a failed read earns nothing, so blind time does not count, while a database merely slow to read -
+	// every reading gapped - still makes progress a reading at a time and never freezes the cut. Leaving is
+	// never delayed.
 	next.inCut = raw.inCut && s.lastRaw.inCut
+	if !next.inCut || s.standing.Load().inCut {
+		s.eligible = 0
+	} else {
+		s.eligible++
+		next.inCut = s.eligible > v.staleAhead*max(1, int(s.beat/s.scan))
+	}
 	if gapped {
 		next.candidates = max(s.lastRaw.candidates, raw.candidates)
 		next.draining = max(s.lastRaw.draining, raw.draining)

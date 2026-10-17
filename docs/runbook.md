@@ -27,6 +27,7 @@ registry.
 | [Backlog is growing](#backlog-is-growing) | Throughput |
 | [Throughput collapsed after a restart or crash](#throughput-collapsed-after-a-restart-or-crash) | Throughput |
 | [One shard is slow or unreachable](#one-shard-is-slow-or-unreachable) | Partial outage |
+| [A replica stopped dispatching a shard: "Own peer row stale"](#a-replica-stopped-dispatching-a-shard-own-peer-row-stale) | Partial outage |
 | [The database was down](#the-database-was-down) | Usually no action |
 | [Tasks are running more than once](#tasks-are-running-more-than-once) | Correctness of side effects |
 | [Deadlock errors on MySQL or SQL Server](#deadlock-errors-on-mysql-or-sql-server) | Throughput |
@@ -298,6 +299,29 @@ each shard, and the others do not run its steps, so with both of them slow the s
 memory pressure or a slow network path to the database. Fixing or replacing the host is the reliable remedy.
 A graceful restart (one that runs `Shutdown`) hands the replica's place to another working replica only when
 there is one beyond the two; with exactly two working replicas the restarted one takes its place back.
+
+---
+
+## A replica stopped dispatching a shard: "Own peer row stale"
+
+**Confirm.** The engine logs `Own peer row stale; not dispatching until its beats land` with the shard, and
+`dwarf_shard_dispatching` reads 0 for that replica on that shard. The replica can still read the shard, but
+its writes to the `dwarf_peers` registry are failing, so its row there is no longer refreshed. It steps down
+about 40 seconds after the writes start failing, once its row has aged out, and its peers take over its place.
+If every replica logs this for a shard, the shard runs nothing: `sum by (shard) (dwarf_shard_dispatching)`
+reads 0. When the writes land again it logs `Own peer row fresh again` and rejoins the order within a second
+or two - at the end of it, if its row was stale long enough for peers to remove it.
+
+**Why it stops.** Its peers no longer count a replica whose row is not refreshed, so its dispatching would add
+connections nobody budgets for. When every replica is in that state at once (a full disk, a database failed over
+to a read-only replica), all of them would otherwise size their pools for a fleet of one. So no replica whose
+registry writes fail dispatches, a lone replica included.
+
+**Respond.** Find why writes to `dwarf_peers` fail on that shard. The engine logs `Peer heartbeat` with the
+database's error for each failed write, which names the cause directly: disk space, a read-only server, revoked
+grants for the engine's database user. Check the database server's own log too. If the shard's other writes are
+failing as well (`dwarf_steps_write_retried` rising), the database is the problem, and no step could run there
+anyway.
 
 ---
 

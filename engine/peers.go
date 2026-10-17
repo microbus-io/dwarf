@@ -49,7 +49,7 @@ import (
 //
 // PER SHARD is the whole point, and it is what a fleet-global count cannot express: a peer whose piston
 // wedges on shard 3 drops out of shard 3's work divisor and stays in every other shard's, and a peer whose
-// beats to shard 3 fail mis-sizes only shard 3's pool. It also retires cross-shard comparison entirely -
+// beats to shard 3 fail stops dispatching only shard 3. It also retires cross-shard comparison entirely -
 // every timestamp in the registry is stamped by the shard holding it, so ages are comparable within a shard
 // and timestamps are comparable nowhere.
 //

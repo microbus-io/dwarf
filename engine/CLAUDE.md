@@ -2437,7 +2437,7 @@ with no rule of its own.
 
 **PER SHARD is the point, and a fleet-global count cannot express it.** A peer whose piston wedges on shard 3
 drops out of shard 3's work divisor and stays in every other shard's; a peer whose beats to shard 3 fail
-mis-sizes only shard 3's pool. It also retires cross-shard comparison entirely - every timestamp in the
+stops dispatching only shard 3. It also retires cross-shard comparison entirely - every timestamp in the
 registry is stamped by the shard holding it, so ages are comparable within a shard and timestamps are
 comparable nowhere. Consequently **every derivation that consumes a replica count does so per shard**:
 `recomputePools`, `recomputeWorkerCeiling` (worst shard wins, since a storm drains through the tightest

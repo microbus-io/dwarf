@@ -1412,3 +1412,214 @@ func TestPeers_ClassifyOrdersByJoinTime(t *testing.T) {
 	}
 	assert.Equal(4, classify(fleet, selfID, true, testWindows).rank, "a replica with no row of its own goes last")
 }
+
+// agedFleet is outrankedFleet with every peer row seenAgeMs old and its own row ownAgeMs old.
+func agedFleet(seenAgeMs, ownAgeMs float64) []peer {
+	fleet := outrankedFleet()
+	for i := range fleet {
+		fleet[i].seenAgeMs = seenAgeMs
+		if fleet[i].engineID == selfID {
+			fleet[i].seenAgeMs = ownAgeMs
+		}
+	}
+	return fleet
+}
+
+// TestPeers_StallRecoveryStaggersEntry pins the correlated-stall storm. A stall past the fresh window ages every
+// row out; once it clears, this replica's own beat may land before its peers', so its readings show it alone and
+// first in line while sixteen peers ahead of it still read stale. It must wait a beat per stale row ahead, and
+// fall out of the cut as they beat again, rather than enter on the partial roster.
+func TestPeers_StallRecoveryStaggersEntry(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	fleet := outrankedFleet()
+	r.s.observe(ctx, fleet, nil)
+	assert.False(r.s.InCut())
+
+	for range 180 {
+		r.clk.advance(r.s.scan)
+		r.s.observe(ctx, nil, errors.New("registry unreachable"))
+	}
+	stale := float64(r.s.fresh.Milliseconds() + 5000)
+	for range 8 { // two beats of readings: its own row fresh, every peer's still stale
+		r.clk.advance(r.s.scan)
+		r.s.observe(ctx, agedFleet(stale, 100), nil)
+		assert.False(r.s.InCut(), "first in line only because the peers ahead have not beaten yet")
+	}
+	r.clk.advance(r.s.scan)
+	r.s.observe(ctx, fleet, nil)
+	assert.False(r.s.InCut())
+}
+
+// TestPeers_LateBeaterCannotEnterAsPeersAgeOut pins beats failing fleet-wide while reads succeed, seen from the
+// replica whose last good beat landed last. Its peers age out one by one while its own row is still fresh, with no
+// read gap to hold anything; the stale rows ahead keep it out of the cut until its own row ages out too, and from
+// then on a replica whose beats fail takes no slot at all.
+func TestPeers_LateBeaterCannotEnterAsPeersAgeOut(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	fleet := outrankedFleet()
+	r.s.observe(ctx, fleet, nil)
+	fresh := float64(r.s.fresh.Milliseconds())
+
+	// Four peers age out per reading, while its own row stays fresh for the first four.
+	for step := 1; step <= 4; step++ {
+		r.clk.advance(r.s.scan)
+		reading := outrankedFleet()
+		for i := range reading {
+			if i < 4*step {
+				reading[i].seenAgeMs = fresh + 100
+			}
+		}
+		r.s.observe(ctx, reading, nil)
+		assert.False(r.s.InCut(), "peers ahead are aging out, not leaving")
+	}
+	for range 8 { // every peer ahead stale and its own row still fresh: first in line, for two beats
+		r.clk.advance(r.s.scan)
+		r.s.observe(ctx, agedFleet(fresh+100, 100), nil)
+		assert.False(r.s.InCut(), "the stale rows ahead keep it out")
+	}
+	for range 240 { // a minute of readings with every row stale, its own included
+		r.clk.advance(r.s.scan)
+		r.s.observe(ctx, agedFleet(fresh+1000, fresh+500), nil)
+		assert.False(r.s.InCut(), "a replica whose own beats fail takes no slot")
+	}
+}
+
+// TestPeers_CrashedLeaderHandsOverAfterABeat pins the cost of the stagger on an ordinary handoff: a dispatcher
+// that crashes leaves its row behind, stale, ahead of the replica next in line, which enters a beat later than a
+// clean departure would let it - and still enters.
+func TestPeers_CrashedLeaderHandsOverAfterABeat(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	leader := peer{engineID: 1, seenAgeMs: 100, dispatchAgeMs: 100, joinAgeMs: 60000, working: true}
+	self := peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge, joinAgeMs: 1000, working: true}
+	r.s.observe(ctx, []peer{leader, self}, nil)
+	assert.False(r.s.InCut())
+
+	leader.seenAgeMs = float64(r.s.fresh.Milliseconds() + 100)
+	waited := time.Duration(0)
+	for !r.s.InCut() && waited < 10*r.s.beat {
+		r.clk.advance(r.s.scan)
+		waited += r.s.scan
+		r.s.observe(ctx, []peer{leader, self}, nil)
+	}
+	assert.True(r.s.InCut(), "the next in line takes over")
+	assert.True(waited >= r.s.beat && waited <= r.s.beat+2*r.s.scan, "a beat after the leader's row went stale, waited %s", waited)
+}
+
+// TestPeers_StaleOwnRowRestartsThePrunePatience pins that a reading with this replica's own row stale is not a
+// healthy run. Beats failing fleet-wide while reads succeed age every peer past the straggler age with no read gap;
+// were the prune's patience to run on through that, every replica would delete every other's row, and the fleet
+// would re-register at the end of the join order once beats land, churning every cut.
+func TestPeers_StaleOwnRowRestartsThePrunePatience(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	r.s.straggler = time.Second
+	r.s.pruneAfter = 400 * time.Millisecond
+	assert.NoError(r.s.register(ctx))
+	r.addPeer(t, 90, time.Minute, time.Minute)
+
+	stale := float64(r.s.fresh.Milliseconds() + 1000)
+	for range 10 {
+		r.s.observe(ctx, []peer{
+			{engineID: 90, seenAgeMs: stale, dispatchAgeMs: stale, working: true},
+			{engineID: selfID, seenAgeMs: stale, dispatchAgeMs: stale, working: true},
+		}, nil)
+		r.clk.advance(200 * time.Millisecond)
+	}
+	assert.Equal([]int64{90, selfID}, r.ids(t), "a reading with its own row stale must not count toward the patience")
+
+	// Nor one with its own row missing: its beats are not landing either, though the repair re-inserts it.
+	for range 10 {
+		r.s.observe(ctx, []peer{{engineID: 90, seenAgeMs: stale, dispatchAgeMs: stale, working: true}}, nil)
+		r.clk.advance(200 * time.Millisecond)
+	}
+	assert.Contains(r.ids(t), int64(90), "a reading with its own row missing must not count toward the patience")
+}
+
+// TestPeers_StaleOwnRowStepsDown pins that a dispatcher whose own beats stop landing leaves the cut at once. Its
+// peers have already dropped it and promoted around it, so a slot it kept would be one nobody counts.
+func TestPeers_StaleOwnRowStepsDown(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	self := peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: 100, joinAgeMs: 60000, working: true}
+	peerRow := peer{engineID: 1, seenAgeMs: 100, dispatchAgeMs: staleAge, joinAgeMs: 1000, working: true}
+	r.s.observe(ctx, []peer{peerRow, self}, nil)
+	r.clk.advance(r.s.scan)
+	r.s.observe(ctx, []peer{peerRow, self}, nil)
+	assert.True(r.s.InCut(), "first in the order, it dispatches")
+
+	self.seenAgeMs = float64(r.s.fresh.Milliseconds() + 100)
+	r.clk.advance(r.s.scan)
+	r.s.observe(ctx, []peer{peerRow, self}, nil)
+	assert.False(r.s.InCut(), "its beats are not landing, so it steps down")
+
+	// Its beats land again: coming back takes the two agreeing readings any entry does.
+	self.seenAgeMs = 100
+	r.clk.advance(r.s.scan)
+	r.s.observe(ctx, []peer{peerRow, self}, nil)
+	assert.False(r.s.InCut(), "not on the first fresh reading")
+	r.clk.advance(r.s.scan)
+	r.s.observe(ctx, []peer{peerRow, self}, nil)
+	assert.True(r.s.InCut(), "but on the second")
+}
+
+// TestPeers_StaggerProgressesThroughSustainedGaps pins that the staggered entry is counted in readings: on a
+// database slow enough that every reading ends a gap, the replica next in line behind a crashed dispatcher still
+// takes over, rather than having its wait restarted by every reading.
+func TestPeers_StaggerProgressesThroughSustainedGaps(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	leader := peer{engineID: 1, seenAgeMs: 100, dispatchAgeMs: 100, joinAgeMs: 60000, working: true}
+	self := peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge, joinAgeMs: 1000, working: true}
+	r.s.observe(ctx, []peer{leader, self}, nil)
+	assert.False(r.s.InCut(), "second in line behind a live leader")
+
+	leader.seenAgeMs = float64(r.s.fresh.Milliseconds() + 100)
+	for range 20 {
+		r.clk.advance(3 * r.s.scan) // every reading ends a gap
+		r.s.observe(ctx, []peer{leader, self}, nil)
+	}
+	assert.True(r.s.InCut(), "a slow database still hands the shard over")
+}
+
+// TestPeers_BlindTimeEarnsNoEntry pins that time spent blind does not count toward the staggered entry. A
+// database that recovers for a moment and fails again would otherwise let the wait run out unseen, and the reading
+// that ends the gap would admit the entry.
+func TestPeers_BlindTimeEarnsNoEntry(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	r.s.observe(ctx, outrankedFleet(), nil)
+	stale := float64(r.s.fresh.Milliseconds() + 5000)
+
+	// Briefly up: first in line only because sixteen peers ahead read stale, so the wait starts.
+	r.clk.advance(r.s.scan)
+	r.s.observe(ctx, agedFleet(stale, 100), nil)
+	r.clk.advance(r.s.scan)
+	r.s.observe(ctx, agedFleet(stale, 100), nil)
+	assert.False(r.s.InCut())
+
+	// Down for longer than the whole wait, then up on the same picture.
+	for range 80 {
+		r.clk.advance(r.s.scan)
+		r.s.observe(ctx, nil, errors.New("registry unreachable"))
+	}
+	r.clk.advance(r.s.scan)
+	r.s.observe(ctx, agedFleet(stale, 100), nil)
+	assert.False(r.s.InCut(), "the blind spell did not count toward the wait")
+}

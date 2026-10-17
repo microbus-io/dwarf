@@ -19,7 +19,7 @@ concept of a second.
 
 The per-shard scope is also the *right* answer rather than a simplification. Evidence and decision share a
 scope: a peer whose dispatcher wedges on shard 3 drops out of **shard 3's** work divisor and stays in every
-other shard's, and a peer whose beats to shard 3 fail mis-sizes only shard 3's pool. A process-global
+other shard's, and a peer whose beats to shard 3 fail stops dispatching only shard 3. A process-global
 divisor derived from one shard's rows can express neither.
 
 ## The row's whole lifecycle lives here, and that is what makes deletion final
@@ -112,9 +112,14 @@ deliberately:
   one peer dying but a **correlated stall**: a few seconds of database trouble stalls every replica's write
   *and* every replica's read at once; it clears, everyone reads a roster where every row is stale, everyone
   computes a tiny count, and everyone grows to the full per-database budget simultaneously against a
-  database that is already sick. Skipping exactly one reading closes it, because the beat is far shorter
-  than the read cadence — by the next reading every live peer has refreshed its row and the count is real.
-  The fall is held against the previous *raw* reading, as the cut and the candidate count are (below), and
+  database that is already sick. Skipping one reading covers the count for a gap that aged no row out. It does
+  NOT cover a stall past the fresh window: the beat (1s) is longer than the read cadence (250ms), so peers'
+  beats land spread over several readings once it clears, and those readings show a partial roster with no gap
+  to hold anything. What keeps that from becoming a storm of dispatchers is the staggered entry into the cut
+  (below), not the count: the replicas that dispatch while the roster is partial are the ones already in a
+  cut and the few at the top of the order with no stale row ahead, so a shard runs a dispatcher share or so
+  over its slots for those readings at most, never a share per replica. The fall is held against the previous
+  *raw* reading, as the cut and the candidate count are (below), and
   `Replicas` is published before the standing, so the replica count and the pool divisor fall on the same
   reading and no reader sees the divisor fall ahead of the count. Pinned by
   `TestPeers_ReplicaFallThroughSustainedGaps`.
@@ -135,7 +140,69 @@ deliberately:
   and grow its pool to a dispatcher's share simultaneously. Leaving the cut shrinks a pool and is believed at
   once; entering it waits one reading - `InCut` is true only if the previous raw reading also put the replica
   in the cut. That rule holds on every reading, not only after a gap, because it also orders an ordinary
-  handoff (see "Who dispatches"). The rank itself is published as read: a lower place in the order is not
+  handoff (see "Who dispatches"). Alone it does not cover a stall past the fresh window; the two rules below do.
+
+  Two more rules decide the cut, and together they are the whole defence against a fleet promoting itself at once:
+
+  - **A REPLICA WHOSE OWN ROW IS NOT FRESH DOES NOT DISPATCH, entering or staying.** Its beats are not landing,
+    so its peers have already dropped it and promoted around it; a slot it held or took would be one nobody
+    counts. While beats fail fleet-wide (a full disk, a read-only failover, which end no blind spell at all)
+    every replica reads its own row stale, so NOBODY dispatches - which is what those failures allow anyway.
+    Without the rule, every replica's own row goes stale with the rest, each sees a fleet of one, and every one
+    enters every shard; guarding only entry is not enough either, because a shard's dispatchers slide out of
+    its window as rows age out, and which shards keep one becomes a lottery of row ages, sizing for a fleet of
+    one. The rule is part of the raw verdict, so coming back takes the two agreeing readings any entry does, and
+    the step-down is logged once ("Own peer row stale"). The cost: a failure confined to `dwarf_peers` writes (a
+    revoked grant, a table-level write error) stops dispatch on the shards it hits - a lone replica's included,
+    since it cannot tell itself from a fleet whose beats all fail. A write that BLOCKS (a lock held on the table)
+    does not: the beat and the read share a pass, so the replica goes blind and holds its last standing.
+  - **ENTRY IS STAGGERED BY THE STALE ROWS AHEAD, a beat's worth of readings each.** A replica sees itself
+    in a cut it does not belong to whenever rows ahead of it in the order read stale - after a stall, until
+    every peer's beat lands again, spread over a beat or more. The stale rows are still in the registry, because
+    the prune waits a healthy run, so their count (`staleAhead`) is large exactly when the verdict is suspect,
+    and zero in the steady state. As peers beat again the rows ahead turn fresh and the replica falls out of the
+    cut before its wait runs out. **The wait is counted in READINGS, never in time.** A failed read earns
+    nothing, so blind time does not count (a database that flaps would otherwise admit an entry on the reading
+    that ends a gap), while a database merely slow to read - every reading gapped - still progresses a reading at
+    a time. Restarting the wait at every gap freezes the cut there, and the shard behind a crashed dispatcher
+    runs nothing (`TestPeers_StaggerProgressesThroughSustainedGaps`). Leaving is never delayed. The first reading
+    after `New` is the one exception: it keeps the cut `New` seeds, as the two-reading rule does. The stale rows
+    ahead of a replica on a cold start belong to processes that are gone, and `Join`'s announce-then-wait
+    already orders that handoff.
+
+  **Why the wait is shaped this way.** Each alternative weighed here loses for a reason that recurs:
+
+  - **It scales with the stale rows ahead, not a fixed delay.** The wait does not admit the right replica so
+    much as give the wrong ones time to see the real roster and drop out. Where peers' beats land later than a
+    fixed window (a sick database), every replica that looked eligible reaches the end of the same window
+    together and enters at once: the storm, delayed. Scaled, the margin grows with depth in the order, where a
+    verdict is likeliest to be an artifact, and replicas that do come online come one depth at a time, so
+    connections grow in steps rather than a burst. The cost is the handoff delay below, accepted for that.
+  - **It counts stale rows ahead, not a replica's place in the order** (or its distance from the shard's window
+    start). A place-based delay slows every ordinary entry, a replica deep in the order on every shard whose
+    window it sits in. The stale count is zero in the steady state, and it is local to one reading - the
+    window's start depends on the owner's cut, which the Sonar does not see.
+  - **Every stale row ahead counts, however old.** A row past the straggler age is as much a sign of a partial
+    picture as a fresh-stale one: a stall longer than the straggler age ages every row past it, and counting
+    only the younger ones would zero the count exactly then. The prune bounds the cost.
+
+  **The cost is on ordinary handoffs: a beat per stale row ahead, until the prune removes those rows.** One
+  crashed dispatcher delays the promotion it causes by about a beat. Losing a zone of k replicas, or a rolling
+  restart that kills processes (each restart a new engine id), leaves k stale rows ahead of the replicas that
+  must take over, and each promotion waits k beats until the prune removes them. That takes the straggler age
+  AND five minutes of healthy run, which starts at a Sonar's first reading and which a read gap or a non-fresh
+  own row restarts: after a full-fleet crash restart, or a kill-style roll that replaced every older replica, the
+  stale rows ahead persist about five minutes, and every entry meanwhile waits for them.
+
+  **Do not replace these with a hold that keys on read gaps** (a settle window after a gap, a hold against the
+  published value): every such shape needs a timer tuned to the beat spread, misses the replica whose last
+  good beat landed last (its peers age out one by one with no gap), and ratchets the cut on a database that is
+  merely slow to read. Pinned by `TestPeers_StallRecoveryStaggersEntry`, `TestPeers_BlindTimeEarnsNoEntry`,
+  `TestPeers_StaggerProgressesThroughSustainedGaps`,
+  `TestPeers_LateBeaterCannotEnterAsPeersAgeOut`, `TestPeers_StaleOwnRowStepsDown` and
+  `TestPeers_CrashedLeaderHandsOverAfterABeat`.
+
+  The rank itself is published as read: a lower place in the order is not
   "closer to dispatching" once the cut is a window, so holding the larger rank protects nothing. Pinned by
   `TestPeers_CutEntryIsWithheldAcrossAGap` and `TestPeers_CutEntryTakesTwoReadings`.
 
@@ -223,7 +290,11 @@ to prevent, re-entered through a new door. Regrowth at three readings is already
 one interval is a single missed reading, which a healthy Sonar meets on any transient error, while two
 means the readings have actually stopped. **One threshold serves all three consumers** — it disables
 partitioning, it interrupts the prune's healthy run, and it withholds a fall in the replica count — so a
-gap counts against all of them or none, and there is no second number to keep in step.
+gap counts against all of them or none. An own row that is not fresh (stale or missing) also interrupts the
+prune's healthy run, and must: beats
+failing fleet-wide while reads succeed age every peer past the straggler age with no gap at all, and a patience
+that ran on through that would have every replica delete every other's row (pinned by
+`TestPeers_StaleOwnRowRestartsThePrunePatience`).
 
 **The prune is the most conservative of the three thresholds on purpose.** Every other decision here is
 reversible — a wrongly dropped peer returns on the next reading — while a deleted row is refreshed by
@@ -258,10 +329,10 @@ verified sensitive: removing the gap's reset of the healthy run makes it delete 
 
 Both pinned by `TestPeers_ClassifySelfAbsenceCutsBothWays`.
 
-- **`Rank` follows `Replicas`, not the partition: self is ranked even when its row is missing.** The cut
-  turns a rank into a dispatcher role, and there the dangerous error is the opposite of the partition's:
-  over-claiming a slot over-connects by one share until the row is repaired, while a replica that ranked
-  nowhere would leave a lone replica dispatching nothing at all. Pinned by
+- **`Rank` follows `Replicas`, not the partition: self is ranked even when its row is missing.** That keeps
+  the candidate count, and the dispatcher slots derived from it, from falling with one missing row. It does
+  not put the replica in the cut: a replica whose own row is not fresh dispatches nothing (below), so a
+  replica whose row went missing, a lone one included, waits for its repaired row to be read back. Pinned by
   `TestPeers_ClassifyRanksAnAbsentSelf`.
 
 **The registration repair fires promptly, not on a hygiene cadence**, because being missing makes *peers*
@@ -356,8 +427,9 @@ every other moves nothing. The shards tile the order, so:
   divergent views need a reconciliation rule. The window keeps the per-shard isolation this package is built
   around.
 
-**A replica that is not working is never in the cut**, whatever its rank, and **a missing own row still
-ranks** (self-absence follows `Replicas`, below).
+**A replica that is not working is never in the cut**, whatever its rank, and neither is one whose own row is
+not fresh. **A missing own row still ranks** (self-absence follows `Replicas`, below), which keeps the
+candidate count whole.
 
 **The order, the window rule and its anchor are part of the wire.** Every process in a fleet must apply the
 same ones, and a fleet is upgraded one replica at a time: during a rolling upgrade that changed any of them,

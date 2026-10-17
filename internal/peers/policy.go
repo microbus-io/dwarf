@@ -69,6 +69,11 @@ type view struct {
 	// Distinct from having a FRESH one: a row that exists but has aged out is a liveness problem the beat
 	// fixes on its own, while a missing row is refreshed by nobody.
 	selfSeen bool
+	// selfFresh reports whether this replica's own row is fresh: whether its beats are landing.
+	selfFresh bool
+	// staleAhead counts the working peers ahead of this replica in the shared order whose rows are stale: rows
+	// still in the registry that the rank above skipped.
+	staleAhead int
 	// dead are the ids stale past the straggler age, never including self.
 	dead []int64
 }
@@ -95,9 +100,10 @@ type view struct {
 //     work in it.
 //
 // The candidates and the rank follow replicas, self absence included: a replica that cannot see its own row
-// still counts and ranks itself among the peers it can see, unless selfWorking says it is not working.
-// Over-claiming a dispatcher slot over-connects by one share until the row is repaired; under-claiming one
-// leaves the shard short of a dispatcher, and at one replica leaves it with none.
+// still counts and ranks itself among the peers it can see, unless selfWorking says it is not working. That
+// keeps the candidate count, and the slots derived from it, from falling with one missing row. It does not
+// put the replica in the cut: a replica whose own row is not fresh dispatches nothing until the repaired row is
+// read back (see observe).
 func classify(rows []peer, self int64, selfWorking bool, w windows) view {
 	v := view{ordinal: -1}
 	selfFresh := false
@@ -120,6 +126,9 @@ func classify(rows []peer, self int64, selfWorking bool, w windows) view {
 			v.dead = append(v.dead, p.engineID)
 		}
 		if p.seenAgeMs > w.fresh {
+			if p.working && p.engineID != self && joinedBefore(p.joinAgeMs, p.engineID, selfJoinAge, self) {
+				v.staleAhead++
+			}
 			continue
 		}
 		v.replicas++
@@ -146,6 +155,7 @@ func classify(rows []peer, self int64, selfWorking bool, w windows) view {
 			v.candidates++
 		}
 	}
+	v.selfFresh = selfFresh
 	return v
 }
 
