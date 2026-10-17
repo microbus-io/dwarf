@@ -456,7 +456,8 @@ re-run boundary reads as new.
 **History / Step** - `History` returns the step-by-step execution as `[]workflow.FlowStep`; each includes key, depth,
 task name, status, error, timestamps, and DAG links - but **not** `state`/`changes` (its two-round-trip tree scan
 deliberately omits the payload columns, so `FlowStep.State`/`.Changes` are nil on a History result). Subgraph-executing
-steps have `Subgraph=true` with nested `SubHistory`. `Step` returns one step by key **with** its `state`/`changes`
+steps have `Subgraph=true` with nested `SubHistory` and the child's `SubgraphKey` (the latest child after a
+retry, the same one `SubHistory` shows), so a caller can `Snapshot` what the child returned. `Step` returns one step by key **with** its `state`/`changes`
 (refs resolved) - it is the payload-bearing reader; use it when you need a step's actual data.
 
 **List** - Queries flows by status, workflow URL, or thread key, with cursor pagination (newest first **per shard**
@@ -550,7 +551,9 @@ thread), and a later `Continue` of it would build on the subgraph's turns. **Rej
 `Delete(childKey)` into a whole-tree delete is a
 surprising blast radius, so the engine makes the caller name the root.
 
-What a subgraph-child key *is* good for: **introspection** - `Snapshot`, `Fingerprint`, `History`,
+History hands a child key out on its caller step (`FlowStep.SubgraphKey`, read from the tree scan History
+already makes). That grants a root-key holder nothing new: `History` already returns every child step's key, and
+`Step` reads any of them. What a subgraph-child key *is* good for: **introspection** - `Snapshot`, `Fingerprint`, `History`,
 `Step` all operate on that child's own subtree - and **`Fork`**, which intentionally accepts any recorded step,
 including one deep inside a subgraph. `fixtures/subflowguardflow_test.go` pins both halves (the `Resume`/`Terminate`/`Delete`/`Continue`/`ThreadKey`
 400 rejections, introspection + `List`-by-subgraph-URL still working); `fixtures/gracefulcancelflow_test.go` pins

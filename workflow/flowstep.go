@@ -52,10 +52,16 @@ type FlowStep struct {
 	// the caller's neighbor in the parent flow. Set only by Engine.Step; empty in History.
 	PrevKey string `json:"prevKey,omitzero"`
 	NextKey string `json:"nextKey,omitzero"`
-	// Subgraph reports that the step called a subgraph. SubgraphURL and SubgraphName are the child
-	// workflow's URL and display name, and SubHistory is the child flow's own history, nested the same way.
-	// When the step called its subgraph more than once (a Retry), they describe the latest call.
+	// Subgraph reports that the step called a subgraph. SubgraphKey is the child flow's key, SubgraphURL and
+	// SubgraphName are the child workflow's URL and display name, and SubHistory is the child flow's own
+	// history, nested the same way. When the step called its subgraph more than once (a Retry), they describe
+	// the latest call.
+	//
+	// SubgraphKey is a read handle: pass it to Engine.Snapshot for the child's result, or to Await, Poll,
+	// Fingerprint or History. Operations that change a flow (Resume, Terminate, Cancel, Delete, Continue) reject
+	// it; they take the root's key.
 	Subgraph     bool       `json:"subgraph,omitzero"`
+	SubgraphKey  string     `json:"subgraphKey,omitzero"`
 	SubgraphURL  string     `json:"subgraphURL,omitzero"`
 	SubgraphName string     `json:"subgraphName,omitzero"`
 	SubHistory   []FlowStep `json:"subHistory,omitzero"`

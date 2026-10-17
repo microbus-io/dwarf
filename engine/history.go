@@ -68,7 +68,7 @@ func (e *Engine) history(ctx context.Context, flowKey string) ([]workflow.FlowSt
 	// an N+1 over every step in the tree. This mirrors the root_flow_id membership walks in completion.go.
 	// Starting from a mid-tree flow (a subgraph child, which History accepts) over-fetches the ancestor and
 	// sibling subtrees, but the assembly only descends from flowID, so the extra rows are never rendered.
-	childByCaller, err := e.loadSubgraphChildren(ctx, db, flowID)
+	childByCaller, err := e.loadSubgraphChildren(ctx, db, shardNum, flowID)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -83,6 +83,7 @@ func (e *Engine) history(ctx context.Context, flowKey string) ([]workflow.FlowSt
 // during in-memory History assembly.
 type subgraphChild struct {
 	flowID       int
+	flowKey      string
 	workflowURL  string
 	workflowName string
 }
@@ -91,10 +92,11 @@ type subgraphChild struct {
 // caller step's id to the latest child flow it launched. flow.Retry rewinds a caller in place and re-spawns
 // a fresh child each attempt, so several child flows can share one surgraph_step_id; ORDER BY flow_id ASC
 // means the last row written for a caller step wins, giving the highest flow_id (the child whose value the
-// caller actually used).
-func (e *Engine) loadSubgraphChildren(ctx context.Context, db *sequel.DB, flowID int) (map[int]subgraphChild, error) {
+// caller actually used). Each child carries its flow key: a read handle within the tree whose History the caller
+// already holds, every mutation of it is rejected.
+func (e *Engine) loadSubgraphChildren(ctx context.Context, db *sequel.DB, shardNum int, flowID int) (map[int]subgraphChild, error) {
 	rows, err := db.QueryContext(ctx,
-		"SELECT flow_id, surgraph_step_id, workflow_url, workflow_name FROM dwarf_flows"+
+		"SELECT flow_id, flow_token, surgraph_step_id, workflow_url, workflow_name FROM dwarf_flows"+
 			" WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?) AND surgraph_step_id>0 ORDER BY flow_id",
 		flowID,
 	)
@@ -105,13 +107,14 @@ func (e *Engine) loadSubgraphChildren(ctx context.Context, db *sequel.DB, flowID
 	childByCaller := map[int]subgraphChild{}
 	for rows.Next() {
 		var childFlowID, callerStepID int
-		var url, name string
-		err := rows.Scan(&childFlowID, &callerStepID, &url, &name)
+		var token, url, name string
+		err := rows.Scan(&childFlowID, &token, &callerStepID, &url, &name)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
 		childByCaller[callerStepID] = subgraphChild{
 			flowID:       childFlowID,
+			flowKey:      keys.New(shardNum, childFlowID, strings.TrimSpace(token)),
 			workflowURL:  strings.TrimSpace(url),
 			workflowName: strings.TrimSpace(name),
 		}
@@ -181,6 +184,7 @@ func assembleHistory(flowID int, childByCaller map[int]subgraphChild, stepsByFlo
 		sub := assembleHistory(child.flowID, childByCaller, stepsByFlow)
 		if len(sub) > 0 {
 			steps[i].Subgraph = true
+			steps[i].SubgraphKey = child.flowKey
 			steps[i].SubgraphURL = child.workflowURL
 			steps[i].SubgraphName = child.workflowName
 			steps[i].SubHistory = sub

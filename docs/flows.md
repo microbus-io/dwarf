@@ -140,7 +140,9 @@ summaries, next, err := eng.List(ctx, query)           // paginated flow listing
 
 `History` returns each step's task, depth, status, error, and timings — metadata only, **not** `state`/`changes`;
 use `Step` to read a single step's `state`/`changes`. Subgraph-executing
-steps carry nested `SubHistory`. `List` takes a `workflow.Query` (status, workflow name, thread, task,
+steps carry nested `SubHistory` and the child flow's `SubgraphKey`: pass it to `Snapshot` for what the child
+returned, or to `Await`, `Fingerprint` or `History`. It is a read handle - operations that change a flow take the
+root's key. `List` takes a `workflow.Query` (status, workflow name, thread, task,
 fairness key, priority, time window, shard, free-text `Search`, `Limit`) and returns newest-first with an
 opaque pagination cursor as its second return; see [Retention](#retention) for the same query shape.
 
