@@ -297,6 +297,13 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	if err != nil {
 		return "", errors.New("initial state is not JSON-marshalable: %v", err, http.StatusBadRequest)
 	}
+	// A subgraph spawn reaches here inside persist, which must not retry a size refusal: hence a permanentError.
+	if err := e.checkPayloadSize("initial state", stateJSON); err != nil {
+		return "", err
+	}
+	if err := e.checkPayloadSize("baggage", baggageJSON); err != nil {
+		return "", err
+	}
 
 	flowToken := keys.RandomIdentifier(16)
 	stepToken := keys.RandomIdentifier(16)

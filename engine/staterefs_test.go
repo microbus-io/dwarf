@@ -19,6 +19,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -299,6 +300,66 @@ func TestStateRefs_UnreadableSideColumnFailsTheStep(t *testing.T) {
 			assert.Contains(outcome.Error, "unreadable "+column)
 		}
 	}
+}
+
+// TestStateRefs_ManyLargeWritersStayByRef pins that a state refs the large fields of any number of writing steps.
+// Past maxAnchors only anchors below the bar for opening one are inlined. Inlining by count alone copied one large
+// field into every step's state from the fifth writer on - re-anchored at the next step, then inlined again - so
+// the assertion is on what each step STORED, which a task cannot see.
+func TestStateRefs_ManyLargeWritersStayByRef(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	e := unseeded(NewEngineUnderTest(t.Name()))
+	defer e.Shutdown(ctx)
+	mux := hosts.NewMux()
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+
+	const writers = 6
+	const field = 4000
+	g := workflow.NewGraph("Refs")
+	for i := range writers {
+		task := fmt.Sprintf("W%d", i)
+		next := fmt.Sprintf("W%d", i+1)
+		if i == writers-1 {
+			next = "Check"
+		}
+		g.SetURL(task, "refs/many/"+task)
+		g.AddTransition(task, next)
+		name := fmt.Sprintf("f%d", i)
+		mux.HandleTask("refs/many/"+task, func(ctx context.Context, f *workflow.Flow) error {
+			f.SetString(name, blob(field))
+			return nil
+		})
+	}
+	g.SetURL("Check", "refs/many/check")
+	g.AddTransition("Check", workflow.End)
+	assert.NoError(g.Validate())
+	mux.HandleGraph("refs/many/wf", g)
+	var sawAll atomic.Bool
+	mux.HandleTask("refs/many/check", func(ctx context.Context, f *workflow.Flow) error {
+		all := true
+		for i := range writers {
+			all = all && len(f.GetString(fmt.Sprintf("f%d", i))) == field
+		}
+		sawAll.Store(all)
+		return nil
+	})
+
+	_, outcome, err := e.Run(ctx, "refs/many/wf", nil, nil)
+	assert.NoError(err)
+	assert.Equal(workflow.StatusCompleted, outcome.Status, outcome.Error)
+	assert.True(sawAll.Load(), "the last step must see every field whole")
+
+	for i := 1; i < writers; i++ {
+		_, _, stored := stepRefsOf(t, e, stepIDsByTask(t, e, fmt.Sprintf("W%d", i))[0])
+		assert.True(stored < field, "W%d stores a large field inline", i)
+	}
+	_, refs, stored := stepRefsOf(t, e, stepIDsByTask(t, e, "Check")[0])
+	assert.True(stored < field, "Check stores a large field inline")
+	assert.Len(refs, writers, "every writer's field is carried by ref")
 }
 
 // TestStateRefs_CarryAcrossFanOut is the end-to-end shape the design exists for, asserted on what is actually

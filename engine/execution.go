@@ -718,6 +718,13 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	}
 	dropIdentityNulls(accumulatedChanges, reducers)
 	changesJSON, _ := json.Marshal(accumulatedChanges)
+	// Every outcome write below carries these changes (completion, retry, interrupt, subgraph park). A value the
+	// database cannot store fails the step now, before hundreds of megabytes go out to be refused, and without the
+	// write retries: the task has run, and running it again would produce the same value.
+	if err := e.checkPayloadSize("changes of task '"+stripProto(taskName)+"'", changesJSON); err != nil {
+		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
+		return errors.Trace(err)
+	}
 	// What the successors are handed, and what routing reads: the input with the step's delta folded in. A value
 	// the reducer cannot combine fails the step here, naming the field, before anything is written.
 	successorBase := state.Clone()
@@ -1294,6 +1301,11 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// The linear/static-fan-out successors all share this one snapshot, so it is minted once; a forEach
 	// branch re-mints because its state carries the injected element (below).
 	linearStateJSON, linearRefsJSON, err := e.linkerFor(shardNum).Mint(childInputState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), folded, nil)
+	if err == nil {
+		// Refs keep a carried field out of this column, but a reduced field's folded value, and fields over the
+		// anchor cap, are stored inline - so a state can outgrow the column though no single step wrote that much.
+		err = e.checkPayloadSize("successor state of task '"+stripProto(taskName)+"'", linearStateJSON)
+	}
 	if err != nil {
 		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
 		return errors.Trace(err)
@@ -1464,6 +1476,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 					stepStateJSON, stepRefsJSON, mintErr = e.linkerFor(shardNum).Mint(perStepState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), noRef, item)
 					if mintErr != nil {
 						return errors.Trace(mintErr)
+					}
+					if err := e.checkPayloadSize("successor state of task '"+stripProto(taskName)+"'", stepStateJSON); err != nil {
+						return err
 					}
 				}
 				succ.rows = append(succ.rows, successorRow{
@@ -1949,6 +1964,9 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 
 		if interruptPayload.Len() > 0 {
 			payloadJSON, _ := json.Marshal(interruptPayload)
+			if err := e.checkPayloadSize("interrupt payload", payloadJSON); err != nil {
+				return err
+			}
 			payloadLen = len(payloadJSON)
 			payloadArgs := []any{payloadJSON}
 			payloadArgs = append(payloadArgs, allStepIDs...)
@@ -2063,6 +2081,9 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		mergedJSON, refsJSON, merr := e.linkerFor(shardNum).Mint(mergedState, ourChanges, ourRefs, stepID, staterefs.Linear, folded, nil)
 		if merr != nil {
 			return errors.Trace(merr)
+		}
+		if err := e.checkPayloadSize("fan-in state of task '"+stripProto(fanInTarget)+"'", mergedJSON); err != nil {
+			return err
 		}
 		txBytes.stateWritten = len(mergedJSON)
 
@@ -2326,6 +2347,11 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 	mergedJSON, refsJSON, err := e.linkerFor(shardNum).Mint(merged, spawnChanges, spawnRefs, cohortSpawnID, staterefs.Linear, memberWrites, nil)
 	if err != nil {
 		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(err)
+	}
+	// The fold is where a cohort's contributions meet: an append over N branches can outgrow the column though no
+	// branch wrote that much.
+	if err := e.checkPayloadSize("fan-in state of task '"+stripProto(fanInTaskName)+"'", mergedJSON); err != nil {
+		return successorRow{}, 0, nil, stateByteCount{}, err
 	}
 	bytes.stateWritten = len(mergedJSON)
 	row = successorRow{

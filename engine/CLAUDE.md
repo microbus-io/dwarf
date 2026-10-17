@@ -94,7 +94,7 @@ the rationale, the workarounds and the shape any future guard must take. On the 
 
 ### Size and count limits are the host's job, not the engine's
 
-The engine enforces **no** size or count bound anywhere - not on initial state, `baggage`, the per-flow-frozen
+The engine enforces **no** size or count bound as policy (the storage limit below is the one bound, and it is not policy) - not on initial state, `baggage`, the per-flow-frozen
 graph JSON, interrupt/resume payloads, `forEach` fan-out width (one step row + full state snapshot per array
 element), or subgraph nesting depth. This is the **same structural reason** as backpressure and the absent
 time-budget ceiling: the sizing that matters is workload-defined and keyed on identity the engine cannot see.
@@ -105,6 +105,18 @@ context lives: reject an over-large `initialState`/`Baggage` before `Create`, ca
 an author-space entry task, bound retention (recall `Purge` deletes ≤4096 roots/call, so a retention job
 loops). For a **pass-through host** that adds no policy of its own, the obligation flows through to the
 application using that host - it is not silently absorbed anywhere.
+
+**The one bound the engine does enforce is what one column can store** (`maxPayloadBytes`, 256,000,000 bytes,
+`payloadsize.go`). It is a storage fact, not a policy: a value over it would be refused by the database anyway,
+only after the task ran, the bytes were sent and the write retries ran out. Every payload
+write checks the marshalled bytes first - a task's changes (before any outcome write), each successor's and
+fan-in's minted state, the interrupt payload, the final state, and at the door the initial state, baggage,
+`Continue`'s state, resume data and Fork's leaf. The error is a `permanentError` with a 413, so persist does not
+retry it and `failFlowTx`/`terminalFinalState` take an oversized final state as `{}`. **What it means for a flow:**
+refs keep carried fields out of `state`, so mid-flow the binding column is a step's `changes`; but every flow
+boundary flattens (`final_state`, `Continue`, subgraph in/out, Fork's leaf), so the whole state must fit when the
+flow ends. A reduced field's fold is stored inline, so it can still grow a `state` past the limit mid-flow; the
+anchor cap inlines only anchors below the bar for opening one (`internal/staterefs`). Pinned by `engine/payloadsize_test.go`. A new payload column write must call `checkPayloadSize`.
 
 Subgraph nesting depth is the one axis that is *also* a crash vector if handled carelessly: `Fork` clones the
 tree with an **explicit LIFO worklist** (`cloneTree` drives `cloneOneFlow` per flow), not recursion, so

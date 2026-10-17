@@ -325,6 +325,7 @@ type Engine struct {
 	deletionGrace       time.Duration // DeleteOnCompletion linger window before reap (1m)
 	reapInterval        time.Duration // reaper goroutine tick; read once at Startup (1m)
 	leaseRecoveryBatch  int           // ids per lease-recovery reset, embedded as a literal IN list (1024)
+	maxPayloadBytes     int           // largest JSON value written into one payload column (maxPayloadBytes)
 	// persistBackoff is the outcome-write retry schedule, short and exponential because the errors it
 	// exists for resolve in SECONDS. A minutes-long backoff would be slow in both directions - slow to
 	// recover from a blip that already cleared, and slow to report a permanent failure we could have named
@@ -377,6 +378,7 @@ func NewEngine() *Engine {
 	e.deletionGrace = 1 * time.Minute
 	e.reapInterval = 1 * time.Minute
 	e.leaseRecoveryBatch = 1024
+	e.maxPayloadBytes = maxPayloadBytes
 	e.seams = seamster.New(testing.Testing())
 	return e
 }

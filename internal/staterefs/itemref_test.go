@@ -180,15 +180,17 @@ func TestLinker_MintItem(t *testing.T) {
 	t.Run("over_the_cap_inlines_array_and_element_together", func(t *testing.T) {
 		assert := testarossa.For(t)
 		// The item ref is grouped under its array's anchor, so when that anchor is the one the cap drops, the
-		// array and the element are inlined together and neither is left pointing at a dropped anchor.
-		merged := branch(5)
+		// array and the element are inlined together and neither is left pointing at a dropped anchor. The
+		// array and element together must be below the bar (384 bytes at this width) to be dropped at all.
+		small := []any{map[string]any{"page": 0, "text": blob(100)}, map[string]any{"page": 1, "text": blob(100)}}
+		merged := mustState(map[string]any{"items": small, "item": small[1], "itemIndex": 1, "itemCount": 2})
 		inherited := Refs{"items": {Anchor: 7}}
 		for i := range maxAnchors {
 			field := fmt.Sprintf("big%d", i)
 			_ = merged.Set(field, blob(100_000))
 			inherited[field] = Ref{Anchor: 100 + i}
 		}
-		stored, refs := mint(t, merged, inherited, &Item{Key: "item", Source: "items", Index: 5})
+		stored, refs := mint(t, merged, inherited, &Item{Key: "item", Source: "items", Index: 1})
 		assert.NotContains(refs, "items")
 		assert.NotContains(refs, "item")
 		assert.True(stored.Has("items"))

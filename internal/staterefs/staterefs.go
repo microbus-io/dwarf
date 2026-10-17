@@ -208,8 +208,9 @@ const (
 	// stored entry, which is a little larger than a plain ref's (the array's field name and the index ride
 	// in it). Below it the element is cheaper inline.
 	minItem = 96
-	// maxAnchors bounds the resolve IN-list. It is the SAME knob as the threshold seen from the other end
-	// (the cost model prices anchor ROWS), and the scheme is correct at any value.
+	// maxAnchors is how many anchors a state may point at before its small ones are inlined, to shorten the
+	// resolve IN-list on a cache miss. It is not a hard cap: an anchor at or above the bar for opening one is
+	// kept however many there are (inlineExcessAnchors). The scheme is correct at any value.
 	maxAnchors = 4
 
 	// The resolved-bytes cache is bounded in bytes (given to NewCache) and in entries (cacheEntries), and an
@@ -486,7 +487,7 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.Changes, inherited
 		mintItem(raw, refs, *item)
 	}
 
-	inlineExcessAnchors(raw, refs, merged)
+	inlineExcessAnchors(raw, refs, merged, openThreshold(successors, l.inflation(successors)))
 
 	stateJSON, err := json.Marshal(raw)
 	if err != nil {
@@ -525,11 +526,16 @@ func mintItem(raw map[string]json.RawMessage, refs Refs, item Item) {
 	delete(raw, item.Key)
 }
 
-// inlineExcessAnchors caps the pointer fan at maxAnchors by inlining the cheapest anchors' fields back into
-// state as literals - one copy, paid once, to shorten the resolve IN-list. It costs no database read: the
-// literals are all present in merged (state was resolved at dispatch). Anchors are dropped smallest-bytes
-// first, since those are the ones whose refs buy the least.
-func inlineExcessAnchors(raw map[string]json.RawMessage, refs Refs, merged workflow.State) {
+// inlineExcessAnchors inlines the smallest anchors' fields back into state as literals once the state points at
+// more than maxAnchors - one copy, paid once, to shorten the resolve IN-list. It inlines only anchors whose
+// fields sum below bar, the size this mint requires to open an anchor: a ref below it is not worth an anchor
+// row by the policy's own pricing, while one above it is worth more than the shorter IN-list. Inlining a large
+// anchor writes its bytes again; the next mint re-anchors it with that step's own write, the step after that
+// inlines the then-smallest anchor, and so on - one large field rewritten at every step. And the IN-list it
+// would shorten is usually not read at all, the minting replica's cache holding the anchors (Seed, and the
+// dispatch resolve). It costs no database read: the literals are all present in merged
+// (state was resolved at dispatch).
+func inlineExcessAnchors(raw map[string]json.RawMessage, refs Refs, merged workflow.State, bar int) {
 	if len(refs) == 0 {
 		return
 	}
@@ -537,7 +543,6 @@ func inlineExcessAnchors(raw map[string]json.RawMessage, refs Refs, merged workf
 	// An anchor is PINNED (un-droppable) if any of its fields' literals are absent from merged - a merely
 	// carried ref whose payload this step never materialized. Inlining it would require a literal we do not
 	// have, so dropping it would delete the field outright: the exact data loss the carry-forward above closes.
-	// Such a ref must survive the cap even if that means a wider IN-list (correctness over the perf bound).
 	// Detecting it needs only a presence check, no marshal.
 	pinned := map[int]bool{}
 	for k, ref := range refs {
@@ -549,39 +554,38 @@ func inlineExcessAnchors(raw map[string]json.RawMessage, refs Refs, merged workf
 	if len(byAnchor) <= maxAnchors {
 		return
 	}
-	// Over the cap: only NOW size the droppable anchors (largest-bytes first so the survivors are the ones the
-	// refs buy the most on). This is the only path that marshals ref'd fields - a possibly-large carried
-	// payload is never re-serialized in the common under-cap case above. Ties break on anchor id for determinism.
+	// Over the count: only NOW size the droppable anchors, smallest first. This is the only path that measures
+	// ref'd fields - a possibly-large carried payload is never touched in the common case above. Sizing reads
+	// the raw JSON merged already holds, so it marshals nothing. Ties break on anchor id for determinism.
 	bytesOf := map[int]int{}
 	droppable := make([]int, 0, len(byAnchor))
-	pinnedCount := 0
 	for a, keys := range byAnchor {
 		if pinned[a] {
-			pinnedCount++
 			continue
 		}
 		for _, k := range keys {
-			if data := merged.GetJSON(k); data != nil {
-				bytesOf[a] += len(data)
-			}
+			bytesOf[a] += len(merged.GetJSON(k))
 		}
 		droppable = append(droppable, a)
 	}
 	sort.Slice(droppable, func(i, j int) bool {
 		if bytesOf[droppable[i]] != bytesOf[droppable[j]] {
-			return bytesOf[droppable[i]] > bytesOf[droppable[j]]
+			return bytesOf[droppable[i]] < bytesOf[droppable[j]]
 		}
 		return droppable[i] < droppable[j]
 	})
-	// Keep the pinned anchors plus the largest droppable ones up to the cap; inline the rest.
-	keepDroppable := max(0, maxAnchors-pinnedCount)
-	for _, a := range droppable[min(keepDroppable, len(droppable)):] {
+	kept := len(byAnchor)
+	for _, a := range droppable {
+		if kept <= maxAnchors || bytesOf[a] >= bar {
+			break
+		}
 		for _, k := range byAnchor[a] {
 			if data := merged.GetJSON(k); data != nil {
 				raw[k] = data
 			}
 			delete(refs, k)
 		}
+		kept--
 	}
 }
 

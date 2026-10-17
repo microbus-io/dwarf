@@ -355,6 +355,12 @@ func (e *Engine) computeFinalStateFrom(ctx context.Context, db sequel.Executor, 
 	if err != nil {
 		return nil, "", errors.Trace(err)
 	}
+	// The final state is flattened - every ref resolved - so it holds the whole state, which can exceed what one
+	// column stores though no step's row did. A permanentError, so the flow fails with an empty final state
+	// (failFlowTx), and Terminate still stops it (terminalFinalState).
+	if err := e.checkPayloadSize("final state", data); err != nil {
+		return nil, "", err
+	}
 	return data, workflowURL, nil
 }
 
@@ -1607,6 +1613,9 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 		resumeDataJSON, err = json.Marshal(resumeState)
 		if err != nil {
 			return errors.Trace(err)
+		}
+		if err := e.checkPayloadSize("resume data", resumeDataJSON); err != nil {
+			return err
 		}
 	}
 

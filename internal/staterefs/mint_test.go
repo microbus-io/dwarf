@@ -296,25 +296,61 @@ func TestLinker_MintTiers(t *testing.T) {
 		assert.Equal(0, len(refs), "trivial scalars are never ref'd, however wide the fan-out")
 	})
 
-	t.Run("max_anchors_inlines_the_cheapest", func(t *testing.T) {
+	t.Run("over_max_anchors_inlines_only_small_anchors", func(t *testing.T) {
 		assert := testarossa.For(t)
-		// More distinct anchors than maxAnchors: the pointer fan is capped by inlining the anchors whose
-		// refs buy the least (fewest bytes), paying one copy to shorten the resolve IN-list. maxAnchors is
-		// the same knob as the threshold - the cost model prices ROWS.
+		// More distinct anchors than maxAnchors: the smallest are inlined to shorten the resolve IN-list, but
+		// only those below the bar for opening an anchor (threshold, linear), and only down to maxAnchors.
 		state := mustState(map[string]any{})
 		inherited := Refs{}
-		for i := range maxAnchors + 2 {
+		sizes := []int{200, 300, 400, 2000, 3000, 4000, 5000} // three small, four large
+		for i, n := range sizes {
 			field := "f" + string(rune('0'+i))
-			_ = state.Set(field, blob(2000+i*1000)) // f0 smallest ... f5 largest
+			_ = state.Set(field, blob(n))
 			inherited[field] = Ref{Anchor: 100 + i}
 		}
 		stored, refs := mint(t, state, mustState(map[string]any{}), inherited, 1)
-		assert.Equal(maxAnchors, len(refs), "the pointer fan is capped")
-		// The two cheapest anchors were inlined back as literals; the largest survive as refs.
+		// Seven anchors: the three small ones are inlined, which brings the count to maxAnchors. The large ones
+		// all keep their refs.
+		assert.Equal(maxAnchors, len(refs))
 		assert.True(stored.Has("f0"))
 		assert.True(stored.Has("f1"))
-		assert.False(stored.Has("f5"))
-		assert.Equal(105, refs["f5"].Anchor)
+		assert.True(stored.Has("f2"))
+		for i := 3; i < len(sizes); i++ {
+			assert.Equal(100+i, refs["f"+string(rune('0'+i))].Anchor)
+		}
+	})
+
+	t.Run("large_anchors_survive_any_count", func(t *testing.T) {
+		assert := testarossa.For(t)
+		// Every anchor is above the bar: none is inlined, however many there are. Inlining one would copy a
+		// large field into this state and every state after it.
+		state := mustState(map[string]any{})
+		inherited := Refs{}
+		for i := range maxAnchors + 3 {
+			field := "f" + string(rune('0'+i))
+			_ = state.Set(field, blob(2000+i*1000))
+			inherited[field] = Ref{Anchor: 100 + i}
+		}
+		stored, refs := mint(t, state, mustState(map[string]any{}), inherited, 1)
+		assert.Equal(maxAnchors+3, len(refs), "no large anchor is inlined")
+		assert.Equal(0, stored.Len())
+	})
+
+	t.Run("small_anchors_within_max_anchors_stay", func(t *testing.T) {
+		assert := testarossa.For(t)
+		// Inlining stops at maxAnchors: with five anchors, only the smallest small one goes.
+		state := mustState(map[string]any{})
+		inherited := Refs{}
+		sizes := []int{200, 300, 2000, 3000, 4000}
+		for i, n := range sizes {
+			field := "f" + string(rune('0'+i))
+			_ = state.Set(field, blob(n))
+			inherited[field] = Ref{Anchor: 100 + i}
+		}
+		stored, refs := mint(t, state, mustState(map[string]any{}), inherited, 1)
+		assert.Equal(maxAnchors, len(refs))
+		assert.True(stored.Has("f0"))
+		assert.Equal(101, refs["f1"].Anchor)
 	})
 
 	t.Run("carried_ref_absent_from_merged_is_re_emitted", func(t *testing.T) {
@@ -347,7 +383,7 @@ func TestLinker_MintTiers(t *testing.T) {
 		inherited := Refs{}
 		for i := range maxAnchors + 1 {
 			field := "f" + string(rune('0'+i))
-			_ = merged.Set(field, blob(2000+i*1000)) // inlineable: present in merged
+			_ = merged.Set(field, blob(100+i*10)) // inlineable: present in merged, and below the bar
 			inherited[field] = Ref{Anchor: 100 + i}
 		}
 		inherited["carried"] = Ref{Anchor: 999} // absent from merged: un-inlineable, must be pinned

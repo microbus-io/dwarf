@@ -124,6 +124,9 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	if err != nil {
 		return "", errors.Trace(err)
 	}
+	if err := e.checkPayloadSize("state of the fork step", mergedLeafState); err != nil {
+		return "", err
+	}
 
 	// The fork inherits the origin root's scheduling and baggage (no FlowOptions), applied uniformly to
 	// every cloned flow and step.

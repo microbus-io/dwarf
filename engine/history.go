@@ -1049,6 +1049,9 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 		if err != nil {
 			return errors.Trace(err)
 		}
+		if err := e.checkPayloadSize("initial state", mergedStateJSON); err != nil {
+			return err
+		}
 
 		// Inherit the thread's baggage; DeleteOnCompletion is forced off (a disposable flow deletes itself,
 		// so it could never have been a Continue source). A turn wanting different policy uses Create with

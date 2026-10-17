@@ -186,9 +186,37 @@ from the flow's finish time, which is the right signal for "keep for 30 days aft
 **Deleting a flow deletes its whole subgraph tree**, keyed on the tree root — children are not left behind.
 You cannot delete a subgraph child on its own; that would strand its parent.
 
+## The size limit: 256 MB per value
+
+The one limit is what the database can store. No single JSON value dwarf writes may be larger than
+**256 MB (256,000,000 bytes)**, on every database. This limit is per value, not per flow. In practice:
+
+- **A task's changes in one step** must fit in 256 MB. That is what one step writes.
+- **The flow's state while it runs** can be somewhat larger than 256 MB. A large field is stored once, in the
+  step that wrote it, and later steps refer to it instead of copying it, so each step's own row holds only
+  its small fields. The exception is a field that a reducer accumulates (`append`, `concat`, `merge`): it is
+  copied forward whole, so it counts toward the limit in every step it reaches.
+- **The flow's state when it ends** must fit in 256 MB, because the final state holds every field at once.
+  The same is true wherever a whole state crosses from one flow to another: a `Continue` turn's starting
+  state, a subgraph's input and its result, and the step a `Fork` restarts from. A flow should drop large
+  fields it no longer needs (`flow.Del`) before it ends.
+- **Initial state, baggage, resume data and an interrupt payload** must each fit in 256 MB.
+
+A value over the limit is refused before it is written. `Create`, `Continue`, `Resume` and `Fork` return
+a 413 error and create nothing. A step whose changes are too large fails at once, with an error naming the
+largest field, and its task is not run again. A flow whose final state is too large fails, and its final
+state is stored empty.
+
+PostgreSQL is the one database that can refuse a value below the limit: it stores JSON in a binary form that,
+for an array of many small numbers, is several times larger than the text. Such a value fails when it is
+written.
+
+On MySQL and MariaDB the limit holds only if the server's `max_allowed_packet` is at least 256M; see
+[Deployment](deployment.md#mysql--mariadb--supported-expect-tuning).
+
 ## What the engine does not bound
 
-The engine enforces **no** size or count limits: not on initial state, baggage, the frozen graph, interrupt
+Below the size limit, the engine enforces **no** size or count limits: not on initial state, baggage, the frozen graph, interrupt
 payloads, fan-out width, or subgraph nesting depth. This is the same reasoning as access control — a limit
 that fits a small control flow would reject a document-processing workflow that legitimately carries tens of
 megabytes per flow, and the identity a quota turns on is invisible to the engine.

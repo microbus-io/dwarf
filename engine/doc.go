@@ -108,7 +108,15 @@ limitations under the License.
 //
 // # Resource limits
 //
-// The engine imposes no size or count limits — not on initial state, baggage, the frozen graph JSON,
+// The one limit is what the database can store: no single JSON value the engine writes may exceed 256 MB
+// (256,000,000 bytes). That bounds a task's changes in one step, initial state, baggage, resume data, an
+// interrupt payload, and a flow's whole state when it ends (its final state holds every field at once). Mid-flow,
+// a large field is stored once and carried by reference, so a running flow's state may exceed the limit somewhat;
+// see docs/data-handling.md for how far.
+// Create, Continue, Resume and Fork return a 413 for an oversized value; a step that produces one fails at once,
+// and its task is not run again.
+//
+// Below it, the engine imposes no size or count limits — not on initial state, baggage, the frozen graph JSON,
 // interrupt/resume payloads, forEach fan-out width (one step row per array element), or subgraph nesting
 // depth. This is deliberate, the same division of labor as backpressure and time budgets: state size is
 // workload-defined (a document-processing workflow may legitimately carry tens of megabytes per flow), and no

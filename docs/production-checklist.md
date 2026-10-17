@@ -91,8 +91,13 @@
 - [ ] **`List` (and its `Query.Search`) is gated by credential** in your host. The engine has no notion of a caller, and
   `List` is the one operation that returns flow keys wholesale — which are capabilities.
   → [Data handling](data-handling.md#access-control-is-the-hosts-job)
-- [ ] **Quotas enforced before `Create`.** The engine bounds nothing: not initial state size, not baggage,
-  not fan-out width, not subgraph depth. → [Data handling](data-handling.md#what-the-engine-does-not-bound)
+- [ ] **Quotas enforced before `Create`.** Beyond refusing any single value over 256 MB, the engine bounds
+  nothing: not initial state size, not baggage, not fan-out width, not subgraph depth.
+  → [Data handling](data-handling.md#what-the-engine-does-not-bound)
+- [ ] **A flow's final state fits in 256 MB.** State can grow past it while the flow runs, but the final
+  state holds every field at once. → [Data handling](data-handling.md#the-size-limit-256-mb-per-value)
+- [ ] **MySQL/MariaDB: `max_allowed_packet` is at least 256M.**
+  → [Deployment](deployment.md#mysql--mariadb--supported-expect-tuning)
 
 ## Workflows and tasks
 

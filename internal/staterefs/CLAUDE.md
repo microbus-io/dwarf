@@ -212,6 +212,16 @@ both measure ~1x, so the ambiguity is moot and no server-version probe is needed
    anti-aliasing guarantee rests on immutability, not on copying.
    `TestLinker_ResolveCachesBytesNotValues` pins it (two resolves must not share a mutable value) and
    mutation-fails against a decoded-value cache.
+7. **Past `maxAnchors`, only anchors below `openThreshold` are inlined; a larger one keeps its ref however many
+   anchors there are.** Do not make `maxAnchors` a hard count again. A count that ignores size inlines a large
+   field, the next mint re-anchors it (its bytes now sit in that step's `state`) beside that step's own write,
+   and the step after inlines the then-smallest anchor: from the fifth large-field writer on, every step
+   rewrites one large field - the carry multiplier refs exist to remove. What the count buys - a shorter resolve IN-list - is paid only on a cache miss, and the minting
+   replica's cache holds the anchors (`Seed`, and the dispatch resolve); a miss reads them all in one round
+   trip, and the steps after it hit. The bar is this mint's own price for an
+   anchor, so a ref below it is one the policy would not have opened. Pinned by
+   `TestLinker_MintTiers`'s `over_max_anchors_inlines_only_small_anchors` and `large_anchors_survive_any_count`,
+   and against a real database `TestStateRefs_ManyLargeWritersStayByRef` (fails with the size test removed).
 
 ## `inlineOnly` is NOT "put a nil in changes"
 
