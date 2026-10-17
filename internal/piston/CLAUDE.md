@@ -514,6 +514,25 @@ per fetch against 9 ms, measured locally on PG 18 at saturation. Without the ran
 than the selection index on every column. The band scan keeps the plain predicate - it is what the due index is
 for. Pinned by `TestFetchQuery_PostgresPlan`, whose control (plain conjuncts) must seek `not_before`.
 
+### On pgx the fetch is planned with its values on every execution
+
+`FetchSteps` runs the fetch as an unnamed statement (`pgx.QueryExecModeCacheDescribe` as the first query
+argument; pgx consumes it through `database/sql` and sequel, which pass arguments through untouched). pgx's
+default prepares a named statement per connection, and after five executions Postgres may keep a GENERIC plan,
+made without the values, if it costs no more than the custom ones. Statistics taken at a small backlog make it
+look nearly free, and the plan it picks seeks `idx_dwarf_steps_due` on `(parked, priority)` alone, filters each
+key row by row and sorts: O(keys x backlog). Measured on a rig: one such fetch ran 509 s and held the vacuum
+horizon for all of it (`_WORK.md` #30). `CacheDescribe` stays one round trip; the cost is a plan per fetch, a few
+per second per shard. Pinned by `TestFetchSteps_PostgresPlansEveryExecution` (no named statement for the fetch
+after seven executions; a default-mode control leaves one).
+
+**Do not answer this with the CASE wrap the due-ness test uses.** That works because `not_before` is a column
+only the due index has. `parked` and `priority` lead BOTH indexes, so wrapping either one blinds the selection
+index too: on PG 18 its skip scan steps over the wrapped column and the plan puts a Sort on
+`(created_at, step_id)` under the `LIMIT`, losing the early stop (measured with `EXPLAIN (GENERIC_PLAN)`), and a
+server without skip scan (PG 16 and earlier) seeks on `status` alone. Nor set `plan_cache_mode` session-wide: it
+re-plans every hot-path statement to fix one background read.
+
 ### The lateral join is NOT available on two of the four dialects
 
 | dialect | key list | per-key cap | cost |

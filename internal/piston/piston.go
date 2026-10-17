@@ -48,6 +48,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/microbus-io/dwarf/internal/candidates"
 	"github.com/microbus-io/dwarf/internal/pipeline"
 	"github.com/microbus-io/dwarf/internal/planner"
@@ -949,6 +950,14 @@ func (p *Piston) FetchSteps(ctx context.Context, shard, band int, keys []string,
 	stmt, args, err := fetchQuery(p.db.DriverName(), band, keys, perKey*overFetch, part, partArgs)
 	if err != nil {
 		return nil, errors.Trace(err)
+	}
+	if p.db.DriverName() == "pgx" {
+		// An unnamed statement, planned with its actual values on every execution. pgx's default prepares a
+		// named statement per connection, and after five executions Postgres may keep a generic plan made
+		// without the values: one that does not know the key count or the band, and that seeks the due index on
+		// (parked, priority) and walks every due row at the band for each key (the ScanBand-shaped cost the
+		// lateral exists to avoid). CacheDescribe keeps it one round trip.
+		args = append([]any{pgx.QueryExecModeCacheDescribe}, args...)
 	}
 	// The turn must outlive the ROWS, not just the call, so this is deferred before the query - same
 	// ordering argument as in ScanBand.

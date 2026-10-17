@@ -92,3 +92,47 @@ func TestFetchQuery_PostgresPlan(t *testing.T) {
 	assert.False(seeksDue.MatchString(fetchPlan), "the fetch must not range-seek due-ness:\n%s", fetchPlan)
 	assert.True(seeksDue.MatchString(controlPlan), "control: plain conjuncts should let the due index seek:\n%s", controlPlan)
 }
+
+// TestFetchSteps_PostgresPlansEveryExecution pins that the Postgres fetch runs as an unnamed statement, so
+// Postgres plans it with its actual values on every execution and never caches a generic plan for it. A
+// generic plan does not know the key count or the band; after an ANALYZE taken at a small backlog it seeks the
+// due index on (parked, priority) and walks every due row at the band for each key (measured on a rig: a
+// 509-second fetch). Prepared statements are per session, so the pool is held to one connection and the
+// fetch runs past the five executions after which Postgres considers a generic plan. The control runs the
+// same statement in pgx's default mode, which must leave a named statement - proving the check can see one.
+func TestFetchSteps_PostgresPlansEveryExecution(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	if r.db.DriverName() != "pgx" {
+		t.Skip("named statements and generic plans are Postgres's")
+	}
+	r.db.SetMaxOpenConns(1)
+	r.db.SetMaxIdleConns(1)
+	r.insertStep(t, 1, 5, "alpha", 1)
+	r.insertStep(t, 2, 5, "beta", 1)
+
+	named := func() int {
+		var n int
+		err := r.db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM pg_prepared_statements WHERE statement LIKE '%CROSS JOIN LATERAL%'"+
+				" AND statement NOT LIKE '%pg_prepared_statements%'").Scan(&n)
+		assert.NoError(err)
+		return n
+	}
+	for range 7 {
+		got, err := r.p.FetchSteps(ctx, 1, 5, []string{"alpha", "beta"}, 2)
+		assert.NoError(err)
+		assert.Len(got, 2)
+	}
+	assert.Zero(named(), "the fetch must not leave a named statement, whose plan Postgres may make generic")
+
+	stmt, args, err := fetchQuery("pgx", 5, []string{"alpha", "beta"}, 2, "", nil)
+	assert.NoError(err)
+	rows, err := r.db.QueryContext(ctx, stmt, args...)
+	if assert.NoError(err) {
+		rows.Close()
+	}
+	assert.Equal(1, named(), "control: the default mode prepares a named statement")
+}
