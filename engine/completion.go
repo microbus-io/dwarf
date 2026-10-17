@@ -98,20 +98,29 @@ func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, flowI
 // fallback when it finds none. Each carries the flow's payload_ver, because the final state is computed for flows
 // this replica did not check at a claim (Terminate, the wedge sweep, a failStep past the deferral bound); the join
 // puts the check on a read it makes anyway. Snapshot, Step and Fork check on their own reads.
+//
+// firstCompletedTailSQL and firstAnyTailSQL read only the first tail's lineage, which decides whether the tail rows
+// are needed at all (readTerminalTails).
 const (
-	completedTailsSQL = "SELECT s.state, s.changes, s.state_refs, s.lineage_id, f.payload_ver FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.flow_id=? AND s.successor_id=0 AND s.status='" + workflow.StatusCompleted + "' ORDER BY s.step_id"
-	anyTailsSQL       = "SELECT s.state, s.changes, s.state_refs, s.lineage_id, f.payload_ver FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.flow_id=? AND s.successor_id=0 ORDER BY s.step_id"
+	completedTailsSQL     = "SELECT s.state, s.changes, s.state_refs, s.lineage_id, f.payload_ver FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.flow_id=? AND s.successor_id=0 AND s.status='" + workflow.StatusCompleted + "' ORDER BY s.step_id"
+	anyTailsSQL           = "SELECT s.state, s.changes, s.state_refs, s.lineage_id, f.payload_ver FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.flow_id=? AND s.successor_id=0 ORDER BY s.step_id"
+	firstCompletedTailSQL = "SELECT s.lineage_id, f.payload_ver FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.flow_id=? AND s.successor_id=0 AND s.status='" + workflow.StatusCompleted + "' ORDER BY s.step_id LIMIT_OFFSET(1, 0)"
+	firstAnyTailSQL       = "SELECT s.lineage_id, f.payload_ver FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.flow_id=? AND s.successor_id=0 ORDER BY s.step_id LIMIT_OFFSET(1, 0)"
 )
 
 // terminalTails is a flow's tail steps as read for its final state: the first tail's state is the merge base,
 // and every tail's changes fold onto it. Rows are kept as read and decoded only by a merge that uses them: when
 // the first tail is a cohort member, the final state is rebuilt from its cohort and the tails go unused.
+//
+// rowsSQL is set when only the first tail's lineage was read (readTerminalTails): the rows are then read only if
+// the merge turns out to need them after all.
 type terminalTails struct {
 	found       bool
 	baseState   []byte
 	baseRefs    []byte
 	baseLineage int
 	changes     [][]byte
+	rowsSQL     string
 }
 
 // scan reads one tail row.
@@ -150,8 +159,35 @@ func queueCompletedTails(b *txBatch, flowID int, t *terminalTails) {
 	}, completedTailsSQL, flowID)
 }
 
-// readTerminalTails reads a flow's tails by query into t.
-func readTerminalTails(ctx context.Context, db sequel.Executor, query string, flowID int, t *terminalTails) error {
+// readTerminalTails reads a flow's tails into t - its completed tails, or with all set every tail. It reads the
+// first tail's lineage first: a cohort member means the final state is rebuilt from its cohort, so no tail row is
+// read, which on a failed or terminated fan-out is every branch's full state and changes, under Terminate's and
+// failStep's locks. Otherwise it reads the rows.
+func readTerminalTails(ctx context.Context, db sequel.Executor, all bool, flowID int, t *terminalTails) error {
+	firstSQL, rowsSQL := firstCompletedTailSQL, completedTailsSQL
+	if all {
+		firstSQL, rowsSQL = firstAnyTailSQL, anyTailsSQL
+	}
+	var lineageID, flowPayloadVer int
+	err := db.QueryRowContext(ctx, firstSQL, flowID).Scan(&lineageID, &flowPayloadVer)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if err := checkPayloadVer(flowPayloadVer); err != nil {
+		return err
+	}
+	if lineageID != 0 {
+		t.found, t.baseLineage, t.rowsSQL = true, lineageID, rowsSQL
+		return nil
+	}
+	return readTailRows(ctx, db, rowsSQL, flowID, t)
+}
+
+// readTailRows reads every tail row by query into t.
+func readTailRows(ctx context.Context, db sequel.Executor, query string, flowID int, t *terminalTails) error {
 	rows, err := db.QueryContext(ctx, query, flowID)
 	if err != nil {
 		return errors.Trace(err)
@@ -172,7 +208,7 @@ func terminalTailsOf(ctx context.Context, db sequel.Executor, flowID int, comple
 		return completed, nil
 	}
 	t := &terminalTails{}
-	if err := readTerminalTails(ctx, db, anyTailsSQL, flowID, t); err != nil {
+	if err := readTerminalTails(ctx, db, true, flowID, t); err != nil {
 		return nil, errors.Trace(err)
 	}
 	return t, nil
@@ -241,7 +277,7 @@ func (e *Engine) flowGraph(ctx context.Context, db sequel.Executor, shardNum, fl
 // computeFinalState computes the merged state for a flow.
 func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shardNum, flowID int) ([]byte, string, error) {
 	var completed terminalTails
-	if err := readTerminalTails(ctx, db, completedTailsSQL, flowID, &completed); err != nil {
+	if err := readTerminalTails(ctx, db, false, flowID, &completed); err != nil {
 		return nil, "", errors.Trace(err)
 	}
 	return e.computeFinalStateFrom(ctx, db, shardNum, flowID, &completed)
@@ -300,7 +336,15 @@ func (e *Engine) computeFinalStateFrom(ctx context.Context, db sequel.Executor, 
 		merged, err = e.mergeCohortState(ctx, db, shardNum, flowID, outermost, graph, workflowURL)
 	} else {
 		// A tail outside every cohort - the ordinary completed flow, whose terminal step is downstream of every
-		// fan-in - is stripped of NOTHING: every fan-in it passed already stripped its own cohort's names.
+		// fan-in - is stripped of NOTHING: every fan-in it passed already stripped its own cohort's names. Its rows
+		// are still unread only when its lineage named a spawn that is gone.
+		if tails.rowsSQL != "" {
+			lazy := &terminalTails{}
+			if err := readTailRows(ctx, db, tails.rowsSQL, flowID, lazy); err != nil {
+				return nil, "", errors.Trace(err)
+			}
+			tails = lazy
+		}
 		merged, err = e.mergeTerminalSteps(ctx, db, shardNum, tails, workflowURL, graph.Reducers())
 	}
 	if err != nil {
