@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -246,7 +247,7 @@ func TestCancelOncePerFlow(t *testing.T) {
 		t.Fatal("the recovered flow never reached C")
 	}
 
-	assert.NoError(e.Cancel(ctx, fk, "second"), "a repeat is a no-op, not an error")
+	assert.NoError(e.Cancel(ctx, fk, "second"), "a repeat is not an error")
 	close(cGo)
 
 	outcome, err := e.Await(ctx, fk)
@@ -255,6 +256,56 @@ func TestCancelOncePerFlow(t *testing.T) {
 	}
 	assert.Equal(workflow.StatusCompleted, outcome.Status, "the second Cancel must not reach the recovered flow")
 	assert.True(outcome.State.GetBool("carriedOn"))
+}
+
+// TestCancel_RetryFinishesAFailedMark pins that a Cancel whose mark failed after its watermark committed is
+// finished by the retry. The steps it left unmarked would otherwise run on, and a flow whose last step was among
+// them completes uncancelled while the retry, finding the watermark set, reports success.
+func TestCancel_RetryFinishesAFailedMark(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	aStarted, aGo := make(chan struct{}), make(chan struct{})
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("CancelRetry")
+	g.SetURL("A", "cretry/a")
+	g.AddTransition("A", workflow.End) // A is the last step: no successor can inherit the mark
+	mux.HandleGraph("cretry/g", g)
+	mux.HandleTask("cretry/a", func(ctx context.Context, f *workflow.Flow) error {
+		close(aStarted)
+		<-aGo
+		return nil
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+	release := sync.OnceFunc(func() { close(aGo) })
+	defer release() // below the Shutdown defer, so it unwinds first
+
+	fk, err := e.Create(ctx, "cretry/g", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	select {
+	case <-aStarted:
+	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
+		t.Fatal("A never started")
+	}
+
+	e.seams.Inject(engineseams.FaultCancelMarkErr)
+	assert.Error(e.Cancel(ctx, fk, "stop"), "the mark failed after the watermark committed")
+	assert.NoError(e.Cancel(ctx, fk, "again"), "the retry finishes the mark")
+	release()
+
+	outcome, err := e.Await(ctx, fk)
+	if !assert.NoError(err) {
+		return
+	}
+	assert.Equal(workflow.StatusCancelled, outcome.Status, "A was marked by the retry, so its completion is cancelled")
+	assert.Equal("stop", outcome.CancelReason, "the first call's reason stands")
 }
 
 // TestCancelPreempt_ReasonReadErrorReleasesTheInFlightGauges pins that a Cancel-preempted step whose re-read of the

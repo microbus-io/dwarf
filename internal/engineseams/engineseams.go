@@ -95,6 +95,7 @@ const (
 	// Process-wide, consumed per attempt (InjectN sets how many attempts fail):
 	FaultCompleteSurgraphErr = "completeSurgraphErr" // the subgraph-completion write returns a non-contention database error
 	FaultCancelReasonReadErr = "cancelReasonReadErr" // a Cancel-preempted step's re-read of the cancel reason returns a non-contention database error
+	FaultCancelMarkErr       = "cancelMarkErr"       // a chunk of Cancel's step mark errors before it runs, after the watermark committed
 
 	// Process-wide (no scope):
 	FaultInterruptStaleWrite = "interruptStaleWrite" // the interrupt path's in-transaction lease-generation read is forced to mismatch (zombie)

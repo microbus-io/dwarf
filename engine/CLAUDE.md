@@ -313,7 +313,8 @@ a rollback on the interrupt chain): built, it multiplied dialect branches at fou
 writes are the class that breaks the MySQL fence (see "Lease fencing"). The cost of honoring is
 latency - a rare `Cancel` landing mid-task on a step that then arms a subgraph lets that child run to completion
 before its caller is redirected - and a `Terminate` covers the rare long child. (Not a second `Cancel`: a
-flow is cancelled once, and a repeat call is a no-op - see "one cancel per flow" on `cancel`.)
+flow is cancelled once, and a repeat call only re-applies the first call's watermark-bounded mark - see "one
+cancel per flow" on `cancel`.)
 
 *Two rules at the claim are load-bearing:*
 

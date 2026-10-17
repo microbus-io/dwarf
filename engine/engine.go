@@ -1320,9 +1320,10 @@ func (e *Engine) Terminate(ctx context.Context, flowKey string, reason string) e
 // when it is next resumed, and its resume data is not acted on. Cancel returns once the request is recorded,
 // not when the flow stops; use Await for that. Terminate is the unconditional, immediate alternative.
 //
-// A flow is cancelled once. Calling Cancel again on a flow already cancelled does nothing, so a call whose
-// response was lost is safe to retry - even after a handler has caught the first cancellation and the flow
-// has carried on. To stop a flow that recovered from its cancellation, Terminate it.
+// A flow is cancelled once. Calling Cancel again on a flow already cancelled records nothing new: the first
+// reason stands, and a flow whose handler caught the first cancellation and carried on is left alone. It does
+// finish delivering the first cancellation to the steps it covered, so a Cancel that returned an error, or
+// whose response was lost, is safe to retry. To stop a flow that recovered from its cancellation, Terminate it.
 func (e *Engine) Cancel(ctx context.Context, flowKey string, reason string) error {
 	if err := e.ensureStarted(); err != nil {
 		return errors.Trace(err)

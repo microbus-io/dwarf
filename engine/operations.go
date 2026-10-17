@@ -776,13 +776,17 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 // waits for it to commit, after which the mark below finds them pending. Every step inserted after the Cancel
 // sits above the watermark, which is what keeps a handler that caught the cancellation from passing it on.
 //
-// ONE CANCEL PER FLOW: a nonzero cancel_watermark means the flow was already cancelled, and a repeat call is
-// a no-op. Not cancel_reason, which may be empty and is shared with Terminate. A repeat that re-marked would
-// preempt the onError handler that caught the first cancellation - a host retrying a Cancel whose response
-// was lost would cancel a flow that had recovered - so a flow that recovers and must still stop is
-// Terminated. The watermark write is itself guarded on cancel_watermark=0, so two concurrent calls that both
-// read zero raise it once. A no-op on a terminal flow too, rather than a 409: the flow write is guarded to
-// non-terminal flows, so it can never rewrite a recorded outcome.
+// ONE CANCEL PER FLOW: a nonzero cancel_watermark means the flow was already cancelled, and a repeat call
+// writes no reason and no watermark. Not cancel_reason, which may be empty and is shared with Terminate. A
+// repeat does re-apply the mark, which is what makes a Cancel that failed after its watermark committed safe to
+// retry: otherwise the steps it left unmarked run on, and a flow whose last step was among them completes
+// uncancelled while the retry reports success. Re-applying it reaches only steps at or below each flow's
+// watermark, so it cannot touch the onError handler that caught the first cancellation, or anything else
+// inserted after it, and a flow that recovered is left alone; a flow that recovered and must still stop is
+// Terminated. Raising the watermark again would reach that handler, which is why a repeat never does. The
+// watermark write is itself guarded on cancel_watermark=0, so two concurrent calls that both read zero raise
+// it once. A no-op on a terminal flow, rather than a 409: the flow write is guarded to non-terminal flows, so
+// it can never rewrite a recorded outcome.
 func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) error {
 	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
@@ -811,8 +815,8 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	if surgraphFlowID != 0 {
 		return errors.New("cannot cancel a subgraph child; use the root flow key", http.StatusBadRequest)
 	}
-	if watermark != 0 || workflow.IsTerminalStatus(status) {
-		return nil // already cancelled, or already ended - see above. The writes below re-guard both.
+	if workflow.IsTerminalStatus(status) {
+		return nil // already ended - see above. The writes below re-guard it.
 	}
 
 	// Same tree-membership shape Terminate's descendant walk uses (root_flow_id scan, non-terminal nodes
@@ -831,26 +835,29 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	// subquery reads the snapshot taken before the statement waited for its row lock, so a single statement would
 	// miss a successor that a transition committed while holding that lock - and that successor could then run to
 	// completion before the mark below, unmarked, and pass nothing on. Every lock is taken before any watermark is
-	// read. The flow-id lists are chunked: a tree can hold more flows than a statement can bind.
-	err = db.Transact(ctx, func(tx *sequel.Tx) error {
-		for chunk := range slices.Chunk(allFlowIDs, inListChunk) {
-			ph, ids := inList(chunk)
-			lockFlowRows(ctx, tx, "flow_id IN ("+ph+") AND status NOT IN ("+terminalStatusesSQL+")", ids...)
+	// read. The flow-id lists are chunked: a tree can hold more flows than a statement can bind. A repeat
+	// Cancel skips it and only re-applies the mark (see "one cancel per flow" above).
+	if watermark == 0 {
+		err = db.Transact(ctx, func(tx *sequel.Tx) error {
+			for chunk := range slices.Chunk(allFlowIDs, inListChunk) {
+				ph, ids := inList(chunk)
+				lockFlowRows(ctx, tx, "flow_id IN ("+ph+") AND status NOT IN ("+terminalStatusesSQL+")", ids...)
+			}
+			for chunk := range slices.Chunk(allFlowIDs, inListChunk) {
+				ph, ids := inList(chunk)
+				tx.ExecContext(ctx,
+					"UPDATE dwarf_flows SET cancel_reason=?,"+
+						" cancel_watermark=(SELECT COALESCE(MAX(s.step_id), 0) FROM dwarf_steps s WHERE s.flow_id=dwarf_flows.flow_id),"+
+						" touch=1-touch WHERE flow_id IN ("+ph+") AND status NOT IN ("+terminalStatusesSQL+")"+
+						" AND cancel_watermark=0",
+					append([]any{reason}, ids...)...,
+				)
+			}
+			return nil
+		})
+		if err != nil {
+			return errors.Trace(err)
 		}
-		for chunk := range slices.Chunk(allFlowIDs, inListChunk) {
-			ph, ids := inList(chunk)
-			tx.ExecContext(ctx,
-				"UPDATE dwarf_flows SET cancel_reason=?,"+
-					" cancel_watermark=(SELECT COALESCE(MAX(s.step_id), 0) FROM dwarf_steps s WHERE s.flow_id=dwarf_flows.flow_id),"+
-					" touch=1-touch WHERE flow_id IN ("+ph+") AND status NOT IN ("+terminalStatusesSQL+")"+
-					" AND cancel_watermark=0",
-				append([]any{reason}, ids...)...,
-			)
-		}
-		return nil
-	})
-	if err != nil {
-		return errors.Trace(err)
 	}
 	e.seams.Checkpoint(ctx, engineseams.CheckpointCancelBeforeMark)
 	// The mark reaches only steps at or below their flow's watermark. A step above it was inserted after the
@@ -860,6 +867,9 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	// second time to the handler written to catch it. A chunk holds whole flows, so each flow is marked by one
 	// statement.
 	for chunk := range slices.Chunk(allFlowIDs, inListChunk) {
+		if e.seams.IsFault(engineseams.FaultCancelMarkErr) {
+			return errors.New("injected fault: " + engineseams.FaultCancelMarkErr)
+		}
 		ph, ids := inList(chunk)
 		_, err = db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET cancelling=1 WHERE flow_id IN ("+ph+")"+

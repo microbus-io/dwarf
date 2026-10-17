@@ -198,9 +198,10 @@ err := eng.Cancel(ctx, flowKey, "customer withdrew the order") // surfaced as Ca
   sleeping or backed-off step is reached when it next wakes, and an interrupted flow stays `interrupted` until
   someone calls `Resume` or `Terminate`.
 - Address the flow by its root key; calling `Cancel` on a flow that has already stopped does nothing.
-- **A flow is cancelled once.** A second `Cancel` on a flow already cancelled does nothing, so a call whose
-  response was lost is safe to retry - even after an `onError` handler caught the first cancellation and the
-  flow carried on. To stop a flow that recovered, `Terminate` it.
+- **A flow is cancelled once.** A second `Cancel` on a flow already cancelled records nothing new: the first
+  reason stands, and a flow whose `onError` handler caught the first cancellation and carried on is left
+  alone. It does finish delivering the first cancellation, so a `Cancel` that returned an error, or whose
+  response was lost, is safe to retry. To stop a flow that recovered, `Terminate` it.
 
 ## Terminating, and recovering with Fork
 
