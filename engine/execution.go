@@ -999,6 +999,17 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultPersistErr, taskName)) {
 				return errors.New("injected fault: " + engineseams.FaultPersistErr + " " + taskName)
 			}
+			// engineseams.FaultPersistSlowErr is the same failure, slow: a write that takes the whole retry window to be
+			// rejected, like a row near a column limit, so no retry can fit after it. FaultPersistStallErr takes half
+			// the window, like a write a failover stalls until its connection resets, so each retry still fits.
+			if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultPersistSlowErr, taskName)) {
+				time.Sleep(e.persistRetryWindow())
+				return errors.New("injected fault: " + engineseams.FaultPersistSlowErr + " " + taskName)
+			}
+			if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultPersistStallErr, taskName)) {
+				time.Sleep(e.persistRetryWindow() / 2)
+				return errors.New("injected fault: " + engineseams.FaultPersistStallErr + " " + taskName)
+			}
 			const where = " WHERE step_id=? AND status NOT IN ('" + workflow.StatusTerminated + "', '" + workflow.StatusCancelled + "') AND lease_seq=?"
 			switch db.DriverName() {
 			case "pgx", "sqlite":

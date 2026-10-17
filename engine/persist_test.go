@@ -29,6 +29,7 @@ import (
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
@@ -179,6 +180,88 @@ func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testi
 	assert.Equal(int32(1), runs.Load(), "nothing re-dispatches a terminalized step")
 }
 
+// slowWriteEngine is a one-task flow whose task counts its executions, on an engine whose persist lease renewal
+// is 1s, so its retry window is 500ms.
+func slowWriteEngine(t *testing.T, prefix string, runs *atomic.Int32) (*Engine, sdkmetric.Reader) {
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("Persist")
+	g.SetURL("A", prefix+"/a")
+	g.AddTransition("A", workflow.End)
+	mux.HandleGraph(prefix+"/wf", g)
+	mux.HandleTask(prefix+"/a", func(ctx context.Context, f *workflow.Flow) error {
+		runs.Add(1)
+		f.SetString("out", "done")
+		return nil
+	})
+	e := NewEngineUnderTest(t.Name())
+	e.SetHost(mux)
+	e.persistBackoff = shortPersistBackoff
+	e.persistLeaseExtension = time.Second
+	reader := withManualReader(e)
+	return e, reader
+}
+
+// TestPersist_SlowFailingWriteFailsTheStepWithoutRetrying pins the retry window. A write that keeps failing and
+// takes the whole window to be rejected leaves no room for a retry, so persist goes straight to the classifier
+// while the step is still its own, and the step fails after one execution. Retrying anyway is what let a ladder of
+// slow failures outlive its lease: lease recovery took the step, the final failStep was fenced into a silent
+// no-op, and the task re-ran forever. Without the window this test retries three times.
+func TestPersist_SlowFailingWriteFailsTheStepWithoutRetrying(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	var runs atomic.Int32
+	e, reader := slowWriteEngine(t, "p/slow", &runs)
+	defer e.Shutdown(ctx)
+	assert.NoError(e.Startup(t.Context()))
+	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistSlowErr, "A"), 1000)
+
+	_, outcome, err := e.Run(ctx, "p/slow/wf", nil, nil)
+	if !assert.NoError(err) || !assert.NotNil(outcome) {
+		return
+	}
+	assert.Equal(workflow.StatusFailed, outcome.Status)
+	assert.Contains(outcome.Error, engineseams.FaultPersistSlowErr)
+	assert.Equal(int32(1), runs.Load(), "the task must execute exactly once")
+
+	var rm metricdata.ResourceMetrics
+	assert.NoError(reader.Collect(ctx, &rm))
+	retried, _ := sumCounter(rm, "dwarf_steps_write_retried", "", "")
+	assert.Equal(int64(0), retried, "no retry fits after a failure that took the whole window")
+	failed, _ := sumCounter(rm, "dwarf_steps_write_failed", "", "")
+	assert.Equal(int64(1), failed)
+}
+
+// TestPersist_StalledWritesAreRetriedOnARenewedLease pins that the window is per retry. Two writes that each stall
+// for half the window before failing - a failover holding them until their connections reset - are followed by one
+// that lands: the flow completes with the task run once. Measured from a single renewal, the second retry would not
+// fit, and the step would fail over a fault that had already cleared.
+func TestPersist_StalledWritesAreRetriedOnARenewedLease(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	var runs atomic.Int32
+	e, reader := slowWriteEngine(t, "p/stall", &runs)
+	defer e.Shutdown(ctx)
+	assert.NoError(e.Startup(t.Context()))
+	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistStallErr, "A"), 2)
+
+	_, outcome, err := e.Run(ctx, "p/stall/wf", nil, nil)
+	if !assert.NoError(err) || !assert.NotNil(outcome) {
+		return
+	}
+	assert.Equal(workflow.StatusCompleted, outcome.Status, "a write that stalls and then clears must not fail the flow")
+	assert.Equal("done", stateVal(outcome.State, "out"))
+	assert.Equal(int32(1), runs.Load(), "the WRITE is retried, never the task")
+
+	var rm metricdata.ResourceMetrics
+	assert.NoError(reader.Collect(ctx, &rm))
+	retried, _ := sumCounter(rm, "dwarf_steps_write_retried", "", "")
+	assert.Equal(int64(2), retried)
+}
+
 // TestPersist_LeaseExtensionStatusGuard pins that persist's lease-extension UPDATE is guarded on
 // `status IN ('running','completed')` - the two states a worker legitimately holds a step in - so it extends
 // the lease of a step we still own but NEVER stamps a future lease_expires onto one that lease recovery has
@@ -246,7 +329,7 @@ func TestPersist_LeaseExtensionStatusGuard(t *testing.T) {
 
 	// A `completed` step whose transition write is retrying IS still ours (that is the second persist site): the
 	// extension must land, the retry loop must run, and a lease shorter than the extension must move out to
-	// ~persistLeaseExtensionMs. A lease already longer is kept, not cut back - and the step is still not fenced,
+	// ~persistLeaseExtension. A lease already longer is kept, not cut back - and the step is still not fenced,
 	// though the extension then changes nothing.
 	t.Run("completed_is_extended_not_fenced", func(t *testing.T) {
 		assert := testarossa.For(t)
@@ -266,7 +349,7 @@ func TestPersist_LeaseExtensionStatusGuard(t *testing.T) {
 		assert.False(errors.Is(err, errPersistFenced), "a completed step we own (transition retry) must NOT be fenced")
 		assert.True(writeCalls > 1, "the retry loop must run for a step we still own, got %d write(s)", writeCalls)
 		after := leaseMsOut(t, db)
-		assert.True(after > 20000 && after < 60000, "a short lease must be extended to ~persistLeaseExtensionMs (30s), got %.0fms", after)
+		assert.True(after > 50000 && after < 90000, "a short lease must be extended to ~persistLeaseExtension (60s), got %.0fms", after)
 
 		_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), 999000) WHERE step_id=1")
 		assert.NoError(err)

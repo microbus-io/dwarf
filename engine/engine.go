@@ -332,6 +332,14 @@ type Engine struct {
 	// after the second attempt. A per-engine field (not a package var) so a test shortens it on its own
 	// engine without racing a parallel peer.
 	persistBackoff []time.Duration
+	// persistLeaseExtension is how far ahead persist renews a step's lease before each retry (60s): the first half
+	// covers the retry's sleep and write (persistRetryWindow), the second leaves failOnPersistError room to fail the
+	// step. Without it a task that consumed most of its time budget has only `leaseMargin` left, so the backoff would
+	// put us PAST the lease: a peer re-claims the step, re-executes the task, and our late write is fenced and
+	// discarded - precisely the re-execution persist exists to prevent. A crash mid-ladder strands the step for up to
+	// this long - or for what remained of its original lease, if that was longer, since a renewal never shortens a
+	// lease - before lease recovery can take it.
+	persistLeaseExtension time.Duration
 
 	// Test-only instrumentation seams (see engineundertest.go), delegated to a seamster.Seamster constructed enabled
 	// under testing.Testing() in NewEngine. Every consult is a lock-free bool read in production. The
@@ -372,6 +380,7 @@ func NewEngine() *Engine {
 	// is cutting short a wait somebody legitimately asked for.
 	e.awaitDefaultBudget = 15 * time.Minute
 	e.persistBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+	e.persistLeaseExtension = 60 * time.Second
 	e.recoveryInterval = time.Minute
 	e.parkWedgeThreshold = 5 * time.Minute
 	e.orphanFlowThreshold = 5 * time.Minute

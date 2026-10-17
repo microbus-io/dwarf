@@ -50,15 +50,18 @@ const (
 	// contentionMaxAttempts matches Transact's retry depth, so a statement run on its own survives the same
 	// contention a transaction does.
 	contentionMaxAttempts = 8
-
-	// persistLeaseExtensionMs holds the step across the retry window. Without it a task that consumed most of
-	// its time budget has only `leaseMargin` left, so sleeping through the backoff would put us PAST the lease:
-	// a peer re-claims the step, re-executes the task, and our late write is fenced and discarded - precisely
-	// the re-execution this exists to prevent. It is deliberately modest (the whole window is ~7s): a crash
-	// mid-retry strands the step for this long - or for what remained of its original lease, if that was longer,
-	// since an extension never shortens a lease - before lease recovery can take it.
-	persistLeaseExtensionMs = 30_000
 )
+
+// persistRetryWindow is the first half of each lease renewal (30s of the default 60s): a retry must be expected to
+// finish inside it. The second half is left for failOnPersistError, whose failStep reads the flow's final state,
+// which can be large.
+//
+// Do not let a retry run past it. A write that keeps failing and is SLOW (a row near a column or packet limit, a slow
+// link) otherwise outlives the lease mid-ladder: lease recovery takes the step and re-runs the task, the failStep at
+// the end of the ladder is fenced into a silent no-op, and every re-run repeats it.
+func (e *Engine) persistRetryWindow() time.Duration {
+	return e.persistLeaseExtension / 2
+}
 
 var (
 	// errPersistFenced: a peer re-claimed the step while we were failing. We are a zombie; abandon silently.
@@ -102,7 +105,9 @@ func retryContention(ctx context.Context, stmt func() error) error {
 // yield hands back whatever the caller is holding for the duration of a wait that is not the database -
 // see the backoff below. Nil means the caller holds nothing.
 func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, leaseSeq int, write func() error, yield func(func())) error {
+	started := time.Now()
 	err := write()
+	lastWrite := time.Since(started)
 	if err == nil {
 		return nil
 	}
@@ -118,35 +123,50 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 		return errors.Trace(err)
 	}
 
-	// Extend the lease BEFORE sleeping, so the backoff cannot outlive our ownership of the step. This write
-	// carries no payload, so it is not subject to whatever is killing the real one.
-	//
-	// The status guard is load-bearing, not decoration. It matches the two states a worker legitimately HOLDS a
-	// step in - `running` (its outcome has not landed) and `completed` (it landed, but the follow-up transition
-	// has not) - exactly as releaseLease does, because persist sites of both kinds reach here: the completion
-	// write, a Retry rewind, a subgraph spawn and an interrupt retry while the step is `running`, the transition
-	// writes while it is `completed`. Restricting to `running` alone would wrongly fence the transition retry.
-	// A write that already landed moves the step out of both (a rewind to `pending`, an interrupt to
-	// `interrupted`, a spawn to parked), so a retry after an ambiguous commit finds the step not ours and stops.
-	//
-	// What the guard excludes is the case this closes: lease recovery resets an expired step to `pending` WITHOUT
-	// bumping `lease_seq` (see "Lease fencing"), so the generation fence alone still matches a step recovery has
-	// already taken back. Stamping a FUTURE `lease_expires` onto that pending row would strand it OUTRIGHT: every
-	// claim and selection predicate requires `lease_expires<=NOW` on a pending step, so no piston cycle would ever
-	// select it, and lease recovery could not rescue it either - that sweep only resets `running` rows. The step
-	// would simply sit `pending` and invisible until its future lease lapsed on its own.
-	//
-	// A zero-row match (the query SUCCEEDED but matched nothing) therefore means we no longer own the step - a peer
-	// re-claimed it (lease_seq bumped), recovery reset it to `pending`, or a racing Terminate terminalized it. Abandon
-	// silently: retrying would be a zombie's write, and the fence would reject it anyway. An ERROR here means the
-	// database is unreachable, which is exactly the case the retry loop is for - so fall through and try, with
-	// whatever lease we still hold (the margin is 30s and the window is ~7s, so there is room unless the task
-	// burned its entire budget).
-	if held, xerr := e.extendLease(ctx, db, stepID, leaseSeq); xerr == nil && !held {
-		return errPersistFenced
-	}
-
 	for _, backoff := range e.persistBackoff {
+		// Renew the lease BEFORE each sleep, so the retry cannot outlive our ownership of the step: its first half
+		// (persistRetryWindow) must cover the sleep and the write, the second is left for failOnPersistError to fail
+		// the step. Renewing per retry rather than once keeps the whole ladder for a write that is slow but
+		// transient - a failover can stall one for tens of seconds before its connection resets - while a write
+		// that is slow every time still ends inside a lease we hold. This write carries no payload, so it is not
+		// subject to whatever is killing the real one.
+		//
+		// The status guard is load-bearing, not decoration. It matches the two states a worker legitimately HOLDS a
+		// step in - `running` (its outcome has not landed) and `completed` (it landed, but the follow-up transition
+		// has not) - exactly as releaseLease does, because persist sites of both kinds reach here: the completion
+		// write, a Retry rewind, a subgraph spawn and an interrupt retry while the step is `running`, the transition
+		// writes while it is `completed`. Restricting to `running` alone would wrongly fence the transition retry.
+		// A write that already landed moves the step out of both (a rewind to `pending`, an interrupt to
+		// `interrupted`, a spawn to parked), so a retry after an ambiguous commit finds the step not ours and stops.
+		//
+		// What the guard excludes is the case this closes: lease recovery resets an expired step to `pending` WITHOUT
+		// bumping `lease_seq` (see "Lease fencing"), so the generation fence alone still matches a step recovery has
+		// already taken back. Stamping a FUTURE `lease_expires` onto that pending row would strand it OUTRIGHT: every
+		// claim and selection predicate requires `lease_expires<=NOW` on a pending step, so no piston cycle would ever
+		// select it, and lease recovery could not rescue it either - that sweep only resets `running` rows. The step
+		// would simply sit `pending` and invisible until its future lease lapsed on its own.
+		//
+		// A zero-row match (the query SUCCEEDED but matched nothing) therefore means we no longer own the step - a peer
+		// re-claimed it (lease_seq bumped), recovery reset it to `pending`, or a racing Terminate terminalized it. Abandon
+		// silently: retrying would be a zombie's write, and the fence would reject it anyway. An ERROR here means the
+		// database is unreachable, which is exactly the case the retry loop is for - so fall through and try, with
+		// whatever lease we still hold.
+		//
+		// The window is measured from BEFORE the renewal: the lease runs from the database's NOW at the UPDATE, and
+		// on a slow link the round trip back can take seconds.
+		renewed := time.Now()
+		if held, xerr := e.extendLease(ctx, db, stepID, leaseSeq); xerr == nil && !held {
+			e.logLostLease(ctx, stepID, err)
+			return errPersistFenced
+		}
+		// A retry starts only if it should finish inside the window, judged by how long the write that just failed
+		// took: repeated failures of one write take about as long as each other. It is not cancelled mid-flight
+		// instead - a cancelled write can still commit, and failStep, which matches a `completed` step, would then
+		// fail a step whose outcome landed.
+		deadline := renewed.Add(e.persistRetryWindow())
+		if time.Until(deadline) < backoff+lastWrite {
+			break
+		}
 		// The sleep is not database work, so whatever admission the caller is holding goes back for its
 		// duration - up to ~7s across the whole ladder. Holding it would park a turn on a timer, which is
 		// the one thing the admission rule forbids, and it would do so during a database blip: exactly when
@@ -175,8 +195,13 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 			e.releaseLease(ctx, db, stepID, leaseSeq)
 			return errPersistDrained
 		}
+		if time.Until(deadline) < lastWrite {
+			break // waiting for the turn back took the room the retry needed
+		}
 		e.metricStepWriteRetried(ctx, shardNum)
+		started = time.Now()
 		err = write()
+		lastWrite = time.Since(started)
 		if err == nil {
 			return nil
 		}
@@ -193,7 +218,17 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 	return errors.Trace(err)
 }
 
-// extendLease ensures a step's lease runs at least persistLeaseExtensionMs into the future, fenced on the lease
+// logLostLease reports a step whose outcome write failed for a reason of its own and that was then no longer this
+// worker's. Usually lease recovery has taken it and the task runs again; a write that fails every time makes that a
+// loop, which shows here and as dwarf_steps_recovered climbing. It is a warning, not an error: a write that landed
+// with its acknowledgement lost, or a racing Terminate or Cancel, also moves the step out of this worker's hands, and
+// then nothing runs again. A zombie whose write the fence rejected never gets here: persist returns before it.
+func (e *Engine) logLostLease(ctx context.Context, stepID int, writeErr error) {
+	e.logger.WarnContext(ctx, "Step is no longer this worker's after its outcome write failed; it may run again",
+		"step", stepID, "error", writeErr)
+}
+
+// extendLease ensures a step's lease runs at least persistLeaseExtension into the future, fenced on the lease
 // generation and on the two states a worker holds a step in (see persist for why the status guard is load-bearing),
 // unparked: a parked caller waits on its child and belongs to no worker, so a persist that finds its own write
 // parked the step has landed it and must stop.
@@ -207,7 +242,7 @@ func (e *Engine) extendLease(ctx context.Context, db *sequel.DB, stepID, leaseSe
 	const owned = " WHERE step_id=? AND lease_seq=? AND parked=? AND status IN ('" + workflow.StatusRunning + "', '" + workflow.StatusCompleted + "')"
 	res, err := db.ExecContext(ctx,
 		"UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), ?)"+owned+" AND lease_expires < DATE_ADD_MILLIS(NOW_UTC(), ?)",
-		persistLeaseExtensionMs, stepID, leaseSeq, parkedNone, persistLeaseExtensionMs,
+		e.persistLeaseExtension.Milliseconds(), stepID, leaseSeq, parkedNone, e.persistLeaseExtension.Milliseconds(),
 	)
 	if err != nil {
 		return false, errors.Trace(err)
@@ -267,6 +302,7 @@ func (e *Engine) failOnPersistError(ctx context.Context, shardNum, stepID, lease
 		return errors.Trace(writeErr)
 	}
 	if fenced {
+		e.logLostLease(ctx, stepID, writeErr)
 		return nil
 	}
 	// A nonzero dwarf_steps_write_failed means a write the engine could not land was permanent - a latent bug

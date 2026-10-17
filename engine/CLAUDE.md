@@ -1733,11 +1733,29 @@ the completion write.
   dropped connection, a momentary connection-limit rejection - clear in **seconds**, so a blip is absorbed with
   **zero re-execution**. A minutes-long backoff would be slow in both directions: slow to recover from something
   that already cleared, and slow to report a permanent failure.
-- **The lease is extended first** (`persistLeaseExtensionMs`, 30s). Without it, a task that consumed most of its
-  budget has only `leaseMargin` left, so sleeping through the backoff would put the worker *past* its lease: a peer
-  re-claims, **re-executes the task**, and the late write is fenced away - exactly the re-execution this prevents.
-  The extension is itself a fenced, payload-free write, so a **zero-row** match means a peer already re-claimed us
-  and we abandon silently.
+- **The lease is renewed before each retry** (`persistLeaseExtension`, 60s). Without it, a task that consumed most
+  of its budget has only `leaseMargin` left, so sleeping through the backoff would put the worker *past* its lease:
+  a peer re-claims, **re-executes the task**, and the late write is fenced away - exactly the re-execution this
+  prevents. The renewal is itself a fenced, payload-free write, so a **zero-row** match means the step is no longer
+  ours and we abandon silently.
+- **Each retry must end inside the first half of its renewal** (`persistRetryWindow`, 30s); the second half is left
+  for `failOnPersistError`, whose `failStep` reads the final state. A retry starts only if, judged by how long the
+  write that just failed took, it should finish in time; otherwise the ladder stops and the step is classified while
+  it is still ours. Two rules hold it up:
+  - **Renew per retry, measured from before the renewal.** One renewal for the whole ladder fails a flow over a
+    write that is slow but transient (a failover stalls it until its connection resets) that a later retry would
+    have landed. The window starts before the renewal's round trip, because the lease starts at the database's NOW.
+  - **Do not cancel a retry at the deadline instead:** a cancelled write can still commit, and `failStep` matches a
+    `completed` step, so it would fail a step whose outcome landed.
+
+  Left unbounded, a write that keeps failing *slowly* (a row near a column or packet limit, a slow link) outlives
+  the lease: lease recovery re-runs the task, the classifier's `failStep` is fenced into a silent no-op, and the
+  next run repeats it - forever, with 300 MB rows measured at ~25-70s per rejection. Pinned by
+  `TestPersist_SlowFailingWriteFailsTheStepWithoutRetrying` (`FaultPersistSlowErr`) and
+  `TestPersist_StalledWritesAreRetriedOnARenewedLease` (`FaultPersistStallErr`). What the window cannot cover is a
+  FIRST write that outlives the lease before persist can act: it shows as `dwarf_steps_recovered` climbing and a
+  `logLostLease` warning (a warning, because a write that landed with its acknowledgement lost, or a racing
+  Terminate, also loses the step and nothing runs again).
 - **Drain aborts it.** A worker asleep in the backoff selects on `drainStop` (closed at the top of `drainRuntime` -
   the lifetime ctx is deliberately not cancelled until *after* the workers drain, so there is nothing else to
   watch), releases its lease, and exits. That *does* re-execute the task on the peer that picks it up - it is the

@@ -82,6 +82,8 @@ const (
 	FaultContention           = "contention"           // a dispatch transaction returns a lock-contention error
 	FaultLeaseStaleWrite      = "leaseStaleWrite"      // the completion write carries a stale lease_seq (zombie)
 	FaultPersistErr           = "persistErr"           // the step-completion write returns a non-contention database error (consumed per attempt, so InjectN sets how many attempts fail)
+	FaultPersistSlowErr       = "persistSlowErr"       // the step-completion write takes the whole persist retry window, then returns a non-contention database error (consumed per attempt)
+	FaultPersistStallErr      = "persistStallErr"      // the step-completion write takes half the persist retry window, then returns a non-contention database error (consumed per attempt)
 	FaultCompletionContention = "completionContention" // the step-completion write returns a lock-contention error (consumed per attempt, so InjectN sets how many attempts fail)
 	FaultSubgraphSpawnErr     = "subgraphSpawnErr"     // the subgraph spawn errors before its transaction, with the caller step not yet parked
 	FaultRetryRewindErr       = "retryRewindErr"       // the flow.Retry rewind returns a non-contention database error (consumed per attempt)

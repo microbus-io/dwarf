@@ -112,7 +112,7 @@ func (s *cohortStripe) unlock() {
 // The caller parks holding NO turn: the stripe exists so a losing sibling waits without occupying a connection, and
 // a turn is that occupancy one level up.
 func (e *Engine) lockCohortStripe(ctx context.Context, stripe *cohortStripe, db *sequel.DB, shardNum, stepID, leaseSeq int) bool {
-	interval := min(e.leaseMargin, persistLeaseExtensionMs*time.Millisecond) / 2
+	interval := min(e.leaseMargin, e.persistLeaseExtension) / 2
 	return stripe.lock(interval, func() bool {
 		tctx, doneTurn := e.dbTurn(ctx, shardNum)
 		defer doneTurn()
