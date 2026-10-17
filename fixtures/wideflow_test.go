@@ -19,6 +19,7 @@ package fixtures
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
@@ -67,6 +68,33 @@ func TestWideflow(t *testing.T) {
 	pause.AddTransition("Wait", workflow.End)
 	mux.HandleGraph("wideflow.verify:428/pause", pause)
 
+	// The same tree with a leaf that completes.
+	doneTree := workflow.NewGraph("WideDoneTree")
+	doneTree.SetURL("Seed", "wideflow.verify:428/seed")
+	doneTree.SetURL("Call", "wideflow.verify:428/calldone")
+	doneTree.SetURL("Join", "wideflow.verify:428/join")
+	doneTree.SetFanIn("Join")
+	doneTree.AddTransitionForEach("Seed", "Call", "items", "item")
+	doneTree.AddTransitionChain("Call", "Join", workflow.End)
+	mux.HandleGraph("wideflow.verify:428/donetree", doneTree)
+
+	leaf := workflow.NewGraph("Leaf")
+	leaf.SetURL("Leaf", "wideflow.verify:428/seed")
+	leaf.AddTransition("Leaf", workflow.End)
+	mux.HandleGraph("wideflow.verify:428/leaf", leaf)
+
+	// Top calls a tree as a subgraph, so the tree's flow is a mid-tree flow with every Call's child beneath it.
+	outer := workflow.NewGraph("WideOuter")
+	outer.SetURL("Top", "wideflow.verify:428/top")
+	outer.AddTransition("Top", workflow.End)
+	mux.HandleGraph("wideflow.verify:428/outer", outer)
+
+	// Top calls the completing tree, then retries once, which reaps that child and the whole tree under it.
+	retry := workflow.NewGraph("WideRetry")
+	retry.SetURL("Top", "wideflow.verify:428/topretry")
+	retry.AddTransition("Top", workflow.End)
+	mux.HandleGraph("wideflow.verify:428/retry", retry)
+
 	noop := func(ctx context.Context, f *workflow.Flow) error { return nil }
 	mux.HandleTask("wideflow.verify:428/seed", noop)
 	mux.HandleTask("wideflow.verify:428/join", noop)
@@ -79,6 +107,39 @@ func TestWideflow(t *testing.T) {
 		if yield || err != nil {
 			return err
 		}
+		return nil
+	})
+	mux.HandleTask("wideflow.verify:428/calldone", func(ctx context.Context, f *workflow.Flow) error {
+		yield, err := f.Subgraph("wideflow.verify:428/leaf", nil, nil)
+		if yield || err != nil {
+			return err
+		}
+		return nil
+	})
+	mux.HandleTask("wideflow.verify:428/top", func(ctx context.Context, f *workflow.Flow) error {
+		var ids []int
+		if _, err := f.Get("items", &ids); err != nil {
+			return err
+		}
+		yield, err := f.Subgraph("wideflow.verify:428/tree", map[string]any{"items": ids}, nil)
+		if yield || err != nil {
+			return err
+		}
+		return nil
+	})
+	mux.HandleTask("wideflow.verify:428/topretry", func(ctx context.Context, f *workflow.Flow) error {
+		if f.Attempt() > 0 {
+			return nil
+		}
+		var ids []int
+		if _, err := f.Get("items", &ids); err != nil {
+			return err
+		}
+		yield, err := f.Subgraph("wideflow.verify:428/donetree", map[string]any{"items": ids}, nil)
+		if yield || err != nil {
+			return err
+		}
+		f.Retry(time.Millisecond, 1, time.Millisecond, 0)
 		return nil
 	})
 	mux.HandleTask("wideflow.verify:428/wait", func(ctx context.Context, f *workflow.Flow) error {
@@ -132,21 +193,21 @@ func TestWideflow(t *testing.T) {
 	t.Run("subgraph_tree_past_the_ceiling", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		// Terminate binds three parameters per flow of the tree, so 750 children are past it.
-		const width = 750
-		flowKey, err := eng.Create(ctx, "wideflow.verify:428/tree", items(width), nil)
+		// Root -> Top's child (the tree) -> one Pause flow per item. The tree's flow has 2,200 descendants, so
+		// its fingerprint lists them; Cancel and Terminate list every flow of the root's tree.
+		const width = 2200
+		flowKey, err := eng.Create(ctx, "wideflow.verify:428/outer", items(width), nil)
 		if !assert.NoError(err) {
 			return
 		}
-		// The root rests interrupted at the first child's interrupt, so wait for every one of them.
+		// The root rests interrupted at the first leaf's interrupt, so wait for every one of them.
 		awaitPropagatedInterrupts(t, eng, flowKey, width)
-		children, _, err := eng.List(ctx, workflow.Query{WorkflowURL: "wideflow.verify:428/pause", IncludeSubgraphs: true, Limit: 2 * width})
-		if !assert.NoError(err) || !assert.Len(children, width) {
+		trees, _, err := eng.List(ctx, workflow.Query{WorkflowURL: "wideflow.verify:428/tree", IncludeSubgraphs: true})
+		if !assert.NoError(err) || !assert.Len(trees, 1) {
 			return
 		}
 
-		// A fingerprint of the root covers the whole tree; one of a child covers its own subtree.
-		for _, key := range []string{flowKey, children[0].FlowKey} {
+		for _, key := range []string{flowKey, trees[0].FlowKey} {
 			fp1, _, err := eng.Fingerprint(ctx, key)
 			assert.NoError(err)
 			fp2, _, err := eng.Fingerprint(ctx, key)
@@ -166,6 +227,23 @@ func TestWideflow(t *testing.T) {
 		terminated, _, err := eng.List(ctx, workflow.Query{WorkflowURL: "wideflow.verify:428/pause", IncludeSubgraphs: true, Status: workflow.StatusTerminated, Limit: 2 * width})
 		if assert.NoError(err) {
 			assert.Len(terminated, width)
+		}
+	})
+
+	t.Run("retry_reaps_a_tree_past_the_ceiling", func(t *testing.T) {
+		assert := testarossa.For(t)
+
+		// Top's retry reaps its child and the 2,200 leaves under it, listing them level by level.
+		const width = 2200
+		_, out, err := eng.Run(ctx, "wideflow.verify:428/retry", items(width), nil)
+		if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, out.Status) {
+			return
+		}
+		for _, url := range []string{"wideflow.verify:428/donetree", "wideflow.verify:428/leaf"} {
+			left, _, err := eng.List(ctx, workflow.Query{WorkflowURL: url, IncludeSubgraphs: true, Limit: 2 * width})
+			if assert.NoError(err) {
+				assert.Len(left, 0, "%s flows left after the retry", url)
+			}
 		}
 	})
 }
