@@ -569,9 +569,11 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 			if commitFault != "" && e.seams.IsFault(commitFault) {
 				return errors.New("injected fault: " + commitFault)
 			}
-			// The flow-id lists are chunked: a tree can hold more flows than a statement can bind.
+			// The flow-id lists are chunked: a tree can hold more flows than a statement can bind. The lock passes
+			// run in ascending id order (lockOrder), recomputed per run because a re-run covers a larger set.
+			lockIDs := lockOrder(allFlowIDs)
 			terminateSteps := func() {
-				for chunk := range slices.Chunk(allFlowIDs, inListChunk) {
+				for chunk := range slices.Chunk(lockIDs, inListChunk) {
 					ph, ids := inList(chunk)
 					tx.ExecContext(ctx,
 						"UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE flow_id IN ("+ph+") AND status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusInterrupted+"', '"+workflow.StatusRunning+"')",
@@ -590,7 +592,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 			// between the UPDATE above and this lock exists now and was not covered by it. The second UPDATE
 			// catches it, so no step of the tree is left running, and none can go on to spawn a subgraph.
 			var locked int64
-			for chunk := range slices.Chunk(allFlowIDs, inListChunk) {
+			for chunk := range slices.Chunk(lockIDs, inListChunk) {
 				ph, ids := inList(chunk)
 				n, err := lockFlowRows(ctx, tx, "flow_id IN ("+ph+") AND status NOT IN ("+terminalStatusesSQL+")", ids...)
 				if err != nil {

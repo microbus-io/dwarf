@@ -823,7 +823,8 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	if err != nil {
 		return errors.Trace(err)
 	}
-	allFlowIDs := append([]any{flowID}, descendantFlowIDs...)
+	// Ascending, so the chunked lock passes below take their rows in the order Terminate's do (lockOrder).
+	allFlowIDs := lockOrder(append([]any{flowID}, descendantFlowIDs...))
 
 	reason = strings.TrimSpace(reason)
 	// The watermark is read by a statement AFTER the one that takes the flow rows' locks. On Postgres an UPDATE's

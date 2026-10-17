@@ -16,7 +16,11 @@ limitations under the License.
 
 package engine
 
-import "strings"
+import (
+	"cmp"
+	"slices"
+	"strings"
+)
 
 // inListChunk is the most ids one bound IN (...) list carries. SQL Server rejects a statement with more than
 // 2,100 parameters, the tightest ceiling of the four dialects, so an id list whose length the workload sets - a
@@ -37,4 +41,15 @@ func inList[T any](ids []T) (placeholders string, args []any) {
 		args[i] = ids[min(i, len(ids)-1)]
 	}
 	return strings.Repeat("?,", arity-1) + "?", args
+}
+
+// lockOrder returns flow ids ascending, as a copy, for statements that take row locks chunk by chunk. One
+// statement over the whole list locks in its plan's order, but chunks lock in turn, so two transactions over
+// overlapping sets that chunk in different orders can each hold rows the other's next chunk waits on - a deadlock
+// a single statement could not form. Ascending order makes every chunked lock pass take its rows in one order. A
+// copy, because callers keep the original aligned with other per-flow slices.
+func lockOrder(flowIDs []any) []any {
+	out := slices.Clone(flowIDs)
+	slices.SortFunc(out, func(a, b any) int { return cmp.Compare(a.(int), b.(int)) })
+	return out
 }
