@@ -201,8 +201,12 @@ Inject an OpenTelemetry `trace.TracerProvider`:
 eng.SetTracerProvider(otel.GetTracerProvider())
 ```
 
-It defaults to the global `otel.GetTracerProvider()` (no-op unless the SDK is configured). The host injects
-only the provider — there is no span code to write and no trace context to thread by hand.
+It defaults to the global `otel.GetTracerProvider()`. The host injects only the provider — there is no span
+code to write and no trace context to thread by hand.
+
+**Install the OpenTelemetry SDK before `Startup`.** The engine resolves its tracer once, at `Startup`. If no
+SDK is installed by then, it traces through a no-op provider, so an engine running without tracing spends
+nothing building spans. A provider installed after `Startup` is not picked up until the next `Startup`.
 
 The engine creates two kinds of span, under the `github.com/microbus-io/dwarf` scope:
 

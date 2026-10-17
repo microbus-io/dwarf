@@ -639,11 +639,14 @@ func (e *Engine) SetMeterProvider(mp metric.MeterProvider) error {
 }
 
 // SetTracerProvider sets the OpenTelemetry TracerProvider the engine builds its spans from. Defaults to
-// the global otel.GetTracerProvider() (the no-op provider unless the host configures the OTEL SDK). The
-// engine emits one span per flow and one span per task, nested to mirror the call structure, under the
-// "github.com/microbus-io/dwarf" scope; the provider's Resource carries the host's identity. The host
-// injects only the provider - it writes no span or context code. Construction-time only - the engine
-// resolves the tracer once at Startup.
+// the global otel.GetTracerProvider(). The engine emits one span per flow and one span per task, nested to
+// mirror the call structure, under the "github.com/microbus-io/dwarf" scope, and its database layer one per
+// query; the provider's Resource carries the host's identity. The host injects only the provider - it writes
+// no span or context code. Construction-time only - the engine resolves the tracer once at Startup.
+//
+// Install the OpenTelemetry SDK before Startup. If no SDK is installed by then, the engine traces through a
+// no-op provider rather than OpenTelemetry's global placeholder, which allocates a span per call even when
+// nothing records; a provider installed after Startup is never reached.
 func (e *Engine) SetTracerProvider(tp trace.TracerProvider) error {
 	if e.started.Load() {
 		return errSetAfterStartup("tracer provider")
@@ -720,12 +723,14 @@ func (e *Engine) Startup(ctx context.Context) error {
 	if e.testHashedID != "" {
 		testConnCap = e.testConnCap
 	}
+	// Resolved before the shards open, so the migrations trace through the same provider as everything after.
+	tp := e.initTracer()
 	err := e.db.Open(ctx, database.Config{
 		Shards:         shards,
 		TestID:         e.testHashedID,
 		TestConnCap:    testConnCap,
 		Logger:         e.logger,
-		TracerProvider: e.tracerProvider,
+		TracerProvider: tp,
 		MeterProvider:  e.meterProvider,
 	})
 	if err != nil {
@@ -922,9 +927,6 @@ func (e *Engine) initRuntime() error {
 	if err != nil {
 		e.logger.ErrorContext(e.lifetimeCtx, "Initializing metrics", "error", err)
 	}
-
-	// Resolve the tracer (no-op unless a TracerProvider was injected or the global SDK is configured).
-	e.initTracer()
 
 	// Build the pistons now that the cache is sized: each takes its own shard's handle, the shared planner
 	// and the shared cache. A piston starts idle on a shard this replica does not dispatch, and on every

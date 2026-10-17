@@ -45,7 +45,8 @@ The observability providers, injected separately (none is a `Host` method):
   `otel.GetMeterProvider()` (no-op unless the host configures the SDK). The engine builds its `dwarf_*`
   instruments under the `github.com/microbus-io/dwarf` scope (see "Metrics" below).
 - **`trace.TracerProvider`** - OTEL tracer provider (`SetTracerProvider`); defaults to the global
-  `otel.GetTracerProvider()` (no-op unless the host configures the SDK). The engine mints the root
+  `otel.GetTracerProvider()`, and OTel's untouched global stand-in is swapped for a true no-op at Startup (see
+  "Tracing"). The engine mints the root
   "workflow" span at `Create` and a per-step span in `processStep`, both under the
   `github.com/microbus-io/dwarf` scope (see "Tracing" below). The host injects only the provider - no
   span code.
@@ -3237,7 +3238,25 @@ The engine is OTEL-native for tracing, symmetric with metrics: `SetTracerProvide
 `otel.GetTracerProvider()` (no-op unless the host configures the SDK), and the engine creates spans from
 `tp.Tracer("github.com/microbus-io/dwarf")` (same scope as metrics; service identity lives in the provider's
 Resource, not span attributes). The host injects **only** the provider - no span code, no `trace_parent` handling.
-Resolved once in `initRuntime` (`initTracer`); under the no-op tracer every site below is free.
+
+**Resolved once per Startup, before the shards open, and the same provider goes to sequel** (`initTracer` ->
+`resolveTracerProvider`). The injected provider wins, else the global; **OTel's untouched stand-in - what
+`otel.GetTracerProvider()` returns before any SDK is installed - is replaced by `noop.NewTracerProvider()`,
+wherever it came from** (the README's `SetTracerProvider(otel.GetTracerProvider())` passes it explicitly).
+- **Why:** the stand-in can start forwarding to a provider installed later, so it builds a span per call while
+  nothing records - 3 allocations per span against at most 1 for the no-op (`TestTracing_ResolveTracerProvider`),
+  and sequel opens one per query, transaction and batch, which is most of the cost.
+- **A stand-in injected before the host installed its SDK forwards to it by Startup,** so the resolve reads the
+  global for it as well, and an installed SDK wins.
+- **The cost:** a tracer installed after Startup is never reached (the stand-in would have forwarded to it). The
+  public docs tell hosts to install it first; a host that truly needs late binding wraps the global in its own type.
+- **The stand-in is matched by OTel's internal type name, which fails safe.** Do not match it by a pointer
+  captured at package init: a tracer another package's `init` installed before this one's would be captured as
+  "the default" and replaced by the no-op, silently. A renamed type only fails to match, keeping the stand-in.
+  `TestTracing_OTelStandInIsRecognized` catches a rename at upgrade; it reads the process-global provider, so no
+  engine-package test may install one.
+
+Under the no-op tracer every site below is free.
 
 **Two span sites, persisted across replicas via the `trace_parent` column.** A flow's trace context is
 minted once and reconstructed on every step dispatch (which may land on any replica), so it must survive

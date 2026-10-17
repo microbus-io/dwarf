@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"reflect"
 	"strings"
 
 	"go.opentelemetry.io/otel"
@@ -25,6 +26,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 // traceScope is the OpenTelemetry instrumentation scope for the engine's spans (same as the metric
@@ -35,16 +37,49 @@ const traceScope = metricScope
 // Stateless, so a package-level value is safe to share.
 var traceProp = propagation.TraceContext{}
 
-// initTracer resolves the engine's tracer from the injected TracerProvider, falling back to the global
-// otel.GetTracerProvider() (the no-op provider unless the host configures the OTEL SDK). Called from
-// initRuntime. With no provider injected the tracer is a no-op: Start returns a non-recording span,
-// mintWorkflowSpan yields "" (so trace_parent stays empty), and there is zero per-step overhead.
-func (e *Engine) initTracer() {
-	tp := e.tracerProvider
-	if tp == nil {
-		tp = otel.GetTracerProvider()
-	}
+// initTracer resolves the provider for this run, sets the engine's tracer from it, and returns it for the
+// shards' sequel layer. Called from Startup before the shards open.
+func (e *Engine) initTracer() trace.TracerProvider {
+	tp := resolveTracerProvider(e.tracerProvider, otel.GetTracerProvider())
 	e.tracer = tp.Tracer(traceScope)
+	return tp
+}
+
+// otelStandInPkg and otelStandInType name OTel's global stand-in provider: what otel.GetTracerProvider()
+// returns until a host installs one. Pinned by TestTracing_OTelStandInIsRecognized.
+const (
+	otelStandInPkg  = "go.opentelemetry.io/otel/internal/global"
+	otelStandInType = "tracerProvider"
+)
+
+// resolveTracerProvider picks the provider the engine and its shards' sequel layer trace through, once per
+// Startup: the injected one, else the global - and a true no-op in place of OTel's untouched stand-in,
+// wherever it came from. The stand-in can start forwarding to a provider installed later, so it builds a span
+// per call even while nothing records: ~7% of bytes allocated per step with tracing off, most of it sequel's
+// span per query. The cost of the swap is that a tracer installed after Startup is never reached.
+//
+// A stand-in injected before the host installed its SDK already forwards to it, so global (the current
+// otel.GetTracerProvider(), a parameter so tests need not install one) is read for it too: an installed SDK
+// wins.
+func resolveTracerProvider(injected, global trace.TracerProvider) trace.TracerProvider {
+	tp := injected
+	if tp == nil || isOTelStandIn(tp) {
+		tp = global
+	}
+	if isOTelStandIn(tp) {
+		return noop.NewTracerProvider()
+	}
+	return tp
+}
+
+// isOTelStandIn reports whether tp is OTel's global stand-in. The type is internal to OTel, so it is matched by
+// name. Do not match by a pointer captured at package init instead: a tracer installed by another package's init
+// before this one's would be captured as "the default" and silently replaced by the no-op. A renamed type only
+// fails to match, which keeps the stand-in - today's cost, no lost spans.
+func isOTelStandIn(tp trace.TracerProvider) bool {
+	t := reflect.TypeOf(tp)
+	return t != nil && t.Kind() == reflect.Pointer &&
+		t.Elem().PkgPath() == otelStandInPkg && t.Elem().Name() == otelStandInType
 }
 
 // mintWorkflowSpan creates a "workflow" span for a flow, ends it immediately, and serializes its W3C

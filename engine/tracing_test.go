@@ -24,9 +24,56 @@ import (
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
+	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
+
+// TestTracing_OTelStandInIsRecognized pins the type name isOTelStandIn matches against the stand-in OTel
+// actually returns. An OTel upgrade that renames it would leave the engine on the stand-in and its span per
+// call, silently; this test is what catches it. It reads the process-global provider, so no test in this
+// package may install one (otel.SetTracerProvider cannot be undone).
+func TestTracing_OTelStandInIsRecognized(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	assert.True(isOTelStandIn(otel.GetTracerProvider()), "OTel's stand-in is now %T", otel.GetTracerProvider())
+	assert.False(isOTelStandIn(noop.NewTracerProvider()))
+	assert.False(isOTelStandIn(sdktrace.NewTracerProvider()))
+	assert.False(isOTelStandIn(nil))
+}
+
+// TestTracing_ResolveTracerProvider pins which provider a run traces through, and that the swap pays: an
+// untraced span through the resolved provider allocates at most the context it rides on.
+func TestTracing_ResolveTracerProvider(t *testing.T) {
+	// Not parallel: AllocsPerRun counts every goroutine's allocations.
+	assert := testarossa.For(t)
+	standIn := otel.GetTracerProvider()
+	sdk := sdktrace.NewTracerProvider()
+	injected := sdktrace.NewTracerProvider()
+
+	_, isNoop := resolveTracerProvider(nil, standIn).(noop.TracerProvider)
+	assert.True(isNoop, "nothing injected, no SDK installed")
+	_, isNoop = resolveTracerProvider(standIn, standIn).(noop.TracerProvider)
+	assert.True(isNoop, "the stand-in injected, no SDK installed")
+	assert.True(resolveTracerProvider(nil, sdk) == sdk, "nothing injected, an SDK installed")
+	assert.True(resolveTracerProvider(standIn, sdk) == sdk, "the stand-in injected, an SDK installed since")
+	assert.True(resolveTracerProvider(injected, sdk) == injected, "an injected provider wins")
+
+	spanAllocs := func(tp trace.TracerProvider) float64 {
+		tracer := tp.Tracer(traceScope)
+		ctx := context.Background()
+		return testing.AllocsPerRun(1000, func() {
+			_, span := tracer.Start(ctx, "step")
+			span.End()
+		})
+	}
+	resolved := spanAllocs(resolveTracerProvider(nil, standIn))
+	assert.True(resolved <= 1, "%v allocations per untraced span", resolved)
+	assert.True(spanAllocs(standIn) > resolved, "the stand-in should cost more than the resolved provider")
+}
 
 // spanAttrString returns the string value of a span attribute, or "" if absent.
 func spanAttrString(s sdktrace.ReadOnlySpan, key string) string {
