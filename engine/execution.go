@@ -2072,7 +2072,9 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		}
 
 		var ourStateJSON, ourChangesJSON, ourRefsJSON []byte
-		tx.QueryRowContext(ctx, "SELECT state, changes, state_refs FROM dwarf_steps WHERE step_id=?", stepID).Scan(&ourStateJSON, &ourChangesJSON, &ourRefsJSON)
+		if rerr := tx.QueryRowContext(ctx, "SELECT state, changes, state_refs FROM dwarf_steps WHERE step_id=?", stepID).Scan(&ourStateJSON, &ourChangesJSON, &ourRefsJSON); rerr != nil {
+			return errors.Trace(rerr)
+		}
 		txBytes.stateRead = len(ourStateJSON)
 		txBytes.changesRead = len(ourChangesJSON)
 		ourState, serr := workflow.NewState(ourStateJSON)
