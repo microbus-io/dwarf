@@ -26,7 +26,8 @@ type FlowOutcome struct {
 	// State is the flow's accumulated state. For terminal statuses this is the flow's final state; for an
 	// interrupted flow it is the merged snapshot of the interrupted step. For a running flow it is empty.
 	State State `json:"state,omitzero"`
-	// Error is the task error string. Populated when Status is "failed".
+	// Error is the task error string. Populated when Status is "failed". A message over 16 KB is cut to that
+	// size and ends with " ... [truncated]".
 	Error string `json:"error,omitzero"`
 	// InterruptPayload is the raw payload from flow.Interrupt(payload). Populated when Status is "interrupted".
 	InterruptPayload State `json:"interruptPayload,omitzero"`

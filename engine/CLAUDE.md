@@ -1821,8 +1821,10 @@ contention or an unwritable classifier, which is what `TestLeaseFence_RecoveryRe
 payloads via `computeFinalState`. If an unreadable value had already landed in a row, that merge would die the same
 way, `failStep` would error, and the classifier would misread it as "the database is down" - restoring the very
 loop this closes. So `computeFinalState` failing on this path falls back to `final_state='{}'`, and the error
-message is stripped of control bytes before it goes into a text column (Postgres rejects a NUL in `text` exactly as
-in `jsonb`, so a driver error quoting the offending value back could kill the clean write).
+message passes `sanitizeErrorMessage` before it goes into a text column: control bytes and invalid UTF-8 replaced
+(Postgres rejects both in `text` as in `jsonb`, so a driver error quoting the offending value back could kill the
+clean write), and cut to `maxErrorBytes` (MySQL's `TEXT` refuses a value over 65,535 bytes; measured on MySQL 8,
+an uncut 100 KB task error left the step for lease recovery and the task re-running).
 
 Two counters: `dwarf_steps_write_retried` (a blip absorbed - the database is flaky, the workflow is fine) and
 `dwarf_steps_write_failed` (an **alarm**, like `dwarf_steps_unwedged`: the database was reachable and the outcome

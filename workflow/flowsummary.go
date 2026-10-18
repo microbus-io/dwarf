@@ -29,6 +29,8 @@ type FlowSummary struct {
 	// step it is interrupted at, which a Terminate of an interrupted flow keeps. It is empty while the flow is
 	// running, and for a stop with no single step.
 	StoppedTaskName string `json:"stoppedTaskName,omitzero"`
+	// Error is the task error string when Status is "failed". A message over 16 KB is cut to that size and ends
+	// with " ... [truncated]".
 	Error           string `json:"error,omitzero"`
 	TerminateReason string `json:"terminateReason,omitzero"`
 	// CancelReason is the reason string passed to Cancel(flowKey, reason). Populated when Status is "cancelled".

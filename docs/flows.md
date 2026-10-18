@@ -120,6 +120,9 @@ type FlowOutcome struct {
 }
 ```
 
+An error message over 16 KB is cut to that size and ends with ` ... [truncated]`, in `Error` and in `History`'s
+steps alike.
+
 `terminated` means `Terminate` stopped the flow outright; `cancelled` means a graceful `Cancel` stopped it (see
 [Cancelling gracefully](#cancelling-gracefully)).
 

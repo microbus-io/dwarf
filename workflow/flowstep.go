@@ -80,7 +80,8 @@ type FlowStep struct {
 	// Parked reports whether the step is currently held out of dispatch (a subgraph caller waiting on
 	// its child). A terminal step is never parked.
 	Parked bool `json:"parked,omitzero"`
-	// Error is the step's error message, empty when it has none.
+	// Error is the step's error message, empty when it has none. A message over 16 KB is cut to that size and
+	// ends with " ... [truncated]".
 	Error string `json:"error,omitzero"`
 	// CreatedAt is when the step was created.
 	CreatedAt time.Time `json:"createdAt,omitzero"`

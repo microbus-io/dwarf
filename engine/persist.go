@@ -21,6 +21,7 @@ import (
 	"math/rand/v2"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/staterefs"
@@ -289,20 +290,37 @@ func (e *Engine) failOnPersistError(ctx context.Context, shardNum, stepID, lease
 	return nil
 }
 
-// sanitizeErrorMessage strips control bytes from a message bound for a text column. A driver error can quote the
-// offending value back at you, so the message carrying "this value is unstorable" can itself be unstorable - and
-// on Postgres a NUL is rejected in `text` just as it is in `jsonb`. Replacement, not rejection: the message is
-// diagnostic, and a mangled one still names the failure.
+// maxErrorBytes bounds an error message stored in a text column. MySQL's TEXT holds 65,535 bytes and refuses
+// more under its default strict mode; well below that, every List row and History step carries the message.
+const maxErrorBytes = 16 << 10
+
+// truncatedMark ends a message cut to maxErrorBytes.
+const truncatedMark = " ... [truncated]"
+
+// sanitizeErrorMessage makes a message storable in a text column: control bytes and invalid UTF-8 are replaced,
+// and a message over maxErrorBytes is cut on a rune boundary and marked. A driver error can quote the offending
+// value back at you, so the message carrying "this value is unstorable" can itself be unstorable - Postgres
+// rejects a NUL and invalid UTF-8 in `text` just as in `jsonb`, and MySQL a value over the column's size. Replace
+// and cut, never reject: the message is diagnostic, and a mangled one still names the failure, while a rejected
+// one leaves failStep unable to land, which the classifier reads as the database being down.
 func sanitizeErrorMessage(msg string) string {
-	if !strings.ContainsFunc(msg, func(r rune) bool { return r < 0x20 && r != '\n' && r != '\t' }) {
-		return msg
+	if !utf8.ValidString(msg) || strings.ContainsFunc(msg, func(r rune) bool { return r < 0x20 && r != '\n' && r != '\t' }) {
+		// Ranging over invalid UTF-8 yields utf8.RuneError, so Map replaces it too.
+		msg = strings.Map(func(r rune) rune {
+			if r < 0x20 && r != '\n' && r != '\t' {
+				return '�'
+			}
+			return r
+		}, msg)
 	}
-	return strings.Map(func(r rune) rune {
-		if r < 0x20 && r != '\n' && r != '\t' {
-			return '�'
+	if len(msg) > maxErrorBytes {
+		cut := maxErrorBytes - len(truncatedMark)
+		for cut > 0 && !utf8.RuneStart(msg[cut]) {
+			cut--
 		}
-		return r
-	}, msg)
+		msg = msg[:cut] + truncatedMark
+	}
+	return msg
 }
 
 // persistStep is persist plus the disposition every caller in processStep shares: a lost lease or a drain is a
