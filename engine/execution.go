@@ -1920,10 +1920,8 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 		return errors.Trace(err)
 	}
 
-	fenced := false
 	payloadLen := 0
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
-		fenced = false
 		payloadLen = 0
 		// Steps-first-then-flow lock ordering, matching resume and Terminate (which walk this same surgraph
 		// chain). Interrupt is non-terminating, so it carries no write-first orphan obligation; the only
@@ -1966,7 +1964,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 		// site that turns a READ into a control decision the caller reports as SUCCESS. A failed chain UPDATE
 		// leaves the leaf `running` - EXACTLY what a genuine fence looks like - so a read that returned the
 		// pre-UPDATE row instead of the transaction's error would make the fence below trip on a merely-
-		// contended write and `return nil`: a leaf we still own, abandoned with no interrupt, no error and no
+		// contended write and abandon: a leaf we still own, abandoned with no interrupt, no error and no
 		// retry, its flow stuck `running` until the lease lapses (minutes) - permanently if a Resume lands in
 		// that window, since the lost branch never marked its caller step interrupted. sequel's QueryRow
 		// reports the transaction's error like every other statement method, so the check below catches it and
@@ -1986,7 +1984,6 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 			curLeaseSeq = leaseSeq + 1
 		}
 		if curLeaseSeq != leaseSeq || curStatus != workflow.StatusInterrupted {
-			fenced = true
 			return errLeaseFenced
 		}
 
@@ -2042,11 +2039,8 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 		return nil
 	})
 	if err != nil {
-		if fenced {
-			// Our lease was re-granted to a peer mid-execution; the peer owns this step and re-runs the
-			// interrupt. Abandon quietly - not an error.
-			return nil
-		}
+		// A fence (errLeaseFenced) included: the peer that owns the step re-runs the interrupt, and persist
+		// abandons this one quietly, so the caller neither counts nor signals an interrupt that did not land.
 		return errors.Trace(err)
 	}
 

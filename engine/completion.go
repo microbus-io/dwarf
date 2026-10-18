@@ -609,6 +609,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 
 	reason = strings.TrimSpace(reason)
 	settled := false
+	var terminalized []bool // per allFlowIDs entry: its UPDATE matched, so this transaction ended it
 	for run := 1; ; run++ {
 		if run > maxTerminateRuns {
 			return errors.New("terminate did not settle after %d runs; the tree kept spawning subgraphs", maxTerminateRuns, http.StatusServiceUnavailable)
@@ -729,6 +730,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 			// by status at the Go API level (FlowOutcome's TerminateReason vs CancelReason, in snapshot()).
 			batch := newTxBatch(ctx, tx)
 			var ended int64
+			terminalized = make([]bool, len(allFlowIDs))
 			for i, fid := range allFlowIDs {
 				batch.queue(func(res *sequel.BatchResults) error {
 					r, err := res.Exec()
@@ -737,6 +739,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 					}
 					n, _ := r.RowsAffected()
 					ended += n
+					terminalized[i] = n > 0
 					return nil
 				},
 					"UPDATE dwarf_flows SET final_state=?, status=?, cancel_reason=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
@@ -768,15 +771,15 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 	}
 
 	for i, cid := range allCompositeIDs {
+		// Only the flows this transaction ended: a flow that terminalized on its own path first (a root completing
+		// between the first scan and the lock, which the rescan keeps regardless) was counted and signalled there,
+		// and its UPDATE's status guard matched nothing here. Every flow ended here was started (createWithGraph
+		// counts subgraph children too), and the in-flight panel is started minus ended.
+		if !terminalized[i] {
+			continue
+		}
 		fid := allFlowIDs[i].(int)
 		e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, fid), "to", workflow.StatusTerminated)
-		// Counted per flow, alongside the signal and on the same set, because every one of these was started
-		// (createWithGraph counts subgraph children too) and the in-flight panel is started minus ended.
-		// The set is the flows the in-transaction rescan found live under the flow-row lock, plus the root,
-		// which the rescan keeps regardless. A root that terminalized between the first scan and the lock is
-		// excluded by the UPDATE's own status guard but still counted here, so a terminate racing the root's
-		// completion can over-count by one. That window is microseconds, so it is not worth a round trip to
-		// close.
 		label := labelByFlowID[fid]
 		e.metricFlowEnded(ctx, label.workflowURL, workflow.StatusTerminated, label.priority, shardNum)
 		e.signalStop(ctx, cid, workflow.StatusTerminated)

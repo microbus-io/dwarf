@@ -26,8 +26,10 @@ import (
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 // TestFault_InterruptStaleWriteRollback pins the interrupt lease-fence — the ONLY fence in the engine that
@@ -78,6 +80,7 @@ func TestFault_InterruptStaleWriteRollback(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
+	reader := withManualReader(e)
 	e.SetTimeBudget(200 * time.Millisecond)
 	e.leaseMargin = 100 * time.Millisecond // lease = budget+margin = 300ms, so lease recovery re-dispatches fast
 	assert.NoError(e.Startup(t.Context()))
@@ -86,7 +89,7 @@ func TestFault_InterruptStaleWriteRollback(t *testing.T) {
 	fk, err := e.Create(ctx, "fisw/parent", nil, nil)
 	assert.NoError(err)
 
-	// The fenced first attempt rolls back and returns nil (abandon quietly), leaving the child step
+	// The fenced first attempt rolls back and abandons quietly, leaving the child step
 	// running-and-leased — it does not schedule its own recovery, so drive the lease-recovery backstop until
 	// the re-dispatch lands (see driveLeaseRecovery; this is the site whose fixed-sleep version flaked).
 	driveLeaseRecovery(t, e, leaseRecoveryWait, func() bool { return xCalls.Load() >= 2 })
@@ -99,6 +102,12 @@ func TestFault_InterruptStaleWriteRollback(t *testing.T) {
 	// while driveLeaseRecovery is still looping, fenced, and run a third time.
 	assert.True(xCalls.Load() >= 2, "the fenced attempt must have forced a re-dispatch, got %d calls", xCalls.Load())
 	enginetest.AssertInvariants(t, e) // no strand: the rollback undid the ancestor re-park, so no terminal-flow-with-live-step
+
+	// Only the interrupt that landed is counted: a fenced attempt wrote nothing, so it must not count as one.
+	var rm metricdata.ResourceMetrics
+	assert.NoError(reader.Collect(ctx, &rm))
+	interrupts, _ := sumCounter(rm, "dwarf_steps_executed", "status", workflow.StatusInterrupted)
+	assert.Equal(int64(1), interrupts, "a fenced interrupt must not be counted")
 
 	// The rollback left a clean, resumable tree: Resume threads down to the leaf and the whole tree completes.
 	err = e.Resume(ctx, fk, map[string]any{"answer": "yes"})
@@ -184,7 +193,7 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 		defer e.Shutdown(ctx)
 
 		err := e.handleInterrupt(ctx, 1, db, 2, 7, 2, "ctok", "u", []byte(`{"answer":"x"}`), mustState(map[string]any{"ask": "approve?"}))
-		assert.NoError(err) // fenced -> abandon quietly
+		assert.True(errors.Is(err, errLeaseFenced), "fenced -> persist abandons quietly, got %v", err)
 
 		leafStatus, _ := stepState(t, db, 2)
 		assert.Equal(workflow.StatusPending, leafStatus, "the pending leaf must be left exactly as recovery left it")
@@ -197,11 +206,11 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 
 	// A FAILED chain UPDATE is a transaction failure, not a fence. The two look identical through the fence
 	// read - both leave the leaf `running` - but they demand opposite handling: a fence means a peer owns the
-	// step (abandon quietly, return nil), while a failed statement means nothing was written and the interrupt
+	// step (abandon quietly), while a failed statement means nothing was written and the interrupt
 	// must be RETRIED. Reading them as the same thing wedged parallel subgraph interrupts on SQL Server: two
 	// callers interrupting at once deadlock (flipping running->interrupted deletes keys from the three
 	// status-filtered dwarf_steps indexes, so disjoint row sets still cycle), the victim's UPDATE applies
-	// nothing, and the fence read returned the pre-UPDATE row - so handleInterrupt returned nil, abandoning a
+	// nothing, and the fence read returned the pre-UPDATE row - so handleInterrupt took it for a fence, abandoning a
 	// leaf it still owned. Its flow sat `running` with no interrupt until the lease lapsed (budget + margin),
 	// and a Resume landing in that window flipped the parent back to `running` for good, since the lost branch
 	// never marked its caller step interrupted.
@@ -219,6 +228,7 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 
 		err := e.handleInterrupt(ctx, 1, db, 2, 7, 2, "ctok", "u", []byte(`{"answer":"x"}`), mustState(map[string]any{"ask": "approve?"}))
 		assert.Error(err, "a failed chain UPDATE must surface as an error so Transact retries it, NOT be swallowed as a fence")
+		assert.False(errors.Is(err, errLeaseFenced), "a failed chain UPDATE must not read as a fence")
 
 		// Nothing committed: the leaf is still ours to re-interrupt on the retry.
 		leafStatus, _ := stepState(t, db, 2)

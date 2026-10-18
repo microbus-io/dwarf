@@ -1919,7 +1919,8 @@ has exactly one fenced write to the dispatched step, and everything after it is 
   the fence cannot be the leaf's first write. Instead the combined UPDATE runs unchanged, then an **in-tx read
   of the leaf's `lease_seq`** decides: on mismatch the whole transaction **rolls back** (undoing the ancestor
   re-park, which would otherwise flip callers out of `parkedSubgraph` and strand the parent revive) via the
-  `errLeaseFenced` sentinel, and the caller returns `nil`. The check reads the leaf directly rather than a
+  `errLeaseFenced` sentinel, which `persist` turns into a quiet abandon - the interrupt is neither counted in
+  `dwarf_steps_executed` nor signalled. The check reads the leaf directly rather than a
   same-table subquery, which MySQL rejects on an `UPDATE` target.
 - **recovery defer reset** — fenced with `AND lease_seq=?` so a zombie's `err`-path reset cannot rewind the
   peer's freshly-claimed step. Skipped when the captured generation is `0` (a claim/read error *before* any
@@ -3245,10 +3246,9 @@ narrow it to `completed`: that breaks it in two ways at once - the `status` attr
 in-flight panel this metric exists for - `flows_started` minus this - drifts upward permanently by every flow
 that did not finish cleanly. Both halves are pinned by `TestMetrics_EndedCountsEveryTerminalStatus`, which
 fails on all three of its assertions against a completions-only counter (it exercises the
-completed/failed/terminated shape). The terminate path counts the flows
-that were non-terminal when it
-scanned the tree, so a terminate racing a concurrent completion can over-count by one; that window is
-microseconds and the miscount is bounded to at most one flow, so it is not worth a round trip to close.
+completed/failed/terminated shape). The terminate path counts only the flows whose own UPDATE matched (the
+batch reads each flow's `RowsAffected`), so a flow that completed between the tree scan and the lock is counted
+once, by its own path (`TestMetrics_TerminateCountsOnlyTheFlowsItEnded`).
 `cancelled` (a graceful `Cancel` whose every loss was a cancellation) is tallied the same way, from both
 `failStep` and the cohort-fail path. **Every path that starts a flow must call
 `metricFlowStarted`** - `Create`, `Continue`, AND `Fork` (which builds its new root through its own

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -867,6 +868,85 @@ func TestMetrics_EndedCountsEveryTerminalStatus(t *testing.T) {
 	started, _ := sumCounter(rm, "dwarf_flows_started", "", "")
 	allEnded, _ := sumCounter(rm, "dwarf_flows_ended", "", "")
 	assert.Equal(started, allEnded, "started minus ended must not drift when flows fail or terminate")
+}
+
+// TestMetrics_TerminateCountsOnlyTheFlowsItEnded pins that Terminate counts and signals a flow only when its own
+// UPDATE ended it. The root of the tree is kept in the set whatever its status, so a root that terminalized after
+// Terminate's scan - here written straight to the row, standing in for the root's own path - matches nothing in
+// the batch, and counting it anyway would end it a second time.
+func TestMetrics_TerminateCountsOnlyTheFlowsItEnded(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	mux := hosts.NewMux()
+	parent := workflow.NewGraph("Parent")
+	parent.SetURL("Call", "tcoe/call")
+	parent.AddTransition("Call", workflow.End)
+	mux.HandleGraph("tcoe/parent", parent)
+	child := workflow.NewGraph("Child")
+	child.SetURL("X", "tcoe/x")
+	child.AddTransition("X", workflow.End)
+	mux.HandleGraph("tcoe/child", child)
+	mux.HandleTask("tcoe/call", func(ctx context.Context, f *workflow.Flow) error {
+		yield, err := f.Subgraph("tcoe/child", nil, nil)
+		if yield || err != nil {
+			return err
+		}
+		return nil
+	})
+	entered, release := make(chan struct{}, 1), make(chan struct{})
+	mux.HandleTask("tcoe/x", func(ctx context.Context, f *workflow.Flow) error {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+		return nil
+	})
+
+	eng := NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
+	defer close(release)
+	eng.SetHost(mux)
+	eng.SetMeterProvider(mp)
+	assert.NoError(eng.Startup(t.Context()))
+
+	fk, err := eng.Create(ctx, "tcoe/parent", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	select {
+	case <-entered: // the child is live, so Terminate's scan collects it beside the root
+	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
+		assert.True(false, "the child task never ran")
+		return
+	}
+
+	eng.seams.Break(engineseams.CheckpointTerminateAfterScan)
+	terminated := make(chan error, 1)
+	go func() { terminated <- eng.Terminate(ctx, fk, "test") }()
+	if !assert.True(eng.seams.WaitTimeout(ctx, engineseams.CheckpointTerminateAfterScan, 10*time.Second), "Terminate never finished its scan") {
+		return
+	}
+	shardNum, rootID, _, _ := keys.ParseFlowKey(fk)
+	db, err := eng.db.Shard(shardNum)
+	assert.NoError(err)
+	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET status=? WHERE flow_id=?", workflow.StatusCompleted, rootID)
+	assert.NoError(err)
+	eng.seams.Resume(engineseams.CheckpointTerminateAfterScan)
+	assert.NoError(<-terminated)
+
+	var rm metricdata.ResourceMetrics
+	if !assert.NoError(reader.Collect(ctx, &rm)) {
+		return
+	}
+	ended, ok := sumCounter(rm, "dwarf_flows_ended", "status", workflow.StatusTerminated)
+	assert.True(ok, "dwarf_flows_ended{status=terminated} should be present")
+	assert.Equal(int64(1), ended, "only the child was terminated by this Terminate")
 }
 
 // TestMetrics_StartedAndEndedBalanceAcrossTrees pins that every flow counted in dwarf_flows_started is counted
