@@ -226,8 +226,8 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 
 	// State byte throughput: both counters fire on the execution path, labelled by workflow and by the
 	// column the bytes moved through. Even no-op tasks carry at least the empty-object JSON ("{}"), so the
-	// workflow-level sums are strictly positive; per-column, the entry snapshot ("state") and the
-	// completion delta ("changes") must both appear for this two-task linear flow.
+	// workflow-level sums are strictly positive; per-column, the entry snapshot ("state"), the successor's refs
+	// ("state_refs") and the completion delta ("changes") must all appear for this two-task linear flow.
 	writeBytes, ok := sumCounter(rm, "dwarf_state_write_bytes", "workflow", "metricsflow.verify:428/g")
 	assert.True(ok, "dwarf_state_write_bytes{workflow} should be present")
 	assert.True(writeBytes > 0, "state write bytes should be positive, got %d", writeBytes)
@@ -237,6 +237,10 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	changesW, ok := sumCounter(rm, "dwarf_state_write_bytes", "column", "changes")
 	assert.True(ok, "dwarf_state_write_bytes{column=changes} should be present")
 	assert.True(changesW > 0)
+	// The successor's refs column, written beside its snapshot ("{}" when it holds no ref).
+	refsW, ok := sumCounter(rm, "dwarf_state_write_bytes", "column", "state_refs")
+	assert.True(ok, "dwarf_state_write_bytes{column=state_refs} should be present")
+	assert.True(refsW > 0)
 	readBytes, ok := sumCounter(rm, "dwarf_state_read_bytes", "workflow", "metricsflow.verify:428/g")
 	assert.True(ok, "dwarf_state_read_bytes{workflow} should be present")
 	assert.True(readBytes > 0, "state read bytes should be positive, got %d", readBytes)

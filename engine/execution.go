@@ -1503,6 +1503,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 					stateJSON: stepStateJSON, refsJSON: stepRefsJSON, ordinal: successorOrdinal,
 				})
 				txBytes.stateWritten += len(stepStateJSON)
+				txBytes.refsWritten += len(stepRefsJSON)
 				if len(succ.rows) == successorBatchMax {
 					// A wide fan-out goes successorBatchMax rows to a batch, so it never holds every branch's
 					// state at once.
@@ -1687,6 +1688,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		return err
 	}
 	e.metricStateWriteBytes(ctx, workflowURL, "state", txBytes.stateWritten)
+	e.metricStateWriteBytes(ctx, workflowURL, "state_refs", txBytes.refsWritten)
 	e.metricStateReadBytes(ctx, workflowURL, "state", txBytes.stateRead)
 	e.metricStateReadBytes(ctx, workflowURL, "changes", txBytes.changesRead)
 
@@ -2107,6 +2109,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 			return err
 		}
 		txBytes.stateWritten = len(mergedJSON)
+		txBytes.refsWritten = len(refsJSON)
 
 		nextStepDepth := stepDepth + 1
 		sleepMs := sleepDur.Milliseconds()
@@ -2139,6 +2142,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		return nil
 	}
 	e.metricStateWriteBytes(ctx, workflowURL, "state", txBytes.stateWritten)
+	e.metricStateWriteBytes(ctx, workflowURL, "state_refs", txBytes.refsWritten)
 	e.metricStateReadBytes(ctx, workflowURL, "state", txBytes.stateRead)
 	e.metricStateReadBytes(ctx, workflowURL, "changes", txBytes.changesRead)
 
@@ -2155,6 +2159,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 // re-runs the closure, so inline emission would double-count).
 type stateByteCount struct {
 	stateWritten int // "state" column: snapshots written (successor, fan-in inserts)
+	refsWritten  int // "state_refs" column: refs written beside those snapshots, lists included
 	stateRead    int // "state" column: snapshots read (fan-in spawn/own state)
 	changesRead  int // "changes" column: deltas read (fan-in spawn + cohort members)
 }
@@ -2162,6 +2167,7 @@ type stateByteCount struct {
 // add adds o's counts to c.
 func (c *stateByteCount) add(o stateByteCount) {
 	c.stateWritten += o.stateWritten
+	c.refsWritten += o.refsWritten
 	c.stateRead += o.stateRead
 	c.changesRead += o.changesRead
 }
@@ -2382,6 +2388,7 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 		return successorRow{}, 0, nil, stateByteCount{}, err
 	}
 	bytes.stateWritten = len(mergedJSON)
+	bytes.refsWritten = len(refsJSON)
 	row = successorRow{
 		taskName: fanInTaskName, taskURL: dispatchURLOf(graph, fanInTaskName),
 		stateJSON: mergedJSON, refsJSON: refsJSON, reducedJSON: reducedColumn(rec), ordinal: c.spawnFanOutOrdinal,

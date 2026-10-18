@@ -199,7 +199,7 @@ func (e *Engine) initMetrics() error {
 	// State byte throughput on the dispatch hot path only: rates here track against the database's
 	// byte-throughput ceiling (disk/WAL), which binds separately from its steps ceiling. Reads/writes by
 	// the introspection APIs (List/History/Snapshot) and flow-row writes (final_state) are not counted.
-	m.stateWriteBytes = bytesCtr("dwarf_state_write_bytes", "Counts payload bytes written to step rows on the execution path, labelled by workflow and by column (state, changes, interrupt_payload).")
+	m.stateWriteBytes = bytesCtr("dwarf_state_write_bytes", "Counts payload bytes written to step rows on the execution path, labelled by workflow and by column (state, state_refs, changes, interrupt_payload).")
 	m.stateReadBytes = bytesCtr("dwarf_state_read_bytes", "Counts payload bytes read from step rows on the execution path, labelled by workflow and by column (state, changes, resume_data, subgraph_result, and state_ref for a large field stored once and read back from the step holding it).")
 
 	// The piston-owned instruments (the three dwarf_refill_* plus dwarf_steps_stolen) are NOT built here.

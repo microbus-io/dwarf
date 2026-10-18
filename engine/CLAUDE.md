@@ -3125,11 +3125,13 @@ own (`dwarf_refill_candidates_selected` / `_discarded`, `dwarf_steps_stolen`), p
 `dwarf_state_write_bytes` / `dwarf_state_read_bytes` (labels `workflow` + `column`, unit `By`) - payload
 bytes the engine writes to / reads from **step rows on the execution path**. The `column` label is the
 dwarf_steps column the bytes moved through (`state` snapshots, `changes` task-output deltas,
-`resume_data`, `interrupt_payload`, `subgraph_result`, and on reads `state_ref` - the anchor rows a state-refs
-resolve scans; bounded cardinality; sum across it for totals),
+`resume_data`, `interrupt_payload`, `subgraph_result`, on writes `state_refs` - the refs written beside each
+snapshot, where a field under `append` is stored as a list, so it grows with a loop's length while `state` stays
+flat - and on reads `state_ref` - the anchor rows a state-refs resolve scans; bounded cardinality; sum across it
+for totals),
 so a chart can split task data from engine snapshots from human-in-the-loop payloads. Counted: the claim
 read (state+changes+resume_data+subgraph_result), completion/retry/park/interrupt `changes` writes, the
-interrupt payload write, entry/successor/fan-in `state` snapshot writes, and the fan-in merge's cohort
+interrupt payload write, successor/fan-in `state` snapshot and `state_refs` writes, the entry `state` write, and the fan-in merge's cohort
 reads. Deliberately NOT counted: introspection reads (`List`/`History`/`Snapshot`), flow-row payloads
 (`final_state`, `baggage`, `graph` - per-flow context, not per-step data), Fork's clone (a DB-side
 `INSERT…SELECT`; the bytes never pass through the engine - though its leaf's flatten does count, as `state_ref`
