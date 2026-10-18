@@ -723,9 +723,10 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// A field with no reducer whose new value only extends the array it held is stored as what it gained, so a
 	// task that rewrites a growing list each step stores each element once. Only outside a cohort: an addition is
 	// relative to the step's own input, and the fan-in folds a member's changes onto the spawn's instead, where a
-	// replace must win outright. Comparing costs the task's own decode of the array again, and holds no turn.
+	// replace must win outright. The common case is a byte compare; decoding both arrays, when that misses, runs
+	// with the turn handed back.
 	if lineageID == 0 {
-		recordAdditions(accumulatedChanges, state, reducers)
+		recordAdditions(accumulatedChanges, state, reducers, func(decode func()) { yieldTurn(ctx, &persistPass, decode) })
 	}
 	changesJSON, _ := json.Marshal(accumulatedChanges)
 	// Every outcome write below carries these changes (completion, retry, interrupt, subgraph park). A value the

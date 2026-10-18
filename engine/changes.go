@@ -54,8 +54,13 @@ func checkChanges(changes workflow.Changes, reducers map[string]workflow.Reducer
 		if inBranch && reduced && changes.IsOverwritten(k) {
 			return errors.New("cannot overwrite or delete reduced field %q inside a fan-out branch", k)
 		}
-		if changes.Additions().Has(k) && (reduced || inBranch) {
-			return errors.New("state field %q holds an addition the engine never records there", k)
+		if changes.Additions().Has(k) {
+			if reduced || inBranch {
+				return errors.New("state field %q holds an addition the engine never records there", k)
+			}
+			if v := bytes.TrimSpace(changes.Additions().GetJSON(k)); len(v) == 0 || v[0] != '[' {
+				return errors.New("state field %q holds an addition that is not a list of elements", k)
+			}
 		}
 	}
 	return nil
@@ -223,43 +228,62 @@ func cohortAppendFolds(spawnState workflow.State, spawnChanges workflow.Changes,
 // whole array the field held in input - the state the changes apply onto - into an addition of the elements after
 // it. Applying the changes onto input gives the same state; they store only what the field gained.
 //
-// Elements compare by bytes, else decoded and re-encoded with numbers kept as written. That misses only a number
-// spelled two ways (a database's respelling of 1e21, say), and a miss costs the addition, never the value.
-func recordAdditions(c workflow.Changes, input workflow.State, reducers map[string]workflow.Reducer) {
+// The common case is a byte prefix - the input array without its closing bracket, then a comma - which costs a
+// memory compare: a task that decodes and re-encodes its history spells it as the engine handed it over, from the
+// minting replica's cache. Only when that misses (the input was read back from a database that respells JSON) are
+// both arrays decoded and compared element by element, by bytes, else decoded and re-encoded with numbers kept as
+// written. That misses only a number spelled two ways, and a miss costs the addition, never the value. The
+// decoding pass runs inside slow, which the caller uses to hand back its database turn while it runs.
+func recordAdditions(c workflow.Changes, input workflow.State, reducers map[string]workflow.Reducer, slow func(func())) {
 	contributed := c.Contributions()
+	var undecided []string
 	for _, k := range slices.Collect(contributed.Names()) {
 		if r := reducers[k]; r != "" && r != workflow.ReducerReplace {
 			continue
 		}
 		base := bytes.TrimSpace(input.GetJSON(k))
 		value := bytes.TrimSpace(contributed.GetJSON(k))
-		if len(base) == 0 || base[0] != '[' || len(value) == 0 || value[0] != '[' {
+		if len(base) < 3 || base[0] != '[' || base[len(base)-1] != ']' || len(value) <= len(base) || value[0] != '[' {
 			continue
 		}
-		var baseElems, valueElems []json.RawMessage
-		if json.Unmarshal(base, &baseElems) != nil || json.Unmarshal(value, &valueElems) != nil {
+		prefix := bytes.TrimRight(base[:len(base)-1], " \t\r\n")
+		if rest := bytes.TrimLeft(value[min(len(prefix), len(value)):], " \t\r\n"); len(prefix) > 1 && bytes.HasPrefix(value, prefix) && len(rest) > 0 && rest[0] == ',' {
+			added := append([]byte{'['}, bytes.TrimLeft(rest[1:], " \t\r\n")...)
+			contributed.Del(k)
+			c.Additions().SetJSON(k, added)
 			continue
 		}
-		if len(baseElems) == 0 || len(valueElems) <= len(baseElems) {
-			continue
-		}
-		same := true
-		for i, e := range baseElems {
-			if !sameElement(e, valueElems[i]) {
-				same = false
-				break
+		undecided = append(undecided, k)
+	}
+	if len(undecided) == 0 {
+		return
+	}
+	slow(func() {
+		for _, k := range undecided {
+			if added, ok := addedElements(input.GetJSON(k), contributed.GetJSON(k)); ok {
+				contributed.Del(k)
+				c.Additions().SetJSON(k, added)
 			}
 		}
-		if !same {
-			continue
-		}
-		added, err := json.Marshal(valueElems[len(baseElems):])
-		if err != nil {
-			continue
-		}
-		contributed.Del(k)
-		c.Additions().SetJSON(k, added)
+	})
+}
+
+// addedElements returns the elements value has after the whole of base, when value begins with base's elements.
+func addedElements(base, value json.RawMessage) (json.RawMessage, bool) {
+	var baseElems, valueElems []json.RawMessage
+	if json.Unmarshal(base, &baseElems) != nil || json.Unmarshal(value, &valueElems) != nil {
+		return nil, false
 	}
+	if len(baseElems) == 0 || len(valueElems) <= len(baseElems) {
+		return nil, false
+	}
+	for i, e := range baseElems {
+		if !sameElement(e, valueElems[i]) {
+			return nil, false
+		}
+	}
+	added, err := json.Marshal(valueElems[len(baseElems):])
+	return added, err == nil
 }
 
 // sameElement reports whether two JSON values are equal: by bytes, else decoded with numbers kept as written and

@@ -26,8 +26,8 @@ import (
 )
 
 // TestRef_Grammar pins the one ref grammar every form shares: a plain ref, a column, a field and index path,
-// a range at the end of the path, and a list of entries joined by ';'. Today's two spellings are sentences of
-// it with their meaning unchanged.
+// a range at the end of the path, and a list of entries joined by ';'. The plain and item ref spellings are
+// sentences of it with their meaning unchanged.
 func TestRef_Grammar(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -56,12 +56,12 @@ func TestRef_Grammar(t *testing.T) {
 		{`"1234c[3:]"`, Ref{Anchor: 1234, Col: ColChanges, Span: &Span{From: 3, To: -1}}, `"1234c[3:]"`},
 		{`"1234 [1]"`, Ref{Anchor: 1234, Path: []int{1}}, `"1234[1]"`},
 		{`"9 data[3][0:4]"`, Ref{Anchor: 9, Field: "data", Path: []int{3}, Span: &Span{From: 0, To: 4}}, `"9 data[3][:4]"`},
-		{`"1201s[:2];1202c[:];s[0];1204c"`, Ref{List: []Ref{
+		{`"1201s[:2];1202c[:];1203s[0];1204c"`, Ref{List: []Ref{
 			{Anchor: 1201, Col: ColState, Span: &Span{From: 0, To: 2}},
 			{Anchor: 1202, Col: ColChanges, Span: &Span{From: 0, To: -1}},
-			{Col: ColState, Path: []int{0}},
+			{Anchor: 1203, Col: ColState, Path: []int{0}},
 			{Anchor: 1204, Col: ColChanges},
-		}}, `"1201s[:2];1202c[:];s[0];1204c"`},
+		}}, `"1201s[:2];1202c[:];1203s[0];1204c"`},
 		{`"1204c;"`, Ref{List: []Ref{{Anchor: 1204, Col: ColChanges}}}, `"1204c;"`},
 	}
 	for _, c := range cases {
@@ -71,9 +71,9 @@ func TestRef_Grammar(t *testing.T) {
 	}
 
 	for _, bad := range []string{
-		`"s[1]"`,       // this step's own state, outside a list
-		`"c[1];7"`,     // a self entry names the state column only
-		`"s;7"`,        // a self entry needs an index or range
+		`"s[1]"`,   // every entry names its step
+		`"7;s[1]"`, // in a list too
+		`"c[1];7"`,
 		`"1234c[2:1]"`, // a range that runs backwards
 		`"1234[1:2][3]"`,
 		`"1234x"`,
@@ -88,9 +88,8 @@ func TestRef_Grammar(t *testing.T) {
 }
 
 // TestLinker_ResolveList pins how a list resolves: its entries concatenated in order, each read from the
-// column it names - a range adding its elements, an entry without one adding its value as one element, and a
-// self entry reading the elements stored inline in the resolving step's own state. One Loader call serves
-// every anchor, and each is asked only for the columns its entries name.
+// column it names - a range adding its elements, an entry without one adding its value as one element. One
+// Loader call serves every anchor, and each is asked only for the columns its entries name.
 func TestLinker_ResolveList(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -104,11 +103,10 @@ func TestLinker_ResolveList(t *testing.T) {
 		14: {State: cols(map[string]any{"log": []string{"s1"}}), Changes: cols(map[string]any{"log": []string{"c1"}})},
 	}}
 	var list Ref
-	assert.NoError(json.Unmarshal([]byte(`"10s[:2];11c[:1];s[0];12c;13c[1:];14s[:1];14c[:1]"`), &list))
-	want := []any{"a", "b", "c", "inline", "d", "y", "z", "s1", "c1"}
+	assert.NoError(json.Unmarshal([]byte(`"10s[:2];11c[:1];12c;13c[1:];14s[:1];14c[:1]"`), &list))
+	want := []any{"a", "b", "c", "d", "y", "z", "s1", "c1"}
 
 	state := newState()
-	state.SetJSON("log", json.RawMessage(`["inline"]`))
 	_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, state, Refs{"log": list}, nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal(want, stateVal(state, "log"))
@@ -122,7 +120,7 @@ func TestLinker_ResolveList(t *testing.T) {
 	assert.Equal(Read{ID: 14, State: true, Changes: true}, byID[14])
 
 	// Flatten splices the same array into the state document.
-	flat, err := New("sqlite", 1, NewCache(testCacheBytes)).Flatten(ctx, []byte(`{"log":["inline"],"n":1}`), Refs{"log": list}, anchors.load)
+	flat, err := New("sqlite", 1, NewCache(testCacheBytes)).Flatten(ctx, []byte(`{"n":1}`), Refs{"log": list}, anchors.load)
 	assert.NoError(err)
 	var doc map[string]any
 	assert.NoError(json.Unmarshal(flat, &doc))
@@ -185,9 +183,9 @@ func TestLinker_MintFoldList(t *testing.T) {
 	t.Run("base_is_a_list", func(t *testing.T) {
 		assert := testarossa.For(t)
 		var base Ref
-		assert.NoError(json.Unmarshal([]byte(`"7c[:2];s[0]"`), &base))
+		assert.NoError(json.Unmarshal([]byte(`"7c[:2];8c"`), &base))
 		_, refs := mint(t, mustState(map[string]any{"log": msgs(4)}), contributed(), Refs{"log": base}, map[string]Fold{"log": {Base: 3, Parts: []Part{{Step: step, Single: true}}}})
-		assert.Equal(`"7c[:2];42s[0];42c"`, spelled(t, refs["log"]), "a self entry of the input names the input's step once carried")
+		assert.Equal(`"7c[:2];8c;42c"`, spelled(t, refs["log"]), "the input's entries, then the step's own")
 	})
 
 	t.Run("overwrite", func(t *testing.T) {
@@ -227,12 +225,12 @@ func TestLinker_MintFoldList(t *testing.T) {
 		assert.True(stored.Has("log"))
 	})
 
-	t.Run("carried_list_names_the_step", func(t *testing.T) {
+	t.Run("carried_list_is_unchanged", func(t *testing.T) {
 		assert := testarossa.For(t)
 		var base Ref
-		assert.NoError(json.Unmarshal([]byte(`"7c[:2];s[0:2]"`), &base))
+		assert.NoError(json.Unmarshal([]byte(`"7c[:2];8s[:2]"`), &base))
 		_, refs := mint(t, mustState(map[string]any{"other": 1}), workflow.NewChanges(), Refs{"log": base}, nil)
-		assert.Equal(`"7c[:2];42s[:2]"`, spelled(t, refs["log"]))
+		assert.Equal(`"7c[:2];8s[:2]"`, spelled(t, refs["log"]), "a step that did not touch the field carries its list as it is")
 	})
 }
 
@@ -289,10 +287,22 @@ func TestLinker_SeedList(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal([]any{"a", "b", "c", "d"}, stateVal(state, "log"))
 	assert.Equal([][]int{{7}}, anchors.calls, "the seeded contribution is not read")
+
+	// An addition is seeded the same way: it is what the step's changes hold of the field.
+	linker = New("sqlite", 1, NewCache(testCacheBytes))
+	added := workflow.NewChanges()
+	added.Additions().SetJSON("log", json.RawMessage(`["c","d"]`))
+	linker.Seed(42, merged, added, []byte(`{"log":"7[:2];42c[:2]"}`))
+	anchors.calls = nil
+	state = newState()
+	_, err = linker.Resolve(ctx, state, Refs{"log": list}, nil, anchors.load)
+	assert.NoError(err)
+	assert.Equal([]any{"a", "b", "c", "d"}, stateVal(state, "log"))
+	assert.Equal([][]int{{7}}, anchors.calls, "the seeded addition is not read")
 }
 
 // TestRef_Remap pins Fork's remap of a ref through its clone id map: every anchor a ref names, a list's entries
-// included, maps, a self entry stays this step's, and an anchor outside the map is reported.
+// included, maps, and an anchor outside the map is reported.
 func TestRef_Remap(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -300,11 +310,11 @@ func TestRef_Remap(t *testing.T) {
 	ids := map[int]int{7: 107, 8: 108}
 	m := func(a int) (int, bool) { to, ok := ids[a]; return to, ok }
 	var list Ref
-	assert.NoError(json.Unmarshal([]byte(`"7c[:2];s[0];8c"`), &list))
+	assert.NoError(json.Unmarshal([]byte(`"7c[:2];8c"`), &list))
 	got, _, ok := list.Remap(m)
 	assert.True(ok)
 	data, _ := json.Marshal(got)
-	assert.Equal(`"107c[:2];s[0];108c"`, string(data))
+	assert.Equal(`"107c[:2];108c"`, string(data))
 	got, _, ok = Ref{Anchor: 8, Field: "pages", Path: []int{2}}.Remap(m)
 	assert.True(ok)
 	assert.Equal(Ref{Anchor: 108, Field: "pages", Path: []int{2}}, got)
@@ -334,8 +344,8 @@ func TestInlineExcessAnchors_SkipsLists(t *testing.T) {
 }
 
 // TestLinker_ResolveReadsAnAddition pins the addition suffix in an anchor's changes: a list entry reading the
-// changes column ranges over the elements the step gained, stored under "field+", while a whole-field ref never
-// resolves to them - they are not the field's value.
+// changes column ranges over the elements the step gained, stored under "field+", while a whole-field ref to such a
+// row is an error - its state holds the step's input, a value the step went on to extend.
 func TestLinker_ResolveReadsAnAddition(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -351,8 +361,6 @@ func TestLinker_ResolveReadsAnAddition(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal([]any{"a", "x", "y"}, stateVal(state, "log"))
 
-	whole := newState()
-	_, err = New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, whole, Refs{"log": {Anchor: 15}}, nil, anchors.load)
-	assert.NoError(err)
-	assert.Equal([]any{"a"}, stateVal(whole, "log"), "a whole-field ref reads the field, not what a step added to it")
+	_, err = New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, newState(), Refs{"log": {Anchor: 15}}, nil, anchors.load)
+	assert.Error(err, "a whole-field ref never resolves to the stale input of a step that extended the field")
 }

@@ -36,8 +36,8 @@ const AdditionSuffix = "+"
 /*
 Changes is what a step writes to its flow's state, as the orchestrator records it. Each field it writes is
 either a contribution - combined through the field's reducer with what the field already holds - or an
-overwrite, which replaces the field, or deletes it when its value is nil. A field is one or the other, never
-both. State.Apply folds Changes onto a state.
+overwrite, which replaces the field, or deletes it when its value is nil, or an addition (below). A field is
+exactly one of these. State.Apply folds Changes onto a state.
 
 A task does not use Changes directly: Flow.Set, Flow.Overwrite and Flow.Del build them.
 
@@ -145,7 +145,8 @@ func (c Changes) IsDeleted(name string) bool {
 // under ReducerAppend becomes a list; onto an overwrite, it folds onto the overwritten value and the field stays
 // overwritten. On a field with no reducer the value replaces, and a nil deletes, which is an overwrite with
 // nothing. On a reduced field a nil contributes nothing. It returns an error if the value cannot be marshalled,
-// if the reducer cannot combine it, or if name ends with OverwriteSuffix; on an error the Changes are unchanged.
+// if the reducer cannot combine it, or if name ends with OverwriteSuffix or AdditionSuffix; on an error the
+// Changes are unchanged.
 func (c Changes) Set(name string, value any, reducers map[string]Reducer) error {
 	raw, err := marshalWrite(name, value)
 	if err != nil {
@@ -205,7 +206,7 @@ func (c Changes) Compose(later Changes, reducers map[string]Reducer) error {
 func (c Changes) add(name string, elems json.RawMessage) error {
 	for _, m := range []State{c.contributions, c.overwrites, c.additions} {
 		if prev, ok := m.d[name]; ok {
-			extended, err := appendRaw(name, prev, []json.RawMessage{elems}, false)
+			extended, err := extend(name, prev, elems)
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -215,6 +216,17 @@ func (c Changes) add(name string, elems json.RawMessage) error {
 	}
 	c.additions.d[name] = elems
 	return nil
+}
+
+// extend appends an addition's elements to a field's value. The value must be a list, or absent.
+func extend(name string, value, elems json.RawMessage) (json.RawMessage, error) {
+	if v := bytes.TrimSpace(value); len(v) > 0 && !bytes.Equal(v, []byte("null")) && v[0] != '[' {
+		return nil, errors.New("addition to field %q: the field does not hold a list", name)
+	}
+	if e := bytes.TrimSpace(elems); len(e) == 0 || e[0] != '[' {
+		return nil, errors.New("addition to field %q: the addition is not a list of elements", name)
+	}
+	return appendRaw(name, value, []json.RawMessage{elems}, false)
 }
 
 // contribute folds one contribution, given as JSON, onto the Changes.

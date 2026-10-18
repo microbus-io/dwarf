@@ -81,10 +81,9 @@ type Span struct {
 // last level. Col picks the column.
 //
 // A list ref (List non-nil) is an array made of its entries, concatenated in order: an entry with a Span adds
-// those elements, one without adds its value as one element. An entry with no Anchor reads this step's own
-// state, where the field holds only the elements stored inline.
+// those elements, one without adds its value as one element.
 type Ref struct {
-	Anchor int    // the step whose row holds the bytes; 0 in a list entry means this step
+	Anchor int    // the step whose row holds the bytes
 	Col    byte   // ColAny, ColState or ColChanges
 	Field  string // the field name at the anchor; empty means the refs key itself
 	Path   []int  // indices into that field; empty means the whole field
@@ -112,23 +111,6 @@ func (r Ref) count() (int, bool) {
 	}
 }
 
-// carried is the ref as a successor of the step anchorID stores it: a list's entries that read that step's own
-// state now name it.
-func (r Ref) carried(anchorID int) Ref {
-	if r.List == nil {
-		return r
-	}
-	list := make([]Ref, len(r.List))
-	for i, e := range r.List {
-		if e.Anchor == 0 {
-			e.Anchor = anchorID
-		}
-		list[i] = e
-	}
-	r.List = list
-	return r
-}
-
 // Remap returns the ref with every anchor it names passed through m. It is false, with the anchor m could not
 // map, when one fails.
 func (r Ref) Remap(m func(anchor int) (int, bool)) (Ref, int, bool) {
@@ -142,13 +124,11 @@ func (r Ref) Remap(m func(anchor int) (int, bool)) (Ref, int, bool) {
 	}
 	list := make([]Ref, len(r.List))
 	for i, e := range r.List {
-		if e.Anchor > 0 {
-			to, ok := m(e.Anchor)
-			if !ok {
-				return Ref{}, e.Anchor, false
-			}
-			e.Anchor = to
+		to, ok := m(e.Anchor)
+		if !ok {
+			return Ref{}, e.Anchor, false
 		}
+		e.Anchor = to
 		list[i] = e
 	}
 	r.List = list
@@ -227,7 +207,7 @@ func (r *Ref) UnmarshalJSON(data []byte) error {
 		return errors.Trace(err)
 	}
 	if !strings.Contains(s, ";") {
-		e, err := parseEntry(s, false)
+		e, err := parseEntry(s)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -240,7 +220,7 @@ func (r *Ref) UnmarshalJSON(data []byte) error {
 	}
 	list := make([]Ref, 0, len(parts))
 	for _, part := range parts {
-		e, err := parseEntry(part, true)
+		e, err := parseEntry(part)
 		if err != nil {
 			return errors.New("malformed state ref %q: %v", s, err)
 		}
@@ -253,12 +233,12 @@ func (r *Ref) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// parseEntry reads one ref of the string form, front to back: the anchor's digits (absent only for a list
-// entry reading this step's own state), a column letter, a space and a field name running to the first '[',
+// parseEntry reads one ref of the string form, front to back: the anchor's digits, a column letter, a space and a
+// field name running to the first '[',
 // then each "[N]" as one index and a final "[a:b]" as a range. A field name cannot hold a '[', ';' or space
 // (Mint names a field only for a forEach source array, which Graph.Validate requires to be an identifier), so
 // the parse is unambiguous.
-func parseEntry(s string, inList bool) (Ref, error) {
+func parseEntry(s string) (Ref, error) {
 	var r Ref
 	i := 0
 	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
@@ -275,7 +255,7 @@ func parseEntry(s string, inList bool) (Ref, error) {
 		r.Col = s[i]
 		i++
 	}
-	if r.Anchor == 0 && (!inList || r.Col != ColState) {
+	if r.Anchor == 0 {
 		return Ref{}, errors.New("malformed state ref %q", s)
 	}
 	rest := s[i:]
@@ -323,9 +303,6 @@ func parseEntry(s string, inList bool) (Ref, error) {
 			return Ref{}, errors.New("malformed state ref %q", s)
 		}
 		r.Path = append(r.Path, idx)
-	}
-	if r.Anchor == 0 && len(r.Path) == 0 && r.Span == nil {
-		return Ref{}, errors.New("malformed state ref %q", s)
 	}
 	return r, nil
 }
@@ -672,7 +649,7 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.Changes, inherited
 			// is unconditional precisely because the fan-out policy below is not size-based.
 			if anchor, isRef := inherited[k]; isRef {
 				if !changes.Mentions(k) {
-					refs[k] = anchor.carried(anchorID)
+					refs[k] = anchor
 					continue
 				}
 			}
@@ -719,7 +696,7 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.Changes, inherited
 		if changes.Mentions(k) {
 			continue
 		}
-		refs[k] = anchor.carried(anchorID)
+		refs[k] = anchor
 	}
 
 	if item != nil {
@@ -754,7 +731,7 @@ func foldList(f Fold, base Ref, hasBase bool, anchorID int, folded json.RawMessa
 	if (len(f.Parts) == 0 || !f.Parts[start].Overwrite) && f.Base > 0 {
 		switch {
 		case hasBase && base.List != nil:
-			entries = append(entries, base.carried(anchorID).List...)
+			entries = append(entries, base.List...)
 		case hasBase && base.Span == nil:
 			// A whole field or an item ref at its anchor: the base is that value's elements.
 			e := base
@@ -831,8 +808,7 @@ func mintItem(raw map[string]json.RawMessage, refs Refs, item Item) {
 }
 
 // entryAt is the item ref to element index of a list stored under key, pointing at the row the entry holding
-// it names. It is false for an element in this step's own state, or past an entry whose length the ref does
-// not state.
+// it names. It is false past an entry whose length the ref does not state.
 func (r Ref) entryAt(key string, index int) (Ref, bool) {
 	for _, e := range r.List {
 		c, ok := e.count()
@@ -842,9 +818,6 @@ func (r Ref) entryAt(key string, index int) (Ref, bool) {
 		if index >= c {
 			index -= c
 			continue
-		}
-		if e.Anchor == 0 {
-			return Ref{}, false
 		}
 		ref := Ref{Anchor: e.Anchor, Col: e.Col, Field: e.field(key), Path: slices.Clone(e.Path)}
 		if e.Span != nil {
@@ -1027,7 +1000,7 @@ func (l *Linker) resolve(ctx context.Context, state workflow.State, refs Refs, w
 		// caller on input missing every field they point at.
 		return 0, errors.New("state refs given with no state to resolve them into")
 	}
-	values, err := l.fetch(ctx, refs, want, state.GetJSON, load, shared)
+	values, err := l.fetch(ctx, refs, want, load, shared)
 	if err != nil {
 		return 0, errors.Trace(err)
 	}
@@ -1051,13 +1024,12 @@ func (l *Linker) resolve(ctx context.Context, state workflow.State, refs Refs, w
 // fetch returns the raw bytes of every selected ref'd field, serving what it can from the cache and asking
 // the Loader for the rest - once, in one call, unless shared. It is the shared core of the two read paths,
 // which differ only in what they do with the bytes: Resolve decodes them into a live state map, Flatten
-// splices them into a state document without decoding at all. self returns a field's value in the resolving
-// step's own state column, which a list's self entries read.
+// splices them into a state document without decoding at all.
 //
 // shared makes concurrent misses on one field read it once (see ResolveShared). Such a fetch reads the
 // fields no other fetch is reading, then waits for the rest and takes them from the flight; one whose wait
 // did not deliver - the other read failed - reads for itself. So it makes zero, one or two Loader calls.
-func (l *Linker) fetch(ctx context.Context, refs Refs, want map[string]bool, self func(string) json.RawMessage, load Loader, shared bool) (map[string]json.RawMessage, error) {
+func (l *Linker) fetch(ctx context.Context, refs Refs, want map[string]bool, load Loader, shared bool) (map[string]json.RawMessage, error) {
 	selected := make(map[string]Ref, len(refs))
 	needed := map[cacheKey]bool{}
 	for key, ref := range refs {
@@ -1070,9 +1042,7 @@ func (l *Linker) fetch(ctx context.Context, refs Refs, want map[string]bool, sel
 			continue
 		}
 		for _, e := range ref.List {
-			if e.Anchor > 0 {
-				needed[l.key(e.Anchor, e.field(key), e.Col)] = true
-			}
+			needed[l.key(e.Anchor, e.field(key), e.Col)] = true
 		}
 	}
 	entries := make(map[cacheKey]*cachedField, len(needed))
@@ -1091,7 +1061,7 @@ func (l *Linker) fetch(ctx context.Context, refs Refs, want map[string]bool, sel
 	}
 	values := make(map[string]json.RawMessage, len(selected))
 	for key, ref := range selected {
-		value, err := l.value(key, ref, entries, self)
+		value, err := l.value(key, ref, entries)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -1240,7 +1210,9 @@ func (l *Linker) loadInto(ctx context.Context, fields []cacheKey, wanted map[cac
 // step, or a fan-in's reduced output). Both are legitimate anchor locations; changes is the newer of the two.
 // In changes, a field the task overwrote is named with the overwrite suffix, and one the engine stored as an
 // addition with the addition suffix. An addition holds only the elements the field gained, so only a list
-// entry, which ranges over exactly those, reads it (ColChanges); a whole-field lookup never resolves to one.
+// entry, which ranges over exactly those, reads it (ColChanges). A whole-field lookup on such a row is an error:
+// falling through to the row's state would return that step's input, a value the step went on to extend. The
+// mint never makes one; the error is what a bug that did would see, as with the one-hop assertion.
 func lookup(row Anchor, k cacheKey) (json.RawMessage, error) {
 	if k.col != ColState {
 		if value, found := row.Changes[k.field+workflow.OverwriteSuffix]; found {
@@ -1258,6 +1230,11 @@ func lookup(row Anchor, k cacheKey) (json.RawMessage, error) {
 			}
 		}
 	}
+	if k.col == ColAny {
+		if _, added := row.Changes[k.field+workflow.AdditionSuffix]; added {
+			return nil, errors.New("state ref to %q at step %d reads the whole field, but the step stored only what it added", k.field, k.anchor)
+		}
+	}
 	if k.col != ColChanges {
 		if value, found := row.State[k.field]; found {
 			return value, nil
@@ -1271,7 +1248,7 @@ func lookup(row Anchor, k cacheKey) (json.RawMessage, error) {
 
 // value returns the bytes a ref resolves to, given the cache entries of every field it names: the field itself
 // for a plain ref, what its path and range select otherwise, and for a list the array its entries make.
-func (l *Linker) value(key string, ref Ref, entries map[cacheKey]*cachedField, self func(string) json.RawMessage) (json.RawMessage, error) {
+func (l *Linker) value(key string, ref Ref, entries map[cacheKey]*cachedField) (json.RawMessage, error) {
 	if ref.List == nil {
 		k := l.key(ref.Anchor, ref.field(key), ref.Col)
 		f := entries[k]
@@ -1289,19 +1266,12 @@ func (l *Linker) value(key string, ref Ref, entries map[cacheKey]*cachedField, s
 	}
 	var out []json.RawMessage
 	for _, e := range ref.List {
-		var bytes json.RawMessage
-		split := func(_ string, array json.RawMessage) ([]json.RawMessage, error) { return splitArray(array) }
-		if e.Anchor == 0 {
-			bytes = self(e.field(key))
-		} else {
-			k := l.key(e.Anchor, e.field(key), e.Col)
-			f := entries[k]
-			if f == nil {
-				return nil, errors.New("state ref %q: step %d was not read", key, e.Anchor)
-			}
-			bytes, split = f.bytes, l.splitter(k, f)
+		k := l.key(e.Anchor, e.field(key), e.Col)
+		f := entries[k]
+		if f == nil {
+			return nil, errors.New("state ref %q: step %d was not read", key, e.Anchor)
 		}
-		one, elems, err := l.pick(key, e, bytes, split)
+		one, elems, err := l.pick(key, e, f.bytes, l.splitter(k, f))
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -1540,12 +1510,12 @@ func (l *Linker) Flatten(ctx context.Context, stateJSON []byte, refs Refs, load 
 	if raw == nil {
 		raw = map[string]json.RawMessage{}
 	}
-	values, err := l.fetch(ctx, refs, nil, func(k string) json.RawMessage { return raw[k] }, load, false)
+	values, err := l.fetch(ctx, refs, nil, load, false)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	// A ref'd field is absent from the state column, except a list whose own elements are stored there; either
-	// way the resolved value is the whole field.
+	// A ref'd field is absent from the state column by construction, so splicing can only add keys - it never
+	// has to decide between a literal and a resolved value.
 	for k, v := range values {
 		raw[k] = v
 	}

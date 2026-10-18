@@ -197,8 +197,10 @@ The one limit is what the database can store. No single JSON value dwarf writes 
   its small fields. The exception is a field under a reducer other than `append` (`concat`, `merge`,
   `union`, `add` and the rest): the step after one that contributes to it stores the combined value whole, so
   a large one counts toward the limit in that step's row. Steps that do not touch it refer to it as before. A
-  field under `append` is stored as references to the steps that hold its elements, and so is a list with no
-  reducer that a task rewrites each step but only ever extends: each step stores only the elements it added.
+  field under `append` is stored as references to the steps that hold its elements once it is past about 1 KB,
+  and so is a list with no reducer that a task rewrites each step but only ever extends: each step stores only
+  the elements it added. That holds outside a fan-out's branches; a branch that rewrites such a list stores its
+  whole value, as it always did.
 - **The flow's state when it ends** must fit in 256 MB, because the final state holds every field at once.
   The same is true wherever a whole state crosses from one flow to another: a `Continue` turn's starting
   state, a subgraph's input and its result, and the step a `Fork` restarts from. A flow should drop large

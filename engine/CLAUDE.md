@@ -1159,7 +1159,7 @@ fan-in 15 plus their contributions) and `TestHandOff_ReducerErrorFailsTheStep`.
   inline (the rest of `foldedFields`, passed as `inlineOnly`). A fan-in INSIDE an outer cohort keeps everything its cohort wrote inline (below), and so does a
   field an inner fan-in's part touches: that part is a projection of the inner fan-in's state, not a
   contribution in a `changes` column. Pinned by `TestArrayRefs_AppendLoopStoresEachElementOnce`,
-  `TestStateRefs_ReducedFieldIsResolvedAndReanchored`,
+  `TestArrayRefs_ListAtTrunkFanInAfterInnerCohort`, `TestStateRefs_ReducedFieldIsResolvedAndReanchored`,
   `TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue`, `TestStateRefs_EmptyForEachFoldsAReffedBase` and
   `fixtures/arrayrefsflow_test.go`.
 - **A folded field's BASE may be carried by a ref**, so the fan-in paths resolve it before folding:
@@ -1430,11 +1430,17 @@ and `TestChanges_ErrorRouteComposesThroughTheReducers`, each failing with its si
   (no reducer, outside a cohort). Each fails the step, naming the field. Pinned by
   `TestChanges_RemoteResultIsChecked`.
 - **An addition is recorded at persist time, outside a cohort** (`recordAdditions` in `processStep`, before
-  `changesJSON`, holding no turn): an addition is relative to the step's own input, and the
-  fan-in folds a member onto the spawn's. Its field is a fold like an `append` contribution (`foldedFields`,
-  `appendFolds`, `cohortAppendFolds`), so it is a list or inline and never anchored at the step, and `fanInBase`
-  resolves its base. `Step` shows the whole value written (`changesView` applies it onto the step's state). Pinned
-  by `TestArrayRefs_ReplaceLoopStoresOnlyWhatEachStepAdds` and `fixtures/arrayrefsflow_test.go`'s replace loop.
+  `changesJSON`): an addition is relative to the step's own input, and the fan-in folds a member onto the spawn's.
+  The persist turn is already held there, so only a byte compare runs under it (the input array, minus its closing
+  bracket, as a prefix of the new one); decoding both arrays, when that misses, runs with the turn handed back
+  (`yieldTurn`) - measured ~2.8 ms per step at 100 respelled 1 KB messages and ~27 ms at 1,000, too long to hold a
+  connection's turn. Its field is a fold like an `append` contribution (`foldedFields`, `appendFolds`,
+  `cohortAppendFolds`), so it is a list or inline and never anchored at the step. `fanInBase` resolves its base
+  (`TestArrayRefs_FanOutSourceAddition` loses the history without it), and a branch that writes the field replaces
+  the spawn's addition at the fan-in (`TestArrayRefs_BranchRewriteOfASpawnAddition`, a same-length rewrite the
+  list's count check cannot see). `Step` shows the whole value written (`changesView` applies it onto the step's
+  state). Pinned by `TestRecordAdditions`, `TestArrayRefs_ReplaceLoopStoresOnlyWhatEachStepAdds` and
+  `fixtures/arrayrefsflow_test.go`'s replace loop.
 - **`Step` shows a step's changes as a `State`** (`changesView`): an overwrite as its value, a delete as a
   null.
 - **`state_reduced` holds a fan-in's `reduced` record and nothing else** (see "A member's contribution is its

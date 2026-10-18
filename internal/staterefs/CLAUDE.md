@@ -84,7 +84,8 @@ input for large elements, `D/(1+D)` for mid-size ones. Task outputs (`changes`) 
 
 ## Lists: a folded field stored by its elements
 
-A field under the append reducer holds a value that exists in no row: not in the folding step's
+A field under the append reducer - or one with no reducer that a step extended, recorded as an addition (`name+`,
+`workflow/CLAUDE.md`) - holds a value that exists in no row: not in the folding step's
 `state`, which predates the fold, nor its `changes`, which hold the contribution. Stored inline in every
 successor, a loop adding one element per step stores n²/2 elements. Past the bar `Mint` stores it as a **list**
 instead - entries naming the rows that already hold its elements - given a `Fold` per field: the base's length,
@@ -98,7 +99,6 @@ contribution's elements it keeps is decided on decoded values inside the fold, w
 | `1234s` / `1234c` | the same, from that column only |
 | `1234 pages[5]` | element 5 of `pages` at 1234 |
 | `1234c[0:2]` / `1234c[3:]` | elements 0-1 / 3 to the end of this field in 1234's `changes` (Go slices) |
-| `s[1]` | element 1 of this field in THIS step's own `state` (lists only) |
 | `1201s[:2];1202c[:2];1204c` | a list: entries concatenated; an entry without a range is one element |
 | `1204c;` | a list of one entry |
 
@@ -108,17 +108,18 @@ contribution's elements it keeps is decided on decoded values inside the fold, w
   constant on it - ~11 bytes per contributing step.
 - **No letter keeps the whole-field lookup; ranges name their column.** A step that received a field inline in
   `state` and contributed to it in `changes` holds both, and only a range must choose.
-- **A self entry (`s[...]`) is rewritten to name its step when the list is carried** (`Ref.carried`), so an
-  element stored inline is stored once and refs stay one hop. Never plain-ref a list field: that step's `state`
-  holds only its inline elements, a fragment.
-- **The count is checked, not trusted.** `foldList` declines - the field stays inline - unless its entries account
-  for exactly the folded value's elements; a disagreement would drop or repeat elements silently. That is why the
-  mint writes explicit range ends: `mintItem` places a `forEach` element in a list by entry lengths, and an open
-  end has none.
+- **Every entry names its step.** A list is carried unchanged, and each entry points at literal bytes, so refs
+  stay one hop. The field is absent from the `state` column of a step that stores it as a list.
+- **The element COUNT is checked, not trusted.** `foldList` declines - the field stays inline - unless its entries
+  add up to the folded value's element count, so a list that would drop or repeat elements is never written. It
+  cannot catch a same-count substitution: which step's elements the list names is the caller's `Fold`, so a fold
+  path that misdescribes its parts (a branch's rewrite of a field read as the spawn's addition) needs its own
+  guard and test (`cohortAppendFolds`, `TestArrayRefs_BranchRewriteOfASpawnAddition`). The mint writes explicit
+  range ends: `mintItem` places a `forEach` element in a list by entry lengths, and an open end has none.
 - **A list neither counts toward `maxAnchors` nor is inlined by it**: it names an anchor per contributing step by
   design, and a cold read of it is one chunked query, after which the cache serves the steps that follow.
 - Pinned by `TestRef_Grammar`, `TestLinker_ResolveList`, `TestLinker_MintFoldList`,
-  `TestLinker_MintItemThroughList`, `TestLinker_SeedList`, `TestInlineExcessAnchors_SkipsLists`.
+  `TestLinker_MintItemThroughList`, `TestLinker_SeedList`, `TestInlineExcessAnchors_SkipsLists`, `TestRef_Remap`.
 
 ## The shape: resolve once at dispatch, mint once at the successor write
 
@@ -356,10 +357,9 @@ The shape is load-bearing in five ways:
 ## The resolve cache is sized in bytes
 
 The replica's cache (one `Cache`, shared by every shard's Linker, below) is an LRU of `cachedField` entries
-with three bounds: bytes (the budget the engine passes to `NewCache`), entries (`cacheEntries`, 65,536), and
+with three bounds: bytes (the budget the engine passes to `NewCache`), entries (`cacheEntries`, 1,048,576), and
 idleness (an entry unread for `cacheIdle`, 5 minutes, expires).
-Each entry is charged `max(len, minCharge)` plus `entryOverhead`, and each split it holds adds its element
-slices. The budget is `SetStateCacheSize`, else a tenth of the process's memory limit (`internal/memlimit`),
+Each entry is charged its length plus `entryOverhead`, and each split it holds adds its element slices. The budget is `SetStateCacheSize`, else a tenth of the process's memory limit (`internal/memlimit`),
 else 1 GiB (`engine/staterefs.go` `stateCacheBudget`).
 
 - **Bytes are the primary bound; never bound it by entry count alone.** An entry is a whole ref'd field: a 1 MB

@@ -496,7 +496,8 @@ func (s State) Apply(c Changes, reducers map[string]Reducer) error {
 //   - a contribution to a field with no reducer, or ReducerReplace, takes the new value, or removes the field
 //     if the value is null;
 //   - a contribution to any other field is combined through its reducer, whose base is this State's current
-//     value or nil if it holds none. A null contributes nothing: it is the reducer's identity.
+//     value or nil if it holds none. A null contributes nothing: it is the reducer's identity;
+//   - an addition appends its elements to the field's current value, which must be a list or absent.
 //
 // Pass nil reducers to replace every field. Each combined field is decoded once and encoded once whatever the
 // number of changes, because a combining reducer re-encodes its accumulator, and folding per member would be
@@ -563,7 +564,7 @@ func (s State) ApplyAll(cs []Changes, reducers map[string]Reducer) error {
 		// An addition is only ever recorded on a field with no reducer, so nothing is pending for it here: it
 		// extends the field's current value.
 		for k, v := range c.additions.d {
-			extended, err := appendRaw(k, s.d[k], []json.RawMessage{v}, false)
+			extended, err := extend(k, s.d[k], v)
 			if err != nil {
 				return errors.Trace(err)
 			}

@@ -533,8 +533,8 @@ func (e *Engine) SetEngineID(id int64) error {
 // SetStateCacheSize sets how much memory, in bytes, the engine may use to keep large state fields it has
 // written or read, so the steps that read them next take them from memory rather than from the database. One
 // cache serves all of the engine's shards; a field larger than the whole size is not kept. Each field counts
-// as at least 4 KB, at most 65,536 are kept, and a field unread for 5 minutes expires, its memory released by
-// a later store or lookup.
+// as its size plus a few hundred bytes, at most 1,048,576 are kept, and a field unread for 5 minutes expires, its
+// memory released by a later store or lookup.
 //
 // The default is a tenth of the memory this process may use: GOMEMLIMIT when it is set; otherwise, on
 // Linux, the tightest of the process's cgroup memory limits and physical memory. When none of these can be

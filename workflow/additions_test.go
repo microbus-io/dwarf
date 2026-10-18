@@ -87,3 +87,22 @@ func TestChanges_AdditionSuffixIsReserved(t *testing.T) {
 	assert.Error(f.Set("x+", 1))
 	assert.Equal(0, c.Len())
 }
+
+// TestChanges_AdditionNeedsAList pins that an addition only ever extends a list: one onto a field holding something
+// else, or one that is not itself a list of elements, is an error naming the field - not a reducer it does not have.
+func TestChanges_AdditionNeedsAList(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	in, _ := NewState(json.RawMessage(`{"f":"text"}`))
+	err := in.Apply(added(`[1]`), nil)
+	if assert.Error(err) {
+		assert.Contains(err.Error(), "does not hold a list")
+		assert.NotContains(err.Error(), "append")
+	}
+	in, _ = NewState(json.RawMessage(`{"f":[1]}`))
+	assert.Error(in.Apply(added(`2`), nil))
+	in, _ = NewState(json.RawMessage(`{}`))
+	assert.NoError(in.Apply(added(`[1]`), nil), "an absent field takes the elements as its list")
+	assert.Equal(`[1]`, string(in.GetJSON("f")))
+}

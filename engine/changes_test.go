@@ -301,6 +301,33 @@ func TestChanges_RemoteResultIsChecked(t *testing.T) {
 		assert.Equal(workflow.StatusFailed, outcome.Status)
 		assert.Contains(outcome.Error, "inside a fan-out branch")
 	}
+
+	// An addition the engine could never have recorded: a name ending with the addition suffix, an addition on a
+	// reduced field, one whose value is not a list of elements, and one inside a fan-out branch.
+	for _, tc := range []struct{ changes, want string }{
+		{`{"x++":[1]}`, "cannot be written"},
+		{`{"log+":["b"]}`, "never records there"},
+		{`{"x+":"b"}`, "not a list of elements"},
+		{`{"x+":null}`, "not a list of elements"},
+	} {
+		changes = tc.changes
+		_, outcome, err := e.Run(ctx, "changeschecked/wf", map[string]any{"log": []string{"a"}, "x": []string{"a"}}, nil)
+		if assert.NoError(err) {
+			assert.Equal(workflow.StatusFailed, outcome.Status, tc.changes)
+			assert.Contains(outcome.Error, tc.want, tc.changes)
+		}
+	}
+	changes = `{"x+":["b"]}`
+	_, outcome, err = e.Run(ctx, "changeschecked/wf", map[string]any{"x": []string{"a"}}, nil)
+	if assert.NoError(err) {
+		assert.Equal(workflow.StatusCompleted, outcome.Status, outcome.Error)
+		assert.Equal([]string{"a", "b"}, outcome.State.GetStrings("x"), "an addition on the trunk extends the field")
+	}
+	_, outcome, err = e.Run(ctx, "changeschecked/fan", map[string]any{"items": []string{"x"}, "x": []string{"a"}}, nil)
+	if assert.NoError(err) {
+		assert.Equal(workflow.StatusFailed, outcome.Status)
+		assert.Contains(outcome.Error, "never records there")
+	}
 }
 
 // TestChanges_InterruptedSnapshotFoldsThroughTheReducers pins that an interrupted flow's Snapshot shows the

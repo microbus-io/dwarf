@@ -387,29 +387,40 @@ func TestArrayRefs_ReplaceLoopStoresOnlyWhatEachStepAdds(t *testing.T) {
 }
 
 // TestRecordAdditions pins when a write to a field with no reducer is stored as what it gained: its new value is an
-// array that begins with the whole array the field held. Elements compare by bytes, else decoded and re-encoded, so
-// a database's reordering and respacing of the stored input still matches; a number spelled two ways does not, and
-// that costs only the addition.
+// array that begins with the whole array the field held. A byte prefix is decided at once; anything else is decoded
+// in the slow pass, which the engine runs with its database turn handed back. Elements there compare by bytes, else
+// decoded and re-encoded, so a database's reordering and respacing of the stored input still matches; a number
+// spelled two ways does not, and that costs only the addition.
 func TestRecordAdditions(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
+	slowPasses := 0
 	record := func(input, value string, reducers map[string]workflow.Reducer) workflow.Changes {
 		in, err := workflow.NewState(json.RawMessage(`{"f":` + input + `}`))
 		assert.NoError(err)
 		c := workflow.NewChanges()
 		c.Contributions().SetJSON("f", json.RawMessage(value))
-		recordAdditions(c, in, reducers)
+		recordAdditions(c, in, reducers, func(decode func()) {
+			slowPasses++
+			decode()
+		})
 		return c
 	}
 
-	c := record(`[{"a":1, "b":"x"},2]`, `[{"b":"x","a":1},2,3,{"c":4}]`, nil)
+	c := record(`[{"a":1,"b":"x"},2]`, `[{"a":1,"b":"x"},2,3,{"c":4}]`, nil)
+	assert.Equal(`[3,{"c":4}]`, string(c.Additions().GetJSON("f")))
+	assert.Equal(0, slowPasses, "a byte prefix is decided without decoding")
+
+	c = record(`[{"a":1, "b":"x"},2]`, `[{"b":"x","a":1},2,3,{"c":4}]`, nil)
 	assert.True(c.Additions().Has("f"), "a reordered, respaced prefix is still the same prefix")
 	assert.False(c.Contributions().Has("f"))
 	assert.Equal(`[3,{"c":4}]`, string(c.Additions().GetJSON("f")))
+	assert.Equal(1, slowPasses, "a respelled prefix takes the decoding pass")
 
 	for _, tc := range []struct{ name, input, value string }{
 		{"different prefix", `[1,2]`, `[1,3,4]`},
+		{"a byte prefix inside an element", `[1,2]`, `[1,23,4]`},
 		{"same length", `[1,2]`, `[1,2]`},
 		{"shorter", `[1,2]`, `[1]`},
 		{"empty input", `[]`, `[1]`},
@@ -424,4 +435,220 @@ func TestRecordAdditions(t *testing.T) {
 
 	c = record(`[1]`, `[1,2]`, map[string]workflow.Reducer{"f": workflow.ReducerAppend})
 	assert.False(c.Additions().Has("f"), "a reduced field's write is already a contribution")
+}
+
+// rewriteHistory reads "messages", fails unless it is messages 0..k-1, and returns it.
+func rewriteHistory(f *workflow.Flow) ([]loopMsg, error) {
+	var history []loopMsg
+	if _, err := f.Get("messages", &history); err != nil {
+		return nil, err
+	}
+	if err := checkLoopHistory(history); err != nil {
+		return nil, fmt.Errorf("%s: %w", f.StepKey(), err)
+	}
+	return history, nil
+}
+
+// TestArrayRefs_FanOutSourceAddition pins the fan-in's base for a field the fan-out source extended by an addition:
+// the source's changes hold only what it added, so the fan-in must resolve the source's input before applying
+// them (fanInBase), or the history before the source is lost. Over another array and over the extended field itself
+// (each branch's element an item ref into the addition).
+func TestArrayRefs_FanOutSourceAddition(t *testing.T) {
+	t.Parallel()
+	for _, overMessages := range []bool{false, true} {
+		t.Run(fmt.Sprintf("over_messages=%v", overMessages), func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			assert := testarossa.For(t)
+			prefix := fmt.Sprintf("srcaddition%v", overMessages)
+			mux := hosts.NewMux()
+			g := workflow.NewGraph("SourceAddition")
+			chain := []string{"L0", "L1", "L2", "Src"}
+			for _, n := range chain {
+				g.SetURL(n, prefix+"/step")
+			}
+			g.SetURL("Work", prefix+"/work")
+			g.SetURL("Join", prefix+"/join")
+			g.SetURL("Tail", prefix+"/step")
+			g.SetFanIn("Join")
+			g.AddTransitionChain(chain...)
+			source := "pages"
+			if overMessages {
+				source = "messages"
+			}
+			g.AddTransitionForEach("Src", "Work", source, "page")
+			g.AddTransitionChain("Work", "Join", "Tail", workflow.End)
+			assert.NoError(g.Validate())
+			mux.HandleGraph(prefix+"/wf", g)
+			mux.HandleTask(prefix+"/step", func(ctx context.Context, f *workflow.Flow) error {
+				history, err := rewriteHistory(f)
+				if err != nil {
+					return err
+				}
+				return f.Set("messages", append(history, loopMsg{N: len(history), Text: blob(600)}))
+			})
+			mux.HandleTask(prefix+"/work", func(ctx context.Context, f *workflow.Flow) error {
+				history, err := rewriteHistory(f)
+				if err != nil {
+					return err
+				}
+				if len(history) != 4 {
+					return fmt.Errorf("branch sees %d messages, want 4", len(history))
+				}
+				if overMessages {
+					var m loopMsg
+					if _, err := f.Get("page", &m); err != nil {
+						return err
+					}
+					if m.N != f.GetInt("pageIndex") || len(m.Text) != 600 {
+						return fmt.Errorf("branch %d sees element %d", f.GetInt("pageIndex"), m.N)
+					}
+				}
+				return nil
+			})
+			mux.HandleTask(prefix+"/join", func(ctx context.Context, f *workflow.Flow) error {
+				history, err := rewriteHistory(f)
+				if err == nil && len(history) != 4 {
+					err = fmt.Errorf("the fan-in sees %d messages, want 4", len(history))
+				}
+				return err
+			})
+			e := unseeded(NewEngineUnderTest(t.Name()))
+			defer e.Shutdown(ctx)
+			e.SetHost(mux)
+			assert.NoError(e.Startup(t.Context()))
+
+			fk, err := e.Create(ctx, prefix+"/wf", map[string]any{"pages": []string{"a", "b", "c"}}, nil)
+			assert.NoError(err)
+			awaitLoop(t, e, fk, 5)
+		})
+	}
+}
+
+// TestArrayRefs_BranchRewriteOfASpawnAddition pins that a branch's rewrite of a field the fan-out source extended
+// wins at the fan-in, even one that keeps its length: the fan-in's list would otherwise be built from the source's
+// addition, and the element count, the only thing the list is checked against, is the same.
+func TestArrayRefs_BranchRewriteOfASpawnAddition(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("BranchRewrite")
+	chain := []string{"L0", "L1", "L2", "Src"}
+	for _, n := range chain {
+		g.SetURL(n, "branchrewrite/step")
+	}
+	g.SetURL("Work", "branchrewrite/work")
+	g.SetURL("Join", "branchrewrite/join")
+	g.SetFanIn("Join")
+	g.AddTransitionChain(chain...)
+	g.AddTransitionForEach("Src", "Work", "pages", "page")
+	g.AddTransitionChain("Work", "Join", workflow.End)
+	assert.NoError(g.Validate())
+	mux.HandleGraph("branchrewrite/wf", g)
+	mux.HandleTask("branchrewrite/step", func(ctx context.Context, f *workflow.Flow) error {
+		history, err := rewriteHistory(f)
+		if err != nil {
+			return err
+		}
+		return f.Set("messages", append(history, loopMsg{N: len(history), Text: blob(600)}))
+	})
+	mux.HandleTask("branchrewrite/work", func(ctx context.Context, f *workflow.Flow) error {
+		history, err := rewriteHistory(f)
+		if err != nil {
+			return err
+		}
+		if f.GetInt("pageIndex") == 2 {
+			history[len(history)-1].Text = strings.Repeat("X", 600)
+			return f.Set("messages", history)
+		}
+		return nil
+	})
+	mux.HandleTask("branchrewrite/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	e := unseeded(NewEngineUnderTest(t.Name()))
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+
+	_, out, err := e.Run(ctx, "branchrewrite/wf", map[string]any{"pages": []string{"a", "b", "c"}}, nil)
+	assert.NoError(err)
+	assert.Equal(workflow.StatusCompleted, out.Status, out.Error)
+	var history []loopMsg
+	_, _ = out.State.Get("messages", &history)
+	if assert.Len(history, 4) {
+		assert.Equal(strings.Repeat("X", 600), history[3].Text, "the branch's rewrite wins")
+	}
+}
+
+// TestArrayRefs_ListAtTrunkFanInAfterInnerCohort pins the list a trunk fan-in builds from members that are steps
+// after an inner fan-in: each branch's contribution to the outer field comes from a step after its inner cohort,
+// while the inner field, which the inner fan-ins' parts carry, stays inline at the trunk fan-in.
+func TestArrayRefs_ListAtTrunkFanInAfterInnerCohort(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("Nested")
+	g.SetReducer("log", workflow.ReducerAppend)
+	g.SetReducer("inner", workflow.ReducerAppend)
+	for _, n := range []string{"Seed", "Group", "Item", "JoinItems", "After", "JoinGroups", "Tail"} {
+		g.SetURL(n, "trunklist/"+strings.ToLower(n))
+	}
+	g.SetFanIn("JoinItems")
+	g.SetFanIn("JoinGroups")
+	g.AddTransitionForEach("Seed", "Group", "groups", "group")
+	g.AddTransitionForEach("Group", "Item", "items", "item")
+	g.AddTransitionChain("Item", "JoinItems", "After", "JoinGroups", "Tail", workflow.End)
+	assert.NoError(g.Validate())
+	mux.HandleGraph("trunklist/wf", g)
+	entry := func(tag string) []string { return []string{tag + strings.Repeat("e", 600)} }
+	mux.HandleTask("trunklist/seed", func(ctx context.Context, f *workflow.Flow) error {
+		if err := f.Set("inner", entry("seed")); err != nil {
+			return err
+		}
+		return f.Set("log", entry("seed"))
+	})
+	mux.HandleTask("trunklist/group", func(ctx context.Context, f *workflow.Flow) error {
+		return f.Set("log", entry("group"+f.GetString("group")))
+	})
+	mux.HandleTask("trunklist/item", func(ctx context.Context, f *workflow.Flow) error {
+		return f.Set("inner", entry("item"+f.GetString("group")+f.GetString("item")))
+	})
+	mux.HandleTask("trunklist/joinitems", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("trunklist/after", func(ctx context.Context, f *workflow.Flow) error {
+		if n := len(f.GetStrings("inner")); n != 4 {
+			return fmt.Errorf("after sees %d inner entries, want 4", n)
+		}
+		return f.Set("log", entry("after"+f.GetString("group")))
+	})
+	mux.HandleTask("trunklist/joingroups", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("trunklist/tail", func(ctx context.Context, f *workflow.Flow) error {
+		return f.Set("log", entry("tail"))
+	})
+	e := unseeded(NewEngineUnderTest(t.Name()))
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+
+	fk, out, err := e.Run(ctx, "trunklist/wf", map[string]any{"groups": []string{"A", "B"}, "items": []string{"1", "2", "3"}}, nil)
+	assert.NoError(err)
+	assert.Equal(workflow.StatusCompleted, out.Status, out.Error)
+	tagsOf := func(field string) []string {
+		var tags []string
+		for _, x := range out.State.GetStrings(field) {
+			tags = append(tags, strings.TrimRight(x, "e"))
+		}
+		return tags
+	}
+	assert.Equal([]string{"seed", "groupA", "afterA", "groupB", "afterB", "tail"}, tagsOf("log"))
+	assert.Equal([]string{"seed", "itemA1", "itemA2", "itemA3", "itemB1", "itemB2", "itemB3"}, tagsOf("inner"))
+	for _, r := range loopRows(t, e, fk) {
+		if r.task != "JoinGroups" {
+			continue
+		}
+		assert.NotNil(r.refs["log"].List, "the trunk fan-in stores the outer field as a list")
+		assert.True(r.state.Has("inner"), "the field the inner fan-ins' parts carry stays inline")
+	}
 }
