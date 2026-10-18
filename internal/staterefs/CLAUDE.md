@@ -260,7 +260,10 @@ both measure ~1x, so the ambiguity is moot and no server-version probe is needed
    rewrites one large field - the carry multiplier refs exist to remove. What the count buys - a shorter resolve IN-list - is paid only on a cache miss, and the minting
    replica's cache holds the anchors (`Seed`, and the dispatch resolve); a miss reads them all in one round
    trip, and the steps after it hit. The bar is this mint's own price for an
-   anchor, so a ref below it is one the policy would not have opened. Pinned by
+   anchor, so a ref below it is one the policy would not have opened. With no hard count, a state names an anchor
+   per large-field writer, so the IN list is the workload's length: the engine's loader chunks it at
+   `inListChunk` (SQL Server rejects a statement past 2,100 parameters; pinned against it by
+   `TestStateRefs_AnchorLoaderChunksPastTheParameterCeiling`). Pinned by
    `TestLinker_MintTiers`'s `over_max_anchors_inlines_only_small_anchors` and `large_anchors_survive_any_count`,
    and against a real database `TestStateRefs_ManyLargeWritersStayByRef` (fails with the size test removed).
 
@@ -297,7 +300,7 @@ the per-anchor SUM test in `Mint` price something the reader does not do. Pinned
 **Each `Read` names the columns it needs.** A list's entries mostly read a contribution from `changes`, and that
 step's `state` holds its own list, so reading `state` too makes a cold read of a long list cost the square of its
 length. The engine's loader therefore makes up to two queries (anchors needing `state`, anchors needing only
-`changes`), each chunked at 512 ids for SQL Server's 2,100-parameter ceiling. Pinned by
+`changes`), each chunked at `inListChunk` (512) ids for SQL Server's 2,100-parameter ceiling. Pinned by
 `TestLinker_ResolveList`. A `ResolveShared` that waited on another read makes no call when
 that read delivered, and a second call only when it failed.
 

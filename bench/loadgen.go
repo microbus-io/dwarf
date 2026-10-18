@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -311,6 +312,13 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 					errCount.Add(1)
 					continue
 				}
+				if w.check != nil {
+					if err := w.check(outcome); err != nil {
+						fmt.Fprintf(os.Stderr, "flow failed its workload check: %v\n", err)
+						errCount.Add(1)
+						continue
+					}
+				}
 				flows.Add(1)
 				latMu.Lock()
 				latencies = append(latencies, elapsed)
@@ -520,6 +528,13 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 						awaitWG.Go(func() {
 							defer func() { <-sampleSem }()
 							oc, aerr := eng.Await(awaitCtx, key)
+							if aerr == nil && oc.Status == workflow.StatusCompleted && w.check != nil {
+								if err := w.check(oc); err != nil {
+									fmt.Fprintf(os.Stderr, "flow failed its workload check: %v\n", err)
+									errCount.Add(1)
+									return
+								}
+							}
 							if measuring.Load() && aerr == nil && oc.Status == workflow.StatusCompleted {
 								latMu.Lock()
 								doneLat = append(doneLat, time.Since(born))

@@ -34,6 +34,9 @@ type workload struct {
 	// throughput in steps/s into flows/s; an open-loop window's own flowsPerSec is the ADMISSION rate, which
 	// runs ahead of completion by up to -max-outstanding flows and is no measure of what was served.
 	stepsPerFlow int
+	// check, when set, verifies a completed flow's outcome; a flow that fails it counts as an error, which
+	// invalidates the run. It is how a workload whose tasks cannot see their own last write checks it landed.
+	check func(*workflow.FlowOutcome) error
 	// build builds the payload the workload's tasks write or carry, nil for none. It runs once, before any
 	// window (prepare): built by the first task instead, it blocks every concurrent writer on the build -
 	// ~10-20s for the 4GB a -payload 250MB -fanout-width 8 run needs, inside a short warmup's window.
@@ -359,8 +362,10 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 	// field, `loopreplace` rewrites the whole history. Read dwarf_state_write_bytes{column} per flow against
 	// -linear-steps: a history stored again at every step grows with the square of the chain length.
 	//
-	// Every task checks the history it was handed is whole and in order (each message carries its index), so a
-	// message dropped or duplicated fails the run rather than reading as a byte saving.
+	// Step i checks it was handed exactly i messages, each carrying its index, and the outcome check (closed loop,
+	// and the open loop's sampled awaits) that the flow ended with -linear-steps of them. A message dropped,
+	// duplicated or never folded therefore fails the run rather than reading as a byte saving: an index check
+	// alone passes a step whose predecessor's message never arrived, since the shorter history is still in order.
 	loopMessage := payloadBytes
 	if loopMessage == 0 {
 		loopMessage = defaultLoopMessage
@@ -371,16 +376,25 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	}
-	loopTask := func(appendMode bool) func(context.Context, *workflow.Flow) error {
+	checkHistory := func(history []loopMsg, want int) error {
+		if len(history) != want {
+			return fmt.Errorf("%d messages, want %d - a lost or repeated message, not a saving", len(history), want)
+		}
+		for i, m := range history {
+			if m.N != i {
+				return fmt.Errorf("message %d of %d carries index %d - a lost or repeated message, not a saving", i, len(history), m.N)
+			}
+		}
+		return nil
+	}
+	loopTask := func(appendMode bool, step int) func(context.Context, *workflow.Flow) error {
 		return func(ctx context.Context, f *workflow.Flow) error {
 			var history []loopMsg
 			if _, err := f.Get("messages", &history); err != nil {
 				return fmt.Errorf("loop: reading the history at %s: %w", f.StepKey(), err)
 			}
-			for i, m := range history {
-				if m.N != i {
-					return fmt.Errorf("loop: message %d of %d at %s carries index %d - a lost or repeated message, not a saving", i, len(history), f.StepKey(), m.N)
-				}
+			if err := checkHistory(history, step); err != nil {
+				return fmt.Errorf("loop: %s: %w", f.StepKey(), err)
 			}
 			msg := loopMsg{N: len(history), Role: "assistant", Content: loopFresh().next()}
 			h.bytesWritten.Add(int64(loopMessage))
@@ -390,14 +404,24 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 			return f.Set("messages", append(history, msg))
 		}
 	}
-	h.tasks["bench/loop"] = loopTask(true)
-	h.tasks["bench/loopreplace"] = loopTask(false)
+	loopCheck := func(out *workflow.FlowOutcome) error {
+		var history []loopMsg
+		if _, err := out.State.Get("messages", &history); err != nil {
+			return fmt.Errorf("loop: reading the final history: %w", err)
+		}
+		if err := checkHistory(history, chainSteps); err != nil {
+			return fmt.Errorf("loop: the final history: %w", err)
+		}
+		return nil
+	}
 	for _, mode := range []string{"loop", "loopreplace"} {
 		g := workflow.NewGraph("Loop")
 		loopNames := make([]string, 0, chainSteps+1)
 		for i := range chainSteps {
 			n := fmt.Sprintf("L%d", i)
-			g.SetURL(n, "bench/"+mode)
+			url := fmt.Sprintf("bench/%s/%s", mode, n)
+			h.tasks[url] = loopTask(mode == "loop", i)
+			g.SetURL(n, url)
 			loopNames = append(loopNames, n)
 		}
 		loopNames = append(loopNames, workflow.End)
@@ -473,12 +497,14 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 			graphURL:     "bench/loop",
 			initialState: func() map[string]any { return nil },
 			stepsPerFlow: chainSteps,
+			check:        loopCheck,
 			build:        func() { loopFresh() },
 		},
 		"loopreplace": {
 			graphURL:     "bench/loopreplace",
 			initialState: func() map[string]any { return nil },
 			stepsPerFlow: chainSteps,
+			check:        loopCheck,
 			build:        func() { loopFresh() },
 		},
 		"carryfanout": {

@@ -20,7 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"strings"
+	"slices"
 
 	"github.com/microbus-io/dwarf/internal/memlimit"
 	"github.com/microbus-io/dwarf/internal/staterefs"
@@ -80,13 +80,10 @@ func decodeAnchorColumn(data []byte, fields *map[string]json.RawMessage) error {
 	return json.Unmarshal(data, fields)
 }
 
-// anchorChunk is the most anchors one query names. A list ref names an anchor per contributing step, and SQL
-// Server takes at most 2,100 parameters in one statement.
-const anchorChunk = 512
-
 // anchorLoader adapts a shard handle to the Linker's Loader: one query for every anchor at once, which is
-// what the policy's "an anchor's other fields are free" tier is priced on - split into chunks only past
-// anchorChunk, and into two queries when some anchors need their state and others only their changes. A list
+// what the policy's "an anchor's other fields are free" tier is priced on - split into chunks of inListChunk
+// only past that many (a list ref names an anchor per contributing step, and a state an anchor per large-field
+// writer, so the count is the workload's), and into two queries when some anchors need their state and others only their changes. A list
 // reads its contributions from changes alone, and those steps' state holds their own lists, so reading it too
 // would make a cold read of a long list cost the square of its length.
 //
@@ -115,8 +112,7 @@ func anchorLoader(db sequel.Executor, readBytes *int) staterefs.Loader {
 			ids       []int
 			withState bool
 		}{{withState, true}, {changesOnly, false}} {
-			for start := 0; start < len(group.ids); start += anchorChunk {
-				chunk := group.ids[start:min(start+anchorChunk, len(group.ids))]
+			for chunk := range slices.Chunk(group.ids, inListChunk) {
 				if err := readAnchors(ctx, db, chunk, group.withState, readBytes, fetched); err != nil {
 					return nil, errors.Trace(err)
 				}
@@ -129,16 +125,13 @@ func anchorLoader(db sequel.Executor, readBytes *int) staterefs.Loader {
 // readAnchors reads one chunk of anchor rows into fetched: their changes, and with withState their state and
 // refs too.
 func readAnchors(ctx context.Context, db sequel.Executor, ids []int, withState bool, readBytes *int, fetched map[int]staterefs.Anchor) error {
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		args[i] = id
-	}
+	placeholders, args := inList(ids)
 	columns := "step_id, changes"
 	if withState {
 		columns = "step_id, changes, state, state_refs"
 	}
 	rows, err := db.QueryContext(ctx,
-		"SELECT "+columns+" FROM dwarf_steps WHERE step_id IN ("+strings.Repeat("?,", len(ids)-1)+"?)",
+		"SELECT "+columns+" FROM dwarf_steps WHERE step_id IN ("+placeholders+")",
 		args...,
 	)
 	if err != nil {

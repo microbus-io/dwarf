@@ -867,3 +867,42 @@ func TestStateRefs_DeletesAndNullsOfCarriedFields(t *testing.T) {
 		}
 	})
 }
+
+// TestStateRefs_AnchorLoaderChunksPastTheParameterCeiling pins that a resolve naming more anchors than a statement
+// can bind still reads them all. A list names an anchor per contributing step and a state an anchor per large-field
+// writer, so the count is the workload's; SQL Server rejects a statement past 2,100 parameters, which an unchunked
+// IN list over 2,200 anchors reaches - in each of the loader's two queries here.
+func TestStateRefs_AnchorLoaderChunksPastTheParameterCeiling(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	mux := hosts.NewMux()
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+	g := workflow.NewGraph("One")
+	g.SetURL("A", "chunked/a")
+	g.AddTransition("A", workflow.End)
+	mux.HandleGraph("chunked/wf", g)
+	mux.HandleTask("chunked/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	_, outcome, err := e.Run(ctx, "chunked/wf", map[string]any{"doc": "the doc"}, nil)
+	assert.NoError(err)
+	assert.Equal(workflow.StatusCompleted, outcome.Status, outcome.Error)
+	real := stepIDsByTask(t, e, "A")[0]
+
+	// Both query groups past the ceiling: anchors needing their state, and anchors needing only their changes.
+	var reads []staterefs.Read
+	for i := range 4400 {
+		reads = append(reads, staterefs.Read{ID: 1_000_000 + i, State: i%2 == 0, Changes: true})
+	}
+	reads = append(reads, staterefs.Read{ID: real, State: true, Changes: true})
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	var readBytes int
+	fetched, err := anchorLoader(db, &readBytes)(ctx, reads)
+	assert.NoError(err)
+	assert.Len(fetched, 1, "only the real step exists")
+	assert.Equal(`"the doc"`, string(fetched[real].State["doc"]))
+}
