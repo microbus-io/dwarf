@@ -392,7 +392,9 @@ Tasks signal the engine via control methods on the `Flow` carrier (distinct from
   attempt would still land within `giveUpAfter` of the step's first creation, else `false` (task should return its
   error) - including when the next backoff delay alone would overshoot the horizon, so a doomed wait is never parked
   before failing. The give-up check is made client-side in `Retry` against `flow.StepCreatedAt()`; the engine only
-  consumes the backoff shape.
+  consumes the backoff shape. `Retry` refuses a negative delay or cap and a negative, NaN or infinite multiplier;
+  a remote host's carrier is not bound by that, so the engine fails a step whose retry delay comes out negative
+  (`TestRetry_NegativeDelayFailsTheStep`), and `backoffDelay` saturates at the largest `Duration`.
   Pass `giveUpAfter <= 0` for unlimited; to bound by count instead, pass `0` and gate on `flow.Attempt()`. The step row
   is reused. The engine tracks `attempt` and computes the re-dispatch delay `min(initialDelay * delayMultiplier^attempt,
   maxIntervalDelay)`, merging `state + changes` back into `state` so the task sees its prior output. `flow.Retry`

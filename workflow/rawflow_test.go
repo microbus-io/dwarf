@@ -17,6 +17,7 @@ limitations under the License.
 package workflow
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -35,4 +36,22 @@ func TestRawFlow_RetryDelay(t *testing.T) {
 	assert.Equal(4*time.Second, rf.RetryDelay(2))
 	assert.Equal(5*time.Second, rf.RetryDelay(3))
 	assert.Equal(5*time.Second, rf.RetryDelay(1000))
+}
+
+// TestBackoffDelay_Saturates pins that a delay past the largest Duration saturates rather than converting a float64
+// out of int64's range, which is implementation-defined and came out negative on amd64; and that a negative
+// initialDelay comes back as it is, for the engine to refuse.
+func TestBackoffDelay_Saturates(t *testing.T) {
+	assert := testarossa.For(t)
+
+	const largest = time.Duration(math.MaxInt64)
+	assert.Equal(largest, backoffDelay(time.Second, 1e10, 0, 1))
+	assert.Equal(largest, backoffDelay(time.Second, 1e300, 0, 3))
+	assert.Equal(largest, backoffDelay(time.Second, math.Inf(1), 0, 1))
+	assert.Equal(largest, backoffDelay(largest, 1, 0, 0))
+	assert.Equal(time.Hour, backoffDelay(time.Second, 1e300, time.Hour, 3))
+	assert.Equal(time.Hour, backoffDelay(2*time.Hour, 2, time.Hour, 0))
+	assert.Equal(time.Duration(0), backoffDelay(0, math.Inf(1), 0, 3))
+	assert.Equal(time.Second, backoffDelay(time.Second, math.NaN(), 0, 3))
+	assert.Equal(-time.Second, backoffDelay(-time.Second, 1e300, 0, 3))
 }

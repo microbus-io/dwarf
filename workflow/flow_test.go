@@ -18,6 +18,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -410,6 +411,32 @@ func TestFlow_Retry(t *testing.T) {
 	ok = f4.Retry(time.Hour, 1.0, 0, time.Minute)
 	assert.False(ok)
 	assert.False(f4.retry)
+
+	// A delay that saturates still gives up: summed with the time spent, it would overflow to a negative.
+	f5 := NewFlow()
+	f5.stepCreatedAt = time.Now()
+	f5.attempt = 1
+	ok = f5.Retry(time.Second, 1e10, 0, time.Hour)
+	assert.False(ok)
+	assert.False(f5.retry)
+
+	// Arguments outside the allowed values arm nothing.
+	for _, args := range []struct {
+		initialDelay time.Duration
+		multiplier   float64
+		maxDelay     time.Duration
+	}{
+		{-time.Second, 2, 0},
+		{time.Second, 2, -time.Second},
+		{time.Second, -2, 0},
+		{time.Second, math.NaN(), 0},
+		{time.Second, math.Inf(1), 0},
+	} {
+		f6 := NewFlow()
+		ok = f6.Retry(args.initialDelay, args.multiplier, args.maxDelay, 0)
+		assert.False(ok, args)
+		assert.False(f6.retry, args)
+	}
 }
 
 func TestFlow_Sleep(t *testing.T) {

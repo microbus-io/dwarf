@@ -890,11 +890,17 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 
 	// Handle retry
 	if _, _, _, retryRequested := resultFlow.RetryRequested(); retryRequested {
-		e.logger.DebugContext(ctx, "Task retried", "task", taskName, "workflow", workflowURL, "step", stepID, "attempt", attempt)
 		// Sleep is the floor and the backoff adds on top: total = Sleep + min(backoff, maxDelay). This lets a
 		// task set a precise wait (e.g. a downstream's Retry-After via Sleep) and still get exponential backoff
 		// on repeated attempts. maxDelay caps the backoff component, not the total.
 		retrySleepMs := sleepDur.Milliseconds() + resultFlow.RetryDelay(attempt).Milliseconds()
+		if retrySleepMs < 0 {
+			// Retry refuses a negative initialDelay, but a remote host's carrier is not bound by it, and a past
+			// not_before would re-dispatch the step at once on every attempt.
+			err = errors.New("task '%s' requested a retry with a negative delay", stripProto(taskName))
+			return errors.Trace(e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName))
+		}
+		e.logger.DebugContext(ctx, "Task retried", "task", taskName, "workflow", workflowURL, "step", stepID, "attempt", attempt)
 		// A retry rewinds this step in place and clears its subgraph park slot, so on
 		// re-dispatch flow.Subgraph re-arms and spawns a *fresh* child. The prior attempt's
 		// child (always terminal by now - the park only resolves on a terminal child) must be

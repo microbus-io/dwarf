@@ -18,6 +18,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"math"
 	"slices"
 	"time"
 
@@ -554,7 +555,8 @@ a wait we already know is doomed is not parked before failing. Pass giveUpAfter 
 The delay before attempt N is min(initialDelay * delayMultiplier^N, maxIntervalDelay); pass a zero
 initialDelay for immediate retries, and a zero maxIntervalDelay for no per-interval cap. To hold the
 delay constant (e.g. honoring a provider's Retry-After carried in initialDelay), pass delayMultiplier
-1.0. Sleep, if also set, is added on top as a floor.
+1.0. Sleep, if also set, is added on top as a floor. initialDelay and maxIntervalDelay must not be negative,
+and delayMultiplier must be a finite number that is not negative; otherwise Retry returns false.
 
 Retry carries no condition of its own - it is the single retry primitive, called inside whatever
 error branch the task decides is retryable. Keeping the condition explicit at the call site avoids
@@ -573,12 +575,17 @@ To bound by count instead of (or in addition to) time, gate on Attempt: pass giv
 flow.Attempt() at the call site.
 */
 func (f *Flow) Retry(initialDelay time.Duration, delayMultiplier float64, maxIntervalDelay time.Duration, giveUpAfter time.Duration) bool {
+	if initialDelay < 0 || maxIntervalDelay < 0 || !(delayMultiplier >= 0) || math.IsInf(delayMultiplier, 1) {
+		f.retry = false
+		return false
+	}
 	if giveUpAfter > 0 && !f.stepCreatedAt.IsZero() {
 		// Give up if we've crossed the horizon, or if the next attempt's delay alone would overshoot it -
 		// no point parking for a wait we already know lands past the deadline. The delay is the one the
-		// engine will apply (see backoffDelay).
+		// engine will apply (see backoffDelay). Compared against the time left, not summed with the time
+		// spent: a saturated delay plus the elapsed time overflows to a negative and never gives up.
 		nextDelay := backoffDelay(initialDelay, delayMultiplier, maxIntervalDelay, f.attempt)
-		if time.Since(f.stepCreatedAt)+nextDelay >= giveUpAfter {
+		if nextDelay >= giveUpAfter-time.Since(f.stepCreatedAt) {
 			f.retry = false
 			return false
 		}

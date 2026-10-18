@@ -17,6 +17,7 @@ limitations under the License.
 package workflow
 
 import (
+	"math"
 	"time"
 )
 
@@ -148,19 +149,25 @@ func (f *RawFlow) RetryDelay(attempt int) time.Duration {
 }
 
 // backoffDelay is min(initialDelay * multiplier^attempt, maxDelay); a non-positive multiplier or maxDelay
-// disables that term. It clamps in float space and stops multiplying at the cap, so it never overflows int64 ns.
+// disables that term. A negative initialDelay, which Retry refuses but a carrier decoded off the wire may hold,
+// comes back as it is, for the engine to refuse. Without a maxDelay the product saturates at the largest Duration:
+// converting a float64 past int64's range is implementation-defined, and a huge delay came out negative on amd64.
 func backoffDelay(initialDelay time.Duration, multiplier float64, maxDelay time.Duration, attempt int) time.Duration {
+	ceiling := time.Duration(math.MaxInt64)
+	if maxDelay > 0 {
+		ceiling = maxDelay
+	}
 	delay := float64(initialDelay)
-	if multiplier > 0 {
+	if multiplier > 0 && delay > 0 {
 		for range attempt {
-			if maxDelay > 0 && delay >= float64(maxDelay) {
+			if delay >= float64(ceiling) {
 				break
 			}
 			delay *= multiplier
 		}
 	}
-	if maxDelay > 0 && delay > float64(maxDelay) {
-		delay = float64(maxDelay)
+	if delay >= float64(ceiling) {
+		return ceiling
 	}
 	return time.Duration(delay)
 }

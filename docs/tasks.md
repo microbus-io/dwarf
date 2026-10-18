@@ -200,9 +200,11 @@ if err != nil {
 
 The delay before attempt N is `min(initialDelay * delayMultiplier^N, maxIntervalDelay)`. Pass a zero
 `initialDelay` for immediate retries, a zero `maxIntervalDelay` for no per-interval cap, and `delayMultiplier`
-`1.0` to hold the delay constant. Pass `giveUpAfter <= 0` for unlimited retry. To bound by count instead, pass
-`giveUpAfter` `0` and gate on `f.Attempt()` at the call site. On retry the engine merges the task's prior
-output back into its input, so the next attempt sees what the last one wrote.
+`1.0` to hold the delay constant. `initialDelay` and `maxIntervalDelay` must not be negative, and `delayMultiplier`
+must be a finite number that is not negative; otherwise `Retry` returns `false`. Pass `giveUpAfter <= 0` for
+unlimited retry. To bound by count instead, pass `giveUpAfter` `0` and gate on `f.Attempt()` at the call site.
+On retry the engine merges the task's prior output back into its input, so the next attempt sees what the last
+one wrote.
 
 ### Sleep
 
