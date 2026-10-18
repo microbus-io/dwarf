@@ -4,3 +4,6 @@
 bench/results/
 bench/bench
 /todo/
+
+# Local scratch space
+/tmp/

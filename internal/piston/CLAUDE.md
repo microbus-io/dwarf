@@ -531,7 +531,9 @@ tested against the failure; this one can. The rules that keep it working:
 - **Do not steer the plan instead.** A CASE around `parked` or `priority` blinds the selection index as well
   (both lead both indexes: PG 18's skip scan steps over the wrapped column and puts a Sort under the `LIMIT`;
   PG 16 seeks on `status` alone). A plan-cache mode or `enable_sort = off` only removes the cases it names, and
-  neither could be shown to matter in a local test.
+  neither could be shown to matter in a local test. Nor can the statistics be steered: rows that moved the
+  fetch's estimates would have to be pending rows at the band, which get dispatched, and the 1,224 s plan was made
+  before the table's first ANALYZE anyway.
 
 **The cost, measured** (PG 18, 400k due rows at one band, 32 keys, warm, six runs each): the dense band scan
 reads its rows off the selection index, where the guard is checked per row - **~71 -> ~80 ms (+12%)**. The
