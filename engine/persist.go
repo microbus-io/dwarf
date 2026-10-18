@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/internal/turnstile"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -398,10 +399,13 @@ type permanentError struct{ err error }
 func (p *permanentError) Error() string { return p.err.Error() }
 func (p *permanentError) Unwrap() error { return p.err }
 
-// isPermanentError reports whether err carries a permanentError.
+// isPermanentError reports whether err carries a permanentError, or is a state ref the stored rows cannot satisfy
+// (staterefs.IsUnresolvable) - the same kind of failure, raised where the engine's own wrapping does not reach: a
+// final-state merge, a fan-in fold, a Fork leaf. Left transient, Terminate, Delete and Purge of a flow with such a
+// row would retry it forever, and nothing could stop the flow.
 func isPermanentError(err error) bool {
 	var pe *permanentError
-	return errors.As(err, &pe)
+	return errors.As(err, &pe) || staterefs.IsUnresolvable(err)
 }
 
 // settlePersist applies persistStep's disposition to the error persist returned, and reports whether the write

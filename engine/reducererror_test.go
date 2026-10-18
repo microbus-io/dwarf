@@ -279,3 +279,64 @@ func TestHandOff_ReducerErrorFailsTheStep(t *testing.T) {
 		}
 	}
 }
+
+// TestTerminate_UnresolvableRefDoesNotBlockTerminate pins that a tail whose refs the stored rows cannot satisfy - a
+// ref to a step that does not exist - does not keep Terminate or Delete from stopping the flow: the error follows
+// from stored data alone (staterefs.IsUnresolvable), so the final state falls back to empty rather than the
+// operation retrying it forever.
+func TestTerminate_UnresolvableRefDoesNotBlockTerminate(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("TerminateUnresolvable")
+	g.SetURL("A", "reducererror.verify:429/ua")
+	g.SetURL("B", "reducererror.verify:429/ub")
+	g.AddTransitionChain("A", "B", workflow.End)
+	mux.HandleGraph("reducererror.verify:429/unresolvable", g)
+	mux.HandleTask("reducererror.verify:429/ua", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("reducererror.verify:429/ub", func(ctx context.Context, f *workflow.Flow) error {
+		_, err := f.Interrupt(nil, nil)
+		return err
+	})
+
+	eng := NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
+	eng.SetHost(mux)
+	assert.NoError(eng.Startup(t.Context()))
+	db, err := eng.db.Shard(1)
+	assert.NoError(err)
+
+	interrupted := func() string {
+		flowKey, outcome, err := eng.Run(ctx, "reducererror.verify:429/unresolvable", nil, nil)
+		assert.NoError(err)
+		assert.Equal(workflow.StatusInterrupted, outcome.Status)
+		_, flowID, _, err := keys.ParseFlowKey(flowKey)
+		assert.NoError(err)
+		_, err = db.ExecContext(ctx,
+			"UPDATE dwarf_steps SET state_refs=? WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'",
+			[]byte(`{"x":999999999}`), flowID)
+		assert.NoError(err)
+		return flowKey
+	}
+
+	flowKey := interrupted()
+	assert.NoError(eng.Terminate(ctx, flowKey, "stop"))
+	outcome, err := eng.Snapshot(ctx, flowKey)
+	if assert.NoError(err) {
+		assert.Equal(workflow.StatusTerminated, outcome.Status)
+		assert.Equal(0, outcome.State.Len(), "a final state that cannot be resolved is stored empty")
+	}
+	assert.NoError(eng.Delete(ctx, interrupted()), "Delete terminates an interrupted flow first, through the same path")
+}
+
+// TestParseCachedGraph_UnreadableGraphIsPermanent pins that a stored graph that cannot be parsed is a permanent
+// failure: the bytes will not parse on a retry either, and a flow whose graph cannot be read must still stop.
+func TestParseCachedGraph_UnreadableGraphIsPermanent(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	_, err := parseCachedGraph([]byte(`[1]`), "u")
+	assert.Error(err)
+	assert.True(isPermanentError(err))
+}

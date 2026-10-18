@@ -19,6 +19,7 @@ package staterefs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/microbus-io/dwarf/workflow"
@@ -363,4 +364,37 @@ func TestLinker_ResolveReadsAnAddition(t *testing.T) {
 
 	_, err = New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, newState(), Refs{"log": {Anchor: 15}}, nil, anchors.load)
 	assert.Error(err, "a whole-field ref never resolves to the stale input of a step that extended the field")
+}
+
+// TestIsUnresolvable pins which errors follow from the stored data alone: a ref to a step that does not exist, a
+// field or element that is not where a ref says, a refs column that cannot be read. A failure of the read itself
+// is not one, so a caller that retries keeps retrying it.
+func TestIsUnresolvable(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	anchors := &fakeAnchors{rows: map[int]Anchor{7: {Changes: cols(map[string]any{"log": []string{"a"}})}}}
+	resolve := func(refs Refs, load Loader) error {
+		_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, newState(), refs, nil, load)
+		return err
+	}
+	var past Ref
+	assert.NoError(json.Unmarshal([]byte(`"7c[:3];"`), &past))
+	for name, err := range map[string]error{
+		"missing step":      resolve(Refs{"log": {Anchor: 99}}, anchors.load),
+		"missing field":     resolve(Refs{"other": {Anchor: 7}}, anchors.load),
+		"range past an end": resolve(Refs{"log": past}, anchors.load),
+	} {
+		assert.True(IsUnresolvable(err), name)
+	}
+	_, err := Parse([]byte(`{"x":true}`))
+	assert.True(IsUnresolvable(err), "an unreadable refs column")
+
+	failing := func(ctx context.Context, reads []Read) (map[int]Anchor, error) {
+		return nil, errors.New("connection reset")
+	}
+	err = resolve(Refs{"log": {Anchor: 7}}, failing)
+	assert.Error(err)
+	assert.False(IsUnresolvable(err), "a failed read is not a fact about the stored data")
 }

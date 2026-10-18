@@ -120,11 +120,13 @@ func (e *Engine) internGraph(graphJSON []byte, workflowURL, graphHash string) (*
 	return cg, nil
 }
 
-// parseCachedGraph parses a flow's stored graph JSON into a cache entry.
+// parseCachedGraph parses a flow's stored graph JSON into a cache entry. A graph that cannot be parsed is a
+// permanentError: the stored bytes will not parse on a retry either, and a flow whose graph cannot be read must
+// still be stoppable.
 func parseCachedGraph(graphJSON []byte, workflowURL string) (*cachedGraph, error) {
 	parsed := &workflow.Graph{}
 	if err := json.Unmarshal(graphJSON, parsed); err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Trace(&permanentError{errors.New("stored graph of %s: %v", workflowURL, err)})
 	}
 	return &cachedGraph{graph: parsed, fanIn: faninmap.New(parsed), workflowURL: workflowURL}, nil
 }

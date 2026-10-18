@@ -36,6 +36,10 @@ input for large elements, `D/(1+D)` for mid-size ones. Task outputs (`changes`) 
   an older replica defers or refuses them before it gets as far as `Parse`, and a newer one keeps minting the old
   form into older flows (`engine/CLAUDE.md`, "Payload format versions").
   Pinned by `TestStateRefs_UnreadableRefsFailTheStep`.
+- **Every error that follows from stored data alone is `IsUnresolvable`** - an unreadable column, a ref to a missing
+  step, a field or element not where the ref says - and a Loader's own error is not. The engine counts the first
+  kind as permanent, so a flow whose rows hold one can still be terminated; a new error raised from the stored data
+  takes `unresolvableError`, never `errors.New` (`TestIsUnresolvable`).
 - **The item ref is minted INSIDE `Mint`** (`mintItem`), after the array's own fate is decided, because it
   points at whichever anchor holds the array's bytes - carried from an earlier step, or opened here. Pointing at
   a step that merely carries a ref to the array would dangle (the one-hop rule). If the array stays inline, so

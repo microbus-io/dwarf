@@ -896,6 +896,25 @@ func inlineExcessAnchors(raw map[string]json.RawMessage, refs Refs, merged workf
 	}
 }
 
+// unresolvable marks an error that follows from stored data alone: a ref the rows cannot satisfy, or a column that
+// cannot be read. Reading again gives the same error, unlike a failure of the read itself.
+type unresolvable struct{ error }
+
+func (u unresolvable) Unwrap() error { return u.error }
+
+// unresolvableError is errors.New for an error that follows from stored data alone.
+func unresolvableError(pattern string, args ...any) error {
+	return unresolvable{errors.New(pattern, args...)}
+}
+
+// IsUnresolvable reports whether err follows from the stored data alone - a ref to a step that does not exist, a
+// field or element that is not where a ref says, a refs or state column that cannot be read - rather than from a
+// failure to read it. Reading again gives the same error, so a caller that retries on errors should not retry it.
+func IsUnresolvable(err error) bool {
+	var u unresolvable
+	return errors.As(err, &u)
+}
+
 // Parse decodes a refs column. An empty or absent value yields no refs and allocates nothing, which is the
 // overwhelmingly common case.
 //
@@ -910,7 +929,7 @@ func Parse(refsJSON []byte) (Refs, error) {
 	}
 	var refs Refs
 	if err := json.Unmarshal(refsJSON, &refs); err != nil {
-		return nil, errors.New("unreadable state refs (written in a format this version does not know?): %v", err)
+		return nil, unresolvableError("unreadable state refs (written in a format this version does not know?): %v", err)
 	}
 	if len(refs) == 0 {
 		return nil, nil
@@ -998,7 +1017,7 @@ func (l *Linker) resolve(ctx context.Context, state workflow.State, refs Refs, w
 	if state.IsZero() {
 		// Refs with nowhere to resolve into are a state that failed to load; resolving nothing would run the
 		// caller on input missing every field they point at.
-		return 0, errors.New("state refs given with no state to resolve them into")
+		return 0, unresolvableError("state refs given with no state to resolve them into")
 	}
 	values, err := l.fetch(ctx, refs, want, load, shared)
 	if err != nil {
@@ -1191,7 +1210,7 @@ func (l *Linker) loadInto(ctx context.Context, fields []cacheKey, wanted map[cac
 		}
 		row, ok := fetched[k.anchor]
 		if !ok {
-			return loaded, errors.New("state ref to %q points at missing step %d", k.field, k.anchor)
+			return loaded, unresolvableError("state ref to %q points at missing step %d", k.field, k.anchor)
 		}
 		value, err := lookup(row, k)
 		if err != nil {
@@ -1232,7 +1251,7 @@ func lookup(row Anchor, k cacheKey) (json.RawMessage, error) {
 	}
 	if k.col == ColAny {
 		if _, added := row.Changes[k.field+workflow.AdditionSuffix]; added {
-			return nil, errors.New("state ref to %q at step %d reads the whole field, but the step stored only what it added", k.field, k.anchor)
+			return nil, unresolvableError("state ref to %q at step %d reads the whole field, but the step stored only what it added", k.field, k.anchor)
 		}
 	}
 	if k.col != ColChanges {
@@ -1240,10 +1259,10 @@ func lookup(row Anchor, k cacheKey) (json.RawMessage, error) {
 			return value, nil
 		}
 		if _, isRef := row.Refs[k.field]; isRef {
-			return nil, errors.New("state ref to %q resolves to step %d, which itself refs %q - one-hop violated", k.field, k.anchor, k.field)
+			return nil, unresolvableError("state ref to %q resolves to step %d, which itself refs %q - one-hop violated", k.field, k.anchor, k.field)
 		}
 	}
-	return nil, errors.New("state ref to %q not found in step %d", k.field, k.anchor)
+	return nil, unresolvableError("state ref to %q not found in step %d", k.field, k.anchor)
 }
 
 // value returns the bytes a ref resolves to, given the cache entries of every field it names: the field itself
@@ -1253,7 +1272,7 @@ func (l *Linker) value(key string, ref Ref, entries map[cacheKey]*cachedField) (
 		k := l.key(ref.Anchor, ref.field(key), ref.Col)
 		f := entries[k]
 		if f == nil {
-			return nil, errors.New("state ref %q: step %d was not read", key, ref.Anchor)
+			return nil, unresolvableError("state ref %q: step %d was not read", key, ref.Anchor)
 		}
 		one, elems, err := l.pick(key, ref, f.bytes, l.splitter(k, f))
 		if err != nil {
@@ -1269,7 +1288,7 @@ func (l *Linker) value(key string, ref Ref, entries map[cacheKey]*cachedField) (
 		k := l.key(e.Anchor, e.field(key), e.Col)
 		f := entries[k]
 		if f == nil {
-			return nil, errors.New("state ref %q: step %d was not read", key, e.Anchor)
+			return nil, unresolvableError("state ref %q: step %d was not read", key, e.Anchor)
 		}
 		one, elems, err := l.pick(key, e, f.bytes, l.splitter(k, f))
 		if err != nil {
@@ -1296,10 +1315,10 @@ func (l *Linker) pick(key string, ref Ref, value json.RawMessage, split func(pat
 		}
 		elems, err := split(at, value)
 		if err != nil {
-			return nil, nil, errors.New("state ref %q: %s in step %d: %v", key, at, ref.Anchor, err)
+			return nil, nil, unresolvableError("state ref %q: %s in step %d: %v", key, at, ref.Anchor, err)
 		}
 		if i >= len(elems) {
-			return nil, nil, errors.New("state ref %q: index %d out of range of %s in step %d (length %d)", key, i, at, ref.Anchor, len(elems))
+			return nil, nil, unresolvableError("state ref %q: index %d out of range of %s in step %d (length %d)", key, i, at, ref.Anchor, len(elems))
 		}
 		value = elems[i]
 	}
@@ -1311,14 +1330,14 @@ func (l *Linker) pick(key string, ref Ref, value json.RawMessage, split func(pat
 	}
 	elems, err := split(at, value)
 	if err != nil {
-		return nil, nil, errors.New("state ref %q: %s in step %d: %v", key, at, ref.Anchor, err)
+		return nil, nil, unresolvableError("state ref %q: %s in step %d: %v", key, at, ref.Anchor, err)
 	}
 	from, to := ref.Span.From, ref.Span.To
 	if to < 0 {
 		to = len(elems)
 	}
 	if from > to || to > len(elems) {
-		return nil, nil, errors.New("state ref %q: range [%d:%d] out of range of %s in step %d (length %d)", key, from, to, at, ref.Anchor, len(elems))
+		return nil, nil, unresolvableError("state ref %q: range [%d:%d] out of range of %s in step %d (length %d)", key, from, to, at, ref.Anchor, len(elems))
 	}
 	return nil, elems[from:to], nil
 }
@@ -1504,7 +1523,7 @@ func (l *Linker) Flatten(ctx context.Context, stateJSON []byte, refs Refs, load 
 	var raw map[string]json.RawMessage
 	if len(bytes.TrimSpace(stateJSON)) > 0 {
 		if err := json.Unmarshal(stateJSON, &raw); err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Trace(unresolvable{err})
 		}
 	}
 	if raw == nil {

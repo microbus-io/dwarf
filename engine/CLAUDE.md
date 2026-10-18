@@ -1246,6 +1246,11 @@ same values and hits the same error, and `failFlowTx` falls back. (An unknown re
 write metric moves. `mergeCohortState`'s member fold - a failed fan-out's final state - is wrapped the same way, and
 a path that terminalizes a flow whatever it holds - `terminateSubtree` (Terminate, Delete, Purge, the orphan
 sweep) - reads the final state through `terminalFinalState`, which takes a `permanentError` as `{}`; propagating it would leave the flow impossible to stop (`TestTerminate_ReducerErrorDoesNotBlockTerminate`).
+`isPermanentError` also counts a state ref the stored rows cannot satisfy (`staterefs.IsUnresolvable`: a ref to a
+missing step, a field or element not where it says, an unreadable refs or state column), raised from resolves no
+engine wrapper reaches, and a stored graph that cannot be parsed (`parseCachedGraph`). A failed READ is neither, and
+stays transient. Pinned by `TestTerminate_UnresolvableRefDoesNotBlockTerminate` (Terminate and Delete of a flow
+whose tail refs a missing step) and `TestParseCachedGraph_UnreadableGraphIsPermanent`.
 
 **Escalation is counter-based (`cohort_failures`), not status-based, and happens *before* `fanInRow`.**
 `fanInRow` itself never marks the flow terminal - but it is only reached when the cohort resolves with
