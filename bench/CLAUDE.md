@@ -195,7 +195,25 @@ not the pool. Size the rig under the regime the experiment will actually run in.
 
 ## Running the cloud rig
 
+**The kit is `bench/gcp/rig/`.** Each orchestrator creates its rig, sources a step script, pulls the artifacts
+into `bench/results/redo-<name>-<date>/`, and tears everything down on exit, failures included.
+- **`x-rig.sh <name> <disk-gb> <step>`:** one Cloud SQL instance (`TIER`, default 32 vCPU) and one engine/admin VM
+  (`VMTYPE`, default c4a-16).
+- **`xp-rig.sh <name> <tier> <vm-type> <tag>`:** the tier table's pairing, two engine hosts sharing one database,
+  plus an admin VM.
+- **Steps:** `one_run` from `a-step-lib.sh` runs one arm on a fresh database. `*-step.sh` are the arms each
+  campaign used, with their pass criteria in the header.
+- **What stays out of git** lives in `$RIG_HOME` (default `tmp/rig/`, ignored): `dbpass` and the pinned
+  `bench-<sha>` binaries (`CGO_ENABLED=0 GOOS=linux GOARCH=arm64`, built from a clean clone).
+- **Gate every quoted rig on its draw:** run `bench/gcp/dbcpu.sh -live 3` a few minutes into the first window.
+
 Operational traps on Cloud SQL + GCE, each of which has cost a run.
+
+- **Same-spec instances are not the same machine, and a slow draw looks ordinary.** On one build and one rig
+  shape, 32 vCPU instances ran 15.9k-24.1k steps/s. The slow ones burned ~1.5 DB core-ms per step against
+  ~1.1, at the same ~77% CPU, so neither steps/s nor CPU alone gives them away. `dbcpu.sh` prints core-ms per
+  step; read it early, and redraw rather than quote a slow instance. What decides the draw is open: every slow
+  instance on 2026-10-18 was created without `--database-flags` while others ran saturated beside it.
 
 - **Cloud SQL provisions IOPS by disk size (~30 IOPS/GB).** A 100 GB disk gives ~3,000 IOPS (~23 MB/s of
   random 8 KB I/O), and a write-heavy or volume run then measures the disk: the fill rate falls off a cliff
@@ -450,6 +468,15 @@ checks hold `-stall-timeout` and `-drain` to.
 every slow cell: 20,000 outstanding 10-step flows need 300s even at ~667 steps/s. And since its silence is
 the watchdog's own definition of a hang, met after the watchdog stopped, a drain that gives up ends the run
 too - the next window would start on the hung engines.
+
+**The drain's accounting is per PROCESS, so a fleet of bench processes on separate hosts fails it falsely.**
+Each process counts flows created by its own load generator but flows completed by its own engine, and a
+replica completes its peers' flows too. The first process to reach zero exits and finishes more of its peers'
+flows during its shutdown, after its counters were read, so a peer is left reporting them "unfinished" until it
+gives up. Measured: 110 "unfinished" on one host, which was exactly 16 counted by the other plus 94 finished in
+its shutdown, while the database held every flow `completed`. In a multi-process run, verify with status
+counts in the database before dropping it, and read the per-process drain verdict as advisory.
+`-replicas N` (in-process) is not affected, since one process sees every engine's counters.
 
 **A collection that failed on any replica is a failed collection**, never the other replicas' sum. Counters
 and gauges come back nil, histograms report `histogramsMissing`, a gauge-sampler tick is left out of the means

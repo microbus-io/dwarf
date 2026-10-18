@@ -13,10 +13,19 @@
 # number to read; widen the window (-p) to get a mean worth trusting. `gcloud monitoring` has no
 # time-series verb, hence the REST call.
 #
+# It also prints DATABASE CORE-MS PER STEP (mean cores x 1000 / steps/s), which is the draw-quality check: same-spec
+# instances differ, and a slow one shows here within minutes while its steps/s looks like an ordinary number. On
+# `9e5d16b`, linear 0 B, saturated: 32 vCPU draws measured 1.09 (normal) and 1.51-1.55 (slow, ~28% fewer
+# steps/s); 64 vCPU 1.20; 8 and 16 vCPU 1.7-1.9 (CPU-bound tiers run higher; compare like with like). Check every
+# rig whose numbers will be quoted, early, and redraw a slow instance rather than quote it.
+#
 # Usage:
 #   ./dbcpu.sh artifact.json [artifact.json ...]
 #   ./dbcpu.sh -w 2026-07-31T12:00:00Z 2026-07-31T12:05:00Z
-# Knobs (env): PROJECT, DB_INSTANCE, VCPUS (for the cores conversion, default 16),
+#   STEPS=21900 ./dbcpu.sh -live 3        # the last 3 minutes of a run in progress: the draw check
+# Knobs (env): PROJECT, DB_INSTANCE, VCPUS (for the cores conversion, default 16), STEPS (steps/s for the per-step
+#   figure; read from each artifact by default - set it for a multi-host fleet, whose artifacts each hold one
+#   replica's share),
 #   PAD_SECONDS (widen each side of the window, default 60), WRITE (1 = also store the reading in each
 #   artifact as dbCpu {meanPct, peakPct, points}, which bench/charts_redo.py reads)
 set -euo pipefail
@@ -28,17 +37,17 @@ PAD_SECONDS="${PAD_SECONDS:-60}"
 
 command -v python3 >/dev/null 2>&1 || { echo "ABORT: python3 required" >&2; exit 1; }
 
-fetch() { # $1=start $2=end $3=label [$4=artifact to store the reading in, when WRITE=1]
+fetch() { # $1=start $2=end $3=label [$4=artifact to store the reading in, when WRITE=1] [$5=steps/s]
   local token filter
   token="$(gcloud auth print-access-token 2>/dev/null)" || {
     echo "ABORT: not authenticated (gcloud auth login)" >&2; exit 1; }
-  filter="metric.type=\"cloudsql.googleapis.com/database/cpu/utilization\" AND resource.labels.database_id=\"${PROJECT}:${DB_INSTANCE}\""
+  filter="metric.type=\"cloudsql.googleapis.com/database/cpu/utilization\" AND resource.type=\"cloudsql_database\" AND resource.labels.database_id=\"${PROJECT}:${DB_INSTANCE}\""
   curl -sG "https://monitoring.googleapis.com/v3/projects/${PROJECT}/timeSeries" \
     -H "Authorization: Bearer ${token}" \
     --data-urlencode "filter=${filter}" \
     --data-urlencode "interval.startTime=$1" \
     --data-urlencode "interval.endTime=$2" |
-  VCPUS="$VCPUS" LABEL="$3" ARTIFACT="${4:-}" WRITE="${WRITE:-}" python3 -c '
+  VCPUS="$VCPUS" LABEL="$3" ARTIFACT="${4:-}" WRITE="${WRITE:-}" STEPS_PER_SEC="${5:-}" python3 -c '
 import json,os,sys
 d=json.load(sys.stdin)
 label=os.environ["LABEL"]; v=float(os.environ["VCPUS"])
@@ -49,8 +58,10 @@ ts=d.get("timeSeries") or []
 if not ts:
     print(f"{label:28} no data (window too narrow? the metric samples ~1/min)"); sys.exit()
 p=[x["value"]["doubleValue"] for x in ts[0]["points"]]
+steps = float(os.environ.get("STEPS_PER_SEC") or 0)
+per = f"   {v*sum(p)/len(p)*1000/steps:.2f} core-ms/step" if steps > 0 else ""
 print(f"{label:28} n={len(p):>3}  mean {100*sum(p)/len(p):>5.1f}%  max {100*max(p):>5.1f}%   "
-      f"({v*sum(p)/len(p):>5.2f} / {v*max(p):>5.2f} of {v:.0f} cores)")
+      f"({v*sum(p)/len(p):>5.2f} / {v*max(p):>5.2f} of {v:.0f} cores){per}")
 if os.environ.get("WRITE") == "1" and os.environ.get("ARTIFACT"):
     path = os.environ["ARTIFACT"]
     j = json.load(open(path))
@@ -60,21 +71,27 @@ if os.environ.get("WRITE") == "1" and os.environ.get("ARTIFACT"):
 }
 
 if [[ "${1:-}" == "-w" ]]; then
-  fetch "$2" "$3" "window"
+  fetch "$2" "$3" "window" "" "${STEPS:-}"
+  exit 0
+fi
+if [[ "${1:-}" == "-live" ]]; then
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  from=$(python3 -c 'import datetime,sys; print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=float(sys.argv[1]))).strftime("%Y-%m-%dT%H:%M:%SZ"))' "${2:-3}")
+  fetch "$from" "$now" "last ${2:-3} min" "" "${STEPS:-}"
   exit 0
 fi
 
-[[ $# -gt 0 ]] || { echo "usage: $0 artifact.json [...] | $0 -w <start> <end>" >&2; exit 1; }
+[[ $# -gt 0 ]] || { echo "usage: $0 artifact.json [...] | $0 -w <start> <end> | $0 -live [minutes]" >&2; exit 1; }
 
 printf '%-28s %s\n' "artifact" "cloud sql cpu"
 for f in "$@"; do
-  read -r start end < <(PAD="$PAD_SECONDS" python3 -c '
+  read -r start end steps < <(PAD="$PAD_SECONDS" python3 -c '
 import json,os,sys,datetime
 j=json.load(open(sys.argv[1])); pad=int(os.environ["PAD"])
 def shift(t,secs):
     d=datetime.datetime.fromisoformat(t.replace("Z","+00:00"))+datetime.timedelta(seconds=secs)
     return d.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-print(shift(j["startedAt"],-pad), shift(j["endedAt"],pad))
+print(shift(j["startedAt"],-pad), shift(j["endedAt"],pad), j["results"][0].get("stepsPerSec", 0))
 ' "$f")
-  fetch "$start" "$end" "$(basename "$f" .json)" "$f"
+  fetch "$start" "$end" "$(basename "$f" .json)" "$f" "${STEPS:-$steps}"
 done
