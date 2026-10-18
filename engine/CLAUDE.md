@@ -3626,7 +3626,9 @@ transaction (so a crash mid-clone rolls back), and the leaf fork step is held `c
 SQLite a read-first transaction cannot upgrade against a concurrent writer and gets `SQLITE_BUSY` (`SQLITE_LOCKED`
 under a shared cache, as in the test suite) at once on every `Transact` retry - measured as ~1 Fork in 8 failing under the bench soak, and pinned by
 `fixtures/forkconcurrentflow_test.go`. Every other `Transact` in the engine already opens with a write; a new one
-that reads first needs the same.
+that reads first needs the same. The lock also re-checks what Fork read before its transaction: it matches only
+`delete_after_ms=0`, so a Delete or Purge that stamped the origin in between is still a 409, and an origin the
+reaper removed is a 404 (`TestFork_DeletionAfterThePreCheck`).
 
 **The two disciplines still cross in one place on row-locking engines, and that is tolerated, not eliminated.**
 On MySQL `REPEATABLE READ` and SQL Server without RCSI, a flow-row-first transaction and a steps-first one can

@@ -127,6 +127,7 @@ const (
 	CheckpointResumeBeforeFlowWrite     = "resumeBeforeFlowWrite"     // Resume, just before its transaction's flow-status gate write
 	CheckpointBeforeTransitionTx        = "beforeTransitionTx"        // step execution, after the step is marked completed, before whichever transaction transitions it
 	CheckpointCancelBeforeMark          = "cancelBeforeMark"          // Cancel, after its watermark transaction commits, before it marks the steps
+	CheckpointForkBeforeClone           = "forkBeforeClone"           // Fork, after its pre-transaction checks, before its clone transaction
 	CheckpointBeforeSubgraphSpawn       = "beforeSubgraphSpawn"       // step execution, before the transaction that parks a subgraph caller and creates its child
 	CheckpointTerminateAfterScan        = "terminateAfterScan"        // Terminate, after its pre-transaction scan of the tree, before its transaction
 	CheckpointTerminateAfterStepsLocked = "terminateAfterStepsLocked" // Terminate, in its transaction, after its first step UPDATE and before it locks the flow rows

@@ -146,6 +146,7 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 		timeBudgetMs:    rootTimeBudgetMs,
 	}
 
+	e.seams.Checkpoint(ctx, engineseams.CheckpointForkBeforeClone)
 	var newRootFlowID int
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		cc.newLeafStepID = 0
@@ -162,9 +163,23 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 		// timeout, and every Transact retry is
 		// read-first again (measured: ~1 Fork in 8 failed under the bench soak). Locking the origin root first
 		// makes the first statement a write there; on the server dialects it is a locking read, which also holds
-		// off a Delete or Purge of the origin while it is cloned.
-		if _, err := lockFlowRows(ctx, tx, "flow_id=?", rootFlowID); err != nil {
+		// off a Delete or Purge of the origin while it is cloned. The lock re-checks what was read before the
+		// transaction: a Delete or Purge stamp that landed in between is a 409 as it would have been then, and an
+		// origin the reaper removed since is the 404 an unknown key gets, not a missing row deep in the clone.
+		locked, err := lockFlowRows(ctx, tx, "flow_id=? AND delete_after_ms=0", rootFlowID)
+		if err != nil {
 			return err
+		}
+		if locked == 0 {
+			var exists int
+			err := tx.QueryRowContext(ctx, "SELECT 1 FROM dwarf_flows WHERE flow_id=?", rootFlowID).Scan(&exists)
+			if err == sql.ErrNoRows {
+				return errors.New("flow not found", http.StatusNotFound)
+			}
+			if err != nil {
+				return errors.Trace(err)
+			}
+			return errors.New("cannot fork a flow scheduled for deletion", http.StatusConflict)
 		}
 		id, cloneErr := e.cloneTree(ctx, tx, cc, rootFlowID)
 		if cloneErr != nil {
@@ -344,10 +359,16 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	}
 	for crows.Next() {
 		var cFlow, cCaller int
-		crows.Scan(&cFlow, &cCaller)
+		if err := crows.Scan(&cFlow, &cCaller); err != nil {
+			crows.Close()
+			return 0, nil, errors.Trace(err)
+		}
 		childByCaller[cCaller] = cFlow
 	}
 	crows.Close()
+	if err := crows.Err(); err != nil {
+		return 0, nil, errors.Trace(err)
+	}
 
 	type stepMeta struct {
 		oldID, predID, succID, lineageID, cohortSize int
@@ -365,7 +386,10 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	for mrows.Next() {
 		var s stepMeta
 		var refsJSON []byte
-		mrows.Scan(&s.oldID, &s.predID, &s.succID, &s.lineageID, &s.cohortSize, &s.status, &refsJSON)
+		if err := mrows.Scan(&s.oldID, &s.predID, &s.succID, &s.lineageID, &s.cohortSize, &s.status, &refsJSON); err != nil {
+			mrows.Close()
+			return 0, nil, errors.Trace(err)
+		}
 		if pruned[s.oldID] {
 			continue
 		}
@@ -378,6 +402,9 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		keep = append(keep, s)
 	}
 	mrows.Close()
+	if err := mrows.Err(); err != nil {
+		return 0, nil, errors.Trace(err)
+	}
 
 	// A terminal fork origin never holds an interrupted step (interrupt forces the whole surgraph chain -
 	// up to the root - non-terminal, and Fork rejects a non-terminal root), so a KEPT interrupted step (one
