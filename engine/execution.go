@@ -1216,7 +1216,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	if isFanOutSource && fanInOfSource != "" &&
 		((cohortSize == 0 && !routedToEnd) || (cohortSize == 1 && realTasks[0].taskName == fanInOfSource)) {
 		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, &persistPass, func() error {
-			return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, leaseSeq, stepDepth, lineageID, fanOutOrdinal, fanInOfSource, dispatchURLOf(graph, fanInOfSource), workflowURL, graph, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs, inheritCancel)
+			return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, leaseSeq, stepDepth, lineageID, fanOutOrdinal, fanInOfSource, dispatchURLOf(graph, fanInOfSource), workflowURL, graph, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs, inheritCancel, row.flowPayloadVer >= listsFrom)
 		})
 	}
 	if isFanOutSource && cohortSize == 0 {
@@ -1301,9 +1301,15 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// The successors' base state is the input with the step's delta folded in (successorBase); a forEach branch
 	// re-mints per element below. A reduced field the step folded holds a value that exists in no row - not
 	// in this step's state, which predates the fold, nor its changes, which hold only the delta - so it is
-	// stored inline in the successors' state and never ref'd at this step.
+	// never ref'd at this step: under append, in a flow whose format stores lists, it is a list of the rows
+	// holding its elements (folds); otherwise it is stored inline in the successors' state.
 	childInputState := successorBase
 	folded := foldedFields(accumulatedChanges, reducers)
+	var folds map[string]staterefs.Fold
+	if row.flowPayloadVer >= listsFrom {
+		folds = appendFolds(state, accumulatedChanges, reducers, stepID)
+	}
+	inlineFolded := withoutKeys(folded, folds)
 	// Mint state refs for the successors: a field big enough to be worth an anchor is omitted from their
 	// `state` and recorded in `state_refs` instead, pointing at THIS step (which holds the bytes in its
 	// `changes` if the task just wrote them, or in its `state` if it merely carried them). A field that
@@ -1311,7 +1317,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	//
 	// The linear/static-fan-out successors all share this one snapshot, so it is minted once; a forEach
 	// branch re-mints because its state carries the injected element (below).
-	linearStateJSON, linearRefsJSON, err := e.linkerFor(shardNum).Mint(childInputState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), folded, nil, nil)
+	linearStateJSON, linearRefsJSON, err := e.linkerFor(shardNum).Mint(childInputState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), inlineFolded, nil, folds)
 	if err == nil {
 		// Refs keep a carried field out of this column, but a reduced field's folded value, and fields over the
 		// anchor cap, are stored inline - so a state can outgrow the column though no single step wrote that much.
@@ -1479,12 +1485,12 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 					// array, so Mint may point it into whichever anchor holds the array. Everything else in the
 					// branch's state comes from this step and re-mints exactly as the linear case.
 					noRef := map[string]bool{next.itemKey + "Index": true, next.itemKey + "Count": true}
-					for k := range folded {
+					for k := range inlineFolded {
 						noRef[k] = true
 					}
 					item := &staterefs.Item{Key: next.itemKey, Source: next.forEachKey, Index: next.cohortIndex}
 					var mintErr error
-					stepStateJSON, stepRefsJSON, mintErr = e.linkerFor(shardNum).Mint(perStepState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), noRef, item, nil)
+					stepStateJSON, stepRefsJSON, mintErr = e.linkerFor(shardNum).Mint(perStepState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), noRef, item, folds)
 					if mintErr != nil {
 						return errors.Trace(mintErr)
 					}
@@ -1614,7 +1620,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 					}
 				}
 				if fullyResolved && failures == 0 {
-					row, depth, exits, fanInBytes, err := e.fanInRow(ctx, tx, shardNum, nextStepDepth, cohortSpawnID, &cohort, fanInTaskName, graph, workflowURL)
+					row, depth, exits, fanInBytes, err := e.fanInRow(ctx, tx, shardNum, nextStepDepth, cohortSpawnID, &cohort, fanInTaskName, graph, workflowURL, row.flowPayloadVer >= listsFrom)
 					if err != nil {
 						return errors.Trace(err)
 					}
@@ -2044,7 +2050,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 // fireFanInDirect creates the fan-in step immediately for a fan-out source that converges with no branches:
 // an empty forEach, or a goto/onError/when/switch route straight to the source's own fan-in. The source is the
 // spawn, so the fan-in runs on the source's own state and changes.
-func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.DB, flowID int, stepID, leaseSeq int, stepDepth int, lineageID int, fanOutOrdinal int, fanInTarget, fanInURL string, workflowURL string, graph *workflow.Graph, sleepDur time.Duration, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int, inheritCancel int) error {
+func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.DB, flowID int, stepID, leaseSeq int, stepDepth int, lineageID int, fanOutOrdinal int, fanInTarget, fanInURL string, workflowURL string, graph *workflow.Graph, sleepDur time.Duration, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int, inheritCancel int, lists bool) error {
 	var fanInStepID int64
 	var txBytes stateByteCount
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
@@ -2078,7 +2084,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		// With no members there is nothing more to fold: the fan-in's state is this step's changes folded onto its
 		// state, exactly as fanInRow builds its base and as a linear transition does. So it mints as a linear
 		// successor would, carried refs and all - except that a field the step folded needs its base, which
-		// may be carried by a ref, and its folded value is in no row, so it is stored inline.
+		// may be carried by a ref, and its folded value is in no row, so it is a list or inline.
 		reducers := graph.Reducers()
 		dropIdentityNulls(ourChanges, reducers)
 		folded := foldedFields(ourChanges, reducers)
@@ -2089,7 +2095,11 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		if err := mergedState.Apply(ourChanges, reducers); err != nil {
 			return errors.Trace(&permanentError{err})
 		}
-		mergedJSON, refsJSON, merr := e.linkerFor(shardNum).Mint(mergedState, ourChanges, ourRefs, stepID, staterefs.Linear, folded, nil, nil)
+		var folds map[string]staterefs.Fold
+		if lists {
+			folds = appendFolds(ourState, ourChanges, reducers, stepID)
+		}
+		mergedJSON, refsJSON, merr := e.linkerFor(shardNum).Mint(mergedState, ourChanges, ourRefs, stepID, staterefs.Linear, withoutKeys(folded, folds), nil, folds)
 		if merr != nil {
 			return errors.Trace(merr)
 		}
@@ -2242,7 +2252,7 @@ func (e *Engine) fanInBase(ctx context.Context, tx sequel.Executor, shardNum int
 // the fan-in's step_depth, the cohort-exit steps whose successor_id must point at the fan-in step, and the state
 // bytes it moved (read: spawn snapshot + every cohort member's changes; written: the merged fan-in snapshot),
 // which the caller emits after its transaction commits.
-func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nextStepDepth, cohortSpawnID int, c *cohortRead, fanInTaskName string, graph *workflow.Graph, workflowURL string) (row successorRow, depth int, exitStepIDs []int, bytes stateByteCount, err error) {
+func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nextStepDepth, cohortSpawnID int, c *cohortRead, fanInTaskName string, graph *workflow.Graph, workflowURL string, lists bool) (row successorRow, depth int, exitStepIDs []int, bytes stateByteCount, err error) {
 	bytes = stateByteCount{stateRead: len(c.spawnStateJSON), changesRead: len(c.spawnChangesJSON) + c.changesRead}
 	spawnState, err := workflow.NewState(c.spawnStateJSON)
 	if err != nil {
@@ -2355,7 +2365,14 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 	// re-copy the payload into its own row. A field that arrived at the spawn as a ref keeps that ref, so the
 	// chain stays one hop. Member-contributed fields are excluded and therefore inline (above); a reduced field no
 	// member touched is carried or anchored at the spawn like any other.
-	mergedJSON, refsJSON, err := e.linkerFor(shardNum).Mint(merged, spawnChanges, spawnRefs, cohortSpawnID, staterefs.Linear, memberWrites, nil, nil)
+	// A field under append the cohort folded is a list - the spawn's base, the spawn's part, each member's - at a
+	// fan-in on the trunk. A fan-in inside an outer cohort keeps every field its cohort wrote inline: the outer
+	// fold projects its part from this row's raw state (projectReduced).
+	var folds map[string]staterefs.Fold
+	if lists && c.spawnLineageID == 0 {
+		folds = cohortAppendFolds(spawnState, spawnChanges, cohortSpawnID, c.members, parts, reducers)
+	}
+	mergedJSON, refsJSON, err := e.linkerFor(shardNum).Mint(merged, spawnChanges, spawnRefs, cohortSpawnID, staterefs.Linear, withoutKeys(memberWrites, folds), nil, folds)
 	if err != nil {
 		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(err)
 	}

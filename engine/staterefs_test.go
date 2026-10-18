@@ -498,19 +498,26 @@ func TestStateRefs_ReducedFieldIsResolvedAndReanchored(t *testing.T) {
 	// 400 accumulated + one entry per branch. Had the fan-in folded onto an absent base, this would be 3.
 	assert.Equal(403.0, stateVal(outcome.State, "logLen"))
 
-	// The reduced value exists in no other row, so the fan-in step INLINES it and becomes its anchor - the
-	// third of the three places an anchor's bytes can live.
+	// The folded value exists in no row, so the fan-in stores it as a list of the rows holding its elements: the
+	// base in the entry step's state (the flow's input), then each branch's contribution in its changes.
+	seed := stepIDsByTask(t, e, "Seed")[0]
+	works := stepIDsByTask(t, e, "Work")
 	join := stepIDsByTask(t, e, "Join")[0]
 	joinState, joinRefs, _ := stepRefsOf(t, e, join)
-	assert.NotContains(joinRefs, "log", "a reduced field cannot be a ref - the merged value exists nowhere else")
-	assert.True(joinState.Has("log"), "the fan-in step inlines it, anchoring it for everything downstream")
+	assert.False(joinState.Has("log"), "the folded value is not copied into the fan-in's row")
+	list := joinRefs["log"].List
+	if assert.Len(list, 4) {
+		assert.Equal(staterefs.Ref{Anchor: seed, Col: staterefs.ColState, Span: &staterefs.Span{From: 0, To: 400}}, list[0])
+		got := []int{list[1].Anchor, list[2].Anchor, list[3].Anchor}
+		assert.Equal(works, got, "each branch's contribution, in fold order")
+	}
 }
 
 // TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue pins where a fan-out source's own write to a large reduced
 // field is stored at the fan-in. A Set folds into the input, and the folded value exists in no row - not the
-// spawn's state (before the fold) nor its changes (the delta alone) - so the fan-in must store it inline; a ref
-// to the spawn would resolve to the delta. An Overwrite is the value the spawn wrote, which is in its changes,
-// so the fan-in may anchor it there.
+// spawn's state (before the fold) nor its changes (the delta alone) - so the fan-in stores it as a list of the
+// input's elements and the spawn's contribution; a plain ref to the spawn would resolve to the delta. An
+// Overwrite is the value the spawn wrote, which is in its changes, so the fan-in anchors it there.
 func TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -565,10 +572,10 @@ func TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue(t *testing.T) {
 	for _, tc := range []struct {
 		overwrite bool
 		want      int
-		anchored  bool
+		list      bool
 	}{
-		{overwrite: false, want: 401, anchored: false},
-		{overwrite: true, want: 400, anchored: true},
+		{overwrite: false, want: 401, list: true},
+		{overwrite: true, want: 400, list: false},
 	} {
 		workLens = nil
 		flowKey, outcome, err := e.Run(ctx, "sc/wf", map[string]any{"log": []string{"initial"}, "pages": []string{"a", "b", "c"}, "overwrite": tc.overwrite}, nil)
@@ -586,8 +593,9 @@ func TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue(t *testing.T) {
 			_, joinID, _, err := keys.ParseStepKey(step.StepKey)
 			assert.NoError(err)
 			_, joinRefs, _ := stepRefsOf(t, e, joinID)
-			_, isRef := joinRefs["log"]
-			assert.Equal(tc.anchored, isRef, "overwrite=%v", tc.overwrite)
+			ref, isRef := joinRefs["log"]
+			assert.True(isRef, "overwrite=%v", tc.overwrite)
+			assert.Equal(tc.list, ref.List != nil, "overwrite=%v", tc.overwrite)
 		}
 	}
 }

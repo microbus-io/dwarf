@@ -116,8 +116,9 @@ fan-in's minted state, the interrupt payload, the final state, and at the door t
 retry it and `failFlowTx`/`terminalFinalState` take an oversized final state as `{}`. **What it means for a flow:**
 refs keep carried fields out of `state`, so mid-flow the binding column is a step's `changes`; but every flow
 boundary flattens (`final_state`, `Continue`, subgraph in/out, Fork's leaf), so the whole state must fit when the
-flow ends. A reduced field's fold is stored inline, so it can still grow a `state` past the limit mid-flow; the
-anchor cap inlines only anchors below the bar for opening one (`internal/staterefs`). Pinned by `engine/payloadsize_test.go`. A new payload column write must call `checkPayloadSize`.
+flow ends. A fold under a reducer other than `append` (or in a format-1 flow) is stored inline, so it can still
+grow a `state` past the limit mid-flow; the anchor cap inlines only anchors below the bar for opening one
+(`internal/staterefs`). Pinned by `engine/payloadsize_test.go`. A new payload column write must call `checkPayloadSize`.
 
 Subgraph nesting depth is the one axis that is *also* a crash vector if handled carelessly: `Fork` clones the
 tree with an **explicit LIFO worklist** (`cloneTree` drives `cloneOneFlow` per flow), not recursion, so
@@ -1152,12 +1153,18 @@ fan-in 15 plus their contributions) and `TestHandOff_ReducerErrorFailsTheStep`.
 
 - **The step's whole delta is what the carrier returns** (it was seeded with the earlier runs' changes); persist
   it as is, never composed onto them again (`workflow/CLAUDE.md`, "A step's runs compose").
-- **A fold's result must be stored where it is held.** It exists in no row until a successor's state holds
-  it, so `processStep`'s mints, `fireFanInDirect`'s mint and `fanInRow`'s (for the spawn's own folded
-  fields) pass `foldedFields` as `inlineOnly`. A ref to the folding step would resolve to the delta alone.
-  Pinned by `TestStateRefs_FoldedFieldIsStoredInline`, `TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue`
-  and, for `fireFanInDirect`, `TestStateRefs_EmptyForEachFoldsAReffedBase` (each fails with its inline set
-  removed).
+- **A fold's result is in no row, so it is never anchored at the folding step** - a ref there would resolve to
+  the delta alone. Under `append`, in a flow at payload format 2 or later (`listsFrom`), the mint stores it as a
+  list naming the rows that hold its elements: the base where it already is, then each contribution in the
+  `changes` of the step that made it (`appendFolds` at the linear, branch and `fireFanInDirect` mints;
+  `cohortAppendFolds` at a trunk fan-in, from the spawn's base and part and each member's). Any other reducer,
+  a base that is not an array, and a format-1 flow are stored inline (the rest of `foldedFields`, passed as
+  `inlineOnly`). A fan-in INSIDE an outer cohort keeps everything its cohort wrote inline (below), and so does a
+  field an inner fan-in's part touches: that part is a projection of the inner fan-in's state, not a
+  contribution in a `changes` column. Pinned by `TestArrayRefs_AppendLoopStoresEachElementOnce` (and its
+  format-1 half writing no list), `TestStateRefs_ReducedFieldIsResolvedAndReanchored`,
+  `TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue`, `TestStateRefs_EmptyForEachFoldsAReffedBase` and
+  `fixtures/arrayrefsflow_test.go`.
 - **A folded field's BASE may be carried by a ref**, so the fan-in paths resolve it before folding:
   `fanInRow` resolves every reduced field the spawn did not overwrite, `fireFanInDirect` the fields it folds
   (`TestStateRefs_EmptyForEachFoldsAReffedBase` fails without the resolve).
@@ -1165,9 +1172,9 @@ fan-in 15 plus their contributions) and `TestHandOff_ReducerErrorFailsTheStep`.
   `fireFanInDirect`'s and the spawn's stored changes). It contributes nothing, but the state-refs mint reads any
   key a delta writes as a rewrite: it would drop the carried ref and re-anchor the field at a row holding the
   null. The carrier never writes one; a remote host or a row stored before overwrites existed can.
-- **Known cost: a folded field cannot be shared by a ref across a fan-out's branches.** It exists in no row, so
-  a fan-out source that folds into a large reduced field stores it inline in every branch's state, N copies.
-  A forEach over a reduced array is the case to watch.
+- **Known cost: a folded field under any reducer but `append`, or in a format-1 flow, cannot be shared across a
+  fan-out's branches.** A fan-out source that folds into a large one stores it inline in every branch's state,
+  N copies. Under `append` each branch holds the list instead.
 
 **Fan-in merge order and contribution (lineage `SetFanIn` path).** `queueCohortRead` reads cohort members
 (`lineage_id = cohortSpawnID`) `ORDER BY fan_out_ordinal, step_depth, step_id` and `fanInRow` folds them in that
@@ -1218,9 +1225,10 @@ its own task's writes. Everything its cohort added sits in its `state`. So:
   plain field's override in place of what the cohort wrote. Pinned by the frozen half of
   `TestCohortFold_ProjectionEqualsContributions` and `fixtures/nestedreducerflow_test.go`'s
   `fork_at_inner_fan_in_with_overrides`.
-- **Every field a cohort wrote must be stored INLINE in its fan-in's `state`, never as a ref.** The projection
-  reads the raw `state` and `state_reduced` columns: a ref'd field reads as absent, which projects a plain field as a DELETE. `fanInRow`
-  guarantees it by passing the contributed fields to `Mint` as `inlineOnly` (`memberWrites`). Keep it so.
+- **Every field a cohort wrote must be stored INLINE in an inner fan-in's `state`, never as a ref or a list.**
+  The projection reads the raw `state` and `state_reduced` columns: a ref'd field reads as absent, which projects
+  a plain field as a DELETE. `fanInRow` guarantees it by passing the contributed fields to `Mint` as
+  `inlineOnly` (`memberWrites`) and listing folds only at a trunk fan-in (`c.spawnLineageID == 0`). Keep it so.
 - **The reducer comes from the graph,** never from the stored record.
 
 Pinned by `TestCohortFold_ProjectionEqualsContributions` (every reducer: the projected part folds exactly as
@@ -1565,8 +1573,13 @@ format" is decided once, at the claim, and holds for everything the dispatch rea
 - **Do not put the version inside a payload column** (`state_refs` included). Those are keyed by state field
   names, which are unconstrained, so a version key collides with a field of the same name.
 
-**Introducing payload format 2 (or any next version) - the checklist.** The mechanism above is built and tested
-at version 1; the release that first needs it does all of this:
+**Format 2 adds list refs** (`listsFrom`): a field under `append` stored as entries naming the rows that hold
+its elements (`internal/staterefs/CLAUDE.md`, "Lists"). Every writer of one gates on the flow's version
+(`row.flowPayloadVer`, threaded into `fireFanInDirect` and `fanInRow` as `lists`); every reader parses both, since
+format 1's two ref forms are sentences of format 2's grammar.
+
+**Introducing the next payload format - the checklist.** Format 2 went through it; the release that next needs
+one does all of this:
 
 1. **Decide whether the change needs a version at all.** It does if a build at the current version would misread a
    row holding the new form - read it as something else, drop it, or fail on it. A change every existing reader

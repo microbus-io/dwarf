@@ -129,6 +129,32 @@ func (r Ref) carried(anchorID int) Ref {
 	return r
 }
 
+// Remap returns the ref with every anchor it names passed through m. It is false, with the anchor m could not
+// map, when one fails.
+func (r Ref) Remap(m func(anchor int) (int, bool)) (Ref, int, bool) {
+	if r.List == nil {
+		to, ok := m(r.Anchor)
+		if !ok {
+			return Ref{}, r.Anchor, false
+		}
+		r.Anchor = to
+		return r, 0, true
+	}
+	list := make([]Ref, len(r.List))
+	for i, e := range r.List {
+		if e.Anchor > 0 {
+			to, ok := m(e.Anchor)
+			if !ok {
+				return Ref{}, e.Anchor, false
+			}
+			e.Anchor = to
+		}
+		list[i] = e
+	}
+	r.List = list
+	return r, 0, true
+}
+
 // MarshalJSON writes a plain ref as a bare number and any other as a string. One grammar covers every form:
 // "<anchor><col> <field>[i][j]" for one ref, with any part but the anchor optional and "[a:b]" for a range,
 // and entries joined by ';' for a list - a list of one entry ends with ';'. The number form is the only one a
@@ -349,23 +375,27 @@ type Read struct {
 // for a column that failed to decode - wrong for a metric whose job is to track a byte-throughput ceiling.
 type Loader func(ctx context.Context, reads []Read) (map[int]Anchor, error)
 
-// Fold describes how the dispatched step changed a field whose reducer appends (append, union), so Mint can
-// store the folded value as a list pointing at the rows that already hold its elements instead of inline. The
-// caller derives it from the fold; Mint reads no row.
+// Fold describes how a field under the append reducer came to its folded value, so Mint can store that value as
+// a list pointing at the rows that already hold its elements instead of inline: the base the fold started from,
+// then each contribution folded onto it, in fold order. The caller derives it from the fold; Mint reads no row.
 type Fold struct {
-	// Base is how many elements the field held in the step's input. They are where the input's ref points,
-	// or, for a field the input held as a literal, in the step's own state.
+	// Base is how many elements the field held before the first part. They are where the inherited ref points,
+	// or, for a field held as a literal, in the minting step's own state.
 	Base int
-	// Overwrite reports that the step replaced the field: there is no base, and the elements are the step's
-	// overwrite value.
+	// Parts are the contributions, in the order they were folded.
+	Parts []Part
+}
+
+// Part is one contribution to a folded field, held in a step's changes.
+type Part struct {
+	// Step is the step whose changes hold the contribution.
+	Step int
+	// Overwrite reports that the part replaced the field: the base and every part before it are gone.
 	Overwrite bool
 	// Single reports that the contribution was added as one element rather than spread.
 	Single bool
-	// Added is how many elements a spread contribution, or an overwrite, holds.
+	// Added is how many elements a spread contribution holds.
 	Added int
-	// Kept, when non-nil, holds the ranges of the contribution's elements the fold kept - a union drops those
-	// already present. Nil keeps all of them.
-	Kept []Span
 }
 
 const (
@@ -600,9 +630,9 @@ func mentions(s workflow.State, field string) bool {
 // is stored as an item ref into the same anchor - one copy of the array serves every branch's
 // element, and resolving it costs no anchor the branch was not already reading. Otherwise it is inline.
 //
-// folds names the fields whose reducer appends that the step folded into, with how it did (Fold). Such a
-// field's value exists in no row - not in the step's state, which predates the fold, nor its changes, which
-// hold the contribution - so it is never anchored here. Past the bar it becomes a list pointing at the rows
+// folds names the fields under the append reducer whose folded value merged holds, with how it came to be
+// (Fold). Such a value exists in no row - not in the folding step's state, which predates the fold, nor any
+// changes, which hold contributions - so it is never anchored here. Past the bar it becomes a list pointing at the rows
 // that hold its elements; below it, or when the list cannot account for every element, it is inline.
 //
 // Minting needs no database read: merged was resolved at dispatch, so every literal is already in hand and
@@ -709,13 +739,19 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.Changes, inherited
 	return stateJSON, refsJSON, nil
 }
 
-// foldList builds the list a folded field is stored as: the input's elements where they already are, then
-// the step's contribution in its changes. It declines - the field then stays inline - when the list cannot be
-// shown to hold exactly the folded value's elements: a mismatch would silently drop or repeat them, so the
-// count is checked against the value itself rather than trusted.
+// foldList builds the list a folded field is stored as: the base's elements where they already are, then each
+// part in its step's changes. It declines - the field then stays inline - when the list cannot be shown to hold
+// exactly the folded value's elements: a mismatch would silently drop or repeat them, so the count is checked
+// against the value itself rather than trusted.
 func foldList(f Fold, base Ref, hasBase bool, anchorID int, folded json.RawMessage) (Ref, bool) {
+	start := 0
+	for i, p := range f.Parts {
+		if p.Overwrite {
+			start = i
+		}
+	}
 	var entries []Ref
-	if !f.Overwrite && f.Base > 0 {
+	if (len(f.Parts) == 0 || !f.Parts[start].Overwrite) && f.Base > 0 {
 		switch {
 		case hasBase && base.List != nil:
 			entries = append(entries, base.carried(anchorID).List...)
@@ -728,21 +764,17 @@ func foldList(f Fold, base Ref, hasBase bool, anchorID int, folded json.RawMessa
 		case hasBase:
 			return Ref{}, false
 		default:
-			// The input held the field as a literal in this step's own state.
+			// The field was held as a literal in the minting step's own state.
 			entries = append(entries, Ref{Anchor: anchorID, Col: ColState, Span: &Span{From: 0, To: f.Base}})
 		}
 	}
-	switch {
-	case f.Single:
-		entries = append(entries, Ref{Anchor: anchorID, Col: ColChanges})
-	case f.Kept != nil:
-		for _, kept := range f.Kept {
-			if kept.To > kept.From {
-				entries = append(entries, Ref{Anchor: anchorID, Col: ColChanges, Span: &Span{From: kept.From, To: kept.To}})
-			}
+	for _, p := range f.Parts[start:] {
+		switch {
+		case p.Single:
+			entries = append(entries, Ref{Anchor: p.Step, Col: ColChanges})
+		case p.Added > 0:
+			entries = append(entries, Ref{Anchor: p.Step, Col: ColChanges, Span: &Span{From: 0, To: p.Added}})
 		}
-	case f.Added > 0:
-		entries = append(entries, Ref{Anchor: anchorID, Col: ColChanges, Span: &Span{From: 0, To: f.Added}})
 	}
 	if len(entries) == 0 {
 		return Ref{}, false

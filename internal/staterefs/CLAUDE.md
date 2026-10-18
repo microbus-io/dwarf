@@ -84,11 +84,13 @@ input for large elements, `D/(1+D)` for mid-size ones. Task outputs (`changes`) 
 
 ## Lists: a folded field stored by its elements
 
-A field a reducer appends to (`append`, `union`) holds a value that exists in no row: not in the folding step's
+A field under the append reducer holds a value that exists in no row: not in the folding step's
 `state`, which predates the fold, nor its `changes`, which hold the contribution. Stored inline in every
 successor, a loop adding one element per step stores n²/2 elements. Past the bar `Mint` stores it as a **list**
-instead - entries naming the rows that already hold its elements - given a `Fold` per field describing what the
-step did (the base's length, a spread or single contribution, an overwrite, the ranges a union kept).
+instead - entries naming the rows that already hold its elements - given a `Fold` per field: the base's length,
+then each `Part` in fold order (the step whose `changes` hold it, spread or single, or an overwrite that drops what
+came before). A fan-in's fold has parts from the spawn and every member. `union` is not listed: which of a
+contribution's elements it keeps is decided on decoded values inside the fold, which would have to report them.
 
 | ref | meaning |
 |---|---|
@@ -223,7 +225,8 @@ both measure ~1x, so the ambiguity is moot and no server-version probe is needed
    **initial input** → the **entry step's `state`** (no task produced it, so it is in no `changes` anywhere —
    and it is the headline case); a **reducer's output** → the `state` of the step that RECEIVED it (a fold's
    value exists nowhere else: not in the folding step's `state`, which predates it, nor its `changes`, which
-   hold the delta). That is why the caller passes a step's folded fields as `inlineOnly`. A changes-only resolver silently misses the last two. Pinned by
+   hold the delta). That is why the caller passes a step's folded fields as `inlineOnly` - or, under append,
+   as `folds`, which become a list and never a plain ref at the folding step. A changes-only resolver silently misses the last two. Pinned by
    `TestLinker_ResolveReadsBothColumns`. In `changes` a field the task OVERWROTE is stored as `field!`
    (`workflow.OverwriteSuffix`), so the lookup tries that spelling first; a resolver that tries only `field`
    misses every overwritten anchor (`TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue` fails).

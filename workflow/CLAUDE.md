@@ -80,8 +80,9 @@ never both: `contributions`, combined through the field's reducer, and `overwrit
 - **Routing reads the ENGINE's fold, never the carrier's returned view** (`evaluateTransitions` takes the
   successor base). A remote task is untrusted and may compute its view differently.
 - **A folded value exists in no row**, so a ref must never anchor it at the step that folded it: not its
-  `state` (before the fold) nor its `changes` (the contribution). It is stored inline in the successor's state
-  (`foldedFields` -> `Mint`'s `inlineOnly`). Never assume `reduce(nil, d) == d` - false for `append` of a single
+  `state` (before the fold) nor its `changes` (the contribution). Under `append` the engine stores it as a list
+  of the rows holding its elements; otherwise inline in the successor's state (`engine/CLAUDE.md`, "A fold's
+  result is in no row"). Never assume `reduce(nil, d) == d` - false for `append` of a single
   value and for `union` with duplicates.
 
 **A delete is an overwrite with a null value, and a materialized state holds no deletes.** `State.Apply` enacts

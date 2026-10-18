@@ -17,9 +17,12 @@ limitations under the License.
 package engine
 
 import (
+	"bytes"
+	"encoding/json"
 	"slices"
 	"strings"
 
+	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 )
@@ -64,6 +67,123 @@ func foldedFields(c workflow.Changes, reducers map[string]workflow.Reducer) map[
 		folded[k] = true
 	}
 	return folded
+}
+
+// appendFolds describes, for each field under the append reducer the changes contribute to, how its value folds
+// onto input - the step's own state, the base those changes fold onto - so the mint can store the folded value as
+// a list pointing at the rows that hold its elements (staterefs.Fold). step is the step whose changes these are.
+// A field whose base is not an array (an append onto a bare value) is left out, and stays inline.
+func appendFolds(input workflow.State, changes workflow.Changes, reducers map[string]workflow.Reducer, step int) map[string]staterefs.Fold {
+	var folds map[string]staterefs.Fold
+	for k := range foldedFields(changes, reducers) {
+		if reducers[k] != workflow.ReducerAppend {
+			continue
+		}
+		base, ok := arrayLen(input.GetJSON(k))
+		if !ok {
+			continue
+		}
+		if folds == nil {
+			folds = map[string]staterefs.Fold{}
+		}
+		folds[k] = staterefs.Fold{Base: base, Parts: []staterefs.Part{appendPart(step, changes.Contributions().GetJSON(k))}}
+	}
+	return folds
+}
+
+// appendPart is how a contribution folds under append: a JSON array is spread, anything else is one element -
+// the rule State.Apply's splice follows.
+func appendPart(step int, contribution json.RawMessage) staterefs.Part {
+	if v := bytes.TrimSpace(contribution); len(v) > 0 && v[0] == '[' {
+		if n, ok := arrayLen(v); ok {
+			return staterefs.Part{Step: step, Added: n}
+		}
+	}
+	return staterefs.Part{Step: step, Single: true}
+}
+
+// arrayLen is the element count of a JSON array, with absent and null counting as empty. It is false for any
+// other value, or for an array it cannot read.
+func arrayLen(value json.RawMessage) (int, bool) {
+	v := bytes.TrimSpace(value)
+	if len(v) == 0 || bytes.Equal(v, []byte("null")) {
+		return 0, true
+	}
+	if v[0] != '[' {
+		return 0, false
+	}
+	var elems []json.RawMessage
+	if err := json.Unmarshal(v, &elems); err != nil {
+		return 0, false
+	}
+	return len(elems), true
+}
+
+// cohortAppendFolds describes, for each field under the append reducer a cohort folded, how its value came to
+// be: the spawn's base (spawnState, its reduced refs resolved), the spawn's own contribution or overwrite, then
+// each completed member's contribution in fold order. A field an inner fan-in's part touches is left out, and
+// stays inline: that part is a projection of the inner fan-in's state, not a contribution in its changes. So is
+// a field only the spawn overwrote: its value is the spawn's overwrite, which the mint anchors as a plain ref.
+func cohortAppendFolds(spawnState workflow.State, spawnChanges workflow.Changes, spawnID int, members []cohortMember, parts map[int]workflow.Changes, reducers map[string]workflow.Reducer) map[string]staterefs.Fold {
+	var folds map[string]staterefs.Fold
+	for k, r := range reducers {
+		if r != workflow.ReducerAppend {
+			continue
+		}
+		var f staterefs.Fold
+		base, ok := arrayLen(spawnState.GetJSON(k))
+		f.Base = base
+		contributed := false
+		switch {
+		case spawnChanges.IsOverwritten(k):
+			value := bytes.TrimSpace(spawnChanges.Overwrites().GetJSON(k))
+			n, isArray := arrayLen(value)
+			if !isArray || len(value) == 0 || value[0] != '[' {
+				continue
+			}
+			f.Parts = append(f.Parts, staterefs.Part{Step: spawnID, Overwrite: true, Added: n})
+			ok = true
+		case spawnChanges.Contributions().Has(k):
+			f.Parts = append(f.Parts, appendPart(spawnID, spawnChanges.Contributions().GetJSON(k)))
+			contributed = true
+		}
+		if !ok {
+			continue
+		}
+		usable := true
+		for _, m := range members {
+			if parts[m.stepID].Mentions(k) || m.changes.IsOverwritten(k) {
+				usable = false
+				break
+			}
+			if m.changes.Contributions().Has(k) {
+				f.Parts = append(f.Parts, appendPart(m.stepID, m.changes.Contributions().GetJSON(k)))
+				contributed = true
+			}
+		}
+		if !usable || !contributed {
+			continue
+		}
+		if folds == nil {
+			folds = map[string]staterefs.Fold{}
+		}
+		folds[k] = f
+	}
+	return folds
+}
+
+// withoutKeys is set minus the keys of drop, sharing set when there is nothing to drop.
+func withoutKeys[V any](set map[string]bool, drop map[string]V) map[string]bool {
+	if len(drop) == 0 {
+		return set
+	}
+	out := make(map[string]bool, len(set))
+	for k := range set {
+		if _, gone := drop[k]; !gone {
+			out[k] = true
+		}
+	}
+	return out
 }
 
 // dropIdentityNulls removes every null contribution to a field the graph reduces. Such a null contributes

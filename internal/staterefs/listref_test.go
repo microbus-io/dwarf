@@ -171,14 +171,14 @@ func TestLinker_MintFoldList(t *testing.T) {
 
 	t.Run("base_inline_here", func(t *testing.T) {
 		assert := testarossa.For(t)
-		stored, refs := mint(t, mustState(map[string]any{"log": msgs(5)}), contributed(), nil, map[string]Fold{"log": {Base: 3, Added: 2}})
+		stored, refs := mint(t, mustState(map[string]any{"log": msgs(5)}), contributed(), nil, map[string]Fold{"log": {Base: 3, Parts: []Part{{Step: step, Added: 2}}}})
 		assert.Equal(`"42s[:3];42c[:2]"`, spelled(t, refs["log"]))
 		assert.False(stored.Has("log"), "the folded value is not copied")
 	})
 
 	t.Run("base_by_ref", func(t *testing.T) {
 		assert := testarossa.For(t)
-		_, refs := mint(t, mustState(map[string]any{"log": msgs(5)}), contributed(), Refs{"log": {Anchor: 7}}, map[string]Fold{"log": {Base: 3, Added: 2}})
+		_, refs := mint(t, mustState(map[string]any{"log": msgs(5)}), contributed(), Refs{"log": {Anchor: 7}}, map[string]Fold{"log": {Base: 3, Parts: []Part{{Step: step, Added: 2}}}})
 		assert.Equal(`"7[:3];42c[:2]"`, spelled(t, refs["log"]), "the base is read where the input's ref points, by the same lookup")
 	})
 
@@ -186,32 +186,43 @@ func TestLinker_MintFoldList(t *testing.T) {
 		assert := testarossa.For(t)
 		var base Ref
 		assert.NoError(json.Unmarshal([]byte(`"7c[:2];s[0]"`), &base))
-		_, refs := mint(t, mustState(map[string]any{"log": msgs(4)}), contributed(), Refs{"log": base}, map[string]Fold{"log": {Base: 3, Single: true}})
+		_, refs := mint(t, mustState(map[string]any{"log": msgs(4)}), contributed(), Refs{"log": base}, map[string]Fold{"log": {Base: 3, Parts: []Part{{Step: step, Single: true}}}})
 		assert.Equal(`"7c[:2];42s[0];42c"`, spelled(t, refs["log"]), "a self entry of the input names the input's step once carried")
 	})
 
 	t.Run("overwrite", func(t *testing.T) {
 		assert := testarossa.For(t)
-		_, refs := mint(t, mustState(map[string]any{"log": msgs(4)}), contributed(), Refs{"log": {Anchor: 7}}, map[string]Fold{"log": {Overwrite: true, Added: 4}})
+		_, refs := mint(t, mustState(map[string]any{"log": msgs(4)}), contributed(), Refs{"log": {Anchor: 7}}, map[string]Fold{"log": {Base: 2, Parts: []Part{{Step: step, Overwrite: true, Added: 4}}}})
 		assert.Equal(`"42c[:4];"`, spelled(t, refs["log"]), "a list of one entry is marked as a list")
 	})
 
-	t.Run("union_keeps_some", func(t *testing.T) {
+	t.Run("parts_from_several_steps", func(t *testing.T) {
 		assert := testarossa.For(t)
-		_, refs := mint(t, mustState(map[string]any{"log": msgs(5)}), contributed(), Refs{"log": {Anchor: 7}}, map[string]Fold{"log": {Base: 3, Kept: []Span{{From: 0, To: 1}, {From: 2, To: 3}}}})
-		assert.Equal(`"7[:3];42c[:1];42c[2:3]"`, spelled(t, refs["log"]))
+		// A fan-in: the spawn's own contribution, then each branch's, in fold order.
+		_, refs := mint(t, mustState(map[string]any{"log": msgs(6)}), contributed(), Refs{"log": {Anchor: 7}}, map[string]Fold{"log": {Base: 2, Parts: []Part{
+			{Step: step, Added: 1}, {Step: 50, Single: true}, {Step: 51, Added: 2},
+		}}})
+		assert.Equal(`"7[:2];42c[:1];50c;51c[:2]"`, spelled(t, refs["log"]))
+	})
+
+	t.Run("overwrite_drops_what_came_before", func(t *testing.T) {
+		assert := testarossa.For(t)
+		_, refs := mint(t, mustState(map[string]any{"log": msgs(4)}), contributed(), Refs{"log": {Anchor: 7}}, map[string]Fold{"log": {Base: 4, Parts: []Part{
+			{Step: 50, Added: 1}, {Step: step, Overwrite: true, Added: 3}, {Step: 51, Single: true},
+		}}})
+		assert.Equal(`"42c[:3];51c"`, spelled(t, refs["log"]))
 	})
 
 	t.Run("small_stays_inline", func(t *testing.T) {
 		assert := testarossa.For(t)
-		stored, refs := mint(t, mustState(map[string]any{"log": []any{"a", "b"}}), contributed(), nil, map[string]Fold{"log": {Base: 1, Added: 1}})
+		stored, refs := mint(t, mustState(map[string]any{"log": []any{"a", "b"}}), contributed(), nil, map[string]Fold{"log": {Base: 1, Parts: []Part{{Step: step, Added: 1}}}})
 		assert.NotContains(refs, "log")
 		assert.True(stored.Has("log"))
 	})
 
 	t.Run("count_mismatch_stays_inline", func(t *testing.T) {
 		assert := testarossa.For(t)
-		stored, refs := mint(t, mustState(map[string]any{"log": msgs(5)}), contributed(), nil, map[string]Fold{"log": {Base: 3, Added: 5}})
+		stored, refs := mint(t, mustState(map[string]any{"log": msgs(5)}), contributed(), nil, map[string]Fold{"log": {Base: 3, Parts: []Part{{Step: step, Added: 5}}}})
 		assert.NotContains(refs, "log", "a list that does not account for every element is never written")
 		assert.True(stored.Has("log"))
 	})
@@ -278,6 +289,29 @@ func TestLinker_SeedList(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal([]any{"a", "b", "c", "d"}, stateVal(state, "log"))
 	assert.Equal([][]int{{7}}, anchors.calls, "the seeded contribution is not read")
+}
+
+// TestRef_Remap pins Fork's remap of a ref through its clone id map: every anchor a ref names, a list's entries
+// included, maps, a self entry stays this step's, and an anchor outside the map is reported.
+func TestRef_Remap(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	ids := map[int]int{7: 107, 8: 108}
+	m := func(a int) (int, bool) { to, ok := ids[a]; return to, ok }
+	var list Ref
+	assert.NoError(json.Unmarshal([]byte(`"7c[:2];s[0];8c"`), &list))
+	got, _, ok := list.Remap(m)
+	assert.True(ok)
+	data, _ := json.Marshal(got)
+	assert.Equal(`"107c[:2];s[0];108c"`, string(data))
+	got, _, ok = Ref{Anchor: 8, Field: "pages", Path: []int{2}}.Remap(m)
+	assert.True(ok)
+	assert.Equal(Ref{Anchor: 108, Field: "pages", Path: []int{2}}, got)
+	assert.NoError(json.Unmarshal([]byte(`"7c[:2];9c"`), &list))
+	_, missing, ok := list.Remap(m)
+	assert.False(ok)
+	assert.Equal(9, missing)
 }
 
 // TestInlineExcessAnchors_SkipsLists pins that a list neither counts toward maxAnchors nor is inlined: it names

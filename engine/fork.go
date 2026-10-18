@@ -449,12 +449,14 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		if len(s.refs) > 0 {
 			remapped := make(staterefs.Refs, len(s.refs))
 			for field, ref := range s.refs {
-				newAnchor, ok := idMap[ref.Anchor]
-				if !ok || newAnchor == 0 {
-					return 0, nil, errors.New("cannot fork: step %d refs field %q at step %d, which is not in the clone", s.oldID, field, ref.Anchor)
+				mapped, missing, ok := ref.Remap(func(anchor int) (int, bool) {
+					to, ok := idMap[anchor]
+					return to, ok && to != 0
+				})
+				if !ok {
+					return 0, nil, errors.New("cannot fork: step %d refs field %q at step %d, which is not in the clone", s.oldID, field, missing)
 				}
-				ref.Anchor = newAnchor
-				remapped[field] = ref
+				remapped[field] = mapped
 			}
 			data, merr := json.Marshal(remapped)
 			if merr != nil {
