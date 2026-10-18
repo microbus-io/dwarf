@@ -211,7 +211,7 @@ the default sits at or near the best of the pools tried on every size:
 | 8 vCPU | 600 | 250 | 150-300 (~4,100-4,500 steps/s) | default |
 | 16 vCPU | 800 | 250 | 200 (~8,500 steps/s) | default |
 | 32 vCPU | 1,000 | 250 | 250 (~20,900 steps/s) | default |
-| 64 vCPU | 1,000 | 250 | 500 (~25,400-28,500 steps/s, +14% over 250) | `MaxConnections: 500` |
+| 64 vCPU | 1,000 | 250 | 500 (~25,400-29,400 steps/s, +14-22% over 250) | `MaxConnections: 500` |
 
 At 1 ms the default rises to 500 (or half the server's limit, if lower), which recovered most of what the
 distance cost where it was measured. Throughput keeps climbing slowly as connections are added - more
@@ -344,17 +344,23 @@ fresh database, averaged over a 16-minute window. The full conditions are in the
 
 | shards × database vCPUs | engine replicas | steps/s |
 |---|---|---|
-| 1 × 8 | 2 × 2 vCPU | 4,041 |
-| 1 × 16 | 2 × 4 vCPU | 7,675 |
-| 1 × 32 | 1 × 16 vCPU | 19,154–19,868 |
-| 4 × 32 | 1 × 48 vCPU | 66,843 |
-| 4 × 32 | 4 × 16 vCPU | 69,382 |
-| 4 × 32 | 8 × 8 vCPU | 74,879 |
+| 1 × 8 | 2 × 2 vCPU | 4,186 |
+| 1 × 16 | 2 × 4 vCPU | 7,015–7,122 |
+| 1 × 32 | 1 × 16 vCPU | 21,878–21,952 |
+| 1 × 64 (`MaxConnections: 500`) | 1 × 16 vCPU | 29,415 |
+| 4 × 32 | 1 × 48 vCPU | 66,843 (earlier engine) |
+| 4 × 32 | 4 × 16 vCPU | 69,382 (earlier engine) |
+| 4 × 32 | 8 × 8 vCPU | 74,879 (earlier engine) |
 
 How to read it:
 
-- **Plan on the settled rate.** Every run settles 8–13% below where it starts within its window, so plan a
-  32-vCPU database at ~16,000 steps/s: its settled rate less room to catch up after a failover or a spike.
+- **Plan below the saturated rate, from your load's shape.** A database sustained 95% of its saturated rate with
+  a median flow latency under 0.1 s, and not 100%. Plan a 32-vCPU database at ~19,000 steps/s of average load,
+  then check what your peaks cost in waiting
+  ([planning capacity](benchmark-cloud.md#planning-capacity)). Same-size instances differ, so treat any one
+  figure as a range.
+- **32 vCPU is the most economical database.** Smaller sizes run out of CPU and cost more per step; larger ones
+  are held back by the write-ahead log, so past 32 vCPU add shards.
 - **Give each shard two engine replicas at half its vCPU.** Each runs at about a third of its CPU and can
   carry the shard alone. Replicas beyond two per shard add standby capacity, not database throughput.
 - **Or serve several shards from a larger host, with `GOMAXPROCS` capped.** Plan the engine at about one

@@ -5,10 +5,10 @@ Run from the repo root with matplotlib available:
     python3 -m venv /tmp/viz && /tmp/viz/bin/pip install matplotlib && /tmp/viz/bin/python bench/charts_cloud.py [out-dir]
 
 PNGs go to out-dir (default docs/). Three charts draw from tables in this file, because their numbers come from
-many runs and from CPU profiles rather than from one artifact: database size (tiers), shards, and engine host
-size. Three read run artifacts under bench/results/, which are kept on the machine that ran them: replicas and
-minute-by-minute (redo-one-20261009, redo-rs-20261009) and failover (redo-fo-20261011). A chart whose
-artifacts are missing is skipped with a note.
+many runs, from Cloud Monitoring and from CPU profiles rather than from one artifact: database size (tiers), shards,
+and engine host size. The rest read run artifacts under bench/results/, which are kept on the machine that ran
+them: replicas (redo-one-20261009, redo-rs-20261009), minute-by-minute (redo-h3-20261017), headroom
+(redo-hr4-20261018) and failover (redo-fo-20261011). A chart whose artifacts are missing is skipped with a note.
 """
 import collections
 import glob
@@ -57,35 +57,75 @@ def skip(name, why):
     print(f"skip {name}: {why}")
 
 
-# ---- Database size with its engine pairing: throughput and $ per million steps ----
-# (database vCPU, steps/s, engines, monthly $ for the database, its 1 TB SSD and both engine hosts). One shard,
-# saturated, 2 x engines at half the database's vCPU; 32 vCPU is the per-shard rate of 4 shards x 8 replicas.
-TIERS = [(8, 4041, "2 x 2 vCPU", 702), (16, 7675, "2 x 4 vCPU", 1237), (32, 18720, "2 x 8 vCPU", 2306)]
+# ---- Database size: throughput, $ per million steps, and database CPU per step ----
+# (database vCPU, steps/s, engines, monthly $ for the database, its 1 TB SSD and both engine hosts, database
+# core-ms per step). One shard, saturated, 2026-10-17/18, engine 9e5d16b or its predecessor 400efb5:
+#   8 vCPU   q8b, 2 x c4a-2 engines.  16 vCPU  mean of q16b and q16c (7,015 / 7,122), 2 x c4a-4.
+#   32 vCPU  H3's three runs on one instance (21,952 / 21,931 / 21,878), one c4a-16 engine; priced as 2 x 8 vCPU.
+#   64 vCPU  q64b at MaxConnections 500, one c4a-16 engine (6.8 cores used); priced as 2 x 16 vCPU.
+# Price every row with the pairing rule (two engine hosts totalling half the database's vCPU), never with the
+# host the run happened to use: a cheaper engine on one row makes its $ per step look better than the rule buys.
+# Core-ms per step = Cloud Monitoring's cloudsql database/cpu/utilization over the window x vCPU / steps/s
+# (bench/gcp/dbcpu.sh). Monthly $ = on-demand us-east4: Cloud SQL ~$0.069/vCPU-h, SSD ~$0.23/h per TB, c4a
+# ~$0.045/vCPU-h, 730 h.
+TIERS = [(8, 4186, "2 x 2 vCPU", 702, 1.74), (16, 7069, "2 x 4 vCPU", 1237, 1.90),
+         (32, 21920, "2 x 8 vCPU", 2306, 1.08), (64, 29415, "2 x 16 vCPU", 4443, 1.36)]
+# Database CPU utilization over each window, %, from the same Cloud Monitoring reads. Do not chart the share of
+# backends waiting on the WAL write lock as a second line: it read 59-74% at EVERY size (a saturated database's
+# backends queue there whatever binds), so it cannot separate a CPU-bound size from a WAL-bound one.
+TIER_CPU = [93, 84, 74, 63]
 
 
 def chart_tiers():
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4.4))
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4.6))
     xs = range(len(TIERS))
-    cols = [S5, S4, S2]
+    cols = [S5, S4, S2, S1]
+    labels = [f"{t[0]} vCPU DB\n{t[2]}" for t in TIERS]
     axes[0].bar(xs, [t[1] for t in TIERS], width=0.6, color=cols)
-    for x, (v, steps, eng, usd) in zip(xs, TIERS):
-        axes[0].text(x, steps + 400, f"{steps:,}", ha="center", va="bottom", fontsize=9.5, color=INK)
-    axes[0].set_ylim(0, 21000)
-    axes[0].set_yticks(range(0, 20001, 5000))
+    for x, t in zip(xs, TIERS):
+        axes[0].text(x, t[1] + 500, f"{t[1]:,}", ha="center", va="bottom", fontsize=9.5, color=INK)
+    axes[0].set_ylim(0, 33000)
     axes[0].yaxis.set_major_formatter(kilo)
     axes[0].set_ylabel("steps/s (16-min window mean)")
     axes[0].set_title("Throughput")
     per = [t[3] / (t[1] * 730 * 3600 / 1e6) for t in TIERS]  # at the measured rate, 730 h a month
     axes[1].bar(xs, per, width=0.6, color=cols)
     for x, v in zip(xs, per):
-        axes[1].text(x, v + 0.0012, f"${v:.4f}", ha="center", va="bottom", fontsize=9.5, color=INK)
+        axes[1].text(x, v + 0.0012, f"${v:.3f}", ha="center", va="bottom", fontsize=9.5, color=INK)
     axes[1].set_ylim(0, 0.08)
     axes[1].yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"${v:.2f}"))
     axes[1].set_ylabel("$ per million steps (lower is better)", labelpad=8)
     axes[1].set_title("Cost per million steps")
+    # Two lines: database CPU busy, and what each database vCPU delivers. CPU falls as the database grows; output
+    # per vCPU peaks at 32, where the cores are neither starved (below) nor idle behind the write-ahead log (above).
+    a3, a3r = axes[2], axes[2].twinx()
+    a3.axvspan(-0.5, 1.5, color=OUTAGE, alpha=0.07, lw=0)
+    a3.plot(list(xs), TIER_CPU, color=S3, lw=2.2, marker="o", ms=6, label="database CPU busy (%)")
+    for x, v in zip(xs, TIER_CPU):  # below the line where the per-vCPU line passes above it (32 vCPU)
+        up = TIERS[x][0] != 32
+        a3.text(x, v + 3 if up else v - 3, f"{v}%", ha="center", va="bottom" if up else "top", fontsize=9.5, color=S3)
+    per_vcpu = [t[1] / t[0] for t in TIERS]
+    a3r.plot(list(xs), per_vcpu, color=S1, lw=2.2, marker="s", ms=6, label="steps/s per database vCPU")
+    for x, v in zip(xs, per_vcpu):
+        up = TIERS[x][0] == 32
+        a3r.text(x, v + 30 if up else v - 45, f"{v:.0f}", ha="center", va="bottom" if up else "top", fontsize=9.5,
+                 color=S1)
+    a3.set_ylim(0, 115)
+    a3.set_ylabel("database CPU busy (%)", color=S3)
+    a3r.set_ylim(0, 920)
+    a3r.set_ylabel("steps/s per database vCPU", color=S1)
+    a3r.grid(False)
+    a3r.spines["right"].set_visible(True)
+    a3.text(0.5, 107, "CPU-bound", ha="center", fontsize=9.5, color=INK2)
+    a3.text(2.5, 107, "write-ahead-log-bound", ha="center", fontsize=9.5, color=INK2)
+    a3.set_title("Where 32 vCPU wins")
+    a3.legend(handles=[Line2D([0], [0], color=S3, lw=2.2, marker="o", label="database CPU busy"),
+                       Line2D([0], [0], color=S1, lw=2.2, marker="s", label="steps/s per database vCPU")],
+              frameon=False, fontsize=9, loc="lower left")
     for ax in axes:
         ax.set_xticks(list(xs))
-        ax.set_xticklabels([f"{t[0]} vCPU DB\n{t[2]}" for t in TIERS], fontsize=9.5)
+        ax.set_xticklabels(labels, fontsize=9)
+        ax.set_xlim(-0.5, len(TIERS) - 0.5)
     finish(fig, "benchmark-cloud-tiers.png")
 
 
@@ -227,21 +267,64 @@ def chart_replicas():
     finish(fig, "benchmark-cloud-replicas.png")
 
 
+# ---- Minute by minute: H3's three saturated runs on one 32 vCPU instance (2026-10-17) ----
+H3 = os.path.join(RESULTS, "redo-h3-20261017/out")
+
+
+def series(path):
+    """An artifact's 10 s window series as (t seconds, steps/s, flows outstanding)."""
+    ser = json.load(open(path))["results"][0]["gauges"]["series"]
+    return [(p["t"], p["stepsPerSec"], p.get("outstanding", 0)) for p in ser]
+
+
 def chart_minutes():
-    if not all(arm_files(t, "log") and all(os.path.exists(p) for p in arm_files(t, "log")) for t in ARMS):
-        return skip("benchmark-cloud-minutes.png", f"logs not in {ONE} / {RS}")
+    runs = [os.path.join(H3, f"h3-{i}.json") for i in (1, 2, 3)]
+    if not all(os.path.exists(p) for p in runs):
+        return skip("benchmark-cloud-minutes.png", f"artifacts not in {H3}")
     fig, ax = plt.subplots(figsize=(8.5, 4.6))
-    for (t, name), colour in zip(ARMS.items(), [S1, S2, S3, S4, S5]):
-        pm = [v / ARM_SHARDS[t] for v in per_minute(t)]
-        ax.plot(range(1, 17), pm, color=colour, lw=2, marker="o", ms=3.5, label=name)
+    for i, (path, colour) in enumerate(zip(runs, [S1, S2, S3])):
+        mins = collections.defaultdict(list)
+        for t, steps, _ in series(path):
+            mins[int(t // 60)].append(steps)  # a sample at t belongs to the minute it ends in
+        pm = [sum(mins[m]) / len(mins[m]) for m in range(16) if mins[m]]
+        ax.plot(range(1, len(pm) + 1), pm, color=colour, lw=2, marker="o", ms=3.5, label=f"run {i + 1}")
     ax.set_xlabel("minute of the measurement window")
-    ax.set_ylabel("steps/s per shard")
-    ax.set_ylim(14000, 21000)
+    ax.set_ylabel("steps/s")
+    ax.set_ylim(14000, 24000)
     ax.set_xticks(range(1, 17))
     ax.yaxis.set_major_formatter(kilo)
-    ax.set_title("Minute by minute, per shard")
-    ax.legend(frameon=False, ncol=2, fontsize=9.5, loc="lower left")
+    ax.set_title("Minute by minute: three saturated runs on one 32 vCPU database")
+    ax.legend(frameon=False, ncol=3, fontsize=9.5, loc="lower left")
     finish(fig, "benchmark-cloud-minutes.png")
+
+
+# ---- Headroom: commanded at 100% and at 95% of the instance's saturated rate (hr4, 2026-10-18) ----
+HR = os.path.join(RESULTS, "redo-hr4-20261018/out")
+
+
+def chart_headroom():
+    runs = [("h-r100", "100%: 19,960 steps/s", OUTAGE), ("h-r95", "95%: 18,962 steps/s", S2)]
+    if not all(os.path.exists(os.path.join(HR, f"{t}.json")) for t, _, _ in runs):
+        return skip("benchmark-cloud-headroom.png", f"artifacts not in {HR}")
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(12, 4.4))
+    for tag, label, colour in runs:
+        ser = series(os.path.join(HR, f"{tag}.json"))
+        a1.plot([t / 60 for t, _, _ in ser], [s for _, s, _ in ser], color=colour, lw=1.6, label=label)
+        a2.plot([t / 60 for t, _, _ in ser], [max(o, 1) for _, _, o in ser], color=colour, lw=1.8, label=label)
+    a1.set_ylim(14000, 22000)
+    a1.yaxis.set_major_formatter(kilo)
+    a1.set_ylabel("steps/s delivered (10 s)")
+    a1.set_title("Delivered")
+    a2.set_yscale("log")
+    a2.set_ylim(50, 40000)
+    a2.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
+    a2.set_ylabel("flows waiting (log scale)")
+    a2.set_title("Backlog")
+    for ax in (a1, a2):
+        ax.set_xlabel("minute of the measurement window")
+        ax.set_xlim(0, 16)
+        ax.legend(frameon=False, fontsize=9.5, loc="lower right" if ax is a1 else "upper left")
+    finish(fig, "benchmark-cloud-headroom.png")
 
 
 # ---- Failover: 2 shards x 8 replicas, 1, 2, 3 then 4 dispatchers killed at once ----
@@ -318,4 +401,5 @@ chart_shards()
 chart_engine_hosts()
 chart_replicas()
 chart_minutes()
+chart_headroom()
 chart_failover()
