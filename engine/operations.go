@@ -51,6 +51,11 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 		if opts.Priority < 0 {
 			return "", errors.New("priority must be >= 0", http.StatusBadRequest)
 		}
+		// The priority and the budget's milliseconds are stored in 32-bit columns; a larger value would fail the
+		// insert with a driver error (or, on SQLite, be stored) instead of being refused here.
+		if opts.Priority > math.MaxInt32 {
+			return "", errors.New("priority must fit in a 32-bit integer", http.StatusBadRequest)
+		}
 		if opts.FairnessWeight < 0 {
 			return "", errors.New("fairness weight must be >= 0", http.StatusBadRequest)
 		}
@@ -58,6 +63,9 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 		// step is stamped with a 0 budget and its task's deadline has already passed when it is dispatched.
 		if opts.TimeBudget < 0 || (opts.TimeBudget > 0 && opts.TimeBudget < time.Millisecond) {
 			return "", errors.New("time budget must be 0 (engine default) or at least 1ms", http.StatusBadRequest)
+		}
+		if opts.TimeBudget > maxTimeBudget {
+			return "", errors.New("time budget must be at most %v", maxTimeBudget, http.StatusBadRequest)
 		}
 	}
 	opts = e.resolveFlowOptions(opts)

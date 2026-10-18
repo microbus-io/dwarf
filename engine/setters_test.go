@@ -228,3 +228,42 @@ func TestStateCacheBudget_Default(t *testing.T) {
 	assert.Equal(limit/10, total)
 	assert.Equal(detected, source)
 }
+
+// TestCreate_RejectsValuesTheColumnsCannotHold pins the 400s for a priority or a time budget too large for their
+// 32-bit columns: on Postgres the insert otherwise fails with a driver error ("unable to encode 2592000000 into
+// binary format for int4"), and on SQLite the value is stored. The largest value accepted runs: on Postgres a
+// budget at the full 2^31-1 ms is stored, then every claim overflows adding the lease margin and the flow never
+// runs.
+func TestCreate_RejectsValuesTheColumnsCannotHold(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("Bounds")
+	g.SetURL("A", "bounds/a")
+	g.AddTransition("A", workflow.End)
+	mux.HandleGraph("bounds/wf", g)
+	mux.HandleTask("bounds/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+
+	for name, opts := range map[string]*workflow.FlowOptions{
+		"priority":    {Priority: math.MaxInt32 + 1},
+		"time budget": {TimeBudget: maxTimeBudget + time.Millisecond},
+	} {
+		_, err := e.Create(ctx, "bounds/wf", nil, opts)
+		assert.Error(err, name)
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), name)
+	}
+	_, outcome, err := e.Run(ctx, "bounds/wf", nil, &workflow.FlowOptions{Priority: math.MaxInt32, TimeBudget: maxTimeBudget})
+	assert.NoError(err)
+	assert.Equal(workflow.StatusCompleted, outcome.Status, outcome.Error)
+
+	err = e.SetTimeBudget(maxTimeBudget + time.Millisecond)
+	assert.Error(err)
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
+	assert.NoError(e.SetTimeBudget(maxTimeBudget))
+}

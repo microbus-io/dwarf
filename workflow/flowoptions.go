@@ -24,7 +24,7 @@ import "time"
 type FlowOptions struct {
 	// Priority orders flows competing for workers; an explicit priority is >= 1,
 	// lower runs first. Zero means "unset" and uses the engine's
-	// DefaultPriority config.
+	// DefaultPriority config. Create rejects a negative value or one beyond 32 bits.
 	Priority int `json:"priority,omitzero"`
 	// FairnessKey groups flows for fair scheduling, typically a tenant.
 	// Empty uses the "" bucket.
@@ -39,7 +39,8 @@ type FlowOptions struct {
 	//
 	// Create rejects a negative value, or a positive one below 1ms - the budget is persisted in
 	// milliseconds, so a sub-millisecond value would truncate to zero and dispatch every task with a
-	// deadline that has already passed.
+	// deadline that has already passed - and one over just under 24.8 days, the most the stored count of
+	// milliseconds holds. A task that waits for days should Sleep or Interrupt instead.
 	TimeBudget time.Duration `json:"timeBudget,omitzero"`
 	// DeleteOnCompletion marks the flow (and its subgraph subtree) for deletion once it completes
 	// successfully - for fire-and-forget jobs whose output is not retained. Failed, terminated, and

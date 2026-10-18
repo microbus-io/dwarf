@@ -80,7 +80,9 @@ See [Writing tasks → Handling transient failures](tasks.md#handling-transient-
 
 Each step's `ExecuteTask` call runs under a context deadline: the flow's `FlowOptions.TimeBudget` if it set
 one, otherwise the engine default from `SetTimeBudget` (2 minutes unless changed). The budget is fixed when
-the flow is created and applies to every step of it, its subgraphs included. Your executor must honor `ctx` cancellation. For a tighter per-task bound,
+the flow is created and applies to every step of it, its subgraphs included. It is at most just under 24.8 days
+(a 32-bit count of milliseconds); a step whose replica crashes is not run again until its budget has passed, so a task that waits for
+days should `Sleep` or `Interrupt` rather than hold one long call. Your executor must honor `ctx` cancellation. For a tighter per-task bound,
 enforce it inside your executor (shorten the call context); the engine's budget is the outer ceiling. There
 is no engine-imposed *flow* deadline — implement one in author space with a `CreatedAt()` guard (see
 [Writing tasks → Timestamps](tasks.md#timestamps)).

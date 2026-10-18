@@ -565,13 +565,26 @@ func (e *Engine) SetStateCacheSize(bytes int64) error {
 // FairnessWeight, 0 cannot mean "unset" here: this setter IS the default. The floor is a millisecond
 // rather than a nanosecond because the budget is persisted in MILLISECONDS: a positive duration below
 // 1ms truncates to zero and produces exactly the expired-deadline case.
+//
+// The budget is at most just under 24.8 days: it is stored as a 32-bit count of milliseconds. A step whose replica
+// crashes is not run again until its budget has passed, so a task that waits for days should Sleep or Interrupt
+// rather than hold one long call.
 func (e *Engine) SetTimeBudget(d time.Duration) error {
 	if d < time.Millisecond {
 		return errors.New("time budget must be at least 1ms (it is stored in milliseconds)", http.StatusBadRequest)
 	}
+	if d > maxTimeBudget {
+		return errors.New("time budget must be at most %v", maxTimeBudget, http.StatusBadRequest)
+	}
 	e.timeBudgetMs.Store(int64(d / time.Millisecond))
 	return nil
 }
+
+// maxTimeBudget is the longest time budget a flow can carry. time_budget_ms is a 32-bit column, and the claim
+// adds the lease margin to it in SQL (time_budget_ms + ?), which Postgres computes as a 32-bit integer: a budget
+// within the margin of 2^31-1 ms is stored and then fails every claim with "integer out of range", the step
+// retried forever. A minute of headroom covers the 30s margin.
+const maxTimeBudget = time.Duration(math.MaxInt32)*time.Millisecond - time.Minute
 
 // SetDefaultPriority sets the default priority for new flows: an integer >= 1, lower runs first. Live:
 // read fresh on each Create, so it takes effect on a running engine immediately.
