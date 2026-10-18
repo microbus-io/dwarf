@@ -1058,7 +1058,7 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 // returned so processStep abandons quietly - the peer owns the step and will settle it. All failStep call
 // sites in processStep go through this so the defer covers every fail path uniformly.
 func (e *Engine) failAndReturn(ctx context.Context, shardNum int, stepID int, leaseSeq int, flowID int, flowToken string, taskErr error, taskName string) error {
-	fenced, ferr := e.failStep(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, taskErr, taskName)
+	fenced, ferr := e.failStep(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, taskErr, taskName, heldEither)
 	if ferr != nil {
 		return errors.Trace(ferr)
 	}
@@ -1068,10 +1068,32 @@ func (e *Engine) failAndReturn(ctx context.Context, shardNum int, stepID int, le
 	return errors.Trace(taskErr)
 }
 
+// stepHeld is the state a worker holds its dispatched step in, as the predicate failStep fences on. A persist site
+// passes the state its write STARTS from, never the broad heldEither: a write that committed but reported an error
+// has moved the step out of that state, so failStep matches nothing and abandons, and lease recovery settles the
+// landed outcome without running the task again. With heldEither a landed completion (`completed`, advancing=1) or
+// transition (`completed`, advancing=0) still matches, and failStep fails a step whose outcome is stored.
+//
+// Flow completion writes nothing to the step row, so the row cannot show it landed: those sites pass
+// heldAdvancing, and an ambiguous flow completion still fails the step. The flow stays completed, and failFlowTx,
+// finding it terminal, neither delivers a failure to a parent nor counts it again.
+type stepHeld string
+
+const (
+	// heldEither is for a failure the worker detects itself, with no write in doubt.
+	heldEither stepHeld = "status IN ('" + workflow.StatusRunning + "', '" + workflow.StatusCompleted + "')"
+	// heldRunning: the completion write, an interrupt, a subgraph spawn (which parks the step) and a Retry rewind.
+	heldRunning stepHeld = "status='" + workflow.StatusRunning + "' AND parked=0"
+	// heldAdvancing: a transition and a fan-in arrival, which clear advancing.
+	heldAdvancing stepHeld = "status='" + workflow.StatusCompleted + "' AND advancing=1"
+	// heldRerouting: the Cancel-covered reroute, which sets advance_on_error.
+	heldRerouting stepHeld = heldAdvancing + " AND advance_on_error=0"
+)
+
 // failStep handles a task failure. It returns fenced=true (with a nil error) when the dispatch's lease was
-// re-granted to a peer - its fenced step UPDATE matched zero rows, so it wrote nothing and the caller must
-// abandon quietly rather than fail a flow the peer is healthily re-executing.
-func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSeq int, flowID int, flowToken string, taskErr error, taskName string) (fenced bool, err error) {
+// re-granted to a peer, or the step is no longer in the held state - its fenced step UPDATE matched zero rows, so it
+// wrote nothing and the caller must abandon quietly rather than fail a flow the peer is healthily re-executing.
+func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSeq int, flowID int, flowToken string, taskErr error, taskName string, held stepHeld) (fenced bool, err error) {
 	if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultFailStepErr, taskName)) {
 		return false, errors.New("injected fault: " + engineseams.FaultFailStepErr)
 	}
@@ -1143,20 +1165,19 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 		failFlow = stepLineageID == 0
 		flowCancelled := stepCancelled
 		loss = flowLoss{}
-		// Fence the fail on BOTH our lease generation AND the two states a worker legitimately fails a step
-		// from: `running` (a task error, or the step-completion write itself failing) and `completed` (a
-		// transition/eval failure that failOnPersistError fails the already-completed step for, to escape the
-		// re-execution loop). The lease fence alone guards the zombie "late error → healthy-flow kill" hazard;
-		// the status guard - which every sibling post-execution write carries and this one was missing - closes
-		// the rest. Without it a step a racing Terminate just terminated (terminateSubtree does NOT bump lease_seq,
-		// so it still matches our generation) is rewritten terminated→failed, violating step immutability and
-		// seeding a phantom branch failure a later Fork re-derives from step status; and a step recovery reset to
-		// `pending` (also lease_seq-preserving) would be terminalized out from under the peer re-claiming it. This
-		// is the first write in the transaction, so a zero-row match means nothing was written - commit the empty
-		// tx and report fenced so the caller abandons without failing a flow that is terminated or that a peer is
-		// re-running.
+		// Fence the fail on BOTH our lease generation AND the state the worker holds the step in (held): `running` (a
+		// task error, or the step-completion write itself failing) or `completed` (a transition/eval failure that
+		// failOnPersistError fails the already-completed step for, to escape the re-execution loop). The lease fence
+		// alone guards the zombie "late error → healthy-flow kill" hazard; the status guard - which every sibling post-
+		// execution write carries and this one was missing - closes the rest. Without it a step a racing Terminate just
+		// terminated (terminateSubtree does NOT bump lease_seq, so it still matches our generation) is rewritten
+		// terminated→failed, violating step immutability and seeding a phantom branch failure a later Fork re-derives
+		// from step status; and a step recovery reset to `pending` (also lease_seq-preserving) would be terminalized
+		// out from under the peer re-claiming it. This is the first write in the transaction, so a zero-row match means
+		// nothing was written - commit the empty tx and report fenced so the caller abandons without failing a flow
+		// that is terminated or that a peer is re-running.
 		res, uerr := tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, parked=?, error=?, updated_at=NOW_UTC() WHERE step_id=? AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusCompleted+"') AND lease_seq=?",
+			"UPDATE dwarf_steps SET status=?, parked=?, error=?, updated_at=NOW_UTC() WHERE step_id=? AND "+string(held)+" AND lease_seq=?",
 			stepStatus, parkedNone, errMsg, stepID, leaseSeq,
 		)
 		if uerr != nil {
@@ -1192,7 +1213,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	// The step is now failed (or cancelled) regardless of whether the whole flow fails - count it.
 	e.metricStepExecuted(ctx, taskName, stepStatus, shardNum)
 
-	if !failFlow {
+	if !failFlow || loss.status == "" {
 		return false, nil
 	}
 	e.endLostFlow(ctx, shardNum, flowID, flowToken, lostLabel, loss)
@@ -1234,10 +1255,19 @@ func (e *Engine) failFlowTx(ctx context.Context, tx sequel.Executor, shardNum, f
 			"flow", keys.CorrelationID(shardNum, flowID), "error", err)
 		finalStateJSON = []byte("{}")
 	}
-	tx.ExecContext(ctx,
+	res, uerr := tx.ExecContext(ctx,
 		"UPDATE dwarf_flows SET final_state=?, status=?, error=?, stopped_step_id=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
 		finalStateJSON, loss.status, flowErrorText(cancelled, lossErr), stoppedStepID, flowID,
 	)
+	if uerr == nil {
+		if n, _ := res.RowsAffected(); n == 0 {
+			// The flow was already terminal, and whatever ended it settled its parent and counted it. A flow
+			// completion whose commit landed with its acknowledgement lost reaches here through failStep: delivering
+			// a failure would hand the parent a loss for a child that completed. The new status always differs from
+			// a non-terminal one, so RowsAffected is honest on MySQL.
+			return flowLoss{}, nil
+		}
+	}
 	if parentStepID != 0 {
 		loss.reDispatchParent, err = e.deliverFlowFailureToParent(ctx, tx, parentStepID, lossErr)
 		if err != nil {

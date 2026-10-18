@@ -83,7 +83,7 @@ func TestLeaseFence_FailStep(t *testing.T) {
 		setup(t, e, 5) // the owner holds generation 5
 
 		// A zombie holding the prior generation 4 returns an error late. It must write nothing.
-		fenced, err := e.failStep(ctx, 1, 1, 4, 1, "ftok", errors.New("boom"), "T")
+		fenced, err := e.failStep(ctx, 1, 1, 4, 1, "ftok", errors.New("boom"), "T", heldEither)
 		assert.NoError(err)
 		assert.True(fenced)
 
@@ -101,7 +101,7 @@ func TestLeaseFence_FailStep(t *testing.T) {
 		setup(t, e, 5)
 
 		// The current owner (generation 5) fails the step normally.
-		fenced, err := e.failStep(ctx, 1, 1, 5, 1, "ftok", errors.New("boom"), "T")
+		fenced, err := e.failStep(ctx, 1, 1, 5, 1, "ftok", errors.New("boom"), "T", heldEither)
 		assert.NoError(err)
 		assert.False(fenced)
 
@@ -706,7 +706,7 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 		e, db := setup(t, workflow.StatusTerminated, workflow.StatusTerminated)
 		defer e.Shutdown(ctx)
 
-		fenced, err := e.failStep(ctx, 1, 1, 5, 1, "ftok", errors.New("boom"), "T")
+		fenced, err := e.failStep(ctx, 1, 1, 5, 1, "ftok", errors.New("boom"), "T", heldEither)
 		assert.NoError(err)
 		assert.True(fenced, "a terminated step under our generation must fence, not be rewritten to failed")
 
@@ -722,7 +722,7 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 		e, db := setup(t, workflow.StatusRunning, workflow.StatusCompleted)
 		defer e.Shutdown(ctx)
 
-		fenced, err := e.failStep(ctx, 1, 1, 5, 1, "ftok", errors.New("could not persist transition"), "T")
+		fenced, err := e.failStep(ctx, 1, 1, 5, 1, "ftok", errors.New("could not persist transition"), "T", heldEither)
 		assert.NoError(err)
 		assert.False(fenced, "a completed step we own must still be failable (failOnPersistError's escape)")
 
@@ -730,4 +730,108 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 		assert.Equal(workflow.StatusFailed, stepStatus)
 		assert.Equal(workflow.StatusFailed, flowStatus)
 	})
+}
+
+// TestFailStep_HeldStates pins each persist site's held state both ways: failStep fails a step in the state the
+// site's write starts from - a write that did not land leaves it there, and fencing it would turn a permanent failure
+// into a task re-run forever - and matches nothing once the write has landed, so a landed outcome whose
+// acknowledgement was lost is never failed. A flow already completed (a flow completion that landed) keeps its
+// status and is not handed to a parent as a failure.
+func TestFailStep_HeldStates(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	type row struct {
+		status          string
+		parked          int
+		advancing       int
+		advanceOnError  int
+		flowStatus      string
+		parentStepState string // a parked caller step in a parent flow, if set
+	}
+	cases := []struct {
+		name   string
+		held   stepHeld
+		row    row
+		fenced bool
+	}{
+		{"running_starts_completion", heldRunning, row{status: workflow.StatusRunning}, false},
+		{"running_after_completion_landed", heldRunning, row{status: workflow.StatusCompleted, advancing: 1}, true},
+		{"running_after_interrupt_landed", heldRunning, row{status: workflow.StatusInterrupted}, true},
+		{"running_after_spawn_landed", heldRunning, row{status: workflow.StatusRunning, parked: parkedSubgraph}, true},
+		{"running_after_rewind_landed", heldRunning, row{status: workflow.StatusPending}, true},
+		{"advancing_starts_transition", heldAdvancing, row{status: workflow.StatusCompleted, advancing: 1}, false},
+		{"advancing_after_transition_landed", heldAdvancing, row{status: workflow.StatusCompleted}, true},
+		{"rerouting_starts_reroute", heldRerouting, row{status: workflow.StatusCompleted, advancing: 1}, false},
+		{"rerouting_after_reroute_landed", heldRerouting, row{status: workflow.StatusCompleted, advancing: 1, advanceOnError: 1}, true},
+		{"advancing_after_flow_completion_landed", heldAdvancing, row{status: workflow.StatusCompleted, advancing: 1, flowStatus: workflow.StatusCompleted, parentStepState: workflow.StatusRunning}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := testarossa.For(t)
+			e := NewEngineUnderTest(t.Name())
+			defer e.Shutdown(ctx)
+			e.SetHost(hosts.NewMux())
+			assert.NoError(e.Startup(t.Context()))
+			db, err := e.db.Shard(1)
+			assert.NoError(err)
+
+			flowStatus := tc.row.flowStatus
+			if flowStatus == "" {
+				flowStatus = workflow.StatusRunning
+			}
+			surgraphFlowID, surgraphStepID := 0, 0
+			if tc.row.parentStepState != "" {
+				// The parent flow (flow_id=1) and its caller step (step_id=1), parked on the child.
+				_, err = db.ExecContext(ctx,
+					"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, thread_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+					"ptok", "u", "W", []byte("{}"), "", workflow.StatusRunning, 1, 1, 1000,
+				)
+				assert.NoError(err)
+				_, err = db.ExecContext(ctx,
+					"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, parked, time_budget_ms, lease_seq, lease_expires) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 999000))",
+					1, 1, "pstok", "P", "u", tc.row.parentStepState, parkedSubgraph, 1000, 1,
+				)
+				assert.NoError(err)
+				surgraphFlowID, surgraphStepID = 1, 1
+			}
+			_, err = db.ExecContext(ctx,
+				"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, thread_id, time_budget_ms, surgraph_flow_id, surgraph_step_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+				"ftok", "u", "W", []byte("{}"), "", flowStatus, 0, 0, 1000, surgraphFlowID, surgraphStepID,
+			)
+			assert.NoError(err)
+			var flowID int
+			assert.NoError(db.QueryRowContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE flow_token='ftok'").Scan(&flowID))
+			_, err = db.ExecContext(ctx,
+				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, parked, advancing, advance_on_error, time_budget_ms, lease_seq, lease_expires) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 999000))",
+				flowID, 1, "stok", "T", "u", tc.row.status, tc.row.parked, tc.row.advancing, tc.row.advanceOnError, 1000, 5,
+			)
+			assert.NoError(err)
+			var stepID int
+			assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE step_token='stok'").Scan(&stepID))
+
+			fenced, err := e.failStep(ctx, 1, stepID, 5, flowID, "ftok", errors.New("boom"), "T", tc.held)
+			assert.NoError(err)
+			assert.Equal(tc.fenced, fenced)
+
+			var stepStatus, gotFlowStatus string
+			assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE step_id=?", stepID).Scan(&stepStatus))
+			assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&gotFlowStatus))
+			switch {
+			case tc.fenced:
+				assert.Equal(tc.row.status, stepStatus, "a fenced failStep writes nothing")
+				assert.Equal(flowStatus, gotFlowStatus)
+			case tc.row.flowStatus == workflow.StatusCompleted:
+				assert.Equal(workflow.StatusCompleted, gotFlowStatus, "a completed flow keeps its outcome")
+				var parentErr string
+				var parked int
+				assert.NoError(db.QueryRowContext(ctx, "SELECT parked, COALESCE(subgraph_error, '') FROM dwarf_steps WHERE step_id=1").Scan(&parked, &parentErr))
+				assert.Equal(parkedSubgraph, parked, "no failure is delivered to the parent of a completed child")
+				assert.Equal("", parentErr)
+			default:
+				assert.Equal(workflow.StatusFailed, stepStatus)
+				assert.Equal(workflow.StatusFailed, gotFlowStatus)
+			}
+		})
+	}
 }

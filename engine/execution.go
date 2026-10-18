@@ -262,7 +262,6 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	flowRead := true
 	row := new(claimRow)
 	stepDest, flowDest := row.destinations()
-	claimSent := time.Now()
 
 	switch db.DriverName() {
 	case "pgx":
@@ -344,8 +343,6 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	stepCreatedAt, leaseSeq, fanOutOrdinal = row.stepCreatedAt, row.leaseSeq, row.fanOutOrdinal
 	stepCancelling, replaying, replayGoto = row.stepCancelling, row.replaying, row.replayGoto
 	replaySleepLeftMs, replayOnError = row.replaySleepLeftMs, row.replayOnError
-	// The claim's lease runs from the database's NOW at the claim, which is after claimSent.
-	ctx = withLeaseHeld(ctx, &leaseHeld{until: claimSent.Add(time.Duration(timeBudgetMs)*time.Millisecond + e.leaseMargin)})
 	if n == 0 {
 		// A lost claim is routine, not an error: the candidate cache holds hints, not ownership, so the row
 		// may have been claimed by a peer or left the claimable state between selection and claim. Counted
@@ -787,7 +784,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		e.logger.DebugContext(ctx, "Task interrupted", "task", taskName, "workflow", workflowURL)
 		landed, err := e.settlePersist(ctx, e.persistYielding(ctx, db, shardNum, stepID, leaseSeq, &persistPass, func() error {
 			return e.handleInterrupt(ctx, shardNum, db, stepID, leaseSeq, flowID, flowToken, workflowURL, changesJSON, interruptPayload)
-		}), shardNum, stepID, leaseSeq, flowID, flowToken, taskName)
+		}), shardNum, stepID, leaseSeq, flowID, flowToken, taskName, heldRunning)
 		if landed {
 			e.metricStepExecuted(ctx, taskName, workflow.StatusInterrupted, shardNum)
 		}
@@ -876,7 +873,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				return nil
 			}
 			return err
-		}), shardNum, stepID, leaseSeq, flowID, flowToken, taskName)
+		}), shardNum, stepID, leaseSeq, flowID, flowToken, taskName, heldRunning)
 		if !landed {
 			return err
 		}
@@ -935,7 +932,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				rewound = true
 				return errors.Trace(e.deleteSubgraphFlowsRootedAt(ctx, tx, stepID))
 			})
-		}), shardNum, stepID, leaseSeq, flowID, flowToken, taskName)
+		}), shardNum, stepID, leaseSeq, flowID, flowToken, taskName, heldRunning)
 		if !landed || !rewound {
 			return err
 		}
@@ -1015,17 +1012,6 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultPersistErr, taskName)) {
 				return errors.New("injected fault: " + engineseams.FaultPersistErr + " " + taskName)
 			}
-			// engineseams.FaultPersistSlowErr is the same failure, slow: a write that takes the whole retry window to be
-			// rejected, like a row near a column limit, so no retry can fit after it. FaultPersistStallErr takes half
-			// the window, like a write a failover stalls until its connection resets, so each retry still fits.
-			if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultPersistSlowErr, taskName)) {
-				time.Sleep(e.persistRetryWindow())
-				return errors.New("injected fault: " + engineseams.FaultPersistSlowErr + " " + taskName)
-			}
-			if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultPersistStallErr, taskName)) {
-				time.Sleep(e.persistRetryWindow() / 2)
-				return errors.New("injected fault: " + engineseams.FaultPersistStallErr + " " + taskName)
-			}
 			const where = " WHERE step_id=? AND status NOT IN ('" + workflow.StatusTerminated + "', '" + workflow.StatusCancelled + "') AND lease_seq=?"
 			switch db.DriverName() {
 			case "pgx", "sqlite":
@@ -1067,10 +1053,15 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 					}
 				}
 			}
+			// engineseams.FaultPersistLandedErr reports an error for a write that landed, as a lost acknowledgement
+			// of a commit does, consumed per attempt.
+			if stepRowsAffected > 0 && e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultPersistLandedErr, taskName)) {
+				return errors.New("injected fault: " + engineseams.FaultPersistLandedErr + " " + taskName)
+			}
 			return nil
 		})
 	})
-	if landed, err := e.settlePersist(ctx, err, shardNum, stepID, leaseSeq, flowID, flowToken, taskName); !landed {
+	if landed, err := e.settlePersist(ctx, err, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, heldRunning); !landed {
 		return err
 	}
 	if stepRowsAffected == 0 {
@@ -1144,7 +1135,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				return nil
 			})
 		})
-		if landed, err := e.settlePersist(ctx, err, shardNum, stepID, leaseSeq, flowID, flowToken, taskName); !landed {
+		if landed, err := e.settlePersist(ctx, err, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, heldRerouting); !landed {
 			return err
 		}
 		errorRouted = true
@@ -1236,7 +1227,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	}
 	if isFanOutSource && fanInOfSource != "" &&
 		((cohortSize == 0 && !routedToEnd) || (cohortSize == 1 && realTasks[0].taskName == fanInOfSource)) {
-		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, &persistPass, func() error {
+		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, heldAdvancing, &persistPass, func() error {
 			return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, leaseSeq, stepDepth, lineageID, fanOutOrdinal, fanInOfSource, dispatchURLOf(graph, fanInOfSource), workflowURL, graph, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs, inheritCancel)
 		})
 	}
@@ -1256,7 +1247,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				errors.New("fan-out source '%s' is inside a cohort but %s", taskName, reason),
 				taskName)
 		}
-		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, &persistPass, func() error {
+		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, heldAdvancing, &persistPass, func() error {
 			return e.completeFlowSequential(ctx, shardNum, flowID, stepID, flowToken, workflowURL)
 		})
 	}
@@ -1276,7 +1267,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				errors.New("task '%s' is inside a fan-out cohort but matched no onward transition; every branch must reach a fan-in task", taskName),
 				taskName)
 		}
-		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, &persistPass, func() error {
+		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, heldAdvancing, &persistPass, func() error {
 			return e.completeFlowSequential(ctx, shardNum, flowID, stepID, flowToken, workflowURL)
 		})
 	}
@@ -1699,7 +1690,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		cohortMu.unlock()
 		cohortMu = nil
 	}
-	if landed, err := e.settlePersist(ctx, err, shardNum, stepID, leaseSeq, flowID, flowToken, taskName); !landed {
+	if landed, err := e.settlePersist(ctx, err, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, heldAdvancing); !landed {
 		return err
 	}
 	e.metricStateWriteBytes(ctx, workflowURL, "state", txBytes.stateWritten)

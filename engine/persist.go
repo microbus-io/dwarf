@@ -39,8 +39,8 @@ import (
 // The fix is to retry the WRITE, never the task:
 //
 //  1. Retry in place, holding the lease. An ephemeral database error (a failover, a dropped connection, a
-//     momentary connection-limit rejection) clears in seconds, so a short exponential lands the write with ZERO
-//     re-execution - which is the whole point, and what re-dispatching could never give us.
+//     momentary connection-limit rejection) clears in seconds to tens of seconds, so an exponential ladder lands
+//     the write with ZERO re-execution - which is the whole point, and what re-dispatching could never give us.
 //  2. If the retries are exhausted, ask the database to classify the failure for us - see failOnPersistError.
 //
 // Lock contention is NOT handled here: it is retried before it reaches persist - by `sequel.Transact` for a
@@ -53,17 +53,6 @@ const (
 	// contention a transaction does.
 	contentionMaxAttempts = 8
 )
-
-// persistRetryWindow is the first half of each lease renewal (30s of the default 60s): a retry must be expected to
-// finish inside it. The second half is left for failOnPersistError, whose failStep reads the flow's final state,
-// which can be large.
-//
-// Do not let a retry run past it. A write that keeps failing and is SLOW (a row near a column or packet limit, a slow
-// link) otherwise outlives the lease mid-ladder: lease recovery takes the step and re-runs the task, the failStep at
-// the end of the ladder is fenced into a silent no-op, and every re-run repeats it.
-func (e *Engine) persistRetryWindow() time.Duration {
-	return e.persistLeaseExtension / 2
-}
 
 var (
 	// errPersistFenced: a peer re-claimed the step while we were failing. We are a zombie; abandon silently.
@@ -107,9 +96,7 @@ func retryContention(ctx context.Context, stmt func() error) error {
 // yield hands back whatever the caller is holding for the duration of a wait that is not the database -
 // see the backoff below. Nil means the caller holds nothing.
 func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, leaseSeq int, write func() error, yield func(func())) error {
-	started := time.Now()
 	err := write()
-	lastWrite := time.Since(started)
 	if err == nil {
 		return nil
 	}
@@ -125,14 +112,11 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 		return errors.Trace(err)
 	}
 
-	lease := leaseHeldFrom(ctx)
 	for _, backoff := range e.persistBackoff {
-		// Renew the lease BEFORE each sleep, so the retry cannot outlive our ownership of the step: its first half
-		// (persistRetryWindow) must cover the sleep and the write, the second is left for failOnPersistError to fail
-		// the step. Renewing per retry rather than once keeps the whole ladder for a write that is slow but
-		// transient - a failover can stall one for tens of seconds before its connection resets - while a write
-		// that is slow every time still ends inside a lease we hold. This write carries no payload, so it is not
-		// subject to whatever is killing the real one.
+		// Renew the lease BEFORE each sleep, so the retry cannot outlive our ownership of the step: the renewal covers
+		// the sleep, then persistLeaseExtension - its first half for the write, its second for failOnPersistError to
+		// fail the step. Renewing per retry rather than once keeps the whole ladder, which sleeps a minute in all, on a
+		// lease we hold. This write carries no payload, so it is not subject to whatever is killing the real one.
 		//
 		// The status guard is load-bearing, not decoration. It matches the two states a worker legitimately HOLDS a
 		// step in - `running` (its outcome has not landed) and `completed` (it landed, but the follow-up transition
@@ -152,35 +136,16 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 		// A zero-row match (the query SUCCEEDED but matched nothing) therefore means we no longer own the step - a peer
 		// re-claimed it (lease_seq bumped), recovery reset it to `pending`, or a racing Terminate terminalized it. Abandon
 		// silently: retrying would be a zombie's write, and the fence would reject it anyway. An ERROR here means the
-		// database is unreachable, which is exactly the case the retry loop is for - so fall through and try, but only
-		// inside the lease we still hold (lease.until), not the one the renewal would have given. Do not break to the
-		// classifier on a renewal error instead: a failover fails the renewal too, and a blip would then cost a
-		// re-execution.
-		//
-		// The window is measured from BEFORE the renewal: the lease runs from the database's NOW at the UPDATE, and
-		// on a slow link the round trip back can take seconds.
-		renewed := time.Now()
-		held, xerr := e.extendLease(ctx, db, stepID, leaseSeq)
+		// database is unreachable, which is exactly the case the retry loop is for - so fall through and try on whatever
+		// lease we still hold. Do not break to the classifier on a renewal error instead: a failover fails the renewal
+		// too, and a blip would then cost a re-execution.
+		held, xerr := e.extendLease(ctx, db, stepID, leaseSeq, backoff+e.persistLeaseExtension)
 		if xerr == nil && !held {
 			e.logLostLease(ctx, stepID, err)
 			return errPersistFenced
 		}
-		// A retry starts only if it should finish inside the window, judged by how long the write that just failed
-		// took: repeated failures of one write take about as long as each other. It is not cancelled mid-flight
-		// instead - a cancelled write can still commit, and failStep, which matches a `completed` step, would then
-		// fail a step whose outcome landed. Either way the window ends where the lease's second half - the
-		// classifier's room - begins.
-		deadline := renewed.Add(e.persistRetryWindow())
-		if xerr == nil {
-			lease.extend(renewed.Add(e.persistLeaseExtension))
-		} else {
-			deadline = lease.until.Add(e.persistRetryWindow() - e.persistLeaseExtension)
-		}
-		if time.Until(deadline) < backoff+lastWrite {
-			break
-		}
 		// The sleep is not database work, so whatever admission the caller is holding goes back for its
-		// duration - up to ~7s across the whole ladder. Holding it would park a turn on a timer, which is
+		// duration - about a minute across the whole ladder. Holding it would park a turn on a timer, which is
 		// the one thing the admission rule forbids, and it would do so during a database blip: exactly when
 		// the remaining turns are most contended.
 		drained := false
@@ -207,13 +172,8 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 			e.releaseLease(ctx, db, stepID, leaseSeq)
 			return errPersistDrained
 		}
-		if time.Until(deadline) < lastWrite {
-			break // waiting for the turn back took the room the retry needed
-		}
 		e.metricStepWriteRetried(ctx, shardNum)
-		started = time.Now()
 		err = write()
-		lastWrite = time.Since(started)
 		if err == nil {
 			return nil
 		}
@@ -240,7 +200,7 @@ func (e *Engine) logLostLease(ctx context.Context, stepID int, writeErr error) {
 		"step", stepID, "error", writeErr)
 }
 
-// extendLease ensures a step's lease runs at least persistLeaseExtension into the future, fenced on the lease
+// extendLease ensures a step's lease runs at least d into the future, fenced on the lease
 // generation and on the two states a worker holds a step in (see persist for why the status guard is load-bearing),
 // unparked: a parked caller waits on its child and belongs to no worker, so a persist that finds its own write
 // parked the step has landed it and must stop.
@@ -250,14 +210,14 @@ func (e *Engine) logLostLease(ctx context.Context, stepID int, writeErr error) {
 // The UPDATE matches only a lease that needs extending, so its new expiry always differs from the old and
 // RowsAffected is honest on MySQL. A zero-row match is therefore ambiguous - taken back, or already long enough -
 // and only then a read settles which.
-func (e *Engine) extendLease(ctx context.Context, db *sequel.DB, stepID, leaseSeq int) (bool, error) {
+func (e *Engine) extendLease(ctx context.Context, db *sequel.DB, stepID, leaseSeq int, d time.Duration) (bool, error) {
 	if e.seams.Enabled() && e.seams.IsFault(engineseams.FaultExtendLeaseErr) {
 		return false, errors.New("injected fault: " + engineseams.FaultExtendLeaseErr)
 	}
 	const owned = " WHERE step_id=? AND lease_seq=? AND parked=? AND status IN ('" + workflow.StatusRunning + "', '" + workflow.StatusCompleted + "')"
 	res, err := db.ExecContext(ctx,
 		"UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), ?)"+owned+" AND lease_expires < DATE_ADD_MILLIS(NOW_UTC(), ?)",
-		e.persistLeaseExtension.Milliseconds(), stepID, leaseSeq, parkedNone, e.persistLeaseExtension.Milliseconds(),
+		d.Milliseconds(), stepID, leaseSeq, parkedNone, d.Milliseconds(),
 	)
 	if err != nil {
 		return false, errors.Trace(err)
@@ -270,36 +230,6 @@ func (e *Engine) extendLease(ctx context.Context, db *sequel.DB, stepID, leaseSe
 		return false, errors.Trace(err)
 	}
 	return held > 0, nil
-}
-
-// leaseHeld is how long this worker knows it holds its dispatched step's lease, by its own clock: until the claim's
-// lease ends at first - measured from before the claim was sent, so never late - then until a later renewal's does.
-// persist retries only inside it when a renewal errors. processStep publishes one on its context
-// (withLeaseHeld); without one nothing is known to be held.
-type leaseHeld struct {
-	until time.Time
-}
-
-// extend records a lease that lasts until t, if that is later than the one already known.
-func (l *leaseHeld) extend(t time.Time) {
-	if t.After(l.until) {
-		l.until = t
-	}
-}
-
-type leaseHeldKey struct{}
-
-// withLeaseHeld publishes the dispatched step's lease to everything the step's processing calls.
-func withLeaseHeld(ctx context.Context, l *leaseHeld) context.Context {
-	return context.WithValue(ctx, leaseHeldKey{}, l)
-}
-
-// leaseHeldFrom returns the lease withLeaseHeld published, or an empty one: nothing known to be held.
-func leaseHeldFrom(ctx context.Context) *leaseHeld {
-	if l, ok := ctx.Value(leaseHeldKey{}).(*leaseHeld); ok {
-		return l
-	}
-	return &leaseHeld{}
 }
 
 // releaseLease hands a step back for immediate re-dispatch, fenced on our lease generation. It resets from
@@ -337,8 +267,8 @@ func (e *Engine) releaseLease(ctx context.Context, db *sequel.DB, stepID, leaseS
 // The two attempts are milliseconds apart and differ only in what they carry, which is what makes the
 // classification sound. Guessing the other way - terminalizing on any unknown error - would kill live flows on
 // every routine failover, and a terminal flow is immutable (recovery is a human running Fork).
-func (e *Engine) failOnPersistError(ctx context.Context, shardNum, stepID, leaseSeq, flowID int, flowToken string, writeErr error, taskName string) error {
-	fenced, ferr := e.failStep(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, writeErr, taskName)
+func (e *Engine) failOnPersistError(ctx context.Context, shardNum, stepID, leaseSeq, flowID int, flowToken string, writeErr error, taskName string, held stepHeld) error {
+	fenced, ferr := e.failStep(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, writeErr, taskName, held)
 	if ferr != nil {
 		// Cannot write even a payload-free failure: the DATABASE is down, not the payload. Surface the original
 		// error and leave the step to lease recovery.
@@ -377,9 +307,10 @@ func sanitizeErrorMessage(msg string) string {
 
 // persistStep is persist plus the disposition every caller in processStep shares: a lost lease or a drain is a
 // benign no-op, lock contention goes to the recovery defer (never the classifier - terminalizing a flow because the
-// database was busy is exactly backwards), and anything else that would not land is classified.
-func (e *Engine) persistStep(ctx context.Context, db *sequel.DB, shardNum, stepID, leaseSeq, flowID int, flowToken, taskName string, write func() error, yield func(func())) error {
-	_, err := e.settlePersist(ctx, e.persist(ctx, db, shardNum, stepID, leaseSeq, write, yield), shardNum, stepID, leaseSeq, flowID, flowToken, taskName)
+// database was busy is exactly backwards), and anything else that would not land is classified. held is the state
+// the write starts from (see stepHeld).
+func (e *Engine) persistStep(ctx context.Context, db *sequel.DB, shardNum, stepID, leaseSeq, flowID int, flowToken, taskName string, held stepHeld, write func() error, yield func(func())) error {
+	_, err := e.settlePersist(ctx, e.persist(ctx, db, shardNum, stepID, leaseSeq, write, yield), shardNum, stepID, leaseSeq, flowID, flowToken, taskName, held)
 	return err
 }
 
@@ -413,7 +344,7 @@ func isPermanentError(err error) bool {
 // classified as one: terminalizing on it would kill live flows during a contention storm. It was already retried
 // to exhaustion (by Transact, or by retryContention), so it goes to the recovery defer, which rewinds the step
 // and re-polls.
-func (e *Engine) settlePersist(ctx context.Context, err error, shardNum, stepID, leaseSeq, flowID int, flowToken, taskName string) (landed bool, _ error) {
+func (e *Engine) settlePersist(ctx context.Context, err error, shardNum, stepID, leaseSeq, flowID int, flowToken, taskName string, held stepHeld) (landed bool, _ error) {
 	switch {
 	case err == nil:
 		return true, nil
@@ -423,10 +354,10 @@ func (e *Engine) settlePersist(ctx context.Context, err error, shardNum, stepID,
 		return false, errors.Trace(err)
 	case isPermanentError(err):
 		// Not a storage fault: the step fails with it, without the write alarm.
-		_, ferr := e.failStep(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
+		_, ferr := e.failStep(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName, held)
 		return false, errors.Trace(ferr)
 	default:
-		return false, errors.Trace(e.failOnPersistError(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName))
+		return false, errors.Trace(e.failOnPersistError(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName, held))
 	}
 }
 
@@ -439,8 +370,8 @@ func (e *Engine) persistYielding(ctx context.Context, db *sequel.DB, shardNum, s
 }
 
 // persistStepYielding is persistStep for a caller holding a turn - see persistYielding.
-func (e *Engine) persistStepYielding(ctx context.Context, db *sequel.DB, shardNum, stepID, leaseSeq, flowID int, flowToken, taskName string, pass *turnstile.Pass, write func() error) error {
-	return e.persistStep(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, write, func(wait func()) {
+func (e *Engine) persistStepYielding(ctx context.Context, db *sequel.DB, shardNum, stepID, leaseSeq, flowID int, flowToken, taskName string, held stepHeld, pass *turnstile.Pass, write func() error) error {
+	return e.persistStep(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, held, write, func(wait func()) {
 		yieldTurn(ctx, pass, wait)
 	})
 }

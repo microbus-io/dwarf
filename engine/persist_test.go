@@ -180,9 +180,8 @@ func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testi
 	assert.Equal(int32(1), runs.Load(), "nothing re-dispatches a terminalized step")
 }
 
-// slowWriteEngine is a one-task flow whose task counts its executions, on an engine whose persist lease renewal
-// is 1s, so its retry window is 500ms.
-func slowWriteEngine(t *testing.T, prefix string, runs *atomic.Int32) (*Engine, sdkmetric.Reader) {
+// countingEngine is a one-task flow whose task counts its executions, on an engine with a short persist ladder.
+func countingEngine(t *testing.T, prefix string, runs *atomic.Int32) (*Engine, sdkmetric.Reader) {
 	mux := hosts.NewMux()
 	g := workflow.NewGraph("Persist")
 	g.SetURL("A", prefix+"/a")
@@ -196,73 +195,8 @@ func slowWriteEngine(t *testing.T, prefix string, runs *atomic.Int32) (*Engine, 
 	e := NewEngineUnderTest(t.Name())
 	e.SetHost(mux)
 	e.persistBackoff = shortPersistBackoff
-	e.persistLeaseExtension = time.Second
 	reader := withManualReader(e)
 	return e, reader
-}
-
-// TestPersist_SlowFailingWriteFailsTheStepWithoutRetrying pins the retry window. A write that keeps failing and
-// takes the whole window to be rejected leaves no room for a retry, so persist goes straight to the classifier
-// while the step is still its own, and the step fails after one execution. Retrying anyway is what let a ladder of
-// slow failures outlive its lease: lease recovery took the step, the final failStep was fenced into a silent
-// no-op, and the task re-ran forever. Without the window this test retries three times.
-func TestPersist_SlowFailingWriteFailsTheStepWithoutRetrying(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	assert := testarossa.For(t)
-
-	var runs atomic.Int32
-	e, reader := slowWriteEngine(t, "p/slow", &runs)
-	defer e.Shutdown(ctx)
-	assert.NoError(e.Startup(t.Context()))
-	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistSlowErr, "A"), 1000)
-
-	_, outcome, err := e.Run(ctx, "p/slow/wf", nil, nil)
-	if !assert.NoError(err) || !assert.NotNil(outcome) {
-		return
-	}
-	assert.Equal(workflow.StatusFailed, outcome.Status)
-	assert.Contains(outcome.Error, engineseams.FaultPersistSlowErr)
-	assert.Equal(int32(1), runs.Load(), "the task must execute exactly once")
-
-	var rm metricdata.ResourceMetrics
-	assert.NoError(reader.Collect(ctx, &rm))
-	retried, _ := sumCounter(rm, "dwarf_steps_write_retried", "", "")
-	assert.Equal(int64(0), retried, "no retry fits after a failure that took the whole window")
-	failed, _ := sumCounter(rm, "dwarf_steps_write_failed", "", "")
-	assert.Equal(int64(1), failed)
-}
-
-// TestPersist_StalledWritesAreRetriedOnARenewedLease pins that the window is per retry. Two writes that each stall
-// for half the window before failing - a failover holding them until their connections reset - are followed by one
-// that lands: the flow completes with the task run once. Measured from a single renewal, the second retry would not
-// fit, and the step would fail over a fault that had already cleared.
-func TestPersist_StalledWritesAreRetriedOnARenewedLease(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	assert := testarossa.For(t)
-
-	var runs atomic.Int32
-	e, reader := slowWriteEngine(t, "p/stall", &runs)
-	defer e.Shutdown(ctx)
-	// A stall is half the retry window, so the window's other half is the headroom each retry must fit in, renewal
-	// round trip included. At slowWriteEngine's 1s extension that is ~250ms, which a loaded parallel run can eat.
-	e.persistLeaseExtension = 4 * time.Second
-	assert.NoError(e.Startup(t.Context()))
-	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistStallErr, "A"), 2)
-
-	_, outcome, err := e.Run(ctx, "p/stall/wf", nil, nil)
-	if !assert.NoError(err) || !assert.NotNil(outcome) {
-		return
-	}
-	assert.Equal(workflow.StatusCompleted, outcome.Status, "a write that stalls and then clears must not fail the flow")
-	assert.Equal("done", stateVal(outcome.State, "out"))
-	assert.Equal(int32(1), runs.Load(), "the WRITE is retried, never the task")
-
-	var rm metricdata.ResourceMetrics
-	assert.NoError(reader.Collect(ctx, &rm))
-	retried, _ := sumCounter(rm, "dwarf_steps_write_retried", "", "")
-	assert.Equal(int64(2), retried)
 }
 
 // TestPersist_LeaseExtensionStatusGuard pins that persist's lease-extension UPDATE is guarded on
@@ -594,17 +528,16 @@ func TestPersist_DrainReleasesTheLeaseInsteadOfSleepingItOut(t *testing.T) {
 		"a worker asleep in a persistence backoff must wake on the drain, not sleep it out (Shutdown took %v)", time.Since(start))
 }
 
-// TestPersist_FailedRenewalStillRetriesInsideTheHeldLease pins the outage case: the database refuses the write
-// and the lease renewal alike, as during a failover, and the claim's lease still has room. The retry runs inside
-// that lease, the write lands on it, and the task runs once. Breaking to the classifier on a failed renewal
-// instead would cost exactly this blip a re-execution.
-func TestPersist_FailedRenewalStillRetriesInsideTheHeldLease(t *testing.T) {
+// TestPersist_FailedRenewalStillRetries pins the outage case: the database refuses the write and the lease renewal
+// alike, as during a failover. The retry still runs, on the lease already held, the write lands, and the task runs
+// once. Breaking to the classifier on a failed renewal instead would cost exactly this blip a re-execution.
+func TestPersist_FailedRenewalStillRetries(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
 	var runs atomic.Int32
-	e, reader := slowWriteEngine(t, "p/renewout", &runs)
+	e, reader := countingEngine(t, "p/renewout", &runs)
 	defer e.Shutdown(ctx)
 	assert.NoError(e.Startup(t.Context()))
 	e.seams.InjectN(engineseams.FaultExtendLeaseErr, 1000)
@@ -622,46 +555,31 @@ func TestPersist_FailedRenewalStillRetriesInsideTheHeldLease(t *testing.T) {
 	assert.Equal(int64(1), retried)
 }
 
-// TestPersist_FailedRenewalDoesNotRetryPastTheHeldLease pins that a renewal that errors grants nothing: the retry
-// window is then the lease the worker still holds, less the classifier's half. Here the task outlasts its budget,
-// so the claim's lease leaves no room, and persist goes straight to the classifier while the step is still its
-// own. Measured as if the renewal had landed, it would retry on a lease that may already have lapsed - the loop
-// the retry window exists to close.
-func TestPersist_FailedRenewalDoesNotRetryPastTheHeldLease(t *testing.T) {
+// TestPersist_LandedWriteReportingAnErrorIsNotFailed pins that failStep, after a failed persist, matches only the
+// state the failed write started from. The completion write lands on every attempt but reports an error, as when
+// a commit's acknowledgement is lost, until the ladder is spent. The step is `completed` by then, so failStep
+// matches nothing; the orphan sweep replays the landed completion once the lease lapses, and the flow completes
+// with the task run once. Fenced on `running` or `completed`, failStep matched the landed row and failed the flow.
+func TestPersist_LandedWriteReportingAnErrorIsNotFailed(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
 	var runs atomic.Int32
-	mux := hosts.NewMux()
-	g := workflow.NewGraph("Persist")
-	g.SetURL("A", "p/renewlate/a")
-	g.AddTransition("A", workflow.End)
-	mux.HandleGraph("p/renewlate/wf", g)
-	mux.HandleTask("p/renewlate/a", func(ctx context.Context, f *workflow.Flow) error {
-		runs.Add(1)
-		time.Sleep(200 * time.Millisecond) // past the 100ms budget, into the lease margin
-		return nil
-	})
-	e := NewEngineUnderTest(t.Name())
+	e, _ := countingEngine(t, "p/landed", &runs)
 	defer e.Shutdown(ctx)
-	e.SetHost(mux)
-	e.persistBackoff = shortPersistBackoff
-	e.persistLeaseExtension = time.Second // the classifier's half: 500ms
-	e.leaseMargin = 500 * time.Millisecond
-	reader := withManualReader(e)
+	// The lease the sweep waits out is the longest of the claim's (budget + margin) and the renewals'.
+	e.persistLeaseExtension = 200 * time.Millisecond
+	e.leaseMargin = 200 * time.Millisecond
+	e.recoveryInterval = 200 * time.Millisecond
 	assert.NoError(e.Startup(t.Context()))
-	e.seams.InjectN(engineseams.FaultExtendLeaseErr, 1000)
-	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistErr, "A"), 1)
+	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistLandedErr, "A"), 1+len(shortPersistBackoff))
 
-	_, outcome, err := e.Run(ctx, "p/renewlate/wf", nil, &workflow.FlowOptions{TimeBudget: 100 * time.Millisecond})
+	_, outcome, err := e.Run(ctx, "p/landed/wf", nil, &workflow.FlowOptions{TimeBudget: 500 * time.Millisecond})
 	if !assert.NoError(err) || !assert.NotNil(outcome) {
 		return
 	}
-	assert.Equal(workflow.StatusFailed, outcome.Status, "no retry fits in the lease still held")
-	assert.Equal(int32(1), runs.Load(), "the task must execute exactly once")
-	var rm metricdata.ResourceMetrics
-	assert.NoError(reader.Collect(ctx, &rm))
-	retried, _ := sumCounter(rm, "dwarf_steps_write_retried", "", "")
-	assert.Equal(int64(0), retried)
+	assert.Equal(workflow.StatusCompleted, outcome.Status, outcome.Error)
+	assert.Equal("done", stateVal(outcome.State, "out"))
+	assert.Equal(int32(1), runs.Load(), "a landed completion is replayed, never re-run")
 }

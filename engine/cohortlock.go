@@ -116,7 +116,7 @@ func (e *Engine) lockCohortStripe(ctx context.Context, stripe *cohortStripe, db 
 	return stripe.lock(interval, func() bool {
 		tctx, doneTurn := e.dbTurn(ctx, shardNum)
 		defer doneTurn()
-		held, err := e.extendLease(tctx, db, stepID, leaseSeq)
+		held, err := e.extendLease(tctx, db, stepID, leaseSeq, e.persistLeaseExtension)
 		return held || err != nil
 	})
 }

@@ -326,19 +326,19 @@ type Engine struct {
 	reapInterval        time.Duration // reaper goroutine tick; read once at Startup (1m)
 	leaseRecoveryBatch  int           // ids per lease-recovery reset, embedded as a literal IN list (1024)
 	maxPayloadBytes     int           // largest JSON value written into one payload column (maxPayloadBytes)
-	// persistBackoff is the outcome-write retry schedule, short and exponential because the errors it
-	// exists for resolve in SECONDS. A minutes-long backoff would be slow in both directions - slow to
-	// recover from a blip that already cleared, and slow to report a permanent failure we could have named
-	// after the second attempt. A per-engine field (not a package var) so a test shortens it on its own
-	// engine without racing a parallel peer.
+	// persistBackoff is the outcome-write retry schedule (1s doubling to 32s, a minute in all), exponential
+	// because the errors it exists for - a dropped connection, a failover - clear in seconds to tens of seconds. A
+	// longer ladder would be slow to report a permanent failure. A per-engine field (not a package var) so a test
+	// shortens it on its own engine without racing a parallel peer.
 	persistBackoff []time.Duration
-	// persistLeaseExtension is how far ahead persist renews a step's lease before each retry (60s): the first half
-	// covers the retry's sleep and write (persistRetryWindow), the second leaves failOnPersistError room to fail the
-	// step. Without it a task that consumed most of its time budget has only `leaseMargin` left, so the backoff would
-	// put us PAST the lease: a peer re-claims the step, re-executes the task, and our late write is fenced and
-	// discarded - precisely the re-execution persist exists to prevent. A crash mid-ladder strands the step for up to
-	// this long - or for what remained of its original lease, if that was longer, since a renewal never shortens a
-	// lease - before lease recovery can take it.
+	// persistLeaseExtension is how far past its backoff sleep persist renews a step's lease before each retry (60s):
+	// the first half covers the retry's write, the second leaves failOnPersistError room to fail the step. A write that
+	// takes longer than that outlives the lease, and lease recovery runs the task again. Without it a task that
+	// consumed most of its time budget has only `leaseMargin` left, so the backoff would put us PAST the lease: a peer
+	// re-claims the step, re-executes the task, and our late write is fenced and discarded - precisely the re-execution
+	// persist exists to prevent. A crash mid-ladder strands the step for up to this long plus the backoff - or for what
+	// remained of its original lease, if that was longer, since a renewal never shortens a lease - before lease
+	// recovery can take it.
 	persistLeaseExtension time.Duration
 
 	// Test-only instrumentation seams (see engineundertest.go), delegated to a seamster.Seamster constructed enabled
@@ -379,7 +379,7 @@ func NewEngine() *Engine {
 	// query (it rides the detector's existing per-shard lookup), so the only thing a short budget would buy
 	// is cutting short a wait somebody legitimately asked for.
 	e.awaitDefaultBudget = 15 * time.Minute
-	e.persistBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+	e.persistBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 32 * time.Second}
 	e.persistLeaseExtension = 60 * time.Second
 	e.recoveryInterval = time.Minute
 	e.parkWedgeThreshold = 5 * time.Minute

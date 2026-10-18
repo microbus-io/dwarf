@@ -18,7 +18,7 @@ schedule is what tells you whether to intervene or wait — and the answer is us
 |---|---|---|
 | A replica dies holding in-flight steps | Each step's lease lapses and the step returns to `pending` for another replica | Up to the flow's `TimeBudget` + 30s, then within the next 1-minute recovery sweep |
 | A replica dies after completing a step but before creating its successor | A sweep hands the step back and dispatch creates the successor from its recorded output — the task does **not** re-run | Up to the flow's `TimeBudget` + 30s, then within the next 1-minute recovery sweep |
-| A database blip mid-write | The step's outcome write retries in place, holding its lease — the task does **not** re-run | 1s, 2s, 4s; longer outages fall through to lease recovery |
+| A database blip mid-write | The step's outcome write retries in place, holding its lease — the task does **not** re-run | 1s doubling to 32s, about a minute in all; longer outages fall through to lease recovery |
 | A replica joins or leaves | Every peer re-reads the shared registry and re-divides each database's connection budget | Registry read every 250ms; a dead replica stops counting after 40s |
 | Work is created on a replica that does not dispatch its shard | A replica that does dispatch it finds the work on its next selection cycle | Under a second at the derived cycle rate |
 | A flow marked for deletion | A background reaper removes the flow and its whole subgraph tree | Within ~1 minute |

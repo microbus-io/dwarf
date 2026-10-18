@@ -1245,7 +1245,7 @@ string under `add`) errors `fanInRow` and the resolving step fails naming the fi
 discard it, or the fan-in runs with that field's accumulated contributions silently dropped. It is wrapped as a
 `permanentError` - a deterministic failure of the engine's own computation inside a persisted write - which
 persist does NOT retry and `settlePersist` fails without `dwarf_steps_write_failed`: routing it through the
-storage classifier would page an operator for a type mistake after ~7s of pointless backoff. Wrap only a failure
+storage classifier would page an operator for a type mistake after a minute of pointless backoff. Wrap only a failure
 that is a pure function of stored data; a database error from the same computation is transient. The failed flow's `final_state` is `{}` - `computeFinalState` folds the
 same values and hits the same error, and `failFlowTx` falls back. (An unknown reducer name never gets this far:
 `Graph.Validate` rejects it at `Create`.) Pinned by `TestFanIn_ReducerErrorFailsTheFlow`, which also asserts neither
@@ -1729,9 +1729,10 @@ It is immutable for the flow's life, like `priority`, and **inherited by subgrap
 retro-edit existing flows; it only seeds flows created afterward. On a subgraph spawn the child's `LoadGraph` is
 bounded by the caller flow's budget; the create-time `LoadGraph` runs on the caller's own request context instead.
 
-**No engine-imposed ceiling** on `FlowOptions.TimeBudget`, for the reason it owns no flow-level deadline: a host
+**No engine-imposed SLA ceiling** on `FlowOptions.TimeBudget`, for the reason it owns no flow-level deadline: a host
 wanting an SLA cap rejects an over-limit budget before `Create`, and a caller setting a very large one owns the
-consequences below.
+consequences below. The only bound is storage: `maxTimeBudget`, just under 2^31-1 ms, because the claim's
+`time_budget_ms + ?` is computed as a 32-bit integer on Postgres.
 
 The worker lease is sized from the **step's own `time_budget_ms`** + `leaseMargin` (30s), written self-referentially
 in the claim CAS (`lease_expires = DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?)`, only the margin a bind param), so
@@ -1761,37 +1762,24 @@ outcome write added outside `persist` reopens the loop above. A test fails the r
 through it with `FaultRetryRewindErr` and the reroute write with `FaultRerouteWriteErr`, as `FaultPersistErr` does
 the completion write.
 
-- **In-place retry, holding the lease:** a short exponential (1s/2s/4s), because the errors it exists for clear in
-  seconds (`persist.go`'s header). A minutes-long backoff is slow both to recover and to report a permanent failure.
-- **The lease is renewed before each retry** (`persistLeaseExtension`, 60s). Without it, a task that consumed most
-  of its budget has only `leaseMargin` left, so sleeping through the backoff would put the worker *past* its lease:
-  a peer re-claims, **re-executes the task**, and the late write is fenced away - exactly the re-execution this
-  prevents. The renewal is itself a fenced, payload-free write, so a **zero-row** match means the step is no longer
-  ours and we abandon silently.
-- **Each retry must end inside the first half of its renewal** (`persistRetryWindow`, 30s); the second half is left
-  for `failOnPersistError`, whose `failStep` reads the final state. A retry starts only if, judged by how long the
-  write that just failed took, it should finish in time; otherwise the ladder stops and the step is classified while
-  it is still ours. Two rules hold it up:
-  - **Renew per retry, measured from before the renewal.** One renewal for the whole ladder fails a flow over a
-    write that is slow but transient (a failover stalls it until its connection resets) that a later retry would
-    have landed. The window starts before the renewal's round trip, because the lease starts at the database's NOW.
-  - **Do not cancel a retry at the deadline instead:** a cancelled write can still commit, and `failStep` matches a
-    `completed` step, so it would fail a step whose outcome landed.
-  - **A renewal that errors grants nothing, and does not end the ladder.** The retry is then measured against the
-    lease the worker still holds (`leaseHeld`: the claim's lease, timed from before the claim was sent, or the last
-    renewal that landed), less the classifier's half. Breaking to the classifier instead would re-execute every
-    step caught by a failover, which fails the renewal too. Pinned by
-    `TestPersist_FailedRenewalStillRetriesInsideTheHeldLease` and
-    `TestPersist_FailedRenewalDoesNotRetryPastTheHeldLease`.
-
-  Left unbounded, a write that keeps failing *slowly* (a row near a column or packet limit, a slow link) outlives
-  the lease: lease recovery re-runs the task, the classifier's `failStep` is fenced into a silent no-op, and the
-  next run repeats it - forever, with 300 MB rows measured at ~25-70s per rejection. Pinned by
-  `TestPersist_SlowFailingWriteFailsTheStepWithoutRetrying` (`FaultPersistSlowErr`) and
-  `TestPersist_StalledWritesAreRetriedOnARenewedLease` (`FaultPersistStallErr`). What the window cannot cover is a
-  FIRST write that outlives the lease before persist can act: it shows as `dwarf_steps_recovered` climbing and a
-  `logLostLease` warning (a warning, because a write that landed with its acknowledgement lost, or a racing
-  Terminate, also loses the step and nothing runs again).
+- **In-place retry, holding the lease:** an exponential ladder (1s doubling to 32s, a minute in all), because the
+  errors it exists for clear in seconds to tens of seconds (`persist.go`'s header). A longer one is slow to report a
+  permanent failure.
+- **The lease is renewed before each retry**, to the backoff plus `persistLeaseExtension` (60s): half for the write,
+  half for `failOnPersistError`, whose `failStep` reads the final state. Without it, a task that consumed most of its
+  budget has only `leaseMargin` left, so sleeping through the backoff would put the worker *past* its lease: a peer
+  re-claims, **re-executes the task**, and the late write is fenced away - exactly the re-execution this prevents.
+  The renewal is itself a fenced, payload-free write, so a **zero-row** match means the step is no longer ours and we
+  abandon silently. Renew per retry, not once: a single renewal cannot cover a minute-long ladder of slow attempts.
+  **A renewal that errors does not end the ladder** - a failover fails the renewal too, and breaking to the
+  classifier would cost every blip a re-execution (`TestPersist_FailedRenewalStillRetries`).
+- **What the ladder does not cover: a write that takes longer than ~30s every time** (measured: 300 MB rows rejected
+  after ~25-70s). It outlives the lease, lease recovery re-runs the task, the classifier's `failStep` is fenced into a
+  silent no-op, and the next run repeats it. That is a payload far past any sensible size on a link too slow for it;
+  it shows as `dwarf_steps_recovered` climbing and a `logLostLease` warning (a warning, because a write that landed
+  with its acknowledgement lost, or a racing Terminate, also loses the step and nothing runs again). Do not predict a
+  retry's duration to stop the ladder early instead: it fails a step that a later retry would have landed, and it
+  needs per-dispatch timing carried through `processStep`.
 - **Drain aborts it.** A worker asleep in the backoff selects on `drainStop` (closed at the top of `drainRuntime` -
   the lifetime ctx is deliberately not cancelled until *after* the workers drain, so there is nothing else to
   watch), releases its lease, and exits. That *does* re-execute the task on the peer that picks it up - it is the
@@ -1806,6 +1794,13 @@ attempts the **clean** terminal write (`failStep` - a status and an error messag
 - it **also fails** ⇒ the database is unreachable, so nothing was recorded and nothing *can* be. Leave the step for
   lease recovery (`dwarf_steps_recovered` counts it). Re-execution here is unavoidable **and correct** - from the
   database's point of view the step never ran.
+- **`failStep` fences on the state the failed write STARTS from** (`stepHeld`, passed by each persist site), not on
+  `running` or `completed`. A write that committed but reported an error has moved the step out of it, so `failStep`
+  matches nothing and lease recovery settles the landed outcome without re-running the task; the broad guard
+  matches a landed completion and fails a flow whose outcome is stored. Flow completion writes nothing to the step
+  row, so an ambiguous one still fails the step; the flow stays completed, and `failFlowTx`, whose flow UPDATE then
+  matches nothing, returns no loss - no failure delivered to a parent, no second `dwarf_flows_ended`. Pinned by
+  `TestPersist_LandedWriteReportingAnErrorIsNotFailed` (`FaultPersistLandedErr`) and `TestFailStep_HeldStates`.
 
 The two attempts are milliseconds apart and differ only in what they carry, which is what makes the classification
 sound. It needs **no per-driver error taxonomy** (the part that would rot). Guessing the other way - terminalizing
