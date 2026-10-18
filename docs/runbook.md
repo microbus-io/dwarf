@@ -323,7 +323,8 @@ to a read-only replica), all of them would otherwise size their pools for a flee
 registry writes fail dispatches, a lone replica included.
 
 **Respond.** Find why writes to `dwarf_peers` fail on that shard. The engine logs `Peer heartbeat` with the
-database's error for each failed write, which names the cause directly: disk space, a read-only server, revoked
+database's error when the writes start failing (and `Peer heartbeat writing again` when they recover), which
+names the cause directly: disk space, a read-only server, revoked
 grants for the engine's database user. Check the database server's own log too. If the shard's other writes are
 failing as well (`dwarf_steps_write_retried` rising), the database is the problem, and no step could run there
 anyway.

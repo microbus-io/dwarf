@@ -263,6 +263,8 @@ type Sonar struct {
 	// the prune's patience.
 	healthySince time.Time
 	blindLogged  bool
+	// beatFailing reports whether the last beat failed, so a run of failures is logged once.
+	beatFailing bool
 	// lastRaw is the standing the previous successful reading computed, before any withholding. A gapped
 	// reading is held against THIS, not against what was published, so a promotion waits one reading rather
 	// than for the gaps to stop - see observe.
@@ -789,10 +791,20 @@ func (s *Sonar) publishBeat(ctx context.Context, dispatched, draining bool) bool
 	}
 	_, err := s.db.ExecContext(ctx,
 		"UPDATE dwarf_peers SET "+set+" WHERE engine_id=?", s.engineID)
-	if err != nil && ctx.Err() == nil {
-		s.logger.Load().ErrorContext(ctx, "Peer heartbeat", "shard", s.shard, "error", err)
+	// Logged on the edges, as blindness is: a failed beat is retried on every pass, so a line per failure would
+	// be four a second per shard, from every replica, in exactly the incident it reports.
+	if err != nil {
+		if ctx.Err() == nil && !s.beatFailing {
+			s.beatFailing = true
+			s.logger.Load().ErrorContext(ctx, "Peer heartbeat", "shard", s.shard, "error", err)
+		}
+		return false
 	}
-	return err == nil
+	if s.beatFailing {
+		s.beatFailing = false
+		s.logger.Load().InfoContext(ctx, "Peer heartbeat writing again", "shard", s.shard)
+	}
+	return true
 }
 
 // read returns every row in the shard's registry, engine_id-ascending, with both ages computed by the

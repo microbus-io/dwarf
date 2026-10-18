@@ -1546,10 +1546,14 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 		return nil, nil, nil, errors.Trace(err)
 	}
 
-	// Each tree flow's interrupted leaf: order in SQL, take the first row per flow_id in memory.
+	// Each tree flow's interrupted leaf: order in SQL, take the first row per flow_id in memory. The order is
+	// Snapshot's - the step the flow row recorded as the one it stopped at, then the earliest-updated - so Resume
+	// resolves the interrupt Snapshot and StoppedTaskName report.
 	interruptedLeafByFlow := map[int]int{}
 	srows, err := db.QueryContext(ctx,
-		"SELECT flow_id, step_id FROM dwarf_steps WHERE status='"+workflow.StatusInterrupted+"' AND flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)) ORDER BY flow_id, updated_at, step_id",
+		"SELECT s.flow_id, s.step_id FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id"+
+			" WHERE s.status='"+workflow.StatusInterrupted+"' AND f.root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)"+
+			" ORDER BY s.flow_id, CASE WHEN s.step_id=f.stopped_step_id THEN 0 ELSE 1 END, s.updated_at, s.step_id",
 		flowID,
 	)
 	if err != nil {

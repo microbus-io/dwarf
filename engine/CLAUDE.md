@@ -230,9 +230,13 @@ schedule), never the engine's.
 (`completed`/`failed`/`terminated`/`cancelled`) it returns the flow's `final_state` (plus
 `Error`/`TerminateReason`/`CancelReason`); for
 `interrupted` it returns the interrupted step's merged `state+changes` and its `interrupt_payload`. When the
-flow has several interrupted steps, Snapshot picks the **same one the next `Resume` will resolve** - the
-earliest-`updated_at` (`step_id` tiebreak), *not* by `step_depth` - so a Snapshot reports exactly the
-interrupt the next Resume acts on. For a `running` flow it returns the status with an **empty `State`** -
+flow has several interrupted steps, Snapshot picks the **same one the next `Resume` will resolve** - the one
+the flow row records (`stopped_step_id`), then the earliest-`updated_at` (`step_id` tiebreak), *not* by
+`step_depth` - so a Snapshot reports exactly the interrupt the next Resume acts on, and the one
+`StoppedTaskName` names. **The record must come first:** the interrupt that commits its flow-row write first is
+recorded, and a sibling can write its step earlier (or in the same millisecond) yet commit later, so ordering by
+`updated_at` alone reports a different interrupt than `StoppedTaskName`. Pinned by
+`fixtures/interruptselectionflow_test.go`'s `TestInterruptSnapshotFollowsTheRecordedInterrupt`. For a `running` flow it returns the status with an **empty `State`** -
 dwarf does not reconstruct live in-flight merged state (a fan-out included). Exposing a
 live fan-out snapshot is a deliberately-deferred decision; confirm against product intent before implementing.
 
@@ -987,7 +991,7 @@ not parallelism:
   takes anyway: the completion and loss writes (`completeFlow`, `failFlowTx`) record the step that ended the flow
   (0 for a completing arrival that resolves a failed cohort, which is not the loss); the interrupt write records
   each chain flow's interrupted step, the FIRST interrupt winning; Resume clears it on the flow it sets running and
-  re-points a flow left interrupted at its earliest interrupted step (the one `Snapshot` reports); Terminate leaves
+  re-points a flow left interrupted at its earliest remaining interrupted step; Terminate leaves
   it. A running flow records 0. `FlowSummary.StoppedTaskName` and `Query.StoppedTaskName` read it. **Do not advance it per step:** on
   PostgreSQL every UPDATE writes a full new copy of the row, and the flow row is ~1.2 KB with the graph held inline
   (TOAST moves a value out of line only past a ~2 KB row), so a per-step advance is a row version per step on the
@@ -1760,18 +1764,18 @@ the completion write.
     have landed. The window starts before the renewal's round trip, because the lease starts at the database's NOW.
   - **Do not cancel a retry at the deadline instead:** a cancelled write can still commit, and `failStep` matches a
     `completed` step, so it would fail a step whose outcome landed.
-
-  Left unbounded, a write that keeps failing *slowly* (a row near a column or packet limit, a slow link) outlives
-  the lease: lease recovery re-runs the task, the classifier's `failStep` is fenced into a silent no-op, and the
-  next run repeats it - forever, with 300 MB rows measured at ~25-70s per rejection. Pinned by
-  `TestPersist_SlowFailingWriteFailsTheStepWithoutRetrying` (`FaultPersistSlowErr`) and
-  `TestPersist_StalledWritesAreRetriedOnARenewedLease` (`FaultPersistStallErr`). What the window cannot cover is a
   - **A renewal that errors grants nothing, and does not end the ladder.** The retry is then measured against the
     lease the worker still holds (`leaseHeld`: the claim's lease, timed from before the claim was sent, or the last
     renewal that landed), less the classifier's half. Breaking to the classifier instead would re-execute every
     step caught by a failover, which fails the renewal too. Pinned by
     `TestPersist_FailedRenewalStillRetriesInsideTheHeldLease` and
     `TestPersist_FailedRenewalDoesNotRetryPastTheHeldLease`.
+
+  Left unbounded, a write that keeps failing *slowly* (a row near a column or packet limit, a slow link) outlives
+  the lease: lease recovery re-runs the task, the classifier's `failStep` is fenced into a silent no-op, and the
+  next run repeats it - forever, with 300 MB rows measured at ~25-70s per rejection. Pinned by
+  `TestPersist_SlowFailingWriteFailsTheStepWithoutRetrying` (`FaultPersistSlowErr`) and
+  `TestPersist_StalledWritesAreRetriedOnARenewedLease` (`FaultPersistStallErr`). What the window cannot cover is a
   FIRST write that outlives the lease before persist can act: it shows as `dwarf_steps_recovered` climbing and a
   `logLostLease` warning (a warning, because a write that landed with its acknowledgement lost, or a racing
   Terminate, also loses the step and nothing runs again).
@@ -2103,9 +2107,9 @@ tree first, so each walk works whether its starting flow is the root or a mid-tr
   `surgraph_flow_id`/`surgraph_step_id` pointers from the flow up to the root, collecting each ancestor's caller
   step + token. One scan, where a level-by-level walk costs *two* queries per level.
 - `interruptedSubgraphChain` (Resume's *down*-walk) - one tree scan plus **one** batched query for every flow's
-  interrupted leaf (`status=interrupted ... ORDER BY flow_id, updated_at, step_id`, first row per flow taken in
-  memory), then descends by `surgraph_step_id`. SQL does the earliest-`updated_at` ordering, so there is no
-  fragile Go-side timestamp comparison (the leaf is the one Snapshot reports).
+  interrupted leaf (`status=interrupted`, ordered by flow, then Snapshot's order - the recorded step, then the
+  earliest `updated_at` - first row per flow taken in memory), then descends by `surgraph_step_id`. SQL does the
+  ordering, so there is no fragile Go-side timestamp comparison (the leaf is the one Snapshot reports).
 
 `Fork`'s own tree-discovery uses `surgraphChain` + per-flow child queries while it walks its worklist (it needs the
 structure to clone, not just membership), and `deleteSubgraphFlowsRootedAt` stays step-scoped (`surgraph_step_id`).
@@ -2139,8 +2143,8 @@ the top-level flow sees `interrupted`.
 **Resume propagation (both directions):** `Resume` walks up (`surgraphChain`) and down (`interruptedSubgraphChain`),
 re-parks intermediate surgraph steps, records resume data on the leaf's `resume_data`, resets the leaf to `pending`,
 transitions all flows to `running`, and rings the doorbell - all in one transaction. The down-walk picks each
-flow's interrupted step by **earliest `updated_at`** (`step_id` tiebreak) - the same selection `Snapshot` uses, so
-a Snapshot reports exactly the interrupt the next Resume resolves - and descends into the child subgraph spawned by
+flow's interrupted step by Snapshot's selection - the one the flow row records, then **earliest `updated_at`**
+(`step_id` tiebreak) - so a Snapshot reports exactly the interrupt the next Resume resolves - and descends into the child subgraph spawned by
 that step via **`surgraph_step_id`** (the caller step's PK), never by depth (which is ambiguous when parallel
 subgraph callers share a depth).
 

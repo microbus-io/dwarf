@@ -18,6 +18,7 @@ package peers
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1653,4 +1654,54 @@ func TestPeers_BlindTimeEarnsNoEntry(t *testing.T) {
 	r.clk.advance(r.s.scan)
 	r.s.observe(ctx, agedFleet(stale, 100), nil)
 	assert.False(r.s.InCut(), "the blind spell did not count toward the wait")
+}
+
+// beatLogCapture records the messages a Sonar logs.
+type beatLogCapture struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (c *beatLogCapture) Enabled(context.Context, slog.Level) bool { return true }
+func (c *beatLogCapture) WithAttrs([]slog.Attr) slog.Handler       { return c }
+func (c *beatLogCapture) WithGroup(string) slog.Handler            { return c }
+func (c *beatLogCapture) Handle(_ context.Context, r slog.Record) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.msgs = append(c.msgs, r.Message)
+	return nil
+}
+
+// TestPeers_FailingBeatLogsOnItsEdges pins that a run of failed beats is logged once, and its end once. A failed
+// beat is retried on every pass, so a line per failure is four a second per shard from every replica of a fleet
+// whose registry writes fail - the incident the line reports.
+func TestPeers_FailingBeatLogsOnItsEdges(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	logs := &beatLogCapture{}
+	r.s.SetLogger(slog.New(logs))
+	assert.NoError(r.s.register(ctx))
+
+	// A missing table fails the UPDATE with a real database error, as a revoked grant would.
+	rename := func(from, to string) {
+		q := "ALTER TABLE " + from + " RENAME TO " + to
+		if r.db.DriverName() == "mssql" {
+			q = "EXEC sp_rename '" + from + "', '" + to + "'"
+		}
+		_, err := r.db.ExecContext(ctx, q)
+		assert.NoError(err)
+	}
+	rename("dwarf_peers", "dwarf_peers_away")
+	for range 4 {
+		assert.False(r.s.publishBeat(ctx, false, false))
+	}
+	rename("dwarf_peers_away", "dwarf_peers")
+	assert.True(r.s.publishBeat(ctx, false, false))
+	assert.True(r.s.publishBeat(ctx, false, false))
+
+	logs.mu.Lock()
+	defer logs.mu.Unlock()
+	assert.Equal([]string{"Peer heartbeat", "Peer heartbeat writing again"}, logs.msgs)
 }

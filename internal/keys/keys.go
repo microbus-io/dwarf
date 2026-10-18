@@ -49,18 +49,20 @@ func ParseStepKey(stepKey string) (shardNum int, stepID int, stepToken string, e
 	return parseKey(stepKey, "invalid step key")
 }
 
-// parseKey splits a "{shard}-{id}-{token}" key; invalid names the key kind in the 400 it returns.
+// parseKey splits a "{shard}-{id}-{token}" key; invalid names the key kind in the 400 it returns. It accepts only
+// the canonical spelling New produces: ParseInt also takes a '+' or leading zeros, and a key spelled that way
+// names the same row under a different string, which anything keying on the key - a parked Await - never matches.
 func parseKey(key, invalid string) (shardNum int, id int, token string, err error) {
 	parts := strings.SplitN(key, "-", 3)
 	if len(parts) != 3 {
 		return 0, 0, "", errors.New("%s", invalid, http.StatusBadRequest)
 	}
 	shardNum64, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil || shardNum64 < 1 {
+	if err != nil || shardNum64 < 1 || strconv.FormatInt(shardNum64, 10) != parts[0] {
 		return 0, 0, "", errors.New("%s", invalid, http.StatusBadRequest)
 	}
 	id64, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil {
+	if err != nil || strconv.FormatInt(id64, 10) != parts[1] {
 		return 0, 0, "", errors.New("%s", invalid, http.StatusBadRequest)
 	}
 	return int(shardNum64), int(id64), parts[2], nil

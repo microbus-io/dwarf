@@ -26,6 +26,7 @@ import (
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
+	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -163,6 +164,93 @@ func TestInterruptSnapshotMatchesResume(t *testing.T) {
 	assert.Equal("B", stateVal(out.InterruptPayload, "branch"))
 
 	// Resume B; the flow completes.
+	assert.NoError(eng.Resume(ctx, flowKey, nil))
+	final, err := eng.Await(ctx, flowKey)
+	assert.NoError(err)
+	assert.Equal(workflow.StatusCompleted, final.Status)
+}
+
+// TestInterruptSnapshotFollowsTheRecordedInterrupt pins that Snapshot, Resume and StoppedTaskName agree when the
+// step rows' order and the flow row's record disagree. The flow row records the interrupt whose flow-row write
+// committed first; a sibling can write its step earlier yet commit later (or in the same millisecond). The test
+// forges that shape by backdating B's step past A's, which A's record must outrank: ordering by updated_at alone
+// reports B while StoppedTaskName says A.
+func TestInterruptSnapshotFollowsTheRecordedInterrupt(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("SnapRecord")
+	g.SetURL("Src", "snaprecord.verify:428/src")
+	g.SetURL("A", "snaprecord.verify:428/a")
+	g.SetURL("B", "snaprecord.verify:428/b")
+	g.SetURL("J", "snaprecord.verify:428/j")
+	g.SetFanIn("J")
+	g.AddTransition("Src", "A")
+	g.AddTransition("Src", "B")
+	g.AddTransition("A", "J")
+	g.AddTransition("B", "J")
+	g.AddTransition("J", workflow.End)
+	mux.HandleGraph("snaprecord.verify:428/g", g)
+
+	gateB := make(chan struct{})
+	interrupt := func(branch string, gate chan struct{}) func(ctx context.Context, f *workflow.Flow) error {
+		return func(ctx context.Context, f *workflow.Flow) error {
+			if gate != nil {
+				select {
+				case <-gate:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			yield, err := f.Interrupt(map[string]any{"branch": branch}, nil)
+			if yield || err != nil {
+				return err
+			}
+			return nil
+		}
+	}
+	mux.HandleTask("snaprecord.verify:428/src", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("snaprecord.verify:428/a", interrupt("A", nil))
+	mux.HandleTask("snaprecord.verify:428/b", interrupt("B", gateB))
+	mux.HandleTask("snaprecord.verify:428/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	eng := engine.NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
+	assert.NoError(eng.SetWorkers(4))
+	eng.SetHost(mux)
+	assert.NoError(eng.Startup(t.Context()))
+
+	flowKey, err := eng.Create(ctx, "snaprecord.verify:428/g", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	awaitPropagatedInterrupts(t, eng, flowKey, 1) // A's interrupt is the flow's record
+	close(gateB)
+	awaitPropagatedInterrupts(t, eng, flowKey, 2)
+
+	shard, flowID, _, err := keys.ParseFlowKey(flowKey)
+	assert.NoError(err)
+	db, err := engineseams.DB(eng).Shard(shard)
+	assert.NoError(err)
+	_, err = db.ExecContext(ctx,
+		"UPDATE dwarf_steps SET updated_at=DATE_ADD_MILLIS(NOW_UTC(), -60000) WHERE flow_id=? AND task_name='B'", flowID)
+	assert.NoError(err)
+
+	summaries, _, err := eng.List(ctx, workflow.Query{WorkflowURL: "snaprecord.verify:428/g"})
+	if assert.NoError(err) && assert.Len(summaries, 1) {
+		assert.Equal("A", summaries[0].StoppedTaskName)
+	}
+	out, err := eng.Snapshot(ctx, flowKey)
+	assert.NoError(err)
+	assert.Equal("A", stateVal(out.InterruptPayload, "branch"), "Snapshot reports the recorded interrupt")
+
+	// Resume resolves that same step, so B is the one left.
+	assert.NoError(eng.Resume(ctx, flowKey, nil))
+	out, err = eng.Snapshot(ctx, flowKey)
+	assert.NoError(err)
+	assert.Equal("B", stateVal(out.InterruptPayload, "branch"))
 	assert.NoError(eng.Resume(ctx, flowKey, nil))
 	final, err := eng.Await(ctx, flowKey)
 	assert.NoError(err)

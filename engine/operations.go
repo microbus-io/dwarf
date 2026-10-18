@@ -457,12 +457,15 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 	case workflow.StatusInterrupted:
 		// For interrupted, query the leaf step's state and interrupt payload
 		var stepStateJSON, stepChangesJSON, stepRefsJSON, interruptPayloadJSON []byte
-		// Pick the same interrupted leaf Resume's chain walk would act on (earliest-updated, step_id
-		// tiebreak) - not by step_depth, which is only an informational ordering and varies with branch
-		// length (loops/gotos) without indicating which interrupt resolves next.
+		// Pick the same interrupted leaf Resume's chain walk would act on: the step the flow row recorded as the one
+		// it stopped at (the interrupt whose flow-row write committed first, which StoppedTaskName also reports),
+		// then the earliest-updated - not by step_depth, which is only an informational ordering and varies with
+		// branch length (loops/gotos) without indicating which interrupt resolves next.
 		err = db.QueryRowContext(ctx,
-			"SELECT state, changes, state_refs, interrupt_payload FROM dwarf_steps"+
-				" WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"' ORDER BY updated_at, step_id LIMIT_OFFSET(1, 0)",
+			"SELECT s.state, s.changes, s.state_refs, s.interrupt_payload FROM dwarf_steps s"+
+				" JOIN dwarf_flows f ON f.flow_id=s.flow_id"+
+				" WHERE s.flow_id=? AND s.status='"+workflow.StatusInterrupted+"'"+
+				" ORDER BY CASE WHEN s.step_id=f.stopped_step_id THEN 0 ELSE 1 END, s.updated_at, s.step_id LIMIT_OFFSET(1, 0)",
 			flowID,
 		).Scan(&stepStateJSON, &stepChangesJSON, &stepRefsJSON, &interruptPayloadJSON)
 		// A missing interrupted step (ErrNoRows) is a tolerated race - report empty state; a real DB
