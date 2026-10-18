@@ -7,34 +7,41 @@
 
 ## The short version
 
+**What it delivers**
+
 - **One 32 vCPU PostgreSQL database runs ~21,900 steps/s**, about 1.9 billion steps a day, at the engine's
   shipped defaults. Instances of the same size differ: others ran 20,000–24,100 steps/s on the same engine.
-- **It sustains ~95% of that with low latency.** Offered at 95% of its saturated rate, a database delivered the
-  full load with a median flow latency of 83 ms; at 100% its backlog grew. Plan from your load's average, its
-  peaks and your tolerance for waiting during them ([Planning capacity](#planning-capacity)).
 - **32 vCPU is the most economical database size**, about $0.04 per million steps at full load. Smaller
   databases run out of CPU, larger ones are held back by the write-ahead log, so past 32 vCPU you add shards.
-- **Shards add throughput linearly.** Four shards ran 3.9–4.2 times one shard.
-- **Replicas add availability, not cost.** One, two or four replicas on a shard deliver the same
-  throughput within 6%. Each shard is served by two of them, and any others stand by to take over.
-- **Pair each database with two engines at half its vCPU.** 8 vCPU with 2 × 2 vCPU engines runs ~4,200
-  steps/s, 16 vCPU with 2 × 4 runs ~7,100, 32 vCPU with 2 × 8 runs ~21,900.
 - **The engine is cheap.** A shard's work takes about 5 engine cores. Two 8 vCPU engine hosts per
   32 vCPU database serve it at about a third of their CPU each, and either can carry it alone.
+- **Shards add throughput linearly.** Four shards ran 3.9–4.2 times one shard.
+- **No flow failed in any run.** In the 226 runs behind this page, across 38 sessions, no flow errored and no
+  step was left stuck. The engine recovered a crashed worker's step only in the runs that killed engines on
+  purpose.
+- **Failover takes about 40 seconds and loses nothing.** With every dispatcher killed at once, dispatch
+  paused for ~40 s, standby replicas took over, and every flow completed.
+- **Replicas add availability, not cost.** One, two or four replicas on a shard deliver the same
+  throughput within 6%. Each shard is served by two of them, and any others stand by to take over.
 - **Long tasks cost no throughput, and mixed durations share one engine.** With 8-second tasks the engine
   delivered the full offered rate, and a mix of 5 ms, 200 ms and 8 s tasks ran at the latency each class
   predicts. 10,000 concurrent 60-second tasks ran on under one engine core.
 - **Large state works up to the database column's limit.** 250 MB per step completed cleanly, at ~45 MB/s for
   one flow and ~135 MB/s for four.
-- **Failover takes about 40 seconds and loses nothing.** With every dispatcher killed at once, dispatch
-  paused for ~40 s, standby replicas took over, and every flow completed.
+
+**What it means for sizing**
+
+- **A database sustains ~95% of its saturated rate with low latency.** Offered at 95%, a database delivered the
+  full load with a median flow latency of 83 ms; at 100% its backlog grew ([Sustained load](#sustained-load)).
+- **Pair each database with two engines at half its vCPU.** 8 vCPU with 2 × 2 vCPU engines runs ~4,200
+  steps/s, 16 vCPU with 2 × 4 runs ~7,100, 32 vCPU with 2 × 8 runs ~21,900.
 - **Keep the engine near its database.** A step makes about five round trips, so distance costs throughput;
   the engine opens more connections as distance grows, which recovers most of it out to 1 ms.
 - **One large engine host can serve several shards.** One 48 vCPU engine ran four 32 vCPU shards at their
   databases' pace on 20 of its cores. Size its CPU from what the shards can deliver, and on a large host cap
   `GOMAXPROCS` to that: garbage collection takes about twice the share of CPU on 48 vCPU as on 2–16.
 
-[Sizing a deployment](#sizing-a-deployment) turns these into a recipe.
+[Sizing a deployment](deployment.md#sizing-a-deployment) turns these into a recipe.
 
 ## How these numbers were measured
 
@@ -61,7 +68,11 @@ notes](#method-notes)). The runs below span several sessions, engine builds and 
 own set of instances. A comparison is made within one session, on one build and one setup, unless a section
 says otherwise, and each section dates its runs.
 
-## One database
+## What it delivers
+
+Throughput, cost and behavior under failure, measured. Each section dates its runs.
+
+### One database
 
 On one 32 vCPU database, one engine replica ran **21,952, 21,931 and 21,878 steps/s** in three runs, about
 2,190 flows/s and 1.9 billion steps a day, steady from the first minute of each window to the last
@@ -73,7 +84,7 @@ Other instances of the same size, on the same engine, ran 19,960 and 24,107 step
 Those two spent ~40% more database CPU per step, so the difference is in the instance, not the load
 ([method notes](#method-notes) describe how to check an instance).
 
-## Database size: what limits each
+### Database size: what limits each
 
 ![Database size: throughput, cost per million steps, and where 32 vCPU wins](benchmark-cloud-tiers.png)
 
@@ -112,7 +123,7 @@ engine hosts. The cost per million steps assumes the deployment runs at its meas
 
 *(Measured 2026-10-17/18. Same-size instances differ; see [method notes](#method-notes).)*
 
-## The write-ahead log, and why a shard is its own server
+### The write-ahead log, and why a shard is its own server
 
 On a saturated 32 vCPU shard, ~140 backends wait on the write-ahead log's write lock at once. A deeper look at
 a 16 vCPU instance (July 2026) showed that the ceiling is a stack of locks, so buying around one of them does
@@ -142,7 +153,7 @@ it. Same total connections, measured directly:
 
 *(Measured July 2026 on 16 vCPU instances; these are properties of PostgreSQL, not of the engine.)*
 
-## Shards: throughput adds up
+### Shards: throughput adds up
 
 ![Throughput by shard count and fleet shape](benchmark-cloud-shards.png)
 
@@ -162,7 +173,7 @@ Each shard is its own 32 vCPU database. *These runs used an earlier engine (2026
 - **New flows spread evenly.** Each shard received an even share of new flows (1,680–1,790 flows/s per
   shard with four replicas).
 
-## One engine for several shards
+### One engine for several shards
 
 The same shard counts, served by a single replica:
 
@@ -184,7 +195,7 @@ The same shard counts, served by a single replica:
 
 *(The four-shard row measured 2026-10-12; the two-shard rows 2026-10-10, in a separate session.)*
 
-## Replicas: availability without a throughput cost
+### Replicas: availability without a throughput cost
 
 ![Replicas on one shard](benchmark-cloud-replicas.png)
 
@@ -208,7 +219,7 @@ One 32 vCPU shard, served by one, two and four replicas on separate hosts:
 
 *(Measured 2026-10-09 on an earlier engine; the ratios between replica counts are what carry over.)*
 
-## The recommended shape
+### The recommended shape
 
 **Two 8 vCPU engine replicas for each 32 vCPU database.** With `S` shards, that is `2S` replicas, and each
 replica dispatches exactly one shard.
@@ -228,7 +239,7 @@ capacity and capacity for your own traffic, not workflow throughput.
 The same rule scales down: two engines at half the database's vCPU (see
 [Database size](#database-size-what-limits-each)).
 
-## The engine is cheap
+### The engine is cheap
 
 ![Engine host size](benchmark-cloud-engine-hosts.png)
 
@@ -246,7 +257,7 @@ The same rule scales down: two engines at half the database's vCPU (see
   the engine's garbage collection takes about twice the share of CPU it takes on 2 to 16 vCPU. Go sizes
   its runtime to every core it may use, and the collector's cost grows with that count, so on a large
   host set `GOMAXPROCS` to the cores the engine needs rather than the whole host (see
-  [Sizing a deployment](#sizing-a-deployment)). Raising `GOGC` above its default of 100 makes the
+  [Sizing a deployment](deployment.md#sizing-a-deployment)). Raising `GOGC` above its default of 100 makes the
   collector run less often at the price of memory: in July 2026, `GOGC=400` on a 48 vCPU host cut
   garbage collection from about a fifth of the engine's CPU to about a twentieth. It has not been
   remeasured since.
@@ -255,7 +266,7 @@ These figures are the engine's own cost, measured 2026-10-09/12. On the current 
 driving a 32 vCPU database ran 4,100–4,300 steps/s per engine core (2026-10-17). Your tasks run on the same
 hosts and need their own headroom.
 
-## Minute by minute
+### Minute by minute
 
 ![Minute by minute: three saturated runs on one 32 vCPU database](benchmark-cloud-minutes.png)
 
@@ -267,7 +278,7 @@ starts at is the rate to plan on. Over hours and a growing database, [Database v
 
 *(Measured 2026-10-17.)*
 
-## Planning capacity
+### Sustained load
 
 ![Commanded at 100% and at 95% of a database's saturated rate](benchmark-cloud-headroom.png)
 
@@ -287,31 +298,9 @@ instance), then offered fixed rates at 100% and at 95% of that, 16 minutes each:
 
 *(Measured 2026-10-18.)*
 
-**Plan from the shape of your load, not one percentage.** Call the rate a database sustains `C` (about 95% of
-its saturated rate):
+How to plan for peaks above that rate is in [Planning for peaks](deployment.md#planning-for-peaks).
 
-- **The average must stay at or below `C`.** Above it the backlog grows without end.
-- **Peaks above `C` cost waiting, not work.** A peak at `P` steps/s lasting `T` seconds leaves a backlog of
-  `(P − C) × T` steps. It drains at `C − A`, where `A` is the load after the peak, and while it lasts each new
-  flow waits about `backlog ÷ C` longer.
-- **Your tolerance for that wait decides the headroom.** If waiting during peaks is unacceptable, size so that
-  peaks stay under `C`. If it is acceptable, size for the average, with quiet periods long enough to drain each
-  peak before the next.
-
-For example, a shard sustaining 19,000 steps/s that sees two minutes at 24,000 builds a backlog of 600,000 steps.
-With the load back at 17,000 that clears in five minutes, and at its largest it adds about 30 seconds to a flow.
-
-**Priority bands let urgent work skip that wait.** The engine always dispatches a higher band's steps ahead of
-any lower band's, so during a peak the backlog forms in the lowest bands. Flows that cannot wait run in a higher
-band and keep their latency; best-effort flows absorb the peak and catch up in the quiet that follows. What has
-to stay under `C` is then the urgent work alone. Three things to know:
-
-- A flow's priority is set when it is created and does not change.
-- Dispatch is not preemptive, but the only wait a high-priority step has is for a database connection to free
-  up, typically well under a second; a step whose task is still running holds no connection.
-- A higher band that never goes quiet keeps the lower bands from running at all.
-
-## Long tasks
+### Long tasks
 
 A task that waits on something slow, such as a model call or a human, ties up the flow but not the
 database. These runs check that the engine keeps the offered rate as tasks lengthen, and that a waiting
@@ -369,7 +358,7 @@ weighted classes, so fast and slow tasks share one engine (2026-10-18):
 
 No flow errors in any of these runs.
 
-## Failover
+### Failover
 
 ![Failover: dispatchers killed 1, 2, 3, then 4 at a time](benchmark-cloud-failover.png)
 
@@ -399,75 +388,7 @@ orchestrator would. Admission stops at minute 18.
   admission stopped 4 minutes later, and they completed within 3 minutes. A fleet with more headroom
   catches up faster.
 
-## Network distance
-
-A step makes **about five database round trips** on PostgreSQL, and each holds a connection while it
-travels, so the time to the database is paid five times per step. Measured with a deliberately small pool
-of 8 connections, the time a step holds a connection is **5.19 × round trip + 7.88 ms**.
-
-The engine compensates by opening more connections as distance grows: **250 per shard up to 0.25 ms,
-rising linearly to 500 at 1 ms** and beyond (clamped to half the server's `max_connections`). Measured at
-0.25 and 1 ms, steps/s, with the connections per shard in parentheses:
-
-| Database | 0.25 ms | 1 ms, same connections | 1 ms, twice the connections |
-|---|---|---|---|
-| 16 vCPU | 8,484 (200) | 8,006 (200), −6% | 8,373 (400), −1% |
-| 32 vCPU | 20,863 (250) | 19,363 (250), −7% | — |
-| 64 vCPU | 22,301 (250) | 19,567 (250), −12% | 24,254 (500), +9% |
-
-- **Out to 1 ms, twice the connections recover what distance costs**, which is what the ramp to 500 is for.
-  (A 64 vCPU database gains from 500 connections even nearby.)
-- **Past 1 ms, co-locate.** Each further millisecond costs about five per step, and the budget does not keep
-  growing. A cross-zone hop on Google Cloud is ~1.1 ms; keep the engine in its database's zone.
-
-*(Measured 2026-10-07/08 with network delay added on the engine host, with the same connection budget.)*
-
-## How the connection budget was chosen
-
-The budget of 250 connections per shard is measured, not guessed.
-
-- **More connections keep helping, and do not collapse.** On a 16 vCPU database at 0.25 ms, pinned pools of
-  59, 88, 192 and 384 connections ran 5,478, 6,647, 7,802 and **8,185** steps/s. The gain comes from
-  group commit: more committers per WAL flush (22 → 70). The run at 384 was the steadiest of the set.
-- **A budget of 125-250 connections beat a smaller pool sized per vCPU at every size:**
-  +42% at 4 vCPU, +7% at 8, +15% at 16, +10% at 32 and +10% at 64 vCPU. A 4 vCPU database ran stable at
-  250 connections, so one constant serves every size.
-- **A constant, clamped to the server.** Half of `max_connections` is the ceiling, so a small or tightly
-  configured server is never handed all its connections. Two dispatchers per shard split the budget.
-- **`MaxConnections` is the lever.** A 64 vCPU database wants ~500 even nearby (+14–22%); a database shared
-  with other work wants less. See [deployment](deployment.md#connection-pool).
-
-*(Measured 2026-10-07/08, saturated, 16-minute windows, one run per setting.)*
-
-## Sizing a deployment
-
-1. **Shards.** Plan each 32 vCPU database at **~19,000 steps/s** sustained, 95% of the slower full-speed
-   instances measured, and size from your load's shape ([Planning capacity](#planning-capacity)):
-   `shards = average steps/s ÷ 19,000`, rounded up, then check that each peak's backlog drains in time and adds
-   a wait you accept, or put the work that cannot wait in a higher priority band. Below one shard's worth,
-   a 16 vCPU database (~6,700 sustained) or an 8 vCPU database (~4,000) costs less in total, at a higher
-   price per step.
-2. **Engine replicas.** Two per shard at half the database's vCPU: `2S` replicas of 8 vCPU for 32 vCPU
-   shards. Each runs at about a third of its CPU and can carry its shard alone. A larger host can serve
-   several shards instead: give its engine about one core per 3,300 steps/s its shards can deliver at
-   most - four 32 vCPU shards, ~20–24 cores - and set `GOMAXPROCS` to that plus whatever your tasks use
-   in the same process, rather than leaving it at the host's full count. Run at least two such hosts, so
-   one can fail.
-3. **Your tasks.** Add the CPU and memory your tasks use on the engine hosts. The engine itself holds ~15 KB
-   per flow in flight, plus the state of each step it is running - large payloads need far more
-   ([State size](#state-size)); with long tasks, flows in flight = flows/s × flow duration.
-4. **Distance.** Put the engine in its database's zone. Up to 1 ms the budget compensates; past it, plan for
-   less per shard.
-5. **Disk.** Size each database's disk for IOPS, not only capacity (see [method notes](#method-notes)).
-
-**Worked example.** 50,000 steps/s on average (5,000 flows/s of 10-step flows), with a daily peak of 65,000
-for 10 minutes: 3 × 32 vCPU shards sustain ~57,000, so the average fits. The peak leaves a backlog of
-(65,000 − 57,000) × 600 s = 4.8 million steps, which clears in ~11 minutes once the load falls back to 50,000
-and adds up to ~84 seconds to a flow meanwhile. If that wait is acceptable, the deployment is 3 shards and
-6 × 8 vCPU engine replicas, about $6,900 a month at on-demand list price before your tasks' own cost. If it is
-not, put the latency-sensitive flows in a higher priority band, or plan a fourth shard.
-
-## Workload shape and payload
+### Workload shape and payload
 
 Three workflow shapes on one 32 vCPU database, at payloads from 0 to 1 MB. Every flow has 10 steps:
 
@@ -548,7 +469,7 @@ engine host, with the cache at several sizes:
 
 *(Measured 2026-10-14.)*
 
-## State size
+### State size
 
 How large a payload one step can carry, on one 32 vCPU database and one 16 vCPU engine host. Each flow is 5 steps,
 and every step writes a fresh, incompressible value of the given size; one or four flows run at a time:
@@ -572,7 +493,52 @@ and every step writes a fresh, incompressible value of the given size; one or fo
 
 *(Measured 2026-10-18.)*
 
-## Database volume
+## Sizing and reproducing
+
+What sets the engine's defaults, what moves the numbers, and how to measure your own. The recipe for sizing a
+deployment from these results is in [Deployment](deployment.md#sizing-a-deployment).
+
+### Network distance
+
+A step makes **about five database round trips** on PostgreSQL, and each holds a connection while it
+travels, so the time to the database is paid five times per step. Measured with a deliberately small pool
+of 8 connections, the time a step holds a connection is **5.19 × round trip + 7.88 ms**.
+
+The engine compensates by opening more connections as distance grows: **250 per shard up to 0.25 ms,
+rising linearly to 500 at 1 ms** and beyond (clamped to half the server's `max_connections`). Measured at
+0.25 and 1 ms, steps/s, with the connections per shard in parentheses:
+
+| Database | 0.25 ms | 1 ms, same connections | 1 ms, twice the connections |
+|---|---|---|---|
+| 16 vCPU | 8,484 (200) | 8,006 (200), −6% | 8,373 (400), −1% |
+| 32 vCPU | 20,863 (250) | 19,363 (250), −7% | — |
+| 64 vCPU | 22,301 (250) | 19,567 (250), −12% | 24,254 (500), +9% |
+
+- **Out to 1 ms, twice the connections recover what distance costs**, which is what the ramp to 500 is for.
+  (A 64 vCPU database gains from 500 connections even nearby.)
+- **Past 1 ms, co-locate.** Each further millisecond costs about five per step, and the budget does not keep
+  growing. A cross-zone hop on Google Cloud is ~1.1 ms; keep the engine in its database's zone.
+
+*(Measured 2026-10-07/08 with network delay added on the engine host, with the same connection budget.)*
+
+### How the connection budget was chosen
+
+The budget of 250 connections per shard is measured, not guessed.
+
+- **More connections keep helping, and do not collapse.** On a 16 vCPU database at 0.25 ms, pinned pools of
+  59, 88, 192 and 384 connections ran 5,478, 6,647, 7,802 and **8,185** steps/s. The gain comes from
+  group commit: more committers per WAL flush (22 → 70). The run at 384 was the steadiest of the set.
+- **A budget of 125-250 connections beat a smaller pool sized per vCPU at every size:**
+  +42% at 4 vCPU, +7% at 8, +15% at 16, +10% at 32 and +10% at 64 vCPU. A 4 vCPU database ran stable at
+  250 connections, so one constant serves every size.
+- **A constant, clamped to the server.** Half of `max_connections` is the ceiling, so a small or tightly
+  configured server is never handed all its connections. Two dispatchers per shard split the budget.
+- **`MaxConnections` is the lever.** A 64 vCPU database wants ~500 even nearby (+14–22%); a database shared
+  with other work wants less. See [deployment](deployment.md#connection-pool).
+
+*(Measured 2026-10-07/08, saturated, 16-minute windows, one run per setting.)*
+
+### Database volume
 
 *Measured in July 2026 on 8 vCPU databases with 500 GB disks:*
 
@@ -587,7 +553,7 @@ and every step writes a fresh, incompressible value of the given size; one or fo
 
 *(Measured July 2026.)*
 
-## Method notes
+### Method notes
 
 - **Use a fresh database for every configuration.** Accumulated volume settles a database by ~15–20%, so
   comparing a fresh run with a long-lived one folds that settling into the result.
@@ -602,7 +568,7 @@ and every step writes a fresh, incompressible value of the given size; one or fo
   milliseconds of database CPU per step against ~1.1. Divide the database's CPU (cores busy × 1,000) by the
   steps/s a few minutes into a run; if it is well above the size's usual figure, use another instance.
 
-## Known gaps
+### Known gaps
 
 - **A capped `GOMAXPROCS` on a large host** is not measured: how much engine CPU it saves, and where the cap
   starts to cost throughput.
@@ -618,7 +584,7 @@ and every step writes a fresh, incompressible value of the given size; one or fo
 - **Sustained create-and-purge**: hours of retention churn and recovery after a long-task burst are not
   measured.
 
-## Reproducing
+### Reproducing
 
 ```sh
 GOOS=linux GOARCH=arm64 go build -o dwarf-bench ./bench

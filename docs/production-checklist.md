@@ -53,7 +53,7 @@
 - [ ] **Logger, meter provider and tracer provider injected.** All three default to no-ops, so an engine with
   nothing injected is silent — including its error logs. → [Observability](observability.md)
 - [ ] **Two engine replicas per shard, each at half the database's vCPU** (two 8-vCPU replicas per 32-vCPU
-  database), so either can carry the shard alone. → [Cloud benchmarks](benchmark-cloud.md#sizing-a-deployment)
+  database), so either can carry the shard alone. → [Deployment](deployment.md#sizing-a-deployment)
 
 ## Lifecycle
 

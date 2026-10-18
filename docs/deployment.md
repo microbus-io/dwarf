@@ -335,7 +335,65 @@ That has three consequences worth knowing:
 - **A replica that dies needs no goodbye.** Its rows stop being refreshed and it drops out of both counts
   on its own; a clean shutdown deletes them outright and the fleet regrows immediately.
 
-## Reference configurations
+## Sizing a deployment
+
+The measurements behind this recipe, with the configuration of every run, are in the
+[cloud benchmarks](benchmark-cloud.md). Same-size instances differ, so treat any one figure as a range, and
+measure your own workload: task shape, payload size and round-trip time all move these numbers.
+
+1. **Shards.** Plan each 32 vCPU database at **~19,000 steps/s** sustained, 95% of the slower full-speed
+   instances measured, and size from your load's shape ([Planning for peaks](#planning-for-peaks)):
+   `shards = average steps/s ÷ 19,000`, rounded up, then check that each peak's backlog drains in time and adds
+   a wait you accept, or put the work that cannot wait in a higher priority band. Below one shard's worth,
+   a 16 vCPU database (~6,700 sustained) or an 8 vCPU database (~4,000) costs less in total, at a higher
+   price per step.
+2. **Engine replicas.** Two per shard at half the database's vCPU: `2S` replicas of 8 vCPU for 32 vCPU
+   shards. Each runs at about a third of its CPU and can carry its shard alone. A larger host can serve
+   several shards instead: give its engine about one core per 3,300 steps/s its shards can deliver at
+   most - four 32 vCPU shards, ~20–24 cores - and set `GOMAXPROCS` to that plus whatever your tasks use
+   in the same process, rather than leaving it at the host's full count. Run at least two such hosts, so
+   one can fail.
+3. **Your tasks.** Add the CPU and memory your tasks use on the engine hosts. The engine itself holds ~15 KB
+   per flow in flight, plus the state of each step it is running - large payloads need far more
+   ([State size](benchmark-cloud.md#state-size)); with long tasks, flows in flight = flows/s × flow duration.
+4. **Distance.** Put the engine in its database's zone. Up to 1 ms the budget compensates; past it, plan for
+   less per shard.
+5. **Disk.** Size each database's disk for IOPS, not only capacity (see [Disk throughput](#disk-throughput)).
+
+**Worked example.** 50,000 steps/s on average (5,000 flows/s of 10-step flows), with a daily peak of 65,000
+for 10 minutes: 3 × 32 vCPU shards sustain ~57,000, so the average fits. The peak leaves a backlog of
+(65,000 − 57,000) × 600 s = 4.8 million steps, which clears in ~11 minutes once the load falls back to 50,000
+and adds up to ~84 seconds to a flow meanwhile. If that wait is acceptable, the deployment is 3 shards and
+6 × 8 vCPU engine replicas, about $6,900 a month at on-demand list price before your tasks' own cost. If it is
+not, put the latency-sensitive flows in a higher priority band, or plan a fourth shard.
+
+### Planning for peaks
+
+**Plan from the shape of your load, not one percentage.** Call the rate a database sustains `C` (about 95% of
+its saturated rate, [measured](benchmark-cloud.md#sustained-load)):
+
+- **The average must stay at or below `C`.** Above it the backlog grows without end.
+- **Peaks above `C` cost waiting, not work.** A peak at `P` steps/s lasting `T` seconds leaves a backlog of
+  `(P − C) × T` steps. It drains at `C − A`, where `A` is the load after the peak, and while it lasts each new
+  flow waits about `backlog ÷ C` longer.
+- **Your tolerance for that wait decides the headroom.** If waiting during peaks is unacceptable, size so that
+  peaks stay under `C`. If it is acceptable, size for the average, with quiet periods long enough to drain each
+  peak before the next.
+
+For example, a shard sustaining 19,000 steps/s that sees two minutes at 24,000 builds a backlog of 600,000 steps.
+With the load back at 17,000 that clears in five minutes, and at its largest it adds about 30 seconds to a flow.
+
+**Priority bands let urgent work skip that wait.** The engine always dispatches a higher band's steps ahead of
+any lower band's, so during a peak the backlog forms in the lowest bands. Flows that cannot wait run in a higher
+band and keep their latency; best-effort flows absorb the peak and catch up in the quiet that follows. What has
+to stay under `C` is then the urgent work alone. Three things to know:
+
+- A flow's priority is set when it is created and does not change.
+- Dispatch is not preemptive, but the only wait a high-priority step has is for a database connection to free
+  up, typically well under a second; a step whose task is still running holds no connection.
+- A higher band that never goes quiet keeps the lower bands from running at all.
+
+### Reference configurations
 
 Measured points to start a capacity plan from. All are Cloud SQL for PostgreSQL 16 on a 1 TB SSD, in the
 same zone as the engine (round trip ~0.06 ms), running a 10-step chain of no-op tasks saturated against a
@@ -351,31 +409,6 @@ fresh database, averaged over a 16-minute window. The full conditions are in the
 | 4 × 32 | 1 × 48 vCPU | 66,843 (earlier engine) |
 | 4 × 32 | 4 × 16 vCPU | 69,382 (earlier engine) |
 | 4 × 32 | 8 × 8 vCPU | 74,879 (earlier engine) |
-
-How to read it:
-
-- **Plan below the saturated rate, from your load's shape.** A database sustained 95% of its saturated rate with
-  a median flow latency under 0.1 s, and not 100%. Plan a 32-vCPU database at ~19,000 steps/s of average load,
-  then check what your peaks cost in waiting
-  ([planning capacity](benchmark-cloud.md#planning-capacity)). Same-size instances differ, so treat any one
-  figure as a range.
-- **32 vCPU is the most economical database.** Smaller sizes run out of CPU and cost more per step; larger ones
-  are held back by the write-ahead log, so past 32 vCPU add shards.
-- **Give each shard two engine replicas at half its vCPU.** Each runs at about a third of its CPU and can
-  carry the shard alone. Replicas beyond two per shard add standby capacity, not database throughput.
-- **Or serve several shards from a larger host, with `GOMAXPROCS` capped.** Plan the engine at about one
-  core per 3,300 steps/s its shards can deliver at most, and set `GOMAXPROCS` to that plus your in-process
-  tasks' share rather than the host's full core count: Go's garbage collection costs a larger share of CPU
-  the more cores it may use. Run at least two such hosts so one can fail.
-- **Shard past 32 vCPU.** A 64-vCPU database bought +22% for 1.9 times the price; four 32-vCPU shards ran
-  3.9–4.2 times one.
-- **Disk IOPS scale with disk size on most managed databases.** A 100 GB disk (~3,000 IOPS) throttles a
-  write-heavy workload that the same instance serves comfortably on a larger one; see
-  [Disk throughput](#disk-throughput).
-
-For example, for ~50,000 steps/s at peak: four 32-vCPU shards (each its own server) and eight 8-vCPU engine
-replicas. Then measure your own workload against it, because task shape, payload size and round-trip time
-all move these numbers.
 
 ## Shutting down
 
