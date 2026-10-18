@@ -65,7 +65,7 @@ func TestRestartSurvival(t *testing.T) {
 		if !assert.NoError(err) {
 			return false
 		}
-		deadline := time.Now().Add(10 * time.Second)
+		deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 		for time.Now().Before(deadline) {
 			var n int
 			if err := db.QueryRowContext(ctx, query, args...).Scan(&n); err == nil && n > 0 {

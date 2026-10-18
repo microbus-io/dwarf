@@ -245,6 +245,9 @@ func TestPersist_StalledWritesAreRetriedOnARenewedLease(t *testing.T) {
 	var runs atomic.Int32
 	e, reader := slowWriteEngine(t, "p/stall", &runs)
 	defer e.Shutdown(ctx)
+	// A stall is half the retry window, so the window's other half is the headroom each retry must fit in, renewal
+	// round trip included. At slowWriteEngine's 1s extension that is ~250ms, which a loaded parallel run can eat.
+	e.persistLeaseExtension = 4 * time.Second
 	assert.NoError(e.Startup(t.Context()))
 	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistStallErr, "A"), 2)
 
@@ -579,7 +582,7 @@ func TestPersist_DrainReleasesTheLeaseInsteadOfSleepingItOut(t *testing.T) {
 	assert.NoError(err)
 
 	// Wait until the task has run and the worker is therefore inside the retry backoff.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(5 * time.Second * enginetest.TimeoutScale())
 	for runs.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}

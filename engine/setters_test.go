@@ -20,12 +20,14 @@ import (
 	"context"
 	"math"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/enginetest"
+	"github.com/microbus-io/dwarf/internal/memlimit"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -213,16 +215,16 @@ func TestSetStateCacheSize_SharedByShards(t *testing.T) {
 }
 
 // TestStateCacheBudget_Default pins the default without an override: a tenth of the detected memory
-// limit, else the fallback.
+// limit. It sets the process's memory limit so a machine with none to detect still checks the arithmetic, and
+// so it does not run in parallel: the limit is process-wide.
 func TestStateCacheBudget_Default(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
+	prev := debug.SetMemoryLimit(40 << 30)
+	defer debug.SetMemoryLimit(prev)
+	limit, detected := memlimit.Detect()
+	assert.Equal(int64(40<<30), limit)
 	total, source := NewEngine().stateCacheBudget()
-	if source == "fallback" {
-		assert.Equal(int64(stateCacheFallback), total)
-	} else {
-		assert.True(total > 0)
-		assert.NotEqual("SetStateCacheSize", source)
-	}
+	assert.Equal(limit/10, total)
+	assert.Equal(detected, source)
 }

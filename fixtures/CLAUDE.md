@@ -142,8 +142,9 @@ seconds serially can exceed a 15s ceiling. The `enginetest` wait helpers (`Bound
 (`internal/enginetest/timeoutscale_*.go`).
 The ceilings guard against a genuine hang, not a timing contract, so stretching them under `-race` keeps every test
 parallel without masking a real wedge (a wedged flow never completes and still trips even the stretched ceiling).
-A test's own ceiling - a `context.WithTimeout`, or a `time.After` hang ceiling in a `select` - multiplies by
-`enginetest.TimeoutScale()` the same way. Left unscaled on purpose: a negative wait ("nothing happens within
+A test's own ceiling - a `context.WithTimeout`, a `time.After` hang ceiling in a `select`, or the
+`deadline := time.Now().Add(...)` a polling loop gives up at - multiplies by `enginetest.TimeoutScale()` the same
+way. Left unscaled on purpose: a negative wait ("nothing happens within
 500ms"), a bounded optional wait whose expiry is an outcome, and a safety net inside a task body.
 
 **Give a `-race` run of `fixtures` an explicit `-timeout`, e.g. `-timeout 20m`.** On SQLite it measured 582s, near

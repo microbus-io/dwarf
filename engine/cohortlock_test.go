@@ -33,7 +33,7 @@ import (
 // waitQueued waits until the stripe has n waiters queued.
 func waitQueued(t *testing.T, s *cohortStripe, n int) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(5 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
 		s.mu.Lock()
 		got := len(s.queue)

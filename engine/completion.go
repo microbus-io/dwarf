@@ -622,6 +622,9 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 			// The flow-id lists are chunked: a tree can hold more flows than a statement can bind. The lock passes
 			// run in ascending id order (lockOrder), recomputed per run because a re-run covers a larger set.
 			lockIDs := lockOrder(allFlowIDs)
+			if e.seams.Enabled() {
+				e.seams.Variable(engineseams.Join(engineseams.VariableLockOrder, "terminate"), slices.Clone(lockIDs))
+			}
 			terminateSteps := func() {
 				for chunk := range slices.Chunk(lockIDs, inListChunk) {
 					ph, ids := inList(chunk)

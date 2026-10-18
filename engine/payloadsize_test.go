@@ -60,6 +60,8 @@ func TestPayloadSize_OversizedChangesFailTheStepOnce(t *testing.T) {
 	_, outcome, err := e.Run(ctx, "ps/changes/wf", nil, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusFailed, outcome.Status)
+	// The changes check names its payload; the final-state check would catch the same field otherwise.
+	assert.Contains(outcome.Error, "changes of task 'A'")
 	assert.Contains(outcome.Error, "over the 1000-byte limit")
 	assert.Contains(outcome.Error, `"big"`)
 	assert.Equal(int32(1), runs.Load(), "the task must run exactly once")

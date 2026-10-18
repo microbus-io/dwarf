@@ -190,7 +190,7 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	// Run can return before dwarf_flows_ended is recorded: the completing worker counts it after its transaction
 	// commits, and the await's database poll can see that commit first. Collect until the counter lands.
 	var rm metricdata.ResourceMetrics
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(3 * time.Second * enginetest.TimeoutScale())
 	for {
 		if !assert.NoError(reader.Collect(ctx, &rm)) {
 			return
@@ -346,7 +346,7 @@ func TestMetrics_BacklogGauges(t *testing.T) {
 	assert.False(ok, "nothing is reported before the leader's first refresh: a collection makes no query")
 
 	e.refreshBacklog(ctx)
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(5 * time.Second * enginetest.TimeoutScale())
 	for {
 		assert.NoError(reader.Collect(ctx, &rm))
 		if lag, ok := gaugeAt(rm, "dwarf_steps_dispatch_lag_seconds", shard1); ok && lag >= 25 || !time.Now().Before(deadline) {

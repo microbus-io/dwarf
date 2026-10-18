@@ -839,6 +839,9 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	}
 	// Ascending, so the chunked lock passes below take their rows in the order Terminate's do (lockOrder).
 	allFlowIDs := lockOrder(append([]any{flowID}, descendantFlowIDs...))
+	if e.seams.Enabled() {
+		e.seams.Variable(engineseams.Join(engineseams.VariableLockOrder, "cancel"), slices.Clone(allFlowIDs))
+	}
 
 	reason = strings.TrimSpace(reason)
 	// The watermark is read by a statement AFTER the one that takes the flow rows' locks. On Postgres an UPDATE's

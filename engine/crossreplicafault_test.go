@@ -145,7 +145,7 @@ func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
 
 	// Wait until A has executed the task (its write is then fenced), then "crash" A. Shutdown drains A's
 	// worker, so the fenced completion write has landed and the step rests `running` under A's lease.
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 	for runs.Load() < 1 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}

@@ -276,17 +276,17 @@ func TestAwait_IgnoresANonSettledWake(t *testing.T) {
 	done := make(chan result, 1)
 	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 	defer cancel()
+	parked := e.seams.Waiter(engineseams.Join(engineseams.CheckpointAwaitParked, flowKey)) // armed before the goroutine that trips it
 	go func() {
 		out, aerr := e.await(awaitCtx, flowKey)
 		done <- result{out, aerr}
 	}()
 
 	// Park first - before that, there is no waiter for a wake to displace and the test would prove nothing.
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && e.latches.Waiting(flowKey) == 0 {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if !assert.True(e.latches.Waiting(flowKey) > 0, "Await never parked") {
+	select {
+	case <-parked:
+	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
+		assert.True(false, "Await never parked")
 		return
 	}
 

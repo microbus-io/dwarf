@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -119,7 +120,7 @@ func awaitFleetSettled(t *testing.T, fleet *restartFleet, shard, wantR, budget i
 		_, open := shardPool(budget, dispatcherSlots(wantR))
 		return open
 	}
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(30 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
 		settled := true
 		for _, e := range fleet.snapshot() {

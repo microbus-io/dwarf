@@ -23,6 +23,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -163,7 +164,7 @@ func TestStepDepth_FanInIsMaxCohortDepthPlus1(t *testing.T) {
 
 	// Wait until the deep branch's Deep step has completed (its fan-in arrival committed); only then release
 	// the shallow branch, guaranteeing it is the last arrival that triggers the fan-in.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(5 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
 		s, ok := findStep(mustHistory(t, eng, flowKey), "Deep")
 		if ok && s.Status == workflow.StatusCompleted {

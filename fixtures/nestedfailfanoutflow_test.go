@@ -24,6 +24,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -108,7 +109,7 @@ func TestNestedfailfanoutflow(t *testing.T) {
 	}
 
 	// Wait until all 9 inner cells have started.
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(15 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
 		mu.Lock()
 		s := innerStarts

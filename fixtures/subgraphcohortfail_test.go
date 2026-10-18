@@ -27,6 +27,7 @@ import (
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -135,7 +136,7 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 	// Wait until Boom has failed AND the grandchild is running (so Slow is parked on it) - the moment the old
 	// eager short-circuit would have terminalized the child.
 	var childFlowID, childReady int
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(5 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
 		var boomFailed, gcRunning int
 		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE task_name=? AND status=?",

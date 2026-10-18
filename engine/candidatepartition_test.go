@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 )
@@ -97,7 +98,7 @@ func TestPartition_AppliedFromRegistry(t *testing.T) {
 
 	// Back to solo - partitioning switches off rather than leaving a stale residue class.
 	delPeerRow(t, e, math.MaxInt64)
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
 		if _, _, ok := e.partitionOn(1); !ok {
 			return
@@ -172,7 +173,7 @@ func addPeerRowWithDispatch(t *testing.T, e *Engine, id int64, dispatches bool) 
 func awaitPartition(t *testing.T, e *Engine, shard, wantDispatchers, wantOrdinal int) {
 	t.Helper()
 	assert := testarossa.For(t)
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 	var d, o int
 	var ok bool
 	for time.Now().Before(deadline) {

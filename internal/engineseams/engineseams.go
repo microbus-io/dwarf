@@ -219,6 +219,13 @@ const (
 	CheckpointRefillCycleDone = piston.CheckpointCycleDone // a shard's piston reconciled its cache partition
 	CheckpointRefillTallyDone = piston.CheckpointTallyDone // a shard's piston published a tally from a real scan
 	CheckpointRefillStole     = piston.CheckpointStole     // a shard's piston selected steps from OUTSIDE its residue class
+
+	// CheckpointPeerPass is fired scoped by shard (Join(CheckpointPeerPass, shard)) as that shard's Sonar starts
+	// a registry pass - its beat and its read - from the turn the engine hands it, so only once the runtime is
+	// up. Passes run one at a time, so a visit also says the previous pass is over: two visits counted from a
+	// moment mean a whole read ran after it. That is how a test waits for a reading that was attempted, where
+	// the Sonar's own BlindFor grows with the clock whether or not anything read.
+	CheckpointPeerPass = "peerPass"
 )
 
 // --- Recorded variables ---
@@ -231,3 +238,8 @@ const (
 // recorded is the engine's derivation, before the test-mode connection cap clamps what the pool actually
 // takes.
 const VariablePoolIdle = "poolIdle"
+
+// VariableLockOrder is the flow-id list a tree operation's chunked lock passes bind, targeted by the operation
+// (Join(VariableLockOrder, "cancel") or Join(VariableLockOrder, "terminate")), recorded as a copy on each run of
+// the passes. The order the statements took their rows in is in no row, so this is its only witness.
+const VariableLockOrder = "lockOrder"

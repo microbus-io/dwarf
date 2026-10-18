@@ -124,7 +124,7 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 	// Wait until the subgraph child exists and is running. The caller's park and the child's insert commit
 	// together, so a running child implies the caller is parked.
 	var parentStepID int
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(5 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
 		if db.QueryRowContext(ctx,
 			"SELECT surgraph_step_id FROM dwarf_flows WHERE surgraph_flow_id=? AND status=?",
@@ -219,7 +219,7 @@ func TestWedgeSweep_SubgraphCallerWithNoChildFails(t *testing.T) {
 	// Wait for the caller to be parked on a running child (see the sibling test for why `running`, not
 	// merely parked, is the right signal).
 	var parentStepID, childFlowID int
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(5 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
 		if db.QueryRowContext(ctx,
 			"SELECT surgraph_step_id, flow_id FROM dwarf_flows WHERE surgraph_flow_id=? AND status=?",
@@ -469,7 +469,7 @@ func TestWedgeSweep_OrphanedSubgraphChildTerminated(t *testing.T) {
 		return
 	}
 	var healthyChildID int
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(5 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
 		if db.QueryRowContext(ctx,
 			"SELECT flow_id FROM dwarf_flows WHERE surgraph_flow_id=? AND status=?",

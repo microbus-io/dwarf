@@ -125,7 +125,7 @@ func insertPeerRows(t *testing.T, e *Engine, ids ...int64) {
 // line up what the next recompute will read.
 func awaitPeerCount(t *testing.T, e *Engine, shard, want int) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
 		if e.replicasOn(shard) == want {
 			awaitCutSettled(t, e, shard)
@@ -145,7 +145,7 @@ func awaitCutSettled(t *testing.T, e *Engine, shard int) {
 	if s == nil || e.zeroWorkers() {
 		return
 	}
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
 		rank, candidates := s.Rank()
 		place := slices.Index(slices.Sorted(slices.Values(e.db.Indices())), shard)
@@ -175,7 +175,7 @@ func peerCounts(e *Engine) map[int]int {
 // caused has landed.
 func awaitPeerChange(t *testing.T, e *Engine, before map[int]int) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
 		moved := true
 		for idx, was := range before {
@@ -412,7 +412,7 @@ func TestPoolSizing_PeerExpiry(t *testing.T) {
 
 	// Nothing forces a recount: the Sonar re-reads on its own cadence and the reconcile loop re-derives.
 	// The bound is a "did it hang" ceiling, not a timing contract.
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(30 * time.Second * enginetest.TimeoutScale())
 	for db.DB.Stats().MaxOpenConnections != 48 && time.Now().Before(deadline) {
 		time.Sleep(2 * time.Millisecond)
 	}
@@ -459,7 +459,7 @@ func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
 		assert.NoError(err)
 	}
 	// The pool must grow past its resident set to run them all at once.
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 	for running.Load() < int32(flows) && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -544,7 +544,7 @@ func TestPoolSizing_SaturationDoesNotGrowThePool(t *testing.T) {
 	// second and leaves immediately, while a loaded remote SQL Server was measured at 3.5-6.5 flows/s - so a 30s
 	// bound cut the drain off at 105 and 196 of 400 on two separate runs. Do NOT shrink the backlog to fit a
 	// tighter bound: the 400 concurrent Runs ARE the saturation this test needs every worker queued behind.
-	deadline := time.Now().Add(3 * time.Minute)
+	deadline := time.Now().Add(3 * time.Minute * enginetest.TimeoutScale())
 	for done.Load() < 400 && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -929,7 +929,7 @@ func TestPoolSizing_StartupSizesFromRegisteredFleet(t *testing.T) {
 	assert.Equal(shareOf(2), db2.DB.Stats().MaxOpenConnections, "eng2 sizes for R=2 immediately - no partial over-connect")
 
 	// eng1 converges to the R=2 share on its own reading, with no signal wiring.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(5 * time.Second * enginetest.TimeoutScale())
 	for db1.DB.Stats().MaxOpenConnections != 24 && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}

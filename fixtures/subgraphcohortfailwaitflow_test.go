@@ -111,7 +111,7 @@ func TestSubgraphCohortFailWaitflow(t *testing.T) {
 	// the flow - the cohort is not fully arrived while Slow blocks). Only then does releasing Slow make its
 	// completion the last arrival, deterministically driving the transition-path cohort failure under test.
 	var child string
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 	for {
 		mu.Lock()
 		child = childKey

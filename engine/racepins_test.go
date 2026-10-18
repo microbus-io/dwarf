@@ -338,7 +338,7 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		return n
 	}
 	awaitFlow := func(t *testing.T, e *Engine, fk, workflowURL string) bool {
-		deadline := time.Now().Add(10 * time.Second)
+		deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 		for time.Now().Before(deadline) {
 			if countFlows(t, e, fk, workflowURL) > 0 {
 				return true

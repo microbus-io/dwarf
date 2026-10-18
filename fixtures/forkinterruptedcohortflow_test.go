@@ -24,6 +24,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -92,7 +93,7 @@ func TestForkInterruptedCohortFlow(t *testing.T) {
 		// Branch A's failure races the Await that returned on B's interrupt, so wait for A to actually reach
 		// `failed` (and B `interrupted`) before asserting the flow held.
 		var aKey string
-		deadline := time.Now().Add(3 * time.Second)
+		deadline := time.Now().Add(3 * time.Second * enginetest.TimeoutScale())
 		for {
 			hist, herr := eng.History(ctx, flowKey)
 			if !assert.NoError(herr) {

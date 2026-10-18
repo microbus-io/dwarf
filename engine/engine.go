@@ -991,6 +991,9 @@ func (e *Engine) initRuntime() error {
 			// queue to drain, and it shares the band with one piston whose two loops take one turn each per
 			// cycle, against a turn count of turnstilePassesPerConn x the connections.
 			s.SetTurnFunc(func(ctx context.Context) (context.Context, func()) {
+				if e.seams.Enabled() { // Enabled gates the assembled name in production
+					e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointPeerPass, strconv.Itoa(idx)))
+				}
 				return e.dbTurnAt(ctx, idx, priorityRefill)
 			})
 		}

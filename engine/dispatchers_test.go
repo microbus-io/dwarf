@@ -353,7 +353,7 @@ func TestDispatchers_DemotedReplicaHoldsItsPoolUntilInFlightStepsFinish(t *testi
 		assert.NoError(err)
 		keys = append(keys, fk)
 	}
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 	for runs.Load() < flows && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -462,7 +462,7 @@ func TestDispatchers_PromotionWhileHeldClearsTheHold(t *testing.T) {
 func awaitDrainingRow(t *testing.T, db *sequel.DB, id int64, want int) int {
 	t.Helper()
 	var got int
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 	for {
 		if err := db.QueryRowContext(t.Context(), "SELECT draining FROM dwarf_peers WHERE engine_id=?", id).Scan(&got); err != nil {
 			t.Errorf("read draining for %d: %v", id, err)
@@ -741,7 +741,7 @@ func TestDispatchers_DrainGivesUpTheSlotBeforeWaiting(t *testing.T) {
 		close(release)
 		wg.Wait()
 	}()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
 		var working, draining int
 		err := db.QueryRowContext(ctx, "SELECT working, draining FROM dwarf_peers WHERE engine_id=?", e.engineID).Scan(&working, &draining)
@@ -793,7 +793,7 @@ func TestDispatchers_DrainStopsClaimingDispatch(t *testing.T) {
 		return ms
 	}
 	// The beat stamps dispatched_at every second while the replica dispatches; wait for the first stamp.
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 	for age := dispatchAge(); age < 0 || age > 1500; age = dispatchAge() {
 		if time.Now().After(deadline) {
 			t.Fatal("the replica never stamped dispatched_at")
@@ -807,7 +807,7 @@ func TestDispatchers_DrainStopsClaimingDispatch(t *testing.T) {
 		close(release)
 		wg.Wait()
 	}()
-	deadline = time.Now().Add(10 * time.Second)
+	deadline = time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
 		if dispatchAge() > 2500 {
 			for _, p := range e.pistons {
@@ -867,19 +867,11 @@ func TestDispatchers_DrainingReplicasClassPassesToAPeer(t *testing.T) {
 
 	// Both dispatchers partition the shard between them before the drain starts, or the peer would be serving
 	// every class already and the test would prove nothing.
-	deadline := time.Now().Add(30 * time.Second * enginetest.TimeoutScale())
-	var drainerOrd int
-	for {
-		r, ord, ok := drainer.partitionOn(1)
-		pr, _, pok := peer.partitionOn(1)
-		if ok && pok && r == 2 && pr == 2 {
-			drainerOrd = ord
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the two dispatchers never partitioned the shard")
-		}
-		time.Sleep(10 * time.Millisecond)
+	awaitPartition(t, drainer, 1, 2, -1)
+	awaitPartition(t, peer, 1, 2, -1)
+	_, drainerOrd, ok := drainer.partitionOn(1)
+	if !ok {
+		t.Fatal("the drainer stopped partitioning the shard")
 	}
 
 	heldKey, err := drainer.Create(ctx, "drainhandoff/g", map[string]any{"hold": "yes"}, nil)
@@ -887,6 +879,14 @@ func TestDispatchers_DrainingReplicasClassPassesToAPeer(t *testing.T) {
 	_, heldFlowID, _, err := keys.ParseFlowKey(heldKey)
 	assert.NoError(err)
 	<-started
+	db, err := creator.db.Shard(1)
+	assert.NoError(err)
+	// The held task must be the drainer's, or nothing holds its drain open and the handoff is never exercised.
+	var claimer int64
+	assert.NoError(db.QueryRowContext(ctx, "SELECT engine_id FROM dwarf_steps WHERE flow_id=?", heldFlowID).Scan(&claimer))
+	if claimer != drainer.engineID {
+		t.Fatal("the held task ran on the peer, not the drainer")
+	}
 	var wg sync.WaitGroup
 	wg.Go(func() { drainer.Shutdown(ctx) })
 	defer func() {
@@ -894,8 +894,6 @@ func TestDispatchers_DrainingReplicasClassPassesToAPeer(t *testing.T) {
 		wg.Wait()
 	}()
 
-	db, err := creator.db.Shard(1)
-	assert.NoError(err)
 	var flowKeys []string
 	for range 16 {
 		fk, err := creator.Create(ctx, "drainhandoff/g", nil, nil)
@@ -904,11 +902,15 @@ func TestDispatchers_DrainingReplicasClassPassesToAPeer(t *testing.T) {
 		}
 		flowKeys = append(flowKeys, fk)
 	}
+	// One deadline for all of them: a stranded class fails at the bound, not after one bound per flow.
+	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
+	defer cancel()
 	for _, fk := range flowKeys {
-		out, err := enginetest.BoundedAwait(t, creator, fk)
-		if assert.NoError(err, "a flow waited past the bound while the drain was held open") && assert.NotNil(out) {
-			assert.Equal(workflow.StatusCompleted, out.Status)
+		out, err := creator.Await(awaitCtx, fk)
+		if !assert.NoError(err, "a flow waited past the bound while the drain was held open") || !assert.NotNil(out) {
+			return
 		}
+		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
 	// The handoff was in the path only if some of that work fell in the drainer's class.
 	var inDrainerClass int
@@ -916,11 +918,6 @@ func TestDispatchers_DrainingReplicasClassPassesToAPeer(t *testing.T) {
 		"SELECT COUNT(*) FROM dwarf_steps WHERE task_name='W' AND step_id % 2 = ? AND flow_id <> ?",
 		drainerOrd, heldFlowID).Scan(&inDrainerClass))
 	assert.True(inDrainerClass > 0, "none of the work fell in the drainer's residue class")
-	select {
-	case <-release:
-		t.Fatal("the drain was released before the work finished")
-	default:
-	}
 }
 
 // TestDispatchers_RoleFlagsSurviveARestartUnderLoad pins that the role flags are published, not assigned in
@@ -1065,7 +1062,7 @@ func TestDispatchers_DrainingDispatcherHandsItsSlotToAPeer(t *testing.T) {
 		close(release)
 		wg.Wait()
 	}()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
 		if reader.dispatchesOn(1) {
 			return // promoted while the dispatcher's task is still holding its drain open

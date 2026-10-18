@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -35,7 +36,7 @@ import (
 // awaitPoolSize waits for one shard's applied pool ceiling, reporting what it settled at.
 func awaitPoolSize(t *testing.T, db *sequel.DB, want int) int {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
 		if got := db.DB.Stats().MaxOpenConnections; got == want {
 			return got
@@ -45,16 +46,15 @@ func awaitPoolSize(t *testing.T, db *sequel.DB, want int) int {
 	return db.DB.Stats().MaxOpenConnections
 }
 
-// awaitBlind waits until a shard's Sonar has gone d without a good reading, so the negative assertions that
-// follow are made against a replica that is observably blind, not one a fixed sleep hoped had read by then.
+// awaitBlind waits until a shard's Sonar has finished a reading begun after the call, and has gone d without a
+// good one. The negative assertions that follow are then made against a replica that READ and failed, not one
+// whose BlindFor merely grew with the clock while its loop was starved. Every wait is on a pass.
 func awaitBlind(t *testing.T, e *Engine, shard int, d time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second * enginetest.TimeoutScale())
+	pass := engineseams.Join(engineseams.CheckpointPeerPass, strconv.Itoa(shard))
+	enginetest.AwaitVisits(t, e.seams, 2, 30*time.Second, pass)
 	for e.sonarFor(shard).BlindFor() < d {
-		if time.Now().After(deadline) {
-			t.Fatalf("shard %d's Sonar was never blind for %s", shard, d)
-		}
-		time.Sleep(testPeerCadence / 5)
+		enginetest.AwaitVisits(t, e.seams, 1, 30*time.Second, pass)
 	}
 }
 
@@ -192,7 +192,7 @@ func TestPeerFault_BeatFailureEvictsFromTheDispatchers(t *testing.T) {
 	// The worker drops it from the WORK divisor once its dispatch evidence ages out, and stops partitioning:
 	// with one dispatcher left there is nothing to divide, so the survivor selects everything. That is the
 	// takeover - no rebalancing, just a divisor that shrank.
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(30 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
 		if _, _, ok := worker.partitionOn(1); !ok {
 			break

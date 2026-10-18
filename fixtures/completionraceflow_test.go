@@ -23,6 +23,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -106,7 +107,7 @@ func TestCompletionRaceflow(t *testing.T) {
 		)
 		stuck := keys
 		lastProgress := time.Now()
-		capAt := time.Now().Add(absoluteCap)
+		capAt := time.Now().Add(absoluteCap * enginetest.TimeoutScale())
 		for len(stuck) > 0 && time.Now().Before(capAt) {
 			var remaining []string
 			for _, k := range stuck {
