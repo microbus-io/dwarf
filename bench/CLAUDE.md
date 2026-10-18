@@ -430,8 +430,11 @@ heap** and the crew is mostly stacks.
 **Every mode runs the stall watchdog** (`watchProgress`): sweep windows open- and closed-loop, the volume fill
 and soak. It fires when no task has started and no flow has ended for `-stall-timeout` while work is in
 flight, and that ends the RUN, not the window: the artifact is written, and the process exits 3 without the
-engines' shutdown, which would wait on whatever hung. A phase that waits on its submitters must not wait once
-it has fired, since a submitter stuck in `Create` or `Run` on a hung engine never returns.
+engines' shutdown, which would wait on whatever hung. **A phase waits on its submitters through the watchdog
+(`progressWatch.await`), and stops the watchdog only after that wait.** A submitter stuck in `Create` or `Run`
+on a hung engine never returns, and one wedged flow among healthy ones is masked while the others keep tasks
+starting: it shows only once they have exited, so a wait taken after `stop()` hangs on exactly that flow
+(probed: 18s past a 2s stall timeout and still waiting).
 
 **Silence is measured between task starts as well as flow ends**, by the watchdog and the drain alike. Flow
 ends alone go quiet for a whole flow's remaining length - 10-step flows of 60s tasks in lockstep end nothing

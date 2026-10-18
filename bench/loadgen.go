@@ -212,6 +212,23 @@ func (w *progressWatch) reason() string {
 
 func (w *progressWatch) stop() { w.cancel() }
 
+// await runs wait and reports whether it returned before the watchdog fired. A phase waits on its goroutines
+// through it, with the watchdog still running: one flow wedged among healthy ones is masked while the others
+// keep tasks starting, and shows only once they have exited - here, where an unwatched Wait would hang.
+func (w *progressWatch) await(wait func()) bool {
+	done := make(chan struct{})
+	go func() {
+		wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-w.stalled:
+		return false
+	}
+}
+
 // drainResult is what became of every flow an open-loop step created. "Nothing lost" is otherwise an inference
 // from window counters (no errors, executed = offered) that says nothing about the ~2,000 flows still in flight
 // when the window closes; this follows them to their end.
@@ -352,13 +369,12 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 	waitAfter := wait.snapshot()
 	bytesAfter := bytesWritten.Load()
 	stop.Store(true)
+	// A submitter stuck in Run on a hung engine never returns, so the wait gives up when the watchdog fires.
+	watch.await(submitters.Wait)
 	watch.stop()
 	stallWhy := watch.reason()
 	if stallWhy != "" {
-		// A submitter stuck in Run on a hung engine never returns, so do not wait for one.
 		fmt.Println("STALLED:", stallWhy)
-	} else {
-		submitters.Wait()
 	}
 
 	deltas := counterDeltas(before, after)
@@ -579,26 +595,26 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 	waitAfter := wait.snapshot()
 	bytesAfter := bytesWritten.Load()
 	stop.Store(true)
-	watch.stop()
 	cancelAwaits()
+	// A creator stuck in Create on a hung engine never returns, so the wait gives up when the watchdog fires.
+	// main.go exits without the engines' graceful shutdown for the same reason.
+	watch.await(func() {
+		creatorsWG.Wait()
+		awaitWG.Wait()
+	})
+	watch.stop()
 	stallWhy := watch.reason()
 	var drain *drainResult
 	if stallWhy != "" {
-		// A creator stuck in Create on a hung engine never returns, so do not wait for one. main.go exits
-		// without the engines' graceful shutdown for the same reason.
 		fmt.Println("STALLED:", stallWhy)
-	} else {
-		creatorsWG.Wait()
-		awaitWG.Wait()
-		if guard.drain > 0 {
-			drain = drainOutstanding(readers, stepStart, created.Load(), outstanding, tasksStarted.Load, guard.drain)
-			if drain.Unfinished > 0 {
-				// The drain gives up only when no task started and no flow ended for -drain: the watchdog's own
-				// definition of a hang, met after the watchdog stopped. The next window would start on the hung
-				// engines, so it ends the run as a stall does.
-				fmt.Println("STALLED in the drain:", drain.Unfinished, "flows unfinished")
-				stalledRun.Store(true)
-			}
+	} else if guard.drain > 0 {
+		drain = drainOutstanding(readers, stepStart, created.Load(), outstanding, tasksStarted.Load, guard.drain)
+		if drain.Unfinished > 0 {
+			// The drain gives up only when no task started and no flow ended for -drain: the watchdog's own
+			// definition of a hang, met after the watchdog stopped. The next window would start on the hung
+			// engines, so it ends the run as a stall does.
+			fmt.Println("STALLED in the drain:", drain.Unfinished, "flows unfinished")
+			stalledRun.Store(true)
 		}
 	}
 

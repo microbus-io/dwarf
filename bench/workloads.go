@@ -65,6 +65,11 @@ const (
 	defaultStatePayload = 64 * 1024
 	// defaultLoopMessage is the size of the message each `loop`/`loopreplace` step adds when -payload is 0.
 	defaultLoopMessage = 1024
+	// loopMessageOverhead is a generous bound on the JSON a loop message adds around its content (its index,
+	// role and keys), for the up-front check of the final history against maxFinalState.
+	loopMessageOverhead = 64
+	// maxFinalState is the engine's per-value limit, which a flow's final state must fit in.
+	maxFinalState = 256_000_000
 )
 
 // effectivePayload is the payload size a workload writes for a -payload value.
@@ -397,10 +402,12 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 				return fmt.Errorf("loop: %s: %w", f.StepKey(), err)
 			}
 			msg := loopMsg{N: len(history), Role: "assistant", Content: loopFresh().next()}
-			h.bytesWritten.Add(int64(loopMessage))
 			if appendMode {
+				h.bytesWritten.Add(int64(loopMessage))
 				return f.Set("messages", []loopMsg{msg})
 			}
+			// loopreplace writes the whole history, so that is what it counts.
+			h.bytesWritten.Add(int64((len(history) + 1) * loopMessage))
 			return f.Set("messages", append(history, msg))
 		}
 	}

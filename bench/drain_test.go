@@ -227,3 +227,25 @@ func TestCollectAll_OneFailedReplicaFailsTheCollection(t *testing.T) {
 	assert.Len(counterDeltas(nil, map[string]int64{"x": 7}), 0)
 	assert.Len(counterDeltas(map[string]int64{"x": 7}, nil), 0)
 }
+
+// TestWatchProgress_AwaitGivesUpAtTheStall pins that a phase's wait on its goroutines ends when the watchdog
+// fires: a submitter stuck on a hung engine never returns, and waiting for it unwatched hangs the run.
+func TestWatchProgress_AwaitGivesUpAtTheStall(t *testing.T) {
+	// Not parallel: guard and stalledRun are the process's own run guards.
+	assert := testarossa.For(t)
+	defer func(stall time.Duration) { guard.stall = stall; stalledRun.Store(false) }(guard.stall)
+	guard.stall = 1500 * time.Millisecond
+
+	w := watchProgress(context.Background(), nil, func() int64 { return 1 })
+	assert.True(w.await(func() {}), "a wait that returns is reported as returned")
+	w.stop()
+
+	stuck := make(chan struct{})
+	defer close(stuck)
+	start := time.Now()
+	w = watchProgress(context.Background(), nil, func() int64 { return 1 })
+	assert.False(w.await(func() { <-stuck }), "a wait the watchdog outlived is reported as given up")
+	assert.True(time.Since(start) < 10*time.Second, "await must end at the stall, took %s", time.Since(start))
+	assert.Contains(w.reason(), "1 flows in flight")
+	w.stop()
+}

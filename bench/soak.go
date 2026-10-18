@@ -185,13 +185,15 @@ loop:
 
 	stop.Store(true)
 	close(stopCh)
-	watch.stop()
-	if report.Stalled = watch.reason(); report.Stalled != "" {
-		// A submitter or the sweeper stuck on a hung engine may never return, so do not wait for either.
-		fmt.Println("STALLED:", report.Stalled)
-	} else {
+	// A submitter or the sweeper stuck on a hung engine may never return, so the wait gives up when the
+	// watchdog fires.
+	watch.await(func() {
 		submitters.Wait()
 		sweeper.Wait()
+	})
+	watch.stop()
+	if report.Stalled = watch.reason(); report.Stalled != "" {
+		fmt.Println("STALLED:", report.Stalled)
 	}
 
 	takeSample() // final reading after the load drains

@@ -80,7 +80,7 @@ func run() error {
 	var (
 		dsns         shardFlags
 		workloadName = flag.String("workload", "linear", "workload: linear, fanout, scatter, state, carry, carryfanout, loop, loopreplace, llm, mixed")
-		payload      = flag.Int("payload", 0, "payload size in bytes: fresh bytes written by every `linear`/`fanout` task, the size of each `scatter` element, rewritten every step by `state`, written once and then carried by `carry`/`carryfanout`. 0 = no payload for linear/fanout/scatter, 64KB for state/carry")
+		payload      = flag.Int("payload", 0, "payload size in bytes: fresh bytes written by every `linear`/`fanout` task, the size of each `scatter` element, rewritten every step by `state`, written once and then carried by `carry`/`carryfanout`, the message each `loop`/`loopreplace` step adds. 0 = no payload for linear/fanout/scatter, 64KB for state/carry, 1KB for loop")
 		taskDelay    = flag.Duration("task-delay", 0, "per-task sleep simulating remote executor latency (the exec term)")
 		taskBurst    = flag.Duration("task-burst", 0, "bursty profile: apply -task-delay for this long, then drop it to zero for -task-quiet, repeating. 0 (with -task-quiet) keeps -task-delay constant for the whole run. A constant delay cannot see a crew that only shrinks once load FALLS - see taskProfile")
 		taskQuiet    = flag.Duration("task-quiet", 0, "bursty profile: the quiet half of the cycle, during which tasks do not sleep. Flows keep arriving at the same rate, so only the exec term moves")
@@ -124,7 +124,7 @@ func run() error {
 		volumeProbeWL   = flag.String("volume-probe-workload", "linear", "-volume-probe only: the workload the probe windows run, which need not be the fill's - a bytes-axis fill is `state` while its probes measure `linear`")
 		volumeProbe     = flag.Duration("volume-probe", 0, "-volume only: at each checkpoint (and on the empty database first), pause the fill for an open-loop saturated window of this length and then one at 2/3 of its flows/s, at the pinned pool (0 = no throughput probe)")
 		fairnessKeys    = flag.Int("fairness-keys", 1, "spread flows across this many distinct fairness keys (1 = all on the single default key, the degenerate case for the refiller's per-key scan bound)")
-		linearStepsFlag = flag.Int("linear-steps", linearSteps, "linear workload chain length; sweeping it separates a slow replica's share of STEPS from its share of FLOWS (see workloads.go)")
+		linearStepsFlag = flag.Int("linear-steps", linearSteps, "linear workload chain length, and the number of messages a `loop`/`loopreplace` flow ends with; sweeping it separates a slow replica's share of STEPS from its share of FLOWS (see workloads.go)")
 		fanOutWidth     = flag.Int("fanout-width", 16, "forEach branch count for the fanout, scatter and carryfanout workloads - the knob that decouples pending-step backlog from submitter concurrency (backlog ~= concurrency x width)")
 		branchDepth     = flag.Int("branch-depth", 1, "scatter workload: steps per branch (1 or 2 in the cloud plan); depth > 1 is where an element stored inline would be copied at every branch step")
 		carryRead       = flag.Bool("carry-read", false, "carry workloads: make every task READ the carried document instead of only passing it along. Storage is identical either way, so this is the arm switch for how carried state is HELD, not how much is stored")
@@ -230,6 +230,14 @@ func run() error {
 		// progress, as the watchdog does, so the longest gap it can see in a healthy run is one task.
 		return fmt.Errorf("-drain %s must exceed the longest task (%s plus -task-jitter %s)",
 			*drain, longestTask, *taskJitter)
+	}
+	if *workloadName == "loop" || *workloadName == "loopreplace" {
+		// The final history holds every message at once, and a flow's final state over the engine's 256 MB limit
+		// fails the flow at its last step: refuse the run rather than report those failures as errors.
+		if history := *linearStepsFlag * (effectivePayload(*workloadName, *payload) + loopMessageOverhead); history > maxFinalState {
+			return fmt.Errorf("-linear-steps %d of %d-byte messages makes a %d-byte history, over the %d-byte final state limit",
+				*linearStepsFlag, effectivePayload(*workloadName, *payload), history, maxFinalState)
+		}
 	}
 	regHost := &benchHost{
 		graphs:       map[string]*workflow.Graph{},

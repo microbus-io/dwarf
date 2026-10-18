@@ -149,17 +149,7 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 	// submitter stuck in Run on a hung engine never returns.
 	pause := func() bool {
 		stop.Store(true)
-		done := make(chan struct{})
-		go func() {
-			submitters.Wait()
-			close(done)
-		}()
-		select {
-		case <-done:
-			return true
-		case <-watch.stalled:
-			return false
-		}
+		return watch.await(submitters.Wait)
 	}
 	report := &volumeReport{TargetStepRows: targetSteps, Concurrency: k}
 	invalid := func(window string, why string) {
