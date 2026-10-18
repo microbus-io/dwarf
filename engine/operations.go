@@ -26,6 +26,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/microbus-io/dwarf/internal/candidates"
 	"github.com/microbus-io/dwarf/internal/engineseams"
@@ -736,10 +737,30 @@ func (e *Engine) enqueueStepDue(ctx context.Context, shard, stepID, priority int
 	e.logger.DebugContext(ctx, "Doorbell (due)", "stepID", stepID, "priority", priority, "admitted", admitted)
 }
 
+// maxReasonBytes bounds a Terminate or Cancel reason. A reason is copied into every step a Cancel covers, as that
+// step's error, so it is held to the size of a sentence a person typed rather than a payload.
+const maxReasonBytes = 4096
+
+// checkReason refuses a Terminate or Cancel reason the reason and error columns cannot hold: one over
+// maxReasonBytes, or one that is not valid UTF-8 or holds a NUL, which PostgreSQL rejects in a text column and
+// MySQL rejects under its default strict mode.
+func checkReason(reason string) error {
+	if len(reason) > maxReasonBytes {
+		return errors.New("reason is %d bytes, over the %d-byte limit", len(reason), maxReasonBytes, http.StatusBadRequest)
+	}
+	if !utf8.ValidString(reason) || strings.ContainsRune(reason, 0) {
+		return errors.New("reason must be valid UTF-8 without NUL characters", http.StatusBadRequest)
+	}
+	return nil
+}
+
 // terminate forcefully stops a flow and its whole subgraph subtree, unconditionally. Root-only: a subgraph
 // child is not an independently terminable unit (its parent is parked on it, and the unit of any lifecycle
 // change is the tree), so a child key is rejected rather than silently widened into a tree-wide terminate.
 func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) error {
+	if err := checkReason(reason); err != nil {
+		return errors.Trace(err)
+	}
 	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
 		return errors.Trace(err)
@@ -810,6 +831,9 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 // it once. A no-op on a terminal flow, rather than a 409: the flow write is guarded to non-terminal flows, so
 // it can never rewrite a recorded outcome.
 func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) error {
+	if err := checkReason(reason); err != nil {
+		return errors.Trace(err)
+	}
 	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
 		return errors.Trace(err)

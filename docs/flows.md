@@ -333,7 +333,7 @@ Each operation adds these to the 503 and 500 every call can return:
 | `Step` | malformed key | unknown step | | |
 | `List`, `Purge` | malformed `ThreadKey`, invalid status or shard, a negative `OlderThan` or `NewerThan`; `List` with a malformed cursor; `Purge` with no filter (`Shard` and `Limit` are not filters) or with `IncludeSubgraphs` | unknown `ThreadKey` | | |
 | `Resume` | malformed key, a subgraph child's key, data not JSON-marshalable | unknown flow | | the flow is not interrupted, including when a `Delete` or `Terminate` won the race |
-| `Cancel`, `Terminate` | malformed key, a subgraph child's key | unknown flow | | |
+| `Cancel`, `Terminate` | malformed key, a subgraph child's key, a reason over 4,096 bytes or not valid UTF-8 without NUL | unknown flow | | |
 | `Fork` | malformed key, overrides not JSON-marshalable | unknown step | | the flow is not terminal, is scheduled for deletion, or holds an unresolved interrupt off the fork path |
 | `Continue` | malformed key, a subgraph child's key, `additionalState` not JSON-marshalable | unknown flow | | the thread's latest flow is not completed, including when a concurrent `Continue` won |
 | `Delete` | malformed key, a subgraph child's key | unknown flow | | the flow is running, including when a `Resume` won the race |
