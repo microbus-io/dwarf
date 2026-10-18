@@ -1311,7 +1311,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	//
 	// The linear/static-fan-out successors all share this one snapshot, so it is minted once; a forEach
 	// branch re-mints because its state carries the injected element (below).
-	linearStateJSON, linearRefsJSON, err := e.linkerFor(shardNum).Mint(childInputState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), folded, nil)
+	linearStateJSON, linearRefsJSON, err := e.linkerFor(shardNum).Mint(childInputState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), folded, nil, nil)
 	if err == nil {
 		// Refs keep a carried field out of this column, but a reduced field's folded value, and fields over the
 		// anchor cap, are stored inline - so a state can outgrow the column though no single step wrote that much.
@@ -1484,7 +1484,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 					}
 					item := &staterefs.Item{Key: next.itemKey, Source: next.forEachKey, Index: next.cohortIndex}
 					var mintErr error
-					stepStateJSON, stepRefsJSON, mintErr = e.linkerFor(shardNum).Mint(perStepState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), noRef, item)
+					stepStateJSON, stepRefsJSON, mintErr = e.linkerFor(shardNum).Mint(perStepState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), noRef, item, nil)
 					if mintErr != nil {
 						return errors.Trace(mintErr)
 					}
@@ -1694,7 +1694,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// branch's array ref too (both mint at the same width); where a branch anchors what the linear mint inlined,
 	// the branch's resolve simply misses.
 	if len(normalNexts) > 0 && len(newStepIDs) > 0 && !e.seams.IsFault(engineseams.FaultSkipRefSeed) {
-		e.linkerFor(shardNum).Seed(stepID, childInputState, linearRefsJSON)
+		e.linkerFor(shardNum).Seed(stepID, childInputState, accumulatedChanges, linearRefsJSON)
 	}
 
 	// A sleeping successor is left to the piston: its not_before is in the future, so it is invisible to
@@ -2089,7 +2089,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		if err := mergedState.Apply(ourChanges, reducers); err != nil {
 			return errors.Trace(&permanentError{err})
 		}
-		mergedJSON, refsJSON, merr := e.linkerFor(shardNum).Mint(mergedState, ourChanges, ourRefs, stepID, staterefs.Linear, folded, nil)
+		mergedJSON, refsJSON, merr := e.linkerFor(shardNum).Mint(mergedState, ourChanges, ourRefs, stepID, staterefs.Linear, folded, nil, nil)
 		if merr != nil {
 			return errors.Trace(merr)
 		}
@@ -2355,7 +2355,7 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 	// re-copy the payload into its own row. A field that arrived at the spawn as a ref keeps that ref, so the
 	// chain stays one hop. Member-contributed fields are excluded and therefore inline (above); a reduced field no
 	// member touched is carried or anchored at the spawn like any other.
-	mergedJSON, refsJSON, err := e.linkerFor(shardNum).Mint(merged, spawnChanges, spawnRefs, cohortSpawnID, staterefs.Linear, memberWrites, nil)
+	mergedJSON, refsJSON, err := e.linkerFor(shardNum).Mint(merged, spawnChanges, spawnRefs, cohortSpawnID, staterefs.Linear, memberWrites, nil, nil)
 	if err != nil {
 		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(err)
 	}

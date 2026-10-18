@@ -203,7 +203,7 @@ func TestSetStateCacheSize_SharedByShards(t *testing.T) {
 	seed := func(shard int, size int) int64 {
 		state, _ := workflow.NewState()
 		state.SetJSON("doc", []byte(`"`+strings.Repeat("x", size-2)+`"`))
-		e.linkerFor(shard).Seed(9, state, []byte(`{"doc":9}`))
+		e.linkerFor(shard).Seed(9, state, workflow.NewChanges(), []byte(`{"doc":9}`))
 		return e.stateCache.Bytes()
 	}
 	assert.True(seed(1, 5<<20) > 5<<20, "5 MiB fits the 8 MiB the shards share")

@@ -80,66 +80,99 @@ func decodeAnchorColumn(data []byte, fields *map[string]json.RawMessage) error {
 	return json.Unmarshal(data, fields)
 }
 
+// anchorChunk is the most anchors one query names. A list ref names an anchor per contributing step, and SQL
+// Server takes at most 2,100 parameters in one statement.
+const anchorChunk = 512
+
 // anchorLoader adapts a shard handle to the Linker's Loader: one query for every anchor at once, which is
-// what the policy's "an anchor's other fields are free" tier is priced on.
+// what the policy's "an anchor's other fields are free" tier is priced on - split into chunks only past
+// anchorChunk, and into two queries when some anchors need their state and others only their changes. A list
+// reads its contributions from changes alone, and those steps' state holds their own lists, so reading it too
+// would make a cold read of a long list cost the square of its length.
 //
 // db may be a transaction - anchors never cross a flow, and a flow never crosses a shard, so resolution is
 // always a same-connection read and the fan-in and final-state paths can resolve inside the transactions
 // they already run in.
 //
-// state_refs comes along so the one-hop invariant can be ASSERTED rather than trusted - a violated one would
-// otherwise degrade silently into a chain walk.
+// state_refs comes along with state so the one-hop invariant can be ASSERTED rather than trusted - a violated
+// one would otherwise degrade silently into a chain walk.
 //
 // readBytes accumulates the raw length of every payload column scanned. Counted here rather than from the
 // decoded values the Linker hands back: those drop each column's keys, braces and separators, and count zero
 // for a column that failed to decode - both wrong for a metric tracking a byte-throughput ceiling.
 func anchorLoader(db sequel.Executor, readBytes *int) staterefs.Loader {
-	return func(ctx context.Context, anchorIDs []int) (map[int]staterefs.Anchor, error) {
-		if len(anchorIDs) == 0 {
-			return nil, nil
+	return func(ctx context.Context, reads []staterefs.Read) (map[int]staterefs.Anchor, error) {
+		var withState, changesOnly []int
+		for _, r := range reads {
+			if r.State {
+				withState = append(withState, r.ID)
+			} else {
+				changesOnly = append(changesOnly, r.ID)
+			}
 		}
-		args := make([]any, len(anchorIDs))
-		for i, id := range anchorIDs {
-			args[i] = id
-		}
-		ph := strings.Repeat("?,", len(anchorIDs)-1) + "?"
-		rows, err := db.QueryContext(ctx,
-			"SELECT step_id, state, changes, state_refs FROM dwarf_steps WHERE step_id IN ("+ph+")",
-			args...,
-		)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		defer rows.Close()
 		fetched := map[int]staterefs.Anchor{}
-		for rows.Next() {
-			var anchorID int
-			var stateJSON, changesJSON, refsJSON []byte
-			if err := rows.Scan(&anchorID, &stateJSON, &changesJSON, &refsJSON); err != nil {
-				return nil, errors.Trace(err)
+		for _, group := range []struct {
+			ids       []int
+			withState bool
+		}{{withState, true}, {changesOnly, false}} {
+			for start := 0; start < len(group.ids); start += anchorChunk {
+				chunk := group.ids[start:min(start+anchorChunk, len(group.ids))]
+				if err := readAnchors(ctx, db, chunk, group.withState, readBytes, fetched); err != nil {
+					return nil, errors.Trace(err)
+				}
 			}
-			*readBytes += len(stateJSON) + len(changesJSON)
-			refs, err := staterefs.Parse(refsJSON)
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
-			anchor := staterefs.Anchor{Refs: refs}
-			// An unreadable column must say so: left undecoded, every field in it reads as "not found".
-			// It is a pure function of stored data, so it is permanent: a persisted write must not retry it, and a
-			// path that terminalizes a flow whatever its state holds must not be stopped by it.
-			if err := decodeAnchorColumn(stateJSON, &anchor.State); err != nil {
-				return nil, errors.Trace(&permanentError{errors.New("anchor step %d: unreadable state: %v", anchorID, err)})
-			}
-			if err := decodeAnchorColumn(changesJSON, &anchor.Changes); err != nil {
-				return nil, errors.Trace(&permanentError{errors.New("anchor step %d: unreadable changes: %v", anchorID, err)})
-			}
-			fetched[anchorID] = anchor
-		}
-		if err := rows.Err(); err != nil {
-			return nil, errors.Trace(err)
 		}
 		return fetched, nil
 	}
+}
+
+// readAnchors reads one chunk of anchor rows into fetched: their changes, and with withState their state and
+// refs too.
+func readAnchors(ctx context.Context, db sequel.Executor, ids []int, withState bool, readBytes *int, fetched map[int]staterefs.Anchor) error {
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	columns := "step_id, changes"
+	if withState {
+		columns = "step_id, changes, state, state_refs"
+	}
+	rows, err := db.QueryContext(ctx,
+		"SELECT "+columns+" FROM dwarf_steps WHERE step_id IN ("+strings.Repeat("?,", len(ids)-1)+"?)",
+		args...,
+	)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var anchorID int
+		var stateJSON, changesJSON, refsJSON []byte
+		dest := []any{&anchorID, &changesJSON}
+		if withState {
+			dest = append(dest, &stateJSON, &refsJSON)
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return errors.Trace(err)
+		}
+		*readBytes += len(stateJSON) + len(changesJSON)
+		refs, err := staterefs.Parse(refsJSON)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		anchor := staterefs.Anchor{Refs: refs}
+		// An unreadable column must say so: left undecoded, every field in it reads as "not found".
+		// It is a pure function of stored data, so it is permanent: a persisted write must not retry it, and a
+		// path that terminalizes a flow whatever its state holds must not be stopped by it.
+		if err := decodeAnchorColumn(stateJSON, &anchor.State); err != nil {
+			return errors.Trace(&permanentError{errors.New("anchor step %d: unreadable state: %v", anchorID, err)})
+		}
+		if err := decodeAnchorColumn(changesJSON, &anchor.Changes); err != nil {
+			return errors.Trace(&permanentError{errors.New("anchor step %d: unreadable changes: %v", anchorID, err)})
+		}
+		fetched[anchorID] = anchor
+	}
+	return errors.Trace(rows.Err())
 }
 
 // resolveStateRefs materializes ref'd fields into state, in place. want, when non-nil, selects which refs to
@@ -172,10 +205,10 @@ func (e *Engine) resolveStateRefs(ctx context.Context, db sequel.Executor, shard
 func (e *Engine) resolveDispatchRefs(ctx context.Context, db sequel.Executor, shardNum int, state workflow.State, refs staterefs.Refs, workflowURL string) (int, error) {
 	var readBytes int
 	load := anchorLoader(db, &readBytes)
-	materialized, err := e.linkerFor(shardNum).ResolveShared(ctx, state, refs, func(ctx context.Context, anchorIDs []int) (map[int]staterefs.Anchor, error) {
+	materialized, err := e.linkerFor(shardNum).ResolveShared(ctx, state, refs, func(ctx context.Context, reads []staterefs.Read) (map[int]staterefs.Anchor, error) {
 		ctx, doneTurn := e.dbTurn(ctx, shardNum)
 		defer doneTurn()
-		return load(ctx, anchorIDs)
+		return load(ctx, reads)
 	})
 	if readBytes > 0 {
 		e.metricStateReadBytes(ctx, workflowURL, "state_ref", readBytes)

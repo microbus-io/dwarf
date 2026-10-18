@@ -119,7 +119,7 @@ func TestLinker_MintTiers(t *testing.T) {
 	mint := func(t *testing.T, state workflow.State, changes workflow.State, inherited Refs, successors int) (workflow.State, Refs) {
 		t.Helper()
 		assert := testarossa.For(t)
-		stateJSON, refsJSON, err := New("sqlite", 1, NewCache(testCacheBytes)).Mint(state, workflow.ChangesOf(changes), inherited, anchor, successors, nil, nil)
+		stateJSON, refsJSON, err := New("sqlite", 1, NewCache(testCacheBytes)).Mint(state, workflow.ChangesOf(changes), inherited, anchor, successors, nil, nil, nil)
 		assert.NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)
@@ -239,7 +239,7 @@ func TestLinker_MintTiers(t *testing.T) {
 		// dangle. Even a huge element stays inline. (The same inlineOnly set carries a cohort member's contribution
 		// past the fan-in's mint, whose bytes are likewise not in the anchor's row.)
 		state := mustState(map[string]any{"item": blob(50000), "doc": blob(50000)})
-		stateJSON, refsJSON, err := New("sqlite", 1, NewCache(testCacheBytes)).Mint(state, workflow.ChangesOf(mustState(map[string]any{})), nil, anchor, 32, map[string]bool{"item": true}, nil)
+		stateJSON, refsJSON, err := New("sqlite", 1, NewCache(testCacheBytes)).Mint(state, workflow.ChangesOf(mustState(map[string]any{})), nil, anchor, 32, map[string]bool{"item": true}, nil, nil)
 		assert.NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)
@@ -265,7 +265,7 @@ func TestLinker_MintTiers(t *testing.T) {
 
 		// PostgreSQL: jsonb stores this array ~4.7x larger than its text length, which the dialect factor
 		// corrects for, so the array refs.
-		stateJSON, refsJSON, err := New("pgx", 1, NewCache(testCacheBytes)).Mint(state, workflow.ChangesOf(mustState(map[string]any{})), nil, anchor, 64, noRef, nil)
+		stateJSON, refsJSON, err := New("pgx", 1, NewCache(testCacheBytes)).Mint(state, workflow.ChangesOf(mustState(map[string]any{})), nil, anchor, 64, noRef, nil, nil)
 		assert.NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)

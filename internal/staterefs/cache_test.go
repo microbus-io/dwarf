@@ -24,6 +24,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -34,7 +35,7 @@ func payload(n int) json.RawMessage {
 
 // charge is what the cache charges an entry of n bytes before any split.
 func charge(n int) int64 {
-	return max(int64(n), minCharge) + entryOverhead
+	return int64(n) + entryOverhead
 }
 
 // TestLinker_CacheBoundedByBytes pins the bound: the cache is charged each field's bytes plus a per-entry
@@ -71,9 +72,10 @@ func TestLinker_CacheBoundedByBytes(t *testing.T) {
 	assert.Equal([]int{1}, anchors.calls[3])
 }
 
-// TestLinker_SmallFieldsChargedTheMinimum pins the minimum charge: a field below it costs the minimum, so a
-// budget holds a quarter as many 1KB fields as their bytes alone would allow.
-func TestLinker_SmallFieldsChargedTheMinimum(t *testing.T) {
+// TestLinker_SmallFieldsChargedTheirBytes pins that a small field is charged its bytes and its overhead and no
+// more: a list caches one entry per contributing step, so a long conversation of small messages is many small
+// entries, and a minimum charge would evict them long before the budget's bytes are used.
+func TestLinker_SmallFieldsChargedTheirBytes(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -82,13 +84,13 @@ func TestLinker_SmallFieldsChargedTheMinimum(t *testing.T) {
 	for id := 1; id <= 8; id++ {
 		anchors.rows[id] = Anchor{Changes: map[string]json.RawMessage{"doc": payload(1024)}}
 	}
-	linker := New("sqlite", 1, NewCache(4*charge(1024)))
+	linker := New("sqlite", 1, NewCache(8*charge(1024)))
 	for id := 1; id <= 8; id++ {
 		_, err := linker.Resolve(ctx, newState(), Refs{"doc": {Anchor: id}}, nil, anchors.load)
 		assert.NoError(err)
 	}
-	assert.Equal(4, linker.cache.Len())
-	assert.Equal(4*charge(1024), linker.cacheBytes())
+	assert.Equal(8, linker.cache.Len())
+	assert.Equal(8*(1024+entryOverhead), int(linker.cacheBytes()))
 }
 
 // TestLinker_FieldLargerThanCacheIsNotCached pins that a field heavier than the whole cache resolves
@@ -118,7 +120,7 @@ func TestLinker_FieldLargerThanCacheIsNotCached(t *testing.T) {
 	// Seeding an oversized field is declined the same way.
 	seeded := newState()
 	seeded.SetJSON("big", payload(20000))
-	linker.Seed(9, seeded, []byte(`{"big":9}`))
+	linker.Seed(9, seeded, workflow.NewChanges(), []byte(`{"big":9}`))
 	assert.Equal(charge(100), linker.cacheBytes())
 }
 
@@ -155,7 +157,7 @@ func TestLinker_SplitChargedToItsArray(t *testing.T) {
 	// Another field pushes the array out, and its split goes with it.
 	_, err = linker.Resolve(ctx, newState(), Refs{"other": {Anchor: 8}}, nil, anchors.load)
 	assert.NoError(err)
-	_, ok := linker.cache.Load(linker.key(7, "pages"))
+	_, ok := linker.cache.Load(linker.key(7, "pages", ColAny))
 	assert.False(ok)
 	assert.Equal(charge(6000), linker.cacheBytes())
 	_, err = linker.Resolve(ctx, newState(), Refs{"page": {Anchor: 7, Field: "pages", Path: []int{0}}}, nil, anchors.load)
@@ -177,7 +179,7 @@ func TestLinker_ArrayAndElementShareOneEntry(t *testing.T) {
 	_, err := linker.Resolve(ctx, newState(), Refs{"pages": {Anchor: 7}, "page": {Anchor: 7, Field: "pages", Path: []int{1}}}, nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal(1, linker.cache.Len())
-	entry, ok := linker.cache.Load(linker.key(7, "pages"))
+	entry, ok := linker.cache.Load(linker.key(7, "pages", ColAny))
 	assert.True(ok)
 	_, ok = entry.splits["pages"]
 	assert.True(ok, "the cached entry holds the split the element was served from")
@@ -186,8 +188,8 @@ func TestLinker_ArrayAndElementShareOneEntry(t *testing.T) {
 	// A later store of the same field keeps the existing entry and its split.
 	seeded := newState()
 	seeded.SetJSON("pages", json.RawMessage(`["a","b","c"]`))
-	linker.Seed(7, seeded, []byte(`{"pages":7}`))
-	again, _ := linker.cache.Load(linker.key(7, "pages"))
+	linker.Seed(7, seeded, workflow.NewChanges(), []byte(`{"pages":7}`))
+	again, _ := linker.cache.Load(linker.key(7, "pages", ColAny))
 	assert.True(again == entry)
 }
 
@@ -206,10 +208,10 @@ func TestLinker_SplitsRaceEviction(t *testing.T) {
 			"pages": json.RawMessage(`[[` + elem + `,` + elem + `],[` + elem + `,` + elem + `]]`),
 		}}
 	}
-	load := func(ctx context.Context, ids []int) (map[int]Anchor, error) {
+	load := func(ctx context.Context, reads []Read) (map[int]Anchor, error) {
 		out := map[int]Anchor{}
-		for _, id := range ids {
-			out[id] = rows[id]
+		for _, r := range reads {
+			out[r.ID] = rows[r.ID]
 		}
 		return out, nil
 	}
@@ -293,9 +295,9 @@ func TestLinker_ShardsShareOneCache(t *testing.T) {
 	// was just read.
 	_, err = two.Resolve(ctx, newState(), Refs{"doc": {Anchor: 8}}, nil, twoRows.load)
 	assert.NoError(err)
-	_, ok := cache.lru.Load(two.key(7, "doc"))
+	_, ok := cache.lru.Load(two.key(7, "doc", ColAny))
 	assert.False(ok)
-	_, ok = cache.lru.Load(one.key(7, "doc"))
+	_, ok = cache.lru.Load(one.key(7, "doc", ColAny))
 	assert.True(ok)
 	assert.Equal(2*charge(size), cache.Bytes())
 }

@@ -24,10 +24,11 @@ for a depth-D branch. An item ref stores the array once: `"<anchor> <field>[<ind
 `{"pages": 1234, "page": "1234 pages[5]"}`. The saving is arithmetic, not empirical: 50% of a fan-out's carried
 input for large elements, `D/(1+D)` for mid-size ones. Task outputs (`changes`) are irreducible.
 
-- **The wire format is owned by `Ref`'s JSON methods.** A plain ref is always a bare JSON number, so a refs
-  column with no item refs is readable by a reader that knows only plain refs. The string form holds an index
-  path of any depth (`"9 data[3][0]"`). Field names cannot hold `[` (`Graph.Validate`'s `isFieldName`), which is
-  what makes the front-to-back parse unambiguous.
+- **The wire format is owned by `Ref`'s JSON methods, and every form shares one grammar** (see "Lists" below for
+  the forms it adds). A plain ref is always a bare JSON number, so a refs column with no other form is readable by
+  a reader that knows only plain refs. The string form holds an index path of any depth (`"9 data[3][0]"`). A field
+  is named only for a `forEach` source array, an identifier (`Graph.Validate`'s `isFieldName`), so no `[`, `;` or
+  space can occur in one - which is what makes the front-to-back parse unambiguous.
 - **A refs column the reader cannot decode is an error, never "no refs".** `Parse` returns one, and dispatch
   fails the step with it (the same path as a ref it cannot resolve). Degrading to no refs instead runs the task
   with every field the column points at missing, and the next mint makes that loss permanent - silent data loss.
@@ -68,7 +69,7 @@ input for large elements, `D/(1+D)` for mid-size ones. Task outputs (`changes`) 
 - **Nested fan-outs.** An inner forEach over a separately computed array (the doc -> pages -> chunks shape) is an
   ordinary one-level item ref into the step that computed it, and the outer element rides into the inner
   branches as the outer branch's item ref. An inner forEach over the outer element itself extends the path (above).
-  `element` walks the path level by level, keeping each level's split in the array's cache entry under the
+  `pick` walks the path level by level, keeping each level's split in the array's cache entry under the
   path to it (`data`, then `data[3]`), so each inner array is split once per cohort. Why the split lives
   in the entry is in "The resolve cache is sized in bytes" below.
 - **Fidelity depends on how the element was stored.** Resolving from the array's stored bytes returns an integer
@@ -80,6 +81,42 @@ input for large elements, `D/(1+D)` for mid-size ones. Task outputs (`changes`) 
 - **Pinned by** `TestRef_WireFormat`, `TestLinker_MintItem`, `TestLinker_ResolveItem`,
   `TestLinker_ResolveNestedItem`, `TestSplitArray`, and against a real database `engine/itemref_test.go`
   (storage shape at every branch step, nested and 2D fan-outs, a failed fan-out, `Fork`, the shared-`as` strip).
+
+## Lists: a folded field stored by its elements
+
+A field a reducer appends to (`append`, `union`) holds a value that exists in no row: not in the folding step's
+`state`, which predates the fold, nor its `changes`, which hold the contribution. Stored inline in every
+successor, a loop adding one element per step stores n²/2 elements. Past the bar `Mint` stores it as a **list**
+instead - entries naming the rows that already hold its elements - given a `Fold` per field describing what the
+step did (the base's length, a spread or single contribution, an overwrite, the ranges a union kept).
+
+| ref | meaning |
+|---|---|
+| `1234` | the field at 1234: `changes` (`F!`, then `F`), else `state` |
+| `1234s` / `1234c` | the same, from that column only |
+| `1234 pages[5]` | element 5 of `pages` at 1234 |
+| `1234c[0:2]` / `1234c[3:]` | elements 0-1 / 3 to the end of this field in 1234's `changes` (Go slices) |
+| `s[1]` | element 1 of this field in THIS step's own `state` (lists only) |
+| `1201s[:2];1202c[:2];1204c` | a list: entries concatenated; an entry without a range is one element |
+| `1204c;` | a list of one entry |
+
+- **One string per list, not JSON arrays.** `jsonb` spends ~4 bytes of entry header per array element and widens
+  every number to `numeric`: six entries took 294 bytes as integer arrays against 68 as one string, measured on
+  Postgres 18. The lists are the part that still grows n² (each step stores its whole list), so this is the
+  constant on it - ~11 bytes per contributing step.
+- **No letter keeps the whole-field lookup; ranges name their column.** A step that received a field inline in
+  `state` and contributed to it in `changes` holds both, and only a range must choose.
+- **A self entry (`s[...]`) is rewritten to name its step when the list is carried** (`Ref.carried`), so an
+  element stored inline is stored once and refs stay one hop. Never plain-ref a list field: that step's `state`
+  holds only its inline elements, a fragment.
+- **The count is checked, not trusted.** `foldList` declines - the field stays inline - unless its entries account
+  for exactly the folded value's elements; a disagreement would drop or repeat elements silently. That is why the
+  mint writes explicit range ends: `mintItem` places a `forEach` element in a list by entry lengths, and an open
+  end has none.
+- **A list neither counts toward `maxAnchors` nor is inlined by it**: it names an anchor per contributing step by
+  design, and a cold read of it is one chunked query, after which the cache serves the steps that follow.
+- Pinned by `TestRef_Grammar`, `TestLinker_ResolveList`, `TestLinker_MintFoldList`,
+  `TestLinker_MintItemThroughList`, `TestLinker_SeedList`, `TestInlineExcessAnchors_SkipsLists`.
 
 ## The shape: resolve once at dispatch, mint once at the successor write
 
@@ -144,8 +181,9 @@ the completion pushes the row past 2KB and TOAST moves a third copy.
 - **`Seed` needs the anchor's own payload committed** - the completion write, which precedes `Mint`. The
   engine seeds only after the transition commits, because that is where the successors exist, ahead of the
   doorbell; a transition that rolled back left no successor and seeds nothing.
-- **It seeds plain refs at the dispatched step only.** An inherited ref points at an earlier anchor, and an
-  item ref is served from its array's entry (`element` splits the cached bytes). The engine seeds from the
+- **It seeds plain refs at the dispatched step, and a list's entries reading that step's `changes`** (the
+  contribution, from the changes `Mint` was given). An inherited ref points at an earlier anchor, and an item ref
+  is served from its array's entry (`pick` splits the cached bytes). The engine seeds from the
   linear mint; where a forEach branch's mint anchors what the linear one inlined (a nested forEach sharing
   `as` can push the linear mint past `maxAnchors`), the branch's resolve misses.
 - **The seed hides the read path from a single-engine test.** Every resolve hits, so a regression in
@@ -251,7 +289,13 @@ flow and a flow never crosses a shard, which is what makes a same-connection rea
 It takes **every anchor at once** because the free tier is priced on exactly that: "an already-fetched row's
 other fields are free" is only true if k anchors cost one round trip rather than k. A per-id loader would make
 the per-anchor SUM test in `Mint` price something the reader does not do. Pinned by
-`TestLinker_ResolveOneRoundTripPerBatch`. A `ResolveShared` that waited on another read makes no call when
+`TestLinker_ResolveOneRoundTripPerBatch`.
+
+**Each `Read` names the columns it needs.** A list's entries mostly read a contribution from `changes`, and that
+step's `state` holds its own list, so reading `state` too makes a cold read of a long list cost the square of its
+length. The engine's loader therefore makes up to two queries (anchors needing `state`, anchors needing only
+`changes`), each chunked at 512 ids for SQL Server's 2,100-parameter ceiling. Pinned by
+`TestLinker_ResolveList`. A `ResolveShared` that waited on another read makes no call when
 that read delivered, and a second call only when it failed.
 
 ## Two byte counts, and they are not interchangeable
@@ -314,12 +358,12 @@ else 1 GiB (`engine/staterefs.go` `stateCacheBudget`).
   count, and a cache that fills in about a minute at saturation holds that whole amount whatever the workload
   has in flight. Under a count bound, the in-flight state gauge (`dwarf_state_in_flight_bytes`) reads megabytes
   while the heap is tens of gigabytes, so an in-flight cap would never fire. The cache is where the memory is.
-- **The count cap and the 4 KB minimum charge are for the small fields, which are the many.** The linear
-  threshold sits at 1 KB, a fan-out's bar falls to tens of bytes, and `Seed` caches every anchored field, so a
-  budget of gigabytes in bytes alone would hold millions of entries, each a handful of objects the garbage
-  collector marks every cycle. The minimum charge holds a quarter as many 1 KB fields; the cap bounds the count
-  outright. `entryOverhead` only keeps the byte count honest. Whether the GC cost of many small entries matters
-  at all is unmeasured. Pinned by `TestLinker_SmallFieldsChargedTheMinimum`.
+- **An entry is charged its bytes plus `entryOverhead` (256, its real memory), with no minimum.** A list caches
+  one entry per contributing step, so a long conversation of small messages is many small entries, and a 4 KB
+  minimum charge evicted them long before the budget's bytes were used. The entry cap (1,048,576) sits high enough
+  that bytes bind: at a 1 GiB budget, 1 KB entries with their overhead come to ~800k. Each entry is a handful of
+  objects the garbage collector marks every cycle; whether that cost matters is unmeasured - read GC% on the bench
+  `loop` workload before lowering the cap. Pinned by `TestLinker_SmallFieldsChargedTheirBytes`.
 - **Expiry is by idleness, not age.** A carried ref is resolved again at every dispatch of its flow, so a field
   stays cached as long as its flow keeps moving, however long the flow lives; an idle one leaves after 5
   minutes. In idle mode the LRU list is also in order of last use, so `lru.evict` drops expired entries from the

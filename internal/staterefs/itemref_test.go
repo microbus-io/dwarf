@@ -60,7 +60,7 @@ func TestRef_WireFormat(t *testing.T) {
 		assert.Nil(refs)
 	}
 
-	for _, bad := range []string{`""`, `"data[1]"`, `"x data[1]"`, `"0 data[1]"`, `"9 [1]"`, `"9 data[1"`, `"9 data[-1]"`, `"9 data[1]x"`, `"9 data[]"`, `true`} {
+	for _, bad := range []string{`""`, `"data[1]"`, `"x data[1]"`, `"0 data[1]"`, `"9 data[1"`, `"9 data[-1]"`, `"9 data[1]x"`, `"9 data[]"`, `true`} {
 		var r Ref
 		assert.Error(json.Unmarshal([]byte(bad), &r), bad)
 	}
@@ -86,7 +86,7 @@ func TestLinker_MintItem(t *testing.T) {
 	mint := func(t *testing.T, merged workflow.State, inherited Refs, item *Item) (workflow.State, Refs) {
 		t.Helper()
 		assert := testarossa.For(t)
-		stateJSON, refsJSON, err := New("sqlite", 1, NewCache(testCacheBytes)).Mint(merged, workflow.NewChanges(), inherited, anchor, width, ordinals, item)
+		stateJSON, refsJSON, err := New("sqlite", 1, NewCache(testCacheBytes)).Mint(merged, workflow.NewChanges(), inherited, anchor, width, ordinals, item, nil)
 		assert.NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)
@@ -128,7 +128,7 @@ func TestLinker_MintItem(t *testing.T) {
 		// A narrow fan-out of a small array: the array stays inline, so there is no anchor to point into.
 		few := []any{map[string]any{"text": blob(150)}, map[string]any{"text": blob(150)}}
 		merged := mustState(map[string]any{"items": few, "item": few[1]})
-		stateJSON, refsJSON, err := New("sqlite", 1, NewCache(testCacheBytes)).Mint(merged, workflow.NewChanges(), nil, anchor, 2, nil, &Item{Key: "item", Source: "items", Index: 1})
+		stateJSON, refsJSON, err := New("sqlite", 1, NewCache(testCacheBytes)).Mint(merged, workflow.NewChanges(), nil, anchor, 2, nil, &Item{Key: "item", Source: "items", Index: 1}, nil)
 		assert.NoError(err)
 		refs := mustParse(refsJSON)
 		assert.NotContains(refs, "items")
@@ -282,7 +282,7 @@ func TestLinker_ResolveNestedItem(t *testing.T) {
 		assert.Equal(`{"x":`+c.want+`}`, string(flat), c.path)
 	}
 	assert.Equal(1, len(anchors.calls))
-	entry, ok := linker.cache.Load(linker.key(7, "data"))
+	entry, ok := linker.cache.Load(linker.key(7, "data", ColAny))
 	assert.True(ok)
 	_, ok = entry.splits["data[1][1]"]
 	assert.True(ok, "each level's split is kept in the array's entry under the path to it")

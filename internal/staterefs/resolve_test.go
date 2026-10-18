@@ -38,11 +38,16 @@ const testCacheBytes = 1 << 20
 type fakeAnchors struct {
 	rows  map[int]Anchor
 	calls [][]int
+	reads []Read
 }
 
-func (f *fakeAnchors) load(ctx context.Context, anchorIDs []int) (map[int]Anchor, error) {
-	ids := append([]int(nil), anchorIDs...)
+func (f *fakeAnchors) load(ctx context.Context, reads []Read) (map[int]Anchor, error) {
+	ids := make([]int, len(reads))
+	for i, r := range reads {
+		ids[i] = r.ID
+	}
 	f.calls = append(f.calls, ids)
+	f.reads = append(f.reads, reads...)
 	out := map[int]Anchor{}
 	for _, id := range ids {
 		if row, ok := f.rows[id]; ok {
@@ -254,7 +259,7 @@ func TestLinker_ConcurrentMissesReadOnce(t *testing.T) {
 	var mu sync.Mutex
 	reads, failFirst := 0, false
 	release := make(chan struct{})
-	slow := func(ctx context.Context, anchorIDs []int) (map[int]Anchor, error) {
+	slow := func(ctx context.Context, _ []Read) (map[int]Anchor, error) {
 		mu.Lock()
 		reads++
 		fail := failFirst && reads == 1
@@ -348,14 +353,14 @@ func TestLinker_SeedServesTheMintedAnchor(t *testing.T) {
 		"small":   "s",
 	})
 	changes := workflow.ChangesOf(mustState(map[string]any{"doc": blob(2048), "pages": []any{blob(600), blob(600)}}))
-	_, refsJSON, err := linker.Mint(merged, changes, Refs{"carried": {Anchor: 7}}, anchor, 1, nil, nil)
+	_, refsJSON, err := linker.Mint(merged, changes, Refs{"carried": {Anchor: 7}}, anchor, 1, nil, nil, nil)
 	assert.NoError(err)
 	refs := mustParse(refsJSON)
 	assert.Equal(anchor, refs["doc"].Anchor)
 	assert.Equal(anchor, refs["pages"].Anchor)
 	assert.Equal(7, refs["carried"].Anchor)
 
-	linker.Seed(anchor, merged, refsJSON)
+	linker.Seed(anchor, merged, workflow.NewChanges(), refsJSON)
 
 	anchors := &fakeAnchors{rows: map[int]Anchor{}}
 	state := newState()
@@ -377,8 +382,8 @@ func TestLinker_SeedServesTheMintedAnchor(t *testing.T) {
 	assert.Len(anchors.calls, 1)
 
 	// Nothing to seed is a no-op, malformed refs included.
-	linker.Seed(anchor, merged, []byte("{}"))
-	linker.Seed(anchor, merged, []byte("not json"))
+	linker.Seed(anchor, merged, workflow.NewChanges(), []byte("{}"))
+	linker.Seed(anchor, merged, workflow.NewChanges(), []byte("not json"))
 }
 
 // TestLinker_ResolveRefusesAZeroState pins that refs with no state to resolve into are an error: a state that
@@ -386,7 +391,7 @@ func TestLinker_SeedServesTheMintedAnchor(t *testing.T) {
 func TestLinker_ResolveRefusesAZeroState(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	load := func(ctx context.Context, ids []int) (map[int]Anchor, error) {
+	load := func(ctx context.Context, reads []Read) (map[int]Anchor, error) {
 		return map[int]Anchor{7: {State: map[string]json.RawMessage{"doc": json.RawMessage(`"d"`)}}}, nil
 	}
 	_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(context.Background(), workflow.State{}, Refs{"doc": {Anchor: 7}}, nil, load)

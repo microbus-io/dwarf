@@ -81,7 +81,8 @@ func TestBacklogSQL_UsesTheDueIndex(t *testing.T) {
 			if err := rows.Scan(ptrs...); err != nil {
 				return err
 			}
-			plan.WriteString(fmt.Sprint(vals...) + "\n")
+			plan.WriteString(fmt.Sprint(vals...))
+			plan.WriteString("\n")
 		}
 		if err := rows.Err(); err != nil {
 			return err
