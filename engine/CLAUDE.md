@@ -376,8 +376,11 @@ one (`flowErrorText`), whose explanation is its `cancel_reason` - as a terminate
 *`subgraph_error` holds the delivered error's `TracedError` JSON, stack stripped, not its message*, and
 `flow.Subgraph` decodes it. That is what carries the cancellation marker across the boundary - a cancelled child
 reaches its caller as an error `IsCancelled` recognizes, so a caller that returns it resolves `cancelled` - and
-it keeps a real child error's status code and properties, which a bare message lost. A value that is not such
-JSON decodes as a bare message.
+it keeps a real child error's status code and properties, which a bare message lost. The column is a JSON
+column, `{}` for no error (`subgraphErrorText` maps it to none at the claim); its writer, inside the child's
+terminating transaction, keeps only the message and status code when the properties would make the JSON
+unstorable (over the payload limit, or holding a NUL a JSONB column refuses), since a failure write that cannot
+land is read by the classifier as the database being down.
 
 **Never pass a stored or operator-supplied string as `errors.New`'s pattern.** It counts every `%` as a format
 verb consuming a trailing argument, so `errors.New(msg, errors.StatusCode)`-style calls silently lose the status

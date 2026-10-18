@@ -400,7 +400,7 @@ Tasks signal the engine via control methods on the `Flow` carrier (distinct from
   maxIntervalDelay)`, merging `state + changes` back into `state` so the task sees its prior output. `flow.Retry`
   rewinds the step row in place (it is task-initiated, while the flow is still `running` - distinct from `Fork`, which
   clones a *terminal* flow into a new one). **A retry clears the park
-  slot** (`interrupt_done`/`subgraph_done` -> 0, `resume_data`/`subgraph_result` -> `'{}'`, `subgraph_error` -> `''`),
+  slot** (`interrupt_done`/`subgraph_done` -> 0, `resume_data`/`subgraph_result`/`subgraph_error` -> `'{}'`),
   so a retry after a resolved `flow.Subgraph` re-runs the child and after a resolved `flow.Interrupt` re-interrupts.
   **A retry of a step that launched a subgraph reaps the prior attempt's child flow, recursively, in the same
   transaction as the rewind** (`deleteSubgraphFlowsRootedAt(stepID)`). The child is always *terminal* at retry time

@@ -91,7 +91,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `resume_data` | JSON inbound payload recorded by `Resume`; returned by `flow.Interrupt` on re-dispatch. `'{}'` until resumed |
 | `subgraph_done` | `1` once a `flow.Subgraph` park resolved; drives `flow.Subgraph`'s return-vs-arm decision. A retry clears it to re-run the child |
 | `subgraph_result` | JSON child `final_state` returned by `flow.Subgraph`. `'{}'` until resolved |
-| `subgraph_error` | child error text for a failed `flow.Subgraph` park, returned as the `err`. `''` when none |
+| `subgraph_error` | JSON: the child's error as `TracedError` JSON (status code and properties kept, a cancellation marker among them) for a failed `flow.Subgraph` park, returned as the `err`. `'{}'` when none, which the claim read maps to no error (`subgraphErrorText`) |
 | `status` | Step lifecycle: `created`/`pending`/`running`/`interrupted`/`completed`/`failed`/`terminated`/`cancelled` |
 | `error` | Error text when `failed`; `''` otherwise |
 | `time_budget_ms` | Execution budget; the deadline on the `ExecuteTask` call context. Denormalized from the flow's `time_budget_ms` at step insert (frozen, not the live config), and also self-referenced in the claim CAS to size the crash-recovery lease (`time_budget_ms + leaseMargin`) |
@@ -412,10 +412,10 @@ must apply the same treatment.
 
 ### Payload columns are binary on SQL Server, and every payload bind is a Go `[]byte`
 
-On the `-- DRIVER: mssql` blocks the ten JSON payload columns - `dwarf_flows.graph`/`baggage`/`final_state` and
-`dwarf_steps.state`/`changes`/`interrupt_payload`/`state_refs`/`state_reduced`/`resume_data`/`subgraph_result` - are
-**`VARBINARY(MAX) NOT NULL DEFAULT 0x7B7D`** (`0x7B7D` is `{}`), not `NVARCHAR(MAX)`. The genuinely-textual columns
-(`error`, `subgraph_error`, `cancel_reason`, `workflow_url`, `workflow_name`, `task_name`, `task_url`,
+On the `-- DRIVER: mssql` blocks the eleven JSON payload columns - `dwarf_flows.graph`/`baggage`/`final_state` and
+`dwarf_steps.state`/`changes`/`interrupt_payload`/`state_refs`/`state_reduced`/`resume_data`/`subgraph_result`/
+`subgraph_error` - are **`VARBINARY(MAX) NOT NULL DEFAULT 0x7B7D`** (`0x7B7D` is `{}`), not `NVARCHAR(MAX)`. The
+genuinely-textual columns (`error`, `cancel_reason`, `workflow_url`, `workflow_name`, `task_name`, `task_url`,
 `fairness_key`, `status`, the tokens, `trace_parent`) stay `NVARCHAR`/`NCHAR` - they are compared, searched, and read
 by humans.
 

@@ -344,7 +344,8 @@ func TestWedgeSweep_ChildLiveAgainIsLeftAlone(t *testing.T) {
 	}
 
 	// The caller is untouched: still parked, nothing delivered to it.
-	var status, subgraphErr string
+	var status string
+	var subgraphErr []byte
 	var parked, subgraphDone int
 	err = db.QueryRowContext(ctx, "SELECT status, parked, subgraph_done, subgraph_error FROM dwarf_steps WHERE step_id=?", callerStepID).
 		Scan(&status, &parked, &subgraphDone, &subgraphErr)
@@ -352,7 +353,7 @@ func TestWedgeSweep_ChildLiveAgainIsLeftAlone(t *testing.T) {
 		assert.Equal(workflow.StatusRunning, status)
 		assert.Equal(parkedSubgraph, parked)
 		assert.Equal(0, subgraphDone)
-		assert.Equal("", subgraphErr)
+		assert.Equal("", subgraphErrorText(subgraphErr))
 	}
 
 	// And the flow finishes normally once its child does.

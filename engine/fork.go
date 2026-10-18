@@ -652,8 +652,8 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		if isLeafFlow && rewind == cc.leafStepID {
 			// Leaf fork step: merged input, cleared output/park/cohort, gated `created`.
 			_, err = tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, parked=?, state=?, state_refs=?, state_reduced=?, changes=?, error='', attempt=0, interrupt_done=0, resume_data=?, subgraph_done=0, subgraph_result=?, subgraph_error='', successor_id=0, cohort_size=0, cohort_arrivals=0, cohort_failures=0, cohort_cancellations=0, not_before=NOW_UTC(), lease_expires=NOW_UTC(), created_at=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
-				workflow.StatusCreated, parkedNone, cc.mergedLeafState, emptyJSON, cc.leafReduced, emptyJSON, emptyJSON, emptyJSON, newRewindID,
+				"UPDATE dwarf_steps SET status=?, parked=?, state=?, state_refs=?, state_reduced=?, changes=?, error='', attempt=0, interrupt_done=0, resume_data=?, subgraph_done=0, subgraph_result=?, subgraph_error=?, successor_id=0, cohort_size=0, cohort_arrivals=0, cohort_failures=0, cohort_cancellations=0, not_before=NOW_UTC(), lease_expires=NOW_UTC(), created_at=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
+				workflow.StatusCreated, parkedNone, cc.mergedLeafState, emptyJSON, cc.leafReduced, emptyJSON, emptyJSON, emptyJSON, emptyJSON, newRewindID,
 			)
 			cc.newLeafStepID = newRewindID
 		} else {
@@ -661,8 +661,8 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 			// Its changes are cleared: the revived run re-executes the task from the top, so keeping the
 			// origin's changes as prior changes would fold every post-Subgraph contribution twice.
 			_, err = tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, parked=?, changes=?, subgraph_done=0, subgraph_result=?, subgraph_error='', successor_id=0, error='', not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
-				workflow.StatusRunning, parkedSubgraph, emptyJSON, emptyJSON, newRewindID,
+				"UPDATE dwarf_steps SET status=?, parked=?, changes=?, subgraph_done=0, subgraph_result=?, subgraph_error=?, successor_id=0, error='', not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
+				workflow.StatusRunning, parkedSubgraph, emptyJSON, emptyJSON, emptyJSON, newRewindID,
 			)
 		}
 		if err != nil {

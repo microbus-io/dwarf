@@ -823,11 +823,11 @@ func TestFailStep_HeldStates(t *testing.T) {
 				assert.Equal(flowStatus, gotFlowStatus)
 			case tc.row.flowStatus == workflow.StatusCompleted:
 				assert.Equal(workflow.StatusCompleted, gotFlowStatus, "a completed flow keeps its outcome")
-				var parentErr string
+				var parentErr []byte
 				var parked int
-				assert.NoError(db.QueryRowContext(ctx, "SELECT parked, COALESCE(subgraph_error, '') FROM dwarf_steps WHERE step_id=1").Scan(&parked, &parentErr))
+				assert.NoError(db.QueryRowContext(ctx, "SELECT parked, subgraph_error FROM dwarf_steps WHERE step_id=1").Scan(&parked, &parentErr))
 				assert.Equal(parkedSubgraph, parked, "no failure is delivered to the parent of a completed child")
-				assert.Equal("", parentErr)
+				assert.Equal("", subgraphErrorText(parentErr))
 			default:
 				assert.Equal(workflow.StatusFailed, stepStatus)
 				assert.Equal(workflow.StatusFailed, gotFlowStatus)

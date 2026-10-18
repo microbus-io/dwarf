@@ -72,7 +72,7 @@ type claimRow struct {
 	resumeDataJSON                             []byte
 	subgraphDone                               bool
 	subgraphResultJSON                         []byte
-	subgraphErrorStr                           string
+	subgraphErrorJSON                          []byte
 	stepCreatedAt                              time.Time
 	leaseSeq, fanOutOrdinal                    int
 	stepCancelling, replaying                  bool
@@ -104,7 +104,7 @@ func (r *claimRow) destinations() (step, flow []any) {
 	r.dest = [claimStepCols + claimFlowCols]any{
 		&r.stepDepth, &r.taskName, &r.stepToken, &r.stateJSON, &r.priorChangesJSON, &r.stateRefsJSON, &r.attempt,
 		&r.lineageID, &r.flowID, &r.timeBudgetMs, &r.interruptDone, &r.resumeDataJSON, &r.subgraphDone,
-		&r.subgraphResultJSON, &r.subgraphErrorStr, &r.stepCreatedAt, &r.leaseSeq, &r.fanOutOrdinal,
+		&r.subgraphResultJSON, &r.subgraphErrorJSON, &r.stepCreatedAt, &r.leaseSeq, &r.fanOutOrdinal,
 		&r.stepCancelling, &r.replaying, &r.replayGoto, &r.replaySleepLeftMs, &r.replayOnError, &r.payloadDeferrals,
 		&r.flowToken, &r.flowStatus, &r.workflowURL, &r.baggageJSON, &r.traceParent, &r.flowCreatedAt,
 		&r.flowUpdatedAt, &r.flowPriority, &r.flowFairnessKey, &r.flowFairnessWeight, &r.flowTimeBudgetMs,
@@ -232,7 +232,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	var resumeDataJSON []byte
 	var subgraphDone bool
 	var subgraphResultJSON []byte
-	var subgraphErrorStr string
+	var subgraphErrorJSON []byte
 	var stepCreatedAt time.Time
 	var stateRefsJSON []byte
 	// stepCancelling is this step's own Cancel mark as of the claim.
@@ -339,7 +339,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	stateJSON, priorChangesJSON, stateRefsJSON = row.stateJSON, row.priorChangesJSON, row.stateRefsJSON
 	attempt, lineageID, flowID, timeBudgetMs = row.attempt, row.lineageID, row.flowID, row.timeBudgetMs
 	interruptDone, resumeDataJSON = row.interruptDone, row.resumeDataJSON
-	subgraphDone, subgraphResultJSON, subgraphErrorStr = row.subgraphDone, row.subgraphResultJSON, row.subgraphErrorStr
+	subgraphDone, subgraphResultJSON, subgraphErrorJSON = row.subgraphDone, row.subgraphResultJSON, row.subgraphErrorJSON
 	stepCreatedAt, leaseSeq, fanOutOrdinal = row.stepCreatedAt, row.leaseSeq, row.fanOutOrdinal
 	stepCancelling, replaying, replayGoto = row.stepCancelling, row.replaying, row.replayGoto
 	replaySleepLeftMs, replayOnError = row.replaySleepLeftMs, row.replayOnError
@@ -519,7 +519,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		if derr != nil {
 			sideErr = errors.New("unreadable subgraph result: %v", derr)
 		}
-		flow.SetSubgraphResolution(subgraphResult, subgraphErrorStr)
+		flow.SetSubgraphResolution(subgraphResult, subgraphErrorText(subgraphErrorJSON))
 	}
 	baggage, derr := workflow.NewState(baggageJSON)
 	if derr != nil && sideErr == nil {
@@ -926,8 +926,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			return db.Transact(ctx, func(tx *sequel.Tx) error {
 				rewound = false
 				res, execErr := tx.ExecContext(ctx,
-					"UPDATE dwarf_steps SET status=?, changes=?, attempt=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), lease_expires=NOW_UTC(), updated_at=NOW_UTC(), interrupt_done=0, resume_data=?, subgraph_done=0, subgraph_result=?, subgraph_error='' WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND lease_seq=?",
-					workflow.StatusPending, changesJSON, attempt+1, retrySleepMs, emptyJSON, emptyJSON, stepID, leaseSeq,
+					"UPDATE dwarf_steps SET status=?, changes=?, attempt=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), lease_expires=NOW_UTC(), updated_at=NOW_UTC(), interrupt_done=0, resume_data=?, subgraph_done=0, subgraph_result=?, subgraph_error=? WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND lease_seq=?",
+					workflow.StatusPending, changesJSON, attempt+1, retrySleepMs, emptyJSON, emptyJSON, emptyJSON, stepID, leaseSeq,
 				)
 				if execErr != nil {
 					return errors.Trace(execErr)
