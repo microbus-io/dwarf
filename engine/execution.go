@@ -1669,7 +1669,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 						// The cohort fully resolved here (this branch completed last), so every sibling has
 						// settled - nothing is stranded.
 						var parentStepID int
-						tx.QueryRowContext(ctx, "SELECT surgraph_step_id FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&parentStepID)
+						if rerr := tx.QueryRowContext(ctx, "SELECT surgraph_step_id FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&parentStepID); rerr != nil {
+							return errors.Trace(rerr)
+						}
 						var lerr error
 						loss, lerr = e.failFlowTx(ctx, tx, shardNum, flowID, flowCancelled, nil, parentStepID, 0)
 						if lerr != nil {
