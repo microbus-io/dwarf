@@ -213,6 +213,10 @@ Operational traps on Cloud SQL + GCE, each of which has cost a run.
   Judge such an arm on steps/s, flows/s against the commanded rate, and `maxOutstandingObserved`.
 - **`INTERNAL_ERROR` on `gcloud sql instances create` can be partial:** the instance is created and reaches
   `RUNNABLE` while the command fails. Wait for `RUNNABLE` and carry on; do not create a second instance.
+- **Never rewrite a rig script in place while a rig is running it.** Bash reads a script as it executes, so
+  truncating and rewriting the same file (an editor's save, `open(p, 'w')`) hands every running copy garbage at
+  its current offset: three rigs died at once mid-provision that way, each tearing itself down. Write a new file
+  and rename it over the old one (`sed -i` does), or copy the kit before changing it.
 - **`pkill -f`/`pgrep -f` over ssh match their own command line**, so a poll for a finished driver reads it as
   running forever. Match the binary's exact name (`-x`), or poll a marker file the driver writes.
 - **`DROP DATABASE` needs `WITH (FORCE)` after engines are killed** - their connections outlive the process
