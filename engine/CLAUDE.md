@@ -1435,7 +1435,9 @@ and `TestChanges_ErrorRouteComposesThroughTheReducers`, each failing with its si
 
 - **The `changes` column is `workflow.Changes` JSON** - contributions under their names, overwrites under
   `name!`, additions under `name+` (`workflow/CLAUDE.md`). Read it with `changesOf`, never `workflow.NewState`: a
-  plain decode reads an overwrite as a field named `name!`. Write it with `json.Marshal`. The state-refs anchor
+  plain decode reads an overwrite as a field named `name!`. An unreadable column is a `permanentError`, never no
+  changes: read as none, every fold, final state and re-dispatch built from it drops the step's writes silently
+  (`TestChanges_UnreadableColumnIsAnErrorNotNoChanges`). Write it with `json.Marshal`. The state-refs anchor
   loader is the one raw reader, and `internal/staterefs` looks up `field!` before `field` (and `field+` for a list
   entry reading `changes`).
 - **A task's result is checked, not trusted** (`checkChanges`): no name ending with either suffix, no overwrite

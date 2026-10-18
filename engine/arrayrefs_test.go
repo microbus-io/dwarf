@@ -349,7 +349,9 @@ func TestArrayRefs_ReplaceLoopStoresOnlyWhatEachStepAdds(t *testing.T) {
 		db, _ := e.db.Shard(1)
 		var changesJSON []byte
 		assert.NoError(db.QueryRowContext(ctx, "SELECT changes FROM dwarf_steps WHERE step_id=?", stepID).Scan(&changesJSON))
-		return changesOf(changesJSON)
+		c, err := changesOf(changesJSON)
+		assert.NoError(err)
+		return c
 	}
 
 	for _, r := range rows {

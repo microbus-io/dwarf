@@ -463,6 +463,12 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// and a wait on another dispatch's read touch no connection and queue for nothing.
 		refBytes, err = e.resolveDispatchRefs(ctx, db, shardNum, state, inheritedRefs, workflowURL)
 	}
+	// Unreadable prior changes fail the step too: running the task without its earlier runs' writes would
+	// lose them silently.
+	var priorChanges workflow.Changes
+	if err == nil {
+		priorChanges, err = changesOf(priorChangesJSON)
+	}
 	if err != nil {
 		// Its own turn, for the reason above: still the entry phase, so nothing covers this transaction.
 		fctx, doneTurn := e.dbTurn(ctx, shardNum)
@@ -470,7 +476,6 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		doneTurn()
 		return errors.Trace(err)
 	}
-	priorChanges := changesOf(priorChangesJSON)
 	// The carrier's view is the step's input with the changes of its earlier runs (a Retry, a resumed
 	// Interrupt, a Subgraph re-entry) folded in through the reducers, and its changes are those runs' delta: a
 	// step is one unit of work however many times its task runs, so this run's writes compose onto theirs.
@@ -2081,7 +2086,10 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		if serr != nil {
 			return errors.Trace(&permanentError{serr})
 		}
-		ourChanges := changesOf(ourChangesJSON)
+		ourChanges, cerr := changesOf(ourChangesJSON)
+		if cerr != nil {
+			return errors.Trace(cerr)
+		}
 		ourRefs, rerr := staterefs.Parse(ourRefsJSON)
 		if rerr != nil {
 			return errors.Trace(&permanentError{rerr})
@@ -2215,7 +2223,9 @@ func queueCohortRead(b *txBatch, flowID, cohortSpawnID int, c *cohortRead) {
 			}
 			c.changesRead += len(changesJSON)
 			if m.completed = status == workflow.StatusCompleted; m.completed {
-				m.changes = changesOf(changesJSON)
+				if m.changes, err = changesOf(changesJSON); err != nil {
+					return errors.Trace(err)
+				}
 			}
 			c.members = append(c.members, m)
 		}
@@ -2269,7 +2279,10 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 	if err != nil {
 		return row, 0, nil, bytes, errors.Trace(&permanentError{err})
 	}
-	spawnChanges := changesOf(c.spawnChangesJSON)
+	spawnChanges, err := changesOf(c.spawnChangesJSON)
+	if err != nil {
+		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(err)
+	}
 	spawnRefs, err := staterefs.Parse(c.spawnRefsJSON)
 	if err != nil {
 		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(&permanentError{err})

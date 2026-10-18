@@ -27,13 +27,15 @@ import (
 	"github.com/microbus-io/errors"
 )
 
-// changesOf decodes a changes column. An unreadable column reads as no changes, as a state column does.
-func changesOf(data []byte) workflow.Changes {
+// changesOf decodes a changes column. An empty or null column is no changes; an unreadable one is an error, never
+// read as no changes, which would drop the step's writes silently from everything folded from it. The error is a
+// permanentError: the stored bytes will not decode on a retry either.
+func changesOf(data []byte) (workflow.Changes, error) {
 	var c workflow.Changes
 	if err := c.UnmarshalJSON(data); err != nil {
-		return workflow.NewChanges()
+		return workflow.NewChanges(), errors.Trace(&permanentError{errors.New("unreadable changes column: %v", err)})
 	}
-	return c
+	return c, nil
 }
 
 // checkChanges checks what a task wrote, which is untrusted. A reduced field may not be overwritten or deleted

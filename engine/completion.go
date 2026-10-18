@@ -233,7 +233,9 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, sha
 	}
 	changes := make([]workflow.Changes, len(t.changes))
 	for i, c := range t.changes {
-		changes[i] = changesOf(c)
+		if changes[i], err = changesOf(c); err != nil {
+			return workflow.State{}, errors.Trace(err)
+		}
 	}
 	// FLATTEN: final_state is a flow-boundary value (a dwarf_flows column that Continue feeds into the next
 	// turn, and that outlives this flow's steps - DeleteOnCompletion may reap them). A ref that escaped the
@@ -400,7 +402,10 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 	if err != nil {
 		return workflow.State{}, errors.Trace(&permanentError{err})
 	}
-	spawnChanges := changesOf(spawnChangesJSON)
+	spawnChanges, err := changesOf(spawnChangesJSON)
+	if err != nil {
+		return workflow.State{}, errors.Trace(err)
+	}
 	// FLATTEN: final_state is a flow-boundary value, so everything the spawn carried by reference is materialized
 	// here - unlike the fan-in, which may pass a carried ref through. resolveStateRefs mutates the map in place.
 	spawnRefs, err := staterefs.Parse(spawnRefsJSON)
@@ -459,7 +464,11 @@ func (e *Engine) simulatedFanInPart(ctx context.Context, db sequel.Executor, sha
 		return workflow.Changes{}, errors.Trace(&permanentError{err})
 	}
 	reducers := graph.Reducers()
-	merged, err := e.fanInBase(ctx, db, shardNum, state, changesOf(changesJSON), refs, reducers, workflowURL)
+	changes, err := changesOf(changesJSON)
+	if err != nil {
+		return workflow.Changes{}, errors.Trace(err)
+	}
+	merged, err := e.fanInBase(ctx, db, shardNum, state, changes, refs, reducers, workflowURL)
 	if err != nil {
 		return workflow.Changes{}, errors.Trace(err)
 	}
@@ -513,7 +522,11 @@ func (e *Engine) cohortContributions(ctx context.Context, db sequel.Executor, sh
 		// branch's partial output is not a fact the flow can build on (an error voids the task's changes). An
 		// inner fan-in that did not complete still brings its cohort's part (memberContribution).
 		if m.completed = status == workflow.StatusCompleted; m.completed {
-			m.changes = changesOf(changesJSON)
+			var cerr error
+			if m.changes, cerr = changesOf(changesJSON); cerr != nil {
+				rows.Close()
+				return nil, errors.Trace(cerr)
+			}
 		}
 		members = append(members, m)
 	}

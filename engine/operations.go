@@ -505,7 +505,11 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 			if gerr != nil {
 				return nil, errors.Trace(gerr)
 			}
-			if err := stepState.Apply(changesOf(stepChangesJSON), graph.Reducers()); err != nil {
+			stepChanges, cerr := changesOf(stepChangesJSON)
+			if cerr != nil {
+				return nil, errors.Trace(cerr)
+			}
+			if err := stepState.Apply(stepChanges, graph.Reducers()); err != nil {
 				return nil, errors.Trace(err)
 			}
 			out.State = stepState

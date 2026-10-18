@@ -21,10 +21,13 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
+	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -407,5 +410,82 @@ func TestChanges_ErrorRouteComposesThroughTheReducers(t *testing.T) {
 	}
 	if assert.Len(errs, 2) {
 		assert.Equal("first", errs[0])
+	}
+}
+
+// TestChanges_UnreadableColumnIsAnErrorNotNoChanges pins that a changes column that does not decode is reported,
+// never read as no changes. Read as none, the task's writes vanished silently: Snapshot of an interrupted flow
+// returned without them, a Resume re-ran the task without its earlier writes and completed cleanly, and a
+// Terminate's final state left them out. Now Snapshot and Step return the error, the resumed dispatch fails the
+// step without running the task, and Terminate still stops the flow, with an empty final state.
+func TestChanges_UnreadableColumnIsAnErrorNotNoChanges(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	var bRuns atomic.Int32
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("UnreadableChanges")
+	g.SetURL("A", "unreadablechanges/a")
+	g.SetURL("B", "unreadablechanges/b")
+	g.AddTransitionChain("A", "B", workflow.End)
+	mux.HandleGraph("unreadablechanges/wf", g)
+	mux.HandleTask("unreadablechanges/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("unreadablechanges/b", func(ctx context.Context, f *workflow.Flow) error {
+		bRuns.Add(1)
+		f.SetInt("x", 42)
+		_, err := f.Interrupt(nil, nil)
+		return err
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+	db, err := e.db.Shard(1)
+	if !assert.NoError(err) {
+		return
+	}
+
+	// interrupted runs a flow to B's interrupt, checks the write is visible, then makes B's changes unreadable.
+	interrupted := func() (flowKey, stepKey string) {
+		flowKey, outcome, err := e.Run(ctx, "unreadablechanges/wf", nil, nil)
+		if !assert.NoError(err) || !assert.Equal(workflow.StatusInterrupted, outcome.Status) {
+			t.FailNow()
+		}
+		assert.Equal(42, outcome.State.GetInt("x"))
+		history, err := e.History(ctx, flowKey)
+		if !assert.NoError(err) || !assert.Len(history, 2) {
+			t.FailNow()
+		}
+		_, flowID, _, err := keys.ParseFlowKey(flowKey)
+		assert.NoError(err)
+		_, err = db.ExecContext(ctx,
+			"UPDATE dwarf_steps SET changes=? WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'",
+			[]byte(`[1]`), flowID)
+		assert.NoError(err)
+		return flowKey, history[1].StepKey
+	}
+
+	flowKey, stepKey := interrupted()
+	_, err = e.Snapshot(ctx, flowKey)
+	assert.Error(err, "Snapshot must not report the interrupted state without the step's writes")
+	_, err = e.Step(ctx, stepKey)
+	assert.Error(err, "Step must not report the step without its writes")
+
+	runsBefore := bRuns.Load()
+	assert.NoError(e.Resume(ctx, flowKey, nil))
+	outcome, err := enginetest.BoundedAwait(t, e, flowKey)
+	if assert.NoError(err) {
+		assert.Equal(workflow.StatusFailed, outcome.Status, "the resumed step cannot run without its earlier writes")
+	}
+	assert.Equal(runsBefore, bRuns.Load(), "the task is not run without its earlier writes")
+
+	flowKey, _ = interrupted()
+	assert.NoError(e.Terminate(ctx, flowKey, "stop"))
+	outcome, err = e.Snapshot(ctx, flowKey)
+	if assert.NoError(err) {
+		assert.Equal(workflow.StatusTerminated, outcome.Status)
+		assert.Equal(0, outcome.State.Len(), "a final state that cannot be read is stored empty")
 	}
 }
