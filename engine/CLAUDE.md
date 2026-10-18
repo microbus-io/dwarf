@@ -3631,8 +3631,12 @@ honors no existing-row lock order and cannot cycle. `Fork` performs its entire t
 transaction (so a crash mid-clone rolls back), and the leaf fork step is held `created` until the mapping is complete.
 **Fork's transaction opens with `lockFlowRows` on the origin root, because the clone reads before it writes.** On
 SQLite a read-first transaction cannot upgrade against a concurrent writer and gets `SQLITE_BUSY` (`SQLITE_LOCKED`
-under a shared cache, as in the test suite) at once on every `Transact` retry - measured as ~1 Fork in 8 failing under the bench soak, and pinned by
-`fixtures/forkconcurrentflow_test.go`. Every other `Transact` in the engine already opens with a write; a new one
+under a shared cache, as in the test suite) at once on every `Transact` retry - measured as ~1 Fork in 8 failing under the bench soak. Pinned by
+`TestFork_TransactionOpensWithAWrite`, which reads each attempt's first statement off the database spans; the soak
+in `fixtures/forkconcurrentflow_test.go` catches a read-first Fork only now and then. Do not try to make that race
+deterministic with a checkpoint inside the clone: modernc waits on a shared-cache lock with `sqlite3_unlock_notify`,
+which cannot be interrupted, so a probing writer blocks rather than being refused, and blocked cannot be told from
+held without a timer. Every other `Transact` in the engine already opens with a write; a new one
 that reads first needs the same. The lock also re-checks what Fork read before its transaction: it matches only
 `delete_after_ms=0`, so a Delete or Purge that stamped the origin in between is still a 409, and an origin the
 reaper removed is a 404 (`TestFork_DeletionAfterThePreCheck`).

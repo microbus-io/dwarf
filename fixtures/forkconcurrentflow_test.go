@@ -32,7 +32,8 @@ import (
 // the clone; on SQLite a transaction that reads first must upgrade its lock at its first write, and against a
 // concurrent writer that upgrade fails at once on every retry - SQLITE_BUSY, or on this suite's shared-cache
 // in-memory database SQLITE_LOCKED ("database table is locked"). Fork therefore takes a write first.
-// Every Fork here must succeed while other flows keep writing.
+// Every Fork here must succeed while other flows keep writing. A read-first Fork fails here only now and then;
+// engine's TestFork_TransactionOpensWithAWrite pins the opening write every time.
 func TestForkConcurrentflow(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
