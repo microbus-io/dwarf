@@ -1310,6 +1310,38 @@ func TestGraph_ValidateUnreachableStripsProto(t *testing.T) {
 	}
 }
 
+// TestGraph_ValidateLineageStripsProto pins that the lineage messages print the fan-out frames as task names
+// without their protocol, as every other Validate message does.
+func TestGraph_ValidateLineageStripsProto(t *testing.T) {
+	assert := testarossa.For(t)
+
+	unpopped := NewGraph("EndUnpopped")
+	unpopped.AddTransition("https://svc/s", "https://svc/a")
+	unpopped.AddTransition("https://svc/s", "https://svc/b")
+	unpopped.AddTransition("https://svc/a", "https://svc/join")
+	unpopped.AddTransition("https://svc/b", End)
+	unpopped.AddTransition("https://svc/join", End)
+	unpopped.SetFanIn("https://svc/join")
+	err := unpopped.Validate()
+	if assert.Error(err) {
+		assert.Contains(err.Error(), "unpopped fan-out frames [svc/s]")
+	}
+
+	divergent := NewGraph("DivergentStacks")
+	divergent.AddTransition("https://svc/s", "https://svc/a")
+	divergent.AddTransition("https://svc/s", "https://svc/b")
+	divergent.AddTransition("https://svc/a", "https://svc/shared")
+	divergent.AddTransition("https://svc/b", "https://svc/shared")
+	divergent.AddTransition("https://svc/shared", "https://svc/join")
+	divergent.AddTransitionGoto("https://svc/join", "https://svc/shared")
+	divergent.AddTransition("https://svc/join", End)
+	divergent.SetFanIn("https://svc/join")
+	err = divergent.Validate()
+	if assert.Error(err) {
+		assert.Contains(err.Error(), "two different lineage stacks ([svc/s] and [])")
+	}
+}
+
 // validateLineage memoizes IsFanOutSource rather than re-implementing the fan-out predicate, because the
 // engine ROUTES on IsFanOutSource (internal/faninmap, processStep): a validator that disagreed with the
 // router about what fans out would bless a graph the engine then mis-executes. This pins the agreement

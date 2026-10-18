@@ -47,7 +47,7 @@ neither hides data from a query nor exposes any.
 `Query.Search`, consumed by `List`, is a case-insensitive substring match. It covers exactly:
 
 - the workflow URL and display name
-- the task name
+- the name of the task the flow stopped at (`StoppedTaskName`), so a running flow never matches on a task
 - **the flow's error text**
 - **the terminate or cancel reason**
 - the flow key

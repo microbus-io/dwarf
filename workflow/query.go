@@ -28,7 +28,8 @@ type Query struct {
 	WorkflowName string `json:"workflowName,omitzero"`
 	ThreadKey    string `json:"threadKey,omitzero"`
 	// StoppedTaskName filters to flows that stopped at the named task: the step that completed, failed or
-	// cancelled the flow, or the step it is interrupted at. It matches no running flow.
+	// cancelled the flow, or the step it is interrupted at (which a Terminate of an interrupted flow keeps). It
+	// matches no running flow.
 	StoppedTaskName string `json:"stoppedTaskName,omitzero"`
 	// FairnessKey filters to flows with this scheduling fairness key. The host typically sets the
 	// fairness key to the tenant, so this is how "list flows for tenant X" is expressed. Empty
@@ -57,9 +58,9 @@ type Query struct {
 	// Cursor is the opaque pagination cursor returned as nextCursor by the previous List call.
 	Cursor string `json:"cursor,omitzero"`
 	// Search is a case-insensitive substring matched against the flow's WorkflowURL, WorkflowName,
-	// current task name, Error, TerminateReason, CancelReason, and the flow key. Any '%' or '_' in the value
-	// is matched literally, not as a wildcard, so "a_b" matches only "a_b" (not "axb") and "50%" matches only
-	// a literal "50%".
+	// StoppedTaskName (so a running flow never matches on a task), Error, TerminateReason, CancelReason, and
+	// the flow key. Any '%' or '_' in the value is matched literally, not as a wildcard, so "a_b" matches only
+	// "a_b" (not "axb") and "50%" matches only a literal "50%".
 	Search string `json:"search,omitzero"`
 	// Limit is a PER-SHARD cap divided across shards, NOT a hard ceiling on the total returned (default
 	// 100). On a multi-shard fleet each shard returns up to ceil(Limit/shards) of its own newest flows, so

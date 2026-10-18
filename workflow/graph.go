@@ -684,7 +684,7 @@ func (g *Graph) validateLineage() error {
 				if len(nextStack) != 0 {
 					return errors.New(
 						"transition from '%s' to END in graph '%s' has unpopped fan-out frames %v; every branch must pass through a fan-in task before reaching END",
-						stripProto(from), g.name, nextStack,
+						stripProto(from), g.name, stripProtoAll(nextStack),
 					)
 				}
 				continue
@@ -694,7 +694,7 @@ func (g *Graph) validateLineage() error {
 				if !stackEqual(prior, nextStack) {
 					return errors.New(
 						"task '%s' in graph '%s' is reachable with two different lineage stacks (%v and %v); register a separate alias task via SetURL to disambiguate",
-						stripProto(tr.To), g.name, prior, nextStack,
+						stripProto(tr.To), g.name, stripProtoAll(prior), stripProtoAll(nextStack),
 					)
 				}
 				continue
@@ -726,6 +726,15 @@ func stripProto(s string) string {
 		x = s
 	}
 	return x
+}
+
+// stripProtoAll is stripProto of every name in names, as a new slice.
+func stripProtoAll(names []string) []string {
+	out := make([]string, len(names))
+	for i, n := range names {
+		out[i] = stripProto(n)
+	}
+	return out
 }
 
 // graphJSON is the graph's wire form, shared by MarshalJSON and UnmarshalJSON.

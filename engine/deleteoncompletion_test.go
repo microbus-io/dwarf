@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -316,6 +317,56 @@ func TestDeleteOnCompletion_ReaperCascadesSubgraph(t *testing.T) {
 	time.Sleep(5 * time.Millisecond) // let the 1ms delete_after_ms elapse on the database clock
 	e.reapDueFlows(ctx)
 	assert.Equal(0, shardFlowCount(t, e, shardNum)) // root and child both removed - no orphan
+}
+
+// TestDeleteOnCompletion_HistoryOfAChildHidesWithItsRoot pins that History of a subgraph child's key 404s during
+// its root's deletion window, as History of the root does: only the root is stamped, so the child's own row
+// would let its history through.
+func TestDeleteOnCompletion_HistoryOfAChildHidesWithItsRoot(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	mux := hosts.NewMux()
+	parent := workflow.NewGraph("Parent")
+	parent.SetURL("RunInner", "doc/hc-run-inner")
+	parent.AddTransition("RunInner", workflow.End)
+	mux.HandleGraph("doc/hc-parent", parent)
+	inner := workflow.NewGraph("Inner")
+	inner.SetURL("X", "doc/hc-x")
+	inner.AddTransition("X", workflow.End)
+	mux.HandleGraph("doc/hc-inner", inner)
+	mux.HandleTask("doc/hc-x", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("doc/hc-run-inner", func(ctx context.Context, f *workflow.Flow) error {
+		var out map[string]any
+		_, err := f.Subgraph("doc/hc-inner", map[string]any{}, &out)
+		return err
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	shortenDeletion(e, time.Hour, time.Hour) // the grace window outlasts the test
+	assert.NoError(e.Startup(t.Context()))
+
+	fk, err := e.Create(ctx, "doc/hc-parent", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
+	assert.NoError(err)
+	shardNum, _, _, err := keys.ParseFlowKey(fk)
+	assert.NoError(err)
+	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
+
+	db, err := e.db.Shard(shardNum)
+	assert.NoError(err)
+	var childID int
+	var childToken string
+	assert.NoError(db.QueryRowContext(ctx,
+		"SELECT flow_id, flow_token FROM dwarf_flows WHERE surgraph_flow_id>0").Scan(&childID, &childToken))
+	childKey := keys.New(shardNum, childID, childToken)
+
+	_, err = e.History(ctx, fk)
+	assert.Equal(http.StatusNotFound, errors.StatusCode(err))
+	_, err = e.History(ctx, childKey)
+	assert.Equal(http.StatusNotFound, errors.StatusCode(err))
 }
 
 // TestDeleteOnCompletion_OutcomeObservableUnderConcurrency hammers many disposable flows concurrently to pin

@@ -54,9 +54,12 @@ func (e *Engine) history(ctx context.Context, flowKey string) ([]workflow.FlowSt
 	ctx, doneTurn := e.opTurn(ctx, shardNum, "history")
 	defer doneTurn()
 	// delete_after_ms=0 excludes a flow scheduled for deletion: History is the full step detail a disposable
-	// flow is discarding, so it 404s during the grace window (Snapshot/Await still serve the outcome).
+	// flow is discarding, so it 404s during the grace window (Snapshot/Await still serve the outcome). Only the
+	// root is stamped, so a subgraph child's key is checked against its root's row (a root is its own root).
 	var exists int
-	err = db.QueryRowContext(ctx, "SELECT 1 FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND delete_after_ms=0", flowID, flowToken).Scan(&exists)
+	err = db.QueryRowContext(ctx,
+		"SELECT 1 FROM dwarf_flows f JOIN dwarf_flows r ON r.flow_id=f.root_flow_id"+
+			" WHERE f.flow_id=? AND f.flow_token=? AND r.delete_after_ms=0", flowID, flowToken).Scan(&exists)
 	if err == sql.ErrNoRows {
 		return nil, errors.New("flow not found", http.StatusNotFound)
 	}

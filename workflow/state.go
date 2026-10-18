@@ -215,6 +215,11 @@ func decodeValue(r Reducer, raw json.RawMessage) (any, error) {
 		}
 		return m, nil
 	}
+	// A number or a bool is what add/min/max/and/or fold, on every write; read it without a Decoder, whose
+	// setup is most of a Set's allocations.
+	if v, ok := scalarValue(raw); ok {
+		return v, nil
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var v any
@@ -227,6 +232,65 @@ func decodeValue(r Reducer, raw json.RawMessage) (any, error) {
 		return nil, errors.New("workflow: invalid JSON: data after the first value")
 	}
 	return v, nil
+}
+
+// scalarValue reads raw as a bool, or as a number in the json.Number form a UseNumber Decoder gives, when it is
+// exactly one such literal (JSON whitespace around it allowed). ok is false for anything else, which the Decoder
+// then reads.
+func scalarValue(raw json.RawMessage) (v any, ok bool) {
+	b := bytes.Trim(raw, " \t\r\n")
+	switch string(b) {
+	case "true":
+		return true, true
+	case "false":
+		return false, true
+	}
+	if !isNumberLiteral(b) {
+		return nil, false
+	}
+	return json.Number(b), true
+}
+
+// isNumberLiteral reports whether b is exactly a JSON number: -? (0 | [1-9][0-9]*) (.[0-9]+)? ([eE][+-]?[0-9]+)?
+func isNumberLiteral(b []byte) bool {
+	i := 0
+	if i < len(b) && b[i] == '-' {
+		i++
+	}
+	switch {
+	case i < len(b) && b[i] == '0':
+		i++
+	case i < len(b) && b[i] >= '1' && b[i] <= '9':
+		for i < len(b) && b[i] >= '0' && b[i] <= '9' {
+			i++
+		}
+	default:
+		return false
+	}
+	if i < len(b) && b[i] == '.' {
+		i++
+		start := i
+		for i < len(b) && b[i] >= '0' && b[i] <= '9' {
+			i++
+		}
+		if i == start {
+			return false
+		}
+	}
+	if i < len(b) && (b[i] == 'e' || b[i] == 'E') {
+		i++
+		if i < len(b) && (b[i] == '+' || b[i] == '-') {
+			i++
+		}
+		start := i
+		for i < len(b) && b[i] >= '0' && b[i] <= '9' {
+			i++
+		}
+		if i == start {
+			return false
+		}
+	}
+	return i == len(b)
 }
 
 // Names iterates the field names in unspecified order, for use with range-over-func:

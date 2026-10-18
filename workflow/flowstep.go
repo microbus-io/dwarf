@@ -55,7 +55,7 @@ type FlowStep struct {
 	// Subgraph reports that the step called a subgraph. SubgraphKey is the child flow's key, SubgraphURL and
 	// SubgraphName are the child workflow's URL and display name, and SubHistory is the child flow's own
 	// history, nested the same way. When the step called its subgraph more than once (a Retry), they describe
-	// the latest call.
+	// the latest call. Set only by Engine.History; empty from Engine.Step.
 	//
 	// SubgraphKey is a read handle: pass it to Engine.Snapshot for the child's result, or to Await, Poll,
 	// Fingerprint or History. Operations that change a flow (Resume, Terminate, Cancel, Delete, Continue) reject

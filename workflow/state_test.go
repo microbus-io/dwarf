@@ -19,6 +19,7 @@ package workflow
 import (
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -769,5 +770,37 @@ func TestState_ApplyAllBareValueOntoNothing(t *testing.T) {
 		assert.NoError(allAtOnce.ApplyAll(members, reducers), r)
 		assert.Equal([]string{"x", "y"}, allAtOnce.GetStrings("f"), r)
 		assert.Equal(oneByOne.GetStrings("f"), allAtOnce.GetStrings("f"), r)
+	}
+}
+
+// TestDecodeValue_ScalarFastPathMatchesTheDecoder pins that the scalar fast path reads exactly what the UseNumber
+// Decoder reads - the same json.Number literal, the same bool - and takes nothing that is not one JSON scalar,
+// so a malformed number still fails as the Decoder fails it.
+func TestDecodeValue_ScalarFastPathMatchesTheDecoder(t *testing.T) {
+	assert := testarossa.For(t)
+
+	for _, in := range []string{
+		"0", "-0", "7", "-12", "1234567890123456789", "1.5", "-0.25", "1e21", "1E+3", "2.5e-7", " 42 ", "\n3\t",
+		"true", "false", " true ",
+	} {
+		v, ok := scalarValue(json.RawMessage(in))
+		if !assert.True(ok, "%q must take the fast path", in) {
+			continue
+		}
+		var want any
+		dec := json.NewDecoder(strings.NewReader(in))
+		dec.UseNumber()
+		assert.NoError(dec.Decode(&want))
+		assert.Equal(want, v, "%q", in)
+	}
+	for _, in := range []string{
+		"01", "-", "1.", ".5", "1e", "1e+", "+1", "1 2", "--1", "0x10", "Infinity", "NaN", "tru", "\"1\"", "[1]", "",
+	} {
+		_, ok := scalarValue(json.RawMessage(in))
+		assert.False(ok, "%q must not take the fast path", in)
+	}
+	for _, in := range []string{"01", "1.", "1 2", "+1"} {
+		_, err := decodeValue(ReducerAdd, json.RawMessage(in))
+		assert.Error(err, "%q must still fail to decode", in)
 	}
 }
