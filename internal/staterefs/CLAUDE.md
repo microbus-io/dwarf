@@ -370,9 +370,11 @@ else 1 GiB (`engine/staterefs.go` `stateCacheBudget`).
 - **An entry is charged its bytes plus `entryOverhead` (256, its real memory), with no minimum.** A list caches
   one entry per contributing step, so a long conversation of small messages is many small entries, and a 4 KB
   minimum charge evicted them long before the budget's bytes were used. The entry cap (1,048,576) sits high enough
-  that bytes bind: at a 1 GiB budget, 1 KB entries with their overhead come to ~800k. Each entry is a handful of
-  objects the garbage collector marks every cycle; whether that cost matters is unmeasured - read GC% on the bench
-  `loop` workload before lowering the cap. Pinned by `TestLinker_SmallFieldsChargedTheirBytes`.
+  that bytes bind: at a 1 GiB budget, 1 KB entries with their overhead come to ~800k. Each entry is four objects
+  the garbage collector marks every cycle: a full 1 GiB of 1 KB entries measured ~61 ms per forced cycle against
+  ~33 ms for the same bytes in 4 KB entries. A live heap that size also makes cycles rarer under the default GOGC,
+  so do not restore a minimum charge on this ground alone - measure a workload whose cache is actually full first.
+  Pinned by `TestLinker_SmallFieldsChargedTheirBytes`.
 - **Expiry is by idleness, not age.** A carried ref is resolved again at every dispatch of its flow, so a field
   stays cached as long as its flow keeps moving, however long the flow lives; an idle one leaves after 5
   minutes. In idle mode the LRU list is also in order of last use, so `lru.evict` drops expired entries from the
