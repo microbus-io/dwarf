@@ -113,11 +113,15 @@ func (e *Engine) runRecoverySweep(ctx context.Context, heavy bool) {
 // defaults, and ~3x the lease at a 2s budget. The path runs when a replica died without draining, and also on a
 // live one: persist leaves a step for lease recovery when the database is unreachable for both the outcome write
 // and failStep, and a release on drain can fail the same way. A sweep run only at startup, or triggered by a
-// peer's stale registry row, never reaches those. The SELECT reads every `running` non-parked row
-// (`lease_expires` is not a seekable key in the selection index), and every dispatcher of the shard runs it, so
-// its cost is O(in-flight) per dispatcher per tick - small at a minute. Making it O(expired) would need a
-// `lease_expires` index on running rows, maintained on every claim and completion of the hottest table; not
-// worth it at this rate.
+// peer's stale registry row, never reaches those. The SELECT walks the selection index's whole `running` range
+// (`lease_expires` is not a seekable key there), and that range is mostly DEAD entries: every claim inserts one,
+// the step's later updates are non-HOT, and only a scan or vacuum clears it. So a pass costs a heap fetch per step
+// that left `running` since the range was last cleaned - throughput x the gap between sweeps, not the in-flight
+// count - and marks those entries dead for the next. Measured: 34 live rows behind 7,997 heap fetches locally,
+// ~1s a pass after a minute at ~1,300 steps/s, ~0.8s mean on a 32 vCPU rig at ~22k. A held vacuum horizon stops
+// the marking, and every pass then walks everything since the hold began. Do not add a `lease_expires` index on
+// running rows for this: a completed step's entry keeps its claim-time lease, so it enters the expired prefix a
+// lease later and a held horizon grows it just the same, while every claim of the hottest table pays the insert.
 //
 // Find the ids with a plain SELECT, then reset them by id. A single `UPDATE ... WHERE lease_expires<=NOW` must
 // row-lock every row its WHERE re-checks, so it can queue behind every in-flight claim and completion; that form
