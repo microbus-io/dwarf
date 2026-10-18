@@ -23,9 +23,8 @@ round trip (server execution, WAL, queueing at the pool). Both terms are MEASURE
 completely differently:
 
 - **`k` is portable** — a property of the code path, and COUNTED rather than fitted: `completionRoundTrips`
-  (`engine/poolsize.go`) plus the claim and the flow read gives a linear step **5** on PostgreSQL (the claim
-  returns the flow row and the transition is one pipelined batch), **9** on SQLite, **10** on SQL Server
-  and **11** on MySQL (whose claim is two statements). The fits quoted in this file - **12.1** (netem sweep, M=8, 2026-07-11) and **9.11** (netem sweep,
+  (`engine/poolsize.go`) plus the claim and the flow read. The per-driver totals are stated once, in
+  `engine/CLAUDE.md` ("THE CEILING EQUATION"); take them from there rather than keeping a copy here. The fits quoted in this file - **12.1** (netem sweep, M=8, 2026-07-11) and **9.11** (netem sweep,
   M=96, `linear`, 2026-08-01, R² high, residuals uncurved) - were taken on PostgreSQL before the transition
   was pipelined; they are not the current PostgreSQL `k`.
 - **`s` is NOT portable and is the bigger trap.** 4.4 ms at M=8 against **9.49 ms** at M=96 — it absorbs
@@ -51,9 +50,9 @@ completely differently:
   measures otherwise.**
 
   The reason the intuition misleads is worth keeping: a fan-out does more work per FLOW but throughput is
-  quoted per STEP, and most of its steps are *branches*. A branch inserts no successor, writes no
-  `successor_id` and advances no `step_id` (a fan-out flow sits at `step_id=0`), so it is CHEAPER in
-  round trips than a linear step; the expensive spawn and fan-in are 2 steps in 18.
+  quoted per STEP, and most of its steps are *branches*. A branch's transition is a cohort bump: it inserts no
+  successor and writes no `successor_id`, so it is CHEAPER in round trips than a linear step; the expensive
+  spawn and fan-in are 2 steps in 18.
 
 **Use it to NORMALIZE, which is what makes campaigns on different rigs comparable at all:**
 

@@ -35,9 +35,8 @@ import (
 // (fireFanInDirect) must not extend a flow a concurrent Terminate already terminalized. The window is the
 // completed-step-then-terminate race - the spawn step is marked `completed` by processStep, then the flow is
 // terminated, then the worker reaches fireFanInDirect against the now-terminated flow. Without the
-// terminal-status guard on fireFanInDirect's opening lock-grab it would insert a `pending` fan-in step and
-// overwrite the flow's `step_id` on the terminated flow (orphan work reaped only later by the claim-time
-// terminal check).
+// terminal-status guard on fireFanInDirect's opening lock-grab it would insert a `pending` fan-in step and link
+// the spawn to it on the terminated flow (orphan work reaped only later by the claim-time terminal check).
 //
 // Timing is made deterministic by blocking the spawn task on a channel: while it is blocked (step `running`
 // under a valid lease), the flow row is terminated by SQL (leaving the spawn step non-terminated so its
@@ -109,8 +108,7 @@ func TestFanInDirectTerminate_NoExtendTerminatedFlow(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	var stepIDBefore, spawnStepID int
-	assert.NoError(db.QueryRowContext(ctx, "SELECT stopped_step_id FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&stepIDBefore))
+	var spawnStepID int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='Spawn'", flowID).Scan(&spawnStepID))
 
 	// Release the spawn task: it completes, then processStep reaches fireFanInDirect against the terminated flow.
@@ -124,14 +122,14 @@ func TestFanInDirectTerminate_NoExtendTerminatedFlow(t *testing.T) {
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE step_id=?", spawnStepID).Scan(&spawnStatus))
 	assert.Equal(workflow.StatusCompleted, spawnStatus) // the worker got past the completion write to fireFanInDirect
 
-	// The guard held: no pending fan-in step was inserted, and the flow's step_id was not overwritten.
+	// The guard held: no pending fan-in step was inserted, and the spawn was not linked to one.
 	var joinSteps int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND task_name='Join'", flowID).Scan(&joinSteps))
 	assert.Equal(0, joinSteps)
 
-	var stepIDAfter int
-	assert.NoError(db.QueryRowContext(ctx, "SELECT stopped_step_id FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&stepIDAfter))
-	assert.Equal(stepIDBefore, stepIDAfter)
+	var spawnSuccessor int
+	assert.NoError(db.QueryRowContext(ctx, "SELECT successor_id FROM dwarf_steps WHERE step_id=?", spawnStepID).Scan(&spawnSuccessor))
+	assert.Equal(0, spawnSuccessor)
 
 	// The flow stays terminated (terminal, immutable); the completed spawn step is a harmless tail on it.
 	var flowStatus string

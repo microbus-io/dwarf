@@ -110,8 +110,8 @@ func TestSuccessorBatch_WideFanOutKeepsBranchOrder(t *testing.T) {
 	assert.Equal(firstBranch, successorID)
 }
 
-// TestSuccessorBatch_LoneSuccessorLinks pins the single-successor transition, whose own-row write and flow advance
-// name the new step in SQL on PostgreSQL rather than by a bind. Linear flows run concurrently, so inserts from
+// TestSuccessorBatch_LoneSuccessorLinks pins the single-successor transition, whose own-row write names the new
+// step in SQL on PostgreSQL rather than by a bind. Linear flows run concurrently, so inserts from
 // different sessions interleave: an id that is not the session's own would link a step to another flow's row.
 // Every link must agree with its successor's predecessor_id and stay within the flow, and every flow must point
 // at its own last step.

@@ -417,8 +417,8 @@ func (e *Engine) terminateOrphanedSubtree(ctx context.Context, shard int, childF
 // Where running flows are a small fraction of the table, the scan probes each of them through
 // idx_dwarf_steps_flow_id and costs running flows x their steps: measured on PostgreSQL 18 at ~0.3s for 20,000
 // running flows of 11 steps over 5.2M step rows. Where most flows are running, the planner hashes all of
-// dwarf_steps instead (~4.7s at 2.2M rows, cold). If that ever matters, a stranded linear flow's step_id points at
-// its flagged step, a single primary-key probe per running flow (~65ms on the first data set).
+// dwarf_steps instead (~4.7s at 2.2M rows, cold). The flow row cannot shortcut it: stopped_step_id is 0 while a
+// flow runs.
 func (e *Engine) recoverOrphanedFlows(ctx context.Context, db *sequel.DB, shard int, alarm bool) {
 	rows, err := db.QueryContext(ctx,
 		"SELECT f.flow_id, f.workflow_url FROM dwarf_flows f"+

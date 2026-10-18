@@ -1750,8 +1750,9 @@ var errTransitionFlowTerminal = errors.New("flow terminal at transition")
 // its rows affected.
 //
 // On PostgreSQL and MySQL it is a locking read. An UPDATE writes a new row version even when it changes nothing,
-// and the flow row is locked on every step: on PostgreSQL those versions fill its pages faster than they are
-// pruned, so the step's real write to the row (the step_id advance) stops being HOT. FOR NO KEY UPDATE is the lock
+// and the flow row is locked on every step: on PostgreSQL that is a row version per step on a row that otherwise
+// changes a few times per flow, filling its pages faster than they are pruned, so its writes stop being HOT. FOR
+// NO KEY UPDATE is the lock
 // a non-key UPDATE takes, so it conflicts with exactly what the UPDATE did.
 //
 // SQLite and SQL Server flip the non-indexed touch column. SQLite must take its write lock up front: a read takes
@@ -2060,7 +2061,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		txBytes = stateByteCount{}
 		// Write-first, guarded on non-terminal status - the same lock-grab the transition tx uses. If a
 		// concurrent Terminate/failStep terminalized this flow, the guard yields zero rows and this becomes a
-		// clean no-op; without it we would insert a pending fan-in step and overwrite step_id on a terminal
+		// clean no-op; without it we would insert a pending fan-in step and link the spawn to it on a terminal
 		// flow (orphan work reaped only later by the claim-time terminal-flow guard).
 		locked, flowErr := lockFlowRows(ctx, tx, liveFlowWhere, flowID)
 		if flowErr != nil {

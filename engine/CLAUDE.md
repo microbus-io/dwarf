@@ -518,7 +518,7 @@ is, because the new turn is inserted `running` and only completes after its entr
 `fixtures/concurrentcontinueflow_test.go`). The insert half is shared with `Create`/subgraph spawn via
 `insertFlowTx` (one copy of the flow+entry-step INSERTs); `Continue` differs only by wrapping it in the
 lock-and-recheck transaction. Edge case: if the thread anchor row (`flow_id == thread_id`) was `Delete`d while
-later turns remain, the write-first UPDATE matches no row and the serialization degrades to the unlocked race
+later turns remain, the anchor lock matches no row and the serialization degrades to the unlocked race
 above for that thread - still safe, just non-deterministic; continuing via a deleted anchor *key* already
 404s, so this only affects continuing via a surviving later-turn key on a thread whose original root was deleted.
 
@@ -2063,7 +2063,7 @@ recursive `surgraph_flow_id` walk that issues one round-trip per tree level. It 
 immutable** thereafter:
 
 - A top-level flow (`Create`/`Run`/`Continue`) is its **own** root: `root_flow_id = its own flow_id` (set in the
-  same post-insert UPDATE that fixes `thread_id`/`step_id`). The own-id convention - rather than `0`-means-self -
+  same post-insert UPDATE that fixes `thread_id`/`thread_token`). The own-id convention - rather than `0`-means-self -
   keeps the root's *own* row matching the membership scan with no `COALESCE`/`OR` predicate.
 - A subgraph child **inherits** the parent's `root_flow_id` (`createSubgraphFlow` reads it alongside the inherited
   scheduling/budget and passes it into `createWithGraph`).
@@ -2328,8 +2328,9 @@ is already local and free, at the price of a write per await.
   `lockedFlowRows` in a batch), which returns the rows it locked, so a guarded grab
   (`WHERE ... status NOT IN (terminal)`) bails on zero. **On PostgreSQL and MySQL the grab is a locking read**
   (`FOR NO KEY UPDATE` / `FOR UPDATE`), not an UPDATE: an UPDATE writes a new row version even when it changes
-  nothing, and the flow row is grabbed on every step, so the grab would double the versions competing for room on
-  the row's page and push the `step_id` advance off HOT (see the fillfactor section in
+  nothing, and the flow row is grabbed on every step, so the grab would be the row's only per-step write - a row
+  version per step on a row that otherwise changes a few times per flow, which fills its page and pushes its
+  writes off HOT (see "`dwarf_flows` stays HOT only while its pages have room" in
   `internal/migrations/CLAUDE.md`). `FOR NO KEY UPDATE` is the lock a non-key UPDATE takes, so it conflicts with
   exactly what the UPDATE did. **On SQLite and SQL Server it flips the non-indexed `touch` column**
   (`touch=1-touch`): SQLite needs a write to take its lock, and SQL Server's `UPDLOCK` read is unverified under
@@ -2394,7 +2395,7 @@ returns the flow row and whose transition is one pipelined batch, 8 on SQLite, 9
 `k` does not vary with WORKLOAD SHAPE: fitted on PostgreSQL with an unpipelined transition, `linear` 9.11
 against `fanout` 8.67 on one rig at one pool, a gap inside the fanout arms' own spread. The intuition that a fan-out costs more
 per step is the wrong unit - it costs more per FLOW, while most of its STEPS are branches that insert no
-successor and advance no `step_id`. Constants, their portability, and the normalization formula are in
+successor. Constants, their portability, and the normalization formula are in
 `bench/CLAUDE.md`; the operator-facing version is in `docs/benchmark-cloud.md` and `docs/deployment.md`.
 
 ### Connection pool sizing - a constant budget, ramped by distance, clamped by the server (`poolsize.go`)
@@ -3885,7 +3886,7 @@ timeout also kills transactions that sit idle while a busy replica is slow.
 ### Per-Function Crash Analysis
 
 - **Create** - one transaction: insert flow (`running`) -> insert entry step (`pending`) -> set the flow's
-  `thread_id`/`step_id`, then ring the doorbell. A pre-commit crash rolls back entirely (no partial flow); after a
+  `thread_id`/`thread_token`/`root_flow_id`, then ring the doorbell. A pre-commit crash rolls back entirely (no partial flow); after a
   post-commit crash before the doorbell, the committed `pending` entry step is due, so its shard's next piston cycle
   selects it.
   There is no separate `Start`, so no inert `created` window. Self-healing.
@@ -3900,7 +3901,7 @@ timeout also kills transactions that sit idle while a busy replica is slow.
 - **processStep - Interrupt** - one transaction. A pre-commit crash rolls back and re-execution produces the interrupt
   again (interrupt-producing tasks should be idempotent). Self-healing.
 - **processStep - Normal Completion (with next steps)** - step -> `completed` (a standalone UPDATE), then a separate
-  transaction inserts the successors / bumps `cohort_arrivals` / updates `step_id`, then the doorbell. The gap is a
+  transaction inserts the successors / bumps `cohort_arrivals`, then the doorbell. The gap is a
   wedge window: a `completed` step with no successor is invisible to lease recovery (`running`-only), the parked-step
   wedge sweep (`parkedSubgraph`-only), and the lock-contention reset (`status='running'`-guarded), so the flow would
   strand `running` forever. Not only a ~microsecond crash window - the follow-up transaction can fail *persistently*

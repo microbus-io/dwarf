@@ -116,7 +116,7 @@ throughput  =  connections / (k × RTT + s)
 ```
 
 where `k` is the number of database round trips one step makes — about **5–6** on PostgreSQL, which sends
-a step's statements in batches, and **9–11** on the other dialects — and `s` is the per-step time that is
+a step's statements in batches, and **8–10** on the other dialects — and `s` is the per-step time that is
 not a round trip. Because `k` multiplies RTT, **every 0.1 ms of extra distance costs roughly half a
 millisecond to a millisecond of connection time on every step in the system.**
 

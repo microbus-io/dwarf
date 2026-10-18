@@ -312,6 +312,7 @@ status. A workflow's own failure is not an error: it is the outcome's `Status` (
 | 404 | The key names no flow or step (including one already deleted), or `LoadGraph` found no graph | No |
 | 408 | `Await` or `Run` returned before the flow stopped; the flow keeps running | Await again |
 | 409 | The flow is in the wrong state for the operation, or a concurrent operation got there first | Re-read the flow, then decide |
+| 413 | A value is larger than the [size limit](data-handling.md#the-size-limit-256-mb-per-value) of 256 MB; nothing was created or changed | No - send less |
 | 501 | The flow's data is in a newer format than this replica reads: replicas of a newer release wrote it | Yes, on a replica of the newer release |
 | 503 | The engine is not started, is shutting down, or every shard is cordoned; or a `Terminate` did not settle because the flow's tree kept spawning subgraphs | Yes |
 | 500 | A database error or an engine fault | Yes, if transient |
@@ -329,16 +330,20 @@ Each operation adds these to the 503 and 500 every call can return:
 | `Snapshot`, `Fingerprint` | malformed key | unknown flow | | |
 | `History` | malformed key | unknown flow, or one scheduled for deletion | | |
 | `Step` | malformed key | unknown step | | |
-| `List`, `Purge` | malformed `ThreadKey`, invalid status or shard; `List` with a malformed cursor; `Purge` with no filter (`Shard` and `Limit` are not filters) or with `IncludeSubgraphs` | unknown `ThreadKey` | | |
+| `List`, `Purge` | malformed `ThreadKey`, invalid status or shard, a negative `OlderThan` or `NewerThan`; `List` with a malformed cursor; `Purge` with no filter (`Shard` and `Limit` are not filters) or with `IncludeSubgraphs` | unknown `ThreadKey` | | |
 | `Resume` | malformed key, a subgraph child's key, data not JSON-marshalable | unknown flow | | the flow is not interrupted, including when a `Delete` or `Terminate` won the race |
 | `Cancel`, `Terminate` | malformed key, a subgraph child's key | unknown flow | | |
 | `Fork` | malformed key, overrides not JSON-marshalable | unknown step | | the flow is not terminal, is scheduled for deletion, or holds an unresolved interrupt off the fork path |
 | `Continue` | malformed key, a subgraph child's key, `additionalState` not JSON-marshalable | unknown flow | | the thread's latest flow is not completed, including when a concurrent `Continue` won |
 | `Delete` | malformed key, a subgraph child's key | unknown flow | | the flow is running, including when a `Resume` won the race |
 
-A 501 comes from the operations that read a flow's step data: `Step`, `Fork`, and `Snapshot`, `Await`,
-`Poll` and `Run` on an interrupted flow. The 503 from a `Terminate` that did not settle can also come from
-`Delete` and `Purge`, which terminate an interrupted flow first.
+A 413 comes from the operations that take a value in: `Create` and `Run` (the initial state or the baggage),
+`Continue` (the new flow's initial state, with `additionalState` folded in), `Resume` (the resume data) and
+`Fork` (the fork step's state, with the overrides applied).
+
+A 501 comes from the operations that read a flow's step data: `Step`, `Fork`, and `Snapshot`, `Await`, `Poll`
+and `Run` on an interrupted flow. The 503 from a `Terminate` that did not settle can also come from `Delete` and
+`Purge`, which terminate an interrupted flow first.
 
 Stopping or deleting what is already stopped or deleted is not an error. `Cancel` and `Terminate` on a flow
 that has ended, and `Delete` on a flow already scheduled for deletion, return nil and change nothing, so a
