@@ -501,8 +501,9 @@ func (s State) Apply(c Changes, reducers map[string]Reducer) error {
 //
 // Pass nil reducers to replace every field. Each combined field is decoded once and encoded once whatever the
 // number of changes, because a combining reducer re-encodes its accumulator, and folding per member would be
-// quadratic in the accumulated bytes across a wide fan-in. On a reducer error the receiver is left partly
-// folded; discard it.
+// quadratic in the accumulated bytes across a wide fan-in. It does not validate the values it folds: each must
+// be well-formed JSON, as SetJSON requires, and a malformed one can fold into a malformed field without an
+// error. On a reducer error the receiver is left partly folded; discard it.
 func (s State) ApplyAll(cs []Changes, reducers map[string]Reducer) error {
 	acc := map[string]any{}
 	decoded := map[string]bool{}

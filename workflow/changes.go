@@ -49,6 +49,9 @@ adds "m" to messages, replaces summary and deletes scratch.
 
 A third kind, an addition, is recorded only by the orchestrator: a field with no reducer whose new value only
 extends the array it held, stored as the elements it gained under the name with AdditionSuffix.
+
+A zero Changes is empty and safe to read (Names, Len, Mentions, MarshalJSON all work on it), but the mutating
+methods do not allocate, so Set, Overwrite and Compose panic on it: build one with NewChanges or UnmarshalJSON.
 */
 type Changes struct {
 	contributions State
@@ -181,7 +184,8 @@ func (c Changes) Overwrite(name string, value any) error {
 
 // Compose folds later Changes onto these, mutating the receiver, so that applying the result equals applying the
 // two in turn - up to floating-point rounding under ReducerAdd, which sums the contributions before adding them
-// to the field. On a reducer error the receiver is left partly composed; discard it.
+// to the field. Like State.ApplyAll, it does not validate the values it folds. On a reducer error the receiver is
+// left partly composed; discard it.
 func (c Changes) Compose(later Changes, reducers map[string]Reducer) error {
 	for k, v := range later.contributions.d {
 		if err := c.contribute(k, v, reducers); err != nil {

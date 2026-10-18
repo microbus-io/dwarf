@@ -237,7 +237,10 @@ explicit; `Parse` into a `map[string]any` is the escape hatch, visible at the ca
    `TestConcatRaw_EqualsTheDecodingFold` (every input shape, escapes and the database's re-spelled whitespace
    included). `concat` splices between the quotes, which is exact because JSON escapes are self-contained -
    except a UTF-16 surrogate pair escaped across two writes, which a decoding fold turns into two U+FFFD and
-   the splice reunites; Go's encoder never escapes that way. `union` must compare decoded values, so it
+   the splice reunites; Go's encoder never escapes that way. **The splice trusts its input to be well-formed**
+   (`SetJSON`'s contract, stated on `ApplyAll`): a malformed base such as `[1] [2]` splices into malformed JSON
+   with no error. Do not add `json.Valid` on this path, and do not settle for a first/last-byte check - `[1] [2]`
+   passes it; only a full scan catches it. `union` must compare decoded values, so it
    decodes; `merge` decodes only its top level, into `json.RawMessage` entries.
    `Apply` is `ApplyAll` of one member, so there is one fold to keep correct. Pinned by
    `TestState_ApplyAllMatchesPerMember`, which asserts the one-pass and per-member results are
