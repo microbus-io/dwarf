@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/turnstile"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -123,6 +124,7 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 		return errors.Trace(err)
 	}
 
+	lease := leaseHeldFrom(ctx)
 	for _, backoff := range e.persistBackoff {
 		// Renew the lease BEFORE each sleep, so the retry cannot outlive our ownership of the step: its first half
 		// (persistRetryWindow) must cover the sleep and the write, the second is left for failOnPersistError to fail
@@ -149,21 +151,30 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 		// A zero-row match (the query SUCCEEDED but matched nothing) therefore means we no longer own the step - a peer
 		// re-claimed it (lease_seq bumped), recovery reset it to `pending`, or a racing Terminate terminalized it. Abandon
 		// silently: retrying would be a zombie's write, and the fence would reject it anyway. An ERROR here means the
-		// database is unreachable, which is exactly the case the retry loop is for - so fall through and try, with
-		// whatever lease we still hold.
+		// database is unreachable, which is exactly the case the retry loop is for - so fall through and try, but only
+		// inside the lease we still hold (lease.until), not the one the renewal would have given. Do not break to the
+		// classifier on a renewal error instead: a failover fails the renewal too, and a blip would then cost a
+		// re-execution.
 		//
 		// The window is measured from BEFORE the renewal: the lease runs from the database's NOW at the UPDATE, and
 		// on a slow link the round trip back can take seconds.
 		renewed := time.Now()
-		if held, xerr := e.extendLease(ctx, db, stepID, leaseSeq); xerr == nil && !held {
+		held, xerr := e.extendLease(ctx, db, stepID, leaseSeq)
+		if xerr == nil && !held {
 			e.logLostLease(ctx, stepID, err)
 			return errPersistFenced
 		}
 		// A retry starts only if it should finish inside the window, judged by how long the write that just failed
 		// took: repeated failures of one write take about as long as each other. It is not cancelled mid-flight
 		// instead - a cancelled write can still commit, and failStep, which matches a `completed` step, would then
-		// fail a step whose outcome landed.
+		// fail a step whose outcome landed. Either way the window ends where the lease's second half - the
+		// classifier's room - begins.
 		deadline := renewed.Add(e.persistRetryWindow())
+		if xerr == nil {
+			lease.extend(renewed.Add(e.persistLeaseExtension))
+		} else {
+			deadline = lease.until.Add(e.persistRetryWindow() - e.persistLeaseExtension)
+		}
 		if time.Until(deadline) < backoff+lastWrite {
 			break
 		}
@@ -239,6 +250,9 @@ func (e *Engine) logLostLease(ctx context.Context, stepID int, writeErr error) {
 // RowsAffected is honest on MySQL. A zero-row match is therefore ambiguous - taken back, or already long enough -
 // and only then a read settles which.
 func (e *Engine) extendLease(ctx context.Context, db *sequel.DB, stepID, leaseSeq int) (bool, error) {
+	if e.seams.Enabled() && e.seams.IsFault(engineseams.FaultExtendLeaseErr) {
+		return false, errors.New("injected fault: " + engineseams.FaultExtendLeaseErr)
+	}
 	const owned = " WHERE step_id=? AND lease_seq=? AND parked=? AND status IN ('" + workflow.StatusRunning + "', '" + workflow.StatusCompleted + "')"
 	res, err := db.ExecContext(ctx,
 		"UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), ?)"+owned+" AND lease_expires < DATE_ADD_MILLIS(NOW_UTC(), ?)",
@@ -255,6 +269,36 @@ func (e *Engine) extendLease(ctx context.Context, db *sequel.DB, stepID, leaseSe
 		return false, errors.Trace(err)
 	}
 	return held > 0, nil
+}
+
+// leaseHeld is how long this worker knows it holds its dispatched step's lease, by its own clock: until the claim's
+// lease ends at first - measured from before the claim was sent, so never late - then until a later renewal's does.
+// persist retries only inside it when a renewal errors. processStep publishes one on its context
+// (withLeaseHeld); without one nothing is known to be held.
+type leaseHeld struct {
+	until time.Time
+}
+
+// extend records a lease that lasts until t, if that is later than the one already known.
+func (l *leaseHeld) extend(t time.Time) {
+	if t.After(l.until) {
+		l.until = t
+	}
+}
+
+type leaseHeldKey struct{}
+
+// withLeaseHeld publishes the dispatched step's lease to everything the step's processing calls.
+func withLeaseHeld(ctx context.Context, l *leaseHeld) context.Context {
+	return context.WithValue(ctx, leaseHeldKey{}, l)
+}
+
+// leaseHeldFrom returns the lease withLeaseHeld published, or an empty one: nothing known to be held.
+func leaseHeldFrom(ctx context.Context) *leaseHeld {
+	if l, ok := ctx.Value(leaseHeldKey{}).(*leaseHeld); ok {
+		return l
+	}
+	return &leaseHeld{}
 }
 
 // releaseLease hands a step back for immediate re-dispatch, fenced on our lease generation. It resets from

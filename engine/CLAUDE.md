@@ -1760,6 +1760,12 @@ the completion write.
   next run repeats it - forever, with 300 MB rows measured at ~25-70s per rejection. Pinned by
   `TestPersist_SlowFailingWriteFailsTheStepWithoutRetrying` (`FaultPersistSlowErr`) and
   `TestPersist_StalledWritesAreRetriedOnARenewedLease` (`FaultPersistStallErr`). What the window cannot cover is a
+  - **A renewal that errors grants nothing, and does not end the ladder.** The retry is then measured against the
+    lease the worker still holds (`leaseHeld`: the claim's lease, timed from before the claim was sent, or the last
+    renewal that landed), less the classifier's half. Breaking to the classifier instead would re-execute every
+    step caught by a failover, which fails the renewal too. Pinned by
+    `TestPersist_FailedRenewalStillRetriesInsideTheHeldLease` and
+    `TestPersist_FailedRenewalDoesNotRetryPastTheHeldLease`.
   FIRST write that outlives the lease before persist can act: it shows as `dwarf_steps_recovered` climbing and a
   `logLostLease` warning (a warning, because a write that landed with its acknowledgement lost, or a racing
   Terminate, also loses the step and nothing runs again).

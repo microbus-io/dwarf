@@ -262,6 +262,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	flowRead := true
 	row := new(claimRow)
 	stepDest, flowDest := row.destinations()
+	claimSent := time.Now()
 
 	switch db.DriverName() {
 	case "pgx":
@@ -343,6 +344,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	stepCreatedAt, leaseSeq, fanOutOrdinal = row.stepCreatedAt, row.leaseSeq, row.fanOutOrdinal
 	stepCancelling, replaying, replayGoto = row.stepCancelling, row.replaying, row.replayGoto
 	replaySleepLeftMs, replayOnError = row.replaySleepLeftMs, row.replayOnError
+	// The claim's lease runs from the database's NOW at the claim, which is after claimSent.
+	ctx = withLeaseHeld(ctx, &leaseHeld{until: claimSent.Add(time.Duration(timeBudgetMs)*time.Millisecond + e.leaseMargin)})
 	if n == 0 {
 		// A lost claim is routine, not an error: the candidate cache holds hints, not ownership, so the row
 		// may have been claimed by a peer or left the claimable state between selection and claim. Counted
