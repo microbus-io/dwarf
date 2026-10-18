@@ -198,7 +198,7 @@ type Profile struct {
 // time.
 type Sonar struct {
 	// engineID identifies this replica in the registry. Immutable: it is the registry's primary key, and a
-	// replica that changed it mid-life would leave a ghost row behind.
+	// replica that changed it mid-life would leave a stale row behind.
 	engineID int64
 	shard    int
 	db       *sequel.DB
@@ -370,12 +370,8 @@ func (s *Sonar) SetEvidence(fn EvidenceFunc) {
 
 // SetCadence overrides how often this Sonar reads the registry, for an owner whose whole fleet is
 // ephemeral - a test suite standing engines up and tearing them down, where the default's two-cadence Join
-// would dominate every startup. Zero or negative restores Cadence.
-//
-// It is the ONE knob here, and every other number is deliberately not one: the windows and the beat are
-// this package's policy, derived from which errors are safe in which direction rather than from anything
-// an owner knows better. This one is different because it prices the owner's startup latency, which only
-// the owner can see.
+// would dominate every startup. Zero or negative restores Cadence. It is the only timing an owner can set;
+// the windows and the beat are fixed.
 //
 // Shortening it shortens what derives from it - Join's wait and the blindness grace - and nothing else, so
 // a short-cadence Sonar still applies the same windows to the same rows. The cut-entry stagger, counted in

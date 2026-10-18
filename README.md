@@ -15,8 +15,8 @@ parallel fan-out/fan-in, conditional routing, retries with backoff, timed sleeps
 and human-in-the-loop pauses.
 
 Dwarf has **no built-in transport**. It doesn't know how your tasks are reached (a local function call, an
-RPC, a message bus) or where your graphs live. You wire it to your world through a few small dependency
-interfaces, and it handles scheduling, state, durability, and recovery.
+RPC, a message bus) or where your graphs live. You wire it to your world through one small `Host`
+interface, and it handles scheduling, state, durability, and recovery.
 
 ```go
 // Define the workflow:

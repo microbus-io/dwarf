@@ -126,7 +126,7 @@ deliberately:
 
   **A general K-consecutive debounce was built here and removed.** It is the obvious next reach, and it
   buys nothing this does not: the only failure it additionally covers is a peer whose row *straddles* the
-  fresh window with no gap on the reader's side, which takes ~40 consecutive failed beats and is a real
+  fresh window with no gap on the reader's side, which takes ~40 s of consecutively failing beats and is a real
   fault rather than flapping. It cost a type, a knob, a run-maximum rule for alternating readings, and a
   test — to protect against nothing nameable. Reuse the `gapped` flag the prune already needs instead.
 - **`Partition` fails open on every doubt** — solo dispatcher, self absent, ordinal out of range, or blind.

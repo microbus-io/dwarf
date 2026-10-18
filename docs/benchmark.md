@@ -191,7 +191,7 @@ Reading it:
 - **Large state is still expensive.** A flow carrying 1 MB of state takes hundreds of milliseconds, not
   milliseconds, and small payloads move caller bytes 20–50× less efficiently than large ones. Workflows that
   move large documents should trim state early with `flow.Del`, and keep big blobs in object storage — passing
-  only a key through flow state. (`final_state` holds arbitrarily large output on all four dialects — there is
+  only a key through flow state. (A flow's final state can be up to 256 MB on all four dialects — there is
   no 64 KB cap.)
 
 ## What this does *not* measure

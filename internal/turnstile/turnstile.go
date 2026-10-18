@@ -54,8 +54,7 @@ limitations under the License.
 // Close is the stop signal: it releases every waiter and the turnstile admits nobody forever after.
 // Concurrency is live (Resize), because the resource it is sized against moves at runtime.
 //
-// One Turnstile governs one resource, and a Set holds one per shard. A single turnstile spanning several
-// resources would let a caller queued for a busy one hold up a caller bound for an idle one.
+// One Turnstile governs one resource, and a Set holds one per shard.
 package turnstile
 
 import (

@@ -489,7 +489,7 @@ func (e *Engine) recoverOrphanedFlows(ctx context.Context, db *sequel.DB, shard 
 				o.flowID, -e.orphanFlowThreshold.Milliseconds(),
 			).Scan(&held))
 		})
-		// Token-free correlation id: this is an operator alarm, not a capability. See "Tracing".
+		// Token-free correlation id: an operator alarm must not carry the flow key, which is a write capability.
 		switch {
 		case err != nil:
 			e.logger.ErrorContext(ctx, "Orphan sweep: rewinding stranded steps", "shard", shard, "flow", keys.CorrelationID(shard, o.flowID), "error", err)

@@ -220,8 +220,7 @@ validates identically (a nil/invalid child graph fails the caller step like any 
 consequence for graph authors: a graph with no explicit transition to `END` (relying on "no matching
 transition completes the flow") is rejected at `Create` - `Validate` requires an explicit `END` edge.
 `FlowOptions.ThreadKey` (optional) joins the new flow into an existing thread
-(any **root** flowKey in that thread; a bad/stale key 404s, and a **subgraph-child key 400s** - see "Subgraph
-keys are read-only"). The engine has **no creation-time delay** (no `StartAt`):
+(any **root** flowKey in that thread; a bad/stale key 404s, a **subgraph-child key 400s**). The engine has **no creation-time delay** (no `StartAt`):
 every flow runs as soon as it is created. A flow that should wait runs author-side - an entry **gate** task that
 calls `flow.Sleep(until)` for a one-shot durable delay, or an interrupt-first entry task + `Resume` (staged
 start) - and recurring schedules are an external concern (a host/cron service that calls `Create`/`Run` on a
@@ -243,27 +242,26 @@ leaf's `resume_data` column (the leaf already has `interrupt_done=1`, set when t
 re-dispatch the task's `flow.Interrupt` call returns that data with `yield=false`. Resume data is **not** merged into
 `state`/`changes` - the task receives it as the return value. Re-parks intermediate surgraph steps, resets the leaf
 to `pending`, transitions all flows in the chain to `running`. Propagation goes both directions. Must be addressed
-by the **root** flow key (a subgraph-child key is rejected with 400 - see "Subgraph keys are read-only"). If
+by the **root** flow key (400 on a subgraph-child key). If
 multiple fan-out siblings interrupt, each `Resume` handles one; the flow returns to `running` only when no
 interrupted steps remain.
 
 **Terminate** - Aborts a created, running, or interrupted flow, forcefully and unconditionally: in-flight work is
 abandoned immediately, with no chance for any task to react. Walks **down** (`allSubgraphFlows`) the hierarchy,
 atomically terminates all steps across all flows, computes `final_state` per flow, and sets every flow to
-`terminated` with its own UPDATE, batched - all in one transaction (`terminateSubtree`). Inside it, the steps are terminated, the flow
-rows locked, the steps terminated again, and the tree scanned once more; a scan that finds a flow the set missed
-rolls the transaction back and re-runs it over the larger set. So neither a step created mid-terminate nor a
-subgraph spawned since the first scan escapes (see the orphaned-child sweep under "Background Recovery"). Must be addressed by the **root** flow key
-(a subgraph-child key is rejected with 400 - see "Subgraph keys are read-only"). Takes a reason string surfaced
+`terminated` with its own UPDATE, batched - all in one transaction (`terminateSubtree`), built so that neither a
+step created mid-terminate nor a subgraph spawned since its first scan escapes (the rules are under the
+orphaned-child sweep in "Background Recovery"). Must be addressed by the **root** flow key
+(400 on a subgraph-child key). Takes a reason string surfaced
 as `FlowOutcome.TerminateReason`.
 
 *Down only - Terminate never walks up.* It is addressed only by the **root** flow key (a mid-tree key is
-rejected - see "Subgraph keys are read-only"), so it has no ancestors to walk: `surgraphChain`, the up-walk
+rejected), so it has no ancestors to walk: `surgraphChain`, the up-walk
 helper, has no role here and would find nothing above a root. Every termination the engine performs is
 down-only or one-level: a root-addressed Terminate has no ancestors; the orphan sweep starts at a child whose
 ancestor chain is already terminal; and a child terminalizing settles its *one* caller step by
-`surgraph_step_id` (a PK), not by walking to the root. (`surgraphChain` itself stays: `Resume`,
-`handleInterrupt`, and `Fork` are its real users.)
+`surgraph_step_id` (a PK), not by walking to the root. (`surgraphChain`'s users are `Resume`,
+`handleInterrupt` and `Fork`.)
 
 **`terminateSubtree` is shared with the orphan sweep** (`terminateOrphanedSubtree`), and both treat a tree
 that is already terminal the same way: a no-op returning nil, as `Cancel` and a repeated `Delete` are. A
@@ -485,8 +483,8 @@ always targets roots only (deleting a subgraph child directly would strand its p
 
 **Continue** - `Continue(threadKey, additionalState)` creates and runs a new flow from the latest completed flow
 in a thread, merged with `additionalState` using the graph's reducers - sugar over `Create` for the multi-turn
-case. The `threadKey` accepts any **root** flowKey in the thread (a subgraph-child key is rejected with 400 - see
-"Subgraph keys are read-only"); `Continue` resolves the thread via `thread_id`, finds the
+case. The `threadKey` accepts any **root** flowKey in the thread (400 on a subgraph-child key);
+`Continue` resolves the thread via `thread_id`, finds the
 latest **non-fork** flow (`ORDER BY flow_id DESC` with `forked_from_step=0`), validates it is completed, and
 creates the new flow in the same thread with the same graph, returned **`running`** (like `Create`). The fork
 exclusion keeps a debug `Fork` (which shares the thread's `thread_id` for `List` grouping) from ever becoming a
@@ -1702,17 +1700,14 @@ The graph still carries no per-task timing - the budget is a per-*flow* default 
 wants a tighter per-task bound enforces it inside its `ExecuteTask` (or the task itself), shortening the call context;
 narrowing the deadline at dispatch is always allowed. The engine's budget is the outer ceiling.
 
-`FlowOptions.TimeBudget` is **frozen at `Create`** (immutable for the flow's life, like `priority`), **inherited by
-subgraph children** (`createSubgraphFlow` reads the parent's `time_budget_ms` alongside priority/fairness) and by
+It is immutable for the flow's life, like `priority`, and **inherited by subgraph children** (`createSubgraphFlow` reads the parent's `time_budget_ms` alongside priority/fairness) and by
 `Continue` (the thread's latest turn, since it takes no `FlowOptions`). A later `SetTimeBudget` change does not
 retro-edit existing flows; it only seeds flows created afterward. On a subgraph spawn the child's `LoadGraph` is
 bounded by the caller flow's budget; the create-time `LoadGraph` runs on the caller's own request context instead.
 
-**No engine-imposed ceiling.** The engine enforces **no** upper bound on `FlowOptions.TimeBudget`, mirroring its
-refusal to own a flow-level deadline. A host wanting an SLA cap validates `FlowOptions.TimeBudget` against its own
-limit before `Create` and rejects an over-limit request there (a request to *exceed* the ceiling, distinct from
-narrowing the deadline at dispatch, which the host may always do). A standalone caller setting a very large budget
-owns the consequences below.
+**No engine-imposed ceiling** on `FlowOptions.TimeBudget`, for the reason it owns no flow-level deadline: a host
+wanting an SLA cap rejects an over-limit budget before `Create`, and a caller setting a very large one owns the
+consequences below.
 
 The worker lease is sized from the **step's own `time_budget_ms`** + `leaseMargin` (30s), written self-referentially
 in the claim CAS (`lease_expires = DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?)`, only the margin a bind param), so
@@ -1742,10 +1737,8 @@ outcome write added outside `persist` reopens the loop above. A test fails the r
 through it with `FaultRetryRewindErr` and the reroute write with `FaultRerouteWriteErr`, as `FaultPersistErr` does
 the completion write.
 
-- **In-place retry, holding the lease.** A short exponential (1s/2s/4s). The errors this exists for - a failover, a
-  dropped connection, a momentary connection-limit rejection - clear in **seconds**, so a blip is absorbed with
-  **zero re-execution**. A minutes-long backoff would be slow in both directions: slow to recover from something
-  that already cleared, and slow to report a permanent failure.
+- **In-place retry, holding the lease:** a short exponential (1s/2s/4s), because the errors it exists for clear in
+  seconds (`persist.go`'s header). A minutes-long backoff is slow both to recover and to report a permanent failure.
 - **The lease is renewed before each retry** (`persistLeaseExtension`, 60s). Without it, a task that consumed most
   of its budget has only `leaseMargin` left, so sleeping through the backoff would put the worker *past* its lease:
   a peer re-claims, **re-executes the task**, and the late write is fenced away - exactly the re-execution this
@@ -2088,11 +2081,12 @@ level-by-level recursion gives, at a fixed number of round-trips regardless of n
 per level. The subquery resolves the
 tree first, so each walk works whether its starting flow is the root or a mid-tree node:
 
-- `allDescendantSubgraphFlows` (Delete cascade, `Fingerprint`) - BFS *down* from the given flow over the loaded
-  rows (any status).
-- `allSubgraphFlows` (Terminate's descendant set) - BFS *down* through **non-terminal** nodes only, stopping at a
-  terminal node. Mid-tree Terminate/Delete therefore mean "descendants of *this* node", not "the whole tree."
-- `surgraphChain` (the ordered *up*-walk: Terminate, Resume, Fork, interrupt propagation) - follows
+- `allDescendantSubgraphFlows` (`Fingerprint`) - BFS *down* from the given flow over the loaded rows (any
+  status). Delete needs no walk: it marks the root, and the reaper deletes by `root_flow_id`.
+- `allSubgraphFlows` (the descendant set of `terminateSubtree` and of `Cancel`) - BFS *down* through
+  **non-terminal** nodes only, stopping at a terminal node. Started from a mid-tree flow, as the orphan sweep
+  does, it means "descendants of *this* node", not "the whole tree."
+- `surgraphChain` (the ordered *up*-walk: Resume, Fork, interrupt propagation) - follows
   `surgraph_flow_id`/`surgraph_step_id` pointers from the flow up to the root, collecting each ancestor's caller
   step + token. One scan, where a level-by-level walk costs *two* queries per level.
 - `interruptedSubgraphChain` (Resume's *down*-walk) - one tree scan plus **one** batched query for every flow's
@@ -2187,8 +2181,7 @@ operation that returns keys wholesale (a separate concern) - not the token itsel
 free-text search is a field on `workflow.Query` that `List` consumes.)
 
 **Token entropy (64-bit) and the every-gate-is-`flow_id`+`flow_token` invariant that makes it adequate** live in
-`internal/keys/CLAUDE.md`. Load-bearing for this section: the token is never a standalone lookup, so a leaked key
-is a full write capability for exactly one flow and nothing more.
+`internal/keys/CLAUDE.md`.
 
 **Related engine-side hardening (all verified, none a substitute for host authz):** uniform not-found on
 key mismatch (no existence oracle); telemetry carries only the token-free correlation id and there is no
@@ -2320,8 +2313,8 @@ is already local and free, at the price of a write per await.
 
 ### Write-ordering & lock contention
 
-- **Write-first transactions** - `processStep`'s transition transaction does an `UPDATE dwarf_flows` as its first
-  operation to immediately acquire a write lock (a pure cohort arrival defers that grab, and its cohort bump is the
+- **Write-first transactions** - `processStep`'s transition transaction takes the flow row's lock
+  (`lockFlowRows`) as its first operation (a pure cohort arrival defers that grab, and its cohort bump is the
   first write instead - see "Transactions"). On MySQL/Postgres this serializes concurrent workers. On SQLite with
   `cache=shared`, starting with a write avoids the deadlock where two read-first deferred transactions both hold
   SHARED locks and neither can upgrade. **Every lock-only grab of a flow row goes through `lockFlowRows`** (or
@@ -2434,24 +2427,17 @@ Startup into `shardSizing`):
 - **The fleet is known BEFORE any worker dispatches, so pools are sized right the first time - there is no
   async grace window.** Reading the registry needs open connections, so `Startup` opens the shards at a small
   **bootstrap** pool (`startupBootstrapConns`, 4 - enough to register the row, probe the RTT and read the fleet,
-  which is all any pre-dispatch work needs), then builds the Sonars, joins every shard in parallel, and only
-  then resizes each pool to its derived share and computes `workersDispatch` - all before `initRuntime` spawns
-  a worker. So the replica takes on work with pools already correct for the fleet it is in, with no
-  partial-count over-connect to defend against. The ordering rationale - announce, let peers shrink, then grow -
-  is in §"Peer discovery"; what matters here is that the sizing happens after it and before dispatch.
+  which is all any pre-dispatch work needs), joins the fleet ("Startup announces before it consumes", under
+  §"Peer discovery"), and only then resizes each pool to its derived share and computes `workersDispatch` - all
+  before `initRuntime` spawns a worker.
 
   **The bootstrap pool is deliberately tiny** because a cold-starting fleet's only connections during that window
-  are these (no worker dispatches yet, and lazy fill means the ceiling barely materializes - roughly one
-  connection per shard, since everything in the window runs sequentially on one goroutine per shard), so even N
-  replicas starting together stay far under any server's `max_connections`. It is not an over-connect guard - that
-  is "the fleet is known before dispatch" - just enough to bootstrap the read.
+  are these (roughly one per shard: everything in the window runs sequentially on one goroutine per shard), so
+  even N replicas starting together stay far under any server's `max_connections`.
 
   **`lastAppliedSlots` starts EMPTY (`"nothing derived yet"` per shard), and Startup records each shard's role**
   after sizing its pool directly, so the first reconcile `recomputePools` dedupes against the values the pools
   actually hold.
-
-  None of this depends on any transport: the registry is the only thing anyone reads (see "Peer discovery"
-  below).
 
 - **The derived budget is per DATABASE, so the shard's DISPATCHERS split it**: each of the `X` replicas
   that dispatch a shard takes `max(2, round(budget/(X+D)))`, where `D` counts the replicas draining a share
@@ -2559,10 +2545,9 @@ already closed: lowering a pool's limit closes nothing, so any surplus drains as
 
 **Shutdown drains the Sonars LAST**, after the pistons - see "Shutdown ordering".
 
-**Everything fails open.** A shard with no Sonar (one that failed to build, or any lookup before Startup)
-sizes for a solo replica - the pool-safe direction - and declines to partition. The Sonar's own uncertain
-cases (solo dispatcher, self absent from the roster, an ordinal outside the divisor, a Sonar gone blind) do
-the same, and `internal/piston` validates the pair a third time as its own advertised posture. Three guards,
+**A shard with no Sonar** (one that failed to build, or any lookup before Startup) sizes for a solo replica -
+the pool-safe direction - and declines to partition, as the Sonar's own uncertain cases do (see "Everything
+fails open" under "Candidate de-duplication"); `internal/piston` validates the pair a third time. Three guards,
 deliberately: each package answers for what it knows.
 
 **Under test the cadence is shortened** (`testPeerCadence`, `buildSonars`), because every engine pays
@@ -2579,10 +2564,6 @@ engines to assert their solo pool sizes. The latter (`TestPoolSizing_DerivedWork
 each engine `t.Name()+"#"+key`, so each reads R=1. The
 sizing tests drive fleet size by writing fake peer rows (`addPeerRow`/`delPeerRow`, which wait for the Sonars to
 observe the change).
-
-**Nothing announces a fleet change, and nothing needs to.** The Sonars have no nudge entry point,
-deliberately: reading every `peers.Cadence` converges faster than a broadcast would, so a nudge could only
-ever arrive after the reading that made it redundant.
 
 Design posture: a **lookup, not a control loop** (the counts are exact and discrete and
 independent of the actuation - a shrunk pool still beats), and they are **tuning** numbers (a wrong count
@@ -2777,7 +2758,7 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
   `internal/peers/CLAUDE.md`), so a zone loss or a kill-style roll that leaves k stale rows makes each handoff
   take about k beats until the prune removes them - up to about five minutes.
 
-### Worker sizing: the lease-margin ceiling, with a grow-on-demand pool (`poolsize.go`, `engine.go`)
+### Worker sizing: the lease-margin ceiling, with a grow-on-demand crew (`poolsize.go`, `engine.go`)
 
 The worker count is split into two numbers, because they answer different questions:
 
@@ -2817,7 +2798,7 @@ The worker count is split into two numbers, because they answer different questi
     **The resident floor is deliberately left at the Startup value** (derived at R=1), so a large-R fleet keeps
     an over-provisioned floor. That is the safe direction: surplus workers queue on the pool, and the
     shrink rule collects their stacks without any protocol on the hot path.
-- **`workers` (the MAXIMUM the pool may grow to)** = `workerCeiling` = `M x margin / txTime x safety`,
+- **`workers` (the MAXIMUM the crew may grow to)** = `workerCeiling` = `M x margin / txTime x safety`,
   the largest pool that keeps a **synchronized completion storm** inside the crash-recovery lease margin: every
   in-flight task released at once (a downstream outage ending), N completions draining through M connections,
   and any that out-waits its margin re-executes after a peer re-claims - duplicating the most expensive work at
@@ -2833,7 +2814,7 @@ The worker count is split into two numbers, because they answer different questi
   growth turning into pool contention, and the turn taken BEFORE a candidate is picked up is what regulates
   crew growth - by blocking, not by being consulted. See "Turn-taking on the database" below.
 
-- **The pool grows on demand** (`internal/workers`): a worker that takes a candidate and finds **nobody
+- **The crew grows on demand** (`internal/workers`): a worker that takes a candidate and finds **nobody
   idle** adds one, keeping a standing reserve of one. The turnstile's turn is what makes so easy a trigger
   safe - by BLOCKING, not by being consulted: a worker waiting for a turn holds no candidate, so it counts idle
   and the next check declines. Two traps not to re-introduce, each with its measurement: gating growth on
@@ -2960,7 +2941,7 @@ The schema carries `priority`, `fairness_key`, `fairness_weight` on **both** `dw
 split used for `time_budget_ms`/`baggage`.
 
 `resolveFlowOptions` resolves a caller's `*workflow.FlowOptions` against the engine defaults: priority falls back to
-`SetDefaultPriority`, the fairness key to the host-supplied key (or `""`), the weight to `1`, and the time budget to
+`SetDefaultPriority`, the fairness key to `""`, the weight to `1`, and the time budget to
 `SetTimeBudget` (no ceiling; see "Time Budgets"). These values are immutable for the flow's life (switching a flow's
 fairness key mid-run would be a self-promotion abuse vector). This is the **genesis** path (`Create`/`Run`); the
 **derived** operations inherit instead - `createSubgraphFlow` from the parent (so a high-priority parent never
@@ -2979,9 +2960,9 @@ them by a scalar subquery on `dwarf_flows` per inserted row** - that is 3N PK lo
 - **Priority is a property of the flow, not the task or workflow type.** Step order *within* a flow is dictated by the
   graph, not urgency; priority only arbitrates *between* flows competing for workers, so it is resolved once at
   `Create` and immutable (`workflow.FlowOptions` is flow-level for the same reason).
-- **Workers default to the lease-margin ceiling with a grow-on-demand pool** (see "Worker sizing"); an
+- **Workers default to the lease-margin ceiling with a grow-on-demand crew** (see "Worker sizing"); an
   explicit `SetWorkers` pins the maximum. A worker blocked on an `ExecuteTask` call is just a goroutine
-  stack plus a socket, so the derivation errs generous - and the pool only grows into it when work is
+  stack plus a socket, so the derivation errs generous - and the crew only grows into it when work is
   actually parked.
 - **Fairness weight is denormalized at `Create`, never resolved on the selection path** (a resolver hook would put
   synchronous I/O on the hot critical section). When a key's steps carry inconsistent weights, the oldest candidate
@@ -3057,10 +3038,8 @@ informative against a MERGED pass, whose straggler tax is its gap over the per-s
 barrier there is no such gap, and an end-to-end timer is a coarse duplicate of the four phases, which say
 WHICH part was slow. Do not add it without a question it answers that the phase split does not.
 
-**DO NOT SUM THE FOUR PHASES.** `band_keys` is emitted by the piston's tally loop and
-`planning`/`fetch_steps`/`pushing` by its supply loop, on independent cadences - so their sum is the total
-of two unrelated clocks and reconstructs no single object. There is no "a cycle" to reconstruct.
-These exist because without them the refiller is the one hot-path subsystem with no timing instrument at all,
+**Do not sum the four phases** - they come from two loops on independent cadences (`bench/CLAUDE.md` has the
+trap). These exist because without them the refiller is the one hot-path subsystem with no timing instrument at all,
 and "what binds at the ceiling" cannot be asked of it - without them a flat shard arm cannot be told from a
 load-generator-bound one. They discriminate three hypotheses that look identical from outside
 (the rules below record how each resolved):
@@ -3084,11 +3063,8 @@ found while writing the degradation harness: the band scan's plan flips between 
 That is indistinguishable from a slow shard without the phase split, and phase 1 is where the measured cost
 concentrates, so the split is what makes the band scan's backlog dependence visible at all.
 
-Explicit second-valued bucket boundaries (`refillBuckets`, in `internal/piston`) are mandatory: the
-OTEL defaults are tuned for millisecond-valued instruments and would file every sample in bucket 0. **The
-LOW end is load-bearing** - a warm band scan is ~0.29ms and the same query is ~100ms once its statistics go
-stale, which is the flip the `phase` label exists to expose, so boundaries starting at 0.0005 hide the
-healthy case in bucket 0.
+Explicit second-valued bucket boundaries (`refillBuckets`, in `internal/piston`) are mandatory, and their low
+end is load-bearing (`internal/piston/CLAUDE.md`).
 
 **What the instruments measured, as rules** - each one makes a future change WRONG if unknown:
 
@@ -3262,9 +3238,6 @@ subtracts per band. **Every end path must label with it too**, and each reads it
 already makes rather than a query of its own: `completeFlow`'s lock grab, `dynamicSubgraphParent` (failStep),
 `allSubgraphFlows`' tree scan (terminate), and `processStep`'s flow read (the cohort-fail path). An end counted
 under a different priority than its start leaves both bands drifting.
-
-> Observability note: the per-priority/per-task gauges are aggregate-only by design - no
-> per-`fairness_key` labels (unbounded cardinality).
 
 ## Tracing (`engine/tracing.go`)
 
@@ -3608,10 +3581,8 @@ ordering:
   `fireFanInDirect`. The one exception is a **pure cohort arrival** (no successor): its first
   write is the cohort bump on the spawn step row, and only the arrival that resolves the cohort grabs the flow row,
   after the bump - still write-first, and grabbing for every arrival would serialize the whole cohort on one row
-  (the rationale is at `pureArrival` in `execution.go`). This is mandatory, not stylistic - see "Write-ordering & lock contention" above for the
-  SQLite SHARED-upgrade deadlock and the `completed`-step-strands-`running` orphan failure mode it prevents (the
-  terminating step is marked `completed` in a standalone UPDATE *before* the disposition tx, so the flow row must
-  be locked first for the disposition to be recoverable). Do not reorder these to read-first.
+  (the rationale is at `pureArrival` in `execution.go`). Mandatory - the failure modes are under "Write-ordering &
+  lock contention" above. Do not reorder these to read-first.
 - **Steps-first.** The lifecycle mutations update `dwarf_steps` before `dwarf_flows`: `Resume`, `Terminate`,
   `failStep`, `handleInterrupt`, and `Delete`/`Purge` (the deletes run steps-before-flows, ascending id).
   `handleInterrupt` belongs here despite advancing the flow (running→interrupted): interrupt is
@@ -3626,8 +3597,8 @@ flow-row-first in statement order, but into a **brand-new** flow whose rows no c
 honors no existing-row lock order and cannot cycle. `Fork` performs its entire tree clone (an iterative worklist) in one
 transaction (so a crash mid-clone rolls back), and the leaf fork step is held `created` until the mapping is complete.
 **Fork's transaction opens with `lockFlowRows` on the origin root, because the clone reads before it writes.** On
-SQLite a read-first transaction cannot upgrade against a concurrent writer and gets `SQLITE_BUSY` at once on every
-`Transact` retry - measured as ~1 Fork in 8 failing under the bench soak, and pinned by
+SQLite a read-first transaction cannot upgrade against a concurrent writer and gets `SQLITE_BUSY` (`SQLITE_LOCKED`
+under a shared cache, as in the test suite) at once on every `Transact` retry - measured as ~1 Fork in 8 failing under the bench soak, and pinned by
 `fixtures/forkconcurrentflow_test.go`. Every other `Transact` in the engine already opens with a write; a new one
 that reads first needs the same.
 
@@ -3647,10 +3618,8 @@ read-first-upgrade one the write-first rule already closes) while giving `Termin
 flow row and waiting on `Terminate`'s gap lock cycles with `Terminate` waiting on that flow row - observed in
 `TestTerminateVsSubgraphSpawn_Deterministic`, retry-recovered like the rest.
 
-**`Terminate` takes steps, then flows, then steps AGAIN, and the second pass is the one exception to steps-first.**
-`terminateSubtree` locks the tree's flow rows after its first step UPDATE and then re-runs that UPDATE, to catch a
-step a transition committed in between (see the orphaned-child rules under "Background Recovery"). The second
-pass can only reach a step created after the first one - every older step is already locked by it - so it crosses
+**`Terminate` takes steps, then flows, then steps AGAIN** (why, under the orphaned-child rules in "Background
+Recovery"), **and the second pass is the one exception to steps-first.** It can only reach a step created after the first one - every older step is already locked by it - so it crosses
 only a transaction that took such a just-created step first and then wants the flow row: a worker that claimed it
 and is already in `failStep` or `handleInterrupt` (both steps, then flows). That needs the step inserted, claimed,
 executed and failed or interrupted inside `Terminate`'s own transaction; the cycle is retry-recovered by
@@ -3670,7 +3639,7 @@ form a cycle - the same reason steps-first `Resume` already coexisted with them.
 Orthogonal to that tolerated cross (the deadlock stays retry-recovered; the lock order is **unchanged** - the
 transition tx still takes the flow row write-first), the transition must not *extend* a flow `Terminate` already
 terminalized. Whenever the race resolves in `Terminate`'s favor - or the transition simply re-runs after a
-contention rollback against a since-terminated flow - its opening write-first `UPDATE dwarf_flows` is **guarded on
+contention rollback against a since-terminated flow - its opening flow-row lock grab (`lockFlowRows`) is **guarded on
 non-terminal status** (`AND status NOT IN (completed, failed, terminated, cancelled)`) and bails on zero rows. Without the
 guard it would insert `pending` successors (and bump `cohort_arrivals` / write a fan-in step) into the terminal
 flow - orphan work reaped only later by the claim-time terminal-flow guard. The already-`completed` step is left
@@ -3928,12 +3897,13 @@ the not-shard-fault-tolerant contract, and the DSN/test-mode resolution — live
 `internal/database/CLAUDE.md`. This section is the engine-side *semantics*.
 
 **Shard routing & encoding:** external flow IDs encode the shard (`{shard}-{flowID}-{token}`); every operation parses
-it and routes via `e.db.Shard(n)`. Indices are 1-based (`1..NumShards`); `0` is the "no shard / all shards" sentinel
-used by `Query.Shard`.
+it and routes via `e.db.Shard(n)`. Indices are the declared ones (`>= 1`, sparse); `0` is the "no shard / all
+shards" sentinel used by `Query.Shard`.
 
 **Shard affinity:** subgraph flows are created on the parent's shard (avoids cross-shard references during
 subgraph completion and history reconstruction). Only top-level flow creation picks a shard - a
-weighted random pick over non-cordoned shards (below).
+weighted random pick over the non-cordoned shards this replica dispatches, when there are any (below, and
+"Dispatchers").
 
 **New-flow placement is weighted by `ShardSpec.Weight` (`pickShard`, default 1).** Placement is the engine's
 only load-balancing moment - flows are shard-pinned for life (subgraph affinity, thread continuations, forks)

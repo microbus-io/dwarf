@@ -194,8 +194,10 @@ The one limit is what the database can store. No single JSON value dwarf writes 
 - **A task's changes in one step** must fit in 256 MB. That is what one step writes.
 - **The flow's state while it runs** can be somewhat larger than 256 MB. A large field is stored once, in the
   step that wrote it, and later steps refer to it instead of copying it, so each step's own row holds only
-  its small fields. The exception is a field that a reducer accumulates (`append`, `concat`, `merge`): it is
-  copied forward whole, so it counts toward the limit in every step it reaches.
+  its small fields. The exception is a field under a reducer other than `append` (`concat`, `merge`,
+  `union`, `add` and the rest): the step after one that contributes to it stores the combined value whole, so
+  a large one counts toward the limit in that step's row. Steps that do not touch it refer to it as before. A
+  field under `append` is stored as references to the steps that hold its elements.
 - **The flow's state when it ends** must fit in 256 MB, because the final state holds every field at once.
   The same is true wherever a whole state crosses from one flow to another: a `Continue` turn's starting
   state, a subgraph's input and its result, and the step a `Fork` restarts from. A flow should drop large
@@ -227,7 +229,7 @@ fan-out's source array in an entry task, and bound your retention sweeps.
 Two values are known not to survive storage, and both fail silently rather than loudly:
 
 - **An integer beyond ±2^53, read untyped.** Storage itself is exact — the value round-trips through steps,
-  `final_state`, `Fork` and `Continue` — and typed accessors like `GetInt`, and a `when` expression comparing
+  the final state, `Fork` and `Continue` — and typed accessors like `GetInt`, and a `when` expression comparing
   it, are exact too. But a read into an untyped `any` (`Get` into an `any`, `Parse` into a map) comes back
   **rounded**, with no error anywhere. On MySQL, storage is exact only within 64 bits: an integer above
   2^64-1 or below -2^63, including an `add` sum that grows past it, is stored as a floating-point number.

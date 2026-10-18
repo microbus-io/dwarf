@@ -94,4 +94,12 @@ fit its own concurrency. `SetWorkers(n)` is an expert override — mainly for bo
 in-flight step carries its state map — and pins the maximum rather than the resident set. See
 [Deployment → Workers](deployment.md#workers).
 
+## Crash recovery
+
+A step a crashed worker was running is recovered on its own: it is run again once its lease lapses, within the
+flow's time budget plus about a minute and a half, and a step whose outcome was recorded but whose next step was
+not is picked up from that record without running its task again. Execution is therefore at least once, so make
+tasks idempotent. The timings, and what an operator sees, are in
+[Deployment → Crash recovery](deployment.md#crash-recovery).
+
 Next: [Observability](observability.md).

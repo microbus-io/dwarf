@@ -518,7 +518,8 @@ seeks `(parked, priority, fairness_key)` and returns each key's run already in `
 due index seeks `(parked, priority)` too, and when its estimates are small the planner takes it, filters each key
 row by row and sorts: O(backlog) per key. Measured on a rig (PG 16, 512 keys, saturated): a CUSTOM plan made
 1 m 50 s into a fresh database's warmup, `rows=1` at cost 8.4, ran **1,224 s** and held the vacuum horizon the
-whole time (`_WORK.md` #30's loop: a later good-plan fetch took 69 s, the lease-recovery sweep 57 s). The plan
+whole time, and the held horizon slowed every later read (`engine/CLAUDE.md`, "A long read holds back vacuum"):
+a later good-plan fetch took 69 s, the lease-recovery sweep 57 s. The plan
 could not be reproduced locally on PG 16 or 18 from any table contents, so a fix that steers the plan cannot be
 tested against the failure; this one can. The rules that keep it working:
 
@@ -535,7 +536,7 @@ tested against the failure; this one can. The rules that keep it working:
 **The cost, measured** (PG 18, 400k due rows at one band, 32 keys, warm, six runs each): the dense band scan
 reads its rows off the selection index, where the guard is checked per row - **~71 -> ~80 ms (+12%)**. The
 sleeper shape (396k asleep, 4k due), where the band scan seeks the due index, and the backlog aggregate in both
-shapes are unchanged; the fetch is unchanged against the CASE-wrapped predicate it replaces. The band scan is a
+shapes are unchanged, and so is the fetch's cost. The band scan is a
 resource tax rather than a supply bound (`engine/CLAUDE.md`, Metrics), so the 12% is database CPU, not throughput.
 Pinned by `TestFetchQuery_PostgresPlan` (with the selection index dropped the fetch must not touch the due index;
 the same statement with the guard must), `TestScanBand_CanSeekTheDueIndex` (pgx, sqlite) and

@@ -1737,7 +1737,7 @@ func readCancelReason(ctx context.Context, db sequel.Executor, flowID int) (stri
 // errLeaseFenced is an in-transaction sentinel: a post-execution write found the dispatch's lease had
 // been re-granted to a peer, so the transaction must roll back and the worker must abandon quietly. It is
 // never surfaced - callers detect it via a captured `fenced` bool, or persist maps it to errPersistFenced,
-// and return nil. See "Lease fencing".
+// and return nil.
 var errLeaseFenced = errors.New("dispatch lease fenced")
 
 // errTransitionFlowTerminal is an in-transaction sentinel: the transition's flow-row lock grab found the flow
@@ -2036,7 +2036,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 	if err != nil {
 		if fenced {
 			// Our lease was re-granted to a peer mid-execution; the peer owns this step and re-runs the
-			// interrupt. Abandon quietly - not an error (see "Lease fencing").
+			// interrupt. Abandon quietly - not an error.
 			return nil
 		}
 		return errors.Trace(err)

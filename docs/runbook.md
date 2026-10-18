@@ -106,8 +106,11 @@ and their flows failed with them. The task ran exactly once.
 
 - **A `NUL` byte (`U+0000`) in a string.** PostgreSQL rejects it in JSON outright; other dialects accept it.
   Base64-encode binary data instead of putting raw bytes in state.
-- **A payload exceeding a column or packet limit.** Check your driver's max packet size against the size of
-  the state being written; `dwarf_state_write_bytes_total` shows what workflows are writing.
+- **A value the database refuses below the [256 MB limit](data-handling.md#the-size-limit-256-mb-per-value).**
+  On MySQL and MariaDB, a statement larger than `max_allowed_packet` where it is set below 256M; on
+  PostgreSQL, a value whose binary JSON form is larger than its text (an array of many small numbers). A value
+  over the limit itself never reaches this counter: the engine refuses it before writing, and the step fails
+  with an error saying it is over the limit. `dwarf_state_write_bytes_total` shows what workflows are writing.
 
 **Respond.** Read the failed flows' error text — it names the driver's actual complaint. Fix the task that
 produces the value, then `Fork` the failed flows from the offending step with a state override that repairs
@@ -144,7 +147,7 @@ deep, and database CPU is high. This is the expected shape at capacity — the e
 overwhelming the server. Add database capacity, or add a shard ([Resharding](resharding.md)). Adding engine
 replicas will **not** help: they share the same per-database connection budget.
 
-**2. The engine is saturated.** Engine CPU is high and the database is not. Plan for roughly 3,000 steps/s
+**2. The engine is saturated.** Engine CPU is high and the database is not. Plan for roughly 3,300 steps/s
 per engine core ([benchmark](benchmark-cloud.md#the-engine-is-cheap)). Add replicas.
 
 **3. Neither is busy — the query planner has gone stale.** This is the one that looks like nothing is wrong:
@@ -220,8 +223,10 @@ the fault. Directly:
 SELECT engine_id, seen_at FROM dwarf_peers ORDER BY seen_at;
 ```
 
-**Respond.** A stale row stops counting toward the replica count after **40 seconds** — so the damage
-resolves itself that fast. Deletion of the row is slower and needs two conditions: the row must be older
+**Respond.** A stale row stops counting toward the replica count after **40 seconds**, so the pool damage
+resolves itself that fast. Until the row is deleted, though, it can still delay each hand-off of a shard's
+dispatch to another replica by about one heartbeat (a second), once per stale row, so a crash-looping fleet
+with many stale rows hands dispatch over slowly for up to about five minutes. Deletion of the row is slower and needs two conditions: the row must be older
 than **80 seconds**, *and* the registry must have been continuously readable for **5 minutes**. **Wait
 first** — the cleanup is deliberately patient because deleting a row is the only irreversible act in the
 registry. If rows persist well beyond that, delete the

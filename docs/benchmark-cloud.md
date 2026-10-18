@@ -3,7 +3,7 @@
 > **For operators** sizing a deployment. This page answers how much one database serves, what adding
 > shards and engine replicas does, and what the engine itself costs. Every number was measured, and the
 > configuration that produced it is stated beside it. The database volume section quotes measurements from
-> July 2026 while it is being remeasured, and says so.
+> July 2026, on 8 vCPU databases, and says so.
 
 ## The short version
 
@@ -387,7 +387,7 @@ The budget of 250 connections per shard is measured, not guessed.
 
 ## Sizing a deployment
 
-1. **Shards.** Plan each 32 vCPU database at **~16,000 steps/s**: its settled rate (~17,000) less room to
+1. **Shards.** Plan each 32 vCPU database at **~16,000 steps/s**: its settled rate (18,400–19,200) less room to
    catch up after a failover or a spike. `shards = peak steps/s ÷ 16,000`, rounded up. Below one shard's
    worth, a 16 vCPU database (~7,000 settled) or an 8 vCPU database (~3,600) costs less, at a higher price
    per step.
@@ -490,8 +490,7 @@ engine host, with the cache at several sizes:
 
 ## Database volume
 
-*Being remeasured: throughput as a 32 vCPU database grows to ~200 million step rows and to 512 GB. Until
-then, measurements on 8 vCPU databases with 500 GB disks:*
+*Measured in July 2026 on 8 vCPU databases with 500 GB disks:*
 
 - **Growth costs a one-time settling of ~15–20%, then nothing more.** Filling to **100 million step rows**,
   the time a step holds a connection rose 7.3 → ~8.7 ms by ~10 million rows and then stayed flat. Filling to
@@ -547,5 +546,7 @@ GOOS=linux GOARCH=arm64 go build -o dwarf-bench ./bench
 # Long tasks: -task-delay 8s, or -workload llm -task-delay 60s -concurrency 10000 for closed-loop in-flight.
 ```
 
-Use a fresh database for every run (`DROP DATABASE ... WITH (FORCE)` after killing engines), and wait ~60 s
-after a hard kill before reusing a database so the dead engine's replica record expires.
+Use a fresh database for every run (`DROP DATABASE ... WITH (FORCE)` after killing engines). A killed engine
+leaves its replica record behind: a reused database counts it as a live replica for 40 seconds, shrinking the
+other replicas' connection pools, and until the record is pruned, minutes later, it can delay each hand-off of a
+shard's dispatch by about a second.

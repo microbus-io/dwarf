@@ -1051,7 +1051,7 @@ func (e *Engine) failAndReturn(ctx context.Context, shardNum int, stepID int, le
 
 // failStep handles a task failure. It returns fenced=true (with a nil error) when the dispatch's lease was
 // re-granted to a peer - its fenced step UPDATE matched zero rows, so it wrote nothing and the caller must
-// abandon quietly rather than fail a flow the peer is healthily re-executing (see "Lease fencing").
+// abandon quietly rather than fail a flow the peer is healthily re-executing.
 func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSeq int, flowID int, flowToken string, taskErr error, taskName string) (fenced bool, err error) {
 	if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultFailStepErr, taskName)) {
 		return false, errors.New("injected fault: " + engineseams.FaultFailStepErr)
@@ -1320,7 +1320,7 @@ func (e *Engine) flowLossError(ctx context.Context, tx sequel.Executor, flowID i
 			flowID,
 		).Scan(&terminated)
 		if terminated == 1 {
-			sample = "a fan-out branch was terminated before it completed; fork at or before the fan-out to re-run it"
+			sample = "a fan-out branch was terminated before it completed; to re-run it, fork at or before a fan-out whose branches include every terminated one"
 		} else {
 			sample = "cohort failed"
 		}

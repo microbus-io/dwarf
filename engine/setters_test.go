@@ -122,7 +122,7 @@ func TestOperations_UnmarshalableInputIs400(t *testing.T) {
 // negatives are rejected. 0 is the
 // pre-column/no-engine sentinel, so accepting it would stamp provenance and heartbeat rows that read as
 // "no engine"; the invariant is a positive identifier. The stable-id opt-in exists so a crash-restart reuses
-// its one registry row instead of leaving a ghost that transiently over-counts replicas.
+// its one registry row instead of leaving a stale row that transiently over-counts replicas.
 func TestSetEngineID_PinsIdentity(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -212,7 +212,7 @@ func TestSetStateCacheSize_SharedByShards(t *testing.T) {
 	assert.Equal(held, seed(1, 9<<20), "a field larger than the whole cache is not kept")
 }
 
-// TestStateCacheBudget_Default pins the default without an override: a quarter of the detected memory
+// TestStateCacheBudget_Default pins the default without an override: a tenth of the detected memory
 // limit, else the fallback.
 func TestStateCacheBudget_Default(t *testing.T) {
 	t.Parallel()

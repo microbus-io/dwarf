@@ -111,8 +111,8 @@ limitations under the License.
 // The one limit is what the database can store: no single JSON value the engine writes may exceed 256 MB
 // (256,000,000 bytes). That bounds a task's changes in one step, initial state, baggage, resume data, an
 // interrupt payload, and a flow's whole state when it ends (its final state holds every field at once). Mid-flow,
-// a large field is stored once and carried by reference, so a running flow's state may exceed the limit somewhat;
-// see docs/data-handling.md for how far.
+// a large field is stored once and carried by reference, so a running flow's state may exceed the limit;
+// docs/data-handling.md says which fields still count toward it.
 // Create, Continue, Resume and Fork return a 413 for an oversized value; a step that produces one fails at once,
 // and its task is not run again.
 //

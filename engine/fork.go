@@ -158,7 +158,8 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 		}
 		// Write-first. The clone reads the origin before its first write, and on SQLite a transaction that reads
 		// first holds a SHARED lock it must upgrade at that write: against a concurrent writer the upgrade cannot
-		// wait, so SQLite returns SQLITE_BUSY at once whatever the busy timeout, and every Transact retry is
+		// wait, so SQLite returns SQLITE_BUSY (SQLITE_LOCKED under a shared cache) at once whatever the busy
+		// timeout, and every Transact retry is
 		// read-first again (measured: ~1 Fork in 8 failed under the bench soak). Locking the origin root first
 		// makes the first statement a write there; on the server dialects it is a locking read, which also holds
 		// off a Delete or Purge of the origin while it is cloned.

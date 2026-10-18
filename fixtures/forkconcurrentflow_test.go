@@ -30,7 +30,8 @@ import (
 
 // TestForkConcurrentflow pins Fork under concurrent writers. Fork's transaction reads the origin before it writes
 // the clone; on SQLite a transaction that reads first must upgrade its lock at its first write, and against a
-// concurrent writer that upgrade fails at once with SQLITE_BUSY on every retry. Fork therefore takes a write first.
+// concurrent writer that upgrade fails at once on every retry - SQLITE_BUSY, or on this suite's shared-cache
+// in-memory database SQLITE_LOCKED ("database table is locked"). Fork therefore takes a write first.
 // Every Fork here must succeed while other flows keep writing.
 func TestForkConcurrentflow(t *testing.T) {
 	t.Parallel()

@@ -156,7 +156,7 @@ func (e *Engine) resolveThread(ctx context.Context, threadKey string) (shardNum,
 	if err != nil {
 		return 0, 0, "", errors.Trace(err)
 	}
-	// A subgraph child key is read-only, like everywhere else (Resume/Terminate/Delete/Continue all 400 it).
+	// A subgraph child key is read-only, like everywhere else (Resume/Terminate/Cancel/Delete/Continue all 400 it).
 	// A child runs on its own private thread precisely so it cannot contaminate the parent's continuation
 	// chain, so joining that thread is never what a caller means: the new flow would be a top-level root
 	// grouped under a subgraph's thread, and a later Continue of it would build on the subgraph's turns.

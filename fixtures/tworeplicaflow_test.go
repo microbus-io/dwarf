@@ -36,7 +36,7 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// NOT t.Parallel: asserts an upper-bound reaction latency (cross-replica wake via peer signal < 2s), which CPU oversubscription
+// NOT t.Parallel: asserts an upper-bound reaction latency (cross-replica wake via the latch detector's poll < 2s), which CPU oversubscription
 // from co-running parallel tests can inflate past the bound.
 func TestTwoReplicaflow(t *testing.T) {
 	assert := testarossa.For(t)
@@ -175,6 +175,6 @@ func TestTwoReplicaflow(t *testing.T) {
 			assert.Equal(workflow.StatusCompleted, out.Status)
 		}
 		assert.True(ranOnWorker.Load(), "the worker replica should have executed the step")
-		assert.True(elapsed < 2*time.Second, "cross-replica Await should wake via peer signal (<2s), took %s", elapsed)
+		assert.True(elapsed < 2*time.Second, "cross-replica Await should wake via the latch detector's poll (<2s), took %s", elapsed)
 	})
 }

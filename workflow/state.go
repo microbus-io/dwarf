@@ -47,7 +47,8 @@ import (
 // The price is that the Go TYPE is not preserved across a store: JSON has one number type, so a value stored
 // as an int and read into an any comes back a float64. Read through a typed getter (GetInt, GetString, ...)
 // or through Get with a typed target and you get the type you asked for; only an untyped read is
-// float64-domain. Carry an integer that exceeds 2^53 as a string.
+// float64-domain. An integer that exceeds 2^53 is stored exactly; carry it as a string only if it must survive an
+// untyped read.
 //
 // A zero State is empty and safe to read (Get, Has, Len, Names, MarshalJSON all work on it), but the
 // mutating methods do not allocate, so one must be initialized via NewState or UnmarshalJSON before
@@ -164,7 +165,8 @@ func (s State) SetStrings(name string, value []string) { s.mustSet(name, value) 
 // SetInt stores an int field (normalized through JSON, like Set).
 func (s State) SetInt(name string, value int) { s.mustSet(name, value) }
 
-// SetFloat stores a float64 field (normalized through JSON, like Set).
+// SetFloat stores a float64 field (normalized through JSON, like Set). It panics on NaN or an infinity, which
+// JSON cannot represent.
 func (s State) SetFloat(name string, value float64) { s.mustSet(name, value) }
 
 // SetBool stores a bool field (normalized through JSON, like Set).
@@ -173,8 +175,8 @@ func (s State) SetBool(name string, value bool) { s.mustSet(name, value) }
 // SetDuration stores a time.Duration field, in nanoseconds (normalized through JSON, like Set).
 func (s State) SetDuration(name string, value time.Duration) { s.mustSet(name, value) }
 
-// mustSet is Set for the typed setters, which have no error to return. The panic is a defensive assertion:
-// these primitive types always marshal, so it is never a live path.
+// mustSet is Set for the typed setters, which have no error to return. The panic is live only for SetFloat's
+// NaN or infinity, the one primitive value that does not marshal.
 func (s State) mustSet(name string, value any) {
 	if err := s.Set(name, value); err != nil {
 		panic(errors.New("state field %q: %v", name, err))

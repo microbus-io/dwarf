@@ -112,7 +112,7 @@ its own deadline — an HTTP status endpoint long-polling a flow that may run fo
 ```go
 type FlowOutcome struct {
     Status           string
-    State            workflow.State  // final_state when terminal; the interrupted step's merged snapshot when interrupted; empty while running/created
+    State            workflow.State  // the final state when terminal; the interrupted step's merged snapshot when interrupted; empty while running
     Error            string          // set when Status == "failed"
     InterruptPayload workflow.State  // set when Status == "interrupted"
     TerminateReason  string          // set when Status == "terminated"
@@ -150,7 +150,7 @@ opaque pagination cursor as its second return; see [Retention](#retention) for t
 descending time order. On a multi-shard fleet each shard contributes its own newest flows and the page is
 grouped by shard, so shard 2's newest flow follows shard 1's oldest returned one. There is no cross-shard
 order to give: flow ids are per-shard sequences (a shard with fewer flows has lower ids, so they don't
-compare), and `created_at` would compare different database servers' clocks. If you need one ordered view,
+compare), and creation times would compare different database servers' clocks. If you need one ordered view,
 sort the page yourself — you decide what to trust — or page a single shard with `Query.Shard`.
 
 **`Query.Limit` is a per-shard cap, not a hard total.** It is divided across shards, so on a multi-shard
@@ -199,7 +199,7 @@ err := eng.Cancel(ctx, flowKey, "customer withdrew the order") // surfaced as Ca
 - **There is no deadline.** `Cancel` returns once the request is recorded - `Await` the flow to see it stop. A
   sleeping or backed-off step is reached when it next wakes, and an interrupted flow stays `interrupted` until
   someone calls `Resume` or `Terminate`.
-- Address the flow by its root key; calling `Cancel` on a flow that has already stopped does nothing.
+- Address the flow by its root key; calling `Cancel` on a flow that has already ended does nothing.
 - **A flow is cancelled once.** A second `Cancel` on a flow already cancelled records nothing new: the first
   reason stands, and a flow whose `onError` handler caught the first cancellation and carried on is left
   alone. It does finish delivering the first cancellation, so a `Cancel` that returned an error, or whose
@@ -230,8 +230,9 @@ not auto-delete. Because the fork is an ordinary new flow, recover a partially-f
 failed branch at a time. A branch lost to a `Cancel` is recovered the same way: the fork re-runs only the step you
 chose and keeps every other branch as it was, so while a cancelled branch remains, the fork ends `cancelled`,
 with the original `CancelReason`. A branch that `Terminate` stopped before it completed is a loss too, so a fork
-that keeps it ends `failed`. To re-run it, fork at or before the fan-out step: everything after the step you
-choose re-runs, every branch of that fan-out included.
+that keeps it ends `failed`. To re-run it, fork at or before a fan-out step whose branches include every branch
+`Terminate` stopped - in a nested fan-out, the outermost one when stopped branches sit under different outer
+branches. Everything after the step you choose re-runs, every branch of that fan-out included.
 
 To re-run a terminal flow from the beginning, fork it at its first step. `History` lists steps in execution
 order, so the first entry is the flow's entry step, and the fork starts from the original's initial state with

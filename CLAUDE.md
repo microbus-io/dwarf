@@ -162,7 +162,8 @@ matching one before working there:**
   revisiting the punt. A fold's decode is internal - its Go values never leave the reducer and go back out as
   JSON - so it decodes numbers as `json.Number` and stays exact; a new fold site must too. Engine code that passes
   stored values on (a forEach's elements) moves their bytes, never decoded values. (`workflow/CLAUDE.md`)
-- **Write-first transactions:** every flow-terminating transaction must UPDATE first, or the flow strands as a
+- **Write-first transactions:** every flow-terminating transaction must take the flow-row lock first
+  (`lockFlowRows`: a locking read on PostgreSQL and MySQL, a `touch` flip elsewhere), or the flow strands as a
   `running` orphan. (`engine/CLAUDE.md`)
 - **Lease fencing:** every post-execution write to the *dispatched* step must carry `AND lease_seq=?` (the
   generation returned by the claim CAS) and treat a zero-row match as a benign no-op (`return nil`, never an

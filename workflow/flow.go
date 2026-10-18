@@ -196,9 +196,9 @@ func (f *Flow) CreatedAt() time.Time {
 	return f.createdAt
 }
 
-// UpdatedAt returns the wall-clock time of the flow's last status change. Useful for
-// tasks that want to gate on "how long since the flow last advanced." Zero when called outside
-// a dispatched task or when the orchestrator has not populated it.
+// UpdatedAt returns the wall-clock time of the flow's last status change, such as its start or its latest
+// Resume; it does not move as steps run. Zero when called outside a dispatched task or when the orchestrator
+// has not populated it.
 func (f *Flow) UpdatedAt() time.Time {
 	return f.updatedAt
 }
@@ -301,9 +301,9 @@ func (f *Flow) Set(name string, value any) error {
 	return f.write(name, one)
 }
 
-// mustSet is Set for the typed setters, which have no error to return. A value of a primitive type always
-// marshals, so the panic is for a value the field's reducer cannot combine - which the orchestrator turns into
-// a failure of the step, naming the field.
+// mustSet is Set for the typed setters, which have no error to return. The panic is for a value the field's
+// reducer cannot combine, or SetFloat's NaN or infinity, which does not marshal - either way the orchestrator
+// turns it into a failure of the step, naming the field.
 func (f *Flow) mustSet(name string, value any) {
 	if err := f.Set(name, value); err != nil {
 		panic(errors.New("state field %q: %v", name, err))
@@ -319,7 +319,8 @@ func (f *Flow) SetStrings(name string, value []string) { f.mustSet(name, value) 
 // SetInt writes a state int field, as Set does.
 func (f *Flow) SetInt(name string, value int) { f.mustSet(name, value) }
 
-// SetFloat writes a state float64 field, as Set does.
+// SetFloat writes a state float64 field, as Set does. It panics on NaN or an infinity, which JSON cannot
+// represent.
 func (f *Flow) SetFloat(name string, value float64) { f.mustSet(name, value) }
 
 // SetBool writes a state bool field, as Set does.
@@ -384,7 +385,7 @@ func (f *Flow) Snapshot() State {
 // "-" or unexported field skipped, and an omitempty or omitzero field skipped when empty. A field that marshals
 // to null is Set(name, nil): it deletes a field with no reducer and contributes nothing to a reduced one. It
 // returns an error if source cannot be marshalled or is not an object, in which case no field is set, or if a
-// field's reducer cannot combine its value, in which case the fields before it are set.
+// field's reducer cannot combine its value, in which case some of the other fields may already be set.
 func (f *Flow) SetChanges(source any) error {
 	data, err := json.Marshal(source)
 	if err != nil {

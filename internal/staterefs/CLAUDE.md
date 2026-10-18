@@ -254,7 +254,7 @@ both measure ~1x, so the ambiguity is moot and no server-version probe is needed
    `TestLinker_ResolveCachesBytesNotValues` pins it (two resolves must not share a mutable value) and
    mutation-fails against a decoded-value cache.
 7. **Past `maxAnchors`, only anchors below `openThreshold` are inlined; a larger one keeps its ref however many
-   anchors there are.** Do not make `maxAnchors` a hard count again. A count that ignores size inlines a large
+   anchors there are.** Do not make `maxAnchors` a hard count. A count that ignores size inlines a large
    field, the next mint re-anchors it (its bytes now sit in that step's `state`) beside that step's own write,
    and the step after inlines the then-smallest anchor: from the fifth large-field writer on, every step
    rewrites one large field - the carry multiplier refs exist to remove. What the count buys - a shorter resolve IN-list - is paid only on a cache miss, and the minting

@@ -96,7 +96,7 @@ are kept as given, so they must be valid UTF-8: PostgreSQL rejects invalid UTF-8
 ### Large integers: exact in storage, rounded by untyped reads
 
 An integer beyond **2^53** (about 9.0e15) is **stored exactly** — it round-trips digit-for-digit into the
-next step's state, into `final_state`, and through `Fork` and `Continue`. Reading one does not damage it
+next step's state, into the final state, and through `Fork` and `Continue`. Reading one does not damage it
 either. What matters is *how you read it back*:
 
 ```go
@@ -110,8 +110,9 @@ var loose any
 f.Get("orderID", &loose)                // ROUNDS to ...800 — untyped lands in a float64
 ```
 
-**Typed accessors are exact at any magnitude.** `GetInt`, `GetFloat`, `GetString` and a `Get` into a typed
-target all decode straight into that type. **Untyped reads round**, because JSON's number type decodes into
+**Typed integer accessors are exact.** `GetInt` and a `Get` into an integer-typed target decode straight into
+that type, so an integer is exact across the type's whole range (`GetInt` panics on one beyond an `int`).
+`GetFloat` returns a `float64`, which holds an integer exactly only up to 2^53. **Untyped reads round**, because JSON's number type decodes into
 `float64` when there is nothing narrower to decode into: `Get` into an `any`, and `Parse` into a map.
 
 **A `when` expression on a transition is exact too:** condition evaluation compares a >2^53 id as an
@@ -307,8 +308,8 @@ func charge(ctx context.Context, f *workflow.Flow) error {
 ```
 
 Baggage is set once at `Create` (as any JSON object — a struct or map), frozen on the flow, inherited by
-subgraphs and `Continue`, and delivered back as a `workflow.State` (the JSON-decoded form, numbers as
-float64). See [Driving flows → Create](flows.md#create-and-run).
+subgraphs and `Continue`, and delivered back as a `workflow.State`, read through the same getters as flow
+state, so its numbers are as exact as flow state's. See [Driving flows → Create](flows.md#create-and-run).
 
 ## Handling transient failures
 
