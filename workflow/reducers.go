@@ -233,9 +233,10 @@ func unionKey(v any) any {
 }
 
 // numberValueKey spells a JSON number by its value: an integer literal as its exact integer, so ids past 2^53 stay
-// distinct; any other number by its float64 - as that float's exact integer when it is whole, so 1, 1.0 and 1e0
-// match, and 1e21 matches its spelling in full - or else in Go's shortest form. A literal that does not parse as a
-// finite float64 keeps its literal.
+// distinct; any other number by its float64 in Go's shortest form - in full when it is whole, so 1, 1.0 and 1e0
+// match, and 1e23 matches the 100000000000000000000000 a database respells it as. A whole float is not keyed by
+// its exact binary integer: past 2^53 that differs from the decimal every writer spells (1e23 is
+// 99999999999999991611392 in binary). A literal that does not parse as a finite float64 keeps its literal.
 func numberValueKey(lit string) string {
 	if !strings.ContainsAny(lit, ".eE") {
 		if i, ok := new(big.Int).SetString(lit, 10); ok {
@@ -246,9 +247,11 @@ func numberValueKey(lit string) string {
 	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
 		return lit
 	}
+	if f == 0 {
+		return "0" // -0 too
+	}
 	if f == math.Trunc(f) {
-		i, _ := new(big.Float).SetFloat64(f).Int(nil)
-		return i.String()
+		return strconv.FormatFloat(f, 'f', -1, 64)
 	}
 	return strconv.FormatFloat(f, 'g', -1, 64)
 }

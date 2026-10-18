@@ -308,8 +308,10 @@ exposure to revisit, not a non-issue:
   `engine/cohortfold.go`) and never reaches a reader: `add`/`min`/`max` fold integers in arbitrary precision
   (`numberApply`; a fraction or exponent folds in float64, as an untyped reader sees it), `min`/`max` keep the
   winning literal, and `merge` keeps each entry's bytes. **`union` compares numbers by value, never by literal**
-  (`unionKey`): an integer literal by its exact integer, any other number by its float64, so `1`, `1.0` and `1e0`
-  are one element while two ids past 2^53 stay two. Do not compare literals: the database is a non-Go writer -
+  (`unionKey`): an integer literal by its exact integer, any other number by its float64 in Go's shortest decimal,
+  so `1`, `1.0` and `1e0` are one element while two ids past 2^53 stay two. Do not key a whole float by its exact
+  binary integer: past 2^53 that is not the decimal any writer spells (`1e23` is `99999999999999991611392`), so
+  `1e+23` from Go and `100000000000000000000000` from Postgres would land twice. Do not compare literals: the database is a non-Go writer -
   Postgres JSONB writes `1e-7` back as `0.0000001` and `1e+21` in full, MySQL `1e+21` as `1e21` - so the same
   value arriving once from a column and once from a task would land twice. Pinned by `TestState_FoldsKeepNumbersExact`
   and the large-integer cases of `TestCohortFold_ProjectionEqualsContributions`.
