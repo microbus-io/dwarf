@@ -847,6 +847,13 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	// completion before the mark below, unmarked, and pass nothing on. Every lock is taken before any watermark is
 	// read. The flow-id lists are chunked: a tree can hold more flows than a statement can bind. A repeat
 	// Cancel skips it and only re-applies the mark (see "one cancel per flow" above).
+	//
+	// The watermarks are read by a plain SELECT and bound into the UPDATE, not computed by a subquery inside it:
+	// on MySQL a subquery inside DML takes shared locks on the steps it reads, after this transaction's flow-row
+	// locks - the reverse of Terminate's steps-then-flows order, a deadlock (measured against a held Terminate).
+	// A plain SELECT is a consistent read there and takes none. It is also this transaction's first
+	// consistent read, after the locking reads, so its snapshot postdates every lock and sees every successor
+	// a transition committed before the lock was granted.
 	if watermark == 0 {
 		err = db.Transact(ctx, func(tx *sequel.Tx) error {
 			for chunk := range slices.Chunk(allFlowIDs, inListChunk) {
@@ -855,12 +862,37 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 			}
 			for chunk := range slices.Chunk(allFlowIDs, inListChunk) {
 				ph, ids := inList(chunk)
+				maxStep := map[int]int{}
+				rows, err := tx.QueryContext(ctx,
+					"SELECT flow_id, MAX(step_id) FROM dwarf_steps WHERE flow_id IN ("+ph+") GROUP BY flow_id", ids...)
+				if err != nil {
+					return errors.Trace(err)
+				}
+				for rows.Next() {
+					var fid, sid int
+					if err := rows.Scan(&fid, &sid); err != nil {
+						rows.Close()
+						return errors.Trace(err)
+					}
+					maxStep[fid] = sid
+				}
+				rows.Close()
+				if err := rows.Err(); err != nil {
+					return errors.Trace(err)
+				}
+				// One CASE arm per flow of the chunk (2 binds each, under SQL Server's ceiling at inListChunk).
+				// Every flow has an entry step, so each watermark is at least 1 and the guard below marks it once.
+				args := []any{reason}
+				for _, id := range chunk {
+					args = append(args, id, maxStep[id.(int)])
+				}
+				args = append(args, ids...)
 				tx.ExecContext(ctx,
 					"UPDATE dwarf_flows SET cancel_reason=?,"+
-						" cancel_watermark=(SELECT COALESCE(MAX(s.step_id), 0) FROM dwarf_steps s WHERE s.flow_id=dwarf_flows.flow_id),"+
+						" cancel_watermark=CASE flow_id"+strings.Repeat(" WHEN ? THEN ?", len(chunk))+" ELSE cancel_watermark END,"+
 						" touch=1-touch WHERE flow_id IN ("+ph+") AND status NOT IN ("+terminalStatusesSQL+")"+
 						" AND cancel_watermark=0",
-					append([]any{reason}, ids...)...,
+					args...,
 				)
 			}
 			return nil

@@ -315,7 +315,11 @@ under cancellation. Pinned by `engine/cancelgap_test.go` and by `ran_covered_wit
 
 **Do not order this by timestamp**, and **do not fold the watermark read into the lock-grab statement**: a
 millisecond clock ties a fast source with the `Cancel` (~1 in 4 runs lost it), and a Postgres `UPDATE`'s subquery
-reads the pre-lock snapshot. The site comments (`successors.go`, `cancel` in `operations.go`) hold the detail.
+reads the pre-lock snapshot. **Nor compute the watermark in a subquery of the UPDATE that writes it**: on MySQL a
+subquery inside DML share-locks the steps it reads after the flow rows are locked, the reverse of Terminate's
+order, and deadlocks against it. `cancel` reads the watermarks with a plain SELECT (a consistent read, no locks)
+and binds them (pinned on MySQL and Postgres by `TestCancelWatermark_TakesNoStepLocks`). The site comments
+(`successors.go`, `cancel` in `operations.go`) hold the detail.
 
 *An error the task itself returns wins over the cancellation.* A covered step that returns a real error takes
 the ordinary error path; with `onError` its handler receives that error, is inserted unmarked (its source was

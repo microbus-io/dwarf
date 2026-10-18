@@ -367,3 +367,63 @@ func TestCancelPreempt_ReasonReadErrorReleasesTheInFlightGauges(t *testing.T) {
 		assert.Equal(workflow.StatusRunning, status)
 	}
 }
+
+// TestCancelWatermark_TakesNoStepLocks pins that Cancel's watermark transaction reads the steps without locking
+// them. Terminate locks steps, then flows; the watermark transaction locks flows, so a read of the steps that took
+// shared locks there - as a subquery inside MySQL DML does - waits on Terminate while holding the flow rows
+// Terminate wants next: a deadlock. Here Terminate is held after locking its steps, and Cancel's watermark
+// transaction must still commit. Meaningful on MySQL and Postgres; SQLite serializes the two writers outright,
+// and SQL Server's plain reads take shared locks without READ_COMMITTED_SNAPSHOT.
+func TestCancelWatermark_TakesNoStepLocks(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("CancelLocks")
+	g.SetURL("A", "cancellocks/a")
+	g.AddTransition("A", workflow.End)
+	mux.HandleGraph("cancellocks/g", g)
+	started, release := make(chan struct{}, 1), make(chan struct{})
+	mux.HandleTask("cancellocks/a", func(ctx context.Context, f *workflow.Flow) error {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		return nil
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+	defer close(release)
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	if driver := db.DriverName(); driver != "mysql" && driver != "pgx" {
+		t.Skip("the two writers serialize, or plain reads lock, on " + driver)
+	}
+
+	fk, err := e.Create(ctx, "cancellocks/g", nil, nil)
+	assert.NoError(err)
+	<-started
+
+	e.seams.Break(engineseams.CheckpointTerminateAfterStepsLocked)
+	terminated := make(chan error, 1)
+	go func() { terminated <- e.Terminate(ctx, fk, "test") }()
+	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointTerminateAfterStepsLocked, 10*time.Second*enginetest.TimeoutScale()),
+		"Terminate never locked the steps")
+
+	marking := e.seams.Waiter(engineseams.CheckpointCancelBeforeMark)
+	cancelled := make(chan error, 1)
+	go func() { cancelled <- e.Cancel(ctx, fk, "test") }()
+	select {
+	case <-marking:
+	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
+		assert.True(false, "Cancel's watermark transaction waited on Terminate's step locks")
+	}
+	e.seams.Resume(engineseams.CheckpointTerminateAfterStepsLocked)
+	assert.NoError(<-terminated)
+	assert.NoError(<-cancelled)
+}
