@@ -108,7 +108,7 @@ func TestLinker_ResolveList(t *testing.T) {
 	want := []any{"a", "b", "c", "d", "y", "z", "s1", "c1"}
 
 	state := newState()
-	_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, state, Refs{"log": list}, nil, anchors.load)
+	_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, testFlow, state, Refs{"log": list}, nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal(want, stateVal(state, "log"))
 	assert.Equal(1, len(anchors.calls), "every anchor of the list in one Loader call")
@@ -121,7 +121,7 @@ func TestLinker_ResolveList(t *testing.T) {
 	assert.Equal(Read{ID: 14, State: true, Changes: true}, byID[14])
 
 	// Flatten splices the same array into the state document.
-	flat, err := New("sqlite", 1, NewCache(testCacheBytes)).Flatten(ctx, []byte(`{"n":1}`), Refs{"log": list}, anchors.load)
+	flat, err := New("sqlite", 1, NewCache(testCacheBytes)).Flatten(ctx, testFlow, []byte(`{"n":1}`), Refs{"log": list}, anchors.load)
 	assert.NoError(err)
 	var doc map[string]any
 	assert.NoError(json.Unmarshal(flat, &doc))
@@ -131,7 +131,7 @@ func TestLinker_ResolveList(t *testing.T) {
 	// A range past the array's end is an error, never a shorter array.
 	var past Ref
 	assert.NoError(json.Unmarshal([]byte(`"11c[:2];10s[:2]"`), &past))
-	_, err = New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, newState(), Refs{"log": past}, nil, anchors.load)
+	_, err = New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, testFlow, newState(), Refs{"log": past}, nil, anchors.load)
 	assert.Error(err)
 }
 
@@ -278,13 +278,13 @@ func TestLinker_SeedList(t *testing.T) {
 	changes := workflow.NewChanges()
 	changes.Contributions().SetJSON("log", json.RawMessage(`["c","d"]`))
 	merged := mustState(map[string]any{"log": []string{"a", "b", "c", "d"}})
-	linker.Seed(42, merged, changes, []byte(`{"log":"7[:2];42c[:2]"}`))
+	linker.Seed(testFlow, 42, merged, changes, []byte(`{"log":"7[:2];42c[:2]"}`))
 
 	anchors := &fakeAnchors{rows: map[int]Anchor{7: {Changes: cols(map[string]any{"log": []string{"a", "b"}})}}}
 	var list Ref
 	assert.NoError(json.Unmarshal([]byte(`"7[:2];42c[:2]"`), &list))
 	state := newState()
-	_, err := linker.Resolve(ctx, state, Refs{"log": list}, nil, anchors.load)
+	_, err := linker.Resolve(ctx, testFlow, state, Refs{"log": list}, nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal([]any{"a", "b", "c", "d"}, stateVal(state, "log"))
 	assert.Equal([][]int{{7}}, anchors.calls, "the seeded contribution is not read")
@@ -293,10 +293,10 @@ func TestLinker_SeedList(t *testing.T) {
 	linker = New("sqlite", 1, NewCache(testCacheBytes))
 	added := workflow.NewChanges()
 	added.Additions().SetJSON("log", json.RawMessage(`["c","d"]`))
-	linker.Seed(42, merged, added, []byte(`{"log":"7[:2];42c[:2]"}`))
+	linker.Seed(testFlow, 42, merged, added, []byte(`{"log":"7[:2];42c[:2]"}`))
 	anchors.calls = nil
 	state = newState()
-	_, err = linker.Resolve(ctx, state, Refs{"log": list}, nil, anchors.load)
+	_, err = linker.Resolve(ctx, testFlow, state, Refs{"log": list}, nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal([]any{"a", "b", "c", "d"}, stateVal(state, "log"))
 	assert.Equal([][]int{{7}}, anchors.calls, "the seeded addition is not read")
@@ -358,11 +358,11 @@ func TestLinker_ResolveReadsAnAddition(t *testing.T) {
 	var list Ref
 	assert.NoError(json.Unmarshal([]byte(`"15s[:1];15c[:2]"`), &list))
 	state := newState()
-	_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, state, Refs{"log": list}, nil, anchors.load)
+	_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, testFlow, state, Refs{"log": list}, nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal([]any{"a", "x", "y"}, stateVal(state, "log"))
 
-	_, err = New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, newState(), Refs{"log": {Anchor: 15}}, nil, anchors.load)
+	_, err = New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, testFlow, newState(), Refs{"log": {Anchor: 15}}, nil, anchors.load)
 	assert.Error(err, "a whole-field ref never resolves to the stale input of a step that extended the field")
 }
 
@@ -376,7 +376,7 @@ func TestIsUnresolvable(t *testing.T) {
 
 	anchors := &fakeAnchors{rows: map[int]Anchor{7: {Changes: cols(map[string]any{"log": []string{"a"}})}}}
 	resolve := func(refs Refs, load Loader) error {
-		_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, newState(), refs, nil, load)
+		_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, testFlow, newState(), refs, nil, load)
 		return err
 	}
 	var past Ref

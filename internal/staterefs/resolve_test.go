@@ -85,7 +85,7 @@ func TestLinker_ResolveReadsBothColumns(t *testing.T) {
 	state := newState()
 	refs := Refs{"fromState": {Anchor: 7}, "fromChanges": {Anchor: 7}, "shadowed": {Anchor: 7}}
 
-	_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, state, refs, nil, anchors.load)
+	_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, testFlow, state, refs, nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal("initial input", stateVal(state, "fromState"), "a field whose bytes are only in the anchor's state column must resolve")
 	assert.Equal("task output", stateVal(state, "fromChanges"))
@@ -106,7 +106,7 @@ func TestLinker_ResolveReadsAnOverwriteBySuffix(t *testing.T) {
 		},
 	}}
 	state := newState()
-	_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, state, Refs{"doc": {Anchor: 7}, "doc!": {Anchor: 7}}, nil, anchors.load)
+	_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, testFlow, state, Refs{"doc": {Anchor: 7}, "doc!": {Anchor: 7}}, nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal("overwritten doc", stateVal(state, "doc"))
 	assert.Equal("the input doc", stateVal(state, "doc!"))
@@ -127,7 +127,7 @@ func TestLinker_ResolveOneRoundTripPerBatch(t *testing.T) {
 	}}
 	state := newState()
 
-	_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, state, Refs{"a": {Anchor: 7}, "b": {Anchor: 7}, "c": {Anchor: 9}}, nil, anchors.load)
+	_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, testFlow, state, Refs{"a": {Anchor: 7}, "b": {Anchor: 7}, "c": {Anchor: 9}}, nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal(1, len(anchors.calls), "three fields across two anchors must cost ONE load, not three")
 	assert.Equal(2, len(anchors.calls[0]), "the batch asks for each DISTINCT anchor once")
@@ -150,10 +150,10 @@ func TestLinker_ResolveCachesBytesNotValues(t *testing.T) {
 	linker := New("sqlite", 1, NewCache(testCacheBytes))
 
 	first := newState()
-	_, err := linker.Resolve(ctx, first, Refs{"doc": {Anchor: 7}}, nil, anchors.load)
+	_, err := linker.Resolve(ctx, testFlow, first, Refs{"doc": {Anchor: 7}}, nil, anchors.load)
 	assert.NoError(err)
 	second := newState()
-	_, err = linker.Resolve(ctx, second, Refs{"doc": {Anchor: 7}}, nil, anchors.load)
+	_, err = linker.Resolve(ctx, testFlow, second, Refs{"doc": {Anchor: 7}}, nil, anchors.load)
 	assert.NoError(err)
 
 	assert.Equal(1, len(anchors.calls), "the second resolve of a settled anchor must be served from cache")
@@ -178,12 +178,12 @@ func TestLinker_ResolveAssertsOneHop(t *testing.T) {
 		7: {Refs: Refs{"doc": {Anchor: 3}}}, // holds no bytes for `doc` - it points onward
 		3: {Changes: cols(map[string]any{"doc": "the payload"})},
 	}}
-	_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, newState(), Refs{"doc": {Anchor: 7}}, nil, anchors.load)
+	_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, testFlow, newState(), Refs{"doc": {Anchor: 7}}, nil, anchors.load)
 	assert.Error(err)
 	assert.Contains(err.Error(), "one-hop")
 
 	// A ref at an anchor that does not exist at all is likewise an error, never a silently absent field.
-	_, err = New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, newState(), Refs{"doc": {Anchor: 404}}, nil, anchors.load)
+	_, err = New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, testFlow, newState(), Refs{"doc": {Anchor: 404}}, nil, anchors.load)
 	assert.Error(err)
 }
 
@@ -202,14 +202,14 @@ func TestLinker_ResolveWantSelects(t *testing.T) {
 	state := newState()
 	refs := Refs{"reduced": {Anchor: 7}, "carried": {Anchor: 7}}
 
-	err := New("sqlite", 1, NewCache(testCacheBytes)).ResolveReduced(ctx, state, refs, map[string]workflow.Reducer{"reduced": workflow.ReducerAppend}, anchors.load)
+	err := New("sqlite", 1, NewCache(testCacheBytes)).ResolveReduced(ctx, testFlow, state, refs, map[string]workflow.Reducer{"reduced": workflow.ReducerAppend}, anchors.load)
 	assert.NoError(err)
 	assert.Equal("R", stateVal(state, "reduced"), "a field a reducer folds must be materialized, or the fold loses its base")
 	assert.False(state.Has("carried"), "a merely-carried ref must cross the fan-in as a ref")
 
 	// No reducer registered for any ref'd field: nothing to fold, so nothing is read at all.
 	anchors.calls = nil
-	err = New("sqlite", 1, NewCache(testCacheBytes)).ResolveReduced(ctx, newState(), refs, map[string]workflow.Reducer{"other": workflow.ReducerAdd}, anchors.load)
+	err = New("sqlite", 1, NewCache(testCacheBytes)).ResolveReduced(ctx, testFlow, newState(), refs, map[string]workflow.Reducer{"other": workflow.ReducerAdd}, anchors.load)
 	assert.NoError(err)
 	assert.Equal(0, len(anchors.calls))
 }
@@ -225,7 +225,7 @@ func TestLinker_FlattenSplicesWithoutDecoding(t *testing.T) {
 	anchors := &fakeAnchors{rows: map[int]Anchor{
 		7: {Changes: cols(map[string]any{"doc": []any{1, 2, 3}})},
 	}}
-	flat, err := New("sqlite", 1, NewCache(testCacheBytes)).Flatten(ctx, []byte(`{"kept":"inline"}`), Refs{"doc": {Anchor: 7}}, anchors.load)
+	flat, err := New("sqlite", 1, NewCache(testCacheBytes)).Flatten(ctx, testFlow, []byte(`{"kept":"inline"}`), Refs{"doc": {Anchor: 7}}, anchors.load)
 	assert.NoError(err)
 
 	var got map[string]any
@@ -234,7 +234,7 @@ func TestLinker_FlattenSplicesWithoutDecoding(t *testing.T) {
 	assert.Equal([]any{1.0, 2.0, 3.0}, got["doc"], "the ref'd field is spliced back in")
 
 	// With no refs the input document is returned untouched - the overwhelmingly common case allocates nothing.
-	same, err := New("sqlite", 1, NewCache(testCacheBytes)).Flatten(ctx, []byte(`{"kept":"inline"}`), nil, anchors.load)
+	same, err := New("sqlite", 1, NewCache(testCacheBytes)).Flatten(ctx, testFlow, []byte(`{"kept":"inline"}`), nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal(`{"kept":"inline"}`, string(same))
 }
@@ -279,9 +279,9 @@ func TestLinker_ConcurrentMissesReadOnce(t *testing.T) {
 				state := newState()
 				refs := Refs{"page": {Anchor: 7, Field: "pages", Path: []int{i % 4}}}
 				if shared {
-					_, errs[i] = linker.ResolveShared(ctx, state, refs, slow)
+					_, errs[i] = linker.ResolveShared(ctx, testFlow, state, refs, slow)
 				} else {
-					_, errs[i] = linker.Resolve(ctx, state, refs, nil, slow)
+					_, errs[i] = linker.Resolve(ctx, testFlow, state, refs, nil, slow)
 				}
 				if errs[i] == nil && stateVal(state, "page") != []string{"a", "b", "c", "d"}[i%4] {
 					errs[i] = errors.New("wrong element")
@@ -360,30 +360,30 @@ func TestLinker_SeedServesTheMintedAnchor(t *testing.T) {
 	assert.Equal(anchor, refs["pages"].Anchor)
 	assert.Equal(7, refs["carried"].Anchor)
 
-	linker.Seed(anchor, merged, workflow.NewChanges(), refsJSON)
+	linker.Seed(testFlow, anchor, merged, workflow.NewChanges(), refsJSON)
 
 	anchors := &fakeAnchors{rows: map[int]Anchor{}}
 	state := newState()
-	_, err = linker.Resolve(ctx, state, Refs{"doc": {Anchor: anchor}, "pages": {Anchor: anchor}}, nil, anchors.load)
+	_, err = linker.Resolve(ctx, testFlow, state, Refs{"doc": {Anchor: anchor}, "pages": {Anchor: anchor}}, nil, anchors.load)
 	assert.NoError(err)
 	assert.Len(anchors.calls, 0, "a seeded anchor must be served without a read")
 	assert.Equal(blob(2048), state.GetString("doc"))
 
 	item := newState()
-	_, err = linker.Resolve(ctx, item, Refs{"page": {Anchor: anchor, Field: "pages", Path: []int{1}}}, nil, anchors.load)
+	_, err = linker.Resolve(ctx, testFlow, item, Refs{"page": {Anchor: anchor, Field: "pages", Path: []int{1}}}, nil, anchors.load)
 	assert.NoError(err)
 	assert.Len(anchors.calls, 0, "an item ref into a seeded array must be served without a read")
 	assert.Equal(blob(600), item.GetString("page"))
 
 	// The carried ref's anchor was not seeded: resolving it goes to the Loader.
 	anchors.rows[7] = Anchor{State: cols(map[string]any{"carried": blob(4096)})}
-	_, err = linker.Resolve(ctx, newState(), Refs{"carried": {Anchor: 7}}, nil, anchors.load)
+	_, err = linker.Resolve(ctx, testFlow, newState(), Refs{"carried": {Anchor: 7}}, nil, anchors.load)
 	assert.NoError(err)
 	assert.Len(anchors.calls, 1)
 
 	// Nothing to seed is a no-op, malformed refs included.
-	linker.Seed(anchor, merged, workflow.NewChanges(), []byte("{}"))
-	linker.Seed(anchor, merged, workflow.NewChanges(), []byte("not json"))
+	linker.Seed(testFlow, anchor, merged, workflow.NewChanges(), []byte("{}"))
+	linker.Seed(testFlow, anchor, merged, workflow.NewChanges(), []byte("not json"))
 }
 
 // TestLinker_ResolveRefusesAZeroState pins that refs with no state to resolve into are an error: a state that
@@ -394,9 +394,9 @@ func TestLinker_ResolveRefusesAZeroState(t *testing.T) {
 	load := func(ctx context.Context, reads []Read) (map[int]Anchor, error) {
 		return map[int]Anchor{7: {State: map[string]json.RawMessage{"doc": json.RawMessage(`"d"`)}}}, nil
 	}
-	_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(context.Background(), workflow.State{}, Refs{"doc": {Anchor: 7}}, nil, load)
+	_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(context.Background(), testFlow, workflow.State{}, Refs{"doc": {Anchor: 7}}, nil, load)
 	assert.Error(err)
-	n, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(context.Background(), workflow.State{}, nil, nil, load)
+	n, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(context.Background(), testFlow, workflow.State{}, nil, nil, load)
 	assert.NoError(err, "a zero state with no refs has nothing to resolve")
 	assert.Equal(0, n)
 }

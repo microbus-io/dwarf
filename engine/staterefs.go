@@ -178,9 +178,9 @@ func readAnchors(ctx context.Context, db sequel.Executor, ids []int, withState b
 //
 // An introspection read (Snapshot, Step) passes an empty workflowURL and is not counted: the metric tracks the
 // execution path's byte throughput, and introspection reads are documented as outside it.
-func (e *Engine) resolveStateRefs(ctx context.Context, db sequel.Executor, shardNum int, state workflow.State, refs staterefs.Refs, want map[string]bool, workflowURL string) (int, error) {
+func (e *Engine) resolveStateRefs(ctx context.Context, db sequel.Executor, shardNum int, flowToken string, state workflow.State, refs staterefs.Refs, want map[string]bool, workflowURL string) (int, error) {
 	var readBytes int
-	materialized, err := e.linkerFor(shardNum).Resolve(ctx, state, refs, want, anchorLoader(db, &readBytes))
+	materialized, err := e.linkerFor(shardNum).Resolve(ctx, flowToken, state, refs, want, anchorLoader(db, &readBytes))
 	if readBytes > 0 && workflowURL != "" {
 		e.metricStateReadBytes(ctx, workflowURL, "state_ref", readBytes)
 	}
@@ -195,10 +195,10 @@ func (e *Engine) resolveStateRefs(ctx context.Context, db sequel.Executor, shard
 // connection. A cache hit or a wait on another dispatch's read never reaches the loader, so neither queues at
 // the turnstile or parks a turn. Do not take the turn around the whole resolve: a cohort's branches dispatch
 // together, and with more of them than the shard has turns, every turn sits idle behind one anchor read.
-func (e *Engine) resolveDispatchRefs(ctx context.Context, db sequel.Executor, shardNum int, state workflow.State, refs staterefs.Refs, workflowURL string) (int, error) {
+func (e *Engine) resolveDispatchRefs(ctx context.Context, db sequel.Executor, shardNum int, flowToken string, state workflow.State, refs staterefs.Refs, workflowURL string) (int, error) {
 	var readBytes int
 	load := anchorLoader(db, &readBytes)
-	materialized, err := e.linkerFor(shardNum).ResolveShared(ctx, state, refs, func(ctx context.Context, reads []staterefs.Read) (map[int]staterefs.Anchor, error) {
+	materialized, err := e.linkerFor(shardNum).ResolveShared(ctx, flowToken, state, refs, func(ctx context.Context, reads []staterefs.Read) (map[int]staterefs.Anchor, error) {
 		ctx, doneTurn := e.dbTurn(ctx, shardNum)
 		defer doneTurn()
 		return load(ctx, reads)
@@ -211,9 +211,9 @@ func (e *Engine) resolveDispatchRefs(ctx context.Context, db sequel.Executor, sh
 
 // resolveReducedRefs materializes only the ref'd fields a fan-in's reducers actually need, into state in
 // place. A merely-carried ref is deliberately left un-materialized and re-emitted by the caller's mint.
-func (e *Engine) resolveReducedRefs(ctx context.Context, tx sequel.Executor, shardNum int, state workflow.State, refs staterefs.Refs, reducers map[string]workflow.Reducer, workflowURL string) error {
+func (e *Engine) resolveReducedRefs(ctx context.Context, tx sequel.Executor, shardNum int, flowToken string, state workflow.State, refs staterefs.Refs, reducers map[string]workflow.Reducer, workflowURL string) error {
 	var readBytes int
-	err := e.linkerFor(shardNum).ResolveReduced(ctx, state, refs, reducers, anchorLoader(tx, &readBytes))
+	err := e.linkerFor(shardNum).ResolveReduced(ctx, flowToken, state, refs, reducers, anchorLoader(tx, &readBytes))
 	if readBytes > 0 {
 		e.metricStateReadBytes(ctx, workflowURL, "state_ref", readBytes)
 	}
@@ -223,13 +223,13 @@ func (e *Engine) resolveReducedRefs(ctx context.Context, tx sequel.Executor, sha
 // resolvedStepState materializes a step's state column into JSON with every ref'd field spliced back in -
 // the flatten used where a state snapshot must stand on its own, detached from the anchors that backed it
 // (Fork's leaf step, whose anchor ids are about to be remapped into a different flow).
-func (e *Engine) resolvedStepState(ctx context.Context, db sequel.Executor, shardNum int, stateJSON, refsJSON []byte, workflowURL string) ([]byte, error) {
+func (e *Engine) resolvedStepState(ctx context.Context, db sequel.Executor, shardNum int, flowToken string, stateJSON, refsJSON []byte, workflowURL string) ([]byte, error) {
 	refs, err := staterefs.Parse(refsJSON)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	var readBytes int
-	resolved, err := e.linkerFor(shardNum).Flatten(ctx, stateJSON, refs, anchorLoader(db, &readBytes))
+	resolved, err := e.linkerFor(shardNum).Flatten(ctx, flowToken, stateJSON, refs, anchorLoader(db, &readBytes))
 	if readBytes > 0 {
 		e.metricStateReadBytes(ctx, workflowURL, "state_ref", readBytes)
 	}

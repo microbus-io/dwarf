@@ -458,7 +458,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	if err == nil {
 		// No turn here: the resolve takes one only around an anchor read, so a step with no refs, a cache hit
 		// and a wait on another dispatch's read touch no connection and queue for nothing.
-		refBytes, err = e.resolveDispatchRefs(ctx, db, shardNum, state, inheritedRefs, workflowURL)
+		refBytes, err = e.resolveDispatchRefs(ctx, db, shardNum, flowToken, state, inheritedRefs, workflowURL)
 	}
 	// Unreadable prior changes fail the step too: running the task without its earlier runs' writes would
 	// lose them silently.
@@ -1234,7 +1234,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	if isFanOutSource && fanInOfSource != "" &&
 		((cohortSize == 0 && !routedToEnd) || (cohortSize == 1 && realTasks[0].taskName == fanInOfSource)) {
 		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, heldAdvancing, &persistPass, func() error {
-			return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, leaseSeq, stepDepth, lineageID, fanOutOrdinal, fanInOfSource, dispatchURLOf(graph, fanInOfSource), workflowURL, graph, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs, inheritCancel)
+			return e.fireFanInDirect(ctx, shardNum, db, flowID, flowToken, stepID, leaseSeq, stepDepth, lineageID, fanOutOrdinal, fanInOfSource, dispatchURLOf(graph, fanInOfSource), workflowURL, graph, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs, inheritCancel)
 		})
 	}
 	if isFanOutSource && cohortSize == 0 {
@@ -1633,7 +1633,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 					}
 				}
 				if fullyResolved && failures == 0 {
-					row, depth, exits, fanInBytes, err := e.fanInRow(ctx, tx, shardNum, nextStepDepth, cohortSpawnID, &cohort, fanInTaskName, graph, workflowURL)
+					row, depth, exits, fanInBytes, err := e.fanInRow(ctx, tx, shardNum, flowToken, nextStepDepth, cohortSpawnID, &cohort, fanInTaskName, graph, workflowURL)
 					if err != nil {
 						return errors.Trace(err)
 					}
@@ -1673,7 +1673,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 							return errors.Trace(rerr)
 						}
 						var lerr error
-						loss, lerr = e.failFlowTx(ctx, tx, shardNum, flowID, flowCancelled, nil, parentStepID, 0)
+						loss, lerr = e.failFlowTx(ctx, tx, shardNum, flowID, flowToken, flowCancelled, nil, parentStepID, 0)
 						if lerr != nil {
 							return errors.Trace(lerr)
 						}
@@ -1716,7 +1716,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// branch's array ref too (both mint at the same width); where a branch anchors what the linear mint inlined,
 	// the branch's resolve simply misses.
 	if len(normalNexts) > 0 && len(newStepIDs) > 0 && !e.seams.IsFault(engineseams.FaultSkipRefSeed) {
-		e.linkerFor(shardNum).Seed(stepID, childInputState, accumulatedChanges, linearRefsJSON)
+		e.linkerFor(shardNum).Seed(flowToken, stepID, childInputState, accumulatedChanges, linearRefsJSON)
 	}
 
 	// A sleeping successor is left to the piston: its not_before is in the future, so it is invisible to
@@ -2061,7 +2061,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 // fireFanInDirect creates the fan-in step immediately for a fan-out source that converges with no branches:
 // an empty forEach, or a goto/onError/when/switch route straight to the source's own fan-in. The source is the
 // spawn, so the fan-in runs on the source's own state and changes.
-func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.DB, flowID int, stepID, leaseSeq int, stepDepth int, lineageID int, fanOutOrdinal int, fanInTarget, fanInURL string, workflowURL string, graph *workflow.Graph, sleepDur time.Duration, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int, inheritCancel int) error {
+func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.DB, flowID int, flowToken string, stepID, leaseSeq int, stepDepth int, lineageID int, fanOutOrdinal int, fanInTarget, fanInURL string, workflowURL string, graph *workflow.Graph, sleepDur time.Duration, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int, inheritCancel int) error {
 	var fanInStepID int64
 	var txBytes stateByteCount
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
@@ -2104,7 +2104,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		reducers := graph.Reducers()
 		dropIdentityNulls(ourChanges, reducers)
 		folded := foldedFields(ourChanges, reducers)
-		if err := e.resolveReducedRefs(ctx, tx, shardNum, ourState, ourRefs, onlyFields(reducers, folded), workflowURL); err != nil {
+		if err := e.resolveReducedRefs(ctx, tx, shardNum, flowToken, ourState, ourRefs, onlyFields(reducers, folded), workflowURL); err != nil {
 			return errors.Trace(err)
 		}
 		mergedState := ourState.Clone()
@@ -2247,7 +2247,7 @@ func queueCohortRead(b *txBatch, flowID, cohortSpawnID int, c *cohortRead) {
 // payload and re-anchor it at EVERY fan-in, giving back the win in exactly the fan-out graphs refs exist for. A
 // reduced field the spawn OVERWROTE needs no base: its write replaces it, so reading the old value would be a
 // wasted anchor read inside the transaction.
-func (e *Engine) fanInBase(ctx context.Context, tx sequel.Executor, shardNum int, spawnState workflow.State, spawnChanges workflow.Changes, spawnRefs staterefs.Refs, reducers map[string]workflow.Reducer, workflowURL string) (workflow.State, error) {
+func (e *Engine) fanInBase(ctx context.Context, tx sequel.Executor, shardNum int, flowToken string, spawnState workflow.State, spawnChanges workflow.Changes, spawnRefs staterefs.Refs, reducers map[string]workflow.Reducer, workflowURL string) (workflow.State, error) {
 	dropIdentityNulls(spawnChanges, reducers)
 	folded := reducers
 	if spawnChanges.Overwrites().Len() > 0 || spawnChanges.Additions().Len() > 0 {
@@ -2262,7 +2262,7 @@ func (e *Engine) fanInBase(ctx context.Context, tx sequel.Executor, shardNum int
 		}
 	}
 	// resolveReducedRefs mutates the state map in place, so it gets the live map.
-	if err := e.resolveReducedRefs(ctx, tx, shardNum, spawnState, spawnRefs, folded, workflowURL); err != nil {
+	if err := e.resolveReducedRefs(ctx, tx, shardNum, flowToken, spawnState, spawnRefs, folded, workflowURL); err != nil {
 		return workflow.State{}, errors.Trace(err)
 	}
 	merged := spawnState.Clone()
@@ -2276,7 +2276,7 @@ func (e *Engine) fanInBase(ctx context.Context, tx sequel.Executor, shardNum int
 // the fan-in's step_depth, the cohort-exit steps whose successor_id must point at the fan-in step, and the state
 // bytes it moved (read: spawn snapshot + every cohort member's changes; written: the merged fan-in snapshot),
 // which the caller emits after its transaction commits.
-func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nextStepDepth, cohortSpawnID int, c *cohortRead, fanInTaskName string, graph *workflow.Graph, workflowURL string) (row successorRow, depth int, exitStepIDs []int, bytes stateByteCount, err error) {
+func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum int, flowToken string, nextStepDepth, cohortSpawnID int, c *cohortRead, fanInTaskName string, graph *workflow.Graph, workflowURL string) (row successorRow, depth int, exitStepIDs []int, bytes stateByteCount, err error) {
 	bytes = stateByteCount{stateRead: len(c.spawnStateJSON), changesRead: len(c.spawnChangesJSON) + c.changesRead}
 	spawnState, err := workflow.NewState(c.spawnStateJSON)
 	if err != nil {
@@ -2292,7 +2292,7 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum, nex
 	}
 	reducers := graph.Reducers()
 	// The members' contributions fold onto this base in branch order.
-	merged, err := e.fanInBase(ctx, tx, shardNum, spawnState, spawnChanges, spawnRefs, reducers, workflowURL)
+	merged, err := e.fanInBase(ctx, tx, shardNum, flowToken, spawnState, spawnChanges, spawnRefs, reducers, workflowURL)
 	if err != nil {
 		return successorRow{}, 0, nil, stateByteCount{}, errors.Trace(err)
 	}

@@ -28,6 +28,9 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
+// testFlow is the flow token the tests resolve and seed under.
+const testFlow = "0123456789abcdef"
+
 // payload is a JSON string of exactly n bytes, quotes included.
 func payload(n int) json.RawMessage {
 	return json.RawMessage(`"` + strings.Repeat("x", n-2) + `"`)
@@ -56,7 +59,7 @@ func TestLinker_CacheBoundedByBytes(t *testing.T) {
 	linker := New("sqlite", 1, NewCache(budget))
 
 	for id := 1; id <= 3; id++ {
-		_, err := linker.Resolve(ctx, newState(), Refs{"doc": {Anchor: id}}, nil, anchors.load)
+		_, err := linker.Resolve(ctx, testFlow, newState(), Refs{"doc": {Anchor: id}}, nil, anchors.load)
 		assert.NoError(err)
 		assert.True(linker.cacheBytes() <= budget)
 	}
@@ -65,7 +68,7 @@ func TestLinker_CacheBoundedByBytes(t *testing.T) {
 
 	// 3 and 2 are cached; 1 was evicted and is read again.
 	for _, id := range []int{3, 2, 1} {
-		_, err := linker.Resolve(ctx, newState(), Refs{"doc": {Anchor: id}}, nil, anchors.load)
+		_, err := linker.Resolve(ctx, testFlow, newState(), Refs{"doc": {Anchor: id}}, nil, anchors.load)
 		assert.NoError(err)
 	}
 	assert.Equal(4, len(anchors.calls))
@@ -86,7 +89,7 @@ func TestLinker_SmallFieldsChargedTheirBytes(t *testing.T) {
 	}
 	linker := New("sqlite", 1, NewCache(8*charge(1024)))
 	for id := 1; id <= 8; id++ {
-		_, err := linker.Resolve(ctx, newState(), Refs{"doc": {Anchor: id}}, nil, anchors.load)
+		_, err := linker.Resolve(ctx, testFlow, newState(), Refs{"doc": {Anchor: id}}, nil, anchors.load)
 		assert.NoError(err)
 	}
 	assert.Equal(8, linker.cache.Len())
@@ -106,11 +109,11 @@ func TestLinker_FieldLargerThanCacheIsNotCached(t *testing.T) {
 	}}
 	linker := New("sqlite", 1, NewCache(10000))
 
-	_, err := linker.Resolve(ctx, newState(), Refs{"small": {Anchor: 1}}, nil, anchors.load)
+	_, err := linker.Resolve(ctx, testFlow, newState(), Refs{"small": {Anchor: 1}}, nil, anchors.load)
 	assert.NoError(err)
 	for range 2 {
 		state := newState()
-		_, err := linker.Resolve(ctx, state, Refs{"big": {Anchor: 2}}, nil, anchors.load)
+		_, err := linker.Resolve(ctx, testFlow, state, Refs{"big": {Anchor: 2}}, nil, anchors.load)
 		assert.NoError(err)
 		assert.Len(stateVal(state, "big"), 19998)
 	}
@@ -120,7 +123,7 @@ func TestLinker_FieldLargerThanCacheIsNotCached(t *testing.T) {
 	// Seeding an oversized field is declined the same way.
 	seeded := newState()
 	seeded.SetJSON("big", payload(20000))
-	linker.Seed(9, seeded, workflow.NewChanges(), []byte(`{"big":9}`))
+	linker.Seed(testFlow, 9, seeded, workflow.NewChanges(), []byte(`{"big":9}`))
 	assert.Equal(charge(100), linker.cacheBytes())
 }
 
@@ -142,12 +145,12 @@ func TestLinker_SplitChargedToItsArray(t *testing.T) {
 	splitCharge := 3*elemSize + splitOverhead
 	linker := New("sqlite", 1, NewCache(arrayCharge+splitCharge+100))
 
-	_, err := linker.Resolve(ctx, newState(), Refs{"pages": {Anchor: 7}}, nil, anchors.load)
+	_, err := linker.Resolve(ctx, testFlow, newState(), Refs{"pages": {Anchor: 7}}, nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal(arrayCharge, linker.cacheBytes())
 	for i := range 3 {
 		state := newState()
-		_, err := linker.Resolve(ctx, state, Refs{"page": {Anchor: 7, Field: "pages", Path: []int{i}}}, nil, anchors.load)
+		_, err := linker.Resolve(ctx, testFlow, state, Refs{"page": {Anchor: 7, Field: "pages", Path: []int{i}}}, nil, anchors.load)
 		assert.NoError(err)
 		assert.Len(stateVal(state, "page"), 1998)
 	}
@@ -155,12 +158,12 @@ func TestLinker_SplitChargedToItsArray(t *testing.T) {
 	assert.Equal(1, len(anchors.calls))
 
 	// Another field pushes the array out, and its split goes with it.
-	_, err = linker.Resolve(ctx, newState(), Refs{"other": {Anchor: 8}}, nil, anchors.load)
+	_, err = linker.Resolve(ctx, testFlow, newState(), Refs{"other": {Anchor: 8}}, nil, anchors.load)
 	assert.NoError(err)
-	_, ok := linker.cache.Load(linker.key(7, "pages", ColAny))
+	_, ok := linker.cache.Load(linker.key(testFlow, 7, "pages", ColAny))
 	assert.False(ok)
 	assert.Equal(charge(6000), linker.cacheBytes())
-	_, err = linker.Resolve(ctx, newState(), Refs{"page": {Anchor: 7, Field: "pages", Path: []int{0}}}, nil, anchors.load)
+	_, err = linker.Resolve(ctx, testFlow, newState(), Refs{"page": {Anchor: 7, Field: "pages", Path: []int{0}}}, nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal(3, len(anchors.calls), "an evicted array's split is not served from anywhere")
 }
@@ -176,10 +179,10 @@ func TestLinker_ArrayAndElementShareOneEntry(t *testing.T) {
 		7: {Changes: map[string]json.RawMessage{"pages": json.RawMessage(`["a","b","c"]`)}},
 	}}
 	linker := New("sqlite", 1, NewCache(testCacheBytes))
-	_, err := linker.Resolve(ctx, newState(), Refs{"pages": {Anchor: 7}, "page": {Anchor: 7, Field: "pages", Path: []int{1}}}, nil, anchors.load)
+	_, err := linker.Resolve(ctx, testFlow, newState(), Refs{"pages": {Anchor: 7}, "page": {Anchor: 7, Field: "pages", Path: []int{1}}}, nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal(1, linker.cache.Len())
-	entry, ok := linker.cache.Load(linker.key(7, "pages", ColAny))
+	entry, ok := linker.cache.Load(linker.key(testFlow, 7, "pages", ColAny))
 	assert.True(ok)
 	_, ok = entry.splits["pages"]
 	assert.True(ok, "the cached entry holds the split the element was served from")
@@ -188,8 +191,8 @@ func TestLinker_ArrayAndElementShareOneEntry(t *testing.T) {
 	// A later store of the same field keeps the existing entry and its split.
 	seeded := newState()
 	seeded.SetJSON("pages", json.RawMessage(`["a","b","c"]`))
-	linker.Seed(7, seeded, workflow.NewChanges(), []byte(`{"pages":7}`))
-	again, _ := linker.cache.Load(linker.key(7, "pages", ColAny))
+	linker.Seed(testFlow, 7, seeded, workflow.NewChanges(), []byte(`{"pages":7}`))
+	again, _ := linker.cache.Load(linker.key(testFlow, 7, "pages", ColAny))
 	assert.True(again == entry)
 }
 
@@ -229,9 +232,9 @@ func TestLinker_SplitsRaceEviction(t *testing.T) {
 				refs := Refs{"page": {Anchor: id, Field: "pages", Path: path}}
 				var err error
 				if g%2 == 0 {
-					_, err = linker.ResolveShared(ctx, state, refs, load)
+					_, err = linker.ResolveShared(ctx, testFlow, state, refs, load)
 				} else {
-					_, err = linker.Resolve(ctx, state, refs, nil, load)
+					_, err = linker.Resolve(ctx, testFlow, state, refs, nil, load)
 				}
 				if err == nil && len(stateVal(state, "page").(string)) != 998 {
 					err = errors.New("wrong element")
@@ -280,24 +283,47 @@ func TestLinker_ShardsShareOneCache(t *testing.T) {
 		want   string
 	}{{one, onRows, "one"}, {two, twoRows, "two"}} {
 		state := newState()
-		_, err := c.linker.Resolve(ctx, state, Refs{"doc": {Anchor: 7}}, nil, c.rows.load)
+		_, err := c.linker.Resolve(ctx, testFlow, state, Refs{"doc": {Anchor: 7}}, nil, c.rows.load)
 		assert.NoError(err)
 		assert.True(strings.HasPrefix(stateVal(state, "doc").(string), c.want))
 	}
 	assert.Equal(2*charge(size), cache.Bytes())
 	state := newState()
-	_, err := one.Resolve(ctx, state, Refs{"doc": {Anchor: 7}}, nil, onRows.load)
+	_, err := one.Resolve(ctx, testFlow, state, Refs{"doc": {Anchor: 7}}, nil, onRows.load)
 	assert.NoError(err)
 	assert.True(strings.HasPrefix(stateVal(state, "doc").(string), "one"))
 	assert.Equal(1, len(onRows.calls), "shard 1's step 7 is served from the cache, not shard 2's")
 
 	// Shard 2 needs room for step 8: the least recently used field goes - shard 2's own step 7, since shard 1's
 	// was just read.
-	_, err = two.Resolve(ctx, newState(), Refs{"doc": {Anchor: 8}}, nil, twoRows.load)
+	_, err = two.Resolve(ctx, testFlow, newState(), Refs{"doc": {Anchor: 8}}, nil, twoRows.load)
 	assert.NoError(err)
-	_, ok := cache.lru.Load(two.key(7, "doc", ColAny))
+	_, ok := cache.lru.Load(two.key(testFlow, 7, "doc", ColAny))
 	assert.False(ok)
-	_, ok = cache.lru.Load(one.key(7, "doc", ColAny))
+	_, ok = cache.lru.Load(one.key(testFlow, 7, "doc", ColAny))
 	assert.True(ok)
 	assert.Equal(2*charge(size), cache.Bytes())
+}
+
+// TestLinker_ReissuedStepIDIsNotServedAcrossFlows pins the flow token in the cache key: after a restore or a
+// lossy failover reissues a step id to a new flow, that flow's ref to the id reads the new row rather than
+// being served the lost flow's bytes from the cache.
+func TestLinker_ReissuedStepIDIsNotServedAcrossFlows(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	linker := New("sqlite", 1, NewCache(1<<20))
+	lost := &fakeAnchors{rows: map[int]Anchor{7: {Changes: map[string]json.RawMessage{"doc": json.RawMessage(`"lost"`)}}}}
+	state := newState()
+	_, err := linker.Resolve(ctx, "aaaaaaaaaaaaaaaa", state, Refs{"doc": {Anchor: 7}}, nil, lost.load)
+	assert.NoError(err)
+	assert.Equal("lost", stateVal(state, "doc"))
+
+	reissued := &fakeAnchors{rows: map[int]Anchor{7: {Changes: map[string]json.RawMessage{"doc": json.RawMessage(`"new"`)}}}}
+	state = newState()
+	_, err = linker.Resolve(ctx, "bbbbbbbbbbbbbbbb", state, Refs{"doc": {Anchor: 7}}, nil, reissued.load)
+	assert.NoError(err)
+	assert.Equal("new", stateVal(state, "doc"))
+	assert.Equal(1, len(reissued.calls))
 }

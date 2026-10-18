@@ -495,7 +495,7 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 			// actually saw. resolveStateRefs mutates the map in place, so it gets the live map.
 			stepRefs, rerr := staterefs.Parse(stepRefsJSON)
 			if rerr == nil {
-				_, rerr = e.resolveStateRefs(ctx, db, shardNum, stepState, stepRefs, nil, "")
+				_, rerr = e.resolveStateRefs(ctx, db, shardNum, flowToken, stepState, stepRefs, nil, "")
 			}
 			if rerr != nil {
 				return nil, errors.Trace(rerr)

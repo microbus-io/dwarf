@@ -215,7 +215,7 @@ func TestLinker_ResolveItem(t *testing.T) {
 	linker := New("sqlite", 1, NewCache(testCacheBytes))
 	for i := range 3 {
 		state := newState()
-		_, err := linker.Resolve(ctx, state, Refs{"page": {Anchor: 7, Field: "pages", Path: []int{i}}, "pages": {Anchor: 7}}, nil, anchors.load)
+		_, err := linker.Resolve(ctx, testFlow, state, Refs{"page": {Anchor: 7, Field: "pages", Path: []int{i}}, "pages": {Anchor: 7}}, nil, anchors.load)
 		assert.NoError(err)
 		assert.Equal(map[string]any{"n": float64(i)}, stateVal(state, "page"))
 		assert.Len(stateVal(state, "pages"), 3, "the array and its element come from the same anchor read")
@@ -225,33 +225,33 @@ func TestLinker_ResolveItem(t *testing.T) {
 	// An array already in the bytes cache as a plain ref is split for its first item ref without a read.
 	warm := New("sqlite", 1, NewCache(testCacheBytes))
 	anchors.calls = nil
-	_, err := warm.Resolve(ctx, newState(), Refs{"pages": {Anchor: 7}}, nil, anchors.load)
+	_, err := warm.Resolve(ctx, testFlow, newState(), Refs{"pages": {Anchor: 7}}, nil, anchors.load)
 	assert.NoError(err)
 	state := newState()
-	_, err = warm.Resolve(ctx, state, Refs{"page": {Anchor: 7, Field: "pages", Path: []int{1}}}, nil, anchors.load)
+	_, err = warm.Resolve(ctx, testFlow, state, Refs{"page": {Anchor: 7, Field: "pages", Path: []int{1}}}, nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal(map[string]any{"n": float64(1)}, stateVal(state, "page"))
 	assert.Equal(1, len(anchors.calls))
 
 	// The element's array may sit in the anchor's state column, like any ref'd field.
 	state = newState()
-	_, err = linker.Resolve(ctx, state, Refs{"x": {Anchor: 7, Field: "initial", Path: []int{1}}}, nil, anchors.load)
+	_, err = linker.Resolve(ctx, testFlow, state, Refs{"x": {Anchor: 7, Field: "initial", Path: []int{1}}}, nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal("b", stateVal(state, "x"))
 
 	// Flatten splices the element, exactly as Resolve does.
-	flat, err := linker.Flatten(ctx, []byte(`{}`), Refs{"page": {Anchor: 7, Field: "pages", Path: []int{2}}}, anchors.load)
+	flat, err := linker.Flatten(ctx, testFlow, []byte(`{}`), Refs{"page": {Anchor: 7, Field: "pages", Path: []int{2}}}, anchors.load)
 	assert.NoError(err)
 	assert.Equal(`{"page":{"n":2}}`, string(flat))
 
 	// An index past the end, a field that is not an array, and a path deeper than the array nests are
 	// errors, never a silently absent field.
-	_, err = New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, newState(), Refs{"page": {Anchor: 7, Field: "pages", Path: []int{3}}}, nil, anchors.load)
+	_, err = New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, testFlow, newState(), Refs{"page": {Anchor: 7, Field: "pages", Path: []int{3}}}, nil, anchors.load)
 	assert.Error(err)
 	anchors.rows[8] = Anchor{Changes: cols(map[string]any{"doc": "not an array"})}
-	_, err = New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, newState(), Refs{"page": {Anchor: 8, Field: "doc", Path: []int{0}}}, nil, anchors.load)
+	_, err = New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, testFlow, newState(), Refs{"page": {Anchor: 8, Field: "doc", Path: []int{0}}}, nil, anchors.load)
 	assert.Error(err)
-	_, err = New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, newState(), Refs{"page": {Anchor: 7, Field: "pages", Path: []int{0, 0}}}, nil, anchors.load)
+	_, err = New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, testFlow, newState(), Refs{"page": {Anchor: 7, Field: "pages", Path: []int{0, 0}}}, nil, anchors.load)
 	assert.Error(err)
 }
 
@@ -277,18 +277,18 @@ func TestLinker_ResolveNestedItem(t *testing.T) {
 		{[]int{0, 0}, `1`},
 	}
 	for _, c := range cases {
-		flat, err := linker.Flatten(ctx, []byte(`{}`), Refs{"x": {Anchor: 7, Field: "data", Path: c.path}}, anchors.load)
+		flat, err := linker.Flatten(ctx, testFlow, []byte(`{}`), Refs{"x": {Anchor: 7, Field: "data", Path: c.path}}, anchors.load)
 		assert.NoError(err)
 		assert.Equal(`{"x":`+c.want+`}`, string(flat), c.path)
 	}
 	assert.Equal(1, len(anchors.calls))
-	entry, ok := linker.cache.Load(linker.key(7, "data", ColAny))
+	entry, ok := linker.cache.Load(linker.key(testFlow, 7, "data", ColAny))
 	assert.True(ok)
 	_, ok = entry.splits["data[1][1]"]
 	assert.True(ok, "each level's split is kept in the array's entry under the path to it")
 
 	for _, bad := range [][]int{{2, 0}, {0, 3}, {0, 0, 0}} {
-		_, err := linker.Flatten(ctx, []byte(`{}`), Refs{"x": {Anchor: 7, Field: "data", Path: bad}}, anchors.load)
+		_, err := linker.Flatten(ctx, testFlow, []byte(`{}`), Refs{"x": {Anchor: 7, Field: "data", Path: bad}}, anchors.load)
 		assert.Error(err, bad)
 	}
 }
@@ -302,7 +302,7 @@ func TestLinker_ResolveItemIsExact(t *testing.T) {
 	anchors := &fakeAnchors{rows: map[int]Anchor{
 		7: {Changes: map[string]json.RawMessage{"ids": json.RawMessage(`[1,9007199254740993]`)}},
 	}}
-	flat, err := New("sqlite", 1, NewCache(testCacheBytes)).Flatten(context.Background(), []byte(`{}`), Refs{"id": {Anchor: 7, Field: "ids", Path: []int{1}}}, anchors.load)
+	flat, err := New("sqlite", 1, NewCache(testCacheBytes)).Flatten(context.Background(), testFlow, []byte(`{}`), Refs{"id": {Anchor: 7, Field: "ids", Path: []int{1}}}, anchors.load)
 	assert.NoError(err)
 	assert.Equal(`{"id":9007199254740993}`, string(flat))
 }

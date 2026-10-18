@@ -123,7 +123,7 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 
 	state := newState()
 	refs := staterefs.Refs{"fromState": {Anchor: 1}, "fromChanges": {Anchor: 1}, "shadowed": {Anchor: 1}}
-	_, err = e.resolveStateRefs(ctx, db, 1, state, refs, nil, "u")
+	_, err = e.resolveStateRefs(ctx, db, 1, "ftok", state, refs, nil, "u")
 	assert.NoError(err)
 
 	// A resolved field is DECODED, exactly like one that was never ref'd: the storage encoding must never leak
@@ -137,9 +137,9 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 	assert.Equal("new", shadowed, "changes shadows state - it is the newer value")
 
 	// A dangling ref is an invariant violation and must be loud, never a silently-absent field.
-	_, err = e.resolveStateRefs(ctx, db, 1, newState(), staterefs.Refs{"nope": {Anchor: 1}}, nil, "u")
+	_, err = e.resolveStateRefs(ctx, db, 1, "ftok", newState(), staterefs.Refs{"nope": {Anchor: 1}}, nil, "u")
 	assert.Error(err)
-	_, err = e.resolveStateRefs(ctx, db, 1, newState(), staterefs.Refs{"x": {Anchor: 999}}, nil, "u")
+	_, err = e.resolveStateRefs(ctx, db, 1, "ftok", newState(), staterefs.Refs{"x": {Anchor: 999}}, nil, "u")
 	assert.Error(err)
 
 	// An anchor whose column does not decode says so, rather than reading as a field it does not hold.
@@ -148,7 +148,7 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 		1, 2, "s2", "Broken", "u", workflow.StatusCompleted, 60000, []byte(`[1]`), []byte(`{}`),
 	)
 	assert.NoError(err)
-	_, err = e.resolveStateRefs(ctx, db, 1, newState(), staterefs.Refs{"x": {Anchor: 2}}, nil, "u")
+	_, err = e.resolveStateRefs(ctx, db, 1, "ftok", newState(), staterefs.Refs{"x": {Anchor: 2}}, nil, "u")
 	if assert.Error(err) {
 		assert.Contains(err.Error(), "unreadable state")
 	}
@@ -642,7 +642,7 @@ func TestStateRefs_DispatchResolveTakesATurnOnlyToRead(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := e.resolveDispatchRefs(ctx, db, 1, newState(), refs, "u")
+		_, err := e.resolveDispatchRefs(ctx, db, 1, "ftok", newState(), refs, "u")
 		done <- err
 	}()
 	select {
@@ -664,7 +664,7 @@ func TestStateRefs_DispatchResolveTakesATurnOnlyToRead(t *testing.T) {
 	defer cancel()
 	state := newState()
 	start := time.Now()
-	_, err = e.resolveDispatchRefs(warmCtx, db, 1, state, refs, "u")
+	_, err = e.resolveDispatchRefs(warmCtx, db, 1, "ftok", state, refs, "u")
 	assert.NoError(err)
 	assert.True(time.Since(start) < time.Second, "a cache hit must not queue for a turn, took %v", time.Since(start))
 	var doc string

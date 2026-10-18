@@ -217,7 +217,7 @@ func terminalTailsOf(ctx context.Context, db sequel.Executor, flowID int, comple
 // mergeTerminalSteps computes a flow's terminal state from the execution-DAG tail: the tails' changes fold onto
 // the first tail's state through the reducers, as a linear transition's do. A flow with no tails has an empty
 // state.
-func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, shardNum int, t *terminalTails, workflowURL string, reducers map[string]workflow.Reducer) (workflow.State, error) {
+func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, shardNum int, flowToken string, t *terminalTails, workflowURL string, reducers map[string]workflow.Reducer) (workflow.State, error) {
 	if !t.found {
 		return workflow.State{}, nil
 	}
@@ -242,7 +242,7 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, sha
 	// flow would dangle, so the terminal merge always materializes, whatever it costs on this one row.
 	// It is not a regression either: a large field surviving to the end is copied into final_state today.
 	// resolveStateRefs mutates the state map in place, so it gets the live map.
-	if _, err := e.resolveStateRefs(ctx, db, shardNum, base, baseRefs, nil, workflowURL); err != nil {
+	if _, err := e.resolveStateRefs(ctx, db, shardNum, flowToken, base, baseRefs, nil, workflowURL); err != nil {
 		return workflow.State{}, errors.Trace(err)
 	}
 	// A tail's changes are its delta onto its input, folded through the reducers like any hand-off. A value a
@@ -277,20 +277,20 @@ func (e *Engine) flowGraph(ctx context.Context, db sequel.Executor, shardNum, fl
 }
 
 // computeFinalState computes the merged state for a flow.
-func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shardNum, flowID int) ([]byte, string, error) {
+func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shardNum, flowID int, flowToken string) ([]byte, string, error) {
 	var completed terminalTails
 	if err := readTerminalTails(ctx, db, false, flowID, &completed); err != nil {
 		return nil, "", errors.Trace(err)
 	}
-	return e.computeFinalStateFrom(ctx, db, shardNum, flowID, &completed)
+	return e.computeFinalStateFrom(ctx, db, shardNum, flowID, flowToken, &completed)
 }
 
 // terminalFinalState is computeFinalState for a path that terminalizes a flow whatever its state holds -
 // Terminate, Delete, Purge and the wedge sweep. A merge that cannot fold (a permanentError) yields an empty
 // final_state rather than an error: the merge would fail identically on every attempt, so propagating it would
 // leave the flow impossible to stop. A database error still propagates.
-func (e *Engine) terminalFinalState(ctx context.Context, db sequel.Executor, shardNum, flowID int) ([]byte, error) {
-	fs, _, err := e.computeFinalState(ctx, db, shardNum, flowID)
+func (e *Engine) terminalFinalState(ctx context.Context, db sequel.Executor, shardNum, flowID int, flowToken string) ([]byte, error) {
+	fs, _, err := e.computeFinalState(ctx, db, shardNum, flowID, flowToken)
 	if isPermanentError(err) {
 		e.logger.ErrorContext(ctx, "Computing final_state while terminalizing a flow; terminalizing with empty state",
 			"flow", keys.CorrelationID(shardNum, flowID), "error", err)
@@ -300,7 +300,7 @@ func (e *Engine) terminalFinalState(ctx context.Context, db sequel.Executor, sha
 }
 
 // computeFinalStateFrom is computeFinalState from the flow's completed tails, already read (queueCompletedTails).
-func (e *Engine) computeFinalStateFrom(ctx context.Context, db sequel.Executor, shardNum, flowID int, completed *terminalTails) ([]byte, string, error) {
+func (e *Engine) computeFinalStateFrom(ctx context.Context, db sequel.Executor, shardNum, flowID int, flowToken string, completed *terminalTails) ([]byte, string, error) {
 	graph, workflowURL, err := e.flowGraph(ctx, db, shardNum, flowID)
 	if err != nil {
 		return nil, "", errors.Trace(err)
@@ -335,7 +335,7 @@ func (e *Engine) computeFinalStateFrom(ctx context.Context, db sequel.Executor, 
 	}
 	var merged workflow.State
 	if outermost != 0 {
-		merged, err = e.mergeCohortState(ctx, db, shardNum, flowID, outermost, graph, workflowURL)
+		merged, err = e.mergeCohortState(ctx, db, shardNum, flowID, flowToken, outermost, graph, workflowURL)
 	} else {
 		// A tail outside every cohort - the ordinary completed flow, whose terminal step is downstream of every
 		// fan-in - is stripped of NOTHING: every fan-in it passed already stripped its own cohort's names. Its rows
@@ -347,7 +347,7 @@ func (e *Engine) computeFinalStateFrom(ctx context.Context, db sequel.Executor, 
 			}
 			tails = lazy
 		}
-		merged, err = e.mergeTerminalSteps(ctx, db, shardNum, tails, workflowURL, graph.Reducers())
+		merged, err = e.mergeTerminalSteps(ctx, db, shardNum, flowToken, tails, workflowURL, graph.Reducers())
 	}
 	if err != nil {
 		return nil, "", errors.Trace(err)
@@ -386,7 +386,7 @@ func (e *Engine) computeFinalStateFrom(ctx context.Context, db sequel.Executor, 
 // every inner cohort's names were already stripped from that cohort's own fold. Stripping an inner cohort's
 // names HERE would hit the trunk instead, which never held them - a trunk field that shares an inner `as` name
 // (`pageCount` under `forEach ... as "page"`) survives a convergence and would vanish from a failure.
-func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shardNum, flowID, cohortSpawnID int, graph *workflow.Graph, workflowURL string) (workflow.State, error) {
+func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shardNum, flowID int, flowToken string, cohortSpawnID int, graph *workflow.Graph, workflowURL string) (workflow.State, error) {
 	var spawnStateJSON, spawnChangesJSON, spawnRefsJSON []byte
 	var spawnTask string
 	err := db.QueryRowContext(ctx,
@@ -412,7 +412,7 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 	if err != nil {
 		return workflow.State{}, errors.Trace(&permanentError{err})
 	}
-	if _, err := e.resolveStateRefs(ctx, db, shardNum, spawnState, spawnRefs, nil, workflowURL); err != nil {
+	if _, err := e.resolveStateRefs(ctx, db, shardNum, flowToken, spawnState, spawnRefs, nil, workflowURL); err != nil {
 		return workflow.State{}, errors.Trace(err)
 	}
 	// The failed cohort's terminal state is built the SAME way convergence would (fanInRow): the spawn's
@@ -422,7 +422,7 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 		return workflow.State{}, errors.Trace(&permanentError{err})
 	}
 
-	contributions, err := e.cohortContributions(ctx, db, shardNum, flowID, cohortSpawnID, graph, workflowURL)
+	contributions, err := e.cohortContributions(ctx, db, shardNum, flowID, flowToken, cohortSpawnID, graph, workflowURL)
 	if err != nil {
 		return workflow.State{}, errors.Trace(err)
 	}
@@ -444,7 +444,7 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 // keeps a failed nested fan-out's final_state equal to a converged one's. A member's write to its own cohort's
 // `as` name projects as a delete, as it does through a real fan-in, and the strip touches this cohort's fold
 // and not the trunk.
-func (e *Engine) simulatedFanInPart(ctx context.Context, db sequel.Executor, shardNum, flowID, spawnID int, spawnTask string, graph *workflow.Graph, workflowURL string) (workflow.Changes, error) {
+func (e *Engine) simulatedFanInPart(ctx context.Context, db sequel.Executor, shardNum, flowID int, flowToken string, spawnID int, spawnTask string, graph *workflow.Graph, workflowURL string) (workflow.Changes, error) {
 	var stateJSON, changesJSON, refsJSON []byte
 	err := db.QueryRowContext(ctx,
 		"SELECT state, changes, state_refs FROM dwarf_steps WHERE step_id=?", spawnID,
@@ -468,11 +468,11 @@ func (e *Engine) simulatedFanInPart(ctx context.Context, db sequel.Executor, sha
 	if err != nil {
 		return workflow.Changes{}, errors.Trace(err)
 	}
-	merged, err := e.fanInBase(ctx, db, shardNum, state, changes, refs, reducers, workflowURL)
+	merged, err := e.fanInBase(ctx, db, shardNum, flowToken, state, changes, refs, reducers, workflowURL)
 	if err != nil {
 		return workflow.Changes{}, errors.Trace(err)
 	}
-	contributions, err := e.cohortContributions(ctx, db, shardNum, flowID, spawnID, graph, workflowURL)
+	contributions, err := e.cohortContributions(ctx, db, shardNum, flowID, flowToken, spawnID, graph, workflowURL)
 	if err != nil {
 		return workflow.Changes{}, errors.Trace(err)
 	}
@@ -496,7 +496,7 @@ func (e *Engine) simulatedFanInPart(ctx context.Context, db sequel.Executor, sha
 //
 // It runs only on the path that terminalizes a flow whose fan-out never converged, so reading a cohort per
 // level is affordable.
-func (e *Engine) cohortContributions(ctx context.Context, db sequel.Executor, shardNum, flowID, cohortSpawnID int, graph *workflow.Graph, workflowURL string) ([]workflow.Changes, error) {
+func (e *Engine) cohortContributions(ctx context.Context, db sequel.Executor, shardNum, flowID int, flowToken string, cohortSpawnID int, graph *workflow.Graph, workflowURL string) ([]workflow.Changes, error) {
 	type member struct {
 		cohortMember
 		cohortSize, arrivals, failures int
@@ -559,7 +559,7 @@ func (e *Engine) cohortContributions(ctx context.Context, db sequel.Executor, sh
 		}
 		// A spawn's cohort exists only once the spawn completed.
 		if m.completed && m.cohortSize > 0 && (m.arrivals < m.cohortSize || m.failures > 0) {
-			part, err := e.simulatedFanInPart(ctx, db, shardNum, flowID, m.stepID, m.taskName, graph, workflowURL)
+			part, err := e.simulatedFanInPart(ctx, db, shardNum, flowID, flowToken, m.stepID, m.taskName, graph, workflowURL)
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
@@ -730,7 +730,11 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 
 			finalStates := make([][]byte, len(allFlowIDs))
 			for i, fid := range allFlowIDs {
-				fs, err := e.terminalFinalState(ctx, tx, shardNum, fid.(int))
+				_, _, fToken, err := keys.ParseFlowKey(allCompositeIDs[i])
+				if err != nil {
+					return errors.Trace(err)
+				}
+				fs, err := e.terminalFinalState(ctx, tx, shardNum, fid.(int), fToken)
 				if err != nil {
 					return errors.Trace(err)
 				}
@@ -924,7 +928,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, ste
 		if err := batch.flush(); err != nil {
 			return err
 		}
-		fs, wf, err := e.computeFinalStateFrom(ctx, tx, shardNum, flowID, &tails)
+		fs, wf, err := e.computeFinalStateFrom(ctx, tx, shardNum, flowID, flowToken, &tails)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -1196,7 +1200,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 		}
 		if failFlow {
 			var err error
-			loss, err = e.failFlowTx(ctx, tx, shardNum, flowID, flowCancelled, taskErr, parentStepID, stepID)
+			loss, err = e.failFlowTx(ctx, tx, shardNum, flowID, flowToken, flowCancelled, taskErr, parentStepID, stepID)
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -1233,13 +1237,13 @@ type flowLoss struct {
 // lost flow looks like. lastLoss is the resolving step's own error, or nil for a completing arrival. stoppedStepID
 // is the step recorded as the one the flow stopped at: the failing step, or 0 for a completing arrival, which is not
 // the loss.
-func (e *Engine) failFlowTx(ctx context.Context, tx sequel.Executor, shardNum, flowID int, cancelled bool, lastLoss error, parentStepID int, stoppedStepID int) (flowLoss, error) {
+func (e *Engine) failFlowTx(ctx context.Context, tx sequel.Executor, shardNum, flowID int, flowToken string, cancelled bool, lastLoss error, parentStepID int, stoppedStepID int) (flowLoss, error) {
 	loss := flowLoss{status: workflow.StatusFailed, parentStepID: parentStepID}
 	if cancelled {
 		loss.status = workflow.StatusCancelled
 	}
 	lossErr := e.flowLossError(ctx, tx, flowID, cancelled, lastLoss)
-	finalStateJSON, _, err := e.computeFinalState(ctx, tx, shardNum, flowID)
+	finalStateJSON, _, err := e.computeFinalState(ctx, tx, shardNum, flowID, flowToken)
 	if err == nil && e.seams.IsFault(engineseams.FaultFailFlowFinalState) {
 		err = errors.New("injected fault: " + engineseams.FaultFailFlowFinalState)
 	}

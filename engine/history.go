@@ -211,14 +211,14 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	// and ahead of anything arriving after it.
 	ctx, doneTurn := e.opTurn(ctx, shardNum, "step")
 	defer doneTurn()
-	var taskName, statusStr, errMsg string
+	var taskName, statusStr, errMsg, flowToken string
 	var stateJSON, changesJSON, stateRefsJSON, interruptJSON []byte
 	var stepDepth, attempt, predID, succID, ver int
 	var createdAt, updatedAt time.Time
 	err = db.QueryRowContext(ctx,
-		"SELECT s.step_depth, s.task_name, s.attempt, s.state, s.changes, s.state_refs, s.interrupt_payload, s.status, s.error, s.created_at, s.updated_at, s.predecessor_id, s.successor_id, f.payload_ver FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.step_token=?",
+		"SELECT s.step_depth, s.task_name, s.attempt, s.state, s.changes, s.state_refs, s.interrupt_payload, s.status, s.error, s.created_at, s.updated_at, s.predecessor_id, s.successor_id, f.payload_ver, f.flow_token FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.step_token=?",
 		stepID, stepToken,
-	).Scan(&stepDepth, &taskName, &attempt, &stateJSON, &changesJSON, &stateRefsJSON, &interruptJSON, &statusStr, &errMsg, &createdAt, &updatedAt, &predID, &succID, &ver)
+	).Scan(&stepDepth, &taskName, &attempt, &stateJSON, &changesJSON, &stateRefsJSON, &interruptJSON, &statusStr, &errMsg, &createdAt, &updatedAt, &predID, &succID, &ver, &flowToken)
 	if err == sql.ErrNoRows {
 		return nil, errors.New("step not found", http.StatusNotFound)
 	}
@@ -249,7 +249,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	if _, err = e.resolveStateRefs(ctx, db, shardNum, fs.State, refs, nil, ""); err != nil {
+	if _, err = e.resolveStateRefs(ctx, db, shardNum, flowToken, fs.State, refs, nil, ""); err != nil {
 		return nil, errors.Trace(err)
 	}
 	// An overwrite shows as its new value and a delete as a null, which is how a caller reads a delete.

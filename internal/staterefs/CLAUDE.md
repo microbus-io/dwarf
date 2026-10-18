@@ -418,6 +418,16 @@ property of the shard's handle) and the shard's single-flight `loading` map. Eve
 through one `Cache`, under one budget. A `step_id` is a per-shard auto-increment, so the cache key carries the
 shard (`Linker.key`); without it, step 7 of shard 1 would be served for step 7 of shard 2.
 
+**The key also carries the flow's token, because a restore or a lossy failover reissues step ids.** The
+flow that gets an id back has a new random token, so its refs miss the entries cached from the lost timeline
+instead of serving another flow's bytes for up to 5 idle minutes. Keep the shard beside it: the token is
+64 bits and is only ever trusted next to a unique row id (`internal/keys/CLAUDE.md`), and `(shard, anchor)` is
+that id. Every caller passes the token of the flow the refs belong to. A Seed and a resolve under different
+tokens never meet, which `TestStateRefs_LinearSuccessorIsServedFromTheSeed` would catch. A flow that keeps
+running across a restore can still re-run a step under the same token and id and be served its own lost
+output; `docs/backup-and-restore.md` has operators restart replicas for that. Pinned by
+`TestLinker_ReissuedStepIDIsNotServedAcrossFlows`.
+
 - **Do not split the budget per shard, evenly or by `ShardSpec.Weight`.** The cache fills only where this
   replica runs steps (`Seed` at completion, resolves at dispatch, fan-in and flatten), and a shard has at most
   two dispatchers, so a replica in a multi-shard fleet dispatches only some of its shards - every replica ran

@@ -112,7 +112,7 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	// The fork's leaf step is rewritten with fully MATERIALIZED state (and state_refs cleared below): the
 	// caller's overrides merge onto the real values, and the leaf is the one row the fork re-runs from, so it
 	// must not depend on anchors whose ids are about to be remapped. Its successors re-mint refs normally.
-	resolvedLeafState, err := e.resolvedStepState(ctx, db, shardNum, forkStepState, forkStepRefs, rootWorkflowURL)
+	resolvedLeafState, err := e.resolvedStepState(ctx, db, shardNum, leafFlowToken, forkStepState, forkStepRefs, rootWorkflowURL)
 	if err != nil {
 		return "", errors.Trace(err)
 	}

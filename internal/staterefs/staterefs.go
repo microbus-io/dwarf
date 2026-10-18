@@ -434,9 +434,12 @@ const elemSize = int64(unsafe.Sizeof(json.RawMessage(nil)))
 // cacheKey identifies one ref'd field's bytes. Immutable once the anchor step settles (a terminal step is
 // immutable, and a retry rewrites a step's changes only BEFORE any successor exists), so it is as good a key
 // as a content hash. It carries the shard because a step id is unique only within one, and the cache is
-// shared by every shard's Linker.
+// shared by every shard's Linker. It carries the flow's token because a restore or a lossy failover reissues
+// step ids, and the flow that gets an id back gets a new random token, so it never matches an entry cached
+// from the lost timeline.
 type cacheKey struct {
 	shard  int
+	flow   string
 	anchor int
 	field  string
 	col    byte
@@ -504,9 +507,10 @@ func New(driver string, shard int, cache *Cache) *Linker {
 	}
 }
 
-// key is the cache key of a field at an anchor step of this Linker's shard, read from a column.
-func (l *Linker) key(anchor int, field string, col byte) cacheKey {
-	return cacheKey{l.shard, anchor, field, col}
+// key is the cache key of a field at an anchor step of this Linker's shard, in the flow with the given token,
+// read from a column.
+func (l *Linker) key(flowToken string, anchor int, field string, col byte) cacheKey {
+	return cacheKey{l.shard, flowToken, anchor, field, col}
 }
 
 // store caches one field's bytes and returns its entry. An entry already cached for the field is kept and
@@ -953,16 +957,18 @@ func Parse(refsJSON []byte) (Refs, error) {
 // want, when non-nil, selects which refs to resolve; the rest are left for the caller to carry forward.
 // That is what lets a fan-in reduce the fields it must while a large CARRIED field crosses the cohort as a
 // ref (see ResolveReduced).
-func (l *Linker) Resolve(ctx context.Context, state workflow.State, refs Refs, want map[string]bool, load Loader) (int, error) {
-	return l.resolve(ctx, state, refs, want, load, false)
+//
+// flowToken is the token of the flow the refs belong to, here and in every other Linker method that takes it.
+func (l *Linker) Resolve(ctx context.Context, flowToken string, state workflow.State, refs Refs, want map[string]bool, load Loader) (int, error) {
+	return l.resolve(ctx, flowToken, state, refs, want, load, false)
 }
 
 // ResolveShared is Resolve of every ref, for a caller that holds no transaction: a field a concurrent
 // ResolveShared is already reading is taken from that read rather than read again. That is the dispatch of
 // a fan-out's branches, which miss on the same anchor at the same moment. A caller inside a transaction
 // must use Resolve, which never waits on another goroutine while holding its connection and locks.
-func (l *Linker) ResolveShared(ctx context.Context, state workflow.State, refs Refs, load Loader) (int, error) {
-	return l.resolve(ctx, state, refs, nil, load, true)
+func (l *Linker) ResolveShared(ctx context.Context, flowToken string, state workflow.State, refs Refs, load Loader) (int, error) {
+	return l.resolve(ctx, flowToken, state, refs, nil, load, true)
 }
 
 // Seed caches the bytes of every field a Mint anchored at anchorID, so a successor resolving them is served
@@ -973,7 +979,7 @@ func (l *Linker) ResolveShared(ctx context.Context, state workflow.State, refs R
 //
 // Call it only once the anchor step's own payload has committed, and before its successors are offered for
 // dispatch.
-func (l *Linker) Seed(anchorID int, merged workflow.State, changes workflow.Changes, refsJSON []byte) {
+func (l *Linker) Seed(flowToken string, anchorID int, merged workflow.State, changes workflow.Changes, refsJSON []byte) {
 	if len(refsJSON) <= 2 { // "{}"
 		return
 	}
@@ -996,7 +1002,7 @@ func (l *Linker) Seed(anchorID int, merged workflow.State, changes workflow.Chan
 					value = changes.Additions().GetJSON(name)
 				}
 				if len(value) > 0 {
-					l.store(l.key(anchorID, name, ColChanges), value)
+					l.store(l.key(flowToken, anchorID, name, ColChanges), value)
 				}
 			}
 			continue
@@ -1005,12 +1011,12 @@ func (l *Linker) Seed(anchorID int, merged workflow.State, changes workflow.Chan
 			continue
 		}
 		if value := merged.GetJSON(field); len(value) > 0 {
-			l.store(l.key(anchorID, ref.field(field), ref.Col), value)
+			l.store(l.key(flowToken, anchorID, ref.field(field), ref.Col), value)
 		}
 	}
 }
 
-func (l *Linker) resolve(ctx context.Context, state workflow.State, refs Refs, want map[string]bool, load Loader, shared bool) (int, error) {
+func (l *Linker) resolve(ctx context.Context, flowToken string, state workflow.State, refs Refs, want map[string]bool, load Loader, shared bool) (int, error) {
 	if len(refs) == 0 {
 		return 0, nil
 	}
@@ -1019,7 +1025,7 @@ func (l *Linker) resolve(ctx context.Context, state workflow.State, refs Refs, w
 		// caller on input missing every field they point at.
 		return 0, unresolvableError("state refs given with no state to resolve them into")
 	}
-	values, err := l.fetch(ctx, refs, want, load, shared)
+	values, err := l.fetch(ctx, flowToken, refs, want, load, shared)
 	if err != nil {
 		return 0, errors.Trace(err)
 	}
@@ -1048,7 +1054,7 @@ func (l *Linker) resolve(ctx context.Context, state workflow.State, refs Refs, w
 // shared makes concurrent misses on one field read it once (see ResolveShared). Such a fetch reads the
 // fields no other fetch is reading, then waits for the rest and takes them from the flight; one whose wait
 // did not deliver - the other read failed - reads for itself. So it makes zero, one or two Loader calls.
-func (l *Linker) fetch(ctx context.Context, refs Refs, want map[string]bool, load Loader, shared bool) (map[string]json.RawMessage, error) {
+func (l *Linker) fetch(ctx context.Context, flowToken string, refs Refs, want map[string]bool, load Loader, shared bool) (map[string]json.RawMessage, error) {
 	selected := make(map[string]Ref, len(refs))
 	needed := map[cacheKey]bool{}
 	for key, ref := range refs {
@@ -1057,11 +1063,11 @@ func (l *Linker) fetch(ctx context.Context, refs Refs, want map[string]bool, loa
 		}
 		selected[key] = ref
 		if ref.List == nil {
-			needed[l.key(ref.Anchor, ref.field(key), ref.Col)] = true
+			needed[l.key(flowToken, ref.Anchor, ref.field(key), ref.Col)] = true
 			continue
 		}
 		for _, e := range ref.List {
-			needed[l.key(e.Anchor, e.field(key), e.Col)] = true
+			needed[l.key(flowToken, e.Anchor, e.field(key), e.Col)] = true
 		}
 	}
 	entries := make(map[cacheKey]*cachedField, len(needed))
@@ -1080,7 +1086,7 @@ func (l *Linker) fetch(ctx context.Context, refs Refs, want map[string]bool, loa
 	}
 	values := make(map[string]json.RawMessage, len(selected))
 	for key, ref := range selected {
-		value, err := l.value(key, ref, entries)
+		value, err := l.value(flowToken, key, ref, entries)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -1267,9 +1273,9 @@ func lookup(row Anchor, k cacheKey) (json.RawMessage, error) {
 
 // value returns the bytes a ref resolves to, given the cache entries of every field it names: the field itself
 // for a plain ref, what its path and range select otherwise, and for a list the array its entries make.
-func (l *Linker) value(key string, ref Ref, entries map[cacheKey]*cachedField) (json.RawMessage, error) {
+func (l *Linker) value(flowToken string, key string, ref Ref, entries map[cacheKey]*cachedField) (json.RawMessage, error) {
 	if ref.List == nil {
-		k := l.key(ref.Anchor, ref.field(key), ref.Col)
+		k := l.key(flowToken, ref.Anchor, ref.field(key), ref.Col)
 		f := entries[k]
 		if f == nil {
 			return nil, unresolvableError("state ref %q: step %d was not read", key, ref.Anchor)
@@ -1285,7 +1291,7 @@ func (l *Linker) value(key string, ref Ref, entries map[cacheKey]*cachedField) (
 	}
 	var out []json.RawMessage
 	for _, e := range ref.List {
-		k := l.key(e.Anchor, e.field(key), e.Col)
+		k := l.key(flowToken, e.Anchor, e.field(key), e.Col)
 		f := entries[k]
 		if f == nil {
 			return nil, unresolvableError("state ref %q: step %d was not read", key, e.Anchor)
@@ -1492,7 +1498,7 @@ func skipSpace(data []byte, i int) int {
 // Mint's inherited-carry-forward (which handles a ref whose key is absent from the merged state, exactly
 // the case a non-materialized carry produces). That is why this returns no carried set: it is not the
 // caller's to thread - Mint recovers it from the same inherited refs it is already passed.
-func (l *Linker) ResolveReduced(ctx context.Context, state workflow.State, refs Refs, reducers map[string]workflow.Reducer, load Loader) error {
+func (l *Linker) ResolveReduced(ctx context.Context, flowToken string, state workflow.State, refs Refs, reducers map[string]workflow.Reducer, load Loader) error {
 	if len(refs) == 0 {
 		return nil
 	}
@@ -1507,7 +1513,7 @@ func (l *Linker) ResolveReduced(ctx context.Context, state workflow.State, refs 
 	}
 	// The materialized-bytes count is dropped: a fan-in's resolved state is folded and written inside the
 	// caller's transaction, never held across a host call, so nothing downstream meters its residency.
-	_, err := l.Resolve(ctx, state, refs, want, load)
+	_, err := l.Resolve(ctx, flowToken, state, refs, want, load)
 	return err
 }
 
@@ -1516,7 +1522,7 @@ func (l *Linker) ResolveReduced(ctx context.Context, state workflow.State, refs 
 //
 // It splices json.RawMessage values rather than decoding the state map, so a large payload is never
 // decoded and re-encoded on the way through.
-func (l *Linker) Flatten(ctx context.Context, stateJSON []byte, refs Refs, load Loader) ([]byte, error) {
+func (l *Linker) Flatten(ctx context.Context, flowToken string, stateJSON []byte, refs Refs, load Loader) ([]byte, error) {
 	if len(refs) == 0 {
 		return stateJSON, nil
 	}
@@ -1529,7 +1535,7 @@ func (l *Linker) Flatten(ctx context.Context, stateJSON []byte, refs Refs, load 
 	if raw == nil {
 		raw = map[string]json.RawMessage{}
 	}
-	values, err := l.fetch(ctx, refs, nil, load, false)
+	values, err := l.fetch(ctx, flowToken, refs, nil, load, false)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

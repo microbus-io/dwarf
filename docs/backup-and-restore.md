@@ -53,7 +53,8 @@ knowing which of your backups still contain a record you were asked to remove.
 ## Before you restore
 
 1. **Stop the fleet.** Restoring underneath running replicas mixes restored rows with live ones and produces
-   states nothing in the engine expects.
+   states nothing in the engine expects. A replica also holds what it has read in memory, so one that keeps
+   running through a restore can serve a flow data from after the restore point.
 2. **Know your window.** Everything between the backup point and now is lost or will re-run. Which of your
    tasks are safe to run twice? That question is answered by whether they're idempotent
    ([Writing tasks → Idempotency](tasks.md#idempotency)), and the answer is the same one that governs
@@ -86,6 +87,14 @@ Expect, and do not be alarmed by:
 What should **not** happen: `dwarf_steps_write_failed_total`, `dwarf_steps_unwedged_total` or
 `dwarf_flows_orphaned_total` moving. Those are alarms in a restored fleet exactly as in a healthy one — see
 the [Runbook](runbook.md).
+
+## Failing over to a standby that lost writes
+
+Promoting an asynchronous standby is a restore to a few seconds ago, done while the fleet is running. The writes
+the standby had not received are gone, and everything in [What a restore does to flows](#what-a-restore-does-to-flows)
+applies to them. **Restart every replica after such a failover**, for the same reason the fleet is stopped for a
+restore: a replica that kept running holds data from before the failover in memory. A synchronous standby loses
+no committed write, so failing over to one needs no restart.
 
 ## Test the restore, not just the backup
 
