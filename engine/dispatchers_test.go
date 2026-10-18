@@ -882,7 +882,9 @@ func TestDispatchers_DrainingReplicasClassPassesToAPeer(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	_, err := drainer.Create(ctx, "drainhandoff/g", map[string]any{"hold": "yes"}, nil)
+	heldKey, err := drainer.Create(ctx, "drainhandoff/g", map[string]any{"hold": "yes"}, nil)
+	assert.NoError(err)
+	_, heldFlowID, _, err := keys.ParseFlowKey(heldKey)
 	assert.NoError(err)
 	<-started
 	var wg sync.WaitGroup
@@ -911,8 +913,8 @@ func TestDispatchers_DrainingReplicasClassPassesToAPeer(t *testing.T) {
 	// The handoff was in the path only if some of that work fell in the drainer's class.
 	var inDrainerClass int
 	assert.NoError(db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM dwarf_steps WHERE task_name='W' AND step_id % 2 = ? AND state NOT LIKE '%hold%'",
-		drainerOrd).Scan(&inDrainerClass))
+		"SELECT COUNT(*) FROM dwarf_steps WHERE task_name='W' AND step_id % 2 = ? AND flow_id <> ?",
+		drainerOrd, heldFlowID).Scan(&inDrainerClass))
 	assert.True(inDrainerClass > 0, "none of the work fell in the drainer's residue class")
 	select {
 	case <-release:
