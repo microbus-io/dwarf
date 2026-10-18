@@ -895,19 +895,24 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 			return nil
 		}
 		for i, fid := range interruptedIDs {
-			// A root a Resume revived since the SELECT is left running, and the stamp below skips it.
 			err = e.terminateSubtree(ctx, shardIdx, fid, interruptedTokens[i], "purged", true, "")
 			if err != nil && !errors.Is(err, errRootNotInterrupted) {
 				return errors.Trace(err)
 			}
 		}
 
-		// One set-based UPDATE per shard, stamping only terminal roots: a root a Resume revived since the SELECT
-		// is left alone. ids are trusted integers embedded as literals to dodge the per-driver bind-param
-		// ceiling. The count returned is roots MARKED (reaped shortly after).
+		// One set-based UPDATE per shard, stamping only terminal roots. ids are trusted integers embedded as
+		// literals to dodge the per-driver bind-param ceiling. The count returned is roots MARKED (reaped shortly
+		// after). A root selected as interrupted is stamped only if it is now terminated: one a Resume revived
+		// since the SELECT is running, or has already completed or failed, and no longer matches the query. Do not
+		// re-apply the query's WHERE instead - the terminate itself moves the root off a Status or OlderThan filter.
+		revived := ""
+		if len(interruptedIDs) > 0 {
+			revived = " AND (status='" + workflow.StatusTerminated + "' OR flow_id NOT IN (" + intCSV(interruptedIDs) + "))"
+		}
 		res, err := db.ExecContext(ctx,
 			"UPDATE dwarf_flows SET delete_after_ms=1"+
-				" WHERE flow_id IN ("+intCSV(flowIDs)+") AND status IN ("+terminalStatusesSQL+") AND delete_after_ms=0",
+				" WHERE flow_id IN ("+intCSV(flowIDs)+") AND status IN ("+terminalStatusesSQL+") AND delete_after_ms=0"+revived,
 		)
 		if err != nil {
 			return errors.Trace(err)

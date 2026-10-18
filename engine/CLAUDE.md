@@ -3405,8 +3405,9 @@ For operator-driven retention (both mark, do not delete inline):
   roots (`f.surgraph_flow_id=0 AND f.status<>'running' AND f.delete_after_ms=0`, capped at `purgeCap` **4096**, ids
   embedded as integer literals to dodge the per-driver bind-param ceiling), terminates each `interrupted` one
   through `terminateSubtree` as `Delete` does, then `UPDATE ... SET delete_after_ms=1 WHERE flow_id IN (ids) AND
-  status IN (terminal) AND delete_after_ms=0`. Returns the count **marked** (reaped shortly after). Same `Query`
-  shape as `List`; **rejects** `IncludeSubgraphs` with 400.
+  status IN (terminal) AND delete_after_ms=0`, where a root selected as interrupted must now be `terminated` - one a
+  Resume revived may have completed since, and no longer matches the query. Returns the count **marked** (reaped
+  shortly after). Same `Query` shape as `List`; **rejects** `IncludeSubgraphs` with 400.
 
 **The reaper** (`reapDueFlows`, `reaper.go`) runs on its own dedicated goroutine + ~1min ticker (a single goroutine,
 inherently non-overlapping), drained via `reaperStop` in `drainRuntime`. On each shard this replica DISPATCHES (a

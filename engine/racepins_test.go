@@ -719,3 +719,51 @@ func TestDeleteVsResume_ResumeWinsInsideTerminate(t *testing.T) {
 		})
 	}
 }
+
+// TestPurge_ResumedAndCompletedRootIsNotMarked pins Purge's stamp against a root it selected as interrupted that
+// a Resume revived and that then ran to completion before Purge's terminate: the tree has settled, so the
+// terminate is a no-op, and the completed root no longer matches the query. It stays unmarked.
+func TestPurge_ResumedAndCompletedRootIsNotMarked(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("Gate")
+	g.SetURL("Gate", "prcrm/gate")
+	g.AddTransition("Gate", workflow.End)
+	mux.HandleGraph("prcrm/g", g)
+	mux.HandleTask("prcrm/gate", func(ctx context.Context, f *workflow.Flow) error {
+		_, err := f.Interrupt(nil, nil)
+		return err
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
+	e.SetHost(mux)
+	if !assert.NoError(e.Startup(t.Context())) {
+		return
+	}
+
+	fk := createInterruptedFlow(t, e, "prcrm/g")
+	shard, flowID, _, err := keys.ParseFlowKey(fk)
+	assert.NoError(err)
+
+	e.seams.Break(engineseams.CheckpointTerminateAfterScan)
+	purgeDone := make(chan error, 1)
+	var marked int
+	go func() {
+		n, err := e.Purge(ctx, workflow.Query{Status: workflow.StatusInterrupted})
+		marked = n
+		purgeDone <- err
+	}()
+	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointTerminateAfterScan, 10*time.Second), "Purge never reached terminateSubtree")
+
+	assert.NoError(e.Resume(ctx, fk, nil))
+	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
+	e.seams.Resume(engineseams.CheckpointTerminateAfterScan)
+	assert.NoError(<-purgeDone)
+	assert.Equal(0, marked)
+	assert.Equal(1, enginetest.CountRows(t, e, shard,
+		"SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusCompleted+"' AND delete_after_ms=0", flowID),
+		"the completed flow was marked for deletion")
+}
