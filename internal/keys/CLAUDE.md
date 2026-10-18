@@ -14,7 +14,8 @@ A flow/step key is **`{shard}-{id}-{token}`** with a **1-based** shard:
 
 - `{shard}` routes the request to a database shard (1-based; `ParseFlowKey`/`ParseStepKey` reject `< 1`).
 - `{id}` is the per-shard sequential `flow_id`/`step_id` — unique only within a shard, which is why the shard is
-  carried in the key and why the graph cache is keyed by `(shard, flowID)`.
+  carried in the key and why the graph cache is keyed by `(shard, flowID)`, with the flow token beside them
+  because a restore or a lossy failover reissues ids.
 - `{token}` is an unguessable random capability (`RandomIdentifier(16)`).
 
 `New(shard, id, token)` is the **only** place the format is spelled — nothing outside this package composes a key

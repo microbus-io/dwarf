@@ -923,8 +923,10 @@ not parallelism:
   caller on a replica that dispatched the flow pays no graph round trip. Every field of `cachedGraph` must
   stay frozen for the flow's life - nothing invalidates an entry.
 - **The graph cache is two layers: the per-flow layer is sized for flows IN FLIGHT, the shared layer for memory.**
-  `graphCache` maps `(shard, flow_id)` to a WEAK pointer into `sharedGraphs`, which owns the parses and is keyed
-  by `(workflowURL, graph_hash)`, so the flows of one graph share one parse and a per-flow entry is ~150 bytes.
+  `graphCache` maps `(shard, flow_id, flow_token)` to a WEAK pointer into `sharedGraphs`, which owns the parses
+  and is keyed by `(workflowURL, graph_hash)`, so the flows of one graph share one parse and a per-flow entry is
+  ~150 bytes. The token is there because a restore or a lossy failover reissues flow ids: without it a flow
+  given an old id runs on the lost flow's graph (`TestCreate_SeedsGraphCache`).
   A per-flow miss looks the hash up there before it reads anything, and reads the `graph` column (its own turn)
   only for a graph this replica has never parsed. The per-flow layer alone thrashed at a 4,096-entry bound -
   one process holding ~8,200 flows (4 shards x 2,000 in flight) paid 0.98 graph reads per executed step.

@@ -38,10 +38,13 @@ import (
 // that still needs a per-driver form - see the `interrupt_payload` empty-guard in execution.go.)
 var emptyJSON = []byte("{}")
 
-// graphCacheKey scopes the per-flow graph cache by shard, since flow_id is only unique within a shard.
+// graphCacheKey scopes the per-flow graph cache by shard, since flow_id is only unique within a shard, and by the
+// flow's token, since a restore or a lossy failover reissues flow ids: the flow that gets an id back has a new
+// random token, so it never runs on the graph cached for the lost flow.
 type graphCacheKey struct {
-	shard  int
-	flowID int
+	shard     int
+	flowID    int
+	flowToken string
 }
 
 // cachedGraph is a parsed graph paired with its derived fan-in map, shared by every flow whose stored graph
@@ -49,11 +52,7 @@ type graphCacheKey struct {
 // computed once per parse and cached alongside - amortizing the O(V+E) analysis across every step.
 //
 // Every field must be frozen for the flow's life, and nothing may mutate one after the parse: concurrent
-// dispatches of many flows read the same entry. The per-flow key relies on a flow_id not being reused while
-// its entry lives, which is why it carries no flow token: no supported database reuses one. PostgreSQL
-// sequences and SQL Server identities never do, SQLite's AUTOINCREMENT does only after a rolled-back insert
-// (Create seeds the cache after its commit), and the InnoDB counter that is recomputed as MAX(id)+1 on restart
-// is MySQL 5.7 / MariaDB before 10.2.4, neither of which runs the migrations or the refiller's window functions.
+// dispatches of many flows read the same entry.
 type cachedGraph struct {
 	graph       *workflow.Graph
 	fanIn       *faninmap.Map
@@ -62,8 +61,8 @@ type cachedGraph struct {
 
 // cachedFlowGraph returns the flow's entry when this replica holds it. The per-flow layer holds weak
 // pointers, so a parse the shared layer has evicted reads as a miss once no dispatch still holds it.
-func (e *Engine) cachedFlowGraph(shardNum, flowID int) (*cachedGraph, bool) {
-	wp, ok := e.graphCache.Load(graphCacheKey{shard: shardNum, flowID: flowID})
+func (e *Engine) cachedFlowGraph(shardNum, flowID int, flowToken string) (*cachedGraph, bool) {
+	wp, ok := e.graphCache.Load(graphCacheKey{shard: shardNum, flowID: flowID, flowToken: flowToken})
 	if !ok {
 		return nil, false
 	}
@@ -72,8 +71,8 @@ func (e *Engine) cachedFlowGraph(shardNum, flowID int) (*cachedGraph, bool) {
 }
 
 // cacheFlowGraph points the flow at a shared entry from internGraph.
-func (e *Engine) cacheFlowGraph(shardNum, flowID int, cg *cachedGraph) {
-	e.graphCache.Store(graphCacheKey{shard: shardNum, flowID: flowID}, weak.Make(cg))
+func (e *Engine) cacheFlowGraph(shardNum, flowID int, flowToken string, cg *cachedGraph) {
+	e.graphCache.Store(graphCacheKey{shard: shardNum, flowID: flowID, flowToken: flowToken}, weak.Make(cg))
 }
 
 // sharedGraphKey names a parsed graph by the flow's graph_hash, so the flows of one graph share one entry and

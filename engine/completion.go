@@ -256,8 +256,8 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, sha
 // flowGraph returns a flow's parsed graph and workflow URL, from the graph cache when the flow has been
 // dispatched on this replica and from its row otherwise. The returned graph may be shared with concurrent
 // dispatches and must not be mutated. A cache hit reads nothing, so it does not prove the flow row still exists.
-func (e *Engine) flowGraph(ctx context.Context, db sequel.Executor, shardNum, flowID int) (*workflow.Graph, string, error) {
-	if cg, ok := e.cachedFlowGraph(shardNum, flowID); ok {
+func (e *Engine) flowGraph(ctx context.Context, db sequel.Executor, shardNum, flowID int, flowToken string) (*workflow.Graph, string, error) {
+	if cg, ok := e.cachedFlowGraph(shardNum, flowID, flowToken); ok {
 		return cg.graph, cg.workflowURL, nil
 	}
 	var workflowURL, graphHash string
@@ -301,7 +301,7 @@ func (e *Engine) terminalFinalState(ctx context.Context, db sequel.Executor, sha
 
 // computeFinalStateFrom is computeFinalState from the flow's completed tails, already read (queueCompletedTails).
 func (e *Engine) computeFinalStateFrom(ctx context.Context, db sequel.Executor, shardNum, flowID int, flowToken string, completed *terminalTails) ([]byte, string, error) {
-	graph, workflowURL, err := e.flowGraph(ctx, db, shardNum, flowID)
+	graph, workflowURL, err := e.flowGraph(ctx, db, shardNum, flowID, flowToken)
 	if err != nil {
 		return nil, "", errors.Trace(err)
 	}

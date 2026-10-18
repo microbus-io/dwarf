@@ -380,7 +380,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	// wrote. After the commit, so a rolled-back flow id - which SQLite can hand out again - is never cached.
 	if e.dispatchesOn(shardNum) {
 		if cg, perr := e.internGraph(graphJSON, workflowURL, seed.graphHash); perr == nil {
-			e.cacheFlowGraph(shardNum, int(newFlowID), cg)
+			e.cacheFlowGraph(shardNum, int(newFlowID), flowToken, cg)
 		}
 	}
 	e.logger.DebugContext(ctx, "Flow created and started", "workflow", workflowURL, "task", entryPoint)
@@ -501,7 +501,7 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 				return nil, errors.Trace(rerr)
 			}
 			// The interrupted step's view: its changes so far folded onto its state, through the graph's reducers.
-			graph, _, gerr := e.flowGraph(ctx, db, shardNum, flowID)
+			graph, _, gerr := e.flowGraph(ctx, db, shardNum, flowID, flowToken)
 			if gerr != nil {
 				return nil, errors.Trace(gerr)
 			}

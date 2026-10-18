@@ -409,7 +409,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// The graph is frozen at flow creation, so a cached parse makes its JSON - the largest payload on the flow
 	// row - dead weight. A flow this replica has not dispatched finds its parse by the graph_hash the flow row
 	// carries, so the graph column is read only for a graph this replica has not parsed at all.
-	cg, perFlow := e.cachedFlowGraph(shardNum, flowID)
+	cg, perFlow := e.cachedFlowGraph(shardNum, flowID, flowToken)
 	cached := perFlow
 	if !cached {
 		cg, cached = e.sharedGraph(workflowURL, graphHash)
@@ -432,7 +432,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		}
 	}
 	if !perFlow {
-		e.cacheFlowGraph(shardNum, flowID, cg)
+		e.cacheFlowGraph(shardNum, flowID, flowToken, cg)
 	}
 	graph := cg.graph
 

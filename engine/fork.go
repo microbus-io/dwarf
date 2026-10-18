@@ -116,7 +116,7 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	leafReduced, err := e.forkLeafReduced(ctx, db, shardNum, leafFlowID, resolvedLeafState, forkStepReduced)
+	leafReduced, err := e.forkLeafReduced(ctx, db, shardNum, leafFlowID, leafFlowToken, resolvedLeafState, forkStepReduced)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -700,7 +700,7 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 // forkLeafReduced is the state_reduced column for a Fork's leaf: the original record, if any, frozen against the
 // overrides about to replace the state it describes (frozenReduced). stateJSON is the leaf's original state,
 // resolved.
-func (e *Engine) forkLeafReduced(ctx context.Context, db sequel.Executor, shardNum, flowID int, stateJSON, reducedJSON []byte) ([]byte, error) {
+func (e *Engine) forkLeafReduced(ctx context.Context, db sequel.Executor, shardNum, flowID int, flowToken string, stateJSON, reducedJSON []byte) ([]byte, error) {
 	var rec map[string]*reduced
 	if err := json.Unmarshal(reducedJSON, &rec); err != nil {
 		return nil, errors.Trace(err)
@@ -708,7 +708,7 @@ func (e *Engine) forkLeafReduced(ctx context.Context, db sequel.Executor, shardN
 	if len(rec) == 0 {
 		return emptyJSON, nil
 	}
-	graph, _, err := e.flowGraph(ctx, db, shardNum, flowID)
+	graph, _, err := e.flowGraph(ctx, db, shardNum, flowID, flowToken)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
