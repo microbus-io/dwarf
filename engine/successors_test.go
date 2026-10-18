@@ -190,3 +190,94 @@ func TestSuccessorBatch_LoneSuccessorLinks(t *testing.T) {
 			" WHERE s.flow_id IS NULL OR s.flow_id<>f.flow_id OR s.task_name<>?", "S"+strconv.Itoa(steps-1)).Scan(&strays))
 	assert.Zero(strays, "every flow stopped at its own last step")
 }
+
+// TestSuccessorBatch_FullByRowsOrBytes pins when pending successor rows are sent: at successorBatchMax rows, or
+// before a row that would take their payloads past maxBytes - but never before a row that has nothing to join.
+func TestSuccessorBatch_FullByRowsOrBytes(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	row := func(n int) successorRow {
+		return successorRow{stateJSON: make([]byte, n)}
+	}
+	s := successorBatch{maxBytes: 1000}
+	assert.False(s.full(row(5000)), "a row alone is never held back, whatever its size")
+
+	s.rows, s.bytes = []successorRow{row(400), row(400)}, 800
+	assert.False(s.full(row(200)), "exactly at the bound still fits")
+	assert.True(s.full(row(201)), "past the bound sends what is pending first")
+
+	s.rows, s.bytes = make([]successorRow, successorBatchMax), 0
+	assert.True(s.full(row(1)), "successorBatchMax rows are sent however small")
+	s.rows = s.rows[:successorBatchMax-1]
+	assert.False(s.full(row(1)))
+}
+
+// TestSuccessorBatch_ByteBoundedFanOutKeepsBranchOrder runs a fan-out whose branch states are each over half the
+// payload bound, so every branch goes in a batch of its own, and pins that the ids still match their rows across
+// the flushes and the fan-in still folds in input-array order.
+func TestSuccessorBatch_ByteBoundedFanOutKeepsBranchOrder(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	mux := hosts.NewMux()
+	e.SetHost(mux)
+	e.maxPayloadBytes = 110
+	assert.NoError(e.Startup(t.Context()))
+
+	const width = 9
+	g := workflow.NewGraph("ByteBounded")
+	g.SetURL("Seed", "bytebounded/seed")
+	g.SetURL("Work", "bytebounded/work")
+	g.SetURL("Join", "bytebounded/join")
+	g.SetFanIn("Join")
+	g.SetReducer("seen", workflow.ReducerAppend)
+	g.AddTransitionForEach("Seed", "Work", "items", "n")
+	g.AddTransitionChain("Work", "Join", workflow.End)
+	assert.NoError(g.Validate())
+	mux.HandleGraph("bytebounded/wf", g)
+	mux.HandleTask("bytebounded/seed", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("bytebounded/work", func(ctx context.Context, f *workflow.Flow) error {
+		f.Set("seen", []int{f.GetInt("n")})
+		return nil
+	})
+	mux.HandleTask("bytebounded/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	items := make([]int, width)
+	for i := range items {
+		items[i] = i
+	}
+	_, outcome, err := e.Run(ctx, "bytebounded/wf", map[string]any{"items": items}, nil)
+	assert.NoError(err)
+	if !assert.Equal(workflow.StatusCompleted, outcome.Status, outcome.Error) {
+		return
+	}
+	seen, _ := stateVal(outcome.State, "seen").([]any)
+	if assert.Equal(width, len(seen)) {
+		for i, v := range seen {
+			assert.Equal(float64(i), v, "the append reducer folds in input-array order")
+		}
+	}
+
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	rows, err := db.QueryContext(ctx, "SELECT state, state_refs, fan_out_ordinal FROM dwarf_steps WHERE task_name='Work'")
+	assert.NoError(err)
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var stateJSON, refsJSON []byte
+		var ordinal int
+		assert.NoError(rows.Scan(&stateJSON, &refsJSON, &ordinal))
+		assert.True(2*(len(stateJSON)+len(refsJSON)) > e.maxPayloadBytes, "each branch must fill its own batch")
+		state, _ := workflow.NewState(stateJSON)
+		assert.Equal(state.GetInt("nIndex"), ordinal, "a branch's ordinal is its element's index")
+		assert.Equal(state.GetInt("nIndex"), state.GetInt("n"))
+		count++
+	}
+	assert.NoError(rows.Err())
+	assert.Equal(width, count)
+}

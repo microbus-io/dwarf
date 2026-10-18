@@ -27,10 +27,11 @@ import (
 
 /*
 maxPayloadBytes is the largest JSON value the engine writes into one payload column, one figure for every
-dialect. PostgreSQL's JSONB holds at most 268,435,455 bytes, fixed. MySQL and MariaDB cap a whole statement at
-max_allowed_packet, which the deployment doc asks to be set to 256M (268,435,456). SQL Server's VARBINARY(MAX)
-and SQLite's default SQLITE_MAX_LENGTH are several times larger. The ~12 MB between this and the first two is
-room for the rest of a MySQL statement and for JSONB's binary form running a little over the text.
+dialect. PostgreSQL's JSONB holds at most 268,435,455 bytes, fixed. MySQL and MariaDB cap a whole statement, and
+a whole row sent back, at max_allowed_packet, which the deployment doc asks to be set to 512M: a step row holds
+its state and its changes side by side, the claim and the fan-in read them together, and each can be this large.
+SQL Server's VARBINARY(MAX) and SQLite's default SQLITE_MAX_LENGTH are several times larger. The ~12 MB between
+this and JSONB's bound is room for its binary form running a little over the text.
 
 What is measured is the JSON text. JSONB stores strings unescaped, so for string-heavy values it over-counts and
 rejects slightly early. For an array of many small numbers JSONB's binary form is several times the text, so such
@@ -46,8 +47,9 @@ func (e *Engine) checkPayloadSize(what string, payload []byte) error {
 	if len(payload) <= e.maxPayloadBytes {
 		return nil
 	}
-	msg := what + " is %d bytes, over the %d-byte limit"
-	args := []any{len(payload), e.maxPayloadBytes}
+	// what can name a task, and a task name may hold a '%', so it is an argument, never part of the pattern.
+	msg := "%s is %d bytes, over the %d-byte limit"
+	args := []any{what, len(payload), e.maxPayloadBytes}
 	if name, size := largestField(payload); name != "" {
 		msg += "; its largest field, %q, is %d bytes"
 		args = append(args, name, size)

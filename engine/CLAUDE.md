@@ -951,7 +951,8 @@ not parallelism:
   statement with the function that reads its result, `flush` sends and reads in order; one round trip per flush on
   PostgreSQL, other drivers run the same statements one by one). A flush happens where something must be read
   before the next statement can be written - an id, or the cohort bump - where nothing else may run while results
-  are open, and every 64 successor rows, to bound memory.
+  are open, and every 64 successor rows or `maxPayloadBytes` of their payloads, to bound memory and the
+  statement (`successorBatch.full`).
   Measured on PostgreSQL (`TestRoundTrips_*`, simulated RTT, about +-0.5): a linear step ~5 round trips, a one-step
   flow ~11, a fan-out cycle of two branches ~20.5.
 - **On PostgreSQL the claim returns the flow row too** (`UPDATE dwarf_steps s ... FROM dwarf_flows f ...
@@ -973,8 +974,9 @@ not parallelism:
   with `currval` as a scalar subquery** - `flow_id=(SELECT currval(...))` - which PostgreSQL evaluates once as an
   InitPlan; compared directly, the volatile function cannot be an index key (measured on a 100k-row table: a
   sequential scan against a primary-key index scan). `SET` and `VALUES` take it bare.
-- **The transition** queues the lock grab, the successor INSERTs (flushed every 64 rows, so a wide fan-out holds
-  only one batch's branch states in memory) and the fenced own-row write. It writes nothing to the flow row.
+- **The transition** queues the lock grab, the successor INSERTs (flushed every 64 rows or `maxPayloadBytes`, so a
+  wide fan-out holds only one batch's branch states in memory) and the fenced own-row write. It writes nothing to
+  the flow row.
   - A **lone successor** (every linear and goto step, every step inside a forEach branch) is named by
     `insertedID`, so on PostgreSQL the transition is BEGIN, one batch, COMMIT. Pinned by
     `TestSuccessorBatch_LoneSuccessorLinks` (concurrent flows, every link checked against `predecessor_id`, every

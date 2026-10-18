@@ -91,7 +91,37 @@ type successorBatch struct {
 	fairnessWeight float64
 	engineID       int64
 	inheritCancel  int
+	maxBytes       int // the payload bytes past which the pending rows are flushed (add)
 	rows           []successorRow
+	bytes          int // the payload bytes of rows
+}
+
+// size is the bytes of the row's payload columns.
+func (r successorRow) size() int {
+	return len(r.stateJSON) + len(r.refsJSON) + len(r.reducedJSON)
+}
+
+// full reports whether the pending rows must be sent before r joins them: they are successorBatchMax rows, or r
+// would take their payloads past maxBytes. A row alone is never held back, whatever its size.
+//
+// Do not bound a batch by its row count alone. A fan-out whose source holds a large folded field writes it inline
+// into every branch, so 64 branches of a 100 MB state make one 6.4 GB INSERT: PostgreSQL refuses a protocol message
+// over 1 GB, after the task has run, and the transition holds every row of it in memory meanwhile.
+func (s *successorBatch) full(r successorRow) bool {
+	return len(s.rows) == successorBatchMax || len(s.rows) > 0 && s.bytes+r.size() > s.maxBytes
+}
+
+// add adds r to the pending rows, first queueing and flushing those already pending if they are full.
+func (s *successorBatch) add(b *txBatch, ids *[]int, r successorRow) error {
+	if s.full(r) {
+		s.queue(b, ids)
+		if err := b.flush(); err != nil {
+			return err
+		}
+	}
+	s.rows = append(s.rows, r)
+	s.bytes += r.size()
+	return nil
 }
 
 // returnsInsertedRows reports whether the driver can return the rows an INSERT created.
@@ -106,7 +136,7 @@ func returnsInsertedRows(driver string) bool {
 // queue queues the INSERTs of the pending rows onto b, whose readers append the new step ids to ids in row order,
 // and empties the pending rows. A chunk of one row - every row on MySQL - goes in by a single-row INSERT.
 func (s *successorBatch) queue(b *txBatch, ids *[]int) {
-	defer func() { s.rows = s.rows[:0] }()
+	defer func() { s.rows, s.bytes = s.rows[:0], 0 }()
 	appendID := func(id int64) { *ids = append(*ids, int(id)) }
 	for rest := s.rows; len(rest) > 0; {
 		n := 1

@@ -72,10 +72,11 @@ round trips where one would do - which roughly doubles the database round trips 
 driver substitutes the arguments client-side and escapes them itself. The driver rejects it together with the
 `big5`, `gbk`, `sjis` and `cp932` collations, so use a `utf8mb4` connection collation.
 
-Set `max_allowed_packet = 256M` on the server. It caps the size of any one statement, and dwarf writes
-values up to 256 MB (see [the size limit](data-handling.md#the-size-limit-256-mb-per-value)). The defaults,
-64M on MySQL 8 and 16M on MariaDB, refuse a write of a larger value only after the task that produced it
-has run.
+Set `max_allowed_packet = 512M` on the server. It caps the size of any one statement and of any one row the
+server returns. Dwarf stores values up to 256 MB (see [the size limit](data-handling.md#the-size-limit-256-mb-per-value)),
+and a step's input state and its changes sit side by side in one row that is read back whole, so a row can
+hold two such values. The defaults, 64M on MySQL 8 and 16M on MariaDB, refuse a large value only after the
+task that produced it has run.
 
 MariaDB 10.5+ for `JSON`.
 

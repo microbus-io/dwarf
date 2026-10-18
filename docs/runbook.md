@@ -107,7 +107,7 @@ and their flows failed with them. The task ran exactly once.
 - **A `NUL` byte (`U+0000`) in a string.** PostgreSQL rejects it in JSON outright; other dialects accept it.
   Base64-encode binary data instead of putting raw bytes in state.
 - **A value the database refuses below the [256 MB limit](data-handling.md#the-size-limit-256-mb-per-value).**
-  On MySQL and MariaDB, a statement larger than `max_allowed_packet` where it is set below 256M; on
+  On MySQL and MariaDB, a statement or row larger than `max_allowed_packet` where it is set below 512M; on
   PostgreSQL, a value whose binary JSON form is larger than its text (an array of many small numbers). A value
   over the limit itself never reaches this counter: the engine refuses it before writing, and the step fails
   with an error saying it is over the limit. `dwarf_state_write_bytes_total` shows what workflows are writing.

@@ -1106,6 +1106,11 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		accumulatedChanges = accumulatedChanges.Clone()
 		_ = accumulatedChanges.Set("onErr", onErrValue(cancelmarker.New(flowCancelReason)), reducers)
 		changesJSON, _ = json.Marshal(accumulatedChanges)
+		// onErr carries the caller's cancel reason, so it can push changes that passed the check above over the
+		// limit. The step fails on the size, not as cancelled: a real error wins over a cancellation.
+		if err := e.checkPayloadSize("changes of task '"+stripProto(taskName)+"'", changesJSON); err != nil {
+			return errors.Trace(e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName))
+		}
 		successorBase = state.Clone()
 		if err := successorBase.Apply(accumulatedChanges, reducers); err != nil {
 			return errors.Trace(e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName))
@@ -1467,6 +1472,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				flowID: flowID, stepDepth: nextStepDepth, timeBudgetMs: flowTimeBudgetMs, lineageID: childLineageID,
 				predecessorID: stepID, sleepMs: sleepMs, priority: flowPriority, fairnessKey: flowFairnessKey,
 				fairnessWeight: flowFairnessWeight, engineID: e.engineID, inheritCancel: inheritCancel,
+				maxBytes: e.maxPayloadBytes,
 			}
 			for i, next := range normalNexts {
 				// fan_out_ordinal identifies the BRANCH within a cohort so the fan-in folds order-sensitive
@@ -1511,20 +1517,16 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 						return err
 					}
 				}
-				succ.rows = append(succ.rows, successorRow{
+				// A wide fan-out is sent a batch at a time, so it never holds every branch's state at once.
+				err := succ.add(batch, &newStepIDs, successorRow{
 					taskName: next.taskName, taskURL: dispatchURLOf(graph, next.taskName),
 					stateJSON: stepStateJSON, refsJSON: stepRefsJSON, ordinal: successorOrdinal,
 				})
+				if err != nil {
+					return err
+				}
 				txBytes.stateWritten += len(stepStateJSON)
 				txBytes.refsWritten += len(stepRefsJSON)
-				if len(succ.rows) == successorBatchMax {
-					// A wide fan-out goes successorBatchMax rows to a batch, so it never holds every branch's
-					// state at once.
-					succ.queue(batch, &newStepIDs)
-					if err := batch.flush(); err != nil {
-						return err
-					}
-				}
 			}
 			succ.queue(batch, &newStepIDs)
 

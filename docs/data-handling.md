@@ -216,7 +216,7 @@ PostgreSQL is the one database that can refuse a value below the limit: it store
 for an array of many small numbers, is several times larger than the text. Such a value fails when it is
 written.
 
-On MySQL and MariaDB the limit holds only if the server's `max_allowed_packet` is at least 256M; see
+On MySQL and MariaDB the limit holds only if the server's `max_allowed_packet` is at least 512M; see
 [Deployment](deployment.md#mysql--mariadb--supported-expect-tuning).
 
 ## What the engine does not bound

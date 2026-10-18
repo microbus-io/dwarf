@@ -96,7 +96,7 @@
   → [Data handling](data-handling.md#what-the-engine-does-not-bound)
 - [ ] **A flow's final state fits in 256 MB.** State can grow past it while the flow runs, but the final
   state holds every field at once. → [Data handling](data-handling.md#the-size-limit-256-mb-per-value)
-- [ ] **MySQL/MariaDB: `max_allowed_packet` is at least 256M.**
+- [ ] **MySQL/MariaDB: `max_allowed_packet` is at least 512M.**
   → [Deployment](deployment.md#mysql--mariadb--supported-expect-tuning)
 
 ## Workflows and tasks

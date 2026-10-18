@@ -22,8 +22,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -149,4 +151,98 @@ func TestPayloadSize_RefsCarryStateTheFinalStateCannotHold(t *testing.T) {
 	assert.Equal(workflow.StatusFailed, outcome.Status)
 	assert.Contains(outcome.Error, "final state")
 	assert.Equal(0, outcome.State.Len(), "a final state too large to store is stored empty")
+}
+
+// TestPayloadSize_CancelRerouteIsChecked pins the check on the changes a Cancel-covered step is rerouted with.
+// The task's own changes fit, but the onErr carrying the cancel reason takes them over the limit: the step fails
+// on the size, once, and the handler never runs.
+func TestPayloadSize_CancelRerouteIsChecked(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	var workRuns, handlerRuns atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("PayloadSize")
+	g.SetURL("Work", "ps/reroute/work")
+	g.SetURL("Handler", "ps/reroute/handler")
+	g.AddTransition("Work", workflow.End)
+	g.AddTransitionOnError("Work", "Handler")
+	g.AddTransition("Handler", workflow.End)
+	assert.NoError(g.Validate())
+	mux.HandleGraph("ps/reroute/wf", g)
+	mux.HandleTask("ps/reroute/work", func(ctx context.Context, f *workflow.Flow) error {
+		if workRuns.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		f.SetString("big", strings.Repeat("b", 800))
+		return nil
+	})
+	mux.HandleTask("ps/reroute/handler", func(ctx context.Context, f *workflow.Flow) error {
+		handlerRuns.Add(1)
+		return nil
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	e.persistBackoff = shortPersistBackoff
+	e.maxPayloadBytes = 1000
+	assert.NoError(e.Startup(t.Context()))
+
+	fk, err := e.Create(ctx, "ps/reroute/wf", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	<-started
+	assert.NoError(e.Cancel(ctx, fk, strings.Repeat("r", 400)))
+	close(release)
+	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
+	defer cancel()
+	out, err := e.Await(awaitCtx, fk)
+	if !assert.NoError(err) || !assert.NotNil(out) {
+		return
+	}
+	assert.Equal(workflow.StatusFailed, out.Status, "a real error wins over the cancellation")
+	assert.Contains(out.Error, "changes of task 'Work'")
+	assert.Contains(out.Error, "over the 1000-byte limit")
+	assert.Equal(int32(1), workRuns.Load(), "the task must run exactly once")
+	assert.Equal(int32(0), handlerRuns.Load())
+}
+
+// TestPayloadSize_PercentInTaskName pins that a task name is an argument of the error, not part of its pattern:
+// a '%' in it must neither be read as a verb nor shift the sizes that follow.
+func TestPayloadSize_PercentInTaskName(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("PayloadSize")
+	g.SetURL("Pct%dTask", "ps/percent/a")
+	g.AddTransition("Pct%dTask", workflow.End)
+	assert.NoError(g.Validate())
+	mux.HandleGraph("ps/percent/wf", g)
+	mux.HandleTask("ps/percent/a", func(ctx context.Context, f *workflow.Flow) error {
+		f.SetString("big", strings.Repeat("b", 2000))
+		return nil
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	e.persistBackoff = shortPersistBackoff
+	e.maxPayloadBytes = 1000
+	assert.NoError(e.Startup(t.Context()))
+
+	_, outcome, err := e.Run(ctx, "ps/percent/wf", nil, nil)
+	assert.NoError(err)
+	assert.Equal(workflow.StatusFailed, outcome.Status)
+	assert.Contains(outcome.Error, "changes of task 'Pct%dTask'")
+	assert.Contains(outcome.Error, "over the 1000-byte limit")
+	assert.Contains(outcome.Error, `"big"`)
+	assert.NotContains(outcome.Error, "%!")
 }
