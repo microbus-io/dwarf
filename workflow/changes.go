@@ -29,6 +29,10 @@ import (
 // that ends with it cannot be written by a task.
 const OverwriteSuffix = "!"
 
+// AdditionSuffix marks a field in the JSON of Changes as an addition: elements appended to the array the field
+// held in the step's input. A field name that ends with it cannot be written by a task.
+const AdditionSuffix = "+"
+
 /*
 Changes is what a step writes to its flow's state, as the orchestrator records it. Each field it writes is
 either a contribution - combined through the field's reducer with what the field already holds - or an
@@ -42,17 +46,22 @@ Its JSON is one object holding both kinds, an overwritten field's name carrying 
 	{"messages": ["m"], "summary!": "trimmed", "scratch!": null}
 
 adds "m" to messages, replaces summary and deletes scratch.
+
+A third kind, an addition, is recorded only by the orchestrator: a field with no reducer whose new value only
+extends the array it held, stored as the elements it gained under the name with AdditionSuffix.
 */
 type Changes struct {
 	contributions State
 	overwrites    State
+	additions     State
 }
 
 // NewChanges returns empty Changes.
 func NewChanges() Changes {
 	contributions, _ := NewState()
 	overwrites, _ := NewState()
-	return Changes{contributions: contributions, overwrites: overwrites}
+	additions, _ := NewState()
+	return Changes{contributions: contributions, overwrites: overwrites, additions: additions}
 }
 
 // ChangesOf returns Changes that contribute every field of s with its value as given. Applied, each combines
@@ -73,7 +82,7 @@ func (c Changes) IsZero() bool {
 
 // Clone returns a copy of the Changes that shares no map with them.
 func (c Changes) Clone() Changes {
-	return Changes{contributions: c.contributions.Clone(), overwrites: c.overwrites.Clone()}
+	return Changes{contributions: c.contributions.Clone(), overwrites: c.overwrites.Clone(), additions: c.additions.Clone()}
 }
 
 // Contributions returns the fields contributed to, and their contributions. It is the Changes' own State: a
@@ -88,17 +97,20 @@ func (c Changes) Overwrites() State {
 	return c.overwrites
 }
 
-// Names iterates the fields the Changes write, contributed to or overwritten, in unspecified order.
+// Additions returns the fields extended, and the elements each gained. It is the Changes' own State: a mutation
+// of it mutates the Changes.
+func (c Changes) Additions() State {
+	return c.additions
+}
+
+// Names iterates the fields the Changes write, contributed to, overwritten or extended, in unspecified order.
 func (c Changes) Names() iter.Seq[string] {
 	return func(yield func(string) bool) {
-		for k := range c.contributions.d {
-			if !yield(k) {
-				return
-			}
-		}
-		for k := range c.overwrites.d {
-			if !yield(k) {
-				return
+		for _, m := range []State{c.contributions, c.overwrites, c.additions} {
+			for k := range m.d {
+				if !yield(k) {
+					return
+				}
 			}
 		}
 	}
@@ -106,14 +118,15 @@ func (c Changes) Names() iter.Seq[string] {
 
 // Len returns the number of fields the Changes write.
 func (c Changes) Len() int {
-	return c.contributions.Len() + c.overwrites.Len()
+	return c.contributions.Len() + c.overwrites.Len() + c.additions.Len()
 }
 
-// Mentions reports whether the Changes write the field, contributed to or overwritten.
+// Mentions reports whether the Changes write the field, contributed to, overwritten or extended.
 func (c Changes) Mentions(name string) bool {
 	_, contributed := c.contributions.d[name]
 	_, overwritten := c.overwrites.d[name]
-	return contributed || overwritten
+	_, added := c.additions.d[name]
+	return contributed || overwritten || added
 }
 
 // IsOverwritten reports whether the Changes overwrite or delete the field.
@@ -142,22 +155,25 @@ func (c Changes) Set(name string, value any, reducers map[string]Reducer) error 
 }
 
 // marshalWrite encodes a value written to a field of these Changes, rejecting a name that ends with
-// OverwriteSuffix.
+// OverwriteSuffix or AdditionSuffix.
 func marshalWrite(name string, value any) (json.RawMessage, error) {
-	if strings.HasSuffix(name, OverwriteSuffix) {
-		return nil, errors.New("workflow: state field %q cannot be written: the name ends with %q", name, OverwriteSuffix)
+	for _, suffix := range []string{OverwriteSuffix, AdditionSuffix} {
+		if strings.HasSuffix(name, suffix) {
+			return nil, errors.New("workflow: state field %q cannot be written: the name ends with %q", name, suffix)
+		}
 	}
 	return marshalField(name, value)
 }
 
 // Overwrite records that the field is replaced by value, whatever its reducer; a nil value deletes it. It
-// returns an error if the value cannot be marshalled or name ends with OverwriteSuffix.
+// returns an error if the value cannot be marshalled or name ends with OverwriteSuffix or AdditionSuffix.
 func (c Changes) Overwrite(name string, value any) error {
 	raw, err := marshalWrite(name, value)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	delete(c.contributions.d, name)
+	delete(c.additions.d, name)
 	c.overwrites.d[name] = raw
 	return nil
 }
@@ -173,8 +189,31 @@ func (c Changes) Compose(later Changes, reducers map[string]Reducer) error {
 	}
 	for k, v := range later.overwrites.d {
 		delete(c.contributions.d, k)
+		delete(c.additions.d, k)
 		c.overwrites.d[k] = v
 	}
+	for k, v := range later.additions.d {
+		if err := c.add(k, v); err != nil {
+			return errors.Trace(err)
+		}
+	}
+	return nil
+}
+
+// add folds an addition, given as the JSON array of the elements gained, onto the Changes: onto an earlier write
+// to the field it extends that value, and onto nothing it is an addition of its own.
+func (c Changes) add(name string, elems json.RawMessage) error {
+	for _, m := range []State{c.contributions, c.overwrites, c.additions} {
+		if prev, ok := m.d[name]; ok {
+			extended, err := appendRaw(name, prev, []json.RawMessage{elems}, false)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			m.d[name] = extended
+			return nil
+		}
+	}
+	c.additions.d[name] = elems
 	return nil
 }
 
@@ -215,6 +254,7 @@ func (c Changes) contribute(name string, v json.RawMessage, reducers map[string]
 // setPlain records a write to a field with no reducer: v replaces the field, and a null deletes it, which is an
 // overwrite with nothing. A field already overwritten stays overwritten.
 func (c Changes) setPlain(name string, v json.RawMessage) {
+	delete(c.additions.d, name)
 	switch _, overwritten := c.overwrites.d[name]; {
 	case overwritten:
 		c.overwrites.d[name] = orNull(v)
@@ -266,7 +306,7 @@ func orNull(v json.RawMessage) json.RawMessage {
 }
 
 // MarshalJSON writes the Changes as one JSON object: each contribution under its field's name, each overwrite
-// under its name with OverwriteSuffix, a delete as a null.
+// under its name with OverwriteSuffix, a delete as a null, and each addition under its name with AdditionSuffix.
 func (c Changes) MarshalJSON() ([]byte, error) {
 	all := make(map[string]json.RawMessage, c.Len())
 	for k, v := range c.contributions.d {
@@ -275,13 +315,17 @@ func (c Changes) MarshalJSON() ([]byte, error) {
 	for k, v := range c.overwrites.d {
 		all[k+OverwriteSuffix] = orNull(v)
 	}
+	for k, v := range c.additions.d {
+		all[k+AdditionSuffix] = v
+	}
 	b, err := json.Marshal(all)
 	return b, errors.Trace(err)
 }
 
 // UnmarshalJSON reads Changes as MarshalJSON writes them. A name ending with OverwriteSuffix is an overwrite of
-// the field without it; any other name is a contribution. A field written both ways is an overwrite. An empty
-// payload and a JSON null are empty Changes; anything but an object is an error.
+// the field without it, one ending with AdditionSuffix an addition to it; any other name is a contribution. A
+// field written more than one way is an overwrite, else a contribution. An empty payload and a JSON null are
+// empty Changes; anything but an object is an error.
 func (c *Changes) UnmarshalJSON(data []byte) error {
 	*c = NewChanges()
 	data = bytes.TrimSpace(data)
@@ -298,8 +342,13 @@ func (c *Changes) UnmarshalJSON(data []byte) error {
 		}
 	}
 	for k, v := range all.d {
-		if _, overwritten := c.overwrites.d[k]; !strings.HasSuffix(k, OverwriteSuffix) && !overwritten {
+		if _, overwritten := c.overwrites.d[k]; !strings.HasSuffix(k, OverwriteSuffix) && !strings.HasSuffix(k, AdditionSuffix) && !overwritten {
 			c.contributions.d[k] = v
+		}
+	}
+	for k, v := range all.d {
+		if name, ok := strings.CutSuffix(k, AdditionSuffix); ok && !c.Mentions(name) {
+			c.additions.d[name] = v
 		}
 	}
 	return nil

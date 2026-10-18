@@ -154,7 +154,8 @@ matching one before working there:**
   dedupes decoded values, numbers by value; `Fingerprint` hashes `status|count|max(updated_at)`). What JSON storage buys is Go
   TYPE normalization, so never hand a reducer a caller's Go value that has not been marshalled.
   (`workflow/CLAUDE.md`)
-- **A step's `changes` is `workflow.Changes`; an overwrite is its field name with a `!` suffix.** Decode a
+- **A step's `changes` is `workflow.Changes`; an overwrite is its field name with a `!` suffix, and an addition
+  (the elements a list with no reducer gained, recorded by the engine) with a `+` suffix.** Decode a
   `changes` column with `changesOf` / `Changes.UnmarshalJSON`, never as a plain `State`. A null contribution
   means "nothing", so `isCleared` must recognize both null spellings. (`workflow/CLAUDE.md`)
 - **Integers beyond ±2^53 and NULs in strings are unguarded, by decision.** An untyped read rounds such an

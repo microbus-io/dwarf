@@ -332,3 +332,27 @@ func TestInlineExcessAnchors_SkipsLists(t *testing.T) {
 	assert.Equal(maxAnchors+1, len(refs), "at maxAnchors plain anchors nothing is inlined, whatever the list names")
 	assert.Contains(refs, "log")
 }
+
+// TestLinker_ResolveReadsAnAddition pins the addition suffix in an anchor's changes: a list entry reading the
+// changes column ranges over the elements the step gained, stored under "field+", while a whole-field ref never
+// resolves to them - they are not the field's value.
+func TestLinker_ResolveReadsAnAddition(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	anchors := &fakeAnchors{rows: map[int]Anchor{
+		15: {State: cols(map[string]any{"log": []string{"a"}}), Changes: cols(map[string]any{"log+": []string{"x", "y"}})},
+	}}
+	var list Ref
+	assert.NoError(json.Unmarshal([]byte(`"15s[:1];15c[:2]"`), &list))
+	state := newState()
+	_, err := New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, state, Refs{"log": list}, nil, anchors.load)
+	assert.NoError(err)
+	assert.Equal([]any{"a", "x", "y"}, stateVal(state, "log"))
+
+	whole := newState()
+	_, err = New("sqlite", 1, NewCache(testCacheBytes)).Resolve(ctx, whole, Refs{"log": {Anchor: 15}}, nil, anchors.load)
+	assert.NoError(err)
+	assert.Equal([]any{"a"}, stateVal(whole, "log"), "a whole-field ref reads the field, not what a step added to it")
+}

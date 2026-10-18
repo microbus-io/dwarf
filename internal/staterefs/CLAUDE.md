@@ -229,7 +229,10 @@ both measure ~1x, so the ambiguity is moot and no server-version probe is needed
    as `folds`, which become a list and never a plain ref at the folding step. A changes-only resolver silently misses the last two. Pinned by
    `TestLinker_ResolveReadsBothColumns`. In `changes` a field the task OVERWROTE is stored as `field!`
    (`workflow.OverwriteSuffix`), so the lookup tries that spelling first; a resolver that tries only `field`
-   misses every overwritten anchor (`TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue` fails).
+   misses every overwritten anchor (`TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue` fails). A list entry
+   reading `changes` also tries `field+` (`workflow.AdditionSuffix`): the elements a list with no reducer gained,
+   which is all such a step's `changes` holds of it. A whole-field lookup never does - those elements are not the
+   field's value (`TestLinker_ResolveReadsAnAddition`).
 4. **A carried ref absent from `merged` must still be re-emitted.** The fan-in resolves only what its reducers
    fold, so a merely-carried ref's key is absent from `merged` and `Mint`'s main candidate loop never sees it.
    Omitting the trailing carry-forward silently dropped the field from the fan-in step onward and from

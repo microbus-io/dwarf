@@ -997,8 +997,11 @@ func (l *Linker) Seed(anchorID int, merged workflow.State, changes workflow.Chan
 				}
 				name := e.field(field)
 				value := changes.Contributions().GetJSON(name)
-				if changes.IsOverwritten(name) {
+				switch {
+				case changes.IsOverwritten(name):
 					value = changes.Overwrites().GetJSON(name)
+				case changes.Additions().Has(name):
+					value = changes.Additions().GetJSON(name)
 				}
 				if len(value) > 0 {
 					l.store(l.key(anchorID, name, ColChanges), value)
@@ -1235,11 +1238,18 @@ func (l *Linker) loadInto(ctx context.Context, fields []cacheKey, wanted map[cac
 // lookup finds a field's bytes in an anchor row. changes shadows state: the anchor's changes hold the value
 // its task PRODUCED, while its state holds a value it merely received (the flow's initial input at the entry
 // step, or a fan-in's reduced output). Both are legitimate anchor locations; changes is the newer of the two.
-// In changes, a field the task overwrote is named with the overwrite suffix.
+// In changes, a field the task overwrote is named with the overwrite suffix, and one the engine stored as an
+// addition with the addition suffix. An addition holds only the elements the field gained, so only a list
+// entry, which ranges over exactly those, reads it (ColChanges); a whole-field lookup never resolves to one.
 func lookup(row Anchor, k cacheKey) (json.RawMessage, error) {
 	if k.col != ColState {
 		if value, found := row.Changes[k.field+workflow.OverwriteSuffix]; found {
 			return value, nil
+		}
+		if k.col == ColChanges {
+			if value, found := row.Changes[k.field+workflow.AdditionSuffix]; found {
+				return value, nil
+			}
 		}
 		// A key ending with the suffix is always an overwrite of another field, never this one.
 		if !strings.HasSuffix(k.field, workflow.OverwriteSuffix) {

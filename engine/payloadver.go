@@ -32,14 +32,7 @@ import (
 // payloadVer is the newest payload format this build reads and the one it creates flows in. A flow's format
 // (dwarf_flows.payload_ver) is fixed when the flow is created and governs every payload column of every step row
 // of the flow (state, changes, state_refs, state_reduced): whoever writes into the flow writes in its format.
-//
-// Format 2 adds list refs in state_refs: a field under the append reducer stored as entries naming the rows that
-// hold its elements (listsFrom). A format-1 reader would refuse the column, so every writer of a list gates on the
-// flow's format, and a format-1 flow keeps its folded fields inline.
-const payloadVer = 2
-
-// listsFrom is the first payload format whose flows store a folded field as a list.
-const listsFrom = 2
+const payloadVer = 1
 
 // The deferral schedule for a step of a flow in a format newer than this build reads: a backoff doubling from
 // payloadDeferralFirst to payloadDeferralCap, failing the step once it has been deferred maxPayloadDeferrals times.

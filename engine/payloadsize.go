@@ -68,5 +68,5 @@ func largestField(payload []byte) (name string, size int) {
 			name, size = k, len(v)
 		}
 	}
-	return strings.TrimSuffix(name, workflow.OverwriteSuffix), size
+	return strings.TrimSuffix(strings.TrimSuffix(name, workflow.OverwriteSuffix), workflow.AdditionSuffix), size
 }

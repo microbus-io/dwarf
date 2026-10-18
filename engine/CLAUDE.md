@@ -116,7 +116,7 @@ fan-in's minted state, the interrupt payload, the final state, and at the door t
 retry it and `failFlowTx`/`terminalFinalState` take an oversized final state as `{}`. **What it means for a flow:**
 refs keep carried fields out of `state`, so mid-flow the binding column is a step's `changes`; but every flow
 boundary flattens (`final_state`, `Continue`, subgraph in/out, Fork's leaf), so the whole state must fit when the
-flow ends. A fold under a reducer other than `append` (or in a format-1 flow) is stored inline, so it can still
+flow ends. A fold under a reducer other than `append` is stored inline, so it can still
 grow a `state` past the limit mid-flow; the anchor cap inlines only anchors below the bar for opening one
 (`internal/staterefs`). Pinned by `engine/payloadsize_test.go`. A new payload column write must call `checkPayloadSize`.
 
@@ -1152,15 +1152,14 @@ fan-in 15 plus their contributions) and `TestHandOff_ReducerErrorFailsTheStep`.
 - **The step's whole delta is what the carrier returns** (it was seeded with the earlier runs' changes); persist
   it as is, never composed onto them again (`workflow/CLAUDE.md`, "A step's runs compose").
 - **A fold's result is in no row, so it is never anchored at the folding step** - a ref there would resolve to
-  the delta alone. Under `append`, in a flow at payload format 2 or later (`listsFrom`), the mint stores it as a
-  list naming the rows that hold its elements: the base where it already is, then each contribution in the
-  `changes` of the step that made it (`appendFolds` at the linear, branch and `fireFanInDirect` mints;
-  `cohortAppendFolds` at a trunk fan-in, from the spawn's base and part and each member's). Any other reducer,
-  a base that is not an array, and a format-1 flow are stored inline (the rest of `foldedFields`, passed as
-  `inlineOnly`). A fan-in INSIDE an outer cohort keeps everything its cohort wrote inline (below), and so does a
+  the delta alone. Under `append`, and for an addition, the mint stores it as a list naming the rows that hold
+  its elements: the base where it already is, then each contribution in the `changes` of the step that made it
+  (`appendFolds` at the linear, branch and `fireFanInDirect` mints; `cohortAppendFolds` at a trunk fan-in, from
+  the spawn's base and part and each member's). Any other reducer, and a base that is not an array, are stored
+  inline (the rest of `foldedFields`, passed as `inlineOnly`). A fan-in INSIDE an outer cohort keeps everything its cohort wrote inline (below), and so does a
   field an inner fan-in's part touches: that part is a projection of the inner fan-in's state, not a
-  contribution in a `changes` column. Pinned by `TestArrayRefs_AppendLoopStoresEachElementOnce` (and its
-  format-1 half writing no list), `TestStateRefs_ReducedFieldIsResolvedAndReanchored`,
+  contribution in a `changes` column. Pinned by `TestArrayRefs_AppendLoopStoresEachElementOnce`,
+  `TestStateRefs_ReducedFieldIsResolvedAndReanchored`,
   `TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue`, `TestStateRefs_EmptyForEachFoldsAReffedBase` and
   `fixtures/arrayrefsflow_test.go`.
 - **A folded field's BASE may be carried by a ref**, so the fan-in paths resolve it before folding:
@@ -1170,8 +1169,7 @@ fan-in 15 plus their contributions) and `TestHandOff_ReducerErrorFailsTheStep`.
   `fireFanInDirect`'s and the spawn's stored changes). It contributes nothing, but the state-refs mint reads any
   key a delta writes as a rewrite: it would drop the carried ref and re-anchor the field at a row holding the
   null. The carrier never writes one; a remote host or a row stored before overwrites existed can.
-- **Known cost: a folded field under any reducer but `append`, or in a format-1 flow, cannot be shared across a
-  fan-out's branches.** A fan-out source that folds into a large one stores it inline in every branch's state,
+- **Known cost: a folded field under any reducer but `append` cannot be shared across a fan-out's branches.** A fan-out source that folds into a large one stores it inline in every branch's state,
   N copies. Under `append` each branch holds the list instead.
 
 **Fan-in merge order and contribution (lineage `SetFanIn` path).** `queueCohortRead` reads cohort members
@@ -1412,7 +1410,7 @@ its steps; `internal/piston`'s STEAL is the answer** (measured: a crippled peer 
   test any of this**: a chain created on a dispatcher walks hop by hop there and never consults a class. The
   fixtures keep the production doorbell and still exercise the steal.
 
-### Reducers come from the graph; `changes` holds both kinds of write
+### Reducers come from the graph; `changes` holds every kind of write
 
 **Every place that combines writes reads the reducers from the flow's frozen graph** (`graph.Reducers()`), and
 no row stores them. Dispatch hands them to the carrier (`flow.SetReducers`, the error-route carrier too, so its
@@ -1423,12 +1421,20 @@ or be forged by a remote host; one read from the graph cannot. Pinned by `TestCh
 and `TestChanges_ErrorRouteComposesThroughTheReducers`, each failing with its site's reducers removed.
 
 - **The `changes` column is `workflow.Changes` JSON** - contributions under their names, overwrites under
-  `name!` (`workflow/CLAUDE.md`). Read it with `changesOf`, never `workflow.NewState`: a plain decode reads an
-  overwrite as a field named `name!`. Write it with `json.Marshal`. The state-refs anchor loader is the one
-  raw reader, and `internal/staterefs` looks up `field!` before `field`.
-- **A task's result is checked, not trusted** (`checkChanges`): no name ending with the suffix, and no
-  overwrite or delete of a reduced field inside a fan-out branch. Either fails the step, naming the field.
-  Pinned by `TestChanges_RemoteResultIsChecked`.
+  `name!`, additions under `name+` (`workflow/CLAUDE.md`). Read it with `changesOf`, never `workflow.NewState`: a
+  plain decode reads an overwrite as a field named `name!`. Write it with `json.Marshal`. The state-refs anchor
+  loader is the one raw reader, and `internal/staterefs` looks up `field!` before `field` (and `field+` for a list
+  entry reading `changes`).
+- **A task's result is checked, not trusted** (`checkChanges`): no name ending with either suffix, no overwrite
+  or delete of a reduced field inside a fan-out branch, and no addition but one the engine could have recorded
+  (no reducer, outside a cohort). Each fails the step, naming the field. Pinned by
+  `TestChanges_RemoteResultIsChecked`.
+- **An addition is recorded at persist time, outside a cohort** (`recordAdditions` in `processStep`, before
+  `changesJSON`, holding no turn): an addition is relative to the step's own input, and the
+  fan-in folds a member onto the spawn's. Its field is a fold like an `append` contribution (`foldedFields`,
+  `appendFolds`, `cohortAppendFolds`), so it is a list or inline and never anchored at the step, and `fanInBase`
+  resolves its base. `Step` shows the whole value written (`changesView` applies it onto the step's state). Pinned
+  by `TestArrayRefs_ReplaceLoopStoresOnlyWhatEachStepAdds` and `fixtures/arrayrefsflow_test.go`'s replace loop.
 - **`Step` shows a step's changes as a `State`** (`changesView`): an overwrite as its value, a delete as a
   null.
 - **`state_reduced` holds a fan-in's `reduced` record and nothing else** (see "A member's contribution is its
@@ -1571,13 +1577,8 @@ format" is decided once, at the claim, and holds for everything the dispatch rea
 - **Do not put the version inside a payload column** (`state_refs` included). Those are keyed by state field
   names, which are unconstrained, so a version key collides with a field of the same name.
 
-**Format 2 adds list refs** (`listsFrom`): a field under `append` stored as entries naming the rows that hold
-its elements (`internal/staterefs/CLAUDE.md`, "Lists"). Every writer of one gates on the flow's version
-(`row.flowPayloadVer`, threaded into `fireFanInDirect` and `fanInRow` as `lists`); every reader parses both, since
-format 1's two ref forms are sentences of format 2's grammar.
-
-**Introducing the next payload format - the checklist.** Format 2 went through it; the release that next needs
-one does all of this:
+**Introducing payload format 2 (or any next version) - the checklist.** The mechanism above is built and tested
+at version 1; the release that first needs it does all of this:
 
 1. **Decide whether the change needs a version at all.** It does if a build at the current version would misread a
    row holding the new form - read it as something else, drop it, or fail on it. A change every existing reader

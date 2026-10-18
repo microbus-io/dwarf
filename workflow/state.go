@@ -496,6 +496,15 @@ func (s State) ApplyAll(cs []Changes, reducers map[string]Reducer) error {
 		for k, v := range c.overwrites.d {
 			set(k, v)
 		}
+		// An addition is only ever recorded on a field with no reducer, so nothing is pending for it here: it
+		// extends the field's current value.
+		for k, v := range c.additions.d {
+			extended, err := appendRaw(k, s.d[k], []json.RawMessage{v}, false)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			set(k, extended)
+		}
 	}
 	for k := range decoded {
 		encoded, err := json.Marshal(acc[k])

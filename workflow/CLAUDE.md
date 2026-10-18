@@ -121,6 +121,27 @@ may be deleted in a branch; it folds in branch order. Pinned by `fixtures/reduce
   thing every writer and reader of `changes` must carry, nothing fails to compile when one misses it, and a miss
   silently turns an overwrite into a contribution. In one object, a writer that stores `changes` stores both.
 
+### An addition: `name+`, the elements a list gained
+
+`Changes` holds a third kind, written under `name+` (`AdditionSuffix`): the elements appended to the array the
+field held in the step's input. Only the engine records one (`recordAdditions`, before storing a step's changes):
+a write to a field with no reducer whose new value begins with the whole input array. So a loop that rewrites a
+growing list each step stores each element once. Applying the Changes onto that input gives the value written.
+
+- **It is relative to the step's OWN input**, so it is correct only where a step's changes are applied onto its own
+  state: the successor base, a re-run's view, the final state's tails, the spawn's base at a fan-in. The engine
+  records none in a fan-out cohort, where the fan-in applies a member's changes onto the spawn's state and a replace
+  must win outright; `checkChanges` refuses one there, or on a reduced field.
+- **Compose:** a later replace or overwrite drops it; a later addition joins it; an addition onto an earlier write
+  extends that write (`Changes.add`). `Apply` appends it to the field's current value.
+- **`+` is reserved in the names a task writes**, like `!`, and the anchor lookup probes `field+` only for a list
+  entry reading the changes column - a whole-field ref never resolves to the elements a step gained.
+- **It reaches a task only on a re-run** (retry, resume, subgraph return), in the earlier runs' changes the carrier
+  is seeded with; the task's own `Set` replaces it. Elements compare by bytes, else decoded and re-encoded, since a
+  database reorders and respaces what it stores; a number spelled two ways, or a task that does not round-trip
+  elements faithfully, gets no addition, and nothing depends on getting one. Pinned by `TestRecordAdditions`
+  (engine) and `TestChanges_AdditionsApplyAndCompose`.
+
 `Graph.Validate` rejects a reducer name that is not one of the `Reducer` constants, so a misspelled reducer fails
 at `Create` rather than at the first fold.
 

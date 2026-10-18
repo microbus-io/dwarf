@@ -49,119 +49,132 @@ func readHistory(f *workflow.Flow) ([]arrayMsg, error) {
 	return history, nil
 }
 
-// addMessage contributes the next message to "messages".
-func addMessage(f *workflow.Flow, history []arrayMsg) error {
-	return f.Set("messages", []arrayMsg{{N: len(history), Text: strings.Repeat("m", 600)}})
+// addMessage contributes the next message to "messages": the message alone under the append reducer, or the
+// whole history plus the message on a field with no reducer, as a loop written before reducers does.
+func addMessage(f *workflow.Flow, history []arrayMsg, appendMode bool) error {
+	msg := arrayMsg{N: len(history), Text: strings.Repeat("m", 600)}
+	if appendMode {
+		return f.Set("messages", []arrayMsg{msg})
+	}
+	return f.Set("messages", append(history, msg))
 }
 
 // TestArrayrefsflow is the end-to-end contract of storing a folded field as a list of the rows holding its
-// elements (payload format 2): every task still sees the whole history, in order, through every path that
+// elements: every task still sees the whole history, in order, through every path that
 // re-reads a step's input or its earlier runs' changes - a retry, a resumed interrupt, a subgraph's return - and
 // at every flow boundary. The engine is unseeded, so every list is read back from the database.
 func TestArrayrefsflow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	t.Run("agent_loop_through_retry_interrupt_and_subgraph", func(t *testing.T) {
-		t.Parallel()
-		assert := testarossa.For(t)
-		mux := hosts.NewMux()
-		eng := unseededEngine(t.Name())
-		defer eng.Shutdown(ctx)
-		eng.SetHost(mux)
-		assert.NoError(eng.Startup(t.Context()))
+	for _, appendMode := range []bool{true, false} {
+		name := "append"
+		if !appendMode {
+			name = "replace"
+		}
+		t.Run(name+"_loop_through_retry_interrupt_and_subgraph", func(t *testing.T) {
+			t.Parallel()
+			assert := testarossa.For(t)
+			mux := hosts.NewMux()
+			eng := unseededEngine(t.Name())
+			defer eng.Shutdown(ctx)
+			eng.SetHost(mux)
+			assert.NoError(eng.Startup(t.Context()))
 
-		const prefix = "arrayrefsflow.loop"
-		child := workflow.NewGraph("Child")
-		child.SetURL("Reply", prefix+"/reply")
-		child.AddTransition("Reply", workflow.End)
-		mux.HandleGraph(prefix+"/child", child)
-		mux.HandleTask(prefix+"/reply", func(ctx context.Context, f *workflow.Flow) error {
-			f.SetString("reply", "from child of "+f.GetString("asked"))
-			return nil
-		})
-
-		g := workflow.NewGraph("Loop")
-		g.SetReducer("messages", workflow.ReducerAppend)
-		names := []string{"L0", "Retry", "Wait", "Call", "L4", "L5", "L6", "L7"}
-		for _, n := range names {
-			g.SetURL(n, prefix+"/"+strings.ToLower(n))
-		}
-		g.AddTransitionChain(append(names, workflow.End)...)
-		mux.HandleGraph(prefix+"/wf", g)
-		plain := func(ctx context.Context, f *workflow.Flow) error {
-			history, err := readHistory(f)
-			if err != nil {
-				return err
-			}
-			return addMessage(f, history)
-		}
-		for _, n := range []string{"l0", "l4", "l5", "l6", "l7"} {
-			mux.HandleTask(prefix+"/"+n, plain)
-		}
-		// A retry runs the task again on its input, its earlier run's changes folded in.
-		mux.HandleTask(prefix+"/retry", func(ctx context.Context, f *workflow.Flow) error {
-			history, err := readHistory(f)
-			if err != nil {
-				return err
-			}
-			if f.Attempt() == 0 && f.Retry(time.Millisecond, 1, time.Millisecond, 0) {
+			prefix := "arrayrefsflow.loop" + name
+			child := workflow.NewGraph("Child")
+			child.SetURL("Reply", prefix+"/reply")
+			child.AddTransition("Reply", workflow.End)
+			mux.HandleGraph(prefix+"/child", child)
+			mux.HandleTask(prefix+"/reply", func(ctx context.Context, f *workflow.Flow) error {
+				f.SetString("reply", "from child of "+f.GetString("asked"))
 				return nil
-			}
-			return addMessage(f, history)
-		})
-		mux.HandleTask(prefix+"/wait", func(ctx context.Context, f *workflow.Flow) error {
-			history, err := readHistory(f)
-			if err != nil {
-				return err
-			}
-			if yield, err := f.Interrupt(map[string]any{"waiting": len(history)}, nil); err != nil || yield {
-				return err
-			}
-			return addMessage(f, history)
-		})
-		mux.HandleTask(prefix+"/call", func(ctx context.Context, f *workflow.Flow) error {
-			history, err := readHistory(f)
-			if err != nil {
-				return err
-			}
-			var out map[string]any
-			if yield, err := f.Subgraph(prefix+"/child", map[string]any{"asked": fmt.Sprint(len(history))}, &out); err != nil || yield {
-				return err
-			}
-			f.SetString("reply", fmt.Sprint(out["reply"]))
-			return addMessage(f, history)
-		})
+			})
 
-		fk, err := eng.Create(ctx, prefix+"/wf", nil, nil)
-		assert.NoError(err)
-		out, err := eng.Await(ctx, fk)
-		assert.NoError(err)
-		assert.Equal(workflow.StatusInterrupted, out.Status, out.Error)
-		assert.NoError(eng.Resume(ctx, fk, nil))
-		out, err = eng.Await(ctx, fk)
-		assert.NoError(err)
-		assert.Equal(workflow.StatusCompleted, out.Status, out.Error)
-		var history []arrayMsg
-		_, err = out.State.Get("messages", &history)
-		assert.NoError(err)
-		assert.Len(history, len(names))
-		assert.Equal("from child of 3", out.State.GetString("reply"))
+			g := workflow.NewGraph("Loop")
+			if appendMode {
+				g.SetReducer("messages", workflow.ReducerAppend)
+			}
+			names := []string{"L0", "Retry", "Wait", "Call", "L4", "L5", "L6", "L7"}
+			for _, n := range names {
+				g.SetURL(n, prefix+"/"+strings.ToLower(n))
+			}
+			g.AddTransitionChain(append(names, workflow.End)...)
+			mux.HandleGraph(prefix+"/wf", g)
+			plain := func(ctx context.Context, f *workflow.Flow) error {
+				history, err := readHistory(f)
+				if err != nil {
+					return err
+				}
+				return addMessage(f, history, appendMode)
+			}
+			for _, n := range []string{"l0", "l4", "l5", "l6", "l7"} {
+				mux.HandleTask(prefix+"/"+n, plain)
+			}
+			// A retry runs the task again on its input, its earlier run's changes folded in.
+			mux.HandleTask(prefix+"/retry", func(ctx context.Context, f *workflow.Flow) error {
+				history, err := readHistory(f)
+				if err != nil {
+					return err
+				}
+				if f.Attempt() == 0 && f.Retry(time.Millisecond, 1, time.Millisecond, 0) {
+					return nil
+				}
+				return addMessage(f, history, appendMode)
+			})
+			mux.HandleTask(prefix+"/wait", func(ctx context.Context, f *workflow.Flow) error {
+				history, err := readHistory(f)
+				if err != nil {
+					return err
+				}
+				if yield, err := f.Interrupt(map[string]any{"waiting": len(history)}, nil); err != nil || yield {
+					return err
+				}
+				return addMessage(f, history, appendMode)
+			})
+			mux.HandleTask(prefix+"/call", func(ctx context.Context, f *workflow.Flow) error {
+				history, err := readHistory(f)
+				if err != nil {
+					return err
+				}
+				var out map[string]any
+				if yield, err := f.Subgraph(prefix+"/child", map[string]any{"asked": fmt.Sprint(len(history))}, &out); err != nil || yield {
+					return err
+				}
+				f.SetString("reply", fmt.Sprint(out["reply"]))
+				return addMessage(f, history, appendMode)
+			})
 
-		// The next turn starts from the whole history.
-		next, err := eng.Continue(ctx, fk, nil)
-		assert.NoError(err)
-		out, err = eng.Await(ctx, next)
-		assert.NoError(err)
-		assert.Equal(workflow.StatusInterrupted, out.Status, out.Error)
-		assert.NoError(eng.Resume(ctx, next, nil))
-		out, err = eng.Await(ctx, next)
-		assert.NoError(err)
-		assert.Equal(workflow.StatusCompleted, out.Status, out.Error)
-		_, err = out.State.Get("messages", &history)
-		assert.NoError(err)
-		assert.Len(history, 2*len(names))
-	})
+			fk, err := eng.Create(ctx, prefix+"/wf", nil, nil)
+			assert.NoError(err)
+			out, err := eng.Await(ctx, fk)
+			assert.NoError(err)
+			assert.Equal(workflow.StatusInterrupted, out.Status, out.Error)
+			assert.NoError(eng.Resume(ctx, fk, nil))
+			out, err = eng.Await(ctx, fk)
+			assert.NoError(err)
+			assert.Equal(workflow.StatusCompleted, out.Status, out.Error)
+			var history []arrayMsg
+			_, err = out.State.Get("messages", &history)
+			assert.NoError(err)
+			assert.Len(history, len(names))
+			assert.Equal("from child of 3", out.State.GetString("reply"))
+
+			// The next turn starts from the whole history.
+			next, err := eng.Continue(ctx, fk, nil)
+			assert.NoError(err)
+			out, err = eng.Await(ctx, next)
+			assert.NoError(err)
+			assert.Equal(workflow.StatusInterrupted, out.Status, out.Error)
+			assert.NoError(eng.Resume(ctx, next, nil))
+			out, err = eng.Await(ctx, next)
+			assert.NoError(err)
+			assert.Equal(workflow.StatusCompleted, out.Status, out.Error)
+			_, err = out.State.Get("messages", &history)
+			assert.NoError(err)
+			assert.Len(history, 2*len(names))
+		})
+	}
 
 	t.Run("failed_fan_out_keeps_the_history", func(t *testing.T) {
 		t.Parallel()
@@ -192,7 +205,7 @@ func TestArrayrefsflow(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			return addMessage(f, history)
+			return addMessage(f, history, true)
 		})
 		mux.HandleTask(prefix+"/work", func(ctx context.Context, f *workflow.Flow) error {
 			if _, err := readHistory(f); err != nil {

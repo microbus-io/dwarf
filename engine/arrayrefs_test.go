@@ -18,7 +18,9 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -135,10 +137,9 @@ func awaitLoop(t *testing.T, e *Engine, flowKey string, want int) {
 	assert.NoError(checkLoopHistory(history))
 }
 
-// TestArrayRefs_AppendLoopStoresEachElementOnce pins what payload format 2 buys an agent loop: each step's state
-// stores the folded history as a list naming the rows that hold its messages - each in the changes of the step
-// that added it - instead of the whole history again. A flow created in format 1 keeps storing it inline, and
-// writes no list into any row: a format-1 reader would refuse one.
+// TestArrayRefs_AppendLoopStoresEachElementOnce pins what lists buy an agent loop: each step's state stores the
+// folded history as a list naming the rows that hold its messages - each in the changes of the step that added it -
+// instead of the whole history again.
 func TestArrayRefs_AppendLoopStoresEachElementOnce(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -146,37 +147,20 @@ func TestArrayRefs_AppendLoopStoresEachElementOnce(t *testing.T) {
 
 	const steps = 20
 	mux := hosts.NewMux()
-	registerLoop(mux, "arrayloop", steps, true)
+	registerLoop(mux, "arrayloop", steps, false)
 	e := unseeded(NewEngineUnderTest(t.Name()))
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
-	run := func(format int) []loopRow {
-		fk, err := e.Create(ctx, "arrayloop/wf", nil, nil)
-		assert.NoError(err)
-		out, err := e.Await(ctx, fk)
-		assert.NoError(err)
-		assert.Equal(workflow.StatusInterrupted, out.Status)
-		db, flowID, _ := flowRows(t, e, fk)
-		setFlowPayloadVer(t, db, flowID, format)
-		assert.NoError(e.Resume(ctx, fk, nil))
-		awaitLoop(t, e, fk, steps)
-		return loopRows(t, e, fk)
-	}
+	fk, outcome, err := e.Run(ctx, "arrayloop/wf", nil, nil)
+	assert.NoError(err)
+	assert.Equal(workflow.StatusCompleted, outcome.Status, outcome.Error)
+	awaitLoop(t, e, fk, steps)
+	rows := loopRows(t, e, fk)
 
-	listed := run(payloadVer)
-	inline := run(1)
-
-	sizeOf := func(rows []loopRow) int {
-		n := 0
-		for _, r := range rows {
-			n += r.stateSize
-		}
-		return n
-	}
 	// The last loop step's input holds the 19 messages before it: a list of 19 entries, none of them a copy.
-	last := listed[len(listed)-1]
+	last := rows[len(rows)-1]
 	assert.Equal(fmt.Sprintf("L%d", steps-1), last.task)
 	assert.False(last.state.Has("messages"), "the history is not copied into the step's state")
 	if list := last.refs["messages"].List; assert.Len(list, steps-1) {
@@ -184,14 +168,9 @@ func TestArrayRefs_AppendLoopStoresEachElementOnce(t *testing.T) {
 			assert.Equal(staterefs.ColChanges, entry.Col, "each message is read from the changes of the step that added it")
 		}
 	}
-	assert.True(sizeOf(listed)*10 < sizeOf(inline), "listed %d bytes against %d inline", sizeOf(listed), sizeOf(inline))
-
-	// The format-1 flow stores the history inline, and no row of it holds a list.
-	assert.True(inline[len(inline)-1].state.Has("messages"))
-	for _, r := range inline {
-		for field, ref := range r.refs {
-			assert.Nil(ref.List, "step %d (%s) holds a list under %q in a format-1 flow", r.stepID, r.task, field)
-		}
+	// Inline, the 19 messages before the last step would be ~12 KB of its state alone; every step stays small.
+	for _, r := range rows {
+		assert.True(r.stateSize < 1500, "step %s stores %d bytes of state", r.task, r.stateSize)
 	}
 }
 
@@ -313,4 +292,136 @@ func TestArrayRefs_ForkAndContinueMidLoop(t *testing.T) {
 	next, err := e.Continue(ctx, fk, nil)
 	assert.NoError(err)
 	awaitLoop(t, e, next, 2*steps)
+}
+
+// TestArrayRefs_ReplaceLoopStoresOnlyWhatEachStepAdds pins additions: a loop whose field has no reducer, and whose
+// task writes the whole history plus one message each step, stores in each step's changes only the message it
+// added, and in each successor's state a list - as an append loop does. A branch step never records an addition (it
+// is relative to the step's own input, and the fan-in folds a member onto the spawn's), and Step still shows the
+// whole value the task wrote.
+func TestArrayRefs_ReplaceLoopStoresOnlyWhatEachStepAdds(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	const steps = 12
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("ReplaceLoop")
+	var chain []string
+	for i := range steps {
+		n := fmt.Sprintf("L%d", i)
+		g.SetURL(n, "replaceloop/step")
+		chain = append(chain, n)
+	}
+	g.SetURL("Work", "replaceloop/work")
+	g.SetURL("Join", "replaceloop/join")
+	g.SetFanIn("Join")
+	g.AddTransitionChain(chain...)
+	g.AddTransitionForEach(chain[len(chain)-1], "Work", "pages", "page")
+	g.AddTransitionChain("Work", "Join", workflow.End)
+	assert.NoError(g.Validate())
+	mux.HandleGraph("replaceloop/wf", g)
+	rewrite := func(f *workflow.Flow) error {
+		var history []loopMsg
+		if _, err := f.Get("messages", &history); err != nil {
+			return err
+		}
+		if err := checkLoopHistory(history); err != nil {
+			return fmt.Errorf("%s: %w", f.StepKey(), err)
+		}
+		return f.Set("messages", append(history, loopMsg{N: len(history), Text: blob(600)}))
+	}
+	mux.HandleTask("replaceloop/step", func(ctx context.Context, f *workflow.Flow) error { return rewrite(f) })
+	mux.HandleTask("replaceloop/work", func(ctx context.Context, f *workflow.Flow) error { return rewrite(f) })
+	mux.HandleTask("replaceloop/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	e := unseeded(NewEngineUnderTest(t.Name()))
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+
+	fk, err := e.Create(ctx, "replaceloop/wf", map[string]any{"pages": []string{"a", "b"}}, nil)
+	assert.NoError(err)
+	// The fan-in's value is one branch's rewrite (the last in fold order): the loop's history plus one.
+	awaitLoop(t, e, fk, steps+1)
+	rows := loopRows(t, e, fk)
+	changesOfStep := func(stepID int) workflow.Changes {
+		db, _ := e.db.Shard(1)
+		var changesJSON []byte
+		assert.NoError(db.QueryRowContext(ctx, "SELECT changes FROM dwarf_steps WHERE step_id=?", stepID).Scan(&changesJSON))
+		return changesOf(changesJSON)
+	}
+
+	for _, r := range rows {
+		c := changesOfStep(r.stepID)
+		switch {
+		case r.task == "L0":
+			assert.True(c.Contributions().Has("messages"), "the first write extends nothing")
+		case strings.HasPrefix(r.task, "L"):
+			if assert.True(c.Additions().Has("messages"), "%s stores what it added", r.task) {
+				n, _ := arrayLen(c.Additions().GetJSON("messages"))
+				assert.Equal(1, n, r.task)
+			}
+		case r.task == "Work":
+			assert.False(c.Additions().Has("messages"), "a branch step records no addition")
+			assert.True(c.Contributions().Has("messages"))
+		}
+		if r.task == fmt.Sprintf("L%d", steps-1) {
+			assert.False(r.state.Has("messages"), "the history is not copied into the step's state")
+			assert.NotNil(r.refs["messages"].List)
+		}
+	}
+	// Step shows the whole value the task wrote, not the addition.
+	hist, err := e.History(ctx, fk)
+	assert.NoError(err)
+	for _, step := range hist {
+		if step.TaskName == "L5" {
+			full, err := e.Step(ctx, step.StepKey)
+			assert.NoError(err)
+			var written []loopMsg
+			_, err = full.Changes.Get("messages", &written)
+			assert.NoError(err)
+			assert.Len(written, 6)
+		}
+	}
+}
+
+// TestRecordAdditions pins when a write to a field with no reducer is stored as what it gained: its new value is an
+// array that begins with the whole array the field held. Elements compare by bytes, else decoded and re-encoded, so
+// a database's reordering and respacing of the stored input still matches; a number spelled two ways does not, and
+// that costs only the addition.
+func TestRecordAdditions(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	record := func(input, value string, reducers map[string]workflow.Reducer) workflow.Changes {
+		in, err := workflow.NewState(json.RawMessage(`{"f":` + input + `}`))
+		assert.NoError(err)
+		c := workflow.NewChanges()
+		c.Contributions().SetJSON("f", json.RawMessage(value))
+		recordAdditions(c, in, reducers)
+		return c
+	}
+
+	c := record(`[{"a":1, "b":"x"},2]`, `[{"b":"x","a":1},2,3,{"c":4}]`, nil)
+	assert.True(c.Additions().Has("f"), "a reordered, respaced prefix is still the same prefix")
+	assert.False(c.Contributions().Has("f"))
+	assert.Equal(`[3,{"c":4}]`, string(c.Additions().GetJSON("f")))
+
+	for _, tc := range []struct{ name, input, value string }{
+		{"different prefix", `[1,2]`, `[1,3,4]`},
+		{"same length", `[1,2]`, `[1,2]`},
+		{"shorter", `[1,2]`, `[1]`},
+		{"empty input", `[]`, `[1]`},
+		{"input not an array", `"x"`, `["x",1]`},
+		{"value not an array", `[1]`, `1`},
+		{"a number spelled two ways", `[1]`, `[1.0,2]`},
+	} {
+		c := record(tc.input, tc.value, nil)
+		assert.False(c.Additions().Has("f"), tc.name)
+		assert.True(c.Contributions().Has("f"), tc.name)
+	}
+
+	c = record(`[1]`, `[1,2]`, map[string]workflow.Reducer{"f": workflow.ReducerAppend})
+	assert.False(c.Additions().Has("f"), "a reduced field's write is already a contribution")
 }

@@ -250,7 +250,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 		return nil, errors.Trace(err)
 	}
 	// An overwrite shows as its new value and a delete as a null, which is how a caller reads a delete.
-	fs.Changes = changesView(changesOf(changesJSON))
+	fs.Changes = changesView(changesOf(changesJSON), fs.State)
 	if len(interruptJSON) > 0 {
 		fs.InterruptPayload, err = workflow.NewState(interruptJSON)
 		if err != nil {

@@ -277,7 +277,8 @@ func (f *Flow) write(name string, one Changes) error {
 // replace such a field.
 //
 // It returns an error if the value cannot be marshalled to JSON (a NaN, an +Inf, a channel), if the reducer
-// cannot combine it with the field's value (a string under ReducerAdd), or if name ends with OverwriteSuffix.
+// cannot combine it with the field's value (a string under ReducerAdd), or if name ends with OverwriteSuffix or
+// AdditionSuffix.
 func (f *Flow) Set(name string, value any) error {
 	if r := f.reducers[name]; r == "" || r == ReducerReplace {
 		// No reducer, so nothing to fold: the bytes go straight into the view and the changes.
@@ -336,7 +337,8 @@ func (f *Flow) SetDuration(name string, value time.Duration) { f.mustSet(name, v
 // Overwriting a reduced field is not allowed inside a fan-out branch, at any depth: the branches are parallel,
 // and a reset in one of them has no defined meaning for the others. There it returns an error and records
 // nothing, so a task that ignores the error keeps the field as it was. A field with no reducer can be overwritten
-// anywhere. It also returns an error if the value cannot be marshalled or name ends with OverwriteSuffix.
+// anywhere. It also returns an error if the value cannot be marshalled or name ends with OverwriteSuffix or
+// AdditionSuffix.
 func (f *Flow) Overwrite(name string, value any) error {
 	if r := f.reducers[name]; f.inBranch && r != "" && r != ReducerReplace {
 		return errors.New("workflow: cannot overwrite reduced field %q inside a fan-out branch", name)
@@ -350,8 +352,8 @@ func (f *Flow) Overwrite(name string, value any) error {
 
 // Del deletes the listed state fields, whatever reducer they have: it is Overwrite with nil. Later reads in the
 // task see each field as absent. Deleting a reduced field inside a fan-out branch fails the step, as Overwrite
-// does. A name ending with OverwriteSuffix cannot be written, and panics like a typed setter's error, which
-// the orchestrator turns into a failure of the step.
+// does. A name ending with OverwriteSuffix or AdditionSuffix cannot be written, and panics like a typed setter's
+// error, which the orchestrator turns into a failure of the step.
 func (f *Flow) Del(names ...string) {
 	for _, n := range names {
 		one := NewChanges()
