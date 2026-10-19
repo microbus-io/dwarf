@@ -130,11 +130,14 @@ def chart_tiers():
 
 
 # ---- Shards: grouped bars by fleet shape, a dashed linear mark over each group ----
-ONE_SHARD = 17938
+# One session on one set of four 32 vCPU instances, engine 9e5d16b, 2026-10-19 (redo-s2-20261019): the 4-shard
+# arms first, then the two slowest instances removed for 2 shards, then the next for 1. Each bar is the sum of its
+# replicas' artifacts.
+ONE_SHARD = 21267
 SHARD_GROUPS = [  # (shards, [(steps/s, tick label, colour)])
-    (1, [(17938, "1 replica\n16 vCPU", S1)]),
-    (2, [(34115, "2 replicas\n16 vCPU", S1), (34049, "1 replica\n48 vCPU", S3)]),
-    (4, [(69382, "4 replicas\n16 vCPU", S1), (66843, "1 replica\n48 vCPU", S3), (74879, "8 replicas\n8 vCPU", S2)]),
+    (1, [(21267, "2 replicas\n8 vCPU", S2)]),
+    (2, [(43135, "4 replicas\n8 vCPU", S2)]),
+    (4, [(81530, "8 replicas\n8 vCPU", S2), (66250, "1 replica\n48 vCPU", S3)]),
 ]
 
 
@@ -147,7 +150,7 @@ def chart_shards():
         lin = n * ONE_SHARD
         for x, (y, label, colour) in zip(xs, bars):
             ax.bar(x, y, width=w * 0.9, color=colour)
-            ax.text(x, (max(y, lin) if abs(y - lin) < 3000 else y) + 1300, f"{y / 1000:.1f}k", ha="center",
+            ax.text(x, (max(y, lin) if abs(y - lin) < 5000 else y) + 1300, f"{y / 1000:.1f}k", ha="center",
                     va="bottom", fontsize=9.5, color=INK)
             ticks.append(x)
             ticklabels.append(label)
@@ -158,12 +161,11 @@ def chart_shards():
     ax.set_xticklabels(ticklabels, fontsize=8.5)
     ax.tick_params(axis="x", length=0)
     ax.set_xlim(-0.6, len(SHARD_GROUPS) - 0.4)
-    ax.set_ylim(0, 88000)
+    ax.set_ylim(0, 96000)
     ax.yaxis.set_major_formatter(kilo)
     ax.set_ylabel("steps/s (16-min window mean)")
     ax.set_title("Throughput by shard count and fleet shape")
-    ax.legend(handles=[Patch(color=S1, label="one 16 vCPU replica per shard"),
-                       Patch(color=S2, label="two 8 vCPU replicas per shard"),
+    ax.legend(handles=[Patch(color=S2, label="two 8 vCPU replicas per shard"),
                        Patch(color=S3, label="one 48 vCPU replica for all shards"),
                        Line2D([0], [0], color=INK2, lw=1.4, ls=(0, (4, 3)), label="linear: shards x the 1-shard run")],
               frameon=False, loc="upper left", fontsize=9.5)

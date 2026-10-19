@@ -352,7 +352,8 @@ measure your own workload: task shape, payload size and round-trip time all move
    several shards instead: give its engine about one core per 3,300 steps/s its shards can deliver at
    most - four 32 vCPU shards, ~20–24 cores - and set `GOMAXPROCS` to that plus whatever your tasks use
    in the same process, rather than leaving it at the host's full count. Run at least two such hosts, so
-   one can fail.
+   one can fail. Expect less from it: one 48 vCPU engine on four shards ran 81% of what eight 8 vCPU
+   replicas ran on the same databases, so prefer `2S` small replicas where you can.
 3. **Your tasks.** Add the CPU and memory your tasks use on the engine hosts. The engine itself holds ~15 KB
    per flow in flight, plus the state of each step it is running - large payloads need far more
    ([State size](benchmark-cloud.md#state-size)); with long tasks, flows in flight = flows/s × flow duration.
@@ -406,9 +407,11 @@ fresh database, averaged over a 16-minute window. The full conditions are in the
 | 1 × 16 | 2 × 4 vCPU | 7,015–7,122 |
 | 1 × 32 | 1 × 16 vCPU | 21,878–21,952 |
 | 1 × 64 (`MaxConnections: 500`) | 1 × 16 vCPU | 29,415 |
-| 4 × 32 | 1 × 48 vCPU | 66,843 (earlier engine) |
+| 1 × 32 | 2 × 8 vCPU | 21,267 |
+| 2 × 32 | 4 × 8 vCPU | 43,135 |
+| 4 × 32 | 8 × 8 vCPU | 81,530 |
+| 4 × 32 | 1 × 48 vCPU | 66,250 |
 | 4 × 32 | 4 × 16 vCPU | 69,382 (earlier engine) |
-| 4 × 32 | 8 × 8 vCPU | 74,879 (earlier engine) |
 
 ## Shutting down
 

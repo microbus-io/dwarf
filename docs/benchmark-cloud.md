@@ -15,7 +15,8 @@
   databases run out of CPU, larger ones are held back by the write-ahead log, so past 32 vCPU you add shards.
 - **The engine is cheap.** A shard's work takes about 5 engine cores. Two 8 vCPU engine hosts per
   32 vCPU database serve it at about a third of their CPU each, and either can carry it alone.
-- **Shards add throughput linearly.** Four shards ran 3.9–4.2 times one shard.
+- **Shards add throughput linearly.** Four 32 vCPU shards ran 81,530 steps/s, 3.8 times one shard, with
+  each shard at ~95% of what its database runs alone.
 - **No flow failed in any run.** In the 226 runs behind this page, across 38 sessions, no flow errored and no
   step was left stuck. The engine recovered a crashed worker's step only in the runs that killed engines on
   purpose.
@@ -37,9 +38,10 @@
   steps/s, 16 vCPU with 2 × 4 runs ~7,100, 32 vCPU with 2 × 8 runs ~21,900.
 - **Keep the engine near its database.** A step makes about five round trips, so distance costs throughput;
   the engine opens more connections as distance grows, which recovers most of it out to 1 ms.
-- **One large engine host can serve several shards.** One 48 vCPU engine ran four 32 vCPU shards at their
-  databases' pace on 20 of its cores. Size its CPU from what the shards can deliver, and on a large host cap
-  `GOMAXPROCS` to that: garbage collection takes about twice the share of CPU on 48 vCPU as on 2–16.
+- **Prefer two small engines per shard to one large engine for several.** One 48 vCPU engine ran four
+  32 vCPU shards at 66,250 steps/s on 18 of its cores, 81% of what eight 8 vCPU engines delivered on the same
+  databases. On a large host, cap `GOMAXPROCS` to the cores it needs: garbage collection takes about twice the
+  share of CPU on 48 vCPU as on 2–16.
 
 [Sizing a deployment](deployment.md#sizing-a-deployment) turns these into a recipe.
 
@@ -117,7 +119,7 @@ engine hosts. The cost per million steps assumes the deployment runs at its meas
 - **So 32 vCPU is the most economical size.** Each of its vCPUs delivers ~685 steps/s, against 442–523 for the
   other sizes. From 16 to 32 vCPU, throughput triples for 1.8 times the price, because the step also gets
   cheaper. From 32 to 64 vCPU it grows 1.34 times for 1.9 times the price, and only with
-  `MaxConnections: 500`. Past 32 vCPU, add shards, which scale ~1.9 times per doubling.
+  `MaxConnections: 500`. Past 32 vCPU, add shards, which scale ~1.9–2.0 times per doubling.
 - **The pairing holds at every size.** Each engine runs at about a third of its CPU, so either replica can
   carry its shard alone if the other fails.
 
@@ -157,21 +159,22 @@ it. Same total connections, measured directly:
 
 ![Throughput by shard count and fleet shape](benchmark-cloud-shards.png)
 
-Each shard is its own 32 vCPU database. *These runs used an earlier engine (2026-10-09/12), which ran
-~15–20% below the current one per database; the ratios between shard counts are what carry over.*
+Each shard is its own 32 vCPU database, served by two 8 vCPU engine replicas. All runs used one set of four
+instances: each was first run alone, saturated, for 6 minutes (20,520–22,724 steps/s), then the four-shard run,
+then the two slowest instances were removed for two shards, and the next for one.
 
-| Shards | Replicas | Engine hosts | steps/s | vs 1 shard | Per shard |
+| Shards | Replicas | steps/s | vs 1 shard | Per shard | Of the databases' rate alone |
 |---|---|---|---|---|---|
-| 1 | 1 | 16 vCPU | 17,938 | ×1.00 | 17,938 |
-| 2 | 2 | 16 vCPU | 34,115 | ×1.90 | 17,058 |
-| 4 | 4 | 16 vCPU | 69,382 | **×3.87** | 17,346 |
-| 4 | 8 | 8 vCPU | 74,879 | **×4.17** | 18,720 |
+| 1 | 2 | 21,267 | ×1.00 | 21,267 | 95% |
+| 2 | 4 | 43,135 | ×2.03 | 21,568 | 96% |
+| 4 | 8 | 81,530 | **×3.83** | 20,383 | 94% |
 
-- **Every shard carries what one shard carries alone.** At four shards, each held 17,300–18,700 steps/s,
-  within the spread of a single shard. The two four-shard runs used different instances, so the 8%
-  between them is instance variance, not the fleet's shape.
-- **New flows spread evenly.** Each shard received an even share of new flows (1,680–1,790 flows/s per
-  shard with four replicas).
+- **Every shard carries what its database carries alone**, at every shard count: 94–96% of each instance's own
+  saturated rate. The four-shard run includes the two slower instances, which is why its per-shard figure is
+  lower.
+- **The engines were never the limit.** Each 8 vCPU replica used about 2.5 of its cores.
+
+*(Measured 2026-10-19.)*
 
 ### One engine for several shards
 
@@ -181,19 +184,20 @@ The same shard counts, served by a single replica:
 |---|---|---|---|---|
 | 2 | 16 vCPU | 32,564 | 10.3 of 16 cores | saturated |
 | 2 | 48 vCPU | 34,049 | 14.8 of 48 cores | saturated |
-| 4 | 48 vCPU | **66,843 (×3.73)** | 20.0 of 48 cores | slowest saturated |
+| 4 | 48 vCPU | **66,250 (×3.12)** | 18.4 of 48 cores | 53–71% CPU |
 
 - **One engine serves two shards at full speed**, even on a 16 vCPU host, with a third of its CPU to
   spare.
-- **One engine runs four shards at their databases' pace.** It delivered 66,843 steps/s, steady from
-  minute to minute, with 28 of its 48 cores idle. Four replicas on four shards ran 69,382 and eight ran 74,879,
-  each on its own set of instances; the gap is within the spread between instances of one size.
-- **The slowest database set every shard's pace in this run.** All four ran at 16,700 steps/s, because
+- **One engine runs four shards, but below what replicas get from the same databases.** It delivered 66,250
+  steps/s, 81% of the 81,530 that eight 8 vCPU replicas ran on the same four instances, with 30 of its 48 cores
+  idle and the databases short of saturation.
+- **The slowest database set every shard's pace in this run.** All four ran at ~16,600 steps/s, because
   the load generator places flows evenly and caps flows in flight across all shards: the slowest shard's
   flows stay in flight longest and fill that shared cap. Shards whose databases ran faster sat with free
   capacity. The same holds for any caller that limits its own concurrency across shards.
 
-*(The four-shard row measured 2026-10-12; the two-shard rows 2026-10-10, in a separate session.)*
+*(The four-shard row measured 2026-10-19, ×3.12 against the one-shard run [above](#shards-throughput-adds-up);
+the two-shard rows 2026-10-10 on an earlier engine, in a separate session.)*
 
 ### Replicas: availability without a throughput cost
 
@@ -224,13 +228,13 @@ One 32 vCPU shard, served by one, two and four replicas on separate hosts:
 **Two 8 vCPU engine replicas for each 32 vCPU database.** With `S` shards, that is `2S` replicas, and each
 replica dispatches exactly one shard.
 
-Measured at four shards and eight c4a-standard-8 replicas: **74,879 steps/s**. Each replica carried
-8,400–9,800 steps/s on 2.3–3.0 of its 8 cores. If one replica of a shard fails, the other takes over its
-share: about 5.5 cores, which still fits an 8 vCPU host.
+Measured at four shards and eight c4a-standard-8 replicas: **81,530 steps/s**. At two shards and four
+replicas, each replica carried 10,600–10,900 steps/s on about 2.5 of its 8 cores. If one replica of a shard
+fails, the other takes over its share: about 5 cores, which still fits an 8 vCPU host.
 
 | Replicas | Shards each replica dispatches | Engine host | Engine CPU used |
 |---|---|---|---|
-| `2S` | 1 | 8 vCPU | 2.3–3.0 cores |
+| `2S` | 1 | 8 vCPU | ~2.5 cores |
 | `S` | 2 | 16 vCPU | 5.3–5.6 cores |
 
 Choose `S` or `2S` replicas so every replica carries the same share. Replicas beyond `2S` add standby
@@ -576,7 +580,7 @@ The budget of 250 connections per shard is measured, not guessed.
   are not, nor other clouds or regions.
 - **Payload results are single runs**, and the byte ceiling across shards is not remeasured. In July 2026,
   two shards scaled it ×1.77–1.82.
-- **Shards, replicas, failover and the engine's host sizes** were measured on an earlier engine, which ran
+- **Replicas, failover and the engine's host sizes** were measured on an earlier engine, which ran
   ~15–20% below the current one per database. The ratios hold; the absolute figures are low.
 - **Priority bands under peaks past capacity** are not measured on a cloud database: the engine's ordering by band
   is tested, the latency it keeps for a higher band through a peak is not.
