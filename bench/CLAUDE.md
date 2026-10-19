@@ -212,8 +212,8 @@ Operational traps on Cloud SQL + GCE, each of which has cost a run.
 - **Same-spec instances are not the same machine, and a slow draw looks ordinary.** On one build and one rig
   shape, 32 vCPU instances ran 15.9k-24.1k steps/s. The slow ones burned ~1.5 DB core-ms per step against
   ~1.1, at the same ~77% CPU, so neither steps/s nor CPU alone gives them away. `dbcpu.sh` prints core-ms per
-  step; read it early, and redraw rather than quote a slow instance. What decides the draw is open: every slow
-  instance on 2026-10-18 was created without `--database-flags` while others ran saturated beside it.
+  step; read it early, and redraw rather than quote a slow instance. Nothing in how an instance is created picks
+  the draw: slow ones came up with and without `--database-flags`, alone and beside other saturated instances.
 
 - **Cloud SQL provisions IOPS by disk size (~30 IOPS/GB).** A 100 GB disk gives ~3,000 IOPS (~23 MB/s of
   random 8 KB I/O), and a write-heavy or volume run then measures the disk: the fill rate falls off a cliff
