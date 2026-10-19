@@ -201,6 +201,9 @@ into `bench/results/redo-<name>-<date>/`, and tears everything down on exit, fai
   (`VMTYPE`, default c4a-16).
 - **`xp-rig.sh <name> <tier> <vm-type> <tag>`:** the tier table's pairing, two engine hosts sharing one database,
   plus an admin VM.
+- **`s2-rig.sh`:** the shard ladder on one set of four instances: a parallel solo draw check (redraws a slow one),
+  then 4 shards on one c4a-48, 4 x 8 c4a-8, 2 x 4 and 1 x 2, deleting instances and VMs as the count falls. Gates
+  every arm on `rtt.sh` (one `psql` session per DSN, min of a dozen `SELECT 1`) from every engine host.
 - **Steps:** `one_run` from `a-step-lib.sh` runs one arm on a fresh database. `*-step.sh` are the arms each
   campaign used, with their pass criteria in the header.
 - **What stays out of git** lives in `$RIG_HOME` (default `tmp/rig/`, ignored): `dbpass` and the pinned
