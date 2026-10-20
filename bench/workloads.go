@@ -37,6 +37,8 @@ type workload struct {
 	// check, when set, verifies a completed flow's outcome; a flow that fails it counts as an error, which
 	// invalidates the run. It is how a workload whose tasks cannot see their own last write checks it landed.
 	check func(*workflow.FlowOutcome) error
+	// class names the -mix class a workload was registered for ("linear:1K"), empty outside a mix.
+	class string
 	// build builds the payload the workload's tasks write or carry, nil for none. It runs once, before any
 	// window (prepare): built by the first task instead, it blocks every concurrent writer on the build -
 	// ~10-20s for the 4GB a -payload 250MB -fanout-width 8 run needs, inside a short warmup's window.
@@ -128,7 +130,8 @@ func (f *freshBytes) nextN(n int) []string {
 	return out
 }
 
-// registerWorkloads builds every benchmark graph and task into the host and returns the workloads by name.
+// registerWorkloads builds every benchmark graph and task into the host and returns the workloads by name. ns
+// prefixes every graph and task URL under "bench/" (empty for the run's own set, "m1/" and so on for -mix classes).
 //
 //   - linear: a 10-step chain - the steps/s floor (pure dispatch + transaction cost). With -payload, every
 //     task writes fresh bytes of that size to `data`.
@@ -158,7 +161,9 @@ func (f *freshBytes) nextN(n int) []string {
 // reads a field is the case an engine can decline to materialize, and a task that reads every field is the
 // case where it cannot. Both arms store identically, so a storage measurement should not vary with it - if
 // one does, the workload is not carrying what it thinks it is.
-func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, branchDepth int, carryReadsDoc bool) map[string]*workload {
+func registerWorkloads(h *benchHost, ns string, payloadBytes, fanOutWidth, chainSteps, branchDepth int, carryReadsDoc bool) map[string]*workload {
+	// pre namespaces every graph and task URL, so -mix can register one set per payload and shape side by side.
+	pre := "bench/" + ns
 	if chainSteps < 1 {
 		chainSteps = linearSteps
 	}
@@ -166,7 +171,7 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 		branchDepth = 1
 	}
 	nop := func(ctx context.Context, f *workflow.Flow) error { return nil }
-	h.tasks["bench/nop"] = nop
+	h.tasks[pre+"nop"] = nop
 
 	// The payloads below are built for the workloads the run picks (workload.prepare), not here. Every
 	// workload is registered whatever the run picks, and a payload built eagerly is resident for the whole
@@ -180,7 +185,7 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 	}
 
 	// write: the linear and fanout task. -payload 0 makes it a no-op, the dispatch-cost floor.
-	h.tasks["bench/write"] = func(ctx context.Context, f *workflow.Flow) error {
+	h.tasks[pre+"write"] = func(ctx context.Context, f *workflow.Flow) error {
 		if payloadBytes > 0 {
 			f.SetString("data", fresh().next())
 			h.bytesWritten.Add(int64(payloadBytes))
@@ -193,22 +198,22 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 	names := make([]string, 0, chainSteps+1)
 	for i := range chainSteps {
 		n := fmt.Sprintf("T%d", i)
-		linear.SetURL(n, "bench/write")
+		linear.SetURL(n, pre+"write")
 		names = append(names, n)
 	}
 	names = append(names, workflow.End)
 	linear.AddTransitionChain(names...)
-	h.graphs["bench/linear"] = linear
+	h.graphs[pre+"linear"] = linear
 
 	// fanout
 	fanout := workflow.NewGraph("FanOut")
-	fanout.SetURL("Split", "bench/write")
-	fanout.SetURL("Work", "bench/write")
-	fanout.SetURL("Join", "bench/write")
+	fanout.SetURL("Split", pre+"write")
+	fanout.SetURL("Work", pre+"write")
+	fanout.SetURL("Join", pre+"write")
 	fanout.SetFanIn("Join")
 	fanout.AddTransitionForEach("Split", "Work", "items", "item")
 	fanout.AddTransitionChain("Work", "Join", workflow.End)
-	h.graphs["bench/fanout"] = fanout
+	h.graphs[pre+"fanout"] = fanout
 	fanoutItems := make([]int, fanOutWidth)
 	for i := range fanoutItems {
 		fanoutItems[i] = i
@@ -217,30 +222,30 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 	// scatter: Split writes the array the branches fan out over, fresh per flow; each branch step reads its
 	// element and checks it arrived whole. The check is what makes a storage number trustworthy here, as in
 	// carry: an element that went missing would otherwise read as an excellent byte saving.
-	h.tasks["bench/scatter-split"] = func(ctx context.Context, f *workflow.Flow) error {
+	h.tasks[pre+"scatter-split"] = func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("items", fresh().nextN(fanOutWidth))
 		h.bytesWritten.Add(int64(fanOutWidth * payloadBytes))
 		return nil
 	}
-	h.tasks["bench/scatter-read"] = func(ctx context.Context, f *workflow.Flow) error {
+	h.tasks[pre+"scatter-read"] = func(ctx context.Context, f *workflow.Flow) error {
 		if got := len(f.GetString("item")); got != payloadBytes {
 			return fmt.Errorf("scatter: %s sees a %d-byte element, want %d", f.StepKey(), got, payloadBytes)
 		}
 		return nil
 	}
 	scatter := workflow.NewGraph("Scatter")
-	scatter.SetURL("Split", "bench/scatter-split")
-	scatter.SetURL("Join", "bench/nop")
+	scatter.SetURL("Split", pre+"scatter-split")
+	scatter.SetURL("Join", pre+"nop")
 	scatter.SetFanIn("Join")
 	branch := make([]string, 0, branchDepth+2)
 	for i := range branchDepth {
 		n := fmt.Sprintf("B%d", i)
-		scatter.SetURL(n, "bench/scatter-read")
+		scatter.SetURL(n, pre+"scatter-read")
 		branch = append(branch, n)
 	}
 	scatter.AddTransitionForEach("Split", branch[0], "items", "item")
 	scatter.AddTransitionChain(append(branch, "Join", workflow.End)...)
-	h.graphs["bench/scatter"] = scatter
+	h.graphs[pre+"scatter"] = scatter
 
 	// state: every step rewrites the payload so each step row carries the full write. The payload must be
 	// incompressible: a repeated-character payload TOAST-compresses to ~nothing on the Postgres side, so
@@ -258,7 +263,7 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 		}
 		return string(b)
 	})
-	h.tasks["bench/state"] = func(ctx context.Context, f *workflow.Flow) error {
+	h.tasks[pre+"state"] = func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("data", payload())
 		h.bytesWritten.Add(int64(statePayload))
 		return nil
@@ -267,12 +272,12 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 	stateNames := make([]string, 0, stateSteps+1)
 	for i := range stateSteps {
 		n := fmt.Sprintf("S%d", i)
-		state.SetURL(n, "bench/state")
+		state.SetURL(n, pre+"state")
 		stateNames = append(stateNames, n)
 	}
 	stateNames = append(stateNames, workflow.End)
 	state.AddTransitionChain(stateNames...)
-	h.graphs["bench/state"] = state
+	h.graphs[pre+"state"] = state
 
 	// The carry payload is STRUCTURED, and that is not a detail - it decides whether the workload can see
 	// the thing it exists to measure. `state`'s payload is one opaque incompressible string, which is right
@@ -334,33 +339,33 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 		f.SetInt("steps", 1)
 		return nil
 	}
-	h.tasks["bench/carry"] = carryTask
+	h.tasks[pre+"carry"] = carryTask
 
 	carry := workflow.NewGraph("Carry")
 	carryNames := make([]string, 0, chainSteps+1)
 	for i := range chainSteps {
 		n := fmt.Sprintf("C%d", i)
-		carry.SetURL(n, "bench/carry")
+		carry.SetURL(n, pre+"carry")
 		carryNames = append(carryNames, n)
 	}
 	carryNames = append(carryNames, workflow.End)
 	carry.AddTransitionChain(carryNames...)
-	h.graphs["bench/carry"] = carry
+	h.graphs[pre+"carry"] = carry
 
 	// carryfanout: the N x D case, which is where carrying gets expensive - a fan-out of N branches, each
 	// two steps deep, all carrying the same document. Split is the ENTRY step, so it holds the document and
 	// is the anchor its branches point at; the branches are multi-step so the cost is N x D copies rather
 	// than N. Widen it with -fanout-width, the same knob the fanout workload uses.
 	carryFanOut := workflow.NewGraph("CarryFanOut")
-	carryFanOut.SetURL("Split", "bench/carry")
-	carryFanOut.SetURL("Work", "bench/carry")
-	carryFanOut.SetURL("Enrich", "bench/carry")
-	carryFanOut.SetURL("Join", "bench/carry")
+	carryFanOut.SetURL("Split", pre+"carry")
+	carryFanOut.SetURL("Work", pre+"carry")
+	carryFanOut.SetURL("Enrich", pre+"carry")
+	carryFanOut.SetURL("Join", pre+"carry")
 	carryFanOut.SetFanIn("Join")
 	carryFanOut.SetReducer("steps", workflow.ReducerAdd)
 	carryFanOut.AddTransitionForEach("Split", "Work", "items", "item")
 	carryFanOut.AddTransitionChain("Work", "Enrich", "Join", workflow.End)
-	h.graphs["bench/carryfanout"] = carryFanOut
+	h.graphs[pre+"carryfanout"] = carryFanOut
 
 	// loop / loopreplace: an agent loop, one message added per step - the shape where a carried history grows
 	// with the flow. The two differ only in how the task writes: `loop` contributes its message to an append
@@ -426,7 +431,7 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 		loopNames := make([]string, 0, chainSteps+1)
 		for i := range chainSteps {
 			n := fmt.Sprintf("L%d", i)
-			url := fmt.Sprintf("bench/%s/%s", mode, n)
+			url := pre + fmt.Sprintf("%s/%s", mode, n)
 			h.tasks[url] = loopTask(mode == "loop", i)
 			g.SetURL(n, url)
 			loopNames = append(loopNames, n)
@@ -436,7 +441,7 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 		if mode == "loop" {
 			g.SetReducer("messages", workflow.ReducerAppend)
 		}
-		h.graphs["bench/"+mode] = g
+		h.graphs[pre+mode] = g
 	}
 
 	// llm: ONE step per flow, so a flow's wall time is exactly the -task-delay. The multi-step workloads
@@ -444,49 +449,49 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 	// sane window. This is the shape that validates the derived worker ceiling: the pool must grow past
 	// its (connection-derived) resident set to keep thousands of minutes-long tasks in flight at once.
 	llm := workflow.NewGraph("LLM")
-	llm.SetURL("Call", "bench/nop") // the delay lives in the host's ExecuteTask (-task-delay)
+	llm.SetURL("Call", pre+"nop") // the delay lives in the host's ExecuteTask (-task-delay)
 	llm.AddTransition("Call", workflow.End)
-	h.graphs["bench/llm"] = llm
+	h.graphs[pre+"llm"] = llm
 
 	// interrupt: an entry gate that interrupts once (the soak's load generator resumes it), then
 	// proceeds to a no-op. Registered here (not lazily) so the shared registry is never mutated after
 	// the engines start. Not a sweep workload - the soak references "bench/interrupt" directly.
-	h.tasks["bench/gate"] = func(ctx context.Context, f *workflow.Flow) error {
+	h.tasks[pre+"gate"] = func(ctx context.Context, f *workflow.Flow) error {
 		_, err := f.Interrupt(nil, nil)
 		return err
 	}
 	interrupt := workflow.NewGraph("Interrupt")
-	interrupt.SetURL("Gate", "bench/gate")
-	interrupt.SetURL("Work", "bench/nop")
+	interrupt.SetURL("Gate", pre+"gate")
+	interrupt.SetURL("Work", pre+"nop")
 	interrupt.AddTransitionChain("Gate", "Work", workflow.End)
-	h.graphs["bench/interrupt"] = interrupt
+	h.graphs[pre+"interrupt"] = interrupt
 
 	return map[string]*workload{
 		"llm": {
-			graphURL:     "bench/llm",
+			graphURL:     pre + "llm",
 			initialState: func() map[string]any { return nil },
 			stepsPerFlow: 1,
 		},
 		"linear": {
-			graphURL:     "bench/linear",
+			graphURL:     pre + "linear",
 			initialState: func() map[string]any { return nil },
 			stepsPerFlow: chainSteps,
 			build:        buildFresh,
 		},
 		"fanout": {
-			graphURL:     "bench/fanout",
+			graphURL:     pre + "fanout",
 			initialState: func() map[string]any { return map[string]any{"items": fanoutItems} },
 			stepsPerFlow: fanOutWidth + 2,
 			build:        buildFresh,
 		},
 		"scatter": {
-			graphURL:     "bench/scatter",
+			graphURL:     pre + "scatter",
 			initialState: func() map[string]any { return nil },
 			stepsPerFlow: fanOutWidth*branchDepth + 2,
 			build:        buildFresh,
 		},
 		"state": {
-			graphURL:     "bench/state",
+			graphURL:     pre + "state",
 			initialState: func() map[string]any { return nil },
 			stepsPerFlow: stateSteps,
 			build:        func() { payload() },
@@ -495,27 +500,27 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps, bran
 		// makes the entry step its anchor - the case where a payload lives in a step's `state` column with
 		// no task having produced it, and so appears in no `changes` anywhere.
 		"carry": {
-			graphURL:     "bench/carry",
+			graphURL:     pre + "carry",
 			initialState: func() map[string]any { return map[string]any{"doc": records()} },
 			stepsPerFlow: chainSteps,
 			build:        func() { records() },
 		},
 		"loop": {
-			graphURL:     "bench/loop",
+			graphURL:     pre + "loop",
 			initialState: func() map[string]any { return nil },
 			stepsPerFlow: chainSteps,
 			check:        loopCheck,
 			build:        func() { loopFresh() },
 		},
 		"loopreplace": {
-			graphURL:     "bench/loopreplace",
+			graphURL:     pre + "loopreplace",
 			initialState: func() map[string]any { return nil },
 			stepsPerFlow: chainSteps,
 			check:        loopCheck,
 			build:        func() { loopFresh() },
 		},
 		"carryfanout": {
-			graphURL: "bench/carryfanout",
+			graphURL: pre + "carryfanout",
 			initialState: func() map[string]any {
 				return map[string]any{"doc": records(), "items": fanoutItems}
 			},

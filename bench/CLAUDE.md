@@ -204,7 +204,10 @@ into `bench/results/redo-<name>-<date>/`, and tears everything down on exit, fai
 - **`s2-rig.sh`:** the shard ladder on one set of four instances: a parallel solo draw check (redraws a slow one),
   then 4 shards on one c4a-48, 4 x 8 c4a-8, 2 x 4 and 1 x 2, deleting instances and VMs as the count falls. Gates
   every arm on `rtt.sh` (one `psql` session per DSN, min of a dozen `SELECT 1`) from every engine host.
-- **Steps:** `one_run` from `a-step-lib.sh` runs one arm on a fresh database. `*-step.sh` are the arms each
+- **`real-rig.sh`:** REAL, a day on one database: a draw check, the mix's calibration, then three 90-minute periods
+  on two c4a-8 replicas with a rolling restart, verified against the database at the end.
+- **Steps:** `one_run` from `a-step-lib.sh` runs one arm on a fresh database. `vrows-step.sh` and `vbytes-step.sh`
+  are V's two axes, on `x-rig.sh` with a 1 TB and a 2 TB disk. `*-step.sh` are the arms each
   campaign used, with their pass criteria in the header.
 - **What stays out of git** lives in `$RIG_HOME` (default `tmp/rig/`, ignored): `dbpass` and the pinned
   `bench-<sha>` binaries (`CGO_ENABLED=0 GOOS=linux GOARCH=arm64`, built from a clean clone).
@@ -513,7 +516,24 @@ every replica; 0 derives it from `GOMEMLIMIT` or the host's memory - the artifac
 `goMemLimit` and `GOGC`, which a payload arm's heap depends on as much as on the flag), `-stats-interval`
 (periodic readout), `-pprof` (CPU + heap profiles), `-log-level` (the engines' own log on stderr, `warn` by
 default; the engine's default logger discards everything, so without it a role change or a stale peer row
-leaves no trace in a rig's log).
+leaves no trace in a rig's log), `-mix "0.85:linear:1K,0.15:fanout:4K:8"` (per-flow classes, each its own
+payload and shape under its own graph URLs; usable in any mode), `-volume-checkpoints` (the step-row counts a
+`-volume` fill probes at, e.g. a doubling ladder).
+
+**`-real D` runs a schedule, not a window.** `-arrival-profile` (levels and ramps in fleet steps/s) and
+`-arrival-bursts` repeat every period, with seeded per-minute `-arrival-noise` and Poisson arrivals, plus a
+`-high-priority-share` band, Zipf tenants (`-fairness-skew`) and a `-retention` Purge. Four things about it:
+- **The schedule is a function of the time since `-arrival-epoch`.** Give every process of a fleet the same
+  epoch and its `-arrival-share`, and a process restarted mid-run rejoins in phase and stops at the shared end.
+- **The record is a JSONL series beside the artifact**, one line per `-stats-interval`, written as it goes, with
+  commanded, offered and admitted flows/s side by side - a `Create` that slows in a burst shows as admission
+  falling short, not as a smaller overload - and p50/p99 of the flows that completed in the interval, by class,
+  band and top tenant against the tail.
+- **SIGTERM is a graceful stop** (stop creating, write the artifact, let the engines drain), which is what a
+  rolling restart sends. At the schedule's end a process instead waits until no flow is running on the shard,
+  asking the database rather than its own counters, so every flow can be checked for an end afterwards.
+- **A process's counts are its own.** Admitted flows are the ones it created and ended flows the ones its engines
+  ended, so a fleet's totals are the sum of its processes' series.
 
 **Collecting the engine's gauges costs the database nothing, however often this harness collects.** The per-band
 backlog (`dwarf_steps_pending`, `oldest_pending_age`) is an O(backlog) aggregate the shard's leader runs in the

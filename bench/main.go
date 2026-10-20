@@ -38,6 +38,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
@@ -45,6 +46,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
@@ -65,6 +67,7 @@ type artifact struct {
 	Results     []stepResult   `json:"results"`
 	Soak        *soakReport    `json:"soak,omitzero"`   // set in -soak mode instead of Results
 	Volume      *volumeReport  `json:"volume,omitzero"` // set in -volume mode instead of Results
+	Real        *realReport    `json:"real,omitzero"`   // set in -real mode instead of Results
 	Valid       bool           `json:"valid"`           // false when recovery/unwedge counters fired
 	Invalidity  string         `json:"invalidity,omitzero"`
 }
@@ -121,6 +124,7 @@ func run() error {
 		replicaWorkers  = flag.String("replica-workers", "", "comma-separated per-replica worker counts overriding -workers (e.g. '0,4' = replica 1 awaits only)")
 		volume          = flag.Int("volume", 0, "volume mode: fill to this many dwarf_steps rows with NO deletion, probing the read paths at checkpoints, then measure Purge/reaper throughput (0 = disabled)")
 		volumeCheckpt   = flag.Int("volume-checkpoint", 0, "probe every this many step rows during -volume (0 = one fifth of the target)")
+		volumeCheckpts  = flag.String("volume-checkpoints", "", "-volume only: comma-separated step-row counts to probe at instead of every -volume-checkpoint rows, e.g. a doubling ladder; the -volume target is probed too")
 		printPool       = flag.Float64("print-pool", 0, "print the budget the engine derives for one PostgreSQL shard at this round-trip time in ms against -server-max-connections, and exit - what a driver script pins with -max-connections, so every arm runs the pool that ships")
 		serverMaxConns  = flag.Int("server-max-connections", 0, "-print-pool only: the server's max_connections the budget is clamped to half of (0 = unknown, no clamp)")
 		volumeProbeWL   = flag.String("volume-probe-workload", "linear", "-volume-probe only: the workload the probe windows run, which need not be the fill's - a bytes-axis fill is `state` while its probes measure `linear`")
@@ -129,6 +133,18 @@ func run() error {
 		linearStepsFlag = flag.Int("linear-steps", linearSteps, "linear workload chain length, and the number of messages a `loop`/`loopreplace` flow ends with; sweeping it separates a slow replica's share of STEPS from its share of FLOWS (see workloads.go)")
 		fanOutWidth     = flag.Int("fanout-width", 16, "forEach branch count for the fanout, scatter and carryfanout workloads - the knob that decouples pending-step backlog from submitter concurrency (backlog ~= concurrency x width)")
 		branchDepth     = flag.Int("branch-depth", 1, "scatter workload: steps per branch (1 or 2 in the cloud plan); depth > 1 is where an element stored inline would be copied at every branch step")
+		mixFlag         = flag.String("mix", "", "per-flow classes instead of -workload: comma-separated share:workload:payload[:width[:depth]] over linear, fanout and scatter, e.g. '0.85:linear:1K,0.15:fanout:4K:8'; shares sum to 1")
+		realDur         = flag.Duration("real", 0, "real mode: offer -arrival-profile's schedule over the -mix classes until -arrival-epoch plus this, writing a per-interval series, instead of the concurrency sweep (0 = off)")
+		arrivalProfile  = flag.String("arrival-profile", "", "-real: the repeating schedule of offered steps/s across the fleet, comma-separated duration:level or duration:from-to (a ramp), e.g. '25m:8000,10m:8000-12000,40m:12000,15m:12000-8000'")
+		arrivalBursts   = flag.String("arrival-bursts", "", "-real: bursts into each period, comma-separated offset+duration:level, e.g. '10m+2m:16000,58m+5m:16000'")
+		arrivalNoise    = flag.Float64("arrival-noise", 0.1, "-real: scale each minute of the period by a seeded factor in [1-n, 1+n]")
+		arrivalSeed     = flag.Uint64("arrival-seed", 1, "-real: the noise seed; the same seed gives every process the same schedule")
+		arrivalShare    = flag.Float64("arrival-share", 1, "-real: this process's share of the fleet's offered load (0.5 for each of two replicas)")
+		arrivalEpoch    = flag.Int64("arrival-epoch", 0, "-real: Unix seconds the schedule starts from, the same for every process of a fleet and for one restarted mid-run (0 = now)")
+		fairnessSkew    = flag.Float64("fairness-skew", 0, "spread flows over -fairness-keys by a Zipf law with this exponent (> 1; key k0 the heaviest), instead of uniformly (0); -real only")
+		highShare       = flag.Float64("high-priority-share", 0, "-real: the share of flows created in a higher priority band")
+		highPriority    = flag.Int("high-priority", 50, "-real: that band's priority (the engine's default is 100; lower runs first)")
+		retention       = flag.Duration("retention", 0, "-real: Purge completed flows older than this every minute, so the step table reaches a steady size (0 = keep everything)")
 		carryRead       = flag.Bool("carry-read", false, "carry workloads: make every task READ the carried document instead of only passing it along. Storage is identical either way, so this is the arm switch for how carried state is HELD, not how much is stored")
 	)
 	flag.Var(&dsns, "dsn", "shard DSN, repeatable; 'N=dsn' sets shard N, a bare dsn sets shard 1 (default: throwaway local SQLite)")
@@ -249,10 +265,27 @@ func run() error {
 		delayDist:    dist,
 		bytesWritten: sharedBytes,
 	}
-	workloads := registerWorkloads(regHost, *payload, *fanOutWidth, *linearStepsFlag, *branchDepth, *carryRead)
+	workloads := registerWorkloads(regHost, "", *payload, *fanOutWidth, *linearStepsFlag, *branchDepth, *carryRead)
 	pick, err := chooseWorkload(workloads, *workloadName)
 	if err != nil {
 		return err
+	}
+	meanSteps := float64(pick().stepsPerFlow)
+	if *mixFlag != "" {
+		classes, err := parseMix(*mixFlag, *fanOutWidth)
+		if err != nil {
+			return err
+		}
+		pick, _, meanSteps = buildMix(regHost, classes, *linearStepsFlag)
+		for _, c := range classes {
+			classShares[c.name] = c.share
+		}
+	}
+	if *realDur > 0 && *arrivalProfile == "" {
+		return fmt.Errorf("-real needs -arrival-profile")
+	}
+	if *fairnessSkew != 0 && *fairnessSkew <= 1 {
+		return fmt.Errorf("-fairness-skew %g must be above 1 (or 0 for uniform)", *fairnessSkew)
 	}
 
 	// Build the fleet of in-process engine replicas. Each shares the registry above and the same
@@ -386,15 +419,65 @@ func run() error {
 		Valid:       true,
 	}
 
-	if *volume > 0 {
-		every := *volumeCheckpt
-		if every <= 0 {
-			every = max(1, *volume/5)
+	if *realDur > 0 {
+		profile, err := parseArrivalProfile(*arrivalProfile, *arrivalBursts, *arrivalNoise, *arrivalSeed)
+		if err != nil {
+			return err
+		}
+		epoch := time.Now()
+		if *arrivalEpoch > 0 {
+			epoch = time.Unix(*arrivalEpoch, 0)
+		}
+		seriesPath := *out
+		if seriesPath == "" {
+			seriesPath = filepath.Join("bench/results", "run-"+art.StartedAt.Format("20060102-150405")+".json")
+		}
+		seriesPath = strings.TrimSuffix(seriesPath, ".json") + ".series.jsonl"
+		interval := *statsEvery
+		if interval <= 0 {
+			interval = 10 * time.Second
+		}
+		for k, v := range map[string]any{"arrivalProfile": *arrivalProfile, "arrivalBursts": *arrivalBursts,
+			"arrivalNoise": *arrivalNoise, "arrivalSeed": *arrivalSeed, "arrivalShare": *arrivalShare,
+			"arrivalEpoch": epoch.Unix(), "realSec": realDur.Seconds(), "mix": *mixFlag, "fairnessKeys": *fairnessKeys,
+			"fairnessSkew": *fairnessSkew, "highPriorityShare": *highShare, "highPriority": *highPriority,
+			"retentionSec": retention.Seconds()} {
+			art.Config[k] = v
+		}
+		// A rolling restart stops a replica with SIGTERM: stop creating, write the artifact, and let the deferred
+		// engine Shutdown drain what this replica holds, as a host's graceful stop would.
+		sigCtx, stopSignals := signal.NotifyContext(ctx, syscall.SIGTERM, os.Interrupt)
+		defer stopSignals()
+		report, err := runReal(sigCtx, engines, readers, pick, realConfig{
+			profile: profile, epoch: epoch, until: epoch.Add(*realDur), share: *arrivalShare, meanSteps: meanSteps,
+			creators: ks[0], maxOutstanding: *maxOutstanding, fairnessKeys: *fairnessKeys, fairnessSkew: *fairnessSkew,
+			highShare: *highShare, highPriority: *highPriority, retention: *retention, interval: interval,
+			seriesPath: seriesPath,
+		})
+		if err != nil {
+			return err
+		}
+		art.Real = report
+		switch {
+		case report.Stalled != "":
+			art.Valid, art.Invalidity = false, "real: stalled: "+report.Stalled
+		case report.Errors != 0:
+			art.Valid, art.Invalidity = false, fmt.Sprintf("real: %d flow errors", report.Errors)
+		case report.DrainGaveUp:
+			art.Valid, art.Invalidity = false, "real: the drain gave up with flows still running"
+		case report.ThrottledMs != 0:
+			// The cap is a fuse above the largest burst backlog; once it binds, a burst measures the cap.
+			art.Valid, art.Invalidity = false, fmt.Sprintf("real: -max-outstanding bound for %dms", report.ThrottledMs)
+		}
+	} else if *volume > 0 {
+		checkpoints, err := volumeCheckpoints(*volumeCheckpts, *volumeCheckpt, *volume)
+		if err != nil {
+			return err
 		}
 		art.Config["volumeTargetSteps"] = *volume
-		art.Config["volumeCheckpointRows"] = every
-		fmt.Printf("volume: filling to %d step rows at concurrency %d across %d replica(s), probing every %d rows\n",
-			*volume, ks[0], *replicas, every)
+		art.Config["volumeCheckpointRows"] = checkpoints
+		fmt.Printf("volume: filling to %d step rows at concurrency %d across %d replica(s), probing at %v rows\n",
+			*volume, ks[0], *replicas, checkpoints)
 		var probe func(rate float64) (stepResult, string)
 		probeSPF := 0
 		if *volumeProbe > 0 {
@@ -413,7 +496,7 @@ func run() error {
 				return res, res.Invalidity
 			}
 		}
-		report := runVolume(ctx, engines, readers, dbs, pick, ks[0], *volume, every, probe, probeSPF)
+		report := runVolume(ctx, engines, readers, dbs, pick, ks[0], *volume, checkpoints, probe, probeSPF)
 		art.Volume = report
 		if report.Errors != 0 {
 			art.Valid = false
@@ -527,6 +610,30 @@ func benchLogger(level string) (*slog.Logger, error) {
 		return nil, fmt.Errorf("-log-level: %w", err)
 	}
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: l})), nil
+}
+
+// volumeCheckpoints is the ascending list of step-row counts a -volume fill probes at: the -volume-checkpoints
+// list when given, else every -volume-checkpoint rows (a fifth of the target by default) below the target.
+func volumeCheckpoints(list string, every, target int) ([]int, error) {
+	var out []int
+	if list != "" {
+		for part := range strings.SplitSeq(list, ",") {
+			n, err := strconv.Atoi(strings.TrimSpace(part))
+			if err != nil || n <= 0 {
+				return nil, fmt.Errorf("-volume-checkpoints: %q is not a positive row count", part)
+			}
+			out = append(out, n)
+		}
+		slices.Sort(out)
+		return slices.Compact(out), nil
+	}
+	if every <= 0 {
+		every = max(1, target/5)
+	}
+	for n := every; n < target; n += every {
+		out = append(out, n)
+	}
+	return out, nil
 }
 
 // windowInvalidity says why one measurement window is not a measurement, or "" when it is. Every window -

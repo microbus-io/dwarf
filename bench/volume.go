@@ -91,7 +91,8 @@ type volumeReport struct {
 	Invalidity string `json:"invalidity,omitzero"`
 }
 
-// runVolume fills to targetSteps rows, probing every checkpointEvery rows, then measures retention.
+// runVolume fills to targetSteps rows, probing at each of checkpoints (ascending step-row counts; the target is
+// probed whether or not it is listed), then measures retention.
 //
 // Between checkpoints the fill tracks its progress from the executed-steps counter: every step row a sweep
 // workload creates executes once, so the rows at the last exact count plus the steps executed since is the
@@ -107,7 +108,7 @@ type volumeReport struct {
 // saturated window's EXECUTED steps/s in flows, never of its flowsPerSec, which is the admission rate and runs
 // ahead of what was served.
 func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric.ManualReader, dbs *dbStatsSampler,
-	pick func() *workload, k, targetSteps, checkpointEvery int, probe func(rate float64) (stepResult, string),
+	pick func() *workload, k, targetSteps int, checkpoints []int, probe func(rate float64) (stepResult, string),
 	probeStepsPerFlow int) *volumeReport {
 
 	var (
@@ -251,7 +252,16 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 	fmt.Printf("%-7s %11s %10s %12s %10s %10s %10s %9s %9s\n",
 		"t(s)", "stepRows", "flowRows", "fillSteps/s", "histMs", "listMs", "listDeepMs", "stepsMB", "flowsMB")
 
-	next := checkpointEvery
+	// nextAfter is the first checkpoint past rows, or the target once none is left.
+	nextAfter := func(rows int) int {
+		for _, c := range checkpoints {
+			if c > rows {
+				return c
+			}
+		}
+		return targetSteps
+	}
+	next := nextAfter(lastRows)
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -299,9 +309,7 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 		report.Checkpoints = append(report.Checkpoints, cp)
 
 		lastRows, lastT = steps, now
-		for next <= steps {
-			next += checkpointEvery
-		}
+		next = nextAfter(steps)
 		if steps >= targetSteps {
 			break
 		}
