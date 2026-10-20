@@ -70,7 +70,15 @@ func startPgssSampler(dsn string) *pgssSampler {
 	db.SetMaxIdleConns(1)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	// IF NOT EXISTS does not cover replicas starting at once: the losers of the race fail on
+	// pg_extension_name_index. So a failed create counts only if the extension is still absent.
 	_, err = db.ExecContext(ctx, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
+	if err != nil {
+		var present int
+		if db.QueryRowContext(ctx, "SELECT COUNT(*) FROM pg_extension WHERE extname='pg_stat_statements'").Scan(&present) == nil && present > 0 {
+			err = nil
+		}
+	}
 	if err != nil {
 		fmt.Printf("pg_stat_statements unavailable (server-side timings not recorded): %v\n", err)
 		db.Close()

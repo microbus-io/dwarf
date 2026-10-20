@@ -152,7 +152,7 @@ func runSoak(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 		}
 	})
 
-	watch := watchProgress(ctx, engines, inFlight.Load)
+	watch := watchProgress(ctx, engines, readers, inFlight.Load)
 	defer watch.stop()
 	report := &soakReport{Concurrency: k}
 	base := collectAllCounters(readers)

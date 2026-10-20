@@ -35,6 +35,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -86,6 +87,7 @@ func run() error {
 		taskQuiet    = flag.Duration("task-quiet", 0, "bursty profile: the quiet half of the cycle, during which tasks do not sleep. Flows keep arriving at the same rate, so only the exec term moves")
 		pprofDir     = flag.String("pprof", "", "write a CPU profile for the whole run and a heap profile at the end into this directory. Run ONE arm at a time when attributing, since the CPU profile spans every -concurrency step")
 		statsEvery   = flag.Duration("stats-interval", 0, "print a stats line this often during each measurement window (0 = off). The crew column is what a burst arm is for")
+		logLevel     = flag.String("log-level", "warn", "the engines' log level on stderr: debug, info, warn, error or off")
 		taskJitter   = flag.Duration("task-jitter", 0, "additional uniform random [0,d) per-task sleep - de-synchronizes fan-out siblings so a cohort's branches do not all complete at once")
 		taskDist     = flag.String("task-delay-dist", "", "per-task sleep drawn per invocation from weighted classes, e.g. '0.80:5ms,0.15:200ms,0.05:8s' (weights sum to 1): several task durations on one crew. Replaces -task-delay; -task-jitter still adds on top")
 		// 0 on either override means "let the engine derive it" - the self-tuned path a production host
@@ -263,6 +265,12 @@ func run() error {
 	engines := make([]*engine.Engine, *replicas)
 	hosts := make([]*benchHost, *replicas)
 	readers := make([]*sdkmetric.ManualReader, *replicas)
+	// The engines' own warnings - a replica stepping down on a stale peer row, a lost lease - go to stderr, so a
+	// rig's log holds them beside the stats lines. The engine's default logger discards them.
+	logger, err := benchLogger(*logLevel)
+	if err != nil {
+		return err
+	}
 	for i := range *replicas {
 		reader := sdkmetric.NewManualReader()
 		readers[i] = reader
@@ -283,6 +291,7 @@ func run() error {
 			}
 		}
 		setters := []error{
+			eng.SetLogger(logger.With("replica", i)),
 			eng.SetHost(host),
 			eng.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))),
 		}
@@ -502,9 +511,22 @@ func run() error {
 		// The deferred engine shutdowns would wait on the very thing that hung. The artifact is written;
 		// exit without them.
 		fmt.Println("exiting without engine shutdown after a stall")
+		stopProfile() // os.Exit skips the deferred one, which would leave an empty CPU profile
 		os.Exit(3)
 	}
 	return nil
+}
+
+// benchLogger is the engines' logger for -log-level: text on stderr at that level, or a discard for "off".
+func benchLogger(level string) (*slog.Logger, error) {
+	if level == "off" {
+		return slog.New(slog.DiscardHandler), nil
+	}
+	var l slog.Level
+	if err := l.UnmarshalText([]byte(level)); err != nil {
+		return nil, fmt.Errorf("-log-level: %w", err)
+	}
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: l})), nil
 }
 
 // windowInvalidity says why one measurement window is not a measurement, or "" when it is. Every window -

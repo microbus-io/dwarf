@@ -119,7 +119,7 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 		submitters sync.WaitGroup
 	)
 	recentKey.Store("")
-	watch := watchProgress(ctx, engines, inFlight.Load)
+	watch := watchProgress(ctx, engines, readers, inFlight.Load)
 	defer watch.stop()
 
 	fill := func() {

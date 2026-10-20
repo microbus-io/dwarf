@@ -22,6 +22,8 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
 	"github.com/microbus-io/testarossa"
@@ -151,7 +153,7 @@ func TestWatchProgress_FiresOnlyWhenNothingMoves(t *testing.T) {
 	guard.stall = 1500 * time.Millisecond
 
 	// Nothing in flight: silence is not a stall.
-	w := watchProgress(context.Background(), nil, func() int64 { return 0 })
+	w := watchProgress(context.Background(), nil, nil, func() int64 { return 0 })
 	w.pause(3 * time.Second)
 	assert.Equal("", w.reason())
 	w.stop()
@@ -168,7 +170,7 @@ func TestWatchProgress_FiresOnlyWhenNothingMoves(t *testing.T) {
 			}
 		}
 	}()
-	w = watchProgress(context.Background(), nil, func() int64 { return 5 })
+	w = watchProgress(context.Background(), nil, nil, func() int64 { return 5 })
 	w.pause(3 * time.Second)
 	close(stop)
 	assert.Equal("", w.reason())
@@ -177,7 +179,7 @@ func TestWatchProgress_FiresOnlyWhenNothingMoves(t *testing.T) {
 
 	// Work in flight and nothing moving: pause returns early, and the run is marked stalled.
 	start := time.Now()
-	w = watchProgress(context.Background(), nil, func() int64 { return 5 })
+	w = watchProgress(context.Background(), nil, nil, func() int64 { return 5 })
 	w.pause(time.Minute)
 	assert.True(time.Since(start) < 10*time.Second, "pause must end at the stall, took %s", time.Since(start))
 	assert.Contains(w.reason(), "5 flows in flight")
@@ -236,16 +238,40 @@ func TestWatchProgress_AwaitGivesUpAtTheStall(t *testing.T) {
 	defer func(stall time.Duration) { guard.stall = stall; stalledRun.Store(false) }(guard.stall)
 	guard.stall = 1500 * time.Millisecond
 
-	w := watchProgress(context.Background(), nil, func() int64 { return 1 })
+	w := watchProgress(context.Background(), nil, nil, func() int64 { return 1 })
 	assert.True(w.await(func() {}), "a wait that returns is reported as returned")
 	w.stop()
 
 	stuck := make(chan struct{})
 	defer close(stuck)
 	start := time.Now()
-	w = watchProgress(context.Background(), nil, func() int64 { return 1 })
+	w = watchProgress(context.Background(), nil, nil, func() int64 { return 1 })
 	assert.False(w.await(func() { <-stuck }), "a wait the watchdog outlived is reported as given up")
 	assert.True(time.Since(start) < 10*time.Second, "await must end at the stall, took %s", time.Since(start))
 	assert.Contains(w.reason(), "1 flows in flight")
 	w.stop()
+}
+
+// TestDispatchedNothingNote pins the stall verdict for a process whose engines dispatch no shard: its flows run on
+// peers in other processes, so the watchdog fires though nothing is hung, and the verdict has to say so.
+func TestDispatchedNothingNote(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	reading := func(dispatching ...int64) []*sdkmetric.ManualReader {
+		reader := sdkmetric.NewManualReader()
+		meter := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test")
+		_, err := meter.Int64ObservableGauge("dwarf_shard_dispatching", metric.WithInt64Callback(
+			func(_ context.Context, o metric.Int64Observer) error {
+				for i, v := range dispatching {
+					o.Observe(v, metric.WithAttributes(attribute.Int("shard", i+1)))
+				}
+				return nil
+			}))
+		assert.NoError(err)
+		return []*sdkmetric.ManualReader{reader}
+	}
+	assert.NotEqual("", dispatchedNothingNote(reading(0, 0)), "no shard dispatched")
+	assert.Equal("", dispatchedNothingNote(reading(0, 1)), "one shard dispatched")
+	assert.Equal("", dispatchedNothingNote(reading()), "no reading says nothing")
+	assert.Equal("", dispatchedNothingNote(nil))
 }

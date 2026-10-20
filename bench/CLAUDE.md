@@ -480,6 +480,8 @@ gives up. Measured: 110 "unfinished" on one host, which was exactly 16 counted b
 its shutdown, while the database held every flow `completed`. In a multi-process run, verify with status
 counts in the database before dropping it, and read the per-process drain verdict as advisory.
 `-replicas N` (in-process) is not affected, since one process sees every engine's counters.
+A process whose engines dispatch NO shard trips the watchdog the same way: peers run its flows, so nothing it
+counts moves. Its verdict says "dispatched no shard" - read that as a fleet-shape fact, not a hang.
 
 **A collection that failed on any replica is a failed collection**, never the other replicas' sum. Counters
 and gauges come back nil, histograms report `histogramsMissing`, a gauge-sampler tick is left out of the means
@@ -509,7 +511,9 @@ the exec term within a run — the only way to see the crew shrink), `-task-dela
 `-task-delay`), `-state-cache-mb` (`SetStateCacheSize` for
 every replica; 0 derives it from `GOMEMLIMIT` or the host's memory - the artifact's `environment` records
 `goMemLimit` and `GOGC`, which a payload arm's heap depends on as much as on the flag), `-stats-interval`
-(periodic readout), `-pprof` (CPU + heap profiles).
+(periodic readout), `-pprof` (CPU + heap profiles), `-log-level` (the engines' own log on stderr, `warn` by
+default; the engine's default logger discards everything, so without it a role change or a stale peer row
+leaves no trace in a rig's log).
 
 **Collecting the engine's gauges costs the database nothing, however often this harness collects.** The per-band
 backlog (`dwarf_steps_pending`, `oldest_pending_age`) is an O(backlog) aggregate the shard's leader runs in the

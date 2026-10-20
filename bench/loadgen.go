@@ -150,7 +150,7 @@ type progressWatch struct {
 
 // watchProgress starts a watchdog over the engines' ended flows and the hosts' started tasks. With
 // -stall-timeout 0 it never fires.
-func watchProgress(ctx context.Context, engines []*engine.Engine, busy func() int64) *progressWatch {
+func watchProgress(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric.ManualReader, busy func() int64) *progressWatch {
 	w := &progressWatch{stalled: make(chan struct{})}
 	wctx, cancel := context.WithCancel(ctx)
 	w.cancel = cancel
@@ -180,7 +180,8 @@ func watchProgress(ctx context.Context, engines []*engine.Engine, busy func() in
 				continue
 			}
 			if time.Since(lastMove) >= guard.stall {
-				w.why = fmt.Sprintf("no task started and no flow ended for %s with %d flows in flight", guard.stall, busy())
+				w.why = fmt.Sprintf("no task started and no flow ended for %s with %d flows in flight", guard.stall, busy()) +
+					dispatchedNothingNote(readers)
 				stalledRun.Store(true)
 				close(w.stalled)
 				return
@@ -188,6 +189,26 @@ func watchProgress(ctx context.Context, engines []*engine.Engine, busy func() in
 		}
 	}()
 	return w
+}
+
+// dispatchedNothingNote names the one stall the watchdog cannot tell from a hang: this process's engines
+// dispatch no shard, so peers in other processes run its flows and nothing it counts can move. Empty when any
+// engine here dispatches a shard, or when the gauges cannot be read.
+func dispatchedNothingNote(readers []*sdkmetric.ManualReader) string {
+	gauges := collectAllGauges(readers)
+	seen := false
+	for key, v := range gauges {
+		if name, _, _ := strings.Cut(key, "|"); name == "dwarf_shard_dispatching" {
+			seen = true
+			if v > 0 {
+				return ""
+			}
+		}
+	}
+	if !seen {
+		return ""
+	}
+	return "; this process dispatched no shard, so its flows ran on peers and its own counts could not move"
 }
 
 // pause sleeps for d, or until the watchdog fires.
@@ -309,7 +330,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 		latencies  []time.Duration
 		submitters sync.WaitGroup
 	)
-	watch := watchProgress(ctx, engines, inFlight.Load)
+	watch := watchProgress(ctx, engines, readers, inFlight.Load)
 	defer watch.stop()
 
 	for i := range k {
@@ -471,7 +492,7 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 		stepStart = collectAllCounters(readers)
 	}
 
-	watch := watchProgress(ctx, engines, outstanding)
+	watch := watchProgress(ctx, engines, readers, outstanding)
 	defer watch.stop()
 
 	// Sampled completion latency: a bounded pool, cancelled at stop so a still-pending sample never
