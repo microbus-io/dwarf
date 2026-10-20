@@ -128,12 +128,16 @@ func (e *Engine) partitionOn(shard int) (replicas, ordinal int, ok bool) {
 // RTT is there for operators to query. The await-only flag keeps the replica out of every shard's ranking,
 // where it could otherwise win a dispatcher slot it will never serve, while leaving it counted in the fleet
 // its reader pools are part of.
+//
+// Every Sonar gets the same ordering sequence, taken once here: the windows tile only when every shard orders
+// the fleet the same way.
 func (e *Engine) buildSonars() {
 	e.sonars = make(map[int]*peers.Sonar, e.db.NumShards())
 	e.shardsLock.Lock()
 	rtts := maps.Clone(e.shardRTTMs)
 	e.shardsLock.Unlock()
 	indices := slices.Sorted(slices.Values(e.db.Indices()))
+	seq := time.Now().UnixMilli()
 	for place, idx := range indices {
 		db, err := e.db.Shard(idx)
 		if err != nil {
@@ -146,8 +150,9 @@ func (e *Engine) buildSonars() {
 			continue
 		}
 		s.SetProfile(peers.Profile{
-			RTT:     time.Duration(rtts[idx] * float64(time.Millisecond)),
-			Working: !e.zeroWorkers(),
+			RTT:         time.Duration(rtts[idx] * float64(time.Millisecond)),
+			Working:     !e.zeroWorkers(),
+			OrderingSeq: seq,
 		})
 		// The shard's place among the sorted indices staggers its cut along the shared order - see inWindow.
 		s.SetCut(func(rank, candidates int) bool {

@@ -19,6 +19,7 @@ package peers
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -108,9 +109,9 @@ func (r *rig) addPeer(t *testing.T, id int64, seenAge, dispatchAge time.Duration
 	t.Helper()
 	assert := testarossa.For(t)
 	_, err := r.db.ExecContext(context.Background(),
-		"INSERT INTO dwarf_peers (engine_id, seen_at, dispatched_at) VALUES (?,"+
-			" DATE_ADD_MILLIS(NOW_UTC(), ?), DATE_ADD_MILLIS(NOW_UTC(), ?))",
-		id, -seenAge.Milliseconds(), -dispatchAge.Milliseconds())
+		"INSERT INTO dwarf_peers (engine_id, seen_at, dispatched_at, ordering_seq) VALUES (?,"+
+			" DATE_ADD_MILLIS(NOW_UTC(), ?), DATE_ADD_MILLIS(NOW_UTC(), ?), ?)",
+		id, -seenAge.Milliseconds(), -dispatchAge.Milliseconds(), time.Now().UnixMilli())
 	assert.NoError(err)
 }
 
@@ -950,6 +951,24 @@ func TestPeers_EmptyRegistryStillRepairsItself(t *testing.T) {
 	assert.Equal(1, r.s.Replicas())
 }
 
+// TestPeers_ReRegistrationKeepsTheOrderingSeq pins that a re-created row returns to the same place in the order.
+// The owner writes one sequence to every shard, so a repair that re-INSERTs on one shard must carry that value: a
+// fresh one would move the replica on that shard alone, and the shards would stop sharing an order.
+func TestPeers_ReRegistrationKeepsTheOrderingSeq(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	r.s.SetProfile(Profile{Working: true, OrderingSeq: 42})
+	assert.NoError(r.s.register(ctx))
+	assert.Equal(int64(42), r.row(t, selfID).orderingSeq)
+
+	_, err := r.db.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id=?", selfID)
+	assert.NoError(err)
+	r.s.pass(ctx)
+	assert.Equal(int64(42), r.row(t, selfID).orderingSeq, "the repair re-creates the row in its old place")
+}
+
 // TestPeers_PruneWaitsForAHealthyRun pins the most conservative of the three thresholds, and why it is the
 // most conservative: every other decision here is reversible - a wrongly dropped peer returns on the next
 // reading - while a deleted row is refreshed by nobody afterward. Waiting costs nothing, because the
@@ -1017,40 +1036,31 @@ func TestPeers_PruneStandsDownAfterAGap(t *testing.T) {
 // The two assertions past the fleet count are a smoke check on the loop being paced at all: asserting only
 // that the fleet was published would pass against a loop with no cadence whatsoever, since a rise publishes
 // whether or not the reading looked like it ended a gap. They do NOT discriminate start-to-start pacing from
-// end-to-start - a pass here costs a fraction of a millisecond against a 20ms interval, so both spellings
+// end-to-start - a pass here costs a fraction of a millisecond against a 100ms interval, so both spellings
 // stay far inside the grace. The interval arithmetic itself is pinned by
 // TestPeers_PacingMeasuresFromThePassStart, which drives it on a clock instead of a database.
+//
+// Both are OUTCOMES, waited for, never upper bounds on lateness. A starved process can only make the loop turn
+// slower, so "never two cadences without a reading" fails on a loaded machine with nothing wrong in the code -
+// and dropping t.Parallel does not prevent that, since go test runs package binaries concurrently. A loop that
+// is paced eventually gets a quiet stretch and completes a healthy run; a loop whose every reading is gapped
+// never does, however long the wait.
 func TestPeers_RunReadsUntilTheContextEnds(t *testing.T) {
-	// NO t.Parallel, and it is the only test here without it. This one asserts an UPPER BOUND on lateness -
-	// that the loop is never blind, i.e. never goes 2 cadences without a reading - and an upper bound is the
-	// one shape co-running tests break: they cannot make the loop turn faster, only slower, so CPU
-	// oversubscription pushes a healthy loop past the grace and the failure reports the machine rather than
-	// the code. (The same starvation also resets healthySince, which the last assertion checks, so both of
-	// this test's real properties ride on the loop being scheduled.) An OUTCOME assertion tolerates
-	// parallelism because it merely waits longer; this does not. It is the same rule the reaction-latency
-	// fixtures follow, and the 25 sibling tests in this package - several driving their own
-	// real-clock Sonar loops - are exactly the competition it exists to avoid.
-	//
-	// Evidence, stated honestly because it is thinner than the rule: this was observed failing ONCE under
-	// the full parallel -race suite, and has not reproduced in 9 subsequent reps of the same command; it
-	// survives -count=10 -race alone. So the change is preventive - it follows from the shape of the
-	// assertion, not from a reproduction. Do not re-add t.Parallel to speed the package up; the seconds it
-	// buys are the margin this test measures in, and a flake this rare is one nobody will diagnose twice.
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	r := newRig(t)
 	r.s.now = time.Now
 	r.s.lastGood.Store(time.Now().UnixNano())
-	// A CADENCE this test drives on the real clock has to sit well clear of scheduler jitter, because every
-	// assertion below is a multiple of it: the blindness grace is two of these, and a gap that wide also
-	// resets the healthy run. At 20ms the grace was 40ms, which a co-running suite or a bench process on the
-	// same box can eat outright - the loop then genuinely gaps and the test correctly reports a cadence that
-	// the machine, not the code, failed to keep.
+	// A CADENCE this test drives on the real clock has to sit well clear of scheduler jitter: the blindness
+	// grace is two of these, and a gap that wide resets the healthy run the prune below waits for.
 	r.s.scan = 100 * time.Millisecond
 	r.s.beat = 100 * time.Millisecond
+	r.s.pruneAfter = 5 * r.s.scan
 	assert.NoError(r.s.register(ctx))
 	r.addPeer(t, 10, time.Second, time.Second)
+	r.addPeer(t, 90, 2*stragglerAge, 2*stragglerAge) // abandoned, so a healthy run prunes it
 
 	done := make(chan struct{})
 	go func() {
@@ -1063,23 +1073,28 @@ func TestPeers_RunReadsUntilTheContextEnds(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	assert.Equal(2, r.s.Replicas(), "the loop published the fleet it read")
-	// The pass that published this is the one that opened the healthy run, and it is over: observe sets
-	// healthySince before it stores the count. So this instant is an upper bound on healthySince that costs
-	// no clock arithmetic and loosens itself on a slow machine.
-	firstPass := time.Now()
 
-	// Let it turn several more times, then check it is keeping up with its own cadence. Sampled over a
-	// window rather than at one instant: the instant is a coin toss on a busy machine while the property is
-	// not, since a loop that has stopped reading has BlindFor growing without bound and never once dips
-	// under the grace, however long the window.
-	time.Sleep(5 * r.s.scan)
+	// Keeping its cadence, sampled over a window rather than at one instant: the instant is a coin toss on a
+	// busy machine while the property is not, since a loop that has stopped reading has BlindFor growing
+	// without bound and never once dips under the grace, however long the window.
 	kept := false
-	for deadline := time.Now().Add(2 * time.Second); !kept && time.Now().Before(deadline); {
+	for deadline := time.Now().Add(5 * time.Second); !kept && time.Now().Before(deadline); {
 		if kept = r.s.BlindFor() < 2*r.s.scan; !kept {
 			time.Sleep(2 * time.Millisecond)
 		}
 	}
 	assert.True(kept, "a loop keeping its cadence is never blind (blind for %s)", r.s.BlindFor())
+
+	// The prune fires only once the readings have stayed inside the grace for pruneAfter, so the abandoned row
+	// going is the observable proof that the healthy run accumulates. A gap resets the run rather than failing
+	// the test; only a loop that never stops gapping leaves the row in place.
+	pruned := false
+	for deadline := time.Now().Add(10 * time.Second); !pruned && time.Now().Before(deadline); {
+		if pruned = slices.Equal(r.ids(t), []int64{10, selfID}); !pruned {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	assert.True(pruned, "a paced loop accumulates the healthy run the prune waits for (registry %v)", r.ids(t))
 
 	cancel()
 	returned := false
@@ -1089,15 +1104,6 @@ func TestPeers_RunReadsUntilTheContextEnds(t *testing.T) {
 	case <-time.After(5 * time.Second):
 	}
 	assert.True(returned, "Run did not return on a cancelled context")
-
-	// Safe to read the driving goroutine's own state only now that it has returned. If every reading had
-	// looked like it ended a gap, this would have been reset on the last pass rather than set on the first,
-	// and the prune's patience would never accumulate. Compared against the FIRST PASS rather than against
-	// the start plus a few cadences: the first pass is an exact upper bound (it is the pass that set this),
-	// so the two cases are "at or before it" and "after it" with no margin to size.
-	assert.True(!r.s.healthySince.After(firstPass),
-		"the healthy run was set on the first pass and never reset (reset %s into the run)",
-		r.s.healthySince.Sub(firstPass))
 
 	// Leave is the owner's, with a context that still works - Run's is cancelled by the time it returns, and
 	// Run having returned is what makes the delete final.
@@ -1391,9 +1397,9 @@ func TestPeers_LongTurnKeepsProvingService(t *testing.T) {
 func outrankedFleet() []peer {
 	var fleet []peer
 	for id := int64(1); id <= 16; id++ {
-		fleet = append(fleet, peer{engineID: id, seenAgeMs: 100, dispatchAgeMs: staleAge, joinAgeMs: 60000, working: true})
+		fleet = append(fleet, peer{engineID: id, seenAgeMs: 100, dispatchAgeMs: staleAge, orderingSeq: 40000, working: true})
 	}
-	return append(fleet, peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge, joinAgeMs: 1000, working: true})
+	return append(fleet, peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge, orderingSeq: 99000, working: true})
 }
 
 // TestPeers_CutEntryTakesTwoReadings pins the handoff order, which holds with no gap at all. A fleet change
@@ -1426,17 +1432,18 @@ func TestPeers_CutEntryTakesTwoReadings(t *testing.T) {
 	assert.False(r.s.InCut(), "leaving is believed on the reading that shows it")
 }
 
-// TestPeers_ClassifyOrdersByJoinTime pins the shared order: earlier joins come first whatever their ids, a tie
-// goes to the lower id, and a replica that cannot see its own row places itself behind every peer it can see.
-// Ordering by join time is what makes scaling up cheap: a newcomer lands at the end, behind every window.
-func TestPeers_ClassifyOrdersByJoinTime(t *testing.T) {
+// TestPeers_ClassifyOrdersBySequence pins the shared order: lower ordering sequences come first whatever their
+// ids, a tie goes to the lower id, and a replica that cannot see its own row places itself behind every peer it
+// can see. The engine takes the sequence from the clock when it starts, which is what makes scaling up cheap: a
+// newcomer lands at the end, behind every window.
+func TestPeers_ClassifyOrdersBySequence(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	fleet := []peer{
-		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: staleAge, joinAgeMs: 1000, working: true},  // newest
-		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: staleAge, joinAgeMs: 90000, working: true}, // oldest
-		{engineID: 30, seenAgeMs: 100, dispatchAgeMs: staleAge, joinAgeMs: 5000, working: true},
-		{engineID: 40, seenAgeMs: 100, dispatchAgeMs: staleAge, joinAgeMs: 5000, working: true}, // ties 30
+		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: staleAge, orderingSeq: 99000, working: true}, // newest
+		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: staleAge, orderingSeq: 10000, working: true}, // oldest
+		{engineID: 30, seenAgeMs: 100, dispatchAgeMs: staleAge, orderingSeq: 95000, working: true},
+		{engineID: 40, seenAgeMs: 100, dispatchAgeMs: staleAge, orderingSeq: 95000, working: true}, // ties 30
 	}
 	want := map[int64]int{20: 0, 30: 1, 40: 2, 10: 3}
 	for id, rank := range want {
@@ -1530,8 +1537,8 @@ func TestPeers_CrashedLeaderHandsOverAfterABeat(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	r := newRig(t)
-	leader := peer{engineID: 1, seenAgeMs: 100, dispatchAgeMs: 100, joinAgeMs: 60000, working: true}
-	self := peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge, joinAgeMs: 1000, working: true}
+	leader := peer{engineID: 1, seenAgeMs: 100, dispatchAgeMs: 100, orderingSeq: 40000, working: true}
+	self := peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge, orderingSeq: 99000, working: true}
 	r.s.observe(ctx, []peer{leader, self}, nil)
 	assert.False(r.s.InCut())
 
@@ -1585,8 +1592,8 @@ func TestPeers_StaleOwnRowStepsDown(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	r := newRig(t)
-	self := peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: 100, joinAgeMs: 60000, working: true}
-	peerRow := peer{engineID: 1, seenAgeMs: 100, dispatchAgeMs: staleAge, joinAgeMs: 1000, working: true}
+	self := peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: 100, orderingSeq: 40000, working: true}
+	peerRow := peer{engineID: 1, seenAgeMs: 100, dispatchAgeMs: staleAge, orderingSeq: 99000, working: true}
 	r.s.observe(ctx, []peer{peerRow, self}, nil)
 	r.clk.advance(r.s.scan)
 	r.s.observe(ctx, []peer{peerRow, self}, nil)
@@ -1615,8 +1622,8 @@ func TestPeers_StaggerProgressesThroughSustainedGaps(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	r := newRig(t)
-	leader := peer{engineID: 1, seenAgeMs: 100, dispatchAgeMs: 100, joinAgeMs: 60000, working: true}
-	self := peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge, joinAgeMs: 1000, working: true}
+	leader := peer{engineID: 1, seenAgeMs: 100, dispatchAgeMs: 100, orderingSeq: 40000, working: true}
+	self := peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge, orderingSeq: 99000, working: true}
 	r.s.observe(ctx, []peer{leader, self}, nil)
 	assert.False(r.s.InCut(), "second in line behind a live leader")
 

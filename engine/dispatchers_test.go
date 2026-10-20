@@ -58,8 +58,8 @@ func joinFakeFleet(t *testing.T, e *Engine) {
 				joined = -3600000
 			}
 			_, err := db.ExecContext(ctx,
-				"INSERT INTO dwarf_peers (engine_id, seen_at, dispatched_at, joined_at) VALUES (?, NOW_UTC(), NOW_UTC(), DATE_ADD_MILLIS(NOW_UTC(), ?))",
-				id, joined)
+				"INSERT INTO dwarf_peers (engine_id, seen_at, dispatched_at, ordering_seq) VALUES (?, NOW_UTC(), NOW_UTC(), ?)",
+				id, time.Now().UnixMilli()+int64(joined))
 			if err != nil {
 				return err
 			}
@@ -192,6 +192,37 @@ func TestDispatchers_ShardsStaggerTheirCuts(t *testing.T) {
 		assert.Equal(c.on1, e.dispatchesOn(1), "id %d on shard 1", c.id)
 		assert.Equal(c.on3, e.dispatchesOn(3), "id %d on shard 3", c.id)
 		e.Shutdown(t.Context())
+	}
+}
+
+// TestDispatchers_EveryShardSharesTheOrder pins that a replica takes the same place in the order on every shard.
+// The windows tile one order; a key each shard's database stamped on its own would order replicas that start
+// together differently per shard, leaving one with no role while another holds two.
+func TestDispatchers_EveryShardSharesTheOrder(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	e := NewEngineUnderTest(t.Name())
+	assert.NoError(e.SetHost(noopHost{}))
+	for _, idx := range []int{1, 2, 3, 4} {
+		assert.NoError(e.SetShard(ShardSpec{Index: idx}))
+	}
+	assert.NoError(e.Startup(t.Context()))
+	defer e.Shutdown(t.Context())
+
+	var mu sync.Mutex
+	seqs := map[int64]bool{}
+	err := e.db.OnEach(t.Context(), func(ctx context.Context, db *sequel.DB, shard int) error {
+		var seq int64
+		err := db.QueryRowContext(ctx, "SELECT ordering_seq FROM dwarf_peers WHERE engine_id=?", e.engineID).Scan(&seq)
+		mu.Lock()
+		seqs[seq] = true
+		mu.Unlock()
+		return err
+	})
+	assert.NoError(err)
+	assert.Len(seqs, 1, "one ordering sequence on every shard")
+	for seq := range seqs {
+		assert.True(seq > 0)
 	}
 }
 
@@ -581,7 +612,7 @@ func TestDispatchers_ZeroWorkersPeersDoNotDivideTheBudget(t *testing.T) {
 
 	for _, id := range []int64{3001, 3002, 3003} {
 		_, err := db.ExecContext(t.Context(),
-			"INSERT INTO dwarf_peers (engine_id, seen_at, working) VALUES (?, NOW_UTC(), 0)", id)
+			"INSERT INTO dwarf_peers (engine_id, seen_at, working, ordering_seq) VALUES (?, NOW_UTC(), 0, ?)", id, time.Now().UnixMilli())
 		assert.NoError(err)
 	}
 	awaitPeerCount(t, e, 1, 4)
@@ -970,7 +1001,7 @@ func twoReplicaFleet(t *testing.T, dispHost, readHost Host) (disp, reader *Engin
 	assert.NoError(disp.Startup(t.Context()))
 	db, err := disp.db.Shard(1)
 	assert.NoError(err)
-	_, err = db.ExecContext(t.Context(), "INSERT INTO dwarf_peers (engine_id, seen_at, joined_at) VALUES (1002, NOW_UTC(), DATE_ADD_MILLIS(NOW_UTC(), -3600000))")
+	_, err = db.ExecContext(t.Context(), "INSERT INTO dwarf_peers (engine_id, seen_at, ordering_seq) VALUES (1002, NOW_UTC(), ?)", time.Now().UnixMilli()-3600000)
 	assert.NoError(err)
 	reader = mk(readerID, readHost)
 	assert.NoError(reader.Startup(t.Context()))

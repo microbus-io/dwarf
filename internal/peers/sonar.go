@@ -27,7 +27,7 @@ limitations under the License.
 // # Driving one
 //
 //	s, err := peers.New(engineID, shard, db)
-//	s.SetProfile(peers.Profile{RTT: rtt}) // optional; what this replica states in its row
+//	s.SetProfile(peers.Profile{RTT: rtt, Working: true, OrderingSeq: seq}) // optional; what this replica states in its row
 //	s.SetEvidence(dispatcher.Liveness) // optional; without it this replica never claims to dispatch
 //	s.Join(ctx)                        // announce, wait for peers to notice, then read
 //	go s.Run(ctx)                      // ... and keep reading until ctx ends
@@ -190,6 +190,11 @@ type Profile struct {
 	// it still holds connections, but takes no rank: a rank is a claim on a dispatcher slot, and a replica
 	// that will not dispatch would hold that slot empty.
 	Working bool
+	// OrderingSeq places this replica in the shared order, lowest first, ties to the lower engine id. An owner
+	// with several shards must give every shard's Sonar the SAME value, so every shard orders its replicas the
+	// same way: a cut that staggers across shards only balances over one order. Zero takes the wall clock in
+	// Unix milliseconds when the row is first written.
+	OrderingSeq int64
 }
 
 // Sonar owns this replica's row in one shard's peer registry and everything derived from reading it.
@@ -683,6 +688,7 @@ func (s *Sonar) register(ctx context.Context) error {
 	if s.draining.Load() {
 		draining = 1
 	}
+	// The UPDATE leaves ordering_seq alone, so a replica restarting under a pinned id keeps its place.
 	res, err := s.db.ExecContext(ctx,
 		"UPDATE dwarf_peers SET seen_at=NOW_UTC(), working=?, draining=?, rtt_us=? WHERE engine_id=?",
 		working, draining, prof.RTT.Microseconds(), s.engineID)
@@ -696,9 +702,13 @@ func (s *Sonar) register(ctx context.Context) error {
 	if n > 0 {
 		return nil
 	}
+	seq := prof.OrderingSeq
+	if seq == 0 {
+		seq = time.Now().UnixMilli()
+	}
 	_, err = s.db.ExecContext(ctx,
-		"INSERT INTO dwarf_peers (engine_id, seen_at, working, draining, rtt_us) VALUES (?, NOW_UTC(), ?, ?, ?)",
-		s.engineID, working, draining, prof.RTT.Microseconds())
+		"INSERT INTO dwarf_peers (engine_id, seen_at, ordering_seq, working, draining, rtt_us) VALUES (?, NOW_UTC(), ?, ?, ?, ?)",
+		s.engineID, seq, working, draining, prof.RTT.Microseconds())
 	return errors.Trace(err)
 }
 
@@ -833,7 +843,7 @@ func (s *Sonar) read(ctx context.Context) ([]peer, error) {
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT engine_id, DATE_DIFF_MILLIS(NOW_UTC(), seen_at) AS seen_age_ms,"+
 			" DATE_DIFF_MILLIS(NOW_UTC(), dispatched_at) AS dispatch_age_ms,"+
-			" DATE_DIFF_MILLIS(NOW_UTC(), joined_at) AS join_age_ms, working, draining"+
+			" ordering_seq, working, draining"+
 			" FROM dwarf_peers ORDER BY engine_id")
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -843,7 +853,7 @@ func (s *Sonar) read(ctx context.Context) ([]peer, error) {
 	for rows.Next() {
 		var p peer
 		var working, draining int
-		if err := rows.Scan(&p.engineID, &p.seenAgeMs, &p.dispatchAgeMs, &p.joinAgeMs, &working, &draining); err != nil {
+		if err := rows.Scan(&p.engineID, &p.seenAgeMs, &p.dispatchAgeMs, &p.orderingSeq, &working, &draining); err != nil {
 			return nil, errors.Trace(err)
 		}
 		p.working = working != 0

@@ -16,11 +16,14 @@ limitations under the License.
 
 package peers
 
+import "math"
+
 // peer is one registry row as of the read that returned it.
 //
 // Both ages are computed by the DATABASE - NOW_UTC() minus the column - so each is on that shard's own
 // clock and comparable to a window with no reference to this process's clock. They are never comparable to
-// another shard's timestamps, which is why nothing here spans shards.
+// another shard's timestamps, which is why nothing here spans shards. The ordering sequence is the one value
+// that is the same on every shard, because the replica writes it rather than the database.
 type peer struct {
 	engineID int64
 	// seenAgeMs is how long ago the peer last proved it is alive and holding connections.
@@ -28,9 +31,9 @@ type peer struct {
 	// dispatchAgeMs is how long ago the peer last proved it is actually serving this shard. A replica that
 	// has never dispatched carries the column's decades-stale default, so this reads as enormous.
 	dispatchAgeMs float64
-	// joinAgeMs is how long ago the peer's row was created: when it joined this shard's registry. It places
-	// the peer in the shared order, oldest first.
-	joinAgeMs float64
+	// orderingSeq places the peer in the shared order, lowest first: the value the replica wrote into its row
+	// on every shard (Profile.OrderingSeq).
+	orderingSeq int64
 	// working is the peer's own statement that it has workers and is taking on work. A peer that is not -
 	// configured to run no steps, or draining at shutdown - is kept out of the ranking and nothing else: it
 	// still counts in replicas, and the partition never reads it.
@@ -108,10 +111,10 @@ func classify(rows []peer, self int64, selfWorking bool, w windows) view {
 	v := view{ordinal: -1}
 	selfFresh := false
 	// A replica that cannot see its own row places itself as the newest, behind every peer it can see.
-	selfJoinAge := -1.0
+	selfSeq := int64(math.MaxInt64)
 	for _, p := range rows {
 		if p.engineID == self {
-			selfJoinAge = p.joinAgeMs
+			selfSeq = p.orderingSeq
 		}
 	}
 	for _, p := range rows {
@@ -126,7 +129,7 @@ func classify(rows []peer, self int64, selfWorking bool, w windows) view {
 			v.dead = append(v.dead, p.engineID)
 		}
 		if p.seenAgeMs > w.fresh {
-			if p.working && p.engineID != self && joinedBefore(p.joinAgeMs, p.engineID, selfJoinAge, self) {
+			if p.working && p.engineID != self && orderedBefore(p.orderingSeq, p.engineID, selfSeq, self) {
 				v.staleAhead++
 			}
 			continue
@@ -137,7 +140,7 @@ func classify(rows []peer, self int64, selfWorking bool, w windows) view {
 		}
 		if p.working {
 			v.candidates++
-			if p.engineID != self && joinedBefore(p.joinAgeMs, p.engineID, selfJoinAge, self) {
+			if p.engineID != self && orderedBefore(p.orderingSeq, p.engineID, selfSeq, self) {
 				v.rank++
 			}
 		}
@@ -159,13 +162,12 @@ func classify(rows []peer, self int64, selfWorking bool, w windows) view {
 	return v
 }
 
-// joinedBefore reports whether a replica that joined a (ms) ago, with id aID, comes ahead in the shared order of
-// one that joined b ago with id bID: the earlier join first, a tie to the lower id, so the order is total and
-// every replica reading the same rows agrees on it. Ages are computed by the shard's database in one
-// statement, so they compare exactly within a reading and are never compared across shards.
-func joinedBefore(a float64, aID int64, b float64, bID int64) bool {
+// orderedBefore reports whether a replica with ordering sequence a and id aID comes ahead in the shared order of
+// one with sequence b and id bID: the lower sequence first, a tie to the lower id, so the order is total and
+// every replica reading the same rows agrees on it.
+func orderedBefore(a int64, aID int64, b int64, bID int64) bool {
 	if a != b {
-		return a > b
+		return a < b
 	}
 	return aID < bID
 }

@@ -145,11 +145,11 @@ func addPeerRowWithDispatch(t *testing.T, e *Engine, id int64, dispatches bool) 
 		// A non-dispatching peer leaves dispatched_at at its far-past default, which is exactly how an
 		// await-only replica presents itself: alive in seen_at, never advancing the evidence column. There
 		// is no flag to set - the timestamp IS the signal.
-		cols, vals := "engine_id, seen_at", "?, NOW_UTC()"
+		cols, vals := "engine_id, seen_at, ordering_seq", "?, NOW_UTC(), ?"
 		if dispatches {
 			cols, vals = cols+", dispatched_at", vals+", NOW_UTC()"
 		}
-		_, err := db.ExecContext(ctx, "INSERT INTO dwarf_peers ("+cols+") VALUES ("+vals+")", id)
+		_, err := db.ExecContext(ctx, "INSERT INTO dwarf_peers ("+cols+") VALUES ("+vals+")", id, time.Now().UnixMilli())
 		return err
 	})
 	if err != nil {

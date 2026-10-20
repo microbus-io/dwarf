@@ -81,7 +81,7 @@ func addPeerRow(t *testing.T, e *Engine, id int64) {
 	before := peerCounts(e)
 	err := e.db.OnEach(context.Background(), func(ctx context.Context, db *sequel.DB, shard int) error {
 		_, err := db.ExecContext(ctx,
-			"INSERT INTO dwarf_peers (engine_id, seen_at, dispatched_at) VALUES (?, NOW_UTC(), NOW_UTC())", id)
+			"INSERT INTO dwarf_peers (engine_id, seen_at, dispatched_at, ordering_seq) VALUES (?, NOW_UTC(), NOW_UTC(), ?)", id, time.Now().UnixMilli())
 		return err
 	})
 	if err != nil {
@@ -112,7 +112,7 @@ func insertPeerRows(t *testing.T, e *Engine, ids ...int64) {
 	for _, id := range ids {
 		err := e.db.OnEach(context.Background(), func(ctx context.Context, db *sequel.DB, shard int) error {
 			_, err := db.ExecContext(ctx,
-				"INSERT INTO dwarf_peers (engine_id, seen_at, dispatched_at) VALUES (?, NOW_UTC(), NOW_UTC())", id)
+				"INSERT INTO dwarf_peers (engine_id, seen_at, dispatched_at, ordering_seq) VALUES (?, NOW_UTC(), NOW_UTC(), ?)", id, time.Now().UnixMilli())
 			return err
 		})
 		if err != nil {

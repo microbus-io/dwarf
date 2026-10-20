@@ -351,25 +351,33 @@ replica is the only writer of its own row, so that observation cannot be raced.
 A shard's dispatchers are chosen in two steps, and the split between this package and its owner is part of
 the design.
 
-**The order (here).** Every fresh row with `working=1` is a candidate; candidates are ordered by when they
-joined - the row's `joined_at`, oldest first, ties to the lower id - and `Rank` is how many candidates come
+**The order (here).** Every fresh row with `working=1` is a candidate; candidates are ordered by the row's
+`ordering_seq`, lowest first, ties to the lower id - and `Rank` is how many candidates come
 ahead of this replica, published with the candidate count as one value - a rank only means anything against
 the count it came from.
 Rows with `working=0` (the owner's `Profile.Working` false) are counted in `Replicas` but take no place in the
 order. Pinned by `TestPeers_ClassifyNeverRanksAnIdlePeer` and `TestPeers_ClassifyRanksAgreeAcrossReplicas`.
 
-**Join time is the same on every shard, give or take a millisecond**, because every replica registers on every
-shard as it starts, so every shard's registry yields the same order. That sameness is what lets the owner
-stagger the cut. Two replicas joining within the same millisecond may order differently on two shards; that
-dents the tiling, never agreement, because each shard's cut is computed from that shard's rows alone.
+**The order must be the same on every shard, and only a value the replica writes makes it so.** The owner gives
+every shard's Sonar one `Profile.OrderingSeq` (the engine takes the wall clock in Unix milliseconds once, in
+`buildSonars`), so every shard's registry yields the same order, and that sameness is what lets the owner
+stagger the cut. Each shard still decides from its own rows; the value is simply identical in all of them.
+**Do not order by a timestamp each shard's database stamps at INSERT** (`joined_at`): replicas that start
+together register within milliseconds of each other, and a millisecond's difference in when two INSERTs land
+reorders them on one shard and not another. The windows then stop tiling - measured on a cloud rig of 4 shards
+and 8 replicas started at once, one replica held no role on any shard while another held two, and nothing
+re-ranked it while the fleet was unchanged. Pinned by `TestDispatchers_EveryShardSharesTheOrder`.
 
-- `joined_at` is written when the row is INSERTed and never by the beat or the registration's UPDATE, so a
-  replica restarting under a pinned id while its old row still exists keeps its place. A row that is deleted
-  and re-created - a graceful leave, a registration repair - joins again, at the end.
-- Ages are computed by the shard's database within one statement, so they compare exactly within a reading,
-  and like every timestamp here are never compared across shards.
+- `ordering_seq` is written when the row is INSERTed and never by the beat or the registration's UPDATE, so a
+  replica restarting under a pinned id while its old row still exists keeps its place. A registration repair
+  re-INSERTs the same value, so the replica returns to its place on that shard rather than to the end of that
+  shard's order alone (`TestPeers_ReRegistrationKeepsTheOrderingSeq`). A new process takes a new value and joins
+  at the end.
+- Clock skew between engine hosts reorders replicas the same way on every shard, so it can cost a demotion
+  when a skewed replica joins, never the balance. A zero `OrderingSeq` takes the wall clock at the first INSERT,
+  which is right for an owner with one shard and wrong for one with several.
 - A replica that cannot see its own row places itself as the newest, behind every peer it can see.
-- **Why join time and not a hash of the id:** a newcomer always lands at the END of the order, so once there
+- **Why start time and not a hash of the id:** a newcomer always lands at the END of the order, so once there
   are as many candidates as roles (`C >= S*X`) adding a replica, or removing the newest, moves no live
   dispatcher at all - simulated at 4 shards and 8 replicas: 0 demotions per scale-up against 2.2 for a hash
   order, 0 per newest-removed against 1.5. A leave from the middle and a rolling-restart step (oldest
@@ -438,7 +446,8 @@ than its budget feeds, or by none.
 
 **A zero `Profile` states a replica that is NOT working.** `New` seeds `Working: true`, so a Sonar never given
 a profile ranks normally, but `SetProfile` replaces the whole value: an owner that sets only the RTT would
-take itself out of every cut. Always set `Working` alongside it. The `Profile` is written at registration and
+take itself out of every cut. Always set `Working` alongside it, and `OrderingSeq` on an owner with several
+shards. The `Profile` is written at registration and
 at a repair, **never by the beat**: it is a fact about the process, not a liveness signal.
 
 ## Two cadences, because only one of them is detection
@@ -561,16 +570,13 @@ being compared against a synthetic one, which reads as either decades of blindne
 tests that exercise real pacing — `Join`'s wait and `Run`'s loop — put the real clock back and shorten the
 scan interval instead.
 
-**`Run`'s loop test also drops `t.Parallel`, and it is the only test here that does.** It asserts an UPPER
-BOUND on lateness - the loop is never blind, never two cadences without a reading - and an upper bound is the
-one shape co-running tests break, because they can only make the loop turn slower, never faster. CPU
-oversubscription then pushes a healthy loop past the grace and the failure reports the machine. The same
-starvation resets `healthySince`, so both of that test's real properties ride on its goroutine being
-scheduled. An OUTCOME assertion tolerates parallelism (it just waits longer); this does not - the same rule
-`fixtures/CLAUDE.md` applies to its reaction-latency fixtures. The rule rests on the shape of the assertion -
-an upper bound against two dozen parallel siblings, several driving their own real-clock loops - more than on a
-reproduction: the test passes `-count=10 -race` alone, and a failure under the full parallel `-race` suite is
-rare.
+**A real-clock test asserts an OUTCOME it waits for, never an upper bound on lateness.** A loaded machine
+can only make a loop turn slower, so "never two cadences without a reading" fails with nothing wrong in the
+code - and dropping `t.Parallel` does not shield it, since `go test ./...` runs package binaries
+concurrently. `Run`'s loop test therefore proves the healthy run accumulates by waiting for the prune to
+delete an abandoned row: a gap resets the run and only delays the delete, while a loop whose every reading
+is gapped never deletes it. Checked both ways: one 300ms stalled pass fails a "`healthySince` never reset"
+assertion and passes the prune wait; a loop sleeping three intervals fails the prune wait.
 
 **Those two are the only tests a slow database can race, and both rules below were learned by it happening.**
 Every threshold in this package is a multiple of the scan interval, so shortening that interval shortens the

@@ -407,8 +407,8 @@ func TestMetrics_BacklogLeaderOnly(t *testing.T) {
 		return
 	}
 	_, err = db.ExecContext(ctx,
-		"INSERT INTO dwarf_peers (engine_id, seen_at, joined_at, dispatched_at) VALUES (?, NOW_UTC(), DATE_ADD_MILLIS(NOW_UTC(), -60000), NOW_UTC())",
-		int64(1))
+		"INSERT INTO dwarf_peers (engine_id, seen_at, ordering_seq, dispatched_at) VALUES (?, NOW_UTC(), ?, NOW_UTC())",
+		int64(1), time.Now().UnixMilli()-60000)
 	assert.NoError(err)
 	awaitPeerChange(t, e, before)
 	assert.True(e.dispatchesOn(1), "still a dispatcher")
