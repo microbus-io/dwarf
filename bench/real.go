@@ -24,7 +24,6 @@ import (
 	"math"
 	"math/rand/v2"
 	"os"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -192,6 +191,10 @@ type realConfig struct {
 	retention      time.Duration // Purge completed flows older than this; 0 = keep everything
 	interval       time.Duration
 	seriesPath     string
+	// classOf names the class each workflow URL runs, and stepsOf its steps per flow, so the engine's flow counters
+	// (labelled by workflow) give each class's rate.
+	classOf map[string]string
+	stepsOf map[string]int
 }
 
 // realPoint is one interval of the series. Rates are this process's; a fleet's are the sum over its processes.
@@ -215,8 +218,50 @@ type realPoint struct {
 	Crew       float64 `json:"crew"`
 	ConnsInUse float64 `json:"connsInUse"`
 	HeapMB     float64 `json:"heapMB"`
+	CPUCores   float64 `json:"cpuCores"` // this process, engine and load generator together
+	// Rates by class ("class:linear:1K") and by band ("band:high"), flows/s. Admitted counts the flows this process
+	// created; ended counts the flows its engines ended, from the engine's counters, and steps is ended x the
+	// class's steps per flow (the engine counts executed steps by task, which the classes share).
+	AdmittedBy map[string]float64 `json:"admittedBy"`
+	EndedBy    map[string]float64 `json:"endedBy"`
+	StepsBy    map[string]float64 `json:"stepsBy"`
+	// The backlog by band, from the engine's gauges: steps pending and the oldest one's age. Only the shard's
+	// backlog leader reports them, refreshed every 30 s, so a fleet's reading is the max over its processes.
+	Pending      map[string]float64    `json:"pending,omitempty"`
+	OldestSec    map[string]float64    `json:"oldestPendingSec,omitempty"`
+	DispatchLag  float64               `json:"dispatchLagSec"`
+	RefillPhases map[string]refillStat `json:"refill,omitempty"` // the background queries, by phase
 	// Latency of the flows that COMPLETED in the interval, by class, band and tenant: count, p50 and p99 in ms.
 	Latency map[string]latencyStat `json:"latency"`
+	// Create is the admission latency of every Create in the interval.
+	Create latencyStat `json:"create"`
+	// LatencyHist holds the same samples, Create's under "create", as counts per log-spaced bucket
+	// (latencyBucket): percentiles do not add up across intervals or replicas, and these do.
+	LatencyHist map[string]map[string]int `json:"latencyHist"`
+}
+
+// refillStat is one refill phase's calls in an interval and their mean duration.
+type refillStat struct {
+	N      uint64  `json:"n"`
+	MeanMs float64 `json:"meanMs"`
+}
+
+// latencyBucket is the histogram bucket of a latency in ms: bucket b holds [1.1^b, 1.1^(b+1)) ms, so neighbours
+// are 10% apart and a percentile read back from merged buckets is within 10%.
+func latencyBucket(ms float64) int {
+	return int(math.Floor(math.Log(max(ms, 1e-3)) / math.Log(1.1)))
+}
+
+// splitKey parses an instrument key ("name|k=v|k=v") into its name and attributes.
+func splitKey(key string) (string, map[string]string) {
+	parts := strings.Split(key, "|")
+	attrs := make(map[string]string, len(parts)-1)
+	for _, kv := range parts[1:] {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			attrs[k] = v
+		}
+	}
+	return parts[0], attrs
 }
 
 type latencyStat struct {
@@ -272,6 +317,8 @@ func runReal(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 		purged                                         atomic.Int64
 		latMu                                          sync.Mutex
 		lat                                            = map[string][]float64{}
+		admitted                                       = map[string]int64{}
+		createLat                                      []float64
 		wg                                             sync.WaitGroup
 	)
 	outstanding := func() int64 { return created.Load() - (ended() - baseEnded) }
@@ -386,6 +433,11 @@ func runReal(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 					continue
 				}
 				created.Add(1)
+				latMu.Lock()
+				createLat = append(createLat, float64(time.Since(born))/float64(time.Millisecond))
+				admitted["class:"+w.class]++
+				admitted[band]++
+				latMu.Unlock()
 				// Sample one flow in sampleEvery of its class, at the class's current rate, so a rare class is
 				// sampled whole and a common one at ~20 samples a second.
 				rate, _ := flowsPerSec(born)
@@ -443,6 +495,8 @@ func runReal(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 	report := &realReport{SeriesPath: cfg.seriesPath}
 	start := time.Now()
 	prevCounters := collectAllCounters(readers)
+	prevHists, _ := collectAllHistograms(readers)
+	prevHost := sampleHost()
 	prevT, prevCreated, prevEnded, prevOffered, prevDropped, prevThrottled, prevErr, prevPurged :=
 		start, int64(0), ended(), int64(0), int64(0), int64(0), int64(0), int64(0)
 	prevCommanded := 0.0
@@ -462,12 +516,12 @@ func runReal(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 			continue
 		}
 		counters := collectAllCounters(readers)
+		hists, histsOK := collectAllHistograms(readers)
 		gauges := collectAllGauges(readers)
-		var ms runtime.MemStats
-		runtime.ReadMemStats(&ms)
+		host := sampleHost()
 		latMu.Lock()
-		window := lat
-		lat = map[string][]float64{}
+		window, creates, adm := lat, createLat, admitted
+		lat, createLat, admitted = map[string][]float64{}, nil, map[string]int64{}
 		latMu.Unlock()
 		ph, cycle := cfg.profile.phase(now.Sub(cfg.epoch))
 		_, burst := flowsPerSec(now)
@@ -478,19 +532,90 @@ func runReal(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 			Commanded: (cmd - prevCommanded) / sec, Offered: float64(of-prevOffered) / sec,
 			Admitted: float64(cr-prevCreated) / sec, Dropped: dr - prevDropped, Throttled: th - prevThrottled,
 			Ended: float64(en-prevEnded) / sec, Out: outstanding(), Errors: er - prevErr, Purged: int(pu - prevPurged),
-			HeapMB: float64(ms.HeapAlloc) / (1 << 20), Latency: map[string]latencyStat{},
+			HeapMB: float64(host.heapAlloc) / (1 << 20), CPUCores: usageSince(prevHost, host).CPUCores,
+			AdmittedBy: map[string]float64{}, EndedBy: map[string]float64{}, StepsBy: map[string]float64{},
+			Latency: map[string]latencyStat{}, LatencyHist: map[string]map[string]int{},
+		}
+		for k, n := range adm {
+			p.AdmittedBy[k] = float64(n) / sec
+		}
+		band := func(attrs map[string]string) string {
+			if attrs["priority"] == strconv.Itoa(cfg.highPriority) {
+				return "band:high"
+			}
+			return "band:low"
 		}
 		if counters != nil && prevCounters != nil {
 			d := counterDeltas(prevCounters, counters)
 			p.Steps = float64(d["dwarf_steps_executed"]) / sec
 			p.Recovered = d["dwarf_steps_recovered"]
 			p.PeerChange = d["dwarf_peer_changes"]
+			for key, n := range d {
+				name, attrs := splitKey(key)
+				if name != "dwarf_flows_ended" || len(attrs) == 0 {
+					continue
+				}
+				p.EndedBy[band(attrs)] += float64(n) / sec
+				if c, ok := cfg.classOf[attrs["workflow"]]; ok {
+					p.EndedBy["class:"+c] += float64(n) / sec
+					p.StepsBy["class:"+c] += float64(n*int64(cfg.stepsOf[attrs["workflow"]])) / sec
+				}
+			}
+		}
+		for key, v := range gauges {
+			name, attrs := splitKey(key)
+			switch name {
+			case "dwarf_steps_pending":
+				if p.Pending == nil {
+					p.Pending = map[string]float64{}
+				}
+				p.Pending[band(attrs)] += v
+			case "dwarf_steps_oldest_pending_age_seconds":
+				if p.OldestSec == nil {
+					p.OldestSec = map[string]float64{}
+				}
+				p.OldestSec[band(attrs)] = max(p.OldestSec[band(attrs)], v)
+			case "dwarf_steps_dispatch_lag_seconds":
+				p.DispatchLag = max(p.DispatchLag, v)
+			}
+		}
+		if histsOK && prevHists != nil {
+			sums := map[string]float64{}
+			for _, h := range histogramDeltas(prevHists, hists) {
+				if h.Name != "dwarf_refill_query_duration_seconds" || h.Count == 0 {
+					continue
+				}
+				if p.RefillPhases == nil {
+					p.RefillPhases = map[string]refillStat{}
+				}
+				st := p.RefillPhases[h.Attrs["phase"]]
+				st.N += h.Count
+				p.RefillPhases[h.Attrs["phase"]] = st
+				sums[h.Attrs["phase"]] += h.SumSeconds
+			}
+			for ph, st := range p.RefillPhases {
+				st.MeanMs = sums[ph] / float64(st.N) * 1000
+				p.RefillPhases[ph] = st
+			}
 		}
 		p.Crew = gaugeTotal(gauges, "dwarf_workers_resident")
 		p.ConnsInUse = gaugeTotal(gauges, "sequel_pool_in_use_connections")
+		window["create"] = creates
 		for k, v := range window {
 			slices.Sort(v)
-			p.Latency[k] = latencyStat{N: len(v), P50: quantile(v, 0.50), P99: quantile(v, 0.99)}
+			st := latencyStat{N: len(v), P50: quantile(v, 0.50), P99: quantile(v, 0.99)}
+			if k == "create" {
+				p.Create = st
+			} else {
+				p.Latency[k] = st
+			}
+			hist := map[string]int{}
+			for _, ms := range v {
+				hist[strconv.Itoa(latencyBucket(ms))]++
+			}
+			if len(hist) > 0 {
+				p.LatencyHist[k] = hist
+			}
 		}
 		if err := enc.Encode(p); err != nil {
 			fmt.Fprintf(os.Stderr, "WARNING: series line not written: %v\n", err)
@@ -501,6 +626,10 @@ func runReal(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 			p.Latency["all"].P50, p.Latency["all"].P99, p.Latency["band:high"].P99, p.Dropped)
 		prevCounters, prevT, prevCreated, prevEnded, prevOffered, prevDropped, prevThrottled, prevErr, prevPurged, prevCommanded =
 			counters, now, cr, en, of, dr, th, er, pu, cmd
+		prevHost = host
+		if histsOK {
+			prevHists = hists
+		}
 	}
 	stopRun()
 	cancelAwaits()

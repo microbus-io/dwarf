@@ -273,15 +273,25 @@ func run() error {
 		return err
 	}
 	meanSteps := float64(pick().stepsPerFlow)
+	// classOf and stepsOf name the class each workflow URL runs and its steps per flow, for -real's per-class rates.
+	classOf, stepsOf := map[string]string{}, map[string]int{}
 	if *mixFlag != "" {
 		classes, err := parseMix(*mixFlag, *fanOutWidth)
 		if err != nil {
 			return err
 		}
-		pick, _, meanSteps = buildMix(regHost, classes, *linearStepsFlag)
-		for _, c := range classes {
+		var picked []*workload
+		pick, picked, meanSteps = buildMix(regHost, classes, *linearStepsFlag)
+		for i, c := range classes {
 			classShares[c.name] = c.share
+			classOf[picked[i].graphURL], stepsOf[picked[i].graphURL] = c.name, picked[i].stepsPerFlow
 		}
+	} else if *workloadName != "mixed" {
+		// One class, named for the workload.
+		w := *pick()
+		w.class = *workloadName
+		pick = func() *workload { return &w }
+		classOf[w.graphURL], stepsOf[w.graphURL] = w.class, w.stepsPerFlow
 	}
 	if *realDur > 0 && *arrivalProfile == "" {
 		return fmt.Errorf("-real needs -arrival-profile")
@@ -457,7 +467,7 @@ func run() error {
 			profile: profile, epoch: epoch, until: epoch.Add(*realDur), share: *arrivalShare, meanSteps: meanSteps,
 			creators: ks[0], maxOutstanding: *maxOutstanding, fairnessKeys: *fairnessKeys, fairnessSkew: *fairnessSkew,
 			highShare: *highShare, highPriority: *highPriority, retention: *retention, interval: interval,
-			seriesPath: seriesPath,
+			seriesPath: seriesPath, classOf: classOf, stepsOf: stepsOf,
 		})
 		if err != nil {
 			return err

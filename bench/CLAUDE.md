@@ -530,8 +530,16 @@ axis for a bytes fill: two 0 B probes on an empty database wrote ~15M small step
   epoch and its `-arrival-share`, and a process restarted mid-run rejoins in phase and stops at the shared end.
 - **The record is a JSONL series beside the artifact**, one line per `-stats-interval`, written as it goes, with
   commanded, offered and admitted flows/s side by side - a `Create` that slows in a burst shows as admission
-  falling short, not as a smaller overload - and p50/p99 of the flows that completed in the interval, by class,
-  band and top tenant against the tail.
+  falling short, not as a smaller overload - plus admitted and ended flows/s and steps/s by class and by band,
+  the backlog by band, dispatch lag, each refill phase's calls and mean duration, `Create` latency, CPU, and
+  p50/p99 of the flows that completed in the interval by class, band and top tenant against the tail.
+- **Percentiles do not add up across intervals or replicas, so every latency is also kept as a histogram**
+  (`latencyHist`, buckets 10% apart: bucket b holds [1.1^b, 1.1^(b+1)) ms). Sum the buckets over a minute, a phase
+  or both replicas, then read the percentile; it is within 10%. Never average two p99s.
+- **Steps by class are ended flows x steps per flow**, because the engine counts executed steps by task name and
+  the classes share task names. They lag executed steps by the flows in flight, so they agree over a run, not
+  over a burst. The backlog by band is reported by the shard's backlog leader alone, refreshed every 30 s: take a
+  fleet's reading as the max over its processes.
 - **SIGTERM is a graceful stop** (stop creating, write the artifact, let the engines drain), which is what a
   rolling restart sends. At the schedule's end a process instead waits until no flow is running on the shard,
   asking the database rather than its own counters, so every flow can be checked for an end afterwards.

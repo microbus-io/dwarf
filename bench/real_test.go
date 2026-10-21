@@ -18,8 +18,10 @@ package main
 
 import (
 	"context"
+	"maps"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -183,4 +185,55 @@ func TestVolumeCheckpointsMB(t *testing.T) {
 	assert.Nil(cp)
 	_, err = volumeCheckpointsMB("16384,0")
 	assert.Error(err)
+}
+
+// TestLatencyBucket pins the histogram: neighbours 10% apart, and a percentile read back from merged buckets
+// within 10% of the exact one, which is what lets intervals and replicas add.
+func TestLatencyBucket(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	assert.Equal(0, latencyBucket(1))
+	assert.Equal(latencyBucket(100)+1, latencyBucket(110.01))
+	assert.Equal(latencyBucket(0), latencyBucket(-5), "a non-positive latency lands in the lowest bucket")
+
+	r := rand.New(rand.NewPCG(3, 4))
+	var a, b []float64
+	hist := map[int]int{}
+	for range 5000 {
+		x := math.Exp(r.NormFloat64()*1.5 + 6) // a long-tailed latency around ~400 ms
+		if r.IntN(2) == 0 {
+			a = append(a, x)
+		} else {
+			b = append(b, x)
+		}
+		hist[latencyBucket(x)]++
+	}
+	all := append(append([]float64{}, a...), b...)
+	slices.Sort(all)
+	for _, q := range []float64{0.5, 0.99} {
+		exact := quantile(all, q)
+		// The bucket holding the q-th sample, read back as its lower bound.
+		keys := slices.Sorted(maps.Keys(hist))
+		need, seen, got := int(math.Ceil(q*float64(len(all)))), 0, 0.0
+		for _, k := range keys {
+			seen += hist[k]
+			if seen >= need {
+				got = math.Pow(1.1, float64(k))
+				break
+			}
+		}
+		assert.True(got <= exact && exact < got*1.1, "q %g: exact %g, bucket from %g", q, exact, got)
+	}
+}
+
+// TestSplitKey pins the instrument-key parse the per-class and per-band rates rest on.
+func TestSplitKey(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	name, attrs := splitKey("dwarf_flows_ended|priority=50|shard=1|status=completed|workflow=bench/m1/linear")
+	assert.Equal("dwarf_flows_ended", name)
+	assert.Equal(map[string]string{"priority": "50", "shard": "1", "status": "completed", "workflow": "bench/m1/linear"}, attrs)
+	name, attrs = splitKey("dwarf_steps_executed")
+	assert.Equal("dwarf_steps_executed", name)
+	assert.Len(attrs, 0)
 }

@@ -14,8 +14,10 @@
 #      later on the same epoch. At the end every replica keeps its engines up until no flow is left running.
 #   3  the database's record: flows by status, steps not completed, peer rows left, pg_stat_statements, and
 #      Cloud SQL CPU over the day.
-# Each replica writes a per-interval series (out/real-*.series.jsonl): commanded, offered and admitted flows/s,
-# executed steps/s, outstanding, and p50/p99 by class, band and top tenant against the tail. ~5.6 h, ~$18.
+# Each replica writes a per-interval series (out/day*-*.series.jsonl, every 10 s): commanded, offered and admitted
+# flows/s; executed steps/s; admitted and ended flows/s and steps/s by class and band; outstanding; the backlog by
+# band and dispatch lag; each refill phase's calls and mean; Create latency; CPU, crew, connections, heap; and p50/p99
+# by class, band and top tenant against the tail, with mergeable histograms (bench/CLAUDE.md). ~5.6 h, ~$18.
 # `touch $OUT/stop` ends after the current phase. The EXIT trap pulls everything and tears the rig down.
 set -u
 BIN=${BIN:?set BIN to a pinned binary in \$RIG_HOME}
