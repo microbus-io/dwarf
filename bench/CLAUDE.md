@@ -518,7 +518,10 @@ every replica; 0 derives it from `GOMEMLIMIT` or the host's memory - the artifac
 default; the engine's default logger discards everything, so without it a role change or a stale peer row
 leaves no trace in a rig's log), `-mix "0.85:linear:1K,0.15:fanout:4K:8"` (per-flow classes, each its own
 payload and shape under its own graph URLs; usable in any mode), `-volume-checkpoints` (the step-row counts a
-`-volume` fill probes at, e.g. a doubling ladder).
+`-volume` fill probes at), `-volume-checkpoints-mb` (the stored sizes it probes at instead, PostgreSQL only - the
+axis for a bytes fill: two 0 B probes on an empty database wrote ~15M small step rows, twice a 512 GB fill of
+64 KB rows, so a row-keyed ladder for bytes is consumed by the probes before the fill starts),
+`-volume-probe-two-thirds=false` (one saturated probe per checkpoint instead of two windows).
 
 **`-real D` runs a schedule, not a window.** `-arrival-profile` (levels and ramps in fleet steps/s) and
 `-arrival-bursts` repeat every period, with seeded per-minute `-arrival-noise` and Poisson arrivals, plus a

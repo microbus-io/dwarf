@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -92,7 +93,13 @@ type volumeReport struct {
 }
 
 // runVolume fills to targetSteps rows, probing at each of checkpoints (ascending step-row counts; the target is
-// probed whether or not it is listed), then measures retention.
+// probed whether or not it is listed), then measures retention. With checkpointsMB it fills by stored size
+// instead: it probes as dwarf_steps passes each size on disk, ascending MB, and stops at the last. Size is the
+// axis for a bytes fill, because the probes' own small rows outnumber the fill's large ones by far: two 0 B
+// probes on the empty database wrote ~15M step rows, twice a 512 GB fill's ~7M.
+//
+// twoThirds adds a window at 2/3 of each saturated probe's rate. It doubles the rows and time each checkpoint
+// costs, so a fill whose ladder starts low can leave it out.
 //
 // Between checkpoints the fill tracks its progress from the executed-steps counter: every step row a sweep
 // workload creates executes once, so the rows at the last exact count plus the steps executed since is the
@@ -108,8 +115,8 @@ type volumeReport struct {
 // saturated window's EXECUTED steps/s in flows, never of its flowsPerSec, which is the admission rate and runs
 // ahead of what was served.
 func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric.ManualReader, dbs *dbStatsSampler,
-	pick func() *workload, k, targetSteps int, checkpoints []int, probe func(rate float64) (stepResult, string),
-	probeStepsPerFlow int) *volumeReport {
+	pick func() *workload, k, targetSteps int, checkpoints []int, checkpointsMB []float64,
+	probe func(rate float64) (stepResult, string), probeStepsPerFlow int, twoThirds bool) *volumeReport {
 
 	var (
 		stop       atomic.Bool
@@ -202,7 +209,7 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 		// into the next window and be counted as its throughput. The fill resumes on a drained database for
 		// the same reason.
 		drainRunning(ctx, engines[0])
-		if rate := sat.StepsPerSec / float64(max(1, probeStepsPerFlow)) * 2 / 3; rate > 0 {
+		if rate := sat.StepsPerSec / float64(max(1, probeStepsPerFlow)) * 2 / 3; twoThirds && rate > 0 {
 			twoThirds, why := probe(rate)
 			invalid(fmt.Sprintf("2/3 probe at %d step rows", cp.StepRows), why)
 			cp.TwoThirds = &twoThirds
@@ -262,6 +269,27 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 		return targetSteps
 	}
 	next := nextAfter(lastRows)
+	// storedMB is dwarf_steps' size on disk, or -1 when the reading failed. A size query is a catalog lookup,
+	// cheap enough for every tick, unlike the row count.
+	storedMB := func() float64 {
+		st := dbs.sample(ctx)
+		if !st.ok {
+			return -1
+		}
+		return float64(st.StepsBytes) / (1 << 20)
+	}
+	nextMBAfter := func(mb float64) float64 {
+		for _, c := range checkpointsMB {
+			if c > mb {
+				return c
+			}
+		}
+		return math.Inf(1)
+	}
+	nextMB := math.Inf(1)
+	if len(checkpointsMB) > 0 {
+		nextMB = nextMBAfter(storedMB())
+	}
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -270,7 +298,11 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 		case <-watch.stalled:
 			return abandon(nil)
 		}
-		if est := estimate(); est < 0 || (est < int64(next) && est < int64(targetSteps)) {
+		if len(checkpointsMB) > 0 {
+			if mb := storedMB(); mb < 0 || mb < nextMB {
+				continue // a failed reading is retried on the next tick
+			}
+		} else if est := estimate(); est < 0 || (est < int64(next) && est < int64(targetSteps)) {
 			continue // a failed collection is retried on the next tick
 		}
 		now := time.Now()
@@ -291,6 +323,10 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 		fmt.Printf("%-7.0f %11d %10d %12.0f %10.1f %10.1f %10.1f %9.1f %9.1f\n",
 			cp.TSec, cp.StepRows, cp.FlowRows, cp.FillStepsPerSec,
 			cp.HistoryMs, cp.ListFirstMs, cp.ListDeepMs, cp.StepsDiskMB, cp.FlowsDiskMB)
+		done := steps >= targetSteps
+		if len(checkpointsMB) > 0 {
+			done = cp.StepsDiskMB >= checkpointsMB[len(checkpointsMB)-1]
+		}
 		if probe != nil {
 			if !pause() {
 				return abandon(&cp)
@@ -298,7 +334,7 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 			if probeThroughput(&cp) {
 				return abandon(&cp)
 			}
-			if steps < targetSteps {
+			if !done {
 				fill()
 			}
 			// The probe windows add rows too (they count toward the fill, as the plan expects), but the fill
@@ -310,7 +346,11 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 
 		lastRows, lastT = steps, now
 		next = nextAfter(steps)
-		if steps >= targetSteps {
+		if len(checkpointsMB) > 0 {
+			// The probe's rows count toward the size, so the next checkpoint is the first past where it left it.
+			nextMB = nextMBAfter(storedMB())
+		}
+		if done {
 			break
 		}
 	}

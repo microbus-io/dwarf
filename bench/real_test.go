@@ -170,3 +170,17 @@ func TestQuantile(t *testing.T) {
 	assert.Equal(10.0, quantile(v, 0.99))
 	assert.Equal(1.0, quantile(v, 0))
 }
+
+// TestVolumeCheckpointsMB pins the size ladder's parse: ascending, distinct, positive.
+func TestVolumeCheckpointsMB(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	cp, err := volumeCheckpointsMB("32768,16384,16384")
+	assert.NoError(err)
+	assert.Equal([]float64{16384, 32768}, cp)
+	cp, err = volumeCheckpointsMB("")
+	assert.NoError(err)
+	assert.Nil(cp)
+	_, err = volumeCheckpointsMB("16384,0")
+	assert.Error(err)
+}

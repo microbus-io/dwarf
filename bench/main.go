@@ -124,6 +124,8 @@ func run() error {
 		replicaWorkers  = flag.String("replica-workers", "", "comma-separated per-replica worker counts overriding -workers (e.g. '0,4' = replica 1 awaits only)")
 		volume          = flag.Int("volume", 0, "volume mode: fill to this many dwarf_steps rows with NO deletion, probing the read paths at checkpoints, then measure Purge/reaper throughput (0 = disabled)")
 		volumeCheckpt   = flag.Int("volume-checkpoint", 0, "probe every this many step rows during -volume (0 = one fifth of the target)")
+		volumeMB        = flag.String("volume-checkpoints-mb", "", "volume mode by stored size, PostgreSQL only: comma-separated MB of dwarf_steps on disk to probe at, ascending; the fill stops at the last. Takes the place of -volume, which then only caps the rows")
+		volumeTwoThirds = flag.Bool("volume-probe-two-thirds", true, "-volume-probe only: follow each saturated probe with a window at 2/3 of its rate (doubles each checkpoint's rows and time)")
 		volumeCheckpts  = flag.String("volume-checkpoints", "", "-volume only: comma-separated step-row counts to probe at instead of every -volume-checkpoint rows, e.g. a doubling ladder; the -volume target is probed too")
 		printPool       = flag.Float64("print-pool", 0, "print the budget the engine derives for one PostgreSQL shard at this round-trip time in ms against -server-max-connections, and exit - what a driver script pins with -max-connections, so every arm runs the pool that ships")
 		serverMaxConns  = flag.Int("server-max-connections", 0, "-print-pool only: the server's max_connections the budget is clamped to half of (0 = unknown, no clamp)")
@@ -419,6 +421,9 @@ func run() error {
 		Valid:       true,
 	}
 
+	if *volumeMB != "" && *volume == 0 {
+		*volume = math.MaxInt32 // the sizes end the fill; the row target only caps it
+	}
 	if *realDur > 0 {
 		profile, err := parseArrivalProfile(*arrivalProfile, *arrivalBursts, *arrivalNoise, *arrivalSeed)
 		if err != nil {
@@ -474,10 +479,27 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		checkpointsMB, err := volumeCheckpointsMB(*volumeMB)
+		if err != nil {
+			return err
+		}
+		if len(checkpointsMB) > 0 {
+			if dbs == nil {
+				return fmt.Errorf("-volume-checkpoints-mb needs a PostgreSQL shard, whose size it reads")
+			}
+			checkpoints = nil
+			art.Config["volumeCheckpointMB"] = checkpointsMB
+		}
+		art.Config["volumeProbeTwoThirds"] = *volumeTwoThirds
 		art.Config["volumeTargetSteps"] = *volume
 		art.Config["volumeCheckpointRows"] = checkpoints
-		fmt.Printf("volume: filling to %d step rows at concurrency %d across %d replica(s), probing at %v rows\n",
-			*volume, ks[0], *replicas, checkpoints)
+		if len(checkpointsMB) > 0 {
+			fmt.Printf("volume: filling by stored size at concurrency %d across %d replica(s), probing at %v MB of dwarf_steps\n",
+				ks[0], *replicas, checkpointsMB)
+		} else {
+			fmt.Printf("volume: filling to %d step rows at concurrency %d across %d replica(s), probing at %v rows\n",
+				*volume, ks[0], *replicas, checkpoints)
+		}
 		var probe func(rate float64) (stepResult, string)
 		probeSPF := 0
 		if *volumeProbe > 0 {
@@ -496,7 +518,7 @@ func run() error {
 				return res, res.Invalidity
 			}
 		}
-		report := runVolume(ctx, engines, readers, dbs, pick, ks[0], *volume, checkpoints, probe, probeSPF)
+		report := runVolume(ctx, engines, readers, dbs, pick, ks[0], *volume, checkpoints, checkpointsMB, probe, probeSPF, *volumeTwoThirds)
 		art.Volume = report
 		if report.Errors != 0 {
 			art.Valid = false
@@ -634,6 +656,23 @@ func volumeCheckpoints(list string, every, target int) ([]int, error) {
 		out = append(out, n)
 	}
 	return out, nil
+}
+
+// volumeCheckpointsMB parses -volume-checkpoints-mb: ascending, distinct sizes in MB.
+func volumeCheckpointsMB(list string) ([]float64, error) {
+	if list == "" {
+		return nil, nil
+	}
+	var out []float64
+	for part := range strings.SplitSeq(list, ",") {
+		mb, err := strconv.ParseFloat(strings.TrimSpace(part), 64)
+		if err != nil || mb <= 0 {
+			return nil, fmt.Errorf("-volume-checkpoints-mb: %q is not a positive size in MB", part)
+		}
+		out = append(out, mb)
+	}
+	slices.Sort(out)
+	return slices.Compact(out), nil
 }
 
 // windowInvalidity says why one measurement window is not a measurement, or "" when it is. Every window -
