@@ -8,7 +8,9 @@ PNGs go to out-dir (default docs/). Three charts draw from tables in this file, 
 many runs, from Cloud Monitoring and from CPU profiles rather than from one artifact: database size (tiers), shards,
 and engine host size. The rest read run artifacts under bench/results/, which are kept on the machine that ran
 them: replicas (redo-one-20261009, redo-rs-20261009), minute-by-minute (redo-h3-20261017), headroom
-(redo-hr4-20261018) and failover (redo-fo-20261011). A chart whose artifacts are missing is skipped with a note.
+(redo-hr4-20261018), failover (redo-fo-20261011), and stored volume and row count (redo-vbytes2-20261020,
+redo-vrows-20261020). A chart whose artifacts
+are missing is skipped with a note.
 """
 import collections
 import glob
@@ -329,6 +331,81 @@ def chart_headroom():
     finish(fig, "benchmark-cloud-headroom.png")
 
 
+# ---- Stored volume: a `state` 64 KB fill probed by 0 B `linear` at a doubling size ladder (vbytes2, 2026-10-20) ----
+VB = os.path.join(RESULTS, "redo-vbytes2-20261020/out/v-bytes.json")
+
+
+def chart_volume():
+    if not os.path.exists(VB):
+        return skip("benchmark-cloud-volume.png", f"artifact {VB} missing")
+    cps = [c for c in json.load(open(VB))["volume"]["checkpoints"] if c.get("saturated")]
+    gb = [c["stepsDiskMB"] / 1024 for c in cps]
+    sat = [c["saturated"]["stepsPerSec"] for c in cps]
+    p99 = [c["saturated"]["p99Ms"] / 1000 for c in cps]
+    p50 = [c["saturated"]["p50Ms"] / 1000 for c in cps]
+    # Categorical positions: the ladder doubles, so even spacing reads each step as one doubling.
+    xs = list(range(len(cps)))
+    labels = ["empty" if g < 1 else f"{g:.0f} GB" for g in gb]
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(12, 4.4))
+    a1.plot(xs, sat, color=S1, lw=2, marker="o", ms=8, markeredgecolor=SURFACE, markeredgewidth=2)
+    a1.axhline(sat[0], color=INK2, lw=1.2, ls=(0, (4, 3)))
+    a1.text(xs[-1], sat[0] + 700, f"the empty database: {sat[0]:,.0f}", ha="right", va="bottom", fontsize=9.5, color=INK2)
+    a1.set_ylim(0, 24000)
+    a1.yaxis.set_major_formatter(kilo)
+    a1.set_ylabel("steps/s, saturated (6-min probe)")
+    a1.set_title("Throughput")
+    for vals, colour, name in ((p99, S1, "p99"), (p50, S2, "p50")):
+        a2.plot(xs, vals, color=colour, lw=2, marker="o", ms=8, markeredgecolor=SURFACE, markeredgewidth=2, label=name)
+        a2.text(xs[-1] + 0.15, vals[-1], name, va="center", fontsize=9.5, color=INK)
+    a2.set_xlim(-0.4, xs[-1] + 0.6)
+    a2.set_ylim(0, 3.5)
+    a2.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:.1f} s"))
+    a2.set_ylabel("flow latency, saturated")
+    a2.legend(frameon=False, fontsize=9.5, loc="upper left")
+    a2.set_title("Latency")
+    for ax in (a1, a2):
+        ax.set_xticks(xs)
+        ax.set_xticklabels(labels, fontsize=9.5)
+        ax.set_xlabel("data stored in dwarf_steps")
+    fig.suptitle("One 32 vCPU database as its stored data grows", x=0.01, ha="left", fontsize=13, fontweight="bold")
+    finish(fig, "benchmark-cloud-volume.png")
+
+
+# ---- Row count: one saturated linear 0 B window of 200 minutes, nothing deleted (vrows, 2026-10-20) ----
+VR = os.path.join(RESULTS, "redo-vrows-20261020/out/v-rows.json")
+
+
+def chart_volume_rows():
+    if not os.path.exists(VR):
+        return skip("benchmark-cloud-volume-rows.png", f"artifact {VR} missing")
+    r = json.load(open(VR))["results"][0]
+    ser = r["gauges"]["series"]
+    # Every executed step is a new row and nothing is deleted, so the rows stored at a point are the steps executed
+    # up to it, plus the warmup's. A minute's x is the rows at its end.
+    rows, last_t, per_min, mins = 2 * 60 * ser[0]["stepsPerSec"], 0.0, collections.defaultdict(list), []
+    for p in ser:
+        rows += p["stepsPerSec"] * (p["t"] - last_t)
+        last_t = p["t"]
+        per_min[int((p["t"] - 1e-9) // 60)].append((p["stepsPerSec"], rows))
+    for m in sorted(per_min):
+        pts = per_min[m]
+        mins.append((pts[-1][1] / 1e6, sum(s for s, _ in pts) / len(pts)))
+    first = sum(s for _, s in mins[:10]) / 10
+    fig, ax = plt.subplots(figsize=(9, 4.4))
+    ax.plot([x for x, _ in mins], [y for _, y in mins], color=S1, lw=1.6)
+    ax.axhline(first, color=INK2, lw=1.2, ls=(0, (4, 3)))
+    ax.text(mins[-1][0], first + 600, f"the first 10 minutes: {first:,.0f}", ha="right", va="bottom", fontsize=9.5,
+            color=INK2)
+    ax.set_ylim(0, 24000)
+    ax.set_xlim(0, mins[-1][0] * 1.02)
+    ax.yaxis.set_major_formatter(kilo)
+    ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:.0f}M"))
+    ax.set_xlabel("step rows stored, nothing deleted")
+    ax.set_ylabel("steps/s (1-min mean)")
+    ax.set_title("One 32 vCPU database, saturated for 200 minutes")
+    finish(fig, "benchmark-cloud-volume-rows.png")
+
+
 # ---- Failover: 2 shards x 8 replicas, 1, 2, 3 then 4 dispatchers killed at once ----
 FO = os.path.join(RESULTS, "redo-fo-20261011")
 FO_WINDOW_START = datetime(2026, 10, 11, 6, 47, 10).timestamp()  # the replicas' window start (local time)
@@ -404,4 +481,6 @@ chart_engine_hosts()
 chart_replicas()
 chart_minutes()
 chart_headroom()
+chart_volume()
+chart_volume_rows()
 chart_failover()

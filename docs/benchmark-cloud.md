@@ -2,8 +2,7 @@
 
 > **For operators** sizing a deployment. This page answers how much one database serves, what adding
 > shards and engine replicas does, and what the engine itself costs. Every number was measured, and the
-> configuration that produced it is stated beside it. The database volume section quotes measurements from
-> July 2026, on 8 vCPU databases, and says so.
+> configuration that produced it is stated beside it.
 
 ## The short version
 
@@ -29,6 +28,9 @@
   predicts. 10,000 concurrent 60-second tasks ran on under one engine core.
 - **Large state works up to the database column's limit.** 250 MB per step completed cleanly, at ~45 MB/s for
   one flow and ~135 MB/s for four.
+- **Stored data costs little.** Filled from empty to 522 GB, four times its memory, a 32 vCPU database ran within
+  2.5% of its empty rate at every size. 249 million step rows with nothing deleted cost ~11%, as vacuum fell
+  behind.
 
 **What it means for sizing**
 
@@ -41,7 +43,9 @@
 - **Prefer two small engines per shard to one large engine for several.** One 48 vCPU engine ran four
   32 vCPU shards at 66,250 steps/s on 18 of its cores, 81% of what eight 8 vCPU engines delivered on the same
   databases. On a large host, cap `GOMAXPROCS` to the cores it needs: garbage collection takes about twice the
-  share of CPU on 48 vCPU as on 2–16.
+  share of CPU on 48 vCPU as on 2–16. Raising `GOGC` above its default of 100 trades memory for less of it:
+  `GOGC=400` on a 48 vCPU host cut garbage collection from about a fifth of the engine's CPU to about a
+  twentieth.
 
 [Sizing a deployment](deployment.md#sizing-a-deployment) turns these into a recipe.
 
@@ -128,7 +132,7 @@ engine hosts. The cost per million steps assumes the deployment runs at its meas
 ### The write-ahead log, and why a shard is its own server
 
 On a saturated 32 vCPU shard, ~140 backends wait on the write-ahead log's write lock at once. A deeper look at
-a 16 vCPU instance (July 2026) showed that the ceiling is a stack of locks, so buying around one of them does
+a 16 vCPU instance showed that the ceiling is a stack of locks, so buying around one of them does
 not raise it far:
 
 | connections | steps/s | `LWLock/WALWrite` waiters | `LWLock/BufferContent` | on CPU | `IO/WALSync` |
@@ -153,7 +157,7 @@ it. Same total connections, measured directly:
 | 2 databases, **one** server | 6,916 | ×1.03 |
 | 2 databases, **two** servers | 13,995 | **×2.08** |
 
-*(Measured July 2026 on 16 vCPU instances; these are properties of PostgreSQL, not of the engine.)*
+*(Measured on 16 vCPU instances; these are properties of PostgreSQL, not of the engine.)*
 
 ### Shards: throughput adds up
 
@@ -261,10 +265,7 @@ The same rule scales down: two engines at half the database's vCPU (see
   the engine's garbage collection takes about twice the share of CPU it takes on 2 to 16 vCPU. Go sizes
   its runtime to every core it may use, and the collector's cost grows with that count, so on a large
   host set `GOMAXPROCS` to the cores the engine needs rather than the whole host (see
-  [Sizing a deployment](deployment.md#sizing-a-deployment)). Raising `GOGC` above its default of 100 makes the
-  collector run less often at the price of memory: in July 2026, `GOGC=400` on a 48 vCPU host cut
-  garbage collection from about a fifth of the engine's CPU to about a twentieth. It has not been
-  remeasured since.
+  [Sizing a deployment](deployment.md#sizing-a-deployment)).
 
 These figures are the engine's own cost, measured 2026-10-09/12. On the current engine, one 16 vCPU host
 driving a 32 vCPU database ran 4,100–4,300 steps/s per engine core (2026-10-17). Your tasks run on the same
@@ -544,25 +545,55 @@ The budget of 250 connections per shard is measured, not guessed.
 
 ### Database volume
 
-*Measured in July 2026 on 8 vCPU databases with 500 GB disks:*
+![One 32 vCPU database as its stored data grows](benchmark-cloud-volume.png)
 
-- **Growth costs a one-time settling of ~15–20%, then nothing more.** Filling to **100 million step rows**,
-  the time a step holds a connection rose 7.3 → ~8.7 ms by ~10 million rows and then stayed flat. Filling to
-  **405 GB** with 64 KB payloads, it rose 8.9 → ~10.7 ms by ~32 GB and stayed in a 10–11.3 ms band.
-- **Why it flattens.** Buffer-cache hit ratios stayed ≥ 99.2% even at 13 times the RAM, because active flows
-  touch recent rows; extra index levels made no measurable difference; autovacuum held dead rows between 4%
-  and 30% with no upward trend.
-- **For capacity planning, derate a fresh database's ceiling by ~20%** for a mature deployment.
-  Retention (`Purge`, `DeleteOnCompletion`) caps volume.
+**Stored data.** One 32 vCPU database with a 2 TB disk was filled with steps that each write 64 KB of
+incompressible data, with nothing deleted. At each doubling of the data stored in `dwarf_steps` the fill paused
+for a 6-minute saturated run of the 10-step `linear` workload with no payload:
 
-*(Measured July 2026.)*
+| Stored in `dwarf_steps` | Step rows | Saturated steps/s | vs empty | Flow p50 | Flow p99 |
+|---|---|---|---|---|---|
+| empty | 0 | 19,953 | — | 1.07 s | 1.9 s |
+| 18 GB | 8.6M | 19,622 | −1.7% | 1.01 s | 2.2 s |
+| 33 GB | 16.9M | 19,642 | −1.6% | 1.08 s | 2.2 s |
+| 67 GB | 25.5M | 19,452 | −2.5% | 1.14 s | 2.4 s |
+| 136 GB | 34.5M | 19,765 | −0.9% | 1.13 s | 2.5 s |
+| 265 GB | 44.6M | 19,629 | −1.6% | 0.75 s | 2.7 s |
+| 522 GB | 56.6M | 19,992 | +0.2% | 0.78 s | 2.6 s |
+
+- **Throughput held within 2.5% of the empty database at every size.** At the end the whole database held ~640 GB,
+  five times the instance's 128 GB of memory.
+- **The work touches recent rows, so memory is not outgrown.** The buffer-cache hit ratio fell only from 100% to
+  99.2%. Reading a recent flow's `History` took 12–35 ms, and the first and a deep page of `List` 1–9 ms, at every
+  size.
+- **The tail rose a little; the median did not.** The saturated p99 went from 1.9 s on the empty database to
+  2.5–2.7 s from 136 GB up, while the median, which a saturated run's 2,000-flow backlog sets, stayed at
+  0.75–1.14 s.
+
+**Row count.** On another 32 vCPU database, with a 1 TB disk, the 10-step `linear` workload with no payload ran
+saturated for 200 minutes with nothing deleted. It wrote 249 million step rows and 24.9 million flows, 391 GB in
+all:
+
+![One 32 vCPU database, saturated for 200 minutes](benchmark-cloud-volume-rows.png)
+
+- **Throughput drifted down ~11%.** The first 10 minutes ran 22,076 steps/s and the last 10 ran 19,666; the
+  200-minute mean was 20,534.
+- **Dips to 14,000–17,500 steps/s** lasted a few minutes each, from ~100 million rows on.
+- **Vacuum fell behind, not memory.** The cache hit ratio stayed above 98.5%. Every step row is updated as it
+  runs, and each update leaves a dead version for vacuum to clear. On the step table vacuum ran almost without a
+  break: one pass took 85 minutes, and the next, PostgreSQL's wraparound-prevention vacuum, which a database
+  committing ~70,000 transactions a second needs within the hour, was still running at the end. Dead versions
+  reached 467 million against 249 million live, and the engine's background maintenance queries slowed with them.
+- **This run deleted nothing.** Retention (`Purge`, `DeleteOnCompletion`) bounds the rows a database carries, and
+  the vacuum work with them.
 
 ### Method notes
 
-- **Use a fresh database for every configuration.** Accumulated volume settles a database by ~15–20%, so
-  comparing a fresh run with a long-lived one folds that settling into the result.
+- **Use a fresh database for every configuration**, so one run's rows and dead tuples are not part of the next
+  run's measurement.
 - **Size disk IOPS to the write rate.** Cloud SQL provisions ~30 IOPS per GB, so a 100 GB disk gives ~3,000
-  IOPS (~23 MB/s of random writes) and a write-heavy workload measures the disk. Every run here used 1 TB.
+  IOPS (~23 MB/s of random writes) and a write-heavy workload measures the disk. Every run here used 1 TB, except
+  the stored-data fill, which used 2 TB to hold it.
 - **Use incompressible payloads.** PostgreSQL compresses large values, and repetitive test payloads measured
   ~3 times higher than real ones.
 - **Record the round trip beside every throughput number**, and compare runs only within one instance:
@@ -571,22 +602,6 @@ The budget of 250 connections per shard is measured, not guessed.
   from ~16,000 to 24,100 steps/s. The slow ones did not look busier: at the same ~77% CPU, they spent ~1.5
   milliseconds of database CPU per step against ~1.1. Divide the database's CPU (cores busy × 1,000) by the
   steps/s a few minutes into a run; if it is well above the size's usual figure, use another instance.
-
-### Known gaps
-
-- **A capped `GOMAXPROCS` on a large host** is not measured: how much engine CPU it saves, and where the cap
-  starts to cost throughput.
-- **Only PostgreSQL on Google Cloud is measured here.** MySQL and SQL Server ceilings at the default budget
-  are not, nor other clouds or regions.
-- **Payload results are single runs**, and the byte ceiling across shards is not remeasured. In July 2026,
-  two shards scaled it ×1.77–1.82.
-- **Replicas, failover and the engine's host sizes** were measured on an earlier engine, which ran
-  ~15–20% below the current one per database. The ratios hold; the absolute figures are low.
-- **Priority bands under peaks past capacity** are not measured on a cloud database: the engine's ordering by band
-  is tested, the latency it keeps for a higher band through a peak is not.
-- **Replicas spread across zones**, with unequal distance to the database, are not measured.
-- **Sustained create-and-purge**: hours of retention churn and recovery after a long-task burst are not
-  measured.
 
 ### Reproducing
 
