@@ -31,8 +31,8 @@ import (
 // TestBacklogSQL_UsesTheDueIndex pins that the backlog aggregate reaches idx_dwarf_steps_due, whose partial
 // predicate carries a conjunct (step_id>0) besides the status: a query that does not state it cannot use the
 // index. With the selection index dropped and sequential scans priced out, the aggregate must read the due
-// index, on every dialect whose due index is partial. (It seeks the status and parked prefix; GROUP BY priority
-// leaves priority open, so not_before is not part of the seek.)
+// index, on every dialect whose due index is partial. (It seeks parked; GROUP BY priority leaves priority open,
+// so not_before is not part of the seek.)
 func TestBacklogSQL_UsesTheDueIndex(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)

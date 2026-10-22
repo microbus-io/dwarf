@@ -3021,8 +3021,8 @@ them by a scalar subquery on `dwarf_flows` per inserted row** - that is 3N PK lo
 
 `dwarf_steps.parked SMALLINT NOT NULL DEFAULT 0` takes a step out of the selection band without changing its
 `status`. The selection index `idx_dwarf_steps_selection` `(status, parked, priority, fairness_key, created_at,
-step_id)` and the due index `idx_dwarf_steps_due` `(status, parked, priority, not_before)` lead with the
-partitioning columns, so parked rows are physically excluded from every hot-path scan - no in-memory filter at
+step_id)` and the due index `idx_dwarf_steps_due` `(parked, priority, not_before)` (`status`-led on SQL Server and
+MySQL) lead with the partitioning columns, so parked rows are physically excluded from every hot-path scan - no in-memory filter at
 refill time. (The selection index's trailing `(created_at, step_id)` serves
 the refiller's per-key oldest-first ordering; see `internal/migrations/CLAUDE.md`.) The `parked` value labels *why*
 the step is held:

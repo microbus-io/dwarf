@@ -182,9 +182,6 @@ keeps every band a seek:
 - **The counts statement's cost scales with the configured maximum, not with the bands in use**: one index probe
   per empty band, at most the capacity per band with due work, and - on MySQL and SQLite, which keep no plan across
   executions - parsing and planning one branch per band on every tally. That is why the maximum is capped at 100.
-- **PostgreSQL 16 can read a band's rows off the selection index and filter `not_before`** where 18 seeks the due
-  index, so a band dense with sleepers costs its sleeping population in the tally there. That is the planner's
-  choice for any band statement.
 
 **Work at a priority beyond `MaxPriority` is an OVERFLOW band, never stranded.** `Create` refuses such a priority,
 but a step can still carry one: a flow from before the range existed, from a replica configured with a larger

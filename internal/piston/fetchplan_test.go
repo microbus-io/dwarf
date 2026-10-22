@@ -18,6 +18,7 @@ package piston
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -156,4 +157,116 @@ func assertBandScanSeeks(t *testing.T, r *rig, name, stmt string) {
 	}
 	seeks := regexp.MustCompile(`idx_dwarf_steps_due[^\n]*\n?[^\n]*not_before`)
 	assert.True(seeks.MatchString(plan.String()), "the %s statement must seek the due index on not_before:\n%s", name, plan.String())
+}
+
+// TestScanBand_AnEmptyBandIsAProbe pins that the counts statement costs an empty band one probe of the due index,
+// however deep another band is. On PostgreSQL the index's key must not lead with status: its partial predicate fixes
+// status, so PostgreSQL removes the query's status='pending' from the index conditions, and a leading column with
+// no condition cannot be seeked. Versions before 18, which have no skip scan, then walk the whole index for every
+// band; 18 skips over the single status value and hides the defect, so this fails only before 18 (measured on 16).
+func TestScanBand_AnEmptyBandIsAProbe(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	r := newRig(t)
+	if r.db.DriverName() != "pgx" {
+		t.Skip("buffer counts are PostgreSQL's")
+	}
+	ctx := context.Background()
+	r.insertStep(t, 1, 1, "k", 1)
+	for range 14 { // 16,384 due steps at band 1, the depth an empty band's probe must not read
+		_, err := r.db.ExecContext(ctx, "INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url,"+
+			" status, time_budget_ms, priority, fairness_key, fairness_weight, not_before, lease_expires, created_at)"+
+			" SELECT flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, priority, fairness_key,"+
+			" fairness_weight, not_before, lease_expires, created_at FROM dwarf_steps")
+		assert.NoError(err)
+	}
+	_, err := r.db.ExecContext(ctx, "ANALYZE dwarf_steps")
+	assert.NoError(err)
+
+	errRollback := errors.New("rollback")
+	var buffers int
+	err = r.db.Transact(ctx, func(tx *sequel.Tx) error {
+		// Only the due index is left, and sequential scans are priced out, so the plan reads it.
+		if _, err := tx.ExecContext(ctx, "DROP INDEX idx_dwarf_steps_selection"); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
+			return err
+		}
+		var out string
+		// Bands 2 and 3 and the overflow are empty; band 1 stops at its LIMIT of 8.
+		stmt := "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + bandCountsQuery("pgx", "", 3, 8)
+		if err := tx.QueryRowContext(ctx, stmt).Scan(&out); err != nil {
+			return err
+		}
+		var plan []struct {
+			Plan struct {
+				Hit  int `json:"Shared Hit Blocks"`
+				Read int `json:"Shared Read Blocks"`
+			} `json:"Plan"`
+		}
+		if err := json.Unmarshal([]byte(out), &plan); err != nil {
+			return err
+		}
+		buffers = plan[0].Plan.Hit + plan[0].Plan.Read
+		return errRollback
+	})
+	if !errors.Is(err, errRollback) {
+		assert.NoError(err)
+	}
+	// A probe is a few pages per branch; a walk of the index is well over a hundred per empty band.
+	assert.True(buffers > 0 && buffers < 60, "the counts statement read %d buffers", buffers)
+}
+
+// TestScanBand_SQLServerChoosesTheDueIndex pins that SQL Server's optimizer picks the due index for the counts
+// statement while the selection index exists too, as it does in production. Its key must keep status leading on
+// SQL Server: without the filter column in the index the optimizer costs the filtered index as needing a lookup,
+// prefers the selection index, and walks a band's sleepers. Unlike the plan tests above, nothing is dropped.
+func TestScanBand_SQLServerChoosesTheDueIndex(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	r := newRig(t)
+	if r.db.DriverName() != "mssql" {
+		t.Skip("the plan pinned here is SQL Server's")
+	}
+	ctx := context.Background()
+	r.insertStep(t, 1, 1, "k", 1)
+	r.insertStep(t, 2, 2, "k", 1)
+	_, err := r.db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), 3600000) WHERE priority=2")
+	assert.NoError(err)
+	for range 14 { // 16,384 steps at each of band 1 (due) and band 2 (asleep for an hour)
+		_, err := r.db.ExecContext(ctx, "INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url,"+
+			" status, time_budget_ms, priority, fairness_key, fairness_weight, not_before, lease_expires, created_at)"+
+			" SELECT flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, priority, fairness_key,"+
+			" fairness_weight, not_before, lease_expires, created_at FROM dwarf_steps")
+		assert.NoError(err)
+	}
+	_, err = r.db.ExecContext(ctx, "UPDATE STATISTICS dwarf_steps WITH FULLSCAN")
+	assert.NoError(err)
+
+	errRollback := errors.New("rollback")
+	var plan string
+	err = r.db.Transact(ctx, func(tx *sequel.Tx) error {
+		if _, err := tx.ExecContext(ctx, "SET SHOWPLAN_XML ON"); err != nil {
+			return err
+		}
+		err := tx.QueryRowContext(ctx, bandCountsQuery("mssql", "", 2, 8)).Scan(&plan)
+		if _, offErr := tx.ExecContext(ctx, "SET SHOWPLAN_XML OFF"); offErr != nil && err == nil {
+			err = offErr
+		}
+		if err != nil {
+			return err
+		}
+		return errRollback
+	})
+	if !errors.Is(err, errRollback) {
+		assert.NoError(err)
+	}
+	// The branches' index reads, in order: band 1, band 2, then the overflow. An empty overflow range is one cheap
+	// seek in either index, so only the bands are pinned; band 2 is the one a selection read would walk.
+	reads := regexp.MustCompile(`Index="\[(idx_dwarf_steps_\w+)\]"`).FindAllStringSubmatch(plan, -1)
+	if assert.True(len(reads) >= 2, "the plan names no index reads:\n%s", plan) {
+		assert.Equal("idx_dwarf_steps_due", reads[0][1], "band 1 must read the due index")
+		assert.Equal("idx_dwarf_steps_due", reads[1][1], "band 2, all asleep, must read the due index")
+	}
 }
