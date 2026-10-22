@@ -29,10 +29,11 @@ import (
 )
 
 // TestBacklogSQL_UsesTheDueIndex pins that the backlog aggregate reaches idx_dwarf_steps_due, whose partial
-// predicate carries a conjunct (step_id>0) besides the status: a query that does not state it cannot use the
+// predicate carries a conjunct (step_id<>0) besides the status: a query that does not state it cannot use the
 // index. With the selection index dropped and sequential scans priced out, the aggregate must read the due
 // index, on every dialect whose due index is partial. (It seeks parked; GROUP BY priority leaves priority open,
-// so not_before is not part of the seek.)
+// so not_before is not part of the seek.) The guard must be the inequality: on PostgreSQL a range (step_id>0)
+// still matches the index, so no plan shows it, but its planning walks the primary key's dead low end.
 func TestBacklogSQL_UsesTheDueIndex(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -93,4 +94,5 @@ func TestBacklogSQL_UsesTheDueIndex(t *testing.T) {
 		assert.NoError(err)
 	}
 	assert.True(strings.Contains(plan.String(), "idx_dwarf_steps_due"), "the backlog aggregate must read the due index:\n%s", plan.String())
+	assert.True(strings.Contains(backlogSQL, " AND step_id<>0 "), "the backlog aggregate must state the guard as an inequality:\n%s", backlogSQL)
 }

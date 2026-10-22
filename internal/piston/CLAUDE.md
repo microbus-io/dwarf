@@ -550,7 +550,7 @@ so the estimate stays at 100. Pinned by `TestFetchQuery_PostgresPlan`.
 
 ### The lateral fetch cannot use the due index (`dueIndexGuard`)
 
-`idx_dwarf_steps_due`'s partial predicate is `status = 'pending' AND step_id > 0`. The second conjunct is always
+`idx_dwarf_steps_due`'s partial predicate is `status = 'pending' AND step_id <> 0`. The second conjunct is always
 true (ids start at 1); it exists so that only a query stating it can use the index, because a database uses a
 partial index only for a query whose own predicate implies the index's. The band scan's counts and tally,
 the window-shaped fetches (`dueSteps`) and the engine's backlog aggregate state it. The pgx and mssql lateral
@@ -567,8 +567,12 @@ a later good-plan fetch took 69 s, the lease-recovery sweep 57 s. The plan
 could not be reproduced locally on PG 16 or 18 from any table contents, so a fix that steers the plan cannot be
 tested against the failure; this one can. The rules that keep it working:
 
-- **A new query that wants the due index states `step_id>0`.** Without it the query silently falls back to the
+- **A new query that wants the due index states `step_id<>0`.** Without it the query silently falls back to the
   selection index or a scan - correct results, the sleeper-heavy cost the due index exists to avoid.
+- **The guard is an inequality, not a range.** `step_id>0` lies below every value in the column's statistics, so
+  PostgreSQL's planner reads the primary key's lowest live entry to refine the estimate, on every plan of every
+  branch - through the dead entries retention leaves at that end. The measurement is at `dueIndexGuard`; pinned by
+  `TestScanBand_PlanningReadsNoIndexEnd`.
 - **Never state the guard in the lateral fetch.** That reopens the 1,224 s plan.
 - **Never add the guard to the selection index's predicate** to make the band scan cheaper: the fetch, which does
   not state it, would lose the selection index too.

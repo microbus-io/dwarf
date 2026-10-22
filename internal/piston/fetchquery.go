@@ -43,7 +43,16 @@ const dueNow = "status='" + workflow.StatusPending + "' AND parked=0" +
 // rig: one such fetch, a custom plan at 503 keys, ran 1,224 s. Steering the plan (a CASE around a column, a
 // plan-cache mode) only removes the cases it names; parked and priority lead both indexes, so wrapping them
 // blinds the selection index too.
-const dueIndexGuard = " AND step_id>0"
+//
+// The guard is an inequality, never a range: do not write it step_id>0. A range below every value in the
+// column's histogram makes the PostgreSQL planner read the primary key's lowest entry not yet removable to refine
+// its estimate, on every plan of every branch, and retention leaves that end of the index full of dead entries
+// the probe walks once they are removable but not yet vacuumed. Measured on PostgreSQL 16 and 18 with the oldest
+// 2.5M of 3M rows deleted and not yet vacuumed: 1,000-1,700 buffers and 5-50 ms of planning per branch, against
+// none for step_id<>0, whose estimate needs no probe. The counts statement has a branch per band, so on a
+// bloated table its planning outran its execution. (Reproducing it needs no older transaction open anywhere on
+// the cluster: one holds the entries not removable, and the probe stops at the first.)
+const dueIndexGuard = " AND step_id<>0"
 
 // dueSteps is dueNow for the queries that want the due index: the band scan's counts and tally, and
 // the window-shaped fetches, whose cost is the band's due rows however they are found.
@@ -183,8 +192,7 @@ func fetchQuery(driverName string, pairs []planner.Slot, perKey int, part string
 }
 
 // bandsIn is the pairs' distinct bands as an inlined IN-list of integer literals, for the ranking-shape fetches.
-// It gives the planner an equality on priority to seek the index by: a row-value IN alone does not, and SQLite
-// with ANALYZE statistics then planned the fetch as a rowid range over the whole table off the step_id>0 guard.
+// It gives the planner an equality on priority to seek the index by, which a row-value IN alone does not.
 func bandsIn(pairs []planner.Slot) string {
 	seen := map[int]bool{}
 	var list []string

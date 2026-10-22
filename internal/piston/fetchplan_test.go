@@ -218,6 +218,74 @@ func TestScanBand_AnEmptyBandIsAProbe(t *testing.T) {
 	assert.True(buffers > 0 && buffers < 60, "the counts statement read %d buffers", buffers)
 }
 
+// TestScanBand_PlanningReadsNoIndexEnd pins that planning the band scan's statements reads no index. A guard
+// written as a range (step_id>0) lies below every value in the column's histogram, so the planner reads the
+// primary key's lowest entry not yet removable to refine the estimate, on every branch of every plan: a few pages
+// per branch at the least, and every dead entry before it once those are removable but not yet vacuumed - which
+// is what retention leaves. How far the probe walks depends on the cluster-wide vacuum horizon (an open
+// transaction in any database stops it at the first dead entry), so the assertions rest only on what holds either
+// way: a warm plan without a range reads less than a page per branch, and a range reads at least two per branch
+// more. Each statement is planned twice on one connection, so the second plan's buffers are its own, not the
+// session's first catalog reads.
+func TestScanBand_PlanningReadsNoIndexEnd(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	r := newRig(t)
+	if r.db.DriverName() != "pgx" {
+		t.Skip("planning buffer counts are PostgreSQL's")
+	}
+	ctx := context.Background()
+	_, err := r.db.ExecContext(ctx, "ALTER TABLE dwarf_steps SET (autovacuum_enabled = off)")
+	assert.NoError(err)
+	r.insertStep(t, 1, 1, "k", 1)
+	for range 14 { // 16,384 steps
+		_, err := r.db.ExecContext(ctx, "INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url,"+
+			" status, time_budget_ms, priority, fairness_key, fairness_weight, not_before, lease_expires, created_at)"+
+			" SELECT flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, priority, fairness_key,"+
+			" fairness_weight, not_before, lease_expires, created_at FROM dwarf_steps")
+		assert.NoError(err)
+	}
+	_, err = r.db.ExecContext(ctx, "ANALYZE dwarf_steps")
+	assert.NoError(err)
+	// What retention leaves: the oldest steps gone, their index entries dead until a vacuum.
+	_, err = r.db.ExecContext(ctx, "DELETE FROM dwarf_steps WHERE step_id <= (SELECT MAX(step_id) - 1024 FROM dwarf_steps)")
+	assert.NoError(err)
+
+	planBuffers := func(stmt string) int {
+		var buffers int
+		err := r.db.Transact(ctx, func(tx *sequel.Tx) error {
+			for range 2 {
+				var out string
+				if err := tx.QueryRowContext(ctx, "EXPLAIN (BUFFERS, FORMAT JSON) "+stmt).Scan(&out); err != nil {
+					return err
+				}
+				var plan []struct {
+					Planning struct {
+						Hit  int `json:"Shared Hit Blocks"`
+						Read int `json:"Shared Read Blocks"`
+					} `json:"Planning"`
+				}
+				if err := json.Unmarshal([]byte(out), &plan); err != nil {
+					return err
+				}
+				buffers = plan[0].Planning.Hit + plan[0].Planning.Read
+			}
+			return nil
+		})
+		assert.NoError(err)
+		return buffers
+	}
+	const countsBranches, tallyBranches = 4, 3 // bands 1-3 and the overflow; bands 1-3
+	counts := bandCountsQuery("pgx", "", 3, 8)
+	tally := bandTallyQuery("", []int{1, 2, 3}, 3)
+	countsBuffers, tallyBuffers := planBuffers(counts), planBuffers(tally)
+	assert.True(countsBuffers < countsBranches, "planning the counts statement read %d buffers", countsBuffers)
+	assert.True(tallyBuffers < tallyBranches, "planning the tally statement read %d buffers", tallyBuffers)
+	// Control: the same statement with the guard written as a range reads the primary key on every branch.
+	ranged := planBuffers(strings.ReplaceAll(counts, dueIndexGuard, " AND step_id>0"))
+	assert.True(ranged >= countsBuffers+2*countsBranches, "control: a range guard read only %d buffers in planning", ranged)
+}
+
 // TestScanBand_SQLServerChoosesTheDueIndex pins that SQL Server's optimizer picks the due index for the counts
 // statement while the selection index exists too, as it does in production. Its key must keep status leading on
 // SQL Server: without the filter column in the index the optimizer costs the filtered index as needing a lookup,
