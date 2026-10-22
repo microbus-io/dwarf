@@ -126,6 +126,39 @@ func histSum(rm metricdata.ResourceMetrics, name string, attrs map[string]string
 	return 0, false
 }
 
+// histMax returns the largest single sample of a float64 Histogram metric, filtered to points carrying ALL
+// of the given attributes (nil = no filter).
+func histMax(rm metricdata.ResourceMetrics, name string, attrs map[string]string) (float64, bool) {
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			hist, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok {
+				return 0, false
+			}
+			var largest float64
+			matched := false
+		points:
+			for _, dp := range hist.DataPoints {
+				for k, want := range attrs {
+					v, ok := dp.Attributes.Value(attribute.Key(k))
+					if !ok || v.String() != want {
+						continue points
+					}
+				}
+				if v, ok := dp.Max.Value(); ok {
+					largest = max(largest, v)
+					matched = true
+				}
+			}
+			return largest, matched
+		}
+	}
+	return 0, false
+}
+
 // gaugeValue returns the single data point of an int64 observable gauge. It takes the LAST point rather
 // than summing, because an observable gauge reports a level, not an accumulation.
 func gaugeValue(rm metricdata.ResourceMetrics, name string) (int64, bool) {
@@ -1088,7 +1121,9 @@ func TestMetrics_OperationSeconds(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
-	const slow = 500 * time.Millisecond
+	// Each sample is held under the delay rather than their sum: under a loaded suite the database's own share of
+	// four creates has summed past 1s, but a leaked delay lands whole in one sample, far above any of them.
+	const slow = 2 * time.Second
 	mux := hosts.NewMux()
 	g := workflow.NewGraph("Timed")
 	g.SetURL("A", "opmetric.verify:428/a")
@@ -1176,10 +1211,12 @@ func TestMetrics_OperationSeconds(t *testing.T) {
 
 	// Run's create half paid the graph delay outside its turn, and its await parked for the task outside any
 	// turn, so neither shows up in the samples.
-	sum, _ := histSum(rm, "dwarf_operation_seconds", map[string]string{"op": "create"})
-	assert.True(sum < slow.Seconds(), "create's samples must exclude the host's graph load, got %fs", sum)
-	sum, _ = histSum(rm, "dwarf_operation_seconds", map[string]string{"op": "snapshot"})
-	assert.True(sum < slow.Seconds(), "snapshot's samples must exclude Await's park, got %fs", sum)
+	longest, ok := histMax(rm, "dwarf_operation_seconds", map[string]string{"op": "create"})
+	assert.True(ok)
+	assert.True(longest < slow.Seconds(), "create's samples must exclude the host's graph load, got %fs", longest)
+	longest, ok = histMax(rm, "dwarf_operation_seconds", map[string]string{"op": "snapshot"})
+	assert.True(ok)
+	assert.True(longest < slow.Seconds(), "snapshot's samples must exclude Await's park, got %fs", longest)
 }
 
 // TestOperation_HonorsDeadlineOnAFullShard pins that a caller's deadline bounds an operation queued at a shard
