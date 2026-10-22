@@ -33,9 +33,9 @@ import (
 // TestBandSpillflow pins that a better band which cannot fill the cache does not starve a worse one: the worse
 // band gets the capacity the better band leaves unused.
 //
-// The shape is a sparse but CONTINUOUS better band over a backlog at the default band. A free-running trickle cannot pin it: on a fast local database the better band's steps are claimed
-// so quickly that many scans find none of them due, and every such scan lets the backlog through. So the
-// refill loops are HELD at their checkpoints while each round of the better band is created, then stepped one
+// The shape is a sparse but CONTINUOUS better band over a backlog at a worse band. A free-running trickle
+// cannot pin it: on a fast local database the better band's steps are claimed so quickly that many scans find
+// none of them due, and every such scan lets the backlog through. So the refill loops are HELD at their checkpoints while each round of the better band is created, then stepped one
 // turn each - a scan, then a push planned from it: every scan the dispatcher makes sees better-band work due,
 // and never enough to fill the cache.
 //
@@ -139,6 +139,6 @@ func TestBandSpillflow(t *testing.T) {
 	mu.Lock()
 	got := ranLow
 	mu.Unlock()
-	assert.Equal(lowCount, got, "the default band starved behind a better band that never fills the cache")
-	assert.True(await(lows), "the default band starved behind a better band that never fills the cache")
+	assert.Equal(lowCount, got, "the worse band starved behind a better band that never fills the cache")
+	assert.True(await(lows), "the worse band starved behind a better band that never fills the cache")
 }

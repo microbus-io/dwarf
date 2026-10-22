@@ -29,7 +29,7 @@ part of the outcome — you need it for later `History`/`Resume`/`Fork`).
 
 ```go
 &workflow.FlowOptions{
-    Priority:    10,                             // lower runs first; 0 uses the engine default
+    Priority:    2,                              // 1..5, lower runs first; 0 takes the midpoint, 3
     FairnessKey: "tenant-42",                    // fair-scheduling bucket
     FairnessWeight: 4,                           // relative share within the key
     Baggage:     map[string]any{"actor": "ada"}, // opaque host context; read with BaggageFrom(ctx)

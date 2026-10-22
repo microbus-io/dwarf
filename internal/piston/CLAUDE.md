@@ -195,9 +195,17 @@ matches them exactly. **Do not drop the overflow to keep the statement to the ra
 then sit pending forever with no error anywhere. In normal operation it is empty and costs one index probe; its
 range on `priority` reads the overflow's sleepers, which only out-of-range work has.
 
-The statements' texts change with the bands a tally reaches and with the cache capacity they inline, so each
-distinct text is its own prepared statement. The set is bounded - the reached bands are a prefix of the range plus
-the overflow - so the plan caches settle. Pinned by `TestPiston_ScanBandTalliesBandsUntilCapacity`, `TestPiston_ScanBandSkipsASleepingBand`,
+The statements' texts change with the reach and with the cache capacity they inline, so each distinct text is its
+own prepared statement. **The tally covers every band up to the reach, empty ones included, and that is what bounds
+the set**: at most `MaxPriority+1` tally texts per capacity, so the plan caches settle. Tallying only the non-empty
+bands would make the text a function of which sparse bands happen to hold work - up to `2^(MaxPriority+1)` texts,
+each a fresh prepare on pgx and a fresh compile on SQL Server as bands come and go - to save an index probe per
+empty band.
+
+**The two statements are not one snapshot.** Steps can be claimed between them, so a band the counts saw filling
+the cache can tally short; that cycle's plan then reads the fill as fitting (`Reach` is `math.MaxInt`), leaves the
+shortfall idle, and lets the doorbell admit any band until the next tally. It needs a band hovering at the
+capacity and lasts one tally period, so it is accepted rather than carried into the planner. Pinned by `TestPiston_ScanBandTalliesBandsUntilCapacity`, `TestPiston_ScanBandSkipsASleepingBand`,
 `TestPiston_ScanBandServesTheOverflowLast`, `TestScanQueries_PlaceholdersMatchArgs` and, for both statements,
 `TestScanBand_CanSeekTheDueIndex`.
 
@@ -223,7 +231,8 @@ steal grace. **Do not count unpartitioned.** A band only a peer's class holds wo
 counts, tally nothing of its own, and idle it while its own class waits - and the peer is serving that band from
 its own plan. Cross-replica priority is therefore strict within the steal grace: a peer's better-band work that
 its owner cannot reach enters this replica's counts, ahead of its own worse bands, once it has waited out a grace.
-Pinned by `TestPiston_PartitionNarrowsTheBands`.
+Pinned by `TestPiston_ReachIsCountedInThisReplicasOwnClass`, which fills this replica's counts with a peer's
+band; `TestPiston_PartitionNarrowsTheBands` pins the tally side.
 
 The residue class is a **residency, not a lock**: the claim CAS remains the only thing that grants a step,
 so a stale `(replicas, ordinal)` pair costs a lost claim, never correctness. `step_id % R` is not sargable,
@@ -546,7 +555,7 @@ so the estimate stays at 100. Pinned by `TestFetchQuery_PostgresPlan`.
 
 `idx_dwarf_steps_due`'s partial predicate is `status = 'pending' AND step_id > 0`. The second conjunct is always
 true (ids start at 1); it exists so that only a query stating it can use the index, because a database uses a
-partial index only for a query whose own predicate implies the index's. The band scan, its `MIN(priority)` probe,
+partial index only for a query whose own predicate implies the index's. The band scan's counts and tally,
 the window-shaped fetches (`dueSteps`) and the engine's backlog aggregate state it. The pgx and mssql lateral
 fetch (`dueNow`) does not, so no plan - generic or custom, under any statistics - can put the fetch on the due
 index.

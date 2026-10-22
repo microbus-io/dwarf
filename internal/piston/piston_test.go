@@ -333,6 +333,25 @@ func TestPiston_FetchTrimsEachBandToItsOwnCap(t *testing.T) {
 	assert.Len(got[planner.Slot{Band: 9, Key: "b"}], 3)
 }
 
+// TestPiston_CountBandsReachesContiguously pins that the bands handed to the tally run from 1 to the reach with
+// none skipped, empty ones included, so the tally's statement text is a function of the reach alone - not of
+// which sparse bands happen to hold work, which would prepare (and on SQL Server compile) a new statement each
+// time one came or went.
+func TestPiston_CountBandsReachesContiguously(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	r.p.SetMaxPriority(10)
+
+	r.insertStep(t, 1, 1, "a", 1)
+	r.insertStep(t, 2, 4, "b", 1)
+
+	reached, err := r.p.countBands(ctx, "", nil, r.cache.Capacity())
+	assert.NoError(err)
+	assert.Equal([]int{1, 2, 3, 4}, reached, "bands 2 and 3 are empty and still tallied; nothing past band 4 is")
+}
+
 // TestPiston_ScanBandExcludesUnselectableSteps pins the due-ness predicates: a parked step is invisible
 // to selection by construction, so tallying one would advertise a backlog no worker can ever pick up.
 func TestPiston_ScanBandExcludesUnselectableSteps(t *testing.T) {

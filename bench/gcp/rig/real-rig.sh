@@ -9,9 +9,10 @@
 #   2  the day: three 90-minute periods (4.5 h) of night 8,000 / ramp / day 12,000 / ramp, bursts to 16,000 at
 #      minutes 10 (2 min), 40 (2 min) and 58 (5 min), +-10% seeded noise per minute, Poisson arrivals; the mix below,
 #      85% 2 ms / 12% 100 ms / 3% 5 s tasks, 200 fairness keys on a Zipf (s 1.1), flows across all five priority
-#      levels (3 / 12 / 55 / 20 / 10% at 1..5), completed flows purged after 30 min. A rolling restart in period 2's day phase: replica A at minute 47,
-#      replica B at minute 51, each by SIGTERM (the bench stops creating and its engine drains), restarted 10 s
-#      later on the same epoch. At the end every replica keeps its engines up until no flow is left running.
+#      levels (3 / 12 / 55 / 20 / 10% at 1..5), completed flows purged after 30 min. A rolling restart in period
+#      2's day phase: replica A at minute 47, replica B at minute 51, each by SIGTERM (the bench stops creating and
+#      its engine drains), restarted 10 s later on the same epoch. At the end every replica keeps its engines up
+#      until no flow is left running.
 #   3  the database's record: flows by status, steps not completed, peer rows left, pg_stat_statements, and
 #      Cloud SQL CPU over the day.
 # Each replica writes a per-interval series (out/day*-*.series.jsonl, every 10 s): commanded, offered and admitted

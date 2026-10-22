@@ -62,8 +62,8 @@ type partition struct {
 	// subtracts it from the discard count so the refiller's waste signal is not charged for candidates it
 	// never selected.
 	offered int
-	// limit is the worst band Offer admits into a non-empty partition - the plan's reach, set by the Refill
-	// that planned it, or the band of an Offer into an empty partition. FROZEN until the next Refill: see Offer.
+	// limit is the worst band Offer admits - the plan's reach, set by the Refill that planned the partition,
+	// and math.MaxInt before any Refill has. FROZEN until the next Refill, however the partition drains: see Offer.
 	limit int
 	// reserved is how many workers WaitForWork has routed here that have not yet reached their TryPopFrom -
 	// in the engine, the workers queued at this shard's gate. Routing ranks by what is left once they are
@@ -71,6 +71,12 @@ type partition struct {
 	// choosing the deepest. A Refill leaves it alone: those workers are still on their way and will pop
 	// from the new batch.
 	reserved int
+}
+
+// newPartition is a partition no Refill has planned yet: it admits a doorbell at any band, since no plan has said
+// what is waiting uncached.
+func newPartition() *partition {
+	return &partition{limit: math.MaxInt}
 }
 
 // unreserved is how many of this partition's candidates no routed worker is already on its way to take.
@@ -363,7 +369,7 @@ func (c *Cache) MoveReservation(from, to int) {
 	}
 	p := c.parts[to]
 	if p == nil {
-		p = &partition{}
+		p = newPartition()
 		c.parts[to] = p
 	}
 	c.moveReservationLocked(from, p)
@@ -417,7 +423,7 @@ func (c *Cache) Refill(shard int, batch []Job, limit int) (discarded int) {
 	}
 	p := c.parts[shard]
 	if p == nil {
-		p = &partition{}
+		p = newPartition()
 		c.parts[shard] = p
 	}
 	// Only the refiller's OWN un-popped selections are waste it can act on; candidates the doorbell
@@ -461,12 +467,13 @@ func (c *Cache) Refill(shard int, batch []Job, limit int) (discarded int) {
 //
 // Three rules, and each is load-bearing:
 //
-//   - An EMPTY partition admits REGARDLESS of the global bound. That bound is a sum over all partitions, so
-//     gating this on it lets one busy shard silence an idle one's doorbell - and a caller reads a decline as
-//     "this partition needs nothing", so the step then waits for a scan nobody asked for.
-//   - A band WORSE than the partition's limit is DECLINED. The limit is where the plan ran out of capacity,
-//     so work at that band is still waiting uncached, and admitting a worse band would run it first - a
-//     strict-priority inversion rather than the soft staleness the design accepts.
+//   - A band WORSE than the partition's limit is DECLINED, empty partition or not. The limit is where the plan
+//     ran out of capacity, so work at that band is still waiting uncached, and admitting a worse band would run
+//     it first - a strict-priority inversion rather than the soft staleness the design accepts. A partition
+//     DRAINING does not lift it: the plan that set it is still the latest word on what waits uncached.
+//   - Within the limit, an EMPTY partition admits REGARDLESS of the global bound. That bound is a sum over all
+//     partitions, so gating this on it lets one busy shard silence an idle one's doorbell - and a caller reads
+//     a decline as "this partition needs nothing", so the step then waits for a scan nobody asked for.
 //   - Otherwise admit while a slot has been freed (totalLen < size), in BAND ORDER: behind every candidate
 //     at its own band or better, so nothing the plan chose at those bands is reordered, and ahead of every
 //     worse one, so a worker never takes a worse band while it waits here.
@@ -480,19 +487,16 @@ func (c *Cache) Offer(j Job, priority int) (admitted bool) {
 	}
 	p := c.parts[j.Shard]
 	if p == nil {
-		p = &partition{}
+		p = newPartition()
 		c.parts[j.Shard] = p
 	}
 	j.Priority = priority
 	j.offered = true
 	switch {
-	case len(p.items) == 0:
-		// Nothing cached here, so nothing to be worse than - and this arrival sets the limit until the
-		// next Refill.
-		p.items = []Job{j}
-		p.limit = priority
 	case priority > p.limit:
 		return false // worse than the plan reached - see above
+	case len(p.items) == 0:
+		p.items = []Job{j}
 	case c.totalLen() < c.size:
 		at := sort.Search(len(p.items), func(i int) bool { return p.items[i].Priority > priority })
 		p.items = slices.Insert(p.items, at, j)

@@ -52,8 +52,8 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 		if opts.Priority < 0 {
 			return "", errors.New("priority must be >= 0", http.StatusBadRequest)
 		}
-		// The selection scan counts only bands 1..maxPriority, so a priority beyond it would leave the flow
-		// pending forever, invisible to selection.
+		// The range is the contract callers configure: a priority beyond it would run, but only as the selection
+		// scan's overflow, after every level in the range.
 		if opts.Priority > e.maxPriority {
 			return "", errors.New("priority must be at most the maximum priority %d", e.maxPriority, http.StatusBadRequest)
 		}

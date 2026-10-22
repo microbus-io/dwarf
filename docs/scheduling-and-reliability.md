@@ -21,15 +21,15 @@ and lower numbers run first. An unset priority (0) takes the midpoint of the ran
 maximum on every replica sharing a database. Work that carries a priority beyond a replica's range - a flow
 created before the range existed, or by a replica configured with a larger one - still runs there, after all of
 its own levels. Priority is **strict over capacity**: lower-priority work gets only the capacity higher-priority
-work leaves unused. Once the engine observes due priority-5 work, priority-10 work is selected only for the
-workers priority-5 work cannot keep busy, so a light stream of urgent flows never idles the engine while a
+work leaves unused. Once the engine observes due priority-1 work, priority-4 work is selected only for the
+workers priority-1 work cannot keep busy, so a light stream of urgent flows never idles the engine while a
 backlog waits below it.
 
 The guarantee is over *observed* work, and observation is not instantaneous — the scheduler works from
-periodic snapshots of what is due. When priority-5 work arrives, it takes a snapshot cycle or two before
-every part of a sharded cluster has observed it, and a small amount of priority-10 work may start in that
-window. With several replicas, each one serves its own share of the due work first, so priority-10 work
-can start on one replica while priority-5 work waits a few cycles for another, after which any replica takes
+periodic snapshots of what is due. When priority-1 work arrives, it takes a snapshot cycle or two before
+every part of a sharded cluster has observed it, and a small amount of priority-4 work may start in that
+window. With several replicas, each one serves its own share of the due work first, so priority-4 work
+can start on one replica while priority-1 work waits a few cycles for another, after which any replica takes
 it ahead of its own lower-priority work. These effects are bounded by the snapshot cycle, not by the size of
 the backlog: strict ordering is what you get between arrivals separated by more than a cycle or two, which is
 the normal case.

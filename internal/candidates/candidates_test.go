@@ -178,9 +178,9 @@ func TestCandidateCache_OfferTakesAVacatedSlot(t *testing.T) {
 // TestCandidateCache_OfferDeclinesAWorseBand pins the one priority test, which points the opposite way from
 // the obvious guess. A BETTER band is admitted - it is at least as important as everything the plan chose -
 // and goes AHEAD of the worse candidates, so a worker never takes a worse band while it waits here. A band
-// WORSE than the plan's reach is declined: work at the reach is still waiting uncached, and admitting a worse
-// band would run it first - a strict priority inversion rather than the soft cross-shard staleness the design
-// accepts.
+// WORSE than the plan's reach is declined, however far the partition has drained: work at the reach is still
+// waiting uncached, and admitting a worse band would run it first - a strict priority inversion rather than the
+// soft cross-shard staleness the design accepts.
 func TestCandidateCache_OfferDeclinesAWorseBand(t *testing.T) {
 	assert := testarossa.For(t)
 
@@ -204,13 +204,21 @@ func TestCandidateCache_OfferDeclinesAWorseBand(t *testing.T) {
 	// Drained, so it advertises nothing at all rather than a band it can no longer serve.
 	assert.Expect(c.parts[1].floor(false), math.MaxInt)
 
-	// An EMPTY partition has nothing cached to be worse than, so any band is admitted - which is what keeps
-	// a worse-band sequential chain running once the better band has drained. That arrival also sets the
-	// limit until the next Refill.
-	assert.True(c.Offer(Job{StepID: 96, Shard: 1}, 900))
-	assert.Expect(c.parts[1].floor(false), 900)
-	assert.True(c.Offer(Job{StepID: 95, Shard: 1}, 900))
-	assert.False(c.Offer(Job{StepID: 94, Shard: 1}, 901), "still worse than the limit")
+	// DRAINED, the partition keeps the limit its Refill set: the plan that set it is still the latest word on what
+	// waits uncached, so a band past it is declined even into an empty partition - otherwise a band-900 successor
+	// would run ahead of band-100 work the plan could not fit - while a band within it is admitted regardless of
+	// the global bound.
+	assert.False(c.Offer(Job{StepID: 96, Shard: 1}, 900), "past the limit, even empty")
+	assert.True(c.Offer(Job{StepID: 95, Shard: 1}, 100), "within it, empty")
+
+	// Nor does a better arrival narrow it: a band-1 step into an empty partition planned to MaxInt leaves band-900
+	// successors admissible.
+	c.Refill(2, nil, math.MaxInt)
+	assert.True(c.Offer(Job{StepID: 201, Shard: 2}, 1))
+	assert.True(c.Offer(Job{StepID: 202, Shard: 2}, 900), "the limit is the plan's, not the first arrival's")
+
+	// A partition no Refill has planned admits any band: nothing has said what waits uncached.
+	assert.True(c.Offer(Job{StepID: 301, Shard: 3}, 900))
 }
 
 // TestCandidateCache_OfferedCountSurvivesBandOrder pins the discard accounting where band order puts an offered

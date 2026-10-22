@@ -135,7 +135,7 @@ if err != nil {
 defer eng.Shutdown(ctx)
 
 flowKey, err := eng.Create(ctx, "checkout", initialState, &workflow.FlowOptions{
-    Priority:    10,
+    Priority:    2,
     FairnessKey: tenantID,
     Baggage:     actorClaims,
 })

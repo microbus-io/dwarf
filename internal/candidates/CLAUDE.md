@@ -159,10 +159,14 @@ partition.
 Jobs carry `Priority` - set by the plan for a batch, stamped by `Offer` for an admission - and it is what the
 order and the floor read; a popped candidate is self-describing (the worker logs it).
 
-**`limit` is the worst band `Offer` admits into a non-empty partition, and it is NOT the floor.** `Refill`
-sets it to the plan's reach - the band where the fill ran out of capacity, `math.MaxInt` when everything due
-fit - and an `Offer` into an empty partition sets it to the arrival's band. It is frozen until the next
-`Refill`, so the admission bar does not move as the partition drains.
+**`limit` is the worst band `Offer` admits, and it is NOT the floor.** `Refill` sets it to the plan's reach -
+the band where the fill ran out of capacity, `math.MaxInt` when everything due fit - and a partition no `Refill`
+has planned starts at `math.MaxInt`. It is frozen until the next `Refill`, so the admission bar does not move as
+the partition drains. **Do not let an arrival into an empty partition set it.** The partition draining says
+nothing about what the plan left uncached, and the arrival's band moves the bar in either direction: a worse one
+widens it, admitting worse successors ahead of the reach's uncached work every cycle, and a better one narrows
+it, declining the spilled band's successors until the next `Refill`. Pinned by
+`TestCandidateCache_OfferDeclinesAWorseBand`.
 
 **`Refill` is a wholesale replace of ONE partition, and that includes an EMPTY batch** — it empties the
 partition, exactly as draining the last item through `Pop` does. An empty batch is the scan's statement
@@ -181,8 +185,8 @@ does not trim: each refiller slices its batch from its own independent roll of t
 of slices can transiently overshoot and simply drains within a cycle. `Capacity()` is also what the
 refillers draw their global plan at.
 
-**`Offer` admits into a VACATED SLOT: empty partition always, otherwise while the cache is under its
-bound, and never reordering.** Its callers are step-origination sites - most often the successor of a step
+**Within the limit, `Offer` admits into a VACATED SLOT: empty partition always, otherwise while the cache is
+under its bound, and never reordering.** Its callers are step-origination sites - most often the successor of a step
 that just completed - so the question is whether this replica can run the step now or must wait a cycle for
 a plan to select it.
 
@@ -225,9 +229,9 @@ the plan chose. A band worse than the reach is declined: the plan ran out of cap
 there is still waiting uncached, and admitting a worse band would run it first — a strict priority inversion,
 not the soft cross-shard staleness the design accepts. **Do not bar at the partition's best band.** It is the
 starvation shape the spill exists to remove: with a sparse better band at the head, every successor of the
-worse band the plan spilled into would be declined and wait a cycle per hop. An **empty** partition has nothing
-cached to be worse than, so it admits any band — which is what keeps a worse-band sequential chain moving once
-the better band has drained.
+worse band the plan spilled into would be declined and wait a cycle per hop. An **empty** partition holds to the
+same bar: a worse-band sequential chain keeps moving at every hop the plan's reach covers, and past it waits for
+the next `Refill`, which raises the reach once the better band has drained.
 
 Which callers can even bring a better band is worth knowing, because it is not the successor case:
 priority is frozen at `Create` and inherited by every step of a flow, so a successor never arrives at a

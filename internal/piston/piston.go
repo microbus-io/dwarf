@@ -905,9 +905,14 @@ func (p *Piston) ScanBand(ctx context.Context, shard int) (band int, tallies []p
 	return band, tallies, nil
 }
 
-// countBands runs the counts statement and returns the bands with due work up to, and including, the one where
-// the counts reach capacity, best first. MaxPriority+1 stands for the overflow - every priority beyond the range,
-// counted together and served after every band in it.
+// countBands runs the counts statement and returns every band from 1 up to, and including, the one where the
+// counts reach capacity - or the worst band with due work, when they never do - best first, or none when nothing
+// is due. MaxPriority+1 stands for the overflow - every priority beyond the range, counted together and served
+// after every band in it.
+//
+// EVERY band up to the reach, empty ones included, so the tally's statement text depends on the reach alone: an
+// empty band costs its branch one index probe, while a text per subset of non-empty bands is a fresh prepare on
+// pgx and a fresh compile on SQL Server each time a sparse band comes or goes.
 func (p *Piston) countBands(ctx context.Context, part string, partArgs []any, capacity int) ([]int, error) {
 	maxBand := p.MaxPriority()
 	args := make([]any, 0, (maxBand+1)*len(partArgs))
@@ -936,13 +941,16 @@ func (p *Piston) countBands(ctx context.Context, part string, partArgs []any, ca
 	if err := rows.Err(); err != nil {
 		return nil, errors.Trace(err)
 	}
-	var reached []int
-	counted := 0
+	last, counted := 0, 0
 	for b := 1; b <= maxBand+1 && counted < capacity; b++ {
 		if counts[b] > 0 {
-			reached = append(reached, b)
+			last = b
 			counted += counts[b]
 		}
+	}
+	reached := make([]int, last)
+	for i := range reached {
+		reached[i] = i + 1
 	}
 	return reached, nil
 }

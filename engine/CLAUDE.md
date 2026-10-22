@@ -818,14 +818,15 @@ wedge sweep's `deliverSubgraphError`) where the priority is not in hand. If
 preempt, the cache stays untouched, and nothing is scheduled: the step's own `not_before` keeps it invisible
 to selection until it comes due, and visible to the next cycle after that.
 Otherwise the step is offered to its own shard's PARTITION (an `Offer` routes by `Job.Shard`), which admits
-it into a **vacated slot**: an empty partition always, otherwise while the cache is under its bound, in BAND
-ORDER - behind everything cached at its own band or better, so nothing the plan chose there is reordered, and
+it, within the plan's reach, into a **vacated slot**: an empty partition always, otherwise while the cache is
+under its bound, in BAND ORDER - behind everything cached at its own band or better, so nothing the plan chose there is reordered, and
 ahead of everything worse. The one priority test is against a band **worse than the plan's reach**, which is
 declined - work at the reach is still waiting uncached, and running a worse band first is a strict inversion.
 Admissions are counted as `dwarf_steps_offered` and subtracted from the refiller's discard signal, so waste
 stays attributed to whoever caused it.
 
-**An EMPTY partition ADMITS the arrival, and that is what makes a fixed-cadence refiller viable.** Do not
+**An EMPTY partition ADMITS the arrival within the reach, and that is what makes a fixed-cadence refiller
+viable.** Do not
 make it decline (request a scan, cache nothing) on the reasoning that an arbitrary-priority step must not jump
 an idle replica's queue. Declining is only affordable when something answers the decline within a fraction of
 a cycle, and nothing does: a sequential chain holds exactly one pending step at a time, so its partition is

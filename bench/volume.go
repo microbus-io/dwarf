@@ -299,8 +299,11 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 			return abandon(nil)
 		}
 		if len(checkpointsMB) > 0 {
+			// By size, with the row target as a cap: either one reached makes a checkpoint.
 			if mb := storedMB(); mb < 0 || mb < nextMB {
-				continue // a failed reading is retried on the next tick
+				if est := estimate(); est < 0 || est < int64(targetSteps) {
+					continue // a failed reading is retried on the next tick
+				}
 			}
 		} else if est := estimate(); est < 0 || (est < int64(next) && est < int64(targetSteps)) {
 			continue // a failed collection is retried on the next tick
@@ -325,7 +328,7 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 			cp.HistoryMs, cp.ListFirstMs, cp.ListDeepMs, cp.StepsDiskMB, cp.FlowsDiskMB)
 		done := steps >= targetSteps
 		if len(checkpointsMB) > 0 {
-			done = cp.StepsDiskMB >= checkpointsMB[len(checkpointsMB)-1]
+			done = done || cp.StepsDiskMB >= checkpointsMB[len(checkpointsMB)-1]
 		}
 		if probe != nil {
 			if !pause() {
@@ -347,8 +350,10 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 		lastRows, lastT = steps, now
 		next = nextAfter(steps)
 		if len(checkpointsMB) > 0 {
-			// The probe's rows count toward the size, so the next checkpoint is the first past where it left it.
-			nextMB = nextMBAfter(storedMB())
+			// The probe's rows count toward the size, so the next checkpoint is the first past where it left it - and
+			// never one at or below the checkpoint just taken, which a failed size reading (-1) would otherwise restart
+			// the ladder from.
+			nextMB = nextMBAfter(max(storedMB(), cp.StepsDiskMB, nextMB))
 		}
 		if done {
 			break
