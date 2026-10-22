@@ -19,6 +19,7 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"slices"
 	"strings"
 	"time"
 
@@ -437,41 +438,77 @@ func (e *Engine) terminateOrphanedSubtree(ctx context.Context, shard int, childF
 // backoff (`pending`), a parked subgraph caller (`running`+parked), a human (`interrupted`), and a live fan-out
 // sibling.
 //
-// Where running flows are a small fraction of the table, the scan probes each of them through
-// idx_dwarf_steps_flow_id and costs running flows x their steps: measured on PostgreSQL 18 at ~0.3s for 20,000
-// running flows of 11 steps over 5.2M step rows. Where most flows are running, the planner hashes all of
-// dwarf_steps instead (~4.7s at 2.2M rows, cold). The flow row cannot shortcut it: stopped_step_id is 0 while a
-// flow runs.
+// THE SCAN LISTS THE RUNNING FLOWS, THEN CHECKS THEM inListChunk AT A TIME, so it costs running flows x their
+// steps, not the size of dwarf_steps. Do not check every running flow in one statement: once the running flows
+// are a large share of the table, the planner hashes them and reads all of dwarf_steps once per NOT EXISTS.
+// Measured on PostgreSQL 16 at 240,000 running flows over 2.1M step rows: the one statement ran two parallel
+// sequential scans of dwarf_steps (1.5 s), the chunks probe the primary key and idx_dwarf_steps_flow_id per
+// flow (6-7 ms per chunk, ~3 s for the pass); against a 190 GB dwarf_steps the one statement averaged 48 s a
+// pass and peaked at 596 s. A chunk's outer side is at most inListChunk rows, so the per-flow probe wins whatever
+// the table holds, and the pass grows with running flows alone (~13 us each), which delays the next lease
+// recovery by as much. RUNNING INCLUDES THE SLEEPERS: a flow waiting out flow.Sleep or a retry backoff is running
+// (its step pending, not_before ahead), as are a task mid-execution and a parked subgraph caller, so every one is
+// listed and probed on every pass, to find its live step. The cost is O(running + sleeping), and a large sleeping
+// population pays it once a minute on every dispatcher of the shard. A chunk that fails is skipped rather than ending the pass, so one bad chunk cannot hold
+// back every repair on the shard. The flow row cannot shortcut it: stopped_step_id is 0 while a flow runs.
 func (e *Engine) recoverOrphanedFlows(ctx context.Context, db *sequel.DB, shard int, alarm bool) {
-	rows, err := db.QueryContext(ctx,
-		"SELECT f.flow_id, f.workflow_url FROM dwarf_flows f"+
-			" WHERE f.status='"+workflow.StatusRunning+"'"+
-			" AND NOT EXISTS (SELECT 1 FROM dwarf_steps s WHERE s.flow_id=f.flow_id AND s.status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"'))"+
-			// A flagged step whose lease is unexpired is still its worker's; the flow is left until it lapses.
-			" AND NOT EXISTS (SELECT 1 FROM dwarf_steps s3 WHERE s3.flow_id=f.flow_id AND s3.status='"+workflow.StatusCompleted+"' AND s3.advancing=1 AND s3.lease_expires > NOW_UTC())",
-	)
+	var running []int
+	rows, err := db.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE status='"+workflow.StatusRunning+"'")
 	if err != nil {
-		e.logSweepError(ctx, "Orphan sweep: querying running flows", "shard", shard, "error", err)
+		e.logSweepError(ctx, "Orphan sweep: listing running flows", "shard", shard, "error", err)
 		return
 	}
-	type orphan struct {
-		flowID      int
-		workflowURL string
-	}
-	var hits []orphan
 	for rows.Next() {
-		var o orphan
-		if err := rows.Scan(&o.flowID, &o.workflowURL); err != nil {
+		var flowID int
+		if err := rows.Scan(&flowID); err != nil {
 			rows.Close()
 			e.logSweepError(ctx, "Orphan sweep: scanning running flow", "shard", shard, "error", err)
 			return
 		}
-		hits = append(hits, o)
+		running = append(running, flowID)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		e.logSweepError(ctx, "Orphan sweep: iterating running flows", "shard", shard, "error", err)
 		return
+	}
+	// Ascending, so each chunk's primary-key probes stay in one region of the index.
+	slices.Sort(running)
+
+	type orphan struct {
+		flowID      int
+		workflowURL string
+	}
+	var hits []orphan
+	for chunk := range slices.Chunk(running, inListChunk) {
+		if ctx.Err() != nil {
+			return // abandoned by the drain; the next pass finds what is left
+		}
+		ph, ids := inList(chunk)
+		rows, err := db.QueryContext(ctx,
+			"SELECT f.flow_id, f.workflow_url FROM dwarf_flows f"+
+				" WHERE f.flow_id IN ("+ph+") AND f.status='"+workflow.StatusRunning+"'"+
+				" AND NOT EXISTS (SELECT 1 FROM dwarf_steps s WHERE s.flow_id=f.flow_id AND s.status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"'))"+
+				// A flagged step whose lease is unexpired is still its worker's; the flow is left until it lapses.
+				" AND NOT EXISTS (SELECT 1 FROM dwarf_steps s3 WHERE s3.flow_id=f.flow_id AND s3.status='"+workflow.StatusCompleted+"' AND s3.advancing=1 AND s3.lease_expires > NOW_UTC())",
+			ids...,
+		)
+		if err != nil {
+			e.logSweepError(ctx, "Orphan sweep: checking running flows", "shard", shard, "error", err)
+			continue
+		}
+		for rows.Next() {
+			var o orphan
+			if err := rows.Scan(&o.flowID, &o.workflowURL); err != nil {
+				e.logSweepError(ctx, "Orphan sweep: scanning stranded flow", "shard", shard, "error", err)
+				break
+			}
+			hits = append(hits, o)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			e.logSweepError(ctx, "Orphan sweep: iterating stranded flows", "shard", shard, "error", err)
+		}
 	}
 
 	for _, o := range hits {

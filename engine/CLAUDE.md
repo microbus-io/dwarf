@@ -3825,8 +3825,12 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
    per-step write moves `dwarf_flows.updated_at`, which stays at go-`running` time, so it tracks no per-step progress and is
    permanently satisfied for any flow running past 5m.
 
-   The scan probes every running flow through `idx_dwarf_steps_flow_id`, so it costs running flows x their steps,
-   not the size of `dwarf_steps`. The flow row offers no shortcut to the flagged step: `stopped_step_id` is 0 while a
+   The scan lists the running flows and checks them `inListChunk` at a time, so every chunk probes
+   `idx_dwarf_steps_flow_id` per flow and the pass costs running flows x their steps, not the size of `dwarf_steps`. A sleeping flow is a running
+   flow, so the sleepers are probed on every pass too: O(running + sleeping).
+   **Do not check every running flow in one statement:** once running flows are a large share of
+   the table, PostgreSQL hashes them and reads all of `dwarf_steps` once per `NOT EXISTS` (the measurements are at
+   `recoverOrphanedFlows`). The flow row offers no shortcut to the flagged step: `stopped_step_id` is 0 while a
    flow runs.
 4. **Parked-step wedge sweep** (`recoverWedgedSubgraphParks` + `recoverOrphanedSubgraphChildren`, `wedge.go`,
    called inline from `runRecoverySweep`) - defense in depth for the `parkedSubgraph` park, whose releasing

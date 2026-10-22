@@ -19,6 +19,7 @@ package engine
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +30,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -621,6 +623,107 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 		assert.Equal(keys.CorrelationID(shard, orphanFlowID), seen[0], "the flagged flow is the forged orphan, not the healthy blocked flow")
 		assert.NotEqual(orphanKey, seen[0], "the logged id carries no token")
 	}
+}
+
+// TestOrphanDetection_ChecksEveryChunk pins that the scan, which checks the running flows inListChunk at a time,
+// finds a stranded flow in every chunk - at both edges of a chunk boundary and in the short last chunk, whose
+// last id the IN list's padding repeats - and reports each once and none of the healthy flows around them. The flows are forged as rows: a stranded one is running with no
+// step at all, a healthy one holds an interrupted step, which nothing dispatches.
+func TestOrphanDetection_ChecksEveryChunk(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	capture := &orphanLogCapture{}
+	mux := hosts.NewMux()
+	solo := workflow.NewGraph("Solo")
+	solo.SetURL("A", "orphanchunk.verify:0/a")
+	solo.AddTransition("A", workflow.End)
+	mux.HandleGraph("orphanchunk.verify:0/solo", solo)
+	mux.HandleTask("orphanchunk.verify:0/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.NoError(e.SetLogger(slog.New(capture)))
+	assert.NoError(e.Startup(t.Context()))
+
+	// A completed flow is the template every forged row copies its required columns from.
+	key, err := e.Create(ctx, "orphanchunk.verify:0/solo", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	out, err := e.Await(ctx, key)
+	if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, out.Status) {
+		return
+	}
+	shard, templateID, _, err := keys.ParseFlowKey(key)
+	if !assert.NoError(err) {
+		return
+	}
+	db, err := e.db.Shard(shard)
+	if !assert.NoError(err) {
+		return
+	}
+	awaitStartupRecoverySweep(t, e)
+
+	// Two full chunks and a short third of three ids, padded to four by repeating the last.
+	const n = 2*inListChunk + 3
+	stranded := map[int]bool{0: true, inListChunk - 1: true, inListChunk: true, 2*inListChunk - 1: true, n - 1: true, 300: true}
+	var ids []int
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		for range n {
+			_, err := tx.ExecContext(ctx,
+				"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status)"+
+					" SELECT flow_token, workflow_url, workflow_name, graph, graph_hash, '"+workflow.StatusRunning+"' FROM dwarf_flows WHERE flow_id=?",
+				templateID)
+			if err != nil {
+				return err
+			}
+		}
+		rows, err := tx.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE flow_id>? ORDER BY flow_id", templateID)
+		if err != nil {
+			return err
+		}
+		ids = ids[:0]
+		for rows.Next() {
+			var id int
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			ids = append(ids, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for i, id := range ids {
+			if stranded[i] {
+				continue
+			}
+			_, err := tx.ExecContext(ctx,
+				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms) VALUES (?, 1, 'forged', 'A', 'orphanchunk.verify:0/a', '"+workflow.StatusInterrupted+"', 1000)",
+				id)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if !assert.NoError(err) || !assert.Len(ids, n) {
+		return
+	}
+
+	e.recoverOrphanedFlows(ctx, db, shard, true)
+	var want []string
+	for i := range stranded {
+		want = append(want, keys.CorrelationID(shard, ids[i]))
+	}
+	got := capture.seen()
+	slices.Sort(want)
+	slices.Sort(got)
+	assert.Equal(want, got, "the stranded flows of every chunk, and only those, are flagged")
 }
 
 // TestOrphanDetection_IgnoresCompletedSuccessorWindow pins that a healthy flow mid-transition, which
