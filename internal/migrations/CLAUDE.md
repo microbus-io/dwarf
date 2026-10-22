@@ -469,3 +469,16 @@ bound Go `time.Time`.** Two reasons, both load-bearing:
    RFC3339 and its age guard silently never matches; backdate with `DATE_ADD_MILLIS(NOW_UTC(), -ms)` - DB clock,
    native format. Never round-trip a timestamp out to Go and back into a `WHERE`/`SET`; recompute it in SQL.
 
+**Time columns hold UTC wall time without a zone: `TIMESTAMP` on PostgreSQL, never `TIMESTAMPTZ`.** It matches
+`DATETIME(3)` on MySQL, `DATETIME2(3)` on SQL Server and sequel's own `sequel_migrations` table. `NOW_UTC()` on
+PostgreSQL is `(NOW() AT TIME ZONE 'UTC')`, a `timestamp` without a zone. Assigned to a `TIMESTAMPTZ` column, or
+compared with one, it is converted through the SESSION's `TimeZone`:
+- On a UTC session nothing shows.
+- On any other session every stored instant is off by the zone's offset. Comparisons inside SQL stay
+  self-consistent; values read into Go do not.
+- Measured on a server in `America/Los_Angeles`: `CreatedAt` read 7 h in the future, and `flow.Retry`'s give-up
+  horizon, anchored at creation, never expired (`TestRetryHorizonflow` hung).
+
+Pinned by `TestTimestamps_SurviveANonUTCSession`, which fails on a `TIMESTAMPTZ` column. The Docker images run UTC
+and hide it, so a native or managed server in another zone is where it shows.
+

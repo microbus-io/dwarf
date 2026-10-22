@@ -86,9 +86,9 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     fairness_weight      DOUBLE PRECISION NOT NULL DEFAULT 1,
     time_budget_ms       INT              NOT NULL DEFAULT 0,
     engine_id            BIGINT           NOT NULL DEFAULT 0,
-    created_at           TIMESTAMPTZ      NOT NULL DEFAULT NOW_UTC(),
-    started_at           TIMESTAMPTZ      NOT NULL DEFAULT NOW_UTC(),
-    updated_at           TIMESTAMPTZ      NOT NULL DEFAULT NOW_UTC(),
+    created_at           TIMESTAMP        NOT NULL DEFAULT NOW_UTC(),
+    started_at           TIMESTAMP        NOT NULL DEFAULT NOW_UTC(),
+    updated_at           TIMESTAMP        NOT NULL DEFAULT NOW_UTC(),
     touch                SMALLINT         NOT NULL DEFAULT 0,
     PRIMARY KEY (flow_id)
 ) WITH (fillfactor = 80);

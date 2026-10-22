@@ -103,15 +103,15 @@ CREATE TABLE IF NOT EXISTS dwarf_steps (
     cancelling        SMALLINT         NOT NULL DEFAULT 0,
     advancing         SMALLINT         NOT NULL DEFAULT 0,
     advance_goto      VARCHAR(512)     NOT NULL DEFAULT '',
-    advance_sleep_until TIMESTAMPTZ    NOT NULL DEFAULT NOW_UTC(),
+    advance_sleep_until TIMESTAMP      NOT NULL DEFAULT NOW_UTC(),
     advance_on_error  SMALLINT         NOT NULL DEFAULT 0,
-    not_before        TIMESTAMPTZ      NOT NULL DEFAULT NOW_UTC(),
-    lease_expires     TIMESTAMPTZ      NOT NULL DEFAULT NOW_UTC(),
+    not_before        TIMESTAMP        NOT NULL DEFAULT NOW_UTC(),
+    lease_expires     TIMESTAMP        NOT NULL DEFAULT NOW_UTC(),
     lease_seq         BIGINT           NOT NULL DEFAULT 0,
     engine_id         BIGINT           NOT NULL DEFAULT 0,
-    created_at        TIMESTAMPTZ      NOT NULL DEFAULT NOW_UTC(),
-    started_at        TIMESTAMPTZ      NOT NULL DEFAULT NOW_UTC(),
-    updated_at        TIMESTAMPTZ      NOT NULL DEFAULT NOW_UTC(),
+    created_at        TIMESTAMP        NOT NULL DEFAULT NOW_UTC(),
+    started_at        TIMESTAMP        NOT NULL DEFAULT NOW_UTC(),
+    updated_at        TIMESTAMP        NOT NULL DEFAULT NOW_UTC(),
     PRIMARY KEY (step_id)
 );
 
