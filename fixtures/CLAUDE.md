@@ -147,8 +147,14 @@ A test's own ceiling - a `context.WithTimeout`, a `time.After` hang ceiling in a
 way. Left unscaled on purpose: a negative wait ("nothing happens within
 500ms"), a bounded optional wait whose expiry is an outcome, and a safety net inside a task body.
 
-**Give a `-race` run of `fixtures` an explicit `-timeout`, e.g. `-timeout 20m`.** On SQLite it measured 582s, near
-`go test`'s 10-minute default, so the default kills a healthy run instead of letting it fail cleanly.
+**Give a `-race` run of `fixtures` an explicit `-timeout`, e.g. `-timeout 20m`.** It runs for minutes on SQLite,
+and `go test`'s 10-minute default would kill a healthy but slow run instead of letting it fail cleanly.
+
+**A fixture holding thousands of due steps pins a 1s refill period under `-race`** (`enginetest.Race()` +
+`engineseams.SetRefillInterval`, as `TestWideflow` does). The race detector slows the pure-Go SQLite far more
+than Go code, so the band scan and fetch - O(due rows) each - outrun the derived ~67ms period and run back to
+back on the lock and core the workers need. Scope it to the fixture, never to every test-mode engine: the
+period is what `crossshardpriorityflow`'s reaction margin, the steal grace and `TestRefillInterval_*` pin.
 
 **A wall-clock bound may be a "did it hang" ceiling; it may never be the MECHANISM.** Against a real server
 under the parallel suite, every latency a test would bound - create, queue, claim, dispatch, an interrupt write

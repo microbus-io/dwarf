@@ -24,3 +24,6 @@ package enginetest
 // stretching them keeps every test parallel under -race without masking a real wedge (a wedged flow never
 // completes and still trips even the stretched ceiling).
 const testTimeoutScale = 5
+
+// raceEnabled reports a -race build; see Race.
+const raceEnabled = true

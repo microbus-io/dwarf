@@ -20,3 +20,6 @@ package enginetest
 
 // testTimeoutScale is 1 in normal (non-race) test runs; see the race-tagged variant for the rationale.
 const testTimeoutScale = 1
+
+// raceEnabled reports a -race build; see Race.
+const raceEnabled = false

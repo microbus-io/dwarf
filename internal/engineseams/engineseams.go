@@ -47,7 +47,8 @@ var DB func(eng any) *database.ShardSet
 var Seams func(eng any) *seamster.Seamster
 
 // SetRefillInterval pins every shard's refill cycle period to d on a running or configured engine, for a
-// benchmark sweep to hold the period at fixed values; d <= 0 restores the derived period.
+// benchmark sweep to hold the period at fixed values, or a fixture whose backlog makes the derived period too
+// short under -race; d <= 0 restores the derived period.
 var SetRefillInterval func(eng any, d time.Duration) error
 
 // ShardBudget is the connection budget the engine derives for one PostgreSQL shard with no MaxConnections

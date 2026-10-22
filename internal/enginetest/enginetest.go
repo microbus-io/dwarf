@@ -196,6 +196,10 @@ func AwaitAndAssertComplete(t *testing.T, e Engine, flowKey string) *workflow.Fl
 // genuine wedge never completes and trips even the stretched bound.
 func TimeoutScale() time.Duration { return testTimeoutScale }
 
+// Race reports whether the test binary was built with -race, for a fixture whose workload needs a different
+// engine configuration there rather than a longer ceiling.
+func Race() bool { return raceEnabled }
+
 // AwaitVisits blocks until the host passes the named checkpoint n FURTHER times, counted from the moment of
 // the call, and fails the test if it does not inside the timeout.
 //
