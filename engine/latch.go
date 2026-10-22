@@ -48,18 +48,21 @@ const (
 // signalStop the instant they commit, but a flow finished by a peer is visible only in the shared
 // database. Its cost scales with concurrent AWAITERS, not with step throughput - which is what lets the
 // cadence stay tight without tracking how fast the engine is running.
+//
+// It ends on ctx, which drainRuntime cancels, abandoning a sweep in flight: a sweep only reads, and a chunk it
+// could not finish settles nothing.
 func (e *Engine) latchLoop(ctx context.Context) {
 	ticker := time.NewTicker(e.latchSweepInterval)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-e.latchStop:
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		}
 		// The pass has already dealt with whatever failed - a shard that could not answer is simply asked
 		// again next tick - so the error is a log line, never a reason to stop sweeping.
-		if r := e.latches.Sweep(ctx); r.Err != nil {
+		if r := e.latches.Sweep(ctx); r.Err != nil && ctx.Err() == nil {
 			e.logger.ErrorContext(ctx, "Await latch sweep", "keys", r.Latched, "error", r.Err)
 		}
 	}

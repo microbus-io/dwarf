@@ -3426,13 +3426,13 @@ For operator-driven retention (both mark, do not delete inline):
   shortly after). Same `Query` shape as `List`; **rejects** `IncludeSubgraphs` with 400.
 
 **The reaper** (`reapDueFlows`, `reaper.go`) runs on its own dedicated goroutine + ~1min ticker (a single goroutine,
-inherently non-overlapping), drained via `reaperStop` in `drainRuntime`. On each shard this replica DISPATCHES (a
+inherently non-overlapping), stopped by `drainRuntime` cancelling its ctx. On each shard this replica DISPATCHES (a
 reader replica reaps nothing) it loops `reapBatch`-sized batches (4096, the same cap as `purgeCap`):
 `SELECT` due roots (`delete_after_ms>0 AND surgraph_flow_id=0 AND DATE_ADD_MILLIS(updated_at, delete_after_ms)<=NOW`),
 then a two-statement tree delete (`DELETE dwarf_steps WHERE flow_id IN (SELECT flow_id FROM dwarf_flows WHERE
 root_flow_id IN (ids))`, then `DELETE dwarf_flows WHERE root_flow_id IN (ids)`) - set-based, **no N+1**, removing each
-root plus its descendants. It checks `reaperStop` between batches so `Shutdown` aborts a long drain promptly (between
-whole-tree deletes, never mid-statement). No startup/shutdown/wake passes: deletion is latency-tolerant, so a flow
+root plus its descendants. The cancel abandons a pass mid-statement; the batch in flight is one transaction and rolls
+back whole (see "Shutdown ordering"). No startup/shutdown/wake passes: deletion is latency-tolerant, so a flow
 that came due while a replica was down is removed on the next tick (single-replica) or by a peer's tick.
 
 **The tree delete is unconditional on descendant status, deliberately** - do not 409 on a `running` subgraph
@@ -3525,11 +3525,11 @@ outcomes (no `onError` → flow `failed`; with `onError` → routed to the handl
 
 ### Worker context (the engine lifetime)
 
-The background loops and the pistons run on the engine's lifetime context (`e.lifetimeCtx`), created at Startup
-and cancelled only after `Shutdown` drains them all; the workers run on a non-cancelable copy of it. So by the
-time the lifetime ctx is cancelled, every DB operation has committed - in-flight writes are never interrupted by
-ctx cancellation. The only *cancellable*, time-bounded ctx on a worker is the `ExecuteTask` call: `executeTask`
-derives it from the worker's ctx with the step's `time_budget_ms`.
+The engine's lifetime context (`e.lifetimeCtx`) is created at Startup and cancelled only after `Shutdown` has
+drained everything. The workers run on a non-cancelable copy of it, so a step's writes are never interrupted by
+ctx cancellation. The backlog refresh, the recovery loop, the reaper, the latch detector, the pistons and the
+Sonars each run on a child of it that the drain cancels when it stops that goroutine (see "Shutdown ordering"). The only *cancellable*, time-bounded ctx on a
+worker is the `ExecuteTask` call: `executeTask` derives it from the worker's ctx with the step's `time_budget_ms`.
 
 **The crew runs on `context.WithoutCancel(e.lifetimeCtx)`, and it must stay non-cancelable.** Since no worker
 can observe the lifetime ctx's cancellation, cancelability buys the crew nothing - and it costs per QUERY: pgx
@@ -3558,9 +3558,9 @@ closeMetrics()                               // no collection may run against a 
 backlogCancel(); backlogWorker.Wait()        // nor the backlog refresh against a closing database
 cache.Close(); turnstiles.Close()            // BOTH: a worker parks on one or waits on the other
 crew.Drain(); withdrawal.Wait()
-close(recoveryStop); recoveryWorker.Wait()
-close(reaperStop);   reaperWorker.Wait()
-close(latchStop);    latchWorker.Wait()  // the detector stops before the board closes
+recoveryCancel();    recoveryWorker.Wait() // abandons a sweep statement in flight
+reaperCancel();      reaperWorker.Wait()   // ditto, a reap batch
+latchCancel();       latchWorker.Wait()    // the detector stops before the board closes
 pistonCancel();      pistonPool.Wait()   // ctx is the pistons' only stop signal
 sonarCancel();       sonarPool.Wait()    // ditto - and they must outlive the pistons
 leaveFleet()                             // only now is the last possible beat behind us
@@ -3574,9 +3574,34 @@ possible beat behind us, which is what makes `leaveFleet`'s delete final: a beat
 nothing can resurrect a row deleted after its loop stopped.
 
 Both run on **children** of the lifetime ctx (`pistonCancel`, `sonarCancel`), not the lifetime ctx itself:
-that one is deliberately left live until every goroutine has drained, so in-flight database work always
-commits, while `piston.Run` and `Sonar.Run` end on ctx alone. Neither needs a second signal - a cycle is a
-pure read and a beat is one idempotent UPDATE, so abandoning either mid-flight strands nothing.
+that one is deliberately left live until every goroutine has drained, while `piston.Run` and `Sonar.Run` end
+on ctx alone. Neither needs a second signal - a cycle is a pure read and a beat is one idempotent UPDATE, so
+abandoning either mid-flight strands nothing.
+
+**The recovery loop, the reaper and the latch detector each run on a child of their own, and the drain stops
+each by cancelling it**, so the drain stops waiting for the statement a pass has in flight. Do not stop them with a signal while
+they run on the lifetime ctx: the drain then waits out the slowest background statement (measured: a stop held
+9+ minutes by the orphan, lease-recovery and reap statements on a bloated `dwarf_steps`), and `Shutdown` is
+bounded by a sweep rather than by the steps in flight, as its godoc promises.
+- **Abandoning a pass strands nothing.** Each write a pass makes is one statement or one transaction - a lease
+  reset, an orphan rewind, a subtree terminate, a caller revive or re-arm, a reap batch - so an abandoned one
+  lands whole or not at all, and every repair is idempotent and redone by a peer or the next start. A commit the
+  cancel races can land and still report an error; the cost is a skipped signal, doorbell or counter on a
+  replica that is stopping. The detector only reads, and a chunk it could not finish settles nothing.
+- **The cancel stops the CLIENT, not necessarily the server.** On SQL Server and SQLite it interrupts the
+  statement. The PostgreSQL and MySQL drivers close the connection instead and send no cancel, so the server can
+  run an abandoned statement to its end: a long sweep read keeps its snapshot (and the vacuum horizon) for the
+  rest of its run, a lock-waiting reset can still be granted and commit, and a reap batch runs before it rolls
+  back. All of that is safe - each statement repeats its own guard - but it outlives `Shutdown`, so a rolling
+  restart can overlap it with the replacement's entry sweep.
+- **A cancelled pass is not a failure.** It stops at the next hit, and the failures the cancellation causes are not
+  logged (`logSweepError`, and the detector's own `ctx.Err()` check), so a routine stop raises no error lines.
+- **This is cancellation on stop, not a deadline**, so the decision against deadlines on background reads ("A long
+  read holds back vacuum") does not reach it: a deadline fails a pass the running engine depends on, whereas
+  nothing after the stop depends on it.
+
+Pinned by `TestShutdown_AbandonsASweepInFlight`: lease recovery held at a checkpoint between its two statements,
+and (on the row-locking dialects) its reset blocked on a row lock the test holds.
 
 `leaveFleet` runs on `context.Background()` rather than the lifetime ctx, which is cancelled moments later.
 

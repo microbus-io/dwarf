@@ -437,6 +437,8 @@ of any task longer than that.
 
 A worker that is mid-way through *persisting* a step's outcome — retrying a write after a database blip — does not
 delay the drain: it notices the shutdown, hands the step back for another replica to pick up immediately, and exits.
+Nor does the engine's background maintenance (crash recovery, removing deleted flows): a pass still running when
+the drain reaches it is abandoned, and another replica or the next start completes it.
 
 ## Crash recovery
 

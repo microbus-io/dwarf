@@ -31,14 +31,15 @@ import (
 // was down is removed on the next tick here, or by a peer replica's reaper. Only the shards this replica
 // dispatches are reaped: every shard always has a dispatcher, so each is still covered, and a replica that
 // only reads a shard would otherwise run the sweep through its two-connection reader pool once per replica.
-// Drained via reaperStop in drainRuntime; a pass in progress finishes its current tree-delete (checked
-// between batches) and exits.
+// It ends on ctx, which drainRuntime cancels, abandoning a pass in flight: each batch's tree delete is one
+// transaction, so an abandoned batch lands whole or not at all, and what is left is reaped by a peer or the next
+// start.
 func (e *Engine) reaperLoop(ctx context.Context) {
 	ticker := time.NewTicker(e.reapInterval)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-e.reaperStop:
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			e.reapDueFlows(ctx)
@@ -51,8 +52,8 @@ func (e *Engine) reaperLoop(ctx context.Context) {
 // reapBatch-sized chunks until the due set drains. The reapBatch cap keeps each `IN (...)` literal list
 // plannable (same rationale as purgeCap). Only roots ever carry delete_after_ms > 0 (DeleteOnCompletion is
 // root-only; Delete/Purge stamp roots), and the surgraph_flow_id=0 guard makes that explicit, so deleting by
-// root_flow_id removes each root plus its descendants. The between-batch reaperStop check lets Shutdown abort
-// a long drain promptly - between whole-tree deletes, never mid-statement.
+// root_flow_id removes each root plus its descendants. A cancelled ctx ends the pass, mid-statement included;
+// the batch in flight lands whole or not at all.
 //
 // The tree delete is unconditional on descendant status: it removes every flow with root_flow_id IN(ids)
 // regardless of whether a descendant is still non-terminal. deleteFlow's 409 guards only the root's own status
@@ -74,10 +75,8 @@ func (e *Engine) reapDueFlows(ctx context.Context) {
 		ctx, doneTurn := e.dbTurn(ctx, shard)
 		defer doneTurn()
 		for {
-			select {
-			case <-e.reaperStop:
+			if ctx.Err() != nil {
 				return nil
-			default:
 			}
 			rows, err := db.QueryContext(ctx,
 				// ORDER BY flow_id is not for ordering (the tree delete is set-based and order-agnostic) - it is
@@ -95,7 +94,7 @@ func (e *Engine) reapDueFlows(ctx context.Context) {
 				err = errors.New("injected fault: " + engineseams.FaultReapSelectErr)
 			}
 			if err != nil {
-				e.logger.ErrorContext(ctx, "Reaper: selecting due flows", "shard", shard, "error", err)
+				e.logSweepError(ctx, "Reaper: selecting due flows", "shard", shard, "error", err)
 				return nil
 			}
 			var rootIDs []int
@@ -103,14 +102,14 @@ func (e *Engine) reapDueFlows(ctx context.Context) {
 				var fid int
 				if err := rows.Scan(&fid); err != nil {
 					rows.Close()
-					e.logger.ErrorContext(ctx, "Reaper: scanning due flow id", "shard", shard, "error", err)
+					e.logSweepError(ctx, "Reaper: scanning due flow id", "shard", shard, "error", err)
 					return nil
 				}
 				rootIDs = append(rootIDs, fid)
 			}
 			rows.Close()
 			if err := rows.Err(); err != nil {
-				e.logger.ErrorContext(ctx, "Reaper: iterating due flows", "shard", shard, "error", err)
+				e.logSweepError(ctx, "Reaper: iterating due flows", "shard", shard, "error", err)
 				return nil
 			}
 			if len(rootIDs) == 0 {
@@ -141,7 +140,7 @@ func (e *Engine) reapDueFlows(ctx context.Context) {
 				return nil
 			})
 			if err != nil {
-				e.logger.ErrorContext(ctx, "Reaper: deleting due trees", "shard", shard, "error", err)
+				e.logSweepError(ctx, "Reaper: deleting due trees", "shard", shard, "error", err)
 				return nil
 			}
 			if len(rootIDs) < reapBatch {

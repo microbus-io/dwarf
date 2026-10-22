@@ -281,19 +281,21 @@ type Engine struct {
 	backlogWorker  sync.WaitGroup
 
 	// Recovery goroutine: runs the defense-in-depth parked-step wedge sweep on its own slow cadence,
-	// off the hot poll path.
-	recoveryStop   chan struct{}
+	// off the hot poll path. recoveryCancel stops it, abandoning a pass in flight.
+	recoveryCancel context.CancelFunc
 	recoveryWorker sync.WaitGroup
 
 	// Reaper goroutine: deletes flows whose delete_after_ms window has elapsed, on its own ~1min ticker.
-	reaperStop   chan struct{}
+	// reaperCancel stops it, abandoning a pass in flight.
+	reaperCancel context.CancelFunc
 	reaperWorker sync.WaitGroup
 
 	// Await latch: the board callers park on, and the detector goroutine that asks the shards which of
 	// those flows have settled. A stop this replica commits reaches the board instantly through
-	// signalStop; the detector is what makes a PEER's stop observable.
+	// signalStop; the detector is what makes a PEER's stop observable. latchCancel stops the detector,
+	// abandoning a sweep in flight.
 	latches     *latch.Board
-	latchStop   chan struct{}
+	latchCancel context.CancelFunc
 	latchWorker sync.WaitGroup
 
 	// Parsed-graph caches, in two layers. graphCache maps a flow to its entry so a dispatch reads no graph
@@ -879,7 +881,9 @@ func (e *Engine) Startup(ctx context.Context) error {
 // more than once.
 //
 // Shutdown does not consult ctx: it waits for the steps in flight to finish (each task is bounded by its
-// time budget), and a deadline or cancellation on ctx does not make it return sooner.
+// time budget), and a deadline or cancellation on ctx does not make it return sooner. Background maintenance
+// in progress - crash recovery, removing deleted flows - is abandoned rather than waited for, and is
+// completed by another replica or the next start.
 func (e *Engine) Shutdown(ctx context.Context) error {
 	if !e.started.CompareAndSwap(true, false) {
 		return nil
@@ -923,8 +927,12 @@ func (e *Engine) initRuntime() error {
 	e.backlogMu.Unlock()
 	e.backlogWanted.Store(false)
 	e.linkers = make(map[int]*staterefs.Linker)
-	e.recoveryStop = make(chan struct{})
-	e.reaperStop = make(chan struct{})
+	// The background loops' contexts exist before the engine reports itself started, as their stop signals must:
+	// a drain that found one missing would not stop its loop.
+	var recoveryCtx, reaperCtx, latchCtx context.Context
+	recoveryCtx, e.recoveryCancel = context.WithCancel(e.lifetimeCtx)
+	reaperCtx, e.reaperCancel = context.WithCancel(e.lifetimeCtx)
+	latchCtx, e.latchCancel = context.WithCancel(e.lifetimeCtx)
 	// The shared layer has no TTL: a graph's bytes never change, and expiring a hot graph would turn every
 	// one of its flows into a miss at once.
 	e.graphCache = lru.New[graphCacheKey, weak.Pointer[cachedGraph]](graphCacheFlows, 15*time.Minute)
@@ -942,7 +950,6 @@ func (e *Engine) initRuntime() error {
 			e.seams.Checkpoint(e.lifetimeCtx, engineseams.Join(engineseams.CheckpointAwaitParked, flowKey))
 		})
 	}
-	e.latchStop = make(chan struct{})
 	e.started.Store(true)
 
 	// The state cache exists before the gauge callback that reads it is registered.
@@ -1073,9 +1080,9 @@ func (e *Engine) initRuntime() error {
 	// Drain), and a cancelable parent makes every query of every worker register on its one mutex.
 	e.crew.Start(context.WithoutCancel(e.lifetimeCtx), resident)
 	// The pistons run on a CHILD of the lifetime ctx, because they must stop before it does: the lifetime
-	// ctx is deliberately left live until every other goroutine has drained (so in-flight database work
-	// always commits), while piston.Run ends on ctx alone and has no second signal - both of its queries
-	// are read-only, so abandoning one mid-flight strands nothing.
+	// ctx is deliberately left live until every other goroutine has drained, while piston.Run ends on ctx
+	// alone and has no second signal - both of its queries are read-only, so abandoning one mid-flight
+	// strands nothing.
 	pistonCtx, pistonCancel := context.WithCancel(e.lifetimeCtx)
 	e.pistonCancel = pistonCancel
 	for _, p := range e.pistons {
@@ -1083,14 +1090,19 @@ func (e *Engine) initRuntime() error {
 			p.Run(pistonCtx)
 		})
 	}
+	// The recovery loop, the reaper and the latch detector each run on their own child of the lifetime ctx, so
+	// the drain stops waiting for a statement in flight rather than waiting it out: on a bloated table one sweep
+	// statement runs for minutes, and the stop must stay bounded by the steps in flight. Abandoning one strands
+	// nothing: every write they make is a single statement or a single transaction, which lands whole or not at
+	// all, and every repair is idempotent and redone by a peer or the next start.
 	e.recoveryWorker.Go(func() {
-		e.recoveryLoop(e.lifetimeCtx)
+		e.recoveryLoop(recoveryCtx)
 	})
 	e.reaperWorker.Go(func() {
-		e.reaperLoop(e.lifetimeCtx)
+		e.reaperLoop(reaperCtx)
 	})
 	e.latchWorker.Go(func() {
-		e.latchLoop(e.lifetimeCtx)
+		e.latchLoop(latchCtx)
 	})
 	// On a child of the lifetime ctx, so the drain can abandon an aggregate in flight rather than wait out its
 	// timeout: the query is a pure read.
@@ -1195,17 +1207,19 @@ func (e *Engine) drainRuntime() {
 	e.crew.Drain()
 	close(drained)
 	withdrawal.Wait() // before anything below can close what a late withdrawal writes through
-	if e.recoveryStop != nil {
-		close(e.recoveryStop)
+	// Then the background loops, each by cancelling its ctx, so the drain stops waiting for a statement in flight:
+	// the stop stays bounded by the steps in flight, not by the slowest sweep.
+	if e.recoveryCancel != nil {
+		e.recoveryCancel()
 	}
 	e.recoveryWorker.Wait()
-	if e.reaperStop != nil {
-		close(e.reaperStop)
+	if e.reaperCancel != nil {
+		e.reaperCancel()
 	}
 	e.reaperWorker.Wait()
 	// The detector stops before the board closes, since Close does not interrupt a sweep in flight.
-	if e.latchStop != nil {
-		close(e.latchStop)
+	if e.latchCancel != nil {
+		e.latchCancel()
 	}
 	e.latchWorker.Wait()
 	// Then the pistons: their cycles are pure reads, so cancelling mid-flight strands nothing.
