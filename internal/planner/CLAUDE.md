@@ -1,7 +1,7 @@
 # Dwarf `internal/planner` — cross-shard band + fairness planning from per-shard tallies
 
-> Load when: changing `Tally`/`Clear`/`Plan`/`LastBand` semantics, the merge, the fairness lottery, or
-> the slice rule.
+> Load when: changing `Tally`/`Clear`/`Plan`/`Reach`/`LastBand` semantics, the merge, the band fill, the
+> fairness lottery, or the slice rule.
 > Coupled with: `engine/CLAUDE.md` §"Execution Model" — the *scan* that produces a `Tally`, the *fetch*
 > that resolves a `Plan` back to steps, the cadence the caller runs this at, and the candidate cache the
 > result lands in all live there. This package is only the decision in the middle.
@@ -9,9 +9,9 @@
 ## Why the package exists
 
 Two scheduling rules are **global** while the thing that enforces them is **per-shard**. Strict priority
-says no worse band is served while a better one has due work anywhere in the fleet; weighted fairness says
-the distinct keys at that band split the batch by weight. Neither is evaluable from one shard's view, so
-one shard cannot decide what it may dispatch on its own.
+says a worse band gets only the capacity every better band leaves unused; weighted fairness says the
+distinct keys at each band split that band's share of the batch by weight. Neither is evaluable from one
+shard's view, so one shard cannot decide what it may dispatch on its own.
 
 The tally map stands where a cross-shard **barrier** would. Do not reintroduce one: a barrier makes every
 shard wait for the slowest before anyone can plan — an order-statistics tax measured at 2.02x by 6 shards,
@@ -22,15 +22,38 @@ by the time it plans.
 
 ## The load-bearing properties
 
-**A `Tally` is O(distinct keys), never O(backlog), and that is the whole point.** One row per fairness key,
-carrying a `Count` — not one row per step. The producer is expected to cap `Count` at the planning
+**The fill is work-conserving: best band first, then spill.** `fill` runs the best band's lottery for the whole
+capacity, and the next band's for whatever is left, until capacity or the bands run out. **Do not draw a plan
+from the best band alone.** It reads as the strict rule and is not: a sparse but continuous better band - due at
+nearly every scan, never enough to fill the batch - leaves the rest of the batch idle every cycle while the worse
+band never moves, with the workers idle. Pinned by `TestPlanner_FillSpillsToWorseBands`, and end to end by
+`fixtures/bandspillflow_test.go`.
+
+**Fairness is decided WITHIN a band, never across.** A key with due work at two bands is two independent
+entries (the merge keys on `Slot{Band, Key}`); its share at one band says nothing about its share at the other,
+and a band's lottery never sees another band's keys.
+
+**`Plan.Reach` is the band where the fill ran out of capacity, and it needs no lottery.** `pick` draws
+`min(capacity left, the band's total count)` whatever it rolls, so `reach` is a cumulative sum. It is the cache's
+bar for admitting a doorbell (work at the reach is still waiting uncached, so a worse band admitted outside the
+plan would run first) and the dispatch-lag gauge's bar for what strict priority is holding back. `math.MaxInt`
+when everything due fit - then nothing is held back at all.
+
+**A `Tally` is O(distinct keys), never O(backlog), and that is the whole point.** One row per fairness key per
+band, carrying a `Count` — not one row per step. The producer is expected to cap `Count` at the planning
 capacity; the cap is lossless because no key is ever assigned more than the whole batch, so a count above
 capacity is indistinguishable from capacity. A caller that reports per-step defeats the entire three-phase
 shape and reintroduces the scan cost the design exists to avoid.
 
-**A key's weight comes from its OLDEST due step, never its newest.** Both locally (one shard's tally) and
-in the merge (`max` age wins across shards). Keying off the newest would let a tenant self-promote by
-queueing fresh high-weight work in front of its own backlog.
+**A producer may stop at the band where its own counts reach capacity, and that is lossless too.** The global
+cumulative count at any band is at least one shard's, so no fill reaches past the band where a single shard
+fills it. The piston's tally stops there, which is what keeps a deep band below the reach from being read.
+
+**A key's weight is the LOWEST among its due steps.** Both locally (one shard's tally) and in the merge (`min`
+across shards). Any reading that can RISE when a tenant queues more work - the newest step's weight, the
+highest, an average - lets a tenant self-promote by queueing heavier work; the lowest can only fall, and a
+light flow then lowers only its own key. The oldest step's weight would be safe too, but an aggregate cannot
+read it: it takes a lookup per key, and a fan-out puts thousands of a key's steps in one millisecond.
 
 **The lottery re-rolls per SLOT, not per key** (`pick`, Efraimidis-Spirakis over the keys). That is what
 makes a key's expected share proportional to its weight and **independent of backlog depth** — a tenant
@@ -57,7 +80,9 @@ failed. The piston records planning cost directly (`dwarf_refill_query_duration_
 get a real cardinality profile off that before touching the lottery.
 
 **`slice` must be deterministic, and this is the subtle one.** Each shard runs it independently and they
-must agree on who owns which slot *without exchanging a word*. Same plan + same snapshot must produce the
+must agree on who owns which slot *without exchanging a word*. (`fill` is deterministic in its LENGTH per band,
+which is all `reach` and the band boundaries depend on; the lottery's order within a band is the only random
+part, and every shard rolls its own.) Same plan + same snapshot must produce the
 same assignment on every caller, so nothing here may depend on map iteration order — hence shard-ordinal
 iteration, insertion-ordered keys out of `merge`, and largest-remainder rounding with an explicit tie-break.
 
@@ -70,11 +95,10 @@ steps oldest-first, and the head carries the globally-oldest.
 ## Shape decisions
 
 **A `Plan` carries no verdict, and does not say *why* it is empty.** Nothing due anywhere, nothing due
-here, above the global band, out-slotted at the band — all four take the same action, hold no candidates,
-so `len(Slots)==0` is the entire test. This needs no special case in the code either: a shard above the
-band, or with nothing due, holds none of the planned keys and falls out of `slice` with zero slots on its
-own. A caller that wants the distinction for a log line compares `Plan.GlobalBand` against the band it just
-tallied. Do not add an enum back for the three-way distinction — no caller can act on it differently.
+here, only work past the reach, out-slotted — all four take the same action, hold no candidates, so
+`len(Slots)==0` is the entire test. This needs no special case in the code either: a shard holding only work
+past the reach, or nothing due, holds none of the planned slots and falls out of `slice` with zero slots on
+its own. Do not add an enum back for the distinction — no caller can act on it differently.
 
 **`Plan.Tallied` is NOT that enum, and the difference is that a caller genuinely acts on it.** All four
 cases above are *positive statements made by a shard that reported*; `Tallied=false` says the shard is not
@@ -89,10 +113,10 @@ asking.
 **Participation is DECLARED, never inferred: there is no timeout, and no shard is ever dropped for being
 quiet.** Each cycle a shard either `Tally`s what it saw or `Clear`s because it could not look.
 
-The hazard being handled is real and severe. A shard whose scan fails still holds the best band in the
-map; that claim then makes every peer compute the same global minimum, find none of *its* keys there, and
-dispatch nothing — forever, waiting on a shard that will never report again. Strict priority turns into a
-suicide pact. So a failed shard genuinely must leave the map.
+The hazard being handled is real and severe. A shard whose scan fails still holds its last tally in the
+map; when that tally claims a better band deep enough to fill the batch, every peer finds no capacity left to
+spill into and dispatches nothing — forever, waiting on a shard that will never report again. Strict priority
+turns into a suicide pact. So a failed shard genuinely must leave the map.
 
 The question is only how the planner learns of it, and a clock is the wrong answer — not because the
 constants are hard to tune, but because it is **inference where a fact is available**. The reports come
@@ -100,13 +124,13 @@ from the caller's own per-shard workers over a shard set fixed at startup; the c
 failed, and a timeout throws that away and reconstructs it from silence. Worse, silence is genuinely
 ambiguous: a shard reporting slowly (a deep backlog can make a scan take seconds) is indistinguishable
 from a dead one by elapsed time alone, and guessing wrong in that direction is itself harmful — dropping
-a live shard erases its band from the global minimum, so peers dispatch worse work, and erases its keys
+a live shard erases its bands from the fill, so peers dispatch worse work, and erases its keys
 from the plan, so it wins no slots when it does return. Every timeout-shaped design spends its complexity
 budget on that ambiguity and still gets it wrong at the tails.
 
 `Clear` dissolves the ambiguity rather than managing it. A shard that could not look is excluded because
-it *told* the planner, and it would not have been dispatchable this cycle in any case — the global band
-means the best band with due work that someone can actually serve. A shard that is merely slow says
+it *told* the planner, and it would not have been dispatchable this cycle in any case — the fill means
+the due work that someone can actually serve. A shard that is merely slow says
 nothing, keeps its tally, and stays counted, which is correct: it is alive and its last report is still
 the best information anyone has. Detection is also immediate on the failing cycle instead of a cutoff
 later, and recovery costs exactly one cycle with no cooldown.
@@ -122,15 +146,15 @@ over the symptom costs the diagnosis.
 infinite and the key **permanently unpickable** — silent starvation, no error anywhere. Normalizing at the
 boundary means no producer can reintroduce it.
 
-**`LastBand` reports a negative band for "nothing to report."** An idle fleet's real value is
+**`LastBand` reports the last plan's best band, and a negative one for "nothing to report."** An idle fleet's real value is
 `math.MaxInt`, which reads as a genuine band — wrong in the direction of looking valid — so it is reported
 as a sentinel a caller can test for instead. Its readers are the piston's tests and this package's own;
 no metric reads it, so treat the key count as a test observable rather than a shipped signal.
 
-**`Band` is the production read of the served band, and it reads the TALLIES, not the last plan.** The piston's
-dispatch lag reads zero for a shard whose best band is worse than it, because strict priority, not dispatch,
-is holding that work. `LastBand` would be wrong there: it moves only when something plans, so a stalled supply
-loop would keep a band that has since drained and hide the very lag the gauge exists to show.
+**`Reach` is the production read of what is being served, and it reads the TALLIES, not the last plan.** The
+piston's dispatch lag leaves out every band worse than it, because strict priority, not dispatch, is holding
+that work. The last plan's reach would be wrong there: it moves only when something plans, so a stalled supply
+loop would keep a reach that has since moved and hide the very lag the gauge exists to show.
 
 ## Contracts a caller must hold
 
@@ -143,8 +167,8 @@ into one call: tests need to seed a *peer's* tally to fabricate a competing shar
 have to exist anyway and the fold would buy less than it costs in clarity.
 
 **Every cycle, every shard either `Tally`s or `Clear`s — staying quiet is not an option a caller has.**
-A shard with nothing due still reports (band `math.MaxInt`, no tallies), because "nothing due here" is
-information its peers need: it may raise the global band and release them. A shard whose scan failed
+A shard with nothing due still reports (no tallies), because "nothing due here" is information its peers
+need: it may free capacity for them to spill into. A shard whose scan failed
 clears. Silence means "my previous tally still stands," which is only true while the shard is genuinely
 mid-cycle — a caller that goes quiet on failure instead of clearing is what wedges the fleet.
 
@@ -167,15 +191,15 @@ are the caller's), and it does not own the candidate cache the result lands in.
 
 A shard learns of newly-arrived better-band work from its own scan; peers learn of it **only** through that
 shard's next `Tally`. So a new band becomes globally visible one caller-cycle later (this shard reports)
-plus up to one more (a peer plans on its own next cycle). Inside that window a peer computes a stale global
-minimum, finds itself holding it, and legitimately dispatches worse-band work. **Cross-shard priority is
+plus up to one more (a peer plans on its own next cycle). Inside that window a peer fills from a stale
+picture and legitimately dispatches worse-band work. **Cross-shard priority is
 therefore strict within one or two caller cycles, not instantly** — an inversion of observable dispatch
 *order*, not merely of latency. This is a known, accepted property; the engine-side statement of it, and
 the public one, are cross-referenced from `engine/CLAUDE.md`.
 
 If it is ever worth closing, the shape is an `Announce(shard, band)` that writes an arriving band straight
-into the map without waiting for a scan. Note the trap before trying: `merge` skips row-less entries when
-computing the minimum, so a bare band announcement is invisible and would need a synthetic entry — which
+into the map without waiting for a scan. Note the trap before trying: `merge` builds bands only from tally
+rows, so a bare band announcement is invisible and would need a synthetic entry — which
 then raises how long it lives, what happens when the real tally contradicts it, and whether a peer can be
 wedged by an announcement from a shard that then goes quiet. Not designed; recorded so the next attempt
 starts past the first wrong turn.

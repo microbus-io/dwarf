@@ -10,10 +10,10 @@ configuration, and running multiple replicas.
 ## Configuration
 
 All configuration is set with `Set*` methods, each returning an `error`. They split by whether the knob can
-change on a running engine: the **live** ones (`SetTimeBudget`,
-`SetDefaultPriority`) take effect immediately, even after `Startup`; the **construction-time-only** ones
-(`SetShard`, `SetWorkers`, `SetStateCacheSize`, and the dependency-injection setters below) are rejected if called
-after `Startup`.
+change on a running engine: the **live** one (`SetTimeBudget`) takes effect immediately, even after `Startup`; the
+**construction-time-only** ones
+(`SetShard`, `SetWorkers`, `SetStateCacheSize`, `SetMaxPriority`, and the dependency-injection setters below) are
+rejected if called after `Startup`.
 
 | Method | Default | Purpose |
 |---|---|---|
@@ -21,7 +21,7 @@ after `Startup`.
 | `SetWorkers(n)` | derived | Expert override: pins the worker *maximum* (deterministic tests, benchmarks, memory-bounded hosts). Normally unset — derived from the crash-recovery lease margin and the round-trip time measured at startup, so it holds for any task duration; the pool grows into it only on demand |
 | `SetStateCacheSize(bytes)` | 10% of memory | Memory the engine may use to keep large state fields for the steps that read them next, one cache for all its shards. The default is a tenth of `GOMEMLIMIT` when set; otherwise, on Linux, of the tightest of the process's cgroup memory limits and physical memory; otherwise 1 GiB |
 | `SetTimeBudget(d)` | 2m | Per-step `ExecuteTask` deadline |
-| `SetDefaultPriority(p)` | 100 | Priority for flows that don't set one |
+| `SetMaxPriority(n)` | 5 | How many priority levels flows may use, 1 (first) to `n`, at most 100; a flow that sets none gets the midpoint (3 by default). Use the same value on every replica sharing a database |
 
 **Set `GOMEMLIMIT` on engine hosts**, a little below the memory the process may use (about 90% of its
 container's limit). The engine sizes its state cache from it, and the Go runtime collects harder as the heap
@@ -390,9 +390,11 @@ band and keep their latency; best-effort flows absorb the peak and catch up in t
 to stay under `C` is then the urgent work alone. Three things to know:
 
 - A flow's priority is set when it is created and does not change.
-- Dispatch is not preemptive, but the only wait a high-priority step has is for a database connection to free
-  up, typically well under a second; a step whose task is still running holds no connection.
-- A higher band that never goes quiet keeps the lower bands from running at all.
+- Dispatch is not preemptive, but the worker pool grows on demand, so a high-priority step normally waits only
+  for a database connection to free up, typically well under a second; a step whose task is still running holds
+  no connection. Only when every worker the engine may run is busy does it wait for a task to finish.
+- Lower bands run on whatever capacity the higher ones leave unused; a higher band that keeps the engine at
+  capacity keeps the lower bands from running at all.
 
 ### Reference configurations
 

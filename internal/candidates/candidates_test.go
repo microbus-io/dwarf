@@ -46,9 +46,9 @@ func TestCandidateCache_RefillPopFIFOAndFloorReset(t *testing.T) {
 
 	var c Cache
 	c.Init(4)
-	c.Refill(1, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}, {StepID: 3, Shard: 1}}, 5)
+	c.Refill(1, at(5, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}, {StepID: 3, Shard: 1}}), 5)
 	assert.Expect(c.Len(), 3)
-	assert.Expect(c.parts[1].floor(), 5)
+	assert.Expect(c.parts[1].floor(false), 5)
 
 	j, ok := c.Pop()
 	assert.True(ok)
@@ -61,7 +61,7 @@ func TestCandidateCache_RefillPopFIFOAndFloorReset(t *testing.T) {
 	assert.Expect(j, Job{StepID: 3, Shard: 1, Priority: 5})
 
 	assert.Expect(c.Len(), 0)
-	assert.Expect(c.parts[1].floor(), math.MaxInt)
+	assert.Expect(c.parts[1].floor(false), math.MaxInt)
 }
 
 func TestCandidateCache_PopBlocksThenRefillWakes(t *testing.T) {
@@ -82,7 +82,7 @@ func TestCandidateCache_PopBlocksThenRefillWakes(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	c.Refill(2, []Job{{StepID: 99, Shard: 2}}, 7)
+	c.Refill(2, at(7, []Job{{StepID: 99, Shard: 2}}), 7)
 	select {
 	case j := <-done:
 		assert.Expect(j, Job{StepID: 99, Shard: 2, Priority: 7})
@@ -127,15 +127,15 @@ func TestCandidateCache_PopPicksLowestFloorPartition(t *testing.T) {
 
 	var c Cache
 	c.Init(8)
-	c.Refill(1, []Job{{StepID: 11, Shard: 1}, {StepID: 12, Shard: 1}}, 5)
-	c.Refill(2, []Job{{StepID: 21, Shard: 2}}, 3)
+	c.Refill(1, at(5, []Job{{StepID: 11, Shard: 1}, {StepID: 12, Shard: 1}}), 5)
+	c.Refill(2, at(3, []Job{{StepID: 21, Shard: 2}}), 3)
 
 	// Shard 2's floor (3) beats shard 1's (5) despite shard 1 being deeper.
 	j, _ := c.Pop()
 	assert.Expect(j, Job{StepID: 21, Shard: 2, Priority: 3})
 
 	// Equal floors: the deeper partition wins.
-	c.Refill(2, []Job{{StepID: 22, Shard: 2}}, 5)
+	c.Refill(2, at(5, []Job{{StepID: 22, Shard: 2}}), 5)
 	j, _ = c.Pop()
 	assert.Expect(j, Job{StepID: 11, Shard: 1, Priority: 5})
 
@@ -155,7 +155,7 @@ func TestCandidateCache_OfferTakesAVacatedSlot(t *testing.T) {
 
 	var c Cache
 	c.Init(2) // size 4
-	c.Refill(1, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}}, 100)
+	c.Refill(1, at(100, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}}), 100)
 
 	// Two slots free, so two successors are admitted - behind the planned batch, in arrival order.
 	assert.True(c.Offer(Job{StepID: 50, Shard: 1}, 100))
@@ -176,43 +176,104 @@ func TestCandidateCache_OfferTakesAVacatedSlot(t *testing.T) {
 }
 
 // TestCandidateCache_OfferDeclinesAWorseBand pins the one priority test, which points the opposite way from
-// the obvious guess. A BETTER band appends - it is at least as important as everything the partition was
-// planned to run, so it violates nothing and merely dispatches in arrival order. A WORSE one is declined:
-// admitting it would have a worker run band-900 work while band-100 work sits cached right there, a strict
-// priority inversion rather than the soft cross-shard staleness the design accepts. The head is left as the
-// plan set it either way, so the floor stays the band this partition was PLANNED at.
+// the obvious guess. A BETTER band is admitted - it is at least as important as everything the plan chose -
+// and goes AHEAD of the worse candidates, so a worker never takes a worse band while it waits here. A band
+// WORSE than the plan's reach is declined: work at the reach is still waiting uncached, and admitting a worse
+// band would run it first - a strict priority inversion rather than the soft cross-shard staleness the design
+// accepts.
 func TestCandidateCache_OfferDeclinesAWorseBand(t *testing.T) {
 	assert := testarossa.For(t)
 
 	var c Cache
 	c.Init(8) // size 16: room to spare, so the bound declines nothing here
-	c.Refill(1, []Job{{StepID: 1, Shard: 1}}, 100)
+	c.Refill(1, at(100, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}}), 100)
 
 	assert.True(c.Offer(Job{StepID: 98, Shard: 1}, 1), "a better band is admitted")
 	assert.True(c.Offer(Job{StepID: 99, Shard: 1}, 100), "so is the planned band")
 	assert.False(c.Offer(Job{StepID: 97, Shard: 1}, 900), "a worse band would invert strict priority")
 
-	// The floor is FROZEN at the band the partition was planned to serve, so it does not dip as the
-	// better-banded arrival reaches the head and rise again once it pops. A head-derived floor would
-	// advertise 100,1,100 while draining this partition - oscillating Pop's choice, and swinging Offer's
-	// own admission bar with it, so an offered band-100 step would be taken or refused on pop timing.
-	for _, id := range []int{1, 98, 99} {
-		assert.Expect(c.parts[1].floor(), 100)
+	// The better band goes to the front; the planned band keeps its order, the offered one behind it. The
+	// floor is the head's band, so it is exact as the partition drains.
+	for _, want := range []struct{ id, band int }{{98, 1}, {1, 100}, {2, 100}, {99, 100}} {
+		assert.Expect(c.parts[1].floor(false), want.band)
+		j, ok := c.Pop()
+		if assert.True(ok) {
+			assert.Expect(j.StepID, want.id)
+		}
+	}
+	// Drained, so it advertises nothing at all rather than a band it can no longer serve.
+	assert.Expect(c.parts[1].floor(false), math.MaxInt)
+
+	// An EMPTY partition has nothing cached to be worse than, so any band is admitted - which is what keeps
+	// a worse-band sequential chain running once the better band has drained. That arrival also sets the
+	// limit until the next Refill.
+	assert.True(c.Offer(Job{StepID: 96, Shard: 1}, 900))
+	assert.Expect(c.parts[1].floor(false), 900)
+	assert.True(c.Offer(Job{StepID: 95, Shard: 1}, 900))
+	assert.False(c.Offer(Job{StepID: 94, Shard: 1}, 901), "still worse than the limit")
+}
+
+// TestCandidateCache_OfferedCountSurvivesBandOrder pins the discard accounting where band order puts an offered
+// candidate ahead of planned ones: taking it, or trimming planned ones from behind it, must still charge the
+// refiller for exactly its own selections.
+func TestCandidateCache_OfferedCountSurvivesBandOrder(t *testing.T) {
+	assert := testarossa.For(t)
+
+	var c Cache
+	c.Init(4) // size 8
+	c.Refill(1, at(100, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}}), 100)
+	assert.True(c.Offer(Job{StepID: 50, Shard: 1}, 1)) // lands at the head
+	j, _ := c.Pop()
+	assert.Expect(j.StepID, 50)
+	assert.Equal(2, c.Refill(1, nil, 100), "both planned candidates were the refiller's own")
+
+	c.Refill(1, at(100, []Job{{StepID: 3, Shard: 1}, {StepID: 4, Shard: 1}, {StepID: 5, Shard: 1}}), 100)
+	assert.True(c.Offer(Job{StepID: 60, Shard: 1}, 1)) // the head again, three planned behind it
+	c.Resize(1)                                        // size 2: the trim cuts two planned ones from the tail
+	assert.Expect(c.Len(), 2)
+	assert.Equal(1, c.Refill(1, nil, 100), "the one planned survivor; the offered head is not the refiller's")
+}
+
+// TestCandidateCache_OfferAdmitsUpToTheReach pins that Offer's bar is the plan's reach, not the worst band the
+// partition happens to hold: a plan that reached band 50 but put only band-10 candidates on this shard still
+// admits a band-30 successor, which a bar at the partition's own worst band would decline.
+func TestCandidateCache_OfferAdmitsUpToTheReach(t *testing.T) {
+	assert := testarossa.For(t)
+
+	var c Cache
+	c.Init(8)
+	c.Refill(1, at(10, []Job{{StepID: 1, Shard: 1}}), 50)
+	assert.True(c.Offer(Job{StepID: 2, Shard: 1}, 30), "within the reach")
+	assert.True(c.Offer(Job{StepID: 3, Shard: 1}, 50), "at the reach")
+	assert.False(c.Offer(Job{StepID: 4, Shard: 1}, 51), "past it")
+}
+
+// TestCandidateCache_RefillSpansBands pins the multi-band partition a plan that spilled produces: it is kept
+// in band order whatever order it arrived in (stably, so the plan's order survives within a band), every take
+// is the best band it holds, and Offer admits up to the plan's reach - not merely the best band planned.
+func TestCandidateCache_RefillSpansBands(t *testing.T) {
+	assert := testarossa.For(t)
+
+	var c Cache
+	c.Init(8)
+	c.Refill(1, []Job{
+		{StepID: 1, Shard: 1, Priority: 100},
+		{StepID: 2, Shard: 1, Priority: 50},
+		{StepID: 3, Shard: 1, Priority: 100},
+		{StepID: 4, Shard: 1, Priority: 50},
+	}, 100)
+	c.Refill(2, at(70, []Job{{StepID: 21, Shard: 2}}), 70)
+
+	assert.True(c.Offer(Job{StepID: 5, Shard: 1}, 100), "the reach's band is admitted although the head is better")
+	assert.False(c.Offer(Job{StepID: 6, Shard: 1}, 101))
+
+	// Across partitions the head's band decides, so shard 2's 70 runs between shard 1's 50s and its 100s.
+	for _, id := range []int{2, 4, 21, 1, 3, 5} {
 		j, ok := c.Pop()
 		if assert.True(ok) {
 			assert.Expect(j.StepID, id)
 		}
 	}
-	// Drained, so it advertises nothing at all rather than a band it can no longer serve.
-	assert.Expect(c.parts[1].floor(), math.MaxInt)
-
-	// An EMPTY partition has nothing planned to be worse than, so any band is admitted - which is what
-	// keeps a worse-band sequential chain running once the better band has drained. That arrival also sets
-	// the band the partition serves from here on.
-	assert.True(c.Offer(Job{StepID: 96, Shard: 1}, 900))
-	assert.Expect(c.parts[1].floor(), 900)
-	assert.True(c.Offer(Job{StepID: 95, Shard: 1}, 900))
-	assert.False(c.Offer(Job{StepID: 94, Shard: 1}, 901), "still worse than the band now being served")
 }
 
 // TestCandidateCache_OfferedAreNotChargedAsRefillerWaste pins the discard accounting. Refill's return value
@@ -224,15 +285,15 @@ func TestCandidateCache_OfferedAreNotChargedAsRefillerWaste(t *testing.T) {
 
 	var c Cache
 	c.Init(4) // size 8
-	c.Refill(1, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}}, 100)
+	c.Refill(1, at(100, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}}), 100)
 	assert.True(c.Offer(Job{StepID: 50, Shard: 1}, 100))
 	assert.True(c.Offer(Job{StepID: 51, Shard: 1}, 100))
 
 	// Four resident, two of them offered: the replace discards all four but charges the refiller for two.
-	assert.Expect(c.Refill(1, []Job{{StepID: 9, Shard: 1}}, 100), 2)
+	assert.Expect(c.Refill(1, at(100, []Job{{StepID: 9, Shard: 1}}), 100), 2)
 
 	// Popping an offered candidate retires it from the count, so a later replace does not over-credit.
-	c.Refill(1, []Job{{StepID: 3, Shard: 1}}, 100)
+	c.Refill(1, at(100, []Job{{StepID: 3, Shard: 1}}), 100)
 	assert.True(c.Offer(Job{StepID: 52, Shard: 1}, 100))
 	j, _ := c.Pop() // the planned one
 	assert.Expect(j.StepID, 3)
@@ -249,7 +310,7 @@ func TestCandidateCache_ResizeTrimsOfferedFromTheCount(t *testing.T) {
 
 	var c Cache
 	c.Init(4) // size 8
-	c.Refill(1, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}}, 100)
+	c.Refill(1, at(100, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}}), 100)
 	for i := range 4 {
 		assert.True(c.Offer(Job{StepID: 50 + i, Shard: 1}, 100))
 	}
@@ -261,7 +322,7 @@ func TestCandidateCache_ResizeTrimsOfferedFromTheCount(t *testing.T) {
 
 	// A trim that keeps some offered candidates keeps exactly those in the count.
 	c.Resize(4) // size 8
-	c.Refill(1, []Job{{StepID: 3, Shard: 1}}, 100)
+	c.Refill(1, at(100, []Job{{StepID: 3, Shard: 1}}), 100)
 	for i := range 3 {
 		assert.True(c.Offer(Job{StepID: 60 + i, Shard: 1}, 100))
 	}
@@ -279,7 +340,7 @@ func TestCandidateCache_OfferIsPerPartition(t *testing.T) {
 
 	var c Cache
 	c.Init(1) // size 2: shard 1 alone fills the whole cache
-	c.Refill(1, []Job{{StepID: 11, Shard: 1}, {StepID: 12, Shard: 1}}, 2)
+	c.Refill(1, at(2, []Job{{StepID: 11, Shard: 1}, {StepID: 12, Shard: 1}}), 2)
 
 	assert.False(c.Offer(Job{StepID: 13, Shard: 1}, 1), "shard 1 is full: no slot has been vacated")
 	assert.True(c.Offer(Job{StepID: 21, Shard: 2}, 9), "shard 2's is, bound or no bound")
@@ -306,19 +367,19 @@ func TestCandidateCache_RefillEmptyIsWholesale(t *testing.T) {
 
 	var c Cache
 	c.Init(4)
-	c.Refill(1, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}}, 5)
-	c.Refill(2, []Job{{StepID: 21, Shard: 2}}, 5)
+	c.Refill(1, at(5, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}}), 5)
+	c.Refill(2, at(5, []Job{{StepID: 21, Shard: 2}}), 5)
 	assert.Expect(c.Len(), 3)
 
 	c.Refill(1, nil, math.MaxInt) // shard 1's scan came back empty: nothing is due there
 	assert.Expect(c.Len(), 1)
-	assert.Expect(c.parts[1].floor(), math.MaxInt)
-	assert.Expect(c.parts[2].floor(), 5)
+	assert.Expect(c.parts[1].floor(false), math.MaxInt)
+	assert.Expect(c.parts[2].floor(false), 5)
 
 	// An arrival on the emptied partition is admitted, because emptying it is exactly what re-opens it.
 	assert.True(c.Offer(Job{StepID: 9, Shard: 1}, 7))
 	assert.Expect(len(c.parts[1].items), 1)
-	assert.Expect(c.parts[1].floor(), 7)
+	assert.Expect(c.parts[1].floor(false), 7)
 }
 
 // TestCandidateCache_RefillReportsDiscarded pins the count Refill returns: the candidates the
@@ -332,15 +393,15 @@ func TestCandidateCache_RefillReportsDiscarded(t *testing.T) {
 	c.Init(4)
 
 	// Nothing cached yet: nothing to discard.
-	assert.Equal(0, c.Refill(1, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}, {StepID: 3, Shard: 1}}, 5))
+	assert.Equal(0, c.Refill(1, at(5, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}, {StepID: 3, Shard: 1}}), 5))
 
 	// One popped, so the replace discards the two that were left.
 	_, ok := c.Pop()
 	assert.True(ok)
-	assert.Equal(2, c.Refill(1, []Job{{StepID: 4, Shard: 1}}, 5))
+	assert.Equal(2, c.Refill(1, at(5, []Job{{StepID: 4, Shard: 1}}), 5))
 
 	// A replace of a DIFFERENT partition discards nothing of shard 1's.
-	assert.Equal(0, c.Refill(2, []Job{{StepID: 21, Shard: 2}}, 5))
+	assert.Equal(0, c.Refill(2, at(5, []Job{{StepID: 21, Shard: 2}}), 5))
 
 	// An empty batch is a real replace, so it discards too.
 	assert.Equal(1, c.Refill(1, nil, math.MaxInt))
@@ -348,9 +409,9 @@ func TestCandidateCache_RefillReportsDiscarded(t *testing.T) {
 
 	// A closed cache discards nothing - the replace is a no-op, so reporting a discard would
 	// double-count candidates the drain already abandoned.
-	c.Refill(1, []Job{{StepID: 5, Shard: 1}}, 5)
+	c.Refill(1, at(5, []Job{{StepID: 5, Shard: 1}}), 5)
 	c.Close()
-	assert.Equal(0, c.Refill(1, []Job{{StepID: 6, Shard: 1}}, 5))
+	assert.Equal(0, c.Refill(1, at(5, []Job{{StepID: 6, Shard: 1}}), 5))
 }
 
 func TestCandidateCache_RefillClosedIsNoop(t *testing.T) {
@@ -359,7 +420,7 @@ func TestCandidateCache_RefillClosedIsNoop(t *testing.T) {
 	var c Cache
 	c.Init(2)
 	c.Close()
-	c.Refill(1, []Job{{StepID: 1, Shard: 1}}, 1)
+	c.Refill(1, at(1, []Job{{StepID: 1, Shard: 1}}), 1)
 	assert.Expect(c.Len(), 0)
 }
 
@@ -384,12 +445,12 @@ func TestCandidateCache_ResizeTrimsAndRebounds(t *testing.T) {
 	for i := range batch1 {
 		batch1[i] = Job{StepID: 100 + i, Shard: 1}
 	}
-	c.Refill(1, batch1, 5)
+	c.Refill(1, at(5, batch1), 5)
 	batch2 := make([]Job, 4)
 	for i := range batch2 {
 		batch2[i] = Job{StepID: 200 + i, Shard: 2}
 	}
-	c.Refill(2, batch2, 5)
+	c.Refill(2, at(5, batch2), 5)
 	assert.Equal(16, c.Len())
 
 	// Shrink to a 2-worker replica: capacity 4, trimmed proportionally (12:4 -> 3:1). The trimmed
@@ -412,4 +473,12 @@ func TestCandidateCache_ResizeTrimsAndRebounds(t *testing.T) {
 	c.Close()
 	c.Resize(64)
 	assert.Equal(16, c.Capacity())
+}
+
+// at stamps a band onto a batch, which is what the plan does before a Refill.
+func at(band int, batch []Job) []Job {
+	for i := range batch {
+		batch[i].Priority = band
+	}
+	return batch
 }

@@ -27,10 +27,10 @@ import (
 
 // StepSource is the Supplier's database side - the one query it makes, read-only.
 type StepSource interface {
-	// FetchSteps returns up to perKey step ids for each of keys at the given band, OLDEST FIRST within
-	// each key. The ordering is the StepSource's responsibility - the cycle consumes the lists in order
-	// and does not re-sort them. A key may come back short or missing.
-	FetchSteps(ctx context.Context, shard, band int, keys []string, perKey int) (map[string][]int, error)
+	// FetchSteps returns, for each (band, key) pair of the fetches, up to that band's PerKeyCap step ids,
+	// OLDEST FIRST within each pair. The ordering is the StepSource's responsibility - the cycle consumes the
+	// lists in order and does not re-sort them. A pair may come back short or missing.
+	FetchSteps(ctx context.Context, shard int, fetches []planner.Fetch) (map[planner.Slot][]int, error)
 }
 
 // SupplyResult is one supply cycle's outcome, for logging and metrics. Nothing here is a control signal: a
@@ -44,9 +44,7 @@ type SupplyResult struct {
 	Pushing  time.Duration
 	Total    time.Duration
 
-	// GlobalBand is the best band any shard holds, or NoBand when the fleet has nothing due. A shard whose
-	// own band is worse than this was outranked and served nothing - the ordinary strict-priority case,
-	// not a fault.
+	// GlobalBand is the best band any shard holds, or NoBand when the fleet has nothing due.
 	GlobalBand int
 
 	// Selected is how many candidates were pushed, Discarded how many un-popped ones that replaced.
@@ -152,7 +150,7 @@ func (s *Supplier) run(ctx context.Context, r *SupplyResult) {
 
 	// Fetching.
 	t = time.Now()
-	steps, err := s.source.FetchSteps(ctx, s.shard, plan.GlobalBand, plan.Keys, plan.PerKeyCap)
+	steps, err := s.source.FetchSteps(ctx, s.shard, plan.Fetches)
 	r.Fetching = time.Since(t)
 	if err != nil {
 		r.Err = errors.New("fetching", err)
@@ -160,36 +158,36 @@ func (s *Supplier) run(ctx context.Context, r *SupplyResult) {
 	}
 
 	// Pushing.
-	s.push(r, assemble(plan.Slots, steps, s.shard), plan.GlobalBand)
+	s.push(r, assemble(plan.Slots, steps, s.shard), plan.Reach)
 }
 
 // push hands a batch to the cache and records what it cost.
-func (s *Supplier) push(r *SupplyResult, batch []candidates.Job, floor int) {
+func (s *Supplier) push(r *SupplyResult, batch []candidates.Job, limit int) {
 	t := time.Now()
-	r.Discarded = s.cache.Refill(s.shard, batch, floor)
+	r.Discarded = s.cache.Refill(s.shard, batch, limit)
 	r.Pushing = time.Since(t)
 	r.Selected = len(batch)
 	r.Reconciled = true
 }
 
-// assemble turns the plan's slots into candidates by walking them in order and taking each key's next
-// fetched step. Walking the slots rather than grouping by key is what preserves the plan's fairness
-// interleave in the batch the workers pop from.
+// assemble turns the plan's slots into candidates by walking them in order and taking each slot's next
+// fetched step, stamped with the slot's band. Walking the slots rather than grouping by key is what preserves
+// the plan's fairness interleave in the batch the workers pop from.
 //
 // A key that comes up short - its steps claimed or completed between the fetch and now - simply
 // contributes fewer candidates. The batch runs short for one cycle and the next one re-selects; there is
 // nothing to reconcile.
-func assemble(slots []string, steps map[string][]int, shard int) []candidates.Job {
+func assemble(slots []planner.Slot, steps map[planner.Slot][]int, shard int) []candidates.Job {
 	batch := make([]candidates.Job, 0, len(slots))
-	taken := make(map[string]int, len(steps))
-	for _, key := range slots {
-		list := steps[key]
-		i := taken[key]
+	taken := make(map[planner.Slot]int, len(steps))
+	for _, slot := range slots {
+		list := steps[slot]
+		i := taken[slot]
 		if i >= len(list) {
 			continue
 		}
-		batch = append(batch, candidates.Job{StepID: list[i], Shard: shard})
-		taken[key]++
+		batch = append(batch, candidates.Job{StepID: list[i], Shard: shard, Priority: slot.Band})
+		taken[slot]++
 	}
 	return batch
 }

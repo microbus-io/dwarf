@@ -394,7 +394,7 @@ allow on PostgreSQL 16.
 
 ⚠️ **GAUGES HAVE NO BARE-NAME TOTAL — sum across the attribute sets.** Counters emit `name` alongside
 `name|k=v`; gauges emit only the attributed series (`dwarf_turnstile_available|shard=1`,
-`dwarf_steps_pending|priority=100|shard=1`). Reading the bare name gets a confident **0.0**, which is what three of
+`dwarf_steps_pending|priority=3|shard=1`). Reading the bare name gets a confident **0.0**, which is what three of
 five gauge columns in this readout printed on a run executing hundreds of steps a second, and it would read
 identically on a rig. `gaugeTotal` is the helper; use it for anything new here.
 

@@ -65,7 +65,7 @@ instrument itself carries no suffix (`dwarf_steps_unwedged`).
 
 | Instrument | Read it as |
 |---|---|
-| `dwarf_steps_dispatch_lag_seconds` | The honest backlog signal: how long the most overdue step at the priority band being served has been due, per shard. Rising means dispatch is not keeping up. Aggregate with `max`, never `sum`. |
+| `dwarf_steps_dispatch_lag_seconds` | The honest backlog signal: how long the most overdue step in the priority bands being served has been due, per shard. Rising means dispatch is not keeping up. Aggregate with `max`, never `sum`. |
 | `dwarf_steps_oldest_pending_age_seconds` | The same question per priority band, every 30 seconds. A worse band rising while the lag stays flat is strict priority doing its job, not a fault. |
 | `dwarf_steps_recovered_total` | Steps recovered because their worker was lost to a crash or an overrun. A steady trickle means tasks are overrunning their budget. |
 | `dwarf_peer_replicas` | The fleet size each replica believes in. Should equal your actual replica count. |
@@ -90,14 +90,14 @@ max by (shard) (dwarf_steps_dispatch_lag_seconds) > 30            # for: 5m
 sum by (shard) (dwarf_shard_dispatching) == 0                       # for: 2m
 
 # A priority band that must not starve has waited too long. Add one per band you care about.
-max by (priority) (dwarf_steps_oldest_pending_age_seconds{priority="100"}) > 600   # for: 15m
+max by (priority) (dwarf_steps_oldest_pending_age_seconds{priority="3"}) > 600   # for: 15m
 ```
 
 - **The lag counts from when a step became runnable**, not from when it was created. A step that sleeps, backs
   off, waits on a subgraph or waits for a `Resume` does not raise it, so a long-running workflow does not need
   a looser threshold.
-- **It covers only the band being served**, and reads zero on a shard whose best band is waiting behind a
-  better one elsewhere. Strict priority holding back worse bands is by design. Alert on those bands through
+- **It covers only the bands being served**, leaving out a band that better-priority work leaves no capacity
+  for. Strict priority holding back worse bands is by design. Alert on those bands through
   `dwarf_steps_oldest_pending_age_seconds`, and only for bands that carry a deadline.
 - **Do not alert on the per-band series being absent.** `dwarf_steps_pending` and
   `dwarf_steps_oldest_pending_age_seconds` are refreshed every 30 seconds by one replica per shard. They are

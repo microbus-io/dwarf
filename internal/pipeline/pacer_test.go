@@ -50,21 +50,32 @@ func (f *fakeBandSource) ScanBand(ctx context.Context, shard int) (int, []planne
 
 type fakeStepSource struct {
 	steps    map[string][]int
+	byBand   map[int]map[string][]int // when set, steps per band, overriding steps
 	fetchErr error
 
-	fetches   int
-	gotBand   int
-	gotKeys   []string
-	gotPerKey int
+	fetches    int
+	gotFetches []planner.Fetch
 }
 
-func (f *fakeStepSource) FetchSteps(ctx context.Context, shard, band int, keys []string, perKey int) (map[string][]int, error) {
+func (f *fakeStepSource) FetchSteps(ctx context.Context, shard int, fetches []planner.Fetch) (map[planner.Slot][]int, error) {
 	f.fetches++
-	f.gotBand, f.gotKeys, f.gotPerKey = band, keys, perKey
+	f.gotFetches = fetches
 	if f.fetchErr != nil {
 		return nil, f.fetchErr
 	}
-	return f.steps, nil
+	out := map[planner.Slot][]int{}
+	for _, fe := range fetches {
+		src := f.steps
+		if f.byBand != nil {
+			src = f.byBand[fe.Band]
+		}
+		for _, k := range fe.Keys {
+			if ids, ok := src[k]; ok {
+				out[planner.Slot{Band: fe.Band, Key: k}] = ids
+			}
+		}
+	}
+	return out, nil
 }
 
 // rig is one shard's pair of loops over a faked database, a real planner and a real cache of capacity 8,
@@ -78,8 +89,14 @@ type rig struct {
 	planner  *planner.Planner
 }
 
+// newRig's band is the shard's best band, and is stamped onto every tally that names none.
 func newRig(t *testing.T, tallies []planner.Tally, band int) *rig {
 	t.Helper()
+	for i := range tallies {
+		if tallies[i].Band == 0 {
+			tallies[i].Band = band
+		}
+	}
 	bs := &fakeBandSource{band: band, tallies: tallies}
 	ss := &fakeStepSource{}
 	cache := &candidates.Cache{}

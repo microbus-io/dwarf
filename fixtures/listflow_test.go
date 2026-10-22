@@ -134,16 +134,16 @@ func TestListflow(t *testing.T) {
 	t.Run("filter_by_fairness_key_and_priority", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		// Two flows in fairness key "tenantA" at priority 7, one in "tenantB" at priority 9.
+		// Two flows in fairness key "tenantA" at priority 2, one in "tenantB" at priority 4.
 		for range 2 {
-			fk, err := eng.Create(ctx, "listflow.verify:428/list", nil, &workflow.FlowOptions{FairnessKey: "tenantA", Priority: 7})
+			fk, err := eng.Create(ctx, "listflow.verify:428/list", nil, &workflow.FlowOptions{FairnessKey: "tenantA", Priority: 2})
 			if !assert.NoError(err) {
 				return
 			}
 			_, err = eng.Await(ctx, fk)
 			assert.NoError(err)
 		}
-		fkB, err := eng.Create(ctx, "listflow.verify:428/list", nil, &workflow.FlowOptions{FairnessKey: "tenantB", Priority: 9})
+		fkB, err := eng.Create(ctx, "listflow.verify:428/list", nil, &workflow.FlowOptions{FairnessKey: "tenantB", Priority: 4})
 		if !assert.NoError(err) {
 			return
 		}
@@ -158,7 +158,7 @@ func TestListflow(t *testing.T) {
 		assert.Equal(2, len(flows))
 
 		// Priority combines with FairnessKey for an exact slice.
-		flows, _, err = eng.List(ctx, workflow.Query{FairnessKey: "tenantB", Priority: 9})
+		flows, _, err = eng.List(ctx, workflow.Query{FairnessKey: "tenantB", Priority: 4})
 		if !assert.NoError(err) {
 			return
 		}
@@ -166,7 +166,7 @@ func TestListflow(t *testing.T) {
 		assert.Equal(fkB, flows[0].FlowKey)
 
 		// A key/priority combination with no flows yields nothing.
-		flows, _, err = eng.List(ctx, workflow.Query{FairnessKey: "tenantA", Priority: 9})
+		flows, _, err = eng.List(ctx, workflow.Query{FairnessKey: "tenantA", Priority: 4})
 		if !assert.NoError(err) {
 			return
 		}

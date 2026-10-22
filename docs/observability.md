@@ -71,7 +71,7 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_steps_queue_depth` | gauge | — | steps in the local worker cache | `dwarf_steps_queue_depth` |
 | `dwarf_steps_pending` | gauge | `shard`, `priority` | due pending steps in each priority band of the shard, refreshed every 30 seconds | `dwarf_steps_pending` |
 | `dwarf_steps_oldest_pending_age_seconds` | gauge | `shard`, `priority` | how long the longest-due pending step in each priority band of the shard has been due, refreshed every 30 seconds | `dwarf_steps_oldest_pending_age_seconds` |
-| `dwarf_steps_dispatch_lag_seconds` | gauge | `shard` | how long the most overdue step at the priority band being served has been due on that shard, current to within a selection cycle. Under a second while dispatch keeps up | `dwarf_steps_dispatch_lag_seconds` |
+| `dwarf_steps_dispatch_lag_seconds` | gauge | `shard` | how long the most overdue step in the priority bands being served has been due on that shard, current to within a selection cycle. Under a second while dispatch keeps up | `dwarf_steps_dispatch_lag_seconds` |
 | `dwarf_peer_replicas` | gauge | `shard` | replicas this one currently sees holding connections to that shard, from which the fleet picks that shard's dispatchers | `dwarf_peer_replicas` |
 | `dwarf_shard_dispatching` | gauge | `shard` | 1 when this replica dispatches that shard (holds a share of its connection budget and runs its steps), 0 when it does not dispatch there (it holds a two-connection reader pool, or a share of the budget only until steps it already started there finish). Sum across the fleet for how many replicas dispatch each shard; a shard summing to zero runs nothing | `dwarf_shard_dispatching` |
 | `dwarf_peer_blind_seconds` | gauge | `shard` | time since that shard's peer registry was last read successfully; zero when healthy | `dwarf_peer_blind_seconds` |
@@ -93,10 +93,10 @@ at collection time. No gauge queries the database when it is collected, so a sho
 the database nothing.
 
 **Is dispatch keeping up?** `dwarf_steps_dispatch_lag_seconds` is the live answer: how long the most overdue
-step at the priority band being served has been due, per shard. A step that slept, backed off, or waited on a
+step in the priority bands being served has been due, per shard. A step that slept, backed off, or waited on a
 subgraph or an interrupt is measured from when it became runnable, not from when it was created. The lag covers
-only the band being served, and reads zero on a shard whose best band is worse than one another shard holds.
-Strict priority holds worse bands back by design, and that shows in `dwarf_steps_oldest_pending_age_seconds`,
+only the bands being served: a band that better-priority work leaves no capacity for is left out, and a shard
+holding only such bands reads zero. Strict priority holds those bands back by design, and that shows in `dwarf_steps_oldest_pending_age_seconds`,
 one reading per band, refreshed every 30 seconds along with `dwarf_steps_pending`. While the lead for a shard
 passes from one replica to another, those two may be missing for up to 30 seconds.
 

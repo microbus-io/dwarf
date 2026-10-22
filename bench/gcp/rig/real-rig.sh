@@ -161,7 +161,7 @@ PROFILE="25m:$NIGHT,10m:$NIGHT-$DAY,40m:$DAY,15m:$DAY-$NIGHT"
 BURSTS="10m+2m:$BURST,40m+2m:$BURST,58m+5m:$BURST"
 authok; late; RUN_DB=dwarf_real; fresh $RUN_DB
 EPOCH=$(( $(date +%s) + 120 ))
-DAYARGS="-real 270m -arrival-epoch $EPOCH -arrival-share 0.5 -arrival-profile '$PROFILE' -arrival-bursts '$BURSTS' -arrival-noise 0.1 -arrival-seed 1 -mix '$MIX' -task-delay-dist '$DIST' -fairness-keys 200 -fairness-skew 1.1 -high-priority-share 0.15 -high-priority 50 -retention 30m -concurrency 128 -max-outstanding 150000"
+DAYARGS="-real 270m -arrival-epoch $EPOCH -arrival-share 0.5 -arrival-profile '$PROFILE' -arrival-bursts '$BURSTS' -arrival-noise 0.1 -arrival-seed 1 -mix '$MIX' -task-delay-dist '$DIST' -fairness-keys 200 -fairness-skew 1.1 -high-priority-share 0.15 -high-priority 2 -retention 30m -concurrency 128 -max-outstanding 150000"
 echo "$DAYARGS" > "$OUT/day-args.txt"
 log "the day: epoch $(date -r $EPOCH '+%H:%M:%S'), profile $PROFILE, bursts $BURSTS"
 vmssh "$ADMIN" "setsid nohup ./s-mon.sh $(( 300 * 60 )) out/mon-day.log '$(dsn $RUN_DB)' > /dev/null 2>&1 < /dev/null &"

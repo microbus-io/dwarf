@@ -21,17 +21,27 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/microbus-io/dwarf/internal/planner"
 	"github.com/microbus-io/testarossa"
 )
+
+// pairsAt is the fetch pairs for keys at one band.
+func pairsAt(band int, keys ...string) []planner.Slot {
+	out := make([]planner.Slot, len(keys))
+	for i, k := range keys {
+		out[i] = planner.Slot{Band: band, Key: k}
+	}
+	return out
+}
 
 // fetchDrivers is every driver name fetchQuery answers to, plus one it does not - an unknown name must
 // land on a working branch rather than an empty statement, since the alternative is a shard that silently
 // supplies nothing.
 var fetchDrivers = []string{"pgx", "mysql", "mssql", "sqlite", "unknown"}
 
-// TestFetchQuery_BindCountIsFixed is the regression this file exists for: the chosen keys travel as ONE
-// parameter (a text[] on pgx, JSON elsewhere), so the bind count must not move with how many keys the plan
-// picked.
+// TestFetchQuery_BindCountIsFixed is the regression this file exists for: the chosen (band, key) pairs travel as
+// one or two parameters (arrays on pgx, JSON elsewhere), so the bind count must not move with how many pairs the
+// plan picked.
 //
 // The bound it protects is a HARD one, not a budget - SQL Server rejects a statement with more than 2,100
 // parameters outright, and the key count is bounded only by the candidate cache's capacity (twice the
@@ -50,16 +60,16 @@ func TestFetchQuery_BindCountIsFixed(t *testing.T) {
 		for i := range many {
 			many[i] = "k" + strconv.Itoa(i)
 		}
-		_, fewArgs, err := fetchQuery(driver, 3, few, 4, "", nil)
+		_, fewArgs, err := fetchQuery(driver, pairsAt(3, few...), 4, "", nil)
 		assert.NoError(err, driver)
-		_, manyArgs, err := fetchQuery(driver, 3, many, 4, "", nil)
+		_, manyArgs, err := fetchQuery(driver, pairsAt(3, many...), 4, "", nil)
 		assert.NoError(err, driver)
 		if driver == "mysql" {
-			// mysql alone still binds one per key - it cannot use the json key list without tripping a
-			// cross-collation comparison, and its 65,535 ceiling is ~20x above any reachable key count.
+			// mysql alone still binds per pair - it cannot use a json pair list without tripping a
+			// cross-collation comparison, and its 65,535 ceiling is ~10x above any reachable pair count.
 			// Asserted rather than exempted so the exception stays deliberate.
-			assert.True(len(manyArgs) == len(many)+2,
-				"%s: expected one bind per key plus band and cap, got %d", driver, len(manyArgs))
+			assert.True(len(manyArgs) == 2*len(many)+1,
+				"%s: expected two binds per pair plus the cap, got %d", driver, len(manyArgs))
 			continue
 		}
 		assert.Equal(len(fewArgs), len(manyArgs),
@@ -94,7 +104,7 @@ func TestFetchQuery_PlaceholdersMatchArgs(t *testing.T) {
 	}
 	for _, driver := range fetchDrivers {
 		for _, part := range parts {
-			stmt, args, err := fetchQuery(driver, 3, []string{"a", "b"}, 4, part.sql, part.args)
+			stmt, args, err := fetchQuery(driver, append(pairsAt(3, "a", "b"), pairsAt(7, "a")...), 4, part.sql, part.args)
 			assert.NoError(err, driver)
 			assert.Equal(strings.Count(stmt, "?"), len(args),
 				"%s/%s: %d placeholders against %d args", driver, part.name, strings.Count(stmt, "?"), len(args))
@@ -103,20 +113,46 @@ func TestFetchQuery_PlaceholdersMatchArgs(t *testing.T) {
 }
 
 // TestFetchQuery_ProjectionIsUniform pins the one thing FetchSteps' scan loop assumes across every branch:
-// (fairness_key, step_id), in that order. A branch that projects them the other way round scans a key into
-// an int and fails at runtime on that dialect only - which no SQLite-only test run would ever reach.
+// (priority, fairness_key, step_id), in that order. A branch that projects them in another order scans a key
+// into an int and fails at runtime on that dialect only - which no SQLite-only test run would ever reach.
 func TestFetchQuery_ProjectionIsUniform(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	for _, driver := range fetchDrivers {
-		stmt, _, err := fetchQuery(driver, 3, []string{"a"}, 4, "", nil)
+		stmt, _, err := fetchQuery(driver, pairsAt(3, "a"), 4, "", nil)
 		assert.NoError(err, driver)
 		upper := strings.ToUpper(stmt)
 		assert.True(strings.HasPrefix(upper, "SELECT "), driver)
 		head := upper[len("SELECT "):]
+		band := strings.Index(head, "PRIORITY")
 		key := strings.Index(head, "FAIRNESS_KEY")
 		step := strings.Index(head, "STEP_ID")
-		assert.True(key >= 0 && step >= 0, "%s: projection names both columns", driver)
-		assert.True(key < step, "%s: fairness_key must be projected before step_id", driver)
+		assert.True(band >= 0 && key >= 0 && step >= 0, "%s: projection names all three columns", driver)
+		assert.True(band < key && key < step, "%s: priority, fairness_key and step_id must be projected in that order", driver)
+	}
+}
+
+// TestScanQueries_PlaceholdersMatchArgs pins the band scan's bind pairing: each statement repeats the partition
+// predicate once per branch - every band, plus the overflow, in the counts - and ScanBand repeats its args to
+// match. A branch the args do not cover fails the scan only when the partition carries binds, so every partition
+// shape is exercised.
+func TestScanQueries_PlaceholdersMatchArgs(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	parts := []struct {
+		sql  string
+		args int
+	}{
+		{"", 0},
+		{" AND step_id % ? = ?", 2},
+		{" AND (step_id % ? = ? OR (step_id % ? = ? AND not_before <= DATE_ADD_MILLIS(NOW_UTC(), ?)) OR not_before <= DATE_ADD_MILLIS(NOW_UTC(), ?))", 6},
+	}
+	for _, driver := range fetchDrivers {
+		for _, part := range parts {
+			counts := bandCountsQuery(driver, part.sql, 10, 8)
+			assert.Equal(11*part.args, strings.Count(counts, "?"), "%s counts: ten bands and the overflow", driver)
+			tally := bandTallyQuery(part.sql, []int{2, 5, 11}, 10)
+			assert.Equal(3*part.args, strings.Count(tally, "?"), "%s tally: one branch per band", driver)
+		}
 	}
 }

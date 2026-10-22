@@ -75,7 +75,7 @@ func ExampleEngine_Create() {
 
 	flowKey, err := eng.Create(ctx, "greet", map[string]any{"name": "ada"},
 		&workflow.FlowOptions{
-			Priority:    10,                             // lower runs first
+			Priority:    2,                              // 1..5, lower runs first
 			FairnessKey: "tenant-42",                    // fair scheduling bucket
 			Baggage:     map[string]any{"actor": "ada"}, // read with workflow.BaggageFrom(ctx)
 		})

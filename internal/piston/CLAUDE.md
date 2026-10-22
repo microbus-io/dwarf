@@ -124,9 +124,9 @@ That is the await-only replica.
 
 **Going idle WITHDRAWS the shard, and skipping that wedges the replica.** The planner's contract is that
 every shard either tallies or clears each cycle; an idle piston runs no cycle, so it does neither, and its
-last tally would stand forever. The planner is **shared** across the replica's pistons, so that stale claim
-on the best band is the documented wedge — every live piston finds none of *its* keys at that band and
-dispatches nothing, indefinitely. It is benign only when every piston is idle, and `SetIdle` is per-piston,
+last tally would stand forever. The planner is **shared** across the replica's pistons, so a stale claim
+on a better band that fills the batch is the documented wedge — every live piston finds no capacity left to
+spill into and dispatches nothing, indefinitely. It is benign only when every piston is idle, and `SetIdle` is per-piston,
 so the API permits the bad case. `SetIdle(true)` therefore does the same two things an empty plan does:
 `planner.Clear(shard)` and `cache.Refill(shard, nil, NoBand)` — the partition for the same reason, since a
 dead hint costs a worker a claim round-trip. Pinned by `TestPiston_IdleWithdrawsTheShard`, which asserts the
@@ -158,21 +158,56 @@ circumstance a dispatching piston meets constantly. Here it is a configured **mo
 They implement `pipeline.BandSource` and `pipeline.StepSource` — one per loop, so neither loop can reach
 the other's query — which is the whole reason the piston owns both. Nothing else has the handle. Their per-query rationale lives in their doc comments; the cross-cutting rules are:
 
-**The band scan costs O(due rows at the band), and `rn <= capacity` does not change that — do not
-re-derive it as a fix.** The cut filters *after* the window function has ranked every matching row, so it
-bounds the reported count, not the scan, and not the wire either (the `GROUP BY` emits one row per key
-regardless). Two A/Bs on PostgreSQL at fan-out width 1024 / 256 keys / 6 shards cut the cap — one of them
-genuinely 18 → 6 rows per key per shard — and moved phase time **not at all** (50.2 → 50.6 ms; 46.2 →
-47.8 ms, both inside noise). That is the measurement identifying the window function as the cost. PostgreSQL
-15's WindowAgg run condition does not rescue it either: with `PARTITION BY` present the node stops
-*evaluating* past the cut but still pulls every remaining tuple to find the partition boundary, so only the
-single-partition-at-plan-time case can stop the node outright. The fitted cost is **~0.004–0.005 ms per due
-row** over a floor, and 4× the backlog on one shard made the scan **2.85× slower** while costing 34% of
-throughput (3,640 → 2,404 steps/s) — super-linear, because a slower scan deepens the backlog it scans.
-Sharding divides the variable term (185 → 69 ms mean as backlog/shard fell 16,384 → 2,730); nothing inside
-the query does. A single fairness key is the degenerate case — the `PARTITION BY` collapses to one
-partition over the whole due backlog — and it puts a fan-out workload into a **bistable** regime: healthy
-~2,400 steps/s or collapsed ~550, never between.
+**The band scan is TWO statements, whatever the number of bands.** Priorities run `1..MaxPriority` (5 by
+default, at most 100 - the engine's `SetMaxPriority`), so the bands are known in advance:
+
+1. **Counts** (`bandCountsQuery`): every band, each counted up to the cache capacity by an equality seek with a
+   `LIMIT` inside. From them the scan knows exactly which bands a fill can reach - every band up to the one where
+   the counts reach capacity (`internal/planner/CLAUDE.md`: no fill reaches past it).
+2. **Tally** (`bandTallyQuery`): one `GROUP BY` per reached band, each with its band inlined, and nothing beyond
+   them. A deep band under one that fills the cache is never read.
+
+Nothing due costs the first statement only. Both are `UNION ALL`s of per-band branches, and that shape is what
+keeps every band a seek:
+
+- **Do not count or tally across a priority range.** The due index leads `(parked, priority, not_before)`, so
+  only an equality on `priority` makes the `not_before` range a seek; across a range the scan reads every pending
+  row, sleepers included. A sleeper-only band is an empty range under the equality - its sleepers are past the
+  seek's upper bound on `not_before` and are never read.
+- **Do not count with one `GROUP BY priority`.** It has no early stop, so a deep band below one that fills the
+  cache is read in full on every scan; the per-band `LIMIT` caps each band's cost at the capacity.
+- **Each branch inlines its band**, so a planner sizes it from that band's statistics. **Do not make the band a
+  subquery value**: the planner then sizes it from the AVERAGE band, and on PostgreSQL 18 an under-estimated deep
+  band chose the due index plus a whole-band sort.
+- **The counts statement's cost scales with the configured maximum, not with the bands in use**: one index probe
+  per empty band, at most the capacity per band with due work, and - on MySQL and SQLite, which keep no plan across
+  executions - parsing and planning one branch per band on every tally. That is why the maximum is capped at 100.
+- **PostgreSQL 16 can read a band's rows off the selection index and filter `not_before`** where 18 seeks the due
+  index, so a band dense with sleepers costs its sleeping population in the tally there. That is the planner's
+  choice for any band statement.
+
+**Work at a priority beyond `MaxPriority` is an OVERFLOW band, never stranded.** `Create` refuses such a priority,
+but a step can still carry one: a flow from before the range existed, from a replica configured with a larger
+maximum, or inherited from either by `Continue`, `Fork` or a subgraph. The counts statement has one extra branch
+counting every priority past the maximum together, and when the fill reaches it the tally groups those rows by
+their actual priority, so they are served after every band in the range, in their own order, and the fetch
+matches them exactly. **Do not drop the overflow to keep the statement to the range**: a step outside it would
+then sit pending forever with no error anywhere. In normal operation it is empty and costs one index probe; its
+range on `priority` reads the overflow's sleepers, which only out-of-range work has.
+
+The statements' texts change with the bands a tally reaches and with the cache capacity they inline, so each
+distinct text is its own prepared statement. The set is bounded - the reached bands are a prefix of the range plus
+the overflow - so the plan caches settle. Pinned by `TestPiston_ScanBandTalliesBandsUntilCapacity`, `TestPiston_ScanBandSkipsASleepingBand`,
+`TestPiston_ScanBandServesTheOverflowLast`, `TestScanQueries_PlaceholdersMatchArgs` and, for both statements,
+`TestScanBand_CanSeekTheDueIndex`.
+
+**Each band's statement costs O(due rows at the band), and no cap inside the query changes that — do not
+re-derive one as a fix.** The `GROUP BY` reads every due row of the band to count it; the count is capped in Go,
+which bounds the reported demand, not the scan. A per-key cut is worse than useless: ranking for it needs the rows
+in key order, which is what put PostgreSQL 18 into a spilled sort of a whole deep band (see `bandTallyQuery`). The
+cost grows super-linearly with the backlog, because a slower scan deepens the backlog it scans, and a single
+fairness key - one group over the whole due backlog - puts a fan-out workload into a **bistable** regime, healthy
+or collapsed and never between. Sharding divides the variable term; nothing inside the query does.
 
 **Do not bound the scan by fetching the oldest N due rows instead of tallying the band.** It is the
 obvious way to cap the O(backlog) term, and it breaks fairness in the one regime fairness exists for. A
@@ -182,11 +217,13 @@ producing. The planner's guarantee is that queue depth does not buy share (`inte
 The tally can only honour that if every key with due work appears in it. "It only starves under a burst" is
 no defence: fairness does nothing except under backlog, so "only at peak" means "only when it matters".
 
-**The partition filters the ROWS this replica tallies but deliberately NOT the `MIN(priority)` subquery.**
-The band is a cluster-wide fact, so mining it from one replica's slice would let replicas disagree about
-which band is open. A replica holding nothing at the global band therefore tallies zero rows — correct,
-since its own worse-band work must not be served until the better one drains. `TestPiston_PartitionDoesNotNarrowTheBand`
-pins exactly this, and it is the thing a "simplify the scan" change would break silently.
+**The partition filters the counts as well as the tally.** Every branch of both statements carries the same
+predicate, so this replica's reach is computed from the bands its own class holds, plus foreign steps past the
+steal grace. **Do not count unpartitioned.** A band only a peer's class holds would then fill this replica's
+counts, tally nothing of its own, and idle it while its own class waits - and the peer is serving that band from
+its own plan. Cross-replica priority is therefore strict within the steal grace: a peer's better-band work that
+its owner cannot reach enters this replica's counts, ahead of its own worse bands, once it has waited out a grace.
+Pinned by `TestPiston_PartitionNarrowsTheBands`.
 
 The residue class is a **residency, not a lock**: the claim CAS remains the only thing that grants a step,
 so a stale `(replicas, ordinal)` pair costs a lost claim, never correctness. `step_id % R` is not sargable,
@@ -213,26 +250,23 @@ exactly the dishonesty counting-after-the-trim exists to prevent. Pinned for bot
 `TestPiston_PartitionPairIsValidated`.
 
 **The band scan also publishes the dispatch lag (`DispatchLag`), and it must stay a passenger.** It is one more
-expression - `DATE_DIFF_MILLIS(NOW_UTC(), not_before)` - over rows the window already reads, maxed per key and
-then across keys, so the engine's lag gauge costs no query. Four constraints keep it honest:
+aggregate of the same `GROUP BY` - `DATE_DIFF_MILLIS(NOW_UTC(), MIN(not_before))` per key, maxed across keys - one
+reading per band tallied, so the engine's lag gauge costs no query. Four constraints keep it honest:
 
 - **`not_before`, not `created_at`.** The lag is how long a step has been DUE; `created_at` stays the fairness
   ordering. `not_before` is carried in the selection index, so the scan stays index-only. It means "due since"
   only because every write that returns a step to `pending` stamps it (`internal/migrations/CLAUDE.md`).
-- **Max under the `rn <= capacity` cut, not over the whole key.** A window `MIN(not_before) OVER (PARTITION BY
-  fairness_key)` would see past the cut, but it is a second window pass over every due row - the same cost
-  that rules out counting with `COUNT(*) OVER`. The miss is a step past the first `capacity` of its key, by age, whose own
-  sleep made it due earlier than all of them: the reading is a lower bound there.
-- **Grows between scans, cleared on idle.** The reading carries when its statement was sent, and `DispatchLag`
+- **Exact, over every due row.** `MIN(not_before)` per key is one more aggregate of the same `GROUP BY`, so the
+  reading is the band's genuinely most overdue step at no extra cost.
+- **Grows between scans, cleared on idle.** Each band's reading carries when its statement was sent, and `DispatchLag`
   adds the time since, so a tally loop that stops coming round shows as rising lag rather than a frozen value.
   `SetIdle` and the tally loop's own withdrawal clear it, for the same reason they clear the tally: a scan in
   flight when the piston went idle would otherwise leave a reading that resumes stale.
-- **Zero for a shard held back by strict priority.** The scan's band is this shard's best; when another shard
-  holds a better one, the planner gives this shard no slots and its due steps age by design. Reported as lag,
-  every multi-shard fleet with mixed priorities would page on it. So the reading carries its band and
-  `DispatchLag` compares it with `planner.Band()` - the standing tallies, not the last plan, which a stalled
-  supply loop would hold at a band that has since drained; the held-back work shows in the per-band backlog
-  age instead. Because the reading grows between scans, a healthy shard reads up to one tally period, not zero.
+- **Leaves out the bands strict priority is holding back.** When better bands fill the batch, the planner
+  gives the worse ones no slots and their due steps age by design. Reported as lag, every fleet with mixed
+  priorities would page on it. So each reading carries its band and `DispatchLag` takes the max over the bands
+  no worse than `planner.Reach(capacity)` - the standing tallies, not the last plan, which a stalled supply loop
+  would hold at a reach that has since moved; the held-back work shows in the per-band backlog age instead. Because the reading grows between scans, a healthy shard reads up to one tally period, not zero.
 
 ## Stealing — the answer to a peer that is SLOW rather than dead
 
@@ -459,12 +493,16 @@ inside one millisecond falls through to the `step_id` tiebreak, which is also al
 age would only serve a cross-shard merge, and none exists here: the planner has already assigned the slots. Note the ordering is per key only —
 rows are grouped by key, not sorted across them, which is all `assemble` reads.
 
-## `FetchSteps` passes its keys as ONE bind, and that is a correctness bound
+## `FetchSteps` is ONE statement over the plan's (band, key) pairs, passed as a fixed number of binds - a correctness bound
+
+**One statement serves every band the plan reached**, so a plan spanning several bands costs one round trip on
+the supply loop, which is the supply ceiling's path. Each pair is a lateral lookup on pgx and mssql, a row-value
+`IN` on mysql and sqlite.
 
 **One bind per key overruns SQL Server's hard ceiling of 2,100 parameters per statement at ~2,095 keys.**
-The key count is bounded only by the candidate cache's capacity — twice the worker count — so a
+The pair count is bounded only by the candidate cache's capacity — twice the worker count — so a
 192-connection pool at `workersPerConnBudget = 8` plans at **3,072**, and a per-tenant fairness key with a
-few thousand active tenants puts `len(plan.Keys)` right there. SQLite's own ceiling
+few thousand active tenants puts the plan's pair count right there. SQLite's own ceiling
 (`SQLITE_MAX_VARIABLE_NUMBER`) is 32,766 on a current build but **999** before 3.32.
 
 The failure is quiet, which is what makes it worth a doc section. A failed fetch is the pipeline's "push
@@ -494,9 +532,9 @@ the ranking shape it buys nothing on the scan.
 
 The gap widens with the backlog, since the window shape is proportional to it and the lateral is flat.
 
-### On pgx the keys are a native `text[]`, so the planner can count them
+### On pgx the pairs are native arrays (`int[]`, `text[]`), so the planner can count them
 
-A custom plan sizes `unnest`'s output from the bound array. A JSON set-returning function
+A custom plan sizes `unnest`'s output from the bound arrays. A JSON set-returning function
 (`jsonb_array_elements_text`) is estimated at 100 rows whatever it holds, which multiplies
 the fetch's estimated cost by 100/keys - at one key a flipped plan priced ~500k, past Postgres's JIT thresholds
 (100k / 500k by default), so it was compiled with full optimization on every execution: measured locally, JIT
@@ -546,14 +584,14 @@ the same statement with the guard must), `TestScanBand_CanSeekTheDueIndex` (pgx,
 
 ### The lateral join is NOT available on two of the four dialects
 
-| dialect | key list | per-key cap | cost |
+| dialect | pair list | per-key cap | cost |
 |---|---|---|---|
-| pgx | `unnest` of a `text[]` (1 bind) | `LIMIT` in `CROSS JOIN LATERAL` | O(keys × perKey) |
-| mssql | `OPENJSON` (1 bind) | `TOP` in `CROSS APPLY` | O(keys × perKey) |
-| sqlite | `json_each` (1 bind) | `WHERE rn<=?` after the window | O(due rows at the band) |
-| mysql | `IN`-list (**one bind per key**) | `WHERE rn<=?` after the window | O(due rows at the band) |
+| pgx | `unnest` of an `int[]` and a `text[]` (2 binds) | `LIMIT` in `CROSS JOIN LATERAL` | O(pairs × perKey) |
+| mssql | `OPENJSON` of `[band, key]` pairs (1 bind) | `TOP` in `CROSS APPLY` | O(pairs × perKey) |
+| sqlite | row-value `IN` over `json_each` pairs (1 bind) | `WHERE rn<=?` after the window | O(due rows at the planned keys) |
+| mysql | row-value `IN`-list (**two binds per pair**) | `WHERE rn<=?` after the window | O(due rows at the planned keys) |
 
-**mysql is the one branch that still binds per key, and both halves of that are load-bearing.**
+**mysql is the one branch that still binds per pair, and both halves of that are load-bearing.**
 
 *No lateral*, because the driver name covers MySQL **and** MariaDB and MariaDB has no lateral derived tables
 at any version — `MDEV-19078` is open, and 10.11 rejects `CROSS JOIN LATERAL` outright. (MariaDB's "lateral
@@ -568,11 +606,11 @@ join predicate raises `Error 1267: Illegal mix of collations` — measured on My
 `utf8mb4_0900_ai_ci` server against a `utf8mb4_general_ci` database. **MariaDB cannot reproduce it** (it has
 no `utf8mb4_0900` family), so it passes every MariaDB run and fails on the engine CI uses; a local MariaDB is
 not a proxy for MySQL here. A bind parameter is immune: its collation is COERCIBLE, so the column's wins.
-That makes the `IN`-list the *safe* shape on this dialect, not merely the simpler one — and it keeps the
+That makes the row-value `IN`-list the *safe* shape on this dialect, not merely the simpler one — and it keeps the
 supported-version floor down, since nothing needs `JSON_TABLE`.
 
-One bind per key is sound *here specifically*: MySQL's ceiling is 65,535 placeholders against a key count
-bounded by the cache capacity (twice the worker count, a few thousand on a large pool) — better than 20x of
+Two binds per pair are sound *here specifically*: MySQL's ceiling is 65,535 placeholders against a pair count
+bounded by the cache capacity (twice the worker count, a few thousand on a large pool) — better than 10x of
 margin. The overflow the one-bind shape exists to avoid is SQL Server's hard 2,100, which no other dialect
 approaches.
 Pinned by `TestFetchQuery_BindCountIsFixed`, which asserts the mysql exception explicitly rather than skipping
@@ -655,8 +693,8 @@ is invisible from outside the process and cannot be waited out on a clock. **Eac
 cadence, so "every shard has reconciled its partition against the plan" is not a function of elapsed time**:
 a shard whose goroutine is starved, or whose cycle is blocked on a slow round trip, can hold an unreconciled
 partition arbitrarily long while its peers turn normally. A caller that needs that state — a test asserting
-strict cross-shard priority must, because `Cache.Pop` ranks partitions by a FROZEN band and cannot tell a
-doorbell-set one from a plan-set one — has no other way to know.
+strict cross-shard priority must, because `Cache.Pop` ranks partitions by the bands they hold and cannot tell a
+doorbell-admitted candidate from a plan-selected one — has no other way to know.
 
 **It is gated on `SupplyResult.Reconciled`, NOT on `Err == nil`, and the difference is not cosmetic.** Two
 paths hold everything and leave the partition exactly as they found it — a failed fetch, and an untallied
@@ -681,5 +719,5 @@ either, for the same reason.
 Each test stands up its own isolated, migrated database through `internal/database.ShardSet` — a
 **test-only** import, since the piston itself never opens a handle — and inserts real `dwarf_steps` rows.
 That is what lets them cover things a fake could not: the parked-step predicate, the capacity cap actually
-capping, the `ROW_NUMBER()` ordering, and the residue class splitting a real row set disjointly across
+capping, the fetch's oldest-first ordering, and the residue class splitting a real row set disjointly across
 ordinals.

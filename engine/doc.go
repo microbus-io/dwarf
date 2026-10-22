@@ -35,10 +35,10 @@ limitations under the License.
 //	if err != nil { ... }
 //	defer eng.Shutdown(ctx)
 //
-// Each Set* method returns an error. The live ones (SetTimeBudget, SetDefaultPriority) take effect
+// Each Set* method returns an error. The live one (SetTimeBudget) takes effect
 // immediately on a running engine; the construction-time-only ones (SetShard, SetWorkers, SetHost,
 // SetEngineID, SetStateCacheSize, SetLogger, SetDebugLogger, SetMeterProvider, SetTracerProvider) return an
-// error if called after Startup.
+// error if called after Startup. SetMaxPriority is construction-time only as well.
 //
 // Tuning derives from what the engine observes, plus two optional per-shard levers. Each shard's connection
 // budget follows the round-trip time measured at Startup and the server's own connection limit, unless

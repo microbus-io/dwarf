@@ -60,8 +60,8 @@ func TestCandidateCache_RoutingSpreadsByUnreservedDepth(t *testing.T) {
 
 	c := &Cache{}
 	c.Init(64)
-	c.Refill(1, jobs(1, 1, 3), 10)
-	c.Refill(2, jobs(2, 100, 2), 10)
+	c.Refill(1, at(10, jobs(1, 1, 3)), 10)
+	c.Refill(2, at(10, jobs(2, 100, 2)), 10)
 
 	var got []int
 	for range 5 {
@@ -73,6 +73,27 @@ func TestCandidateCache_RoutingSpreadsByUnreservedDepth(t *testing.T) {
 	assert.Equal([]int{1, 1, 2, 1, 2}, got)
 }
 
+// TestCandidateCache_RoutingReadsPastTheReservations pins that routing ranks a partition by the band the NEXT
+// routed worker would take there, not by its head: the first worker routed to `1 5 5` is on its way to the 1,
+// so the second belongs at the other partition's 3s - by the head it would follow the first and run a 5.
+func TestCandidateCache_RoutingReadsPastTheReservations(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	c := &Cache{}
+	c.Init(64)
+	c.Refill(1, []Job{{StepID: 1, Shard: 1, Priority: 1}, {StepID: 2, Shard: 1, Priority: 5}, {StepID: 3, Shard: 1, Priority: 5}}, 5)
+	c.Refill(2, at(3, jobs(2, 100, 2)), 3)
+
+	var got []int
+	for range 5 {
+		shard, ok := c.WaitForWork()
+		assert.True(ok)
+		got = append(got, shard)
+	}
+	assert.Equal([]int{1, 2, 2, 1, 1}, got)
+}
+
 // TestCandidateCache_FullyReservedParksTheNextWorker pins that a worker finding every candidate spoken for
 // parks rather than being routed to a partition it could only queue at, and that a new candidate wakes it.
 func TestCandidateCache_FullyReservedParksTheNextWorker(t *testing.T) {
@@ -81,7 +102,7 @@ func TestCandidateCache_FullyReservedParksTheNextWorker(t *testing.T) {
 
 	c := &Cache{}
 	c.Init(64)
-	c.Refill(1, jobs(1, 1, 1), 10)
+	c.Refill(1, at(10, jobs(1, 1, 1)), 10)
 	shard, _ := c.WaitForWork()
 	assert.Equal(1, shard)
 
@@ -112,7 +133,7 @@ func TestCandidateCache_PopReleasesTheReservation(t *testing.T) {
 	c.Init(64)
 
 	// Taken: the candidate and the reservation leave together.
-	c.Refill(1, jobs(1, 1, 2), 10)
+	c.Refill(1, at(10, jobs(1, 1, 2)), 10)
 	shard, _ := c.WaitForWork()
 	_, ok := c.TryPopFrom(shard)
 	assert.True(ok)
@@ -121,13 +142,13 @@ func TestCandidateCache_PopReleasesTheReservation(t *testing.T) {
 	assert.True(ok)
 
 	// Lost: the partition emptied while the worker waited; the reservation must go anyway.
-	c.Refill(1, jobs(1, 10, 1), 10)
+	c.Refill(1, at(10, jobs(1, 10, 1)), 10)
 	shard = routeNow(c)
 	assert.Equal(1, shard, "the taken candidate's reservation must have been released")
 	c.Refill(1, nil, 10)
 	_, ok = c.TryPopFrom(shard)
 	assert.False(ok)
-	c.Refill(1, jobs(1, 20, 1), 10)
+	c.Refill(1, at(10, jobs(1, 20, 1)), 10)
 	assert.Equal(1, routeNow(c), "a failed pop must release its reservation")
 	c.Close()
 }
@@ -140,13 +161,13 @@ func TestCandidateCache_ReservationsSurviveARefill(t *testing.T) {
 
 	c := &Cache{}
 	c.Init(64)
-	c.Refill(1, jobs(1, 1, 2), 10)
-	c.Refill(2, jobs(2, 100, 1), 10)
+	c.Refill(1, at(10, jobs(1, 1, 2)), 10)
+	c.Refill(2, at(10, jobs(2, 100, 1)), 10)
 	for range 2 {
 		shard, _ := c.WaitForWork()
 		assert.Equal(1, shard)
 	}
-	c.Refill(1, jobs(1, 10, 2), 10) // two candidates, two workers already on their way
+	c.Refill(1, at(10, jobs(1, 10, 2)), 10) // two candidates, two workers already on their way
 	assert.Equal(2, routeNow(c), "a refill must not make shard 1's reserved candidates routable again")
 	c.Close()
 }
@@ -160,8 +181,8 @@ func TestCandidateCache_FullyReservedBetterBandIsPassedOver(t *testing.T) {
 
 	c := &Cache{}
 	c.Init(64)
-	c.Refill(1, jobs(1, 1, 1), 1)
-	c.Refill(2, jobs(2, 100, 1), 5)
+	c.Refill(1, at(1, jobs(1, 1, 1)), 1)
+	c.Refill(2, at(5, jobs(2, 100, 1)), 5)
 	shard, _ := c.WaitForWork()
 	assert.Equal(1, shard, "the better band first")
 	shard, _ = c.WaitForWork()
@@ -177,18 +198,18 @@ func TestCandidateCache_ShrunkPartitionRecoversThroughFailedPops(t *testing.T) {
 
 	c := &Cache{}
 	c.Init(64)
-	c.Refill(1, jobs(1, 1, 3), 10)
+	c.Refill(1, at(10, jobs(1, 1, 3)), 10)
 	for range 3 {
 		c.WaitForWork()
 	}
-	c.Refill(1, jobs(1, 10, 1), 10) // one candidate, three workers on their way
-	c.Refill(2, jobs(2, 100, 1), 10)
+	c.Refill(1, at(10, jobs(1, 10, 1)), 10) // one candidate, three workers on their way
+	c.Refill(2, at(10, jobs(2, 100, 1)), 10)
 	assert.Equal(2, routeNow(c), "the oversubscribed shard routes nobody")
 
 	for range 3 {
 		c.TryPopFrom(1) // the first takes the candidate, the other two find it empty
 	}
-	c.Refill(1, jobs(1, 20, 1), 10)
+	c.Refill(1, at(10, jobs(1, 20, 1)), 10)
 	assert.Equal(1, routeNow(c), "the failed pops released their reservations")
 	c.Close()
 }
@@ -202,9 +223,9 @@ func TestCandidateCache_RerouteMovesTheReservation(t *testing.T) {
 
 	c := &Cache{}
 	c.Init(64)
-	c.Refill(1, jobs(1, 1, 1), 10)
-	c.Refill(2, jobs(2, 100, 1), 10)
-	c.Refill(3, jobs(3, 200, 1), 10)
+	c.Refill(1, at(10, jobs(1, 1, 1)), 10)
+	c.Refill(2, at(10, jobs(2, 100, 1)), 10)
+	c.Refill(3, at(10, jobs(3, 200, 1)), 10)
 
 	shard, _ := c.WaitForWork()
 	assert.Equal(1, shard)
@@ -231,8 +252,8 @@ func TestCandidateCache_RerouteLeavesTheCallersSliceAlone(t *testing.T) {
 
 	c := &Cache{}
 	c.Init(64)
-	c.Refill(1, jobs(1, 1, 1), 10)
-	c.Refill(2, jobs(2, 100, 1), 10)
+	c.Refill(1, at(10, jobs(1, 1, 1)), 10)
+	c.Refill(2, at(10, jobs(2, 100, 1)), 10)
 	shard, _ := c.WaitForWork()
 	var tried [4]int
 	c.Reroute(shard, tried[:0])
@@ -248,8 +269,8 @@ func TestCandidateCache_MoveReservation(t *testing.T) {
 
 	c := &Cache{}
 	c.Init(64)
-	c.Refill(1, jobs(1, 1, 1), 10)
-	c.Refill(2, jobs(2, 100, 1), 10)
+	c.Refill(1, at(10, jobs(1, 1, 1)), 10)
+	c.Refill(2, at(10, jobs(2, 100, 1)), 10)
 	shard, _ := c.WaitForWork()
 	assert.Equal(1, shard)
 	next, _ := c.Reroute(1, nil)

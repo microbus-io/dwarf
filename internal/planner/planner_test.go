@@ -24,22 +24,39 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// mkEntry fabricates one shard's tally for the merge/slice unit tests, which exercise those functions
-// directly rather than through a Planner.
+// mkEntry fabricates one shard's tally at one band for the merge/slice unit tests, which exercise those
+// functions directly rather than through a Planner.
 func mkEntry(shard, band int, tallies ...Tally) entry {
-	st := &shardTally{band: band, tallies: tallies}
+	for i := range tallies {
+		tallies[i].Band = band
+	}
+	return mkBands(shard, tallies...)
+}
+
+// mkBands is mkEntry for tallies that carry their own bands.
+func mkBands(shard int, tallies ...Tally) entry {
+	st := &shardTally{tallies: tallies}
 	if len(tallies) > 0 {
-		st.byKey = make(map[string]int, len(tallies))
+		st.byKey = make(map[Slot]int, len(tallies))
 		for i, t := range tallies {
-			st.byKey[t.Key] = i
+			st.byKey[Slot{Band: t.Band, Key: t.Key}] = i
 		}
 	}
 	return entry{shard: shard, t: st}
 }
 
-// TestPlanner_MergeAcrossShards pins the merge: the global minimum band; per-key counts summed across
-// shards; the globally-oldest step's weight winning a key's weight (so a tenant cannot self-promote
-// by queueing newer high-weight work); and worse-band shards contributing nothing.
+// slots repeats one slot n times, for building a plan order by hand.
+func slots(band int, key string, n int) []Slot {
+	out := make([]Slot, n)
+	for i := range out {
+		out[i] = Slot{Band: band, Key: key}
+	}
+	return out
+}
+
+// TestPlanner_MergeAcrossShards pins the merge: bands best first; per-key counts summed across shards
+// within a band; the lowest weight any shard reports winning a key's weight (so a tenant cannot self-promote
+// by queueing heavier work on another shard); and a worse band kept apart rather than mixed in.
 func TestPlanner_MergeAcrossShards(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -50,29 +67,42 @@ func TestPlanner_MergeAcrossShards(t *testing.T) {
 			Tally{Key: "b", Weight: 1, AgeMs: 100, Count: 1},
 		),
 		mkEntry(2, 3,
-			Tally{Key: "a", Weight: 7, AgeMs: 900, Count: 6}, // older: its weight wins
+			Tally{Key: "a", Weight: 7, AgeMs: 900, Count: 6}, // older and heavier: its age wins, not its weight
 		),
 		mkEntry(3, 9, Tally{Key: "z", Weight: 1, AgeMs: 1, Count: 1}), // worse band
 		mkEntry(4, math.MaxInt), // nothing due
 	}
-	band, keys := merge(entries)
-	assert.Equal(3, band)
+	bands := merge(entries)
+	assert.Equal(2, len(bands))
+	assert.Equal(3, bands[0].band)
+	keys := bands[0].keys
 	assert.Equal(2, len(keys))
 	assert.Equal("a", keys[0].key)
 	assert.Equal(9, keys[0].count, "counts sum across shards")
-	assert.Equal(7.0, keys[0].weight, "the globally-oldest step's weight wins the merge")
+	assert.Equal(2.0, keys[0].weight, "the lowest weight wins the merge")
+	assert.Equal(900.0, keys[0].ageMs, "the globally-oldest step's age wins the merge")
 	assert.Equal("b", keys[1].key)
+	assert.Equal(9, bands[1].band, "a worse band follows the better one")
+	assert.Equal("z", bands[1].keys[0].key)
+
+	// A key at two bands is two entries: fairness is decided within a band, never across.
+	bands = merge([]entry{mkBands(1,
+		Tally{Band: 5, Key: "t", Weight: 1, AgeMs: 1, Count: 2},
+		Tally{Band: 1, Key: "t", Weight: 1, AgeMs: 1, Count: 3},
+	)})
+	assert.Equal(2, len(bands))
+	assert.Equal(1, bands[0].band, "best band first, whatever order the shard reported in")
+	assert.Equal(3, bands[0].keys[0].count)
+	assert.Equal(2, bands[1].keys[0].count)
 
 	// An all-empty fleet has no band.
-	band, keys = merge([]entry{mkEntry(1, math.MaxInt)})
-	assert.Equal(math.MaxInt, band)
-	assert.Equal(0, len(keys))
+	assert.Equal(0, len(merge([]entry{mkEntry(1, math.MaxInt)})))
 }
 
 // TestPlanner_SliceFirstSlotToOldestThenProportional pins the slice rule: a key's first slot goes to
 // the shard holding its OLDEST step, the rest split proportional to per-shard counts with
-// deterministic largest-remainder rounding, and shards at a worse band win nothing regardless of how
-// much backlog they hold.
+// deterministic largest-remainder rounding, and a shard holding the key only at another band wins nothing
+// regardless of how much backlog it holds there.
 func TestPlanner_SliceFirstSlotToOldestThenProportional(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -80,24 +110,22 @@ func TestPlanner_SliceFirstSlotToOldestThenProportional(t *testing.T) {
 	entries := []entry{
 		mkEntry(1, 3, Tally{Key: "t", Weight: 1, AgeMs: 500, Count: 3}),
 		mkEntry(2, 3, Tally{Key: "t", Weight: 1, AgeMs: 900, Count: 6}),
-		mkEntry(3, 5, Tally{Key: "t", Weight: 1, AgeMs: 9999, Count: 50}), // worse band: excluded
+		mkEntry(3, 5, Tally{Key: "t", Weight: 1, AgeMs: 9999, Count: 50}), // another band: excluded
 	}
-	order := []string{"t", "t", "t", "t"}
+	order := slots(3, "t", 4)
 
 	// Shard 2 holds the oldest step at the band, so it takes the first slot; the remaining 3 split
 	// over avail (shard 1: 3, shard 2: 5) by largest remainder -> shard 1: 1, shard 2: 2 more.
-	s1, k1, cap1 := slice(order, entries, 3, 1)
-	s2, _, cap2 := slice(order, entries, 3, 2)
-	s3, k3, cap3 := slice(order, entries, 3, 3)
+	s1, f1 := slice(order, entries, 1)
+	s2, f2 := slice(order, entries, 2)
+	s3, f3 := slice(order, entries, 3)
 
 	assert.Equal(1, len(s1))
 	assert.Equal(3, len(s2))
-	assert.Equal(0, len(s3), "a shard above the band gets no slots regardless of its backlog")
-	assert.Equal(1, cap1)
-	assert.Equal(3, cap2)
-	assert.Equal(0, cap3)
-	assert.Equal([]string{"t"}, k1)
-	assert.Equal(0, len(k3))
+	assert.Equal(0, len(s3), "a shard holding the key only at another band gets no slots regardless of its backlog")
+	assert.Equal([]Fetch{{Band: 3, Keys: []string{"t"}, PerKeyCap: 1}}, f1)
+	assert.Equal(3, f2[0].PerKeyCap)
+	assert.Equal(0, len(f3))
 
 	// Every slot is accounted for exactly once across the shards holding the key.
 	assert.Equal(len(order), len(s1)+len(s2))
@@ -105,10 +133,9 @@ func TestPlanner_SliceFirstSlotToOldestThenProportional(t *testing.T) {
 	// Deterministic: two shards replaying the same plan against the same snapshot must agree, and
 	// repeated evaluation must be identical (map iteration must not leak into the result).
 	for range 10 {
-		r1, rk1, rc1 := slice(order, entries, 3, 1)
+		r1, rf1 := slice(order, entries, 1)
 		assert.Equal(s1, r1)
-		assert.Equal(k1, rk1)
-		assert.Equal(cap1, rc1)
+		assert.Equal(f1, rf1)
 	}
 }
 
@@ -123,7 +150,7 @@ func TestPlanner_SliceStarvationGuard(t *testing.T) {
 		mkEntry(1, 3, Tally{Key: "t", Weight: 1, AgeMs: 60000, Count: 1}), // one OLD step
 		mkEntry(2, 3, Tally{Key: "t", Weight: 1, AgeMs: 800, Count: 1000}),
 	}
-	s1, _, _ := slice([]string{"t", "t"}, entries, 3, 1)
+	s1, _ := slice(slots(3, "t", 2), entries, 1)
 	assert.Equal(1, len(s1), "the quiet shard's old step must take the first slot, not be rounded away")
 }
 
@@ -141,39 +168,40 @@ func TestPlanner_SliceKeepsFairnessInterleave(t *testing.T) {
 			Tally{Key: "b", Weight: 1, AgeMs: 100, Count: 3},
 		),
 	}
-	order := []string{"a", "b", "a", "b", "a", "b"}
-	slots, keys, perKey := slice(order, entries, 3, 1)
-	assert.Equal(order, slots, "the interleave must survive the filter")
-	assert.Equal([]string{"a", "b"}, keys, "distinct keys in first-appearance order")
-	assert.Equal(3, perKey)
+	a, b := Slot{Band: 3, Key: "a"}, Slot{Band: 3, Key: "b"}
+	order := []Slot{a, b, a, b, a, b}
+	got, fetches := slice(order, entries, 1)
+	assert.Equal(order, got, "the interleave must survive the filter")
+	assert.Equal([]Fetch{{Band: 3, Keys: []string{"a", "b"}, PerKeyCap: 3}}, fetches, "distinct keys in first-appearance order")
 }
 
 // TestPlanner_ClearReleasesTheBand pins the wedge this whole mechanism exists to prevent. A shard whose
-// scan fails still holds the best band, so its stale claim would make every peer compute that global
-// minimum, find none of its own keys there, and dispatch nothing - forever, waiting on a shard that will
+// scan fails still holds its last tally, so a stale claim on a band that fills the batch would leave every
+// peer no capacity to spill into, and they would dispatch nothing - forever, waiting on a shard that will
 // never report again. Clear releases the band on the failing cycle, not after some cutoff elapses.
 func TestPlanner_ClearReleasesTheBand(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
 	p := New()
-	p.Tally(1, 5, []Tally{{Key: "live", Weight: 1, AgeMs: 100, Count: 2}})
-	p.Tally(2, 1, []Tally{{Key: "gone", Weight: 1, AgeMs: 100, Count: 2}})
+	p.Tally(1, []Tally{{Band: 5, Key: "live", Weight: 1, AgeMs: 100, Count: 2}})
+	p.Tally(2, []Tally{{Band: 1, Key: "gone", Weight: 1, AgeMs: 100, Count: 8}})
 
-	// Both reporting: shard 2's better band wins, and shard 1 correctly dispatches nothing.
+	// Both reporting: shard 2's better band fills the batch, and shard 1 correctly dispatches nothing.
 	plan := p.Plan(1, 8)
 	assert.Equal(1, plan.GlobalBand)
-	assert.Equal(0, len(plan.Slots), "shard 1 is above the band and dispatches nothing")
+	assert.Equal(1, plan.Reach)
+	assert.Equal(0, len(plan.Slots), "shard 1 is past the reach and dispatches nothing")
 
 	p.Clear(2)
 
 	plan = p.Plan(1, 8)
 	assert.Equal(5, plan.GlobalBand, "a cleared shard's band claim must not hold the fleet")
 	assert.Equal(2, len(plan.Slots), "shard 1 now holds the band and takes both its steps")
-	assert.Equal([]string{"live"}, plan.Keys)
+	assert.Equal([]Fetch{{Band: 5, Keys: []string{"live"}, PerKeyCap: 2}}, plan.Fetches)
 
 	// Recovery costs one cycle and no more: the next Tally restores the band with no cooldown.
-	p.Tally(2, 1, []Tally{{Key: "gone", Weight: 1, AgeMs: 100, Count: 2}})
+	p.Tally(2, []Tally{{Band: 1, Key: "gone", Weight: 1, AgeMs: 100, Count: 8}})
 	assert.Equal(1, p.Plan(1, 8).GlobalBand, "a recovered shard is counted immediately")
 }
 
@@ -185,16 +213,16 @@ func TestPlanner_SlowShardIsNotDropped(t *testing.T) {
 	assert := testarossa.For(t)
 
 	p := New()
-	p.Tally(1, 9, []Tally{{Key: "fast", Weight: 1, AgeMs: 1, Count: 1}})
-	p.Tally(2, 2, []Tally{{Key: "slow", Weight: 1, AgeMs: 1, Count: 1}})
+	p.Tally(1, []Tally{{Band: 9, Key: "fast", Weight: 1, AgeMs: 1, Count: 1}})
+	p.Tally(2, []Tally{{Band: 2, Key: "slow", Weight: 1, AgeMs: 1, Count: 8}})
 
 	// Shard 1 cycles many times while shard 2 says nothing at all - a deep scan in progress, not a
 	// failure. Shard 2's better band must survive every one of those cycles.
 	for range 100 {
-		p.Tally(1, 9, []Tally{{Key: "fast", Weight: 1, AgeMs: 1, Count: 1}})
+		p.Tally(1, []Tally{{Band: 9, Key: "fast", Weight: 1, AgeMs: 1, Count: 1}})
 		assert.Equal(2, p.Plan(1, 8).GlobalBand, "a quiet shard is not a dead shard")
 	}
-	assert.Equal(0, len(p.Plan(1, 8).Slots), "and the fast shard stays correctly above the band")
+	assert.Equal(0, len(p.Plan(1, 8).Slots), "and the fast shard stays correctly past the reach")
 }
 
 // TestPlanner_PickIsProportionalAndBacklogIndependent pins the lottery's defining property: a key's
@@ -246,10 +274,10 @@ func TestPlanner_TallyNormalizesWeight(t *testing.T) {
 	assert := testarossa.For(t)
 
 	p := New()
-	p.Tally(1, 5, []Tally{{Key: "zero", Weight: 0, AgeMs: 10, Count: 1}})
+	p.Tally(1, []Tally{{Band: 5, Key: "zero", Weight: 0, AgeMs: 10, Count: 1}})
 	plan := p.Plan(1, 8)
 	assert.Equal(1, len(plan.Slots), "a zero-weight key must still be dispatchable")
-	assert.Equal([]string{"zero"}, plan.Keys)
+	assert.Equal([]string{"zero"}, plan.Fetches[0].Keys)
 }
 
 // TestPlanner_EmptyAndReset pins the two trivial states: a planner nobody has reported to plans
@@ -266,7 +294,7 @@ func TestPlanner_EmptyAndReset(t *testing.T) {
 	assert.Equal(-1, band, "an idle fleet reports nothing to observe, never MaxInt as a metric label")
 	assert.Equal(0, keys)
 
-	p.Tally(1, 5, []Tally{{Key: "a", Weight: 1, AgeMs: 1, Count: 1}})
+	p.Tally(1, []Tally{{Band: 5, Key: "a", Weight: 1, AgeMs: 1, Count: 1}})
 	assert.Equal(1, len(p.Plan(1, 8).Slots))
 	band, keys = p.LastBand()
 	assert.Equal(5, band)
@@ -285,7 +313,7 @@ func TestPlanner_CapacityBounds(t *testing.T) {
 	assert := testarossa.For(t)
 
 	p := New()
-	p.Tally(1, 5, []Tally{{Key: "a", Weight: 1, AgeMs: 1, Count: 1000}})
+	p.Tally(1, []Tally{{Band: 5, Key: "a", Weight: 1, AgeMs: 1, Count: 1000}})
 	assert.Equal(7, len(p.Plan(1, 7).Slots))
 	assert.Equal(0, len(p.Plan(1, 0).Slots))
 	assert.Equal(0, len(p.Plan(1, -1).Slots))
@@ -308,7 +336,7 @@ func TestPlanner_TalliedAgreesWithSlotsUnderConcurrency(t *testing.T) {
 	p := New()
 
 	// A peer holds the same band throughout, so shard 1 always has keys to win slots at.
-	p.Tally(2, 5, []Tally{{Key: "k", Weight: 1, AgeMs: 100, Count: 8}})
+	p.Tally(2, []Tally{{Band: 5, Key: "k", Weight: 1, AgeMs: 100, Count: 8}})
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
@@ -321,7 +349,7 @@ func TestPlanner_TalliedAgreesWithSlotsUnderConcurrency(t *testing.T) {
 				return
 			default:
 			}
-			p.Tally(1, 5, []Tally{{Key: "k", Weight: 1, AgeMs: 100, Count: 8}})
+			p.Tally(1, []Tally{{Band: 5, Key: "k", Weight: 1, AgeMs: 100, Count: 8}})
 			p.Clear(1)
 		}
 	}()
@@ -337,17 +365,96 @@ func TestPlanner_TalliedAgreesWithSlotsUnderConcurrency(t *testing.T) {
 	wg.Wait()
 }
 
-// TestPlanner_BandReadsTheStandingTallies pins Band: the best band any shard reports due work at, moved by a
-// Tally or a Clear without anything planning, and -1 when nothing is due anywhere.
-func TestPlanner_BandReadsTheStandingTallies(t *testing.T) {
+// TestPlanner_ReachReadsTheStandingTallies pins Reach: the band at which a fill at the given capacity runs
+// out, MaxInt when everything fits, moved by a Tally or a Clear without anything planning, and -1 when nothing
+// is due anywhere.
+func TestPlanner_ReachReadsTheStandingTallies(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	p := New()
-	assert.Equal(-1, p.Band(), "nothing reported")
-	p.Tally(1, 5, []Tally{{Key: "a", Weight: 1, Count: 1}})
-	p.Tally(2, 3, []Tally{{Key: "b", Weight: 1, Count: 1}})
-	p.Tally(3, 1, nil) // a shard with nothing due holds no band
-	assert.Equal(3, p.Band())
+	assert.Equal(-1, p.Reach(8), "nothing reported")
+	p.Tally(1, []Tally{{Band: 5, Key: "a", Weight: 1, Count: 1}})
+	p.Tally(2, []Tally{{Band: 3, Key: "b", Weight: 1, Count: 1}})
+	p.Tally(3, nil) // a shard with nothing due holds no band
+	assert.Equal(math.MaxInt, p.Reach(8), "everything due fits, so nothing is held back")
+	assert.Equal(3, p.Reach(1))
+	assert.Equal(5, p.Reach(2))
 	p.Clear(2)
-	assert.Equal(5, p.Band(), "a drained band is gone as soon as its shard reports, with no plan in between")
+	assert.Equal(5, p.Reach(1), "a drained band is gone as soon as its shard reports, with no plan in between")
+}
+
+// TestPlanner_FillSpillsToWorseBands pins the priority rule: a worse band gets exactly the capacity the better
+// ones leave unused. A sparse but continuous better band must not idle the batch - a better band that cannot
+// fill it starves nothing - while one that does fill it holds every worse band back.
+func TestPlanner_FillSpillsToWorseBands(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	p := New()
+
+	// Three steps due at the better band, on shard 1; a deep backlog at the worse one, on shard 2.
+	p.Tally(1, []Tally{{Band: 50, Key: "hi", Weight: 1, AgeMs: 10, Count: 3}})
+	p.Tally(2, []Tally{{Band: 100, Key: "lo", Weight: 1, AgeMs: 60000, Count: 8}})
+	p1, p2 := p.Plan(1, 8), p.Plan(2, 8)
+	assert.Equal(50, p1.GlobalBand)
+	assert.Equal(100, p1.Reach, "the fill ran out of capacity at the worse band")
+	assert.Equal(slots(50, "hi", 3), p1.Slots, "the better band takes all it has")
+	assert.Equal(slots(100, "lo", 5), p2.Slots, "and the worse band takes exactly what is left")
+
+	// A better band that fills the batch holds the worse one back entirely.
+	p.Tally(1, []Tally{{Band: 50, Key: "hi", Weight: 1, AgeMs: 10, Count: 8}})
+	assert.Equal(8, len(p.Plan(1, 8).Slots))
+	assert.Equal(0, len(p.Plan(2, 8).Slots), "no capacity is left to spill into")
+	assert.Equal(50, p.Plan(2, 8).Reach)
+}
+
+// TestPlanner_SlotsAreBestBandFirst pins the order a shard holding several bands gets: the better band's slots
+// lead, and each band gets its own fetch, best first.
+func TestPlanner_SlotsAreBestBandFirst(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	p := New()
+
+	// Reported worst band first, and the same key at both bands.
+	p.Tally(1, []Tally{
+		{Band: 9, Key: "t", Weight: 1, AgeMs: 900, Count: 10},
+		{Band: 2, Key: "t", Weight: 1, AgeMs: 10, Count: 2},
+	})
+	plan := p.Plan(1, 6)
+	assert.Equal(append(slots(2, "t", 2), slots(9, "t", 4)...), plan.Slots)
+	assert.Equal([]Fetch{
+		{Band: 2, Keys: []string{"t"}, PerKeyCap: 2},
+		{Band: 9, Keys: []string{"t"}, PerKeyCap: 4},
+	}, plan.Fetches)
+	assert.Equal(9, plan.Reach)
+}
+
+// TestPlanner_BetterBandsThatFillTheBatchHoldTheRestBack pins the fill's stopping point with four bands due
+// across shards: the best two fill the batch, so the worse two win no slot anywhere and the reach is the
+// second band.
+func TestPlanner_BetterBandsThatFillTheBatchHoldTheRestBack(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	p := New()
+
+	p.Tally(1, []Tally{
+		{Band: 10, Key: "a", Weight: 1, AgeMs: 10, Count: 3},
+		{Band: 30, Key: "e", Weight: 1, AgeMs: 90000, Count: 8},
+	})
+	p.Tally(2, []Tally{
+		{Band: 20, Key: "c", Weight: 1, AgeMs: 10, Count: 4},
+		{Band: 20, Key: "d", Weight: 1, AgeMs: 10, Count: 4},
+		{Band: 40, Key: "f", Weight: 9, AgeMs: 90000, Count: 8},
+	})
+	for _, shard := range []int{1, 2} {
+		plan := p.Plan(shard, 8)
+		assert.Equal(20, plan.Reach)
+		for _, slot := range plan.Slots {
+			assert.True(slot.Band <= 20, "shard %d planned band %d past the reach", shard, slot.Band)
+		}
+		for _, f := range plan.Fetches {
+			assert.True(f.Band <= 20, "shard %d fetches band %d past the reach", shard, f.Band)
+		}
+	}
+	assert.Equal(slots(10, "a", 3), p.Plan(1, 8).Slots, "shard 1 serves all of the best band and none of its band 30")
+	assert.Equal(5, len(p.Plan(2, 8).Slots), "shard 2 fills the rest from band 20, none from band 40")
 }

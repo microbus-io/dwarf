@@ -51,7 +51,7 @@ func TestTallier_PublishesTheBand(t *testing.T) {
 
 // TestTallier_NothingDueStillReports pins that a shard with nothing due REPORTS rather than staying quiet.
 // Silence would mean "my previous tally still stands", so a shard that quietly stopped reporting would hold
-// a band claim forever and wedge every peer. Nothing due may also RAISE the global band and release a peer,
+// a band claim forever and wedge every peer. Nothing due may also free capacity for a peer to spill into,
 // which only a report can do.
 func TestTallier_NothingDueStillReports(t *testing.T) {
 	t.Parallel()
@@ -68,8 +68,8 @@ func TestTallier_NothingDueStillReports(t *testing.T) {
 }
 
 // TestTallier_ScanFailureClearsTheShard pins the first half of the error policy. A shard that could not look
-// must leave planning - a stale claim on the best band makes every peer find no keys of its own there and
-// dispatch nothing - and it must come back on the next good cycle with no cooldown.
+// must leave planning - a stale claim on a better band that fills the batch leaves every peer no capacity to
+// spill into - and it must come back on the next good cycle with no cooldown.
 func TestTallier_ScanFailureClearsTheShard(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)

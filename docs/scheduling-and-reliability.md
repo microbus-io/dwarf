@@ -16,18 +16,31 @@ and immutable for its life:
 eng.Create(ctx, "report", state, &workflow.FlowOptions{Priority: 5})
 ```
 
-Lower numbers run first. An unset priority (0) uses the engine default (`SetDefaultPriority`, 100 by
-default). Priority is **strict and cluster-wide**: once the engine observes due priority-5 work, no
-priority-10 work is selected until it drains.
+Priorities run from 1 to the engine's maximum - 5 by default, configurable up to 100 with `SetMaxPriority` -
+and lower numbers run first. An unset priority (0) takes the midpoint of the range, 3 by default. `Create` and `Run` reject a priority outside the range. Use the same
+maximum on every replica sharing a database. Work that carries a priority beyond a replica's range - a flow
+created before the range existed, or by a replica configured with a larger one - still runs there, after all of
+its own levels. Priority is **strict over capacity**: lower-priority work gets only the capacity higher-priority
+work leaves unused. Once the engine observes due priority-5 work, priority-10 work is selected only for the
+workers priority-5 work cannot keep busy, so a light stream of urgent flows never idles the engine while a
+backlog waits below it.
 
 The guarantee is over *observed* work, and observation is not instantaneous — the scheduler works from
 periodic snapshots of what is due. When priority-5 work arrives, it takes a snapshot cycle or two before
 every part of a sharded cluster has observed it, and a small amount of priority-10 work may start in that
-window. Priority is also never preemptive, so anything already running continues to completion. Both
-effects are bounded by the snapshot cycle, not by the size of the backlog: strict ordering is what you get
-between arrivals separated by more than a cycle or two, which is the normal case.
-There is no aging — a steady stream of high-priority flows will starve lower bands by design, so reserve
-the top bands for genuinely urgent work. To see it happening, chart `dwarf_steps_oldest_pending_age_seconds`
+window. With several replicas, each one serves its own share of the due work first, so priority-10 work
+can start on one replica while priority-5 work waits a few cycles for another, after which any replica takes
+it ahead of its own lower-priority work. These effects are bounded by the snapshot cycle, not by the size of
+the backlog: strict ordering is what you get between arrivals separated by more than a cycle or two, which is
+the normal case.
+
+Priority is never preemptive: anything already running continues to completion. The worker pool grows on demand,
+so newly arrived higher-priority work normally starts as soon as it is observed; only when every worker the
+engine may run is busy with lower-priority tasks does it wait for one of them to finish. Where that can happen
+and urgent latency matters, keep lower-priority tasks short - split a long job into steps - so a worker frees up
+often.
+There is no aging — a stream of high-priority flows that keeps every worker busy will starve lower bands by
+design, so reserve the top bands for genuinely urgent work. To see it happening, chart `dwarf_steps_oldest_pending_age_seconds`
 by `priority`: a lower band whose age climbs while `dwarf_steps_dispatch_lag_seconds` stays low is being held
 back by better-priority work, not by a slow engine ([Operations](operations.md#alerting-on-lag)).
 
@@ -45,8 +58,9 @@ eng.Create(ctx, "import", state, &workflow.FlowOptions{
 })
 ```
 
-The scheduler dispatches in proportion to weight across the distinct keys at the active band — a weight-4
-key gets ~4x the share of a weight-1 key, independent of how much backlog each has. Within a single key,
+The scheduler dispatches in proportion to weight across the distinct keys within each priority band — a weight-4
+key gets ~4x the share of a weight-1 key, independent of how much backlog each has. If flows sharing a key carry
+different weights, the key dispatches at the lowest weight among its due work, so give one key one weight. Within a single key,
 dispatch is oldest-first (FIFO). Both `FairnessKey` and `FairnessWeight` are immutable for the flow's life
 (changing them mid-run would be a self-promotion vector).
 

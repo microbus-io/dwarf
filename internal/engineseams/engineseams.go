@@ -209,10 +209,9 @@ const (
 	// shard's piston completes a cycle that PUSHED - i.e. its cache partition now reflects the plan. Its name
 	// is the piston's, so there is one catalogue, exactly like FaultRefillScanErr.
 	//
-	// What it exists for: `Offer` admits a step into an EMPTY partition unconditionally and stamps that
-	// partition's band from the arrival, while `Cache.Pop` ranks partitions by that FROZEN band and never
-	// consults the current global minimum - so a doorbell-admitted hint is indistinguishable from a
-	// plan-selected one until the owning shard's next cycle reconciles it. Every shard reconciles on its own
+	// What it exists for: `Offer` admits a step into an EMPTY partition unconditionally, while `Cache.Pop` ranks
+	// partitions by the bands they hold and never consults the current plan - so a doorbell-admitted hint is
+	// indistinguishable from a plan-selected one until the owning shard's next cycle reconciles it. Every shard reconciles on its own
 	// cadence, so a test that needs the fleet's partitions to agree with the plan before it asserts dispatch
 	// ORDER must wait for a cycle per shard; no amount of elapsed time substitutes, because one starved
 	// piston is exactly the case that breaks it.

@@ -96,9 +96,9 @@ func TestContinueInheritsThreadPolicy(t *testing.T) {
 	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
-	// Turn 1 with a distinctive priority (7, not the engine default of 100).
+	// Turn 1 with a distinctive priority (4, not the engine default of 3).
 	turn1, err := eng.Create(ctx, "continuepolicy.verify:428/g", map[string]any{},
-		&workflow.FlowOptions{Priority: 7})
+		&workflow.FlowOptions{Priority: 4})
 	assert.NoError(err)
 	_, err = eng.Await(ctx, turn1)
 	assert.NoError(err)
@@ -109,14 +109,14 @@ func TestContinueInheritsThreadPolicy(t *testing.T) {
 	_, err = eng.Await(ctx, turn2)
 	assert.NoError(err)
 
-	// Priority inherited (7), not reset to the engine default.
+	// Priority inherited (4), not reset to the engine default.
 	summaries, _, err := eng.List(ctx, workflow.Query{ThreadKey: turn1})
 	assert.NoError(err)
 	var found bool
 	for _, s := range summaries {
 		if s.FlowKey == turn2 {
 			found = true
-			assert.Equal(7, s.Priority)
+			assert.Equal(4, s.Priority)
 		}
 	}
 	assert.True(found)

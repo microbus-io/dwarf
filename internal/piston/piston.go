@@ -42,8 +42,10 @@ package piston
 import (
 	"context"
 	"log/slog"
+	"math"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -137,6 +139,8 @@ type Piston struct {
 	// Zero disables stealing outright, which is what an owner sets when it wants the residue class enforced
 	// strictly.
 	stealAfter atomic.Int32
+	// maxPriority is the worst band the scan counts - priorities run 1..maxPriority. See SetMaxPriority.
+	maxPriority atomic.Int32
 	// tallyTurns and supplyTurns count each loop's successful cycles, monotonically and independently -
 	// neither loop ever writes the other's. Liveness reports their MINIMUM, because a turn has to mean this
 	// piston can both LOOK at its shard and SERVE it, and the two failures are symmetric:
@@ -159,12 +163,17 @@ type Piston struct {
 	lag atomic.Pointer[lagReading]
 }
 
-// lagReading is one band scan's view of how long its most overdue step had been due.
+// lagReading is one band scan's view of how long its most overdue step had been due, per band it tallied.
+// Empty when the scan found nothing due.
 type lagReading struct {
-	dueMs float64   // meaningful only when due
-	due   bool      // whether the scan found anything due at all
-	band  int       // the band the scan tallied
-	at    time.Time // when the scan's statement was sent, the instant its NOW_UTC() approximates
+	bands []bandLag
+}
+
+// bandLag is one band's reading within a scan.
+type bandLag struct {
+	band  int
+	dueMs float64
+	at    time.Time // when that band's statement was sent, the instant its NOW_UTC() approximates
 }
 
 // New returns a piston for one shard over an already-open database handle. The planner and cache are
@@ -185,6 +194,7 @@ func New(shard int, db *sequel.DB, plan *planner.Planner, cache *candidates.Cach
 	p := &Piston{shard: shard, db: db, planner: plan, cache: cache,
 		shardAttr: attribute.String("shard", strconv.Itoa(shard))}
 	p.stealAfter.Store(defaultStealAfter)
+	p.maxPriority.Store(DefaultMaxPriority)
 	tallier, err := pipeline.NewTallier(shard, p, plan)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -215,9 +225,9 @@ func (p *Piston) Shard() int { return p.shard }
 //
 // GOING IDLE WITHDRAWS THIS SHARD, and it must: the planner's contract is that every shard either tallies
 // or clears each cycle, and an idle piston does neither, so its last tally would stand forever. The
-// planner is shared with this replica's other pistons, so that stale claim on the best band is the
-// documented wedge - every live piston finds none of its own keys at that band and dispatches nothing,
-// indefinitely. Benign only if every piston is idle, and this setter is per-piston, so the API permits the
+// planner is shared with this replica's other pistons, so a stale claim on a better band that fills the
+// batch is the documented wedge - every live piston finds no capacity left to spill into and dispatches
+// nothing, indefinitely. Benign only if every piston is idle, and this setter is per-piston, so the API permits the
 // bad case. The cache partition goes for the same reason an empty plan clears it: nothing here is
 // dispatchable, so every cached candidate is a dead hint a worker would pop and burn a claim round-trip on.
 //
@@ -262,6 +272,20 @@ func (p *Piston) SetStealAfter(periods int) {
 // StealAfter is the current steal grace in cycle periods; zero means stealing is off.
 func (p *Piston) StealAfter() int { return int(p.stealAfter.Load()) }
 
+// DefaultMaxPriority is the worst band a fresh piston counts.
+const DefaultMaxPriority = 5
+
+// SetMaxPriority sets the worst band the scan counts on its own: priorities run 1..maxBand. Work at a priority
+// beyond it is counted together as one overflow band and served after every band in the range. Every piston on
+// every replica sharing the shard should use the same value. A value below 1 is taken as 1. Read once per scan,
+// so it is safe to call on a running piston.
+func (p *Piston) SetMaxPriority(maxBand int) {
+	p.maxPriority.Store(int32(min(max(1, maxBand), math.MaxInt32)))
+}
+
+// MaxPriority is the worst band the scan counts.
+func (p *Piston) MaxPriority() int { return int(p.maxPriority.Load()) }
+
 // Liveness reports whether this piston is turning, for an owner that publishes the fact somewhere the
 // fleet can see it: the count of tally cycles completed so far, whether either loop is working right now,
 // and whether the piston is idling.
@@ -301,26 +325,27 @@ func (p *Piston) Liveness() (turns uint64, busy, idle bool) {
 	return turns, busy, p.idle.Load()
 }
 
-// DispatchLag is how long the most overdue step this piston can see at the band being served has been due,
-// as of now: what the last completed band scan read, plus the time since it read it. ok is false until a scan
-// has completed, and while the piston is idle.
+// DispatchLag is how long the most overdue step this piston can see, at a band the plan reaches, has been
+// due, as of now: what the last completed band scan read, plus the time since it read it. ok is false until a
+// scan has completed, and while the piston is idle.
 //
-// It covers what the scan covers - the shard's best due band, this replica's residue class and foreign steps
-// due past the steal grace - so the maximum across a shard's dispatchers is the shard's figure. It reads zero
-// when nothing is due, and when the shard's best band is worse than the band the planner would serve: that
-// work is held back by strict priority, not waiting on dispatch.
+// It covers what the scan covers - the shard's due bands up to where they fill the cache, this replica's
+// residue class and foreign steps due past the steal grace - so the maximum across a shard's dispatchers is
+// the shard's figure. It reads zero when nothing is due, and leaves out every band worse than the planner's
+// reach: that work is held back by strict priority, not waiting on dispatch.
 func (p *Piston) DispatchLag() (lag time.Duration, ok bool) {
 	r := p.lag.Load()
 	if r == nil || p.idle.Load() {
 		return 0, false
 	}
-	if !r.due {
-		return 0, true
+	reach := p.planner.Reach(p.cache.Capacity())
+	for _, b := range r.bands {
+		if reach >= 0 && b.band > reach {
+			break // bands are best first, so every one after this is held back too
+		}
+		lag = max(lag, time.Duration(b.dueMs*float64(time.Millisecond))+time.Since(b.at))
 	}
-	if served := p.planner.Band(); served >= 0 && r.band > served {
-		return 0, true
-	}
-	return time.Duration(r.dueMs*float64(time.Millisecond)) + time.Since(r.at), true
+	return lag, true
 }
 
 // SetTallyCadence and SetSupplyCadence pace the two loops SEPARATELY, and there is deliberately no setter
@@ -464,7 +489,7 @@ func (p *Piston) SetMeter(m metric.Meter) error {
 // WaitGroup.
 //
 // TWO LOOPS RATHER THAN ONE, because the band scan is O(due rows at the band) on every dialect (see
-// ScanBand) and nothing in the query early-stops. A single loop would let a deep backlog's scan set the
+// ScanBand) and nothing in its tally early-stops. A single loop would let a deep backlog's scan set the
 // whole cycle's period and therefore the rate candidates reach the workers - supplying least exactly when
 // the backlog is deepest. Kept apart, the supply loop turns at its own cadence on whatever the planner
 // already holds while a long scan runs beside it, and what a slow scan costs is the FRESHNESS of the
@@ -818,25 +843,26 @@ func (s *residueSort) Swap(i, j int) {
 }
 func (s *residueSort) Less(i, j int) bool { return s.tiers[i] < s.tiers[j] }
 
-// ScanBand implements pipeline.BandSource. It returns this shard's minimum due priority band and one
-// aggregate row per fairness key at that band.
+// ScanBand implements pipeline.BandSource. It returns this shard's best due priority band and one aggregate
+// row per fairness key per due band, for every band up to the one where the counts reach the cache capacity - no
+// fill reaches past it - in TWO statements whatever the number of bands:
 //
-// It RETURNS O(distinct keys) rows but COSTS O(due rows at the band), on every dialect. The window
-// function ranks every matching row before the outer `rn <= capacity` cut discards any, so the cap bounds
-// the reported COUNT and nothing else - not the scan, and not the wire either, since the GROUP BY emits
-// one row per key whether or not the cut fires. Measured on PostgreSQL at ~0.004-0.005ms per due row over
-// a fixed floor, and 4x the backlog on one shard made the scan 2.85x slower - super-linear, because a
-// slower scan deepens the backlog it is scanning. Sharding divides this term; nothing in the query does.
+//  1. COUNTS: every band 1..MaxPriority, each counted up to the cache capacity (bandCountsQuery). From them the
+//     scan knows exactly which bands a fill can reach.
+//  2. TALLY: one aggregate row per key at each of those bands, and nothing beyond them (bandTallyQuery).
 //
-// The per-key count is CAPPED at the cache capacity rather than exact: MAX(rn) under the `rn <= capacity`
-// cut, not COUNT(*) OVER. Capping is what the planner needs - the count becomes the key's remaining
-// demand, and no key can be assigned more than the whole batch - so the cap is lossless there even though
-// it buys nothing on the scan.
+// Nothing due anywhere costs the first statement only.
 //
-// The partition filters the ROWS this replica tallies but deliberately NOT the MIN(priority) subquery:
-// the band is a cluster-wide fact, so mining it from one replica's slice would let replicas disagree on
-// which band is open. A replica holding nothing at the global band therefore tallies zero rows - correct,
-// since its own work is at a worse band that must not be served until the better one drains.
+// It RETURNS O(distinct keys) rows per reached band but COSTS O(due rows) at the reached bands, on every dialect:
+// the GROUP BY reads every due row of a band to count it. Sharding divides this term; nothing in the query does.
+// The counts statement costs at most the capacity per band, and an empty band one index probe.
+//
+// The per-key count is CAPPED at the cache capacity here rather than in SQL. Capping is what the planner needs -
+// the count becomes the key's remaining demand, and no key can be assigned more than the whole batch - so the cap
+// is lossless.
+//
+// The partition filters both statements, so this replica tallies the bands ITS OWN class holds (plus foreign
+// steps past the steal grace). A band that only a peer's class holds is that peer's to serve.
 //
 // The shard argument is the pipeline's own and equals Shard(); it is accepted for symmetry with the
 // planner and cache calls, which are keyed the same way.
@@ -849,86 +875,219 @@ func (p *Piston) ScanBand(ctx context.Context, shard int) (band int, tallies []p
 	}
 	replicas, ordinal := p.resolvePartition()
 	part, partArgs := p.partitionPredicate(replicas, ordinal, p.stealGrace())
-	args := make([]any, 0, len(partArgs)+1)
-	args = append(args, partArgs...)
-	args = append(args, p.cache.Capacity())
+	capacity := p.cache.Capacity()
+	reached, err := p.countBands(ctx, part, partArgs, capacity)
+	if err != nil {
+		return 0, nil, errors.Trace(err)
+	}
+	band = pipeline.NoBand
+	reading := lagReading{}
+	if len(reached) > 0 {
+		var dueMs map[int]float64
+		var sent time.Time
+		tallies, dueMs, sent, err = p.tallyBands(ctx, part, partArgs, reached, capacity)
+		if err != nil {
+			return 0, nil, errors.Trace(err)
+		}
+		// Best band first. The overflow branch reports the actual priorities beyond the range, so the bands
+		// here are read off the tallies, not off the reached list.
+		bands := make([]int, 0, len(dueMs))
+		for b := range dueMs {
+			bands = append(bands, b)
+		}
+		sort.Ints(bands)
+		for _, b := range bands {
+			band = min(band, b)
+			reading.bands = append(reading.bands, bandLag{band: b, dueMs: dueMs[b], at: sent})
+		}
+	}
+	p.lag.Store(&reading)
+	return band, tallies, nil
+}
+
+// countBands runs the counts statement and returns the bands with due work up to, and including, the one where
+// the counts reach capacity, best first. MaxPriority+1 stands for the overflow - every priority beyond the range,
+// counted together and served after every band in it.
+func (p *Piston) countBands(ctx context.Context, part string, partArgs []any, capacity int) ([]int, error) {
+	maxBand := p.MaxPriority()
+	args := make([]any, 0, (maxBand+1)*len(partArgs))
+	for range maxBand + 1 { // the bands and the overflow
+		args = append(args, partArgs...)
+	}
 	// The turn must outlive the ROWS, not just the call: they hold the connection until Close. Deferring it
 	// FIRST is what gets that ordering - defers run last-in-first-out, so rows.Close below runs before this.
 	// A context nothing stamped yields a no-op pass, which is how a caller that does not order its database
 	// access pays nothing here.
 	pass := turnstile.WaitTurn(ctx)
 	defer pass.Return()
-	// due_ms rides the rows the window already reads, so the dispatch lag costs this scan one expression and
-	// no query of its own. It is measured from not_before, not created_at: a step that slept for an hour has
-	// been WAITING only since it came due.
-	sent := time.Now()
-	rows, err := p.db.QueryContext(ctx, bandScanQuery(part), args...)
+	rows, err := p.db.QueryContext(ctx, bandCountsQuery(p.db.DriverName(), part, maxBand, capacity), args...)
 	if err != nil {
-		return 0, nil, errors.Trace(err)
+		return nil, errors.Trace(err)
 	}
 	defer rows.Close()
-	band = pipeline.NoBand
-	reading := lagReading{at: sent}
+	counts := make(map[int]int, maxBand)
 	for rows.Next() {
-		var t planner.Tally
-		var priority int
-		var dueMs float64
-		if err := rows.Scan(&t.Key, &t.Count, &t.AgeMs, &t.Weight, &priority, &dueMs); err != nil {
-			return 0, nil, errors.Trace(err)
+		var b, n int
+		if err := rows.Scan(&b, &n); err != nil {
+			return nil, errors.Trace(err)
 		}
-		band = priority
-		tallies = append(tallies, t)
-		reading.due = true
-		reading.band = priority
-		reading.dueMs = max(reading.dueMs, dueMs)
+		counts[b] = n
 	}
 	if err := rows.Err(); err != nil {
-		return 0, nil, errors.Trace(err)
+		return nil, errors.Trace(err)
 	}
-	p.lag.Store(&reading)
-	return band, tallies, nil
+	var reached []int
+	counted := 0
+	for b := 1; b <= maxBand+1 && counted < capacity; b++ {
+		if counts[b] > 0 {
+			reached = append(reached, b)
+			counted += counts[b]
+		}
+	}
+	return reached, nil
 }
 
-// bandScanQuery is ScanBand's statement, with the partition predicate part spliced in after the due-ness test.
-// Both halves state dueSteps, the guard included, because both want idx_dwarf_steps_due: the rows by an
-// equality on the band and a range on not_before, the MIN(priority) probe by a top-1 walk of the same order.
-func bandScanQuery(part string) string {
-	return "SELECT fairness_key, MAX(rn) AS cnt," +
-		" MAX(CASE WHEN rn=1 THEN age_ms ELSE NULL END) AS age_ms," +
-		" MAX(CASE WHEN rn=1 THEN weight ELSE NULL END) AS weight," +
-		" MAX(priority) AS priority, MAX(due_ms) AS due_ms FROM (" +
-		"SELECT fairness_key, priority," +
-		" DATE_DIFF_MILLIS(NOW_UTC(), created_at) AS age_ms," +
-		" DATE_DIFF_MILLIS(NOW_UTC(), not_before) AS due_ms," +
-		" fairness_weight AS weight," +
-		" ROW_NUMBER() OVER (PARTITION BY fairness_key ORDER BY created_at, step_id) AS rn" +
-		" FROM dwarf_steps" +
-		" WHERE " + dueSteps +
-		part +
-		" AND priority=(SELECT MIN(priority) FROM dwarf_steps" +
-		" WHERE " + dueSteps + ")" +
-		") t WHERE rn<=? GROUP BY fairness_key"
+// tallyBands runs the tally statement over the given bands and returns its tallies, each band's most overdue
+// step's due time, and when the statement was sent.
+func (p *Piston) tallyBands(ctx context.Context, part string, partArgs []any, bands []int, capacity int) (tallies []planner.Tally, dueMs map[int]float64, sent time.Time, err error) {
+	args := make([]any, 0, len(bands)*len(partArgs))
+	for range bands {
+		args = append(args, partArgs...)
+	}
+	// The same turn-outlives-the-rows ordering as countBands.
+	pass := turnstile.WaitTurn(ctx)
+	defer pass.Return()
+	// due_ms rides the rows the count already reads, so the dispatch lag costs this scan one aggregate and
+	// no query of its own. It is measured from not_before, not created_at: a step that slept for an hour has
+	// been WAITING only since it came due.
+	sent = time.Now()
+	rows, err := p.db.QueryContext(ctx, bandTallyQuery(part, bands, p.MaxPriority()), args...)
+	if err != nil {
+		return nil, nil, sent, errors.Trace(err)
+	}
+	defer rows.Close()
+	dueMs = map[int]float64{}
+	for rows.Next() {
+		var t planner.Tally
+		var rowDueMs float64
+		if err := rows.Scan(&t.Key, &t.Count, &t.AgeMs, &t.Weight, &t.Band, &rowDueMs); err != nil {
+			return nil, nil, sent, errors.Trace(err)
+		}
+		t.Count = min(t.Count, capacity)
+		tallies = append(tallies, t)
+		dueMs[t.Band] = max(dueMs[t.Band], rowDueMs)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, sent, errors.Trace(err)
+	}
+	return tallies, dueMs, sent, nil
 }
 
-// FetchSteps implements pipeline.StepSource. It loads, per chosen fairness key, up to perKey of this shard's
-// oldest due steps at the given band, keyed and ordered oldest-first WITHIN each key - which is all the
-// plan replay reads. Rows are grouped by key rather than sorted across keys.
+// bandCountsQuery is the scan's first statement: one row per band 1..maxBand, its due steps counted up to
+// capacity, with the partition predicate part spliced into every band - plus one OVERFLOW row, maxBand+1, counting
+// every priority beyond the range together.
 //
-// perKey is a UNIFORM cap, the max per-key demand across this shard's slice rather than each key's exact
-// demand. On pgx, mssql and sqlite the chosen keys travel as ONE parameter (a text[] on pgx, JSON on the
-// others) and are joined back to rows in SQL, so the bind count does not grow with the number of keys; mysql
-// binds one IN-list parameter per key - see fetchQuery for why.
+// The overflow is what keeps work outside the range from stranding. Create refuses a priority beyond the maximum,
+// but a step can still carry one: a flow created before the maximum existed, or by a replica configured with a
+// larger one, and anything Continue, Fork or a subgraph inherits from either. Such work is served after every band
+// in the range, in its own priority order. In normal operation the overflow is empty and costs one index probe. Each band is its own branch, an equality
+// on priority with a LIMIT (TOP on mssql) inside, so each is a seek on idx_dwarf_steps_due - (parked, priority,
+// not_before) - that stops after capacity entries, and a band whose steps are all asleep is an empty range: the
+// seek's upper bound on not_before excludes them before any is read. The bands and the cap are inlined as integer
+// literals, never user input, so the statement's binds are only the partition's.
 //
-// Cost is O(len(keys) x perKey) rows examined on pgx and mssql, where the per-key cap is a LIMIT/TOP inside a
-// lateral join over an ordered index scan and therefore stops it. mysql and sqlite rank every due row of every
-// chosen key and cut afterwards - O(due rows at the band), the same shape ScanBand has everywhere.
+// Do not count every band with one GROUP BY priority instead. Without an equality on priority, a range on
+// not_before is no longer a seek, so the count reads every pending row, sleepers included - and it has no early
+// stop, so a deep band below one that fills the cache is read in full on every scan.
+func bandCountsQuery(driverName, part string, maxBand, capacity int) string {
+	limit, top := " LIMIT "+strconv.Itoa(capacity), ""
+	if driverName == "mssql" {
+		limit, top = "", "TOP ("+strconv.Itoa(capacity)+") "
+	}
+	var b strings.Builder
+	for band := 1; band <= maxBand+1; band++ {
+		if band > 1 {
+			b.WriteString(" UNION ALL ")
+		}
+		n := strconv.Itoa(band)
+		match := " AND priority=" + n
+		if band > maxBand {
+			match = " AND priority>" + strconv.Itoa(maxBand)
+		}
+		b.WriteString("SELECT " + n + " AS priority, COUNT(*) AS cnt FROM (SELECT " + top + "1 AS x FROM dwarf_steps" +
+			" WHERE " + dueSteps + part + match + limit + ") t" + n)
+	}
+	return b.String()
+}
+
+// bandTallyQuery is the scan's second statement: one aggregate row per fairness key at each of the given bands,
+// with the partition predicate part spliced into every band. A band beyond maxBand is the overflow (see
+// bandCountsQuery). Each band is its own branch with its value inlined,
+// so each is a seek on idx_dwarf_steps_due's equality and not_before range, and a planner sizes it from that
+// band's own statistics rather than an average.
 //
-// The band is bound (priority=?), not re-mined from a MIN subquery: the plan committed to this band, and
-// re-mining could pick a lower one that arrived between phases and mismatch the chosen keys. A bound
-// priority does not defeat the selection index - only a bound status would, which is why status stays
-// inlined.
-func (p *Piston) FetchSteps(ctx context.Context, shard, band int, keys []string, perKey int) (map[string][]int, error) {
-	if len(keys) == 0 || perKey <= 0 {
+// A plain GROUP BY, and that is load-bearing: nothing in it needs the rows in any order, so whichever index the
+// planner reads them from, it never sorts them. Do not rank them with a window function (ROW_NUMBER() OVER the
+// key, to cap the count or to pick the oldest step's columns): a ranking needs the band's rows in key order, and
+// on PostgreSQL 18 an under-estimated deep band was read off the due index and then sorted whole, spilling to disk.
+// A key's weight is therefore its LOWEST due step's, which an aggregate reads directly; the oldest step's would
+// need a lookup per key, and a fan-out puts thousands of a key's steps in the same millisecond, so the lookup
+// matches thousands of rows.
+func bandTallyQuery(part string, bands []int, maxBand int) string {
+	var b strings.Builder
+	for i, band := range bands {
+		if i > 0 {
+			b.WriteString(" UNION ALL ")
+		}
+		// The overflow groups by the actual priority too, so each priority beyond the range is its own band to
+		// the planner and the fetch matches it exactly.
+		column, match, group := strconv.Itoa(band), " AND priority="+strconv.Itoa(band), ""
+		if band > maxBand {
+			column, match, group = "priority", " AND priority>"+strconv.Itoa(maxBand), ", priority"
+		}
+		b.WriteString("SELECT fairness_key, COUNT(*) AS cnt," +
+			" DATE_DIFF_MILLIS(NOW_UTC(), MIN(created_at)) AS age_ms," +
+			" MIN(fairness_weight) AS weight," +
+			" " + column + " AS priority," +
+			" DATE_DIFF_MILLIS(NOW_UTC(), MIN(not_before)) AS due_ms" +
+			" FROM dwarf_steps" +
+			" WHERE " + dueSteps + part + match +
+			" GROUP BY fairness_key" + group)
+	}
+	return b.String()
+}
+
+// FetchSteps implements pipeline.StepSource. It loads, per (band, key) pair the plan chose, up to that band's
+// per-key cap of this shard's oldest due steps, keyed and ordered oldest-first WITHIN each pair - which is all the
+// plan replay reads. One statement serves every band the plan reached.
+//
+// The statement's per-key cap is UNIFORM, the largest of the plan's per-band caps, and each pair is trimmed to its
+// own band's cap afterwards. On pgx, mssql and sqlite the pairs travel as one or two parameters (arrays on pgx,
+// JSON on the others) and are joined back to rows in SQL, so the bind count does not grow with the number of keys;
+// mysql binds two per pair - see fetchQuery for why.
+//
+// Cost is O(pairs x perKey) rows examined on pgx and mssql, where the per-key cap is a LIMIT/TOP inside a lateral
+// join over an ordered index scan and therefore stops it. mysql and sqlite rank every due row of every chosen pair
+// and cut afterwards - O(due rows at the planned keys), the same shape ScanBand has everywhere.
+//
+// The bands are bound, not re-mined: the plan committed to them, and re-mining could pick a better one that
+// arrived between phases and mismatch the chosen keys. A bound priority does not defeat the selection index - only
+// a bound status would, which is why status stays inlined.
+func (p *Piston) FetchSteps(ctx context.Context, shard int, fetches []planner.Fetch) (map[planner.Slot][]int, error) {
+	var pairs []planner.Slot
+	capOf := make(map[int]int, len(fetches))
+	perKey := 0
+	for _, f := range fetches {
+		if f.PerKeyCap <= 0 {
+			continue
+		}
+		for _, k := range f.Keys {
+			pairs = append(pairs, planner.Slot{Band: f.Band, Key: k})
+		}
+		capOf[f.Band] = f.PerKeyCap
+		perKey = max(perKey, f.PerKeyCap)
+	}
+	if len(pairs) == 0 {
 		return nil, nil
 	}
 	// FaultFetchErr fails the fetch without touching the database, so a test can drive the one failure that
@@ -950,7 +1109,7 @@ func (p *Piston) FetchSteps(ctx context.Context, shard, band int, keys []string,
 	if grace > 0 {
 		overFetch = max(1, min(replicas, 4))
 	}
-	stmt, args, err := fetchQuery(p.db.DriverName(), band, keys, perKey*overFetch, part, partArgs)
+	stmt, args, err := fetchQuery(p.db.DriverName(), pairs, perKey*overFetch, part, partArgs)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -963,21 +1122,21 @@ func (p *Piston) FetchSteps(ctx context.Context, shard, band int, keys []string,
 		return nil, errors.Trace(err)
 	}
 	defer rows.Close()
-	out := map[string][]int{}
+	out := map[planner.Slot][]int{}
 	for rows.Next() {
 		var stepID int
-		var key string
-		// Every dialect's query projects (fairness_key, step_id) in that order - see fetchQuery, which
-		// keeps the projection uniform precisely so this loop is shared.
-		if err := rows.Scan(&key, &stepID); err != nil {
+		var slot planner.Slot
+		// Every dialect's query projects (priority, fairness_key, step_id) in that order - see fetchQuery,
+		// which keeps the projection uniform precisely so this loop is shared.
+		if err := rows.Scan(&slot.Band, &slot.Key, &stepID); err != nil {
 			return nil, errors.Trace(err)
 		}
-		out[key] = append(out[key], stepID)
+		out[slot] = append(out[slot], stepID)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, errors.Trace(err)
 	}
-	stolen := p.rankByResidue(out, perKey, replicas, ordinal)
+	stolen := p.rankByResidue(out, capOf, replicas, ordinal)
 	if stolen > 0 {
 		p.inst.Load().stolen.Add(ctx, int64(stolen), metric.WithAttributes(p.shardAttr))
 		p.fireCheckpoint(ctx, CheckpointStole)
@@ -985,8 +1144,8 @@ func (p *Piston) FetchSteps(ctx context.Context, shard, band int, keys []string,
 	return out, nil
 }
 
-// rankByResidue applies the fill order to a fetch: within each key it sorts the admitted steps by how far
-// they are from this replica, then trims to the per-key cap the plan asked for. It returns how many of the
+// rankByResidue applies the fill order to a fetch: within each (band, key) pair it sorts the admitted steps by how
+// far they are from this replica, then trims to the per-key cap the plan asked for at that band. It returns how many of the
 // KEPT steps came from outside this replica's class, which is what dwarf_steps_stolen counts.
 //
 // The sort is STABLE, so oldest-first survives inside each tier - the fetch returns rows in
@@ -997,9 +1156,10 @@ func (p *Piston) FetchSteps(ctx context.Context, shard, band int, keys []string,
 // Counting the stolen steps AFTER the trim, not before, is what keeps the metric honest. The fetch
 // deliberately over-fetches, so a healthy replica pulls foreign rows it then ranks last and discards -
 // counting those would report stealing that never happened.
-func (p *Piston) rankByResidue(out map[string][]int, perKey, replicas, ordinal int) int {
+func (p *Piston) rankByResidue(out map[planner.Slot][]int, capOf map[int]int, replicas, ordinal int) int {
 	stolen := 0
-	for key, list := range out {
+	for slot, list := range out {
+		perKey := capOf[slot.Band]
 		if replicas > 1 {
 			// Tier is computed once per element (decorate-sort-undecorate) rather than twice per
 			// comparison: sort.SliceStable's comparator would otherwise recompute residueTier on both
@@ -1020,7 +1180,7 @@ func (p *Piston) rankByResidue(out map[string][]int, perKey, replicas, ordinal i
 				}
 			}
 		}
-		out[key] = list
+		out[slot] = list
 	}
 	return stolen
 }

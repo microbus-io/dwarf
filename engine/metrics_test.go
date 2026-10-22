@@ -213,10 +213,10 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	assert.Equal(int64(1), ended)
 
 	// Both lifecycle counters carry the flow's priority, so started minus ended subtracts per band.
-	startedAt, ok := sumCounter(rm, "dwarf_flows_started", "priority", "100")
+	startedAt, ok := sumCounter(rm, "dwarf_flows_started", "priority", "3")
 	assert.True(ok, "dwarf_flows_started{priority} should be present")
 	assert.Equal(int64(1), startedAt)
-	endedAt, ok := sumCounter(rm, "dwarf_flows_ended", "priority", "100")
+	endedAt, ok := sumCounter(rm, "dwarf_flows_ended", "priority", "3")
 	assert.True(ok, "dwarf_flows_ended{priority} should be present")
 	assert.Equal(int64(1), endedAt)
 
@@ -339,7 +339,7 @@ func TestMetrics_BacklogGauges(t *testing.T) {
 	assert.NoError(err)
 
 	shard1 := map[string]string{"shard": "1"}
-	band := map[string]string{"shard": "1", "priority": "100"}
+	band := map[string]string{"shard": "1", "priority": "3"}
 	var rm metricdata.ResourceMetrics
 	assert.NoError(reader.Collect(ctx, &rm))
 	assert.True(e.backlogWanted.Load(), "a collection asks for the backlog")

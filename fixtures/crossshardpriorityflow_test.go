@@ -33,11 +33,9 @@ import (
 // TestCrossShardPriorityflow pins that strict priority still holds ACROSS SHARDS once each shard has
 // its own independent refiller, and that the refillers' scan floor does not break it.
 //
-// Why this shape, and why the existing priorityflow fixture does not cover it. With one refiller the
-// global minimum band came from a single barriered pass that read every shard at once, so cross-shard
-// priority was true by construction. Now each shard scans on its own cadence and publishes to a shared
-// census, the global band is merged from those (possibly one pass stale) entries, and a rate floor sits
-// between a band change and the refiller noticing it. Every one of those is a way for a high-priority
+// Why this shape, and why the existing priorityflow fixture does not cover it. Each shard scans on its own
+// cadence and publishes to a shared planner, the fill is merged from those (possibly one pass stale) entries,
+// and a rate floor sits between a band change and the refiller noticing it. Every one of those is a way for a high-priority
 // arrival on one shard to be ignored while other shards keep draining lower-priority work - a silent
 // semantic break that no throughput benchmark can see. (The rig campaigns ran a single band end to end,
 // so this path was entirely unmeasured there; ordering is a correctness property, not a timing one,
@@ -93,7 +91,7 @@ func TestCrossShardPriorityflow(t *testing.T) {
 	for range lowCount {
 		k, err := eng.Create(ctx, "crossshardpriority.verify:428/priority",
 			map[string]any{"delayMs": 20, "tag": "low"},
-			&workflow.FlowOptions{Priority: 100})
+			&workflow.FlowOptions{Priority: 5})
 		assert.NoError(err)
 		lowKeys = append(lowKeys, k)
 	}
@@ -106,8 +104,8 @@ func TestCrossShardPriorityflow(t *testing.T) {
 	// because each piston turns on its own cadence and one slow shard is precisely the case that breaks it.
 	enginetest.AwaitShardCycles(t, eng, 2)
 
-	// The urgent burst. More than one, deliberately: Offer head-inserts at most ONE pioneer per
-	// band-opening per partition, so everything past the pioneers can only be served by a refill scan
+	// The urgent burst. More than one, deliberately: Offer admits an arrival only into a vacated slot, so
+	// with the caches full of the low backlog most of the burst can only be served by a refill scan
 	// noticing the new band. That is exactly what the scan floor delays.
 	const highCount = 6
 	highKeys := make([]string, 0, highCount)
@@ -131,7 +129,7 @@ func TestCrossShardPriorityflow(t *testing.T) {
 	urgentLatency := time.Since(urgentAt)
 
 	// THE SENSITIVE ASSERTION, and the reason it is latency rather than ordering. A refill pass always
-	// plans the global MINIMUM band, so however slowly the refillers scan, the urgent band is still
+	// plans the best band first, so however slowly the refillers scan, the urgent band is still
 	// selected first whenever a scan does happen - the floor cannot invert the order, it can only make
 	// everything wait. Verified: a build with a 5s floor and the urgent bypass removed still produced
 	// correct ordering, and simply took 22x as long (50.7s vs 2.25s). An ordering-only fixture would
@@ -159,7 +157,7 @@ func TestCrossShardPriorityflow(t *testing.T) {
 	// Where the urgent work landed in the completion order. The assertion is deliberately not "all six
 	// high before every low": a worker already executing a low-priority step finishes it (priority is
 	// not preemptive), the refiller serves the new band on its next pass rather than instantly, and
-	// each shard may pioneer one candidate - so a bounded number of low-priority steps legitimately
+	// the doorbell admits an arrival only where a slot was free - so a bounded number of low-priority steps legitimately
 	// interleave. What must NOT happen is the urgent band waiting out the low-priority backlog.
 	lastHigh, lowsAfterHigh := -1, 0
 	for i, tag := range got {
@@ -180,8 +178,8 @@ func TestCrossShardPriorityflow(t *testing.T) {
 	//
 	// The margin covers FOUR legitimate sources of interleave, and the fourth is why it is a third of the
 	// backlog rather than half. A worker mid-step finishes it (priority is not preemptive); each partition
-	// may pioneer one candidate; dispatch jitter; and - there being no per-shard refill trigger -
-	// everything PAST those pioneers waits for the next cycle boundary rather than for a nudge, up to a
+	// may admit an arrival into a freed slot; dispatch jitter; and - there being no per-shard refill trigger -
+	// everything PAST those admissions waits for the next cycle boundary rather than for a nudge, up to a
 	// full interval (~67ms). Three shards draining 20ms tasks get through roughly ten more low steps in
 	// that window, which is precisely the "strict within one or two intervals" property the design states
 	// rather than a regression. The latency assertion above is the sharp guard - it was verified to catch a

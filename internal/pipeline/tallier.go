@@ -29,11 +29,12 @@ import (
 // fleet (SupplyResult.GlobalBand).
 const NoBand = math.MaxInt
 
-// BandSource is the Tallier's database side - the one query it makes, read-only.
+// BandSource is the Tallier's database side - read-only.
 type BandSource interface {
-	// ScanBand reports this shard's minimum due priority band and one tally per fairness key at that
-	// band, or NoBand and no tallies when nothing is due here. It returns O(distinct keys) rows, never
-	// O(backlog); each tally's Count is expected to be capped at the planning capacity.
+	// ScanBand reports this shard's best due band and one tally per fairness key per due band, best bands
+	// first, or NoBand and no tallies when nothing is due here. It returns O(distinct keys x bands) rows,
+	// never O(backlog); each tally's Count is expected to be capped at the planning capacity, and it may
+	// stop at the band where its counts reach that capacity, since no fill reaches past it.
 	ScanBand(ctx context.Context, shard int) (band int, tallies []planner.Tally, err error)
 }
 
@@ -46,7 +47,7 @@ type TallyResult struct {
 	Tallying time.Duration
 	Total    time.Duration
 
-	// Band is this shard's own minimum due band, or NoBand when nothing is due here or the scan failed.
+	// Band is this shard's own best due band, or NoBand when nothing is due here or the scan failed.
 	Band int
 
 	// Err is set when the scan failed. The cycle has already dealt with it; this is for the log line.
@@ -90,8 +91,8 @@ func (t *Tallier) Shard() int { return t.shard }
 // Cycle scans this shard's band and reports it to the planner, sleeping first for whatever the cadence
 // still owes. It never returns an error; see the package doc.
 //
-// A failed scan means this shard could not LOOK, and it must then leave planning: a stale claim on the best
-// band makes every peer find no keys of its own there and dispatch nothing. It deliberately does NOT touch
+// A failed scan means this shard could not LOOK, and it must then leave planning: a stale claim on a band
+// that fills the batch leaves every peer no capacity to spill into, and they dispatch nothing. It deliberately does NOT touch
 // the candidate cache - which is not this loop's to touch at all - because the failure means "unknown", not
 // "nothing is due".
 func (t *Tallier) Cycle(ctx context.Context) TallyResult {
@@ -111,7 +112,7 @@ func (t *Tallier) Cycle(ctx context.Context) TallyResult {
 		r.Err = errors.New("tallying", err)
 	} else {
 		r.Band = band
-		t.planner.Tally(t.shard, band, tallies)
+		t.planner.Tally(t.shard, tallies)
 	}
 	r.Total = t.end(start)
 	return r

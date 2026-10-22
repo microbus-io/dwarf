@@ -64,7 +64,6 @@ func TestSetters_ConstructionTimeOnly(t *testing.T) {
 
 	// Live: succeed after Startup.
 	assert.NoError(e.SetTimeBudget(30 * time.Second))
-	assert.NoError(e.SetDefaultPriority(5))
 }
 
 // TestSetShard_RejectsBadSpecs pins the status codes of construction-time configuration mistakes: an invalid
@@ -139,24 +138,20 @@ func TestSetEngineID_PinsIdentity(t *testing.T) {
 	assert.Equal(int64(424242), e.engineID)
 }
 
-// TestSetDefaultPriority_RejectsNonPositive pins the validation on the engine-level default. A flow stamped
-// with a non-positive priority is invisible to the refiller's band selection: it sits `pending` forever
-// while the doorbell re-rings it in a loop, and no error is ever raised. `create` already rejected a
-// negative FlowOptions.Priority as a caller bug, but the engine-level default reached the same column
-// unchecked. The int32 upper bound matters for the same reason - a value that overflows the column's width
-// (3_000_000_000, say) wraps NEGATIVE and produces exactly that hang.
-func TestSetDefaultPriority_RejectsNonPositive(t *testing.T) {
+// TestDefaultPriority_IsTheMidpoint pins the priority a flow that sets none gets: the midpoint of 1..max, so it
+// moves with the range and can never fall outside it - a flow stamped outside the range would be served only as
+// the overflow.
+func TestDefaultPriority_IsTheMidpoint(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
-	assert.Error(e.SetDefaultPriority(0), "0 is not a valid priority (1 is the lowest)")
-	assert.Error(e.SetDefaultPriority(-1), "a negative priority hides every flow from the refiller")
-	assert.Error(e.SetDefaultPriority(math.MaxInt32+1), "a value beyond int32 wraps negative in the column")
-	assert.NoError(e.SetDefaultPriority(1))
-	assert.NoError(e.SetDefaultPriority(100))
+	assert.Equal(3, e.defaultPriority(), "the midpoint of 1..5")
+	assert.NoError(e.SetMaxPriority(100))
+	assert.Equal(50, e.defaultPriority())
+	assert.NoError(e.SetMaxPriority(1))
+	assert.Equal(1, e.defaultPriority())
 
-	// The guard rejects rather than clamps: the accepted value is the one the engine dispatches with.
 	mux := hosts.NewMux()
 	g := workflow.NewGraph("Prio")
 	g.SetURL("A", "prio/a")
@@ -168,7 +163,6 @@ func TestSetDefaultPriority_RejectsNonPositive(t *testing.T) {
 	e2 := NewEngineUnderTest(t.Name())
 	defer e2.Shutdown(t.Context())
 	assert.NoError(e2.SetHost(mux))
-	assert.NoError(e2.SetDefaultPriority(7))
 	assert.NoError(e2.Startup(t.Context()))
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*enginetest.TimeoutScale()) // bounds only a hang
@@ -258,7 +252,7 @@ func TestCreate_RejectsValuesTheColumnsCannotHold(t *testing.T) {
 		assert.Error(err, name)
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), name)
 	}
-	_, outcome, err := e.Run(ctx, "bounds/wf", nil, &workflow.FlowOptions{Priority: math.MaxInt32, TimeBudget: maxTimeBudget})
+	_, outcome, err := e.Run(ctx, "bounds/wf", nil, &workflow.FlowOptions{Priority: e.maxPriority, TimeBudget: maxTimeBudget})
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status, outcome.Error)
 
@@ -266,4 +260,41 @@ func TestCreate_RejectsValuesTheColumnsCannotHold(t *testing.T) {
 	assert.Error(err)
 	assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
 	assert.NoError(e.SetTimeBudget(maxTimeBudget))
+}
+
+// TestSetMaxPriority pins the range setter: 1..100 and construction-time only. A Create past the maximum is refused rather than stored as
+// a step the refiller would never select.
+func TestSetMaxPriority(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	e := NewEngine()
+	assert.Error(e.SetMaxPriority(0))
+	assert.Error(e.SetMaxPriority(101), "every band up to the maximum costs the scan a probe each cycle")
+	assert.NoError(e.SetMaxPriority(100))
+
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("MaxPrio")
+	g.SetURL("A", "maxprio/a")
+	g.AddTransition("A", workflow.End)
+	mux.HandleGraph("maxprio/g", g)
+	mux.HandleTask("maxprio/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	e2 := NewEngineUnderTest(t.Name())
+	defer e2.Shutdown(t.Context())
+	assert.NoError(e2.SetHost(mux))
+	assert.NoError(e2.SetMaxPriority(3))
+	assert.NoError(e2.Startup(t.Context()))
+	assert.Error(e2.SetMaxPriority(4), "construction-time only")
+
+	for _, p := range e2.pistons {
+		assert.Equal(3, p.MaxPriority(), "every piston counts the engine's range")
+	}
+
+	_, err := e2.Create(t.Context(), "maxprio/g", nil, &workflow.FlowOptions{Priority: 4})
+	assert.Error(err)
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
+	_, outcome, err := e2.Run(t.Context(), "maxprio/g", nil, &workflow.FlowOptions{Priority: 3})
+	if assert.NoError(err) {
+		assert.Equal(workflow.StatusCompleted, outcome.Status, "the worst band is served")
+	}
 }

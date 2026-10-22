@@ -45,11 +45,11 @@ const (
 	// wasted scans while being long starves dispatch (67ms measured ~50% ahead of 141ms).
 	sustainedDrainPerConn = 120
 	// refillIntervalCap bounds priority latency, and is the only thing that does. A better band arriving
-	// here does not preempt - Offer appends it at the tail - so it becomes servable when a cycle plans it,
-	// and peers plan it a cycle after that. What this bounds is when better work starts. It does not make
-	// cross-shard order strict: peers plan a stale global minimum until the arriving shard's next tally, and a
-	// cached partition keeps its frozen band until its own shard's next push, so order across shards is strict
-	// only within a cycle or two.
+	// here does not preempt running work, so it becomes servable when a cycle plans it (or the doorbell
+	// admits it ahead of worse cached candidates), and peers plan it a cycle after that. What this bounds is
+	// when better work starts. It does not make cross-shard order strict: peers fill from a stale picture
+	// until the arriving shard's next tally, and a cached partition holds its candidates until its own
+	// shard's next push, so order across shards is strict only within a cycle or two.
 	refillIntervalCap = 1 * time.Second
 	// supplyGapDivisor turns the supply loop's derived period into its quiet-time fuse.
 	//

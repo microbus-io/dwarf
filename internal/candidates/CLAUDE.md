@@ -12,8 +12,8 @@ already-claimed candidate is harmless (the CAS loser just pops the next one). No
 popped candidate is still runnable.
 
 **One cache, N partitions — not N caches.** Each shard's refiller wholesale-replaces its own partition
-(`Refill(shard, batch, floor)`), and `Pop` selects across partitions: **lowest floor wins** (that is the
-entire dispatch rule), ties break by depth (deepest first — round-robin would hand every shard an equal
+(`Refill(shard, batch, limit)`), and `Pop` selects across partitions: **the best band at the head wins**
+(that is the entire dispatch rule), ties break by depth (deepest first — round-robin would hand every shard an equal
 share of workers regardless of backlog), then by shard index for determinism. One mutex and ONE condition
 variable span all partitions: N cond vars would let a worker blocked on shard 3's emptiness sleep through
 shard 1 filling.
@@ -54,6 +54,10 @@ several shards; a replica dispatching one has nowhere else to send a worker.
   shard - re-forming the herd every cycle under saturation, where the queues are deepest. A Refill that
   shrinks a partition below its reservations makes it read negative, which routes nobody new there; each
   failed pop then brings the count back down.
+- **Routing ranks a partition by the band past its reservations** - the candidate the next routed worker would
+  actually take, since those already routed take the ones ahead of it. Ranking by the head would send a second
+  worker to `1 5 5` behind the first, who is on the way to the 1, and run a 5 while another partition's 3s wait.
+  Pinned by `TestCandidateCache_RoutingReadsPastTheReservations`.
 - **A fully reserved partition is passed over even when its band is better.** Its every candidate has a
   worker on the way, so an extra one could only queue behind them; the worse band it goes to is on another
   shard, where it competes with nothing the better band needs.
@@ -142,25 +146,23 @@ is the standard thread-pool trick, and it is what mirroring `internal/turnstile`
 amount to. That is a real design with real merits, but it is not this one, and it must not arrive as a side
 effect of a wake change.
 
-**The floor is the band a partition is serving for the current window, and it is FROZEN there** — set by
-the `Refill` that planned it (or by an `Offer` into an empty partition), `math.MaxInt` when empty. It is
-`Pop`'s key for choosing which partition to drain, and `Offer`'s bar for what it will admit.
+**A partition is kept in BAND ORDER, and that is what makes every take a pop from the front.** A plan that
+spilled hands `Refill` a batch spanning several bands; `Refill` sorts it stably by `Job.Priority` (the plan's
+interleave survives within a band), and `Offer` inserts behind everything at its own band or better. So the
+head is always the best candidate the partition holds, and the floor - the key every take ranks partitions by
+- is simply the head's band, exact by construction. **Do not store a floor beside the items instead.** With
+several bands in one partition a stored floor overstates urgency as soon as its best band drains: a partition
+holding `1 5 5 5` would keep advertising 1 and drain its 5s ahead of another partition's 3s. **And do not append
+offers at the tail.** A worker would then take a worse band while a better one waits behind it in the same
+partition.
 
-Frozen rather than read off the head, and the difference is visible. `Offer` appends a better-banded step
-*behind* the planned batch, so a head-derived floor would **dip** as that item reached the front and rise
-again once it popped: a partition planned at band 6 holding `6 6 5 6` would advertise 6,6,5,6 as it
-drained. That oscillates `Pop`'s partition choice — and worse, it swings `Offer`'s own admission bar with
-it, so an offered band-6 step would be taken or refused purely on pop timing.
+Jobs carry `Priority` - set by the plan for a batch, stamped by `Offer` for an admission - and it is what the
+order and the floor read; a popped candidate is self-describing (the worker logs it).
 
-**Storing it is safe only because `Offer` appends at the tail, and the direction is the whole argument.**
-`Offer` declines anything *worse* than the band, so every item present is at least as good as it — a frozen
-floor can only ever **understate** the partition's urgency, delaying a buried better-band step by at most a
-cycle. A stored floor paired with a head-insert fails the other way: it keeps advertising band 1 *after* the
-band-1 head has popped, **overstating** urgency and draining a whole band-5 body ahead of another
-partition's band-3 work. Understating costs latency; overstating costs ordering.
-
-Jobs carry `Priority`, assigned by the cache itself — callers never set it — but the floor does not derive
-from it; it rides along so a popped candidate is self-describing (the worker logs it).
+**`limit` is the worst band `Offer` admits into a non-empty partition, and it is NOT the floor.** `Refill`
+sets it to the plan's reach - the band where the fill ran out of capacity, `math.MaxInt` when everything due
+fit - and an `Offer` into an empty partition sets it to the arrival's band. It is frozen until the next
+`Refill`, so the admission bar does not move as the partition drains.
 
 **`Refill` is a wholesale replace of ONE partition, and that includes an EMPTY batch** — it empties the
 partition, exactly as draining the last item through `Pop` does. An empty batch is the scan's statement
@@ -216,14 +218,16 @@ suppress the empty-partition case; it manufactures it. Do not remove this on the
 partitions are always full - they are not, and the measurement above is the arm to re-run before believing
 otherwise.
 
-**The one priority test is against a WORSE band, and it points the opposite way from the obvious guess.**
-A *better* band appends: the step is at least as important as everything the partition was planned to run,
-so it violates nothing and simply dispatches in arrival order. A *worse* band is declined — admitting it
-would have a worker run band-900 work while band-100 work sat cached right there, which is a strict
-priority inversion, not the soft cross-shard staleness the design already accepts. It waits for a cycle in
-which its band is the global minimum, which is exactly when it is allowed to run. An **empty** partition
-has nothing planned to be worse than, so it admits any band — which is what keeps a worse-band sequential
-chain moving once the better band has drained.
+**The one priority test is against a band WORSE THAN THE LIMIT, and the limit is the plan's reach, not its
+best band.** Everything at the reach or better was planned with capacity to spare at the better bands, so an
+admission there takes a slot the plan would have given that band anyway, and band order puts it behind what
+the plan chose. A band worse than the reach is declined: the plan ran out of capacity at the reach, so work
+there is still waiting uncached, and admitting a worse band would run it first — a strict priority inversion,
+not the soft cross-shard staleness the design accepts. **Do not bar at the partition's best band.** It is the
+starvation shape the spill exists to remove: with a sparse better band at the head, every successor of the
+worse band the plan spilled into would be declined and wait a cycle per hop. An **empty** partition has nothing
+cached to be worse than, so it admits any band — which is what keeps a worse-band sequential chain moving once
+the better band has drained.
 
 Which callers can even bring a better band is worth knowing, because it is not the successor case:
 priority is frozen at `Create` and inherited by every step of a flow, so a successor never arrives at a
@@ -233,26 +237,17 @@ one, and that band's last successor turns up afterwards.
 
 **Admitted candidates are counted (`partition.offered`) and subtracted from `Refill`'s discard count.**
 That return value is the REFILLER's oversupply signal, and charging it for candidates the doorbell admitted
-would make the ratio read worst exactly when the doorbell is working best. The count is exact without a
-per-job flag because of the layout: a `Refill` replaces wholesale and offers only ever append, so the
-refill block is always the head and the offered ones the tail - which makes "is the item `Pop` is about to
-remove an offered one?" the test `len(items) <= offered`. The engine emits the admissions as
+would make the ratio read worst exactly when the doorbell is working best. Band order puts an offered job
+anywhere in the partition, so each one carries an unexported flag that a take, a `Resize` trim and `Refill`
+read to keep the count exact; the flag is cleared before a job leaves the cache, so a caller never sees it.
+The engine emits the admissions as
 `dwarf_steps_offered`; read against `dwarf_refill_candidates_selected` it is the share of dispatch that came
 from step origination rather than from the weighted plan.
 
-**Do not head-insert a better band.** Letting a strictly-better band jump the queue, so the first urgent
-step does not wait a cycle, buys nothing measurable: on `fixtures/crossshardpriorityflow_test.go` — the
-fixture built to measure urgent-burst reaction — burst latency was 134-146ms with a head-insert and
-134-152ms without, with identical counts of lower-priority work ahead of the burst. All it can buy is one
-step, on one shard, arriving up to one interval sooner, and it only ever reorders **one replica's cache** —
-the planner learns of the new band from that shard's next tally either way, so the fleet-level band change
-costs a cycle regardless.
-
-What it costs is real: a fairness bypass that must be argued as bounded to one pioneer per band-opening, an
-"only one" limit that invites widening (a wider one measured no better), and a frozen floor that turns
-from understating to overstating (above). It would also break the public contract in
-`docs/scheduling-and-reliability.md`: *priority is never preemptive*, and the delay before a new band is
-served is *bounded by the snapshot cycle*.
+**Inserting a better band ahead of worse cached candidates is band order, not preemption.** Nothing running is
+interrupted, and within its band the arrival goes last, so it bypasses no fairness decision - the plan's lottery
+is per band. `docs/scheduling-and-reliability.md` states the public contract: *priority is never preemptive*,
+and the delay before a new band is served is *bounded by the snapshot cycle*.
 
 **`Refill` returns the number of candidates it discarded un-popped**, which the engine feeds to
 `dwarf_refill_candidates_discarded`. Discarded steps stay `pending` and are re-selected, so this is cost,

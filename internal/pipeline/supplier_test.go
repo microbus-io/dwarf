@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/candidates"
 	"github.com/microbus-io/dwarf/internal/planner"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -54,7 +55,7 @@ func TestSupplier_PushesThePlannedBatch(t *testing.T) {
 	for _, j := range batch {
 		seen[j.StepID]++
 		assert.Equal(1, j.Shard, "every candidate carries its own shard")
-		assert.Equal(5, j.Priority, "the cache stamps the band the batch was pushed at")
+		assert.Equal(5, j.Priority, "every candidate carries the band its slot was planned at")
 	}
 	for _, id := range []int{11, 12, 13, 21, 22, 23} {
 		assert.Equal(1, seen[id], "step %d pushed exactly once", id)
@@ -141,10 +142,10 @@ func TestSupplier_NothingDueClearsThePartition(t *testing.T) {
 	assert.Equal(3, res.Discarded, "and the hints it dropped are reported")
 }
 
-// TestSupplier_AboveBandClearsAndFetchesNothing pins strict cross-shard priority as the Supplier sees it: a
-// shard with real due work, outranked by a peer holding a better band, serves nothing and does not even pay
-// for a fetch. Its partition is cleared too - those hints are for a band it no longer serves.
-func TestSupplier_AboveBandClearsAndFetchesNothing(t *testing.T) {
+// TestSupplier_PastReachClearsAndFetchesNothing pins strict cross-shard priority as the Supplier sees it: a
+// shard with real due work, outranked by a peer whose better band fills the batch, serves nothing and does
+// not even pay for a fetch. Its partition is cleared too - those hints are for a band the plan does not reach.
+func TestSupplier_PastReachClearsAndFetchesNothing(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -152,16 +153,53 @@ func TestSupplier_AboveBandClearsAndFetchesNothing(t *testing.T) {
 	r := newRig(t, []planner.Tally{{Key: "mine", Weight: 1, AgeMs: 1, Count: 5}}, 9)
 	r.steps.steps = map[string][]int{"mine": {1, 2, 3, 4, 5}}
 	seed(r.cache, 7, 8)
-	// A peer holds a strictly better band.
-	r.planner.Tally(2, 1, []planner.Tally{{Key: "theirs", Weight: 1, AgeMs: 1, Count: 5}})
+	// A peer holds a strictly better band, deep enough to fill the batch.
+	r.planner.Tally(2, []planner.Tally{{Band: 1, Key: "theirs", Weight: 1, AgeMs: 1, Count: 8}})
 
 	tr, res := r.cycle(ctx)
 	assert.NoError(res.Err, "being outranked is the ordinary case, never a fault")
 	assert.Equal(9, tr.Band)
 	assert.Equal(1, res.GlobalBand)
-	assert.True(tr.Band > res.GlobalBand, "Band > GlobalBand is how a caller logs 'outranked'")
+	assert.True(tr.Band > res.GlobalBand, "the peer holds the better band")
 	assert.Equal(0, r.steps.fetches, "an outranked shard pays for no fetch")
 	assert.Equal(0, r.cache.Len(), "and holds no hints for a band it cannot serve")
+}
+
+// TestSupplier_SpillsAcrossBands pins the batch a spilling plan produces: one fetch covering every band, and the
+// better band's candidates popped first whatever the fetch returned them in.
+func TestSupplier_SpillsAcrossBands(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	r := newRig(t, []planner.Tally{
+		{Band: 9, Key: "lo", Weight: 1, AgeMs: 900, Count: 10},
+		{Band: 2, Key: "hi", Weight: 1, AgeMs: 10, Count: 2},
+	}, 2)
+	r.steps.byBand = map[int]map[string][]int{
+		2: {"hi": {1, 2}},
+		9: {"lo": {91, 92, 93, 94, 95, 96, 97, 98}},
+	}
+
+	_, res := r.cycle(ctx)
+	assert.NoError(res.Err)
+	assert.Equal(1, r.steps.fetches, "one fetch for every band the plan reached")
+	assert.Equal(2, len(r.steps.gotFetches))
+	assert.Equal(8, res.Selected, "the worse band fills what the better one left")
+	var got []int
+	for _, j := range drain(r.cache) {
+		got = append(got, j.StepID)
+	}
+	assert.Equal([]int{1, 2, 91, 92, 93, 94, 95, 96}, got)
+
+	// The push sets the doorbell's bar at the plan's reach, band 9, not at its best band: a band-9 successor is
+	// admitted into the partition the plan filled from it.
+	_, res = r.cycle(ctx)
+	assert.NoError(res.Err)
+	j, _ := r.cache.Pop()
+	assert.Equal(2, j.Priority)
+	assert.True(r.cache.Offer(candidates.Job{StepID: 99, Shard: 1}, 9), "the reach admits")
+	assert.False(r.cache.Offer(candidates.Job{StepID: 98, Shard: 1}, 10), "past the reach does not")
 }
 
 // TestSupplier_ShortFetchRunsShort pins that a key whose steps were claimed between the fetch and the
@@ -216,9 +254,8 @@ func TestSupplier_FetchArgumentsComeFromThePlan(t *testing.T) {
 
 	_, res := r.cycle(ctx)
 	assert.NoError(res.Err)
-	assert.Equal(7, r.steps.gotBand, "the fetch binds the planned band, never a freshly-mined one")
-	assert.Equal([]string{"solo"}, r.steps.gotKeys)
-	assert.Equal(8, r.steps.gotPerKey, "one key at capacity 8 wins all eight slots")
+	assert.Equal([]planner.Fetch{{Band: 7, Keys: []string{"solo"}, PerKeyCap: 8}}, r.steps.gotFetches,
+		"the fetch binds the planned band, its keys, and its per-key cap: one key at capacity 8 wins all eight slots")
 	assert.Equal(8, res.Selected)
 }
 

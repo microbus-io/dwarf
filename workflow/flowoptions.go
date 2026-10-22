@@ -22,9 +22,9 @@ import "time"
 // do not take FlowOptions; they inherit policy from their source, so the operation is the
 // inherit-vs-default selector. A nil *FlowOptions, or any zero field, uses the engine's defaults.
 type FlowOptions struct {
-	// Priority orders flows competing for workers; an explicit priority is >= 1,
-	// lower runs first. Zero means "unset" and uses the engine's
-	// DefaultPriority config. Create rejects a negative value or one beyond 32 bits.
+	// Priority orders flows competing for workers: between 1 and the engine's maximum
+	// priority (5 by default), lower runs first. Zero means "unset" and takes the
+	// midpoint of the range (3 by default). Create rejects a value outside the range.
 	Priority int `json:"priority,omitzero"`
 	// FairnessKey groups flows for fair scheduling, typically a tenant.
 	// Empty uses the "" bucket.

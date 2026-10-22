@@ -122,9 +122,9 @@ it. This is a workflow bug, not an infrastructure one; restarting replicas will 
 
 **Confirm it is real.** `dwarf_steps_dispatch_lag_seconds` is the honest signal — aggregate it with `max`
 across replicas, never `sum`. A rising *count* with a flat lag is just more work arriving; a rising lag means
-dispatch is genuinely falling behind. The lag covers only the priority band being served: a worse band aging
-in `dwarf_steps_oldest_pending_age_seconds` while the lag stays flat is strict priority serving the better
-band first, as designed.
+dispatch is genuinely falling behind. The lag covers only the priority bands being served: a worse band aging
+in `dwarf_steps_oldest_pending_age_seconds` while the lag stays flat is better-priority work keeping every
+worker busy, as designed.
 
 **See where it is.** Break the lag down by shard,
 `max by (shard) (dwarf_steps_dispatch_lag_seconds)`, and the shape points at the cause:

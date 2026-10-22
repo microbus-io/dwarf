@@ -134,14 +134,14 @@ Configuration is applied through `Set*` methods, each returning an `error` rathe
 every setter can surface an error). They split into two groups by whether the knob can change safely on a running
 engine:
 
-- **Live** (take effect immediately, callable any time): `SetTimeBudget`, `SetDefaultPriority`, and the
-  bench override `setRefillInterval`, reached through `internal/engineseams`. The pool lever is
+- **Live** (take effect immediately, callable any time): `SetTimeBudget` and the bench override
+  `setRefillInterval`, reached through `internal/engineseams`. The pool lever is
   construction-time, not live: `ShardSpec.MaxConnections` declares a shard's fleet-wide budget (see "Connection
   pool sizing"). There is deliberately no seam that pins a per-replica pool: such a pool is never divided and
   makes every replica dispatch every shard, so a test or bench using one exercises a fleet shape no deployment
   can reach. Pin through `MaxConnections` instead (identical to a per-replica pin at R=1).
-  `SetTimeBudget`/`SetDefaultPriority` are read fresh at each `Create` (an
-  existing flow keeps the budget/priority frozen at its own `Create`). Which replicas dispatch a shard, and so how its
+  `SetTimeBudget` is read fresh at each `Create` (an existing flow keeps the budget frozen at its own
+  `Create`). Which replicas dispatch a shard, and so how its
   derived budget divides, is NOT a setter - it is **read** live from the shared `dwarf_peers` registry (see "Peer
   discovery" and "Dispatchers" below), and `recomputePools` pushes each shard's recomputed size through
   `ShardSet.SetShardPool` (hot/atomic, and it applies the test-mode cap). **The derived *worker* ceiling follows the
@@ -657,24 +657,24 @@ better band is seen up to one Tallier iteration late. The full accounting, and t
 forced (`Plan.Tallied`, and the rule that both refill queries run the identical residue predicate), are in
 `internal/pipeline/CLAUDE.md` and
 `internal/piston/CLAUDE.md`. (1) **Aggregate
-scan** (`piston.ScanBand`): the shard returns *one row per fairness key* at its strict-minimum `priority`
-band - the key's due **count CAPPED at cache capacity** (`MAX(rn)` under a `rn <= capacity` cut, not
-`COUNT(*) OVER`; see "The phase-1 scan count is CAPPED, not exact" below) plus the age and
-`fairness_weight` of its *oldest* due step (`ROW_NUMBER()=1`). The band is a
-`priority=(SELECT MIN(priority) ... due)` subquery, so band and aggregates are self-consistent within the
-statement. (2) **Global merge + weighted pick** (`internal/planner`): the shard's tally is recorded in the
-planner - a shared map holding each shard's LAST report, which is what makes a barrier unnecessary - and the plan
-is computed over all of them: global minimum band (strict priority is cluster-wide; worse-band shards
-contribute nothing), counts summed per key, the globally-oldest step's weight winning, then repeatedly
-weighted-random pick a key (Efraimidis-Spirakis over the *keys*, not the rows) until the plan reaches
-`capacity`. **The plan is global; only the fetch is per-shard**, so fairness semantics are exactly the
+scan** (`piston.ScanBand`): the shard returns *one row per fairness key per due band* - one plain `GROUP BY`:
+the key's due **count, CAPPED at cache capacity** (see "The phase-1 scan count is CAPPED, not exact" below),
+the age of its *oldest* due step, and the *lowest* `fairness_weight` among them. It is two statements whatever the
+number of bands: per-band counts capped at capacity for every band `1..max` (`SetMaxPriority`), then the
+`GROUP BY` for just the bands up to the one where those counts reach capacity, since no fill reaches past it.
+(2) **Global merge + weighted fill** (`internal/planner`): the shard's tally is recorded in the planner - a
+shared map holding each shard's LAST report, which is what makes a barrier unnecessary - and the plan is
+computed over all of them, band by band from the best: counts summed per key within a band, the lowest
+weight winning, then repeatedly weighted-random pick a key (Efraimidis-Spirakis over
+the *keys*, not the rows) until the band is exhausted or the plan reaches `capacity`, and spill to the next
+band only while capacity remains. **The plan is global; only the fetch is per-shard**, so fairness semantics are exactly the
 barrier's - never re-derive this as per-shard lotteries, presence-scaled (`1/d`) weights, or capacity
 allocated by shard counts (count-proportional capacity makes backlog drive share, repealing the "count
 does not drive share" property that makes the design fair). Each piston rolls its own plan from its own
 snapshot - independent rolls change nothing in expectation and need no coordination; the staleness is that
 a piston sees the *other* shards up to one of their cycles old, which fairness (slowly-varying) tolerates
 and dispatch (own-shard scan, always fresh) never sees. (3) **Sliced fetch** (`planner`'s slice rule +
-`piston.FetchSteps`): the plan's per-key demand is split across the shards holding the key - **first slot
+`piston.FetchSteps`, one statement over every planned band): the plan's per-key demand is split across the shards holding the key - **first slot
 to the shard with the key's oldest step** (preserves globally-oldest-first dispatch and prevents a purely
 proportional split from rounding a quiet shard's lone old step to zero forever), remainder proportional to
 per-shard counts, largest-remainder rounding, deterministic - and the piston fetches only its own slice
@@ -701,24 +701,31 @@ strictly dominated by the cycle:
 - **an error clamp** - swallowing a scan error refills the partition **empty** and blocks the shard's workers.
 
 **A shard that could not LOOK must clear itself, and this is the one thing a cycle must never skip.**
-A failed scan leaves the planner holding that shard's last tally, which may claim the best band; every peer
-then plans that band, finds none of its own keys there, and dispatches nothing - forever. So a scan error calls
+A failed scan leaves the planner holding that shard's last tally, which may claim a better band deep enough to
+fill the batch; every peer then finds no capacity left to spill into and dispatches nothing - forever. So a scan error calls
 `planner.Clear` and leaves the cache partition intact (an error means "unknown", not "nothing is due"; the
 Supplier reads the distinction off `Plan.Tallied`). A fetch error clears neither: the tally is still true.
 Participation is **declared, never inferred** - do not add a TTL scaled to the slowest pass; a merely SLOW shard
 keeps its tally and stays counted (`internal/planner/CLAUDE.md`).
 
-**Strict priority across shards: no spill, no back-off needed.** A shard whose own minimum band sits above
-the global minimum plans an **empty slice** and fetches nothing; its partition is cleared, because hints at
-a band it no longer holds due work at are dead. It is simply a cycle that fetched nothing, and the next one
-re-evaluates on its own - no outcome of its own, no watch to avoid spinning. The same is true of a shard AT the
-global band that wins zero slots because a
-capacity-bound plan gave them all to shards holding more (or older) of the planned keys. `planner.Plan`
-deliberately does not say WHICH of those happened - every case takes the same action, hold no candidates.
+**Strict priority is over CAPACITY: a worse band gets exactly what the better bands leave unused.** The fill
+takes the best band first and spills to the next only while slots remain, so a better band that fills the batch
+holds every worse band back, and one that cannot fill it holds back nothing. **Do not draw the plan from the best
+band alone.** It looks like the strict rule and is not work-conserving: a sparse but continuous better band - due
+at nearly every scan, never enough to fill the cache - idles the rest of the batch every cycle while the worse
+band never moves, with the workers idle (`fixtures/bandspillflow_test.go` pins the shape). The plan's `Reach` is the band where the fill ran out of
+capacity; it is the cache's bar for the doorbell, and the dispatch-lag gauge's bar for what is held back.
+
+A shard holding only work past the reach plans an **empty slice** and fetches nothing; its partition is
+cleared, because those hints are for a band the plan does not reach. It is simply a cycle that fetched
+nothing, and the next one re-evaluates on its own - no outcome of its own, no watch to avoid spinning. The same
+is true of a shard that wins zero slots because a capacity-bound plan gave them all to shards holding more (or
+older) of the planned keys. `planner.Plan` deliberately does not say WHICH of those happened - every case takes
+the same action, hold no candidates.
 
 `created_at` (read as an age, comparable across shards) does two things per
-key: fixes the key's `fairness_weight` from the key's oldest step (so a tenant cannot self-promote with newer
-high-weight tasks) and orders dispatch oldest-first within the key. It is the only ordering signal comparable across
+key: gives the key its age (its oldest due step's) and orders dispatch oldest-first within the key. (The key's
+`fairness_weight` is its lowest due step's, so a tenant cannot self-promote by queueing heavier tasks.) It is the only ordering signal comparable across
 shards: `step_id` is a per-shard auto-increment, so a `(shard, step_id)` order would let a brand-new task on a low
 shard jump an old task on a high shard for the *same* tenant (unbounded intra-tenant starvation). The age is
 `DATE_DIFF_MILLIS(NOW_UTC(), created_at)` per shard, and `created_at` defaults to that shard's `NOW_UTC()` at insert
@@ -728,8 +735,8 @@ on independent cadences, so one shard's tally ages can lag another's by up to on
 reordering of one tenant's own queue - not a fairness violation (the weighted *key* pick governs cross-tenant
 fairness) and not a correctness issue (the CAS arbitrates).
 Same-age ties break by `(shard, step_id)` for determinism. The pick is re-rolled per step so expected dispatch share
-is proportional to weight and independent of backlog depth or shard layout. Strict priority means no aging: a fed
-higher-priority band starves lower bands by design.
+is proportional to weight and independent of backlog depth or shard layout. Strict priority means no aging: a
+higher-priority band that keeps the batch full starves lower bands by design.
 
 **The wire/heap cost scales with fairness-key CARDINALITY, not with the backlog, and this is load-bearing.** The
 three-phase split exists to keep that promise, and the two simpler shapes it rules out are both traps:
@@ -742,7 +749,7 @@ three-phase split exists to keep that promise, and the two simpler shapes it rul
   768 x thousands) to pick only `capacity`. And a plain global `LIMIT n` is not an option at all - it lets one
   tenant's old backlog fill the window and starve every other key (a fairness bug traded for the waste).
 
-So phase 1 collapses each key to *one* aggregate row (count + oldest age/weight) server-side, so the scan returns
+So phase 1 collapses each key to *one* aggregate row (count, oldest age, lowest weight) server-side, so the scan returns
 O(distinct keys) rows; phase 2 picks the per-key demand from those aggregates; phase 3 fetches only the selected
 steps. Total rows crossing the wire are bounded by `capacity^2` (at most `capacity` distinct keys chosen, each
 fetched at the uniform per-key cap `<= capacity`) - **independent of key cardinality**. At high cardinality the
@@ -756,24 +763,24 @@ per-shard cap of N captures them all), and the plan's slice rule then assigns ea
 `TestRefillScan_BoundedPerFairnessKey` (one aggregate row per key, the per-key fetch cut, oldest-first).
 
 **The phase-1 scan count is CAPPED, not exact.** The three-phase split bounds the *rows crossing the wire* to
-`capacity^2`; the count bounds what phase 1 reports. **Do not count with `COUNT(*) OVER (PARTITION BY
-fairness_key)`:** it adds a second full window-aggregation pass over every due row of a key, and a single-key flood
-- a `forEach` fan-out's N branches all inherit the flow's `fairness_key`, so a 3M-way fan-out is *one* key with 3M
-due steps - pays it on **every refiller pass**. Measured on Postgres at 3M: ~15-23s per pass (~99s on a loaded
-rig), which stalls dispatch fleet-wide.
+`capacity^2`; the count bounds what phase 1 reports. **Count with the plain `GROUP BY`, never a window.**
+`COUNT(*) OVER (PARTITION BY fairness_key)` adds a second full window pass over every due row of a key, and a
+single-key flood - a `forEach` fan-out's N branches all inherit the flow's `fairness_key`, so a 3M-way fan-out is
+*one* key with 3M due steps - pays it on **every refiller pass** (measured on Postgres at 3M: ~15-23s per pass).
+A `ROW_NUMBER()` ranking is ruled out too: it needs the band's rows in key order, so an under-estimated deep band
+can be read off the due index and then sorted whole (PostgreSQL 18 did, spilling to disk, with the band a
+subquery value sized from the average band). Nothing in a `GROUP BY` needs an order.
 
-The tally `Count` is `min(count, capacity)` - computed as `MAX(rn)` under a `rn <= capacity` cut
-(`piston.ScanBand`). **The cap is LOSSLESS, and this is the whole point:** the planner builds a plan of at most
+The tally `Count` is `min(count, capacity)` - the `GROUP BY`'s `COUNT(*)`, capped in Go (`piston.ScanBand`).
+**The cap is LOSSLESS, and this is the whole point:** the planner builds a plan of at most
 `capacity` slots, so a single key can be picked at most `capacity` times, and the per-key fetch cap is
 `<= capacity` too. So a count above `capacity` is indistinguishable from `capacity` for every downstream consumer.
 **This is NOT the forbidden "approximate count"** (below): an approximation is wrong in *either* direction and
-distorts fairness; a cap is *exact* where it matters (`count < capacity`) and *saturated-correct* above it. The
-oldest step's age/weight still come from the `rn=1` row (`MAX(CASE WHEN rn=1 ...)`); `MAX(priority)` returns the
-band (all inner rows are at the min band). Pinned by `TestPiston_ScanBandCapsCountAtCapacity`.
+distorts fairness; a cap is *exact* where it matters (`count < capacity`) and *saturated-correct* above it.
+Pinned by `TestPiston_ScanBandCapsCountAtCapacity`.
 
-**The cap bounds the reported COUNT, not the SCAN, on every dialect - Postgres included** (its `WindowAgg` run
-condition still pulls every tuple under `PARTITION BY`; `internal/piston/CLAUDE.md` has the measurement). The
-scan stays O(due rows at the band); sub-linear phase 1 needs distinct-key enumeration (PG18+ skip-scan, or a
+**The cap bounds the reported COUNT, not the SCAN, on every dialect.** The `GROUP BY` reads every due row of the
+band, so the scan stays O(due rows at the band); sub-linear phase 1 needs distinct-key enumeration (PG18+ skip-scan, or a
 recursive-CTE loose index scan) and is deliberately deferred. The cap's correctness depends on none of this.
 
 *Aurora / managed variants:* Aurora PostgreSQL runs the **stock PG planner/executor** (Aurora replaces only the
@@ -811,12 +818,10 @@ wedge sweep's `deliverSubgraphError`) where the priority is not in hand. If
 preempt, the cache stays untouched, and nothing is scheduled: the step's own `not_before` keeps it invisible
 to selection until it comes due, and visible to the next cycle after that.
 Otherwise the step is offered to its own shard's PARTITION (an `Offer` routes by `Job.Shard`), which admits
-it into a **vacated slot**: an empty partition always, otherwise while the cache is under its bound, and at
-the TAIL so nothing the plan chose is reordered. The one priority test is against a **worse** band, which
-is declined - running it while better-band work sits cached is a strict inversion; a *better* band is
-harmless and simply appends, waiting its turn. The partition's floor stays FROZEN at the band it was
-planned to serve rather than tracking the head, so neither `Pop`'s partition choice nor `Offer`'s own
-admission bar oscillates as a better-banded arrival passes through.
+it into a **vacated slot**: an empty partition always, otherwise while the cache is under its bound, in BAND
+ORDER - behind everything cached at its own band or better, so nothing the plan chose there is reordered, and
+ahead of everything worse. The one priority test is against a band **worse than the plan's reach**, which is
+declined - work at the reach is still waiting uncached, and running a worse band first is a strict inversion.
 Admissions are counted as `dwarf_steps_offered` and subtracted from the refiller's discard signal, so waste
 stays attributed to whoever caused it.
 
@@ -836,10 +841,9 @@ started.
 It is not a test-only trick: the most loaded fixtures gain most from it, because load empties partitions
 faster than the period refills them (the table is in `internal/candidates/CLAUDE.md`).
 
-**Do not add a priority-preempting head-insert beside it** - measured to buy nothing on
-`fixtures/crossshardpriorityflow_test.go` at the cost of a fairness bypass; the accounting is in
-`internal/candidates/CLAUDE.md`, and `docs/scheduling-and-reliability.md` promises the matching contract:
-priority is never preemptive, and a new band is served within a snapshot cycle or two.
+**Band order in the cache is not preemption.** An offered better band runs before worse candidates that are
+merely cached; nothing already running is interrupted. `docs/scheduling-and-reliability.md` promises the
+matching contract: priority is never preemptive, and a new band is served within a snapshot cycle or two.
 
 **The cycle period is the supply control, DERIVED per shard (`deriveRefillInterval` /
 `recomputeRefillIntervals`, ~67ms at the reference config) - NOT a fixed constant.** `scheduling.go` carries
@@ -873,13 +877,12 @@ the step) and neither reachable on a single shard:
 
 - **The publish gap.** Peers learn of a better band only from the arriving shard's next **tally**, so it is
   globally visible up to one Tallier interval (`derived x scanners`, capped at 1s) plus one supply interval
-  later. Inside that window a peer plans a stale global minimum and dispatches worse-band work: an inversion
+  later. Inside that window a peer fills from a stale picture and dispatches worse-band work: an inversion
   of dispatch ORDER, not merely latency. Do not claim "the rate limit can only delay dispatch, never invert
   order"; that holds only for a cycle planning from a current picture.
-- **The local cache.** `Pop` ranks partitions by a FROZEN band that the doorbell can set (`Offer` into an empty
-  partition stamps `p.band` from the arrival), never by `items[0].Priority` or the current global minimum. Each
-  partition is reconciled only by its own shard's next pushing cycle, so order is as strict as the SLOWEST
-  piston's reconciliation. The failure is asymmetric: one starved piston strands a stale hint, a uniformly slow
+- **The local cache.** `Pop` ranks partitions by the band of the candidate it would take, which is only what that
+  partition holds, never the current global picture. Each partition is reconciled only by its own shard's next
+  pushing cycle, so order is as strict as the SLOWEST piston's reconciliation. The failure is asymmetric: one starved piston strands a stale hint, a uniformly slow
   fleet does not. A test releasing work across shards must wait for two pushing cycles per shard
   (`CheckpointRefillCycleDone`); no elapsed time substitutes (pinned at 1s with no wait, 5 of 5 runs swapped
   adjacent bands).
@@ -2915,8 +2918,8 @@ nothing wraps `sequel.DB` - the call site is what knows when the connection is r
 **Two bands, and band 0 holds only the piston and its shard's peer Sonar.** `priorityRefill` (0) is above
 `priorityCommon` (10; the values are ordinals only), and bands are strict — a band is exhausted before the
 next is looked at. The piston has it because it is bounded by construction (a derived period, and two loops
-taking one turn each per cycle against a turn count of 2x the connections), so it cannot starve what sits
-below it; and it needs it so a cycle runs on its derived period rather than at the depth of the pool queue -
+each holding at most one turn at a time - two statements per scan, one per fetch - against a turn count of 2x
+the connections), so it cannot starve what sits below it; and it needs it so a cycle runs on its derived period rather than at the depth of the pool queue -
 pool wait otherwise rate-limits the refiller (see "What the instruments measured, as rules" under Metrics).
 The Sonar is there because a Sonar that cannot beat reads as BLIND and its replica stops partitioning, so
 throttling the registry would let load reshape the fleet; it beats on a fixed cadence, so it cannot flood
@@ -2978,8 +2981,8 @@ The schema carries `priority`, `fairness_key`, `fairness_weight` on **both** `dw
 `dwarf_steps` (denormalized), so the two-level selection never joins `dwarf_flows` on the hot path - the same
 split used for `time_budget_ms`/`baggage`.
 
-`resolveFlowOptions` resolves a caller's `*workflow.FlowOptions` against the engine defaults: priority falls back to
-`SetDefaultPriority`, the fairness key to `""`, the weight to `1`, and the time budget to
+`resolveFlowOptions` resolves a caller's `*workflow.FlowOptions` against the engine defaults: priority falls back to the
+midpoint of `1..max` (`SetMaxPriority`), the fairness key to `""`, the weight to `1`, and the time budget to
 `SetTimeBudget` (no ceiling; see "Time Budgets"). These values are immutable for the flow's life (switching a flow's
 fairness key mid-run would be a self-promotion abuse vector). This is the **genesis** path (`Create`/`Run`); the
 **derived** operations inherit instead - `createSubgraphFlow` from the parent (so a high-priority parent never
@@ -3003,8 +3006,9 @@ them by a scalar subquery on `dwarf_flows` per inserted row** - that is 3N PK lo
   stack plus a socket, so the derivation errs generous - and the crew only grows into it when work is
   actually parked.
 - **Fairness weight is denormalized at `Create`, never resolved on the selection path** (a resolver hook would put
-  synchronous I/O on the hot critical section). When a key's steps carry inconsistent weights, the oldest candidate
-  step's weight is used; keeping weights consistent for a key is the caller's responsibility.
+  synchronous I/O on the hot critical section). When a key's steps carry inconsistent weights, the lowest due step's
+  weight is used, for as long as that step is due; keeping weights consistent for a key is the caller's
+  responsibility.
 - **Completion writes share the common band with every other non-piston caller, ordered by age at the
   database** - no precedence over starting new work (see "Turn-taking on the database" for why a band for
   either side collapses throughput).
@@ -3123,9 +3127,10 @@ end is load-bearing (`internal/piston/CLAUDE.md`).
 - **CAP the count, never APPROXIMATE it.** `count` sets both a key's batch share and its fetch cap, so an
   approximation is wrong in either direction and breaks fairness; `min(count, capacity)` is exact below the cap
   and lossless above it. Sub-linear phase 1 needs distinct-key enumeration AND a proof the contract survives.
-- **The window functions are not the expensive part**; phase 1's `GROUP BY` over a windowed subquery beat
-  both a double window and a `HashAggregate`+per-key-`LATERAL` rewrite. Re-derive the cost split after any
-  change that moves the baseline.
+- **Keep phase 1 a single `GROUP BY` with no per-key lookup.** Reading the oldest step's columns per key (a
+  `LATERAL`, or a correlated subquery on `created_at = MIN(created_at)`) lost to the aggregate every time it was
+  tried, and a fan-out's same-millisecond siblings make the lookup match thousands of rows per key. Re-derive the
+  cost split after any change that moves the baseline.
 - **Oversupply is live with the loops split** (a fused loop hid it): a high `discarded/selected` names a supply
   loop running ahead of the workers, a cadence-derivation question (`deriveRefillInterval`'s worker term).
 - **Supply is not what binds at saturation, and a slow Tallier does not make it so.** Under a deep backlog the
@@ -3182,12 +3187,13 @@ being measured. The gauges that need the database get it another way (`backlog.g
   leadership from its own registry reading on its own tick, so a handoff can leave two reporters for up to an
   interval (the documented `max` absorbs it) or none (the series is absent for up to an interval).
 - **`dwarf_steps_dispatch_lag_seconds` {shard}** rides the band scan: `ScanBand` selects
-  `DATE_DIFF_MILLIS(NOW_UTC(), not_before)` beside the rows it already reads and the piston publishes the max
+  `DATE_DIFF_MILLIS(NOW_UTC(), MIN(not_before))` beside the aggregates it already computes and the piston publishes the max
   (`Piston.DispatchLag`), plus the time since the scan was sent, so a stalled tally loop reads as rising lag.
   Reported by each dispatcher of the shard; the max across them covers the shard, because a class its owner is
-  not serving enters a peer's scan past the steal grace. Minimum band only - the per-band pair covers the rest -
-  and zero for a shard whose best band is worse than the band its tallies say is being served (`planner.Band`),
-  since strict priority, not dispatch, is holding that work. A healthy shard reads up to one tally period, not zero.
+  not serving enters a peer's scan past the steal grace. The bands the scan walked, up to the plan's reach as
+  the standing tallies give it (`planner.Reach`) - the per-band pair covers the rest - so a band past the reach
+  is left out, since strict priority, not dispatch, is holding that work. A healthy shard reads up to one tally
+  period, not zero.
 - **Both ages are measured from `not_before`, not `created_at`.** A step that slept or backed off has been
   waiting only since it came due; from `created_at` an hour-long sleep reads as an hour of backlog the moment
   it wakes. `created_at` stays the fairness ordering key in the scan. This holds only because every write that

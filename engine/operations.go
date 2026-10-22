@@ -52,10 +52,10 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 		if opts.Priority < 0 {
 			return "", errors.New("priority must be >= 0", http.StatusBadRequest)
 		}
-		// The priority and the budget's milliseconds are stored in 32-bit columns; a larger value would fail the
-		// insert with a driver error (or, on SQLite, be stored) instead of being refused here.
-		if opts.Priority > math.MaxInt32 {
-			return "", errors.New("priority must fit in a 32-bit integer", http.StatusBadRequest)
+		// The selection scan counts only bands 1..maxPriority, so a priority beyond it would leave the flow
+		// pending forever, invisible to selection.
+		if opts.Priority > e.maxPriority {
+			return "", errors.New("priority must be at most the maximum priority %d", e.maxPriority, http.StatusBadRequest)
 		}
 		if opts.FairnessWeight < 0 {
 			return "", errors.New("fairness weight must be >= 0", http.StatusBadRequest)

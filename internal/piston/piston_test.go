@@ -72,6 +72,7 @@ func newRig(t *testing.T) *rig {
 	}
 	p.SetTallyCadence(0, 0)
 	p.SetSupplyCadence(0, 0)
+	p.SetMaxPriority(40) // the highest band the tests use; every band costs the counts statement a branch
 	return &rig{p: p, db: db, planner: pl, cache: cache}
 }
 
@@ -95,6 +96,19 @@ func (r *rig) insertStep(t *testing.T, flowID, priority int, key string, weight 
 		t.Fatal(err)
 	}
 	return id
+}
+
+// fetch runs FetchSteps for keys at one band and returns the result keyed by key, the view most tests assert on.
+func (r *rig) fetch(ctx context.Context, band int, keys []string, perKey int) (map[string][]int, error) {
+	got, err := r.p.FetchSteps(ctx, 1, []planner.Fetch{{Band: band, Keys: keys, PerKeyCap: perKey}})
+	if got == nil {
+		return nil, err
+	}
+	byKey := map[string][]int{}
+	for slot, ids := range got {
+		byKey[slot.Key] = ids
+	}
+	return byKey, err
 }
 
 // park makes a step invisible to selection, the way the engine does for a step awaiting a subgraph.
@@ -143,34 +157,180 @@ func drain(c *candidates.Cache) []int {
 	return out
 }
 
-// TestPiston_ScanBandTalliesPerKeyAtTheMinimumBand pins phase one against real SQL: one aggregate row per
-// fairness key, only at this shard's minimum due band, carrying the count and the OLDEST step's age and
-// weight. A worse band contributes nothing until the better one drains.
-func TestPiston_ScanBandTalliesPerKeyAtTheMinimumBand(t *testing.T) {
+// TestPiston_ScanBandTalliesBandsUntilCapacity pins phase one against real SQL: one aggregate row per fairness
+// key per band, carrying the count, the OLDEST step's age and the LOWEST weight, best band first - and the tally stops
+// at the band where the counts reach the cache capacity, since no fill reaches past it.
+func TestPiston_ScanBandTalliesBandsUntilCapacity(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	r := newRig(t)
 
-	r.insertStep(t, 1, 5, "alpha", 2)
+	r.insertStep(t, 1, 5, "alpha", 3)
 	r.insertStep(t, 2, 5, "alpha", 2)
 	r.insertStep(t, 3, 5, "beta", 1)
-	r.insertStep(t, 4, 9, "gamma", 1) // worse band: invisible while band 5 has work
+	r.insertStep(t, 4, 9, "gamma", 1)
+	r.insertStep(t, 5, 12, "alpha", 1) // the same key at a third band
 
 	band, tallies, err := r.p.ScanBand(ctx, 1)
 	assert.NoError(err)
-	assert.Equal(5, band, "the minimum due band")
-	assert.Equal(2, len(tallies), "one row per key at that band, never one per step")
+	assert.Equal(5, band, "the best due band")
+	assert.Equal(4, len(tallies), "one row per key per band, never one per step")
 
-	byKey := map[string]planner.Tally{}
+	bySlot := map[planner.Slot]planner.Tally{}
 	for _, tl := range tallies {
-		byKey[tl.Key] = tl
+		bySlot[planner.Slot{Band: tl.Band, Key: tl.Key}] = tl
 	}
-	assert.Equal(2, byKey["alpha"].Count)
-	assert.Equal(2.0, byKey["alpha"].Weight, "the oldest step's weight")
-	assert.Equal(1, byKey["beta"].Count)
-	_, hasGamma := byKey["gamma"]
-	assert.False(hasGamma, "a worse band must not be tallied at all")
+	assert.Equal(2, bySlot[planner.Slot{Band: 5, Key: "alpha"}].Count)
+	assert.Equal(2.0, bySlot[planner.Slot{Band: 5, Key: "alpha"}].Weight, "the lowest weight among the key's due steps")
+	assert.Equal(1, bySlot[planner.Slot{Band: 5, Key: "beta"}].Count)
+	assert.Equal(1, bySlot[planner.Slot{Band: 9, Key: "gamma"}].Count, "a worse band is tallied while capacity remains")
+	assert.Equal(1, bySlot[planner.Slot{Band: 12, Key: "alpha"}].Count)
+	assert.Equal(5, tallies[0].Band, "best band first")
+
+	// Five more at band 5 make eight - the capacity - so the tally stops there.
+	for i := range 5 {
+		r.insertStep(t, 10+i, 5, "beta", 1)
+	}
+	_, tallies, err = r.p.ScanBand(ctx, 1)
+	assert.NoError(err)
+	for _, tl := range tallies {
+		assert.Equal(5, tl.Band, "a band past the one that fills the cache is never scanned")
+	}
+}
+
+// TestPiston_BetterBandsThatFillTheCacheHoldTheRestBack pins strict priority over capacity end to end against
+// real SQL: four bands due, the best two deep enough to fill the cache. One tally and one push must put only
+// those two in the cache, best first, never scan the other two at all, and leave the doorbell declining them.
+func TestPiston_BetterBandsThatFillTheCacheHoldTheRestBack(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t) // capacity 8
+
+	flow := 0
+	insert := func(band int, key string, n int) {
+		for range n {
+			flow++
+			r.insertStep(t, flow, band, key, 1)
+		}
+	}
+	insert(10, "a", 2)
+	insert(10, "b", 1)
+	insert(20, "c", 3)
+	insert(20, "d", 3) // bands 10 and 20 hold 9 due steps against a capacity of 8
+	insert(30, "e", 4)
+	insert(40, "f", 4)
+
+	_, tallies, err := r.p.ScanBand(ctx, 1)
+	assert.NoError(err)
+	for _, tl := range tallies {
+		assert.True(tl.Band <= 20, "the tally stops at the band that fills the cache, but tallied band %d", tl.Band)
+	}
+
+	tr, sr := r.p.Cycle(ctx)
+	assert.NoError(tr.Err)
+	assert.NoError(sr.Err)
+	assert.Equal(8, sr.Selected, "the cache is filled")
+
+	var bands []int
+	for r.cache.Len() > 0 {
+		j, ok := r.cache.Pop()
+		if !ok {
+			break
+		}
+		bands = append(bands, j.Priority)
+		if len(bands) == 1 {
+			// A slot is free now, so only the limit decides: the reach admits, a held-back band does not.
+			assert.False(r.cache.Offer(candidates.Job{StepID: 9001, Shard: 1}, 30), "band 30 is past the reach")
+			assert.False(r.cache.Offer(candidates.Job{StepID: 9002, Shard: 1}, 40), "band 40 is past the reach")
+			assert.True(r.cache.Offer(candidates.Job{StepID: 9003, Shard: 1}, 20), "band 20 is the reach")
+		}
+	}
+	assert.Equal([]int{10, 10, 10, 20, 20, 20, 20, 20, 20}, bands,
+		"all of band 10, the rest of the cache from band 20 (plus the admitted offer), nothing worse")
+}
+
+// TestPiston_ScanBandSkipsASleepingBand pins that a band whose pending steps are all asleep neither stops the
+// scan nor is tallied: under the counts' equality seek its band is an empty range, so the due band behind it is
+// still reached.
+func TestPiston_ScanBandSkipsASleepingBand(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+
+	r.insertStep(t, 1, 10, "a", 1)
+	asleep := r.insertStep(t, 2, 20, "b", 1)
+	_, err := r.db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), 3600000) WHERE step_id=?", asleep)
+	assert.NoError(err)
+	r.insertStep(t, 3, 30, "c", 1)
+
+	band, tallies, err := r.p.ScanBand(ctx, 1)
+	assert.NoError(err)
+	assert.Equal(10, band)
+	var bands []int
+	for _, tl := range tallies {
+		bands = append(bands, tl.Band)
+	}
+	assert.Equal([]int{10, 30}, bands, "the sleeping band is stepped over, not tallied and not the end of the scan")
+}
+
+// TestPiston_ScanBandServesTheOverflowLast pins what happens to work at a priority beyond the range - a flow from
+// before the maximum existed, or from a replica configured with a larger one: it is counted as one overflow band,
+// served after every band in the range, each priority in its own order, and held back like any worse band when
+// the range fills the cache.
+func TestPiston_ScanBandServesTheOverflowLast(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t) // capacity 8
+	r.p.SetMaxPriority(10)
+
+	r.insertStep(t, 1, 10, "edge", 1)
+	r.insertStep(t, 2, 100, "legacy", 1)
+	r.insertStep(t, 3, 50, "wider", 1)
+
+	_, tallies, err := r.p.ScanBand(ctx, 1)
+	assert.NoError(err)
+	got := map[string]int{}
+	for _, tl := range tallies {
+		got[tl.Key] = tl.Band
+	}
+	assert.Equal(map[string]int{"edge": 10, "legacy": 100, "wider": 50}, got,
+		"the overflow is tallied at its actual priorities, so the planner orders it after band 10 and among itself")
+
+	// Band 10 deep enough to fill the cache holds the overflow back like any worse band.
+	for i := range 8 {
+		r.insertStep(t, 10+i, 10, "edge", 1)
+	}
+	_, tallies, err = r.p.ScanBand(ctx, 1)
+	assert.NoError(err)
+	for _, tl := range tallies {
+		assert.Equal(10, tl.Band, "past the reach, the overflow is not tallied")
+	}
+}
+
+// TestPiston_FetchTrimsEachBandToItsOwnCap pins the per-band trim: one statement over-fetches every pair at the
+// largest per-key cap, and each pair is cut back to its own band's cap. Cutting to the largest instead would hand
+// the lighter band more steps than the plan gave it, and count stolen steps the batch never keeps.
+func TestPiston_FetchTrimsEachBandToItsOwnCap(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+
+	for i := range 4 {
+		r.insertStep(t, 1+i, 2, "a", 1)
+		r.insertStep(t, 10+i, 9, "b", 1)
+	}
+	got, err := r.p.FetchSteps(ctx, 1, []planner.Fetch{
+		{Band: 2, Keys: []string{"a"}, PerKeyCap: 1},
+		{Band: 9, Keys: []string{"b"}, PerKeyCap: 3},
+	})
+	assert.NoError(err)
+	assert.Len(got[planner.Slot{Band: 2, Key: "a"}], 1)
+	assert.Len(got[planner.Slot{Band: 9, Key: "b"}], 3)
 }
 
 // TestPiston_ScanBandExcludesUnselectableSteps pins the due-ness predicates: a parked step is invisible
@@ -192,7 +352,7 @@ func TestPiston_ScanBandExcludesUnselectableSteps(t *testing.T) {
 }
 
 // TestPiston_ScanBandOnEmptyShard pins that a shard with nothing due reports NoBand and no tallies -
-// which the planner needs, since "nothing due here" may raise the global band and release a peer.
+// which the planner needs, since "nothing due here" may free capacity for a peer to spill into.
 func TestPiston_ScanBandOnEmptyShard(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -204,9 +364,8 @@ func TestPiston_ScanBandOnEmptyShard(t *testing.T) {
 	assert.Equal(0, len(tallies))
 }
 
-// TestPiston_ScanBandCapsCountAtCapacity pins the lossless cap: the count is MAX(rn) under an
-// rn<=capacity cut, not an exact COUNT, so the scan stops touching a key's rows past capacity instead of
-// counting the whole partition - the O(backlog) cost this shape exists to avoid.
+// TestPiston_ScanBandCapsCountAtCapacity pins the lossless cap: a key's count is capped at the cache capacity,
+// since no key can be assigned more than the whole batch. The cap bounds the reported demand, not the scan.
 func TestPiston_ScanBandCapsCountAtCapacity(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -235,7 +394,7 @@ func TestPiston_FetchStepsReturnsOldestFirst(t *testing.T) {
 	b1 := r.insertStep(t, 4, 5, "beta", 1)
 	r.insertStep(t, 5, 5, "unchosen", 1)
 
-	got, err := r.p.FetchSteps(ctx, 1, 5, []string{"alpha", "beta"}, 2)
+	got, err := r.fetch(ctx, 5, []string{"alpha", "beta"}, 2)
 	assert.NoError(err)
 	assert.Equal(2, len(got), "only the chosen keys come back")
 	assert.Equal([]int{a1, a2}, got["alpha"], "the two OLDEST of alpha's three, in order")
@@ -254,11 +413,11 @@ func TestPiston_FetchStepsDegenerateArgs(t *testing.T) {
 	r := newRig(t)
 	r.insertStep(t, 1, 5, "alpha", 1)
 
-	got, err := r.p.FetchSteps(ctx, 1, 5, nil, 4)
+	got, err := r.fetch(ctx, 5, nil, 4)
 	assert.NoError(err)
 	assert.Equal(0, len(got))
 
-	got, err = r.p.FetchSteps(ctx, 1, 5, []string{"alpha"}, 0)
+	got, err = r.fetch(ctx, 5, []string{"alpha"}, 0)
 	assert.NoError(err)
 	assert.Equal(0, len(got))
 }
@@ -287,7 +446,7 @@ func TestPiston_PartitionSplitsSelectionAcrossReplicas(t *testing.T) {
 	seen := map[int]int{}
 	for ordinal := range 2 {
 		r.p.SetPartitionFunc(func() (int, int, bool) { return 2, ordinal, true })
-		got, err := r.p.FetchSteps(ctx, 1, 5, []string{"k"}, 8)
+		got, err := r.fetch(ctx, 5, []string{"k"}, 8)
 		assert.NoError(err)
 		for _, id := range got["k"] {
 			seen[id]++
@@ -299,31 +458,29 @@ func TestPiston_PartitionSplitsSelectionAcrossReplicas(t *testing.T) {
 
 	// ok=false disables partitioning: one replica sees everything, which is right for a solo engine.
 	r.p.SetPartitionFunc(func() (int, int, bool) { return 2, 0, false })
-	got, err := r.p.FetchSteps(ctx, 1, 5, []string{"k"}, 8)
+	got, err := r.fetch(ctx, 5, []string{"k"}, 8)
 	assert.NoError(err)
 	assert.Equal(6, len(got["k"]))
 
 	// A nil func behaves the same as ok=false rather than panicking.
 	r.p.SetPartitionFunc(nil)
-	got, err = r.p.FetchSteps(ctx, 1, 5, []string{"k"}, 8)
+	got, err = r.fetch(ctx, 5, []string{"k"}, 8)
 	assert.NoError(err)
 	assert.Equal(6, len(got["k"]))
 }
 
-// TestPiston_PartitionDoesNotNarrowTheBand pins the deliberate asymmetry in the scan: the residue class
-// filters the rows this replica tallies but NOT the MIN(priority) subquery. The band is a cluster-wide
-// fact, so a replica whose own slice holds only worse-band work must still report the better band it can
-// see - otherwise replicas disagree about which band is open.
-func TestPiston_PartitionDoesNotNarrowTheBand(t *testing.T) {
+// TestPiston_PartitionNarrowsTheBands pins that the residue class filters the band counts as well as the
+// rows: a replica whose own class holds only worse-band work tallies that work, rather than stopping at a
+// better band only a peer's class holds - which would idle this replica while the peer serves its own.
+func TestPiston_PartitionNarrowsTheBands(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	r := newRig(t)
 
-	// Same grace argument as TestPiston_PartitionSplitsSelectionAcrossReplicas: the residue class only
-	// excludes while nothing has aged, so the grace has to dominate this fixture's own setup.
-	r.p.SetTallyCadence(500*time.Millisecond, 0)
-	r.p.SetSupplyCadence(500*time.Millisecond, 0)
+	// Stealing off, so the residue class is strict: what is pinned here is the partition, and a peer's step
+	// that aged past a grace - a slow first compile on SQL Server is enough - would be admitted by design.
+	r.p.SetStealAfter(0)
 
 	best := r.insertStep(t, 1, 1, "urgent", 1) // band 1, will belong to one ordinal only
 	r.insertStep(t, 2, 7, "bulk", 1)
@@ -332,15 +489,16 @@ func TestPiston_PartitionDoesNotNarrowTheBand(t *testing.T) {
 	for ordinal := range 2 {
 		r.p.SetPartitionFunc(func() (int, int, bool) { return 2, ordinal, true })
 		band, tallies, err := r.p.ScanBand(ctx, 1)
-		assert.NoError(err)
+		if err != nil {
+			t.Fatalf("ordinal %d: %+v", ordinal, err)
+		}
 		if ordinal == best%2 {
 			assert.Equal(1, band, "the ordinal owning the band-1 step tallies it")
-			assert.Equal(1, len(tallies))
+			assert.Equal("urgent", tallies[0].Key, "first")
 		} else {
-			// This replica owns nothing at band 1, so it tallies zero rows and reports NoBand - which is
-			// correct: its own band-7 work must not be served while band 1 is open.
-			assert.Equal(pipeline.NoBand, band, "a replica holding nothing at the open band tallies nothing")
-			assert.Equal(0, len(tallies))
+			// This replica owns nothing at band 1; its own class holds band-7 work, and that is what it tallies.
+			assert.Equal(7, band, "a replica holding nothing at band 1 tallies its own best band")
+			assert.Equal(1, len(tallies))
 		}
 	}
 }
@@ -481,7 +639,7 @@ func TestPiston_IdleWithdrawsAgainstARunningLoop(t *testing.T) {
 	// holding only band 9 is the best band in the fleet and is released to dispatch. A stale band-5 claim
 	// from the idle shard would outrank it forever.
 	time.Sleep(50 * time.Millisecond) // settle past any further in-flight cycle
-	r.planner.Tally(2, 9, []planner.Tally{{Key: "beta", Weight: 1, Count: 1}})
+	r.planner.Tally(2, []planner.Tally{{Band: 9, Key: "beta", Weight: 1, Count: 1}})
 	plan := r.planner.Plan(2, 8)
 	assert.Equal(9, plan.GlobalBand, "the idle shard's band claim must not come back")
 	assert.True(len(plan.Slots) > 0, "so the live shard is released to dispatch")
@@ -605,8 +763,8 @@ func TestPiston_SeamsDefaultInert(t *testing.T) {
 // TestPiston_IdleWithdrawsTheShard pins that going idle makes the same positive statement an empty plan
 // does. The planner's contract is that every shard tallies or clears each cycle, and an idle piston runs no
 // cycle - so without this its last tally stands forever. The planner is SHARED across a replica's pistons,
-// so a stale claim on the best band makes every live piston find none of its own keys there and dispatch
-// nothing, indefinitely. The cache partition goes for the reason an empty plan clears it: dead hints cost a
+// so a stale claim on a better band that fills the batch leaves every live piston no capacity to spill into,
+// and they dispatch nothing, indefinitely. The cache partition goes for the reason an empty plan clears it: dead hints cost a
 // worker a claim round-trip each.
 func TestPiston_IdleWithdrawsTheShard(t *testing.T) {
 	t.Parallel()
@@ -627,7 +785,7 @@ func TestPiston_IdleWithdrawsTheShard(t *testing.T) {
 	// The withdrawal is visible to a PEER planning off the same shared planner: with shard 1 cleared, a
 	// peer holding only band 9 is now the best band in the fleet and dispatches, instead of deferring
 	// forever to a band nobody is serving.
-	r.planner.Tally(2, 9, []planner.Tally{{Key: "beta", Weight: 1, Count: 1}})
+	r.planner.Tally(2, []planner.Tally{{Band: 9, Key: "beta", Weight: 1, Count: 1}})
 	plan := r.planner.Plan(2, 8)
 	assert.Equal(9, plan.GlobalBand, "the idle shard's stale band claim is gone")
 	assert.True(len(plan.Slots) > 0, "so the live shard is released to dispatch")
@@ -670,7 +828,7 @@ func TestPiston_PartitionPairIsValidated(t *testing.T) {
 		// while leaving a ranking built from that bad pair with nothing in tier 0, so every kept step counts
 		// as taken from a peer. That shows up as stolen candidates the fetch never stole.
 		before := r.p.seams.Load().Visits(CheckpointStole)
-		got, err := r.p.FetchSteps(ctx, 1, 5, []string{"k"}, 6)
+		got, err := r.fetch(ctx, 5, []string{"k"}, 6)
 		assert.NoError(err, "%s must not error the fetch", tc.name)
 		assert.Equal(6, len(got["k"]), "%s: the fetch must select everything too", tc.name)
 		assert.Equal(before, r.p.seams.Load().Visits(CheckpointStole),
@@ -1015,19 +1173,19 @@ func TestPiston_FetchPrefersItsOwnClass(t *testing.T) {
 	assert.NoError(err)
 
 	// Asking for exactly this replica's own count must yield its own class and nothing else.
-	got, err := r.p.FetchSteps(ctx, 1, 5, []string{"k"}, len(own))
+	got, err := r.fetch(ctx, 5, []string{"k"}, len(own))
 	assert.NoError(err)
 	assert.Equal(own, got["k"], "own-class steps rank ahead of admitted foreign ones")
 
 	// Asking for more than it owns fills the remainder from the foreign classes, own first, and each tier
 	// stays oldest-first inside itself.
-	got, err = r.p.FetchSteps(ctx, 1, 5, []string{"k"}, 8)
+	got, err = r.fetch(ctx, 5, []string{"k"}, 8)
 	assert.NoError(err)
 	assert.Equal(append(append([]int{}, own...), foreign...), got["k"],
 		"the shortfall is filled from foreign classes, behind every own-class step")
 
 	// And the per-key cap is honoured despite the over-fetch, so the plan gets what it asked for.
-	got, err = r.p.FetchSteps(ctx, 1, 5, []string{"k"}, 2)
+	got, err = r.fetch(ctx, 5, []string{"k"}, 2)
 	assert.NoError(err)
 	assert.Equal(2, len(got["k"]), "the over-fetch is trimmed back to the plan's per-key cap")
 }
@@ -1072,7 +1230,7 @@ func TestPiston_StealTakesOnlyLongDueForeignSteps(t *testing.T) {
 	// charged against the grace. Same database clock as the ageing UPDATE below, never a bound Go time.
 	_, err := r.db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=NOW_UTC()")
 	assert.NoError(err)
-	got, err := r.p.FetchSteps(ctx, 1, 5, []string{"k"}, 100)
+	got, err := r.fetch(ctx, 5, []string{"k"}, 100)
 	assert.NoError(err)
 	assert.Equal(own, got["k"], "a young foreign step belongs to its owner")
 
@@ -1081,7 +1239,7 @@ func TestPiston_StealTakesOnlyLongDueForeignSteps(t *testing.T) {
 	_, err = r.db.ExecContext(ctx,
 		"UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), -5000) WHERE step_id % 2 = 1")
 	assert.NoError(err)
-	got, err = r.p.FetchSteps(ctx, 1, 5, []string{"k"}, 100)
+	got, err = r.fetch(ctx, 5, []string{"k"}, 100)
 	assert.NoError(err)
 	assert.Equal(8, len(got["k"]), "a long-due foreign step is taken by an idle peer")
 }
@@ -1116,7 +1274,7 @@ func TestPiston_StealReachesPastTheNeighbourAfterTwoGraces(t *testing.T) {
 	// DATABASE clock, never a bound Go time.
 	_, err := r.db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), -5000)")
 	assert.NoError(err)
-	got, err := r.p.FetchSteps(ctx, 1, 5, []string{"k"}, 100)
+	got, err := r.fetch(ctx, 5, []string{"k"}, 100)
 	assert.NoError(err)
 	assert.Equal(append(append([]int{}, own...), neighbour...), got["k"],
 		"one grace admits the neighbour's class and not the far one")
@@ -1125,7 +1283,7 @@ func TestPiston_StealReachesPastTheNeighbourAfterTwoGraces(t *testing.T) {
 	_, err = r.db.ExecContext(ctx,
 		"UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), -10000) WHERE step_id % 3 = 2")
 	assert.NoError(err)
-	got, err = r.p.FetchSteps(ctx, 1, 5, []string{"k"}, 100)
+	got, err = r.fetch(ctx, 5, []string{"k"}, 100)
 	assert.NoError(err)
 	assert.Equal(append(append(append([]int{}, own...), neighbour...), far...), got["k"],
 		"two graces admit anyone's class")
@@ -1133,7 +1291,7 @@ func TestPiston_StealReachesPastTheNeighbourAfterTwoGraces(t *testing.T) {
 
 // TestPiston_DispatchLag pins the lag reading the band scan publishes: absent until a scan completes and while
 // idle, zero when nothing is due, measured from not_before rather than created_at, and zero for a shard whose
-// best band strict priority is holding behind another shard's better one.
+// bands are all past the reach of another shard's better one.
 func TestPiston_DispatchLag(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -1158,11 +1316,14 @@ func TestPiston_DispatchLag(t *testing.T) {
 	assert.True(ok)
 	assert.True(lag >= 29*time.Second, "measured from not_before, got %v", lag)
 
-	// Another shard holds a better band: this shard's work is held by priority, not lagging.
-	r.planner.Tally(2, 1, []planner.Tally{{Key: "urgent", Weight: 1, Count: 1}})
+	// Another shard holds a better band that fills the cache: this shard's work is held by priority, not lagging.
+	r.planner.Tally(2, []planner.Tally{{Band: 1, Key: "urgent", Weight: 1, Count: 8}})
 	lag, ok = r.p.DispatchLag()
 	assert.True(ok)
 	assert.Equal(time.Duration(0), lag, "a shard held back by strict priority reads zero")
+	r.planner.Tally(2, []planner.Tally{{Band: 1, Key: "urgent", Weight: 1, Count: 1}})
+	lag, _ = r.p.DispatchLag()
+	assert.True(lag >= 29*time.Second, "a better band that leaves capacity holds nothing back")
 	r.planner.Clear(2)
 	lag, _ = r.p.DispatchLag()
 	assert.True(lag >= 29*time.Second, "back at the served band, the lag reads again")

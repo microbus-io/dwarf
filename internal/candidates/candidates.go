@@ -20,24 +20,26 @@ limitations under the License.
 package candidates
 
 import (
+	"cmp"
 	"math"
 	"slices"
 	"sort"
 	"sync"
 )
 
-// Job holds a step ID, its shard index, and its priority band for the worker pool. Priority is
-// assigned by the cache itself: Refill stamps its floor onto every batch job, and Offer stamps the
-// offered priority onto the single job it admits.
+// Job holds a step ID, its shard index, and its priority band for the worker pool. A Refill batch carries
+// each job's band as the plan chose it; Offer stamps the offered priority onto the single job it admits.
 type Job struct {
 	StepID   int
 	Shard    int
 	Priority int
+
+	offered bool // admitted by Offer rather than planned; cleared before a job leaves the cache
 }
 
 // Cache is a bounded per-replica set of step candidates - hints, not ownership - partitioned by
 // shard. Each shard's refiller wholesale-replaces its own partition; workers Pop from whichever
-// partition advertises the best (lowest) floor. One mutex and one condition variable span all
+// partition's next candidate is at the best (lowest) band. One mutex and one condition variable span all
 // partitions, so a worker blocked on an empty cache wakes when ANY partition fills - N separate
 // cond vars would let a worker sleep through another shard's refill.
 type Cache struct {
@@ -51,19 +53,18 @@ type Cache struct {
 	closed  bool
 }
 
-// partition is one shard's slice of the cache. Its floor is the band it is serving for the current window,
-// stored rather than read off the head - see floor for why that is frozen.
+// partition is one shard's slice of the cache, kept in BAND ORDER - best band first, and within a band in
+// the order the plan chose, then the order Offer admitted. The head is therefore always the best candidate
+// the partition holds, which is what lets every take be a pop from the front.
 type partition struct {
 	items []Job
 	// offered is how many of the CURRENTLY resident items arrived by Offer rather than by Refill. Refill
 	// subtracts it from the discard count so the refiller's waste signal is not charged for candidates it
-	// never selected. Exact because of the layout: a Refill replaces items wholesale and offers only ever
-	// append, so the refill block is always the head and the offered ones the tail - which makes "was the
-	// item Pop is about to remove an offered one?" the test len(items) <= offered, with no per-job flag.
+	// never selected.
 	offered int
-	// band is the priority band this partition is serving for the current window - set by the Refill that
-	// planned it, or by an Offer into an empty partition. FROZEN until the next Refill: see floor.
-	band int
+	// limit is the worst band Offer admits into a non-empty partition - the plan's reach, set by the Refill
+	// that planned it, or the band of an Offer into an empty partition. FROZEN until the next Refill: see Offer.
+	limit int
 	// reserved is how many workers WaitForWork has routed here that have not yet reached their TryPopFrom -
 	// in the engine, the workers queued at this shard's gate. Routing ranks by what is left once they are
 	// served (unreserved), so workers peeking at the same instant spread across shards instead of all
@@ -78,25 +79,36 @@ func (p *partition) unreserved() int {
 	return len(p.items) - p.reserved
 }
 
-// floor is the band this partition is serving for the current window, or math.MaxInt when it is empty.
-// It is Pop's key for choosing which partition to drain, and Offer's bar for what it will admit.
+// floor is the band of the candidate the next caller would take from this partition, or math.MaxInt when
+// there is none. It is the key every take ranks partitions by.
 //
-// FROZEN for the window rather than read off the head, and the difference is visible: Offer appends a
-// better-banded step behind the planned batch, so a head-derived floor would DIP as that item reached the
-// front and rise again after it popped. A partition planned at band 6 holding `6 6 5 6` would advertise
-// 6,6,5,6 as it drained, oscillating Pop's partition choice - and worse, Offer's own admission test would
-// swing with it, so an offered band-6 step would be declined or accepted purely on pop timing.
-//
-// Storing it is safe because of its direction. Offer declines anything worse than this band, so every item
-// present is at least as good as it: a frozen floor can only ever UNDERSTATE the partition's urgency, which
-// delays a buried better-band step by at most a cycle. That rests on Offer never head-inserting a better
-// band: with a head-insert, a stored floor would keep advertising the better band after that head had popped,
-// OVERSTATING urgency and draining a whole worse-band body ahead of another partition's better work.
-func (p *partition) floor() int {
-	if len(p.items) == 0 {
+// Routing reads PAST the reservations: the workers already routed here will take the first `reserved`
+// candidates, so the next one routed gets the one after them. Ranking by the head instead would send a second
+// worker to a partition holding `1 5 5` while another holds `3 3`, behind the first worker who is on its way to
+// the 1 - and it would run a 5 ahead of the 3s. A pop ignores reservations, so it reads the head.
+func (p *partition) floor(routing bool) int {
+	i := 0
+	if routing {
+		i = max(0, p.reserved)
+	}
+	if i >= len(p.items) {
 		return math.MaxInt
 	}
-	return p.band
+	return p.items[i].Priority
+}
+
+// take removes and returns the head. Callers hold c.mu and have checked the partition is non-empty.
+func (p *partition) take() Job {
+	j := p.items[0]
+	if j.offered {
+		p.offered--
+		j.offered = false
+	}
+	p.items = p.items[1:]
+	if len(p.items) == 0 {
+		p.items = nil
+	}
+	return j
 }
 
 // Init sizes the cache to twice the worker count and resets it for reuse.
@@ -192,8 +204,12 @@ func (c *Cache) Resize(workers int) {
 	for _, s := range shards {
 		p := c.parts[s]
 		if len(p.items) > targets[s] {
-			// The trim cuts the tail, which is where the offered items sit.
-			p.offered = max(0, p.offered-(len(p.items)-targets[s]))
+			// The trim cuts the tail, which is the worst band.
+			for _, j := range p.items[targets[s]:] {
+				if j.offered {
+					p.offered--
+				}
+			}
 			p.items = p.items[:targets[s]]
 			if len(p.items) == 0 {
 				p.items = nil
@@ -203,7 +219,7 @@ func (c *Cache) Resize(workers int) {
 }
 
 // Pop removes and returns the front candidate of the best partition, blocking until one is available
-// or the cache closes. Partition selection is lowest floor; ties break by depth (deepest first -
+// or the cache closes. Partition selection is the best band at the head; ties break by depth (deepest first -
 // round-robin would hand every shard an equal share of workers regardless of backlog), then by lower
 // shard index for determinism. It neither makes nor releases reservations: it is the single-call form,
 // and routing a worker ahead of its pop is what reservations are for.
@@ -219,20 +235,13 @@ func (c *Cache) Pop() (j Job, ok bool) {
 		c.mu.Unlock()
 		return Job{}, false
 	}
-	j = best.items[0]
-	if len(best.items) <= best.offered {
-		best.offered--
-	}
-	best.items = best.items[1:]
-	if len(best.items) == 0 {
-		best.items = nil
-	}
+	j = best.take()
 	c.mu.Unlock()
 	return j, true
 }
 
 // bestPartition returns the partition to drain and its shard, or nil when none qualifies. Callers hold c.mu.
-// Selection is lowest floor; ties break by unreserved depth (deepest first - round-robin would hand every
+// Selection is lowest floor - the band the caller would take there; ties break by unreserved depth (deepest first - round-robin would hand every
 // shard an equal share of workers regardless of backlog), then by lower shard index for determinism.
 //
 // routing restricts the choice to partitions with an unreserved candidate, which is how WaitForWork routes a
@@ -249,7 +258,7 @@ func (c *Cache) bestPartition(routing bool, skip func(shard int) bool) (*partiti
 			best, bestShard = p, shard
 			continue
 		}
-		bf, pf := best.floor(), p.floor()
+		bf, pf := best.floor(routing), p.floor(routing)
 		bd, pd := best.unreserved(), p.unreserved()
 		switch {
 		case pf < bf:
@@ -320,15 +329,7 @@ func (c *Cache) TryPopFrom(shard int) (j Job, ok bool) {
 	if p == nil || len(p.items) == 0 {
 		return Job{}, false
 	}
-	j = p.items[0]
-	if len(p.items) <= p.offered {
-		p.offered--
-	}
-	p.items = p.items[1:]
-	if len(p.items) == 0 {
-		p.items = nil
-	}
-	return j, true
+	return p.take(), true
 }
 
 // Reroute moves the reservation a WaitForWork made on from to the best other partition with an unreserved
@@ -390,9 +391,11 @@ func (c *Cache) PeekShard() (shard int, ok bool) {
 	return shard, p != nil
 }
 
-// Refill replaces one shard's partition with batch at the given priority floor and wakes up to ONE WAITER
-// PER UNRESERVED CANDIDATE - never all of them, since a wake beyond those cannot be given anything to do.
-// The floor is stamped onto every batch job, which is what keeps the partition's floor exact.
+// Refill replaces one shard's partition with batch and wakes up to ONE WAITER PER UNRESERVED CANDIDATE -
+// never all of them, since a wake beyond those cannot be given anything to do. Each job carries its own
+// band; the batch is put in band order (stably, so the plan's order survives within a band), and limit is
+// the worst band Offer admits until the next Refill - the plan's reach, or math.MaxInt when the plan held
+// everything due.
 //
 // The replacement is WHOLESALE, and the empty case must not be short-circuited. An empty batch is the
 // scan's statement that nothing is due on that shard, so every candidate still cached there is a dead hint
@@ -406,7 +409,7 @@ func (c *Cache) PeekShard() (shard int, ok bool) {
 // discarded counts the candidates thrown away un-popped, MINUS those the doorbell admitted - it is the
 // refiller's oversupply signal, and charging it for work it never selected would read worst exactly when
 // the doorbell is working best.
-func (c *Cache) Refill(shard int, batch []Job, floor int) (discarded int) {
+func (c *Cache) Refill(shard int, batch []Job, limit int) (discarded int) {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -425,10 +428,8 @@ func (c *Cache) Refill(shard int, batch []Job, floor int) (discarded int) {
 	if len(batch) == 0 {
 		batch = nil // Pop's empty representation, so Len/append behave identically either way
 	}
-	p.band = floor
-	for i := range batch {
-		batch[i].Priority = floor
-	}
+	p.limit = limit
+	slices.SortStableFunc(batch, func(a, b Job) int { return cmp.Compare(a.Priority, b.Priority) })
 	// Deliberately NOT trimmed to c.size. The bound is a sizing target, not an invariant: Offer admits into a
 	// non-empty partition only below it and Resize enforces it when the bound moves, but each refiller slices its batch from its own
 	// roll of the global plan, so the sum of independently-rolled slices can transiently overshoot the bound and
@@ -463,12 +464,12 @@ func (c *Cache) Refill(shard int, batch []Job, floor int) (discarded int) {
 //   - An EMPTY partition admits REGARDLESS of the global bound. That bound is a sum over all partitions, so
 //     gating this on it lets one busy shard silence an idle one's doorbell - and a caller reads a decline as
 //     "this partition needs nothing", so the step then waits for a scan nobody asked for.
-//   - A WORSE band than the partition's is DECLINED. Admitting it would run band-900 work while band-100
-//     work sits cached right here, a strict-priority inversion rather than the soft staleness the design
-//     accepts. Note the direction: a BETTER band is harmless and simply appends.
-//   - Otherwise admit while a slot has been freed (totalLen < size), at the TAIL so nothing the plan chose
-//     is reordered. A better band is deliberately not head-inserted: preempting measured no latency gain
-//     and costs a fairness bypass.
+//   - A band WORSE than the partition's limit is DECLINED. The limit is where the plan ran out of capacity,
+//     so work at that band is still waiting uncached, and admitting a worse band would run it first - a
+//     strict-priority inversion rather than the soft staleness the design accepts.
+//   - Otherwise admit while a slot has been freed (totalLen < size), in BAND ORDER: behind every candidate
+//     at its own band or better, so nothing the plan chose at those bands is reordered, and ahead of every
+//     worse one, so a worker never takes a worse band while it waits here.
 //
 // Admissions are counted (partition.offered) so Refill's discard count stays the refiller's own waste.
 func (c *Cache) Offer(j Job, priority int) (admitted bool) {
@@ -483,16 +484,18 @@ func (c *Cache) Offer(j Job, priority int) (admitted bool) {
 		c.parts[j.Shard] = p
 	}
 	j.Priority = priority
+	j.offered = true
 	switch {
 	case len(p.items) == 0:
-		// Nothing planned here, so nothing to be worse than - and this arrival sets the band the partition
-		// serves until the next Refill.
+		// Nothing cached here, so nothing to be worse than - and this arrival sets the limit until the
+		// next Refill.
 		p.items = []Job{j}
-		p.band = priority
-	case priority > p.floor():
-		return false // worse than this partition's planned band - see above
+		p.limit = priority
+	case priority > p.limit:
+		return false // worse than the plan reached - see above
 	case c.totalLen() < c.size:
-		p.items = append(p.items, j)
+		at := sort.Search(len(p.items), func(i int) bool { return p.items[i].Priority > priority })
+		p.items = slices.Insert(p.items, at, j)
 	default:
 		return false // no vacated slot to take
 	}

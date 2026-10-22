@@ -74,6 +74,7 @@ func TestShardedflow(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
 	eng.SetWorkers(1)
+	eng.SetMaxPriority(10) // the ordering below spans more bands than the default five
 	for i := 1; i <= 8; i++ {
 		eng.SetShard(engine.ShardSpec{Index: i})
 	}
@@ -108,9 +109,9 @@ func TestShardedflow(t *testing.T) {
 			placement[tag] = strings.SplitN(k, "-", 2)[0]
 		}
 
-		// Every p-flow was doorbell-admitted into its shard's EMPTY partition on creation, which stamps that
-		// partition's band from the arrival itself - and `Cache.Pop` ranks partitions by that frozen band
-		// without ever consulting the current global minimum. Until each shard's piston has run a cycle, the
+		// Every p-flow was doorbell-admitted into its shard's EMPTY partition on creation, which no plan chose -
+		// and `Cache.Pop` ranks partitions by the bands they hold without ever consulting the current plan.
+		// Until each shard's piston has run a cycle, the
 		// cache therefore holds eight hints that no plan chose, and which one Pop takes depends on which
 		// pistons have got round to reconciling. Releasing the worker into that state is what makes the
 		// ordering below a race: it is won by whichever shards happen to have cycled, not by priority.

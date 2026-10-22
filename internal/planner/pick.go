@@ -21,8 +21,8 @@ import (
 	"sort"
 )
 
-// keyAgg is one fairness key's aggregate ACROSS shards at the global band - the merge of every
-// shard's Tally for that key.
+// keyAgg is one fairness key's aggregate ACROSS shards at one band - the merge of every shard's Tally for
+// that key there.
 type keyAgg struct {
 	key    string
 	weight float64
@@ -30,53 +30,82 @@ type keyAgg struct {
 	count  int
 }
 
-// merge computes the globally-minimum due band and the per-key aggregates at that band.
-//
-// A key's steps can span shards, so counts sum. Its weight comes from the globally-oldest step (max
-// age wins), which is the same anti-self-promotion rule a single shard's Tally applies locally.
-// Shards at a worse band contribute nothing: a worse band materializes only once the better one
-// drains, which is what "strict" means here.
-//
-// Iteration is in shard order and keys keep insertion order, so the returned slice is stable - the
-// lottery downstream depends on that for reproducibility.
-func merge(entries []entry) (band int, keys []keyAgg) {
-	band = math.MaxInt
-	for _, e := range entries {
-		if len(e.t.tallies) > 0 && e.t.band < band {
-			band = e.t.band
-		}
-	}
-	if band == math.MaxInt {
-		return band, nil
-	}
-	byKey := map[string]*keyAgg{}
-	var order []string
-	for _, e := range entries {
-		if e.t.band != band {
-			continue
-		}
-		for _, t := range e.t.tallies {
-			agg := byKey[t.Key]
-			if agg == nil {
-				byKey[t.Key] = &keyAgg{key: t.Key, weight: t.Weight, ageMs: t.AgeMs, count: t.Count}
-				order = append(order, t.Key)
-				continue
-			}
-			agg.count += t.Count
-			if t.AgeMs > agg.ageMs {
-				agg.ageMs = t.AgeMs
-				agg.weight = t.Weight
-			}
-		}
-	}
-	keys = make([]keyAgg, 0, len(order))
-	for _, k := range order {
-		keys = append(keys, *byKey[k])
-	}
-	return band, keys
+// bandAgg is one band's keys, merged across shards.
+type bandAgg struct {
+	band int
+	keys []keyAgg
 }
 
-// pick runs the weighted fairness lottery over the band's keys and returns the ordered sequence of
+// merge groups every shard's tallies by band, best band first, and merges each key within its band.
+//
+// A key's steps can span shards, so counts sum, its age is the globally-oldest step's, and its weight is the
+// lowest any shard reports - the same anti-self-promotion rule a single shard's Tally applies locally. A key
+// at two bands is two independent entries: fairness is decided within a band, never across bands.
+//
+// Iteration is in shard order and keys keep insertion order within their band, so the result is stable -
+// the lottery downstream depends on that for reproducibility.
+func merge(entries []entry) []bandAgg {
+	var bands []bandAgg
+	at := map[int]int{}   // band -> index into bands
+	idx := map[Slot]int{} // (band, key) -> index into that band's keys
+	for _, e := range entries {
+		for _, t := range e.t.tallies {
+			b, ok := at[t.Band]
+			if !ok {
+				b = len(bands)
+				at[t.Band] = b
+				bands = append(bands, bandAgg{band: t.Band})
+			}
+			s := Slot{Band: t.Band, Key: t.Key}
+			i, ok := idx[s]
+			if !ok {
+				idx[s] = len(bands[b].keys)
+				bands[b].keys = append(bands[b].keys, keyAgg{key: t.Key, weight: t.Weight, ageMs: t.AgeMs, count: t.Count})
+				continue
+			}
+			agg := &bands[b].keys[i]
+			agg.count += t.Count
+			agg.ageMs = max(agg.ageMs, t.AgeMs)
+			agg.weight = min(agg.weight, t.Weight)
+		}
+	}
+	sort.Slice(bands, func(i, j int) bool { return bands[i].band < bands[j].band })
+	return bands
+}
+
+// fill draws the global plan: the best band's lottery first, then the next band's for whatever capacity is
+// left, and so on until capacity is reached or every band is exhausted. That is the whole priority rule - a
+// worse band gets exactly the capacity the better ones leave unused, so a better band that fills the batch
+// starves the worse ones, and one that cannot fill it starves nothing.
+func fill(bands []bandAgg, capacity int, randFloat func() float64) []Slot {
+	order := make([]Slot, 0, capacity)
+	for _, b := range bands {
+		if len(order) >= capacity {
+			break
+		}
+		for _, k := range pick(b.keys, capacity-len(order), randFloat) {
+			order = append(order, Slot{Band: b.band, Key: k})
+		}
+	}
+	return order
+}
+
+// reach is the band at which a fill at capacity runs out of capacity, or math.MaxInt when every due step fits.
+// It needs no lottery: pick draws min(capacity left, the band's total count) slots whatever it rolls.
+func reach(bands []bandAgg, capacity int) int {
+	n := 0
+	for _, b := range bands {
+		for _, k := range b.keys {
+			n += k.count
+		}
+		if n >= capacity {
+			return b.band
+		}
+	}
+	return math.MaxInt
+}
+
+// pick runs the weighted fairness lottery over one band's keys and returns the ordered sequence of
 // keys to dispatch - one entry per step, at most capacity.
 //
 // Each slot is an independent Efraimidis-Spirakis draw over the KEYS, re-rolled every slot. Rolling
@@ -112,7 +141,8 @@ func pick(keys []keyAgg, capacity int, randFloat func() float64) []string {
 
 // slice routes the global plan to shards and returns the part that lands on one of them.
 //
-// Per key, the FIRST slot goes to the shard holding that key's oldest step. That shard fetches
+// Per slot - one key at one band - the FIRST occurrence goes to the shard holding that key's oldest step
+// at that band. That shard fetches
 // oldest-first, so the key leads with its globally-oldest step - and, more importantly, it is what
 // stops unbounded intra-tenant starvation: a key with one old step on a quiet shard and a
 // constantly-replenished backlog on a busy one would see a purely proportional split round the quiet
@@ -125,12 +155,13 @@ func pick(keys []keyAgg, capacity int, randFloat func() float64) []string {
 //
 // Deliberately NOT: per-shard lotteries, weights scaled by how many shards hold a key, or capacity
 // allocated by shard counts. The global pick already priced every key's share; this only routes it.
-func slice(order []string, entries []entry, band, shard int) (slots, keys []string, perKeyCap int) {
-	needed := map[string]int{}
+func slice(order []Slot, entries []entry, shard int) (slots []Slot, fetches []Fetch) {
+	needed := map[Slot]int{}
 	for _, k := range order {
 		needed[k]++
 	}
-	assign := make(map[string][]int, len(needed))
+	assign := make(map[Slot][]int, len(needed))
+	perKey := make(map[Slot]int, len(needed))
 	mine := 0
 	for k, n := range needed {
 		type holder struct {
@@ -140,9 +171,6 @@ func slice(order []string, entries []entry, band, shard int) (slots, keys []stri
 		}
 		var holders []holder
 		for _, e := range entries {
-			if e.t.band != band {
-				continue
-			}
 			if i, ok := e.t.byKey[k]; ok {
 				t := e.t.tallies[i]
 				holders = append(holders, holder{shard: e.shard, count: t.Count, age: t.AgeMs})
@@ -221,19 +249,18 @@ func slice(order []string, entries []entry, band, shard int) (slots, keys []stri
 				c++
 			}
 		}
-		if c > perKeyCap {
-			perKeyCap = c
-		}
+		perKey[k] = c
 		mine += c
 	}
 	if mine == 0 {
-		return nil, nil, 0
+		return nil, nil
 	}
 	// Replay the global order keeping only this shard's occurrences. Filtering preserves relative
-	// order, so the fairness interleave survives intact within the slice.
-	occ := map[string]int{}
-	slots = make([]string, 0, mine)
-	seen := make(map[string]bool, len(needed))
+	// order, so the fairness interleave survives intact within each band, and the bands stay best first.
+	occ := map[Slot]int{}
+	slots = make([]Slot, 0, mine)
+	seen := make(map[Slot]bool, len(needed))
+	fetchAt := map[int]int{} // band -> index into fetches
 	for _, k := range order {
 		seq := assign[k]
 		o := occ[k]
@@ -242,10 +269,18 @@ func slice(order []string, entries []entry, band, shard int) (slots, keys []stri
 			continue
 		}
 		slots = append(slots, k)
-		if !seen[k] {
-			seen[k] = true
-			keys = append(keys, k)
+		if seen[k] {
+			continue
 		}
+		seen[k] = true
+		f, ok := fetchAt[k.Band]
+		if !ok {
+			f = len(fetches)
+			fetchAt[k.Band] = f
+			fetches = append(fetches, Fetch{Band: k.Band})
+		}
+		fetches[f].Keys = append(fetches[f].Keys, k.Key)
+		fetches[f].PerKeyCap = max(fetches[f].PerKeyCap, perKey[k])
 	}
-	return slots, keys, perKeyCap
+	return slots, fetches
 }

@@ -104,7 +104,7 @@ type Engine struct {
 	workers                atomic.Int32
 	workersSet             atomic.Bool // SetWorkers was called: skip the derived default
 	timeBudgetMs           atomic.Int64
-	defaultPriority        atomic.Int32
+	maxPriority            int          // construction-time only, see SetMaxPriority
 	refillIntervalOverride atomic.Int64 // bench override (nanoseconds): pins every piston's cycle period; <=0 = derive
 
 	// engineID is a random positive identifier minted per engine instance (fresh on every restart). It is
@@ -362,7 +362,7 @@ func NewEngine() *Engine {
 	}
 	e.workers.Store(64)
 	e.timeBudgetMs.Store(int64(2 * time.Minute / time.Millisecond))
-	e.defaultPriority.Store(100)
+	e.maxPriority = piston.DefaultMaxPriority
 	e.SetEngineID(int64(rand.Uint64() >> 1)) // positive, 63 bits of entropy
 	// Empty, not seeded: "nothing derived yet" per shard. Startup reads each shard's count, sizes its pool
 	// directly, and records it here; the reconcile loop then dedupes against that.
@@ -586,24 +586,30 @@ func (e *Engine) SetTimeBudget(d time.Duration) error {
 // retried forever. A minute of headroom covers the 30s margin.
 const maxTimeBudget = time.Duration(math.MaxInt32)*time.Millisecond - time.Minute
 
-// SetDefaultPriority sets the default priority for new flows: an integer >= 1, lower runs first. Live:
-// read fresh on each Create, so it takes effect on a running engine immediately.
+// maxPriorityCeiling is the largest maximum SetMaxPriority accepts. Every band up to the maximum costs the
+// selection scan an index probe on every cycle, whether or not anything uses it.
+const maxPriorityCeiling = 100
+
+// SetMaxPriority sets how many priority levels flows may use: priorities run from 1 (served first) to max, at
+// most 100. The default is 5. A flow that sets no priority gets the midpoint of the range - 3 at the default.
 //
-// A value below 1, or one too large to store as a 32-bit integer, is rejected with an error: a flow given a
-// non-positive priority would never be scheduled. FlowOptions.Priority is validated separately at Create,
-// where 0 means "unset, take this default".
-func (e *Engine) SetDefaultPriority(p int) error {
-	// The pistons select a band only through predicates that assume it is positive, so a non-positive
-	// priority leaves the step pending forever, invisible to selection. An int beyond int32 would wrap
-	// negative in the column and hang the same way.
-	if p < 1 {
-		return errors.New("default priority must be >= 1", http.StatusBadRequest)
+// Use the same value on every replica sharing a database. Work that carries a priority beyond the range - created
+// before it existed, or by a replica with a larger one - is served after every level in it. Construction-time
+// only.
+func (e *Engine) SetMaxPriority(max int) error {
+	if e.started.Load() {
+		return errSetAfterStartup("max priority")
 	}
-	if p > math.MaxInt32 {
-		return errors.New("default priority must fit in an int32", http.StatusBadRequest)
+	if max < 1 || max > maxPriorityCeiling {
+		return errors.New("max priority must be between 1 and %d", maxPriorityCeiling, http.StatusBadRequest)
 	}
-	e.defaultPriority.Store(int32(p))
+	e.maxPriority = max
 	return nil
+}
+
+// defaultPriority is the priority a flow with none gets: the midpoint of the range.
+func (e *Engine) defaultPriority() int {
+	return (1 + e.maxPriority) / 2
 }
 
 // setRefillInterval is the benchmark override that PINS every piston's cycle period to d, replacing the
@@ -982,14 +988,16 @@ func (e *Engine) initRuntime() error {
 		}
 		p.SetLogger(e.logger)
 		p.SetSeams(e.seams)
+		p.SetMaxPriority(e.maxPriority)
 		// The two halves of this shard's peer accounting, wired to each other through the engine rather than
 		// through either package knowing the other: the piston selects within the residue class its shard's
 		// Sonar publishes, and that Sonar stamps this replica as SERVING the shard only when the piston says
 		// it is turning. Both are pure reads of live state, so neither captures anything that could go stale.
 		p.SetPartitionFunc(func() (int, int, bool) { return e.partitionOn(idx) })
-		// A cycle's two queries run in the one band above the common one, which the piston shares only with
-		// this shard's Sonar (below). Both are bounded by construction - the piston cycles on a derived period
-		// and takes two turns per cycle, the Sonar beats on a fixed cadence - so neither can flood the band. The
+		// A cycle's queries run in the one band above the common one, which the piston shares only with this
+		// shard's Sonar (below). Both are bounded by construction - the piston cycles on a derived period and
+		// takes at most three turns per cycle (two for the scan, one for the fetch), the Sonar beats on a fixed
+		// cadence - so neither can flood the band. The
 		// piston needs to be there because a cycle that queued behind the dispatch it feeds would starve the
 		// workers it fills for.
 		p.SetContextFunc(func(ctx context.Context) context.Context {
@@ -1249,7 +1257,7 @@ func (e *Engine) taskTimeBudget() time.Duration {
 // default and is frozen onto the returned options.
 func (e *Engine) resolveFlowOptions(opts *workflow.FlowOptions) *workflow.FlowOptions {
 	resolved := &workflow.FlowOptions{
-		Priority:       int(e.defaultPriority.Load()),
+		Priority:       e.defaultPriority(),
 		FairnessWeight: 1,
 		TimeBudget:     e.taskTimeBudget(),
 	}

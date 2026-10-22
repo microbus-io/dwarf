@@ -76,6 +76,7 @@ func TestPriorityflow(t *testing.T) {
 	defer release()
 	eng.SetHost(mux)
 	eng.SetWorkers(1)
+	eng.SetMaxPriority(10) // the ordering below spans more bands than the default five
 	assert.NoError(eng.Startup(t.Context()))
 
 	t.Run("strict_priority_ordering", func(t *testing.T) {

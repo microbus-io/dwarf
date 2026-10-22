@@ -25,7 +25,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/pipeline"
-
+	"github.com/microbus-io/dwarf/internal/planner"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -357,9 +357,19 @@ func TestRefillScan_BoundedPerFairnessKey(t *testing.T) {
 	assert.Equal(capped, counts["tenant-a"])
 	assert.Equal(capped, counts["tenant-b"])
 
+	// fetch runs phase 3 for the tenants at the band, keyed by tenant.
+	fetch := func(perKey int) (map[string][]int, error) {
+		got, err := e.pistons[1].FetchSteps(ctx, 1, []planner.Fetch{{Band: band, Keys: tenants, PerKeyCap: perKey}})
+		byKey := map[string][]int{}
+		for slot, ids := range got {
+			byKey[slot.Key] = ids
+		}
+		return byKey, err
+	}
+
 	// Phase 3: the fetch cuts each key at perKey - not the backlog - and every key still reaches the batch.
 	for _, perKey := range []int{1, 3, 10} {
-		byKey, err := e.pistons[1].FetchSteps(ctx, 1, band, tenants, perKey)
+		byKey, err := fetch(perKey)
 		if !assert.NoError(err) {
 			return
 		}
@@ -372,11 +382,11 @@ func TestRefillScan_BoundedPerFairnessKey(t *testing.T) {
 	// And the fetch keeps the OLDEST step of each key: the single row for a key at perKey=1 is its oldest
 	// (smallest step_id here, since steps are created in age order). A bound that kept the newest would
 	// starve the head of every queue.
-	one, err := e.pistons[1].FetchSteps(ctx, 1, band, tenants, 1)
+	one, err := fetch(1)
 	if !assert.NoError(err) {
 		return
 	}
-	all, err := e.pistons[1].FetchSteps(ctx, 1, band, tenants, perTenant)
+	all, err := fetch(perTenant)
 	if !assert.NoError(err) {
 		return
 	}

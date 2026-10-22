@@ -19,7 +19,7 @@ Tallier    tallying                       -> planner.Tally
 Supplier   planning -> fetching -> pushing -> the candidate cache
 ```
 
-**The band scan costs O(due rows at the band) on every dialect and nothing in the query early-stops, so it
+**The band scan's tally costs O(due rows at the band) on every dialect and nothing in it early-stops, so it
 grows with the backlog.** A single loop would let it set the cycle's period and therefore the rate at which
 candidates reach the workers: supply is `capacity / period`, so the refiller would supply *least* exactly
 when the backlog was deepest. Measured on local PostgreSQL 18.1 (fan-out width 32, open-loop, with
@@ -178,12 +178,12 @@ neither can be read without the other.
 | Scan succeeded | Tallier | `Tally` | untouched (not its cache) |
 | **Scan failed** | Tallier | **`Clear`** | untouched (not its cache) |
 | **Shard untallied (`!Plan.Tallied`)** | Supplier | untouched | **untouched** |
-| Plan gave slots | Supplier | (already tallied) | `Refill(batch, band)` |
+| Plan gave slots | Supplier | (already tallied) | `Refill(batch, plan.Reach)` |
 | Plan gave no slots | Supplier | (already tallied) | **`Refill(nil, NoBand)`** — cleared |
 | **Fetch failed** | Supplier | **untouched** | **untouched** |
 
-**A failed scan clears the shard but spares the cache — and those are two different loops.** Clearing is necessary because a stale claim on the best band makes every peer find none of its own
-keys there and dispatch nothing. Sparing the cache is necessary because the failure means *unknown*, not
+**A failed scan clears the shard but spares the cache — and those are two different loops.** Clearing is necessary because a stale claim on a better band that fills the batch leaves every peer no
+capacity to spill into, and they dispatch nothing. Sparing the cache is necessary because the failure means *unknown*, not
 "nothing is due" — wholesale-replacing a healthy partition with nothing because the database blipped would
 idle this shard's workers for a cycle, throwing away the last good information anyone had.
 
@@ -195,17 +195,17 @@ reported. Pinned by `TestSupplier_UntalliedShardSparesTheCache`, which turns the
 against a failing scan.
 
 **A failed fetch clears nothing.** The tally already succeeded and is *still true*: the shard looked, saw
-its band, and reported it honestly. Clearing would drop a valid band claim from the global minimum and let
-peers serve worse work for no reason. It simply pushes nothing this cycle.
+its bands, and reported them honestly. Clearing would drop a valid band claim from the fill and let peers
+serve worse work for no reason. It simply pushes nothing this cycle.
 
 **An empty plan from a TALLIED shard is not a failure, and is the one case that DOES empty the partition.**
 It is a positive statement — nothing here is dispatchable — so every cached candidate is a dead hint a
 worker would pop and burn a claim round-trip on. This is the distinction the cache's doc calls its sharp
 edge; here it is an invariant with a name.
 
-Being outranked (this shard's band worse than `GlobalBand`, a peer holds a better one) travels this same
-empty-plan path and returns `Err == nil`. It is ordinary strict priority, never a fault — and it costs no
-fetch at all.
+Being outranked (this shard holds only work past `Plan.Reach`, because better bands elsewhere fill the batch)
+travels this same empty-plan path and returns `Err == nil`. It is ordinary strict priority, never a fault — and
+it costs no fetch at all.
 
 **`Reconciled` is not `Err == nil`, and a caller waiting on the partition must use it.** Two paths hold
 everything and only one of them is an error, so a waiter gated on the error would be told the partition
@@ -243,12 +243,14 @@ cycle's cost, not its period; the period is `Slept + Total`.
 
 ## Contracts a source must hold
 
-**`ScanBand` returns O(distinct keys), never O(backlog)** — one tally per fairness key, with a `Count`,
-capped at the planning capacity. A source that returns per-step defeats the entire three-phase shape.
+**`ScanBand` returns O(distinct keys) per band, never O(backlog)** — one tally per fairness key per due band,
+with a `Count` capped at the planning capacity, and it may stop at the band where its counts reach that
+capacity. A source that returns per-step defeats the entire three-phase shape.
 (Note the cost is a separate question: the scan *returns* O(keys) while it *costs* O(due rows at the band),
 which is the whole reason for the split above.)
 
-**`FetchSteps` returns each key's steps OLDEST FIRST.** The assembly consumes the lists in order and never
+**`FetchSteps` is called once per cycle with every band the plan reached**, and returns each (band, key)
+pair's steps **OLDEST FIRST**. The assembly consumes the lists in order and never
 re-sorts them, so the ordering is the source's to get right. A key may come back short or missing.
 
 **A source whose two methods must agree owns that agreement itself.** The Supplier fetches against a plan
@@ -259,8 +261,8 @@ the failure it costs is recorded there.
 
 ## Assembly preserves the interleave
 
-The batch is built by walking `Plan.Slots` **in order** and taking each key's next fetched step — not by
-grouping per key. Grouping would hand one tenant a contiguous run and undo the fairness interleave the
+The batch is built by walking `Plan.Slots` **in order** and taking each slot's next fetched step, stamped with
+the slot's band — not by grouping per key. The slots come best band first, and the cache keeps that order. Grouping would hand one tenant a contiguous run and undo the fairness interleave the
 lottery produced. A key that comes up short (its steps claimed between the fetch and now) simply
 contributes fewer candidates; the batch runs short for one cycle and the next re-selects. There is nothing
 to reconcile.

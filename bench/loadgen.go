@@ -309,10 +309,9 @@ func endedByStatus(deltas map[string]int64) (completed int64, other map[string]i
 func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric.ManualReader, pgss *pgssSampler, wait *waitSampler, dbs *dbStatsSampler,
 	bytesWritten *atomic.Int64, pick func() *workload, k, fairnessKeys int, warmup, window time.Duration) stepResult {
 
-	// The refiller bounds its scan PER fairness key (ROW_NUMBER partitioned by it). With every flow on
-	// one default key that bound degenerates to a single partition, so the window must order the whole
-	// due backlog before the rn<=n cut applies. Spreading flows across keys is what restores the
-	// intended bound - and makes the degenerate case measurable against it.
+	// The refiller tallies and fetches PER fairness key. With every flow on one default key that degenerates
+	// to a single group over the whole due backlog. Spreading flows across keys is what restores the
+	// intended shape - and makes the degenerate case measurable against it.
 	flowOpts := func() *workflow.FlowOptions {
 		if fairnessKeys <= 1 {
 			return nil
