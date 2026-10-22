@@ -62,7 +62,9 @@ echo "== Cloud SQL instance ($DB_TIER, ${DB_DISK_GB}GB SSD) =="
 if ! exists gc sql instances describe "$DB_INSTANCE"; then
   FLAGS=()
   if [[ -n "$DB_MAX_CONNECTIONS" ]]; then
-    FLAGS+=(--database-flags="max_connections=$DB_MAX_CONNECTIONS")
+    FLAGS+=(--database-flags="max_connections=$DB_MAX_CONNECTIONS,autovacuum_work_mem=1048576")
+  else
+    FLAGS+=(--database-flags="autovacuum_work_mem=1048576")
   fi
   # ${FLAGS[@]+...} keeps an empty array from tripping set -u on bash 3.2 (macOS default).
   # --zone (mutually exclusive with --region; it implies it) pins the DB to the VM's zone: same-zone is

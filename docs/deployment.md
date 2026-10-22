@@ -51,6 +51,13 @@ concurrency. Use Postgres 13+ for `JSONB` and partial indexes. Set `max_connecti
 derived pool budget plus two connections for every replica beyond the few that dispatch it (see
 [Running more than one replica](#connection-pool)), and `shared_buffers` to ~25% of host RAM.
 
+Give autovacuum enough memory: on PostgreSQL 16 and older, set `autovacuum_work_mem` to 1 GB, the most it will
+use. The engine's step table updates and deletes rows continuously, and vacuum holds the dead rows it finds in
+that memory. Each time the memory fills, it scans every index of the table in full before it can go on. At the 64 MB
+many managed services default to, a long pass rescans the indexes many times and falls behind the churn. It is a
+server setting: `postgresql.conf` or `ALTER SYSTEM`, or a database flag on a managed service. PostgreSQL 17 and
+later store dead rows far more compactly and need much less.
+
 ### SQL Server
 
 Enable `READ_COMMITTED_SNAPSHOT ON` per shard database for Postgres-like non-blocking reads and near-zero

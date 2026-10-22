@@ -27,7 +27,7 @@ R=$(cd "$D/../../.." && pwd)
 S=${RIG_HOME:-$R/tmp/rig}
 PROJECT=${PROJECT:-dwarf-bench-mbus} ZONE=${ZONE:-us-east4-a} NAME=${NAME:-real}
 TIER=${TIER:-db-custom-32-131072}
-DBFLAGS=${DBFLAGS-cloudsql.enable_auto_explain=on,auto_explain.log_min_duration=10000,log_lock_waits=on}
+DBFLAGS=${DBFLAGS-cloudsql.enable_auto_explain=on,auto_explain.log_min_duration=10000,log_lock_waits=on,autovacuum_work_mem=1048576}
 RTT_MAX=${RTT_MAX:-0.35} DRAW_MAX=${DRAW_MAX:-1.35} REDRAWS=${REDRAWS:-2}
 NIGHT=${NIGHT:-8000} DAY=${DAY:-12000} BURST=${BURST:-16000}
 RESTART_A=${RESTART_A:-137} RESTART_B=${RESTART_B:-141} # minutes into the run: period 2's day phase, clear of its bursts

@@ -96,7 +96,10 @@ the database nothing.
 step in the priority bands being served has been due, per shard. A step that slept, backed off, or waited on a
 subgraph or an interrupt is measured from when it became runnable, not from when it was created. The lag covers
 only the bands being served: a band that better-priority work leaves no capacity for is left out, and a shard
-holding only such bands reads zero. Strict priority holds those bands back by design, and that shows in `dwarf_steps_oldest_pending_age_seconds`,
+holding only such bands reads zero. When better-priority work leaves capacity over, the served bands reach
+further, and if a band that has waited a long time comes into reach the lag jumps to its age. It falls back
+when the better bands fill the capacity again. A jump of that kind is priority at work, not a stalled dispatcher:
+read it beside the per-band ages. Strict priority holds those bands back by design, and that shows in `dwarf_steps_oldest_pending_age_seconds`,
 one reading per band, refreshed every 30 seconds along with `dwarf_steps_pending`. While the lead for a shard
 passes from one replica to another, those two may be missing for up to 30 seconds.
 

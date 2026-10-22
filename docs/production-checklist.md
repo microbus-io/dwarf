@@ -19,6 +19,8 @@
 - [ ] **Disk IOPS sized to the write rate**, not just to capacity. Cloud providers often provision IOPS by
   disk size, and a throttled disk shows up as throughput collapse with everything apparently idle.
   → [Deployment](deployment.md#disk-throughput)
+- [ ] **PostgreSQL 16 and older: `autovacuum_work_mem` set to 1 GB.** At a 64 MB default, vacuum on the step table
+  rescans every index each time its memory fills, and falls behind. → [Deployment](deployment.md#postgresql--recommended-for-production)
 - [ ] **`ANALYZE`/autovacuum tuned for `dwarf_steps`.** It is a high-churn queue table whose row counts swing
   by orders of magnitude, and stale statistics can flip the selection query from an index scan to a
   sequential one. → [Runbook](runbook.md#backlog-is-growing)

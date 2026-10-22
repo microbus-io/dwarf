@@ -140,7 +140,7 @@ worker busy, as designed.
   higher-priority work is using the capacity, as designed. If that band has a deadline, the fix is capacity or
   fewer flows at the better bands, not the engine.
 
-**Then find which of five things is binding.**
+**Then find which of six things is binding.**
 
 **1. The database is saturated.** `dwarf_turnstile_available` sits at zero with `dwarf_turnstile_waiting`
 deep, and database CPU is high. This is the expected shape at capacity — the engine queues rather than
@@ -205,6 +205,23 @@ A replication slot can hold the horizon too; check `age(xmin)` in `pg_replicatio
 - **Do not set a statement or transaction timeout** to prevent a recurrence. See the
   [production checklist](production-checklist.md#database). Keep long-running queries off the shard databases
   instead.
+
+**6. Vacuum cannot keep up (PostgreSQL).** The symptoms:
+- The step table grows far past what its live rows explain, and keeps growing.
+- `dwarf_refill_query_duration_seconds` climbs over hours.
+- Autovacuum's log shows passes on `dwarf_steps` whose elapsed time is many times their CPU time, or `index
+  scans` above 1. The log line is `automatic vacuum of table ...`, with `elapsed` and `CPU` under `system usage`.
+
+A pass that runs for hours cannot remove anything that died after it began, so dead rows pile up meanwhile.
+
+**Respond:**
+- **On PostgreSQL 16 and older, set `autovacuum_work_mem` to 1 GB** ([Deployment](deployment.md#postgresql--recommended-for-production)).
+  `index scans` above 1 means the pass ran out of this memory and rescanned every index.
+- **If elapsed time far exceeds CPU time,** the pass is mostly asleep on autovacuum's cost limit, which is
+  shared by every running autovacuum worker. Raising it lets vacuum keep up at the price of more I/O while it
+  runs.
+- **Retention adds to the load.** Deleting old flows puts dead rows on old pages, so every pass has the whole
+  table to clean.
 
 ---
 

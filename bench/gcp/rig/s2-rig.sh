@@ -21,7 +21,7 @@ R=$(cd "$D/../../.." && pwd)                          # the repository: dbcpu.sh
 S=${RIG_HOME:-$R/tmp/rig}                             # never committed: dbpass and the pinned bench binaries
 PROJECT=${PROJECT:-dwarf-bench-mbus} ZONE=${ZONE:-us-east4-a} NAME=${NAME:-s2}
 TIER=${TIER:-db-custom-32-131072}
-DBFLAGS=${DBFLAGS-cloudsql.enable_auto_explain=on,auto_explain.log_min_duration=10000,log_lock_waits=on}
+DBFLAGS=${DBFLAGS-cloudsql.enable_auto_explain=on,auto_explain.log_min_duration=10000,log_lock_waits=on,autovacuum_work_mem=1048576}
 RTT_MAX=${RTT_MAX:-0.35}                              # ms, the idle RTT gate per engine host and shard
 DRAW_MAX=${DRAW_MAX:-1.35}                            # DB core-ms per step: ~1.1-1.2 normal, ~1.5 slow
 REDRAWS=${REDRAWS:-2}

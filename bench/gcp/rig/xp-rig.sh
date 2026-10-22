@@ -34,6 +34,9 @@ pass=$(cat $S/dbpass)
 authok
 
 log "creating $DB ($TIER, 1000 GB SSD) + $ADMIN (c4a-2) + $EA, $EB ($ETYPE); tag $TAG"
+# 1 GB of dead-row memory per autovacuum worker: at Cloud SQL's 64 MB default a vacuum pass rescans every index once
+# per ~11M dead rows. DBFLAGS may set its own value.
+[[ ,$DBFLAGS, == *,autovacuum_work_mem=* ]] || DBFLAGS=${DBFLAGS:+$DBFLAGS,}autovacuum_work_mem=1048576
 gc sql instances create "$DB" --database-version=POSTGRES_16 --tier="$TIER" --edition=enterprise \
   --zone=$ZONE --storage-type=SSD --storage-size=1000 --insights-config-query-insights-enabled \
   --network="projects/$PROJECT/global/networks/dwarf-bench-net" --no-assign-ip \
