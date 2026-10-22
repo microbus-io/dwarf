@@ -10,9 +10,9 @@
 #      minutes 10 (2 min), 40 (2 min) and 58 (5 min), +-10% seeded noise per minute, Poisson arrivals; the mix below,
 #      85% 2 ms / 12% 100 ms / 3% 5 s tasks, 200 fairness keys on a Zipf (s 1.1), flows across all five priority
 #      levels (3 / 12 / 55 / 20 / 10% at 1..5), completed flows purged after 30 min. A rolling restart in period
-#      2's day phase: replica A at minute 47, replica B at minute 51, each by SIGTERM (the bench stops creating and
-#      its engine drains), restarted 10 s later on the same epoch. At the end every replica keeps its engines up
-#      until no flow is left running.
+#      2's day phase: replica A at run minute $RESTART_A (137), replica B at $RESTART_B (141), each by SIGTERM (the
+#      bench stops creating and its engine drains; SIGKILL if it has not stopped in 3 min), restarted 10 s later on
+#      the same epoch. At the end every replica keeps its engines up until no flow is left running.
 #   3  the database's record: flows by status, steps not completed, peer rows left, pg_stat_statements, and
 #      Cloud SQL CPU over the day.
 # Each replica writes a per-interval series (out/day*-*.series.jsonl, every 10 s): commanded, offered and admitted
@@ -47,6 +47,11 @@ fw() { local ip; ip=$(curl -fsS -m 10 https://checkip.amazonaws.com | tr -d '[:s
   gc compute firewall-rules update dwarf-bench-ssh --source-ranges="$ip/32" >/dev/null 2>&1; }
 vmssh() { local vm=$1 i; for i in 1 2 3 4 5; do
   gc compute ssh "$vm" --zone="$ZONE" --command "$2" -- -o ConnectTimeout=20 2>/dev/null && return 0; fw; sleep 15; done; return 1; }
+# vmdone <vm> <file>: whether <file> exists on <vm>. Only an ssh failure is retried: vmssh retries ANY nonzero exit,
+# so a poll for a file that is not there yet would spend its whole retry ladder (and a firewall update) on each probe.
+vmdone() { local i out; for i in 1 2 3 4 5; do
+  out=$(gc compute ssh "$1" --zone="$ZONE" --command "test -f $2 && echo yes || echo no" -- -o ConnectTimeout=20 2>/dev/null)
+  case $out in yes) return 0 ;; no) return 1 ;; esac; fw; sleep 15; done; return 1; }
 pullvm() { local vm=$1; mkdir -p "$OUT/$vm"
   ( vmssh "$vm" 'tar czf /tmp/out.tgz out 2>/dev/null' && gc compute scp --zone=$ZONE "$vm":/tmp/out.tgz "$OUT/$vm/out.tgz" >/dev/null 2>&1 &&
     (cd "$OUT/$vm" && tar xzf out.tgz && rm out.tgz) ) && log "  artifacts from $vm saved" || log "  ARTIFACT PULL FAILED: $vm"; }
@@ -98,7 +103,7 @@ rttgate() { local vm try v; for vm in "$EA" "$EB"; do
 both() { local tag=$1 start=$2 vm; shift 2
   for vm in "$EA" "$EB"; do
     vmssh "$vm" "${RUN_ENV:-} setsid nohup ./g-run.sh $tag-$vm $start '$(dsn "$RUN_DB")' $* > /dev/null 2>&1 < /dev/null &"; done
-  for vm in "$EA" "$EB"; do until vmssh "$vm" "test -f out/$tag-$vm.done"; do late; sleep 30; done; done; }
+  for vm in "$EA" "$EB"; do until vmdone "$vm" "out/$tag-$vm.done"; do late; sleep 30; done; done; }
 steps() { vmssh "$1" "python3 -c \"
 import json
 r = json.load(open('out/$2.json'))['results'][0]
@@ -171,18 +176,19 @@ vmssh "$ADMIN" "setsid nohup ./v-mon.sh $(( 300 * 60 )) out/vmon-day.log '$(dsn 
 for vm in "$EA" "$EB"; do
   vmssh "$vm" "setsid nohup ./g-run.sh day1-$vm $EPOCH '$(dsn $RUN_DB)' $DAYARGS > /dev/null 2>&1 < /dev/null &"; done
 # restart <vm> <minute of the run>: SIGTERM, wait for its graceful stop, start a fresh process on the same epoch.
-restart() { local vm=$1 at=$(( EPOCH + $2 * 60 )) i
+restart() { local vm=$1 at=$(( EPOCH + $2 * 60 )) stop
   while (( $(date +%s) < at )); do late; sleep 20; done
   log "restart $vm: SIGTERM at run minute $2"; echo "$(date -u +%FT%TZ) $vm SIGTERM" >> "$OUT/restarts.txt"
   vmssh "$vm" 'pkill -TERM -x dwarf-bench'
-  for i in $(seq 1 18); do vmssh "$vm" "test -f out/day1-$vm.done" && break; sleep 10; done
-  vmssh "$vm" "test -f out/day1-$vm.done" || { log "  $vm did not stop in 3 min - SIGKILL"; vmssh "$vm" 'pkill -9 -x dwarf-bench; true'; }
+  stop=$(( $(date +%s) + 180 ))
+  until vmdone "$vm" "out/day1-$vm.done"; do (( $(date +%s) < stop )) || break; sleep 10; done
+  vmdone "$vm" "out/day1-$vm.done" || { log "  $vm did not stop in 3 min - SIGKILL"; vmssh "$vm" 'pkill -9 -x dwarf-bench; true'; }
   sleep 10
   vmssh "$vm" "setsid nohup ./g-run.sh day2-$vm 0 '$(dsn $RUN_DB)' $DAYARGS > /dev/null 2>&1 < /dev/null &"
   echo "$(date -u +%FT%TZ) $vm restarted" >> "$OUT/restarts.txt"; log "  $vm restarted"; }
 restart "$EA" "$RESTART_A"
 restart "$EB" "$RESTART_B"
-for vm in "$EA" "$EB"; do until vmssh "$vm" "test -f out/day2-$vm.done"; do late; sleep 60; done; done
+for vm in "$EA" "$EB"; do until vmdone "$vm" "out/day2-$vm.done"; do late; sleep 60; done; done
 log "the day done: $(for vm in "$EA" "$EB"; do vmssh "$vm" "grep -hE '^drain:|INVALID|valid:' out/day2-$vm.log | tr '\n' ' '"; done)"
 
 # ---- 3: the database's record
