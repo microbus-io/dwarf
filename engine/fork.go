@@ -316,36 +316,39 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		deleteOnCompletion = 0
 	}
 
-	// Hoist the minted token: the root overwrites it with cc.rootFlowToken below, but a non-root subgraph
-	// flow keeps it AND must echo it into thread_token (it is its own thread), or List builds a malformed
-	// ThreadKey ("{shard}-{id}-") that the API's thread resolution then 404s on.
-	newFlowToken := keys.RandomIdentifier(16)
+	// The cloned root takes cc.rootFlowToken, the token in the key returned to the caller, and joins the origin's
+	// thread; it is its own root, and its descendants inherit its id as their root_flow_id. A subgraph flow is its
+	// own thread - thread_token echoes its own minted token, or List builds a malformed ThreadKey
+	// ("{shard}-{id}-") that the API's thread resolution then 404s on - and shares the cloned root's tree.
 	// The origin's cancel reason comes along: a kept fan-out branch lost to the origin's cancellation is a loss
 	// the clone inherits, and a fork whose only losses are such branches resolves cancelled - so it reports the
 	// reason that explains it, rather than a cancellation nobody gave a reason for. cancel_watermark is
 	// deliberately NOT copied: the fork is not under cancellation, so none of its steps may pass one on.
-	newFlowID64, err := tx.InsertReturnID(ctx, "flow_id",
-		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, baggage, status, surgraph_flow_id, surgraph_step_id, forked_from_step, trace_parent, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, cancel_reason, payload_ver)"+
-			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		newFlowToken, workflowURL, workflowName, graphJSON, graphHash, baggageJSON, newStatus, newSurgFlowID, newSurgStepID, forkedFromStep, newTrace, deleteOnCompletion, flowPriority, flowFairnessKey, flowFairnessWeight, flowBudget, e.engineID, cancelReason, originPayloadVer,
+	columns := "flow_token, thread_token, workflow_url, workflow_name, graph, graph_hash, baggage, status, surgraph_flow_id, surgraph_step_id, forked_from_step, trace_parent, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, cancel_reason, payload_ver"
+	values := "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
+	var flowToken, threadToken, self string
+	var known int
+	if isRoot {
+		flowToken, threadToken = cc.rootFlowToken, cc.threadToken
+		columns, values, self, known = columns+", thread_id", values+", ?", "root_flow_id", cc.threadID
+	} else {
+		flowToken = keys.RandomIdentifier(16)
+		threadToken = flowToken
+		columns, values, self, known = columns+", root_flow_id", values+", ?", "thread_id", cc.newRootFlowID
+	}
+	insert, fixup := selfFlowInsertSQL(tx.DriverName(), columns, values, self)
+	newFlowID64, err := tx.InsertReturnID(ctx, "flow_id", insert,
+		flowToken, threadToken, workflowURL, workflowName, graphJSON, graphHash, baggageJSON, newStatus, newSurgFlowID, newSurgStepID, forkedFromStep, newTrace, deleteOnCompletion, flowPriority, flowFairnessKey, flowFairnessWeight, flowBudget, e.engineID, cancelReason, originPayloadVer, known,
 	)
 	if err != nil {
 		return 0, nil, errors.Trace(err)
 	}
 	newFlowID := int(newFlowID64)
 	if isRoot {
-		// The cloned root is its own root; descendants inherit this id as their root_flow_id.
 		cc.newRootFlowID = newFlowID
-		// The root's flow_token must match the key returned to the caller.
-		_, err = tx.ExecContext(ctx, "UPDATE dwarf_flows SET flow_token=?, thread_id=?, thread_token=?, root_flow_id=? WHERE flow_id=?",
-			cc.rootFlowToken, cc.threadID, cc.threadToken, newFlowID, newFlowID)
-		if err != nil {
-			return 0, nil, errors.Trace(err)
-		}
-	} else {
-		// Subgraph flows are their own thread (thread_id/thread_token = own flow_id/flow_token) but share
-		// the cloned root's tree-membership id. step_id is set below, once idMap is built.
-		_, err = tx.ExecContext(ctx, "UPDATE dwarf_flows SET thread_id=?, thread_token=?, root_flow_id=? WHERE flow_id=?", newFlowID, newFlowToken, cc.newRootFlowID, newFlowID)
+	}
+	if fixup != "" {
+		_, err = tx.ExecContext(ctx, fixup, selfFlowFixupArgs(newFlowID64, 1)...)
 		if err != nil {
 			return 0, nil, errors.Trace(err)
 		}

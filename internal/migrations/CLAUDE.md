@@ -60,7 +60,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `created_at` | UTC creation time. Append-only and PK-correlated. Surfaced to tasks via `Flow.CreatedAt()`. A `Fork` clone is a new flow with its own `created_at` = fork time. **Deliberately unindexed on `dwarf_flows`**: no query on the flows table filters or orders on it (`List`/`Purge` age filters anchor on `updated_at` - which for a terminal flow is its finish time, the correct "time since finished" retention signal, and only terminal flows are purged). The fairness scheduler's `created_at` ordering runs on the **steps** copy, which *is* indexed (see `dwarf_steps.created_at`); the flows copy is never a hot-path order/filter key. A `dwarf_flows.created_at` index would be pure write amplification; if a "created in window X" analytics filter is ever added, add the index with the `Query` field then |
 | `started_at` | UTC time this attempt began dispatching. Stamped when the flow goes `running` at `Create` (and by `Fork` when the clone goes live); there is no separate `Start`. Distinct from `created_at`, which is the row's INSERT moment. Drives `FlowSummary.Duration()` (`updated_at - started_at`) |
 | `updated_at` | UTC time of the last **status transition** (`created`→`running`→terminal, `running`↔`interrupted`). Surfaced to tasks via `Flow.UpdatedAt()`. It is **not** bumped on intra-flow step progress: a running flow advancing through N steps leaves `updated_at` fixed at its go-`running` time - no step writes the flow row, and the per-step lock grabs (the transition, `completeFlow`, the fan-in) are locking reads on PostgreSQL and MySQL and flip the non-indexed `touch` column on SQLite and SQL Server, so the running band of `idx_dwarf_flows_status` does not churn once per step (it moves only when the flow's own status changes). Consequence: for a **running** flow `updated_at ≈ started_at` (so `FlowSummary.Duration()` reads ~0 until it stops); for a **terminal** flow it is the finish time (Duration = total runtime, and `Purge`/`List` `OlderThan` = "time since finished" - both correct, since only terminal flows are retention targets) |
-| `touch` | Churn-avoidance toggle (`SMALLINT`, `0`/`1`). Carries **no meaning** and is never SELECTed - it exists only so a flow-row write can (a) acquire the row's write lock without moving the `(status, updated_at)` index entry, and (b) guarantee a value change so `RowsAffected()` reflects the `WHERE` match on every driver (MySQL's default "changed rows" count included). **Every** `UPDATE dwarf_flows` flips it (`touch=1-touch`); the status-transition writes flip it *alongside* `updated_at=NOW_UTC()`. A self-assign (`SET col=col`) was rejected for (b): MySQL reports 0 rows changed when no value differs, which would silently break the terminal-status `RowsAffected==0` guards. **A lock that writes nothing else is not an UPDATE on PostgreSQL or MySQL** (`lockFlowRowsSQL`): there it is a locking read (`FOR NO KEY UPDATE` / `FOR UPDATE`), because on PostgreSQL every UPDATE writes a new row version even when it changes nothing, so a lock-only UPDATE on the row every step locks would be a row version per step on a row that otherwise changes a few times per flow (see the fillfactor section). SQLite and SQL Server still flip `touch` for it |
+| `touch` | Churn-avoidance toggle (`SMALLINT`, `0`/`1`). Carries **no meaning** and is never SELECTed - it exists only so a flow-row write can (a) acquire the row's write lock without moving the `(status, updated_at)` index entry, and (b) guarantee a value change so `RowsAffected()` reflects the `WHERE` match on every driver (MySQL's default "changed rows" count included). A `dwarf_flows` UPDATE whose matched count is read must change a value on every row it matches; the status-transition writes flip it (`touch=1-touch`) *alongside* `updated_at=NOW_UTC()`, and a write that always moves another column (the `delete_after_ms` mark, the creation fix-up of a new flow's own-id `thread_id`/`root_flow_id`) does not flip it. A self-assign (`SET col=col`) was rejected for (b): MySQL reports 0 rows changed when no value differs, which would silently break the terminal-status `RowsAffected==0` guards. **A lock that writes nothing else is not an UPDATE on PostgreSQL or MySQL** (`lockFlowRowsSQL`): there it is a locking read (`FOR NO KEY UPDATE` / `FOR UPDATE`), because on PostgreSQL every UPDATE writes a new row version even when it changes nothing, so a lock-only UPDATE on the row every step locks would be a row version per step on a row that otherwise changes a few times per flow (see the fillfactor section). SQLite and SQL Server still flip `touch` for it |
 | `priority` | Scheduling priority, `1..max` (the engine's `SetMaxPriority`, 5 by default), lower runs first. Resolved at `Create` from `FlowOptions` else the midpoint of the range; inherited unchanged by `Continue`/subgraph. Immutable. The refiller counts bands `1..max` one by one and every priority beyond `max` together as an overflow served last, so a row outside the range (written before the range existed, or by a replica with a larger one) still runs |
 | `fairness_key` | Fairness bucket. From `FlowOptions`, else `''`. Immutable. **Deliberately unindexed on `dwarf_flows`** (it *is* indexed on `dwarf_steps` as the hot selection key). The only reader on the flows table is the `List`/`Purge` `Query.FairnessKey` filter (the documented "list tenant X" path), a cold per-shard scan on a warm operator path - not worth a secondary-index entry per insert against the write-amplification budget. If tenant-scoped listing ever becomes a routine operational path, add `(fairness_key, flow_id)` with the filter then. A status-less `OlderThan` purge scans for the same reason (`idx_dwarf_flows_status` is unusable without the `status` prefix), and is intentionally left as-is: a standalone `updated_at` index would amplify writes on a churny column - exactly the cost the dropped `created_at` indexes carried. `workflow_name`/`priority` filters are likewise deliberately unindexed |
 | `fairness_weight` | Relative dispatch share of the `fairness_key`. From `FlowOptions`, else `1` |
@@ -252,8 +252,8 @@ over dead tuples is that fragmentation persists while latency recovers.
   `status`, which leads the step indexes. On a linear step (claim, completion, successor link) only the link is
   HOT-eligible, which caps the ratio near 1/3, and HOT pruning already leaves the link room on the page without
   a lower fillfactor. A higher ratio needs the claim and completion to stop writing an indexed column - a schema
-  change, not a storage setting. `dwarf_flows` is the opposite case - its writes other than the status transitions are all HOT-eligible,
-  so whether they are HOT is decided by page room, which fillfactor does control (next section). The one place
+  change, not a storage setting. `dwarf_flows` is the opposite case - its rows are few and wide, so whether an update's new version
+  stays on its page, HOT or not, is decided by page room, which fillfactor does control (next section). The one place
   it shows on `dwarf_steps` is a row kept wide and inline by a sub-KB state field: fillfactor 80 then moves
   more of the non-HOT updates onto the same page and trims WAL per step a little. Nothing above or below that band.
 - **`SET STORAGE MAIN` on `state`/`changes`, to keep a value inline instead of TOASTing it:** raises WAL per
@@ -267,26 +267,37 @@ Narrowing `selection`'s predicate to `status = 'pending'` would attack the mecha
 makes a claim a pure delete. It is rejected for the reason given in the `idx_dwarf_steps_due` row above: the
 expired-lease sweep reads `running` rows from this index as an index-only scan.
 
-### `dwarf_flows` stays HOT only while its pages have room, and the row's width decides that (PostgreSQL)
+### `dwarf_flows` updates stay on their page only while it has room, and the row's width decides that (PostgreSQL)
 
-A flow's row is written a few times per flow, never per step: `Create`'s fix-up, the interrupt and Resume
-writes, and its terminal write. The lock grabs are locking reads and `stopped_step_id` records only the step a flow
-stopped at (`engine/CLAUDE.md`). **Keep it that way:** a per-step write to this row is a row version per step
-and puts it on the cliff below. The status transitions move `idx_dwarf_flows_status` and can never be HOT; the
-rest can. Whether an eligible update IS HOT depends on one thing: room on the row's page for the new version
-once the page's dead versions are pruned. The flow row carries the graph JSON inline, so the row is large (~1-2
+A flow's row is written a few times per flow, never per step: the interrupt and Resume writes and its terminal
+write. Creation adds none: the INSERT writes the flow's own-id `thread_id` and `root_flow_id` itself
+(`engine/CLAUDE.md`, "Creating a flow"). The lock grabs are locking reads and `stopped_step_id` records only the
+step a flow stopped at. **Keep it that way:** a per-step write to this row is a row version per step and puts it
+on the cliff below, and an UPDATE of `thread_id`/`root_flow_id` after the INSERT adds an entry to each of the
+row's indexes for every flow.
+
+**Almost no flow-row write can be HOT.** The status transitions (interrupt, Resume, the terminal write, the Fork
+root's `created`->`running` flip) move `idx_dwarf_flows_status`, and the `delete_after_ms` mark moves its partial
+index. What is left HOT-eligible is Cancel's `cancel_reason`/`cancel_watermark` mark, Resume re-pointing
+`stopped_step_id` on a flow a sibling interrupt keeps interrupted, and the `stopped_step_id` write to a Fork's
+cloned subgraph flow - its `updated_at=NOW_UTC()` leaves the index key where the INSERT put it, because on
+PostgreSQL `NOW_UTC()` is the transaction's start time. So `n_tup_hot_upd` on `dwarf_flows` reads near zero in a
+healthy deployment, and is not a health signal.
+
+**Page room still decides every update's cost.** An update's new version goes on the row's own page whenever it
+fits there, HOT or not; HOT additionally spares the index entries. Whether it fits depends on one thing: room on
+the row's page for the new version once the page's dead versions are pruned. The flow row carries the graph JSON inline, so the row is large (~1-2
 KB for an ordinary graph), only a handful fit on a page, and the room left after packing - and how fast pruning
 can reclaim it while flows rewrite their rows - is what decides.
 
 **At the default fillfactor this is a cliff in row width, and not a monotonic one.** A width change of a few
-dozen bytes - one added column, or a slightly larger graph - can flip the flow-row writes from HOT to non-HOT,
-and a wider row can land back on the good side. The page arithmetic does not predict which side a width falls
-on; it has to be measured. When it flips, every such write takes a new heap page and an index entry: the
+dozen bytes - one added column, or a slightly larger graph - can flip the flow-row writes from fitting on their
+page to not, and a wider row can land back on the good side. The page arithmetic does not predict which side a width falls
+on; it has to be measured. When it flips, every write takes a new heap page, and a HOT-eligible one stops being HOT and adds index entries too: the
 heap grows many-fold for the same live rows, every `dwarf_flows` write slows, and the occasional slow
 completion holds a connection long enough to exhaust the pool. **The signature is a tail, not a mean:** the
-same statements per step and the same throughput, but more pool waits and a heavier `Create` p99, with
-`pg_stat_user_tables.n_tup_hot_upd / n_tup_upd` on `dwarf_flows` well below its ~90% ceiling and the table far
-larger than `n_live_tup` explains.
+same statements per step and the same throughput, but more pool waits and a heavier `Create` p99, with the
+table far larger than `n_live_tup` explains.
 
 **What bounds it:** PostgreSQL compresses or moves a row's large values out of line once the row passes ~2 KB
 (`TOAST_TUPLE_THRESHOLD`, a compile-time constant), and an update that does not change a TOASTed value keeps its
@@ -294,14 +305,15 @@ pointer. So no `dwarf_flows` row is ever wider than ~2 KB inline, whatever the g
 costs a write nothing. The exposed range is the inline one, up to ~2 KB. `toast_tuple_target` does not
 move the threshold down: lowering it leaves a sub-2 KB row's graph inline.
 
-**`fillfactor=80` on `dwarf_flows` holds its writes HOT across that whole inline range** - verified at
-widths spanning ~1.1 KB to the ~2 KB TOAST threshold, including widths that fall off the cliff at the default.
-`fillfactor=90` does not: it left the ratio on the bad side. That makes 80 a width-independent setting, unlike
-`dwarf_steps`, where fillfactor cannot help (see above). It costs heap space (pages are left 20% empty at
-insert), which is far less than the bloat of falling off the cliff. `1.sql` creates `dwarf_flows` with it on
-pgx; do not drop it as a no-op on the strength of a graph that happens to land on the good side. Any column
-added to `dwarf_flows` moves the row's width; re-check the HOT ratio on PostgreSQL rather than assume its
-writes stay HOT.
+**`dwarf_flows` takes the default fillfactor, and whether a lower one pays is unmeasured at today's write
+rate.** Measured with the flow row rewritten on every step, `fillfactor=80` kept its writes on their page across
+the whole inline range (88-90% HOT at widths from ~1.1 KB to the ~2 KB TOAST threshold, against 73-75% at the
+default for widths on the cliff), and `fillfactor=90` did not. The row is now written two to four times per flow,
+so the cliff costs far fewer row versions and that measurement no longer decides it. A lower fillfactor costs heap
+space (pages left partly empty at insert). Before setting one, measure the table's size against `n_live_tup` at
+the default and at 80 on a realistic row width, under a workload with interrupts and Resume. Any column added to
+`dwarf_flows` moves the row's width; check on PostgreSQL that the table does not grow far past `n_live_tup`
+rather than assume it.
 
 ### `List` gets no indexes of its own, and its `ORDER BY` is not a bug
 

@@ -982,7 +982,8 @@ not parallelism:
   role that can insert a row already holds the sequence privilege `currval` needs. **A `WHERE` clause compares
   with `currval` as a scalar subquery** - `flow_id=(SELECT currval(...))` - which PostgreSQL evaluates once as an
   InitPlan; compared directly, the volatile function cannot be an index key (measured on a 100k-row table: a
-  sequential scan against a primary-key index scan). `SET` and `VALUES` take it bare.
+  sequential scan against a primary-key index scan). `SET` and `VALUES` take it bare. A flow INSERT that draws
+  its own id (`selfFlowInsertSQL`) calls `nextval`, which sets `currval` as a default-filled id does.
 - **The transition** queues the lock grab, the successor INSERTs (flushed every 64 rows or `maxPayloadBytes`, so a
   wide fan-out holds only one batch's branch states in memory) and the fenced own-row write. It writes nothing to
   the flow row.
@@ -1044,9 +1045,17 @@ not parallelism:
   merge, so it cannot join the batch; the fallback read of any tails, and a ref resolution, follow only when
   needed.
 - **Creating a flow** (`insertFlowTx`, shared by `Create`, `Continue` and a subgraph spawn) is [flow INSERT,
-  entry-step INSERT naming the flow by `insertedID`, the flow's thread/root fix-up naming it too]: BEGIN,
-  one batch, COMMIT on PostgreSQL. Pinned by `TestInsertFlowTx_ConcurrentCreates` (every new flow's thread and
-  root ids point at its own row, and its entry step belongs to it).
+  entry-step INSERT naming the flow by `insertedID`]: BEGIN, one batch, COMMIT on PostgreSQL. A new thread's
+  `thread_id` and a new tree's `root_flow_id` are the row's own `flow_id`; a known thread (Continue, or Create
+  with `FlowOptions.ThreadKey`) or root (a subgraph child) is bound. **On PostgreSQL the INSERT writes the self columns itself** (`selfFlowInsertSQL`:
+  `INSERT ... SELECT n, n, ... FROM (SELECT nextval(...) AS n) s`), so the row is written once. **Do not write
+  them with an UPDATE after the INSERT there:** `thread_id` and `root_flow_id` are indexed, so that UPDATE can
+  never be HOT: a dead row version, and a new entry in each of the row's indexes, for every flow. The other
+  dialects keep that fix-up UPDATE, which updates in place, after the entry step; it writes only the self
+  columns, since the INSERT stamped `updated_at` in the same transaction. Fork's clone builds its flow rows with
+  the same helper. Pinned by `TestInsertFlowTx_ConcurrentCreates` (every new flow's thread and root ids point at
+  its own row, and its entry step belongs to it) and `TestInsertFlowTx_SelfColumnsInTheInsert` (no fix-up on
+  PostgreSQL; the thread and root ids of Create, a subgraph spawn, Continue and both kinds of Fork clone).
 - **A batch reader scans with the PostgreSQL driver's own type conversions** when the batch is pipelined, and
   they are stricter than `database/sql`'s: **scan a column into the Go type it is stored as.** A `SMALLINT` flag
   (`delete_on_completion`, `cancelling`, `advancing`, ...) does not scan into a `bool` - it scans into an `int`.
@@ -2092,9 +2101,9 @@ all its subgraph descendants, recursively) is reachable in **one query** - `WHER
 recursive `surgraph_flow_id` walk that issues one round-trip per tree level. It is **write-once at creation,
 immutable** thereafter:
 
-- A top-level flow (`Create`/`Run`/`Continue`) is its **own** root: `root_flow_id = its own flow_id` (set in the
-  same post-insert UPDATE that fixes `thread_id`/`thread_token`). The own-id convention - rather than `0`-means-self -
-  keeps the root's *own* row matching the membership scan with no `COALESCE`/`OR` predicate.
+- A top-level flow (`Create`/`Run`/`Continue`) is its **own** root: `root_flow_id = its own flow_id` (written by the
+  flow's INSERT on PostgreSQL and by a fix-up UPDATE in the same transaction elsewhere - see "Creating a flow").
+  The own-id convention - rather than `0`-means-self - keeps the root's *own* row matching the membership scan with no `COALESCE`/`OR` predicate.
 - A subgraph child **inherits** the parent's `root_flow_id` (`createSubgraphFlow` reads it alongside the inherited
   scheduling/budget and passes it into `createWithGraph`).
 - A `Fork` clone is a fresh self-contained tree: the new root is its **own** root, and the fork's cloned subgraph
@@ -2365,7 +2374,7 @@ is already local and free, at the price of a write per await.
   (`FOR NO KEY UPDATE` / `FOR UPDATE`), not an UPDATE: an UPDATE writes a new row version even when it changes
   nothing, and the flow row is grabbed on every step, so the grab would be the row's only per-step write - a row
   version per step on a row that otherwise changes a few times per flow, which fills its page and pushes its
-  writes off HOT (see "`dwarf_flows` stays HOT only while its pages have room" in
+  writes onto new pages (see "`dwarf_flows` updates stay on their page only while it has room" in
   `internal/migrations/CLAUDE.md`). `FOR NO KEY UPDATE` is the lock a non-key UPDATE takes, so it conflicts with
   exactly what the UPDATE did. **On SQLite and SQL Server it flips the non-indexed `touch` column**
   (`touch=1-touch`): SQLite needs a write to take its lock, and SQL Server's `UPDLOCK` read is unverified under
@@ -2373,8 +2382,8 @@ is already local and free, at the price of a write per await.
   `idx_dwarf_flows_status (status, updated_at)`, so it would move a running flow's index entry on every step, and
   it must stay the flow's last genuine *status* transition. `touch=1-touch` (not a `SET col=col` self-assign) is
   deliberate: it always changes the value, so `RowsAffected()` counts the match on MySQL, which counts *changed*
-  rows. Every `UPDATE dwarf_flows` flips `touch`; the status-transition writes flip it alongside
-  `updated_at=NOW_UTC()`. (This applies to `dwarf_flows` only - `dwarf_steps` has no such per-step
+  rows. A `dwarf_flows` UPDATE whose matched count is read must change a value on every row it matches; the
+  status-transition writes flip `touch` alongside `updated_at=NOW_UTC()`. (This applies to `dwarf_flows` only - `dwarf_steps` has no such per-step
   churn: a step row is short-lived and its `updated_at` moves track its own `pending→running→terminal` transitions,
   which are genuine and unavoidable.) **Every flow-terminating transaction must be write-first for the same
   reason**, and the failure mode is worse than a transient error: the terminal step is marked `completed` by
@@ -3363,7 +3372,7 @@ parents the subgraph's "workflow" span under it (rather than minting detached). 
 `Start`, so it does not matter that the caller span (and the subgraph "workflow" span) have already ended
 by the time the subgraph's steps dispatch later - the children simply reference the recorded parent span
 ID. `createSubgraphFlow` does not read the parent flow's `trace_parent` column (it uses the live caller span
-instead); baggage is inherited via its post-insert UPDATE.
+instead); the parent's baggage is passed into the child's INSERT.
 
 **Reentrancy → one span per dispatch.** The per-step span is created inside each `processStep` call, so a
 step that yields (`flow.Subgraph`/`flow.Interrupt`) and later re-dispatches produces **two** spans - one
@@ -3662,8 +3671,8 @@ ordering:
   which walk the *same* surgraph chain, so the two never lock that chain's flow+step rows in opposite order (a
   flow-first `handleInterrupt` forms a deadlock cycle with `Resume` - see below).
 
-`Create` inserts the flow row (already `running`), then the entry step, then fixes the flow's thread/root ids -
-flow-row-first in statement order, but into a **brand-new** flow whose rows no concurrent transaction can reach until commit, so it
+`Create` inserts the flow row (already `running`), then the entry step, then - off PostgreSQL - fixes the flow's
+thread/root ids - flow-row-first in statement order, but into a **brand-new** flow whose rows no concurrent transaction can reach until commit, so it
 honors no existing-row lock order and cannot cycle. `Fork` performs its entire tree clone (an iterative worklist) in one
 transaction (so a crash mid-clone rolls back), and the leaf fork step is held `created` until the mapping is complete.
 **Fork's transaction opens with `lockFlowRows` on the origin root, because the clone reads before it writes.** On
@@ -3930,8 +3939,8 @@ timeout also kills transactions that sit idle while a busy replica is slow.
 
 ### Per-Function Crash Analysis
 
-- **Create** - one transaction: insert flow (`running`) -> insert entry step (`pending`) -> set the flow's
-  `thread_id`/`thread_token`/`root_flow_id`, then ring the doorbell. A pre-commit crash rolls back entirely (no partial flow); after a
+- **Create** - one transaction: insert flow (`running`) -> insert entry step (`pending`) -> off PostgreSQL, set
+  the flow's own-id `thread_id`/`root_flow_id`, then ring the doorbell. A pre-commit crash rolls back entirely (no partial flow); after a
   post-commit crash before the doorbell, the committed `pending` entry step is due, so its shard's next piston cycle
   selects it.
   There is no separate `Start`, so no inert `created` window. Self-healing.

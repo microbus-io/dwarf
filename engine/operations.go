@@ -206,19 +206,39 @@ type flowSeed struct {
 }
 
 // insertFlowTx inserts the flow row (already `running`) and its entry step (`pending`, immediately
-// claimable), then fixes thread_id/root_flow_id - the shared write-half of every creation path,
-// run inside the caller's transaction. Returns the new flow and step ids. createWithGraph wraps it in a
-// bare transaction; continueFlow wraps it in a transaction that first locks the thread and re-checks the
-// latest turn, so both share exactly one copy of the insert SQL.
+// claimable) - the shared write-half of every creation path, run inside the caller's transaction. Returns the
+// new flow and step ids. createWithGraph wraps it in a bare transaction; continueFlow wraps it in a transaction
+// that first locks the thread and re-checks the latest turn, so both share exactly one copy of the insert SQL.
 func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, newStepID int64, err error) {
-	// The three writes form a chain - the step and the fix-up take the flow's id - which insertedID makes one
-	// statement batch on PostgreSQL.
+	// A top-level flow starts its own thread; a Continue joins the thread it continues. root_flow_id is the
+	// denormalized tree-membership index: a top-level flow is its own root; a subgraph child inherits the
+	// parent's. Written once here, immutable thereafter, so a whole tree is reachable by `WHERE root_flow_id=?`
+	// without a recursive surgraph walk. A known thread or root is bound; a "self" column takes the new row's own
+	// id (selfFlowInsertSQL), so a retry, with a new flow_id, recomputes it rather than reusing the prior attempt's.
+	threadToken := s.threadToken
+	columns := "flow_token, workflow_url, workflow_name, graph, graph_hash, baggage, trace_parent, status, surgraph_flow_id, surgraph_step_id, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, payload_ver, started_at, thread_token"
+	values := "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC(), ?"
+	if s.threadID == 0 {
+		threadToken = s.flowToken
+	}
+	args := []any{s.flowToken, s.workflowURL, s.workflowName, s.graphJSON, s.graphHash, s.baggageJSON, s.traceParent, workflow.StatusRunning, s.surgraphFlowID, s.surgraphStepID, s.deleteOnCompletion, s.priority, s.fairnessKey, s.fairnessWeight, s.timeBudgetMs, s.engineID, payloadVer, threadToken}
+	var self []string
+	if s.threadID == 0 {
+		self = append(self, "thread_id")
+	} else {
+		columns, values, args = columns+", thread_id", values+", ?", append(args, s.threadID)
+	}
+	if s.rootFlowID == 0 {
+		self = append(self, "root_flow_id")
+	} else {
+		columns, values, args = columns+", root_flow_id", values+", ?", append(args, s.rootFlowID)
+	}
+	insert, fixup := selfFlowInsertSQL(tx.DriverName(), columns, values, self...)
+
+	// The step and, off PostgreSQL, the fix-up take the flow's id - a chain insertedID makes one statement
+	// batch on PostgreSQL.
 	batch := newTxBatch(ctx, tx)
-	queueInsertID(batch, "flow_id", func(id int64) { newFlowID = id },
-		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, baggage, trace_parent, status, surgraph_flow_id, surgraph_step_id, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, payload_ver, started_at)"+
-			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC())",
-		s.flowToken, s.workflowURL, s.workflowName, s.graphJSON, s.graphHash, s.baggageJSON, s.traceParent, workflow.StatusRunning, s.surgraphFlowID, s.surgraphStepID, s.deleteOnCompletion, s.priority, s.fairnessKey, s.fairnessWeight, s.timeBudgetMs, s.engineID, payloadVer,
-	)
+	queueInsertID(batch, "flow_id", func(id int64) { newFlowID = id }, insert, args...)
 	flowID, flowArgs, err := batch.insertedID(lastFlowIDSQL, func() any { return newFlowID })
 	if err != nil {
 		return 0, 0, err
@@ -233,35 +253,56 @@ func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, ne
 			" VALUES ("+flowID+", ?, ?, ?, ?, ?, ?, ?, NOW_UTC(), NOW_UTC(), ?, ?, ?, ?)",
 		append(append([]any{}, flowArgs...), s.callerStepDepth+1, s.stepToken, s.entryPoint, s.entryURL, s.stateJSON, workflow.StatusPending, s.timeBudgetMs, s.priority, s.fairnessKey, s.fairnessWeight, s.engineID)...,
 	)
-
-	// A top-level flow starts its own thread; a Continue joins the thread it continues. root_flow_id is the
-	// denormalized tree-membership index: a top-level flow is its own root; a subgraph child inherits the
-	// parent's root. Written once here, immutable thereafter, so a whole tree is reachable by
-	// `WHERE root_flow_id=?` without a recursive surgraph walk. Both derive from the new flow inside the
-	// closure, so a retry (with a new flow_id) recomputes them rather than reusing the prior attempt's id.
-	threadID, threadArgs, threadToken := "?", []any{s.threadID}, s.threadToken
-	if s.threadID == 0 {
-		threadID, threadArgs, threadToken = flowID, flowArgs, s.flowToken
+	if fixup != "" {
+		// Only where the INSERT could not name its own id, which insertedID has therefore already read.
+		batch.queue(execOnly, fixup, selfFlowFixupArgs(newFlowID, len(self))...)
 	}
-	rootID, rootArgs := "?", []any{s.rootFlowID}
-	if s.rootFlowID == 0 {
-		rootID, rootArgs = flowID, flowArgs
-	}
-	args := append(append([]any{}, threadArgs...), threadToken)
-	args = append(args, rootArgs...)
-	args = append(args, flowArgs...)
-	flowKey := flowID
-	if tx.DriverName() == "pgx" {
-		flowKey = "(SELECT " + flowID + ")" // currval, evaluated once so the primary key is used
-	}
-	batch.queue(execOnly,
-		"UPDATE dwarf_flows SET thread_id="+threadID+", thread_token=?, root_flow_id="+rootID+", updated_at=NOW_UTC(), touch=1-touch WHERE flow_id="+flowKey,
-		args...,
-	)
 	if err := batch.flush(); err != nil {
 		return 0, 0, err
 	}
 	return newFlowID, newStepID, nil
+}
+
+/*
+selfFlowInsertSQL returns the INSERT of one dwarf_flows row of the given columns and VALUES expressions whose self
+columns - a new thread's thread_id, a new tree's root_flow_id - hold the row's own flow_id, and the fix-up UPDATE that
+writes them, or "" when the INSERT writes them itself. Bind the fix-up with selfFlowFixupArgs.
+
+On PostgreSQL the INSERT draws the id from the sequence in a subselect and writes it to flow_id and every self
+column, so no UPDATE has to follow. A fix-up there is an UPDATE of the indexed thread_id and root_flow_id, which can
+never be HOT: a dead row version and a new entry in each of the row's indexes, per flow. nextval also sets currval, so
+lastFlowIDSQL names the row as it does after a default-filled flow_id. Keep the subselect: in a VALUES list,
+nextval(...) and currval(...) side by side have no evaluation order PostgreSQL promises, while a subselect whose
+target list is volatile is never pulled up into the outer query, so its nextval runs once.
+
+The other dialects leave the self columns at their default for the fix-up, which updates the row in place (an
+undo log, a version store or a B-tree rewrite, not a dead heap tuple). The INSERT stamped updated_at in the same
+transaction, so the fix-up writes nothing else.
+*/
+func selfFlowInsertSQL(driver, columns, values string, self ...string) (insert, fixup string) {
+	if driver == "pgx" {
+		var selfColumns string
+		for _, col := range self {
+			selfColumns += col + ", "
+		}
+		return "INSERT INTO dwarf_flows (flow_id, " + selfColumns + columns + ")" +
+			" SELECT n, " + strings.Repeat("n, ", len(self)) + values +
+			" FROM (SELECT nextval(pg_get_serial_sequence('dwarf_flows', 'flow_id')) AS n) s", ""
+	}
+	insert = "INSERT INTO dwarf_flows (" + columns + ") VALUES (" + values + ")"
+	if len(self) > 0 {
+		fixup = "UPDATE dwarf_flows SET " + strings.Join(self, "=?, ") + "=? WHERE flow_id=?"
+	}
+	return insert, fixup
+}
+
+// selfFlowFixupArgs binds selfFlowInsertSQL's fix-up of selfColumns self columns to the row flowID.
+func selfFlowFixupArgs(flowID int64, selfColumns int) []any {
+	args := make([]any, selfColumns+1)
+	for i := range args {
+		args[i] = flowID
+	}
+	return args
 }
 
 // createWithGraph is the shared creation path for Create, Continue, and subgraph children. It inserts the

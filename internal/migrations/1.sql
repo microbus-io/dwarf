@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     updated_at           TIMESTAMP        NOT NULL DEFAULT NOW_UTC(),
     touch                SMALLINT         NOT NULL DEFAULT 0,
     PRIMARY KEY (flow_id)
-) WITH (fillfactor = 80);
+);
 
 -- DRIVER: pgx
 CREATE INDEX idx_dwarf_flows_status ON dwarf_flows (status, updated_at);
