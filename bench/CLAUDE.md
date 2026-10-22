@@ -525,12 +525,14 @@ axis for a bytes fill: two 0 B probes on an empty database wrote ~15M small step
 
 **`-real D` runs a schedule, not a window.** `-arrival-profile` (levels and ramps in fleet steps/s) and
 `-arrival-bursts` repeat every period, with seeded per-minute `-arrival-noise` and Poisson arrivals, plus a
-`-high-priority-share` band, Zipf tenants (`-fairness-skew`) and a `-retention` Purge. Four things about it:
+`-priority-mix` over the engine's five priority levels, Zipf tenants (`-fairness-skew`) and a `-retention` Purge.
+Four things about it:
 - **The schedule is a function of the time since `-arrival-epoch`.** Give every process of a fleet the same
   epoch and its `-arrival-share`, and a process restarted mid-run rejoins in phase and stops at the shared end.
 - **The record is a JSONL series beside the artifact**, one line per `-stats-interval`, written as it goes, with
   commanded, offered and admitted flows/s side by side - a `Create` that slows in a burst shows as admission
-  falling short, not as a smaller overload - plus admitted and ended flows/s and steps/s by class and by band,
+  falling short, not as a smaller overload - plus admitted and ended flows/s and steps/s by class and by priority
+  band (`band:1` .. `band:5`, the level itself, keyed the same as the engine's `priority` label),
   the backlog by band, dispatch lag, each refill phase's calls and mean duration, `Create` latency, CPU, and
   p50/p99 of the flows that completed in the interval by class, band and top tenant against the tail.
 - **Percentiles do not add up across intervals or replicas, so every latency is also kept as a histogram**

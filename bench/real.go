@@ -185,9 +185,8 @@ type realConfig struct {
 	creators       int
 	maxOutstanding int
 	fairnessKeys   int
-	fairnessSkew   float64 // Zipf exponent over the keys; 0 = uniform
-	highShare      float64 // share of flows created in the high band
-	highPriority   int
+	fairnessSkew   float64       // Zipf exponent over the keys; 0 = uniform
+	priorities     priorityMix   // the share of flows created at each priority level
 	retention      time.Duration // Purge completed flows older than this; 0 = keep everything
 	interval       time.Duration
 	seriesPath     string
@@ -219,7 +218,7 @@ type realPoint struct {
 	ConnsInUse float64 `json:"connsInUse"`
 	HeapMB     float64 `json:"heapMB"`
 	CPUCores   float64 `json:"cpuCores"` // this process, engine and load generator together
-	// Rates by class ("class:linear:1K") and by band ("band:high"), flows/s. Admitted counts the flows this process
+	// Rates by class ("class:linear:1K") and by priority band ("band:2"), flows/s. Admitted counts the flows this process
 	// created; ended counts the flows its engines ended, from the engine's counters, and steps is ended x the
 	// class's steps per flow (the engine counts executed steps by task, which the classes share).
 	AdmittedBy map[string]float64 `json:"admittedBy"`
@@ -407,10 +406,8 @@ func runReal(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 				}
 				w := pick()
 				opts := &workflow.FlowOptions{}
-				band := "band:low"
-				if r.Float64() < cfg.highShare {
-					opts.Priority, band = cfg.highPriority, "band:high"
-				}
+				opts.Priority = cfg.priorities.sample(r.Float64())
+				band := bandLabel(opts.Priority)
 				tenant := "tenant:tail"
 				if cfg.fairnessKeys > 1 {
 					k := 0
@@ -503,7 +500,7 @@ func runReal(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 	tick := time.NewTicker(cfg.interval)
 	defer tick.Stop()
 	fmt.Printf("%-8s %5s %7s %9s %9s %9s %9s %9s %8s %9s %9s\n",
-		"t(s)", "cycle", "phase", "command/s", "admit/s", "steps/s", "out", "p50ms", "p99ms", "hiP99ms", "dropped")
+		"t(s)", "cycle", "phase", "command/s", "admit/s", "steps/s", "out", "p50ms", "p99ms", "topP99ms", "dropped")
 	for done := false; !done; {
 		select {
 		case <-runCtx.Done():
@@ -540,10 +537,7 @@ func runReal(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 			p.AdmittedBy[k] = float64(n) / sec
 		}
 		band := func(attrs map[string]string) string {
-			if attrs["priority"] == strconv.Itoa(cfg.highPriority) {
-				return "band:high"
-			}
-			return "band:low"
+			return "band:" + attrs["priority"]
 		}
 		if counters != nil && prevCounters != nil {
 			d := counterDeltas(prevCounters, counters)
@@ -623,7 +617,7 @@ func runReal(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 		report.Intervals++
 		fmt.Printf("%-8.0f %5d %7.1f %9.0f %9.0f %9.0f %9d %9.0f %8.0f %9.0f %9d\n",
 			p.T, p.Cycle, p.PhaseMin, p.Commanded*cfg.meanSteps, p.Admitted*cfg.meanSteps, p.Steps, p.Out,
-			p.Latency["all"].P50, p.Latency["all"].P99, p.Latency["band:high"].P99, p.Dropped)
+			p.Latency["all"].P50, p.Latency["all"].P99, p.Latency[bandLabel(cfg.priorities[0].priority)].P99, p.Dropped)
 		prevCounters, prevT, prevCreated, prevEnded, prevOffered, prevDropped, prevThrottled, prevErr, prevPurged, prevCommanded =
 			counters, now, cr, en, of, dr, th, er, pu, cmd
 		prevHost = host

@@ -144,8 +144,7 @@ func run() error {
 		arrivalShare    = flag.Float64("arrival-share", 1, "-real: this process's share of the fleet's offered load (0.5 for each of two replicas)")
 		arrivalEpoch    = flag.Int64("arrival-epoch", 0, "-real: Unix seconds the schedule starts from, the same for every process of a fleet and for one restarted mid-run (0 = now)")
 		fairnessSkew    = flag.Float64("fairness-skew", 0, "spread flows over -fairness-keys by a Zipf law with this exponent (> 1; key k0 the heaviest), instead of uniformly (0); -real only")
-		highShare       = flag.Float64("high-priority-share", 0, "-real: the share of flows created in a higher priority band")
-		highPriority    = flag.Int("high-priority", 2, "-real: that band's priority (1..5, the engine's default is 3; lower runs first)")
+		priorityMixFlag = flag.String("priority-mix", "", "-real: the share of flows at each priority level, \"1:0.03,2:0.12,3:0.55,4:0.2,5:0.1\" (1..5, lower runs first); empty = every flow at the engine's default, 3")
 		retention       = flag.Duration("retention", 0, "-real: Purge completed flows older than this every minute, so the step table reaches a steady size (0 = keep everything)")
 		carryRead       = flag.Bool("carry-read", false, "carry workloads: make every task READ the carried document instead of only passing it along. Storage is identical either way, so this is the arm switch for how carried state is HELD, not how much is stored")
 	)
@@ -224,6 +223,11 @@ func run() error {
 	// transition the burst exists to make sharp.
 	profile := taskProfile{delay: *taskDelay, on: *taskBurst, off: *taskQuiet, start: time.Now()}
 	dist, err := parseDelayDist(*taskDist)
+	if err != nil {
+		return err
+	}
+	// Parsed before any engine starts, so a mistyped mix fails the run up front rather than after its warmup.
+	priorities, err := parsePriorityMix(*priorityMixFlag)
 	if err != nil {
 		return err
 	}
@@ -455,7 +459,7 @@ func run() error {
 		for k, v := range map[string]any{"arrivalProfile": *arrivalProfile, "arrivalBursts": *arrivalBursts,
 			"arrivalNoise": *arrivalNoise, "arrivalSeed": *arrivalSeed, "arrivalShare": *arrivalShare,
 			"arrivalEpoch": epoch.Unix(), "realSec": realDur.Seconds(), "mix": *mixFlag, "fairnessKeys": *fairnessKeys,
-			"fairnessSkew": *fairnessSkew, "highPriorityShare": *highShare, "highPriority": *highPriority,
+			"fairnessSkew": *fairnessSkew, "priorityMix": *priorityMixFlag,
 			"retentionSec": retention.Seconds()} {
 			art.Config[k] = v
 		}
@@ -466,7 +470,7 @@ func run() error {
 		report, err := runReal(sigCtx, engines, readers, pick, realConfig{
 			profile: profile, epoch: epoch, until: epoch.Add(*realDur), share: *arrivalShare, meanSteps: meanSteps,
 			creators: ks[0], maxOutstanding: *maxOutstanding, fairnessKeys: *fairnessKeys, fairnessSkew: *fairnessSkew,
-			highShare: *highShare, highPriority: *highPriority, retention: *retention, interval: interval,
+			priorities: priorities, retention: *retention, interval: interval,
 			seriesPath: seriesPath, classOf: classOf, stepsOf: stepsOf,
 		})
 		if err != nil {

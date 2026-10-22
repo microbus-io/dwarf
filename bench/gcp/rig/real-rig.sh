@@ -8,8 +8,8 @@
 #      minutes of the window. If it is under 14,000 steps/s every level below is scaled to 0.85 x C_mix / 12,000.
 #   2  the day: three 90-minute periods (4.5 h) of night 8,000 / ramp / day 12,000 / ramp, bursts to 16,000 at
 #      minutes 10 (2 min), 40 (2 min) and 58 (5 min), +-10% seeded noise per minute, Poisson arrivals; the mix below,
-#      85% 2 ms / 12% 100 ms / 3% 5 s tasks, 200 fairness keys on a Zipf (s 1.1), 15% of flows in a higher band,
-#      completed flows purged after 30 min. A rolling restart in period 2's day phase: replica A at minute 47,
+#      85% 2 ms / 12% 100 ms / 3% 5 s tasks, 200 fairness keys on a Zipf (s 1.1), flows across all five priority
+#      levels (3 / 12 / 55 / 20 / 10% at 1..5), completed flows purged after 30 min. A rolling restart in period 2's day phase: replica A at minute 47,
 #      replica B at minute 51, each by SIGTERM (the bench stops creating and its engine drains), restarted 10 s
 #      later on the same epoch. At the end every replica keeps its engines up until no flow is left running.
 #   3  the database's record: flows by status, steps not completed, peer rows left, pg_stat_statements, and
@@ -32,6 +32,7 @@ NIGHT=${NIGHT:-8000} DAY=${DAY:-12000} BURST=${BURST:-16000}
 RESTART_A=${RESTART_A:-137} RESTART_B=${RESTART_B:-141} # minutes into the run: period 2's day phase, clear of its bursts
 MIX=${MIX:-0.459:linear:1K,0.15:linear:0,0.20:fanout:4K:8,0.10:scatter:4K:8:1,0.05:scatter:1K:4:2,0.04:linear:64K,0.001:linear:1M}
 DIST=${DIST:-0.85:2ms,0.12:100ms,0.03:5s}
+PRIO=${PRIO:-1:0.03,2:0.12,3:0.55,4:0.2,5:0.1}
 OUT=$R/bench/results/redo-$NAME-$(date +%Y%m%d); mkdir -p "$OUT"
 ADMIN=dwarf-$NAME-m EA=dwarf-$NAME-ea EB=dwarf-$NAME-eb
 VMS=() DB="" IP=""
@@ -161,7 +162,7 @@ PROFILE="25m:$NIGHT,10m:$NIGHT-$DAY,40m:$DAY,15m:$DAY-$NIGHT"
 BURSTS="10m+2m:$BURST,40m+2m:$BURST,58m+5m:$BURST"
 authok; late; RUN_DB=dwarf_real; fresh $RUN_DB
 EPOCH=$(( $(date +%s) + 120 ))
-DAYARGS="-real 270m -arrival-epoch $EPOCH -arrival-share 0.5 -arrival-profile '$PROFILE' -arrival-bursts '$BURSTS' -arrival-noise 0.1 -arrival-seed 1 -mix '$MIX' -task-delay-dist '$DIST' -fairness-keys 200 -fairness-skew 1.1 -high-priority-share 0.15 -high-priority 2 -retention 30m -concurrency 128 -max-outstanding 150000"
+DAYARGS="-real 270m -arrival-epoch $EPOCH -arrival-share 0.5 -arrival-profile '$PROFILE' -arrival-bursts '$BURSTS' -arrival-noise 0.1 -arrival-seed 1 -mix '$MIX' -task-delay-dist '$DIST' -fairness-keys 200 -fairness-skew 1.1 -priority-mix '$PRIO' -retention 30m -concurrency 128 -max-outstanding 150000"
 echo "$DAYARGS" > "$OUT/day-args.txt"
 log "the day: epoch $(date -r $EPOCH '+%H:%M:%S'), profile $PROFILE, bursts $BURSTS"
 vmssh "$ADMIN" "setsid nohup ./s-mon.sh $(( 300 * 60 )) out/mon-day.log '$(dsn $RUN_DB)' > /dev/null 2>&1 < /dev/null &"
