@@ -2104,10 +2104,10 @@ Single-shard by construction: subgraph flows have parent-shard affinity, so a wh
 **Membership, not structure.** `root_flow_id` answers *which flows are in this tree* (the set); it does **not**
 encode *who is whose parent* (the structure). So it **augments**, never replaces, the `surgraph_flow_id`/
 `surgraph_step_id` links: `root_flow_id` is the **membership index** that loads the tree's rows in one scan, and
-the surgraph links - read from those *in-memory* rows - are what supplies the parent/caller/child
-*structure* every walk follows.
+the surgraph links - read from those *in-memory* rows by the down-walks, and by primary key by the up-walk - are
+what supplies the parent/caller/child *structure* every walk follows.
 
-**Where it is used.** All four tree walks fetch the whole tree in one `root_flow_id` scan
+**Where it is used.** The three *down*-walks fetch the whole tree in one `root_flow_id` scan
 (`WHERE root_flow_id = (SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)`) and derive their result **in
 memory** by following the loaded `surgraph_flow_id`/`surgraph_step_id` pointers - the same result a
 level-by-level recursion gives, at a fixed number of round-trips regardless of nesting depth instead of one or two
@@ -2119,13 +2119,18 @@ tree first, so each walk works whether its starting flow is the root or a mid-tr
 - `allSubgraphFlows` (the descendant set of `terminateSubtree` and of `Cancel`) - BFS *down* through
   **non-terminal** nodes only, stopping at a terminal node. Started from a mid-tree flow, as the orphan sweep
   does, it means "descendants of *this* node", not "the whole tree."
-- `surgraphChain` (the ordered *up*-walk: Resume, Fork, interrupt propagation) - follows
-  `surgraph_flow_id`/`surgraph_step_id` pointers from the flow up to the root, collecting each ancestor's caller
-  step + token. One scan, where a level-by-level walk costs *two* queries per level.
 - `interruptedSubgraphChain` (Resume's *down*-walk) - one tree scan plus **one** batched query for every flow's
   interrupted leaf (`status=interrupted`, ordered by flow, then Snapshot's order - the recorded step, then the
   earliest `updated_at` - first row per flow taken in memory), then descends by `surgraph_step_id`. SQL does the
   ordering, so there is no fragile Go-side timestamp comparison (the leaf is the one Snapshot reports).
+
+**The *up*-walk, `surgraphChain` (Resume, Fork, interrupt propagation), does NOT ride the tree scan.** It
+follows `surgraph_flow_id`/`surgraph_step_id` up to the root by primary key, one round trip per level: each
+query reads a flow's caller link joined to its parent's token and own link, so a top-level or depth-1 flow costs
+one round trip. Do not put it on the tree scan to save the round trips at depth: the chain is as long as the
+nesting is deep, the tree as wide as its widest fan-out, and every leaf interrupt walks the chain - so a scan makes
+interrupting a fan-out of W subgraph leaves read O(W^2) rows (`TestWideflow/subgraph_tree_past_the_ceiling`, at
+W=2,200, is where it shows).
 
 `Fork`'s own tree-discovery uses `surgraphChain` + per-flow child queries while it walks its worklist (it needs the
 structure to clone, not just membership), and `deleteSubgraphFlowsRootedAt` stays step-scoped (`surgraph_step_id`).
@@ -2142,8 +2147,8 @@ fixed two round-trips regardless of nesting depth. (`idx_dwarf_flows_surgraph_st
 elsewhere - the retry-reap, the wedge sweep, and `Step`-navigation.)
 
 **Consistency.** Denormalized + write-once-at-create is low-risk, but a creation path that forgot to set it (or set
-it wrong on a fork descendant) would silently drop rows from tree scans - and, because the structural walks ride
-the same scan, mis-route a Terminate/Resume/Fork. `TestRootFlowID_*` (engine package, white-box) pins the three
+it wrong on a fork descendant) would silently drop rows from tree scans - and, because the down-walks ride
+the same scan, mis-route a Terminate/Resume. `TestRootFlowID_*` (engine package, white-box) pins the three
 population paths: top-level self-root, subgraph inheritance, and Fork self-root + non-inheritance; `Continue`
 starting a fresh root. `fixtures/deepsubgraphflow_test.go` pins the walks themselves at depth 5: a leaf interrupt
 propagating up to the root, Resume descending back to the leaf with state threaded through every level, and a

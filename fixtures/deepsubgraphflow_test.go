@@ -16,14 +16,13 @@ limitations under the License.
 
 /*
 Deeply nested subgraphs (5 levels: g0 -> g1 -> g2 -> g3 -> leaf) exercise the
-root_flow_id-backed tree walks end to end. An interrupt raised in the deepest leaf
-propagates up the whole chain (surgraphChain) so the caller awaiting the root sees
-interrupted; Resume on the root descends back down (interruptedSubgraphChain +
-surgraphChain) to the leaf and the chain runs to completion, with state threaded
-correctly through every level. A second case terminates a deeply-interrupted tree from
-the root (surgraphChain + the membership down-walk allSubgraphFlows). These are the
-operations whose per-level recursion was collapsed to single tree scans; the test
-pins that the collapse is behavior-preserving at depth.
+tree walks end to end at depth. An interrupt raised in the deepest leaf propagates
+up the whole chain (surgraphChain, one level per query) so the caller awaiting the
+root sees interrupted; Resume on the root descends back down (interruptedSubgraphChain,
+a root_flow_id tree scan, + surgraphChain) to the leaf and the chain runs to
+completion, with state threaded correctly through every level. A second case
+terminates a deeply-interrupted tree from the root (the membership down-walk
+allSubgraphFlows).
 */
 package fixtures
 

@@ -1833,54 +1833,38 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	return nil
 }
 
-// surgraphChain walks from a flow up to the root surgraph. It loads the whole tree once via the denormalized
-// root_flow_id, then follows surgraph_flow_id/surgraph_step_id pointers from flowID up to the root in memory -
-// one round-trip regardless of nesting depth. root_flow_id gives the tree
-// membership; the surgraph links give the parent/caller structure the walk follows.
+// surgraphChain walks from a flow up to the root surgraph, following surgraph_flow_id/surgraph_step_id one
+// level per round trip: each query reads a flow's caller link joined to its parent's token and own link, so
+// it touches only the chain, never the rest of the tree.
 func (e *Engine) surgraphChain(ctx context.Context, shardNum int, flowID int, flowToken string) (flowIDs []any, stepIDs []any, compositeFlowIDs []string, err error) {
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return nil, nil, nil, errors.Trace(err)
 	}
-	rows, err := db.QueryContext(ctx,
-		"SELECT flow_id, flow_token, surgraph_flow_id, surgraph_step_id FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)",
-		flowID,
-	)
-	if err != nil {
-		return nil, nil, nil, errors.Trace(err)
-	}
-	type fnode struct {
-		token      string
-		surgFlowID int
-		surgStepID int
-	}
-	byID := map[int]fnode{}
-	for rows.Next() {
-		var id, sfid, ssid int
-		var token string
-		if err := rows.Scan(&id, &token, &sfid, &ssid); err != nil {
-			rows.Close()
-			return nil, nil, nil, errors.Trace(err)
-		}
-		byID[id] = fnode{token: token, surgFlowID: sfid, surgStepID: ssid}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, nil, nil, errors.Trace(err)
-	}
-
 	flowIDs = []any{flowID}
 	compositeFlowIDs = []string{keys.New(shardNum, flowID, flowToken)}
 	cur := flowID
 	for {
-		n, ok := byID[cur]
-		if !ok || n.surgFlowID == 0 {
+		var surgFlowID, surgStepID, nextSurgFlowID int
+		var surgToken string
+		err := db.QueryRowContext(ctx,
+			"SELECT f.surgraph_flow_id, f.surgraph_step_id, COALESCE(p.flow_token, ''), COALESCE(p.surgraph_flow_id, 0)"+
+				" FROM dwarf_flows f LEFT JOIN dwarf_flows p ON p.flow_id=f.surgraph_flow_id WHERE f.flow_id=?",
+			cur,
+		).Scan(&surgFlowID, &surgStepID, &surgToken, &nextSurgFlowID)
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && surgFlowID == 0) {
 			break
 		}
-		flowIDs = append(flowIDs, n.surgFlowID)
-		stepIDs = append(stepIDs, n.surgStepID)
-		compositeFlowIDs = append(compositeFlowIDs, keys.New(shardNum, n.surgFlowID, byID[n.surgFlowID].token))
-		cur = n.surgFlowID
+		if err != nil {
+			return nil, nil, nil, errors.Trace(err)
+		}
+		flowIDs = append(flowIDs, surgFlowID)
+		stepIDs = append(stepIDs, surgStepID)
+		compositeFlowIDs = append(compositeFlowIDs, keys.New(shardNum, surgFlowID, surgToken))
+		if nextSurgFlowID == 0 {
+			break
+		}
+		cur = surgFlowID
 	}
 	return flowIDs, stepIDs, compositeFlowIDs, nil
 }
