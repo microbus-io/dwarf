@@ -130,10 +130,11 @@ func TestPiston_ReachIsCountedInThisReplicasOwnClass(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	r := newRig(t) // capacity 8
-	// FetchSteps and ScanBand are driven directly, so the cadence only feeds the steal grace: 2s, clear of the
-	// fixture's own round trips.
-	r.p.SetTallyCadence(500*time.Millisecond, 0)
-	r.p.SetSupplyCadence(500*time.Millisecond, 0)
+	// FetchSteps and ScanBand are driven directly, so the cadence feeds nothing but the steal grace. Until the
+	// last scan it is an hour, so the grace (4h) admits nothing foreign whatever the scans cost: a 2s grace was
+	// lost to the first scan's compile on a loaded SQL Server.
+	r.p.SetTallyCadence(time.Hour, 0)
+	r.p.SetSupplyCadence(time.Hour, 0)
 	r.p.SetStealAfter(4)
 
 	// Sixteen at band 1, then the odd ids dropped: eight remain, all in ordinal 0's class.
@@ -149,10 +150,6 @@ func TestPiston_ReachIsCountedInThisReplicasOwnClass(t *testing.T) {
 		}
 	}
 	assert.True(ownBulk > 0, "the fixture needs band-7 work in ordinal 1's class")
-	// Freshly due at the scan, so the grace admits nothing foreign. Database clock, never a bound Go time.
-	_, err = r.db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=NOW_UTC()")
-	assert.NoError(err)
-
 	r.p.SetPartitionFunc(func() (int, int, bool) { return 2, 1, true })
 	band, tallies, err := r.p.ScanBand(ctx, 1)
 	assert.NoError(err)
@@ -169,7 +166,10 @@ func TestPiston_ReachIsCountedInThisReplicasOwnClass(t *testing.T) {
 		assert.Equal(1, tl.Band, "ordinal 0's band 1 fills the cache, so its band 7 is past the reach")
 	}
 
-	// The peer's band 1 has now been due past the grace: it enters ordinal 1's counts ahead of its own band 7.
+	// The peer's band 1 has now been due past the grace, 2s from here: it enters ordinal 1's counts ahead of its
+	// own band 7. Database clock, never a bound Go time.
+	r.p.SetTallyCadence(500*time.Millisecond, 0)
+	r.p.SetSupplyCadence(500*time.Millisecond, 0)
 	_, err = r.db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), -5000) WHERE priority=1")
 	assert.NoError(err)
 	r.p.SetPartitionFunc(func() (int, int, bool) { return 2, 1, true })

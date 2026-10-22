@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -324,9 +325,11 @@ func TestCancelPreempt_ReasonReadErrorReleasesTheInFlightGauges(t *testing.T) {
 	g.AddTransition("A", "B")
 	g.AddTransition("B", workflow.End)
 	mux.HandleGraph("creason/g", g)
-	// A's sleep holds B pending, so the Cancel marks B before it is claimed: its claim is the preempt.
+	// A's sleep holds B pending, so the Cancel marks B before it is claimed: its claim is the preempt. The sleep
+	// outlasts the test and B is made due by hand once the mark has landed: a sleep sized to cover the Cancel is
+	// outrun by a slow server, and B then runs unmarked.
 	mux.HandleTask("creason/a", func(ctx context.Context, f *workflow.Flow) error {
-		f.Sleep(2 * time.Second)
+		f.Sleep(time.Hour)
 		return nil
 	})
 	mux.HandleTask("creason/b", func(ctx context.Context, f *workflow.Flow) error { bRan.Add(1); return nil })
@@ -347,8 +350,16 @@ func TestCancelPreempt_ReasonReadErrorReleasesTheInFlightGauges(t *testing.T) {
 	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
 		t.Fatal("A was never dispatched")
 	}
-	bDone := e.seams.Waiter(engineseams.CheckpointClaimedDispatchDone)
+	bIDs := stepIDsByTask(t, e, "B")
+	if !assert.Len(bIDs, 1) {
+		return
+	}
 	assert.NoError(e.Cancel(ctx, fk, "stop"))
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	bDone := e.seams.Waiter(engineseams.Join(engineseams.CheckpointClaimedDispatchDone, "1", strconv.Itoa(bIDs[0])))
+	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=NOW_UTC() WHERE step_id=?", bIDs[0])
+	assert.NoError(err)
 	select {
 	case <-bDone:
 	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
@@ -360,12 +371,8 @@ func TestCancelPreempt_ReasonReadErrorReleasesTheInFlightGauges(t *testing.T) {
 	assert.Equal(int32(0), bRan.Load(), "a preempted step runs no task")
 	// The read failed, so the dispatch returned before preempting: B is left running, for lease recovery.
 	var status string
-	if bIDs := stepIDsByTask(t, e, "B"); assert.Len(bIDs, 1) {
-		db, err := e.db.Shard(1)
-		assert.NoError(err)
-		assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE step_id=?", bIDs[0]).Scan(&status))
-		assert.Equal(workflow.StatusRunning, status)
-	}
+	assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE step_id=?", bIDs[0]).Scan(&status))
+	assert.Equal(workflow.StatusRunning, status)
 }
 
 // TestCancelWatermark_TakesNoStepLocks pins that Cancel's watermark transaction reads the steps without locking

@@ -449,13 +449,12 @@ func TestPiston_PartitionSplitsSelectionAcrossReplicas(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	r := newRig(t)
-	// The class is strict only while nothing has aged past the STEAL GRACE - the predicate is relaxed on
-	// every query now, and age is what admits. The rig pins interval and gap to 0, so the grace floors at
-	// 4 x DefaultMinGap = 80ms, which six inserts plus two fetches outrun on a slow dialect (measured
-	// failing on MySQL 8 and SQL Server, passing on the rest). Pinning the interval makes the grace 2s,
-	// an order of magnitude clear of this fixture's own setup, without leaving the production default.
-	r.p.SetTallyCadence(500*time.Millisecond, 0)
-	r.p.SetSupplyCadence(500*time.Millisecond, 0)
+	// The class is strict only while nothing has aged past the STEAL GRACE, which is a multiple of the cycle
+	// period. The fetches are driven directly, so the cadence feeds nothing but the grace: an hour keeps the
+	// production predicate with no wall-clock stake. A 2s grace lost to six inserts and the first fetch's
+	// compile on a loaded SQL Server.
+	r.p.SetTallyCadence(time.Hour, 0)
+	r.p.SetSupplyCadence(time.Hour, 0)
 
 	var all []int
 	for i := range 6 {
@@ -536,23 +535,37 @@ func TestPiston_RunDispatchesAndReportsItsTurns(t *testing.T) {
 	assert.False(busy)
 	assert.False(idle)
 
+	sm := seamster.New(true)
+	r.p.SetSeams(sm)
+
 	want := []int{
 		r.insertStep(t, 1, 5, "k", 1),
 		r.insertStep(t, 2, 5, "k", 1),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	stop := sync.OnceFunc(func() { cancel(); <-done })
+	defer stop()
+	tallied := sm.Waiter(CheckpointTallyDone)
 	go func() { defer close(done); r.p.Run(ctx) }()
 
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if n, _, _ := r.p.Liveness(); n > 0 && r.cache.Len() >= len(want) {
-			break
-		}
-		time.Sleep(2 * time.Millisecond)
+	// A scan, then a push planned from it, rendezvoused rather than polled for. The first cycle of each loop
+	// runs its statements for the first time against a fresh database, and on a loaded SQL Server that alone
+	// takes seconds (measured to 6s alongside other suites, under 1s alone), so the ceiling is a hang guard
+	// and nothing else.
+	hang := time.After(60 * time.Second)
+	select {
+	case <-tallied:
+	case <-hang:
+		t.Fatal("the tally loop never completed a scan")
 	}
-	cancel()
-	<-done
+	pushed := sm.Waiter(CheckpointCycleDone)
+	select {
+	case <-pushed:
+	case <-hang:
+		t.Fatal("the supply loop never pushed")
+	}
+	stop()
 
 	assert.Equal(want, drain(r.cache), "the loop pushed both due steps, oldest first")
 	turns, _, _ = r.p.Liveness()
