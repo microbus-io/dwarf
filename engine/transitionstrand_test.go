@@ -78,7 +78,9 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 	releaseA := func() { releaseOnce.Do(func() { close(release) }) }
 	defer releaseA() // below the Shutdown defer, so an early exit frees the held worker before the drain waits on it
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	if !assert.NoError(e.Startup(t.Context())) {
+		return
+	}
 
 	fk, err := e.Create(ctx, "strand/g", nil, nil)
 	assert.NoError(err)
@@ -91,7 +93,9 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 		t.Fatal("A never started")
 	}
 	db, err := e.db.Shard(shard)
-	assert.NoError(err)
+	if !assert.NoError(err) {
+		return
+	}
 	_, err = db.ExecContext(ctx,
 		"UPDATE dwarf_steps SET status='"+workflow.StatusCompleted+"', changes=?, advancing=1, lease_seq=lease_seq+1, updated_at=NOW_UTC()"+
 			" WHERE flow_id=? AND task_name='A'", []byte(`{"a":1}`), flowID)
@@ -117,11 +121,15 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 	e2 := NewEngineUnderTest(t.Name())
 	defer e2.Shutdown(ctx)
 	e2.SetHost(mux)
-	assert.NoError(e2.Startup(t.Context()))
+	if !assert.NoError(e2.Startup(t.Context())) {
+		return
+	}
 	assert.NoError(e.Shutdown(ctx))
 	awaitStartupRecoverySweep(t, e2)
 	db2, err := e2.db.Shard(shard)
-	assert.NoError(err)
+	if !assert.NoError(err) {
+		return
+	}
 
 	// The lease still holds A for its dead worker, so the sweep waits.
 	e2.recoverOrphanedFlows(ctx, db2, shard, true)
@@ -157,7 +165,9 @@ func slowWorkerReplay(t *testing.T, e *Engine, mux *hosts.Mux, flowURL string, i
 	ctx := context.Background()
 
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	if !assert.NoError(e.Startup(t.Context())) {
+		t.FailNow()
+	}
 	awaitStartupRecoverySweep(t, e)
 
 	e.seams.Break(engineseams.CheckpointBeforeTransitionTx)
@@ -167,7 +177,9 @@ func slowWorkerReplay(t *testing.T, e *Engine, mux *hosts.Mux, flowURL string, i
 	shard, flowID, _, err = keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
-	assert.NoError(err)
+	if !assert.NoError(err) {
+		t.FailNow()
+	}
 	var stalledSeq int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT lease_seq FROM dwarf_steps WHERE flow_id=? AND task_name='A' AND status='"+
 		workflow.StatusCompleted+"' AND advancing=1", flowID).Scan(&stalledSeq), "the completion write did not set advancing")
@@ -381,7 +393,9 @@ func TestBumpCohortArrivals_Fence(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	if !assert.NoError(e.Startup(t.Context())) {
+		return
+	}
 
 	fk, err := e.Create(ctx, "bump/g", nil, nil)
 	assert.NoError(err)
@@ -389,7 +403,9 @@ func TestBumpCohortArrivals_Fence(t *testing.T) {
 	shard, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
-	assert.NoError(err)
+	if !assert.NoError(err) {
+		return
+	}
 	var spawnID, b1ID, b1Seq int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&spawnID))
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id, lease_seq FROM dwarf_steps WHERE flow_id=? AND task_name='B1'", flowID).Scan(&b1ID, &b1Seq))
