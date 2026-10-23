@@ -285,8 +285,9 @@ type Sonar struct {
 	// lastErr is the most recent read's error, kept so Join can report synchronously what the loop only logs.
 	lastErr error
 
-	// now is the clock, indirected for tests only.
-	now func() time.Time
+	// now is the clock and sleep the wait, both indirected for tests only.
+	now   func() time.Time
+	sleep func(ctx context.Context, d time.Duration) bool
 }
 
 // New returns a Sonar for one shard over an already-open database handle.
@@ -305,7 +306,7 @@ func New(engineID int64, shard int, db *sequel.DB) (*Sonar, error) {
 		return nil, errors.New("db is required")
 	}
 	s := &Sonar{
-		engineID: engineID, shard: shard, db: db, now: time.Now,
+		engineID: engineID, shard: shard, db: db, now: time.Now, sleep: sleep,
 		scan: scanInterval, beat: beatInterval, fresh: freshWindow,
 		dispatch: dispatchWindow, straggler: stragglerAge, pruneAfter: pruneHealthyFor,
 	}
@@ -1047,7 +1048,7 @@ func (s *Sonar) blind(now time.Time) bool {
 }
 
 // sleep waits d or until ctx is done, reporting false if the context ended.
-func (s *Sonar) sleep(ctx context.Context, d time.Duration) bool {
+func sleep(ctx context.Context, d time.Duration) bool {
 	if d <= 0 {
 		return ctx.Err() == nil
 	}

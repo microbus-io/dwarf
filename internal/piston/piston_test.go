@@ -1234,16 +1234,14 @@ func TestPiston_StealTakesOnlyLongDueForeignSteps(t *testing.T) {
 	r := newRig(t)
 	// Ordinal 0 of 2: this replica owns EVEN step ids, so odd ones are foreign.
 	r.p.SetPartitionFunc(func() (int, int, bool) { return 2, 0, true })
-	// The grace has to dominate the fixture's own setup, because "young" is measured against the DATABASE
-	// clock from the moment a step became due - so every insert, query and round trip between the two
-	// counts against it. At a 50ms period the grace was 200ms, and eight inserts plus two queries under
-	// -race on a busy box outran it: the oldest foreign step crossed the line and was taken, failing "a
-	// young foreign step belongs to its owner" by exactly one id. FetchSteps is driven directly here, so the
-	// interval paces nothing and only feeds stealGrace; 2s leaves the setup an order of magnitude of room
-	// while staying well under the 5s backdate the last phase uses to age a step PAST the grace.
-	r.p.SetTallyCadence(500*time.Millisecond, 0)
-	r.p.SetSupplyCadence(500*time.Millisecond, 0)
-	r.p.SetStealAfter(4) // grace = 2s
+	// The grace has to dominate any stall of the database, because "young" is measured against the DATABASE
+	// clock from the moment a step became due - so the round trips between the re-stamp and the fetch count
+	// against it. A 200ms grace was outrun by inserts under -race on a busy box, and a 2s grace by a loaded
+	// SQL Server. FetchSteps is driven directly here, so the interval paces nothing and only feeds
+	// stealGrace; 10 minutes is past any stall, and the last phase backdates by an hour to age a step PAST it.
+	r.p.SetTallyCadence(time.Minute, 0)
+	r.p.SetSupplyCadence(time.Minute, 0)
+	r.p.SetStealAfter(10) // grace = 10m
 
 	for range 8 {
 		r.insertStep(t, 1, 5, "k", 1)
@@ -1269,7 +1267,7 @@ func TestPiston_StealTakesOnlyLongDueForeignSteps(t *testing.T) {
 	// Age the foreign steps past the grace: a stalled owner's class ages without bound, and only then is it
 	// admitted. Backdated with the DATABASE clock, never a bound Go time.
 	_, err = r.db.ExecContext(ctx,
-		"UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), -5000) WHERE step_id % 2 = 1")
+		"UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), -3600000) WHERE step_id % 2 = 1")
 	assert.NoError(err)
 	got, err = r.fetch(ctx, 5, []string{"k"}, 100)
 	assert.NoError(err)
@@ -1287,12 +1285,13 @@ func TestPiston_StealReachesPastTheNeighbourAfterTwoGraces(t *testing.T) {
 	r := newRig(t)
 	// Ordinal 0 of 3: this replica owns step_id%3==0, its neighbour's class is 1, and class 2 is the far one.
 	r.p.SetPartitionFunc(func() (int, int, bool) { return 3, 0, true })
-	// FetchSteps is driven directly, so the cadence only feeds stealGrace: 4s. Age only grows, so the
+	// FetchSteps is driven directly, so the cadence only feeds stealGrace: 10 minutes. Age only grows, so the
 	// neighbour's admission cannot be lost to delay; what the margin protects is the far class staying out,
-	// which holds while less than 3s passes between the first backdate and its fetch.
-	r.p.SetTallyCadence(500*time.Millisecond, 0)
-	r.p.SetSupplyCadence(500*time.Millisecond, 0)
-	r.p.SetStealAfter(8) // grace = 4s
+	// which holds while less than 5 minutes pass between the first backdate and its fetch - past any stall of
+	// the database.
+	r.p.SetTallyCadence(time.Minute, 0)
+	r.p.SetSupplyCadence(time.Minute, 0)
+	r.p.SetStealAfter(10) // grace = 10m
 
 	for range 9 {
 		r.insertStep(t, 1, 5, "k", 1)
@@ -1302,9 +1301,9 @@ func TestPiston_StealReachesPastTheNeighbourAfterTwoGraces(t *testing.T) {
 	far, _ := r.idsByResidue(t, 3, 2)
 	assert.True(len(own) > 0 && len(neighbour) > 0 && len(far) > 0, "the fixture needs all three classes populated")
 
-	// Due for a quarter past one grace: past the first tier, well short of the second. Backdated with the
+	// Due for half past one grace: past the first tier, well short of the second. Backdated with the
 	// DATABASE clock, never a bound Go time.
-	_, err := r.db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), -5000)")
+	_, err := r.db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), -900000)")
 	assert.NoError(err)
 	got, err := r.fetch(ctx, 5, []string{"k"}, 100)
 	assert.NoError(err)
@@ -1313,7 +1312,7 @@ func TestPiston_StealReachesPastTheNeighbourAfterTwoGraces(t *testing.T) {
 
 	// Past two graces the far class opens too, ranked behind the nearer tiers.
 	_, err = r.db.ExecContext(ctx,
-		"UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), -10000) WHERE step_id % 3 = 2")
+		"UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), -1800000) WHERE step_id % 3 = 2")
 	assert.NoError(err)
 	got, err = r.fetch(ctx, 5, []string{"k"}, 100)
 	assert.NoError(err)

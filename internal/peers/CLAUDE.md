@@ -566,9 +566,16 @@ whole suite stays parallel and sub-second. The clock is an unexported field with
 seam, not API.
 
 Note the rig replaces `now` **and** re-seeds `lastGood`. Swapping only the clock leaves a real timestamp
-being compared against a synthetic one, which reads as either decades of blindness or none at all. The two
-tests that exercise real pacing — `Join`'s wait and `Run`'s loop — put the real clock back and shorten the
-scan interval instead.
+being compared against a synthetic one, which reads as either decades of blindness or none at all. `Join`'s
+wait goes through the injected `sleep`, so its test runs on the rig's clock and observes the order (announced
+when the wait begins, read after it) instead of timing it. Only `Run`'s loop test puts the real clock back
+and shortens the scan interval instead.
+
+**The windows are measured on the DATABASE clock, which no fake reaches.** A row's age is
+`DATE_DIFF_MILLIS(NOW_UTC(), seen_at)`, so a database stall between inserting a peer and the read ages it
+whatever the injected clock says. A test that is not about a window widens it (`dispatch`, `fresh`,
+`straggler`): a 6s stall before `Join`'s read took peers inserted 1s old past the 5s dispatch window, and the
+replica counted itself the only dispatcher.
 
 **A real-clock test asserts an OUTCOME it waits for, never an upper bound on lateness.** A loaded machine
 can only make a loop turn slower, so "never two cadences without a reading" fails with nothing wrong in the
@@ -578,17 +585,18 @@ delete an abandoned row: a gap resets the run and only delays the delete, while 
 is gapped never deletes it. Checked both ways: one 300ms stalled pass fails a "`healthySince` never reset"
 assertion and passes the prune wait; a loop sleeping three intervals fails the prune wait.
 
-**Those two are the only tests a slow database can race, and both rules below were learned by it happening.**
+**A real-clock test can be raced by a slow database, and both rules below were learned by it happening.**
 Every threshold in this package is a multiple of the scan interval, so shortening that interval shortens the
-grace the assertions are measured against:
+grace the assertions are measured against. Prefer the injected clock and sleep; where a test must keep the
+real clock:
 
 - **Read the getters BEFORE any assertion queries anything.** `Partition` is gated on the blindness grace,
-  so a round trip of the test's own between `Join` and the assertion spends the exact margin under test.
+  so a round trip of the test's own between the reading and the assertion spends the exact margin under test.
   Measured on an idle Postgres: one `SELECT engine_id FROM dwarf_peers` moved `BlindFor` from **2µs to
   2-8ms** — already a third of a 20ms budget, and past it on a loaded box. The same query is microseconds
   on SQLite, which is why this only ever fails on a real database.
-- **Do not shorten the cadence below a round trip plus scheduler jitter** (the test cadences sit at
-  100-250ms). At a 20ms cadence the grace is 40ms, which a co-running suite eats outright — and the test then
+- **Do not shorten the cadence below a round trip plus scheduler jitter** (`Run`'s loop test sits at
+  100ms). At a 20ms cadence the grace is 40ms, which a co-running suite eats outright — and the test then
   correctly reports a cadence the machine, not the code, failed to keep.
 
 Prefer stating a fact as an **order** rather than a duration where it can be: "`lastGood` is newer than the
