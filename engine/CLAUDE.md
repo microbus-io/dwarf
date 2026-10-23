@@ -2079,10 +2079,15 @@ Defense in depth for any residual orphan is
 `recoverOrphanedSubgraphChildren` (see "Background Recovery"). `fixtures`/`engine`
 `TestSubgraphCohortFail_NoStrandOnBranchFailure` pins the child staying `running` after one branch failed while a
 sibling is parked on a live grandchild, then converging to a clean terminal tree with the branch error surfaced
-to the root. `fixtures/subgrapherrorwaitflow_test.go` pins the `Await(childKey)` wake: an `Await` registered on a
-still-running child returns promptly (well under the poll interval) when the child fails, proving the signal, not
-the backstop, woke it. `fixtures/subgraphcohortfailwaitflow_test.go` pins the same wake for the other settle
-path (a completing last-arriver resolving a failed cohort).
+to the root. `fixtures/subgrapherrorwaitflow_test.go` pins the `Await(childKey)` wake: with an `Await` parked on a
+still-running child, the child's failure fires the targeted `CheckpointFlowStopped` for `(childKey, failed)` and
+the `Await` returns that failure. The checkpoint proves `signalStop` was RAISED for the child's key - it fires at
+the top of `signalStop`, before `FaultDropSignalStop` and `Board.Release` - not that the release was delivered;
+the `Await` returning cannot prove the signal either, because the detector finds the committed stop too, and no
+time bound can tell the two apart. Delivery is pinned at unit level (`internal/latch`
+`TestRelease_WakesWithoutASweep`), and the detector-only case by
+`TestSubgraphChildStopSignal_DroppedThenBackstopped`. `fixtures/subgraphcohortfailwaitflow_test.go` pins the same
+for the other settle path (a completing last-arriver resolving a failed cohort).
 
 ### Surgraph Step Identification
 

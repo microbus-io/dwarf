@@ -32,11 +32,11 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestSubgraphErrorWaitflow pins that a failing subgraph child wakes an Await already blocked on its (read-only)
-// child key. A subgraph child is a legal introspection target, so a flow-stop must broadcast to its Await
-// waiters. The child here captures its own key,
-// then blocks so the test can register an Await while the child is still running; releasing it fails the child.
-// The Await must be woken by the failure's signalStop, not left to time out against its context deadline.
+// TestSubgraphErrorWaitflow pins that a failing subgraph child raises signalStop for its (read-only) child key
+// and that an Await already blocked on that key returns the failure. A subgraph child is a legal introspection
+// target, so its flow-stop must be signalled to its Await waiters. The child here captures its own key, then
+// blocks so the test can register an Await while the child is still running; releasing it fails the child. The
+// Await must return that failure rather than be left to time out against its context deadline.
 func TestSubgraphErrorWaitflow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -58,15 +58,23 @@ func TestSubgraphErrorWaitflow(t *testing.T) {
 	inner.AddTransition("Boom", workflow.End)
 	mux.HandleGraph("subgrapherrwait.verify:0/inner", inner)
 
+	// Execution is at-least-once, so the capture is once-only: a re-executed Boom must not close captured twice.
 	var mu sync.Mutex
 	var childKey string
 	captured := make(chan struct{})
+	var captureOnce sync.Once
+	// The release is deferred below the Shutdown defer so it unwinds first: an early return otherwise leaves Boom
+	// holding a worker the drain waits on forever.
 	release := make(chan struct{})
+	releaseBoom := sync.OnceFunc(func() { close(release) })
+	defer releaseBoom()
 	mux.HandleTask("subgrapherrwait.verify:0/boom", func(ctx context.Context, f *workflow.Flow) error {
-		mu.Lock()
-		childKey = f.FlowKey() // a subgraph child sees its own (child) flow key
-		mu.Unlock()
-		close(captured)
+		captureOnce.Do(func() {
+			mu.Lock()
+			childKey = f.FlowKey() // a subgraph child sees its own (child) flow key
+			mu.Unlock()
+			close(captured)
+		})
 		<-release // stay running until the test has an Await registered on the child key
 		return errors.New("child boom", http.StatusInternalServerError)
 	})
@@ -93,19 +101,30 @@ func TestSubgraphErrorWaitflow(t *testing.T) {
 	// Wait until the child has captured its key and is blocked (so it is still running).
 	select {
 	case <-captured:
-	case <-time.After(5 * time.Second * enginetest.TimeoutScale()):
+	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
 		assert.True(false, "inner (child) task never ran")
 		return
 	}
 	mu.Lock()
 	child := childKey
 	mu.Unlock()
-	assert.True(child != "", "expected the inner task to capture the child flow key")
+	if !assert.True(child != "", "expected the inner task to capture the child flow key") {
+		return
+	}
 
-	// Register an Await on the child key while the child is still running: it must block, then be woken by the
-	// failure's signalStop. The ctx is generous so it never gates the outcome; the wake bound below is what the
-	// test asserts on.
-	awaitCtx, cancelAwait := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
+	// The stop is waited for as an event, not a duration: everything between the release and the wake - the task
+	// returning, failStep committing, the Await's read - is database work, and a 2s bound on it was outlasted by
+	// a loaded SQL Server. The targeted checkpoint fires at the top of signalStop, post-commit, so its arrival
+	// proves failStep's subgraph-child path raised signalStop for the child's key as failed. That is the half of
+	// the wake the Await's return cannot show, because the latch detector would also find the committed stop.
+	// Delivery from signalStop to a parked caller is internal/latch's TestRelease_WakesWithoutASweep, and the
+	// detector-only case is TestSubgraphChildStopSignal_DroppedThenBackstopped. Every wait below is a hang
+	// ceiling and nothing else. Armed before anything can fail the child.
+	stopped := engineseams.Seams(eng).Waiter(engineseams.Join(engineseams.CheckpointFlowStopped, child, workflow.StatusFailed))
+
+	// Register an Await on the child key while the child is still running: it must block until the child fails.
+	// The ctx outlasts the hang ceilings below, so it is never what returns the Await.
+	awaitCtx, cancelAwait := context.WithTimeout(ctx, 60*time.Second*enginetest.TimeoutScale())
 	defer cancelAwait()
 	awaitCh := make(chan outcome, 1)
 	parked := engineseams.Seams(eng).Waiter(engineseams.Join(engineseams.CheckpointAwaitParked, child)) // armed before the goroutine that trips it
@@ -123,35 +142,33 @@ func TestSubgraphErrorWaitflow(t *testing.T) {
 		assert.True(false, "the Await never parked on the child, so no blocked waiter was there to be woken")
 		return
 	}
-	close(release) // the child now fails via failStep's subgraph-child path, which must signalStop the child
-
-	// What this bound pins is that failStep's subgraph-child path RESOLVES the child key at all - a failure that
-	// never wrote the child's stop leaves this Await hanging to its ctx. It does not isolate which wake path
-	// returned it: the latch detector reads the committed stop within its own cadence, far inside this bound,
-	// so no timing here can tell a delivered signalStop from a missing one. TestFault_DropSignalStop covers the
-	// detector-only case directly instead.
-	//
-	// Being a "did it happen at all" ceiling rather than the mechanism, it stretches under -race like the
-	// shared enginetest helpers do: everything between the release and the wake - the task returning, failStep
-	// committing, the stop resolving - is database work the suite's own load makes unbounded, and 2s of it was
-	// measured expiring on a `go test ./... -race` pass. A wake that never comes still trips the stretched
-	// bound, and the Await's own ctx is more generous again so it is never what returns here.
+	releaseBoom() // the child now fails via failStep's subgraph-child path, which must signalStop the child
+	select {
+	case <-stopped:
+	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
+		assert.True(false, "the child's failure never raised signalStop for a failed stop on its key")
+		return
+	}
 	select {
 	case aw := <-awaitCh:
-		assert.NoError(aw.err, "Await(childKey) must be woken by the failure's signalStop, not time out")
+		assert.NoError(aw.err, "Await(childKey) must return the child's failure, not time out")
 		if assert.NotNil(aw.out) {
 			assert.Equal(workflow.StatusFailed, aw.out.Status)
 			assert.Equal("child boom", aw.out.Error)
 		}
-	case <-time.After(2 * time.Second * enginetest.TimeoutScale()):
-		assert.True(false, "Await(childKey) not woken — a failing subgraph child did not signalStop its Await waiters")
+	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
+		assert.True(false, "Await(childKey) never returned, though signalStop was raised for the child's failed stop")
 		return
 	}
 
 	// The parent flow (root) fails too, since flow.Subgraph surfaces the child error and the caller returns it.
-	root := <-rootCh
-	assert.NoError(root.err)
-	if assert.NotNil(root.out) {
-		assert.Equal(workflow.StatusFailed, root.out.Status)
+	select {
+	case root := <-rootCh:
+		assert.NoError(root.err)
+		if assert.NotNil(root.out) {
+			assert.Equal(workflow.StatusFailed, root.out.Status)
+		}
+	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
+		assert.True(false, "parent flow did not stop")
 	}
 }

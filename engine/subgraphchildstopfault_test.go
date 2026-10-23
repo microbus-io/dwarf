@@ -32,8 +32,8 @@ import (
 )
 
 // TestSubgraphChildStopSignal_DroppedThenBackstopped is the dropped-wake variant of
-// TestSubgraphErrorWaitflow. That fixture proves a failing subgraph child's signalStop wakes an Await blocked
-// on its (read-only) child key promptly. Here we arm engineseams.FaultDropSignalStop so the child's terminal wake is LOST
+// TestSubgraphErrorWaitflow. That fixture proves a failing subgraph child raises signalStop for its (read-only)
+// child key, with an Await blocked on that key. Here we arm engineseams.FaultDropSignalStop so the child's terminal wake is LOST
 // (the first signalStop consult is the child's failure; the fault fires once and is consumed there, so the
 // root's later wake is delivered normally). The child-key Await must STILL return - via the latch detector,
 // which reads the child's committed stop out of the flow row - rather than hanging to the caller's ctx
@@ -56,15 +56,20 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 	assert.NoError(inner.Validate())
 	mux.HandleGraph("scss/inner", inner)
 
+	// Execution is at-least-once, so the capture is once-only: a re-executed Boom must not close captured twice.
 	var mu sync.Mutex
 	var childKey string
 	captured := make(chan struct{})
+	var captureOnce sync.Once
 	release := make(chan struct{})
+	releaseBoom := sync.OnceFunc(func() { close(release) })
 	mux.HandleTask("scss/boom", func(ctx context.Context, f *workflow.Flow) error {
-		mu.Lock()
-		childKey = f.FlowKey() // a subgraph child sees its own (child) flow key
-		mu.Unlock()
-		close(captured)
+		captureOnce.Do(func() {
+			mu.Lock()
+			childKey = f.FlowKey() // a subgraph child sees its own (child) flow key
+			mu.Unlock()
+			close(captured)
+		})
 		<-release // stay running until the test has an Await registered on the child key
 		return errors.New("child boom", http.StatusInternalServerError)
 	})
@@ -78,6 +83,9 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
+	// Below the Shutdown defer, so it unwinds first: an early return otherwise leaves Boom holding a worker the
+	// drain waits on forever.
+	defer releaseBoom()
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -98,7 +106,9 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 	mu.Lock()
 	child := childKey
 	mu.Unlock()
-	assert.True(child != "", "expected the inner task to capture the child flow key")
+	if !assert.True(child != "", "expected the inner task to capture the child flow key") {
+		return
+	}
 
 	// Register an Await on the child key while the child is still running, so it blocks and then must be woken.
 	awaitCtx, cancelAwait := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
@@ -127,7 +137,7 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 	// nothing. The fault fires once and is consumed on the child's (first) stop, so the root's later wake is
 	// unaffected.
 	e.seams.Inject(engineseams.FaultDropSignalStop)
-	close(release) // the child now fails via failStep's subgraph-child path, whose signalStop is dropped
+	releaseBoom() // the child now fails via failStep's subgraph-child path, whose signalStop is dropped
 
 	// Despite the lost signal, Await(childKey) must still return - the only remaining wake path is the latch
 	// detector. A generous bound (far above the detector's cadence, well below the 30s Await ctx) proves it was
