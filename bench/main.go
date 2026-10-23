@@ -146,6 +146,7 @@ func run() error {
 		fairnessSkew    = flag.Float64("fairness-skew", 0, "spread flows over -fairness-keys by a Zipf law with this exponent (> 1; key k0 the heaviest), instead of uniformly (0); -real only")
 		priorityMixFlag = flag.String("priority-mix", "", "-real: the share of flows at each priority level, \"1:0.03,2:0.12,3:0.55,4:0.2,5:0.1\" (1..5, lower runs first); empty = every flow at the engine's default, 3")
 		retention       = flag.Duration("retention", 0, "-real: Purge completed flows older than this every minute, so the step table reaches a steady size (0 = keep everything)")
+		deleteOnDone    = flag.Bool("delete-on-completion", false, "-real: create every flow with DeleteOnCompletion, so the reaper removes it a minute after it completes and the step table holds only work in flight")
 		carryRead       = flag.Bool("carry-read", false, "carry workloads: make every task READ the carried document instead of only passing it along. Storage is identical either way, so this is the arm switch for how carried state is HELD, not how much is stored")
 	)
 	flag.Var(&dsns, "dsn", "shard DSN, repeatable; 'N=dsn' sets shard N, a bare dsn sets shard 1 (default: throwaway local SQLite)")
@@ -460,7 +461,7 @@ func run() error {
 			"arrivalNoise": *arrivalNoise, "arrivalSeed": *arrivalSeed, "arrivalShare": *arrivalShare,
 			"arrivalEpoch": epoch.Unix(), "realSec": realDur.Seconds(), "mix": *mixFlag, "fairnessKeys": *fairnessKeys,
 			"fairnessSkew": *fairnessSkew, "priorityMix": *priorityMixFlag,
-			"retentionSec": retention.Seconds()} {
+			"retentionSec": retention.Seconds(), "deleteOnCompletion": *deleteOnDone} {
 			art.Config[k] = v
 		}
 		// A rolling restart stops a replica with SIGTERM: stop creating, write the artifact, and let the deferred
@@ -470,7 +471,7 @@ func run() error {
 		report, err := runReal(sigCtx, engines, readers, pick, realConfig{
 			profile: profile, epoch: epoch, until: epoch.Add(*realDur), share: *arrivalShare, meanSteps: meanSteps,
 			creators: ks[0], maxOutstanding: *maxOutstanding, fairnessKeys: *fairnessKeys, fairnessSkew: *fairnessSkew,
-			priorities: priorities, retention: *retention, interval: interval,
+			priorities: priorities, retention: *retention, deleteOnCompletion: *deleteOnDone, interval: interval,
 			seriesPath: seriesPath, classOf: classOf, stepsOf: stepsOf,
 		})
 		if err != nil {

@@ -525,7 +525,8 @@ axis for a bytes fill: two 0 B probes on an empty database wrote ~15M small step
 
 **`-real D` runs a schedule, not a window.** `-arrival-profile` (levels and ramps in fleet steps/s) and
 `-arrival-bursts` repeat every period, with seeded per-minute `-arrival-noise` and Poisson arrivals, plus a
-`-priority-mix` over the engine's five priority levels, Zipf tenants (`-fairness-skew`) and a `-retention` Purge.
+`-priority-mix` over the engine's five priority levels, Zipf tenants (`-fairness-skew`) and a `-retention` Purge
+(or `-delete-on-completion`, which keeps the step table to the work in flight plus the one-minute deletion grace).
 Four things about it:
 - **The schedule is a function of the time since `-arrival-epoch`.** Give every process of a fleet the same
   epoch and its `-arrival-share`, and a process restarted mid-run rejoins in phase and stops at the shared end.

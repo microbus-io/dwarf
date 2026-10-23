@@ -177,19 +177,20 @@ func poisson(r *rand.Rand, lambda float64) int {
 
 // realConfig is everything the real mode takes from the flags.
 type realConfig struct {
-	profile        *arrivalProfile
-	epoch          time.Time
-	until          time.Time
-	share          float64 // this process's share of the fleet's offered load
-	meanSteps      float64 // the mix's steps per flow
-	creators       int
-	maxOutstanding int
-	fairnessKeys   int
-	fairnessSkew   float64       // Zipf exponent over the keys; 0 = uniform
-	priorities     priorityMix   // the share of flows created at each priority level
-	retention      time.Duration // Purge completed flows older than this; 0 = keep everything
-	interval       time.Duration
-	seriesPath     string
+	profile            *arrivalProfile
+	epoch              time.Time
+	until              time.Time
+	share              float64 // this process's share of the fleet's offered load
+	meanSteps          float64 // the mix's steps per flow
+	creators           int
+	maxOutstanding     int
+	fairnessKeys       int
+	fairnessSkew       float64       // Zipf exponent over the keys; 0 = uniform
+	priorities         priorityMix   // the share of flows created at each priority level
+	retention          time.Duration // Purge completed flows older than this; 0 = keep everything
+	deleteOnCompletion bool          // create every flow with DeleteOnCompletion
+	interval           time.Duration
+	seriesPath         string
 	// classOf names the class each workflow URL runs, and stepsOf its steps per flow, so the engine's flow counters
 	// (labelled by workflow) give each class's rate.
 	classOf map[string]string
@@ -405,7 +406,7 @@ func runReal(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 					throttled.Add(1)
 				}
 				w := pick()
-				opts := &workflow.FlowOptions{}
+				opts := &workflow.FlowOptions{DeleteOnCompletion: cfg.deleteOnCompletion}
 				opts.Priority = cfg.priorities.sample(r.Float64())
 				band := bandLabel(opts.Priority)
 				tenant := "tenant:tail"
