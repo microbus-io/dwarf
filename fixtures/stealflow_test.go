@@ -18,6 +18,7 @@ package fixtures
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -58,9 +59,10 @@ import (
 // steal fires only once a foreign step has been DUE longer than the grace (four cycle periods, ~533ms at
 // the derived test interval), and a single worker chewing through 40 no-op steps against in-memory SQLite
 // finishes well inside that - so with instant tasks the crippled class never ages and the test is a
-// coin-flip on scheduling. A delay makes the backlog build for a reason the test controls. The caller defers
-// the returned shutdown, which shuts all three down.
-func stealFleet(t *testing.T, name string, crippledWorkers int, crippledDelay time.Duration) (creator, healthy, crippled *engine.Engine, ran map[string]*atomic.Int64, shutdown func()) {
+// coin-flip on scheduling. A delay makes the backlog build for a reason the test controls. A non-nil gate
+// holds every task on both dispatchers until it is closed, which the caller must do before the returned
+// shutdown, which shuts all three down.
+func stealFleet(t *testing.T, name string, crippledWorkers int, crippledDelay time.Duration, gate <-chan struct{}) (creator, healthy, crippled *engine.Engine, ran map[string]*atomic.Int64, shutdown func()) {
 	t.Helper()
 	assert := testarossa.For(t)
 	ran = map[string]*atomic.Int64{"creator": {}, "healthy": {}, "crippled": {}}
@@ -76,6 +78,12 @@ func stealFleet(t *testing.T, name string, crippledWorkers int, crippledDelay ti
 		p.HandleGraph(name+"/g", g)
 		for _, url := range []string{name + "/a", name + "/b"} {
 			p.HandleTask(url, func(ctx context.Context, f *workflow.Flow) error {
+				if gate != nil {
+					select {
+					case <-gate:
+					case <-ctx.Done():
+					}
+				}
 				if replica == "crippled" && crippledDelay > 0 {
 					select {
 					case <-time.After(crippledDelay):
@@ -144,7 +152,7 @@ func TestStealCapacityPoisonflow(t *testing.T) {
 	t.Parallel()
 	const name = "stealcap.verify:428"
 	assert := testarossa.For(t)
-	creator, healthy, _, ran, shutdown := stealFleet(t, name, 1, 150*time.Millisecond)
+	creator, healthy, _, ran, shutdown := stealFleet(t, name, 1, 150*time.Millisecond, nil)
 	defer shutdown()
 
 	// Warm both dispatchers so the crippled one genuinely holds a class before the load arrives.
@@ -172,7 +180,7 @@ func TestStealLatencyPoisonflow(t *testing.T) {
 	t.Parallel()
 	const name = "stealrtt.verify:428"
 	assert := testarossa.For(t)
-	creator, healthy, crippled, ran, shutdown := stealFleet(t, name, 4, 0)
+	creator, healthy, crippled, ran, shutdown := stealFleet(t, name, 4, 0, nil)
 	defer shutdown()
 
 	drainFlows(t, 30*time.Second, creator, name, 4)
@@ -200,24 +208,28 @@ func TestStealLatencyPoisonflow(t *testing.T) {
 // or a regression: a healthy fleet must keep dispatching from its OWN classes, or the residue partition
 // stops excluding anything and every replica is back to racing its peers for the same rows.
 //
-// It is measured over the window where a healthy fleet's own classes are unambiguously full - a backlog deep enough
-// that BOTH classes can fill their batch - and over CYCLES rather than a duration, so a loaded suite makes
-// the backlog deeper rather than the measurement noisier. That framing is the whole point of the shape
-// below, and the reason for each half:
+// It is measured only while a healthy fleet's own classes are unambiguously full, and the shape below is
+// what makes that true rather than hoped for:
 //
+//   - HELD, because creating the backlog does not build one: Create is one transaction per flow, and two
+//     four-worker dispatchers drain the chain as fast as the creator makes it, so an unheld fleet has run
+//     every step before a window opens and the assertion measures an empty shard. Under a loaded suite the
+//     drain merely lags, and the window lands on its tail instead - the moderate-load regime below. The gate
+//     holds every task until the whole backlog is due, which also puts every foreign step past the grace:
+//     the fill order alone is under test, which is the saturation case it exists for.
 //   - DEEP, because at MODERATE load a replica legitimately reaches outside its class with nobody at fault:
 //     classes empty between arrivals while everything ages past the grace, so a light workload measures the
 //     grace rather than the fill order. Under -race, which slows execution ~10x, that regime stole on up to
 //     17 cycles of a 31-cycle drain - i.e. the light-load number carries no signal at all.
-//   - CYCLES, because CheckpointRefillStole fires once per FETCH that took a foreign row, and a pending
-//     step is re-fetched every cycle until someone claims it. The raw count is therefore bounded by the
-//     LENGTH of the drain, not by the steps in it, and a loaded suite lengthens the drain: an absolute
-//     bound on it reported the suite's load (measured 22-23 against a bound of 20 in a parallel -race run
-//     with nothing wrong).
+//   - BOUNDED BY THE BACKLOG, not by a cycle count or a duration, because either one lets a slow suite or a
+//     fast drain carry the window past the deep phase. It closes once either dispatcher has run half of what
+//     a class holds, which leaves each class still several batches deep.
+//   - Counted per CYCLE, because CheckpointRefillStole fires once per FETCH that took a foreign row, and a
+//     pending step is re-fetched every cycle until someone claims it, so a raw count reports the length of
+//     the window rather than the steps in it.
 //
-// The residual is not zero and is not expected to be: the fleet still passes through moderate load on its
-// way in and out of the deep phase. It is NOT inflated by an unavailable partition pair - that resolves to a
-// zero pair, the ranking is skipped and nothing is counted stolen (pinned by
+// The residual is not zero and is not expected to be. It is NOT inflated by an unavailable partition pair -
+// that resolves to a zero pair, the ranking is skipped and nothing is counted stolen (pinned by
 // TestPiston_PartitionPairIsValidated). A build that reached outside its class whenever it merely COULD
 // would steal on essentially every cycle that fetched anything, which is the regression this guards. The
 // mechanism itself is pinned deterministically in internal/piston against real rows
@@ -225,35 +237,51 @@ func TestStealLatencyPoisonflow(t *testing.T) {
 func TestStealHoldsOffAHealthyFleetflow(t *testing.T) {
 	t.Parallel()
 	const name = "stealhealthy.verify:428"
+	const flows = 200
 	assert := testarossa.For(t)
-	creator, healthy, crippled, ran, shutdown := stealFleet(t, name, 4, 0)
+	gate := make(chan struct{})
+	var opened sync.Once
+	release := func() { opened.Do(func() { close(gate) }) }
+	creator, healthy, crippled, ran, shutdown := stealFleet(t, name, 4, 0, gate)
 	defer shutdown()
+	defer release() // below the shutdown, so a failed assertion cannot leave the drain waiting on the gate
 
 	// The cache holds 2 x 4 workers, so ~100 due steps per residue class is far past "this class can fill
-	// its own batch". Created up front, and not awaited until the measurement is over.
-	keys := createFlows(t, creator, name, 200)
+	// its own batch".
+	keys := createFlows(t, creator, name, flows)
 
-	// Two cycles of settling before the window opens: a replica only reaches outside its class for slots its own class could not fill, and
-	// the cycle before this work landed saw an empty shard, so the first one after it is legitimately still
-	// armed.
+	// A scan must have seen the backlog before the window opens, or the first fetch plans from a tally of
+	// an empty shard.
 	enginetest.AwaitShardCycles(t, healthy, 2)
 	enginetest.AwaitShardCycles(t, crippled, 2)
-	stoleBefore := engineseams.Seams(healthy).Visits(engineseams.CheckpointRefillStole) +
-		engineseams.Seams(crippled).Visits(engineseams.CheckpointRefillStole)
-	cyclesBefore := engineseams.Seams(healthy).Visits(engineseams.CheckpointRefillCycleDone) +
-		engineseams.Seams(crippled).Visits(engineseams.CheckpointRefillCycleDone)
+	visits := func(checkpoint string) int {
+		return engineseams.Seams(healthy).Visits(checkpoint) + engineseams.Seams(crippled).Visits(checkpoint)
+	}
+	stoleBefore := visits(engineseams.CheckpointRefillStole)
+	cyclesBefore := visits(engineseams.CheckpointRefillCycleDone)
+	release()
 
-	enginetest.AwaitShardCycles(t, healthy, 10)
-	enginetest.AwaitShardCycles(t, crippled, 10)
-	stole := engineseams.Seams(healthy).Visits(engineseams.CheckpointRefillStole) +
-		engineseams.Seams(crippled).Visits(engineseams.CheckpointRefillStole) - stoleBefore
-	cycles := engineseams.Seams(healthy).Visits(engineseams.CheckpointRefillCycleDone) +
-		engineseams.Seams(crippled).Visits(engineseams.CheckpointRefillCycleDone) - cyclesBefore
+	// Each dispatcher runs its own class's A steps and the B each one chains into its own cache, so a
+	// replica that has run `flows/2` tasks is half-way through a class of ~flows/2 A steps.
+	deadline := time.After(60 * time.Second * enginetest.TimeoutScale())
+	for {
+		cycled := engineseams.Seams(healthy).Waiter(engineseams.CheckpointRefillCycleDone)
+		if max(ran["healthy"].Load(), ran["crippled"].Load()) >= flows/2 {
+			break
+		}
+		select {
+		case <-cycled:
+		case <-deadline:
+			t.Fatalf("the held backlog never drained half a class (ran %d and %d)", ran["healthy"].Load(), ran["crippled"].Load())
+		}
+	}
+	stole := visits(engineseams.CheckpointRefillStole) - stoleBefore
+	cycles := visits(engineseams.CheckpointRefillCycleDone) - cyclesBefore
 	assert.True(2*stole < cycles,
 		"a fleet whose every class can fill its own batch must mostly not steal (stole on %d of %d cycles)",
 		stole, cycles)
 
 	awaitFlows(t, 120*time.Second, creator, keys)
-	assert.Equal(int64(400), ran["healthy"].Load()+ran["crippled"].Load(), "and the work still drains exactly once")
+	assert.Equal(int64(2*flows), ran["healthy"].Load()+ran["crippled"].Load(), "and the work still drains exactly once")
 	assert.Equal(int64(0), ran["creator"].Load())
 }

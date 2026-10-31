@@ -348,9 +348,9 @@ continuous arrivals leaves a keeping-up replica a step or two due on almost ever
 lesson holds for the fill order too — the fixtures cannot distinguish a mechanism that fires from one that
 does not, so a change here is measured on the bench or it is not measured.
 
-### The OVER-FETCH and its clamp — `max(1, min(R, 4))`
+### The OVER-FETCH and its clamp — `max(1, min(2R, 4))`
 
-The fetch asks for **`perKey × max(1, min(R, 4))`**, and **only while the grace can admit a foreign row at
+The fetch asks for **`perKey × max(1, min(2R, 4))`**, and **only while the grace can admit a foreign row at
 all** — with the class strict, every admitted row is already this replica's own, so a multiple would walk
 and ship four times the plan's demand purely to discard three quarters of it. In practice that guard costs
 nothing: the grace is zero only under `SetStealAfter(0)`, which nothing outside tests calls, so a
@@ -361,17 +361,25 @@ rows are precisely the stalled peer's, so asking for exactly `perKey` comes back
 leaves the ranking nothing of this replica's own to prefer — failing in exactly the case the mechanism
 exists for.
 
-Both bounds of the clamp are load-bearing, for unrelated reasons.
+The floor, the factor and the cap are each load-bearing, for unrelated reasons.
 
 **Floored at 1, because `replicas` reads ZERO when partitioning does not apply.** A multiple of zero binds
 `LIMIT 0` and the fetch returns **nothing** — silently starving every solo deployment while the query, the
 plan, the phase histogram and the `selected` counter all still look correct. Nothing names that failure, so
 the floor is the only thing between a solo replica and a refiller that supplies nothing at all.
 
-**Capped at R, because a fleet of R has only R residue classes to rank.** Fetching more than R times the cap
-can never surface an own-class row that R times would have missed, so anything above it is pure wire.
+**Twice R, not R, because a multiple of R surfaces this replica's share only ON AVERAGE.** Under saturation
+every due step is past the grace, so every class is admitted and the oldest rows are the classes interleaved
+in creation order. Among the oldest `perKey × R` this replica's count is then ~Binomial(`perKey × R`, 1/R),
+whose mean is exactly `perKey`, so it falls short about half the time even with its own class hundreds deep,
+and the trim keeps foreign rows a healthy peer is about to fetch too: a lost claim, and a
+`dwarf_steps_stolen` reading on a fleet with nothing wrong. At `perKey=8`, R=2 that is a shortfall on ~40% of
+saturated fetches; at 2R it is ~0.1%. **Do not reason about the multiple as if the oldest rows were dealt
+round-robin** — they are not, and the shortfall is in the variance, not the mean. Pinned by
+`TestPiston_FetchSurfacesItsShareFromAForeignHead`, and in the engine by `TestStealHoldsOffAHealthyFleetflow`,
+which steals on a large fraction of its cycles at `m = R`.
 
-**And capped at 4, because the multiple has to cover how many classes are simultaneously LONG-DUE, not how
+**Capped at 4, because the multiple has to cover how many classes are simultaneously LONG-DUE, not how
 large the fleet is.** With k stalled peers this replica's share of the admitted rows is ~1/(1+k), so 4
 covers three stalled peers at once — well past the design point. Scaling with R instead is actively harmful
 on the healthy path, where the admitted fraction is 1/R and the index walk is `perKey × m × R`, i.e.
@@ -388,7 +396,12 @@ Measured, PostgreSQL 18.1, **1,392,636 pending rows**, one key, real lateral sha
 | 3 tiers, everything aged | **128** | **512** | **2048** |
 
 So at R=16 the 4× cap walks 8,191 entries (~1.7–3 ms) where an uncapped `m = R` walks ~32,700 (~12 ms),
-**every cycle**. Below R=4 the cap is inert and the multiple is simply R.
+**every cycle**.
+
+**The cap re-opens the shortfall from R=3 up, and that is accepted.** At R=3 the multiple is 4/3 of R, and from
+R=4 it is R or less, so the variance argument above applies again. The engine runs two dispatchers per shard
+(`maxDispatchers` in `engine/CLAUDE.md`), so R=2 is the steady state and R=3 lasts only through a dispatcher
+handoff. At R=2 the cap is exactly 2R.
 
 Three facts from that table worth keeping:
 
@@ -407,7 +420,9 @@ JIT emission on a one-shot statement; the scan underneath was 0.3 ms. Nothing ab
 remaining tiers only if short: it walks half as much on the healthy path (`perKey × 2 × R` against
 `perKey × 4 × R`) and wins whenever the multiple exceeds 2. It is not built because at R=4 the saving is
 ~0.3 ms per key per cycle, against a band scan measured at **1.6–2.1 s in the same database** and an RTT of
-~0.6 ms that the extra round trip costs whenever it fires. Revisit it for a large-R deployment; the table
+~0.6 ms that the extra round trip costs whenever it fires. Its first phase must still be twice the classes it
+admits, for the variance reason above: at R=2 own+neighbour is every class, so a first phase at `perKey × 2`
+is the shortfall again. Revisit it for a large-R deployment; the table
 above is the measurement, so that decision needs no re-run.
 
 **Known exposure: fairness-key CARDINALITY.** The tally is relaxed too (it must be — see below), so the R

@@ -1264,6 +1264,41 @@ func TestPiston_FetchPrefersItsOwnClass(t *testing.T) {
 	assert.Equal(2, len(got["k"]), "the over-fetch is trimmed back to the plan's per-key cap")
 }
 
+// TestPiston_FetchSurfacesItsShareFromAForeignHead pins the over-fetch's factor of 2R. Under saturation every
+// class is admitted and the oldest rows are the classes interleaved by chance, so a window of perKey*R holds
+// this replica's share only on average. The head here is a run of foreign rows longer than a perKey*R window
+// can absorb (6 of 8 at perKey=4) and shorter than a 2R one (6 of 16), with this replica's own class still
+// deeper than the cap behind it - so the fetch must come back own-class only.
+func TestPiston_FetchSurfacesItsShareFromAForeignHead(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	// Ordinal 0 of 2: this replica owns EVEN step ids, so odd ones are foreign.
+	r.p.SetPartitionFunc(func() (int, int, bool) { return 2, 0, true })
+	r.p.SetTallyCadence(500*time.Millisecond, 0)
+	r.p.SetSupplyCadence(500*time.Millisecond, 0)
+	r.p.SetStealAfter(4) // grace = 2s
+
+	for range 24 {
+		r.insertStep(t, 1, 5, "k", 1)
+	}
+	_, foreign := r.idsByResidue(t, 2, 0)
+	// Six foreign rows become the oldest, and everything is past the grace, so admission orders nothing.
+	// Both backdated with the DATABASE clock, never a bound Go time.
+	for _, id := range foreign[:6] {
+		_, err := r.db.ExecContext(ctx, "UPDATE dwarf_steps SET created_at=DATE_ADD_MILLIS(NOW_UTC(), -10000) WHERE step_id=?", id)
+		assert.NoError(err)
+	}
+	_, err := r.db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), -5000)")
+	assert.NoError(err)
+	own, _ := r.idsByResidue(t, 2, 0)
+
+	got, err := r.fetch(ctx, 5, []string{"k"}, 4)
+	assert.NoError(err)
+	assert.Equal(own[:4], got["k"], "a foreign head the window can see past must not displace this replica's own class")
+}
+
 // TestPiston_StealTakesOnlyLongDueForeignSteps drives the relaxed predicate against real SQL, which is the
 // only way to know the clause means what it reads as. The age is measured from not_before, NOT created_at:
 // not_before is stamped at creation and pushed forward by flow.Sleep and every retry backoff, so this reads

@@ -1110,12 +1110,14 @@ func (p *Piston) FetchSteps(ctx context.Context, shard int, fetches []planner.Fe
 	grace := p.stealGrace()
 	part, partArgs := p.partitionPredicate(replicas, ordinal, grace)
 	// Over-fetch, so the ranking below has own-class rows to prefer: the query returns oldest first and the
-	// oldest admitted rows are the stalled peer's. ONLY when foreign rows can be admitted at all - with the
-	// class strict, every admitted row is already this replica's own, and a multiple would fetch four times
-	// the plan's demand purely to discard three quarters of it.
+	// oldest admitted rows are the stalled peer's. Twice R, not R: when every class is admitted, the own rows
+	// in the oldest perKey*R are only perKey ON AVERAGE, so a multiple of R leaves the ranking short about
+	// half the time. ONLY when foreign rows can be admitted at all - with the class strict, every admitted row
+	// is already this replica's own, and a multiple would fetch four times the plan's demand purely to
+	// discard three quarters of it.
 	overFetch := 1
 	if grace > 0 {
-		overFetch = max(1, min(replicas, 4))
+		overFetch = max(1, min(2*replicas, 4))
 	}
 	stmt, args, err := fetchQuery(p.db.DriverName(), pairs, perKey*overFetch, part, partArgs)
 	if err != nil {
