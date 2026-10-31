@@ -1107,3 +1107,461 @@ func (e *Engine) awaitStopped(ctx context.Context, flowKey string) (*workflow.Fl
 	}
 	return outcome, nil
 }
+
+// errResumeLost is an in-transaction sentinel: the root flow was terminalized by a concurrent
+// Delete/Terminate between resume's pre-tx status read and its own writes, so the transaction must roll
+// back (undoing the step re-park/leaf-reset) and the caller must 409 rather than falsely report success.
+var errResumeLost = errors.New("resume lost to a concurrent terminalization")
+
+// resume continues a flow paused by flow.Interrupt, delivering resume data to the leaf interrupt park.
+func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
+	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	// Normalize the caller's resume data (a struct, map, or nil) into a State; an empty one stays "{}".
+	resumeState, err := workflow.NewState(data)
+	if err != nil {
+		return errors.Trace(err, http.StatusBadRequest)
+	}
+	resumeDataJSON := []byte("{}")
+	if resumeState.Len() > 0 {
+		resumeDataJSON, err = json.Marshal(resumeState)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if err := e.checkPayloadSize("resume data", resumeDataJSON); err != nil {
+			return err
+		}
+	}
+
+	db, err := e.db.Shard(shardNum)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
+	// calls has to know about turns. Its age is stamped here, so it queues behind work already running
+	// and ahead of anything arriving after it.
+	ctx, doneTurn := e.opTurn(ctx, shardNum, "resume")
+	defer doneTurn()
+
+	var flowStatus string
+	var surgraphFlowID int
+	err = db.QueryRowContext(ctx, "SELECT status, surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&flowStatus, &surgraphFlowID)
+	if err == sql.ErrNoRows {
+		return errors.New("flow not found", http.StatusNotFound)
+	}
+	if err != nil {
+		return errors.Trace(err)
+	}
+	// Resume acts on the whole interrupt chain (it walks up to the root and down to the leaf), so it must be
+	// addressed by the root flow key; a subgraph child key is read-only (introspection/Fork only).
+	if surgraphFlowID != 0 {
+		return errors.New("cannot resume a subgraph child; use the root flow key", http.StatusBadRequest)
+	}
+	if flowStatus != workflow.StatusInterrupted {
+		return errors.New("flow is not interrupted (status: %s)", flowStatus, http.StatusConflict)
+	}
+
+	upFlowIDs, upStepIDs, upCompositeIDs, err := e.surgraphChain(ctx, shardNum, flowID, flowToken)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	downFlowIDs, downStepIDs, downCompositeIDs, err := e.interruptedSubgraphChain(ctx, shardNum, flowID, flowToken)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	chainFlowIDs := append([]any{}, upFlowIDs...)
+	chainCompositeIDs := append([]string{}, upCompositeIDs...)
+	chainFlowIDs = append(chainFlowIDs, downFlowIDs[1:]...)
+	chainCompositeIDs = append(chainCompositeIDs, downCompositeIDs[1:]...)
+
+	leafStepID := downStepIDs[len(downStepIDs)-1]
+	parkStepIDs := append([]any{}, upStepIDs...)
+	parkStepIDs = append(parkStepIDs, downStepIDs[:len(downStepIDs)-1]...)
+
+	var leafInterruptDone bool
+	err = db.QueryRowContext(ctx, "SELECT interrupt_done FROM dwarf_steps WHERE step_id=?", leafStepID).Scan(&leafInterruptDone)
+	// ErrNoRows means the leaf step is gone (a concurrent Resume/state change) - a 409, not a false one.
+	// Any other scan error is a real DB failure; surface it rather than masking it as "not paused" (409).
+	if err == sql.ErrNoRows {
+		return errors.New("flow is not interrupted", http.StatusConflict)
+	}
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if !leafInterruptDone {
+		return errors.New("flow is not interrupted", http.StatusConflict)
+	}
+
+	// Test-only checkpoint: a breakpoint here lets a test freeze resume before its transaction so a racing
+	// Delete/Terminate can commit its interrupted->terminated flip deterministically, then confirm the gate
+	// write below rolls this transaction back (409) instead of falsely succeeding. Placed *before* the
+	// transaction, not mid-tx: on SQLite the racing Delete would deadlock against this transaction's write
+	// lock if frozen inside it. No-op in production.
+	e.seams.Checkpoint(ctx, engineseams.CheckpointResumeBeforeFlowWrite)
+
+	lost := false
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		lost = false
+		// engineseams.FaultResumeCommit fails this transaction once, before any write, so the test proves it rolls back
+		// atomically (the flow stays interrupted, its steps untouched) and a retry then resumes cleanly.
+		if e.seams.IsFault(engineseams.FaultResumeCommit) {
+			return errors.New("injected fault: " + engineseams.FaultResumeCommit)
+		}
+		allStepIDs := append([]any{leafStepID}, parkStepIDs...)
+		clearPlaceholders := strings.Repeat("?,", len(allStepIDs)-1) + "?"
+		tx.ExecContext(ctx, "UPDATE dwarf_steps SET interrupt_payload=? WHERE step_id IN ("+clearPlaceholders+")",
+			append([]any{emptyJSON}, allStepIDs...)...)
+
+		if len(parkStepIDs) > 0 {
+			parkPlaceholders := strings.Repeat("?,", len(parkStepIDs)-1) + "?"
+			parkArgs := append([]any{workflow.StatusRunning, parkedSubgraph}, parkStepIDs...)
+			tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE step_id IN ("+parkPlaceholders+") AND status='"+workflow.StatusInterrupted+"'", parkArgs...)
+		}
+
+		tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, resume_data=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusInterrupted+"'",
+			workflow.StatusPending, resumeDataJSON, leafStepID)
+
+		// Race gate against a concurrent Delete/Terminate. The step writes above are unconditional (their
+		// WHERE status='interrupted' still matches, because Delete terminalizes the flow row without
+		// touching steps), so without this gate a Delete that flipped the root interrupted→terminated first
+		// would let resume re-park ancestors and reset the leaf, then match 0 rows on the flow update below,
+		// and still return success - a resume that did not take effect reported as if it had, leaving a
+		// transient terminated-flow-with-non-terminal-steps until the reaper mops it. The root flow row is the
+		// serialization point: this guarded lock takes the row and confirms it is still interrupted.
+		// A zero-row match means Delete/Terminate won - roll the whole transaction back and 409, mutually
+		// exclusive with Delete's own WHERE status='interrupted'. flowID is always the root here
+		// (subgraph-child keys were rejected above), which is exactly the row Delete/Terminate terminalize.
+		n, gerr := lockFlowRows(ctx, tx, "flow_id=? AND status='"+workflow.StatusInterrupted+"'", flowID)
+		if gerr != nil {
+			return gerr
+		}
+		if n == 0 {
+			lost = true
+			return errResumeLost
+		}
+
+		for _, chainFlowID := range chainFlowIDs {
+			tx.ExecContext(ctx,
+				"UPDATE dwarf_flows SET status=?, stopped_step_id=0, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"' AND (SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"')=0",
+				workflow.StatusRunning, chainFlowID, chainFlowID,
+			)
+			// A flow still interrupted by another step now records that one - the step Snapshot reports and the
+			// next Resume acts on - rather than the step just resumed.
+			tx.ExecContext(ctx,
+				"UPDATE dwarf_flows SET stopped_step_id=(SELECT step_id FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"' ORDER BY updated_at, step_id LIMIT_OFFSET(1, 0)), touch=1-touch WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'",
+				chainFlowID, chainFlowID,
+			)
+		}
+		return nil
+	})
+	if lost {
+		return errors.New("flow is not interrupted", http.StatusConflict)
+	}
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	// No wake for the interrupted -> running transition, on this flow or its surgraph chain. An Await
+	// returns on `interrupted` (it is a stop), so nobody is parked here to wake - and a caller who parked
+	// while the flow was running is waiting for it to SETTLE, which resuming is the opposite of.
+	e.enqueueStep(ctx, shardNum, leafStepID.(int))
+	return nil
+}
+
+func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
+	// Shard and Limit bound a purge but select every flow they reach, so neither counts as a filter.
+	narrowed := query.Status != "" || query.WorkflowURL != "" || query.WorkflowName != "" || query.ThreadKey != "" ||
+		query.StoppedTaskName != "" || query.FairnessKey != "" || query.Priority != 0 || query.OlderThan != 0 ||
+		query.NewerThan != 0 || query.Search != ""
+	if !narrowed {
+		return 0, errors.New("purge requires at least one filter; Shard and Limit do not narrow it", http.StatusBadRequest)
+	}
+	// A subgraph child cannot be purged independently - it is removed as part of its root's subtree. Reject
+	// IncludeSubgraphs rather than silently ignoring it, so a caller is not surprised the flag did nothing.
+	if query.IncludeSubgraphs {
+		return 0, errors.New("purge cannot include subgraphs; a subgraph child is purged with its root", http.StatusBadRequest)
+	}
+	// Cap the matched-root count per call so the per-shard id list embedded into each DELETE's `IN (...)`
+	// predicate stays well under the size where the optimizer struggles. This is not just a slow-plan concern:
+	// on SQL Server a large enough literal IN-list can *fail* to plan outright (errors 8623 "query processor
+	// ran out of internal resources" / 8632 "expression services limit reached"), a hard error rather than a
+	// slow query - which is why there is a hard cap. That failure regime is in the tens of thousands of terms;
+	// 4096 keeps an order-of-magnitude of headroom under it while still purging in useful batches. It is a
+	// single unbatched statement (ids embedded as integer literals via intCSV, so the per-driver bind-param
+	// ceiling - SQL Server 2100 / older SQLite 999 - does not apply; the ceiling here is IN-list planning, not
+	// statement size). A caller trimming more loops Purge until it returns 0.
+	const purgeCap = 4096
+	limit := query.Limit
+	if limit <= 0 || limit > purgeCap {
+		limit = purgeCap
+	}
+	indices, pos := e.shardOrdinals()
+
+	// Purge selects root flows only and marks each matched root for deletion; the reaper removes its whole
+	// subgraph subtree.
+	joinSQL, whereSQL, baseArgs, restrictShardNum, err := e.queryClauses(ctx, query, "f.surgraph_flow_id=0")
+	if err != nil {
+		return 0, errors.Trace(err)
+	}
+
+	singleShard := restrictShardNum != 0
+	perShardLimit := limit
+	if !singleShard && len(indices) > 0 {
+		perShardLimit = max((limit+len(indices)-1)/len(indices), 1)
+	}
+
+	perShardDeleted := make([]int, len(pos))
+	err = e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
+		if restrictShardNum != 0 && shardIdx != restrictShardNum {
+			return nil
+		}
+		// A turn on each shard it reads, so this queues for that shard's connections like any other caller
+		// instead of taking them from work already under way.
+		ctx, doneTurn := e.opTurn(ctx, shardIdx, "purge")
+		defer doneTurn()
+		where := whereSQL
+		args := append([]any(nil), baseArgs...)
+		if sc, scArgs := searchClause(db.DriverName(), shardIdx, query.Search); sc != "" {
+			where += " AND " + sc
+			args = append(args, scArgs...)
+		}
+		args = append(args, perShardLimit)
+		// Purge MARKS, it does not delete: select candidate roots (not running, not already scheduled), terminate
+		// any that are interrupted exactly as Delete does (terminateSubtree), then stamp delete_after_ms=1 (due
+		// immediately) on the terminal ones so the reaper removes each tree on its next pass.
+		selectIDs := "SELECT DISTINCT f.flow_id, f.flow_token, f.status FROM dwarf_flows f" + joinSQL +
+			" WHERE " + where + " AND f.status<>'" + workflow.StatusRunning + "' AND f.delete_after_ms=0 ORDER BY f.flow_id LIMIT_OFFSET(?, 0)"
+		rows, err := db.QueryContext(ctx, selectIDs, args...)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		var flowIDs []int
+		var interruptedIDs []int
+		var interruptedTokens []string
+		for rows.Next() {
+			var fid int
+			var token, status string
+			err := rows.Scan(&fid, &token, &status)
+			if err != nil {
+				rows.Close()
+				return errors.Trace(err)
+			}
+			flowIDs = append(flowIDs, fid)
+			if status == workflow.StatusInterrupted {
+				interruptedIDs = append(interruptedIDs, fid)
+				interruptedTokens = append(interruptedTokens, token)
+			}
+		}
+		rows.Close()
+		err = rows.Err()
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if len(flowIDs) == 0 {
+			return nil
+		}
+		for i, fid := range interruptedIDs {
+			err = e.terminateSubtree(ctx, shardIdx, fid, interruptedTokens[i], "purged", true, "")
+			if err != nil && !errors.Is(err, errRootNotInterrupted) {
+				return errors.Trace(err)
+			}
+		}
+
+		// One set-based UPDATE per shard, stamping only terminal roots. ids are trusted integers embedded as
+		// literals to dodge the per-driver bind-param ceiling. The count returned is roots MARKED (reaped shortly
+		// after). A root selected as interrupted is stamped only if it is now terminated: one a Resume revived
+		// since the SELECT is running, or has already completed or failed, and no longer matches the query. Do not
+		// re-apply the query's WHERE instead - the terminate itself moves the root off a Status or OlderThan filter.
+		revived := ""
+		if len(interruptedIDs) > 0 {
+			revived = " AND (status='" + workflow.StatusTerminated + "' OR flow_id NOT IN (" + intCSV(interruptedIDs) + "))"
+		}
+		res, err := db.ExecContext(ctx,
+			"UPDATE dwarf_flows SET delete_after_ms=1"+
+				" WHERE flow_id IN ("+intCSV(flowIDs)+") AND status IN ("+terminalStatusesSQL+") AND delete_after_ms=0"+revived,
+		)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		n, _ := res.RowsAffected()
+		perShardDeleted[pos[shardIdx]] = int(n)
+		return nil
+	})
+	if err != nil {
+		return 0, errors.Trace(err)
+	}
+	total := 0
+	for _, n := range perShardDeleted {
+		total += n
+	}
+	return total, nil
+}
+
+func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalState any) (string, error) {
+	shardNum, flowID, flowToken, err := keys.ParseFlowKey(threadKey)
+	if err != nil {
+		return "", errors.Trace(err)
+	}
+	db, err := e.db.Shard(shardNum)
+	if err != nil {
+		return "", errors.Trace(err)
+	}
+
+	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
+	// calls has to know about turns. Its age is stamped here, so it queues behind work already running
+	// and ahead of anything arriving after it.
+	ctx, doneTurn := e.opTurn(ctx, shardNum, "continue")
+	defer doneTurn()
+
+	// The caller's raw Go value is the only reducer input that does not arrive decoded from the database, so
+	// canonicalize it: NewState JSON-round-trips a map/struct, so a struct's declaration-order fields become
+	// sorted-key map form and a fold never compares two spellings of the same value (reducers compare
+	// marshalled bytes). Done before the transaction: a lock-contention retry re-runs the closure, invariant.
+	additional, err := workflow.NewState(additionalState)
+	if err != nil {
+		return "", errors.Trace(err, http.StatusBadRequest)
+	}
+
+	var threadID int
+	var threadToken string
+	var surgraphFlowID int
+	err = db.QueryRowContext(ctx, "SELECT thread_id, thread_token, surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&threadID, &threadToken, &surgraphFlowID)
+	if err == sql.ErrNoRows {
+		return "", errors.New("flow not found", http.StatusNotFound)
+	}
+	if err != nil {
+		return "", errors.Trace(err)
+	}
+	// A subgraph child runs in its own thread (subgraphs never join the parent's continuation chain), so
+	// continuing one would spin up a detached top-level flow from the subgraph's final state - not a thread
+	// turn. Continue must be addressed by a root flow's key.
+	if surgraphFlowID != 0 {
+		return "", errors.New("cannot continue a subgraph child; use a root flow key", http.StatusBadRequest)
+	}
+
+	// Create the new turn atomically with a re-check of the thread's latest turn, all under a write-first
+	// lock on the thread anchor row (flow_id == threadID). Without the lock, two concurrent Continues on
+	// one thread could both read turn N as the latest completed turn and both insert a successor - silently
+	// branching a thread that is meant to be linear. The lock serializes them: the winner inserts its new
+	// (running) turn; every other concurrent Continue then reads THAT running turn as the latest and is
+	// rejected with 409 (a next turn is already in flight). This makes the outcome deterministic - exactly
+	// one Continue succeeds per race - rather than timing-dependent. The lock writes no updated_at, so the
+	// anchor's stays frozen at its own last status transition; and because interrupt/terminate/resume never
+	// lock a thread SIBLING's rows, this anchor lock cannot cycle with them.
+	newFlowToken := keys.RandomIdentifier(16)
+	newStepToken := keys.RandomIdentifier(16)
+	var newFlowID, newStepID int64
+	var newPriority int
+	var newWorkflowURL string
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		// Write-first: grab the thread anchor's row lock to serialize concurrent Continues on this thread.
+		if _, err := lockFlowRows(ctx, tx, "flow_id=?", threadID); err != nil {
+			return err
+		}
+
+		// The new turn inherits the latest completed turn's full policy (scheduling, baggage).
+		// Exclude debug forks: a Fork shares the thread_id for List grouping but must never become a
+		// production Continue's base (forked_from_step<>0 marks a fork).
+		var flowStatus, workflowURL, fairnessKey, graphHash string
+		var finalStateJSON, graphJSON, baggageJSON []byte
+		var priority, timeBudgetMs int
+		var fairnessWeight float64
+		err := tx.QueryRowContext(ctx,
+			// delete_after_ms=0 skips turns scheduled for deletion, so Continue builds on the latest UNDELETED
+			// turn even when the newest turn is on its way out (its state was copied here before the reap).
+			"SELECT status, final_state, graph, graph_hash, workflow_url, baggage, priority, fairness_key, fairness_weight, time_budget_ms FROM dwarf_flows WHERE thread_id=? AND forked_from_step=0 AND delete_after_ms=0 ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
+			threadID,
+		).Scan(&flowStatus, &finalStateJSON, &graphJSON, &graphHash, &workflowURL, &baggageJSON, &priority, &fairnessKey, &fairnessWeight, &timeBudgetMs)
+		if err == sql.ErrNoRows {
+			return errors.New("no flows found in thread", http.StatusNotFound)
+		}
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if flowStatus != workflow.StatusCompleted {
+			return errors.New("latest flow in thread is not completed (status: %s)", flowStatus, http.StatusConflict)
+		}
+
+		finalState, err := workflow.NewState(finalStateJSON)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		var graph workflow.Graph
+		if err := json.Unmarshal(graphJSON, &graph); err != nil {
+			return errors.Trace(err)
+		}
+		entryPoint := graph.EntryPoint()
+		if entryPoint == "" {
+			return errors.New("workflow has no entry point", http.StatusBadRequest)
+		}
+		// Fold the caller's additionalState onto the prior turn's final_state through the graph's reducers. A nil
+		// deletes a plain field and contributes nothing to a reduced one, so a new turn cannot reset a reduced
+		// field; the turn's first task can, with Overwrite.
+		if err := finalState.Apply(workflow.ChangesOf(additional), graph.Reducers()); err != nil {
+			// A value that will not fold onto the thread's state is the caller's mistake, not a server fault.
+			return errors.Trace(err, http.StatusBadRequest)
+		}
+		mergedStateJSON, err := json.Marshal(finalState)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if err := e.checkPayloadSize("initial state", mergedStateJSON); err != nil {
+			return err
+		}
+
+		// Inherit the thread's baggage; DeleteOnCompletion is forced off (a disposable flow deletes itself,
+		// so it could never have been a Continue source). A turn wanting different policy uses Create with
+		// FlowOptions.ThreadKey instead.
+		inheritedBaggage, _ := workflow.NewState(baggageJSON)
+		baggageOut, err := json.Marshal(inheritedBaggage)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		timeBudget := time.Duration(timeBudgetMs) * time.Millisecond
+		if timeBudget <= 0 {
+			timeBudget = e.taskTimeBudget()
+		}
+		newWorkflowURL = workflowURL
+
+		// A Continue turn starts its own trace (fresh detached root span, empty parent) and no surgraph
+		// linkage (threadID/threadToken carried, surgraph/root ids left 0 to self-root).
+		seed := flowSeed{
+			workflowURL:    workflowURL,
+			workflowName:   graph.Name(),
+			graphJSON:      graphJSON,
+			graphHash:      graphHash,
+			baggageJSON:    baggageOut,
+			stateJSON:      mergedStateJSON,
+			traceParent:    e.mintWorkflowSpan(ctx, workflowURL, ""),
+			flowToken:      newFlowToken,
+			stepToken:      newStepToken,
+			entryPoint:     entryPoint,
+			entryURL:       dispatchURLOf(&graph, entryPoint),
+			timeBudgetMs:   timeBudget.Milliseconds(),
+			threadID:       threadID,
+			threadToken:    threadToken,
+			priority:       priority,
+			fairnessKey:    fairnessKey,
+			fairnessWeight: fairnessWeight,
+			engineID:       e.engineID,
+		}
+		newFlowID, newStepID, err = insertFlowTx(ctx, tx, seed)
+		newPriority = priority
+		return err
+	})
+	if err != nil {
+		return "", errors.Trace(err)
+	}
+
+	flowKey := keys.New(shardNum, int(newFlowID), newFlowToken)
+	e.logger.DebugContext(ctx, "Flow continued and started", "workflow", newWorkflowURL)
+	e.metricFlowStarted(ctx, newWorkflowURL, newPriority, shardNum)
+	// Ring the local doorbell so this replica claims the entry step without waiting for a refiller scan. The
+	// entry step is due now and its priority is in hand, so no lookup is needed.
+	e.enqueueStepDue(ctx, shardNum, int(newStepID), newPriority)
+	return flowKey, nil
+}

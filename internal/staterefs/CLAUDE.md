@@ -295,8 +295,8 @@ across branches and overload a value that already means something else.
 ## The Loader is per call, and batched, on purpose
 
 `Resolve` takes a `Loader` rather than owning a connection because **several resolve sites run inside an
-open transaction** (the populated fan-in in `engine/execution.go` and the final-state merge in
-`engine/completion.go`), and their read must land on that transaction's connection. Binding a shard's `*sequel.DB` at construction would silently move those reads onto
+open transaction** (the populated fan-in in `engine/fanin.go` and the final-state merge in
+`engine/finalstate.go`), and their read must land on that transaction's connection. Binding a shard's `*sequel.DB` at construction would silently move those reads onto
 a different connection, where they cannot see the transaction's own uncommitted writes. Anchors never cross a
 flow and a flow never crosses a shard, which is what makes a same-connection read always sufficient.
 

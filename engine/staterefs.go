@@ -42,7 +42,7 @@ import (
 //     metric whose job is to track the database's byte-throughput ceiling - and the wrappers attribute the
 //     total to a workflow.
 //
-// The wrappers below are thin on purpose: they exist so the call sites in execution.go / completion.go do
+// The wrappers below are thin on purpose: they exist so the call sites in execution.go / fanin.go / finalstate.go do
 // not each repeat the linker pick, the loader build and the metric emit.
 
 // stateCacheFallback is the resolve-cache budget when the process's memory cannot be detected (no

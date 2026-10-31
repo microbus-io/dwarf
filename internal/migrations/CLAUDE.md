@@ -205,7 +205,7 @@ without fragmentation or excessive write amplification.
 5-minute parked-subgraph sweep (`recoverWedgedSubgraphParks`), ranges over in-flight `running` steps and is served
 by `_selection`'s `(status, parked)` prefix. Every claim and completion would pay to maintain it, and as the
 smallest partial index on `pending` rows it is the one a Postgres generic plan picked for a claim predicate
-written as plain conjuncts, walking the backlog (`claimEligible` in `engine/execution.go`).
+written as plain conjuncts, walking the backlog (`claimEligible` in `engine/claim.go`).
 
 ### A claim RELOCATES its entry in `idx_dwarf_steps_selection` - that is where a load stall lives
 
@@ -363,7 +363,7 @@ rather than binding it (`status=?`). This is load-bearing for index usability, n
   partial-index prover has the same gap; Postgres is safe via custom plans but a literal is deterministic and
   never worse. MySQL runs these indexes unfiltered (no partial-index support), so a literal is neutral there.
 - **Safe to concatenate:** the values are `workflow.Status*` **constants** the engine controls. The one
-  caller-supplied filter (`List`/`Purge`'s `Query.Status`, `history.go`) is validated with
+  caller-supplied filter (`List`/`Purge`'s `Query.Status`, `query.go`) is validated with
   `workflow.IsValidStatus` **before** it is inlined and rejected `400` otherwise, so only a known constant -
   never arbitrary input - reaches the SQL string; there is no injection surface. Inlining is the fix chosen over
   unfiltering the mssql indexes, which would bloat them with the unbounded terminal-step history the partial

@@ -1134,7 +1134,7 @@ useful for a forEach over a very large array where downstream tasks only care ab
 **Fan-in strip on dynamic fan-out.** The injected per-branch bookkeeping (`<as>`, `<as>Index`, `<as>Count`) has no
 meaning once the cohort is behind the flow: with the Replace reducer, one branch's element value and index would
 otherwise win arbitrarily and ride forward - the flow's state would say which element it saw by *completion order*.
-So `stripForEachBookkeeping` (`completion.go`) deletes those three names. A workflow wanting the element value past
+So `stripForEachBookkeeping` (`finalstate.go`) deletes those three names. A workflow wanting the element value past
 the fan-in must forward it under a different key. **Two paths call it and both must**, or they disagree on what a
 fan-out's state means:
 
@@ -4035,7 +4035,7 @@ sorts the page itself - deciding what to trust - or pages a single shard with `Q
 never "fixed" into a global-order promise by accident.
 
 **`Query.Limit` is a per-shard cap, not a hard total - same honesty, same reason.** `perShardLimit =
-ceil(Limit/shards)` (`history.go`) is applied to each shard's query and the results are concatenated with no final
+ceil(Limit/shards)` (`query.go`) is applied to each shard's query and the results are concatenated with no final
 truncation, so a multi-shard page returns up to `shards * ceil(Limit/shards)` rows (`Limit:10` on 4 shards → up to 12;
 `Limit:1` → up to 4). `purge` divides identically, so `Purge` can mark more than `Limit` roots. This is
 documented rather than clamped **on purpose**: truncating the assembled slice would advance each shard's cursor
