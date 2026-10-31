@@ -249,15 +249,21 @@ func TestCrew_GrowthStopsWhenAWorkerIsParked(t *testing.T) {
 }
 
 // TestCrew_LostPopContinuesRatherThanExiting pins that a worker losing the race for a peeked candidate goes
-// back for more instead of returning. resident never decrements, so a return here would erode the crew under
-// exactly the contention that caused the race - and silently, since nothing else reports it.
+// back for more instead of returning. A return here would shrink the crew below its resident set under exactly
+// the contention that caused the race - and silently, since nothing else reports it.
+//
+// The lost pop is staged, not raced for. WaitForWork reserves the candidate it routes a worker to, so with one
+// candidate only one worker is ever on its way and its pop cannot fail on its own. Holding the gate's only
+// permit parks that worker between its reservation and its pop; the test then takes the candidate itself
+// (Pop ignores reservations) and hands the permit over, so the worker's pop finds the partition empty.
 func TestCrew_LostPopContinuesRatherThanExiting(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	c := newCache(t)
+	set, gate := newGateSet(t, 1)
 
 	var handled atomic.Int32
-	crew, err := New(c, newGate(t, 16), func(_ context.Context, shard, stepID int, release func()) error {
+	crew, err := New(c, gate, func(_ context.Context, shard, stepID int, release func()) error {
 		release()
 		handled.Add(1)
 		return nil
@@ -267,15 +273,34 @@ func TestCrew_LostPopContinuesRatherThanExiting(t *testing.T) {
 	}
 	crew.SetMax(8)
 
-	// Many workers against one candidate at a time: all but one lose the pop on every round.
-	crew.Start(context.Background(), 8)
-	for range 20 {
+	ctx := context.Background()
+	_, hold, _ := gate.Acquire(ctx, 1)
+	crew.Start(ctx, 8)
+	const rounds = 5
+	lost := 0
+	for range rounds {
 		fill(c, 1)
-		time.Sleep(time.Millisecond)
+		// A worker has reserved the candidate and is queued for the permit the test holds.
+		if !assert.True(eventually(func() bool { _, waiting := set.Snapshot(); return waiting[1] == 1 }),
+			"a worker queues for the held permit") {
+			break
+		}
+		if _, ok := c.Pop(); !assert.True(ok, "the test takes the reserved candidate") {
+			break
+		}
+		hold()
+		// Handed the permit, the worker pops an empty partition and gives the permit back, which is what lets
+		// this Acquire return: the lost pop has happened.
+		_, hold, _ = gate.Acquire(ctx, 1)
+		lost++
 	}
-	assert.True(eventually(func() bool { return handled.Load() >= 20 }),
-		"every candidate is handled despite the racing pops, got %d", handled.Load())
+	hold()
+	assert.Equal(rounds, lost, "every round staged a lost pop")
+	assert.Equal(int32(0), handled.Load(), "no lost pop reached the handler")
 	assert.Equal(8, crew.Resident(), "a lost pop must not retire a worker")
+
+	fill(c, 1)
+	assert.True(eventually(func() bool { return handled.Load() == 1 }), "and the crew still serves")
 
 	c.Close()
 	crew.Drain()

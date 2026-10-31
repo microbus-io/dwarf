@@ -19,7 +19,6 @@ package piston
 import (
 	"context"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -604,14 +603,20 @@ func TestPiston_RunSuppliesWhileTheScanIsStalled(t *testing.T) {
 	// Now stall the tally loop and let Run drive both. Only the supply loop can make progress.
 	r.p.SetTallyCadence(time.Hour, 0)
 	r.p.SetSupplyCadence(time.Millisecond, time.Millisecond)
+	sm := seamster.New(true)
+	r.p.SetSeams(sm)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	pushed := sm.Waiter(CheckpointCycleDone)
 	go func() { defer close(done); r.p.Run(ctx) }()
 
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) && r.cache.Len() < len(want) {
-		time.Sleep(2 * time.Millisecond)
+	// The first push is planned from the hand tally, so it carries both steps. The bound is a hang guard only:
+	// a first fetch against a fresh database on a loaded server takes seconds.
+	select {
+	case <-pushed:
+	case <-time.After(60 * time.Second):
+		t.Error("the supply loop never pushed")
 	}
 	cancel()
 	<-done
@@ -624,53 +629,90 @@ func TestPiston_RunSuppliesWhileTheScanIsStalled(t *testing.T) {
 //
 // SetIdle clears what is there when it runs. A loop that entered its cycle before that - past its own idle
 // check - finishes afterwards and re-enters the shard it just withdrew, or re-pushes the partition it just
-// emptied. Both loops then park, and the stale tally stands FOREVER: every live piston on the replica finds
+// emptied. Both loops then park, and the stale state stands FOREVER: every live piston on the replica finds
 // none of its own keys at that band and dispatches nothing, which is the exact wedge SetIdle exists to
 // prevent. The band scan runs for seconds on a deep backlog, so the window is not a sliver.
 //
-// The context func is the hook: it is applied at the START of a cycle, so blocking in it holds BOTH loops
-// demonstrably past their idle checks and inside a cycle - no sleep guesses what a real one would. Both,
-// not whichever calls first: the tally loop is the one that re-enters the shard, and blocking only the
-// supply loop reproduces nothing.
+// Both halves are staged rather than raced, in the one order that leaves each loop something to undo. The
+// context func is applied at the START of a cycle, so blocking in it holds a loop past its idle check, and each
+// loop gets its own context so the two are released one at a time - which is why the test starts the two loops
+// itself, exactly as Run does. The tally loop goes first and is frozen at CheckpointTallyDone, after its scan
+// re-entered the shard and before its own idle check; only then does the supply loop run, so it plans from
+// that stale tally and re-pushes. Released together, the supply loop usually plans from the tally SetIdle had
+// already cleared, pushes nothing, and its withdrawal goes untested.
 func TestPiston_IdleWithdrawsAgainstARunningLoop(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	r := newRig(t)
 	r.p.SetTallyCadence(time.Millisecond, 0)
 	r.p.SetSupplyCadence(time.Millisecond, 0)
+	sm := seamster.New(true)
+	r.p.SetSeams(sm)
 	r.insertStep(t, 1, 5, "alpha", 1)
 
-	var entered atomic.Int32
-	var once sync.Once
-	bothIn, release := make(chan struct{}), make(chan struct{})
+	type loopKey struct{}
+	type loopHold struct {
+		in, release chan struct{}
+		once        sync.Once
+	}
+	holds := map[string]*loopHold{
+		"tally":  {in: make(chan struct{}), release: make(chan struct{})},
+		"supply": {in: make(chan struct{}), release: make(chan struct{})},
+	}
 	r.p.SetContextFunc(func(ctx context.Context) context.Context {
-		if entered.Add(1) >= 2 {
-			once.Do(func() { close(bothIn) })
-		}
-		<-release // a closed channel lets every later cycle straight through
+		h := holds[ctx.Value(loopKey{}).(string)]
+		h.once.Do(func() { close(h.in) })
+		<-h.release // a closed channel lets every later cycle straight through
 		return ctx
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { defer close(done); r.p.Run(ctx) }()
-	defer func() { cancel(); <-done }()
+	var loops sync.WaitGroup
+	loops.Add(2)
+	go func() { defer loops.Done(); r.p.runTallier(context.WithValue(ctx, loopKey{}, "tally")) }()
+	go func() { defer loops.Done(); r.p.runSupplier(context.WithValue(ctx, loopKey{}, "supply")) }()
+	defer func() { cancel(); loops.Wait() }()
 
-	<-bothIn // both loops are inside a cycle, past their idle checks
-	r.p.SetIdle(true)
-	close(release) // and now they complete, re-tallying and re-pushing over the withdrawal
+	hang := time.After(60 * time.Second)
+	await := func(ch <-chan struct{}, what string) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-hang:
+			t.Fatal(what)
+		}
+	}
+	await(holds["tally"].in, "the tally loop never entered a cycle")
+	await(holds["supply"].in, "the supply loop never entered a cycle")
+	r.p.SetIdle(true) // both loops are inside a cycle, past their idle checks
 
-	// The withdrawal must still take, and must STAY taken.
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) && (r.planner.Plan(1, 8).Tallied || r.cache.Len() > 0) {
-		time.Sleep(2 * time.Millisecond)
+	sm.Break(CheckpointTallyDone)
+	defer sm.Resume(CheckpointTallyDone)
+	frozen := sm.Waiter(CheckpointTallyDone)
+	close(holds["tally"].release)
+	await(frozen, "the held tally cycle never completed")
+	assert.True(r.planner.Plan(1, 8).Tallied, "the held scan re-entered the shard after SetIdle")
+
+	pushed := sm.Waiter(CheckpointCycleDone)
+	close(holds["supply"].release)
+	await(pushed, "the held supply cycle never pushed from the stale tally")
+
+	// Each withdrawal must take, and must STAY taken: an idle loop starts no further cycle, so once it has
+	// withdrawn nothing puts the state back.
+	deadline := time.Now().Add(60 * time.Second)
+	for r.cache.Len() > 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	assert.Equal(0, r.cache.Len(), "the supply loop empties the partition it re-pushed")
+	sm.Resume(CheckpointTallyDone)
+	for r.planner.Plan(1, 8).Tallied && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
 	}
 	assert.False(r.planner.Plan(1, 8).Tallied, "an idle shard must not be left in the planner")
 
 	// Asserted from a PEER's point of view too, which is where the wedge is felt: with shard 1 gone, a peer
 	// holding only band 9 is the best band in the fleet and is released to dispatch. A stale band-5 claim
 	// from the idle shard would outrank it forever.
-	time.Sleep(50 * time.Millisecond) // settle past any further in-flight cycle
 	r.planner.Tally(2, []planner.Tally{{Band: 9, Key: "beta", Weight: 1, Count: 1}})
 	plan := r.planner.Plan(2, 8)
 	assert.Equal(9, plan.GlobalBand, "the idle shard's band claim must not come back")

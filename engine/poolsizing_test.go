@@ -738,7 +738,7 @@ func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
 }
 
 // TestPoolSizing_WorkerCeiling pins the lease-margin ceiling: N_max = M x margin / txTime x safety,
-// with txTime = k x RTT + 3ms, where k is the driver's completion round trips (4 on PostgreSQL, 7 on SQLite, 8
+// with txTime = k x RTT + 3ms, where k is the driver's completion round trips (4 on PostgreSQL, 6 on SQLite, 7
 // on MySQL and SQL Server).
 // Every input is engine-visible (the pool, the engine's own 30s margin, the driver, and the RTT probed at
 // Startup) - no task duration appears, which is the property that makes it a derivable default rather than a
@@ -793,7 +793,7 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	assert.Equal(int32(max(64, residentWorkersPerConn*zeroConfig)), int32(e.crew.Resident()), "only the resident floor is spawned eagerly")
 
 	// A large budget plus a small one: the dispatch count follows their AGGREGATE budget, while the ceiling
-	// is keyed on the WORST shard (the small pool), never the aggregate.
+	// is the WORST shard's, never the aggregate's.
 	e2 := newSolo(t, "e2")
 	defer e2.Shutdown(t.Context())
 	assert.NoError(e2.SetHost(noopHost{}))
@@ -801,8 +801,12 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	assert.NoError(e2.SetShard(ShardSpec{Index: 2, MaxConnections: 8}))
 	assert.NoError(e2.Startup(context.Background()))
 	assert.Equal(workersPerConnBudget*(declaredBudget+8), e2.workersDispatch)
-	assert.True(int(e2.workers.Load()) < workerCeiling(declaredBudget, probedRTT(e2, 1), e2.shardDriver(1)),
-		"the smallest pool sets the ceiling")
+	// Each shard's ceiling is taken at its own pool AND its own probed RTT, so the small pool's is the lower one
+	// only when the two probes are close. Two probes of a loaded server need not be: shard 1 at 4ms against
+	// shard 2 at 0.3ms puts the 8-connection ceiling above the 48-connection one on MySQL.
+	ceiling1 := workerCeiling(declaredBudget, probedRTT(e2, 1), e2.shardDriver(1))
+	ceiling2 := workerCeiling(8, probedRTT(e2, 2), e2.shardDriver(2))
+	assert.Equal(min(ceiling1, ceiling2), int(e2.workers.Load()), "the worst shard's ceiling sets the max")
 
 	// An explicit SetWorkers is spawned IN FULL, even above the connection-derived dispatch count: the
 	// operator asked for that many workers, and no-op tasks never park, so growth would never take the
