@@ -61,7 +61,19 @@ func TestCrossShardPriorityflow(t *testing.T) {
 	var mu sync.Mutex
 	var order []string
 
+	// The first low step holds the only worker until the urgent burst exists. Left to drain, the backlog runs
+	// for as long as the shard cycles and the burst's Creates take, which on a loaded server is long enough to
+	// empty it, and every low step that runs before the burst is one fewer the burst can preempt.
+	holding := make(chan struct{})
+	var holdingOnce sync.Once
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+
 	mux.HandleTask("crossshardpriority.verify:428/record", func(ctx context.Context, f *workflow.Flow) error {
+		if f.GetString("tag") == "low" {
+			holdingOnce.Do(func() { close(holding) })
+			<-release
+		}
 		if d := f.GetInt("delayMs"); d > 0 {
 			time.Sleep(time.Duration(d) * time.Millisecond)
 		}
@@ -73,6 +85,8 @@ func TestCrossShardPriorityflow(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
+	// Declared after the Shutdown defer so it unwinds first: the drain waits on the held worker.
+	defer releaseOnce.Do(func() { close(release) })
 	assertSetup := testarossa.For(t)
 	assertSetup.NoError(eng.SetHost(mux))
 	// Three shards, so placement spreads the flows and the global band must be merged from three
@@ -94,6 +108,11 @@ func TestCrossShardPriorityflow(t *testing.T) {
 			&workflow.FlowOptions{Priority: 5})
 		assert.NoError(err)
 		lowKeys = append(lowKeys, k)
+	}
+	select {
+	case <-holding:
+	case <-time.After(60 * time.Second * enginetest.TimeoutScale()):
+		t.Fatal("no low step was dispatched")
 	}
 
 	// The urgent work below must arrive into caches ALREADY full of lower-priority hints - that is the
@@ -117,6 +136,7 @@ func TestCrossShardPriorityflow(t *testing.T) {
 		assert.NoError(err)
 		highKeys = append(highKeys, k)
 	}
+	releaseOnce.Do(func() { close(release) })
 
 	deadline, cancel := context.WithTimeout(ctx, 60*time.Second*enginetest.TimeoutScale())
 	defer cancel()

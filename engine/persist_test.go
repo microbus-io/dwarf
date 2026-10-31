@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
+	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -444,6 +446,12 @@ func TestPersist_CancelRerouteWriteIsPersisted(t *testing.T) {
 			t.FailNow()
 		}
 		<-started
+		// The flow stops when failStep commits, and the classifier counts dwarf_steps_write_failed only after
+		// that, so Await can return before the count. Work's dispatch returning is what follows both.
+		shard, _, _, err := keys.ParseFlowKey(fk)
+		assert.NoError(err)
+		_, _, workStepID := flowRows(t, e, fk)
+		dispatched := e.seams.Waiter(engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(workStepID)))
 		assert.NoError(e.Cancel(ctx, fk, "stop"))
 		close(release)
 		awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
@@ -451,6 +459,11 @@ func TestPersist_CancelRerouteWriteIsPersisted(t *testing.T) {
 		out, err := e.Await(awaitCtx, fk)
 		if !assert.NoError(err) || !assert.NotNil(out) {
 			t.FailNow()
+		}
+		select {
+		case <-dispatched:
+		case <-awaitCtx.Done():
+			t.Fatal("the Work dispatch never returned")
 		}
 		var rm metricdata.ResourceMetrics
 		assert.NoError(reader.Collect(ctx, &rm))
