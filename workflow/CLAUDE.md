@@ -5,7 +5,8 @@
 
 ### Task self-identity on the carrier
 
-`Flow.FlowKey()` and `Flow.StepKey()` return the task's own flow/step keys (`{shard}-{hour}-{id}-{token}`), populated by the
+`Flow.FlowKey()` and `Flow.StepKey()` return the task's own flow/step keys (`{shard}-{hour}-{flowID}-{token}` and
+`{shard}-{hour}-{flowID}-{stepID}-{token}`), populated by the
 orchestrator on every dispatch alongside the timestamps. They let a task correlate logs/traces or call back into the
 engine (`History`, `Step`, `Snapshot`) for its own flow without the host threading identity through baggage. `step_token`
 is read alongside the claim/read in `processStep` (added to the RETURNING/OUTPUT/SELECT of all three driver branches);

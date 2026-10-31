@@ -118,7 +118,7 @@ func TestCreatedHour_EveryRowCarriesItsFlowsHour(t *testing.T) {
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET flow_created_hour=flow_created_hour-? WHERE flow_id=?", back, rootID)
 	assert.NoError(err)
 	movedHour := hour - back
-	rootKey := keys.New(shard, movedHour, rootID, rootToken)
+	rootKey := keys.NewFlowKey(shard, movedHour, rootID, rootToken)
 
 	if !assert.NoError(e.Resume(ctx, rootKey, nil)) {
 		return
@@ -230,7 +230,7 @@ func TestCreatedHour_EveryRowCarriesItsFlowsHour(t *testing.T) {
 	assert.NoError(srows.Err())
 	srows.Close()
 	for _, s := range steps {
-		_, h, stepID, _, err := keys.ParseStepKey(s.StepKey)
+		_, h, _, stepID, _, err := keys.ParseStepKey(s.StepKey)
 		assert.NoError(err)
 		assert.Equal(stepHours[stepID], h, "step key %s", s.StepKey)
 		assert.Equal(movedHour, h, "step key %s is the root's", s.StepKey)
@@ -297,9 +297,14 @@ func TestCreatedHour_WrongHourIsNotFound(t *testing.T) {
 	respell := func(key string) string {
 		shard, hour, id, token, err := keys.ParseFlowKey(key)
 		assert.NoError(err)
-		return keys.New(shard, hour+1, id, token)
+		return keys.NewFlowKey(shard, hour+1, id, token)
 	}
-	wrongDone, wrongParked, wrongStep := respell(doneKey), respell(parkedKey), respell(steps[0].StepKey)
+	respellStep := func(key string) string {
+		shard, hour, flowID, stepID, token, err := keys.ParseStepKey(key)
+		assert.NoError(err)
+		return keys.NewStepKey(shard, hour+1, flowID, stepID, token)
+	}
+	wrongDone, wrongParked, wrongStep := respell(doneKey), respell(parkedKey), respellStep(steps[0].StepKey)
 	notFound := func(op string, err error) {
 		if assert.Error(err, op) {
 			assert.Equal(http.StatusNotFound, errors.StatusCode(err), "%s: %v", op, err)

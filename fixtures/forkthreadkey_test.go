@@ -138,7 +138,7 @@ func TestFork_SubgraphChildGetsThreadTokenAndStepID(t *testing.T) {
 
 	// End-to-end: the ThreadKey List builds for the child must resolve, not 404. A key with an empty token
 	// half matches no row in queryClauses' `WHERE flow_id=? AND flow_token=?`.
-	childThreadKey := keys.New(shardNum, childHour, threadID, threadToken) // a subgraph flow is its own thread
+	childThreadKey := keys.NewFlowKey(shardNum, childHour, threadID, threadToken) // a subgraph flow is its own thread
 	byThread, _, err := eng.List(ctx, workflow.Query{ThreadKey: childThreadKey, IncludeSubgraphs: true})
 	if !assert.NoError(err) {
 		return

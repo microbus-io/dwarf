@@ -264,7 +264,7 @@ func (e *Engine) failFlowTx(ctx context.Context, tx sequel.Executor, shardNum, f
 func (e *Engine) endLostFlow(ctx context.Context, shardNum, flowID, flowHour int, flowToken string, label flowLabel, loss flowLoss) {
 	e.metricFlowEnded(ctx, label.workflowURL, loss.status, label.priority, shardNum)
 	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowID), "to", loss.status)
-	e.signalStop(ctx, keys.New(shardNum, flowHour, flowID, flowToken), loss.status)
+	e.signalStop(ctx, keys.NewFlowKey(shardNum, flowHour, flowID, flowToken), loss.status)
 	if loss.reDispatchParent {
 		e.enqueueStep(ctx, shardNum, loss.parentStepID)
 	}

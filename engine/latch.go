@@ -166,7 +166,7 @@ func (e *Engine) resolveStoppedFlows(ctx context.Context, flowKeys []string) (ma
 				// The row spells its own key, so a parked caller is found by lookup and the token check
 				// falls out of it: a forged key matches nothing here and is left to the IN lookup, which
 				// owns the absent-or-mismatched verdict.
-				flowKey := keys.New(shard, flowHour, flowID, flowToken)
+				flowKey := keys.NewFlowKey(shard, flowHour, flowID, flowToken)
 				if !wanted[flowKey] {
 					continue // nobody is parked on it, which is most of what a busy shard stops
 				}
@@ -212,7 +212,7 @@ func (e *Engine) resolveStoppedFlows(ctx context.Context, flowKeys []string) (ma
 					complete = false
 					break
 				}
-				found[keys.New(shard, flowHour, flowID, flowToken)] = status
+				found[keys.NewFlowKey(shard, flowHour, flowID, flowToken)] = status
 			}
 			if err := rows.Err(); err != nil {
 				fail(err)

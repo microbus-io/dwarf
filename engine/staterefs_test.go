@@ -590,7 +590,7 @@ func TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue(t *testing.T) {
 			if step.TaskName != "Join" {
 				continue
 			}
-			_, _, joinID, _, err := keys.ParseStepKey(step.StepKey)
+			_, _, _, joinID, _, err := keys.ParseStepKey(step.StepKey)
 			assert.NoError(err)
 			_, joinRefs, _ := stepRefsOf(t, e, joinID)
 			ref, isRef := joinRefs["log"]

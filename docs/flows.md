@@ -8,7 +8,7 @@
 Every interaction with a flow is a method on `*engine.Engine`. They fall into a few groups: creating &
 running, inspecting, pausing & resuming, terminating & recovering, threading, and retention. Flows are
 addressed by their **flow key** (`{shard}-{hour}-{flowID}-{token}`), returned at creation; steps by their **step
-key**.
+key** (`{shard}-{hour}-{flowID}-{stepID}-{token}`), which names its flow too.
 
 ## Creating and running
 

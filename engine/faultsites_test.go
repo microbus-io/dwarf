@@ -336,7 +336,7 @@ func TestFaultSite_ForkCommit(t *testing.T) {
 	var aStepID, aStepHour int
 	var aStepToken string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id, flow_created_hour, step_token FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStepID, &aStepHour, &aStepToken))
-	forkStepKey := keys.New(shard, aStepHour, aStepID, aStepToken)
+	forkStepKey := keys.NewStepKey(shard, aStepHour, flowID, aStepID, aStepToken)
 
 	// The clone transaction fails once: Fork errors, the origin is byte-identical, and no clone rows exist.
 	e.seams.Inject(engineseams.FaultForkCommit)

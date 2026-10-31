@@ -424,7 +424,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 		return "", errors.Trace(err)
 	}
 
-	flowKey = keys.New(shardNum, newFlowHour, int(newFlowID), flowToken)
+	flowKey = keys.NewFlowKey(shardNum, newFlowHour, int(newFlowID), flowToken)
 	// Seed the graph cache when this replica dispatches the shard: the doorbell below offers the entry step to
 	// its own candidate cache, so it is about to claim the step and would otherwise read back the graph it just
 	// wrote. After the commit, so a rolled-back flow id - which SQLite can hand out again - is never cached.
@@ -1568,7 +1568,7 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 		return "", errors.Trace(err)
 	}
 
-	flowKey := keys.New(shardNum, newFlowHour, int(newFlowID), newFlowToken)
+	flowKey := keys.NewFlowKey(shardNum, newFlowHour, int(newFlowID), newFlowToken)
 	e.logger.DebugContext(ctx, "Flow continued and started", "workflow", newWorkflowURL)
 	e.metricFlowStarted(ctx, newWorkflowURL, newPriority, shardNum)
 	// Ring the local doorbell so this replica claims the entry step without waiting for a refiller scan. The

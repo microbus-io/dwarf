@@ -205,7 +205,7 @@ func TestPayloadVer_ReadersRefuseNewerFlows(t *testing.T) {
 		assert.Contains(err.Error(), "payload is in format")
 		assert.Equal(http.StatusNotImplemented, errors.StatusCode(err))
 	}
-	_, err = e.Step(ctx, keys.New(shard, hour, stepID, stepToken))
+	_, err = e.Step(ctx, keys.NewStepKey(shard, hour, flowID, stepID, stepToken))
 	if assert.Error(err) {
 		assert.Contains(err.Error(), "payload is in format")
 	}
@@ -249,7 +249,7 @@ func TestPayloadVer_ForkRefusesANewerFlow(t *testing.T) {
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET state_refs=? WHERE step_id=?", []byte(`{"doc":{"v":9}}`), stepID)
 	assert.NoError(err)
 
-	_, err = e.Fork(ctx, keys.New(shard, hour, stepID, stepToken), nil)
+	_, err = e.Fork(ctx, keys.NewStepKey(shard, hour, flowID, stepID, stepToken), nil)
 	if assert.Error(err) {
 		assert.Contains(err.Error(), "payload is in format")
 	}
@@ -301,7 +301,7 @@ func TestPayloadVer_ForkRefusesANewerSubgraph(t *testing.T) {
 	setFlowPayloadVer(t, db, childID, payloadVer+1)
 
 	// Forking at Done keeps Call, whose child is cloned whole.
-	_, err = e.Fork(ctx, keys.New(shard, hour, doneID, doneToken), nil)
+	_, err = e.Fork(ctx, keys.NewStepKey(shard, hour, flowID, doneID, doneToken), nil)
 	if assert.Error(err) {
 		assert.Contains(err.Error(), "payload is in format")
 	}
@@ -339,7 +339,7 @@ func TestPayloadVer_CreateStampsForkCopies(t *testing.T) {
 	setFlowPayloadVer(t, db, flowID, 0)
 	var stepToken string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_token FROM dwarf_steps WHERE step_id=?", stepID).Scan(&stepToken))
-	forkKey, err := e.Fork(ctx, keys.New(shard, hour, stepID, stepToken), nil)
+	forkKey, err := e.Fork(ctx, keys.NewStepKey(shard, hour, flowID, stepID, stepToken), nil)
 	assert.NoError(err)
 	_, _, forkID, _, err := keys.ParseFlowKey(forkKey)
 	assert.NoError(err)

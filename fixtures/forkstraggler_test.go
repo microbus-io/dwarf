@@ -83,7 +83,7 @@ func TestForkStraggler_NormalizedToTerminated(t *testing.T) {
 	}
 
 	// Fork at A. The fork re-runs A -> END and completes; the straggler must not be resurrected.
-	forkKey, err := e.Fork(ctx, keys.New(shardNum, aStepHour, aStepID, aStepToken), nil)
+	forkKey, err := e.Fork(ctx, keys.NewStepKey(shardNum, aStepHour, flowID, aStepID, aStepToken), nil)
 	if !assert.NoError(err) {
 		return
 	}

@@ -52,9 +52,9 @@ func FuzzParseFlowKey(f *testing.F) {
 		if hour < 0 || hour > math.MaxInt32 || id < 0 {
 			t.Fatalf("accepted key %q with an hour %d outside the INT column's range, or a negative id %d", raw, hour, id)
 		}
-		// New is ParseFlowKey's inverse, and the token is the verbatim fourth segment, so re-encoding a
+		// NewFlowKey is ParseFlowKey's inverse, and the token is the verbatim fourth segment, so re-encoding a
 		// parsed key must reproduce the input.
-		if re := New(shard, hour, id, token); re != raw {
+		if re := NewFlowKey(shard, hour, id, token); re != raw {
 			t.Fatalf("accepted a non-canonical key: %q -> (%d,%d,%d,%q) -> %q", raw, shard, hour, id, token, re)
 		}
 		if !canonicalToken(token) {
@@ -67,22 +67,26 @@ func FuzzParseFlowKey(f *testing.F) {
 	})
 }
 
-// FuzzParseStepKey mirrors FuzzParseFlowKey for step keys.
+// FuzzParseStepKey mirrors FuzzParseFlowKey for step keys, which name their flow as well.
 func FuzzParseStepKey(f *testing.F) {
+	f.Add("1-234567-3-7-deadbeefdeadbeef")
 	f.Add("1-234567-7-deadbeefdeadbeef")
 	f.Add("3-")
-	f.Add("-1-1-x")
+	f.Add("-1-1-1-x")
+	f.Add("1-2-+3-4-deadbeefdeadbeef")
 	f.Fuzz(func(t *testing.T, raw string) {
-		shard, hour, id, token, err := ParseStepKey(raw)
+		shard, hour, flowID, stepID, token, err := ParseStepKey(raw)
 		if err != nil {
 			return
 		}
 		if shard < 1 {
 			t.Fatalf("accepted step key %q with shard %d < 1", raw, shard)
 		}
-		s2, h2, i2, t2, err2 := ParseStepKey(New(shard, hour, id, token))
-		if err2 != nil || s2 != shard || h2 != hour || i2 != id || t2 != token {
-			t.Fatalf("round-trip mismatch for %q", raw)
+		if hour < 0 || hour > math.MaxInt32 || flowID < 0 || stepID < 0 {
+			t.Fatalf("accepted step key %q with an hour %d outside the INT column's range, or a negative id", raw, hour)
+		}
+		if re := NewStepKey(shard, hour, flowID, stepID, token); re != raw {
+			t.Fatalf("accepted a non-canonical step key: %q -> %q", raw, re)
 		}
 	})
 }
@@ -109,7 +113,7 @@ func TestParseKey_RejectsNonCanonicalSpellings(t *testing.T) {
 		if _, _, _, _, err := ParseFlowKey(key); err == nil {
 			t.Errorf("flow key %q must be rejected", key)
 		}
-		if _, _, _, _, err := ParseStepKey(key); err == nil {
+		if _, _, _, _, _, err := ParseStepKey(key); err == nil {
 			t.Errorf("step key %q must be rejected", key)
 		}
 	}
@@ -117,17 +121,39 @@ func TestParseKey_RejectsNonCanonicalSpellings(t *testing.T) {
 		if _, _, _, _, err := ParseFlowKey(key); err != nil {
 			t.Errorf("flow key %q must parse: %v", key, err)
 		}
+		// A flow key is not a step key: it names no step.
+		if _, _, _, _, _, err := ParseStepKey(key); err == nil {
+			t.Errorf("flow key %q must not parse as a step key", key)
+		}
+	}
+	for _, key := range []string{
+		"1-2-+3-5-" + tok, "1-2-3-05-" + tok, "1-2-03-5-" + tok, "1-2-3--5-" + tok, // non-canonical ids
+		"1-2-3-5-A1B2C3D4E5F60718", // a token in capitals
+		"0-2-3-5-" + tok,           // shard 0
+		"1-2147483648-3-5-" + tok,  // past the INT columns' range
+	} {
+		if _, _, _, _, _, err := ParseStepKey(key); err == nil {
+			t.Errorf("step key %q must be rejected", key)
+		}
 	}
 }
 
-// TestNew_RoundTrips pins that New and the parsers are inverses, with every part in its place.
+// TestNew_RoundTrips pins that the constructors and the parsers are inverses, with every part in its place.
 func TestNew_RoundTrips(t *testing.T) {
-	key := New(3, 234567, 42, "a1b2c3d4e5f60718")
+	key := NewFlowKey(3, 234567, 42, "a1b2c3d4e5f60718")
 	if key != "3-234567-42-a1b2c3d4e5f60718" {
-		t.Fatalf("New spelled %q", key)
+		t.Fatalf("NewFlowKey spelled %q", key)
 	}
 	shard, hour, id, token, err := ParseFlowKey(key)
 	if err != nil || shard != 3 || hour != 234567 || id != 42 || token != "a1b2c3d4e5f60718" {
 		t.Fatalf("ParseFlowKey(%q) = %d, %d, %d, %q, %v", key, shard, hour, id, token, err)
+	}
+	key = NewStepKey(3, 234567, 42, 77, "a1b2c3d4e5f60718")
+	if key != "3-234567-42-77-a1b2c3d4e5f60718" {
+		t.Fatalf("NewStepKey spelled %q", key)
+	}
+	shard, hour, flowID, stepID, token, err := ParseStepKey(key)
+	if err != nil || shard != 3 || hour != 234567 || flowID != 42 || stepID != 77 || token != "a1b2c3d4e5f60718" {
+		t.Fatalf("ParseStepKey(%q) = %d, %d, %d, %d, %q, %v", key, shard, hour, flowID, stepID, token, err)
 	}
 }

@@ -14,11 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package keys encodes and decodes the engine's composite flow and step keys. A key is
-// "{shard}-{hour}-{id}-{token}" with a 1-based shard: the shard routes the request, the hour is the flow's creation
-// hour (hours since 2000-01-01 00:00 UTC, shared by the flow and every one of its steps), the id is the per-shard
-// sequential row id, and the random token is an unguessable write capability. CorrelationID derives the
-// token-free, capability-free identifier that observability sinks must use.
+// Package keys encodes and decodes the engine's composite flow and step keys. A flow key is
+// "{shard}-{hour}-{flowID}-{token}" and a step key "{shard}-{hour}-{flowID}-{stepID}-{token}", with a 1-based
+// shard: the shard routes the request, the hour is the flow's creation hour (hours since 2000-01-01 00:00 UTC,
+// shared by the flow and every one of its steps), the ids are the per-shard sequential row ids - a step key names
+// its flow too - and the random token is an unguessable write capability. CorrelationID derives the token-free,
+// capability-free identifier that observability sinks must use.
 package keys
 
 import (
@@ -32,49 +33,66 @@ import (
 	"github.com/microbus-io/errors"
 )
 
-// New composes a flow or step key from its parts: "{shard}-{hour}-{id}-{token}" with a 1-based shard. Flow and
-// step keys share one format, so one constructor serves both, and it is the inverse of ParseFlowKey and
-// ParseStepKey - a key it builds parses back to the parts it was given.
-func New(shardNum, hour, id int, token string) string {
-	return strconv.Itoa(shardNum) + "-" + strconv.Itoa(hour) + "-" + strconv.Itoa(id) + "-" + token
+// NewFlowKey composes a flow key from its parts: "{shard}-{hour}-{flowID}-{token}" with a 1-based shard. It is the
+// inverse of ParseFlowKey - a key it builds parses back to the parts it was given.
+func NewFlowKey(shardNum, hour, flowID int, token string) string {
+	return strconv.Itoa(shardNum) + "-" + strconv.Itoa(hour) + "-" + strconv.Itoa(flowID) + "-" + token
+}
+
+// NewStepKey composes a step key from its parts: "{shard}-{hour}-{flowID}-{stepID}-{token}" with a 1-based shard,
+// the hour and flow its flow's. It is the inverse of ParseStepKey.
+func NewStepKey(shardNum, hour, flowID, stepID int, token string) string {
+	return strconv.Itoa(shardNum) + "-" + strconv.Itoa(hour) + "-" + strconv.Itoa(flowID) + "-" + strconv.Itoa(stepID) +
+		"-" + token
 }
 
 // ParseFlowKey extracts the shard, creation hour, numeric flow ID and flow token from a composite flow key.
 // Format: "{shard}-{hour}-{flowID}-{token}" with a 1-based shard.
 func ParseFlowKey(flowKey string) (shardNum int, hour int, flowID int, flowToken string, err error) {
-	return parseKey(flowKey, "invalid flow key")
+	ids, token, err := parseKey(flowKey, 1, "invalid flow key")
+	if err != nil {
+		return 0, 0, 0, "", errors.Trace(err)
+	}
+	return ids[0], ids[1], ids[2], token, nil
 }
 
-// ParseStepKey extracts the shard, creation hour, numeric step ID and step token from a composite step key.
-// Format: "{shard}-{hour}-{stepID}-{token}" with a 1-based shard.
-func ParseStepKey(stepKey string) (shardNum int, hour int, stepID int, stepToken string, err error) {
-	return parseKey(stepKey, "invalid step key")
+// ParseStepKey extracts the shard, its flow's creation hour, the numeric flow and step IDs and the step token from a
+// composite step key. Format: "{shard}-{hour}-{flowID}-{stepID}-{token}" with a 1-based shard.
+func ParseStepKey(stepKey string) (shardNum int, hour int, flowID int, stepID int, stepToken string, err error) {
+	ids, token, err := parseKey(stepKey, 2, "invalid step key")
+	if err != nil {
+		return 0, 0, 0, 0, "", errors.Trace(err)
+	}
+	return ids[0], ids[1], ids[2], ids[3], token, nil
 }
 
-// parseKey splits a "{shard}-{hour}-{id}-{token}" key; invalid names the key kind in the 400 it returns. It accepts
-// only the canonical spelling New produces: ParseInt also takes a '+' or leading zeros, and a key spelled that way
-// names the same row under a different string, which anything keying on the key - a parked Await - never matches.
-func parseKey(key, invalid string) (shardNum int, hour int, id int, token string, err error) {
-	parts := strings.SplitN(key, "-", 4)
-	if len(parts) != 4 {
-		return 0, 0, 0, "", errors.New("%s", invalid, http.StatusBadRequest)
+// parseKey splits a "{shard}-{hour}-{id}...-{token}" key with idCount ids, and returns the shard, the hour and the ids
+// in that order, then the token; invalid names the key kind in the 400 it returns. It accepts only the canonical
+// spelling the constructors produce: ParseInt also takes a '+' or leading zeros, and a key spelled that way names the
+// same row under a different string, which anything keying on the key - a parked Await - never matches.
+func parseKey(key string, idCount int, invalid string) ([]int, string, error) {
+	parts := strings.SplitN(key, "-", idCount+3)
+	if len(parts) != idCount+3 {
+		return nil, "", errors.New("%s", invalid, http.StatusBadRequest)
 	}
-	shardNum64, ok := canonicalInt(parts[0])
-	if !ok || shardNum64 < 1 {
-		return 0, 0, 0, "", errors.New("%s", invalid, http.StatusBadRequest)
+	nums := make([]int, idCount+2)
+	for i, part := range parts[:idCount+2] {
+		n, ok := canonicalInt(part)
+		switch {
+		case !ok:
+			return nil, "", errors.New("%s", invalid, http.StatusBadRequest)
+		case i == 0 && n < 1:
+			return nil, "", errors.New("%s", invalid, http.StatusBadRequest)
+		case i == 1 && n > math.MaxInt32: // the hour columns are INT: a larger value names no row, and PostgreSQL refuses to bind it
+			return nil, "", errors.New("%s", invalid, http.StatusBadRequest)
+		}
+		nums[i] = int(n)
 	}
-	hour64, ok := canonicalInt(parts[1])
-	if !ok || hour64 > math.MaxInt32 { // the hour columns are INT: a larger value names no row, and PostgreSQL refuses to bind it
-		return 0, 0, 0, "", errors.New("%s", invalid, http.StatusBadRequest)
+	token := parts[idCount+2]
+	if !canonicalToken(token) {
+		return nil, "", errors.New("%s", invalid, http.StatusBadRequest)
 	}
-	id64, ok := canonicalInt(parts[2])
-	if !ok {
-		return 0, 0, 0, "", errors.New("%s", invalid, http.StatusBadRequest)
-	}
-	if !canonicalToken(parts[3]) {
-		return 0, 0, 0, "", errors.New("%s", invalid, http.StatusBadRequest)
-	}
-	return int(shardNum64), int(hour64), int(id64), parts[3], nil
+	return nums, token, nil
 }
 
 // canonicalToken reports whether s is spelled as RandomIdentifier(16) spells a token: 16 lowercase hex digits. A
@@ -104,7 +122,7 @@ func canonicalInt(s string) (int64, bool) {
 }
 
 // CorrelationID is the non-secret, capability-free flow identifier for telemetry (spans, logs,
-// metrics): the flowKey with its creation hour and its random token segment omitted. It uniquely identifies the flow for
+// metrics): the flow key with its creation hour and its random token segment omitted. It uniquely identifies the flow for
 // correlation - {shard} disambiguates the per-shard sequential flow_id - but grants nothing. It is
 // deliberately NOT a valid engine key: no operation accepts it, and the engine offers no
 // correlationID->key lookup, so a trace/log reader cannot escalate it into the flow's write capability.

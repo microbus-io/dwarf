@@ -226,7 +226,7 @@ func (f *Flow) FlowKey() string {
 }
 
 // StepKey returns the external key of the step this task is executing, in the form
-// "{shard}-{hour}-{stepID}-{token}". Useful for correlating logs/traces or calling back into the engine
+// "{shard}-{hour}-{flowID}-{stepID}-{token}". Useful for correlating logs/traces or calling back into the engine
 // (e.g. Step) for the task's own step. Empty when called outside a dispatched task.
 func (f *Flow) StepKey() string {
 	return f.stepKey

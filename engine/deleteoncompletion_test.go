@@ -361,7 +361,7 @@ func TestDeleteOnCompletion_HistoryOfAChildHidesWithItsRoot(t *testing.T) {
 	var childToken string
 	assert.NoError(db.QueryRowContext(ctx,
 		"SELECT flow_id, created_hour, flow_token FROM dwarf_flows WHERE surgraph_flow_id>0").Scan(&childID, &childHour, &childToken))
-	childKey := keys.New(shardNum, childHour, childID, childToken)
+	childKey := keys.NewFlowKey(shardNum, childHour, childID, childToken)
 
 	_, err = e.History(ctx, fk)
 	assert.Equal(http.StatusNotFound, errors.StatusCode(err))

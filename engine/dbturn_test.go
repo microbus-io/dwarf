@@ -145,7 +145,7 @@ func TestLatchResolve_SkipsShardsWithNoParkedKey(t *testing.T) {
 	e.turnstiles.Resize(2, 0)
 	defer e.turnstiles.Resize(2, size)
 
-	key := keys.New(1, 0, 1<<30, "0123456789abcdef")
+	key := keys.NewFlowKey(1, 0, 1<<30, "0123456789abcdef")
 	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	start := time.Now()

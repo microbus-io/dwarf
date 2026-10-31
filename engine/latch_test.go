@@ -111,7 +111,7 @@ func TestLatchResolve_ReportsStoppedFlowsOnly(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	forgedKey := keys.New(shard, hour, flowID, "0123456789abcdef")
+	forgedKey := keys.NewFlowKey(shard, hour, flowID, "0123456789abcdef")
 
 	resolved, err := e.resolveStoppedFlows(ctx, []string{stoppedKey, runningKey, forgedKey, "not-a-key"})
 	assert.NoError(err)
@@ -161,7 +161,7 @@ func TestLatchResolve_ChunksWithoutDroppingKeys(t *testing.T) {
 		if i == flowID {
 			continue
 		}
-		askFor = append(askFor, keys.New(shard, hour, i+1, "0123456789abcdef"))
+		askFor = append(askFor, keys.NewFlowKey(shard, hour, i+1, "0123456789abcdef"))
 	}
 	askFor = append(askFor, stoppedKey)
 

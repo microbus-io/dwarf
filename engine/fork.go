@@ -39,7 +39,7 @@ import (
 // The design is a copy-only-keep clone, re-parking ancestor callers up the surgraph chain, a created->pending
 // crash-gate, and uniform scheduling resolution.
 func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides any) (string, error) {
-	shardNum, forkStepHour, forkStepID, forkStepToken, err := keys.ParseStepKey(stepKey)
+	shardNum, forkStepHour, forkFlowID, forkStepID, forkStepToken, err := keys.ParseStepKey(stepKey)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -63,8 +63,8 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	var forkStepState, forkStepRefs, forkStepReduced []byte
 	var leafFlowToken string
 	err = db.QueryRowContext(ctx,
-		"SELECT s.flow_id, s.state, s.state_refs, s.state_reduced, f.payload_ver, f.flow_token FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.step_token=? AND s.flow_created_hour=?",
-		forkStepID, forkStepToken, forkStepHour,
+		"SELECT s.flow_id, s.state, s.state_refs, s.state_reduced, f.payload_ver, f.flow_token FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.flow_id=? AND s.step_token=? AND s.flow_created_hour=?",
+		forkStepID, forkFlowID, forkStepToken, forkStepHour,
 	).Scan(&leafFlowID, &forkStepState, &forkStepRefs, &forkStepReduced, &leafFlowPayloadVer, &leafFlowToken)
 	if err == sql.ErrNoRows {
 		return "", errors.New("step not found", http.StatusNotFound)
@@ -197,7 +197,7 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 		return "", errors.Trace(err)
 	}
 
-	newFlowKey := keys.New(shardNum, cc.newRootFlowHour, newRootFlowID, cc.rootFlowToken)
+	newFlowKey := keys.NewFlowKey(shardNum, cc.newRootFlowHour, newRootFlowID, cc.rootFlowToken)
 	e.logger.InfoContext(ctx, "Flow forked", "fromRoot", rootFlowID, "forkStep", forkStepID, "to", newRootFlowID)
 	// Every flow on the rewind chain - the new root and each subgraph flow between it and the fork step - is
 	// cloned running and ends through completeFlow, which counts it in dwarf_flows_ended. Each must be

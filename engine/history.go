@@ -113,7 +113,7 @@ func (e *Engine) loadSubgraphChildren(ctx context.Context, db *sequel.DB, shardN
 		}
 		childByCaller[callerStepID] = subgraphChild{
 			flowID:       childFlowID,
-			flowKey:      keys.New(shardNum, childHour, childFlowID, strings.TrimSpace(token)),
+			flowKey:      keys.NewFlowKey(shardNum, childHour, childFlowID, strings.TrimSpace(token)),
 			workflowURL:  strings.TrimSpace(url),
 			workflowName: strings.TrimSpace(name),
 		}
@@ -151,7 +151,7 @@ func (e *Engine) loadTreeSteps(ctx context.Context, db *sequel.DB, shardNum int,
 			return nil, errors.Trace(err)
 		}
 		step.Parked = parked != 0
-		step.StepKey = keys.New(shardNum, stepHour, stepID, stepToken)
+		step.StepKey = keys.NewStepKey(shardNum, stepHour, stepFlowID, stepID, stepToken)
 		step.Error = strings.TrimSpace(errMsg)
 		keyOf[stepID] = step.StepKey
 		stepsByFlow[stepFlowID] = append(stepsByFlow[stepFlowID], treeStep{id: stepID, predID: predID, succID: succID, step: step})
@@ -193,7 +193,7 @@ func assembleHistory(flowID int, childByCaller map[int]subgraphChild, stepsByFlo
 }
 
 func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, error) {
-	shardNum, stepHour, stepID, stepToken, err := keys.ParseStepKey(stepKey)
+	shardNum, stepHour, stepFlowID, stepID, stepToken, err := keys.ParseStepKey(stepKey)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -212,8 +212,8 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	var stepDepth, attempt, predID, succID, ver int
 	var createdAt, updatedAt time.Time
 	err = db.QueryRowContext(ctx,
-		"SELECT s.step_depth, s.task_name, s.attempt, s.state, s.changes, s.state_refs, s.interrupt_payload, s.status, s.error, s.created_at, s.updated_at, s.predecessor_id, s.successor_id, f.payload_ver, f.flow_token FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.step_token=? AND s.flow_created_hour=?",
-		stepID, stepToken, stepHour,
+		"SELECT s.step_depth, s.task_name, s.attempt, s.state, s.changes, s.state_refs, s.interrupt_payload, s.status, s.error, s.created_at, s.updated_at, s.predecessor_id, s.successor_id, f.payload_ver, f.flow_token FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.flow_id=? AND s.step_token=? AND s.flow_created_hour=?",
+		stepID, stepFlowID, stepToken, stepHour,
 	).Scan(&stepDepth, &taskName, &attempt, &stateJSON, &changesJSON, &stateRefsJSON, &interruptJSON, &statusStr, &errMsg, &createdAt, &updatedAt, &predID, &succID, &ver, &flowToken)
 	if err == sql.ErrNoRows {
 		return nil, errors.New("step not found", http.StatusNotFound)
@@ -352,7 +352,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 		placeholders := strings.Repeat("?,", len(ids))
 		placeholders = placeholders[:len(placeholders)-1]
 		nrows, err := db.QueryContext(ctx,
-			"SELECT step_id, step_token, flow_created_hour FROM dwarf_steps WHERE step_id IN ("+placeholders+")",
+			"SELECT step_id, step_token, flow_created_hour, flow_id FROM dwarf_steps WHERE step_id IN ("+placeholders+")",
 			ids...,
 		)
 		if err != nil {
@@ -360,13 +360,13 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 		}
 		defer nrows.Close()
 		for nrows.Next() {
-			var nid, nhour int
+			var nid, nhour, nflow int
 			var ntoken string
-			err := nrows.Scan(&nid, &ntoken, &nhour)
+			err := nrows.Scan(&nid, &ntoken, &nhour, &nflow)
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
-			key := keys.New(shardNum, nhour, nid, ntoken)
+			key := keys.NewStepKey(shardNum, nhour, nflow, nid, ntoken)
 			if nid == predID {
 				fs.PredecessorKey = key
 			}

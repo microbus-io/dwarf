@@ -87,7 +87,7 @@ func TestSubgraphCohortFailWaitflow(t *testing.T) {
 	}
 	boomCh := make(chan boomed, 16)
 	mux.HandleTask("subgraphcohortfailwait.verify:0/boom", func(ctx context.Context, f *workflow.Flow) error {
-		shard, _, stepID, _, err := keys.ParseStepKey(f.StepKey())
+		shard, _, _, stepID, _, err := keys.ParseStepKey(f.StepKey())
 		if err != nil {
 			return err
 		}

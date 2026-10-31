@@ -450,8 +450,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// The task's own identity, so it can correlate logs/traces or call back into the engine
 	// (e.g. History/Step) with its own keys. flow_token is loaded with the flow row, step_token
 	// alongside the claim - both available here.
-	flow.SetFlowKey(keys.New(shardNum, flowHour, flowID, flowToken))
-	flow.SetStepKey(keys.New(shardNum, flowHour, stepID, stepToken))
+	flow.SetFlowKey(keys.NewFlowKey(shardNum, flowHour, flowID, flowToken))
+	flow.SetStepKey(keys.NewStepKey(shardNum, flowHour, flowID, stepID, stepToken))
 
 	// A side column this replica cannot read fails the step, as an unreadable state does: the task would
 	// otherwise run on an empty resume payload, child result or baggage, and nothing would say so. A "null"

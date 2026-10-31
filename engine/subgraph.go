@@ -122,7 +122,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 	e.seams.Checkpoint(ctx, engineseams.CheckpointTerminateAfterScan)
 	allFlowIDs := append([]any{flowID}, descendantFlowIDs...)
 	allCompositeIDs := append(
-		[]string{keys.New(shardNum, flowHour, flowID, flowToken)},
+		[]string{keys.NewFlowKey(shardNum, flowHour, flowID, flowToken)},
 		descendantCompositeIDs...,
 	)
 
@@ -549,7 +549,7 @@ func (e *Engine) allSubgraphFlows(ctx context.Context, db sequel.Executor, shard
 				continue
 			}
 			flowIDs = append(flowIDs, child)
-			compositeFlowIDs = append(compositeFlowIDs, keys.New(shardNum, n.hour, child, n.token))
+			compositeFlowIDs = append(compositeFlowIDs, keys.NewFlowKey(shardNum, n.hour, child, n.token))
 			queue = append(queue, child)
 		}
 	}
@@ -637,7 +637,7 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 	}
 
 	flowIDs = []any{flowID}
-	compositeFlowIDs = []string{keys.New(shardNum, flowHour, flowID, flowToken)}
+	compositeFlowIDs = []string{keys.NewFlowKey(shardNum, flowHour, flowID, flowToken)}
 	cur := flowID
 	for {
 		leaf, ok := interruptedLeafByFlow[cur]
@@ -653,7 +653,7 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 			return flowIDs, stepIDs, compositeFlowIDs, nil // no interrupted child spawned here - leaf reached
 		}
 		flowIDs = append(flowIDs, child)
-		compositeFlowIDs = append(compositeFlowIDs, keys.New(shardNum, hourByID[child], child, tokenByID[child]))
+		compositeFlowIDs = append(compositeFlowIDs, keys.NewFlowKey(shardNum, hourByID[child], child, tokenByID[child]))
 		cur = child
 	}
 }
@@ -667,7 +667,7 @@ func (e *Engine) surgraphChain(ctx context.Context, shardNum int, flowID int, fl
 		return nil, nil, nil, errors.Trace(err)
 	}
 	flowIDs = []any{flowID}
-	compositeFlowIDs = []string{keys.New(shardNum, flowHour, flowID, flowToken)}
+	compositeFlowIDs = []string{keys.NewFlowKey(shardNum, flowHour, flowID, flowToken)}
 	cur := flowID
 	for {
 		var surgFlowID, surgStepID, surgHour, nextSurgFlowID int
@@ -685,7 +685,7 @@ func (e *Engine) surgraphChain(ctx context.Context, shardNum int, flowID int, fl
 		}
 		flowIDs = append(flowIDs, surgFlowID)
 		stepIDs = append(stepIDs, surgStepID)
-		compositeFlowIDs = append(compositeFlowIDs, keys.New(shardNum, surgHour, surgFlowID, surgToken))
+		compositeFlowIDs = append(compositeFlowIDs, keys.NewFlowKey(shardNum, surgHour, surgFlowID, surgToken))
 		if nextSurgFlowID == 0 {
 			break
 		}

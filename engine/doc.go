@@ -76,7 +76,8 @@ limitations under the License.
 //
 // # Security model
 //
-// Flow and step keys ("{shard}-{hour}-{id}-{token}") are unguessable bearer capabilities, not authorization.
+// Flow keys ("{shard}-{hour}-{flowID}-{token}") and step keys ("{shard}-{hour}-{flowID}-{stepID}-{token}") are
+// unguessable bearer capabilities, not authorization.
 // Holding a flow key is by itself sufficient to act on that one flow — Resume, Terminate, Fork, Continue,
 // Delete, and every introspection call — with no further check: the sole gate is the key (its numeric id
 // and creation hour, plus its random token). The engine performs no authentication, authorization, or rate

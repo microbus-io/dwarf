@@ -10,7 +10,8 @@ uniform not-found, host-side authz) — see the engine doc.
 
 ### Format
 
-A flow/step key is **`{shard}-{hour}-{id}-{token}`** with a **1-based** shard:
+A flow key is **`{shard}-{hour}-{flowID}-{token}`** and a step key **`{shard}-{hour}-{flowID}-{stepID}-{token}`**,
+with a **1-based** shard:
 
 - `{shard}` routes the request to a database shard (1-based; `ParseFlowKey`/`ParseStepKey` reject `< 1`).
 - `{hour}` is the flow's creation hour, in whole hours since 2000-01-01 00:00 UTC (`dwarf_flows.created_hour`,
@@ -18,22 +19,23 @@ A flow/step key is **`{shard}-{hour}-{id}-{token}`** with a **1-based** shard:
   of its own. It is part of the address, checked with the token (below). The parsers accept 0 through 2^31-1, the
   range of the `INT` columns: a larger hour would fail inside a driver as an encoding error rather than as the
   invalid key it is.
-- `{id}` is the per-shard sequential `flow_id`/`step_id` — unique only within a shard, which is why the shard is
-  carried in the key and why the graph cache is keyed by `(shard, flowID)`, with the flow token beside them
-  because a restore or a lossy failover reissues ids.
+- `{flowID}` and `{stepID}` are the per-shard sequential `flow_id`/`step_id` — unique only within a shard, which
+  is why the shard is carried in the key and why the graph cache is keyed by `(shard, flowID)`, with the flow token
+  beside them because a restore or a lossy failover reissues ids. **A step key names its flow**, and the step gates
+  check it beside the token and the hour (`step_id=? AND flow_id=? AND step_token=? AND flow_created_hour=?`), so a
+  step key is only ever found as a step of the flow it names.
 - `{token}` is an unguessable random capability (`RandomIdentifier(16)`).
 
-**Every segment is accepted only as `New` spells it** (no `+`, no leading zeros), and **every gate checks the hour
-with the token**: `WHERE flow_id=? AND flow_token=? AND created_hour=?`, and for a step
-`step_token=? AND flow_created_hour=?`. Either rule alone
+**Every segment is accepted only as the constructors spell it** (no `+`, no leading zeros), and **every gate checks
+the hour with the token**: `WHERE flow_id=? AND flow_token=? AND created_hour=?`, and for a step
+`step_id=? AND flow_id=? AND step_token=? AND flow_created_hour=?`. Either rule alone
 leaves a flow with two spellings, and a parked `Await` keyed on one is never released by a stop signalled under the
 other: it re-reads the flow on every latch sweep until its budget runs out. A key with the wrong hour is therefore
 not found, exactly as one with the wrong token is.
 
-`New(shard, hour, id, token)` is the **only** place the format is spelled — nothing outside this package composes
-a key by hand, so the constructor and the two parsers stay inverses by construction rather than by convention
-(pinned by `FuzzParseFlowKey`'s round-trip). It serves flow and step keys alike, since the two formats are
-identical.
+`NewFlowKey` and `NewStepKey` are the **only** places the formats are spelled — nothing outside this package composes
+a key by hand, so each constructor and its parser stay inverses by construction rather than by convention (pinned by
+the fuzzers' round-trips). A flow key does not parse as a step key, nor the reverse: their segment counts differ.
 
 `CorrelationID(shard, id)` returns `"{shard}-{id}"` — the key with the hour and token omitted. It is deliberately
 **not** a valid engine key (no operation accepts it) so a trace/log reader cannot escalate it into the flow's write

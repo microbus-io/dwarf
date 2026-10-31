@@ -2194,7 +2194,8 @@ via `workflow.NewState`.
 
 ### Keys are capabilities, not authorization
 
-A flow/step key (`{shard}-{hour}-{id}-{token}`) is an **unguessable bearer capability**, not an authorization
+A flow key (`{shard}-{hour}-{flowID}-{token}`) or step key (`{shard}-{hour}-{flowID}-{stepID}-{token}`) is an
+**unguessable bearer capability**, not an authorization
 decision - the host-facing contract is in `doc.go`; the key *format* and the token-entropy decision are in
 `internal/keys/CLAUDE.md`; this section is the engine-side *enforcement* and posture. The engine
 holds no authN/authZ, no rate limiting, and no notion of caller identity: its only vantage is the flow

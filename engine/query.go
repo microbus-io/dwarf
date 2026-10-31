@@ -116,8 +116,8 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 			}
 			lr.summary.Subgraph = surgraphFlowID != 0
 			lr.summary.TraceID = traceIDFromParent(traceParent)
-			lr.summary.FlowKey = keys.New(shardIdx, flowHour, lr.flowID, flowToken)
-			lr.summary.ThreadKey = keys.New(shardIdx, threadHour, threadID, threadToken)
+			lr.summary.FlowKey = keys.NewFlowKey(shardIdx, flowHour, lr.flowID, flowToken)
+			lr.summary.ThreadKey = keys.NewFlowKey(shardIdx, threadHour, threadID, threadToken)
 			lr.summary.StoppedTaskName = taskName.String
 			lr.summary.Error = strings.TrimSpace(flowError)
 			// cancel_reason is the shared reason column both Terminate and Cancel write into;

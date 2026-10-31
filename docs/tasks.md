@@ -406,7 +406,7 @@ func chargeCard(ctx context.Context, f *workflow.Flow) error {
 }
 ```
 
-`f.StepKey()` is `{shard}-{hour}-{stepID}-{token}` and is **stable across every re-execution of one step** — a
+`f.StepKey()` is `{shard}-{hour}-{flowID}-{stepID}-{token}` and is **stable across every re-execution of one step** — a
 lease recovery, a `flow.Retry`, a re-dispatch after a database blip all rewind the same step row and hand
 back the same key. It is also unique per step, so two steps of one flow never collide.
 

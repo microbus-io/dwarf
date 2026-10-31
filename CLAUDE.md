@@ -101,7 +101,7 @@ matching one before working there:**
   sizing + shard-per-server topology, the connection lifecycle, and the sharding *mechanics* (1-indexed routing,
   parallel `OnEach` fan-out, DSN/test-mode resolution). The pool-sizing *formula* and sharding *semantics* stay in
   `engine/CLAUDE.md`.
-- **`internal/keys/CLAUDE.md`** - the flow/step key *format* (`{shard}-{hour}-{id}-{token}`), token entropy (why 64-bit),
+- **`internal/keys/CLAUDE.md`** - the flow/step key *formats* (`{shard}-{hour}-{flowID}-{token}`, `{shard}-{hour}-{flowID}-{stepID}-{token}`), token entropy (why 64-bit),
   and the token-free `CorrelationID` derivation. (The engine-side enforcement/posture stays in `engine/CLAUDE.md`.)
 - **`internal/workers/CLAUDE.md`** - the demand side: the grow-on-demand goroutine `Crew` (not "pool" -
   that word is the database connection pools), the growth trigger (one edge plus a standing reserve of one idle
