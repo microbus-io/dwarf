@@ -55,7 +55,7 @@ func registerCountedGate(mux *hosts.Mux, prefix string, runs, lastAttempt *atomi
 func flowRows(t *testing.T, e *Engine, fk string) (*sequel.DB, int, int) {
 	t.Helper()
 	assert := testarossa.For(t)
-	shard, flowID, _, err := keys.ParseFlowKey(fk)
+	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
 	assert.NoError(err)
@@ -90,7 +90,7 @@ func TestPayloadVer_NewerFlowIsDeferredUnrun(t *testing.T) {
 
 	fk := createInterruptedFlow(t, e, "newerpayload/g")
 	assert.Equal(int32(1), runs.Load())
-	shard, _, _, err := keys.ParseFlowKey(fk)
+	shard, _, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, flowID, stepID := flowRows(t, e, fk)
 	setFlowPayloadVer(t, db, flowID, payloadVer+1)
@@ -193,7 +193,7 @@ func TestPayloadVer_ReadersRefuseNewerFlows(t *testing.T) {
 	out, err := e.Await(ctx, fk)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusInterrupted, out.Status)
-	shard, _, _, err := keys.ParseFlowKey(fk)
+	shard, hour, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, flowID, stepID := flowRows(t, e, fk)
 	var stepToken string
@@ -205,7 +205,7 @@ func TestPayloadVer_ReadersRefuseNewerFlows(t *testing.T) {
 		assert.Contains(err.Error(), "payload is in format")
 		assert.Equal(http.StatusNotImplemented, errors.StatusCode(err))
 	}
-	_, err = e.Step(ctx, keys.New(shard, stepID, stepToken))
+	_, err = e.Step(ctx, keys.New(shard, hour, stepID, stepToken))
 	if assert.Error(err) {
 		assert.Contains(err.Error(), "payload is in format")
 	}
@@ -239,7 +239,7 @@ func TestPayloadVer_ForkRefusesANewerFlow(t *testing.T) {
 	fk, out, err := e.Run(ctx, "forknewer/g", nil, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, out.Status)
-	shard, _, _, err := keys.ParseFlowKey(fk)
+	shard, hour, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, flowID, stepID := flowRows(t, e, fk)
 	var stepToken string
@@ -249,7 +249,7 @@ func TestPayloadVer_ForkRefusesANewerFlow(t *testing.T) {
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET state_refs=? WHERE step_id=?", []byte(`{"doc":{"v":9}}`), stepID)
 	assert.NoError(err)
 
-	_, err = e.Fork(ctx, keys.New(shard, stepID, stepToken), nil)
+	_, err = e.Fork(ctx, keys.New(shard, hour, stepID, stepToken), nil)
 	if assert.Error(err) {
 		assert.Contains(err.Error(), "payload is in format")
 	}
@@ -290,7 +290,7 @@ func TestPayloadVer_ForkRefusesANewerSubgraph(t *testing.T) {
 	fk, out, err := e.Run(ctx, "forknewersub/parent", nil, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, out.Status, out.Error)
-	shard, flowID, _, err := keys.ParseFlowKey(fk)
+	shard, hour, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
 	assert.NoError(err)
@@ -301,7 +301,7 @@ func TestPayloadVer_ForkRefusesANewerSubgraph(t *testing.T) {
 	setFlowPayloadVer(t, db, childID, payloadVer+1)
 
 	// Forking at Done keeps Call, whose child is cloned whole.
-	_, err = e.Fork(ctx, keys.New(shard, doneID, doneToken), nil)
+	_, err = e.Fork(ctx, keys.New(shard, hour, doneID, doneToken), nil)
 	if assert.Error(err) {
 		assert.Contains(err.Error(), "payload is in format")
 	}
@@ -329,7 +329,7 @@ func TestPayloadVer_CreateStampsForkCopies(t *testing.T) {
 	fk, out, err := e.Run(ctx, "forkcopies/g", nil, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, out.Status)
-	shard, _, _, err := keys.ParseFlowKey(fk)
+	shard, hour, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, flowID, stepID := flowRows(t, e, fk)
 	var ver int
@@ -339,9 +339,9 @@ func TestPayloadVer_CreateStampsForkCopies(t *testing.T) {
 	setFlowPayloadVer(t, db, flowID, 0)
 	var stepToken string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_token FROM dwarf_steps WHERE step_id=?", stepID).Scan(&stepToken))
-	forkKey, err := e.Fork(ctx, keys.New(shard, stepID, stepToken), nil)
+	forkKey, err := e.Fork(ctx, keys.New(shard, hour, stepID, stepToken), nil)
 	assert.NoError(err)
-	_, forkID, _, err := keys.ParseFlowKey(forkKey)
+	_, _, forkID, _, err := keys.ParseFlowKey(forkKey)
 	assert.NoError(err)
 	assert.NoError(db.QueryRowContext(ctx, "SELECT payload_ver FROM dwarf_flows WHERE flow_id=?", forkID).Scan(&ver))
 	assert.Equal(0, ver, "a fork keeps its origin's format")

@@ -115,8 +115,8 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 	// An anchor holding one field in `state` (an initial input nobody produced) and another in `changes` (a
 	// task's own output), plus a field present in BOTH - where changes, being the newer value, must win.
 	_, err = db.ExecContext(ctx,
-		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, state, changes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		1, 1, "s1", "Anchor", "u", workflow.StatusCompleted, 60000,
+		"INSERT INTO dwarf_steps (flow_created_hour, flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, state, changes) VALUES ((SELECT created_hour FROM dwarf_flows WHERE flow_id=?), ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		1, 1, 1, "s1", "Anchor", "u", workflow.StatusCompleted, 60000,
 		[]byte(`{"fromState":"S","shadowed":"old"}`), []byte(`{"fromChanges":"C","shadowed":"new"}`),
 	)
 	assert.NoError(err)
@@ -144,8 +144,8 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 
 	// An anchor whose column does not decode says so, rather than reading as a field it does not hold.
 	_, err = db.ExecContext(ctx,
-		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, state, changes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		1, 2, "s2", "Broken", "u", workflow.StatusCompleted, 60000, []byte(`[1]`), []byte(`{}`),
+		"INSERT INTO dwarf_steps (flow_created_hour, flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, state, changes) VALUES ((SELECT created_hour FROM dwarf_flows WHERE flow_id=?), ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		1, 1, 2, "s2", "Broken", "u", workflow.StatusCompleted, 60000, []byte(`[1]`), []byte(`{}`),
 	)
 	assert.NoError(err)
 	_, err = e.resolveStateRefs(ctx, db, 1, "ftok", newState(), staterefs.Refs{"x": {Anchor: 2}}, nil, "u")
@@ -277,7 +277,7 @@ func TestStateRefs_UnreadableSideColumnFailsTheStep(t *testing.T) {
 		flowKey, err := e.Create(ctx, "unreadableside/g", nil, nil)
 		assert.NoError(err)
 		enginetest.AwaitFlowStatus(t, e, flowKey, workflow.StatusInterrupted, 10*time.Second)
-		_, flowID, _, err := keys.ParseFlowKey(flowKey)
+		_, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 		assert.NoError(err)
 		switch column {
 		case "resume data":
@@ -590,7 +590,7 @@ func TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue(t *testing.T) {
 			if step.TaskName != "Join" {
 				continue
 			}
-			_, joinID, _, err := keys.ParseStepKey(step.StepKey)
+			_, _, joinID, _, err := keys.ParseStepKey(step.StepKey)
 			assert.NoError(err)
 			_, joinRefs, _ := stepRefsOf(t, e, joinID)
 			ref, isRef := joinRefs["log"]
@@ -628,8 +628,8 @@ func TestStateRefs_DispatchResolveTakesATurnOnlyToRead(t *testing.T) {
 	)
 	assert.NoError(err)
 	_, err = db.ExecContext(ctx,
-		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-		1, 1, "s1", "Anchor", "u", workflow.StatusCompleted, 60000, []byte(`{"doc":"D"}`),
+		"INSERT INTO dwarf_steps (flow_created_hour, flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, state) VALUES ((SELECT created_hour FROM dwarf_flows WHERE flow_id=?), ?, ?, ?, ?, ?, ?, ?, ?)",
+		1, 1, 1, "s1", "Anchor", "u", workflow.StatusCompleted, 60000, []byte(`{"doc":"D"}`),
 	)
 	assert.NoError(err)
 	refs := staterefs.Refs{"doc": {Anchor: 1}}
@@ -688,7 +688,7 @@ func TestStateRefs_UnreadableRefsFailTheStep(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	fk := createInterruptedFlow(t, e, "badrefs/g")
-	shard, flowID, _, err := keys.ParseFlowKey(fk)
+	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
 	assert.NoError(err)

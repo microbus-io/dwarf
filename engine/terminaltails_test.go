@@ -65,7 +65,7 @@ func TestTerminalTails_CohortTailReadsNoRow(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	tailsOf := func(flowKey string) terminalTails {
-		shard, flowID, _, err := keys.ParseFlowKey(flowKey)
+		shard, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 		assert.NoError(err)
 		db, err := e.db.Shard(shard)
 		assert.NoError(err)

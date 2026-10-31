@@ -139,7 +139,7 @@ func TestCrossShardReplicaAwait(t *testing.T) {
 	assert.Equal(created, stopped, "every flow must be awaited to completion")
 }
 
-// shardOfFlowKey reads the shard out of a "{shard}-{id}-{token}" flow key. The format is public (doc.go),
+// shardOfFlowKey reads the shard out of a "{shard}-{hour}-{id}-{token}" flow key. The format is public (doc.go),
 // so a fixture may parse it; nothing here reaches into the engine's own key package.
 func shardOfFlowKey(flowKey string) (int, error) {
 	prefix, _, ok := strings.Cut(flowKey, "-")

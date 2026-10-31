@@ -98,7 +98,7 @@ func newCohortRaceRig(t *testing.T, prefix string) *cohortRaceRig {
 	var err error
 	r.fk, err = r.e.Create(t.Context(), prefix+"/g", nil, nil)
 	assert.NoError(err)
-	r.shard, r.flowID, _, err = keys.ParseFlowKey(r.fk)
+	r.shard, _, r.flowID, _, err = keys.ParseFlowKey(r.fk)
 	assert.NoError(err)
 	r.db, err = r.e.db.Shard(r.shard)
 	assert.NoError(err)

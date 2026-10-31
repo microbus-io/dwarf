@@ -116,7 +116,7 @@ func TestLockOrder_TreeOperationsLockAscending(t *testing.T) {
 	enginetest.AwaitVisitCount(t, e.seams, 2, 10*time.Second,
 		engineseams.Join(engineseams.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted))
 
-	shard, rootID, _, err := keys.ParseFlowKey(flowKey)
+	shard, _, rootID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
 	assert.NoError(err)

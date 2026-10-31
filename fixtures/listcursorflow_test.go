@@ -69,7 +69,7 @@ func TestListCursorflow(t *testing.T) {
 		created[flowKey] = true
 	}
 
-	// shardOf parses the leading segment of a flowKey ({shard}-{id}-{token}).
+	// shardOf parses the leading segment of a flowKey ({shard}-{hour}-{id}-{token}).
 	shardOf := func(t *testing.T, key string) int {
 		t.Helper()
 		assert := testarossa.For(t)

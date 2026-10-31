@@ -143,7 +143,7 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 // shard is encoded in the key; the thread_id/thread_token are read from the referenced flow (which may be
 // mid-thread, so its thread_id differs from its own flow_id). Verifies the flow exists (token-checked).
 func (e *Engine) resolveThread(ctx context.Context, threadKey string) (shardNum, threadID int, threadToken string, err error) {
-	shardNum, flowID, flowToken, err := keys.ParseFlowKey(threadKey)
+	shardNum, flowHour, flowID, flowToken, err := keys.ParseFlowKey(threadKey)
 	if err != nil {
 		return 0, 0, "", errors.Trace(err)
 	}
@@ -156,8 +156,8 @@ func (e *Engine) resolveThread(ctx context.Context, threadKey string) (shardNum,
 	tctx, doneTurn := e.dbTurn(ctx, shardNum)
 	var surgraphFlowID int
 	err = db.QueryRowContext(tctx,
-		"SELECT thread_id, thread_token, surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
-		flowID, flowToken,
+		"SELECT thread_id, thread_token, surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?",
+		flowID, flowToken, flowHour,
 	).Scan(&threadID, &threadToken, &surgraphFlowID)
 	doneTurn()
 	if err == sql.ErrNoRows {
@@ -210,7 +210,7 @@ type flowSeed struct {
 // claimable) - the shared write-half of every creation path, run inside the caller's transaction. Returns the
 // new flow and step ids. createWithGraph wraps it in a bare transaction; continueFlow wraps it in a transaction
 // that first locks the thread and re-checks the latest turn, so both share exactly one copy of the insert SQL.
-func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, newStepID int64, err error) {
+func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, newStepID int64, newFlowHour int, err error) {
 	// A top-level flow starts its own thread; a Continue joins the thread it continues. root_flow_id is the
 	// denormalized tree-membership index: a top-level flow is its own root; a subgraph child inherits the
 	// parent's. Written once here, immutable thereafter, so a whole tree is reachable by `WHERE root_flow_id=?`
@@ -239,10 +239,16 @@ func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, ne
 	// The step and, off PostgreSQL, the fix-up take the flow's id - a chain insertedID makes one statement
 	// batch on PostgreSQL.
 	batch := newTxBatch(ctx, tx)
-	queueInsertID(batch, "flow_id", func(id int64) { newFlowID = id }, insert, args...)
+	queueInsertFlow(batch, func(id int64, hour int) { newFlowID, newFlowHour = id, hour }, insert, args...)
 	flowID, flowArgs, err := batch.insertedID(lastFlowIDSQL, func() any { return newFlowID })
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
+	}
+	// The entry step carries its flow's creation hour, which the database chose for the flow row. On PostgreSQL the
+	// INSERT's result is not read until the batch is, so the step reads the row; elsewhere the flush above read it.
+	flowHour, flowHourArgs := "(SELECT created_hour FROM dwarf_flows WHERE flow_id=(SELECT "+lastFlowIDSQL+"))", []any(nil)
+	if tx.DriverName() != "pgx" {
+		flowHour, flowHourArgs = "?", []any{newFlowHour}
 	}
 
 	// Entry step is pending and immediately claimable (not_before=NOW, lease_expires=NOW). Its depth
@@ -250,18 +256,18 @@ func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, ne
 	// A flow that should wait before running uses an entry gate task with flow.Sleep, not a creation-time
 	// delay.
 	queueInsertID(batch, "step_id", func(id int64) { newStepID = id },
-		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, time_budget_ms, not_before, lease_expires, priority, fairness_key, fairness_weight, engine_id)"+
-			" VALUES ("+flowID+", ?, ?, ?, ?, ?, ?, ?, NOW_UTC(), NOW_UTC(), ?, ?, ?, ?)",
-		append(append([]any{}, flowArgs...), s.callerStepDepth+1, s.stepToken, s.entryPoint, s.entryURL, s.stateJSON, workflow.StatusPending, s.timeBudgetMs, s.priority, s.fairnessKey, s.fairnessWeight, s.engineID)...,
+		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, time_budget_ms, not_before, lease_expires, priority, fairness_key, fairness_weight, engine_id, flow_created_hour)"+
+			" VALUES ("+flowID+", ?, ?, ?, ?, ?, ?, ?, NOW_UTC(), NOW_UTC(), ?, ?, ?, ?, "+flowHour+")",
+		append(append(append([]any{}, flowArgs...), s.callerStepDepth+1, s.stepToken, s.entryPoint, s.entryURL, s.stateJSON, workflow.StatusPending, s.timeBudgetMs, s.priority, s.fairnessKey, s.fairnessWeight, s.engineID), flowHourArgs...)...,
 	)
 	if fixup != "" {
 		// Only where the INSERT could not name its own id, which insertedID has therefore already read.
 		batch.queue(execOnly, fixup, selfFlowFixupArgs(newFlowID, len(self))...)
 	}
 	if err := batch.flush(); err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
-	return newFlowID, newStepID, nil
+	return newFlowID, newStepID, newFlowHour, nil
 }
 
 /*
@@ -402,6 +408,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	}
 
 	var newFlowID, newStepID int64
+	var newFlowHour int
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		if beforeInsert != nil {
 			if err := beforeInsert(tx); err != nil {
@@ -410,14 +417,14 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 			e.seams.Checkpoint(ctx, engineseams.CheckpointSubgraphSpawnParked)
 		}
 		var err error
-		newFlowID, newStepID, err = insertFlowTx(ctx, tx, seed)
+		newFlowID, newStepID, newFlowHour, err = insertFlowTx(ctx, tx, seed)
 		return err
 	})
 	if err != nil {
 		return "", errors.Trace(err)
 	}
 
-	flowKey = keys.New(shardNum, int(newFlowID), flowToken)
+	flowKey = keys.New(shardNum, newFlowHour, int(newFlowID), flowToken)
 	// Seed the graph cache when this replica dispatches the shard: the doorbell below offers the entry step to
 	// its own candidate cache, so it is about to claim the step and would otherwise read back the graph it just
 	// wrote. After the commit, so a rolled-back flow id - which SQLite can hand out again - is never cached.
@@ -454,7 +461,7 @@ func splitTerminateCancelReason(status, reason string) (terminateReason, cancelR
 
 // snapshot returns the current outcome of a flow.
 func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
-	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
+	shardNum, flowHour, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -477,8 +484,8 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 	var flowCancelReason string
 	var flowPayloadVer int
 	err = db.QueryRowContext(ctx,
-		"SELECT status, final_state, error, cancel_reason, payload_ver FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
-		flowID, flowToken,
+		"SELECT status, final_state, error, cancel_reason, payload_ver FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?",
+		flowID, flowToken, flowHour,
 	).Scan(&flowStatus, &finalStateJSON, &flowErrorMsg, &flowCancelReason, &flowPayloadVer)
 	if err == sql.ErrNoRows {
 		return nil, errors.New("flow not found", http.StatusNotFound)
@@ -803,7 +810,7 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 	if err := checkReason(reason); err != nil {
 		return errors.Trace(err)
 	}
-	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
+	shardNum, flowHour, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -821,8 +828,8 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 	var flowStatus string
 	var surgraphFlowID int
 	err = db.QueryRowContext(ctx,
-		"SELECT status, surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
-		flowID, flowToken,
+		"SELECT status, surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?",
+		flowID, flowToken, flowHour,
 	).Scan(&flowStatus, &surgraphFlowID)
 	if err == sql.ErrNoRows {
 		return errors.New("flow not found", http.StatusNotFound)
@@ -839,7 +846,7 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 
 	// The root has no ancestors by construction, so this walks DOWN only - see terminateSubtree, which the orphan
 	// sweep shares.
-	return errors.Trace(e.terminateSubtree(ctx, shardNum, flowID, flowToken, reason, false, engineseams.FaultTerminateCommit))
+	return errors.Trace(e.terminateSubtree(ctx, shardNum, flowID, flowHour, flowToken, reason, false, engineseams.FaultTerminateCommit))
 }
 
 // cancel marks every pending, running or interrupted step in the tree with cancelling=1. Each marked step
@@ -876,7 +883,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	if err := checkReason(reason); err != nil {
 		return errors.Trace(err)
 	}
-	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
+	shardNum, flowHour, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -891,8 +898,8 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	var surgraphFlowID, watermark int
 	var status string
 	err = db.QueryRowContext(ctx,
-		"SELECT surgraph_flow_id, cancel_watermark, status FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
-		flowID, flowToken,
+		"SELECT surgraph_flow_id, cancel_watermark, status FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?",
+		flowID, flowToken, flowHour,
 	).Scan(&surgraphFlowID, &watermark, &status)
 	if err == sql.ErrNoRows {
 		return errors.New("flow not found", http.StatusNotFound)
@@ -1016,7 +1023,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 // it. A racing Resume and Delete serialize on the root's row: whichever commits first wins, and a Delete that
 // loses is a 409, as for any running flow.
 func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
-	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
+	shardNum, flowHour, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -1037,8 +1044,8 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	var flowStatus string
 	var surgraphFlowID, deleteAfterMs int
 	err = db.QueryRowContext(ctx,
-		"SELECT status, surgraph_flow_id, delete_after_ms FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
-		flowID, flowToken,
+		"SELECT status, surgraph_flow_id, delete_after_ms FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?",
+		flowID, flowToken, flowHour,
 	).Scan(&flowStatus, &surgraphFlowID, &deleteAfterMs)
 	if err == sql.ErrNoRows {
 		return errors.New("flow not found", http.StatusNotFound)
@@ -1063,7 +1070,7 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 		return nil // already scheduled - idempotent
 	}
 	if flowStatus == workflow.StatusInterrupted {
-		err = e.terminateSubtree(ctx, shardNum, flowID, flowToken, "deleted", true, "")
+		err = e.terminateSubtree(ctx, shardNum, flowID, flowHour, flowToken, "deleted", true, "")
 		if errors.Is(err, errRootNotInterrupted) {
 			return errors.New("cannot delete a running flow; terminate it first", http.StatusConflict)
 		}
@@ -1072,8 +1079,8 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 		}
 	}
 	_, err = db.ExecContext(ctx,
-		"UPDATE dwarf_flows SET delete_after_ms=1 WHERE flow_id=? AND flow_token=? AND status IN ("+terminalStatusesSQL+") AND delete_after_ms=0",
-		flowID, flowToken,
+		"UPDATE dwarf_flows SET delete_after_ms=1 WHERE flow_id=? AND flow_token=? AND created_hour=? AND status IN ("+terminalStatusesSQL+") AND delete_after_ms=0",
+		flowID, flowToken, flowHour,
 	)
 	return errors.Trace(err)
 }
@@ -1116,7 +1123,7 @@ var errResumeLost = errors.New("resume lost to a concurrent terminalization")
 
 // resume continues a flow paused by flow.Interrupt, delivering resume data to the leaf interrupt park.
 func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
-	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
+	shardNum, flowHour, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -1149,7 +1156,7 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 
 	var flowStatus string
 	var surgraphFlowID int
-	err = db.QueryRowContext(ctx, "SELECT status, surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&flowStatus, &surgraphFlowID)
+	err = db.QueryRowContext(ctx, "SELECT status, surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?", flowID, flowToken, flowHour).Scan(&flowStatus, &surgraphFlowID)
 	if err == sql.ErrNoRows {
 		return errors.New("flow not found", http.StatusNotFound)
 	}
@@ -1165,11 +1172,11 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 		return errors.New("flow is not interrupted (status: %s)", flowStatus, http.StatusConflict)
 	}
 
-	upFlowIDs, upStepIDs, upCompositeIDs, err := e.surgraphChain(ctx, shardNum, flowID, flowToken)
+	upFlowIDs, upStepIDs, upCompositeIDs, err := e.surgraphChain(ctx, shardNum, flowID, flowHour, flowToken)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	downFlowIDs, downStepIDs, downCompositeIDs, err := e.interruptedSubgraphChain(ctx, shardNum, flowID, flowToken)
+	downFlowIDs, downStepIDs, downCompositeIDs, err := e.interruptedSubgraphChain(ctx, shardNum, flowID, flowHour, flowToken)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -1334,7 +1341,7 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 		// Purge MARKS, it does not delete: select candidate roots (not running, not already scheduled), terminate
 		// any that are interrupted exactly as Delete does (terminateSubtree), then stamp delete_after_ms=1 (due
 		// immediately) on the terminal ones so the reaper removes each tree on its next pass.
-		selectIDs := "SELECT DISTINCT f.flow_id, f.flow_token, f.status FROM dwarf_flows f" + joinSQL +
+		selectIDs := "SELECT DISTINCT f.flow_id, f.flow_token, f.created_hour, f.status FROM dwarf_flows f" + joinSQL +
 			" WHERE " + where + " AND f.status<>'" + workflow.StatusRunning + "' AND f.delete_after_ms=0 ORDER BY f.flow_id LIMIT_OFFSET(?, 0)"
 		rows, err := db.QueryContext(ctx, selectIDs, args...)
 		if err != nil {
@@ -1343,10 +1350,11 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 		var flowIDs []int
 		var interruptedIDs []int
 		var interruptedTokens []string
+		var interruptedHours []int
 		for rows.Next() {
-			var fid int
+			var fid, hour int
 			var token, status string
-			err := rows.Scan(&fid, &token, &status)
+			err := rows.Scan(&fid, &token, &hour, &status)
 			if err != nil {
 				rows.Close()
 				return errors.Trace(err)
@@ -1355,6 +1363,7 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 			if status == workflow.StatusInterrupted {
 				interruptedIDs = append(interruptedIDs, fid)
 				interruptedTokens = append(interruptedTokens, token)
+				interruptedHours = append(interruptedHours, hour)
 			}
 		}
 		rows.Close()
@@ -1366,7 +1375,7 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 			return nil
 		}
 		for i, fid := range interruptedIDs {
-			err = e.terminateSubtree(ctx, shardIdx, fid, interruptedTokens[i], "purged", true, "")
+			err = e.terminateSubtree(ctx, shardIdx, fid, interruptedHours[i], interruptedTokens[i], "purged", true, "")
 			if err != nil && !errors.Is(err, errRootNotInterrupted) {
 				return errors.Trace(err)
 			}
@@ -1403,7 +1412,7 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 }
 
 func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalState any) (string, error) {
-	shardNum, flowID, flowToken, err := keys.ParseFlowKey(threadKey)
+	shardNum, flowHour, flowID, flowToken, err := keys.ParseFlowKey(threadKey)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -1430,7 +1439,7 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	var threadID int
 	var threadToken string
 	var surgraphFlowID int
-	err = db.QueryRowContext(ctx, "SELECT thread_id, thread_token, surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&threadID, &threadToken, &surgraphFlowID)
+	err = db.QueryRowContext(ctx, "SELECT thread_id, thread_token, surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?", flowID, flowToken, flowHour).Scan(&threadID, &threadToken, &surgraphFlowID)
 	if err == sql.ErrNoRows {
 		return "", errors.New("flow not found", http.StatusNotFound)
 	}
@@ -1456,6 +1465,7 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	newFlowToken := keys.RandomIdentifier(16)
 	newStepToken := keys.RandomIdentifier(16)
 	var newFlowID, newStepID int64
+	var newFlowHour int
 	var newPriority int
 	var newWorkflowURL string
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
@@ -1550,7 +1560,7 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 			fairnessWeight: fairnessWeight,
 			engineID:       e.engineID,
 		}
-		newFlowID, newStepID, err = insertFlowTx(ctx, tx, seed)
+		newFlowID, newStepID, newFlowHour, err = insertFlowTx(ctx, tx, seed)
 		newPriority = priority
 		return err
 	})
@@ -1558,7 +1568,7 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 		return "", errors.Trace(err)
 	}
 
-	flowKey := keys.New(shardNum, int(newFlowID), newFlowToken)
+	flowKey := keys.New(shardNum, newFlowHour, int(newFlowID), newFlowToken)
 	e.logger.DebugContext(ctx, "Flow continued and started", "workflow", newWorkflowURL)
 	e.metricFlowStarted(ctx, newWorkflowURL, newPriority, shardNum)
 	// Ring the local doorbell so this replica claims the entry step without waiting for a refiller scan. The

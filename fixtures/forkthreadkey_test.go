@@ -32,7 +32,7 @@ import (
 // TestFork_SubgraphChildGetsThreadTokenAndStepID pins the non-root branch of cloneOneFlow: a cloned
 // subgraph child must carry its own thread_token and current step_id, exactly as every other creation
 // path does via insertFlowTx. When it did not, the child row kept the schema defaults (thread_token=”,
-// step_id=0), so List built a malformed ThreadKey ("{shard}-{id}-") whose empty token then resolved to
+// step_id=0), so List built a malformed ThreadKey ("{shard}-{hour}-{id}-") whose empty token then resolved to
 // zero rows in a ThreadKey-filtered query - a 404 on a key the API itself handed back.
 //
 // The graph is A -> RunInner -> Z, where RunInner launches a subgraph child; the fork rewinds Z, so the
@@ -110,7 +110,7 @@ func TestFork_SubgraphChildGetsThreadTokenAndStepID(t *testing.T) {
 		return
 	}
 
-	shardNum, forkRootID, _, err := keys.ParseFlowKey(forkKey)
+	shardNum, _, forkRootID, _, err := keys.ParseFlowKey(forkKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -120,12 +120,12 @@ func TestFork_SubgraphChildGetsThreadTokenAndStepID(t *testing.T) {
 	}
 
 	// The fork's subgraph child: a member of the fork tree (root_flow_id) that has a caller (surgraph_flow_id).
-	var childFlowID, threadID, childStepID int
+	var childFlowID, childHour, threadID, childStepID int
 	var childFlowToken, threadToken string
 	err = db.QueryRowContext(ctx,
-		"SELECT flow_id, flow_token, thread_id, thread_token, stopped_step_id FROM dwarf_flows WHERE root_flow_id=? AND surgraph_flow_id<>0",
+		"SELECT flow_id, created_hour, flow_token, thread_id, thread_token, stopped_step_id FROM dwarf_flows WHERE root_flow_id=? AND surgraph_flow_id<>0",
 		forkRootID,
-	).Scan(&childFlowID, &childFlowToken, &threadID, &threadToken, &childStepID)
+	).Scan(&childFlowID, &childHour, &childFlowToken, &threadID, &threadToken, &childStepID)
 	if !assert.NoError(err) {
 		return
 	}
@@ -138,7 +138,7 @@ func TestFork_SubgraphChildGetsThreadTokenAndStepID(t *testing.T) {
 
 	// End-to-end: the ThreadKey List builds for the child must resolve, not 404. A key with an empty token
 	// half matches no row in queryClauses' `WHERE flow_id=? AND flow_token=?`.
-	childThreadKey := keys.New(shardNum, threadID, threadToken)
+	childThreadKey := keys.New(shardNum, childHour, threadID, threadToken) // a subgraph flow is its own thread
 	byThread, _, err := eng.List(ctx, workflow.Query{ThreadKey: childThreadKey, IncludeSubgraphs: true})
 	if !assert.NoError(err) {
 		return

@@ -81,7 +81,7 @@ func TestReviveVsTerminate_Deterministic(t *testing.T) {
 	engineseams.Seams(e).Resume(engineseams.CheckpointBeforeReviveWrite)
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusTerminated, 10*time.Second)
 
-	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
+	shardNum, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := engineseams.DB(e).Shard(shardNum)
 	assert.NoError(err)

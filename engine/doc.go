@@ -76,12 +76,12 @@ limitations under the License.
 //
 // # Security model
 //
-// Flow and step keys ("{shard}-{id}-{token}") are unguessable bearer capabilities, not authorization.
+// Flow and step keys ("{shard}-{hour}-{id}-{token}") are unguessable bearer capabilities, not authorization.
 // Holding a flow key is by itself sufficient to act on that one flow — Resume, Terminate, Fork, Continue,
-// Delete, and every introspection call — with no further check: the sole gate is the key (the numeric id
-// plus its random token). The engine performs no authentication, authorization, or rate limiting and
-// has no notion of caller identity; its only vantage is the flow reference and the task URL, so ownership
-// and tenancy are invisible to it. Authorizing an operation is therefore the host's responsibility:
+// Delete, and every introspection call — with no further check: the sole gate is the key (its numeric id
+// and creation hour, plus its random token). The engine performs no authentication, authorization, or rate
+// limiting and has no notion of caller identity; its only vantage is the flow reference and the task URL, so
+// ownership and tenancy are invisible to it. Authorizing an operation is therefore the host's responsibility:
 // before calling the engine, verify the authenticated principal may act on the flow — typically from the
 // baggage the host set at Create (see workflow.FlowOptions.Baggage), or the host's own record mapping a
 // principal to the keys it was issued.

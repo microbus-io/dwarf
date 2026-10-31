@@ -175,9 +175,9 @@ func TestScanBand_AnEmptyBandIsAProbe(t *testing.T) {
 	r.insertStep(t, 1, 1, "k", 1)
 	for range 14 { // 16,384 due steps at band 1, the depth an empty band's probe must not read
 		_, err := r.db.ExecContext(ctx, "INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url,"+
-			" status, time_budget_ms, priority, fairness_key, fairness_weight, not_before, lease_expires, created_at)"+
+			" status, time_budget_ms, priority, fairness_key, fairness_weight, not_before, lease_expires, created_at, flow_created_hour)"+
 			" SELECT flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, priority, fairness_key,"+
-			" fairness_weight, not_before, lease_expires, created_at FROM dwarf_steps")
+			" fairness_weight, not_before, lease_expires, created_at, flow_created_hour FROM dwarf_steps")
 		assert.NoError(err)
 	}
 	_, err := r.db.ExecContext(ctx, "ANALYZE dwarf_steps")
@@ -240,9 +240,9 @@ func TestScanBand_PlanningReadsNoIndexEnd(t *testing.T) {
 	r.insertStep(t, 1, 1, "k", 1)
 	for range 14 { // 16,384 steps
 		_, err := r.db.ExecContext(ctx, "INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url,"+
-			" status, time_budget_ms, priority, fairness_key, fairness_weight, not_before, lease_expires, created_at)"+
+			" status, time_budget_ms, priority, fairness_key, fairness_weight, not_before, lease_expires, created_at, flow_created_hour)"+
 			" SELECT flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, priority, fairness_key,"+
-			" fairness_weight, not_before, lease_expires, created_at FROM dwarf_steps")
+			" fairness_weight, not_before, lease_expires, created_at, flow_created_hour FROM dwarf_steps")
 		assert.NoError(err)
 	}
 	_, err = r.db.ExecContext(ctx, "ANALYZE dwarf_steps")
@@ -304,9 +304,9 @@ func TestScanBand_SQLServerChoosesTheDueIndex(t *testing.T) {
 	assert.NoError(err)
 	for range 14 { // 16,384 steps at each of band 1 (due) and band 2 (asleep for an hour)
 		_, err := r.db.ExecContext(ctx, "INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url,"+
-			" status, time_budget_ms, priority, fairness_key, fairness_weight, not_before, lease_expires, created_at)"+
+			" status, time_budget_ms, priority, fairness_key, fairness_weight, not_before, lease_expires, created_at, flow_created_hour)"+
 			" SELECT flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, priority, fairness_key,"+
-			" fairness_weight, not_before, lease_expires, created_at FROM dwarf_steps")
+			" fairness_weight, not_before, lease_expires, created_at, flow_created_hour FROM dwarf_steps")
 		assert.NoError(err)
 	}
 	_, err = r.db.ExecContext(ctx, "UPDATE STATISTICS dwarf_steps WITH FULLSCAN")

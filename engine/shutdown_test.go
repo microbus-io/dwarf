@@ -98,7 +98,7 @@ func TestShutdown_AbandonsASweepInFlight(t *testing.T) {
 		if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, out.Status) {
 			return
 		}
-		shard, flowID, _, err := keys.ParseFlowKey(fk)
+		shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 		assert.NoError(err)
 		db, err := e.db.Shard(shard)
 		if !assert.NoError(err) {

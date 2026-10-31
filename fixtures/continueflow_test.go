@@ -163,6 +163,6 @@ func TestCreateWithThreadKeyJoinsThread(t *testing.T) {
 
 	// A non-existent ThreadKey is rejected (404).
 	_, _, err = eng.Run(ctx, "threadjoin.verify:428/g", map[string]any{},
-		&workflow.FlowOptions{ThreadKey: "1-99999-0000000000000000"})
+		&workflow.FlowOptions{ThreadKey: "1-0-99999-0000000000000000"})
 	assert.Error(err)
 }

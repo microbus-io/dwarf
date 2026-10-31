@@ -83,7 +83,7 @@ func TestRootFlowID_CreateAndSubgraph(t *testing.T) {
 	}
 	assert.Equal(workflow.StatusCompleted, out.Status)
 
-	shard, parentFlowID, _, err := keys.ParseFlowKey(flowKey)
+	shard, _, parentFlowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -146,12 +146,12 @@ func TestRootFlowID_ForkIsItsOwnRoot(t *testing.T) {
 		return
 	}
 
-	shard, forkFlowID, _, err := keys.ParseFlowKey(forkKey)
+	shard, _, forkFlowID, _, err := keys.ParseFlowKey(forkKey)
 	if !assert.NoError(err) {
 		return
 	}
 	// The fork is its own root, distinct from the origin.
-	_, originFlowID, _, _ := keys.ParseFlowKey(flowKey)
+	_, _, originFlowID, _, _ := keys.ParseFlowKey(flowKey)
 	assert.Equal(forkFlowID, rootFlowIDOf(t, e, shard, forkFlowID))
 	assert.NotEqual(originFlowID, rootFlowIDOf(t, e, shard, forkFlowID))
 }
@@ -190,7 +190,7 @@ func TestRootFlowID_ContinueStartsFreshRoot(t *testing.T) {
 		return
 	}
 
-	shard, nextFlowID, _, err := keys.ParseFlowKey(nextKey)
+	shard, _, nextFlowID, _, err := keys.ParseFlowKey(nextKey)
 	if !assert.NoError(err) {
 		return
 	}

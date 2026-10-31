@@ -219,14 +219,14 @@ func (f *Flow) Attempt() int {
 }
 
 // FlowKey returns the external key of the flow this task is executing in, in the form
-// "{shard}-{flowID}-{token}". Useful for correlating logs/traces or calling back into the engine
+// "{shard}-{hour}-{flowID}-{token}". Useful for correlating logs/traces or calling back into the engine
 // (e.g. History, Snapshot) for the task's own flow. Empty when called outside a dispatched task.
 func (f *Flow) FlowKey() string {
 	return f.flowKey
 }
 
 // StepKey returns the external key of the step this task is executing, in the form
-// "{shard}-{stepID}-{token}". Useful for correlating logs/traces or calling back into the engine
+// "{shard}-{hour}-{stepID}-{token}". Useful for correlating logs/traces or calling back into the engine
 // (e.g. Step) for the task's own step. Empty when called outside a dispatched task.
 func (f *Flow) StepKey() string {
 	return f.stepKey

@@ -111,7 +111,7 @@ func TestForkCohort_MultiStepBranchCountsBranchesNotMembers(t *testing.T) {
 	// exit steps fold by branch, not by the step_ids the clone renumbers.
 	assert.Equal([]any{"a!", "b!", "c!"}, stateVal(forkOutcome.State, "enriched"))
 
-	_, forkID, _, err := keys.ParseFlowKey(forkKey)
+	_, _, forkID, _, err := keys.ParseFlowKey(forkKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -197,7 +197,7 @@ func TestForkCohort_RewindMidBranchExcludesWholeBranch(t *testing.T) {
 	}
 	assert.Equal(workflow.StatusCompleted, forkOutcome.Status)
 
-	_, forkID, _, err := keys.ParseFlowKey(forkKey)
+	_, _, forkID, _, err := keys.ParseFlowKey(forkKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -482,7 +482,7 @@ func TestForkCohort_TerminatedBranchIsALoss(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	shard, _, _, err := keys.ParseFlowKey(flowKey)
+	shard, _, _, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
 	// Everything but c2/p2/l2's branch must have converged before the Terminate: every Line but the held one, the
 	// three Line cohorts that do not wait on it, and c1's page cohort. Seven completed Lines alone is not that state

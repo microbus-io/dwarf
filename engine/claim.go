@@ -45,7 +45,7 @@ type claimRow struct {
 	replayGoto                                 string
 	replaySleepLeftMs                          float64
 	replayOnError                              bool
-	payloadDeferrals                           int
+	payloadDeferrals, createdHour              int
 	flowToken, flowStatus, workflowURL         string
 	baggageJSON                                []byte
 	traceParent                                string
@@ -60,7 +60,7 @@ type claimRow struct {
 }
 
 const (
-	claimStepCols = 24
+	claimStepCols = 25
 	claimFlowCols = 14
 )
 
@@ -71,7 +71,7 @@ func (r *claimRow) destinations() (step, flow []any) {
 		&r.stepDepth, &r.taskName, &r.stepToken, &r.stateJSON, &r.priorChangesJSON, &r.stateRefsJSON, &r.attempt,
 		&r.lineageID, &r.flowID, &r.timeBudgetMs, &r.interruptDone, &r.resumeDataJSON, &r.subgraphDone,
 		&r.subgraphResultJSON, &r.subgraphErrorJSON, &r.stepCreatedAt, &r.leaseSeq, &r.fanOutOrdinal,
-		&r.stepCancelling, &r.replaying, &r.replayGoto, &r.replaySleepLeftMs, &r.replayOnError, &r.payloadDeferrals,
+		&r.stepCancelling, &r.replaying, &r.replayGoto, &r.replaySleepLeftMs, &r.replayOnError, &r.payloadDeferrals, &r.createdHour,
 		&r.flowToken, &r.flowStatus, &r.workflowURL, &r.baggageJSON, &r.traceParent, &r.flowCreatedAt,
 		&r.flowUpdatedAt, &r.flowPriority, &r.flowFairnessKey, &r.flowFairnessWeight, &r.flowTimeBudgetMs,
 		&r.flowCancelReason, &r.graphHash, &r.flowPayloadVer,
@@ -185,7 +185,7 @@ func claimSet(alias string) string {
 var claimReadCols = []string{"step_depth", "task_name", "step_token", "state", "changes", "state_refs", "attempt",
 	"lineage_id", "flow_id", "time_budget_ms", "interrupt_done", "resume_data", "subgraph_done", "subgraph_result",
 	"subgraph_error", "created_at", "lease_seq", "fan_out_ordinal", "cancelling", "advancing", "advance_goto",
-	"advance_sleep_until", "advance_on_error", "payload_deferrals"}
+	"advance_sleep_until", "advance_on_error", "payload_deferrals", "flow_created_hour"}
 
 // claimCols is claimReadCols as a select list, each qualified by prefix ("s.", "INSERTED." or ""). A recorded
 // sleep is read as what remains of it, on the database clock.

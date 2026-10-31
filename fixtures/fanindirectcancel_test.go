@@ -82,7 +82,7 @@ func TestFanInDirectTerminate_NoExtendTerminatedFlow(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
+	shardNum, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
 		return
 	}

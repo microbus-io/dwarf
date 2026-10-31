@@ -6,7 +6,7 @@
 
 ## The constraint
 
-**A flow's shard is part of its identity and never changes.** Every flow key is `{shard}-{id}-{token}`, so
+**A flow's shard is part of its identity and never changes.** Every flow key is `{shard}-{hour}-{id}-{token}`, so
 the shard index is encoded in the handle your callers hold, and it is what routes every subsequent operation.
 Everything derived from a flow stays on its shard for life: subgraph children, thread continuations, and
 forks are all shard-pinned.

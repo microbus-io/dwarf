@@ -70,7 +70,7 @@ func TestFork_RejectsInterruptedKeptStep(t *testing.T) {
 	}
 	assert.Equal(workflow.StatusCompleted, out.Status)
 
-	shard, _, _, err := keys.ParseFlowKey(flowKey)
+	shard, _, _, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -107,7 +107,7 @@ func TestFork_RejectsInterruptedKeptStep(t *testing.T) {
 // mustFlowToken extracts the flow token component of a flow key.
 func mustFlowToken(t *testing.T, flowKey string) string {
 	t.Helper()
-	_, _, token, err := keys.ParseFlowKey(flowKey)
+	_, _, _, token, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
 		t.Fatalf("parseFlowKey: %v", err)
 	}

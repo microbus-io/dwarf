@@ -124,7 +124,7 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	shard, parentFlowID, _, err := keys.ParseFlowKey(flowKey)
+	shard, _, parentFlowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
 		return
 	}

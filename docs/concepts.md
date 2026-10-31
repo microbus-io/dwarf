@@ -46,7 +46,9 @@ Create ──► running ──► completed
 - **cancelled** — gracefully stopped by `Cancel`: every loss the flow could not recover from was a cancellation,
   none a real error.
 
-A flow's key is a composite string of the form `{shard}-{flowID}-{token}`. You pass it to every operation.
+A flow's key is a composite string of the form `{shard}-{hour}-{flowID}-{token}`: the shard that holds the flow, the hour
+it was created (counted from 2000-01-01 00:00 UTC), its id on that shard, and a random token. You pass it to every
+operation.
 
 ## Step
 

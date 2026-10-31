@@ -50,7 +50,7 @@ func TestCreate_SeedsGraphCache(t *testing.T) {
 
 	fk, err := e.Create(ctx, "seedcache/g", nil, nil)
 	assert.NoError(err)
-	shard, flowID, flowToken, err := keys.ParseFlowKey(fk)
+	shard, _, flowID, flowToken, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	cg, ok := e.graphs.Flow(graphcache.Key{Shard: shard, FlowID: flowID, Token: flowToken})
 	if assert.True(ok, "the creating replica caches the graph it just stored") {
@@ -101,7 +101,7 @@ func TestGraphCache_FlowsShareOneParse(t *testing.T) {
 	for range 2 {
 		fk, err := e.Create(ctx, "sharecache/g", nil, nil)
 		assert.NoError(err)
-		shard, flowID, flowToken, err := keys.ParseFlowKey(fk)
+		shard, _, flowID, flowToken, err := keys.ParseFlowKey(fk)
 		assert.NoError(err)
 		cg, ok := e.graphs.Flow(graphcache.Key{Shard: shard, FlowID: flowID, Token: flowToken})
 		assert.True(ok)
@@ -169,7 +169,7 @@ func TestGraphCache_DispatchMissInterns(t *testing.T) {
 		if assert.NoError(err) {
 			assert.Equal(workflow.StatusInterrupted, out.Status, "the runner dispatched the gate")
 		}
-		shard, flowID, flowToken, err := keys.ParseFlowKey(fk)
+		shard, _, flowID, flowToken, err := keys.ParseFlowKey(fk)
 		assert.NoError(err)
 		_, seeded := creator.graphs.Flow(graphcache.Key{Shard: shard, FlowID: flowID, Token: flowToken})
 		assert.False(seeded, "a replica that does not dispatch the shard seeds nothing")

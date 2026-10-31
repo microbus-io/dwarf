@@ -98,7 +98,7 @@ func TestFanInFlowLock_NonFinalArrivalTakesNoFlowRowWrite(t *testing.T) {
 		// Every branch really did arrive - otherwise a low write count would just mean a broken fan-in.
 		assert.Equal(float64(width), stateVal(outcome.State, "legs"), "every branch must have arrived at the fan-in")
 
-		_, flowID, _, err := keys.ParseFlowKey(flowKey)
+		_, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 		assert.NoError(err)
 		return engineseams.Seams(e).Visits(engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
 	}

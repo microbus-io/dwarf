@@ -74,7 +74,7 @@ func TestAwait_WakesWhenNoSignalIsDelivered(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	shard, flowID, _, err := keys.ParseFlowKey(flowKey)
+	shard, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
 		return
 	}

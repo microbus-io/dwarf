@@ -108,7 +108,7 @@ func TestOperations_UnmarshalableInputIs400(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	// The key is well-formed and unknown: with valid input each call is a 404, so a 400 is the input's.
-	const key = "1-1-0123456789abcdef"
+	const key = "1-0-1-0123456789abcdef"
 	assert.Equal(http.StatusNotFound, errors.StatusCode(e.Resume(t.Context(), key, nil)))
 	_, err := e.Fork(t.Context(), key, nil)
 	assert.Equal(http.StatusNotFound, errors.StatusCode(err))

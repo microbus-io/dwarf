@@ -230,7 +230,7 @@ func TestInterruptSnapshotFollowsTheRecordedInterrupt(t *testing.T) {
 	close(gateB)
 	awaitPropagatedInterrupts(t, eng, flowKey, 2)
 
-	shard, flowID, _, err := keys.ParseFlowKey(flowKey)
+	shard, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
 	db, err := engineseams.DB(eng).Shard(shard)
 	assert.NoError(err)

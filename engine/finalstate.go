@@ -40,9 +40,9 @@ import (
 // updated_at to AFTER completeFlow's transaction, inflating the step's recorded task duration (History and the
 // FlowRenderer read updated_at - started_at) by the cost of completing the flow. It would also be a
 // post-execution step write with neither a status guard nor a lease_seq fence.
-func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, flowID int, stepID int, flowToken string, workflowURL string) error {
+func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, flowID int, stepID int, flowHour int, flowToken string, workflowURL string) error {
 	e.logger.DebugContext(ctx, "Flow completed", "workflow", workflowURL)
-	_, err := e.completeFlow(ctx, shardNum, flowID, stepID, flowToken)
+	_, err := e.completeFlow(ctx, shardNum, flowID, stepID, flowHour, flowToken)
 	return errors.Trace(err)
 }
 
@@ -588,7 +588,7 @@ func stripForEachBookkeeping(state workflow.State, graph *workflow.Graph, spawnT
 
 // completeFlow transitions a flow to completed and propagates to surgraph. stepID is the step that completed it,
 // recorded as the step the flow stopped at.
-func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, stepID int, flowToken string) (bool, error) {
+func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, stepID int, flowHour int, flowToken string) (bool, error) {
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return false, errors.Trace(err)
@@ -705,7 +705,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, ste
 
 	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowID), "to", workflow.StatusCompleted)
 	e.metricFlowEnded(ctx, workflowURL, workflow.StatusCompleted, priority, shardNum)
-	compositeID := keys.New(shardNum, flowID, flowToken)
+	compositeID := keys.New(shardNum, flowHour, flowID, flowToken)
 
 	e.signalStop(ctx, compositeID, workflow.StatusCompleted)
 

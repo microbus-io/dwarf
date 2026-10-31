@@ -101,7 +101,7 @@ func (e *Engine) resolveStoppedFlows(ctx context.Context, flowKeys []string) (ma
 	settled := map[string]string{}
 	byShard := map[int]map[string]bool{}
 	for _, flowKey := range flowKeys {
-		shard, _, _, err := keys.ParseFlowKey(flowKey)
+		shard, _, _, _, err := keys.ParseFlowKey(flowKey)
 		if err != nil {
 			// Names no row in any shard, so no query can settle it and no waiting can improve it.
 			settled[flowKey] = flowUnresolved
@@ -148,7 +148,7 @@ func (e *Engine) resolveStoppedFlows(ctx context.Context, flowKeys []string) (ma
 		// The statuses are inlined - binding one is the filtered-index landmine - and are exactly the set
 		// isStoppedStatus admits. The window is bound, so the statement text is fixed.
 		recent, err := db.QueryContext(ctx,
-			"SELECT flow_id, flow_token, status FROM dwarf_flows WHERE status IN ('"+
+			"SELECT flow_id, flow_token, created_hour, status FROM dwarf_flows WHERE status IN ('"+
 				workflow.StatusCompleted+"','"+workflow.StatusFailed+"','"+
 				workflow.StatusTerminated+"','"+workflow.StatusCancelled+"','"+workflow.StatusInterrupted+
 				"') AND updated_at>=DATE_ADD_MILLIS(NOW_UTC(), ?)",
@@ -157,16 +157,16 @@ func (e *Engine) resolveStoppedFlows(ctx context.Context, flowKeys []string) (ma
 			fail(err) // recorded, not fatal - the lookup still covers every key this shard holds
 		} else {
 			for recent.Next() {
-				var flowID int
+				var flowID, flowHour int
 				var flowToken, status string
-				if err := recent.Scan(&flowID, &flowToken, &status); err != nil {
+				if err := recent.Scan(&flowID, &flowToken, &flowHour, &status); err != nil {
 					fail(err)
 					break
 				}
 				// The row spells its own key, so a parked caller is found by lookup and the token check
 				// falls out of it: a forged key matches nothing here and is left to the IN lookup, which
 				// owns the absent-or-mismatched verdict.
-				flowKey := keys.New(shard, flowID, flowToken)
+				flowKey := keys.New(shard, flowHour, flowID, flowToken)
 				if !wanted[flowKey] {
 					continue // nobody is parked on it, which is most of what a busy shard stops
 				}
@@ -192,12 +192,12 @@ func (e *Engine) resolveStoppedFlows(ctx context.Context, flowKeys []string) (ma
 			// reason the padding may repeat one.
 			ids := make([]int, len(chunk))
 			for i, flowKey := range chunk {
-				_, ids[i], _, _ = keys.ParseFlowKey(flowKey) // parsed once already, so it cannot fail here
+				_, _, ids[i], _, _ = keys.ParseFlowKey(flowKey) // parsed once already, so it cannot fail here
 			}
 			binds := latchPadBinds(ids)
 			// Deliberately UNFILTERED on status - the filter is applied in Go, see above.
 			rows, err := db.QueryContext(ctx,
-				"SELECT flow_id, flow_token, status FROM dwarf_flows WHERE flow_id IN ("+
+				"SELECT flow_id, flow_token, created_hour, status FROM dwarf_flows WHERE flow_id IN ("+
 					strings.Repeat("?,", len(binds)-1)+"?)", binds...)
 			if err != nil {
 				fail(err)
@@ -205,14 +205,14 @@ func (e *Engine) resolveStoppedFlows(ctx context.Context, flowKeys []string) (ma
 			}
 			complete := true
 			for rows.Next() {
-				var flowID int
+				var flowID, flowHour int
 				var flowToken, status string
-				if err := rows.Scan(&flowID, &flowToken, &status); err != nil {
+				if err := rows.Scan(&flowID, &flowToken, &flowHour, &status); err != nil {
 					fail(err)
 					complete = false
 					break
 				}
-				found[keys.New(shard, flowID, flowToken)] = status
+				found[keys.New(shard, flowHour, flowID, flowToken)] = status
 			}
 			if err := rows.Err(); err != nil {
 				fail(err)

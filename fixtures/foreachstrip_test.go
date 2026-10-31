@@ -592,7 +592,7 @@ func TestForEachStrip_TerminatedNestedFanOutKeepsCompletedBranches(t *testing.T)
 		return
 	}
 	// Every Line but the held one has committed its completion.
-	shard, _, _, err := keys.ParseFlowKey(flowKey)
+	shard, _, _, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
 	assert.True(enginetest.WaitUntil(t, 30*time.Second, func() bool {
 		return enginetest.CountRows(t, e, shard,

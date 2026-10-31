@@ -114,7 +114,7 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	shard, parentFlowID, _, err := keys.ParseFlowKey(flowKey)
+	shard, _, parentFlowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -209,7 +209,7 @@ func TestWedgeSweep_SubgraphCallerWithNoChildFails(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	shard, parentFlowID, _, err := keys.ParseFlowKey(flowKey)
+	shard, _, parentFlowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -306,7 +306,7 @@ func TestWedgeSweep_ChildLiveAgainIsLeftAlone(t *testing.T) {
 	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
 		t.Fatal("subgraph child never started")
 	}
-	shard, parentFlowID, _, err := keys.ParseFlowKey(flowKey)
+	shard, _, parentFlowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -439,7 +439,7 @@ func TestWedgeSweep_OrphanedSubgraphChildTerminated(t *testing.T) {
 	if !assert.NoError(err) || !assert.Equal(workflow.StatusInterrupted, out.Status) {
 		return
 	}
-	shard, parentFlowID, _, err := keys.ParseFlowKey(parentKey)
+	shard, _, parentFlowID, _, err := keys.ParseFlowKey(parentKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -467,7 +467,7 @@ func TestWedgeSweep_OrphanedSubgraphChildTerminated(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	_, healthyParentID, _, err := keys.ParseFlowKey(healthyKey)
+	_, _, healthyParentID, _, err := keys.ParseFlowKey(healthyKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -568,7 +568,7 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 	if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, orphanOut.Status) {
 		return
 	}
-	shard, orphanFlowID, _, err := keys.ParseFlowKey(orphanKey)
+	shard, _, orphanFlowID, _, err := keys.ParseFlowKey(orphanKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -582,7 +582,7 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	_, healthyFlowID, _, err := keys.ParseFlowKey(healthyKey)
+	_, _, healthyFlowID, _, err := keys.ParseFlowKey(healthyKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -657,7 +657,7 @@ func TestOrphanDetection_ChecksEveryChunk(t *testing.T) {
 	if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, out.Status) {
 		return
 	}
-	shard, templateID, _, err := keys.ParseFlowKey(key)
+	shard, _, templateID, _, err := keys.ParseFlowKey(key)
 	if !assert.NoError(err) {
 		return
 	}
@@ -703,8 +703,8 @@ func TestOrphanDetection_ChecksEveryChunk(t *testing.T) {
 				continue
 			}
 			_, err := tx.ExecContext(ctx,
-				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms) VALUES (?, 1, 'forged', 'A', 'orphanchunk.verify:0/a', '"+workflow.StatusInterrupted+"', 1000)",
-				id)
+				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, flow_created_hour) VALUES (?, 1, 'forged', 'A', 'orphanchunk.verify:0/a', '"+workflow.StatusInterrupted+"', 1000, (SELECT created_hour FROM dwarf_flows WHERE flow_id=?))",
+				id, id)
 			if err != nil {
 				return err
 			}
@@ -762,7 +762,7 @@ func TestOrphanDetection_IgnoresCompletedSuccessorWindow(t *testing.T) {
 	if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, out.Status) {
 		return
 	}
-	shard, flowID, _, err := keys.ParseFlowKey(key)
+	shard, _, flowID, _, err := keys.ParseFlowKey(key)
 	if !assert.NoError(err) {
 		return
 	}

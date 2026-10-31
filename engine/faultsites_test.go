@@ -80,7 +80,7 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 	e.seams.Inject(engineseams.FaultRecoveryResetErr)
 	fk, err := e.Create(ctx, "ftbreset/g", nil, nil)
 	assert.NoError(err)
-	shard, flowID, _, err := keys.ParseFlowKey(fk)
+	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 
 	stranded := func() bool {
@@ -196,7 +196,7 @@ func TestFaultSite_SubgraphSpawnErr(t *testing.T) {
 		fk, out := batteryRun(t, e, "ftbspawn/parent")
 		assert.Equal(workflow.StatusCompleted, out.Status)
 		assert.Equal(int32(2), calls.Load(), "the caller's task ran again instead of its spawn being recognized as landed")
-		shard, flowID, _, err := keys.ParseFlowKey(fk)
+		shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 		assert.NoError(err)
 		assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE surgraph_flow_id=?", flowID),
 			"a retried spawn created a second child")
@@ -209,7 +209,7 @@ func TestFaultSite_SubgraphSpawnErr(t *testing.T) {
 		defer e.seams.Withdraw(spawnFault)
 		fk, out := batteryRun(t, e, "ftbspawn/parent")
 		assert.Equal(workflow.StatusFailed, out.Status)
-		shard, flowID, _, err := keys.ParseFlowKey(fk)
+		shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 		assert.NoError(err)
 		// No child flow was created (the spawn failed before insert), so no orphan lingers.
 		assert.Equal(0, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE surgraph_flow_id=?", flowID))
@@ -265,7 +265,7 @@ func TestFaultSite_TerminateCommit(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	fk := createInterruptedFlow(t, e, "ftbcancel/g")
-	shard, flowID, _, err := keys.ParseFlowKey(fk)
+	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 
 	// The Terminate transaction fails once: Terminate errors and nothing changed (still interrupted).
@@ -296,7 +296,7 @@ func TestFaultSite_ResumeCommit(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	fk := createInterruptedFlow(t, e, "ftbresume/g")
-	shard, flowID, _, err := keys.ParseFlowKey(fk)
+	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 
 	// The Resume transaction fails once: Resume errors and the flow is still interrupted (leaf still parked).
@@ -325,7 +325,7 @@ func TestFaultSite_ForkCommit(t *testing.T) {
 	// A completed origin to fork from.
 	originKey, out := batteryRun(t, e, "ftbfork/g")
 	assert.Equal(workflow.StatusCompleted, out.Status)
-	shard, flowID, _, err := keys.ParseFlowKey(originKey)
+	shard, _, flowID, _, err := keys.ParseFlowKey(originKey)
 	assert.NoError(err)
 	originFS := readFinalState(t, e, originKey)
 	flowsBefore := shardFlowCount(t, e, shard)
@@ -333,10 +333,10 @@ func TestFaultSite_ForkCommit(t *testing.T) {
 	// The fork step: the completed entry step A.
 	db, err := e.db.Shard(shard)
 	assert.NoError(err)
-	var aStepID int
+	var aStepID, aStepHour int
 	var aStepToken string
-	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id, step_token FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStepID, &aStepToken))
-	forkStepKey := keys.New(shard, aStepID, aStepToken)
+	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id, flow_created_hour, step_token FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStepID, &aStepHour, &aStepToken))
+	forkStepKey := keys.New(shard, aStepHour, aStepID, aStepToken)
 
 	// The clone transaction fails once: Fork errors, the origin is byte-identical, and no clone rows exist.
 	e.seams.Inject(engineseams.FaultForkCommit)
@@ -390,7 +390,7 @@ func TestFaultSite_DeliverFailureErr(t *testing.T) {
 	e.seams.Inject(engineseams.FaultDeliverFailureErr)
 	fk, err := e.Create(ctx, "ftbdeliver/parent", nil, nil)
 	assert.NoError(err)
-	shard, _, _, err := keys.ParseFlowKey(fk)
+	shard, _, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
 	assert.NoError(err)
@@ -469,7 +469,7 @@ func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
 	e.seams.Inject(engineseams.Join(engineseams.FaultDeliverFailureErr, "Call1"))
 	fk, err := e.Create(ctx, "ftbdeep/root", nil, nil)
 	assert.NoError(err)
-	shard, rootFlowID, _, err := keys.ParseFlowKey(fk)
+	shard, _, rootFlowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
 	assert.NoError(err)
@@ -525,7 +525,7 @@ func TestFaultSite_ReapSelectErr(t *testing.T) {
 	fk, err := e.Create(ctx, "ftbreapsel/g", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, 5*time.Second)
-	shard, _, _, err := keys.ParseFlowKey(fk)
+	shard, _, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	time.Sleep(5 * time.Millisecond) // let the 1ms window elapse
 

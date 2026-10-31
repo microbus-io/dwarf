@@ -94,12 +94,12 @@ so restricting search alone does not close it.
 flow reference and the task name. Ownership and tenancy — the axes any real access check turns on — are
 structurally invisible to it. Every access decision belongs to the layer you build around it.
 
-**A flow key is a capability, not a permission.** The key's random token makes the reference unguessable, so
-a caller cannot enumerate flows by counting: without it, the numeric part of a flow key is a sequential
-integer. What the token buys is that an authorization bug alone is not enough to walk the table — you would
-also need each flow's token. What it is *not* is access control. **Anyone holding a flow key can resume,
-terminate, fork and read that flow.** Treat a leaked, logged, or forwarded key as a full write capability for
-that one flow.
+**A flow key is a capability, not a permission.** The key's random token makes the reference unguessable, so a
+caller cannot enumerate flows by counting: without it, the flow's id in the key is a sequential integer, and
+the hour beside it only says when the flow was created. What the token buys is that an authorization bug alone
+is not enough to walk the table — you would also need each flow's token. What it is *not* is access control.
+**Anyone holding a flow key can resume, terminate, fork and read that flow.** Treat a leaked, logged, or
+forwarded key as a full write capability for that one flow.
 
 **`List` is the amplifier.** It is the only operation that returns keys wholesale, so it converts "can call
 the engine" into "holds a capability for every flow returned." Gate it accordingly, and prefer scoping it —

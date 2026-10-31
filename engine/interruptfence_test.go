@@ -152,9 +152,9 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 		)
 		assert.NoError(err)
 		_, err = db.ExecContext(ctx,
-			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, parked, time_budget_ms, lease_seq, not_before, lease_expires)"+
-				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 999000), DATE_ADD_MILLIS(NOW_UTC(), 999000))",
-			1, 1, "pstok", "Call", "u", workflow.StatusRunning, parkedSubgraph, 1000, 1,
+			"INSERT INTO dwarf_steps (flow_created_hour, flow_id, step_depth, step_token, task_name, task_url, status, parked, time_budget_ms, lease_seq, not_before, lease_expires)"+
+				" VALUES ((SELECT created_hour FROM dwarf_flows WHERE flow_id=?), ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 999000), DATE_ADD_MILLIS(NOW_UTC(), 999000))",
+			1, 1, 1, "pstok", "Call", "u", workflow.StatusRunning, parkedSubgraph, 1000, 1,
 		)
 		assert.NoError(err)
 
@@ -165,9 +165,9 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 		)
 		assert.NoError(err)
 		_, err = db.ExecContext(ctx,
-			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, parked, time_budget_ms, lease_seq, not_before, lease_expires)"+
-				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 999000), DATE_ADD_MILLIS(NOW_UTC(), 999000))",
-			2, 2, "cstok", "X", "u", leafStatus, parkedNone, 1000, 7,
+			"INSERT INTO dwarf_steps (flow_created_hour, flow_id, step_depth, step_token, task_name, task_url, status, parked, time_budget_ms, lease_seq, not_before, lease_expires)"+
+				" VALUES ((SELECT created_hour FROM dwarf_flows WHERE flow_id=?), ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 999000), DATE_ADD_MILLIS(NOW_UTC(), 999000))",
+			2, 2, 2, "cstok", "X", "u", leafStatus, parkedNone, 1000, 7,
 		)
 		assert.NoError(err)
 		return e, db
@@ -192,7 +192,7 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 		e, db := setup(t, workflow.StatusPending)
 		defer e.Shutdown(ctx)
 
-		err := e.handleInterrupt(ctx, 1, db, 2, 7, 2, "ctok", "u", []byte(`{"answer":"x"}`), mustState(map[string]any{"ask": "approve?"}))
+		err := e.handleInterrupt(ctx, 1, db, 2, 7, 2, createdHourOf(t, e, 2), "ctok", "u", []byte(`{"answer":"x"}`), mustState(map[string]any{"ask": "approve?"}))
 		assert.True(errors.Is(err, errLeaseFenced), "fenced -> persist abandons quietly, got %v", err)
 
 		leafStatus, _ := stepState(t, db, 2)
@@ -226,7 +226,7 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 		e.seams.Inject(engineseams.FaultInterruptChainWrite)
 		defer e.seams.Withdraw(engineseams.FaultInterruptChainWrite)
 
-		err := e.handleInterrupt(ctx, 1, db, 2, 7, 2, "ctok", "u", []byte(`{"answer":"x"}`), mustState(map[string]any{"ask": "approve?"}))
+		err := e.handleInterrupt(ctx, 1, db, 2, 7, 2, createdHourOf(t, e, 2), "ctok", "u", []byte(`{"answer":"x"}`), mustState(map[string]any{"ask": "approve?"}))
 		assert.Error(err, "a failed chain UPDATE must surface as an error so Transact retries it, NOT be swallowed as a fence")
 		assert.False(errors.Is(err, errLeaseFenced), "a failed chain UPDATE must not read as a fence")
 
@@ -247,7 +247,7 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 		e, db := setup(t, workflow.StatusRunning)
 		defer e.Shutdown(ctx)
 
-		err := e.handleInterrupt(ctx, 1, db, 2, 7, 2, "ctok", "u", []byte(`{"answer":"x"}`), mustState(map[string]any{"ask": "approve?"}))
+		err := e.handleInterrupt(ctx, 1, db, 2, 7, 2, createdHourOf(t, e, 2), "ctok", "u", []byte(`{"answer":"x"}`), mustState(map[string]any{"ask": "approve?"}))
 		assert.NoError(err)
 
 		leafStatus, _ := stepState(t, db, 2)

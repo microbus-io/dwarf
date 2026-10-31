@@ -84,7 +84,7 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 
 	fk, err := e.Create(ctx, "strand/g", nil, nil)
 	assert.NoError(err)
-	shard, flowID, _, err := keys.ParseFlowKey(fk)
+	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 
 	select {
@@ -174,7 +174,7 @@ func slowWorkerReplay(t *testing.T, e *Engine, mux *hosts.Mux, flowURL string, i
 	fk, err := e.Create(ctx, flowURL, initial, nil)
 	assert.NoError(err)
 	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeTransitionTx, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeTransitionTx")
-	shard, flowID, _, err = keys.ParseFlowKey(fk)
+	shard, _, flowID, _, err = keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
 	if !assert.NoError(err) {
@@ -400,7 +400,7 @@ func TestBumpCohortArrivals_Fence(t *testing.T) {
 	fk, err := e.Create(ctx, "bump/g", nil, nil)
 	assert.NoError(err)
 	assert.True(enginetest.WaitUntil(t, 10*time.Second, func() bool { return started.Load() == 2 }), "branches never started")
-	shard, flowID, _, err := keys.ParseFlowKey(fk)
+	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
 	if !assert.NoError(err) {

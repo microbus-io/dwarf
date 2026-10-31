@@ -81,9 +81,9 @@ func (r *rig) insertStep(t *testing.T, flowID, priority int, key string, weight 
 	t.Helper()
 	_, err := r.db.ExecContext(context.Background(),
 		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status,"+
-			" time_budget_ms, priority, fairness_key, fairness_weight, not_before, lease_expires, created_at)"+
+			" time_budget_ms, priority, fairness_key, fairness_weight, not_before, lease_expires, created_at, flow_created_hour)"+
 			" VALUES (?, 0, 'tok0123456789ab', 'T', 'u', '"+workflow.StatusPending+"', 60000, ?, ?, ?,"+
-			" NOW_UTC(), NOW_UTC(), NOW_UTC())",
+			" NOW_UTC(), NOW_UTC(), NOW_UTC(), 0)",
 		flowID, priority, key, weight)
 	if err != nil {
 		t.Fatal(err)

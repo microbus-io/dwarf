@@ -58,7 +58,7 @@ func WaitUntil(t *testing.T, timeout time.Duration, cond func() bool) bool {
 func FlowStatus(t *testing.T, e Engine, flowKey string) string {
 	t.Helper()
 	assert := testarossa.For(t)
-	shard, flowID, _, err := keys.ParseFlowKey(flowKey)
+	shard, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
 	db, err := engineseams.DB(e).Shard(shard)
 	assert.NoError(err)

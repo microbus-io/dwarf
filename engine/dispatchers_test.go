@@ -721,7 +721,7 @@ func TestDispatchers_SweepsSkipShardsThisReplicaOnlyReads(t *testing.T) {
 	fk, err := e.Create(ctx, "sweep/g", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
 	waitDone()
-	shard, _, _, err := keys.ParseFlowKey(fk)
+	shard, _, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	time.Sleep(5 * time.Millisecond) // inherent wall-clock: let the 1ms deletion window elapse
 
@@ -907,7 +907,7 @@ func TestDispatchers_DrainingReplicasClassPassesToAPeer(t *testing.T) {
 
 	heldKey, err := drainer.Create(ctx, "drainhandoff/g", map[string]any{"hold": "yes"}, nil)
 	assert.NoError(err)
-	_, heldFlowID, _, err := keys.ParseFlowKey(heldKey)
+	_, _, heldFlowID, _, err := keys.ParseFlowKey(heldKey)
 	assert.NoError(err)
 	<-started
 	db, err := creator.db.Shard(1)

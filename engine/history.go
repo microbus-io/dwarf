@@ -35,7 +35,7 @@ import (
 )
 
 func (e *Engine) history(ctx context.Context, flowKey string) ([]workflow.FlowStep, error) {
-	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
+	shardNum, flowHour, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -55,7 +55,7 @@ func (e *Engine) history(ctx context.Context, flowKey string) ([]workflow.FlowSt
 	var exists int
 	err = db.QueryRowContext(ctx,
 		"SELECT 1 FROM dwarf_flows f JOIN dwarf_flows r ON r.flow_id=f.root_flow_id"+
-			" WHERE f.flow_id=? AND f.flow_token=? AND r.delete_after_ms=0", flowID, flowToken).Scan(&exists)
+			" WHERE f.flow_id=? AND f.flow_token=? AND f.created_hour=? AND r.delete_after_ms=0", flowID, flowToken, flowHour).Scan(&exists)
 	if err == sql.ErrNoRows {
 		return nil, errors.New("flow not found", http.StatusNotFound)
 	}
@@ -95,7 +95,7 @@ type subgraphChild struct {
 // already holds, every mutation of it is rejected.
 func (e *Engine) loadSubgraphChildren(ctx context.Context, db *sequel.DB, shardNum int, flowID int) (map[int]subgraphChild, error) {
 	rows, err := db.QueryContext(ctx,
-		"SELECT flow_id, flow_token, surgraph_step_id, workflow_url, workflow_name FROM dwarf_flows"+
+		"SELECT flow_id, flow_token, created_hour, surgraph_step_id, workflow_url, workflow_name FROM dwarf_flows"+
 			" WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?) AND surgraph_step_id>0 ORDER BY flow_id",
 		flowID,
 	)
@@ -105,15 +105,15 @@ func (e *Engine) loadSubgraphChildren(ctx context.Context, db *sequel.DB, shardN
 	defer rows.Close()
 	childByCaller := map[int]subgraphChild{}
 	for rows.Next() {
-		var childFlowID, callerStepID int
+		var childFlowID, childHour, callerStepID int
 		var token, url, name string
-		err := rows.Scan(&childFlowID, &token, &callerStepID, &url, &name)
+		err := rows.Scan(&childFlowID, &token, &childHour, &callerStepID, &url, &name)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
 		childByCaller[callerStepID] = subgraphChild{
 			flowID:       childFlowID,
-			flowKey:      keys.New(shardNum, childFlowID, strings.TrimSpace(token)),
+			flowKey:      keys.New(shardNum, childHour, childFlowID, strings.TrimSpace(token)),
 			workflowURL:  strings.TrimSpace(url),
 			workflowName: strings.TrimSpace(name),
 		}
@@ -132,7 +132,7 @@ type treeStep struct {
 // leave their flow, so every predecessor_id/successor_id resolves to a key among the loaded rows.
 func (e *Engine) loadTreeSteps(ctx context.Context, db *sequel.DB, shardNum int, flowID int) (map[int][]treeStep, error) {
 	rows, err := db.QueryContext(ctx,
-		"SELECT flow_id, step_id, step_token, step_depth, task_name, attempt, status, error, created_at, started_at, updated_at, predecessor_id, successor_id, parked, engine_id FROM dwarf_steps"+
+		"SELECT flow_id, step_id, step_token, flow_created_hour, step_depth, task_name, attempt, status, error, created_at, started_at, updated_at, predecessor_id, successor_id, parked, engine_id FROM dwarf_steps"+
 			" WHERE flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)) ORDER BY flow_id, step_depth, step_id",
 		flowID,
 	)
@@ -144,14 +144,14 @@ func (e *Engine) loadTreeSteps(ctx context.Context, db *sequel.DB, shardNum int,
 	keyOf := map[int]string{}
 	for rows.Next() {
 		var step workflow.FlowStep
-		var stepFlowID, stepID, predID, succID, parked int
+		var stepFlowID, stepID, stepHour, predID, succID, parked int
 		var stepToken, errMsg string
-		err := rows.Scan(&stepFlowID, &stepID, &stepToken, &step.StepDepth, &step.TaskName, &step.Attempt, &step.Status, &errMsg, &step.CreatedAt, &step.StartedAt, &step.UpdatedAt, &predID, &succID, &parked, &step.EngineID)
+		err := rows.Scan(&stepFlowID, &stepID, &stepToken, &stepHour, &step.StepDepth, &step.TaskName, &step.Attempt, &step.Status, &errMsg, &step.CreatedAt, &step.StartedAt, &step.UpdatedAt, &predID, &succID, &parked, &step.EngineID)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
 		step.Parked = parked != 0
-		step.StepKey = keys.New(shardNum, stepID, stepToken)
+		step.StepKey = keys.New(shardNum, stepHour, stepID, stepToken)
 		step.Error = strings.TrimSpace(errMsg)
 		keyOf[stepID] = step.StepKey
 		stepsByFlow[stepFlowID] = append(stepsByFlow[stepFlowID], treeStep{id: stepID, predID: predID, succID: succID, step: step})
@@ -193,7 +193,7 @@ func assembleHistory(flowID int, childByCaller map[int]subgraphChild, stepsByFlo
 }
 
 func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, error) {
-	shardNum, stepID, stepToken, err := keys.ParseStepKey(stepKey)
+	shardNum, stepHour, stepID, stepToken, err := keys.ParseStepKey(stepKey)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -212,8 +212,8 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	var stepDepth, attempt, predID, succID, ver int
 	var createdAt, updatedAt time.Time
 	err = db.QueryRowContext(ctx,
-		"SELECT s.step_depth, s.task_name, s.attempt, s.state, s.changes, s.state_refs, s.interrupt_payload, s.status, s.error, s.created_at, s.updated_at, s.predecessor_id, s.successor_id, f.payload_ver, f.flow_token FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.step_token=?",
-		stepID, stepToken,
+		"SELECT s.step_depth, s.task_name, s.attempt, s.state, s.changes, s.state_refs, s.interrupt_payload, s.status, s.error, s.created_at, s.updated_at, s.predecessor_id, s.successor_id, f.payload_ver, f.flow_token FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.step_token=? AND s.flow_created_hour=?",
+		stepID, stepToken, stepHour,
 	).Scan(&stepDepth, &taskName, &attempt, &stateJSON, &changesJSON, &stateRefsJSON, &interruptJSON, &statusStr, &errMsg, &createdAt, &updatedAt, &predID, &succID, &ver, &flowToken)
 	if err == sql.ErrNoRows {
 		return nil, errors.New("step not found", http.StatusNotFound)
@@ -352,7 +352,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 		placeholders := strings.Repeat("?,", len(ids))
 		placeholders = placeholders[:len(placeholders)-1]
 		nrows, err := db.QueryContext(ctx,
-			"SELECT step_id, step_token FROM dwarf_steps WHERE step_id IN ("+placeholders+")",
+			"SELECT step_id, step_token, flow_created_hour FROM dwarf_steps WHERE step_id IN ("+placeholders+")",
 			ids...,
 		)
 		if err != nil {
@@ -360,13 +360,13 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 		}
 		defer nrows.Close()
 		for nrows.Next() {
-			var nid int
+			var nid, nhour int
 			var ntoken string
-			err := nrows.Scan(&nid, &ntoken)
+			err := nrows.Scan(&nid, &ntoken, &nhour)
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
-			key := keys.New(shardNum, nid, ntoken)
+			key := keys.New(shardNum, nhour, nid, ntoken)
 			if nid == predID {
 				fs.PredecessorKey = key
 			}
@@ -457,7 +457,7 @@ func (e *Engine) skipSurgraphBackward(ctx context.Context, db *sequel.DB, id int
 }
 
 func (e *Engine) fingerprint(ctx context.Context, flowKey string) (string, string, error) {
-	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
+	shardNum, flowHour, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
 		return "", "", errors.Trace(err)
 	}
@@ -473,7 +473,7 @@ func (e *Engine) fingerprint(ctx context.Context, flowKey string) (string, strin
 	defer doneTurn()
 	var status string
 	var rootFlowID int
-	err = db.QueryRowContext(ctx, "SELECT status, root_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&status, &rootFlowID)
+	err = db.QueryRowContext(ctx, "SELECT status, root_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?", flowID, flowToken, flowHour).Scan(&status, &rootFlowID)
 	if err == sql.ErrNoRows {
 		return "", "", errors.New("flow not found", http.StatusNotFound)
 	}

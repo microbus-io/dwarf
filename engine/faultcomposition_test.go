@@ -116,7 +116,7 @@ func TestFaultComposition_FanOutBranch(t *testing.T) {
 	assert.Equal(int64(1), yCalls.Load())
 	assert.Equal(int64(1), jCalls.Load()) // fan-in fired exactly once - no double-count from the recovery re-run
 
-	_, flowID, _, err := keys.ParseFlowKey(fk)
+	_, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
@@ -301,7 +301,7 @@ func TestFaultComposition_DeepSubgraphReviveLoss(t *testing.T) {
 	stopped := e.seams.Waiter(engineseams.CheckpointFlowStopped)
 	fk, err := e.Create(ctx, "fcdeep/root", nil, nil)
 	assert.NoError(err)
-	shard, _, _, err := keys.ParseFlowKey(fk)
+	shard, _, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
 	assert.NoError(err)

@@ -39,7 +39,7 @@ import (
 // The design is a copy-only-keep clone, re-parking ancestor callers up the surgraph chain, a created->pending
 // crash-gate, and uniform scheduling resolution.
 func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides any) (string, error) {
-	shardNum, forkStepID, forkStepToken, err := keys.ParseStepKey(stepKey)
+	shardNum, forkStepHour, forkStepID, forkStepToken, err := keys.ParseStepKey(stepKey)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -63,8 +63,8 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	var forkStepState, forkStepRefs, forkStepReduced []byte
 	var leafFlowToken string
 	err = db.QueryRowContext(ctx,
-		"SELECT s.flow_id, s.state, s.state_refs, s.state_reduced, f.payload_ver, f.flow_token FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.step_token=?",
-		forkStepID, forkStepToken,
+		"SELECT s.flow_id, s.state, s.state_refs, s.state_reduced, f.payload_ver, f.flow_token FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.step_token=? AND s.flow_created_hour=?",
+		forkStepID, forkStepToken, forkStepHour,
 	).Scan(&leafFlowID, &forkStepState, &forkStepRefs, &forkStepReduced, &leafFlowPayloadVer, &leafFlowToken)
 	if err == sql.ErrNoRows {
 		return "", errors.New("step not found", http.StatusNotFound)
@@ -78,7 +78,7 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 
 	// Walk up to the root, recording each flow's rewind step: the leaf fork step in its own flow, and the
 	// caller step that spawned the lower flow in each ancestor.
-	chainFlowIDs, chainStepIDs, _, err := e.surgraphChain(ctx, shardNum, leafFlowID, leafFlowToken)
+	chainFlowIDs, chainStepIDs, _, err := e.surgraphChain(ctx, shardNum, leafFlowID, forkStepHour, leafFlowToken)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -197,7 +197,7 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 		return "", errors.Trace(err)
 	}
 
-	newFlowKey := keys.New(shardNum, newRootFlowID, cc.rootFlowToken)
+	newFlowKey := keys.New(shardNum, cc.newRootFlowHour, newRootFlowID, cc.rootFlowToken)
 	e.logger.InfoContext(ctx, "Flow forked", "fromRoot", rootFlowID, "forkStep", forkStepID, "to", newRootFlowID)
 	// Every flow on the rewind chain - the new root and each subgraph flow between it and the fork step - is
 	// cloned running and ends through completeFlow, which counts it in dwarf_flows_ended. Each must be
@@ -226,6 +226,7 @@ type forkClone struct {
 	timeBudgetMs    int
 	newLeafStepID   int
 	newRootFlowID   int      // the cloned root's flow_id; descendants inherit it as their root_flow_id
+	newRootFlowHour int      // the cloned root's created_hour, for the key Fork returns
 	startedURLs     []string // workflow_url of every flow cloned to run again, for flows_started after commit
 }
 
@@ -319,7 +320,7 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	// The cloned root takes cc.rootFlowToken, the token in the key returned to the caller, and joins the origin's
 	// thread; it is its own root, and its descendants inherit its id as their root_flow_id. A subgraph flow is its
 	// own thread - thread_token echoes its own minted token, or List builds a malformed ThreadKey
-	// ("{shard}-{id}-") that the API's thread resolution then 404s on - and shares the cloned root's tree.
+	// ("{shard}-{hour}-{id}-") that the API's thread resolution then 404s on - and shares the cloned root's tree.
 	// The origin's cancel reason comes along: a kept fan-out branch lost to the origin's cancellation is a loss
 	// the clone inherits, and a fork whose only losses are such branches resolves cancelled - so it reports the
 	// reason that explains it, rather than a cancellation nobody gave a reason for. cancel_watermark is
@@ -344,14 +345,21 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		return 0, nil, errors.Trace(err)
 	}
 	newFlowID := int(newFlowID64)
-	if isRoot {
-		cc.newRootFlowID = newFlowID
-	}
 	if fixup != "" {
 		_, err = tx.ExecContext(ctx, fixup, selfFlowFixupArgs(newFlowID64, 1)...)
 		if err != nil {
 			return 0, nil, errors.Trace(err)
 		}
+	}
+	// The clone is a new flow, so its creation hour is its own, from the database clock (the column's default).
+	// Its steps carry it, not the origin's: every step carries its own flow's hour.
+	var newFlowHour int
+	err = tx.QueryRowContext(ctx, "SELECT created_hour FROM dwarf_flows WHERE flow_id=?", newFlowID).Scan(&newFlowHour)
+	if err != nil {
+		return 0, nil, errors.Trace(err)
+	}
+	if isRoot {
+		cc.newRootFlowID, cc.newRootFlowHour = newFlowID, newFlowHour
 	}
 
 	// Direct subgraph children of this flow, keyed by caller step (latest child per caller).
@@ -448,15 +456,15 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		var newID int64
 		if isLeafFlow && s.oldID == cc.leafStepID {
 			newID, err = tx.InsertReturnID(ctx, "step_id",
-				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, state_reduced, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key, fairness_weight, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, engine_id)"+
-					" SELECT ?, step_depth, ?, task_name, task_url, state, state_refs, state_reduced, changes, interrupt_payload, ?, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, ? FROM dwarf_steps WHERE step_id=?",
-				newFlowID, keys.RandomIdentifier(16), workflow.StatusCreated, flowPriority, flowFairnessKey, flowFairnessWeight, e.engineID, s.oldID,
+				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, state_reduced, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key, fairness_weight, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, engine_id, flow_created_hour)"+
+					" SELECT ?, step_depth, ?, task_name, task_url, state, state_refs, state_reduced, changes, interrupt_payload, ?, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, ?, ? FROM dwarf_steps WHERE step_id=?",
+				newFlowID, keys.RandomIdentifier(16), workflow.StatusCreated, flowPriority, flowFairnessKey, flowFairnessWeight, e.engineID, newFlowHour, s.oldID,
 			)
 		} else {
 			newID, err = tx.InsertReturnID(ctx, "step_id",
-				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, state_reduced, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key, fairness_weight, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, engine_id)"+
-					" SELECT ?, step_depth, ?, task_name, task_url, state, state_refs, state_reduced, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, ? FROM dwarf_steps WHERE step_id=?",
-				newFlowID, keys.RandomIdentifier(16), flowPriority, flowFairnessKey, flowFairnessWeight, e.engineID, s.oldID,
+				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, state_reduced, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key, fairness_weight, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, engine_id, flow_created_hour)"+
+					" SELECT ?, step_depth, ?, task_name, task_url, state, state_refs, state_reduced, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, ?, ? FROM dwarf_steps WHERE step_id=?",
+				newFlowID, keys.RandomIdentifier(16), flowPriority, flowFairnessKey, flowFairnessWeight, e.engineID, newFlowHour, s.oldID,
 			)
 		}
 		if err != nil {

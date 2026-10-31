@@ -474,7 +474,8 @@ in the cohort recount above; it is deliberately not offered.
 *Caveat:* the cloned-prefix steps keep the **origin's** timestamps (the `INSERT…SELECT` copies `created_at`/
 `started_at`/`updated_at` verbatim); only the **rewound** rows (the leaf fork step and re-parked ancestor
 callers) are stamped fork-time (`NOW_UTC()`). So a cloned prefix's timings match the original, and only the
-re-run boundary reads as new.
+re-run boundary reads as new. Every cloned step still carries the CLONE's creation hour (`flow_created_hour`), so for
+the prefix that hour and `created_at` disagree: the hour is the flow's, never the row's.
 
 **History / Step** - `History` returns the step-by-step execution as `[]workflow.FlowStep`; each includes key, depth,
 task name, status, error, timestamps, and DAG links - but **not** `state`/`changes` (its two-round-trip tree scan
@@ -931,7 +932,7 @@ not parallelism:
   `graph_hash` is carried verbatim by `Continue` and `Fork`, never recomputed: they copy the graph, and on
   Postgres and MySQL the copied bytes are re-spelled, so their hash would differ.
 - **A transition's successors go in as multi-row INSERTs** (`successorBatch`), in power-of-two chunks of at
-  most 64 rows (22 binds each, under SQL Server's 2,100-parameter ceiling). The ids come back by `RETURNING`/`OUTPUT`
+  most 64 rows (23 binds each, under SQL Server's 2,100-parameter ceiling). The ids come back by `RETURNING`/`OUTPUT`
   and are matched to rows by `step_token`, since neither promises VALUES order. MySQL inserts row by row: it has no
   `RETURNING`, and under the default `innodb_autoinc_lock_mode=2` a multi-row insert's ids are not guaranteed
   contiguous.
@@ -2193,7 +2194,7 @@ via `workflow.NewState`.
 
 ### Keys are capabilities, not authorization
 
-A flow/step key (`{shard}-{id}-{token}`) is an **unguessable bearer capability**, not an authorization
+A flow/step key (`{shard}-{hour}-{id}-{token}`) is an **unguessable bearer capability**, not an authorization
 decision - the host-facing contract is in `doc.go`; the key *format* and the token-entropy decision are in
 `internal/keys/CLAUDE.md`; this section is the engine-side *enforcement* and posture. The engine
 holds no authN/authZ, no rate limiting, and no notion of caller identity: its only vantage is the flow
@@ -2213,7 +2214,7 @@ logged, or shared key is a full write capability for that one flow. The amplifie
 operation that returns keys wholesale (a separate concern) - not the token itself. (There is no `Search` operation;
 free-text search is a field on `workflow.Query` that `List` consumes.)
 
-**Token entropy (64-bit) and the every-gate-is-`flow_id`+`flow_token` invariant that makes it adequate** live in
+**Token entropy (64-bit) and the every-gate-is-`flow_id`+`flow_token`+`created_hour` invariant that makes it adequate** live in
 `internal/keys/CLAUDE.md`.
 
 **Related engine-side hardening (all verified, none a substitute for host authz):** uniform not-found on
@@ -3317,9 +3318,9 @@ metrics: spans need cross-replica continuity, metrics don't).
   (`recordSpanError` → `RecordError`+`SetStatus(codes.Error)`) when the executor returns one.
 
 **Telemetry carries the token-free correlation id, never the flowKey.** `workflow.id` is
-`keys.CorrelationID(shard, flowID)` = `"{shard}-{flowID}"`, **not** the flowKey. The flowKey's third
+`keys.CorrelationID(shard, flowID)` = `"{shard}-{flowID}"`, **not** the flowKey. The flowKey's last
 segment is a random token that is a *bearer write-capability* (`Resume`/`Terminate`/`Fork`/… gate only on
-`flow_id`+`flow_token`), and a trace backend is typically readable far more broadly than the workflow
+`flow_id`+`flow_token`+`created_hour`), and a trace backend is typically readable far more broadly than the workflow
 data - so stamping the key onto every span would hand a write capability for every traced flow to every
 trace reader. The correlation id uniquely identifies the flow ({shard} disambiguates the per-shard
 sequential id) for grouping/pivoting/log-join, but grants nothing. The same rule governs logs and metric
@@ -3967,7 +3968,7 @@ hostnames map cleanly, and a future drained shard's index could retire without r
 the not-shard-fault-tolerant contract, and the DSN/test-mode resolution — live in
 `internal/database/CLAUDE.md`. This section is the engine-side *semantics*.
 
-**Shard routing & encoding:** external flow IDs encode the shard (`{shard}-{flowID}-{token}`); every operation parses
+**Shard routing & encoding:** external flow IDs encode the shard (`{shard}-{hour}-{flowID}-{token}`); every operation parses
 it and routes via `e.db.Shard(n)`. Indices are the declared ones (`>= 1`, sparse); `0` is the "no shard / all
 shards" sentinel used by `Query.Shard`.
 
@@ -4027,7 +4028,7 @@ changes after `Startup`. Callers therefore size per-shard state from `e.db.Indic
 concurrency concern - the sparse indices cannot index a slice directly, so per-shard scratch under `OnEach` uses
 `shardOrdinals()` (index -> ordinal position) and writes distinct slice elements, race-free. Changing the set needs a
 **coordinated restart** of every replica (a maintenance window), because it is not safe to grow live: a flow key
-encodes its shard (`{shard}-{id}-{token}`), so a flow created on a shard unknown to a peer replica is unroutable
+encodes its shard (`{shard}-{hour}-{id}-{token}`), so a flow created on a shard unknown to a peer replica is unroutable
 (404) there - and there is no cross-replica agreement on the set nor any rebalancing of existing flows (they stay on
 their original shard). Doing dynamic growth *correctly* - cross-replica agreement plus rollout sequencing - was
 designed but deliberately deferred; until then the set is fixed per process.

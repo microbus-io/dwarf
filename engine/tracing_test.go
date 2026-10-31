@@ -18,10 +18,12 @@ package engine
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 	"go.opentelemetry.io/otel"
@@ -212,9 +214,11 @@ func TestTracing_SpansEmittedOnRun(t *testing.T) {
 	assert.Equal(subRoot.SpanContext().SpanID(), taskX.Parent().SpanID(), "subgraph step parented to the subgraph workflow span")
 
 	// SEC2: the per-step span's workflow.id is the token-free correlation id ("{shard}-{flowID}"), never
-	// the flowKey (whose third segment is a bearer write-capability). It equals the key with the token
-	// stripped, has no token segment, and is not the full key.
-	wantCorrID := flowKey[:strings.LastIndexByte(flowKey, '-')]
+	// the flowKey (whose last segment is a bearer write-capability). It is the key's shard and id, with neither
+	// the hour nor the token, and is not the full key.
+	shard, _, flowID, _, err := keys.ParseFlowKey(flowKey)
+	assert.NoError(err)
+	wantCorrID := strconv.Itoa(shard) + "-" + strconv.Itoa(flowID)
 	gotID := spanAttrString(taskA, "workflow.id")
 	assert.Equal(wantCorrID, gotID, "workflow.id is the token-free correlation id")
 	assert.Equal(1, strings.Count(gotID, "-"), "correlation id has exactly two segments (shard-flowID), no token")

@@ -34,7 +34,7 @@ import (
 func flowBudgetMs(t *testing.T, e *engine.Engine, flowKey string) int {
 	t.Helper()
 	assert := testarossa.For(t)
-	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
+	shardNum, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
 	db, err := engineseams.DB(e).Shard(shardNum)
 	assert.NoError(err)
@@ -48,7 +48,7 @@ func flowBudgetMs(t *testing.T, e *engine.Engine, flowKey string) int {
 func entryStepBudgetMs(t *testing.T, e *engine.Engine, flowKey string) int {
 	t.Helper()
 	assert := testarossa.For(t)
-	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
+	shardNum, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
 	db, err := engineseams.DB(e).Shard(shardNum)
 	assert.NoError(err)
@@ -134,7 +134,7 @@ func TestTimeBudget_LeaseSizedFromRow(t *testing.T) {
 
 	<-started // the entry step is now running and leased
 
-	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
+	shardNum, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := engineseams.DB(e).Shard(shardNum)
 	assert.NoError(err)
@@ -194,7 +194,7 @@ func TestTimeBudget_InheritedBySubgraph(t *testing.T) {
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 
 	// The child flow (surgraph_flow_id > 0) carries the parent's 45s budget, not the 30s default.
-	shardNum, _, _, err := keys.ParseFlowKey(fk)
+	shardNum, _, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := engineseams.DB(e).Shard(shardNum)
 	assert.NoError(err)

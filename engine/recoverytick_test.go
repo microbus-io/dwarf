@@ -73,7 +73,7 @@ func TestRecoveryTick_LightPassRecoversLeases(t *testing.T) {
 
 	fk, err := e.Create(ctx, "ticklight/g", nil, nil)
 	assert.NoError(err)
-	shard, flowID, _, err := keys.ParseFlowKey(fk)
+	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	select {
 	case <-entered:
@@ -133,7 +133,7 @@ func TestRecoveryTick_ExpiredLeaseRecoveredOnTheTick(t *testing.T) {
 
 	fk, err := e.Create(ctx, "tickloop/g", nil, nil)
 	assert.NoError(err)
-	shard, flowID, _, err := keys.ParseFlowKey(fk)
+	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	select {
 	case <-entered:

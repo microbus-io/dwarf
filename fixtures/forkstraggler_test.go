@@ -58,15 +58,15 @@ func TestForkStraggler_NormalizedToTerminated(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
+	shardNum, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := engineseams.DB(e).Shard(shardNum)
 	assert.NoError(err)
 
 	// The completed entry step A is the fork point.
-	var aStepID int
+	var aStepID, aStepHour int
 	var aStepToken string
-	err = db.QueryRowContext(ctx, "SELECT step_id, step_token FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStepID, &aStepToken)
+	err = db.QueryRowContext(ctx, "SELECT step_id, flow_created_hour, step_token FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStepID, &aStepHour, &aStepToken)
 	if !assert.NoError(err) {
 		return
 	}
@@ -75,15 +75,15 @@ func TestForkStraggler_NormalizedToTerminated(t *testing.T) {
 	// and is kept by the fork). Its lease is already expired, so copied verbatim into the running fork lease
 	// recovery would reset it to pending and re-dispatch task B.
 	_, err = db.ExecContext(ctx,
-		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, lease_expires) VALUES (?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), -60000))",
-		flowID, 1, "btok", "B", "sl/b", workflow.StatusRunning, 1000,
+		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, flow_created_hour, lease_expires) VALUES (?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), -60000))",
+		flowID, 1, "btok", "B", "sl/b", workflow.StatusRunning, 1000, aStepHour,
 	)
 	if !assert.NoError(err) {
 		return
 	}
 
 	// Fork at A. The fork re-runs A -> END and completes; the straggler must not be resurrected.
-	forkKey, err := e.Fork(ctx, keys.New(shardNum, aStepID, aStepToken), nil)
+	forkKey, err := e.Fork(ctx, keys.New(shardNum, aStepHour, aStepID, aStepToken), nil)
 	if !assert.NoError(err) {
 		return
 	}
@@ -94,7 +94,7 @@ func TestForkStraggler_NormalizedToTerminated(t *testing.T) {
 	}
 
 	// The cloned straggler is terminated, not copied verbatim as running.
-	_, forkFlowID, _, err := keys.ParseFlowKey(forkKey)
+	_, _, forkFlowID, _, err := keys.ParseFlowKey(forkKey)
 	assert.NoError(err)
 	var bStatus string
 	err = db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE flow_id=? AND task_name='B'", forkFlowID).Scan(&bStatus)

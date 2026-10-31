@@ -38,8 +38,8 @@ import (
 // dispatch's lease was re-granted to a peer (failStep's fenced step UPDATE matched zero rows), nil is
 // returned so processStep abandons quietly - the peer owns the step and will settle it. All failStep call
 // sites in processStep go through this so the defer covers every fail path uniformly.
-func (e *Engine) failAndReturn(ctx context.Context, shardNum int, stepID int, leaseSeq int, flowID int, flowToken string, taskErr error, taskName string) error {
-	fenced, ferr := e.failStep(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, taskErr, taskName, heldEither)
+func (e *Engine) failAndReturn(ctx context.Context, shardNum int, stepID int, leaseSeq int, flowID int, flowHour int, flowToken string, taskErr error, taskName string) error {
+	fenced, ferr := e.failStep(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, taskErr, taskName, heldEither)
 	if ferr != nil {
 		return errors.Trace(ferr)
 	}
@@ -74,7 +74,7 @@ const (
 // failStep handles a task failure. It returns fenced=true (with a nil error) when the dispatch's lease was
 // re-granted to a peer, or the step is no longer in the held state - its fenced step UPDATE matched zero rows, so it
 // wrote nothing and the caller must abandon quietly rather than fail a flow the peer is healthily re-executing.
-func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSeq int, flowID int, flowToken string, taskErr error, taskName string, held stepHeld) (fenced bool, err error) {
+func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSeq int, flowID int, flowHour int, flowToken string, taskErr error, taskName string, held stepHeld) (fenced bool, err error) {
 	if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultFailStepErr, taskName)) {
 		return false, errors.New("injected fault: " + engineseams.FaultFailStepErr)
 	}
@@ -197,7 +197,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	if !failFlow || loss.status == "" {
 		return false, nil
 	}
-	e.endLostFlow(ctx, shardNum, flowID, flowToken, lostLabel, loss)
+	e.endLostFlow(ctx, shardNum, flowID, flowHour, flowToken, lostLabel, loss)
 	return false, nil
 }
 
@@ -261,10 +261,10 @@ func (e *Engine) failFlowTx(ctx context.Context, tx sequel.Executor, shardNum, f
 // endLostFlow is failFlowTx's post-commit tail. It counts the flow ended - a subgraph child included, since every
 // flow was counted as started - and wakes any Await on it, including on a subgraph child's key (legal read-only
 // introspection), whose failure otherwise travels only to its parent's flow.Subgraph call.
-func (e *Engine) endLostFlow(ctx context.Context, shardNum, flowID int, flowToken string, label flowLabel, loss flowLoss) {
+func (e *Engine) endLostFlow(ctx context.Context, shardNum, flowID, flowHour int, flowToken string, label flowLabel, loss flowLoss) {
 	e.metricFlowEnded(ctx, label.workflowURL, loss.status, label.priority, shardNum)
 	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowID), "to", loss.status)
-	e.signalStop(ctx, keys.New(shardNum, flowID, flowToken), loss.status)
+	e.signalStop(ctx, keys.New(shardNum, flowHour, flowID, flowToken), loss.status)
 	if loss.reDispatchParent {
 		e.enqueueStep(ctx, shardNum, loss.parentStepID)
 	}

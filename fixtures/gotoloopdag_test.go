@@ -109,7 +109,7 @@ func TestFanIn_GotoLoopBranchKeepsInteriorDAGEdges(t *testing.T) {
 	assert.Equal(2, pointingAtJoin, "only the exit Work of each branch points at the fan-in; loop iterations keep their forward edge to the next Work")
 }
 
-// parseFlowShard parses the leading shard number from a "{shard}-{id}-{token}" key.
+// parseFlowShard parses the leading shard number from a "{shard}-{hour}-{id}-{token}" key.
 func parseFlowShard(flowKey string) (int, bool) {
 	n := 0
 	for i := 0; i < len(flowKey); i++ {

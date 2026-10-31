@@ -458,7 +458,7 @@ func TestChanges_UnreadableColumnIsAnErrorNotNoChanges(t *testing.T) {
 		if !assert.NoError(err) || !assert.Len(history, 2) {
 			t.FailNow()
 		}
-		_, flowID, _, err := keys.ParseFlowKey(flowKey)
+		_, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 		assert.NoError(err)
 		_, err = db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET changes=? WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'",

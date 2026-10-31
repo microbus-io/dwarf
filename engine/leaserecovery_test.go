@@ -89,7 +89,7 @@ func TestLeaseRecovery_StepCompletedBetweenSelectAndResetIsLeftAlone(t *testing.
 	case <-time.After(15 * time.Second * enginetest.TimeoutScale()):
 		t.Fatal("A never started")
 	}
-	shard, flowID, _, err := keys.ParseFlowKey(fk)
+	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
 	assert.NoError(err)
@@ -152,7 +152,7 @@ func TestLeaseRecovery_RecoversAStepNeitherWriteCouldRecord(t *testing.T) {
 
 	fk, err := e.Create(ctx, "leaseunwritable/g", nil, nil)
 	assert.NoError(err)
-	shard, flowID, _, err := keys.ParseFlowKey(fk)
+	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
 	assert.NoError(err)
@@ -225,7 +225,7 @@ func TestLeaseRecovery_ResetsPastOneBatch(t *testing.T) {
 			t.Fatal("a step never started")
 		}
 	}
-	shard, _, _, err := keys.ParseFlowKey(fks[0])
+	shard, _, _, _, err := keys.ParseFlowKey(fks[0])
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
 	assert.NoError(err)

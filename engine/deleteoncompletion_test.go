@@ -52,7 +52,7 @@ func shardFlowCount(t *testing.T, e *Engine, shardNum int) int {
 func waitFlowDeleted(t *testing.T, e *Engine, flowKey string, timeout time.Duration) {
 	t.Helper()
 	assert := testarossa.For(t)
-	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
+	shardNum, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
 	db, err := e.db.Shard(shardNum)
 	assert.NoError(err)
@@ -221,7 +221,7 @@ func TestPurge_ReaperRemovesTree(t *testing.T) {
 
 	fk, _, err := e.Run(ctx, "pr/parent", nil, nil)
 	assert.NoError(err)
-	shardNum, _, _, err := keys.ParseFlowKey(fk)
+	shardNum, _, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	assert.Equal(2, shardFlowCount(t, e, shardNum)) // root + subgraph child
 
@@ -260,7 +260,7 @@ func TestDeleteOnCompletion_KeepsFailedFlow(t *testing.T) {
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusFailed, time.Minute) // the minute bounds only a hang
 
 	// The failed flow is never scheduled for deletion, so no reaper pass - now or later - can remove it.
-	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
+	shardNum, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	assert.Equal(1, enginetest.CountRows(t, e, shardNum, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND delete_after_ms=0", flowID))
 }
@@ -304,7 +304,7 @@ func TestDeleteOnCompletion_ReaperCascadesSubgraph(t *testing.T) {
 
 	fk, err := e.Create(ctx, "doc/sg-parent", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
-	shardNum, _, _, err := keys.ParseFlowKey(fk)
+	shardNum, _, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 
 	// The tree's run is four dispatches and a subgraph spawn and revive, which a loaded server stretches past
@@ -351,17 +351,17 @@ func TestDeleteOnCompletion_HistoryOfAChildHidesWithItsRoot(t *testing.T) {
 
 	fk, err := e.Create(ctx, "doc/hc-parent", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
-	shardNum, _, _, err := keys.ParseFlowKey(fk)
+	shardNum, _, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
 
 	db, err := e.db.Shard(shardNum)
 	assert.NoError(err)
-	var childID int
+	var childID, childHour int
 	var childToken string
 	assert.NoError(db.QueryRowContext(ctx,
-		"SELECT flow_id, flow_token FROM dwarf_flows WHERE surgraph_flow_id>0").Scan(&childID, &childToken))
-	childKey := keys.New(shardNum, childID, childToken)
+		"SELECT flow_id, created_hour, flow_token FROM dwarf_flows WHERE surgraph_flow_id>0").Scan(&childID, &childHour, &childToken))
+	childKey := keys.New(shardNum, childHour, childID, childToken)
 
 	_, err = e.History(ctx, fk)
 	assert.Equal(http.StatusNotFound, errors.StatusCode(err))

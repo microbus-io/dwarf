@@ -153,9 +153,9 @@ func TestInsertFlowTx_SelfColumnsInTheInsert(t *testing.T) {
 		assert.True(fixups >= 6, "%d UPDATEs of a flow's thread or root id logged, want at least 6", fixups)
 	}
 
-	_, rootID, rootToken, err := keys.ParseFlowKey(rootKey)
+	_, _, rootID, rootToken, err := keys.ParseFlowKey(rootKey)
 	assert.NoError(err)
-	_, forkID, forkToken, err := keys.ParseFlowKey(forkKey)
+	_, _, forkID, forkToken, err := keys.ParseFlowKey(forkKey)
 	assert.NoError(err)
 	rows, err := db.QueryContext(ctx,
 		"SELECT f.flow_id, f.flow_token, f.thread_id, f.thread_token, f.root_flow_id, f.surgraph_flow_id, COALESCE(p.root_flow_id, 0)"+

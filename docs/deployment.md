@@ -171,7 +171,7 @@ Rules:
 
 - Shard indices start at 1 and must be unique, but need **not** be contiguous — `Index: 1` and
   `Index: 99` is valid. The shard appears as the leading number of a flow key
-  (`{shard}-{flowID}-{token}`) and drives routing, so the index→DSN mapping must be **identical across
+  (`{shard}-{hour}-{flowID}-{token}`) and drives routing, so the index→DSN mapping must be **identical across
   all replicas** and stable across restarts.
 - Every shard database must exist before startup — the engine migrates the schema but does not
   `CREATE DATABASE`. Each shard's DSN is used exactly as given — the engine never rewrites it, so a

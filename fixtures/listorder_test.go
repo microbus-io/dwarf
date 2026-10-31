@@ -76,7 +76,7 @@ func TestList_NewestFirstIsPerShardNotGlobal(t *testing.T) {
 	prev := 0
 	perShard := map[int][]workflow.FlowSummary{}
 	for _, f := range flows {
-		shard, _, _, err := keys.ParseFlowKey(f.FlowKey)
+		shard, _, _, _, err := keys.ParseFlowKey(f.FlowKey)
 		if !assert.NoError(err) {
 			return
 		}

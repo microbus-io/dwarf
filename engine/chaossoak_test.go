@@ -216,7 +216,7 @@ func TestChaosSoak(t *testing.T) {
 // exercising the documented idempotency of a candidate hint: the cache holds hints, never ownership, so
 // re-offering a step that is already running, completed or gone must be absorbed by the claim CAS.
 func chaosEnqueue(ctx context.Context, eng *Engine, flowKey string) {
-	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
+	shardNum, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
 		return
 	}

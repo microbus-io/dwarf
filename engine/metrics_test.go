@@ -690,7 +690,7 @@ func TestOrphanDetection_EmitsMetric(t *testing.T) {
 	if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, out.Status) {
 		return
 	}
-	shard, flowID, _, err := keys.ParseFlowKey(key)
+	shard, _, flowID, _, err := keys.ParseFlowKey(key)
 	if !assert.NoError(err) {
 		return
 	}
@@ -965,7 +965,7 @@ func TestMetrics_TerminateCountsOnlyTheFlowsItEnded(t *testing.T) {
 	if !assert.True(eng.seams.WaitTimeout(ctx, engineseams.CheckpointTerminateAfterScan, 10*time.Second), "Terminate never finished its scan") {
 		return
 	}
-	shardNum, rootID, _, _ := keys.ParseFlowKey(fk)
+	shardNum, _, rootID, _, _ := keys.ParseFlowKey(fk)
 	db, err := eng.db.Shard(shardNum)
 	assert.NoError(err)
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET status=? WHERE flow_id=?", workflow.StatusCompleted, rootID)

@@ -127,7 +127,7 @@ func expireLease(t *testing.T, e *Engine, flowKey, taskName string) {
 	t.Helper()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
+	shardNum, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -467,7 +467,7 @@ func TestFault_SubgraphReviveLost(t *testing.T) {
 	waitChild := awaitNextStop(t, e) // rendezvous on the child's completion (the first stop; parent is parked)
 	fk, err := e.Create(ctx, "fsub/parent", nil, nil)
 	assert.NoError(err)
-	shard, _, _, err := keys.ParseFlowKey(fk)
+	shard, _, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
 	assert.NoError(err)
@@ -504,7 +504,7 @@ func TestFault_ReapMidTree(t *testing.T) {
 	fk, err := e.Create(ctx, "freap/g", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
 	waitDone()
-	shard, _, _, err := keys.ParseFlowKey(fk)
+	shard, _, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	time.Sleep(5 * time.Millisecond) // inherent wall-clock: let the 1ms deletion window elapse
 

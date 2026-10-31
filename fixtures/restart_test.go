@@ -137,7 +137,7 @@ func TestRestartSurvival(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		_, flowID, _, err := keys.ParseFlowKey(flowKey)
+		_, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 		if !assert.NoError(err) {
 			return
 		}

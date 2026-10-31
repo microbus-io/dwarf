@@ -70,7 +70,7 @@ func stateLinear(mux *hosts.Mux, prefix string, calls map[string]*int) {
 func readFinalState(t *testing.T, e *Engine, flowKey string) string {
 	t.Helper()
 	assert := testarossa.For(t)
-	shard, flowID, _, err := keys.ParseFlowKey(flowKey)
+	shard, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
 	assert.NoError(err)

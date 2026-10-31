@@ -94,7 +94,7 @@ func TestCompleteSurgraph_vs_TerminateRoot_BothOrders(t *testing.T) {
 	callStatus := func(t *testing.T, e *engine.Engine, fk string) string {
 		t.Helper()
 		assert := testarossa.For(t)
-		shard, flowID, _, err := keys.ParseFlowKey(fk)
+		shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 		assert.NoError(err)
 		db, err := engineseams.DB(e).Shard(shard)
 		assert.NoError(err)

@@ -181,7 +181,7 @@ func TestTerminate_UnreadableTailDoesNotBlockTerminate(t *testing.T) {
 			return
 		}
 		assert.Equal(workflow.StatusInterrupted, outcome.Status)
-		_, flowID, _, err := keys.ParseFlowKey(flowKey)
+		_, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 		assert.NoError(err)
 		_, err = db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET "+column+"=? WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'",
@@ -313,7 +313,7 @@ func TestTerminate_UnresolvableRefDoesNotBlockTerminate(t *testing.T) {
 		flowKey, outcome, err := eng.Run(ctx, "reducererror.verify:429/unresolvable", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusInterrupted, outcome.Status)
-		_, flowID, _, err := keys.ParseFlowKey(flowKey)
+		_, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 		assert.NoError(err)
 		_, err = db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET state_refs=? WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'",

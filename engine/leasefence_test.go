@@ -59,8 +59,8 @@ func TestLeaseFence_FailStep(t *testing.T) {
 		// lease_expires is set well into the future so the test engine's own lease-recovery poll does not
 		// reset this deliberately-running step to pending mid-test.
 		_, err = db.ExecContext(ctx,
-			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, lease_seq, lease_expires) VALUES (?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 60000))",
-			1, 1, "stok", "T", "u", workflow.StatusRunning, 1000, ownerSeq,
+			"INSERT INTO dwarf_steps (flow_created_hour, flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, lease_seq, lease_expires) VALUES ((SELECT created_hour FROM dwarf_flows WHERE flow_id=?), ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 60000))",
+			1, 1, 1, "stok", "T", "u", workflow.StatusRunning, 1000, ownerSeq,
 		)
 		assert.NoError(err)
 	}
@@ -83,7 +83,7 @@ func TestLeaseFence_FailStep(t *testing.T) {
 		setup(t, e, 5) // the owner holds generation 5
 
 		// A zombie holding the prior generation 4 returns an error late. It must write nothing.
-		fenced, err := e.failStep(ctx, 1, 1, 4, 1, "ftok", errors.New("boom"), "T", heldEither)
+		fenced, err := e.failStep(ctx, 1, 1, 4, 1, createdHourOf(t, e, 1), "ftok", errors.New("boom"), "T", heldEither)
 		assert.NoError(err)
 		assert.True(fenced)
 
@@ -101,7 +101,7 @@ func TestLeaseFence_FailStep(t *testing.T) {
 		setup(t, e, 5)
 
 		// The current owner (generation 5) fails the step normally.
-		fenced, err := e.failStep(ctx, 1, 1, 5, 1, "ftok", errors.New("boom"), "T", heldEither)
+		fenced, err := e.failStep(ctx, 1, 1, 5, 1, createdHourOf(t, e, 1), "ftok", errors.New("boom"), "T", heldEither)
 		assert.NoError(err)
 		assert.False(fenced)
 
@@ -117,7 +117,7 @@ func TestLeaseFence_FailStep(t *testing.T) {
 // the peer's dispatch of the same step can still be returning after the flow it drove has completed.
 func awaitDispatchesReturned(t *testing.T, eng *Engine, flowKey, taskName string, n int) {
 	t.Helper()
-	shard, flowID, _, err := keys.ParseFlowKey(flowKey)
+	shard, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestLeaseFence_CompletionNoDuplicateSuccessor(t *testing.T) {
 	// Release the zombie; its late completion UPDATE carries the stale lease_seq and must write nothing.
 	unblock()
 
-	_, flowID, _, err := keys.ParseFlowKey(flowKey)
+	_, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -304,7 +304,7 @@ func TestLeaseFence_CohortNoDoubleArrival(t *testing.T) {
 	// Release the zombie X; its late arrival must be fenced (no second cohort_arrivals bump, no second J).
 	unblock()
 
-	_, flowID, _, err := keys.ParseFlowKey(flowKey)
+	_, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -377,7 +377,7 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	}
 	assert.True(eng.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeRecoveryReset, 15*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeRecoveryReset")
 
-	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
+	shardNum, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -485,7 +485,7 @@ func TestLeaseFence_RetryRewindFenced(t *testing.T) {
 	// of the completed step, no reap, no re-dispatch).
 	unblock()
 
-	_, flowID, _, err := keys.ParseFlowKey(flowKey)
+	_, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -564,7 +564,7 @@ func TestLeaseFence_SubgraphParkFenced(t *testing.T) {
 	// second child flow).
 	unblock()
 
-	_, flowID, _, err := keys.ParseFlowKey(flowKey)
+	_, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -640,7 +640,7 @@ func TestLeaseRecovery_EndToEnd(t *testing.T) {
 	assert.True(recovered >= 1, "at least one step recovered by lease expiry, got %d", recovered)
 
 	// Lease recovery is NOT a retry: the re-executed step's attempt stays 0 (flow.Retry would have bumped it).
-	_, flowID, _, err := keys.ParseFlowKey(flowKey)
+	_, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -686,8 +686,8 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 		)
 		assert.NoError(err)
 		_, err = db.ExecContext(ctx,
-			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, lineage_id, time_budget_ms, lease_seq, lease_expires) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 999000))",
-			1, 1, "stok", "T", "u", stepStatus, 0, 1000, 5,
+			"INSERT INTO dwarf_steps (flow_created_hour, flow_id, step_depth, step_token, task_name, task_url, status, lineage_id, time_budget_ms, lease_seq, lease_expires) VALUES ((SELECT created_hour FROM dwarf_flows WHERE flow_id=?), ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 999000))",
+			1, 1, 1, "stok", "T", "u", stepStatus, 0, 1000, 5,
 		)
 		assert.NoError(err)
 		return e, db
@@ -706,7 +706,7 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 		e, db := setup(t, workflow.StatusTerminated, workflow.StatusTerminated)
 		defer e.Shutdown(ctx)
 
-		fenced, err := e.failStep(ctx, 1, 1, 5, 1, "ftok", errors.New("boom"), "T", heldEither)
+		fenced, err := e.failStep(ctx, 1, 1, 5, 1, createdHourOf(t, e, 1), "ftok", errors.New("boom"), "T", heldEither)
 		assert.NoError(err)
 		assert.True(fenced, "a terminated step under our generation must fence, not be rewritten to failed")
 
@@ -722,7 +722,7 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 		e, db := setup(t, workflow.StatusRunning, workflow.StatusCompleted)
 		defer e.Shutdown(ctx)
 
-		fenced, err := e.failStep(ctx, 1, 1, 5, 1, "ftok", errors.New("could not persist transition"), "T", heldEither)
+		fenced, err := e.failStep(ctx, 1, 1, 5, 1, createdHourOf(t, e, 1), "ftok", errors.New("could not persist transition"), "T", heldEither)
 		assert.NoError(err)
 		assert.False(fenced, "a completed step we own must still be failable (failOnPersistError's escape)")
 
@@ -789,8 +789,8 @@ func TestFailStep_HeldStates(t *testing.T) {
 				)
 				assert.NoError(err)
 				_, err = db.ExecContext(ctx,
-					"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, parked, time_budget_ms, lease_seq, lease_expires) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 999000))",
-					1, 1, "pstok", "P", "u", tc.row.parentStepState, parkedSubgraph, 1000, 1,
+					"INSERT INTO dwarf_steps (flow_created_hour, flow_id, step_depth, step_token, task_name, task_url, status, parked, time_budget_ms, lease_seq, lease_expires) VALUES ((SELECT created_hour FROM dwarf_flows WHERE flow_id=?), ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 999000))",
+					1, 1, 1, "pstok", "P", "u", tc.row.parentStepState, parkedSubgraph, 1000, 1,
 				)
 				assert.NoError(err)
 				surgraphFlowID, surgraphStepID = 1, 1
@@ -803,14 +803,14 @@ func TestFailStep_HeldStates(t *testing.T) {
 			var flowID int
 			assert.NoError(db.QueryRowContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE flow_token='ftok'").Scan(&flowID))
 			_, err = db.ExecContext(ctx,
-				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, parked, advancing, advance_on_error, time_budget_ms, lease_seq, lease_expires) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 999000))",
-				flowID, 1, "stok", "T", "u", tc.row.status, tc.row.parked, tc.row.advancing, tc.row.advanceOnError, 1000, 5,
+				"INSERT INTO dwarf_steps (flow_created_hour, flow_id, step_depth, step_token, task_name, task_url, status, parked, advancing, advance_on_error, time_budget_ms, lease_seq, lease_expires) VALUES ((SELECT created_hour FROM dwarf_flows WHERE flow_id=?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 999000))",
+				flowID, flowID, 1, "stok", "T", "u", tc.row.status, tc.row.parked, tc.row.advancing, tc.row.advanceOnError, 1000, 5,
 			)
 			assert.NoError(err)
 			var stepID int
 			assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE step_token='stok'").Scan(&stepID))
 
-			fenced, err := e.failStep(ctx, 1, stepID, 5, flowID, "ftok", errors.New("boom"), "T", tc.held)
+			fenced, err := e.failStep(ctx, 1, stepID, 5, flowID, createdHourOf(t, e, flowID), "ftok", errors.New("boom"), "T", tc.held)
 			assert.NoError(err)
 			assert.Equal(tc.fenced, fenced)
 
@@ -834,4 +834,16 @@ func TestFailStep_HeldStates(t *testing.T) {
 			}
 		})
 	}
+}
+
+// createdHourOf reads a flow row's created_hour on shard 1, for a test that calls an engine function directly
+// with a flow it inserted by hand.
+func createdHourOf(t *testing.T, e *Engine, flowID int) int {
+	t.Helper()
+	assert := testarossa.For(t)
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	var hour int
+	assert.NoError(db.QueryRowContext(t.Context(), "SELECT created_hour FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&hour))
+	return hour
 }

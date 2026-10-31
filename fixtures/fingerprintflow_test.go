@@ -113,7 +113,7 @@ func TestFingerprintflow(t *testing.T) {
 
 	t.Run("fingerprint_unknown_flow_errors", func(t *testing.T) {
 		assert := testarossa.For(t)
-		_, _, err := eng.Fingerprint(ctx, "1-999999-00000000deadbeef")
+		_, _, err := eng.Fingerprint(ctx, "1-0-999999-00000000deadbeef")
 		assert.Error(err)
 	})
 }

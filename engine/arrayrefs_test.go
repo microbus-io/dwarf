@@ -95,7 +95,7 @@ type loopRow struct {
 func loopRows(t *testing.T, e *Engine, flowKey string) []loopRow {
 	t.Helper()
 	assert := testarossa.For(t)
-	shard, flowID, _, err := keys.ParseFlowKey(flowKey)
+	shard, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
 	assert.NoError(err)
@@ -275,7 +275,7 @@ func TestArrayRefs_ForkAndContinueMidLoop(t *testing.T) {
 	forked, err := e.Fork(ctx, mid, nil)
 	assert.NoError(err)
 	awaitLoop(t, e, forked, steps)
-	_, forkedFlowID, _, err := keys.ParseFlowKey(forked)
+	_, _, forkedFlowID, _, err := keys.ParseFlowKey(forked)
 	assert.NoError(err)
 	for _, r := range loopRows(t, e, forked) {
 		for _, entry := range r.refs["messages"].List {

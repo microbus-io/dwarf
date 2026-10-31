@@ -74,7 +74,7 @@ func TestDeleteResumeRace(t *testing.T) {
 	// non-terminal (`running`/`interrupted`), it must carry at least one step row.
 	assertNoOrphan := func(t *testing.T, flowKey string) {
 		assert := testarossa.For(t)
-		shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
+		shardNum, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 		if !assert.NoError(err) {
 			return
 		}
@@ -112,7 +112,7 @@ func TestDeleteResumeRace(t *testing.T) {
 			return // Resume reported a conflict/not-found - honest, nothing to prove
 		}
 		assert := testarossa.For(t)
-		shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
+		shardNum, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 		if !assert.NoError(err) {
 			return
 		}

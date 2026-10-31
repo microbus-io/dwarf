@@ -340,7 +340,7 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 // running under it is healthy.
 func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel.DB, shard int, minAge time.Duration) {
 	rows, err := db.QueryContext(ctx,
-		"SELECT c.flow_id, c.flow_token FROM dwarf_flows c"+
+		"SELECT c.flow_id, c.created_hour, c.flow_token FROM dwarf_flows c"+
 			" JOIN dwarf_flows p ON p.flow_id=c.surgraph_flow_id"+
 			" WHERE c.surgraph_flow_id>0 AND c.status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')"+
 			// `<=`, so minAge=0 means "no age guard" - see recoverWedgedSubgraphParks for why a strict `<`
@@ -354,13 +354,13 @@ func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel
 		return
 	}
 	type orphan struct {
-		flowID int
-		token  string
+		flowID, hour int
+		token        string
 	}
 	var hits []orphan
 	for rows.Next() {
 		var o orphan
-		if err := rows.Scan(&o.flowID, &o.token); err != nil {
+		if err := rows.Scan(&o.flowID, &o.hour, &o.token); err != nil {
 			rows.Close()
 			e.logSweepError(ctx, "Wedge sweep: scanning orphaned subgraph child", "shard", shard, "error", err)
 			return
@@ -379,7 +379,7 @@ func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel
 		}
 		e.logger.ErrorContext(ctx, "Wedge sweep: terminating orphaned subgraph child whose parent is terminal",
 			"shard", shard, "childFlow", keys.CorrelationID(shard, o.flowID))
-		if rerr := e.terminateOrphanedSubtree(ctx, shard, o.flowID, o.token); rerr != nil {
+		if rerr := e.terminateOrphanedSubtree(ctx, shard, o.flowID, o.hour, o.token); rerr != nil {
 			e.logSweepError(ctx, "Wedge sweep: terminating orphaned subgraph child", "shard", shard, "childFlow", keys.CorrelationID(shard, o.flowID), "error", rerr)
 			continue
 		}
@@ -391,9 +391,9 @@ func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel
 // the public Terminate's transaction (terminateSubtree). No surgraph up-walk is needed - and none exists: the
 // ancestor chain is already terminal, which is precisely why the child is orphaned. A child that terminalized
 // concurrently between the sweep's SELECT and this write is a no-op, the outcome the sweep wanted anyway.
-func (e *Engine) terminateOrphanedSubtree(ctx context.Context, shard int, childFlowID int, childFlowToken string) error {
+func (e *Engine) terminateOrphanedSubtree(ctx context.Context, shard int, childFlowID, childFlowHour int, childFlowToken string) error {
 	const reason = "parent flow terminated (orphan recovery)"
-	return errors.Trace(e.terminateSubtree(ctx, shard, childFlowID, childFlowToken, reason, false, ""))
+	return errors.Trace(e.terminateSubtree(ctx, shard, childFlowID, childFlowHour, childFlowToken, reason, false, ""))
 }
 
 // recoverOrphanedFlows repairs a `running` flow that is stranded - every step terminal, and a step whose transition

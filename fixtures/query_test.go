@@ -210,3 +210,45 @@ func TestQuery_SearchEscapesWildcards(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(1, len(byName))
 }
+
+// TestQuery_SearchByFlowKey pins that Search matches a flow by its full key, as Query.Search documents: List finds
+// exactly that flow, and a Purge by its key marks exactly it. The key is spelled in SQL from the row's columns, so
+// a format the SQL spells differently from the key matches nothing at all.
+func TestQuery_SearchByFlowKey(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("ByKey")
+	g.SetURL("A", "qk.verify:0/a")
+	g.AddTransition("A", workflow.End)
+	mux.HandleGraph("qk.verify:0/bykey", g)
+	mux.HandleTask("qk.verify:0/a", func(context.Context, *workflow.Flow) error { return nil })
+
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.NoError(e.Startup(ctx))
+
+	var flowKeys []string
+	for range 3 {
+		k, out, err := e.Run(ctx, "qk.verify:0/bykey", nil, nil)
+		if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, out.Status) {
+			return
+		}
+		flowKeys = append(flowKeys, k)
+	}
+
+	found, _, err := e.List(ctx, workflow.Query{Search: flowKeys[1]})
+	if assert.NoError(err) && assert.Len(found, 1) {
+		assert.Equal(flowKeys[1], found[0].FlowKey)
+	}
+	marked, err := e.Purge(ctx, workflow.Query{Search: flowKeys[2]})
+	assert.NoError(err)
+	assert.Equal(1, marked)
+	rest, _, err := e.List(ctx, workflow.Query{})
+	if assert.NoError(err) {
+		assert.Len(rest, 2) // a flow marked for deletion is out of List at once
+	}
+}

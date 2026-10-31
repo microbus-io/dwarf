@@ -121,6 +121,36 @@ func queueInsertID(b *txBatch, column string, set func(int64), query string, arg
 	}, query, args...)
 }
 
+// queueInsertFlow queues a dwarf_flows INSERT ... VALUES (or INSERT ... SELECT on PostgreSQL) and passes set the
+// flow_id it generates and the created_hour the database gave the row: read by RETURNING on PostgreSQL and SQLite,
+// OUTPUT on SQL Server, and on MySQL by a SELECT queued behind it. The hour is the column's default, on the
+// database clock, so it is read back rather than computed. query must spell its VALUES keyword as " VALUES ",
+// once, where it has one: that is where SQL Server's OUTPUT clause goes.
+func queueInsertFlow(b *txBatch, set func(id int64, hour int), query string, args ...any) {
+	read := func(res *sequel.BatchResults) error {
+		var id int64
+		var hour int
+		if err := res.QueryRow().Scan(&id, &hour); err != nil {
+			return errors.Trace(err)
+		}
+		set(id, hour)
+		return nil
+	}
+	switch driver := b.tx.DriverName(); {
+	case driver == "mssql":
+		query = strings.Replace(query, " VALUES ", " OUTPUT INSERTED.flow_id, INSERTED.created_hour VALUES ", 1)
+	case returnsInsertedRows(driver):
+		query += " RETURNING flow_id, created_hour"
+	default:
+		// MySQL has no RETURNING. LAST_INSERT_ID() names the row this connection's INSERT just generated, and unlike
+		// a session-wide last id elsewhere a trigger cannot move it: MySQL restores it when the trigger ends.
+		b.queue(execOnly, query, args...)
+		b.queue(read, "SELECT flow_id, created_hour FROM dwarf_flows WHERE flow_id=LAST_INSERT_ID()")
+		return
+	}
+	b.queue(read, query, args...)
+}
+
 // lastFlowIDSQL and lastStepIDSQL are PostgreSQL SQL for the id of the flow, or of the step, the session inserted
 // last: each table's own sequence, which a role able to insert into the BIGSERIAL table may read. Do not use
 // lastval(), nor another dialect's session last-id (@@IDENTITY): they report ids from ANY table, so a trigger a

@@ -94,7 +94,7 @@ during the fast test suite.
 **Shard indices are sparse.** Valid indices are unique integers `>= 1`, not necessarily contiguous (`Index: 1`
 + `Index: 99` is fine - arbitrary DSNs need no naming pattern, and a drained shard's index could one day retire
 without renumbering); `0` is a sentinel meaning "no shard / all shards" (used by `Query.Shard`). The index is the
-leading number in flow keys (`{shard}-{flowID}-{token}`) and what `Query.Shard`/`ShardInfo` report. Internally `dbs`
+leading number in flow keys (`{shard}-{hour}-{flowID}-{token}`) and what `Query.Shard`/`ShardInfo` report. Internally `dbs`
 is a `map[int]*sequel.DB` plus a sorted `indices` slice (deterministic `OnEach`/`Indices()` order); `Shard(n)` is a
 map lookup whose miss returns a uniform not-found (an unregistered shard in a well-formed key must be
 indistinguishable from a bad key). `Open` rejects two shards resolving to the same DSN - a silent collapse onto one

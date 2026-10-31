@@ -175,6 +175,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	var taskName, stepToken string
 	var stateJSON, priorChangesJSON []byte
 	var attempt, lineageID, fanOutOrdinal, flowID, timeBudgetMs int
+	// flowHour is the flow's creation hour, which its steps carry too: the claimed step's is the flow's.
+	var flowHour int
 	var interruptDone bool
 	var resumeDataJSON []byte
 	var subgraphDone bool
@@ -285,6 +287,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	stepDepth, taskName, stepToken = row.stepDepth, row.taskName, row.stepToken
 	stateJSON, priorChangesJSON, stateRefsJSON = row.stateJSON, row.priorChangesJSON, row.stateRefsJSON
 	attempt, lineageID, flowID, timeBudgetMs = row.attempt, row.lineageID, row.flowID, row.timeBudgetMs
+	flowHour = row.createdHour
 	interruptDone, resumeDataJSON = row.interruptDone, row.resumeDataJSON
 	subgraphDone, subgraphResultJSON, subgraphErrorJSON = row.subgraphDone, row.subgraphResultJSON, row.subgraphErrorJSON
 	stepCreatedAt, leaseSeq, fanOutOrdinal = row.stepCreatedAt, row.leaseSeq, row.fanOutOrdinal
@@ -350,7 +353,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// step, before anything decodes it, for a replica that can. Past this check, every row the step reaches - its
 	// own, its anchors, its cohort, the flow's tails - is readable here.
 	if row.flowPayloadVer > payloadVer {
-		return errors.Trace(e.deferNewerPayload(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, row.flowPayloadVer, row.payloadDeferrals))
+		return errors.Trace(e.deferNewerPayload(ctx, db, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, taskName, row.flowPayloadVer, row.payloadDeferrals))
 	}
 
 	// The graph is frozen at flow creation, so a cached parse makes its JSON - the largest payload on the flow
@@ -374,7 +377,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			// does not exist yet, and failStep runs a whole transaction. Without it the two failure paths
 			// would disagree about whether failing a step is ordered work.
 			fctx, doneTurn := e.dbTurn(ctx, shardNum)
-			err = e.failAndReturn(fctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
+			err = e.failAndReturn(fctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, err, taskName)
 			doneTurn()
 			return errors.Trace(err)
 		}
@@ -417,7 +420,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	if err != nil {
 		// Its own turn, for the reason above: still the entry phase, so nothing covers this transaction.
 		fctx, doneTurn := e.dbTurn(ctx, shardNum)
-		err = e.failAndReturn(fctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
+		err = e.failAndReturn(fctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, err, taskName)
 		doneTurn()
 		return errors.Trace(err)
 	}
@@ -429,7 +432,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	mergedInputState := state.Clone()
 	if err := mergedInputState.Apply(priorChanges, reducers); err != nil {
 		fctx, doneTurn := e.dbTurn(ctx, shardNum)
-		err = e.failAndReturn(fctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
+		err = e.failAndReturn(fctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, err, taskName)
 		doneTurn()
 		return errors.Trace(err)
 	}
@@ -447,8 +450,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// The task's own identity, so it can correlate logs/traces or call back into the engine
 	// (e.g. History/Step) with its own keys. flow_token is loaded with the flow row, step_token
 	// alongside the claim - both available here.
-	flow.SetFlowKey(keys.New(shardNum, flowID, flowToken))
-	flow.SetStepKey(keys.New(shardNum, stepID, stepToken))
+	flow.SetFlowKey(keys.New(shardNum, flowHour, flowID, flowToken))
+	flow.SetStepKey(keys.New(shardNum, flowHour, stepID, stepToken))
 
 	// A side column this replica cannot read fails the step, as an unreadable state does: the task would
 	// otherwise run on an empty resume payload, child result or baggage, and nothing would say so. A "null"
@@ -476,7 +479,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	if sideErr != nil {
 		// Its own turn: still the entry phase, as for an unreadable state above.
 		fctx, doneTurn := e.dbTurn(ctx, shardNum)
-		err = e.failAndReturn(fctx, shardNum, stepID, leaseSeq, flowID, flowToken, sideErr, taskName)
+		err = e.failAndReturn(fctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, sideErr, taskName)
 		doneTurn()
 		return errors.Trace(err)
 	}
@@ -644,7 +647,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			errorRouted = true
 			errorTarget = tr.To
 		} else {
-			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, execErr, taskName)
+			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, execErr, taskName)
 			return errors.Trace(err)
 		}
 	} else {
@@ -666,7 +669,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// the task's output, so it is checked rather than trusted.
 	accumulatedChanges := resultFlow.RawChanges()
 	if err := checkChanges(accumulatedChanges, reducers, lineageID != 0); err != nil {
-		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
+		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, err, taskName)
 		return errors.Trace(err)
 	}
 	dropIdentityNulls(accumulatedChanges, reducers)
@@ -683,14 +686,14 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// database cannot store fails the step now, before hundreds of megabytes go out to be refused, and without the
 	// write retries: the task has run, and running it again would produce the same value.
 	if err := e.checkPayloadSize("changes of task '"+stripProto(taskName)+"'", changesJSON); err != nil {
-		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
+		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, err, taskName)
 		return errors.Trace(err)
 	}
 	// What the successors are handed, and what routing reads: the input with the step's delta folded in. A value
 	// the reducer cannot combine fails the step here, naming the field, before anything is written.
 	successorBase := state.Clone()
 	if err := successorBase.Apply(accumulatedChanges, reducers); err != nil {
-		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
+		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, err, taskName)
 		return errors.Trace(err)
 	}
 
@@ -711,7 +714,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		}
 		if signalCount > 1 {
 			err = errors.New("task '%s' set multiple competing control signals", taskName)
-			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
+			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
 	}
@@ -722,7 +725,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		_, _, subgraphArmed := resultFlow.SubgraphRequested()
 		if (interruptArmed || subgraphArmed) && (interruptDone || subgraphDone) {
 			err = errors.New("task '%s' armed a second park on an already-resolved step", taskName)
-			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
+			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
 	}
@@ -731,8 +734,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	if interruptPayload, interrupted := resultFlow.InterruptRequested(); interrupted {
 		e.logger.DebugContext(ctx, "Task interrupted", "task", taskName, "workflow", workflowURL)
 		landed, err := e.settlePersist(ctx, e.persistYielding(ctx, db, shardNum, stepID, leaseSeq, &persistPass, func() error {
-			return e.handleInterrupt(ctx, shardNum, db, stepID, leaseSeq, flowID, flowToken, workflowURL, changesJSON, interruptPayload)
-		}), shardNum, stepID, leaseSeq, flowID, flowToken, taskName, heldRunning)
+			return e.handleInterrupt(ctx, shardNum, db, stepID, leaseSeq, flowID, flowHour, flowToken, workflowURL, changesJSON, interruptPayload)
+		}), shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, taskName, heldRunning)
 		if landed {
 			e.metricStepExecuted(ctx, taskName, workflow.StatusInterrupted, shardNum)
 		}
@@ -760,19 +763,19 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		}
 		loadCancel() // a panic here fails the step like any LoadGraph error rather than wedging it
 		if lerr != nil {
-			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, lerr, taskName)
+			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, lerr, taskName)
 			return errors.Trace(err)
 		}
 		// Same create-time guarantees for a subgraph child: reject a nil or structurally invalid child graph
 		// (failing the caller step like any LoadGraph error). Validation is pure; the child's fan-in map is
 		// derived once per graph per replica (internal/faninmap), not frozen into its JSON.
 		if subgraphGraph == nil {
-			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken,
+			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken,
 				errors.New("subgraph graph not found: %s", subgraphURL, http.StatusNotFound), taskName)
 			return errors.Trace(err)
 		}
 		if verr := subgraphGraph.Validate(); verr != nil {
-			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken,
+			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken,
 				errors.New("invalid subgraph graph %s: %v", subgraphURL, verr, http.StatusBadRequest), taskName)
 			return errors.Trace(err)
 		}
@@ -821,7 +824,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				return nil
 			}
 			return err
-		}), shardNum, stepID, leaseSeq, flowID, flowToken, taskName, heldRunning)
+		}), shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, taskName, heldRunning)
 		if !landed {
 			return err
 		}
@@ -846,7 +849,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			// Retry refuses a negative initialDelay, but a remote host's carrier is not bound by it, and a past
 			// not_before would re-dispatch the step at once on every attempt.
 			err = errors.New("task '%s' requested a retry with a negative delay", stripProto(taskName))
-			return errors.Trace(e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName))
+			return errors.Trace(e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, err, taskName))
 		}
 		e.logger.DebugContext(ctx, "Task retried", "task", taskName, "workflow", workflowURL, "step", stepID, "attempt", attempt)
 		// A retry rewinds this step in place and clears its subgraph park slot, so on
@@ -886,7 +889,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				rewound = true
 				return errors.Trace(e.deleteSubgraphFlowsRootedAt(ctx, tx, stepID))
 			})
-		}), shardNum, stepID, leaseSeq, flowID, flowToken, taskName, heldRunning)
+		}), shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, taskName, heldRunning)
 		if !landed || !rewound {
 			return err
 		}
@@ -909,7 +912,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// overflow on the completion write (retried, then classified as a payload fault).
 	if gotoTarget := resultFlow.GotoRequested(); len(gotoTarget) > maxGotoTargetLen {
 		err = errors.New("task '%s' requested goto to '%s' but no goto transition exists from this task", stripProto(taskName), stripProto(gotoTarget))
-		return errors.Trace(e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName))
+		return errors.Trace(e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, err, taskName))
 	}
 
 	// Complete the step.
@@ -1015,7 +1018,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			return nil
 		})
 	})
-	if landed, err := e.settlePersist(ctx, err, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, heldRunning); !landed {
+	if landed, err := e.settlePersist(ctx, err, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, taskName, heldRunning); !landed {
 		return err
 	}
 	if stepRowsAffected == 0 {
@@ -1041,7 +1044,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			// completed-to-terminal escape failOnPersistError uses, so the recovery defer - which rewinds only
 			// a `completed` row - has nothing to rewind once it lands, and rewinds it for a re-dispatch (where
 			// the claim preempts it) if it does not.
-			return errors.Trace(e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, cancelmarker.New(flowCancelReason), taskName))
+			return errors.Trace(e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, cancelmarker.New(flowCancelReason), taskName))
 		}
 		// Route to the handler exactly as a task error would, except that the task's own changes are kept -
 		// it ran to completion, so they are a fact, not a half-written attempt - and onErr is added to them.
@@ -1054,11 +1057,11 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// onErr carries the caller's cancel reason, so it can push changes that passed the check above over the
 		// limit. The step fails on the size, not as cancelled: a real error wins over a cancellation.
 		if err := e.checkPayloadSize("changes of task '"+stripProto(taskName)+"'", changesJSON); err != nil {
-			return errors.Trace(e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName))
+			return errors.Trace(e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, err, taskName))
 		}
 		successorBase = state.Clone()
 		if err := successorBase.Apply(accumulatedChanges, reducers); err != nil {
-			return errors.Trace(e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName))
+			return errors.Trace(e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, err, taskName))
 		}
 		// The route is recorded with the changes, so a replay of this step routes to the handler too. It is part
 		// of the step's recorded outcome, so it goes through persist like the completion write above.
@@ -1089,7 +1092,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				return nil
 			})
 		})
-		if landed, err := e.settlePersist(ctx, err, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, heldRerouting); !landed {
+		if landed, err := e.settlePersist(ctx, err, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, taskName, heldRerouting); !landed {
 			return err
 		}
 		errorRouted = true
@@ -1135,7 +1138,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	} else {
 		nextTasks, err = evaluateTransitions(graph, taskName, resultFlow, successorBase)
 		if err != nil {
-			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
+			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
 	}
@@ -1181,8 +1184,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	}
 	if isFanOutSource && fanInOfSource != "" &&
 		((cohortSize == 0 && !routedToEnd) || (cohortSize == 1 && realTasks[0].taskName == fanInOfSource)) {
-		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, heldAdvancing, &persistPass, func() error {
-			return e.fireFanInDirect(ctx, shardNum, db, flowID, flowToken, stepID, leaseSeq, stepDepth, lineageID, fanOutOrdinal, fanInOfSource, dispatchURLOf(graph, fanInOfSource), workflowURL, graph, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs, inheritCancel)
+		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, taskName, heldAdvancing, &persistPass, func() error {
+			return e.fireFanInDirect(ctx, shardNum, db, flowID, flowHour, flowToken, stepID, leaseSeq, stepDepth, lineageID, fanOutOrdinal, fanInOfSource, dispatchURLOf(graph, fanInOfSource), workflowURL, graph, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs, inheritCancel)
 		})
 	}
 	if isFanOutSource && cohortSize == 0 {
@@ -1197,12 +1200,12 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			if routedToEnd {
 				reason = "routed to END without converging on its fan-in task"
 			}
-			return e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken,
+			return e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken,
 				errors.New("fan-out source '%s' is inside a cohort but %s", taskName, reason),
 				taskName)
 		}
-		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, heldAdvancing, &persistPass, func() error {
-			return e.completeFlowSequential(ctx, shardNum, flowID, stepID, flowToken, workflowURL)
+		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, taskName, heldAdvancing, &persistPass, func() error {
+			return e.completeFlowSequential(ctx, shardNum, flowID, stepID, flowHour, flowToken, workflowURL)
 		})
 	}
 
@@ -1217,12 +1220,12 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// spawn source's OWN lineage, 0 for a top-level cohort), so a legitimate `<fan-in> -> END` still
 		// completes here.
 		if lineageID != 0 {
-			return e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken,
+			return e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken,
 				errors.New("task '%s' is inside a fan-out cohort but matched no onward transition; every branch must reach a fan-in task", taskName),
 				taskName)
 		}
-		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, heldAdvancing, &persistPass, func() error {
-			return e.completeFlowSequential(ctx, shardNum, flowID, stepID, flowToken, workflowURL)
+		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, taskName, heldAdvancing, &persistPass, func() error {
+			return e.completeFlowSequential(ctx, shardNum, flowID, stepID, flowHour, flowToken, workflowURL)
 		})
 	}
 
@@ -1259,7 +1262,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// on every dispatch). Failing the step is the honest outcome - the flow terminates with a clear error
 	// instead of hot-looping forever.
 	if fanInArrivals > 0 && cohortSpawnID == 0 {
-		return e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken,
+		return e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken,
 			errors.New("task '%s' is routed to fan-in task '%s' but is not part of a fan-out cohort", taskName, fanInTaskName),
 			taskName)
 	}
@@ -1287,7 +1290,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		err = e.checkPayloadSize("successor state of task '"+stripProto(taskName)+"'", linearStateJSON)
 	}
 	if err != nil {
-		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
+		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, err, taskName)
 		return errors.Trace(err)
 	}
 	nextStepDepth := stepDepth + 1
@@ -1414,7 +1417,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			}
 
 			succ := successorBatch{
-				flowID: flowID, stepDepth: nextStepDepth, timeBudgetMs: flowTimeBudgetMs, lineageID: childLineageID,
+				flowID: flowID, flowHour: flowHour, stepDepth: nextStepDepth, timeBudgetMs: flowTimeBudgetMs, lineageID: childLineageID,
 				predecessorID: stepID, sleepMs: sleepMs, priority: flowPriority, fairnessKey: flowFairnessKey,
 				fairnessWeight: flowFairnessWeight, engineID: e.engineID, inheritCancel: inheritCancel,
 				maxBytes: e.maxPayloadBytes,
@@ -1646,7 +1649,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		cohortMu.unlock()
 		cohortMu = nil
 	}
-	if landed, err := e.settlePersist(ctx, err, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, heldAdvancing); !landed {
+	if landed, err := e.settlePersist(ctx, err, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, taskName, heldAdvancing); !landed {
 		return err
 	}
 	e.metricStateWriteBytes(ctx, workflowURL, "state", txBytes.stateWritten)
@@ -1655,7 +1658,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	e.metricStateReadBytes(ctx, workflowURL, "changes", txBytes.changesRead)
 
 	if loss.status != "" {
-		e.endLostFlow(ctx, shardNum, flowID, flowToken, flowLabel{workflowURL: workflowURL, priority: flowPriority}, loss)
+		e.endLostFlow(ctx, shardNum, flowID, flowHour, flowToken, flowLabel{workflowURL: workflowURL, priority: flowPriority}, loss)
 		return nil
 	}
 
@@ -1711,8 +1714,8 @@ var errTransitionFlowTerminal = errors.New("flow terminal at transition")
 const maxGotoTargetLen = 512
 
 // handleInterrupt pauses a flow for external input.
-func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.DB, stepID, leaseSeq int, flowID int, flowToken string, workflowURL string, changesJSON []byte, interruptPayload workflow.State) error {
-	chainFlowIDs, chainStepIDs, chainCompositeIDs, err := e.surgraphChain(ctx, shardNum, flowID, flowToken)
+func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.DB, stepID, leaseSeq int, flowID int, flowHour int, flowToken string, workflowURL string, changesJSON []byte, interruptPayload workflow.State) error {
+	chainFlowIDs, chainStepIDs, chainCompositeIDs, err := e.surgraphChain(ctx, shardNum, flowID, flowHour, flowToken)
 	if err != nil {
 		return errors.Trace(err)
 	}

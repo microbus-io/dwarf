@@ -293,7 +293,7 @@ func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 
 	fk, err := e.Create(ctx, "cip/parent", nil, nil)
 	assert.NoError(err)
-	shard, parentFlowID, _, err := keys.ParseFlowKey(fk)
+	shard, _, parentFlowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := engineseams.DB(e).Shard(shard)
 	assert.NoError(err)

@@ -232,9 +232,9 @@ func TestPersist_LeaseExtensionStatusGuard(t *testing.T) {
 		)
 		assert.NoError(err)
 		_, err = db.ExecContext(ctx,
-			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, lease_seq, not_before, lease_expires)"+
-				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 999000), DATE_ADD_MILLIS(NOW_UTC(), 999000))",
-			1, 1, "stok", "T", "u", status, 1000, 5,
+			"INSERT INTO dwarf_steps (flow_created_hour, flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, lease_seq, not_before, lease_expires)"+
+				" VALUES ((SELECT created_hour FROM dwarf_flows WHERE flow_id=?), ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 999000), DATE_ADD_MILLIS(NOW_UTC(), 999000))",
+			1, 1, 1, "stok", "T", "u", status, 1000, 5,
 		)
 		assert.NoError(err)
 		return e, db
@@ -323,9 +323,9 @@ func TestPersist_PermanentErrorOnARetryStopsTheLadder(t *testing.T) {
 	)
 	assert.NoError(err)
 	_, err = db.ExecContext(ctx,
-		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, lease_seq, not_before, lease_expires)"+
-			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 999000), DATE_ADD_MILLIS(NOW_UTC(), 999000))",
-		1, 1, "stok", "T", "u", workflow.StatusRunning, 1000, 5,
+		"INSERT INTO dwarf_steps (flow_created_hour, flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, lease_seq, not_before, lease_expires)"+
+			" VALUES ((SELECT created_hour FROM dwarf_flows WHERE flow_id=?), ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 999000), DATE_ADD_MILLIS(NOW_UTC(), 999000))",
+		1, 1, 1, "stok", "T", "u", workflow.StatusRunning, 1000, 5,
 	)
 	assert.NoError(err)
 
@@ -448,7 +448,7 @@ func TestPersist_CancelRerouteWriteIsPersisted(t *testing.T) {
 		<-started
 		// The flow stops when failStep commits, and the classifier counts dwarf_steps_write_failed only after
 		// that, so Await can return before the count. Work's dispatch returning is what follows both.
-		shard, _, _, err := keys.ParseFlowKey(fk)
+		shard, _, _, _, err := keys.ParseFlowKey(fk)
 		assert.NoError(err)
 		_, _, workStepID := flowRows(t, e, fk)
 		dispatched := e.seams.Waiter(engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(workStepID)))

@@ -76,7 +76,7 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 		assert.Equal(workflow.StatusInterrupted, out.Status)
 	}
 
-	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
+	shardNum, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shardNum)
 	assert.NoError(err)
@@ -169,7 +169,7 @@ func TestReaperDeletesRunningDescendant(t *testing.T) {
 	if assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
-	shardNum, rootID, _, err := keys.ParseFlowKey(fk)
+	shardNum, _, rootID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shardNum)
 	assert.NoError(err)
@@ -238,7 +238,7 @@ func TestTerminateVsTransition_Deterministic(t *testing.T) {
 	e.seams.Resume(engineseams.CheckpointBeforeTransitionTx)
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusTerminated, 10*time.Second)
 
-	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
+	shardNum, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shardNum)
 	assert.NoError(err)
@@ -315,7 +315,7 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 	// parent - and that the tree's invariants hold.
 	assertAllTerminated := func(t *testing.T, e *Engine, fk string) {
 		assert := testarossa.For(t)
-		shardNum, _, _, _ := keys.ParseFlowKey(fk)
+		shardNum, _, _, _, _ := keys.ParseFlowKey(fk)
 		db, _ := e.db.Shard(shardNum)
 		rows, err := db.QueryContext(t.Context(), "SELECT flow_id, workflow_url, status FROM dwarf_flows ORDER BY flow_id")
 		if !assert.NoError(err) {
@@ -331,7 +331,7 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		enginetest.AssertInvariants(t, e)
 	}
 	countFlows := func(t *testing.T, e *Engine, fk, workflowURL string) int {
-		shardNum, _, _, _ := keys.ParseFlowKey(fk)
+		shardNum, _, _, _, _ := keys.ParseFlowKey(fk)
 		db, _ := e.db.Shard(shardNum)
 		var n int
 		db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dwarf_flows WHERE workflow_url=?", workflowURL).Scan(&n)
@@ -520,7 +520,7 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		terminated := make(chan error, 1)
 		go func() { terminated <- r.e.Terminate(ctx, fk, "test") }()
 		assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointTerminateAfterScan, 10*time.Second), "Terminate never finished its scan")
-		shardNum, parentFlowID, _, _ := keys.ParseFlowKey(fk)
+		shardNum, _, parentFlowID, _, _ := keys.ParseFlowKey(fk)
 		db, _ := r.e.db.Shard(shardNum)
 		_, err = db.ExecContext(ctx, "DELETE FROM dwarf_steps WHERE flow_id IN (SELECT flow_id FROM dwarf_flows WHERE surgraph_flow_id=?)", parentFlowID)
 		assert.NoError(err)
@@ -591,7 +591,7 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		// Postgres and SQL Server always reach the race: nothing holds the transition off, so Call is created and
 		// claimed while Terminate is frozen. Elsewhere the outcome depends on the locks (and on MySQL's isolation
 		// level), and not claiming Call is legitimate.
-		shardNum, _, _, _ := keys.ParseFlowKey(fk)
+		shardNum, _, _, _, _ := keys.ParseFlowKey(fk)
 		db, _ := r.e.db.Shard(shardNum)
 		if driver := db.DriverName(); driver == "pgx" || driver == "mssql" {
 			assert.True(claimed, "Call was not claimed in time, so the race was not exercised")
@@ -640,7 +640,7 @@ func TestRetryRewindVsTerminate_Deterministic(t *testing.T) {
 	e.seams.Resume(engineseams.CheckpointBeforeRetryRewind)
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusTerminated, 10*time.Second)
 
-	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
+	shardNum, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shardNum)
 	assert.NoError(err)
@@ -687,7 +687,7 @@ func TestDeleteVsResume_ResumeWinsInsideTerminate(t *testing.T) {
 			assert := testarossa.For(t)
 			ctx := t.Context()
 			fk := createInterruptedFlow(t, e, "dvrin/g")
-			shard, flowID, _, err := keys.ParseFlowKey(fk)
+			shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 			assert.NoError(err)
 
 			e.seams.Break(engineseams.CheckpointTerminateAfterScan)
@@ -745,7 +745,7 @@ func TestPurge_ResumedAndCompletedRootIsNotMarked(t *testing.T) {
 	}
 
 	fk := createInterruptedFlow(t, e, "prcrm/g")
-	shard, flowID, _, err := keys.ParseFlowKey(fk)
+	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 
 	e.seams.Break(engineseams.CheckpointTerminateAfterScan)

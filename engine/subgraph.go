@@ -110,7 +110,7 @@ const maxTerminateRuns = 16
 // lock, or the transaction rolls back and errRootNotInterrupted is returned: a Resume that committed first wins.
 // commitFault is a test-only seam name, checked before any write so a fired fault proves the whole transaction
 // rolls back atomically; pass "" for none.
-func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flowToken, reason string, onlyIfInterrupted bool, commitFault string) error {
+func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHour int, flowToken, reason string, onlyIfInterrupted bool, commitFault string) error {
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)
@@ -122,7 +122,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 	e.seams.Checkpoint(ctx, engineseams.CheckpointTerminateAfterScan)
 	allFlowIDs := append([]any{flowID}, descendantFlowIDs...)
 	allCompositeIDs := append(
-		[]string{keys.New(shardNum, flowID, flowToken)},
+		[]string{keys.New(shardNum, flowHour, flowID, flowToken)},
 		descendantCompositeIDs...,
 	)
 
@@ -236,7 +236,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 
 			finalStates := make([][]byte, len(allFlowIDs))
 			for i, fid := range allFlowIDs {
-				_, _, fToken, err := keys.ParseFlowKey(allCompositeIDs[i])
+				_, _, _, fToken, err := keys.ParseFlowKey(allCompositeIDs[i])
 				if err != nil {
 					return errors.Trace(err)
 				}
@@ -505,7 +505,7 @@ func subgraphErrorText(col []byte) string {
 // more in a projection, not a query.
 func (e *Engine) allSubgraphFlows(ctx context.Context, db sequel.Executor, shardNum int, flowID int) (flowIDs []any, compositeFlowIDs []string, labelByFlowID map[int]flowLabel, err error) {
 	rows, err := db.QueryContext(ctx,
-		"SELECT flow_id, flow_token, surgraph_flow_id, status, workflow_url, priority FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)",
+		"SELECT flow_id, flow_token, created_hour, surgraph_flow_id, status, workflow_url, priority FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)",
 		flowID,
 	)
 	if err != nil {
@@ -513,20 +513,21 @@ func (e *Engine) allSubgraphFlows(ctx context.Context, db sequel.Executor, shard
 	}
 	type node struct {
 		token    string
+		hour     int
 		terminal bool
 		label    flowLabel
 	}
 	byID := map[int]node{}
 	childrenByParent := map[int][]int{}
 	for rows.Next() {
-		var id, parent, priority int
+		var id, hour, parent, priority int
 		var token, status, workflowURL string
-		if err := rows.Scan(&id, &token, &parent, &status, &workflowURL, &priority); err != nil {
+		if err := rows.Scan(&id, &token, &hour, &parent, &status, &workflowURL, &priority); err != nil {
 			rows.Close()
 			return nil, nil, nil, errors.Trace(err)
 		}
 		term := workflow.IsTerminalStatus(status)
-		byID[id] = node{token: token, terminal: term, label: flowLabel{workflowURL: workflowURL, priority: priority}}
+		byID[id] = node{token: token, hour: hour, terminal: term, label: flowLabel{workflowURL: workflowURL, priority: priority}}
 		if parent != 0 {
 			childrenByParent[parent] = append(childrenByParent[parent], id)
 		}
@@ -548,7 +549,7 @@ func (e *Engine) allSubgraphFlows(ctx context.Context, db sequel.Executor, shard
 				continue
 			}
 			flowIDs = append(flowIDs, child)
-			compositeFlowIDs = append(compositeFlowIDs, keys.New(shardNum, child, n.token))
+			compositeFlowIDs = append(compositeFlowIDs, keys.New(shardNum, n.hour, child, n.token))
 			queue = append(queue, child)
 		}
 	}
@@ -573,29 +574,31 @@ type flowLabel struct {
 // comparison), then descends in memory - one round-trip per concern regardless of depth. The leaf is picked the SAME way Snapshot does (earliest updated_at, step_id tiebreak),
 // so a Snapshot reports exactly the interrupt the next Resume resolves. Descent is keyed on surgraph_step_id
 // (the caller step's PK), never depth, which is ambiguous when parallel subgraph callers share a depth.
-func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flowID int, flowToken string) (flowIDs []any, stepIDs []any, compositeFlowIDs []string, err error) {
+func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flowID int, flowHour int, flowToken string) (flowIDs []any, stepIDs []any, compositeFlowIDs []string, err error) {
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return nil, nil, nil, errors.Trace(err)
 	}
 
 	frows, err := db.QueryContext(ctx,
-		"SELECT flow_id, flow_token, surgraph_step_id, status FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)",
+		"SELECT flow_id, flow_token, created_hour, surgraph_step_id, status FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)",
 		flowID,
 	)
 	if err != nil {
 		return nil, nil, nil, errors.Trace(err)
 	}
 	tokenByID := map[int]string{}
+	hourByID := map[int]int{}
 	childByCallerStep := map[int]int{} // surgraph_step_id -> interrupted child flow_id
 	for frows.Next() {
-		var id, ssid int
+		var id, hour, ssid int
 		var token, status string
-		if err := frows.Scan(&id, &token, &ssid, &status); err != nil {
+		if err := frows.Scan(&id, &token, &hour, &ssid, &status); err != nil {
 			frows.Close()
 			return nil, nil, nil, errors.Trace(err)
 		}
 		tokenByID[id] = token
+		hourByID[id] = hour
 		if ssid != 0 && status == workflow.StatusInterrupted {
 			childByCallerStep[ssid] = id
 		}
@@ -634,7 +637,7 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 	}
 
 	flowIDs = []any{flowID}
-	compositeFlowIDs = []string{keys.New(shardNum, flowID, flowToken)}
+	compositeFlowIDs = []string{keys.New(shardNum, flowHour, flowID, flowToken)}
 	cur := flowID
 	for {
 		leaf, ok := interruptedLeafByFlow[cur]
@@ -650,7 +653,7 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 			return flowIDs, stepIDs, compositeFlowIDs, nil // no interrupted child spawned here - leaf reached
 		}
 		flowIDs = append(flowIDs, child)
-		compositeFlowIDs = append(compositeFlowIDs, keys.New(shardNum, child, tokenByID[child]))
+		compositeFlowIDs = append(compositeFlowIDs, keys.New(shardNum, hourByID[child], child, tokenByID[child]))
 		cur = child
 	}
 }
@@ -658,22 +661,22 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 // surgraphChain walks from a flow up to the root surgraph, following surgraph_flow_id/surgraph_step_id one
 // level per round trip: each query reads a flow's caller link joined to its parent's token and own link, so
 // it touches only the chain, never the rest of the tree.
-func (e *Engine) surgraphChain(ctx context.Context, shardNum int, flowID int, flowToken string) (flowIDs []any, stepIDs []any, compositeFlowIDs []string, err error) {
+func (e *Engine) surgraphChain(ctx context.Context, shardNum int, flowID int, flowHour int, flowToken string) (flowIDs []any, stepIDs []any, compositeFlowIDs []string, err error) {
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return nil, nil, nil, errors.Trace(err)
 	}
 	flowIDs = []any{flowID}
-	compositeFlowIDs = []string{keys.New(shardNum, flowID, flowToken)}
+	compositeFlowIDs = []string{keys.New(shardNum, flowHour, flowID, flowToken)}
 	cur := flowID
 	for {
-		var surgFlowID, surgStepID, nextSurgFlowID int
+		var surgFlowID, surgStepID, surgHour, nextSurgFlowID int
 		var surgToken string
 		err := db.QueryRowContext(ctx,
-			"SELECT f.surgraph_flow_id, f.surgraph_step_id, COALESCE(p.flow_token, ''), COALESCE(p.surgraph_flow_id, 0)"+
+			"SELECT f.surgraph_flow_id, f.surgraph_step_id, COALESCE(p.flow_token, ''), COALESCE(p.created_hour, 0), COALESCE(p.surgraph_flow_id, 0)"+
 				" FROM dwarf_flows f LEFT JOIN dwarf_flows p ON p.flow_id=f.surgraph_flow_id WHERE f.flow_id=?",
 			cur,
-		).Scan(&surgFlowID, &surgStepID, &surgToken, &nextSurgFlowID)
+		).Scan(&surgFlowID, &surgStepID, &surgToken, &surgHour, &nextSurgFlowID)
 		if errors.Is(err, sql.ErrNoRows) || (err == nil && surgFlowID == 0) {
 			break
 		}
@@ -682,7 +685,7 @@ func (e *Engine) surgraphChain(ctx context.Context, shardNum int, flowID int, fl
 		}
 		flowIDs = append(flowIDs, surgFlowID)
 		stepIDs = append(stepIDs, surgStepID)
-		compositeFlowIDs = append(compositeFlowIDs, keys.New(shardNum, surgFlowID, surgToken))
+		compositeFlowIDs = append(compositeFlowIDs, keys.New(shardNum, surgHour, surgFlowID, surgToken))
 		if nextSurgFlowID == 0 {
 			break
 		}

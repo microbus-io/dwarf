@@ -80,10 +80,10 @@ func checkPayloadVer(ver int) error {
 // comes back here until the fleet changes under it. The bound is therefore sized to a rolling upgrade, not to a
 // number of re-claims. The deferrals are counted apart from attempt, which a task reads through flow.Attempt, and
 // over the step's whole life: a step that runs between two rollouts carries its earlier deferrals into the second.
-func (e *Engine) deferNewerPayload(ctx context.Context, db sequel.Executor, shardNum, stepID, leaseSeq, flowID int, flowToken, taskName string, ver, deferrals int) error {
+func (e *Engine) deferNewerPayload(ctx context.Context, db sequel.Executor, shardNum, stepID, leaseSeq, flowID, flowHour int, flowToken, taskName string, ver, deferrals int) error {
 	if deferrals >= maxPayloadDeferrals {
 		fctx, doneTurn := e.dbTurn(ctx, shardNum)
-		err := e.failAndReturn(fctx, shardNum, stepID, leaseSeq, flowID, flowToken, errPayloadNewer(ver), taskName)
+		err := e.failAndReturn(fctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, errPayloadNewer(ver), taskName)
 		doneTurn()
 		return errors.Trace(err)
 	}
