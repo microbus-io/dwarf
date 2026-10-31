@@ -33,7 +33,7 @@ cycle.
 **Consults are written inline at the site they affect, never wrapped in a helper.** A wrapper puts the fault's
 effect a jump away from the code it perturbs, which is exactly backwards for a seam whose whole purpose is to be
 readable at the point of perturbation. Two consults that are easy to wrap are inline: the lost-delivery consult in
-`deliverFlowFailureToParent` (`subgraph.go`) and the flow-row-write counter's two sites in `execution.go`. Both
+`deliverFlowFailureToParent` (`subgraph.go`) and the flow-row-write counter in `queueFlowGrab` (`dispatch.go`). Both
 guard on `e.seams.Enabled()` first - the lost-delivery one because building its scope needs a **DB read** (a live
 binary must run neither the query nor the consult), the counter because formatting the flow id would otherwise
 allocate a throwaway scope string on the hot path.

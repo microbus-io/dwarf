@@ -38,8 +38,8 @@ import (
 // dispatch's lease was re-granted to a peer (failStep's fenced step UPDATE matched zero rows), nil is
 // returned so processStep abandons quietly - the peer owns the step and will settle it. All failStep call
 // sites in processStep go through this so the defer covers every fail path uniformly.
-func (e *Engine) failAndReturn(ctx context.Context, shardNum int, stepID int, leaseSeq int, flowID int, flowHour int, flowToken string, taskErr error, taskName string) error {
-	fenced, ferr := e.failStep(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, taskErr, taskName, heldEither)
+func (e *Engine) failAndReturn(ctx context.Context, d *dispatch, taskErr error) error {
+	fenced, ferr := e.failStep(ctx, d, taskErr, heldEither)
 	if ferr != nil {
 		return errors.Trace(ferr)
 	}
@@ -74,7 +74,9 @@ const (
 // failStep handles a task failure. It returns fenced=true (with a nil error) when the dispatch's lease was
 // re-granted to a peer, or the step is no longer in the held state - its fenced step UPDATE matched zero rows, so it
 // wrote nothing and the caller must abandon quietly rather than fail a flow the peer is healthily re-executing.
-func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSeq int, flowID int, flowHour int, flowToken string, taskErr error, taskName string, held stepHeld) (fenced bool, err error) {
+func (e *Engine) failStep(ctx context.Context, d *dispatch, taskErr error, held stepHeld) (fenced bool, err error) {
+	shardNum, stepID, leaseSeq, taskName := d.shard, d.stepID, d.row.leaseSeq, d.row.taskName
+	flowID, flowHour, flowToken := d.row.flowID, d.row.createdHour, d.row.flowToken
 	if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultFailStepErr, taskName)) {
 		return false, errors.New("injected fault: " + engineseams.FaultFailStepErr)
 	}

@@ -21,7 +21,6 @@ import (
 	"database/sql"
 	"maps"
 	"strings"
-	"time"
 
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/staterefs"
@@ -111,7 +110,12 @@ func bumpCohortArrivals(ctx context.Context, tx *sequel.Tx, spawnID, n, stepID, 
 // fireFanInDirect creates the fan-in step immediately for a fan-out source that converges with no branches:
 // an empty forEach, or a goto/onError/when/switch route straight to the source's own fan-in. The source is the
 // spawn, so the fan-in runs on the source's own state and changes.
-func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.DB, flowID int, flowHour int, flowToken string, stepID, leaseSeq int, stepDepth int, lineageID int, fanOutOrdinal int, fanInTarget, fanInURL string, workflowURL string, graph *workflow.Graph, sleepDur time.Duration, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int, inheritCancel int) error {
+func (e *Engine) fireFanInDirect(ctx context.Context, d *dispatch, fanInTarget string) error {
+	shardNum, db, flowID, flowHour, flowToken := d.shard, d.db, d.row.flowID, d.row.createdHour, d.row.flowToken
+	stepID, leaseSeq, stepDepth, lineageID, fanOutOrdinal := d.stepID, d.row.leaseSeq, d.row.stepDepth, d.row.lineageID, d.row.fanOutOrdinal
+	workflowURL, graph, sleepDur, inheritCancel := d.row.workflowURL, d.graph, d.sleep, d.inheritCancel
+	priority, fairnessKey, fairnessWeight, timeBudgetMs := d.row.flowPriority, d.row.flowFairnessKey, d.row.flowFairnessWeight, d.row.flowTimeBudgetMs
+	fanInURL := dispatchURLOf(graph, fanInTarget)
 	var fanInStepID int64
 	var txBytes stateByteCount
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {

@@ -26,7 +26,6 @@ import (
 	"github.com/microbus-io/dwarf/internal/turnstile"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
-	"github.com/microbus-io/sequel"
 )
 
 // payloadVer is the newest payload format this build reads and the one it creates flows in. A flow's format
@@ -80,12 +79,11 @@ func checkPayloadVer(ver int) error {
 // comes back here until the fleet changes under it. The bound is therefore sized to a rolling upgrade, not to a
 // number of re-claims. The deferrals are counted apart from attempt, which a task reads through flow.Attempt, and
 // over the step's whole life: a step that runs between two rollouts carries its earlier deferrals into the second.
-func (e *Engine) deferNewerPayload(ctx context.Context, db sequel.Executor, shardNum, stepID, leaseSeq, flowID, flowHour int, flowToken, taskName string, ver, deferrals int) error {
+func (e *Engine) deferNewerPayload(ctx context.Context, d *dispatch) error {
+	db, shardNum, stepID, leaseSeq, flowID, taskName := d.db, d.shard, d.stepID, d.row.leaseSeq, d.row.flowID, d.row.taskName
+	ver, deferrals := d.row.flowPayloadVer, d.row.payloadDeferrals
 	if deferrals >= maxPayloadDeferrals {
-		fctx, doneTurn := e.dbTurn(ctx, shardNum)
-		err := e.failAndReturn(fctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, errPayloadNewer(ver), taskName)
-		doneTurn()
-		return errors.Trace(err)
+		return e.failEntry(ctx, d, errPayloadNewer(ver))
 	}
 	backoff := payloadDeferralBackoff(deferrals)
 	// Warned once per step, at its first deferral: a rollout over a large backlog defers every step up to the bound,

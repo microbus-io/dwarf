@@ -911,6 +911,28 @@ repair; its worst case is `budget + leaseMargin + recoveryInterval`, and the con
 (never from the engine's `TimeBudget`, sized for one surviving sweeper, no crash-detection trigger) are at
 `recoverExpiredLeases` in `wedge.go`.
 
+### `processStep` and `dispatch` (`dispatch.go`)
+
+`processStep` is a sequence of stages - `claim`, `load`, `startTask`, `execute`, `outcome`, then one of
+`parkInterrupt`/`parkSubgraph`/`retry`, or `complete` then `transition` - each an `Engine` method taking the run's
+`*dispatch`. A stage returning `done` ends the dispatch (a lost claim, a terminal flow, a deferral, a failed step).
+
+- **`dispatch` is data only: no methods.** Its fields are grouped by the stage that sets them; a later stage reads a
+  group and does not rewrite it, except where a field's comment says so. The claimed columns are the named field
+  `row claimRow`, not embedded (embedding would promote `destinations()` onto it). It is the one allocation that
+  `claimRow` was, so the split adds none per step.
+- **Every defer that must outlive a stage is registered in `processStep`**, in the original order: the entry-phase
+  close, the claimed-dispatch checkpoint, the recovery (`recoverStep`), the span's `End`, the budget's cancel, the
+  persist pass's return, the exit-phase close. A defer inside a stage runs when that stage returns.
+- **The persist pass is `d.pass`, returned through `defer func() { d.pass.Return() }()`**, never
+  `defer d.pass.Return()`: `yieldTurn` swaps it, and a bound method value would return the pass that existed when the
+  defer was written.
+- **`processStep` owns `ctx`.** It moves the claim stamp after the host call (`turnstile.Away`) and publishes the held
+  turn (`withHeldTurn`), and the recovery reads the ctx it holds at the end. A stage that moves its own `ctx`
+  (`parkSubgraph`'s `yieldTurnAway`) moves only its copy.
+- The persist/fail family (`failStep`, `failAndReturn`, `settlePersist`, `persist*`) and `deferNewerPayload`,
+  `handleInterrupt` and `fireFanInDirect` take `*dispatch` too: every caller is a dispatch.
+
 ### Round-trip minimization in `processStep`
 
 `processStep` is the hot path, and it is strictly **sequential** end to end - the engine spawns no goroutines outside
@@ -921,7 +943,7 @@ not parallelism:
   `RETURNING`/`OUTPUT` (reads the row *as updated* - a consistent snapshot). MySQL lacks RETURNING, so they are two
   statements run **serially** (claim first, read only on success): running them on separate connections is unsafe -
   an independent read snapshot can observe the pre-transition row and deliver an empty resume payload (the reason is
-  spelled out at the claim site in `execution.go`). The lease size comes from the step row's own `time_budget_ms`
+  spelled out at the claim site in `dispatch.go`). The lease size comes from the step row's own `time_budget_ms`
   (referenced self-referentially in the claim UPDATE), not a pre-SELECT.
 - **Flow data** - on PostgreSQL it comes back with the claim (below); elsewhere it is read after the claim,
   since it needs the `flow_id`.
@@ -1377,7 +1399,7 @@ than over-suppressing.
   on the skip path - measured at a 0ms interval, it fed an already-spinning refiller (throughput 1,632 -> 941).
 - **EVERY path that re-offers a step to THIS replica must `RelinquishClaim` first**, since the window outlives
   the step's previous dispatch. Four paths do: the recovery-defer reset and the `flow.Retry` rewind (both
-  `execution.go`), `deferNewerPayload` (`payloadver.go`), and **`enqueueStep`** (`operations.go`), which covers
+  `dispatch.go`), `deferNewerPayload` (`payloadver.go`), and **`enqueueStep`** (`operations.go`), which covers
   every cold re-offer site (surgraph revive, a lost child re-arming its caller, `deliverSubgraphError`, the
   resume leaf, Fork's leaf). `enqueueStep`'s is the easy one to miss, because only the empty-partition `Offer`
   exposes it: a revived caller is popped at once and skipped until the window ages out (189 of 500 flows in
@@ -1661,7 +1683,7 @@ is *recorded*, not *reconstructed*. Every edge lands on at least one endpoint:
   `TestFanIn_GotoLoopBranchKeepsInteriorDAGEdges`. The `successor_id` write targets the exit steps **by primary
   key** (ids collected from `queueCohortRead`'s cohort-member read), not by the
   `(flow_id, lineage_id, task_name)` predicate - which is unindexed and deadlocked concurrent fan-ins on SQL Server
-  (the deadlock story is at that write in `execution.go`).
+  (the deadlock story is at that write in `dispatch.go`).
 - **flow.Retry**: rewinds the step in place (same row), so `predecessor_id` is preserved. (A `Fork` copies the
   step into a new row and remaps `predecessor_id` to the cloned predecessor.)
 - **Entry / subgraph-entry steps**: `predecessor_id` defaults to 0.
@@ -1959,7 +1981,7 @@ becomes the next step, and the failed step is marked `completed` - **with the ta
 `error` *column* already carries only `err.Error()` - the message, no frames.)
 
 **An error voids the task's changes**, and this is the contract on **both** error paths: the `onError` route builds a
-**fresh** `RawFlow` seeded with the input snapshot plus `onErr` (`execution.go`), so anything the task wrote with
+**fresh** `RawFlow` seeded with the input snapshot plus `onErr` (`dispatch.go`), so anything the task wrote with
 `flow.Set` before returning its error never reaches the handler, the step's `changes` column, or `final_state`; and
 `failStep` writes only `status`/`parked`/`error`, never the changes. The two paths agree, so the contract does not
 depend on whether the author happened to declare a handler.
@@ -3489,7 +3511,7 @@ that is the reason to defend: with no process boundary, one buggy task handler w
 sharing the replica. Both `Host` calls are wrapped in `errors.CatchPanic` at their **call boundary** (not
 only at the worker loop):
 
-- **`ExecuteTask`** (`execution.go`) - the panic becomes the call's `error` and flows through the **normal
+- **`ExecuteTask`** (`dispatch.go`) - the panic becomes the call's `error` and flows through the **normal
   disposition**: routed via `onError` if one exists, else `failStep`. This is the load-bearing case. The crew's
   worker loop *already* wraps its callback (and so `processStep`) in `CatchPanic` (`internal/workers/crew.go`), so
   the process never died - but that catch is too coarse: a panic there unwinds the whole `processStep` stack *past* the error routing, leaving the leased step stuck
@@ -3497,7 +3519,7 @@ only at the worker loop):
   also skips the author's `onError`. Catching at the boundary turns a panic into a clean, immediate step failure
   (lease released), identical to a returned error. `errors.CatchPanic` captures the stack trace into the error for
   diagnosis.
-- **`LoadGraph`** (`operations.go` at `Create`, `execution.go` at subgraph spawn) - converted to an error
+- **`LoadGraph`** (`operations.go` at `Create`, `dispatch.go` at subgraph spawn) - converted to an error
   return. The subgraph-spawn site runs inside `processStep`, so without this it would wedge the caller step
   exactly like `ExecuteTask`; the `Create` site fails the `Create` call cleanly instead of unwinding into the
   host's own frame.
@@ -3640,11 +3662,11 @@ ordering:
 
 - **Flow-row-first (write-first).** Every flow-*advancing* / flow-*terminating* transaction takes the
   `dwarf_flows` row's write lock as its **first** statement, before touching steps: `processStep`'s transition
-  transaction (insert next steps, `execution.go`), `completeFlow`, and
+  transaction (insert next steps, `dispatch.go`), `completeFlow`, and
   `fireFanInDirect`. The one exception is a **pure cohort arrival** (no successor): its first
   write is the cohort bump on the spawn step row, and only the arrival that resolves the cohort grabs the flow row,
   after the bump - still write-first, and grabbing for every arrival would serialize the whole cohort on one row
-  (the rationale is at `pureArrival` in `execution.go`). Mandatory - the failure modes are under "Write-ordering &
+  (the rationale is at `pureArrival` in `dispatch.go`). Mandatory - the failure modes are under "Write-ordering &
   lock contention" above. Do not reorder these to read-first.
 - **Steps-first.** The lifecycle mutations update `dwarf_steps` before `dwarf_flows`: `Resume`, `Terminate`,
   `failStep`, `handleInterrupt`, and `Delete`/`Purge` (the deletes run steps-before-flows, ascending id).

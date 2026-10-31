@@ -192,7 +192,7 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 		e, db := setup(t, workflow.StatusPending)
 		defer e.Shutdown(ctx)
 
-		err := e.handleInterrupt(ctx, 1, db, 2, 7, 2, createdHourOf(t, e, 2), "ctok", "u", []byte(`{"answer":"x"}`), mustState(map[string]any{"ask": "approve?"}))
+		err := e.handleInterrupt(ctx, &dispatch{shard: 1, db: db, stepID: 2, changesJSON: []byte(`{"answer":"x"}`), row: claimRow{leaseSeq: 7, flowID: 2, createdHour: createdHourOf(t, e, 2), flowToken: "ctok", workflowURL: "u"}}, mustState(map[string]any{"ask": "approve?"}))
 		assert.True(errors.Is(err, errLeaseFenced), "fenced -> persist abandons quietly, got %v", err)
 
 		leafStatus, _ := stepState(t, db, 2)
@@ -226,7 +226,7 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 		e.seams.Inject(engineseams.FaultInterruptChainWrite)
 		defer e.seams.Withdraw(engineseams.FaultInterruptChainWrite)
 
-		err := e.handleInterrupt(ctx, 1, db, 2, 7, 2, createdHourOf(t, e, 2), "ctok", "u", []byte(`{"answer":"x"}`), mustState(map[string]any{"ask": "approve?"}))
+		err := e.handleInterrupt(ctx, &dispatch{shard: 1, db: db, stepID: 2, changesJSON: []byte(`{"answer":"x"}`), row: claimRow{leaseSeq: 7, flowID: 2, createdHour: createdHourOf(t, e, 2), flowToken: "ctok", workflowURL: "u"}}, mustState(map[string]any{"ask": "approve?"}))
 		assert.Error(err, "a failed chain UPDATE must surface as an error so Transact retries it, NOT be swallowed as a fence")
 		assert.False(errors.Is(err, errLeaseFenced), "a failed chain UPDATE must not read as a fence")
 
@@ -247,7 +247,7 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 		e, db := setup(t, workflow.StatusRunning)
 		defer e.Shutdown(ctx)
 
-		err := e.handleInterrupt(ctx, 1, db, 2, 7, 2, createdHourOf(t, e, 2), "ctok", "u", []byte(`{"answer":"x"}`), mustState(map[string]any{"ask": "approve?"}))
+		err := e.handleInterrupt(ctx, &dispatch{shard: 1, db: db, stepID: 2, changesJSON: []byte(`{"answer":"x"}`), row: claimRow{leaseSeq: 7, flowID: 2, createdHour: createdHourOf(t, e, 2), flowToken: "ctok", workflowURL: "u"}}, mustState(map[string]any{"ask": "approve?"}))
 		assert.NoError(err)
 
 		leafStatus, _ := stepState(t, db, 2)

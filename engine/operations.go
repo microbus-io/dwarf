@@ -732,7 +732,7 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 	// reservation its earlier dispatch took, and those dispatches finish far inside the ~1-2s window. Left
 	// in place it makes this replica skip its own re-dispatch: every worker that pops the step is turned
 	// away by TryClaim, and the refiller keeps re-selecting it, until the reservation ages out. Same reason
-	// and same treatment as the recovery-defer reset and the flow.Retry rewind (execution.go), which is the
+	// and same treatment as the recovery-defer reset and the flow.Retry rewind (dispatch.go), which is the
 	// company this site belongs in. A no-op for the callers that offer a genuinely new step id (Fork's leaf,
 	// Continue), which have no reservation to drop.
 	e.claims.RelinquishClaim(shard, stepID)

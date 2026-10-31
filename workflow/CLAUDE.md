@@ -325,7 +325,7 @@ exposure to revisit, not a non-issue:
 - **NUL (`U+0000`) in a string.** Valid UTF-8, legal JSON, but **PostgreSQL's `JSONB` rejects it**
   (`SQLSTATE 22P05`) while MySQL/SQLite/SQL Server accept it - so it passes the SQLite test suite and kills the
   flow on the recommended production database: the write that carries it is the step's own **completion
-  UPDATE** (`execution.go`), which, left to lease recovery, would leave the step `running` with `error=""`
+  UPDATE** (`dispatch.go`), which, left to lease recovery, would leave the step `running` with `error=""`
   and re-execute the task forever (reproduced against real Postgres). **Workaround: base64-encode binary
   data.** (Invalid UTF-8 in a Go string is coerced to `U+FFFD` on marshal; bytes stored as given - a
   `json.RawMessage` passed to `Set`, a remote host's `changes` - keep it, and the `append`/`concat` splice

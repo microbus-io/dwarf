@@ -1090,7 +1090,8 @@ func TestMeasureOpts_MemoizesUpToTheCap(t *testing.T) {
 
 	// Past the cap a new tuple is built per call and never stored, while the tuples already held still hit.
 	over := measureOptsCap + 1
-	assert.False(memo.get(over, build) == memo.get(over, build), "a tuple past the cap must not be memoized")
+	a, b := memo.get(over, build), memo.get(over, build)
+	assert.False(a == b, "a tuple past the cap must not be memoized")
 	assert.Equal(measureOptsCap, len(*memo.known.Load()))
 	assert.True(first == memo.get(1, build))
 }

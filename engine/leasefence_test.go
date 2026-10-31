@@ -83,7 +83,7 @@ func TestLeaseFence_FailStep(t *testing.T) {
 		setup(t, e, 5) // the owner holds generation 5
 
 		// A zombie holding the prior generation 4 returns an error late. It must write nothing.
-		fenced, err := e.failStep(ctx, 1, 1, 4, 1, createdHourOf(t, e, 1), "ftok", errors.New("boom"), "T", heldEither)
+		fenced, err := e.failStep(ctx, &dispatch{shard: 1, stepID: 1, row: claimRow{leaseSeq: 4, flowID: 1, createdHour: createdHourOf(t, e, 1), flowToken: "ftok", taskName: "T"}}, errors.New("boom"), heldEither)
 		assert.NoError(err)
 		assert.True(fenced)
 
@@ -101,7 +101,7 @@ func TestLeaseFence_FailStep(t *testing.T) {
 		setup(t, e, 5)
 
 		// The current owner (generation 5) fails the step normally.
-		fenced, err := e.failStep(ctx, 1, 1, 5, 1, createdHourOf(t, e, 1), "ftok", errors.New("boom"), "T", heldEither)
+		fenced, err := e.failStep(ctx, &dispatch{shard: 1, stepID: 1, row: claimRow{leaseSeq: 5, flowID: 1, createdHour: createdHourOf(t, e, 1), flowToken: "ftok", taskName: "T"}}, errors.New("boom"), heldEither)
 		assert.NoError(err)
 		assert.False(fenced)
 
@@ -706,7 +706,7 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 		e, db := setup(t, workflow.StatusTerminated, workflow.StatusTerminated)
 		defer e.Shutdown(ctx)
 
-		fenced, err := e.failStep(ctx, 1, 1, 5, 1, createdHourOf(t, e, 1), "ftok", errors.New("boom"), "T", heldEither)
+		fenced, err := e.failStep(ctx, &dispatch{shard: 1, stepID: 1, row: claimRow{leaseSeq: 5, flowID: 1, createdHour: createdHourOf(t, e, 1), flowToken: "ftok", taskName: "T"}}, errors.New("boom"), heldEither)
 		assert.NoError(err)
 		assert.True(fenced, "a terminated step under our generation must fence, not be rewritten to failed")
 
@@ -722,7 +722,7 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 		e, db := setup(t, workflow.StatusRunning, workflow.StatusCompleted)
 		defer e.Shutdown(ctx)
 
-		fenced, err := e.failStep(ctx, 1, 1, 5, 1, createdHourOf(t, e, 1), "ftok", errors.New("could not persist transition"), "T", heldEither)
+		fenced, err := e.failStep(ctx, &dispatch{shard: 1, stepID: 1, row: claimRow{leaseSeq: 5, flowID: 1, createdHour: createdHourOf(t, e, 1), flowToken: "ftok", taskName: "T"}}, errors.New("could not persist transition"), heldEither)
 		assert.NoError(err)
 		assert.False(fenced, "a completed step we own must still be failable (failOnPersistError's escape)")
 
@@ -810,7 +810,7 @@ func TestFailStep_HeldStates(t *testing.T) {
 			var stepID int
 			assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE step_token='stok'").Scan(&stepID))
 
-			fenced, err := e.failStep(ctx, 1, stepID, 5, flowID, createdHourOf(t, e, flowID), "ftok", errors.New("boom"), "T", tc.held)
+			fenced, err := e.failStep(ctx, &dispatch{shard: 1, stepID: stepID, row: claimRow{leaseSeq: 5, flowID: flowID, createdHour: createdHourOf(t, e, flowID), flowToken: "ftok", taskName: "T"}}, errors.New("boom"), tc.held)
 			assert.NoError(err)
 			assert.Equal(tc.fenced, fenced)
 

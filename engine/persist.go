@@ -25,7 +25,6 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/staterefs"
-	"github.com/microbus-io/dwarf/internal/turnstile"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -268,8 +267,9 @@ func (e *Engine) releaseLease(ctx context.Context, db *sequel.DB, stepID, leaseS
 // The two attempts are milliseconds apart and differ only in what they carry, which is what makes the
 // classification sound. Guessing the other way - terminalizing on any unknown error - would kill live flows on
 // every routine failover, and a terminal flow is immutable (recovery is a human running Fork).
-func (e *Engine) failOnPersistError(ctx context.Context, shardNum, stepID, leaseSeq, flowID, flowHour int, flowToken string, writeErr error, taskName string, held stepHeld) error {
-	fenced, ferr := e.failStep(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, writeErr, taskName, held)
+func (e *Engine) failOnPersistError(ctx context.Context, d *dispatch, writeErr error, held stepHeld) error {
+	stepID, taskName := d.stepID, d.row.taskName
+	fenced, ferr := e.failStep(ctx, d, writeErr, held)
 	if ferr != nil {
 		// Cannot write even a payload-free failure: the DATABASE is down, not the payload. Surface the original
 		// error and leave the step to lease recovery.
@@ -327,8 +327,8 @@ func sanitizeErrorMessage(msg string) string {
 // benign no-op, lock contention goes to the recovery defer (never the classifier - terminalizing a flow because the
 // database was busy is exactly backwards), and anything else that would not land is classified. held is the state
 // the write starts from (see stepHeld).
-func (e *Engine) persistStep(ctx context.Context, db *sequel.DB, shardNum, stepID, leaseSeq, flowID, flowHour int, flowToken, taskName string, held stepHeld, write func() error, yield func(func())) error {
-	_, err := e.settlePersist(ctx, e.persist(ctx, db, shardNum, stepID, leaseSeq, write, yield), shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, taskName, held)
+func (e *Engine) persistStep(ctx context.Context, d *dispatch, held stepHeld, write func() error, yield func(func())) error {
+	_, err := e.settlePersist(ctx, d, e.persist(ctx, d.db, d.shard, d.stepID, d.row.leaseSeq, write, yield), held)
 	return err
 }
 
@@ -362,7 +362,7 @@ func isPermanentError(err error) bool {
 // classified as one: terminalizing on it would kill live flows during a contention storm. It was already retried
 // to exhaustion (by Transact, or by retryContention), so it goes to the recovery defer, which rewinds the step
 // and re-polls.
-func (e *Engine) settlePersist(ctx context.Context, err error, shardNum, stepID, leaseSeq, flowID, flowHour int, flowToken, taskName string, held stepHeld) (landed bool, _ error) {
+func (e *Engine) settlePersist(ctx context.Context, d *dispatch, err error, held stepHeld) (landed bool, _ error) {
 	switch {
 	case err == nil:
 		return true, nil
@@ -372,24 +372,24 @@ func (e *Engine) settlePersist(ctx context.Context, err error, shardNum, stepID,
 		return false, errors.Trace(err)
 	case isPermanentError(err):
 		// Not a storage fault: the step fails with it, without the write alarm.
-		_, ferr := e.failStep(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, err, taskName, held)
+		_, ferr := e.failStep(ctx, d, err, held)
 		return false, errors.Trace(ferr)
 	default:
-		return false, errors.Trace(e.failOnPersistError(ctx, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, err, taskName, held))
+		return false, errors.Trace(e.failOnPersistError(ctx, d, err, held))
 	}
 }
 
-// persistYielding is persist for a caller holding a turn: it hands the turn back across the retry backoff,
-// which is a sleep rather than database work, and takes a fresh one before the next attempt.
-func (e *Engine) persistYielding(ctx context.Context, db *sequel.DB, shardNum, stepID, leaseSeq int, pass *turnstile.Pass, write func() error) error {
-	return e.persist(ctx, db, shardNum, stepID, leaseSeq, write, func(wait func()) {
-		yieldTurn(ctx, pass, wait)
+// persistYielding is persist for a dispatch holding its turn (d.pass): it hands the turn back across the retry
+// backoff, which is a sleep rather than database work, and takes a fresh one before the next attempt.
+func (e *Engine) persistYielding(ctx context.Context, d *dispatch, write func() error) error {
+	return e.persist(ctx, d.db, d.shard, d.stepID, d.row.leaseSeq, write, func(wait func()) {
+		yieldTurn(ctx, &d.pass, wait)
 	})
 }
 
-// persistStepYielding is persistStep for a caller holding a turn - see persistYielding.
-func (e *Engine) persistStepYielding(ctx context.Context, db *sequel.DB, shardNum, stepID, leaseSeq, flowID, flowHour int, flowToken, taskName string, held stepHeld, pass *turnstile.Pass, write func() error) error {
-	return e.persistStep(ctx, db, shardNum, stepID, leaseSeq, flowID, flowHour, flowToken, taskName, held, write, func(wait func()) {
-		yieldTurn(ctx, pass, wait)
+// persistStepYielding is persistStep for a dispatch holding its turn - see persistYielding.
+func (e *Engine) persistStepYielding(ctx context.Context, d *dispatch, held stepHeld, write func() error) error {
+	return e.persistStep(ctx, d, held, write, func(wait func()) {
+		yieldTurn(ctx, &d.pass, wait)
 	})
 }
