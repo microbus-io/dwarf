@@ -288,9 +288,15 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shar
 // terminalFinalState is computeFinalState for a path that terminalizes a flow whatever its state holds -
 // Terminate, Delete, Purge and the wedge sweep. A merge that cannot fold (a permanentError) yields an empty
 // final_state rather than an error: the merge would fail identically on every attempt, so propagating it would
-// leave the flow impossible to stop. A database error still propagates.
+// leave the flow impossible to stop. A flow whose row is gone - reaped or deleted under a racing Terminate - needs
+// no final state either: the terminalizing UPDATE's guard will match nothing. A database error still propagates.
 func (e *Engine) terminalFinalState(ctx context.Context, db sequel.Executor, shardNum, flowID int, flowToken string) ([]byte, error) {
 	fs, _, err := e.computeFinalState(ctx, db, shardNum, flowID, flowToken)
+	if errors.Is(err, sql.ErrNoRows) {
+		e.logger.WarnContext(ctx, "Computing final_state while terminalizing a flow found no row; terminalizing with empty state",
+			"flow", keys.CorrelationID(shardNum, flowID), "error", err)
+		return []byte("{}"), nil
+	}
 	if isPermanentError(err) {
 		e.logger.ErrorContext(ctx, "Computing final_state while terminalizing a flow; terminalizing with empty state",
 			"flow", keys.CorrelationID(shardNum, flowID), "error", err)

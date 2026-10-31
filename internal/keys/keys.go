@@ -65,7 +65,26 @@ func parseKey(key, invalid string) (shardNum int, id int, token string, err erro
 	if err != nil || strconv.FormatInt(id64, 10) != parts[1] {
 		return 0, 0, "", errors.New("%s", invalid, http.StatusBadRequest)
 	}
+	if !canonicalToken(parts[2]) {
+		return 0, 0, "", errors.New("%s", invalid, http.StatusBadRequest)
+	}
 	return int(shardNum64), int(id64), parts[2], nil
+}
+
+// canonicalToken reports whether s is spelled as RandomIdentifier(16) spells a token: 16 lowercase hex digits. A
+// database comparing case-insensitively, or ignoring trailing spaces (MySQL's and SQL Server's default collations),
+// matches the token's row under another spelling too, which anything keying on the key - a parked Await - never
+// matches.
+func canonicalToken(s string) bool {
+	if len(s) != 16 {
+		return false
+	}
+	for i := range len(s) {
+		if c := s[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // CorrelationID is the non-secret, capability-free flow identifier for telemetry (spans, logs,

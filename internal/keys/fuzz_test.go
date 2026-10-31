@@ -49,6 +49,9 @@ func FuzzParseFlowKey(f *testing.F) {
 		if re := New(shard, id, token); re != raw {
 			t.Fatalf("accepted a non-canonical key: %q -> (%d,%d,%q) -> %q", raw, shard, id, token, re)
 		}
+		if !canonicalToken(token) {
+			t.Fatalf("accepted key %q with a token %q not spelled as RandomIdentifier spells one", raw, token)
+		}
 		// A key never contains fewer than two dashes if it parsed.
 		if strings.Count(raw, "-") < 2 {
 			t.Fatalf("accepted key %q with fewer than 2 dashes", raw)
@@ -78,9 +81,19 @@ func FuzzParseStepKey(f *testing.F) {
 
 // TestParseKey_RejectsNonCanonicalSpellings pins that a key is accepted only as New spells it. A '+' or leading
 // zeros name the same row under a different string, and a parked Await keyed on that string is never released:
-// it re-reads the flow on every latch sweep instead.
+// it re-reads the flow on every latch sweep instead. So does a token in capitals or with trailing spaces, which a
+// case-insensitive or space-padding collation matches to the row.
 func TestParseKey_RejectsNonCanonicalSpellings(t *testing.T) {
-	for _, key := range []string{"1-+5-tok", "+1-5-tok", "01-5-tok", "1-05-tok", "1-00-tok", "1--0-tok", "1- 5-tok"} {
+	const tok = "a1b2c3d4e5f60718"
+	for _, key := range []string{
+		"1-+5-" + tok, "+1-5-" + tok, "01-5-" + tok, "1-05-" + tok, "1-00-" + tok, "1--0-" + tok, "1- 5-" + tok,
+		"1-5-A1B2C3D4E5F60718",  // a token in capitals
+		"1-5-" + tok + " ",      // a token padded with a space
+		"1-5-a1b2c3d4",          // a token too short
+		"1-5-",                  // no token
+		"1-5-a1b2c3d4-e5f60718", // a token with a dash
+		"1-5-a1b2c3d4e5f6071g",  // a token not hex
+	} {
 		if _, _, _, err := ParseFlowKey(key); err == nil {
 			t.Errorf("flow key %q must be rejected", key)
 		}
@@ -88,7 +101,7 @@ func TestParseKey_RejectsNonCanonicalSpellings(t *testing.T) {
 			t.Errorf("step key %q must be rejected", key)
 		}
 	}
-	for _, key := range []string{"1-5-tok", "12-0-tok", "3-1234567890-", "1-5-tok-with-dashes"} {
+	for _, key := range []string{"1-5-" + tok, "12-0-" + tok, "3-1234567890-" + tok} {
 		if _, _, _, err := ParseFlowKey(key); err != nil {
 			t.Errorf("flow key %q must parse: %v", key, err)
 		}
