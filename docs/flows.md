@@ -33,7 +33,7 @@ part of the outcome — you need it for later `History`/`Resume`/`Fork`).
     FairnessKey: "tenant-42",                    // fair-scheduling bucket
     FairnessWeight: 4,                           // relative share within the key
     Baggage:     map[string]any{"actor": "ada"}, // opaque host context; read with BaggageFrom(ctx)
-    ThreadKey:   "1-42-abc",                     // join an existing thread (any flow key in it)
+    ThreadKey:   threadKey,                      // join an existing thread (any flow key in it)
 }
 ```
 

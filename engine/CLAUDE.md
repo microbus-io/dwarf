@@ -919,9 +919,9 @@ repair; its worst case is `budget + leaseMargin + recoveryInterval`, and the con
 
 - **`dispatch` is data only: no methods.** Its fields are grouped by the stage that sets them; a later stage reads a
   group and does not rewrite it, except where a field's comment says so. The claimed columns are the named field
-  `row claimRow`, not embedded (embedding would promote `destinations()` onto it). It is the one allocation that
-  `claimRow` was, so the split adds none per step.
-- **Every defer that must outlive a stage is registered in `processStep`**, in the original order: the entry-phase
+  `row claimRow`, held by value, not embedded (embedding would promote `destinations()` onto it). The dispatch is
+  the step's one per-dispatch allocation, so a value a stage needs later lives in it rather than escaping on its own.
+- **Every defer that must outlive a stage is registered in `processStep`**, in this order: the entry-phase
   close, the claimed-dispatch checkpoint, the recovery (`recoverStep`), the span's `End`, the budget's cancel, the
   persist pass's return, the exit-phase close. A defer inside a stage runs when that stage returns.
 - **The persist pass is `d.pass`, returned through `defer func() { d.pass.Return() }()`**, never
@@ -930,8 +930,10 @@ repair; its worst case is `budget + leaseMargin + recoveryInterval`, and the con
 - **`processStep` owns `ctx`.** It moves the claim stamp after the host call (`turnstile.Away`) and publishes the held
   turn (`withHeldTurn`), and the recovery reads the ctx it holds at the end. A stage that moves its own `ctx`
   (`parkSubgraph`'s `yieldTurnAway`) moves only its copy.
-- The persist/fail family (`failStep`, `failAndReturn`, `settlePersist`, `persist*`) and `deferNewerPayload`,
-  `handleInterrupt` and `fireFanInDirect` take `*dispatch` too: every caller is a dispatch.
+- The persist/fail family (`failStep`, `failAndReturn`, `failOnPersistError`, `settlePersist`, `persistStep`,
+  `persistYielding`, `persistStepYielding`) and `deferNewerPayload`, `handleInterrupt` and `fireFanInDirect` take
+  `*dispatch` too: every caller is a dispatch. The primitives under them (`persist`, `extendLease`, `releaseLease`)
+  take `(db, stepID, leaseSeq)`; `extendLease` also serves the cohort stripe's keepalive (`lockCohortStripe`).
 
 ### Round-trip minimization in `processStep`
 

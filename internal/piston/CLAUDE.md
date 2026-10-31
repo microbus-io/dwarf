@@ -376,7 +376,7 @@ and the trim keeps foreign rows a healthy peer is about to fetch too: a lost cla
 `dwarf_steps_stolen` reading on a fleet with nothing wrong. At `perKey=8`, R=2 that is a shortfall on ~40% of
 saturated fetches; at 2R it is ~0.1%. **Do not reason about the multiple as if the oldest rows were dealt
 round-robin** — they are not, and the shortfall is in the variance, not the mean. Pinned by
-`TestPiston_FetchSurfacesItsShareFromAForeignHead`, and in the engine by `TestStealHoldsOffAHealthyFleetflow`,
+`TestPiston_FetchSurfacesItsShareFromAForeignHead`, and end to end by `fixtures`' `TestStealHoldsOffAHealthyFleetflow`,
 which steals on a large fraction of its cycles at `m = R`.
 
 **Capped at 4, because the multiple has to cover how many classes are simultaneously LONG-DUE, not how

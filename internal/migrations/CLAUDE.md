@@ -76,7 +76,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 
 | Column | Meaning |
 |---|---|
-| `step_id` | Per-shard auto-increment primary key. External stepKey is `{shard}-{flow_created_hour}-{step_id}-{step_token}` |
+| `step_id` | Per-shard auto-increment primary key. External stepKey is `{shard}-{flow_created_hour}-{flow_id}-{step_id}-{step_token}` |
 | `flow_id` | Owning flow |
 | `step_depth` | Sequential transition depth; fan-out siblings share it. **Purely informational** (History ordering + the surfaced `FlowStep.StepDepth`, useful to see how deep a flow goes) - it is *not* used for the execution DAG (that is `predecessor_id`/`successor_id`), fan-in firing (`lineage_id`/cohort counters), final state (tail steps), or selection. The entry step is `callerStepDepth+1` (1 for a top-level flow; a subgraph continues from its caller's depth); a fan-in step is `max(cohort step_depth)+1` |
 | `step_token` | Random token component of the stepKey |
@@ -176,8 +176,8 @@ without fragmentation or excessive write amplification.
    versus trailing key columns.
    Corollary, and it is the sharp edge: **adding a column to a filtered predicate obliges every query that wants
    the index to compare that column against an INLINED literal**, for exactly the reason status does (below).
-   `parked` is compared as a bound `parked=?` today (`claim.go`, `dispatch.go`, `execution.go`), so a future `parked=0` predicate would
-   silently defeat the filtered index on SQL Server and SQLite until those sites inline it.
+   `parked` is compared as a bound `parked=?` in every `WHERE` that tests it today, so a future `parked=0`
+   predicate would silently defeat the filtered index on SQL Server and SQLite until every such site inlines it.
 
 ### Index Catalog
 
