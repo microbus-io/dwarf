@@ -50,7 +50,10 @@ func (e *Engine) reaperLoop(ctx context.Context) {
 // reapDueFlows removes, per shard, the whole subgraph tree of every root whose delete_after_ms window has
 // elapsed. Set-based (no N+1): one SELECT of due roots + one two-statement tree delete per batch, looped in
 // reapBatch-sized chunks until the due set drains. The reapBatch cap keeps each `IN (...)` literal list
-// plannable (same rationale as purgeCap). Only roots ever carry delete_after_ms > 0 (DeleteOnCompletion is
+// plannable (same rationale as purgeCap), and it keeps each batch's transaction short: a batch of large-payload
+// flows deletes their TOAST too, and for as long as it runs, vacuum cannot remove any row that died after it began.
+// Measured on a laptop PostgreSQL 16, flows with 64 KB states: ~3.6 ms a flow to delete, so a 4096-root batch held its
+// transaction for tens of seconds. Only roots ever carry delete_after_ms > 0 (DeleteOnCompletion is
 // root-only; Delete/Purge stamp roots), and the surgraph_flow_id=0 guard makes that explicit, so deleting by
 // root_flow_id removes each root plus its descendants. A cancelled ctx ends the pass, mid-statement included;
 // the batch in flight lands whole or not at all.
@@ -65,7 +68,7 @@ func (e *Engine) reaperLoop(ctx context.Context) {
 // descendant status; whichever of the reaper and the wedge sweep reaches the orphan first wins, both
 // removing it cleanly.
 func (e *Engine) reapDueFlows(ctx context.Context) {
-	const reapBatch = 4096
+	const reapBatch = 512
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		if !e.dispatchesOn(shard) {
 			return nil // see reaperLoop
