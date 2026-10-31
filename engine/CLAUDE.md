@@ -103,8 +103,8 @@ A cap that fits a small control flow would reject a document-processing workflow
 tens of megabytes of state per flow, and picking one number for both is impossible - so the engine refuses to
 own the number. The host holds the caller/tenant identity a quota turns on, so it enforces limits where that
 context lives: reject an over-large `initialState`/`Baggage` before `Create`, cap a `forEach` source array in
-an author-space entry task, bound retention (recall `Purge` deletes ≤4096 roots/call, so a retention job
-loops). For a **pass-through host** that adds no policy of its own, the obligation flows through to the
+an author-space entry task, bound retention (`Purge` marks at most `purgeCap`, 4096, roots per call, so a
+retention job loops). For a **pass-through host** that adds no policy of its own, the obligation flows through to the
 application using that host - it is not silently absorbed anywhere.
 
 **The one bound the engine does enforce is what one column can store** (`maxPayloadBytes`, 256,000,000 bytes,
@@ -2395,9 +2395,10 @@ is already local and free, at the price of a write per await.
   reason**, and the failure mode is worse than a transient error: the terminal step is marked `completed` by
   `processStep` *before* the disposition runs, so if the disposition's `Transact` exhausts its retries and errors,
   lease recovery (which only resets `running` rows) can't re-dispatch the now-`completed` step - the flow strands
-  `running` with every step terminal until the orphan sweep rewinds the step, minutes later. `failStep`, the fan-in transaction, and `completeFlow` all
-  write first. A high-volume soak (`fixtures/soakflow_test.go`) and `fixtures/completionraceflow_test.go` reproduce
-  the wedge without write-first. This write-first rule governs the flow-*advancing*/*terminating* transactions only; the
+  `running` with every step terminal until the orphan sweep rewinds the step, minutes later. The fan-in transaction
+  and `completeFlow` take the flow row first; `failStep` is steps-first, but its transaction still opens with a write
+  (its step UPDATE). A high-volume soak (`fixtures/soakflow_test.go`) and `fixtures/completionraceflow_test.go`
+  reproduce the wedge without write-first. This write-first rule governs the flow-*advancing*/*terminating* transactions only; the
   lifecycle mutations (`Resume`/`Terminate`/`failStep`/`Delete`) run the **opposite** (steps-first) order on purpose, so
   the two disciplines cross on row-locking engines - see "Transactions" for why that crossing is tolerated (retry-
   recovered) rather than reconciled, and do not "fix" one side into matching the other.
@@ -3442,7 +3443,9 @@ For operator-driven retention (both mark, do not delete inline):
 
 **The reaper** (`reapDueFlows`, `reaper.go`) runs on its own dedicated goroutine + ~1min ticker (a single goroutine,
 inherently non-overlapping), stopped by `drainRuntime` cancelling its ctx. On each shard this replica DISPATCHES (a
-reader replica reaps nothing) it loops `reapBatch`-sized batches (4096, the same cap as `purgeCap`):
+reader replica reaps nothing) it loops `reapBatch`-sized batches (512 roots, kept small because a batch's
+transaction holds back vacuum while it runs: with 64 KB states a flow took ~3.6 ms to delete on PostgreSQL 16, so a
+4096-root batch held one for tens of seconds):
 `SELECT` due roots (`delete_after_ms>0 AND surgraph_flow_id=0 AND DATE_ADD_MILLIS(updated_at, delete_after_ms)<=NOW`),
 then a two-statement tree delete (`DELETE dwarf_steps WHERE flow_id IN (SELECT flow_id FROM dwarf_flows WHERE
 root_flow_id IN (ids))`, then `DELETE dwarf_flows WHERE root_flow_id IN (ids)`) - set-based, **no N+1**, removing each
