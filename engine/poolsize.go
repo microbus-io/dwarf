@@ -185,7 +185,7 @@ It is counted, not fitted, and it differs by driver:
 
 Recount whenever a statement moves into or out of the post-task phase. TestRoundTrips_LinearStep measures the
 whole step, which is this count plus the claim and the flow read: one round trip on PostgreSQL, whose claim
-returns the flow row (on a graphCache hit; a miss reads the graph separately), and two elsewhere.
+returns the flow row (on a graph-cache hit; a miss reads the graph separately), and two elsewhere.
 */
 func completionRoundTrips(driver string) int {
 	switch driver {

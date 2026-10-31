@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/graphcache"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -331,12 +332,13 @@ func TestTerminate_UnresolvableRefDoesNotBlockTerminate(t *testing.T) {
 	assert.NoError(eng.Delete(ctx, interrupted()), "Delete terminates an interrupted flow first, through the same path")
 }
 
-// TestParseCachedGraph_UnreadableGraphIsPermanent pins that a stored graph that cannot be parsed is a permanent
+// TestInternGraph_UnreadableGraphIsPermanent pins that a stored graph that cannot be parsed is a permanent
 // failure: the bytes will not parse on a retry either, and a flow whose graph cannot be read must still stop.
-func TestParseCachedGraph_UnreadableGraphIsPermanent(t *testing.T) {
+func TestInternGraph_UnreadableGraphIsPermanent(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	_, err := parseCachedGraph([]byte(`[1]`), "u")
+	e := &Engine{graphs: graphcache.New(1, 1)}
+	_, err := e.internGraph([]byte(`[1]`), "u", "")
 	assert.Error(err)
 	assert.True(isPermanentError(err))
 }

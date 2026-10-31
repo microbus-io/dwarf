@@ -29,7 +29,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-	"weak"
 
 	"log/slog"
 
@@ -37,8 +36,8 @@ import (
 	"github.com/microbus-io/dwarf/internal/claimstracker"
 	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/graphcache"
 	"github.com/microbus-io/dwarf/internal/latch"
-	"github.com/microbus-io/dwarf/internal/lru"
 	"github.com/microbus-io/dwarf/internal/peers"
 	"github.com/microbus-io/dwarf/internal/piston"
 	"github.com/microbus-io/dwarf/internal/planner"
@@ -298,11 +297,9 @@ type Engine struct {
 	latchCancel context.CancelFunc
 	latchWorker sync.WaitGroup
 
-	// Parsed-graph caches, in two layers. graphCache maps a flow to its entry so a dispatch reads no graph
-	// column; sharedGraphs owns the entries, keyed by the flow's graph_hash, so every flow of one graph points at
-	// one parse. The graph JSON is frozen at flow creation, so neither ever goes stale.
-	graphCache   *lru.Cache[graphCacheKey, weak.Pointer[cachedGraph]]
-	sharedGraphs *lru.Cache[sharedGraphKey, *cachedGraph]
+	// Parsed graphs, so a dispatch reads no graph column. The graph JSON is frozen at flow creation, so an entry
+	// never goes stale.
+	graphs *graphcache.Cache
 	// State-ref linkers, one per shard: they decide which state fields a successor step stores by reference
 	// rather than by value, and resolve those references back. Per shard because a step id is only unique
 	// within one. They share stateCache, one budget of resolved bytes for the whole replica, so it goes to
@@ -933,10 +930,7 @@ func (e *Engine) initRuntime() error {
 	recoveryCtx, e.recoveryCancel = context.WithCancel(e.lifetimeCtx)
 	reaperCtx, e.reaperCancel = context.WithCancel(e.lifetimeCtx)
 	latchCtx, e.latchCancel = context.WithCancel(e.lifetimeCtx)
-	// The shared layer has no TTL: a graph's bytes never change, and expiring a hot graph would turn every
-	// one of its flows into a miss at once.
-	e.graphCache = lru.New[graphCacheKey, weak.Pointer[cachedGraph]](graphCacheFlows, 15*time.Minute)
-	e.sharedGraphs = lru.New[sharedGraphKey, *cachedGraph](graphCacheGraphs, 0)
+	e.graphs = graphcache.New(graphCacheFlows, graphCacheGraphs)
 	// A fresh board per run: the previous one was closed at drain, and a closed board turns every Await
 	// away. resolveStoppedFlows is non-nil, so New cannot fail.
 	e.latches, _ = latch.New(e.resolveStoppedFlows)

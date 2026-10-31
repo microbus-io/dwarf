@@ -20,15 +20,13 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
-	"weak"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/graphcache"
 	"github.com/microbus-io/dwarf/internal/keys"
-	"github.com/microbus-io/dwarf/internal/lru"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -54,17 +52,17 @@ func TestCreate_SeedsGraphCache(t *testing.T) {
 	assert.NoError(err)
 	shard, flowID, flowToken, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	cg, ok := e.cachedFlowGraph(shard, flowID, flowToken)
+	cg, ok := e.graphs.Flow(graphcache.Key{Shard: shard, FlowID: flowID, Token: flowToken})
 	if assert.True(ok, "the creating replica caches the graph it just stored") {
-		assert.Equal("seedcache/g", cg.workflowURL)
+		assert.Equal("seedcache/g", cg.WorkflowURL)
 		hostGraph, err := mux.LoadGraph(ctx, "seedcache/g")
 		assert.NoError(err)
-		assert.True(cg.graph != hostGraph, "the cached graph is a parse of the stored JSON, not the host's object")
-		assert.Equal(hostGraph.EntryPoint(), cg.graph.EntryPoint())
-		assert.NotNil(cg.fanIn)
+		assert.True(cg.Graph != hostGraph, "the cached graph is a parse of the stored JSON, not the host's object")
+		assert.Equal(hostGraph.EntryPoint(), cg.Graph.EntryPoint())
+		assert.NotNil(cg.FanIn)
 	}
 	// A restore or a lossy failover hands the id to a new flow, with a new token: it does not get this graph.
-	_, ok = e.cachedFlowGraph(shard, flowID, "0000000000000000")
+	_, ok = e.graphs.Flow(graphcache.Key{Shard: shard, FlowID: flowID, Token: "0000000000000000"})
 	assert.False(ok, "the same flow id under another token is a different flow")
 
 	// A create that rolls back caches nothing under the id it would have taken.
@@ -75,13 +73,13 @@ func TestCreate_SeedsGraphCache(t *testing.T) {
 	graph, err := mux.LoadGraph(ctx, "seedcache/g")
 	assert.NoError(err)
 	state, _ := workflow.NewState()
-	cachedBefore := e.graphCache.Len()
+	cachedBefore := e.graphs.Flows()
 	tctx, doneTurn := e.dbTurn(ctx, shard)
 	_, err = e.createWithGraph(tctx, shard, "seedcache/g", graph, state, 0, "", "", e.resolveFlowOptions(nil), 0, 0, 0, 0,
 		func(tx *sequel.Tx) error { return errors.New("rolled back") })
 	doneTurn()
 	assert.Error(err)
-	assert.Equal(cachedBefore, e.graphCache.Len(), "a rolled-back create caches nothing")
+	assert.Equal(cachedBefore, e.graphs.Flows(), "a rolled-back create caches nothing")
 }
 
 // TestGraphCache_FlowsShareOneParse pins the shared layer: the flows of one graph point at one parsed entry,
@@ -99,13 +97,13 @@ func TestGraphCache_FlowsShareOneParse(t *testing.T) {
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 
-	var entries []*cachedGraph
+	var entries []*graphcache.Entry
 	for range 2 {
 		fk, err := e.Create(ctx, "sharecache/g", nil, nil)
 		assert.NoError(err)
 		shard, flowID, flowToken, err := keys.ParseFlowKey(fk)
 		assert.NoError(err)
-		cg, ok := e.cachedFlowGraph(shard, flowID, flowToken)
+		cg, ok := e.graphs.Flow(graphcache.Key{Shard: shard, FlowID: flowID, Token: flowToken})
 		assert.True(ok)
 		entries = append(entries, cg)
 
@@ -116,7 +114,7 @@ func TestGraphCache_FlowsShareOneParse(t *testing.T) {
 		var graphJSON []byte
 		var graphHash string
 		assert.NoError(db.QueryRowContext(ctx, "SELECT graph, graph_hash FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&graphJSON, &graphHash))
-		assert.Equal(graphHashOf(mustGraphJSON(t, cg.graph)), graphHash, "graph_hash is the hash of the bytes Create stored")
+		assert.Equal(graphcache.HashOf(mustGraphJSON(t, cg.Graph)), graphHash, "graph_hash is the hash of the bytes Create stored")
 		read, err := e.internGraph(graphJSON, "sharecache/g", graphHash)
 		assert.NoError(err)
 		assert.True(read == cg, "a column read finds Create's entry by its hash")
@@ -124,14 +122,14 @@ func TestGraphCache_FlowsShareOneParse(t *testing.T) {
 	assert.True(entries[0] == entries[1], "two flows of one graph share one parsed entry")
 
 	other := []byte(`{"name":"other"}`)
-	cg, err := e.internGraph(other, "sharecache/g", graphHashOf(other))
+	cg, err := e.internGraph(other, "sharecache/g", graphcache.HashOf(other))
 	if assert.NoError(err) {
 		assert.True(cg != entries[0], "a different graph is a different entry")
 	}
-	sameJSON := mustGraphJSON(t, entries[0].graph)
-	sameBytesOtherURL, err := e.internGraph(sameJSON, "sharecache/other", graphHashOf(sameJSON))
+	sameJSON := mustGraphJSON(t, entries[0].Graph)
+	sameBytesOtherURL, err := e.internGraph(sameJSON, "sharecache/other", graphcache.HashOf(sameJSON))
 	if assert.NoError(err) {
-		assert.Equal("sharecache/other", sameBytesOtherURL.workflowURL, "the workflow URL is part of the key")
+		assert.Equal("sharecache/other", sameBytesOtherURL.WorkflowURL, "the workflow URL is part of the key")
 	}
 }
 
@@ -163,7 +161,7 @@ func TestGraphCache_DispatchMissInterns(t *testing.T) {
 	runner.SetHost(mux)
 	assert.NoError(runner.Startup(t.Context()))
 
-	var entries []*cachedGraph
+	var entries []*graphcache.Entry
 	for range 2 {
 		fk, err := creator.Create(ctx, "misscache/g", nil, nil)
 		assert.NoError(err)
@@ -173,9 +171,9 @@ func TestGraphCache_DispatchMissInterns(t *testing.T) {
 		}
 		shard, flowID, flowToken, err := keys.ParseFlowKey(fk)
 		assert.NoError(err)
-		_, seeded := creator.cachedFlowGraph(shard, flowID, flowToken)
+		_, seeded := creator.graphs.Flow(graphcache.Key{Shard: shard, FlowID: flowID, Token: flowToken})
 		assert.False(seeded, "a replica that does not dispatch the shard seeds nothing")
-		cg, ok := runner.cachedFlowGraph(shard, flowID, flowToken)
+		cg, ok := runner.graphs.Flow(graphcache.Key{Shard: shard, FlowID: flowID, Token: flowToken})
 		if assert.True(ok, "the dispatch miss caches the flow") {
 			entries = append(entries, cg)
 		}
@@ -235,41 +233,4 @@ func TestGraphCache_HashHitReadsNoGraph(t *testing.T) {
 		}
 	}
 	assert.Equal(int32(1), reads.n.Load(), "only the first flow of the graph reads the graph column")
-}
-
-// TestGraphCache_SharedEvictionReleasesTheParse pins the bound that makes the per-flow layer cheap: it holds
-// weak pointers, so a parse the shared layer evicts is released, and its flows read as a miss.
-func TestGraphCache_SharedEvictionReleasesTheParse(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-
-	e := &Engine{
-		graphCache:   lru.New[graphCacheKey, weak.Pointer[cachedGraph]](16, 0),
-		sharedGraphs: lru.New[sharedGraphKey, *cachedGraph](1, 0),
-	}
-	graphJSON := func(name string) []byte {
-		g := workflow.NewGraph(name)
-		g.SetURL(name, "evict/"+name)
-		g.AddTransition(name, workflow.End)
-		return mustGraphJSON(t, g)
-	}
-	func() {
-		cg, err := e.internGraph(graphJSON("First"), "evict/g", "")
-		assert.NoError(err)
-		e.cacheFlowGraph(1, 1, "t", cg)
-	}()
-	_, ok := e.cachedFlowGraph(1, 1, "t")
-	assert.True(ok, "held while the shared layer holds it")
-
-	_, err := e.internGraph(graphJSON("Second"), "evict/g", "") // evicts the first parse from the one-entry layer
-	assert.NoError(err)
-	released := false
-	for range 10 {
-		runtime.GC()
-		if _, ok := e.cachedFlowGraph(1, 1, "t"); !ok {
-			released = true
-			break
-		}
-	}
-	assert.True(released, "an evicted parse is not kept alive by the per-flow layer")
 }

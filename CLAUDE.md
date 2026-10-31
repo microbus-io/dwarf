@@ -106,6 +106,9 @@ matching one before working there:**
 - **`internal/workers/CLAUDE.md`** - the demand side: the grow-on-demand goroutine `Crew` (not "pool" -
   that word is the database connection pools), the growth trigger (one edge plus a standing reserve of one idle
   worker, and why no timer), the busy-fraction shrink rule, and the two-phase drain.
+- **`internal/graphcache/CLAUDE.md`** - the two-layer parsed-graph cache: why a per-flow layer of weak pointers
+  sits over a shared layer that owns one parse per graph, why the shared layer has no TTL, and why its key is
+  SHA-256.
 - **`internal/candidates/CLAUDE.md`** - the bounded hint-cache mechanism; its driving refiller algorithm is in
   `engine/CLAUDE.md`. (`internal/lru` is a textbook LRU+TTL, bounded by count or by weight - godoc only, no
   design doc.)

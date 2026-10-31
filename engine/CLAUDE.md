@@ -923,34 +923,13 @@ not parallelism:
   spelled out at the claim site in `execution.go`). The lease size comes from the step row's own `time_budget_ms`
   (referenced self-referentially in the claim UPDATE), not a pre-SELECT.
 - **Flow data** - on PostgreSQL it comes back with the claim (below); elsewhere it is read after the claim,
-  since it needs the `flow_id`. On a `graphCache` hit nothing selects the `graph` column: the graph is frozen at
-  `Create`, and its JSON is the largest payload on the row.
-- **The flow's graph is read once per replica, not once per completion.** `computeFinalState` takes the graph and
-  workflow URL from `graphCache` (`flowGraph`) and reads the row only on a miss, so every `computeFinalState`
-  caller on a replica that dispatched the flow pays no graph round trip. Every field of `cachedGraph` must
-  stay frozen for the flow's life - nothing invalidates an entry.
-- **The graph cache is two layers: the per-flow layer is sized for flows IN FLIGHT, the shared layer for memory.**
-  `graphCache` maps `(shard, flow_id, flow_token)` to a WEAK pointer into `sharedGraphs`, which owns the parses
-  and is keyed by `(workflowURL, graph_hash)`, so the flows of one graph share one parse and a per-flow entry is
-  ~150 bytes. The token is there because a restore or a lossy failover reissues flow ids: without it a flow
-  given an old id runs on the lost flow's graph (`TestCreate_SeedsGraphCache`).
-  A per-flow miss looks the hash up there before it reads anything, and reads the `graph` column (its own turn)
-  only for a graph this replica has never parsed. The per-flow layer alone thrashed at a 4,096-entry bound -
-  one process holding ~8,200 flows (4 shards x 2,000 in flight) paid 0.98 graph reads per executed step.
-  - **The hash is what makes a flow created ELSEWHERE cheap.** Create seeds the cache only on a replica that
-    dispatches the shard, so where frontends create and do not dispatch - an HA deployment - every flow's
-    first dispatch is a per-flow miss: without the hash, one `SELECT graph` per FLOW (1.0 per step for a
-    one-step flow), with it one per graph per replica. Pinned by `TestGraphCache_HashHitReadsNoGraph`.
-  - **`graph_hash` is SHA-256 of the bytes `Create` stored, carried verbatim by `Continue` and `Fork`** (which
-    copy the graph; on Postgres and MySQL they copy re-spelled bytes, whose hash would differ). Never key the
-    shared layer by a fast or truncated hash: a collision runs a flow on another flow's graph.
-  - **Keep the per-flow pointer weak.** A strong one lets the per-flow layer pin a parse the shared layer evicted,
-    so a workload whose flows rarely share graph bytes (per-actor graphs) holds up to 65,536 parses - measured
-    2.4-14 KB each (5-50 tasks), ~0.5-0.9 GB. Weak, memory is bounded by the shared layer's 4,096 parses and
-    such a workload still gets 4,096 flows of cover.
-  - **The shared layer has no TTL.** A graph's bytes never change, and expiring a hot graph would turn every one
-    of its flows into a miss at once. Its recency is refreshed by each new flow of the graph (Create's seed, or a
-    first dispatch), which is what keeps a graph in use from being evicted.
+  since it needs the `flow_id`.
+- **A flow's graph is read once per graph per replica** (`internal/graphcache`, held as `e.graphs`; how it works
+  is in `internal/graphcache/CLAUDE.md`). Dispatch and `flowGraph` read the `graph` column (dispatch on its own
+  turn) only when both layers miss. Every intern goes through `internGraph`, which makes a parse failure a
+  `permanentError`. `Create` seeds the cache only on a replica that dispatches the shard, and after the commit.
+  `graph_hash` is carried verbatim by `Continue` and `Fork`, never recomputed: they copy the graph, and on
+  Postgres and MySQL the copied bytes are re-spelled, so their hash would differ.
 - **A transition's successors go in as multi-row INSERTs** (`successorBatch`), in power-of-two chunks of at
   most 64 rows (22 binds each, under SQL Server's 2,100-parameter ceiling). The ids come back by `RETURNING`/`OUTPUT`
   and are matched to rows by `step_token`, since neither promises VALUES order. MySQL inserts row by row: it has no
@@ -966,9 +945,7 @@ not parallelism:
   flow ~11, a fan-out cycle of two branches ~20.5.
 - **On PostgreSQL the claim returns the flow row too** (`UPDATE dwarf_steps s ... FROM dwarf_flows f ...
   RETURNING s.*, f.*`), so dispatch reads the `graph` column only for a graph this replica has never parsed
-  (the claim returns `graph_hash`; see the graph-cache bullets above). `Create` seeds
-  the cache (`internGraph`, from the stored JSON, after the commit) on a replica that dispatches the shard,
-  since its doorbell offers the entry step to its own cache. The join reads the flow row without locking it: Postgres locks only an
+  (the claim returns `graph_hash`). The join reads the flow row without locking it: Postgres locks only an
   UPDATE's target rows, so the claim cannot deadlock with Cancel/Terminate, which lock the flow row before its
   steps. **Do not extend it to SQL Server** as things stand: there the join takes a shared lock on the flow row
   while the claim holds the step row - the reverse of that order - unless the database runs
@@ -1272,9 +1249,9 @@ a path that terminalizes a flow whatever it holds - `terminateSubtree` (Terminat
 sweep) - reads the final state through `terminalFinalState`, which takes a `permanentError` as `{}`; propagating it would leave the flow impossible to stop (`TestTerminate_ReducerErrorDoesNotBlockTerminate`).
 `isPermanentError` also counts a state ref the stored rows cannot satisfy (`staterefs.IsUnresolvable`: a ref to a
 missing step, a field or element not where it says, an unreadable refs or state column), raised from resolves no
-engine wrapper reaches, and a stored graph that cannot be parsed (`parseCachedGraph`). A failed READ is neither, and
+engine wrapper reaches, and a stored graph that cannot be parsed (`internGraph`). A failed READ is neither, and
 stays transient. Pinned by `TestTerminate_UnresolvableRefDoesNotBlockTerminate` (Terminate and Delete of a flow
-whose tail refs a missing step) and `TestParseCachedGraph_UnreadableGraphIsPermanent`.
+whose tail refs a missing step) and `TestInternGraph_UnreadableGraphIsPermanent`.
 
 **Escalation is counter-based (`cohort_failures`), not status-based, and happens *before* `fanInRow`.**
 `fanInRow` itself never marks the flow terminal - but it is only reached when the cohort resolves with

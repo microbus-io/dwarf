@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/graphcache"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
@@ -208,8 +209,8 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, sha
 // dispatched on this replica and from its row otherwise. The returned graph may be shared with concurrent
 // dispatches and must not be mutated. A cache hit reads nothing, so it does not prove the flow row still exists.
 func (e *Engine) flowGraph(ctx context.Context, db sequel.Executor, shardNum, flowID int, flowToken string) (*workflow.Graph, string, error) {
-	if cg, ok := e.cachedFlowGraph(shardNum, flowID, flowToken); ok {
-		return cg.graph, cg.workflowURL, nil
+	if cg, ok := e.graphs.Flow(graphcache.Key{Shard: shardNum, FlowID: flowID, Token: flowToken}); ok {
+		return cg.Graph, cg.WorkflowURL, nil
 	}
 	var workflowURL, graphHash string
 	var graphJSON []byte
@@ -224,7 +225,7 @@ func (e *Engine) flowGraph(ctx context.Context, db sequel.Executor, shardNum, fl
 	if err != nil {
 		return nil, "", errors.Trace(err)
 	}
-	return cg.graph, workflowURL, nil
+	return cg.Graph, workflowURL, nil
 }
 
 // computeFinalState computes the merged state for a flow.

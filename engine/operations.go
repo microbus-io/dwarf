@@ -30,6 +30,7 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/candidates"
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/graphcache"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/latch"
 	"github.com/microbus-io/dwarf/internal/staterefs"
@@ -378,7 +379,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 		workflowURL:        workflowURL,
 		workflowName:       graph.Name(),
 		graphJSON:          graphJSON,
-		graphHash:          graphHashOf(graphJSON),
+		graphHash:          graphcache.HashOf(graphJSON),
 		baggageJSON:        baggageJSON,
 		stateJSON:          stateJSON,
 		traceParent:        traceParent,
@@ -422,7 +423,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	// wrote. After the commit, so a rolled-back flow id - which SQLite can hand out again - is never cached.
 	if e.dispatchesOn(shardNum) {
 		if cg, perr := e.internGraph(graphJSON, workflowURL, seed.graphHash); perr == nil {
-			e.cacheFlowGraph(shardNum, int(newFlowID), flowToken, cg)
+			e.graphs.Point(graphcache.Key{Shard: shardNum, FlowID: int(newFlowID), Token: flowToken}, cg)
 		}
 	}
 	e.logger.DebugContext(ctx, "Flow created and started", "workflow", workflowURL, "task", entryPoint)

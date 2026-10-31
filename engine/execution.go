@@ -29,6 +29,7 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/cancelmarker"
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/graphcache"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/internal/turnstile"
@@ -355,10 +356,11 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// The graph is frozen at flow creation, so a cached parse makes its JSON - the largest payload on the flow
 	// row - dead weight. A flow this replica has not dispatched finds its parse by the graph_hash the flow row
 	// carries, so the graph column is read only for a graph this replica has not parsed at all.
-	cg, perFlow := e.cachedFlowGraph(shardNum, flowID, flowToken)
+	graphKey := graphcache.Key{Shard: shardNum, FlowID: flowID, Token: flowToken}
+	cg, perFlow := e.graphs.Flow(graphKey)
 	cached := perFlow
 	if !cached {
-		cg, cached = e.sharedGraph(workflowURL, graphHash)
+		cg, cached = e.graphs.Shared(workflowURL, graphHash)
 	}
 	if !cached {
 		var graphJSON []byte
@@ -378,9 +380,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		}
 	}
 	if !perFlow {
-		e.cacheFlowGraph(shardNum, flowID, flowToken, cg)
+		e.graphs.Point(graphKey, cg)
 	}
-	graph := cg.graph
+	graph := cg.Graph
 
 	// Build the Flow carrier. A State built from JSON holds each field as JSON and decodes it only if
 	// something reads it - a step's state is a full input snapshot, so most fields on most steps are carried
@@ -1175,7 +1177,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// the loop that reaches the source again, writing a step per lap until something outside kills it.
 	fanInOfSource := ""
 	if isFanOutSource {
-		fanInOfSource = cg.fanIn.For(taskName)
+		fanInOfSource = cg.FanIn.For(taskName)
 	}
 	if isFanOutSource && fanInOfSource != "" &&
 		((cohortSize == 0 && !routedToEnd) || (cohortSize == 1 && realTasks[0].taskName == fanInOfSource)) {
