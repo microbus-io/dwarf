@@ -19,15 +19,18 @@ limitations under the License.
 //
 // A day's tables are made by the archive migrations (migrations.Archive) for that day, run as its own sequence, so a
 // later archive migration reaches the existing days within the retention through MigrateDays, run at Startup right
-// after the schema migrations. Which days exist is read from the database's catalog of tables.
+// after the schema migrations. Today's tables and those of the two days after it are made ahead, so a day exists before
+// it begins.
 //
 // One Archive serves one shard:
 //
 //	a := archiver.New(db, archiver.DefaultDayLength, migrations.Archive())
-//	err := a.EnsureToday(ctx)             // at Startup: today's and tomorrow's tables must exist
+//	err := a.EnsureToday(ctx)             // at Startup: the tables of today and the two days after must exist
 //	err = a.MigrateDays(ctx, retention)   // at Startup: the existing days within the retention brought up to date
-//	err = a.Maintain(ctx, retention)      // periodically: today's and tomorrow's tables, expired days dropped
+//	err = a.Maintain(ctx, retention)      // periodically: the days ahead made, expired days dropped
 //	n, err := a.DropBefore(ctx, day)      // an operator's purge of every day before one
+//	err = a.Refresh(ctx)                  // periodically, where Maintain does not run: the days LocateFlow probes
+//	day, err := a.LocateFlow(ctx, id, hour) // the day an archived flow is in, or a 404
 //
 // The Archive assumes every replica of the shard connects as the role that owns dwarf's tables.
 //
@@ -39,6 +42,8 @@ import (
 	"io/fs"
 	"net/http"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/migrations"
@@ -76,6 +81,13 @@ type Archive struct {
 	fsys      fs.FS
 	// clock overrides the database clock in tests; nil reads the database's.
 	clock func(ctx context.Context) (int64, error)
+	// mu guards ensured, the day whose tables, and those of the two days after it, this Archive last saw whole, and
+	// known, the days with both tables at the last catalog read, less the days this Archive dropped since.
+	mu      sync.Mutex
+	ensured int
+	known   []int
+	// catalogs counts the catalog reads, for the tests.
+	catalogs atomic.Int64
 }
 
 // New returns the Archive of the shard db is open on, for days of dayLength. fsys holds the archive migrations,
@@ -145,18 +157,19 @@ func (a *Archive) ensure(ctx context.Context, day int) error {
 	}
 	// The records can outlive the tables - a day dropped, a restore without the archive - and then the migration
 	// makes nothing. Fail naming the day rather than report a day that is not there.
-	tables, err := listTables(ctx, a.db)
+	_, whole, err := a.catalog(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	if !tables[migrations.FlowsTable(day)] || !tables[migrations.StepsTable(day)] {
+	if !slices.Contains(whole, day) {
 		return errors.New("the archive tables of day %d are missing although its migrations are recorded"+
 			" (dropped, or restored without them); delete the day's rows from sequel_migrations to make it again", day)
 	}
 	return nil
 }
 
-// EnsureToday makes sure today's and tomorrow's tables exist. It retries a failure a few times before returning it.
+// EnsureToday makes sure the tables of today and of the two days after it exist. Once it has seen them whole, it reads
+// only the clock until the day changes. It retries a failure a few times before returning it.
 func (a *Archive) EnsureToday(ctx context.Context) error {
 	backoff := 200 * time.Millisecond
 	for attempt := 1; ; attempt++ {
@@ -179,19 +192,30 @@ func (a *Archive) EnsureToday(ctx context.Context) error {
 	}
 }
 
-// ensureCurrent makes sure the tables of today, as the caller read it, and of tomorrow exist - tomorrow's only once
-// today's are whole, so days are always made in order.
+// ensureCurrent makes sure the tables of today, as the caller read it, and of the two days after it exist - each only
+// once the day before is whole, so days are always made in order. Days seen whole stay whole - nothing drops today or a
+// day after it - so once they are, it does nothing until the day changes.
 func (a *Archive) ensureCurrent(ctx context.Context, today int) error {
-	err := a.ensure(ctx, today)
-	if err == nil {
-		err = a.ensure(ctx, today+1)
+	a.mu.Lock()
+	done := a.ensured == today
+	a.mu.Unlock()
+	if done {
+		return nil
 	}
-	return errors.Trace(err)
+	for day := today; day <= today+2; day++ {
+		if err := a.ensure(ctx, day); err != nil {
+			return errors.Trace(err)
+		}
+	}
+	a.mu.Lock()
+	a.ensured = today
+	a.mu.Unlock()
+	return nil
 }
 
 // MigrateDays brings every existing day before today, within the retention, up to the day's migrations,
 // so a later archive migration reaches those days before anything reads them; run it after
-// EnsureToday, which brings today and tomorrow. A day is existing when the catalog lists a table of it. An older day
+// EnsureToday, which brings today and the days ahead. A day is existing when the catalog lists a table of it. An older day
 // is left as it is, for the next Maintain to drop. A day whose migration fails fails the call, as a failed schema
 // migration does, unless it is missing a table by then. A retention of 0 migrates nothing: every day before today is
 // expired.
@@ -200,8 +224,8 @@ func (a *Archive) MigrateDays(ctx context.Context, retention int) error {
 		return nil
 	}
 	// The days are listed before today is read, so a day a peer made just after midnight, when this read of today
-	// would still have been the day before, cannot read as past tomorrow.
-	days, err := listDays(ctx, a.db)
+	// would still have been the day before, cannot read as past the day after tomorrow.
+	days, _, err := a.catalog(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -209,13 +233,13 @@ func (a *Archive) MigrateDays(ctx context.Context, retention int) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	if len(days) > 0 && days[len(days)-1] > today+1 {
-		return errors.New("archive day %d is past tomorrow (%d): the database holds days of another length", days[len(days)-1],
-			today+1)
+	if len(days) > 0 && days[len(days)-1] > today+2 {
+		return errors.New("archive day %d is past the day after tomorrow (%d): the database holds days of another length",
+			days[len(days)-1], today+2)
 	}
 	for _, day := range days {
-		// Written as a bound on day so that a retention near the largest int cannot overflow. Today and tomorrow are
-		// EnsureToday's.
+		// Written as a bound on day so that a retention near the largest int cannot overflow. Today and the days ahead
+		// are EnsureToday's.
 		if day < today-retention || day >= today {
 			continue
 		}
@@ -242,16 +266,16 @@ func (a *Archive) migrateExisting(ctx context.Context, day int) error {
 	if err == nil {
 		return nil
 	}
-	tables, listErr := listTables(ctx, a.db)
-	if listErr == nil && (!tables[migrations.FlowsTable(day)] || !tables[migrations.StepsTable(day)]) {
+	_, whole, listErr := a.catalog(ctx)
+	if listErr == nil && !slices.Contains(whole, day) {
 		return nil
 	}
 	return errors.New("migrating the archive tables of day %d", day, err)
 }
 
-// Maintain makes sure today's and tomorrow's tables exist, and drops every day that
-// ended at least retention days ago. A retention of 0 keeps today's and tomorrow's tables, which nothing writes, and
-// drops every day before today.
+// Maintain makes sure the tables of today and of the two days after it exist, and drops every day that ended at least
+// retention days ago. A retention of 0 keeps today's tables and those ahead, which nothing writes, and drops every day
+// before today.
 func (a *Archive) Maintain(ctx context.Context, retention int) error {
 	// Negative would reach today, which is being written.
 	retention = max(retention, 0)
@@ -259,17 +283,18 @@ func (a *Archive) Maintain(ctx context.Context, retention int) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	// Tomorrow is made before the expired days go, from the same reading of today. A failure to make it does not hold
-	// back the drops: the likeliest cause is a full database, which they free.
+	// The days ahead are made before the expired days go, from the same reading of today. A failure to make them does
+	// not hold back the drops: the likeliest cause is a full database, which they free.
 	err = a.ensureCurrent(ctx, today)
 	// A day ends at the start of the next, so day d has been over for retention days once d+1+retention <= today.
 	// Written as a bound on d so that a retention near the largest int cannot overflow.
 	_, dropErr := a.dropDays(ctx, func(d int) bool { return d < today-retention })
-	return errors.Join(err, dropErr)
+	return errors.Join(err, dropErr, a.forgetDaysBefore(ctx, today-retention))
 }
 
 // DropBefore drops the tables of every day before day, and returns how many days it dropped. It returns a 400 for a
-// day after today: today's and tomorrow's tables are the ones being written, and a day dropped is never made again.
+// day after today: today's tables are the ones being written, those ahead will be, and a day dropped is never made
+// again.
 // Dropping only the oldest days leaves no gap between the days kept.
 func (a *Archive) DropBefore(ctx context.Context, day int) (dropped int, err error) {
 	today, err := a.Today(ctx)
@@ -280,12 +305,12 @@ func (a *Archive) DropBefore(ctx context.Context, day int) (dropped int, err err
 		return 0, errors.New("day %d is after today, %d", day, today, http.StatusBadRequest)
 	}
 	n, err := a.dropDays(ctx, func(d int) bool { return d < day })
-	return n, errors.Trace(err)
+	return n, errors.Join(err, a.forgetDaysBefore(ctx, day))
 }
 
 // dropDays drops every day that has tables and that drop selects, and returns how many it dropped.
 func (a *Archive) dropDays(ctx context.Context, drop func(day int) bool) (int, error) {
-	days, err := listDays(ctx, a.db)
+	days, _, err := a.catalog(ctx)
 	if err != nil {
 		return 0, errors.Trace(err)
 	}
@@ -304,6 +329,7 @@ func (a *Archive) dropDays(ctx context.Context, drop func(day int) bool) (int, e
 			errs = errors.Join(errs, errors.New("dropping the archive tables of day %d", day, err))
 			continue
 		}
+		a.forget(day)
 		dropped++
 	}
 	return dropped, errs
@@ -333,50 +359,60 @@ func (a *Archive) dropDay(ctx context.Context, day int) error {
 	return errors.Trace(err)
 }
 
-// listTables returns the names of the tables in the connection's schema.
-func listTables(ctx context.Context, db *sequel.DB) (map[string]bool, error) {
+// Refresh reads which days exist, for LocateFlow. Maintain and DropBefore read them too, so a replica that runs neither
+// on the shard calls it periodically instead.
+func (a *Archive) Refresh(ctx context.Context) error {
+	_, _, err := a.catalog(ctx)
+	return errors.Trace(err)
+}
+
+// catalog reads the database's catalog of tables for the archive's days, ascending: every day with a table, and those
+// of them with both - the others are half made or half dropped.
+func (a *Archive) catalog(ctx context.Context) (days []int, whole []int, err error) {
+	a.catalogs.Add(1)
+	// The pattern narrows what the catalog returns; DayOfTable decides. Its underscores match any character, harmlessly.
 	var stmt string
-	switch db.DriverName() {
+	switch a.db.DriverName() {
 	case "pgx":
-		stmt = "SELECT tablename FROM pg_tables WHERE schemaname=current_schema()"
+		stmt = "SELECT tablename FROM pg_tables WHERE schemaname=current_schema() AND tablename LIKE 'dwarf_%_archive_%'"
 	case "mysql":
-		stmt = "SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE()"
+		stmt = "SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name LIKE 'dwarf_%_archive_%'"
 	case "mssql":
 		// The default schema only, which the drops and the OBJECT_ID guards resolve to.
-		stmt = "SELECT name FROM sys.tables WHERE schema_id=SCHEMA_ID()"
+		stmt = "SELECT name FROM sys.tables WHERE schema_id=SCHEMA_ID() AND name LIKE 'dwarf_%_archive_%'"
 	default:
-		stmt = "SELECT name FROM sqlite_master WHERE type='table'"
+		stmt = "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'dwarf_%_archive_%'"
 	}
-	rows, err := db.QueryContext(ctx, stmt)
+	rows, err := a.db.QueryContext(ctx, stmt)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, nil, errors.Trace(err)
 	}
 	defer rows.Close()
-	tables := map[string]bool{}
+	tables := map[int]int{}
 	for rows.Next() {
 		var name string
 		err = rows.Scan(&name)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, nil, errors.Trace(err)
 		}
-		tables[name] = true
-	}
-	return tables, errors.Trace(rows.Err())
-}
-
-// listDays returns the days that have a table of flows or steps, ascending.
-func listDays(ctx context.Context, db *sequel.DB) ([]int, error) {
-	tables, err := listTables(ctx, db)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	var days []int
-	for name := range tables {
 		day, ok := migrations.DayOfTable(name)
-		if ok && !slices.Contains(days, day) {
-			days = append(days, day)
+		if ok && (name == migrations.FlowsTable(day) || name == migrations.StepsTable(day)) {
+			tables[day]++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, errors.Trace(err)
+	}
+	for day, n := range tables {
+		days = append(days, day)
+		if n == 2 {
+			whole = append(whole, day)
 		}
 	}
 	slices.Sort(days)
-	return days, nil
+	slices.Sort(whole)
+	a.mu.Lock()
+	a.known = whole
+	a.mu.Unlock()
+	return days, whole, nil
 }

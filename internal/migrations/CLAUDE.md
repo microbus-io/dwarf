@@ -120,6 +120,20 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `parked` | Selection discriminator. `0` = active; `1` = surgraph park. The selection index leads with `(status, parked)`, the due index with `parked` on pgx/sqlite and `(status, parked)` on mssql/mysql, and the claim CAS requires `parked=parkedNone`, so non-zero rows are excluded from the hot path. See "Step Parking" |
 | `engine_id` | Forensic provenance stamp, dual-role: the INSERT stamps the **creator** (entry step, transition successors, fan-in step, Fork clone - the replica whose worker created the row) and the claim CAS **overwrites** it with the **claimer** (the replica that leased and ran this attempt; rides the existing UPDATE, zero extra round trips). So a pending row shows who created it, a running/terminal row who executed it. Never read by the engine; deliberately unindexed; `0` (the column default) = not stamped |
 
+#### `dwarf_flow_days`
+
+The archive's directory: the day each flow was archived on, for the flows a locate would not find by its creation
+hour alone - those archived two or more days after their creation day, or on a day before it (`live/4.sql`). Written
+by the reaper in the move's transaction, read by the archiver's locate, deleted by retention
+(`internal/archiver/CLAUDE.md`, "Locating an archived row"). Sparse by design - a flow archived on its creation day or
+the day after has no row - so it holds only flows that ran about a day or longer. Its name carries no `_archive`, which
+`live/` may not name.
+
+| Column | Meaning |
+|---|---|
+| `flow_id` | **Primary key** - the archived flow (a root or a subgraph child; a step is found by its flow) |
+| `day` | The archive day its tree is in. Indexed (`idx_dwarf_flow_days_day`) for retention's delete of the oldest days, whose rows are at the low end of an index whose inserts arrive at the high end |
+
 #### `dwarf_peers`
 
 The replica registry behind both fleet decisions - which replicas dispatch a shard (and so split its

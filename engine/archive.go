@@ -101,8 +101,8 @@ func (e *Engine) archiveDayLength(ctx context.Context) (time.Duration, error) {
 	return dayLength, nil
 }
 
-// startArchives builds an Archive per open shard and makes sure each shard has today's and tomorrow's tables before
-// the replica serves, whatever the retention, then brings the existing days within the retention up to
+// startArchives builds an Archive per open shard and makes sure each shard has the tables of today and of the two days
+// after it before the replica serves, whatever the retention, then brings the existing days within the retention up to
 // the archive migrations - right after the shards' schema migrations, before anything reads a day.
 func (e *Engine) startArchives(ctx context.Context, dayLength time.Duration) error {
 	set := &archiveSet{byShard: make(map[int]*archiver.Archive, len(e.db.Indices())), dayLength: dayLength}
@@ -155,12 +155,17 @@ func (e *Engine) archiveLoop(ctx context.Context) {
 // suffices, and every pass is idempotent.
 func (e *Engine) maintainArchives(ctx context.Context, set *archiveSet) {
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
-		if !e.dispatchesOn(shard) {
-			return nil
-		}
 		// A turn on the shard, so the pass queues for its connections like any other caller.
 		ctx, doneTurn := e.dbTurn(ctx, shard)
 		defer doneTurn()
+		if !e.dispatchesOn(shard) {
+			// A reader maintains nothing, but its locates still need the days that exist: one catalog read a pass.
+			err := set.byShard[shard].Refresh(ctx)
+			if err != nil {
+				e.logSweepError(ctx, "Reading the archive's days; the next pass retries", "shard", shard, "error", err)
+			}
+			return nil
+		}
 		err := set.byShard[shard].Maintain(ctx, e.retentionDays)
 		if err != nil {
 			e.logSweepError(ctx, "Maintaining the archive tables; the next pass retries", "shard", shard, "error", err)

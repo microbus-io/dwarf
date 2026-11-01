@@ -3435,13 +3435,13 @@ drains (`reapDue`):
 - **Stamped roots** (`delete_after_ms>0`, due at `updated_at + delete_after_ms`): deleted, never archived.
 - **Ended roots** (terminal, unstamped, `updated_at` older than `archiveGrace`): copied into today's day tables
   (`INSERT ... SELECT *`, the day tables carrying the live columns in order) and deleted, in one transaction; at a
-  retention of 0, deleted only. Today's and tomorrow's tables are made sure of once per pass (`EnsureToday`, a read of each day's progress
-  when they are in place, and the backstop for a maintenance pass that failed to make them) and today is then read
-  from the database clock. **While today cannot be
+  retention of 0, deleted only. The tables of today and the two days ahead are made sure of once per pass
+  (`EnsureToday`, the backstop for a maintenance pass that failed to make them, and only a clock read once the archive
+  has seen them whole that day) and today is then read from the database clock. **While today cannot be
   made, it is an archive failure like any other** (below): ended flows wait in the live tables for the failure grace
   and are then deleted unarchived; stamped roots, which need no archive, are deleted throughout. Pinned by
-  `TestArchiving_NoEndedTreeMovesWhileTodayCannotBeMade`. Making sure of tomorrow as well is deliberate: a pass that
-  crosses midnight then finds the new day already made. Do not refuse new work over an archive fault: that would
+  `TestArchiving_NoEndedTreeMovesWhileTodayCannotBeMade`. Making sure of the days ahead as well is deliberate: a pass
+  that crosses midnight then finds the new day already made. Do not refuse new work over an archive fault: that would
   turn it into an outage at once.
 
 One scan feeds several batches: its candidates, own class first, are consumed `reapBatch` (512) at a time and
@@ -3479,6 +3479,12 @@ MySQL, the strength a `DELETE` takes; a `touch` flip with `RETURNING`/`OUTPUT` e
   a table lock on `dwarf_steps`. Moving such a tree in chunks, root last, is not built.
 - **The day is read once per pass and again when it ends** (`refreshReapDay`, `TodayLeft`), so a pass that crosses
   midnight writes the new day from its next batch on.
+- **A flow a locate would not find by its creation hour is named in the directory** (`dwarf_flow_days`) in the
+  move's own transaction, from the same rows: on PostgreSQL a data-modifying CTE over the moved rows in the flows
+  statement, elsewhere an `INSERT ... SELECT` before the delete. Which flows is the archiver's rule
+  (`DirectoryHours`): those archived two or more days after their creation day, or on a day before it - the batch in
+  flight at midnight writes the day just ended, and with days shorter than an hour a straggler's creation day can
+  fall after it (`internal/archiver/CLAUDE.md`, "Locating an archived row"). Pinned by `directory_test.go`.
 - **The ended scan is one branch per terminal status**, each `ORDER BY updated_at LIMIT` on
   `idx_dwarf_flows_status (status, updated_at)`. One scan over all four statuses has no index order, so every scan
   would read and sort the whole due set. A long-lived root's ended subgraph children still sit oldest-first in the
@@ -3549,19 +3555,21 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
 `internal/archiver/CLAUDE.md`). The engine's side:
 
 - **`SetRetention(days)`, construction-time, default 30.** A day is dropped once it ended `days` days ago. **0 keeps
-  no archive**: ended roots are deleted rather than archived, and every day before today is dropped, but today's and
-  tomorrow's tables are still made - nothing writes them - so the shape of a shard does not depend on the setting. Keeping it indefinitely is a large number of days,
+  no archive**: ended roots are deleted rather than archived, and every day before today is dropped, but the tables of
+  today and the days ahead are still made - nothing writes them - so the shape of a shard does not depend on the setting. Keeping it indefinitely is a large number of days,
   never a sentinel. Any replica's pass may drop a day, so the smallest retention in the fleet wins.
 - **Startup does not serve before today's tables exist on every shard**, whatever the retention (`startArchives`, right after the shards
-  open and before the fleet join, so a failure has only the shards to close), and tomorrow's. It
+  open and before the fleet join, so a failure has only the shards to close), and those of the two days after. It
   takes no turn: no worker exists yet. The
   same pass then brings the existing days within the retention up to the archive migrations (`MigrateDays`), so a
   later archive migration reaches them before anything reads them; a day whose migration fails fails Startup. Startup
   costs one `Migrate` per retained day per shard, which is what keeps the default retention at 30 days.
 - **The loop (`archiveLoop`) passes once when it starts, then 24 times a day** (`archivePassInterval`, at least a second
-  apart): today's and tomorrow's tables, then the expired days. The first pass is at once because Startup
+  apart): the tables of today and the days ahead, then the expired days. The first pass is at once because Startup
   makes days but drops none, so a fleet whose replicas live shorter than an interval would never drop one. Like every
-  background sweep it runs only on shards this replica dispatches and takes a turn per shard. The turn is held across
+  background sweep it maintains only shards this replica dispatches, taking a turn per shard; on a shard it only reads
+  it makes one catalog read (`Refresh`), since the locates there need the days that exist, and a reader's record would
+  otherwise date from its Startup. The turn is held across
   sequel's polls for a peer's migration lock and, off PostgreSQL, across a drop's unbounded lock wait: one turn, 24
   times a day.
 - **A drain waits for a day being made.** sequel's `Migrate` takes no context, so a `Shutdown` landing in a pass's

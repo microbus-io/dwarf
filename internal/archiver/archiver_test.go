@@ -244,7 +244,7 @@ func TestArchiver_DropBeforeDropsTheOldestDays(t *testing.T) {
 	assert.NoError(later.MigrateDays(ctx, 30))
 	days, err = archiver.Days(ctx, a)
 	assert.NoError(err)
-	assert.Equal([]int{9003, 9004}, days)
+	assert.Equal([]int{9003, 9004, 9005}, days)
 	var n9003 int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(extra) FROM "+migrations.StepsTable(9003)).Scan(&n9003))
 
@@ -256,13 +256,13 @@ func TestArchiver_DropBeforeDropsTheOldestDays(t *testing.T) {
 	}
 	days, err = archiver.Days(ctx, a)
 	assert.NoError(err)
-	assert.Equal([]int{9003, 9004}, days)
+	assert.Equal([]int{9003, 9004, 9005}, days)
 	assert.Error(archiver.Ensure(ctx, later, 9001))
 }
 
-// TestArchiver_MaintainKeepsTheRetention pins retention by days: Maintain makes today's and tomorrow's tables, and
-// drops a day only once it ended at least retention days ago. A retention of 0 still makes today's
-// and tomorrow's tables and drops every day before today.
+// TestArchiver_MaintainKeepsTheRetention pins retention by days: Maintain makes the tables of today and the two days
+// after, and drops a day only once it ended at least retention days ago. A retention of 0 still makes today's tables
+// and those ahead, and drops every day before today.
 func TestArchiver_MaintainKeepsTheRetention(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -278,33 +278,46 @@ func TestArchiver_MaintainKeepsTheRetention(t *testing.T) {
 	assert.NoError(a.Maintain(ctx, 2))
 	days, err := archiver.Days(ctx, a)
 	assert.NoError(err)
-	assert.Equal([]int{today - 2, today - 1, today, today + 1}, days)
+	assert.Equal([]int{today - 2, today - 1, today, today + 1, today + 2}, days)
 
 	// A retention as long as an int is the documented way to keep everything: it drops nothing, and no error.
 	assert.NoError(a.Maintain(ctx, math.MaxInt))
 	days, err = archiver.Days(ctx, a)
 	assert.NoError(err)
-	assert.Len(days, 4)
+	assert.Len(days, 5)
 
 	assert.NoError(a.Maintain(ctx, 0))
 	days, err = archiver.Days(ctx, a)
 	assert.NoError(err)
-	assert.Equal([]int{today, today + 1}, days)
+	assert.Equal([]int{today, today + 1, today + 2}, days)
 }
 
-// TestArchiver_TomorrowComesWithToday pins that every pass makes tomorrow's tables as well as today's, so each of a
-// day's passes is an attempt at tomorrow's.
-func TestArchiver_TomorrowComesWithToday(t *testing.T) {
+// TestArchiver_TheDaysAheadComeWithToday pins that making today makes the two days after it as well, so a day exists
+// a whole day before it begins - and that once they are whole, making sure of them again reads only the clock until
+// the day changes, from EnsureToday and Maintain alike.
+func TestArchiver_TheDaysAheadComeWithToday(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	assert := testarossa.For(t)
 	db := openShard(t)
 	a := archiver.New(db, archiver.DefaultDayLength, migrations.Archive())
-	archiver.SetClock(a, atHour(9000, 0))
+	hour := 9000 * 24
+	archiver.SetClock(a, func() int64 { return 946684800 + int64(hour)*3600 })
 	assert.NoError(a.EnsureToday(ctx))
 	days, err := archiver.Days(ctx, a)
 	assert.NoError(err)
-	assert.Equal([]int{9000, 9001}, days)
+	assert.Equal([]int{9000, 9001, 9002}, days)
+
+	catalogs := archiver.Catalogs(a)
+	assert.NoError(a.EnsureToday(ctx))
+	assert.NoError(a.Maintain(ctx, 30))
+	assert.Equal(catalogs+1, archiver.Catalogs(a), "only the drops read the catalog")
+
+	hour += 24
+	assert.NoError(a.EnsureToday(ctx))
+	days, err = archiver.Days(ctx, a)
+	assert.NoError(err)
+	assert.Equal([]int{9000, 9001, 9002, 9003}, days, "the next day ahead, once the day changes")
 }
 
 // TestArchiver_MigrateDaysAppliesALaterMigration pins how a schema change reaches the days already made: a later
@@ -393,19 +406,44 @@ func TestArchiver_AFailedDayMigrationFails(t *testing.T) {
 	assert.NoError(archiver.MigrateExisting(ctx, broken, 9001))
 }
 
-// TestArchiver_MigrateDaysRefusesAnotherDayLength pins the guard against two day lengths on one database: a listed
-// day past tomorrow is numbered by another length, and Startup refuses rather than let a retention pass treat the
-// other length's days as its own.
+// TestArchiver_MigrateDaysRefusesAnotherDayLength pins the guard against two day lengths on one database: a day past
+// the day after tomorrow is numbered by another length, and Startup refuses rather than let a retention pass treat the
+// other length's days as its own. The day after tomorrow itself, made ahead, is not.
 func TestArchiver_MigrateDaysRefusesAnotherDayLength(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	assert := testarossa.For(t)
 	db := openShard(t)
 	a := archiver.New(db, archiver.DefaultDayLength, migrations.Archive())
-	assert.NoError(archiver.Ensure(ctx, a, 9500))
+	assert.NoError(archiver.Ensure(ctx, a, 9002))
 	archiver.SetClock(a, atHour(9000, 12))
+	assert.NoError(a.MigrateDays(ctx, 30), "the day after tomorrow")
+	assert.NoError(archiver.Ensure(ctx, a, 9003))
 	err := a.MigrateDays(ctx, 30)
 	if assert.Error(err) {
 		assert.Contains(err.Error(), "another length")
+	}
+}
+
+// TestArchiver_ADayThatCannotBeMadeIsCheckedAgain pins that the record of days seen whole is kept only when all three
+// are: a day ahead that cannot be made fails every EnsureToday, rather than the first only.
+func TestArchiver_ADayThatCannotBeMadeIsCheckedAgain(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	assert := testarossa.For(t)
+	db := openShard(t)
+	a := archiver.New(db, archiver.DefaultDayLength, migrations.Archive())
+	assert.NoError(archiver.Ensure(ctx, a, 9002))
+	// Its migrations recorded, its tables gone: it cannot be made again.
+	for _, table := range []string{migrations.FlowsTable(9002), migrations.StepsTable(9002)} {
+		_, err := db.ExecContext(ctx, "DROP TABLE "+table)
+		assert.NoError(err)
+	}
+	archiver.SetClock(a, atHour(9000, 12))
+	for range 2 {
+		err := a.EnsureToday(ctx)
+		if assert.Error(err) {
+			assert.Contains(err.Error(), "day 9002")
+		}
 	}
 }

@@ -16,7 +16,10 @@ limitations under the License.
 
 package archiver
 
-import "context"
+import (
+	"context"
+	"slices"
+)
 
 // The tests drive the Archive through its exported API; these expose the few internals they pin.
 
@@ -32,10 +35,31 @@ func Ensure(ctx context.Context, a *Archive, day int) error {
 
 // Days returns the days that have a table of flows or steps, ascending.
 func Days(ctx context.Context, a *Archive) ([]int, error) {
-	return listDays(ctx, a.db)
+	days, _, err := a.catalog(ctx)
+	return days, err
+}
+
+// Known returns the days a knows have both tables.
+func Known(a *Archive) []int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Clone(a.known)
+}
+
+// Catalogs returns how many times a has read the catalog.
+func Catalogs(a *Archive) int {
+	return int(a.catalogs.Load())
 }
 
 // MigrateExisting exposes migrateExisting to the tests.
 func MigrateExisting(ctx context.Context, a *Archive, day int) error {
 	return a.migrateExisting(ctx, day)
 }
+
+// CreationDay exposes creationDay to the tests.
+func CreationDay(a *Archive, hour int) int {
+	return a.creationDay(hour)
+}
+
+// ForgetBatch is how many expired directory rows one statement deletes.
+const ForgetBatch = forgetBatch

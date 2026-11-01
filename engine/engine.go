@@ -290,7 +290,7 @@ type Engine struct {
 	reaperCancel context.CancelFunc
 	reaperWorker sync.WaitGroup
 
-	// Archive goroutine: keeps each shard's archive day tables - today's and tomorrow's made, expired days
+	// Archive goroutine: keeps each shard's archive day tables - today's and the two days ahead made, expired days
 	// dropped. archives is the run's set, published at Startup; testArchiveDay, when set, replaces the day's
 	// length for a test (archiveDayLength). archiveCancel stops the loop between its statements.
 	archives atomic.Pointer[archiveSet]
@@ -789,7 +789,7 @@ func (e *Engine) Startup(ctx context.Context) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	// Today's and tomorrow's archive tables exist before this replica serves anything.
+	// The archive tables of today and the days ahead exist before this replica serves anything.
 	err = e.startArchives(ctx, dayLength)
 	if err != nil {
 		e.db.Close()

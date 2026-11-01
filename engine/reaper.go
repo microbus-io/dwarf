@@ -18,7 +18,9 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -187,6 +189,8 @@ func ownFirst(ids []int, count, ordinal, n int) []int {
 type reapDay struct {
 	day  int
 	ends time.Time
+	// archive is the shard's, whose directory hours say which moved flows the directory must name.
+	archive *archiver.Archive
 }
 
 // reapDueFlows removes, per shard this replica dispatches, every due tree: first the roots stamped for deletion,
@@ -247,10 +251,10 @@ func (e *Engine) reapDueFlows(ctx context.Context) {
 	})
 }
 
-// refreshReapDay makes sure today's and tomorrow's tables exist - the backstop for a maintenance pass that failed to
-// make them, and a read of each day's progress when they are in place - and then reads today from the database clock
-// into day. Today is never dropped, and tomorrow exists too, so a day that turns between the two reads is in place as
-// well.
+// refreshReapDay makes sure the tables of today and the days ahead exist - the backstop for a maintenance pass that
+// failed to make them, and only a read of the clock once the archive has seen them whole - and then reads today from
+// the database clock into day. Today is never dropped, and the days ahead exist too, so a day that turns between the
+// two reads is in place as well.
 func (e *Engine) refreshReapDay(ctx context.Context, a *archiver.Archive, day *reapDay) error {
 	err := a.EnsureToday(ctx)
 	var today int
@@ -261,7 +265,7 @@ func (e *Engine) refreshReapDay(ctx context.Context, a *archiver.Archive, day *r
 	if err != nil {
 		return errors.Trace(err)
 	}
-	day.day, day.ends = today, time.Now().Add(left)
+	day.day, day.ends, day.archive = today, time.Now().Add(left), a
 	return nil
 }
 
@@ -459,6 +463,15 @@ func (e *Engine) reapBatchOf(
 		if day != nil && e.seams.IsFault(engineseams.FaultReapArchiveErr) {
 			return errors.New("injected fault: " + engineseams.FaultReapArchiveErr)
 		}
+		// A flow a locate would not find by its creation hour alone - archived two or more days after its creation
+		// day, or on a day before it (a straggler created while a batch begun before midnight ran) - is named in the
+		// directory, in this transaction, from the same rows the move takes.
+		var directory string
+		if day != nil {
+			before, from := day.archive.DirectoryHours(day.day)
+			directory = "INSERT INTO " + archiver.DirectoryTable + " (flow_id, day) SELECT flow_id, " + strconv.Itoa(day.day) +
+				" FROM %s WHERE (created_hour<" + strconv.Itoa(before) + " OR created_hour>=" + strconv.Itoa(from) + ")"
+		}
 		var flowsStmt string
 		switch {
 		case day == nil:
@@ -466,10 +479,12 @@ func (e *Engine) reapBatchOf(
 		case tx.DriverName() == "pgx":
 			// Each table moves in one statement, so what is archived is exactly what is deleted, whatever a
 			// descendant does between statements - only the roots are locked. RETURNING * is in column order, and
-			// the day tables carry the live columns in the same order.
+			// the day tables carry the live columns in the same order. The directory's rows come from the same moved
+			// rows, in the same statement.
 			steps = "WITH moved AS (" + steps + " RETURNING *)" +
 				" INSERT INTO " + migrations.StepsTable(day.day) + " SELECT * FROM moved"
-			flowsStmt = "WITH moved AS (" + flows + " RETURNING *)" +
+			flowsStmt = "WITH moved AS (" + flows + " RETURNING *)," +
+				" named AS (" + fmt.Sprintf(directory, "moved") + ")" +
 				" INSERT INTO " + migrations.FlowsTable(day.day) + " SELECT * FROM moved"
 		default:
 			// Copied, then deleted. A descendant that changes between the copy and the delete - only a fan-out
@@ -478,6 +493,7 @@ func (e *Engine) reapBatchOf(
 				" SELECT * FROM dwarf_flows WHERE root_flow_id IN ("+ids+")")
 			tx.ExecContext(ctx, "INSERT INTO "+migrations.StepsTable(day.day)+
 				" SELECT * FROM dwarf_steps WHERE flow_id IN ("+trees+")")
+			tx.ExecContext(ctx, fmt.Sprintf(directory, "dwarf_flows")+" AND root_flow_id IN ("+ids+")")
 			flowsStmt = flows
 		}
 		// Steps before flows: the subquery reads the flow rows.

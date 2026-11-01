@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -424,7 +425,7 @@ func endedRoots(t *testing.T, e *Engine, n int) []int {
 	return roots
 }
 
-// TestArchiving_NoEndedTreeMovesWhileTodayCannotBeMade pins that while today's or tomorrow's tables cannot be made, the
+// TestArchiving_NoEndedTreeMovesWhileTodayCannotBeMade pins that while today's or a day ahead's tables cannot be made, the
 // ended trees wait in the live tables, neither archived nor deleted, while the stamped ones are still deleted: they
 // need no archive. Once that has lasted the failure grace, the ended trees are deleted unarchived.
 func TestArchiving_NoEndedTreeMovesWhileTodayCannotBeMade(t *testing.T) {
@@ -442,11 +443,17 @@ func TestArchiving_NoEndedTreeMovesWhileTodayCannotBeMade(t *testing.T) {
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1, updated_at=DATE_ADD_MILLIS(NOW_UTC(), -1000)"+
 		" WHERE flow_id=?", stamped)
 	assert.NoError(err)
-	// Tomorrow's tables dropped, its migrations still recorded: it cannot be made again.
+	// Tomorrow's tables dropped, its migrations still recorded: it cannot be made again. The shard's archive is
+	// replaced by a fresh one, as after a restart: one that has seen the days whole reads only the clock until the
+	// day changes.
 	for _, table := range []string{migrations.FlowsTable(today + 1), migrations.StepsTable(today + 1)} {
 		_, err = db.ExecContext(ctx, "DROP TABLE "+table)
 		assert.NoError(err)
 	}
+	set := e.archives.Load()
+	e.archives.Store(&archiveSet{dayLength: set.dayLength, byShard: map[int]*archiver.Archive{
+		1: archiver.New(db, set.dayLength, migrations.Archive()),
+	}})
 
 	e.reapDueFlows(ctx)
 	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {

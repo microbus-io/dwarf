@@ -98,6 +98,7 @@ func TestRetention_StartupMakesTodaysArchive(t *testing.T) {
 	}
 	assert.True(hasArchiveDay(t, e, today), "today %d missing", today)
 	assert.True(hasArchiveDay(t, e, today+1), "tomorrow %d missing", today+1)
+	assert.True(hasArchiveDay(t, e, today+2), "the day after tomorrow %d missing", today+2)
 	assert.False(hasArchiveDay(t, e, today-1), "Startup made yesterday")
 }
 
