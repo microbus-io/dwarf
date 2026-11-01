@@ -104,7 +104,7 @@ nothing between replicas, so there is no transport for you to wire.
 type Host interface {
     // Required. Fetch a workflow graph by its workflow URL (called at Create and at subgraph spawn; the
     // graph is then frozen on the flow).
-    LoadGraph(ctx context.Context, workflowURL string) (*workflow.Graph, error)
+    LoadGraph(ctx context.Context, workflowURL string) (graph *workflow.Graph, err error)
 
     // Required. Execute one task. The Flow carrier arrives with its input state populated; write outputs.
     ExecuteTask(ctx context.Context, taskURL string, flow *workflow.Flow) error

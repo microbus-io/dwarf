@@ -71,7 +71,7 @@ func (r Reducer) isKnown() bool {
 // bool; a merge's maps hold json.RawMessage values).
 // Over other Go types the two can differ: under append, a typed slice such as []int added to a []any base is
 // one element, where a JSON array is spread. The empty and Replace reducers return incoming.
-func (r Reducer) Reduce(base any, incoming any) (any, error) {
+func (r Reducer) Reduce(base any, incoming any) (result any, err error) {
 	switch r {
 	case ReducerAppend:
 		return doAppend(base, incoming)

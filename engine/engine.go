@@ -1320,7 +1320,7 @@ func (e *Engine) Create(ctx context.Context, workflowURL string, initialState an
 }
 
 // Snapshot returns the current state and status of a flow.
-func (e *Engine) Snapshot(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
+func (e *Engine) Snapshot(ctx context.Context, flowKey string) (outcome *workflow.FlowOutcome, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -1385,7 +1385,7 @@ func (e *Engine) Cancel(ctx context.Context, flowKey string, reason string) erro
 // re-executes from that step with optional stateOverrides applied to it. The original flow is never
 // modified. The fork inherits the original's scheduling and baggage (it does not take FlowOptions).
 // Returns the new flow's key.
-func (e *Engine) Fork(ctx context.Context, stepKey string, stateOverrides any) (string, error) {
+func (e *Engine) Fork(ctx context.Context, stepKey string, stateOverrides any) (flowKey string, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return "", errors.Trace(err)
 	}
@@ -1393,7 +1393,7 @@ func (e *Engine) Fork(ctx context.Context, stepKey string, stateOverrides any) (
 }
 
 // History returns the step-by-step execution history of a flow.
-func (e *Engine) History(ctx context.Context, flowKey string) ([]workflow.FlowStep, error) {
+func (e *Engine) History(ctx context.Context, flowKey string) (steps []workflow.FlowStep, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -1401,7 +1401,7 @@ func (e *Engine) History(ctx context.Context, flowKey string) ([]workflow.FlowSt
 }
 
 // Step returns details of a single step.
-func (e *Engine) Step(ctx context.Context, stepKey string) (*workflow.FlowStep, error) {
+func (e *Engine) Step(ctx context.Context, stepKey string) (step *workflow.FlowStep, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -1448,7 +1448,7 @@ func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 // marks at most min(Query.Limit, 4096) roots, divided per shard exactly as in List (up to ceil(n/shards) per
 // shard), so a multi-shard call can mark slightly more; iterate until it returns 0 to mark everything. The
 // query takes any filter List does; one that sets none (only Shard or Limit, or nothing) is a 400.
-func (e *Engine) Purge(ctx context.Context, query workflow.Query) (int, error) {
+func (e *Engine) Purge(ctx context.Context, query workflow.Query) (marked int, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return 0, errors.Trace(err)
 	}
@@ -1458,7 +1458,7 @@ func (e *Engine) Purge(ctx context.Context, query workflow.Query) (int, error) {
 // ShardInfo reports, for every shard, whether it answers a trivial query and how fast. It returns a row per
 // shard even when some are down, with the failure recorded on that shard's row, so it is the call to make when a
 // shard is suspect. It reads no table, so it costs the same however large the shards grow.
-func (e *Engine) ShardInfo(ctx context.Context) ([]ShardSummary, error) {
+func (e *Engine) ShardInfo(ctx context.Context) (shards []ShardSummary, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -1475,7 +1475,7 @@ func (e *Engine) ShardInfo(ctx context.Context) ([]ShardSummary, error) {
 //
 // A wait that runs out - the ctx's deadline or that fallback budget - returns a 408 error that satisfies
 // errors.Is(err, context.DeadlineExceeded).
-func (e *Engine) Await(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
+func (e *Engine) Await(ctx context.Context, flowKey string) (outcome *workflow.FlowOutcome, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -1489,7 +1489,7 @@ func (e *Engine) Await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 //
 // The ctx deadline IS the budget, so pass one; without it Poll blocks on the same long fallback budget as
 // Await before answering, which is rarely what a polling caller wants.
-func (e *Engine) Poll(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
+func (e *Engine) Poll(ctx context.Context, flowKey string) (outcome *workflow.FlowOutcome, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -1517,7 +1517,7 @@ func (e *Engine) Run(ctx context.Context, workflowURL string, initialState any, 
 // Continue creates a new flow from the latest completed flow in a thread, inheriting that flow's policy
 // (scheduling, baggage) - it does not take FlowOptions. For a turn with different policy,
 // use Create with FlowOptions.ThreadKey.
-func (e *Engine) Continue(ctx context.Context, threadKey string, additionalState any) (string, error) {
+func (e *Engine) Continue(ctx context.Context, threadKey string, additionalState any) (flowKey string, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return "", errors.Trace(err)
 	}

@@ -179,7 +179,7 @@ func (f *RawFlow) SleepRequested() time.Duration {
 }
 
 // InterruptRequested returns the interrupt payload and true if Interrupt was called.
-func (f *RawFlow) InterruptRequested() (State, bool) {
+func (f *RawFlow) InterruptRequested() (payload State, requested bool) {
 	return f.interruptPayload, f.interrupt
 }
 

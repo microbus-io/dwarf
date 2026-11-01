@@ -37,7 +37,7 @@ type Host interface {
 	// is identity-dependent (authz, per-actor graphs). The engine validates the returned graph
 	// (graph.Validate) at Create and at subgraph spawn, so the host need not: returning (nil, nil) yields a
 	// 404 and a structurally invalid graph a 400, rather than a later dispatch-time failure.
-	LoadGraph(ctx context.Context, workflowURL string) (*workflow.Graph, error)
+	LoadGraph(ctx context.Context, workflowURL string) (graph *workflow.Graph, err error)
 
 	// ExecuteTask executes a single task within a workflow. taskURL is the task's dispatch URL (the real
 	// downstream address), not the task's name in the graph. The flow carrier has its state pre-populated; the

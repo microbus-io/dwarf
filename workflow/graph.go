@@ -358,7 +358,7 @@ func (g *Graph) autoRegister(name string) {
 }
 
 // ErrorTransition returns the error transition from the given task name, if one exists.
-func (g *Graph) ErrorTransition(name string) (Transition, bool) {
+func (g *Graph) ErrorTransition(name string) (transition Transition, ok bool) {
 	for _, tr := range g.transitions {
 		if tr.From == name && tr.Kind == TransitionError {
 			return tr, true

@@ -65,7 +65,7 @@ func (p *Mux) HandleTask(taskURL string, handler func(ctx context.Context, flow 
 }
 
 // LoadGraph implements engine.Host.
-func (p *Mux) LoadGraph(ctx context.Context, workflowURL string) (*workflow.Graph, error) {
+func (p *Mux) LoadGraph(ctx context.Context, workflowURL string) (graph *workflow.Graph, err error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	g, ok := p.graphs[workflowURL]

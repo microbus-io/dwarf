@@ -23,7 +23,7 @@ showing it beats the poll it would replace.
 
 The interface methods:
 
-- **`LoadGraph(ctx, workflowURL string) (*workflow.Graph, error)`** - fetches a workflow graph by its workflow URL.
+- **`LoadGraph(ctx, workflowURL string) (graph *workflow.Graph, err error)`** - fetches a workflow graph by its workflow URL.
   Called at `Create` (and on subgraph spawn); the graph JSON is then frozen on the flow row. The flow's opaque
   baggage rides on ctx (`workflow.BaggageFrom(ctx)`) for identity-dependent loading (authz, per-actor graphs).
 - **`ExecuteTask(ctx, taskURL string, flow *workflow.Flow) error`** - executes one task. Receives the flow

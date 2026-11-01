@@ -59,15 +59,15 @@ type dispatch struct {
 	claimed bool
 
 	// Set by load: the step's graph, its resolved input, and the carrier the task runs on.
-	graph            *workflow.Graph
-	fanIn            *faninmap.Map
-	state            workflow.State // the resolved input, kept pristine: the successors are folded from it
-	inheritedRefs    staterefs.Refs
-	refBytes         int // the bytes the dispatch's ref resolve put into the carrier
-	priorChanges     workflow.Changes
-	reducers         map[string]workflow.Reducer
-	flow             *workflow.RawFlow
-	baggage          workflow.State
+	graph         *workflow.Graph
+	fanIn         *faninmap.Map
+	state         workflow.State // the resolved input, kept pristine: the successors are folded from it
+	inheritedRefs staterefs.Refs
+	refBytes      int // the bytes the dispatch's ref resolve put into the carrier
+	priorChanges  workflow.Changes
+	reducers      map[string]workflow.Reducer
+	flow          *workflow.RawFlow
+	baggage       workflow.State
 
 	// Set by startTask: the step's span, and the context the host call runs on.
 	taskCtx    context.Context

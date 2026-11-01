@@ -72,7 +72,7 @@ type State struct {
 //
 // Two or more arguments are variadic name/value pairs, e.g. NewState("count", 3, "name", "abc"); each value
 // is stored through Set. An odd count, or a non-string in a name position, is an error.
-func NewState(data ...any) (State, error) {
+func NewState(data ...any) (state State, err error) {
 	s := State{d: map[string]json.RawMessage{}}
 	// Single-argument normalize mode: a lone value is unmarshaled ([]byte), shallow-copied (an already-
 	// normalized State), or JSON-normalized (a map, a struct, or anything else - so nested values decode
