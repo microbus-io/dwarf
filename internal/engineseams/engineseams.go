@@ -136,7 +136,6 @@ const (
 	CheckpointSubgraphSpawnAbandoned    = "subgraphSpawnAbandoned"    // step execution, a subgraph spawn rolled back because its caller step is no longer running
 	CheckpointBeforeRetryRewind         = "beforeRetryRewind"         // step execution, before the flow.Retry rewind transaction
 	CheckpointBeforeCompleteFlowWrite   = "beforeCompleteFlowWrite"   // flow completion, just before its transaction's status-gate write
-	CheckpointBeforeDeleteWrite         = "beforeDeleteWrite"         // Delete, just before its transaction's delete-stamp/interrupted-CAS write
 	CheckpointBeforeReviveWrite         = "beforeReviveWrite"         // the subgraph-completion path, just before its transaction's caller-revive write
 	CheckpointBeforeRecoveryReset       = "beforeRecoveryReset"       // the post-execution recovery path, just before its fenced step-reset transaction
 	CheckpointClaimedDispatchDone       = "claimedDispatchDone"       // step execution returned after winning its claim, recovery reset included; fired bare and targeted by (shard, step id)

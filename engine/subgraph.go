@@ -81,10 +81,6 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 // rolls back and reports success.
 var errTreeSettled = errors.New("tree already terminal")
 
-// errRootNotInterrupted is returned by terminateSubtree called with onlyIfInterrupted when the root is no longer
-// interrupted under its row lock - a Resume won the race - and nothing was written.
-var errRootNotInterrupted = errors.New("flow is no longer interrupted", http.StatusConflict)
-
 // errTreeGrew is an in-transaction sentinel: terminateSubtree's scan found flows its write set did not cover, so
 // the transaction rolls back and re-runs over the larger set.
 var errTreeGrew = errors.New("tree grew during terminate")
@@ -105,12 +101,9 @@ const maxTerminateRuns = 16
 // sweep starts at a child whose whole ancestor chain is already terminal.
 //
 // A tree that went terminal concurrently is a no-op, for every caller: the transaction rolls back so the step
-// writes never touch a frozen tree, and nothing is counted or signalled. With onlyIfInterrupted (Delete and Purge,
-// which may end an interrupted flow but never a running one) the root must still be interrupted under its row
-// lock, or the transaction rolls back and errRootNotInterrupted is returned: a Resume that committed first wins.
-// commitFault is a test-only seam name, checked before any write so a fired fault proves the whole transaction
-// rolls back atomically; pass "" for none.
-func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHour int, flowToken, reason string, onlyIfInterrupted bool, commitFault string) error {
+// writes never touch a frozen tree, and nothing is counted or signalled. commitFault is a test-only seam name,
+// checked before any write so a fired fault proves the whole transaction rolls back atomically; pass "" for none.
+func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHour int, flowToken, reason, commitFault string) error {
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)
@@ -176,16 +169,6 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 			if locked == 0 {
 				settled = true
 				return errTreeSettled
-			}
-			if onlyIfInterrupted {
-				// The root's row is locked now, so its status cannot move under this check.
-				n, err := lockFlowRows(ctx, tx, "flow_id=? AND status='"+workflow.StatusInterrupted+"'", flowID)
-				if err != nil {
-					return err
-				}
-				if n == 0 {
-					return errRootNotInterrupted
-				}
 			}
 			terminateSteps()
 			// The scan before this transaction misses a child spawned since. A spawn parks its caller step in the
@@ -285,9 +268,6 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 	}
 	if settled {
 		return nil
-	}
-	if errors.Is(err, errRootNotInterrupted) {
-		return errRootNotInterrupted
 	}
 	if err != nil {
 		return errors.Trace(err)

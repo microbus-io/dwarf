@@ -36,7 +36,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-// TestChaosSoak mechanizes hunting for the lease-fence and Delete/Purge-vs-Resume bug class: it
+// TestChaosSoak mechanizes hunting for the lease-fence and lifecycle-race bug class: it
 // runs a mixed workload of three graph shapes while a chaos goroutine fires random lifecycle operations
 // (Terminate/Resume/Snapshot/History/Fork/Delete/duplicate work doorbell) at random flows, then drives every
 // flow to terminal and asserts (a) nothing wedged - every Await returns - (b) the structural invariants
@@ -170,8 +170,7 @@ func TestChaosSoak(t *testing.T) {
 	close(stop)
 	chaosWG.Wait()
 
-	// Drive every known flow to terminal: Terminate terminalizes anything still running/interrupted (a Delete of
-	// an interrupted flow already flipped it to terminated), then Await must return for each - a timeout is a
+	// Drive every known flow to terminal: Terminate terminalizes anything still running/interrupted, then Await must return for each - a timeout is a
 	// wedge and fails the test. Errors (404 on a genuinely-gone flow, 400 on a fork's subgraph step key that
 	// never became a root) are legitimate.
 	mu.Lock()

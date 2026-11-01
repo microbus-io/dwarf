@@ -52,7 +52,7 @@ bug, or at rows edited by hand.
 **Confirm.** The counter carries a `workflow` label, which narrows the search. Find the candidates:
 
 ```go
-flows, _, err := eng.List(ctx, workflow.Query{
+flows, err := eng.List(ctx, workflow.Query{
     Status:    workflow.StatusRunning,
     OlderThan: 10 * time.Minute,
 })

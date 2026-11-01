@@ -1409,8 +1409,8 @@ func (e *Engine) Step(ctx context.Context, stepKey string) (step *workflow.FlowS
 
 // List returns the newest flows matching query's filters, at most Query.Limit of them (default 100), newest
 // created first across every shard queried. It has no pagination: flows change constantly, so a caller wanting
-// different flows narrows the filters or the time window. OlderThan, set from the oldest UpdatedAt it holds,
-// reaches flows last updated before that, with no promise that nothing moved in between.
+// different flows narrows the filters or the time window. OlderThan filters on when a flow last changed status, not
+// on its creation, so it is not a next page: it can skip or repeat flows.
 //
 // The order across shards compares the creation times recorded by each shard's own database, so flows created
 // within the clock skew between two shard servers may be listed out of order.
@@ -1421,12 +1421,11 @@ func (e *Engine) List(ctx context.Context, query workflow.Query) (summaries []wo
 	return e.list(ctx, query)
 }
 
-// Delete marks a flow (and its subgraph subtree) for deletion; a background reaper removes it shortly
+// Delete marks an ended flow (and its subgraph subtree) for deletion; a background reaper removes it shortly
 // after. The flow is excluded from List/History immediately, though Snapshot/Await/Run still report its
-// outcome until the reaper removes it. An interrupted flow is terminated first, subgraphs included, exactly
-// as Terminate would, with the reason "deleted". Returns 404 for an unknown key, 400 for a subgraph-child key (address the root
-// instead), and 409 for a flow that is still running. Calling it again on an already-marked flow is
-// idempotent success.
+// outcome until the reaper removes it. Returns 404 for an unknown key, 400 for a subgraph-child key (address the
+// root instead), and 409 for a flow that has not ended: Terminate it first. Calling it again on an already-marked
+// flow is idempotent success.
 func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 	if err := e.ensureStarted(); err != nil {
 		return errors.Trace(err)
@@ -1434,12 +1433,13 @@ func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 	return e.deleteFlow(ctx, flowKey)
 }
 
-// Purge marks flows matching a query (and their subgraph subtrees) for deletion; a background reaper removes
-// them shortly after. Marked flows are excluded from List/History immediately. Interrupted flows are
-// terminated first, as Delete does, with the reason "purged"; running flows are skipped. Returns the count of roots marked. A call
-// marks at most min(Query.Limit, 4096) roots, divided per shard exactly as in List (up to ceil(n/shards) per
-// shard), so a multi-shard call can mark slightly more; iterate until it returns 0 to mark everything. The
-// query takes any filter List does; one that sets none (only Shard or Limit, or nothing) is a 400.
+// Purge marks the ended flows matching a query (and their subgraph subtrees) for deletion; a background reaper
+// removes them shortly after. Marked flows are excluded from List/History immediately. Flows that have not ended
+// are skipped, and a Query.Status naming a status that has not ended is a 400. Returns the count of roots marked.
+// A call marks at most min(Query.Limit, 4096) roots, divided across shards (up to ceil(n/shards) per shard), so a
+// multi-shard call can mark slightly more; iterate until it returns 0 to mark everything. The query takes any
+// filter List does; one that sets none (only Shard or Limit, or nothing) is a 400. Delete and Purge are for
+// removing specific flows; routine retention is a scheduled Purge by OlderThan.
 func (e *Engine) Purge(ctx context.Context, query workflow.Query) (marked int, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return 0, errors.Trace(err)

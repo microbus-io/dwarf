@@ -29,8 +29,7 @@ import (
 
 // TestList_NewestFirstAcrossShards pins List's top-N: at most Limit flows, the newest by creation time across every
 // shard. Each shard reads its own newest Limit and the union is cut to Limit, so a page is neither grouped by shard
-// nor a per-shard share of Limit: with Limit 10 over two shards, a shard holding all ten newest flows supplies all
-// ten.
+// nor a per-shard share of Limit: a shard holding all of the newest flows supplies all of them.
 func TestList_NewestFirstAcrossShards(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -74,12 +73,34 @@ func TestList_NewestFirstAcrossShards(t *testing.T) {
 	}
 	assert.Len(shards, 2, "both shards must contribute (placement is random; 30 flows over 2 shards)")
 
-	// A smaller Limit is a hard cap, and it keeps the newest: exactly the first ten of the whole list.
-	newest, err := e.List(ctx, workflow.Query{Limit: 10})
-	if !assert.NoError(err) || !assert.Len(newest, 10) {
-		return
+	// A smaller Limit is a hard cap, and it keeps the newest: every limit returns exactly that prefix of the whole
+	// list. Checking every prefix, not one, is what catches a Limit divided across shards: that passes a single
+	// limit whenever the newest flows happen to split evenly between the shards, but not every prefix.
+	for limit := 1; limit <= total; limit++ {
+		newest, err := e.List(ctx, workflow.Query{Limit: limit})
+		if !assert.NoError(err) || !assert.Len(newest, limit) {
+			return
+		}
+		for i, f := range newest {
+			assert.Equal(all[i].FlowKey, f.FlowKey, "limit %d, row %d", limit, i)
+		}
 	}
-	for i, f := range newest {
-		assert.Equal(all[i].FlowKey, f.FlowKey, "row %d", i)
+
+	// Query.Shard with a Limit is that shard's newest Limit, in the same order.
+	for shard := range shards {
+		var onShard []string
+		for _, f := range all {
+			if s, _, _, _, _ := keys.ParseFlowKey(f.FlowKey); s == shard {
+				onShard = append(onShard, f.FlowKey)
+			}
+		}
+		limit := min(5, len(onShard))
+		got, err := e.List(ctx, workflow.Query{Shard: shard, Limit: limit})
+		if !assert.NoError(err) || !assert.Len(got, limit) {
+			return
+		}
+		for i, f := range got {
+			assert.Equal(onShard[i], f.FlowKey, "shard %d, row %d", shard, i)
+		}
 	}
 }

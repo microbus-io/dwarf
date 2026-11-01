@@ -1253,13 +1253,13 @@ that is a pure function of stored data; a database error from the same computati
 same values and hits the same error, and `failFlowTx` falls back. (An unknown reducer name never gets this far:
 `Graph.Validate` rejects it at `Create`.) Pinned by `TestFanIn_ReducerErrorFailsTheFlow`, which also asserts neither
 write metric moves. `mergeCohortState`'s member fold - a failed fan-out's final state - is wrapped the same way, and
-a path that terminalizes a flow whatever it holds - `terminateSubtree` (Terminate, Delete, Purge, the orphan
+a path that terminalizes a flow whatever it holds - `terminateSubtree` (Terminate and the orphan
 sweep) - reads the final state through `terminalFinalState`, which takes a `permanentError` as `{}`; propagating it would leave the flow impossible to stop (`TestTerminate_ReducerErrorDoesNotBlockTerminate`).
 `isPermanentError` also counts a state ref the stored rows cannot satisfy (`staterefs.IsUnresolvable`: a ref to a
 missing step, a field or element not where it says, an unreadable refs or state column), raised from resolves no
 engine wrapper reaches, and a stored graph that cannot be parsed (`internGraph`). A failed READ is neither, and
-stays transient. Pinned by `TestTerminate_UnresolvableRefDoesNotBlockTerminate` (Terminate and Delete of a flow
-whose tail refs a missing step) and `TestInternGraph_UnreadableGraphIsPermanent`.
+stays transient. Pinned by `TestTerminate_UnresolvableRefDoesNotBlockTerminate` (Terminate of a flow whose
+tail refs a missing step) and `TestInternGraph_UnreadableGraphIsPermanent`.
 
 **Escalation is counter-based (`cohort_failures`), not status-based, and happens *before* `fanInRow`.**
 `fanInRow` itself never marks the flow terminal - but it is only reached when the cohort resolves with
@@ -2384,7 +2384,7 @@ is already local and free, at the price of a write per await.
   and `completeFlow` take the flow row first; `failStep` is steps-first, but its transaction still opens with a write
   (its step UPDATE). A high-volume soak (`fixtures/soakflow_test.go`) and `fixtures/completionraceflow_test.go`
   reproduce the wedge without write-first. This write-first rule governs the flow-*advancing*/*terminating* transactions only; the
-  lifecycle mutations (`Resume`/`Terminate`/`failStep`/`Delete`) run the **opposite** (steps-first) order on purpose, so
+  lifecycle mutations (`Resume`/`Terminate`/`failStep`) run the **opposite** (steps-first) order on purpose, so
   the two disciplines cross on row-locking engines - see "Transactions" for why that crossing is tolerated (retry-
   recovered) rather than reconciled, and do not "fix" one side into matching the other.
 - **Busy timeout** - `sequel` applies `_pragma=busy_timeout(2000)` to SQLite DSNs without one, so concurrent workers
@@ -3391,9 +3391,8 @@ be relevant after it ends." So retention is either operator-driven or an explici
 **Deletion is deferred: mark, then reap.** No path deletes rows inline. `DeleteOnCompletion`, `Delete`, and `Purge`
 all **stamp `delete_after_ms`** on the target **root** flow (`0`=keep; `>0`=reap at `updated_at + delete_after_ms`);
 a dedicated **reaper** goroutine (`reaperLoop`, ~1min ticker) later removes the whole subtree set-based, keyed on
-`root_flow_id`. This closes the strand race (a `Delete`/`Purge` deleting steps while a `Resume` revives the flow)
-by construction - no rows are deleted where a lifecycle op could interleave (see "Deletion race gate" below) - and
-makes a disposable flow's **outcome observable** during its grace window.
+`root_flow_id`. Only an ended root is ever stamped, so no rows are deleted where a lifecycle op could interleave
+(see "Deletion race gate" below), and a disposable flow's **outcome is observable** during its grace window.
 
 - **`FlowOptions.DeleteOnCompletion`** - the author declares a flow fire-and-forget (durable-execution jobs whose
   output and history are not needed). On success `completeFlow` stamps `delete_after_ms = deletionGrace` (hardcoded
@@ -3410,21 +3409,21 @@ makes a disposable flow's **outcome observable** during its grace window.
 
 For operator-driven retention (both mark, do not delete inline):
 
+Both remove **only ended flows**. An unended flow is the caller's to `Terminate` first: deleting it would hide a
+terminate inside a delete, and nothing either operation does can then race a `Resume`.
+
 - **`Delete(flowKey)`** stamps `delete_after_ms = 1` (due immediately) on the root after the read-guards (404 on
-  unknown key, 400 on a subgraph-child key, 409 on a `running` flow). An `interrupted` flow is first terminated
-  through `terminateSubtree`, exactly as `Terminate` does it - deleting a pending approval *is* terminating it. **Do
-  not flip only the root's status instead:** the tree's interrupted subgraph children, and any live sibling child,
-  would stay non-terminal until reaped - never counted in `dwarf_flows_ended`, so `started - ended` drifts up by
-  one per flow, and a live child keeps executing in the meantime. Pinned by
-  `TestMetrics_StartedAndEndedBalanceAcrossTrees`. The stamp then matches only a terminal root. Already-scheduled
-  (`delete_after_ms > 0`) is idempotent-success. The reaper sweeps the subtree.
-- **`Purge(Query)`** marks all matching roots with one set-based UPDATE per shard: it `SELECT DISTINCT`s candidate
-  roots (`f.surgraph_flow_id=0 AND f.status<>'running' AND f.delete_after_ms=0`, capped at `purgeCap` **4096**, ids
-  embedded as integer literals to dodge the per-driver bind-param ceiling), terminates each `interrupted` one
-  through `terminateSubtree` as `Delete` does, then `UPDATE ... SET delete_after_ms=1 WHERE flow_id IN (ids) AND
-  status IN (terminal) AND delete_after_ms=0`, where a root selected as interrupted must now be `terminated` - one a
-  Resume revived may have completed since, and no longer matches the query. Returns the count **marked** (reaped
-  shortly after). Same `Query` shape as `List`; **rejects** `IncludeSubgraphs` with 400.
+  unknown key, 400 on a subgraph-child key, 409 on any status that is not terminal). The stamp's own
+  terminal-status guard is defense in depth. Already-scheduled (`delete_after_ms > 0`) is idempotent-success. The
+  reaper sweeps the subtree.
+- **`Purge(Query)`** marks matching ended roots with one set-based UPDATE per shard: it `SELECT DISTINCT`s candidate
+  roots (`f.surgraph_flow_id=0 AND f.status IN (terminal) AND f.delete_after_ms=0`, capped at `purgeCap` **4096**,
+  ids embedded as integer literals to dodge the per-driver bind-param ceiling), then `UPDATE ... SET
+  delete_after_ms=1 WHERE flow_id IN (ids) AND status IN (terminal) AND delete_after_ms=0`. **Keep the terminal
+  filter in the SELECT**, not only in the UPDATE: the SELECT is `LIMIT`ed, so unended candidates selected ahead of
+  ended ones would use up the limit, mark nothing, and end a caller's purge loop early
+  (`TestDeleteUnendedflow`). A `Query.Status` naming an unended status is a 400. Returns the count **marked**
+  (reaped shortly after). Same `Query` shape as `List`; **rejects** `IncludeSubgraphs` with 400.
 
 **The reaper** (`reapDueFlows`, `reaper.go`) runs on its own dedicated goroutine + ~1min ticker (a single goroutine,
 inherently non-overlapping), stopped by `drainRuntime` cancelling its ctx. On each shard this replica DISPATCHES (a
@@ -3453,27 +3452,21 @@ shorten them -
 engine-package tests force a reap via `reapDueFlows`; fixtures verify the observable public contract via `List`/
 `History`/`Snapshot`.)
 
-**Deletion race gate.** Because deletion is an *orthogonal column*, not a status, stamping `delete_after_ms`
-alone does not serialize against `Resume`. The invariant that keeps the strand race closed is
-**`delete_after_ms > 0 ⟹ terminal status`**, and the reaper reaps only terminal-rooted trees: DeleteOnCompletion
-stamps a `completed` root (immutable); `Delete`/`Purge` of a terminal flow stamp an immutable row; `Delete`/`Purge`
-of an `interrupted` flow terminate its tree first (`terminateSubtree`, which writes the root's terminal status under
-its row lock), mutually exclusive with `Resume`'s **root-flow gate** (row lock; exactly one wins, loser 409s), and
-the stamp matches only a terminal root. So a live `delete_after_ms` never coexists
-with a resumable flow, and no steps are ever deleted where a `Resume` could interleave.
+**Deletion race gate.** Because deletion is an *orthogonal column*, not a status, the invariant that keeps a
+deletion from racing a lifecycle op is **`delete_after_ms > 0 ⟹ terminal status`**, and the reaper reaps only
+terminal-rooted trees. Every stamp holds it by stamping only an ended root: DeleteOnCompletion stamps the root it
+completes, and `Delete`/`Purge` refuse or skip an unended one. An ended flow never changes status again, so a live
+`delete_after_ms` never coexists with a resumable flow.
 
-The mutual exclusion is not automatic - `resume`'s step writes (leaf `→pending`, ancestor re-park) are
-*unconditional* on `WHERE status='interrupted'` at the **step** level, and `Delete`/`Terminate` terminalize the
-**flow** row without touching steps, so those step writes still match after a `Delete` won. Left ungated,
-`resume` would re-park + reset the leaf, match 0 rows on its `→running` flow update (the flow is now
-`terminated`), and still return success - a resume that did not take effect reported as if it had, leaving a
-transient terminated-flow-with-non-terminal-steps until the reaper mops it. So `resume`'s transaction carries a
-dedicated **gate lock** on the root flow (`lockFlowRows` on `flow_id=<root> AND status='interrupted'`) after its
-step writes: a zero-row match means `Delete`/`Terminate` terminalized the root first, so the whole transaction
-rolls back (undoing the step writes) and `resume` returns 409. The lock is placed *after* the step writes to
-preserve `resume`'s steps-first lock order (shared with `Terminate`). This gate is
-distinct from the `→running` chain-flow update, which legitimately matches 0 rows when a *sibling* interrupt
-still holds the flow (fan-out resume-one-at-a-time), so it cannot serve as the race gate.
+**`Resume` still carries a root-flow gate, against `Terminate`.** A `Terminate` that commits between `resume`'s
+pre-transaction status read and its transaction has terminated the tree's steps, so `resume`'s step writes
+(`WHERE status='interrupted'`) match nothing and its `→running` flow update matches nothing too; left ungated,
+`resume` would return success for a resume that did not take effect. So `resume`'s transaction takes a **gate
+lock** on the root flow (`lockFlowRows` on `flow_id=<root> AND status='interrupted'`) after its step writes: a
+zero-row match rolls the transaction back and `resume` returns 409. The lock is placed *after* the step writes to
+preserve `resume`'s steps-first lock order (shared with `Terminate`). This gate is distinct from the `→running`
+chain-flow update, which legitimately matches 0 rows when a *sibling* interrupt still holds the flow (fan-out
+resume-one-at-a-time), so it cannot serve as the race gate. Pinned by `TestResumeLosesToTerminate_Deterministic`.
 
 **Reads/derivations of a `delete_after_ms > 0` flow.** `Snapshot`/`Await` serve the outcome (the observability win);
 `List` and `History` exclude it; `Continue` and `Fork` **409** (each names a specific doomed flow); `Resume` 409s and `Terminate` is a nil no-op
@@ -3634,7 +3627,7 @@ The trap for anyone re-deriving this: raw `database/sql` behaves differently, an
 broken. On MySQL and SQLite a failed statement does *not* poison a plain `sql.Tx` - the commit succeeds with that write
 silently missing (measured). It is `sequel.Tx`, not the driver, that closes the hole. Any analysis that reasons about
 driver semantics without accounting for the `autoErr` latch will "discover" a partial-commit bug that does not exist -
-in `Delete`/`Terminate`, in the `cohort_arrivals` bump, in the resume leaf reset, in the reaper's deletes.
+in `Terminate`, in the `cohort_arrivals` bump, in the resume leaf reset, in the reaper's deletes.
 
 What is **not** delegated to the latch, and is still checked explicitly at each site: **`RowsAffected()==0`** - a
 zero-row match is a *semantic* outcome (a lost CAS, a terminal-status guard, the resume race gate), not an error, and
@@ -3655,7 +3648,7 @@ ordering:
   (the rationale is at `pureArrival` in `dispatch.go`). Mandatory - the failure modes are under "Write-ordering &
   lock contention" above. Do not reorder these to read-first.
 - **Steps-first.** The lifecycle mutations update `dwarf_steps` before `dwarf_flows`: `Resume`, `Terminate`,
-  `failStep`, `handleInterrupt`, and `Delete`/`Purge` (the deletes run steps-before-flows, ascending id).
+  `failStep`, `handleInterrupt`, and the reaper's tree delete (steps, then flows).
   `handleInterrupt` belongs here despite advancing the flow (running→interrupted): interrupt is
   **non-terminating** and marks no step `completed` in a prior standalone UPDATE, so it carries **no** orphan-strand
   obligation - its only write-first requirement is that the *first* statement be a write (the `UPDATE dwarf_steps`

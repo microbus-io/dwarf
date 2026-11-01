@@ -153,10 +153,10 @@ the engine refuses to pick one.
 Three ways to remove data:
 
 ```go
-// One flow and its whole subgraph tree. Refuses a running flow; terminates an interrupted one first.
+// One ended flow and its whole subgraph tree. Refuses a flow that has not ended: Terminate it first.
 eng.Delete(ctx, flowKey)
 
-// Everything matching a query, except running flows; interrupted ones are terminated first.
+// Every ended flow matching a query; flows that have not ended are skipped.
 count, err := eng.Purge(ctx, workflow.Query{
     Status:    workflow.StatusCompleted,
     OlderThan: 30 * 24 * time.Hour,
@@ -179,8 +179,8 @@ one-minute window comes before the reaper's pass — and `Snapshot` still answer
 them. If you need a hard immediate erasure guarantee, the marking is not it — verify the rows are gone.
 
 **A scheduled retention job is the normal pattern.** `Purge` marks at most 4,096 roots per call (fewer if
-`Query.Limit` is lower), divided across shards as `List` divides it, so a multi-shard call can mark slightly
-more. A retention sweep is a loop until it returns 0, not a single call. `OlderThan` is anchored to the database's clock and measured
+`Query.Limit` is lower), divided across shards (up to `ceil(Limit/shards)` each), so a multi-shard call can mark
+slightly more. A retention sweep is a loop until it returns 0, not a single call. `OlderThan` is anchored to the database's clock and measured
 from the flow's finish time, which is the right signal for "keep for 30 days after it ended."
 
 **Deleting a flow deletes its whole subgraph tree**, keyed on the tree root — children are not left behind.

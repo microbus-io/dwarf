@@ -77,8 +77,8 @@ which means both:
 
 ```go
 // no live work
-running, _, _ := eng.List(ctx, workflow.Query{Shard: 3, Status: workflow.StatusRunning})
-interrupted, _, _ := eng.List(ctx, workflow.Query{Shard: 3, Status: workflow.StatusInterrupted})
+running, _ := eng.List(ctx, workflow.Query{Shard: 3, Status: workflow.StatusRunning})
+interrupted, _ := eng.List(ctx, workflow.Query{Shard: 3, Status: workflow.StatusInterrupted})
 
 // and no terminal flow you still want readable
 count, _ := eng.Purge(ctx, workflow.Query{Shard: 3, OlderThan: 30 * 24 * time.Hour})

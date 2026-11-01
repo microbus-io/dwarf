@@ -18,7 +18,7 @@ package workflow
 
 import "time"
 
-// Query specifies filtering and pagination options for listing or purging flows.
+// Query specifies the filters and the limit for listing or purging flows.
 type Query struct {
 	Status      string `json:"status,omitzero"`
 	WorkflowURL string `json:"workflowURL,omitzero"`

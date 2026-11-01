@@ -15,9 +15,8 @@ limitations under the License.
 */
 
 /*
-List queries flows by status / workflow name, newest first, with opaque cursor
-pagination. This covers the List operation and the FlowSummary it returns, plus
-walking a multi-page result to exhaustion without overlap.
+List queries flows by status / workflow name, newest first. This covers the List
+operation and the FlowSummary it returns.
 */
 package fixtures
 

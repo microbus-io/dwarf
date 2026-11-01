@@ -33,7 +33,6 @@ import (
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
-	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -101,121 +100,6 @@ func TestCompleteFlowVsTerminate_BothOrders(t *testing.T) {
 		// Terminate now arrives on a terminal flow: a no-op, and the flow stays completed.
 		assert.NoError(e.Terminate(ctx, fk, "test"))
 		assert.Equal(workflow.StatusCompleted, enginetest.FlowStatus(t, e, fk))
-		enginetest.AssertInvariants(t, e)
-	})
-}
-
-// TestDeleteVsResume_BothOrders pins the Delete-vs-Resume race in both directions with BOTH operations frozen
-// at their pre-transaction checkpoints, released in a chosen order. Both gate on the flow being `interrupted`,
-// so exactly one wins the CAS: released Resume-first the flow revives (running) and Delete 409s (running
-// flow); released Delete-first the flow terminates and Resume's gate write finds it no longer interrupted and
-// rolls back with an honest 409. The Delete-wins direction mirrors the existing (single-freeze) TestDeleteResumeRace pin; the
-// Resume-wins direction is the untested mirror.
-func TestDeleteVsResume_BothOrders(t *testing.T) {
-	t.Parallel()
-	// newGate builds an interrupted flow whose gate task, on resume, BLOCKS on gateBlock - so a resumed flow
-	// rests `running` (not racing to completion) while the test inspects the Delete outcome.
-	newGate := func(t *testing.T, prefix string) (*engine.Engine, chan struct{}) {
-		assert := testarossa.For(t)
-		gateBlock := make(chan struct{})
-		mux := hosts.NewMux()
-		g := workflow.NewGraph("Gate")
-		g.SetURL("Gate", prefix+"/gate")
-		g.AddTransition("Gate", workflow.End)
-		assert.NoError(g.Validate())
-		mux.HandleGraph(prefix+"/g", g)
-		mux.HandleTask(prefix+"/gate", func(ctx context.Context, f *workflow.Flow) error {
-			yield, err := f.Interrupt(nil, nil)
-			if yield || err != nil {
-				return err
-			}
-			<-gateBlock // on resume, hold the flow running so Delete deterministically sees a running flow
-			return nil
-		})
-		e := engine.NewEngineUnderTest(t.Name())
-		e.SetHost(mux)
-		assert.NoError(e.Startup(t.Context()))
-		return e, gateBlock
-	}
-
-	createInterrupted := func(t *testing.T, e *engine.Engine, url string) string {
-		assert := testarossa.For(t)
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second*enginetest.TimeoutScale())
-		defer cancel()
-		fk, err := e.Create(ctx, url, nil, nil)
-		assert.NoError(err)
-		out, err := e.Await(ctx, fk)
-		assert.NoError(err)
-		if assert.NotNil(out) {
-			assert.Equal(workflow.StatusInterrupted, out.Status)
-		}
-		return fk
-	}
-
-	t.Run("resume_first", func(t *testing.T) {
-		assert := testarossa.For(t)
-		ctx := context.Background()
-		e, gateBlock := newGate(t, "dvr1")
-		defer e.Shutdown(ctx)
-		// Unblock the held task BEFORE the engine drains: deferred funcs unwind LIFO, so this
-		// close runs first and Shutdown never waits out a worker parked in the task body.
-		defer close(gateBlock)
-		fk := createInterrupted(t, e, "dvr1/g")
-
-		// Freeze both operations before their transactions, then launch them.
-		engineseams.Seams(e).Break(engineseams.CheckpointResumeBeforeFlowWrite)
-		engineseams.Seams(e).Break(engineseams.CheckpointBeforeDeleteWrite)
-		resumeDone := make(chan error, 1)
-		deleteDone := make(chan error, 1)
-		go func() { resumeDone <- e.Resume(ctx, fk, nil) }()
-		go func() { deleteDone <- e.Delete(ctx, fk) }()
-		assert.True(engineseams.Seams(e).WaitTimeout(ctx, engineseams.CheckpointResumeBeforeFlowWrite, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointResumeBeforeFlowWrite")
-		assert.True(engineseams.Seams(e).WaitTimeout(ctx, engineseams.CheckpointBeforeDeleteWrite, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeDeleteWrite")
-
-		// Resume wins: released first, it flips interrupted->running and returns cleanly (the gate re-dispatches
-		// and blocks, so the flow rests running).
-		engineseams.Seams(e).Resume(engineseams.CheckpointResumeBeforeFlowWrite)
-		assert.NoError(<-resumeDone)
-
-		// Delete now sees a running flow -> 409, and never stamps deletion.
-		engineseams.Seams(e).Resume(engineseams.CheckpointBeforeDeleteWrite)
-		delErr := <-deleteDone
-		assert.Error(delErr)
-		assert.Equal(409, errors.StatusCode(delErr))
-		assert.NotEqual(workflow.StatusTerminated, enginetest.FlowStatus(t, e, fk)) // Resume won; not terminated
-		enginetest.AssertInvariants(t, e)
-	})
-
-	t.Run("delete_first", func(t *testing.T) {
-		assert := testarossa.For(t)
-		ctx := context.Background()
-		e, gateBlock := newGate(t, "dvr2")
-		defer e.Shutdown(ctx)
-		// Unblock the held task BEFORE the engine drains: deferred funcs unwind LIFO, so this
-		// close runs first and Shutdown never waits out a worker parked in the task body.
-		defer close(gateBlock)
-		fk := createInterrupted(t, e, "dvr2/g")
-
-		engineseams.Seams(e).Break(engineseams.CheckpointResumeBeforeFlowWrite)
-		engineseams.Seams(e).Break(engineseams.CheckpointBeforeDeleteWrite)
-		resumeDone := make(chan error, 1)
-		deleteDone := make(chan error, 1)
-		go func() { resumeDone <- e.Resume(ctx, fk, nil) }()
-		go func() { deleteDone <- e.Delete(ctx, fk) }()
-		assert.True(engineseams.Seams(e).WaitTimeout(ctx, engineseams.CheckpointResumeBeforeFlowWrite, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointResumeBeforeFlowWrite")
-		assert.True(engineseams.Seams(e).WaitTimeout(ctx, engineseams.CheckpointBeforeDeleteWrite, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeDeleteWrite")
-
-		// Delete wins: released first, it flips interrupted->terminated and stamps deletion, returning cleanly.
-		engineseams.Seams(e).Resume(engineseams.CheckpointBeforeDeleteWrite)
-		assert.NoError(<-deleteDone)
-
-		// Resume now finds the flow no longer interrupted: its gate write matches zero rows, the whole
-		// transaction rolls back, and it returns an honest 409 (not a silent success).
-		engineseams.Seams(e).Resume(engineseams.CheckpointResumeBeforeFlowWrite)
-		resErr := <-resumeDone
-		assert.Error(resErr)
-		assert.Equal(409, errors.StatusCode(resErr))
-		assert.Equal(workflow.StatusTerminated, enginetest.FlowStatus(t, e, fk)) // Delete won
 		enginetest.AssertInvariants(t, e)
 	})
 }

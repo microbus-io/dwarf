@@ -131,7 +131,7 @@ outcome,  err := eng.Snapshot(ctx, flowKey)            // current status + state
 fp, status, err := eng.Fingerprint(ctx, flowKey)       // cheap change-detection token + status
 steps,    err := eng.History(ctx, flowKey)             // []workflow.FlowStep, the full execution record
 step,     err := eng.Step(ctx, stepKey)                // one step by key
-summaries, next, err := eng.List(ctx, query)           // paginated flow listing
+summaries, err := eng.List(ctx, query)                 // the newest matching flows, at most query.Limit
 ```
 
 `History` returns each step's task, depth, status, error, and timings — metadata only, **not** `state`/`changes`;
@@ -143,9 +143,10 @@ fairness key, priority, time window, shard, free-text `Search`, `Limit`) and ret
 created first; see [Retention](#retention) for the same query shape.
 
 **`List` returns at most `Limit` flows (default 100): the newest that match, across every shard.** It has no
-pagination, because flows change constantly: to see other flows, narrow the filters or the time window
-(`OlderThan` set from the oldest `UpdatedAt` you hold reaches flows last updated before it, with no promise that
-nothing moved in between). The order across shards compares the creation times each shard's database recorded,
+pagination, because flows change constantly: to see other flows, narrow the filters or the time window.
+`OlderThan` filters on when a flow last changed status, not on when it was created, so it is not a next page:
+set from the oldest `UpdatedAt` you hold, it reaches flows last updated before then, and can skip or repeat
+flows. The order across shards compares the creation times each shard's database recorded,
 so flows created within the clock skew between two shard servers may be listed out of order.
 
 ## Pausing and resuming
@@ -260,17 +261,18 @@ The engine never auto-purges — every flow is potentially resurrectable (resume
 retention explicitly:
 
 ```go
-err := eng.Delete(ctx, flowKey)          // schedule one flow (and its subtree) for deletion; refuses a running flow
-count, err := eng.Purge(ctx, query)      // schedule matching flows (except running) for deletion, capped at 4096
+err := eng.Delete(ctx, flowKey)          // schedule one ended flow (and its subtree) for deletion
+count, err := eng.Purge(ctx, query)      // schedule the matching ended flows for deletion, capped at 4096
 ```
 
 `Delete` and `Purge` **mark** flows for deletion (they do not delete inline); a background reaper removes each
 flow's whole subgraph subtree shortly after. The marked flow drops out of `List` and `History` immediately, so
-it is logically gone even though the row lingers briefly. An `interrupted` flow is first terminated exactly as
-`Terminate` would, subgraphs included; if a `Resume` gets there first, the flow is running again, so `Delete`
-returns 409 and `Purge` skips it. `Purge` returns the count of roots marked, at most 4096 per call (fewer if
-`Query.Limit` is lower). `Purge` divides `Limit` across shards, each marking up to `ceil(Limit/shards)`, so a
-multi-shard call can mark slightly more.
+it is logically gone even though the row lingers briefly. Both remove only flows that have ended: `Delete` of a
+running or interrupted flow returns 409 and `Purge` skips one, so `Terminate` a flow first to delete it. A
+`Purge` whose `Status` names a status that has not ended (`running`, `interrupted`) returns 400. `Purge` returns
+the count of roots marked, at most 4096 per call (fewer if `Query.Limit` is lower). `Purge` divides `Limit` across
+shards, each marking up to `ceil(Limit/shards)`, so a multi-shard call can mark slightly more. `Delete` and
+`Purge` are for removing specific flows; for routine retention, a scheduled `Purge` by `OlderThan` is the tool.
 
 `Purge` takes the same `workflow.Query` as `List`. `OlderThan` / `NewerThan` are database-anchored and
 compose (e.g. "completed, older than 30 days"):
@@ -322,20 +324,19 @@ Each operation adds these to the 503 and 500 every call can return:
 | `Snapshot`, `Fingerprint` | malformed key | unknown flow | | |
 | `History` | malformed key | unknown flow, or one scheduled for deletion | | |
 | `Step` | malformed key | unknown step | | |
-| `List`, `Purge` | invalid status or shard, a negative `OlderThan` or `NewerThan`; `Purge` with no filter (`Shard` and `Limit` are not filters) or with `IncludeSubgraphs` | | | |
-| `Resume` | malformed key, a subgraph child's key, data not JSON-marshalable | unknown flow | | the flow is not interrupted, including when a `Delete` or `Terminate` won the race |
+| `List`, `Purge` | invalid status or shard, a negative `OlderThan` or `NewerThan`; `Purge` with no filter (`Shard` and `Limit` are not filters), with `IncludeSubgraphs`, or with a `Status` that has not ended | | | |
+| `Resume` | malformed key, a subgraph child's key, data not JSON-marshalable | unknown flow | | the flow is not interrupted, including when a `Terminate` won the race |
 | `Cancel`, `Terminate` | malformed key, a subgraph child's key, a reason over 4,096 bytes or not valid UTF-8 without NUL | unknown flow | | |
 | `Fork` | malformed key, overrides not JSON-marshalable | unknown step | | the flow is not terminal, is scheduled for deletion, or holds an unresolved interrupt off the fork path |
 | `Continue` | malformed key, a subgraph child's key, `additionalState` not JSON-marshalable | unknown flow | | the flow is not completed, or is scheduled for deletion |
-| `Delete` | malformed key, a subgraph child's key | unknown flow | | the flow is running, including when a `Resume` won the race |
+| `Delete` | malformed key, a subgraph child's key | unknown flow | | the flow has not ended |
 
 A 413 comes from the operations that take a value in: `Create` and `Run` (the initial state or the baggage),
 `Continue` (the new flow's initial state, with `additionalState` folded in), `Resume` (the resume data) and
 `Fork` (the fork step's state, with the overrides applied).
 
 A 501 comes from the operations that read a flow's step data: `Step`, `Fork`, and `Snapshot`, `Await`, `Poll`
-and `Run` on an interrupted flow. The 503 from a `Terminate` that did not settle can also come from `Delete` and
-`Purge`, which terminate an interrupted flow first.
+and `Run` on an interrupted flow.
 
 Stopping or deleting what is already stopped or deleted is not an error. `Cancel` and `Terminate` on a flow
 that has ended, and `Delete` on a flow already scheduled for deletion, return nil and change nothing, so a

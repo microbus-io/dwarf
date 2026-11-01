@@ -14,11 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Deterministic race pins for two deferred-deletion behaviors, driven by the fault seam instead of a timing
-// hammer:
-//   - Resume-loses-to-Delete: a pause fault holds resume() before its transaction so a Delete can win the
-//     race every run, proving resume 409s and rolls its step writes back (vs. the stochastic
-//     TestDeleteResumeRace, which only hits this branch probabilistically).
+// Deterministic race pins, driven by the seams instead of a timing hammer:
+//   - Resume-loses-to-Terminate: a checkpoint holds resume() before its transaction so a Terminate can win the
+//     race every run, proving resume 409s and rolls its step writes back.
 //   - Reaper-deletes-a-running-descendant: the reaper removes the whole root_flow_id tree regardless of
 //     descendant status, so a live orphan under a terminal root is reaped (deleteFlow guards only the root).
 package engine
@@ -37,12 +35,12 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestResumeLosesToDelete_Deterministic pins the Resume-vs-Delete race: when a Delete terminalizes an interrupted flow in the
-// window after Resume's status check but before its transaction, Resume's in-transaction gate write matches
-// zero rows and the whole transaction rolls back - so Resume returns 409 (never a false success) and leaves
-// no trace of its step writes (the leaf stays `interrupted`, not flipped to `pending`). The pause fault makes
-// the Delete-wins ordering deterministic instead of relying on goroutine timing.
-func TestResumeLosesToDelete_Deterministic(t *testing.T) {
+// TestResumeLosesToTerminate_Deterministic pins the Resume-vs-Terminate race: when a Terminate terminalizes an
+// interrupted flow in the window after Resume's status check but before its transaction, Resume's in-transaction
+// gate write matches zero rows and the whole transaction rolls back - so Resume returns 409 (never a false success)
+// and leaves no trace of its step writes (no step flipped to `pending`). The checkpoint makes the Terminate-wins
+// ordering deterministic instead of relying on goroutine timing.
+func TestResumeLosesToTerminate_Deterministic(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -89,9 +87,9 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 
 	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointResumeBeforeFlowWrite, 10*time.Second), "Resume never reached the checkpoint")
 
-	// Resume is frozen before its flow-status gate write. Drive a Delete to completion: it flips the flow
-	// interrupted->terminated and stamps delete_after_ms under the flow-row lock.
-	assert.NoError(e.Delete(ctx, fk))
+	// Resume is frozen before its flow-status gate write. Drive a Terminate to completion: it flips the flow
+	// interrupted->terminated under the flow-row lock.
+	assert.NoError(e.Terminate(ctx, fk, "test"))
 
 	// Release Resume: its transaction now runs, the gate write finds the flow no longer interrupted, and the
 	// whole transaction rolls back.
@@ -105,15 +103,13 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 		return
 	}
 
-	// The flow is terminated (Delete won) with a live deletion stamp.
+	// The flow is terminated (Terminate won).
 	var status string
-	var deleteAfterMs int
-	assert.NoError(db.QueryRowContext(ctx, "SELECT status, delete_after_ms FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&status, &deleteAfterMs))
+	assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&status))
 	assert.Equal(workflow.StatusTerminated, status)
-	assert.True(deleteAfterMs > 0)
 
-	// Resume's step writes rolled back: no step was flipped to `pending`, and the leaf is `terminated` - Delete
-	// terminated the tree as Terminate would, and Resume added nothing to it. A Resume that ignored its gate
+	// Resume's step writes rolled back: no step was flipped to `pending`, and the leaf is `terminated` - Resume
+	// added nothing to the tree Terminate stopped. A Resume that ignored its gate
 	// would have left the leaf `pending` and returned nil.
 	var pending, terminated int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusPending+"'", flowID).Scan(&pending))
@@ -121,14 +117,6 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 	assert.Equal(0, pending)
 	assert.Equal(1, terminated)
 
-	// The reaper then removes the whole tree, resolving the transient state cleanly. The reaper's due-check is
-	// `DATE_ADD_MILLIS(updated_at, delete_after_ms) <= NOW_UTC()`; Delete stamped delete_after_ms=1 but left
-	// updated_at at the (just-now) interrupt time, so whether the row is due hinges on sub-ms wall-clock timing
-	// - flaky. Backdate updated_at 60s so the due moment is unconditionally in the past and the reap fires every run.
-	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE flow_id=?", -60000, flowID)
-	assert.NoError(err)
-	e.reapDueFlows(ctx)
-	assert.Equal(0, shardFlowCount(t, e, shardNum))
 }
 
 // TestReaperDeletesRunningDescendant pins the reaper's tree-delete: it removes the whole root_flow_id tree regardless of
@@ -651,119 +639,4 @@ func TestRetryRewindVsTerminate_Deterministic(t *testing.T) {
 	assert.Equal(0, attempt)                            // rewind did not bump the attempt
 	assert.Equal(1, aRuns)                              // no re-dispatch
 	enginetest.AssertInvariants(t, e)
-}
-
-// TestDeleteVsResume_ResumeWinsInsideTerminate pins the onlyIfInterrupted gate: a Delete or Purge that has read
-// the flow as interrupted and is about to terminate its tree loses to a Resume that commits in between. The flow
-// stays running, unmarked, and Delete answers 409 while Purge marks nothing.
-func TestDeleteVsResume_ResumeWinsInsideTerminate(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	mux := hosts.NewMux()
-	g := workflow.NewGraph("Gate")
-	g.SetURL("Gate", "dvrin/gate")
-	g.AddTransition("Gate", workflow.End)
-	mux.HandleGraph("dvrin/g", g)
-	hold := make(chan struct{})
-	mux.HandleTask("dvrin/gate", func(ctx context.Context, f *workflow.Flow) error {
-		yield, err := f.Interrupt(nil, nil)
-		if yield || err != nil {
-			return err
-		}
-		<-hold // resumed: keep the flow running while the test inspects it
-		return nil
-	})
-
-	e := NewEngineUnderTest(t.Name())
-	defer e.Shutdown(t.Context())
-	defer close(hold) // declared after Shutdown's defer, so it unwinds first and frees the held worker
-	e.SetHost(mux)
-	if !assert.NoError(e.Startup(t.Context())) {
-		return
-	}
-
-	for _, op := range []string{"delete", "purge"} {
-		t.Run(op, func(t *testing.T) {
-			assert := testarossa.For(t)
-			ctx := t.Context()
-			fk := createInterruptedFlow(t, e, "dvrin/g")
-			shard, _, flowID, _, err := keys.ParseFlowKey(fk)
-			assert.NoError(err)
-
-			e.seams.Break(engineseams.CheckpointTerminateAfterScan)
-			opDone := make(chan error, 1)
-			var marked int
-			go func() {
-				if op == "delete" {
-					opDone <- e.Delete(ctx, fk)
-					return
-				}
-				n, err := e.Purge(ctx, workflow.Query{Status: workflow.StatusInterrupted})
-				marked = n
-				opDone <- err
-			}()
-			assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointTerminateAfterScan, 10*time.Second), "the operation never reached terminateSubtree")
-
-			assert.NoError(e.Resume(ctx, fk, nil))
-			e.seams.Resume(engineseams.CheckpointTerminateAfterScan)
-			opErr := <-opDone
-			if op == "delete" {
-				assert.Equal(409, errors.StatusCode(opErr))
-			} else {
-				assert.NoError(opErr)
-				assert.Equal(0, marked)
-			}
-			assert.Equal(1, enginetest.CountRows(t, e, shard,
-				"SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusRunning+"' AND delete_after_ms=0", flowID),
-				"the resumed flow was terminated or marked")
-		})
-	}
-}
-
-// TestPurge_ResumedAndCompletedRootIsNotMarked pins Purge's stamp against a root it selected as interrupted that
-// a Resume revived and that then ran to completion before Purge's terminate: the tree has settled, so the
-// terminate is a no-op, and the completed root no longer matches the query. It stays unmarked.
-func TestPurge_ResumedAndCompletedRootIsNotMarked(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	ctx := t.Context()
-	mux := hosts.NewMux()
-	g := workflow.NewGraph("Gate")
-	g.SetURL("Gate", "prcrm/gate")
-	g.AddTransition("Gate", workflow.End)
-	mux.HandleGraph("prcrm/g", g)
-	mux.HandleTask("prcrm/gate", func(ctx context.Context, f *workflow.Flow) error {
-		_, err := f.Interrupt(nil, nil)
-		return err
-	})
-
-	e := NewEngineUnderTest(t.Name())
-	defer e.Shutdown(t.Context())
-	e.SetHost(mux)
-	if !assert.NoError(e.Startup(t.Context())) {
-		return
-	}
-
-	fk := createInterruptedFlow(t, e, "prcrm/g")
-	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
-	assert.NoError(err)
-
-	e.seams.Break(engineseams.CheckpointTerminateAfterScan)
-	purgeDone := make(chan error, 1)
-	var marked int
-	go func() {
-		n, err := e.Purge(ctx, workflow.Query{Status: workflow.StatusInterrupted})
-		marked = n
-		purgeDone <- err
-	}()
-	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointTerminateAfterScan, 10*time.Second), "Purge never reached terminateSubtree")
-
-	assert.NoError(e.Resume(ctx, fk, nil))
-	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
-	e.seams.Resume(engineseams.CheckpointTerminateAfterScan)
-	assert.NoError(<-purgeDone)
-	assert.Equal(0, marked)
-	assert.Equal(1, enginetest.CountRows(t, e, shard,
-		"SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusCompleted+"' AND delete_after_ms=0", flowID),
-		"the completed flow was marked for deletion")
 }

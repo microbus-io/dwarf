@@ -784,7 +784,7 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 
 	// The root has no ancestors by construction, so this walks DOWN only - see terminateSubtree, which the orphan
 	// sweep shares.
-	return errors.Trace(e.terminateSubtree(ctx, shardNum, flowID, flowHour, flowToken, reason, false, engineseams.FaultTerminateCommit))
+	return errors.Trace(e.terminateSubtree(ctx, shardNum, flowID, flowHour, flowToken, reason, engineseams.FaultTerminateCommit))
 }
 
 // cancel marks every pending, running or interrupted step in the tree with cancelling=1. Each marked step
@@ -952,14 +952,10 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	return nil
 }
 
-// deleteFlow schedules a flow (and its subgraph subtree) for deletion by the reaper - it does NOT delete rows
-// inline. It stamps delete_after_ms=1 (due immediately) on the root; the reaper removes the whole tree on its
-// next pass. Only a terminal root is stamped, so a live delete_after_ms never coexists with a resumable flow.
-//
-// An interrupted flow is terminated first, exactly as Terminate would (terminateSubtree): its whole tree is
-// stopped, given a final state and counted in dwarf_flows_ended once. Deleting a pending approval is terminating
-// it. A racing Resume and Delete serialize on the root's row: whichever commits first wins, and a Delete that
-// loses is a 409, as for any running flow.
+// deleteFlow schedules an ended flow (and its subgraph subtree) for deletion by the reaper - it does NOT delete
+// rows inline. It stamps delete_after_ms=1 (due immediately) on the root; the reaper removes the whole tree on its
+// next pass. A flow that has not ended is a 409: the caller terminates it first, so a live delete_after_ms never
+// coexists with a resumable flow, and nothing a Delete does can race a Resume.
 func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	shardNum, flowHour, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
@@ -976,9 +972,6 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	ctx, doneTurn := e.opTurn(ctx, shardNum, "delete")
 	defer doneTurn()
 
-	// Test checkpoint: a breakpoint here freezes Delete just before it reads the flow's status (holding no lock,
-	// so a racing Resume can commit), letting a test drive the Delete-vs-Resume race in either order.
-	e.seams.Checkpoint(ctx, engineseams.CheckpointBeforeDeleteWrite)
 	var flowStatus string
 	var surgraphFlowID, deleteAfterMs int
 	err = db.QueryRowContext(ctx,
@@ -1001,20 +994,11 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	// the only running descendant a terminal-rooted tree can hold is a live orphan (which only a bug leaves) the
 	// wedge sweep would terminate anyway, and a worker mid-dispatch on it no-ops via the lease fence (see
 	// reapDueFlows).
-	if flowStatus == workflow.StatusRunning {
-		return errors.New("cannot delete a running flow; terminate it first", http.StatusConflict)
+	if !workflow.IsTerminalStatus(flowStatus) {
+		return errors.New("flow has not ended (status: %s); terminate it first", flowStatus, http.StatusConflict)
 	}
 	if deleteAfterMs > 0 {
 		return nil // already scheduled - idempotent
-	}
-	if flowStatus == workflow.StatusInterrupted {
-		err = e.terminateSubtree(ctx, shardNum, flowID, flowHour, flowToken, "deleted", true, "")
-		if errors.Is(err, errRootNotInterrupted) {
-			return errors.New("cannot delete a running flow; terminate it first", http.StatusConflict)
-		}
-		if err != nil {
-			return errors.Trace(err)
-		}
 	}
 	_, err = db.ExecContext(ctx,
 		"UPDATE dwarf_flows SET delete_after_ms=1 WHERE flow_id=? AND flow_token=? AND created_hour=? AND status IN ("+terminalStatusesSQL+") AND delete_after_ms=0",
@@ -1055,7 +1039,7 @@ func (e *Engine) awaitStopped(ctx context.Context, flowKey string) (*workflow.Fl
 }
 
 // errResumeLost is an in-transaction sentinel: the root flow was terminalized by a concurrent
-// Delete/Terminate between resume's pre-tx status read and its own writes, so the transaction must roll
+// Terminate between resume's pre-tx status read and its own writes, so the transaction must roll
 // back (undoing the step re-park/leaf-reset) and the caller must 409 rather than falsely report success.
 var errResumeLost = errors.New("resume lost to a concurrent terminalization")
 
@@ -1143,9 +1127,9 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	}
 
 	// Test-only checkpoint: a breakpoint here lets a test freeze resume before its transaction so a racing
-	// Delete/Terminate can commit its interrupted->terminated flip deterministically, then confirm the gate
+	// Terminate can commit its interrupted->terminated flip deterministically, then confirm the gate
 	// write below rolls this transaction back (409) instead of falsely succeeding. Placed *before* the
-	// transaction, not mid-tx: on SQLite the racing Delete would deadlock against this transaction's write
+	// transaction, not mid-tx: on SQLite the racing Terminate would deadlock against this transaction's write
 	// lock if frozen inside it. No-op in production.
 	e.seams.Checkpoint(ctx, engineseams.CheckpointResumeBeforeFlowWrite)
 
@@ -1171,16 +1155,12 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 		tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, resume_data=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusInterrupted+"'",
 			workflow.StatusPending, resumeDataJSON, leafStepID)
 
-		// Race gate against a concurrent Delete/Terminate. The step writes above are unconditional (their
-		// WHERE status='interrupted' still matches, because Delete terminalizes the flow row without
-		// touching steps), so without this gate a Delete that flipped the root interrupted→terminated first
-		// would let resume re-park ancestors and reset the leaf, then match 0 rows on the flow update below,
-		// and still return success - a resume that did not take effect reported as if it had, leaving a
-		// transient terminated-flow-with-non-terminal-steps until the reaper mops it. The root flow row is the
-		// serialization point: this guarded lock takes the row and confirms it is still interrupted.
-		// A zero-row match means Delete/Terminate won - roll the whole transaction back and 409, mutually
-		// exclusive with Delete's own WHERE status='interrupted'. flowID is always the root here
-		// (subgraph-child keys were rejected above), which is exactly the row Delete/Terminate terminalize.
+		// Race gate against a concurrent Terminate. A Terminate that committed first has terminated the tree's
+		// steps, so the step writes above matched nothing and the flow update below would match nothing too:
+		// without this gate resume would return success for a resume that did not take effect. The root flow
+		// row is the serialization point: this guarded lock takes the row and confirms it is still interrupted.
+		// A zero-row match means Terminate won - roll the whole transaction back and 409. flowID is always the
+		// root here (subgraph-child keys were rejected above), which is exactly the row Terminate terminalizes.
 		n, gerr := lockFlowRows(ctx, tx, "flow_id=? AND status='"+workflow.StatusInterrupted+"'", flowID)
 		if gerr != nil {
 			return gerr
@@ -1231,6 +1211,10 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 	if query.IncludeSubgraphs {
 		return 0, errors.New("purge cannot include subgraphs; a subgraph child is purged with its root", http.StatusBadRequest)
 	}
+	// Purge removes only ended flows, so a status filter naming any other status could only ever match nothing.
+	if query.Status != "" && workflow.IsValidStatus(query.Status) && !workflow.IsTerminalStatus(query.Status) {
+		return 0, errors.New("purge removes only ended flows; status %q has not ended", query.Status, http.StatusBadRequest)
+	}
 	// Cap the matched-root count per call so the per-shard id list embedded into each DELETE's `IN (...)`
 	// predicate stays well under the size where the optimizer struggles. This is not just a slow-plan concern:
 	// on SQL Server a large enough literal IN-list can *fail* to plan outright (errors 8623 "query processor
@@ -1277,61 +1261,37 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 			args = append(args, scArgs...)
 		}
 		args = append(args, perShardLimit)
-		// Purge MARKS, it does not delete: select candidate roots (not running, not already scheduled), terminate
-		// any that are interrupted exactly as Delete does (terminateSubtree), then stamp delete_after_ms=1 (due
-		// immediately) on the terminal ones so the reaper removes each tree on its next pass.
-		selectIDs := "SELECT DISTINCT f.flow_id, f.flow_token, f.created_hour, f.status FROM dwarf_flows f" + joinSQL +
-			" WHERE " + where + " AND f.status<>'" + workflow.StatusRunning + "' AND f.delete_after_ms=0 ORDER BY f.flow_id LIMIT_OFFSET(?, 0)"
+		// Purge MARKS, it does not delete: select ended candidate roots not already scheduled, then stamp
+		// delete_after_ms=1 (due immediately) so the reaper removes each tree on its next pass.
+		selectIDs := "SELECT DISTINCT f.flow_id FROM dwarf_flows f" + joinSQL +
+			" WHERE " + where + " AND f.status IN (" + terminalStatusesSQL + ") AND f.delete_after_ms=0 ORDER BY f.flow_id LIMIT_OFFSET(?, 0)"
 		rows, err := db.QueryContext(ctx, selectIDs, args...)
 		if err != nil {
 			return errors.Trace(err)
 		}
 		var flowIDs []int
-		var interruptedIDs []int
-		var interruptedTokens []string
-		var interruptedHours []int
 		for rows.Next() {
-			var fid, hour int
-			var token, status string
-			err := rows.Scan(&fid, &token, &hour, &status)
-			if err != nil {
+			var fid int
+			if err := rows.Scan(&fid); err != nil {
 				rows.Close()
 				return errors.Trace(err)
 			}
 			flowIDs = append(flowIDs, fid)
-			if status == workflow.StatusInterrupted {
-				interruptedIDs = append(interruptedIDs, fid)
-				interruptedTokens = append(interruptedTokens, token)
-				interruptedHours = append(interruptedHours, hour)
-			}
 		}
 		rows.Close()
-		err = rows.Err()
-		if err != nil {
+		if err := rows.Err(); err != nil {
 			return errors.Trace(err)
 		}
 		if len(flowIDs) == 0 {
 			return nil
 		}
-		for i, fid := range interruptedIDs {
-			err = e.terminateSubtree(ctx, shardIdx, fid, interruptedHours[i], interruptedTokens[i], "purged", true, "")
-			if err != nil && !errors.Is(err, errRootNotInterrupted) {
-				return errors.Trace(err)
-			}
-		}
 
-		// One set-based UPDATE per shard, stamping only terminal roots. ids are trusted integers embedded as
-		// literals to dodge the per-driver bind-param ceiling. The count returned is roots MARKED (reaped shortly
-		// after). A root selected as interrupted is stamped only if it is now terminated: one a Resume revived
-		// since the SELECT is running, or has already completed or failed, and no longer matches the query. Do not
-		// re-apply the query's WHERE instead - the terminate itself moves the root off a Status or OlderThan filter.
-		revived := ""
-		if len(interruptedIDs) > 0 {
-			revived = " AND (status='" + workflow.StatusTerminated + "' OR flow_id NOT IN (" + intCSV(interruptedIDs) + "))"
-		}
+		// One set-based UPDATE per shard. ids are trusted integers embedded as literals to dodge the per-driver
+		// bind-param ceiling. The count returned is roots MARKED (reaped shortly after). An ended flow never changes
+		// status again, so no re-check against the query is needed; the terminal guard is defense in depth.
 		res, err := db.ExecContext(ctx,
 			"UPDATE dwarf_flows SET delete_after_ms=1"+
-				" WHERE flow_id IN ("+intCSV(flowIDs)+") AND status IN ("+terminalStatusesSQL+") AND delete_after_ms=0"+revived,
+				" WHERE flow_id IN ("+intCSV(flowIDs)+") AND status IN ("+terminalStatusesSQL+") AND delete_after_ms=0",
 		)
 		if err != nil {
 			return errors.Trace(err)

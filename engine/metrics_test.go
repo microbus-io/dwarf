@@ -984,8 +984,8 @@ func TestMetrics_TerminateCountsOnlyTheFlowsItEnded(t *testing.T) {
 
 // TestMetrics_StartedAndEndedBalanceAcrossTrees pins that every flow counted in dwarf_flows_started is counted
 // once in dwarf_flows_ended, for the paths that start or end a whole subgraph tree at once: a Fork at a step
-// inside a subgraph (which clones every flow on the path to it running), and a Delete or Purge of an
-// interrupted root whose interrupted subgraph child would otherwise never end.
+// inside a subgraph (which clones every flow on the path to it running), and a Terminate of an interrupted root,
+// which ends its interrupted subgraph child too.
 func TestMetrics_StartedAndEndedBalanceAcrossTrees(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -1056,19 +1056,13 @@ func TestMetrics_StartedAndEndedBalanceAcrossTrees(t *testing.T) {
 		return flowKey
 	}
 
-	t.Run("delete_interrupted_tree", func(t *testing.T) {
+	t.Run("terminate_interrupted_tree", func(t *testing.T) {
 		assert := testarossa.For(t)
 		flowKey := parkedTree(t)
-		assert.NoError(eng.Delete(ctx, flowKey))
+		assert.NoError(eng.Terminate(ctx, flowKey, "stop"))
 		balanced(t)
-	})
-
-	t.Run("purge_interrupted_tree", func(t *testing.T) {
-		assert := testarossa.For(t)
-		parkedTree(t)
-		n, err := eng.Purge(ctx, workflow.Query{Status: workflow.StatusInterrupted})
-		assert.NoError(err)
-		assert.Equal(1, n)
+		// Deleting the ended tree counts nothing more.
+		assert.NoError(eng.Delete(ctx, flowKey))
 		balanced(t)
 	})
 }
