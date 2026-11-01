@@ -655,7 +655,7 @@ func drainFleet(ctx context.Context, engines []*engine.Engine, quiet time.Durati
 	}
 	lastEnded, lastTasks, lastMove := ended(), tasksStarted.Load(), time.Now()
 	for ctx.Err() == nil {
-		page, _, err := engines[0].List(ctx, workflow.Query{Status: workflow.StatusRunning, Limit: 1})
+		page, err := engines[0].List(ctx, workflow.Query{Status: workflow.StatusRunning, Limit: 1})
 		if err == nil && len(page) == 0 {
 			return time.Since(start).Seconds(), false
 		}

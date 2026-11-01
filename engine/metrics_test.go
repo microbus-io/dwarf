@@ -1169,7 +1169,7 @@ func TestMetrics_OperationSeconds(t *testing.T) {
 	assert.NoError(err)
 	_, err = eng.Continue(ctx, flowKey, nil)
 	assert.NoError(err)
-	_, _, err = eng.List(ctx, workflow.Query{})
+	_, err = eng.List(ctx, workflow.Query{})
 	assert.NoError(err)
 	_, err = eng.ShardInfo(ctx)
 	assert.NoError(err)

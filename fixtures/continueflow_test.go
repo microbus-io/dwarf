@@ -113,7 +113,7 @@ func TestContinueInheritsPolicy(t *testing.T) {
 	assert.NoError(err)
 
 	// Priority inherited (4), not reset to the engine default.
-	summaries, _, err := eng.List(ctx, workflow.Query{Search: turn2})
+	summaries, err := eng.List(ctx, workflow.Query{Search: turn2})
 	assert.NoError(err)
 	if assert.Len(summaries, 1) {
 		assert.Equal(4, summaries[0].Priority)

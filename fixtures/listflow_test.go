@@ -67,7 +67,7 @@ func TestListflow(t *testing.T) {
 	t.Run("list_by_workflow_url_returns_all", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flows, _, err := eng.List(ctx, workflow.Query{WorkflowURL: "listflow.verify:428/list"})
+		flows, err := eng.List(ctx, workflow.Query{WorkflowURL: "listflow.verify:428/list"})
 		if !assert.NoError(err) {
 			return
 		}
@@ -84,7 +84,7 @@ func TestListflow(t *testing.T) {
 	t.Run("list_by_status_completed", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flows, _, err := eng.List(ctx, workflow.Query{
+		flows, err := eng.List(ctx, workflow.Query{
 			WorkflowURL: "listflow.verify:428/list",
 			Status:      workflow.StatusCompleted,
 		})
@@ -92,41 +92,6 @@ func TestListflow(t *testing.T) {
 			return
 		}
 		assert.Equal(total, len(flows))
-	})
-
-	t.Run("cursor_pagination_walks_all_pages_without_overlap", func(t *testing.T) {
-		assert := testarossa.For(t)
-
-		seen := map[string]bool{}
-		cursor := ""
-		pages := 0
-		for {
-			flows, next, err := eng.List(ctx, workflow.Query{
-				WorkflowURL: "listflow.verify:428/list",
-				Limit:       2,
-				Cursor:      cursor,
-			})
-			if !assert.NoError(err) {
-				return
-			}
-			pages++
-			for _, fs := range flows {
-				assert.False(seen[fs.FlowKey], "flow %s appeared on two pages", fs.FlowKey)
-				seen[fs.FlowKey] = true
-			}
-			if next == "" {
-				break
-			}
-			cursor = next
-			if !assert.True(pages <= total+2, "pagination did not terminate") {
-				return
-			}
-		}
-		// Every created flow surfaced exactly once across the pages.
-		assert.Equal(total, len(seen))
-		for fk := range created {
-			assert.True(seen[fk], "flow %s missing from paginated results", fk)
-		}
 	})
 
 	// Runs last: it adds flows under the same workflow name, which would change the by-workflow-name
@@ -151,14 +116,14 @@ func TestListflow(t *testing.T) {
 		assert.NoError(err)
 
 		// FairnessKey narrows to that key only.
-		flows, _, err := eng.List(ctx, workflow.Query{FairnessKey: "tenantA"})
+		flows, err := eng.List(ctx, workflow.Query{FairnessKey: "tenantA"})
 		if !assert.NoError(err) {
 			return
 		}
 		assert.Equal(2, len(flows))
 
 		// Priority combines with FairnessKey for an exact slice.
-		flows, _, err = eng.List(ctx, workflow.Query{FairnessKey: "tenantB", Priority: 4})
+		flows, err = eng.List(ctx, workflow.Query{FairnessKey: "tenantB", Priority: 4})
 		if !assert.NoError(err) {
 			return
 		}
@@ -166,7 +131,7 @@ func TestListflow(t *testing.T) {
 		assert.Equal(fkB, flows[0].FlowKey)
 
 		// A key/priority combination with no flows yields nothing.
-		flows, _, err = eng.List(ctx, workflow.Query{FairnessKey: "tenantA", Priority: 4})
+		flows, err = eng.List(ctx, workflow.Query{FairnessKey: "tenantA", Priority: 4})
 		if !assert.NoError(err) {
 			return
 		}

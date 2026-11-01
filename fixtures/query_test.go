@@ -74,7 +74,7 @@ func TestQuery_WorkflowName(t *testing.T) {
 	}
 
 	// List by WorkflowName returns only the matching graph's flows.
-	got, _, err := e.List(ctx, workflow.Query{WorkflowName: "AlphaFlow"})
+	got, err := e.List(ctx, workflow.Query{WorkflowName: "AlphaFlow"})
 	assert.NoError(err)
 	assert.Equal(alphas, len(got))
 	for _, s := range got {
@@ -83,12 +83,12 @@ func TestQuery_WorkflowName(t *testing.T) {
 	}
 
 	// A non-matching name returns nothing.
-	none, _, err := e.List(ctx, workflow.Query{WorkflowName: "Nope"})
+	none, err := e.List(ctx, workflow.Query{WorkflowName: "Nope"})
 	assert.NoError(err)
 	assert.Equal(0, len(none))
 
 	// Search matches the display name as a substring.
-	searched, _, err := e.List(ctx, workflow.Query{Search: "betaflow"})
+	searched, err := e.List(ctx, workflow.Query{Search: "betaflow"})
 	assert.NoError(err)
 	assert.Equal(betas, len(searched))
 
@@ -96,7 +96,7 @@ func TestQuery_WorkflowName(t *testing.T) {
 	deleted, err := e.Purge(ctx, workflow.Query{WorkflowName: "AlphaFlow"})
 	assert.NoError(err)
 	assert.Equal(alphas, deleted)
-	remaining, _, err := e.List(ctx, workflow.Query{})
+	remaining, err := e.List(ctx, workflow.Query{})
 	assert.NoError(err)
 	assert.Equal(betas, len(remaining))
 }
@@ -130,7 +130,7 @@ func TestQuery_StatusFilter(t *testing.T) {
 	}
 
 	// Valid status with matches.
-	completed, _, err := e.List(ctx, workflow.Query{Status: workflow.StatusCompleted})
+	completed, err := e.List(ctx, workflow.Query{Status: workflow.StatusCompleted})
 	assert.NoError(err)
 	assert.Equal(n, len(completed))
 	for _, s := range completed {
@@ -138,12 +138,12 @@ func TestQuery_StatusFilter(t *testing.T) {
 	}
 
 	// Valid status with no matches (all flows completed, none failed).
-	failed, _, err := e.List(ctx, workflow.Query{Status: workflow.StatusFailed})
+	failed, err := e.List(ctx, workflow.Query{Status: workflow.StatusFailed})
 	assert.NoError(err)
 	assert.Equal(0, len(failed))
 
 	// An unknown status is rejected before it can reach the (literal-inlined) SQL.
-	_, _, err = e.List(ctx, workflow.Query{Status: "bogus'; DROP TABLE dwarf_flows;--"})
+	_, err = e.List(ctx, workflow.Query{Status: "bogus'; DROP TABLE dwarf_flows;--"})
 	assert.Error(err)
 	assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
 }
@@ -192,7 +192,7 @@ func TestQuery_SearchEscapesWildcards(t *testing.T) {
 
 	// "_" is a wildcard in an unescaped LIKE (would match all 4 flows); escaped, it matches only the one
 	// flow whose display name contains a literal underscore.
-	underscore, _, err := e.List(ctx, workflow.Query{Search: "_"})
+	underscore, err := e.List(ctx, workflow.Query{Search: "_"})
 	assert.NoError(err)
 	assert.Equal(1, len(underscore))
 	if len(underscore) == 1 {
@@ -201,12 +201,12 @@ func TestQuery_SearchEscapesWildcards(t *testing.T) {
 
 	// "%" is a wildcard too (would match all); no display name/URL contains a literal percent, so escaped
 	// it matches nothing.
-	percent, _, err := e.List(ctx, workflow.Query{Search: "%"})
+	percent, err := e.List(ctx, workflow.Query{Search: "%"})
 	assert.NoError(err)
 	assert.Equal(0, len(percent))
 
 	// A plain substring search still works - the escaping only neutralizes metacharacters.
-	byName, _, err := e.List(ctx, workflow.Query{Search: "under_score"})
+	byName, err := e.List(ctx, workflow.Query{Search: "under_score"})
 	assert.NoError(err)
 	assert.Equal(1, len(byName))
 }
@@ -240,14 +240,14 @@ func TestQuery_SearchByFlowKey(t *testing.T) {
 		flowKeys = append(flowKeys, k)
 	}
 
-	found, _, err := e.List(ctx, workflow.Query{Search: flowKeys[1]})
+	found, err := e.List(ctx, workflow.Query{Search: flowKeys[1]})
 	if assert.NoError(err) && assert.Len(found, 1) {
 		assert.Equal(flowKeys[1], found[0].FlowKey)
 	}
 	marked, err := e.Purge(ctx, workflow.Query{Search: flowKeys[2]})
 	assert.NoError(err)
 	assert.Equal(1, marked)
-	rest, _, err := e.List(ctx, workflow.Query{})
+	rest, err := e.List(ctx, workflow.Query{})
 	if assert.NoError(err) {
 		assert.Len(rest, 2) // a flow marked for deletion is out of List at once
 	}

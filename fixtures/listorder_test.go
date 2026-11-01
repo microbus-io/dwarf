@@ -27,16 +27,11 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestList_NewestFirstIsPerShardNotGlobal pins what List's ordering actually IS, because the docs long
-// promised something it is not ("newest first", flat) and the tempting "fix" is a real regression.
-//
-// A page is newest-first WITHIN a shard and shard-GROUPED across them: on two shards, List returns shard 1's
-// newest flows, then shard 2's newest - so shard 2's newest flow follows shard 1's oldest returned one, and
-// the concatenation is not one descending time order. There is no cross-shard order to give: flow ids are
-// per-shard sequences (a shard with fewer flows has lower ids, so they do not compare), and merging by
-// created_at - the obvious repair - would compare two different database servers' CLOCKS. The docs say
-// "newest first per shard"; this test is what stops someone "fixing" the code into a global-order promise.
-func TestList_NewestFirstIsPerShardNotGlobal(t *testing.T) {
+// TestList_NewestFirstAcrossShards pins List's top-N: at most Limit flows, the newest by creation time across every
+// shard. Each shard reads its own newest Limit and the union is cut to Limit, so a page is neither grouped by shard
+// nor a per-shard share of Limit: with Limit 10 over two shards, a shard holding all ten newest flows supplies all
+// ten.
+func TestList_NewestFirstAcrossShards(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -56,60 +51,35 @@ func TestList_NewestFirstIsPerShardNotGlobal(t *testing.T) {
 	assert.NoError(e.Startup(ctx))
 
 	// Enough flows that placement (a weighted-random pick) lands some on each shard with overwhelming odds.
-	for range 30 {
+	const total = 30
+	for range total {
 		_, err := e.Create(ctx, "listorder/g", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}
 	}
 
-	flows, _, err := e.List(ctx, workflow.Query{Limit: 100})
-	if !assert.NoError(err) {
+	all, err := e.List(ctx, workflow.Query{Limit: 100})
+	if !assert.NoError(err) || !assert.Len(all, total) {
 		return
 	}
-	assert.Equal(30, len(flows))
-
-	// The page is grouped by shard: each shard's rows are contiguous, so a shard index is never revisited
-	// after the page has moved on from it.
-	var shardRuns []int
-	seen := map[int]bool{}
-	prev := 0
-	perShard := map[int][]workflow.FlowSummary{}
-	for _, f := range flows {
+	shards := map[int]bool{}
+	for i, f := range all {
 		shard, _, _, _, err := keys.ParseFlowKey(f.FlowKey)
-		if !assert.NoError(err) {
-			return
-		}
-		perShard[shard] = append(perShard[shard], f)
-		if shard != prev {
-			assert.False(seen[shard], "shard %d's rows are not contiguous: List must be shard-grouped", shard)
-			seen[shard] = true
-			shardRuns = append(shardRuns, shard)
-			prev = shard
+		assert.NoError(err)
+		shards[shard] = true
+		if i > 0 {
+			assert.False(f.CreatedAt.After(all[i-1].CreatedAt), "row %d is newer than the one before it", i)
 		}
 	}
-	assert.Equal(2, len(shardRuns), "both shards must contribute (placement is random; 30 flows over 2 shards)")
+	assert.Len(shards, 2, "both shards must contribute (placement is random; 30 flows over 2 shards)")
 
-	// Within a shard, newest first holds exactly.
-	for shard, rows := range perShard {
-		for i := 1; i < len(rows); i++ {
-			assert.False(rows[i].CreatedAt.After(rows[i-1].CreatedAt),
-				"shard %d row %d is newer than the one before it: within a shard, List is newest-first", shard, i)
-		}
+	// A smaller Limit is a hard cap, and it keeps the newest: exactly the first ten of the whole list.
+	newest, err := e.List(ctx, workflow.Query{Limit: 10})
+	if !assert.NoError(err) || !assert.Len(newest, 10) {
+		return
 	}
-
-	// And the flat concatenation is NOT globally newest-first: at the shard boundary the page jumps back to
-	// the next shard's newest flow. Asserting the violation is present is the honest way to pin "no global
-	// order is promised" - if a future change ever did sort the page globally, this fails loudly and the docs
-	// get updated on purpose rather than drifting back into a lie. (Stated as an existential over the page,
-	// so a millisecond tie between two adjacent rows cannot flake it.)
-	globallyDescending := true
-	for i := 1; i < len(flows); i++ {
-		if flows[i].CreatedAt.After(flows[i-1].CreatedAt) {
-			globallyDescending = false
-			break
-		}
+	for i, f := range newest {
+		assert.Equal(all[i].FlowKey, f.FlowKey, "row %d", i)
 	}
-	assert.False(globallyDescending,
-		"the page came back globally newest-first; List's contract is per-shard order + shard grouping, so either the ordering changed (update the docs deliberately) or the two shards did not both contribute")
 }

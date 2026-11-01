@@ -100,7 +100,7 @@ func TestDisposableflow(t *testing.T) {
 	if assert.Error(err) {
 		assert.Equal(http.StatusNotFound, errors.StatusCode(err))
 	}
-	roots, _, err := eng.List(ctx, workflow.Query{WorkflowURL: "disposable.verify:428/parent"})
+	roots, err := eng.List(ctx, workflow.Query{WorkflowURL: "disposable.verify:428/parent"})
 	if assert.NoError(err) {
 		assert.Equal(0, len(roots))
 	}

@@ -63,7 +63,7 @@ func TestPurge_EveryListFilterNarrows(t *testing.T) {
 	n, err := e.Purge(ctx, workflow.Query{FairnessKey: "tenantA"})
 	assert.NoError(err)
 	assert.Equal(1, n)
-	summaries, _, err := e.List(ctx, workflow.Query{WorkflowURL: "pf/g"})
+	summaries, err := e.List(ctx, workflow.Query{WorkflowURL: "pf/g"})
 	assert.NoError(err)
 	var keys []string
 	for _, s := range summaries {
@@ -108,10 +108,10 @@ func TestPurge_NegativeDurationIsRejected(t *testing.T) {
 	} {
 		_, err := e.Purge(ctx, q)
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "Purge %+v", q)
-		_, _, err = e.List(ctx, q)
+		_, err = e.List(ctx, q)
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "List %+v", q)
 	}
-	summaries, _, err := e.List(ctx, workflow.Query{WorkflowURL: "pn/g"})
+	summaries, err := e.List(ctx, workflow.Query{WorkflowURL: "pn/g"})
 	assert.NoError(err)
 	if assert.Len(summaries, 1) {
 		assert.Equal(flowKey, summaries[0].FlowKey, "nothing was marked")

@@ -83,7 +83,7 @@ func TestPurgeSubgraphflow(t *testing.T) {
 
 	// The child exists before the purge.
 	includeSubs := workflow.Query{WorkflowURL: "purgesub.verify:428/inner", IncludeSubgraphs: true}
-	subs, _, err := eng.List(ctx, includeSubs)
+	subs, err := eng.List(ctx, includeSubs)
 	assert.NoError(err)
 	assert.Equal(1, len(subs))
 
@@ -108,7 +108,7 @@ func TestPurgeSubgraphflow(t *testing.T) {
 		if assert.Error(err) {
 			assert.Equal(http.StatusNotFound, errors.StatusCode(err))
 		}
-		roots, _, err := eng.List(ctx, workflow.Query{WorkflowURL: "purgesub.verify:428/parent"})
+		roots, err := eng.List(ctx, workflow.Query{WorkflowURL: "purgesub.verify:428/parent"})
 		assert.NoError(err)
 		assert.Equal(0, len(roots))
 	})

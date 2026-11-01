@@ -90,7 +90,7 @@ func TestWideflow(t *testing.T) {
 		}
 		// The root rests interrupted at the first leaf's interrupt, so wait for every one of them.
 		awaitPropagatedInterrupts(t, eng, flowKey, width)
-		trees, _, err := eng.List(ctx, workflow.Query{WorkflowURL: "wideflow.verify:428/tree", IncludeSubgraphs: true})
+		trees, err := eng.List(ctx, workflow.Query{WorkflowURL: "wideflow.verify:428/tree", IncludeSubgraphs: true})
 		if !assert.NoError(err) || !assert.Len(trees, 1) {
 			return
 		}
@@ -112,7 +112,7 @@ func TestWideflow(t *testing.T) {
 		if assert.NoError(err) {
 			assert.Equal(workflow.StatusTerminated, out.Status)
 		}
-		terminated, _, err := eng.List(ctx, workflow.Query{WorkflowURL: "wideflow.verify:428/pause", IncludeSubgraphs: true, Status: workflow.StatusTerminated, Limit: 2 * width})
+		terminated, err := eng.List(ctx, workflow.Query{WorkflowURL: "wideflow.verify:428/pause", IncludeSubgraphs: true, Status: workflow.StatusTerminated, Limit: 2 * width})
 		if assert.NoError(err) {
 			assert.Len(terminated, width)
 		}
@@ -133,7 +133,7 @@ func TestWideflow(t *testing.T) {
 			return
 		}
 		for _, url := range []string{"wideflow.verify:428/donetree", "wideflow.verify:428/leaf"} {
-			left, _, err := eng.List(ctx, workflow.Query{WorkflowURL: url, IncludeSubgraphs: true, Limit: 2 * width})
+			left, err := eng.List(ctx, workflow.Query{WorkflowURL: url, IncludeSubgraphs: true, Limit: 2 * width})
 			if assert.NoError(err) {
 				assert.Len(left, 0, "%s flows left after the retry", url)
 			}

@@ -235,7 +235,7 @@ func TestCreatedHour_EveryRowCarriesItsFlowsHour(t *testing.T) {
 		assert.Equal(stepHours[stepID], h, "step key %s", s.StepKey)
 		assert.Equal(movedHour, h, "step key %s is the root's", s.StepKey)
 	}
-	summaries, _, err := e.List(ctx, workflow.Query{})
+	summaries, err := e.List(ctx, workflow.Query{})
 	assert.NoError(err)
 	assert.Len(summaries, 3) // the roots: the original, its turn and the fork
 	for _, s := range summaries {

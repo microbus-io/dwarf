@@ -31,7 +31,7 @@ import (
 // listedTask returns the StoppedTaskName List reports for flowKey.
 func listedTask(t *testing.T, eng *engine.Engine, flowKey string) string {
 	assert := testarossa.For(t)
-	flows, _, err := eng.List(context.Background(), workflow.Query{Search: flowKey})
+	flows, err := eng.List(context.Background(), workflow.Query{Search: flowKey})
 	if !assert.NoError(err) {
 		return ""
 	}
@@ -181,7 +181,7 @@ func TestStoppedTask_Linear(t *testing.T) {
 		assert.Equal(workflow.StatusFailed, out.Status)
 		assert.Equal("Second", listedTask(t, eng, flowKey))
 
-		flows, _, err := eng.List(ctx, workflow.Query{WorkflowURL: "stoppedtask.verify:428/linear", Status: workflow.StatusFailed, StoppedTaskName: "Second"})
+		flows, err := eng.List(ctx, workflow.Query{WorkflowURL: "stoppedtask.verify:428/linear", Status: workflow.StatusFailed, StoppedTaskName: "Second"})
 		assert.NoError(err)
 		if assert.Len(flows, 1) {
 			assert.Equal(flowKey, flows[0].FlowKey)

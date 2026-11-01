@@ -729,7 +729,7 @@ func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
 	is503("History", err)
 	_, err = e2.Await(ctx, flowKey)
 	is503("Await", err)
-	_, _, err = e2.List(ctx, workflow.Query{}) // unguarded, it returns an EMPTY LIST and no error
+	_, err = e2.List(ctx, workflow.Query{}) // unguarded, it returns an EMPTY LIST and no error
 	is503("List", err)
 	_, err = e2.Purge(ctx, workflow.Query{}) // unguarded, it returns 0 marked and no error
 	is503("Purge", err)

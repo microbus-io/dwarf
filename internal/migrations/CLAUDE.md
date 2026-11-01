@@ -324,8 +324,8 @@ set that covers a cross-product, and adding one per filter would tax the write p
 screen. So most `List` filters are deliberately unindexed (see the `fairness_key` catalog row), and that is a
 decision, not an omission.
 
-**In particular, `idx_dwarf_flows_status` cannot serve `List`'s `ORDER BY f.flow_id DESC` + `flow_id` cursor,
-and does not need to.** Do not add `(status, flow_id)` for it. Measured on
+**In particular, `idx_dwarf_flows_status` cannot serve `List`'s `ORDER BY f.flow_id DESC LIMIT`, and does not
+need to.** Do not add `(status, flow_id)` for it. Measured on
 Postgres (500k flows: 499,600 `completed`, 400 `failed`), the two plans the planner actually picks are
 self-balancing:
 
@@ -337,14 +337,13 @@ self-balancing:
 
 A **rare** status has a small band, so sorting it is cheap. A **common** status makes the backward PK scan
 optimal - it finds the first 100 matches in ~101 rows, and is **~67x cheaper** than the index path would be. The
-planner *chooses* the PK scan there; it is not "falling back," and the cursor is not what keeps it cheap. Cost is
+planner *chooses* the PK scan there; it is not "falling back." Cost is
 bounded by `min(band, ~limit/selectivity)`; the only genuinely expensive case is a status band that is large in absolute terms (e.g. 100k `interrupted`), on a cold operator path.
 
-**And do NOT "fix" it by dropping the `ORDER BY`.** It is what makes the cursor correct: pagination is keyset
-(`flow_id < cursor`, cursor = the smallest `flow_id` returned). Unordered, page 1 returns an arbitrary subset
-and page 2 asks for `flow_id < min(page 1)` - so every match above that id which page 1 did not happen to return
-is **silently never shown**. `flow_id` is the cursor precisely because it is immutable; `updated_at` moves on
-every status transition, so keyset-paginating in the index's own order would shuffle rows between pages.
+**And do NOT "fix" it by dropping the `ORDER BY`.** It is what makes each shard's read its NEWEST `Limit` rows,
+which the engine's cross-shard merge by `created_at` assumes (`engine/CLAUDE.md`, "`List` is a cross-shard
+top-N"). Unordered, a shard returns an arbitrary `Limit` matches, and newer flows it did not happen to return are
+silently left out of the merge.
 
 ### Status predicates are inlined literals, not bound parameters
 

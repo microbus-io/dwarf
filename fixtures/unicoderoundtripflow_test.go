@@ -140,7 +140,7 @@ func TestUnicoderoundtripflow(t *testing.T) {
 
 	// --- the `graph` column: a corrupt graph fails to unmarshal long before this, but assert the
 	// display name explicitly so the failure names the cause rather than surfacing as a decode error ---
-	summaries, _, err := eng.List(ctx, workflow.Query{})
+	summaries, err := eng.List(ctx, workflow.Query{})
 	if assert.NoError(err) && assert.True(len(summaries) > 0) {
 		assert.Equal("Ünicödé 日本語 Graph", summaries[0].WorkflowName, "the stored graph must round-trip")
 	}

@@ -133,7 +133,7 @@ func TestDeletecascadeflow(t *testing.T) {
 	if assert.Error(err) {
 		assert.Equal(404, errors.StatusCode(err))
 	}
-	roots, _, err := eng.List(ctx, workflow.Query{IncludeSubgraphs: true})
+	roots, err := eng.List(ctx, workflow.Query{IncludeSubgraphs: true})
 	if assert.NoError(err) {
 		for _, s := range roots {
 			assert.NotEqual(flowKey, s.FlowKey)

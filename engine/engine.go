@@ -1407,23 +1407,16 @@ func (e *Engine) Step(ctx context.Context, stepKey string) (step *workflow.FlowS
 	return e.step(ctx, stepKey)
 }
 
-// List queries flows by status, workflow name, and the other Query filters, newest first, with cursor pagination
-// (Query.Limit, default 100; the returned cursor fetches the next page). Query.Limit is a per-shard cap
-// divided across shards, not a hard ceiling on the total: a multi-shard page can hold up to
-// shards*ceil(Limit/shards) summaries (see Query.Limit). Pass Query.Shard, or truncate the page, for a
-// strict count.
+// List returns the newest flows matching query's filters, at most Query.Limit of them (default 100), newest
+// created first across every shard queried. It has no pagination: flows change constantly, so a caller wanting
+// different flows narrows the filters or the time window. OlderThan, set from the oldest UpdatedAt it holds,
+// reaches flows last updated before that, with no promise that nothing moved in between.
 //
-// "Newest first" is per shard, not global. On a MULTI-SHARD fleet each shard contributes its own newest
-// flows and the results are grouped by shard, so the concatenation is not in one descending time order -
-// shard 2's newest flow follows shard 1's oldest returned one. There is no cross-shard order to give: the
-// flow ids are per-shard sequences (a shard with fewer flows has lower ids, so they do not compare), and
-// creation times would compare different database servers' clocks. A single-shard engine - the default - is
-// globally newest-first. A caller that needs one ordered view across shards sorts the page itself, choosing
-// what to trust; a UI that must not show interleaving artifacts can page one shard at a time with
-// Query.Shard.
-func (e *Engine) List(ctx context.Context, query workflow.Query) (summaries []workflow.FlowSummary, nextCursor string, err error) {
+// The order across shards compares the creation times recorded by each shard's own database, so flows created
+// within the clock skew between two shard servers may be listed out of order.
+func (e *Engine) List(ctx context.Context, query workflow.Query) (summaries []workflow.FlowSummary, err error) {
 	if err := e.ensureStarted(); err != nil {
-		return nil, "", errors.Trace(err)
+		return nil, errors.Trace(err)
 	}
 	return e.list(ctx, query)
 }

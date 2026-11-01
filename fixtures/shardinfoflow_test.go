@@ -86,7 +86,7 @@ func TestShardinfoflow(t *testing.T) {
 		totalFlows := 0
 		nonEmptyShards := 0
 		for i := 1; i <= numShards; i++ {
-			flows, _, err := eng.List(ctx, workflow.Query{Shard: i, Limit: total})
+			flows, err := eng.List(ctx, workflow.Query{Shard: i, Limit: total})
 			if !assert.NoError(err) {
 				return
 			}

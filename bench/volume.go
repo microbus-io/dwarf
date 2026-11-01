@@ -41,8 +41,7 @@ import (
 //   - fill steps/s        - the refiller's band scan and the claim CAS at depth. Flat = the selection
 //     index still seeks; a decay = the hot path started scanning the accumulated backlog.
 //   - History latency     - the root_flow_id tree scan plus the per-flow step scan on a real tree.
-//   - List first/deep     - keyset (cursor) pagination. First-page ~= deep-page is the proof it is a
-//     seek per page, not a growing scan; a rising deep-page cost would mean OFFSET-like behavior.
+//   - List latency        - the newest 100 flows, a primary-key scan per shard however large the table.
 //   - disk MB             - the "append-only terminal sections" fragmentation claim against a real B-tree.
 //   - throughput (with -volume-probe) - the fill pauses at each checkpoint, including the empty database at
 //     the start, for an open-loop SATURATED window and then one at 2/3 of the flows/s it measured, both at
@@ -62,8 +61,6 @@ type volumeCheckpoint struct {
 	FillStepsPerSec float64 `json:"fillStepsPerSec"` // since the previous checkpoint
 	HistoryMs       float64 `json:"historyMs"`
 	ListFirstMs     float64 `json:"listFirstMs"`
-	ListDeepMs      float64 `json:"listDeepMs"`
-	ListPagesWalked int     `json:"listPagesWalked"`
 	StepsDiskMB     float64 `json:"stepsDiskMB"`
 	FlowsDiskMB     float64 `json:"flowsDiskMB"`
 	// RowCountError is why the exact row count failed at this checkpoint; StepRows is then the estimate that
@@ -256,8 +253,8 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 		lastT = time.Now()
 	}
 	fill()
-	fmt.Printf("%-7s %11s %10s %12s %10s %10s %10s %9s %9s\n",
-		"t(s)", "stepRows", "flowRows", "fillSteps/s", "histMs", "listMs", "listDeepMs", "stepsMB", "flowsMB")
+	fmt.Printf("%-7s %11s %10s %12s %10s %10s %9s %9s\n",
+		"t(s)", "stepRows", "flowRows", "fillSteps/s", "histMs", "listMs", "stepsMB", "flowsMB")
 
 	// nextAfter is the first checkpoint past rows, or the target once none is left.
 	nextAfter := func(rows int) int {
@@ -319,13 +316,13 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 		if cerr != nil {
 			cp.RowCountError = cerr.Error()
 		}
-		cp.HistoryMs, cp.ListFirstMs, cp.ListDeepMs, cp.ListPagesWalked = probeReads(ctx, engines[0], recentKey.Load().(string))
+		cp.HistoryMs, cp.ListFirstMs = probeReads(ctx, engines[0], recentKey.Load().(string))
 		st := dbs.sample(ctx)
 		cp.StepsDiskMB = float64(st.StepsBytes) / (1 << 20)
 		cp.FlowsDiskMB = float64(st.FlowsBytes) / (1 << 20)
-		fmt.Printf("%-7.0f %11d %10d %12.0f %10.1f %10.1f %10.1f %9.1f %9.1f\n",
+		fmt.Printf("%-7.0f %11d %10d %12.0f %10.1f %10.1f %9.1f %9.1f\n",
 			cp.TSec, cp.StepRows, cp.FlowRows, cp.FillStepsPerSec,
-			cp.HistoryMs, cp.ListFirstMs, cp.ListDeepMs, cp.StepsDiskMB, cp.FlowsDiskMB)
+			cp.HistoryMs, cp.ListFirstMs, cp.StepsDiskMB, cp.FlowsDiskMB)
 		done := steps >= targetSteps
 		if len(checkpointsMB) > 0 {
 			done = done || cp.StepsDiskMB >= checkpointsMB[len(checkpointsMB)-1]
@@ -427,7 +424,7 @@ func drainRunning(ctx context.Context, eng *engine.Engine) {
 	deadline := time.Now().Add(10 * time.Minute)
 	for time.Now().Before(deadline) {
 		lctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		running, _, err := eng.List(lctx, workflow.Query{Status: workflow.StatusRunning, Limit: 1})
+		running, err := eng.List(lctx, workflow.Query{Status: workflow.StatusRunning, Limit: 1})
 		cancel()
 		if err == nil && len(running) == 0 {
 			return
@@ -464,9 +461,8 @@ func rowCounts(ctx context.Context, eng *engine.Engine) (steps, flows int, err e
 	return steps, flows, nil
 }
 
-// probeReads times the read paths at the current volume: History on one real flow, the first List page,
-// and a page reached by walking the cursor (keyset pagination should make the two indistinguishable).
-func probeReads(ctx context.Context, eng *engine.Engine, flowKey string) (historyMs, listFirstMs, listDeepMs float64, pages int) {
+// probeReads times the read paths at the current volume: History on one real flow, and List.
+func probeReads(ctx context.Context, eng *engine.Engine, flowKey string) (historyMs, listMs float64) {
 	pctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
@@ -478,22 +474,8 @@ func probeReads(ctx context.Context, eng *engine.Engine, flowKey string) (histor
 	}
 
 	t := time.Now()
-	_, cursor, err := eng.List(pctx, workflow.Query{Limit: 100})
-	if err != nil {
-		return historyMs, 0, 0, 0
+	if _, err := eng.List(pctx, workflow.Query{Limit: 100}); err == nil {
+		listMs = float64(time.Since(t)) / float64(time.Millisecond)
 	}
-	listFirstMs = float64(time.Since(t)) / float64(time.Millisecond)
-
-	// Walk the cursor to a depth that would expose an OFFSET-shaped cost, timing only the last page.
-	const walk = 50
-	for pages = 1; pages < walk && cursor != ""; pages++ {
-		t = time.Now()
-		var summaries []workflow.FlowSummary
-		summaries, cursor, err = eng.List(pctx, workflow.Query{Limit: 100, Cursor: cursor})
-		listDeepMs = float64(time.Since(t)) / float64(time.Millisecond)
-		if err != nil || len(summaries) == 0 {
-			break
-		}
-	}
-	return historyMs, listFirstMs, listDeepMs, pages
+	return historyMs, listMs
 }

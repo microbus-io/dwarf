@@ -69,7 +69,7 @@ func TestSearchLiteralflow(t *testing.T) {
 
 	// searchURLs returns the set of workflow URLs matched by a Search term.
 	searchURLs := func(term string) map[string]bool {
-		flows, _, err := eng.List(ctx, workflow.Query{Search: term})
+		flows, err := eng.List(ctx, workflow.Query{Search: term})
 		assert.NoError(err)
 		got := map[string]bool{}
 		for _, s := range flows {

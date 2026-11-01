@@ -142,7 +142,7 @@ func runSoak(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 				return
 			case <-t.C:
 				pctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-				_, _, _ = engines[0].List(pctx, workflow.Query{Limit: 100})
+				_, _ = engines[0].List(pctx, workflow.Query{Limit: 100})
 				n, err := engines[0].Purge(pctx, workflow.Query{Status: workflow.StatusCompleted, OlderThan: 90 * time.Second})
 				cancel()
 				if err == nil {

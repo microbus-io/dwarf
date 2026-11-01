@@ -483,9 +483,8 @@ steps have `Subgraph=true` with nested `SubHistory` and the child's `SubgraphKey
 retry, the same one `SubHistory` shows), so a caller can `Snapshot` what the child returned. `Step` returns one step by key **with** its `state`/`changes`
 (refs resolved) - it is the payload-bearing reader; use it when you need a step's actual data.
 
-**List** - Queries flows by status, workflow URL and the other `Query` filters, with cursor pagination (newest first **per shard**
-- see "`List` uses per-shard pagination" under Database Sharding; single-shard, the default, is globally
-newest-first - default 100).
+**List** - Returns at most `Query.Limit` (default 100) flows matching the `Query` filters, newest created first
+across shards, with no pagination (see "`List` is a cross-shard top-N" under Database Sharding).
 Returns a `Subgraph` bool in each `workflow.FlowSummary`. By default it returns **root flows only**;
 `Query.IncludeSubgraphs` adds subgraph children to the results. Combined with `WorkflowURL` (a graph that runs only
 as a subgraph has no root flows under that URL) this locates every run of a graph that executed as a subgraph.
@@ -4006,31 +4005,24 @@ operator's to weight down; `dwarf_operation_seconds{op,shard}` is what lets them
 placement entirely (everything resident proceeds - execution, subgraph children, `Continue`, `Fork`); all
 shards cordoned is a loud 503 at `Create`. Pinned by `engine/poolsizing_test.go`.
 
-**`List` uses per-shard pagination, not cross-shard global order.** Each shard returns up to `ceil(limit/numShards)`
-rows by its own `flow_id DESC`; the aggregate is shard-grouped. Cross-shard ordering by `created_at` would compare
-different servers' clocks, and by `flow_id` alone is broken (a shard with fewer flows has lower ids). Pagination uses
-an opaque cursor encoding each shard's smallest-returned `flow_id`. `List` is strict by design: any shard error fails
-the whole call (the per-shard debug path is `ShardInfo` + `List(Shard=N)`).
+**`List` is a cross-shard top-N, merged by `created_at`.** Each shard reads its own newest `Limit` by `flow_id DESC`
+(the PK scan); the engine sorts the union by `created_at` DESC (ties: shard, then `flow_id` DESC) and keeps the
+first `Limit`. `List` is strict: any shard error fails the whole call (the per-shard debug path is `ShardInfo` +
+`List(Shard=N)`).
 
-*Say this out loud in the public docs, do not quietly promise "newest first".* The Operations summary above, the
-`List` godoc, `Query.Limit`, and `docs/flows.md` must not advertise a global newest-first order, which on a
-two-shard fleet visibly is not: `List(Limit:100)` returns shard 1's 50 newest, then shard 2's 50 newest, so shard 2's
-newest flow follows shard 1's oldest returned one - a reverse-chronological UI renders that as an interleaving
-artifact. The answer is the **doc**, not the code: merging by `created_at` (the tempting one) is exactly what the
-clock-comparison argument above rejects, and there is no other cross-shard key. A caller needing one ordered view
-sorts the page itself - deciding what to trust - or pages a single shard with `Query.Shard`. Pinned by
-`TestList_NewestFirstIsPerShardNotGlobal`, which also asserts the global-order violation is *present*, so the code is
-never "fixed" into a global-order promise by accident.
+- **Do not divide `Limit` across shards to read less.** A per-shard share drops a shard's flows that are newer
+  than everything another shard returned. The cost of the full read is `shards x Limit` rows per call, accepted
+  because `List` is an operator and UI call off the hot path.
+- **`created_at` compares two servers' clocks, so the order is only as good as their skew.** Flows created within
+  the skew of each other can swap, or swap across the cut. That is harmless for "the newest N now", and the godoc
+  says it; it is why `List` must not grow a cursor or any promise of a stable walk over this merge: a cursor
+  keyed on a skewed order would skip or repeat flows between pages. `flow_id` cannot order across shards at all
+  (a shard with fewer flows has lower ids).
+- **`Purge` still divides `Limit`**: `ceil(Limit/shards)` per shard, results concatenated, so a call can mark up
+  to `shards * ceil(Limit/shards)` roots. Its godoc and `docs/flows.md` say so.
 
-**`Query.Limit` is a per-shard cap, not a hard total - same honesty, same reason.** `perShardLimit =
-ceil(Limit/shards)` (`query.go`) is applied to each shard's query and the results are concatenated with no final
-truncation, so a multi-shard page returns up to `shards * ceil(Limit/shards)` rows (`Limit:10` on 4 shards → up to 12;
-`Limit:1` → up to 4). `purge` divides identically, so `Purge` can mark more than `Limit` roots. This is
-documented rather than clamped **on purpose**: truncating the assembled slice would advance each shard's cursor
-(`nextPerShard[s]`, set from the last row scanned per shard) past rows never handed to the caller, silently dropping
-them from the next page - the per-shard cursor is exactly why there is no global OFFSET to truncate against. A caller
-needing a strict total truncates its own copy (leaving the returned cursor untouched) or pages one shard at a time.
-The public `Query.Limit`/`List`/`Purge` godocs and `docs/flows.md` state this.
+Pinned by `TestList_NewestFirstAcrossShards` (globally descending, and a smaller `Limit` returns exactly the
+newest `Limit`).
 
 **The shard set is immutable at runtime.** `SetShard` is construction-time only: it records index->DSN pairs before
 `Startup` (which opens+migrates exactly those shards) and is **rejected** on a running engine, so the set never

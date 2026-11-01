@@ -20,7 +20,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"maps"
 	"net/http"
 	"sort"
 	"strconv"
@@ -33,7 +32,7 @@ import (
 	"github.com/microbus-io/sequel"
 )
 
-func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.FlowSummary, string, error) {
+func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.FlowSummary, error) {
 	limit := query.Limit
 	if limit <= 0 {
 		limit = 100
@@ -42,40 +41,20 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 
 	joinSQL, whereSQL, baseArgs, err := e.queryClauses(query, subgraphCondition(query.IncludeSubgraphs))
 	if err != nil {
-		return nil, "", errors.Trace(err)
-	}
-	restrictShardNum := query.Shard
-
-	perShardCursor := map[int]int{}
-	if query.Cursor != "" {
-		for part := range strings.SplitSeq(query.Cursor, ",") {
-			s, fid, ok := strings.Cut(part, "=")
-			if !ok {
-				return nil, "", errors.New("malformed cursor", http.StatusBadRequest)
-			}
-			si, sErr := strconv.Atoi(s)
-			fi, fErr := strconv.Atoi(fid)
-			if sErr != nil || fErr != nil || si < 1 {
-				return nil, "", errors.New("malformed cursor", http.StatusBadRequest)
-			}
-			perShardCursor[si] = fi
-		}
-	}
-
-	singleShard := restrictShardNum != 0
-	perShardLimit := limit
-	if !singleShard && len(indices) > 0 {
-		perShardLimit = max((limit+len(indices)-1)/len(indices), 1)
+		return nil, errors.Trace(err)
 	}
 
 	type listRow struct {
 		summary workflow.FlowSummary
+		shard   int
 		flowID  int
 	}
 	perShard := make([][]listRow, len(indices))
 
+	// Each shard reads its own newest limit, and the union is cut to limit by creation time below. Dividing the
+	// limit across shards instead would drop a shard's flows that are newer than everything another shard returned.
 	err = e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
-		if restrictShardNum != 0 && shardIdx != restrictShardNum {
+		if query.Shard != 0 && shardIdx != query.Shard {
 			return nil
 		}
 		// A turn on each shard it reads, so this queues for that shard's connections like any other caller
@@ -85,15 +64,11 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 		// Exclude flows scheduled for deletion (delete_after_ms>0): they are logically gone, awaiting the reaper.
 		conditions := []string{whereSQL, "f.delete_after_ms=0"}
 		args := append([]any(nil), baseArgs...)
-		if cur, ok := perShardCursor[shardIdx]; ok {
-			conditions = append(conditions, "f.flow_id<?")
-			args = append(args, cur)
-		}
 		if sc, scArgs := searchClause(db.DriverName(), shardIdx, query.Search); sc != "" {
 			conditions = append(conditions, sc)
 			args = append(args, scArgs...)
 		}
-		args = append(args, perShardLimit)
+		args = append(args, limit)
 		stmt := "SELECT f.flow_id, f.flow_token, f.created_hour, f.workflow_url, f.workflow_name, f.status, s.task_name, f.error, f.cancel_reason, f.created_at, f.started_at, f.updated_at, f.priority, f.fairness_key, f.surgraph_flow_id, f.trace_parent" +
 			" FROM dwarf_flows f" + joinSQL +
 			" WHERE " + strings.Join(conditions, " AND ") +
@@ -105,7 +80,7 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 		defer rows.Close()
 		var shardRows []listRow
 		for rows.Next() {
-			var lr listRow
+			lr := listRow{shard: shardIdx}
 			var flowToken, flowError, cancelReason, traceParent string
 			var flowHour, surgraphFlowID int
 			var taskName sql.NullString
@@ -128,48 +103,31 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 		return rows.Err()
 	})
 	if err != nil {
-		return nil, "", errors.Trace(err)
+		return nil, errors.Trace(err)
 	}
 
-	nextPerShard := map[int]int{}
-	maps.Copy(nextPerShard, perShardCursor)
-	var flows []workflow.FlowSummary
-	for _, s := range indices {
-		rows := perShard[pos[s]]
-		if len(rows) == 0 {
-			continue
-		}
-		nextPerShard[s] = rows[len(rows)-1].flowID
-		for _, lr := range rows {
-			flows = append(flows, lr.summary)
-		}
+	var merged []listRow
+	for _, rows := range perShard {
+		merged = append(merged, rows...)
 	}
-	anyAdvance := false
-	for s, fid := range nextPerShard {
-		if cur, had := perShardCursor[s]; !had || cur != fid {
-			anyAdvance = true
-			break
+	// Newest created first across shards. created_at comes from each shard's own clock, so flows created within the
+	// skew between two shard servers may swap; the tie-break keeps the order deterministic.
+	sort.Slice(merged, func(i, j int) bool {
+		a, b := merged[i], merged[j]
+		if !a.summary.CreatedAt.Equal(b.summary.CreatedAt) {
+			return a.summary.CreatedAt.After(b.summary.CreatedAt)
 		}
+		if a.shard != b.shard {
+			return a.shard < b.shard
+		}
+		return a.flowID > b.flowID
+	})
+	merged = merged[:min(len(merged), limit)]
+	flows := make([]workflow.FlowSummary, len(merged))
+	for i, lr := range merged {
+		flows[i] = lr.summary
 	}
-	var nextCursor string
-	if anyAdvance {
-		shardOrder := make([]int, 0, len(nextPerShard))
-		for s := range nextPerShard {
-			shardOrder = append(shardOrder, s)
-		}
-		sort.Ints(shardOrder)
-		var b strings.Builder
-		for i, s := range shardOrder {
-			if i > 0 {
-				b.WriteByte(',')
-			}
-			b.WriteString(strconv.Itoa(s))
-			b.WriteByte('=')
-			b.WriteString(strconv.Itoa(nextPerShard[s]))
-		}
-		nextCursor = b.String()
-	}
-	return flows, nextCursor, nil
+	return flows, nil
 }
 
 // likeEscape is the LIKE ESCAPE character used by searchClause. It is a printable char that is neither a

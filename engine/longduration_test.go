@@ -57,10 +57,10 @@ func TestLongDuration_QueryFilters(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 
-	older, _, err := e.List(ctx, workflow.Query{OlderThan: month})
+	older, err := e.List(ctx, workflow.Query{OlderThan: month})
 	assert.NoError(err)
 	assert.Len(older, 0)
-	newer, _, err := e.List(ctx, workflow.Query{NewerThan: 12 * month})
+	newer, err := e.List(ctx, workflow.Query{NewerThan: 12 * month})
 	assert.NoError(err)
 	assert.Len(newer, 1)
 	marked, err := e.Purge(ctx, workflow.Query{OlderThan: month})

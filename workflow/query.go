@@ -54,21 +54,13 @@ type Query struct {
 	// Shard restricts the query to the shard with this index, as declared in the engine's shard spec.
 	// Zero queries all shards.
 	Shard int `json:"shard,omitzero"`
-	// Cursor is the opaque pagination cursor returned as nextCursor by the previous List call.
-	Cursor string `json:"cursor,omitzero"`
 	// Search is a case-insensitive substring matched against the flow's WorkflowURL, WorkflowName,
 	// StoppedTaskName (so a running flow never matches on a task), Error, TerminateReason, CancelReason, and
 	// the flow key. Any '%' or '_' in the value is matched literally, not as a wildcard, so "a_b" matches only
 	// "a_b" (not "axb") and "50%" matches only a literal "50%".
 	Search string `json:"search,omitzero"`
-	// Limit is a PER-SHARD cap divided across shards, NOT a hard ceiling on the total returned (default
-	// 100). On a multi-shard fleet each shard returns up to ceil(Limit/shards) of its own newest flows, so
-	// a single page can hold as many as shards*ceil(Limit/shards) summaries - e.g. Limit=10 on 4 shards
-	// returns up to 12, and Limit=1 returns up to 4. A single-shard engine (the default) returns at most
-	// Limit. This per-shard division is also why pagination is a cursor and not a global OFFSET: each shard
-	// advances its own newest-first position independently (the cursor holds one position per shard), so
-	// no single offset could page the shard-grouped result without skipping rows. If you need a strict
-	// total, truncate the page yourself or query one shard at a time with Query.Shard. Results come back
-	// newest first per shard, not globally (see Engine.List). Purge divides Limit the same way.
+	// Limit caps the flows List returns (default 100): the newest Limit flows that match, by creation time,
+	// across every shard queried. Purge divides it across shards instead: each shard marks up to
+	// ceil(Limit/shards) roots, so a call can mark as many as shards*ceil(Limit/shards).
 	Limit int `json:"limit,omitzero"`
 }

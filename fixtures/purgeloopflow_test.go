@@ -171,7 +171,7 @@ func TestPurgeLoopflow(t *testing.T) {
 	}
 
 	// List of completed flows is now empty (this engine sees only its own flows).
-	remaining, _, err := eng.List(ctx, workflow.Query{Status: workflow.StatusCompleted})
+	remaining, err := eng.List(ctx, workflow.Query{Status: workflow.StatusCompleted})
 	if assert.NoError(err) {
 		assert.Equal(0, len(remaining))
 	}

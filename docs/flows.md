@@ -139,22 +139,14 @@ use `Step` to read a single step's `state`/`changes`. Subgraph-executing
 steps carry nested `SubHistory` and the child flow's `SubgraphKey`: pass it to `Snapshot` for what the child
 returned, or to `Await`, `Poll`, `Fingerprint` or `History`. It is a read handle - operations that change a flow
 take the root's key. `List` takes a `workflow.Query` (status, workflow name, the task a flow stopped at,
-fairness key, priority, time window, shard, free-text `Search`, `Limit`) and returns newest-first with an
-opaque pagination cursor as its second return; see [Retention](#retention) for the same query shape.
+fairness key, priority, time window, shard, free-text `Search`, `Limit`) and returns the matching flows, newest
+created first; see [Retention](#retention) for the same query shape.
 
-**"Newest first" is per shard, not global.** On a single-shard engine — the default — a page is in one
-descending time order. On a multi-shard fleet each shard contributes its own newest flows and the page is
-grouped by shard, so shard 2's newest flow follows shard 1's oldest returned one. There is no cross-shard
-order to give: flow ids are per-shard sequences (a shard with fewer flows has lower ids, so they don't
-compare), and creation times would compare different database servers' clocks. If you need one ordered view,
-sort the page yourself — you decide what to trust — or page a single shard with `Query.Shard`.
-
-**`Query.Limit` is a per-shard cap, not a hard total.** It is divided across shards, so on a multi-shard
-fleet each shard returns up to `ceil(Limit/shards)` of its own newest flows and a page can hold as many as
-`shards * ceil(Limit/shards)` results (`Limit: 10` on 4 shards returns up to 12; `Limit: 1` returns up to 4).
-A single-shard engine returns at most `Limit`. This per-shard division is why pagination is a cursor rather
-than a global offset — each shard advances its own position independently. `Purge` divides `Limit` the same
-way. For a strict total, truncate the returned page yourself or query one shard at a time with `Query.Shard`.
+**`List` returns at most `Limit` flows (default 100): the newest that match, across every shard.** It has no
+pagination, because flows change constantly: to see other flows, narrow the filters or the time window
+(`OlderThan` set from the oldest `UpdatedAt` you hold reaches flows last updated before it, with no promise that
+nothing moved in between). The order across shards compares the creation times each shard's database recorded,
+so flows created within the clock skew between two shard servers may be listed out of order.
 
 ## Pausing and resuming
 
@@ -277,8 +269,8 @@ flow's whole subgraph subtree shortly after. The marked flow drops out of `List`
 it is logically gone even though the row lingers briefly. An `interrupted` flow is first terminated exactly as
 `Terminate` would, subgraphs included; if a `Resume` gets there first, the flow is running again, so `Delete`
 returns 409 and `Purge` skips it. `Purge` returns the count of roots marked, at most 4096 per call (fewer if
-`Query.Limit` is lower), divided across shards as `List` divides it, so a multi-shard call can mark slightly
-more.
+`Query.Limit` is lower). `Purge` divides `Limit` across shards, each marking up to `ceil(Limit/shards)`, so a
+multi-shard call can mark slightly more.
 
 `Purge` takes the same `workflow.Query` as `List`. `OlderThan` / `NewerThan` are database-anchored and
 compose (e.g. "completed, older than 30 days"):
@@ -330,7 +322,7 @@ Each operation adds these to the 503 and 500 every call can return:
 | `Snapshot`, `Fingerprint` | malformed key | unknown flow | | |
 | `History` | malformed key | unknown flow, or one scheduled for deletion | | |
 | `Step` | malformed key | unknown step | | |
-| `List`, `Purge` | invalid status or shard, a negative `OlderThan` or `NewerThan`; `List` with a malformed cursor; `Purge` with no filter (`Shard` and `Limit` are not filters) or with `IncludeSubgraphs` | | | |
+| `List`, `Purge` | invalid status or shard, a negative `OlderThan` or `NewerThan`; `Purge` with no filter (`Shard` and `Limit` are not filters) or with `IncludeSubgraphs` | | | |
 | `Resume` | malformed key, a subgraph child's key, data not JSON-marshalable | unknown flow | | the flow is not interrupted, including when a `Delete` or `Terminate` won the race |
 | `Cancel`, `Terminate` | malformed key, a subgraph child's key, a reason over 4,096 bytes or not valid UTF-8 without NUL | unknown flow | | |
 | `Fork` | malformed key, overrides not JSON-marshalable | unknown step | | the flow is not terminal, is scheduled for deletion, or holds an unresolved interrupt off the fork path |
