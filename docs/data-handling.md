@@ -145,12 +145,13 @@ your metrics backend as label cardinality.
 
 ## Retention and deletion
 
-**The engine never deletes on a timer.** Every flow stays until you say otherwise, because every flow is
-potentially resurrectable — an `interrupted` flow via `Resume`, a `completed` one via `Continue`, any
-terminal one via `Fork`. No single retention duration fits both an hour-long batch and a 30-day approval, so
-the engine refuses to pick one.
+**A flow is kept for as long as it has not ended, and for the retention after it ends.** A running, sleeping or
+`interrupted` flow is never removed by the engine, however old. About a minute after a flow ends, it moves to the
+archive, which keeps each day's ended flows for `SetRetention` days (30 by default) and then drops the day whole;
+`PurgeBefore(t)` drops every archived day before t's at once. With a retention of 0 an ended flow is deleted
+instead of archived.
 
-Three ways to remove data:
+Three ways to remove an ended flow sooner, in the minute before it is archived:
 
 ```go
 // One ended flow and its whole subgraph tree. Refuses a flow that has not ended: Terminate it first.
@@ -158,8 +159,8 @@ eng.Delete(ctx, flowKey)
 
 // Every ended flow matching a query; flows that have not ended are skipped.
 count, err := eng.Purge(ctx, workflow.Query{
-    Status:    workflow.StatusCompleted,
-    OlderThan: 30 * 24 * time.Hour,
+    Status:       workflow.StatusCompleted,
+    WorkflowName: "Report",
 })
 ```
 
@@ -169,19 +170,18 @@ count, err := eng.Purge(ctx, workflow.Query{
 ```
 
 **Deletion is marked, then reaped.** No path deletes rows inline: the flow is stamped for deletion, drops out
-of `List` and `History` immediately, and a background reaper removes the whole subgraph tree within about a
-minute. A flow marked by `DeleteOnCompletion` keeps serving its outcome to `Snapshot` and `Await` for a
+of `List` and `History` immediately, and a background reaper removes the whole subgraph tree within about 15
+seconds. A flow marked by `DeleteOnCompletion` keeps serving its outcome to `Snapshot` and `Await` for a
 one-minute grace window first, so a fire-and-forget caller can still read its result.
 
 **For a deletion request, that grace matters.** A flow is logically gone the moment it is marked, but its
-rows exist for up to about a minute afterward — up to about two for a `DeleteOnCompletion` flow, whose
-one-minute window comes before the reaper's pass — and `Snapshot` still answers until the reaper removes
+rows exist for up to about 15 seconds afterward — up to about a minute and a quarter for a `DeleteOnCompletion`
+flow, whose one-minute window comes before the reaper's pass — and `Snapshot` still answers until the reaper removes
 them. If you need a hard immediate erasure guarantee, the marking is not it — verify the rows are gone.
 
-**A scheduled retention job is the normal pattern.** `Purge` marks at most 4,096 roots per call (fewer if
-`Query.Limit` is lower), divided across shards (up to `ceil(Limit/shards)` each), so a multi-shard call can mark
-slightly more. A retention sweep is a loop until it returns 0, not a single call. `OlderThan` is anchored to the database's clock and measured
-from the flow's finish time, which is the right signal for "keep for 30 days after it ended."
+**Retention needs no job of your own.** The archive drops each day once the retention has passed. `Purge` marks at
+most 4,096 roots per call (fewer if `Query.Limit` is lower), divided across shards (up to `ceil(Limit/shards)`
+each), so a multi-shard call can mark slightly more, and a purge of many flows is a loop until it returns 0.
 
 **Deleting a flow deletes its whole subgraph tree**, keyed on the tree root — children are not left behind.
 You cannot delete a subgraph child on its own; that would strand its parent.

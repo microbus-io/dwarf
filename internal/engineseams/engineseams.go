@@ -109,6 +109,8 @@ const (
 	FaultRecoveryResetErr    = "recoveryResetErr"    // the post-execution recovery reset write errors
 	FaultReapMidTree         = "reapMidTree"         // the reaper errors after deleting steps, before flows
 	FaultReapSelectErr       = "reapSelectErr"       // the reaper's due-root SELECT errors
+	FaultReapContention      = "reapContention"      // the reaper's archive move fails on lock contention (a deadlock victim)
+	FaultReapArchiveErr      = "reapArchiveErr"      // the reaper's archive move fails with an error that is not lock contention
 	FaultRefillScanErr       = piston.FaultScanErr   // the piston's priority-band scan errors (its name, so there is one catalogue)
 	FaultPeerReadErr         = peers.FaultReadErr    // a shard's peer-registry reading fails: this replica goes BLIND on that shard (their names, so there is one catalogue)
 	FaultPeerBeatErr         = peers.FaultBeatErr    // a shard's peer-registry beat writes nothing: this replica stops proving its liveness THERE, while running on
@@ -125,6 +127,7 @@ const (
 // --- Execution checkpoints ---
 const (
 	CheckpointResumeBeforeFlowWrite     = "resumeBeforeFlowWrite"     // Resume, just before its transaction's flow-status gate write
+	CheckpointBeforeDeleteStamp         = "beforeDeleteStamp"         // Delete, after it read the root, just before the delete stamp
 	CheckpointArchivePassDone           = "archivePassDone"           // the archive loop, after each pass over the shards
 	CheckpointBeforeTransitionTx        = "beforeTransitionTx"        // step execution, after the step is marked completed, before whichever transaction transitions it
 	CheckpointCancelBeforeMark          = "cancelBeforeMark"          // Cancel, after its watermark transaction commits, before it marks the steps

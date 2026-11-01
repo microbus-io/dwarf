@@ -293,10 +293,12 @@ type Engine struct {
 	// Archive goroutine: keeps each shard's archive day tables - today's and tomorrow's made, expired days
 	// dropped. archives is the run's set, published at Startup; testArchiveDay, when set, replaces the day's
 	// length for a test (archiveDayLength). archiveCancel stops the loop between its statements.
-	archives       atomic.Pointer[archiveSet]
-	testArchiveDay time.Duration
-	archiveCancel  context.CancelFunc
-	archiveWorker  sync.WaitGroup
+	archives atomic.Pointer[archiveSet]
+	// archiveFailures is, per shard, since when the reaper's archiving has been failing (reaper.go).
+	archiveFailures archiveFailures
+	testArchiveDay  time.Duration
+	archiveCancel   context.CancelFunc
+	archiveWorker   sync.WaitGroup
 
 	// Await latch: the board callers park on, and the detector goroutine that asks the shards which of
 	// those flows have settled. A stop this replica commits reaches the board instantly through
@@ -331,7 +333,11 @@ type Engine struct {
 	parkWedgeThreshold  time.Duration // min age before a parked step is treated as wedged (5m)
 	orphanFlowThreshold time.Duration // quiet time before a stranded flow with no step to replay is reported orphaned (5m)
 	deletionGrace       time.Duration // DeleteOnCompletion linger window before reap (1m)
-	reapInterval        time.Duration // reaper goroutine tick; read once at Startup (1m)
+	archiveGrace        time.Duration // how long an ended root stays in the live tables before it is archived (1m)
+	archiveFailureGrace time.Duration // how long archiving may fail before ended trees are deleted unarchived (1m)
+	reapBatch           int           // due roots one reaper batch considers (512)
+	reapBatchRows       int           // about how many rows one reaper batch moves, at least one tree (4096)
+	reapInterval        time.Duration // reaper goroutine tick; read once at Startup (15s)
 	leaseRecoveryBatch  int           // ids per lease-recovery reset, embedded as a literal IN list (1024)
 	maxPayloadBytes     int           // largest JSON value written into one payload column (maxPayloadBytes)
 	// persistBackoff is the outcome-write retry schedule (1s doubling to 32s, a minute in all), exponential
@@ -393,7 +399,11 @@ func NewEngine() *Engine {
 	e.parkWedgeThreshold = 5 * time.Minute
 	e.orphanFlowThreshold = 5 * time.Minute
 	e.deletionGrace = 1 * time.Minute
-	e.reapInterval = 1 * time.Minute
+	e.archiveGrace = 1 * time.Minute
+	e.archiveFailureGrace = 1 * time.Minute
+	e.reapBatch = 512
+	e.reapBatchRows = 4096
+	e.reapInterval = 15 * time.Second
 	e.retentionDays = defaultRetentionDays
 	e.leaseRecoveryBatch = 1024
 	e.maxPayloadBytes = maxPayloadBytes
@@ -1452,10 +1462,11 @@ func (e *Engine) List(ctx context.Context, query workflow.Query) (summaries []wo
 }
 
 // Delete marks an ended flow (and its subgraph subtree) for deletion; a background reaper removes it shortly
-// after. The flow is excluded from List/History immediately, though Snapshot/Await/Run still report its
-// outcome until the reaper removes it. Returns 404 for an unknown key, 400 for a subgraph-child key (address the
-// root instead), and 409 for a flow that has not ended: Terminate it first. Calling it again on an already-marked
-// flow is idempotent success.
+// after, without archiving it. The flow is excluded from List/History immediately, though Snapshot/Await/Run still
+// report its outcome until the reaper removes it. It reaches a flow in the minute after it ends: an ended flow then
+// moves to the archive, which only the retention (SetRetention) and PurgeBefore remove, and Delete reports 404 for
+// it. Returns 404 for an unknown key, 400 for a subgraph-child key (address the root instead), and 409 for a flow
+// that has not ended: Terminate it first. Calling it again on an already-marked flow is idempotent success.
 func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 	if err := e.ensureStarted(); err != nil {
 		return errors.Trace(err)
@@ -1464,12 +1475,13 @@ func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 }
 
 // Purge marks the ended flows matching a query (and their subgraph subtrees) for deletion; a background reaper
-// removes them shortly after. Marked flows are excluded from List/History immediately. Flows that have not ended
-// are skipped, and a Query.Status naming a status that has not ended is a 400. Returns the count of roots marked.
-// A call marks at most min(Query.Limit, 4096) roots, divided across shards (up to ceil(n/shards) per shard), so a
-// multi-shard call can mark slightly more; iterate until it returns 0 to mark everything. The query takes any
-// filter List does; one that sets none (only Shard or Limit, or nothing) is a 400. Delete and Purge are for
-// removing specific flows; routine retention is a scheduled Purge by OlderThan.
+// removes them shortly after, without archiving them. Marked flows are excluded from List/History immediately. It
+// reaches flows in the minute after they end, before they move to the archive, which only the retention
+// (SetRetention) and PurgeBefore remove. Flows that have not ended are skipped, and a Query.Status naming a status
+// that has not ended is a 400. Returns the count of roots marked. A call marks at most min(Query.Limit, 4096)
+// roots, divided across shards (up to ceil(n/shards) per shard), so a multi-shard call can mark slightly more;
+// iterate until it returns 0 to mark everything. The query takes any filter List does; one that sets none (only
+// Shard or Limit, or nothing) is a 400.
 func (e *Engine) Purge(ctx context.Context, query workflow.Query) (marked int, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return 0, errors.Trace(err)

@@ -257,35 +257,38 @@ continue the key the last `Continue` returned. Continuing one flow twice gives t
 
 ## Retention
 
-The engine never auto-purges — every flow is potentially resurrectable (resume, continue, fork). Manage
-retention explicitly:
+A flow that has not ended is never removed by the engine. About a minute after it ends it moves to the archive,
+which keeps each day's ended flows for `SetRetention` days (30 by default) and then drops the day whole;
+`PurgeBefore(t)` drops every archived day before t's. With a retention of 0 an ended flow is deleted instead.
 
 ```go
 err := eng.Delete(ctx, flowKey)          // schedule one ended flow (and its subtree) for deletion
 count, err := eng.Purge(ctx, query)      // schedule the matching ended flows for deletion, capped at 4096
+err = eng.PurgeBefore(ctx, t)            // drop every archived day before t's, on every shard
 ```
 
-`Delete` and `Purge` **mark** flows for deletion (they do not delete inline); a background reaper removes each
-flow's whole subgraph subtree shortly after. The marked flow drops out of `List` and `History` immediately, so
-it is logically gone even though the row lingers briefly. Both remove only flows that have ended: `Delete` of a
-running or interrupted flow returns 409 and `Purge` skips one, so `Terminate` a flow first to delete it. A
-`Purge` whose `Status` names a status that has not ended (`running`, `interrupted`) returns 400. `Purge` returns
-the count of roots marked, at most 4096 per call (fewer if `Query.Limit` is lower). `Purge` divides `Limit` across
-shards, each marking up to `ceil(Limit/shards)`, so a multi-shard call can mark slightly more. `Delete` and
-`Purge` are for removing specific flows; for routine retention, a scheduled `Purge` by `OlderThan` is the tool.
+`Delete` and `Purge` remove an ended flow sooner, in the minute before it is archived. They **mark** flows for
+deletion (they do not delete inline); a background reaper removes each flow's whole subgraph subtree shortly
+after, without archiving it. The marked flow drops out of `List` and `History` immediately, so it is logically
+gone even though the row lingers briefly. Both remove only flows that have ended: `Delete` of a running or
+interrupted flow returns 409 and `Purge` skips one, so `Terminate` a flow first to delete it. A `Purge` whose
+`Status` names a status that has not ended (`running`, `interrupted`) returns 400. `Delete` of a flow already
+archived returns 404. `Purge` returns the count of roots marked, at most 4096 per call (fewer if `Query.Limit`
+is lower). `Purge` divides `Limit` across shards, each marking up to `ceil(Limit/shards)`, so a multi-shard call
+can mark slightly more.
 
 `Purge` takes the same `workflow.Query` as `List`. `OlderThan` / `NewerThan` are database-anchored and
-compose (e.g. "completed, older than 30 days"):
+compose:
 
 ```go
 eng.Purge(ctx, workflow.Query{
-    Status:    workflow.StatusCompleted,
-    OlderThan: 30 * 24 * time.Hour,
+    Status:    workflow.StatusFailed,
+    NewerThan: time.Minute,
 })
 ```
 
 A flow created with `FlowOptions.DeleteOnCompletion` schedules its own deletion when it completes successfully
-(failed/terminated/cancelled flows are kept). Its outcome stays observable via `Await`/`Snapshot` for a short grace window
+(a failed, terminated or cancelled flow is archived like any other). Its outcome stays observable via `Await`/`Snapshot` for a short grace window
 before the reaper removes it — so a fire-and-forget caller can still `Run` it and read the result.
 
 ## Operational

@@ -21,7 +21,7 @@ rejected if called after `Startup`.
 | `SetWorkers(n)` | derived | Expert override: pins the worker *maximum* (deterministic tests, benchmarks, memory-bounded hosts). Normally unset — derived from the crash-recovery lease margin and the round-trip time measured at startup, so it holds for any task duration; the pool grows into it only on demand |
 | `SetStateCacheSize(bytes)` | 10% of memory | Memory the engine may use to keep large state fields for the steps that read them next, one cache for all its shards. The default is a tenth of `GOMEMLIMIT` when set; otherwise, on Linux, of the tightest of the process's cgroup memory limits and physical memory; otherwise 1 GiB |
 | `SetTimeBudget(d)` | 2m | Per-step `ExecuteTask` deadline |
-| `SetRetention(days)` | 30 | How many days the archive keeps each UTC day's records, counted from the end of that day; 0 keeps no archive. Use the same value on every replica sharing a database |
+| `SetRetention(days)` | 30 | How many days the archive keeps each UTC day's ended flows, counted from the end of that day; 0 keeps no archive, and an ended flow is deleted about a minute after it ends. Use the same value on every replica sharing a database |
 | `SetMaxPriority(n)` | 5 | How many priority levels flows may use, 1 (first) to `n`, at most 100; a flow that sets none gets the midpoint (3 by default). Use the same value on every replica sharing a database |
 
 **Set `GOMEMLIMIT` on engine hosts**, a little below the memory the process may use (about 90% of its

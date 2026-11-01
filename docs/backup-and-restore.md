@@ -61,8 +61,8 @@ knowing which of your backups still contain a record you were asked to remove.
    ordinary crash recovery — a restore is just a much larger dose of it.
 3. **Expect side effects to re-fire.** Tasks with an idempotency key keyed on `StepKey()` survive this
    correctly, because a restored step keeps its key. Tasks without one will repeat their effect.
-4. **Consider whether to restore at all.** Because the engine never auto-purges, a flow that failed or
-   stalled is still present and still forkable. Recovering specific flows with `Fork` is often narrower and
+4. **Consider whether to restore at all.** A flow that failed is kept for the archive's retention, and one
+   that stalled is never removed, so either is still present to fork. Recovering specific flows with `Fork` is often narrower and
    safer than rewinding every tenant to a point in the past.
 
 ## After a restore

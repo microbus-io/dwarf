@@ -1000,11 +1000,34 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	if deleteAfterMs > 0 {
 		return nil // already scheduled - idempotent
 	}
-	_, err = db.ExecContext(ctx,
+	// Test checkpoint: the reaper can archive the tree between the read and the stamp.
+	e.seams.Checkpoint(ctx, engineseams.CheckpointBeforeDeleteStamp)
+	res, err := db.ExecContext(ctx,
 		"UPDATE dwarf_flows SET delete_after_ms=1 WHERE flow_id=? AND flow_token=? AND created_hour=? AND status IN ("+terminalStatusesSQL+") AND delete_after_ms=0",
 		flowID, flowToken, flowHour,
 	)
-	return errors.Trace(err)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	// The stamp matched nothing, so the row moved since the read: the reaper archived the tree (gone from the live
+	// tables, which are all Delete reaches: a 404), or a racing Delete or Purge stamped it first (success).
+	err = db.QueryRowContext(ctx,
+		"SELECT delete_after_ms FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?",
+		flowID, flowToken, flowHour,
+	).Scan(&deleteAfterMs)
+	if err == sql.ErrNoRows {
+		return errors.New("flow not found", http.StatusNotFound)
+	}
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if deleteAfterMs > 0 {
+		return nil
+	}
+	return errors.New("the flow changed while it was being deleted; try again", http.StatusConflict)
 }
 
 // run creates, starts, and awaits a flow in one call.

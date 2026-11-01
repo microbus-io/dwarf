@@ -86,10 +86,10 @@
 
 ## Data and retention
 
-- [ ] **A retention policy exists and something enforces it.** The engine **never** auto-purges — every flow
-  stays until you remove it, because every flow is potentially resumable, continuable or forkable.
+- [ ] **The retention is set to what you must keep.** Ended flows are archived and kept for `SetRetention` days
+  (30 by default), then dropped a day at a time; flows that have not ended are never removed by the engine.
   → [Data handling](data-handling.md#retention-and-deletion)
-- [ ] **The retention job loops.** `Purge` marks a bounded batch per call (about 4,096 roots); loop until it returns 0.
+- [ ] **The archive's disk is sized for the retention**: a day's ended flows times the retention, per shard.
 - [ ] **Backups cover every shard on the same schedule**, and a restore has been rehearsed against a staging
   fleet — the part worth testing is what your workflows do when they re-run.
   → [Backup and restore](backup-and-restore.md)
@@ -128,7 +128,7 @@
 - [ ] Watch `dwarf_steps_recovered_total` — a steady trickle usually means tasks are overrunning their
   budget, or that your termination grace period is cutting drains short. Neither is broken, but both are
   worth knowing. → [Runbook](runbook.md#tasks-are-running-more-than-once)
-- [ ] Confirm the retention job actually removes rows, by watching table size rather than disk usage —
+- [ ] Confirm the live tables stay level under load, by watching table size rather than disk usage —
   PostgreSQL holds its high-water mark. → [Runbook](runbook.md#disk-did-not-shrink-after-a-purge)
 - [ ] Re-read the sizing rules against what you actually observe. The published numbers assume cheap
   in-process tasks; a host dispatching over a network transport pays more engine CPU per step.

@@ -43,8 +43,8 @@ type FlowOptions struct {
 	// milliseconds holds. A task that waits for days should Sleep or Interrupt instead.
 	TimeBudget time.Duration `json:"timeBudget,omitzero"`
 	// DeleteOnCompletion marks the flow (and its subgraph subtree) for deletion once it completes
-	// successfully - for fire-and-forget jobs whose output is not retained. Failed, terminated, and
-	// cancelled flows are kept. Deletion is deferred: the flow lingers for a short grace window during
+	// successfully - for fire-and-forget jobs whose output is not retained. A failed, terminated or
+	// cancelled flow is archived like any other. Deletion is deferred: the flow lingers for a short grace window during
 	// which its outcome stays observable (Await/Snapshot return the completed FlowOutcome), then a
 	// background reaper removes it and reads return "flow not found". During the window the flow is
 	// excluded from List and History 404s.

@@ -79,17 +79,14 @@ which means both:
 // no live work
 running, _ := eng.List(ctx, workflow.Query{Shard: 3, Status: workflow.StatusRunning})
 interrupted, _ := eng.List(ctx, workflow.Query{Shard: 3, Status: workflow.StatusInterrupted})
-
-// and no terminal flow you still want readable
-count, _ := eng.Purge(ctx, workflow.Query{Shard: 3, OlderThan: 30 * 24 * time.Hour})
 ```
 
-`Query.Shard` scopes both to one shard. Watch `interrupted` flows especially — they wait indefinitely and are
+and no ended flow you still want readable: the shard's ended flows sit in its archive until the retention drops
+their day, so the shard is empty once the retention has passed since its last flow ended.
+
+`Query.Shard` scopes both lists to one shard. Watch `interrupted` flows especially — they wait indefinitely and are
 the ones that will still be there when you assumed the shard was empty. Either resume them, terminate them, or
 wait.
-
-`Purge` marks at most 4,096 roots per call, so draining a large shard is a loop, and a background reaper does
-the actual deletion within about a minute of marking.
 
 **Phase 3 — remove it.** Drop the `SetShard` call and roll the fleet. Leave the index unused; do not
 renumber the survivors, and do not reuse the retired index for a different database — old flow keys naming

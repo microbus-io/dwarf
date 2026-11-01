@@ -114,6 +114,7 @@ func (e *Engine) startArchives(ctx context.Context, dayLength time.Duration) err
 		set.byShard[idx] = archiver.New(db, dayLength, migrations.Archive())
 	}
 	e.archives.Store(set)
+	e.archiveFailures.reset()
 	return errors.Trace(e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		a := set.byShard[shard]
 		err := a.EnsureToday(ctx)
