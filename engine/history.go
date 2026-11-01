@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
@@ -52,30 +53,42 @@ func (e *Engine) history(ctx context.Context, flowKey string) ([]workflow.FlowSt
 	// delete_after_ms=0 excludes a flow scheduled for deletion: History is the full step detail a disposable
 	// flow is discarding, so it 404s during the grace window (Snapshot/Await still serve the outcome). Only the
 	// root is stamped, so a subgraph child's key is checked against its root's row (a root is its own root).
-	var exists int
-	err = db.QueryRowContext(ctx,
-		"SELECT 1 FROM dwarf_flows f JOIN dwarf_flows r ON r.flow_id=f.root_flow_id"+
-			" WHERE f.flow_id=? AND f.flow_token=? AND f.created_hour=? AND r.delete_after_ms=0", flowID, flowToken, flowHour).Scan(&exists)
-	if err == sql.ErrNoRows {
+	var history []workflow.FlowStep
+	found, err := e.queryLiveOrArchive(ctx, db, shardNum, flowID, flowHour, false, func(t flowTables) (bool, error) {
+		var exists int
+		err := db.QueryRowContext(ctx,
+			"SELECT 1 FROM "+t.flows+" f JOIN "+t.flows+" r ON r.flow_id=f.root_flow_id"+
+				" WHERE f.flow_id=? AND f.flow_token=? AND f.created_hour=? AND r.delete_after_ms=0", flowID, flowToken, flowHour).Scan(&exists)
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		if err != nil {
+			return false, errors.Trace(err)
+		}
+		e.seams.Checkpoint(ctx, engineseams.CheckpointHistoryFlowRead)
+		// Load the whole subgraph tree in a fixed two queries via root_flow_id (single-shard by parent-shard
+		// affinity), then assemble the nested history in memory - instead of a per-step surgraph_step_id lookup,
+		// an N+1 over every step in the tree. This mirrors the root_flow_id membership walks in subgraph.go.
+		// Starting from a mid-tree flow (a subgraph child, which History accepts) over-fetches the ancestor and
+		// sibling subtrees, but the assembly only descends from flowID, so the extra rows are never rendered.
+		childByCaller, err := e.loadSubgraphChildren(ctx, db, t, shardNum, flowID)
+		if err != nil {
+			return false, errors.Trace(err)
+		}
+		stepsByFlow, err := e.loadTreeSteps(ctx, db, t, shardNum, flowID)
+		if err != nil {
+			return false, errors.Trace(err)
+		}
+		history = assembleHistory(flowID, childByCaller, stepsByFlow)
+		return true, nil
+	})
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	if !found {
 		return nil, errors.New("flow not found", http.StatusNotFound)
 	}
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	// Load the whole subgraph tree in a fixed two queries via root_flow_id (single-shard by parent-shard
-	// affinity), then assemble the nested history in memory - instead of a per-step surgraph_step_id lookup,
-	// an N+1 over every step in the tree. This mirrors the root_flow_id membership walks in subgraph.go.
-	// Starting from a mid-tree flow (a subgraph child, which History accepts) over-fetches the ancestor and
-	// sibling subtrees, but the assembly only descends from flowID, so the extra rows are never rendered.
-	childByCaller, err := e.loadSubgraphChildren(ctx, db, shardNum, flowID)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	stepsByFlow, err := e.loadTreeSteps(ctx, db, shardNum, flowID)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return assembleHistory(flowID, childByCaller, stepsByFlow), nil
+	return history, nil
 }
 
 // subgraphChild is the latest child flow launched by a surgraph caller step, used to attach subhistory
@@ -93,10 +106,10 @@ type subgraphChild struct {
 // means the last row written for a caller step wins, giving the highest flow_id (the child whose value the
 // caller actually used). Each child carries its flow key: a read handle within the tree whose History the caller
 // already holds, every mutation of it is rejected.
-func (e *Engine) loadSubgraphChildren(ctx context.Context, db *sequel.DB, shardNum int, flowID int) (map[int]subgraphChild, error) {
+func (e *Engine) loadSubgraphChildren(ctx context.Context, db *sequel.DB, t flowTables, shardNum int, flowID int) (map[int]subgraphChild, error) {
 	rows, err := db.QueryContext(ctx,
-		"SELECT flow_id, flow_token, created_hour, surgraph_step_id, workflow_url, workflow_name FROM dwarf_flows"+
-			" WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?) AND surgraph_step_id>0 ORDER BY flow_id",
+		"SELECT flow_id, flow_token, created_hour, surgraph_step_id, workflow_url, workflow_name FROM "+t.flows+
+			" WHERE root_flow_id=(SELECT root_flow_id FROM "+t.flows+" WHERE flow_id=?) AND surgraph_step_id>0 ORDER BY flow_id",
 		flowID,
 	)
 	if err != nil {
@@ -130,10 +143,10 @@ type treeStep struct {
 // loadTreeSteps loads every step of every flow in flowID's subgraph tree (one query, keyed on the
 // root_flow_id membership index), grouped by owning flow_id and ordered within each flow. DAG edges never
 // leave their flow, so every predecessor_id/successor_id resolves to a key among the loaded rows.
-func (e *Engine) loadTreeSteps(ctx context.Context, db *sequel.DB, shardNum int, flowID int) (map[int][]treeStep, error) {
+func (e *Engine) loadTreeSteps(ctx context.Context, db *sequel.DB, t flowTables, shardNum int, flowID int) (map[int][]treeStep, error) {
 	rows, err := db.QueryContext(ctx,
-		"SELECT flow_id, step_id, step_token, flow_created_hour, step_depth, task_name, attempt, status, error, created_at, started_at, updated_at, predecessor_id, successor_id, parked, engine_id FROM dwarf_steps"+
-			" WHERE flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)) ORDER BY flow_id, step_depth, step_id",
+		"SELECT flow_id, step_id, step_token, flow_created_hour, step_depth, task_name, attempt, status, error, created_at, started_at, updated_at, predecessor_id, successor_id, parked, engine_id FROM "+t.steps+
+			" WHERE flow_id IN (SELECT flow_id FROM "+t.flows+" WHERE root_flow_id=(SELECT root_flow_id FROM "+t.flows+" WHERE flow_id=?)) ORDER BY flow_id, step_depth, step_id",
 		flowID,
 	)
 	if err != nil {
@@ -207,16 +220,36 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	// and ahead of anything arriving after it.
 	ctx, doneTurn := e.opTurn(ctx, shardNum, "step")
 	defer doneTurn()
+	var fs *workflow.FlowStep
+	found, err := e.queryLiveOrArchive(ctx, db, shardNum, stepFlowID, stepHour, false, func(t flowTables) (bool, error) {
+		var err error
+		fs, err = e.stepIn(ctx, db, t, shardNum, stepKey, stepID, stepFlowID, stepToken, stepHour)
+		return fs != nil, errors.Trace(err)
+	})
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	if !found {
+		return nil, errors.New("step not found", http.StatusNotFound)
+	}
+	return fs, nil
+}
+
+// stepIn reads the step with the given id and key parts from t, with its state refs resolved from t's steps table -
+// an anchor never crosses a flow, so it is in the same tables - and its navigation keys. It returns nil when t holds
+// no such step.
+func (e *Engine) stepIn(ctx context.Context, db *sequel.DB, t flowTables, shardNum int, stepKey string, stepID, stepFlowID int,
+	stepToken string, stepHour int) (*workflow.FlowStep, error) {
 	var taskName, statusStr, errMsg, flowToken string
 	var stateJSON, changesJSON, stateRefsJSON, interruptJSON []byte
 	var stepDepth, attempt, predID, succID, ver int
 	var createdAt, updatedAt time.Time
-	err = db.QueryRowContext(ctx,
-		"SELECT s.step_depth, s.task_name, s.attempt, s.state, s.changes, s.state_refs, s.interrupt_payload, s.status, s.error, s.created_at, s.updated_at, s.predecessor_id, s.successor_id, f.payload_ver, f.flow_token FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.flow_id=? AND s.step_token=? AND s.flow_created_hour=?",
+	err := db.QueryRowContext(ctx,
+		"SELECT s.step_depth, s.task_name, s.attempt, s.state, s.changes, s.state_refs, s.interrupt_payload, s.status, s.error, s.created_at, s.updated_at, s.predecessor_id, s.successor_id, f.payload_ver, f.flow_token FROM "+t.steps+" s JOIN "+t.flows+" f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.flow_id=? AND s.step_token=? AND s.flow_created_hour=?",
 		stepID, stepFlowID, stepToken, stepHour,
 	).Scan(&stepDepth, &taskName, &attempt, &stateJSON, &changesJSON, &stateRefsJSON, &interruptJSON, &statusStr, &errMsg, &createdAt, &updatedAt, &predID, &succID, &ver, &flowToken)
 	if err == sql.ErrNoRows {
-		return nil, errors.New("step not found", http.StatusNotFound)
+		return nil, nil
 	}
 	if err == nil {
 		err = checkPayloadVer(ver)
@@ -224,6 +257,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
+	e.seams.Checkpoint(ctx, engineseams.CheckpointStepRead)
 	fs := &workflow.FlowStep{
 		StepKey:   stepKey,
 		StepDepth: stepDepth,
@@ -245,7 +279,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	if _, err = e.resolveStateRefs(ctx, db, shardNum, flowToken, fs.State, refs, nil, ""); err != nil {
+	if _, err = e.resolveStateRefsIn(ctx, db, t.steps, shardNum, flowToken, fs.State, refs, nil, ""); err != nil {
 		return nil, errors.Trace(err)
 	}
 	// An overwrite shows as its new value and a delete as a null, which is how a caller reads a delete.
@@ -279,7 +313,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 		// We may be inside a subgraph - look up our own flow's surgraph linkage.
 		var surgraphStepID int
 		err = db.QueryRowContext(ctx,
-			"SELECT f.surgraph_step_id FROM dwarf_steps s JOIN dwarf_flows f ON s.flow_id = f.flow_id WHERE s.step_id=?",
+			"SELECT f.surgraph_step_id FROM "+t.steps+" s JOIN "+t.flows+" f ON s.flow_id = f.flow_id WHERE s.step_id=?",
 			stepID,
 		).Scan(&surgraphStepID)
 		if err != nil && err != sql.ErrNoRows {
@@ -290,7 +324,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 			// intra-flow neighbor in the parent flow.
 			var parentPred, parentSucc int
 			err = db.QueryRowContext(ctx,
-				"SELECT predecessor_id, successor_id FROM dwarf_steps WHERE step_id=?",
+				"SELECT predecessor_id, successor_id FROM "+t.steps+" WHERE step_id=?",
 				surgraphStepID,
 			).Scan(&parentPred, &parentSucc)
 			if err != nil && err != sql.ErrNoRows {
@@ -309,7 +343,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	// past it.
 	var ownChildFlow int
 	err = db.QueryRowContext(ctx,
-		"SELECT flow_id FROM dwarf_flows WHERE surgraph_step_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
+		"SELECT flow_id FROM "+t.flows+" WHERE surgraph_step_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
 		stepID,
 	).Scan(&ownChildFlow)
 	if err != nil && err != sql.ErrNoRows {
@@ -318,7 +352,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	if ownChildFlow > 0 {
 		var entry int
 		err = db.QueryRowContext(ctx,
-			"SELECT step_id FROM dwarf_steps WHERE flow_id=? AND predecessor_id=0 ORDER BY step_id LIMIT_OFFSET(1, 0)",
+			"SELECT step_id FROM "+t.steps+" WHERE flow_id=? AND predecessor_id=0 ORDER BY step_id LIMIT_OFFSET(1, 0)",
 			ownChildFlow,
 		).Scan(&entry)
 		if err != nil && err != sql.ErrNoRows {
@@ -331,11 +365,11 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	// Walk past any surgraph wrapper that the effective neighbor lands on,
 	// descending into the appropriate end of the subgraph (entry for forward,
 	// exit for backward). Loop in case of nested subgraphs.
-	effectiveSuccID, err = e.skipSurgraphForward(ctx, db, effectiveSuccID)
+	effectiveSuccID, err = e.skipSurgraphForward(ctx, db, t, effectiveSuccID)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	effectivePredID, err = e.skipSurgraphBackward(ctx, db, effectivePredID)
+	effectivePredID, err = e.skipSurgraphBackward(ctx, db, t, effectivePredID)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -352,7 +386,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 		placeholders := strings.Repeat("?,", len(ids))
 		placeholders = placeholders[:len(placeholders)-1]
 		nrows, err := db.QueryContext(ctx,
-			"SELECT step_id, step_token, flow_created_hour, flow_id FROM dwarf_steps WHERE step_id IN ("+placeholders+")",
+			"SELECT step_id, step_token, flow_created_hour, flow_id FROM "+t.steps+" WHERE step_id IN ("+placeholders+")",
 			ids...,
 		)
 		if err != nil {
@@ -389,11 +423,11 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 
 // skipSurgraphForward walks past a surgraph wrapper to the entry step of its child
 // subgraph (predecessor_id=0). Loops for nested subgraphs.
-func (e *Engine) skipSurgraphForward(ctx context.Context, db *sequel.DB, id int) (int, error) {
+func (e *Engine) skipSurgraphForward(ctx context.Context, db *sequel.DB, t flowTables, id int) (int, error) {
 	for id > 0 {
 		var childFlow int
 		err := db.QueryRowContext(ctx,
-			"SELECT flow_id FROM dwarf_flows WHERE surgraph_step_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
+			"SELECT flow_id FROM "+t.flows+" WHERE surgraph_step_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
 			id,
 		).Scan(&childFlow)
 		if err == sql.ErrNoRows {
@@ -407,7 +441,7 @@ func (e *Engine) skipSurgraphForward(ctx context.Context, db *sequel.DB, id int)
 		}
 		var entry int
 		err = db.QueryRowContext(ctx,
-			"SELECT step_id FROM dwarf_steps WHERE flow_id=? AND predecessor_id=0 ORDER BY step_id LIMIT_OFFSET(1, 0)",
+			"SELECT step_id FROM "+t.steps+" WHERE flow_id=? AND predecessor_id=0 ORDER BY step_id LIMIT_OFFSET(1, 0)",
 			childFlow,
 		).Scan(&entry)
 		if err != nil {
@@ -424,11 +458,11 @@ func (e *Engine) skipSurgraphForward(ctx context.Context, db *sequel.DB, id int)
 // skipSurgraphBackward is the backward counterpart: if id is a surgraph
 // wrapper, return the subgraph's exit step (completed, with successor_id=0).
 // Loops for nested subgraphs.
-func (e *Engine) skipSurgraphBackward(ctx context.Context, db *sequel.DB, id int) (int, error) {
+func (e *Engine) skipSurgraphBackward(ctx context.Context, db *sequel.DB, t flowTables, id int) (int, error) {
 	for id > 0 {
 		var childFlow int
 		err := db.QueryRowContext(ctx,
-			"SELECT flow_id FROM dwarf_flows WHERE surgraph_step_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
+			"SELECT flow_id FROM "+t.flows+" WHERE surgraph_step_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
 			id,
 		).Scan(&childFlow)
 		if err == sql.ErrNoRows {
@@ -442,7 +476,7 @@ func (e *Engine) skipSurgraphBackward(ctx context.Context, db *sequel.DB, id int
 		}
 		var exit int
 		err = db.QueryRowContext(ctx,
-			"SELECT step_id FROM dwarf_steps WHERE flow_id=? AND successor_id=0 AND status='"+workflow.StatusCompleted+"' ORDER BY step_id DESC LIMIT_OFFSET(1, 0)",
+			"SELECT step_id FROM "+t.steps+" WHERE flow_id=? AND successor_id=0 AND status='"+workflow.StatusCompleted+"' ORDER BY step_id DESC LIMIT_OFFSET(1, 0)",
 			childFlow,
 		).Scan(&exit)
 		if err != nil {
@@ -471,55 +505,67 @@ func (e *Engine) fingerprint(ctx context.Context, flowKey string) (string, strin
 	// and ahead of anything arriving after it.
 	ctx, doneTurn := e.opTurn(ctx, shardNum, "fingerprint")
 	defer doneTurn()
+	// The digest is the same on either side: a tree moves as it is, its updated_at with it.
 	var status string
-	var rootFlowID int
-	err = db.QueryRowContext(ctx, "SELECT status, root_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?", flowID, flowToken, flowHour).Scan(&status, &rootFlowID)
-	if err == sql.ErrNoRows {
-		return "", "", errors.New("flow not found", http.StatusNotFound)
-	}
+	var digest []byte
+	found, err := e.queryLiveOrArchive(ctx, db, shardNum, flowID, flowHour, false, func(t flowTables) (bool, error) {
+		var rootFlowID int
+		err := db.QueryRowContext(ctx, "SELECT status, root_flow_id FROM "+t.flows+" WHERE flow_id=? AND flow_token=? AND created_hour=?", flowID, flowToken, flowHour).Scan(&status, &rootFlowID)
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		if err != nil {
+			return false, errors.Trace(err)
+		}
+		e.seams.Checkpoint(ctx, engineseams.CheckpointFingerprintFlowRead)
+
+		// The digest covers the steps of the flow and every subgraph flow beneath it. A root's subtree is its whole
+		// tree, named by root_flow_id. A subgraph child's is found by the descendant walk, and its flow ids go out in
+		// chunks, each contributing its own count and latest update; they are sorted so an unchanged subtree chunks
+		// the same way twice.
+		type chunk struct {
+			where string
+			args  []any
+		}
+		var chunks []chunk
+		if rootFlowID == flowID {
+			chunks = append(chunks, chunk{"flow_id IN (SELECT flow_id FROM " + t.flows + " WHERE root_flow_id=?)", []any{flowID}})
+		} else {
+			descendants, err := e.allDescendantSubgraphFlowsIn(ctx, db, t, flowID)
+			if err != nil {
+				return false, errors.Trace(err)
+			}
+			flowIDs := append([]int{flowID}, descendants...)
+			slices.Sort(flowIDs)
+			for ids := range slices.Chunk(flowIDs, inListChunk) {
+				ph, args := inList(ids)
+				chunks = append(chunks, chunk{"flow_id IN (" + ph + ")", args})
+			}
+		}
+		digest = fmt.Appendf(nil, "%s", status)
+		for _, c := range chunks {
+			var count int
+			// MAX(updated_at) is an untyped aggregate expression; SQLite returns it as a
+			// string (no column affinity) while other dialects return a time value. Scan
+			// into any and hash its string form — the fingerprint only needs a stable,
+			// change-detecting digest, not a parsed timestamp.
+			var maxUpdated any
+			err = db.QueryRowContext(ctx, "SELECT COUNT(*), MAX(updated_at) FROM "+t.steps+" WHERE "+c.where, c.args...).Scan(&count, &maxUpdated)
+			if err != nil {
+				return false, errors.Trace(err)
+			}
+			if b, ok := maxUpdated.([]byte); ok {
+				maxUpdated = string(b)
+			}
+			digest = fmt.Appendf(digest, "|%d|%v", count, maxUpdated)
+		}
+		return true, nil
+	})
 	if err != nil {
 		return "", "", errors.Trace(err)
 	}
-
-	// The digest covers the steps of the flow and every subgraph flow beneath it. A root's subtree is its whole
-	// tree, named by root_flow_id. A subgraph child's is found by the descendant walk, and its flow ids go out in
-	// chunks, each contributing its own count and latest update; they are sorted so an unchanged subtree chunks
-	// the same way twice.
-	type chunk struct {
-		where string
-		args  []any
-	}
-	var chunks []chunk
-	if rootFlowID == flowID {
-		chunks = append(chunks, chunk{"flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id=?)", []any{flowID}})
-	} else {
-		descendants, err := e.allDescendantSubgraphFlows(ctx, db, flowID)
-		if err != nil {
-			return "", "", errors.Trace(err)
-		}
-		flowIDs := append([]int{flowID}, descendants...)
-		slices.Sort(flowIDs)
-		for ids := range slices.Chunk(flowIDs, inListChunk) {
-			ph, args := inList(ids)
-			chunks = append(chunks, chunk{"flow_id IN (" + ph + ")", args})
-		}
-	}
-	digest := fmt.Appendf(nil, "%s", status)
-	for _, c := range chunks {
-		var count int
-		// MAX(updated_at) is an untyped aggregate expression; SQLite returns it as a
-		// string (no column affinity) while other dialects return a time value. Scan
-		// into any and hash its string form — the fingerprint only needs a stable,
-		// change-detecting digest, not a parsed timestamp.
-		var maxUpdated any
-		err = db.QueryRowContext(ctx, "SELECT COUNT(*), MAX(updated_at) FROM dwarf_steps WHERE "+c.where, c.args...).Scan(&count, &maxUpdated)
-		if err != nil {
-			return "", "", errors.Trace(err)
-		}
-		if b, ok := maxUpdated.([]byte); ok {
-			maxUpdated = string(b)
-		}
-		digest = fmt.Appendf(digest, "|%d|%v", count, maxUpdated)
+	if !found {
+		return "", "", errors.New("flow not found", http.StatusNotFound)
 	}
 	sum := sha256.Sum256(digest)
 	return hex.EncodeToString(sum[:]), status, nil

@@ -98,6 +98,11 @@ func decodeAnchorColumn(data []byte, fields *map[string]json.RawMessage) error {
 // decoded values the Linker hands back: those drop each column's keys, braces and separators, and count zero
 // for a column that failed to decode - both wrong for a metric tracking a byte-throughput ceiling.
 func anchorLoader(db sequel.Executor, readBytes *int) staterefs.Loader {
+	return anchorLoaderIn(db, liveTables.steps, readBytes)
+}
+
+// anchorLoaderIn is anchorLoader over the given steps table: an archived flow's anchors are in its day's.
+func anchorLoaderIn(db sequel.Executor, steps string, readBytes *int) staterefs.Loader {
 	return func(ctx context.Context, reads []staterefs.Read) (map[int]staterefs.Anchor, error) {
 		var withState, changesOnly []int
 		for _, r := range reads {
@@ -113,7 +118,7 @@ func anchorLoader(db sequel.Executor, readBytes *int) staterefs.Loader {
 			withState bool
 		}{{withState, true}, {changesOnly, false}} {
 			for chunk := range slices.Chunk(group.ids, inListChunk) {
-				if err := readAnchors(ctx, db, chunk, group.withState, readBytes, fetched); err != nil {
+				if err := readAnchors(ctx, db, steps, chunk, group.withState, readBytes, fetched); err != nil {
 					return nil, errors.Trace(err)
 				}
 			}
@@ -124,14 +129,14 @@ func anchorLoader(db sequel.Executor, readBytes *int) staterefs.Loader {
 
 // readAnchors reads one chunk of anchor rows into fetched: their changes, and with withState their state and
 // refs too.
-func readAnchors(ctx context.Context, db sequel.Executor, ids []int, withState bool, readBytes *int, fetched map[int]staterefs.Anchor) error {
+func readAnchors(ctx context.Context, db sequel.Executor, steps string, ids []int, withState bool, readBytes *int, fetched map[int]staterefs.Anchor) error {
 	placeholders, args := inList(ids)
 	columns := "step_id, changes"
 	if withState {
 		columns = "step_id, changes, state, state_refs"
 	}
 	rows, err := db.QueryContext(ctx,
-		"SELECT "+columns+" FROM dwarf_steps WHERE step_id IN ("+placeholders+")",
+		"SELECT "+columns+" FROM "+steps+" WHERE step_id IN ("+placeholders+")",
 		args...,
 	)
 	if err != nil {
@@ -179,8 +184,13 @@ func readAnchors(ctx context.Context, db sequel.Executor, ids []int, withState b
 // An introspection read (Snapshot, Step) passes an empty workflowURL and is not counted: the metric tracks the
 // execution path's byte throughput, and introspection reads are documented as outside it.
 func (e *Engine) resolveStateRefs(ctx context.Context, db sequel.Executor, shardNum int, flowToken string, state workflow.State, refs staterefs.Refs, want map[string]bool, workflowURL string) (int, error) {
+	return e.resolveStateRefsIn(ctx, db, liveTables.steps, shardNum, flowToken, state, refs, want, workflowURL)
+}
+
+// resolveStateRefsIn is resolveStateRefs reading anchors from the given steps table.
+func (e *Engine) resolveStateRefsIn(ctx context.Context, db sequel.Executor, steps string, shardNum int, flowToken string, state workflow.State, refs staterefs.Refs, want map[string]bool, workflowURL string) (int, error) {
 	var readBytes int
-	materialized, err := e.linkerFor(shardNum).Resolve(ctx, flowToken, state, refs, want, anchorLoader(db, &readBytes))
+	materialized, err := e.linkerFor(shardNum).Resolve(ctx, flowToken, state, refs, want, anchorLoaderIn(db, steps, &readBytes))
 	if readBytes > 0 && workflowURL != "" {
 		e.metricStateReadBytes(ctx, workflowURL, "state_ref", readBytes)
 	}

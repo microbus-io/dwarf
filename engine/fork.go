@@ -795,8 +795,13 @@ func (e *Engine) collectDAGSubtree(ctx context.Context, db sequel.Executor, flow
 // level-by-level walk would find, but in one round trip regardless of tree depth. root_flow_id gives tree
 // *membership*; the surgraph link still gives the parent/child *structure* the BFS walks.
 func (e *Engine) allDescendantSubgraphFlows(ctx context.Context, db sequel.Executor, flowID int) ([]int, error) {
+	return e.allDescendantSubgraphFlowsIn(ctx, db, liveTables, flowID)
+}
+
+// allDescendantSubgraphFlowsIn is allDescendantSubgraphFlows over the flows table of t.
+func (e *Engine) allDescendantSubgraphFlowsIn(ctx context.Context, db sequel.Executor, t flowTables, flowID int) ([]int, error) {
 	rows, err := db.QueryContext(ctx,
-		"SELECT flow_id, surgraph_flow_id FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)",
+		"SELECT flow_id, surgraph_flow_id FROM "+t.flows+" WHERE root_flow_id=(SELECT root_flow_id FROM "+t.flows+" WHERE flow_id=?)",
 		flowID,
 	)
 	if err != nil {

@@ -17,7 +17,9 @@ limitations under the License.
 package engine
 
 import (
+	"cmp"
 	"context"
+	"database/sql"
 	"net/http"
 	"os"
 	"time"
@@ -75,6 +77,83 @@ func (e *Engine) PurgeBefore(ctx context.Context, before time.Time) error {
 type archiveSet struct {
 	byShard   map[int]*archiver.Archive
 	dayLength time.Duration
+}
+
+// flowTables names the pair of tables a read runs against: the live tables, or one archive day's. The two have the
+// same columns, so a read is written once and run against either.
+type flowTables struct {
+	flows, steps string
+}
+
+// liveTables are the live tables, which a read tries first.
+var liveTables = flowTables{flows: "dwarf_flows", steps: "dwarf_steps"}
+
+// queryLiveOrArchive runs read on the live tables, and when the flow with flowID is not there, on the archive day it
+// is in. read reports whether it found the flow; it must have no side effect and tolerate rows vanishing, since it may
+// run on both sides.
+//
+// A read of more than one statement is closed by a primary-key read of the flow's row. A tree moves in one
+// transaction, and each plain statement sees only what had committed when it began, so the row still there means
+// every statement of the pass saw the tree on that side; the row gone means the pass's result is discarded, an error
+// included, since the error may be the move itself (an anchor read after its tree left). A read of one statement
+// (oneStatement) sees the tree on one side by itself. Neither pass runs in a transaction, which would break that
+// argument on MySQL, whose transactions read one snapshot, and lock tables on SQLite's shared cache.
+//
+// found is false when neither side holds the flow: never archived, archived on a day dropped since, or removed from
+// the archive mid-read. The caller names the 404.
+func (e *Engine) queryLiveOrArchive(ctx context.Context, db *sequel.DB, shard, flowID, hour int, oneStatement bool,
+	read func(t flowTables) (found bool, err error)) (found bool, err error) {
+	found, err = read(liveTables)
+	if found || err != nil {
+		if oneStatement {
+			return found, errors.Trace(err)
+		}
+		there, cerr := flowRowThere(ctx, db, liveTables, flowID)
+		if cerr != nil {
+			return false, errors.Trace(cmp.Or(err, cerr))
+		}
+		if there {
+			return found, errors.Trace(err)
+		}
+	}
+	set := e.archives.Load()
+	if set == nil || set.byShard[shard] == nil {
+		return false, nil
+	}
+	day, err := set.byShard[shard].LocateFlow(ctx, flowID, hour)
+	if errors.StatusCode(err) == http.StatusNotFound {
+		return false, nil
+	}
+	if err != nil {
+		return false, errors.Trace(err)
+	}
+	// A day dropped since the locate - or a directory row outliving its day - fails a statement on its missing table:
+	// the flow is not there.
+	t := flowTables{flows: migrations.FlowsTable(day), steps: migrations.StepsTable(day)}
+	found, err = read(t)
+	if sequel.IsUndefinedTableError(err) {
+		return false, nil
+	}
+	if (found || err != nil) && !oneStatement {
+		there, cerr := flowRowThere(ctx, db, t, flowID)
+		if sequel.IsUndefinedTableError(cerr) || (cerr == nil && !there) {
+			return false, nil
+		}
+		if cerr != nil {
+			return false, errors.Trace(cmp.Or(err, cerr))
+		}
+	}
+	return found, errors.Trace(err)
+}
+
+// flowRowThere reports whether t's flows table holds the flow with flowID: the closing read of a pass.
+func flowRowThere(ctx context.Context, db *sequel.DB, t flowTables, flowID int) (bool, error) {
+	var one int
+	err := db.QueryRowContext(ctx, "SELECT 1 FROM "+t.flows+" WHERE flow_id=?", flowID).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil, errors.Trace(err)
 }
 
 // archiveDayEnv names the environment variable that shortens the archive's day for the benchmark rig, a whole number

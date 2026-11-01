@@ -3384,8 +3384,9 @@ are deterministically flushed by then. Not an engine concern: a real exporter ke
 **An ended root leaves the live tables about a minute after it ends** (`archiveGrace`, a minimum; the reaper's 15 s
 tick adds up to that on top): the reaper moves its whole tree into today's archive day tables, and retention drops
 whole days (see "The archive" below). A flow that has not ended - running, sleeping, interrupted for a human - stays
-in the live tables for as long as it takes, so nothing reaps a row a `Resume` could still revive. The read paths read
-the live tables only, so an archived flow reads as not found, and drops out of `List`.
+in the live tables for as long as it takes, so nothing reaps a row a `Resume` could still revive. The read API reads an
+archived flow as it read it live ("Reading an archived flow" below); `List` reads the live tables only, so an archived
+flow drops out of it, and `Fork` of an archived source is a 404.
 
 Deleting without archiving is either operator-driven (`Delete`, `Purge`) or an explicit author opt-in
 (`DeleteOnCompletion`): a flow whose output and history are not needed. `Delete` and `Purge` reach only the live
@@ -3585,6 +3586,37 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
   shards open (whole seconds, logged as a warning when set): the engine's test seams are inert in a bench binary, so
   a rig cannot reach a test-only override, and a day of minutes is the only way to see rollover and retention under
   load in one run. Engine tests set `testArchiveDay`.
+- **Reading an archived flow** (`queryLiveOrArchive`, `archive.go`). Only the read API reads the archive - `Snapshot`,
+  `Fingerprint` (and so `Await`/`Poll`/`Run`, which build their outcome with `Snapshot`), `History`, `Step` and
+  `Continue`'s source; dispatch and every write path never do, a moved tree being answered there by the zero-row
+  guards they already have. Every read is written once against a `flowTables` pair, run on the live tables and then,
+  when the flow is not there, on the day `LocateFlow` names.
+  - **A read of several statements closes with a primary-key read of the flow's row** (`flowRowThere`). A tree moves
+    in one transaction and each plain statement sees only what had committed when it began, so the row still there
+    means every statement saw the tree on that side; the row gone discards the pass, an error included - an anchor
+    read after the move is unresolvable, which is the move and not a fault. A read of one statement (`Snapshot`,
+    `Continue`) needs none. Do not detect the straddle per operation (a step count, a re-read of the step): the one
+    closing read is what keeps it out of every read.
+  - **Neither pass runs in a transaction.** On MySQL a transaction's plain reads share its first read's snapshot,
+    which breaks the argument above, and on SQLite's shared cache a read transaction keeps each table's lock until it
+    ends, which cycles with the reaper's move. A read must have no side effect and tolerate rows vanishing, since it
+    may run on both sides.
+  - **The archive pass closes the same way**, so a tree removed from its day mid-read is a 404 rather than what the
+    read gathered by then. Only a whole day's drop removes archived rows today; the guard is in place before
+    `Delete` and `Purge` reach the archive and remove single trees. A missing table there (`sequel.IsUndefinedTableError`: a day dropped since the locate, or a directory row outliving
+    its day, which the locate returns unchecked) is a 404. Any other error is returned.
+  - **An archived flow that has not ended is a 500 from `Snapshot`**: only a bug leaves one, and reported as running
+    it would hold an `Await` until its deadline. An interrupted flow is never archived, so `Snapshot`'s interrupted
+    branch reads the live tables only.
+  - **The latch detector reads only the live tables.** It settles a key naming no row as unresolved, and the woken
+    caller's `Snapshot` finds the outcome in the archive. Do not add the archive to the sweep.
+  - **State refs resolve from the table the step was read from** (`resolveStateRefsIn`): an anchor never crosses a
+    flow, so it is in the same day. The ref cache is keyed by step id, which the move keeps, so a cached anchor stays
+    right.
+  Pinned by `archivedreads_test.go`: every read the same before and after the move, for every way a flow ends and for
+  a subgraph child's key; `Fingerprint`, `History` and `Step` straddling the move reading one side; a parked `Await`
+  getting its outcome from the archive; `Continue` from an archived flow; an unended archived flow an error; a day
+  dropped mid-read, a directory day dropped and a tree removed mid-read each a 404.
 - **The run's archives are published whole** (`archives`, an `atomic.Pointer`), like the role flags: a `PurgeBefore`
   straddling a Shutdown/Startup restart must read one run's set, never a map being assigned.
 

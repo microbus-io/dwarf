@@ -421,15 +421,28 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 	// field it surfaces as is decided below, by status.
 	var flowCancelReason string
 	var flowPayloadVer int
-	err = db.QueryRowContext(ctx,
-		"SELECT status, final_state, error, cancel_reason, payload_ver FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?",
-		flowID, flowToken, flowHour,
-	).Scan(&flowStatus, &finalStateJSON, &flowErrorMsg, &flowCancelReason, &flowPayloadVer)
-	if err == sql.ErrNoRows {
-		return nil, errors.New("flow not found", http.StatusNotFound)
-	}
+	var archived bool
+	found, err := e.queryLiveOrArchive(ctx, db, shardNum, flowID, flowHour, true, func(t flowTables) (bool, error) {
+		err := db.QueryRowContext(ctx,
+			"SELECT status, final_state, error, cancel_reason, payload_ver FROM "+t.flows+" WHERE flow_id=? AND flow_token=? AND created_hour=?",
+			flowID, flowToken, flowHour,
+		).Scan(&flowStatus, &finalStateJSON, &flowErrorMsg, &flowCancelReason, &flowPayloadVer)
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		archived = t != liveTables
+		return err == nil, errors.Trace(err)
+	})
 	if err != nil {
 		return nil, errors.Trace(err)
+	}
+	if !found {
+		return nil, errors.New("flow not found", http.StatusNotFound)
+	}
+	// Only ended trees are archived. An archived flow that has not ended is one only a bug leaves, and reported as it
+	// stands it would hold an Await until its deadline.
+	if archived && !workflow.IsTerminalStatus(flowStatus) {
+		return nil, errors.New("archived flow is %s", flowStatus, http.StatusInternalServerError)
 	}
 	flowErrorMsg = strings.TrimSpace(flowErrorMsg)
 	flowCancelReason = strings.TrimSpace(flowCancelReason)
@@ -451,7 +464,9 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 		out.State, decodeErr = workflow.NewState(finalStateJSON)
 		out.TerminateReason, out.CancelReason = splitTerminateCancelReason(flowStatus, flowCancelReason)
 	case workflow.StatusInterrupted:
-		// For interrupted, query the leaf step's state and interrupt payload
+		// For interrupted, query the leaf step's state and interrupt payload, from the live tables: an interrupted
+		// flow is never archived. One terminated between these reads stays live for archiveGrace after it ends,
+		// and its leaf no longer interrupted reads as an empty state.
 		var stepStateJSON, stepChangesJSON, stepRefsJSON, interruptPayloadJSON []byte
 		// Pick the same interrupted leaf Resume's chain walk would act on: the step the flow row recorded as the one
 		// it stopped at (the interrupt whose flow-row write committed first, which StoppedTaskName also reports),
@@ -1358,22 +1373,28 @@ func (e *Engine) continueFlow(ctx context.Context, flowKey string, additionalSta
 		return "", errors.Trace(err, http.StatusBadRequest)
 	}
 
-	// The source is read with no lock and outside the insert's transaction: a completed flow is immutable, and the
-	// new flow copies its state, graph and policy rather than referencing it, so a deletion racing this read leaves
-	// the copy valid.
+	// The source is read with no lock and outside the insert's transaction, from the live tables or the archive: a
+	// completed flow is immutable, and the new flow copies its state, graph and policy rather than referencing it, so
+	// a deletion or a move racing this read leaves the copy valid.
 	var flowStatus, workflowURL, fairnessKey, graphHash string
 	var finalStateJSON, graphJSON, baggageJSON []byte
 	var surgraphFlowID, deleteAfterMs, priority, timeBudgetMs int
 	var fairnessWeight float64
-	err = db.QueryRowContext(ctx,
-		"SELECT status, surgraph_flow_id, delete_after_ms, final_state, graph, graph_hash, workflow_url, baggage, priority, fairness_key, fairness_weight, time_budget_ms FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?",
-		flowID, flowToken, flowHour,
-	).Scan(&flowStatus, &surgraphFlowID, &deleteAfterMs, &finalStateJSON, &graphJSON, &graphHash, &workflowURL, &baggageJSON, &priority, &fairnessKey, &fairnessWeight, &timeBudgetMs)
-	if err == sql.ErrNoRows {
-		return "", errors.New("flow not found", http.StatusNotFound)
-	}
+	found, err := e.queryLiveOrArchive(ctx, db, shardNum, flowID, flowHour, true, func(t flowTables) (bool, error) {
+		err := db.QueryRowContext(ctx,
+			"SELECT status, surgraph_flow_id, delete_after_ms, final_state, graph, graph_hash, workflow_url, baggage, priority, fairness_key, fairness_weight, time_budget_ms FROM "+t.flows+" WHERE flow_id=? AND flow_token=? AND created_hour=?",
+			flowID, flowToken, flowHour,
+		).Scan(&flowStatus, &surgraphFlowID, &deleteAfterMs, &finalStateJSON, &graphJSON, &graphHash, &workflowURL, &baggageJSON, &priority, &fairnessKey, &fairnessWeight, &timeBudgetMs)
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return err == nil, errors.Trace(err)
+	})
 	if err != nil {
 		return "", errors.Trace(err)
+	}
+	if !found {
+		return "", errors.New("flow not found", http.StatusNotFound)
 	}
 	// Continuing a subgraph child would spin up a detached top-level flow from the subgraph's final state, which
 	// is never what a caller means: Continue must be addressed by a root flow's key.

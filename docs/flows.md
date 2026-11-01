@@ -260,6 +260,9 @@ continue the key the last `Continue` returned. Continuing one flow twice gives t
 A flow that has not ended is never removed by the engine. About a minute after it ends it moves to the archive,
 which keeps each day's ended flows for `SetRetention` days (30 by default) and then drops the day whole;
 `PurgeBefore(t)` drops every archived day before t's. With a retention of 0 an ended flow is deleted instead.
+An archived flow reads as it did before it moved: `Snapshot`, `Fingerprint`, `Await`, `Poll`, `Run`, `History`,
+`Step` and `Continue` find it by its key, and a flow whose day was dropped reads as not found. `List` shows only flows
+not yet archived, and `Fork` needs a source not yet archived.
 
 ```go
 err := eng.Delete(ctx, flowKey)          // schedule one ended flow (and its subtree) for deletion

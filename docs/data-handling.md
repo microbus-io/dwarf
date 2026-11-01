@@ -149,7 +149,8 @@ your metrics backend as label cardinality.
 `interrupted` flow is never removed by the engine, however old. About a minute after a flow ends, it moves to the
 archive, which keeps each day's ended flows for `SetRetention` days (30 by default) and then drops the day whole;
 `PurgeBefore(t)` drops every archived day before t's at once. With a retention of 0 an ended flow is deleted
-instead of archived.
+instead of archived. An archived flow's outcome, history and steps stay readable by its key until its day is
+dropped; `List` shows only flows not yet archived.
 
 Three ways to remove an ended flow sooner, in the minute before it is archived:
 

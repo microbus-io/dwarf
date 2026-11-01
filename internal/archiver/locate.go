@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/errors"
@@ -44,6 +45,12 @@ const forgetBatch = 4096
 // dropped since fails with an error sequel.IsUndefinedTableError recognizes, and the caller reads it as not found.
 func (a *Archive) LocateFlow(ctx context.Context, flowID, hour int) (day int, err error) {
 	created := a.creationDay(hour)
+	// The database mints the hour, so a key created more than a day past this replica's clock - a day of skew between
+	// the two being far beyond any real one - names a flow that does not exist, and is answered without a statement,
+	// whose probes of days not made yet would each fail.
+	if created > DayOf(time.Now(), a.dayLength)+1 {
+		return 0, errors.New("flow not found", http.StatusNotFound)
+	}
 	probed := a.worthProbing(created, created+1)
 	// A day known may have been dropped since by a peer, and one not seen yet may not exist: on a missing table the
 	// oldest day probed is left out and the statement run again, down to the directory alone, which is a live table.

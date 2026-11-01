@@ -146,6 +146,9 @@ const (
 	CheckpointLeaseRecoverySelected     = "leaseRecoverySelected"     // lease recovery, after it selected expired steps and before its by-id reset; reached only when it found some
 	CheckpointPoolPushHeld              = "poolPushHeld"              // recomputePools, inside poolsLock between reading the roles and pushing the sizes; reached only by the recompute FaultSlowPoolPush picks
 	CheckpointWedgeSweepSelected        = "wedgeSweepSelected"        // the wedged-park sweep, after it selected parked callers with no live child and before it reads each one's latest child; reached only when it found some
+	CheckpointFingerprintFlowRead       = "fingerprintFlowRead"       // Fingerprint, on each side it reads, after the flow row and before it counts the steps
+	CheckpointHistoryFlowRead           = "historyFlowRead"           // History, on each side it reads, after the flow row and before the tree
+	CheckpointStepRead                  = "stepRead"                  // Step, on each side it reads, after the step row and before its refs and navigation
 
 	// A COUNTING checkpoint (read with Visits, never a rendezvous), scoped by flow id so concurrent flows
 	// count independently. No test arms Wait/Break on it, so Checkpoint just increments and returns; both the

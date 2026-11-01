@@ -1384,7 +1384,8 @@ func (e *Engine) Resume(ctx context.Context, flowKey string, resumeData any) err
 
 // Terminate forcefully, unconditionally stops a flow. In-flight work is abandoned immediately - it is not
 // awaited, and no handler runs. The flow reads "terminated" as soon as this returns. Terminating a flow that
-// has already ended is a no-op that returns nil and leaves its outcome as it was. The reason is a human-readable
+// has already ended is a no-op that returns nil and leaves its outcome as it was; once it has moved to the archive,
+// about a minute after it ended, it returns 404. The reason is a human-readable
 // note of at most 4,096 bytes of UTF-8 text with no NUL; any other reason is refused with a 400.
 func (e *Engine) Terminate(ctx context.Context, flowKey string, reason string) error {
 	if err := e.ensureStarted(); err != nil {

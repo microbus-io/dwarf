@@ -178,10 +178,9 @@ most three relations.
     once per locate (measured 31 reads for 32 concurrent locates), which takes a shared, timed read to bound.
   - **Any other error fails the locate**, never reads as a 404: a 404 on a lost connection tells the caller the flow
     is gone. The cancelled caller's error included.
-  - **Read a missing table as "not there" only from a statement whose only variable relations are day tables.** On
-    PostgreSQL `42P01` is also raised for a SQL mistake - a missing or misused `FROM`-clause alias - so a statement
-    with a bug of that kind would read as a 404 there and nowhere else. The locate's statement is fixed and its only
-    day tables are the probes; a read path that takes the error as not found must keep its statement as plain.
+  - **`IsUndefinedTableError` needs sequel v1.15.4 or later**: PostgreSQL raises `42P01` for a bad `FROM`-clause
+    qualifier as well as a missing table, and earlier versions read that SQL mistake as a missing table - a 404 on
+    PostgreSQL alone.
 - **A day the directory names is returned as written.** It may have been dropped before retention deleted its rows,
   and the caller's read of it then fails on the missing table; the read paths take `IsUndefinedTableError` as not
   found. On MySQL a probe of a table being dropped waits behind the `DROP`'s metadata lock, which can itself wait on a

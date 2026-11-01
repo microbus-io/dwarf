@@ -154,7 +154,7 @@ func TestArchiver_LocatePastTheRetentionsEnd(t *testing.T) {
 	assert.Equal(9008, day, "both dropped: the directory alone")
 	_, err = a.LocateFlow(ctx, 101, hourOfDay(9003, 5))
 	assert.Equal(http.StatusNotFound, errors.StatusCode(err), "both dropped, no directory row")
-	_, err = a.LocateFlow(ctx, 101, hourOfDay(99999, 5))
+	_, err = a.LocateFlow(ctx, 101, hourOfDay(9002, 5))
 	assert.Equal(http.StatusNotFound, errors.StatusCode(err), "days that never existed")
 }
 
@@ -355,4 +355,34 @@ func TestArchiver_RetentionForgetsManyRowsInBatches(t *testing.T) {
 
 	assert.NoError(a.Maintain(ctx, 5))
 	assert.Equal(map[int]int{99: 9009}, directoryDays(t, db))
+}
+
+// TestArchiver_AKeyFromTheFutureIsNotLocated pins that a key whose creation day is more than a day past the replica's
+// clock - which the database cannot have minted - is a 404 without a statement, and that one within a day of it is
+// still probed.
+func TestArchiver_AKeyFromTheFutureIsNotLocated(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	assert := testarossa.For(t)
+	db := openShard(t)
+	a := archiver.New(db, archiver.DefaultDayLength, migrations.Archive())
+	today := archiver.DayOf(time.Now(), archiver.DefaultDayLength)
+	for day := today; day <= today+2; day++ {
+		assert.NoError(archiver.Ensure(ctx, a, day))
+	}
+	archive(t, db, 101, today+1)
+	day, err := a.LocateFlow(ctx, 101, hourOfDay(today+1, 1))
+	assert.NoError(err)
+	assert.Equal(today+1, day, "a day ahead is within the tolerance")
+
+	_, err = db.ExecContext(ctx, "DROP TABLE "+archiver.DirectoryTable)
+	assert.NoError(err)
+	if archiver.DayOf(time.Now(), archiver.DefaultDayLength) != today {
+		t.Skip("midnight passed during the test")
+	}
+	_, err = a.LocateFlow(ctx, 102, hourOfDay(today+2, 1))
+	assert.Equal(http.StatusNotFound, errors.StatusCode(err), "no statement: the directory is gone, and would fail it")
+	_, err = a.LocateFlow(ctx, 102, hourOfDay(today+1, 1))
+	assert.Error(err, "a key within the tolerance runs the statement")
+	assert.NotEqual(http.StatusNotFound, errors.StatusCode(err))
 }
