@@ -16,6 +16,9 @@
 - [ ] **MySQL/MariaDB only:** `interpolateParams=true` in the DSN. Without it every statement with arguments
   costs two round trips, roughly doubling each step's. → [Deployment](deployment.md#mysql--mariadb--supported-expect-tuning)
 - [ ] **SQL Server only:** `READ_COMMITTED_SNAPSHOT ON`.
+- [ ] **Every replica connects to a shard as one database user**, allowed to create and drop tables in the
+  engine's schema. The engine keeps the archive in a table per day, creating and dropping them as it runs.
+  → [Deployment](deployment.md#sharding)
 - [ ] **Disk IOPS sized to the write rate**, not just to capacity. Cloud providers often provision IOPS by
   disk size, and a throttled disk shows up as throughput collapse with everything apparently idle.
   → [Deployment](deployment.md#disk-throughput)

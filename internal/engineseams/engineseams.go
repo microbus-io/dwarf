@@ -125,6 +125,7 @@ const (
 // --- Execution checkpoints ---
 const (
 	CheckpointResumeBeforeFlowWrite     = "resumeBeforeFlowWrite"     // Resume, just before its transaction's flow-status gate write
+	CheckpointArchivePassDone           = "archivePassDone"           // the archive loop, after each pass over the shards
 	CheckpointBeforeTransitionTx        = "beforeTransitionTx"        // step execution, after the step is marked completed, before whichever transaction transitions it
 	CheckpointCancelBeforeMark          = "cancelBeforeMark"          // Cancel, after its watermark transaction commits, before it marks the steps
 	CheckpointForkBeforeClone           = "forkBeforeClone"           // Fork, after its pre-transaction checks, before its clone transaction

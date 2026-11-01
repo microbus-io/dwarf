@@ -1170,6 +1170,7 @@ func TestMetrics_OperationSeconds(t *testing.T) {
 	assert.NoError(eng.Delete(ctx, flowKey))
 	_, err = eng.Purge(ctx, workflow.Query{Status: workflow.StatusTerminated})
 	assert.NoError(err)
+	assert.NoError(eng.PurgeBefore(ctx, time.Now().Add(-48*time.Hour)))
 
 	// Three interrupted flows: one each to resume, terminate and cancel.
 	var parked []string
@@ -1193,7 +1194,7 @@ func TestMetrics_OperationSeconds(t *testing.T) {
 		return
 	}
 	once := []string{"history", "step", "fingerprint", "fork", "continue", "list", "shard_info", "delete", "purge",
-		"resume", "terminate", "cancel"}
+		"purge_before", "resume", "terminate", "cancel"}
 	for _, op := range once {
 		n, ok := histCount(rm, "dwarf_operation_seconds", map[string]string{"op": op, "shard": "1"})
 		assert.True(ok, "op=%s should be recorded on shard 1", op)

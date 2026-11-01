@@ -12,7 +12,7 @@ configuration, and running multiple replicas.
 All configuration is set with `Set*` methods, each returning an `error`. They split by whether the knob can
 change on a running engine: the **live** one (`SetTimeBudget`) takes effect immediately, even after `Startup`; the
 **construction-time-only** ones
-(`SetShard`, `SetWorkers`, `SetStateCacheSize`, `SetMaxPriority`, and the dependency-injection setters below) are
+(`SetShard`, `SetWorkers`, `SetStateCacheSize`, `SetMaxPriority`, `SetRetention`, and the dependency-injection setters below) are
 rejected if called after `Startup`.
 
 | Method | Default | Purpose |
@@ -21,6 +21,7 @@ rejected if called after `Startup`.
 | `SetWorkers(n)` | derived | Expert override: pins the worker *maximum* (deterministic tests, benchmarks, memory-bounded hosts). Normally unset — derived from the crash-recovery lease margin and the round-trip time measured at startup, so it holds for any task duration; the pool grows into it only on demand |
 | `SetStateCacheSize(bytes)` | 10% of memory | Memory the engine may use to keep large state fields for the steps that read them next, one cache for all its shards. The default is a tenth of `GOMEMLIMIT` when set; otherwise, on Linux, of the tightest of the process's cgroup memory limits and physical memory; otherwise 1 GiB |
 | `SetTimeBudget(d)` | 2m | Per-step `ExecuteTask` deadline |
+| `SetRetention(days)` | 30 | How many days the archive keeps each UTC day's records, counted from the end of that day; 0 keeps no archive. Use the same value on every replica sharing a database |
 | `SetMaxPriority(n)` | 5 | How many priority levels flows may use, 1 (first) to `n`, at most 100; a flow that sets none gets the midpoint (3 by default). Use the same value on every replica sharing a database |
 
 **Set `GOMEMLIMIT` on engine hosts**, a little below the memory the process may use (about 90% of its
@@ -176,6 +177,10 @@ Rules:
 - Every shard database must exist before startup — the engine migrates the schema but does not
   `CREATE DATABASE`. Each shard's DSN is used exactly as given — the engine never rewrites it, so a
   percent-encoded credential (a password `p@ss` written `p%40ss`) is safe.
+- **Every replica connects to a shard as the same database user, one allowed to create and drop tables.** The
+  engine creates and drops the archive's daily tables as it runs. On PostgreSQL a table belongs to the user that
+  created it, so under one user every replica can maintain every day, and a replica whose user does not own the
+  engine's tables fails to start, naming their owner.
 - The shard set is fixed for the engine's life: shards are opened and migrated at `Startup`, and
   `SetShard` is rejected after. Each flow key encodes its shard, so changing the set requires a
   coordinated restart of every replica (a maintenance window), not a live/piecemeal change.

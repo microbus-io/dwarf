@@ -1,0 +1,41 @@
+/*
+Copyright (c) 2026 Microbus LLC and various contributors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package archiver
+
+import "context"
+
+// The tests drive the Archive through its exported API; these expose the few internals they pin.
+
+// SetClock makes a read the given seconds since the Unix epoch instead of the database clock.
+func SetClock(a *Archive, secs func() int64) {
+	a.clock = func(context.Context) (int64, error) { return secs(), nil }
+}
+
+// Ensure exposes ensure to the tests.
+func Ensure(ctx context.Context, a *Archive, day int) error {
+	return a.ensure(ctx, day)
+}
+
+// Days returns the days that have a table of flows or steps, ascending.
+func Days(ctx context.Context, a *Archive) ([]int, error) {
+	return listDays(ctx, a.db)
+}
+
+// MigrateExisting exposes migrateExisting to the tests.
+func MigrateExisting(ctx context.Context, a *Archive, day int) error {
+	return a.migrateExisting(ctx, day)
+}

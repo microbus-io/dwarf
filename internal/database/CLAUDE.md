@@ -89,6 +89,17 @@ the `*sql.DB` methods promoted through `sequel.DB`. They are **skipped for SQLit
 dropped the instant their last connection closes. They are a production win (long-lived replicas); they never fire
 during the fast test suite.
 
+## Every replica of a shard connects as the role that owns its tables (`checkOwner`)
+
+On PostgreSQL a table belongs to the role that made it, so `openAndMigrate` checks, right after the migrations, that
+the connection's role owns `dwarf_flows` and `dwarf_steps` exactly, and fails the shard's open otherwise, naming the
+owner. It is a shard-level invariant, not an archive one: a later migration that alters a table needs the owner, and
+the archive's day tables (`internal/archiver/CLAUDE.md`), made at runtime by whichever replica gets there, could not be
+dropped by peers connecting as another role - nothing would show it until retention failed on them. The archive is its
+main reason. It is not retried: nothing but a different role clears it. MySQL and SQL Server are not checked, but
+there the one role matters too: their catalogs show a user only the tables it holds a privilege on, which is how the
+archive lists its days. Pinned by `TestCheckOwner_ANonOwnerFails` (PostgreSQL).
+
 ## Sharding mechanics
 
 **Shard indices are sparse.** Valid indices are unique integers `>= 1`, not necessarily contiguous (`Index: 1`

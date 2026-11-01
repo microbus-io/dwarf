@@ -5,7 +5,8 @@
 
 ## The migration sequence: what must never change once deployed
 
-`database.Open` runs `db.Migrate(sequenceName, migrations.FS)` (`internal/database/database.go`). `sequel`
+The live tables' migrations are `live/<n>.sql`, and each day's archive tables' are `archive/<n>.sql` (below).
+`database.Open` runs `db.Migrate(sequenceName, migrations.Live())` (`internal/database/database.go`). `sequel`
 records progress per **sequence name** in `sequel_migrations(seq_name, seq_num, completed)` and, on every open,
 runs only the files numbered **above the highest completed `seq_num`** for that name. Every rule below follows
 from that watermark.
@@ -205,6 +206,52 @@ without fragmentation or excessive write amplification.
 by `_selection`'s `(status, parked)` prefix. Every claim and completion would pay to maintain it, and as the
 smallest partial index on `pending` rows it is the one a Postgres generic plan picked for a claim predicate
 written as plain conjuncts, walking the backlog (`claimEligible` in `engine/claim.go`).
+
+### The archive day migrations (`archive/`)
+
+Each day's archive tables (`dwarf_flows_archive_<n>`, `dwarf_steps_archive_<n>`) are made and altered by the files in
+`archive/`, run as that day's own migration sequence (`SequenceName(day)`) with the day's names substituted by
+`ArchiveDay` (`internal/archiver/CLAUDE.md`). The files write the tables as `dwarf_flows_archive` and
+`dwarf_steps_archive`, stand-ins no table carries: `live/` makes no empty template tables, so nothing but a day
+ever exists under those names. So:
+- **The columns are the live tables', in the same order**, with the queue-only ones kept at their defaults; an
+  archived row is copied whole. **No auto-increment**: `flow_id` and `step_id` keep their live values, which keys
+  and state refs carry. A column added to a live table in `live/` is added in `archive/` in the same release.
+- **Every index is named for its stand-in** (`idx_dwarf_flows_archive_root`, ...), so the substitution renames it
+  too. An index with any other name collides across days on PostgreSQL and SQLite, where index names are per
+  schema.
+- **Every statement is idempotent** (`IF NOT EXISTS`; `IF OBJECT_ID(...) IS NULL` / `sys.indexes` guards on SQL
+  Server), because a day is made at runtime by any replica, and a runner that dies mid-migration leaves it to a peer
+  that runs it again.
+- **`archive/` is its own sequence, numbered from 1, under the same rules as `live/`**: numbers only append, a
+  shipped file is immutable from v1.0 on, a change is the next number. A file there names only the stand-ins, never
+  a live table: the whole file runs once per day, so a live table in it would be changed once per day. The engine's
+  Startup applies a new one to every existing day within the retention right after the shards open. A live-table
+  change and its archive counterpart are therefore two files, one in each folder.
+- **The flows table carries every live flows index but the deletion one**, so a flow lookup runs with the same
+  plan on either side: `status, updated_at`, `workflow_url`, the two surgraph links (partial where the dialect has
+  partial indexes), and `root_flow_id`, plus a completion-time range (`updated_at`).
+  `delete_after_ms` is always 0 there - a stamped root is deleted, never archived. They cost two to four index
+  inserts per archived FLOW beyond the root and completion-time ones (the surgraph ones only for a subgraph child),
+  about a tenth of the rows, mostly at the right end of their index. **The steps table
+  carries `flow_id` only - never the dispatch indexes** (`selection`, `due`): an archived step is terminal, so on
+  the dialects with partial indexes they would stay empty, and on MySQL, which has none, they would be full indexes
+  on the largest table, on a path bound by WAL bytes.
+- **PostgreSQL freezes a day early** (`autovacuum_freeze_min_age = 0`, an insert-triggered vacuum at 1%, on the table
+  and its TOAST): every row must be frozen once before the transaction-id counter wraps, and a page frozen soon after
+  it fills writes a small freeze record rather than a full-page image.
+
+Pinned by `migrations_test.go`: a day's files name only that day and every index for its table, and `live/` names
+no archive table.
+
+### The live tables vacuum in small unthrottled passes (PostgreSQL)
+
+`live/1.sql` and `live/2.sql` set per-table storage parameters on `dwarf_flows` and `dwarf_steps` and their TOAST
+tables: vacuum and insert scale factors 0.01, cost delay 0, `vacuum_truncate = false`. Every ended flow leaves the live tables
+within minutes, so they churn at the full write rate while staying small, and the defaults (a 20% threshold, a throttled
+worker) let dead rows - TOAST above all - pile up faster than vacuum reclaims them. **Do not let vacuum truncate
+them**: truncating takes an access exclusive lock, stalling every statement on the table while vacuum waits for it,
+and the freed tail is refilled within seconds; on a loaded shard the truncate wait shows beside dispatch stalls.
 
 ### A claim RELOCATES its entry in `idx_dwarf_steps_selection` - that is where a load stall lives
 

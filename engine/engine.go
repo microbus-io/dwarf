@@ -104,6 +104,7 @@ type Engine struct {
 	workersSet             atomic.Bool // SetWorkers was called: skip the derived default
 	timeBudgetMs           atomic.Int64
 	maxPriority            int          // construction-time only, see SetMaxPriority
+	retentionDays          int          // construction-time only, see SetRetention
 	refillIntervalOverride atomic.Int64 // bench override (nanoseconds): pins every piston's cycle period; <=0 = derive
 
 	// engineID is a random positive identifier minted per engine instance (fresh on every restart). It is
@@ -289,6 +290,14 @@ type Engine struct {
 	reaperCancel context.CancelFunc
 	reaperWorker sync.WaitGroup
 
+	// Archive goroutine: keeps each shard's archive day tables - today's and tomorrow's made, expired days
+	// dropped. archives is the run's set, published at Startup; testArchiveDay, when set, replaces the day's
+	// length for a test (archiveDayLength). archiveCancel stops the loop between its statements.
+	archives       atomic.Pointer[archiveSet]
+	testArchiveDay time.Duration
+	archiveCancel  context.CancelFunc
+	archiveWorker  sync.WaitGroup
+
 	// Await latch: the board callers park on, and the detector goroutine that asks the shards which of
 	// those flows have settled. A stop this replica commits reaches the board instantly through
 	// signalStop; the detector is what makes a PEER's stop observable. latchCancel stops the detector,
@@ -385,6 +394,7 @@ func NewEngine() *Engine {
 	e.orphanFlowThreshold = 5 * time.Minute
 	e.deletionGrace = 1 * time.Minute
 	e.reapInterval = 1 * time.Minute
+	e.retentionDays = defaultRetentionDays
 	e.leaseRecoveryBatch = 1024
 	e.maxPayloadBytes = maxPayloadBytes
 	e.seams = seamster.New(testing.Testing())
@@ -751,9 +761,14 @@ func (e *Engine) Startup(ctx context.Context) error {
 	if e.testHashedID != "" {
 		testConnCap = e.testConnCap
 	}
+	// Before the shards open, so a bad value fails Startup with nothing to undo.
+	dayLength, err := e.archiveDayLength(ctx)
+	if err != nil {
+		return errors.Trace(err)
+	}
 	// Resolved before the shards open, so the migrations trace through the same provider as everything after.
 	tp := e.initTracer()
-	err := e.db.Open(ctx, database.Config{
+	err = e.db.Open(ctx, database.Config{
 		Shards:         shards,
 		TestID:         e.testHashedID,
 		TestConnCap:    testConnCap,
@@ -762,6 +777,12 @@ func (e *Engine) Startup(ctx context.Context) error {
 		MeterProvider:  e.meterProvider,
 	})
 	if err != nil {
+		return errors.Trace(err)
+	}
+	// Today's and tomorrow's archive tables exist before this replica serves anything.
+	err = e.startArchives(ctx, dayLength)
+	if err != nil {
+		e.db.Close()
 		return errors.Trace(err)
 	}
 
@@ -879,8 +900,9 @@ func (e *Engine) Startup(ctx context.Context) error {
 //
 // Shutdown does not consult ctx: it waits for the steps in flight to finish (each task is bounded by its
 // time budget), and a deadline or cancellation on ctx does not make it return sooner. Background maintenance
-// in progress - crash recovery, removing deleted flows - is abandoned rather than waited for, and is
-// completed by another replica or the next start.
+// in progress - crash recovery, removing deleted flows, dropping expired archive days - is abandoned rather than
+// waited for, and is completed by another replica or the next start. Making an archive day's tables is the
+// exception: once begun it runs to its end, so Shutdown can wait for it.
 func (e *Engine) Shutdown(ctx context.Context) error {
 	if !e.started.CompareAndSwap(true, false) {
 		return nil
@@ -926,9 +948,10 @@ func (e *Engine) initRuntime() error {
 	e.linkers = make(map[int]*staterefs.Linker)
 	// The background loops' contexts exist before the engine reports itself started, as their stop signals must:
 	// a drain that found one missing would not stop its loop.
-	var recoveryCtx, reaperCtx, latchCtx context.Context
+	var recoveryCtx, reaperCtx, archiveCtx, latchCtx context.Context
 	recoveryCtx, e.recoveryCancel = context.WithCancel(e.lifetimeCtx)
 	reaperCtx, e.reaperCancel = context.WithCancel(e.lifetimeCtx)
+	archiveCtx, e.archiveCancel = context.WithCancel(e.lifetimeCtx)
 	latchCtx, e.latchCancel = context.WithCancel(e.lifetimeCtx)
 	e.graphs = graphcache.New(graphCacheFlows, graphCacheGraphs)
 	// A fresh board per run: the previous one was closed at drain, and a closed board turns every Await
@@ -1095,6 +1118,9 @@ func (e *Engine) initRuntime() error {
 	e.reaperWorker.Go(func() {
 		e.reaperLoop(reaperCtx)
 	})
+	e.archiveWorker.Go(func() {
+		e.archiveLoop(archiveCtx)
+	})
 	e.latchWorker.Go(func() {
 		e.latchLoop(latchCtx)
 	})
@@ -1211,6 +1237,10 @@ func (e *Engine) drainRuntime() {
 		e.reaperCancel()
 	}
 	e.reaperWorker.Wait()
+	if e.archiveCancel != nil {
+		e.archiveCancel()
+	}
+	e.archiveWorker.Wait()
 	// The detector stops before the board closes, since Close does not interrupt a sweep in flight.
 	if e.latchCancel != nil {
 		e.latchCancel()

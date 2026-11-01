@@ -131,3 +131,42 @@ func TestOnEach_ErrorNamesTheFailingShard(t *testing.T) {
 		assert.Equal(7, shardOf(err), "the single-shard path must name its shard too")
 	}
 }
+
+// TestCheckOwner_ANonOwnerFails pins the owner check shard open runs after the migrations: on PostgreSQL, a
+// connection whose role does not own a live table fails, naming the owner, rather than making archive tables its
+// peers could not drop.
+func TestCheckOwner_ANonOwnerFails(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+
+	var set ShardSet
+	err := set.Open(ctx, Config{
+		Shards:      map[int]ShardConfig{1: {MaxIdleConns: 2, MaxOpenConns: 4}},
+		TestID:      TestID(t.Name()),
+		TestConnCap: 4,
+	})
+	if !assert.NoError(err) {
+		return
+	}
+	defer set.Close()
+	db, err := set.Shard(1)
+	if !assert.NoError(err) {
+		return
+	}
+	assert.NoError(checkOwner(ctx, db), "the role that ran the migrations owns the tables")
+	if db.DriverName() != "pgx" {
+		t.Skip("a table's owner is checked on PostgreSQL only")
+	}
+
+	// pg_monitor is a predefined role, so the test creates none on a shared server.
+	_, err = db.ExecContext(ctx, "ALTER TABLE dwarf_steps OWNER TO pg_monitor")
+	if err != nil {
+		t.Skipf("the test role cannot hand a table to another role: %v", err)
+	}
+	defer db.ExecContext(context.Background(), "ALTER TABLE dwarf_steps OWNER TO CURRENT_USER")
+	err = checkOwner(ctx, db)
+	if assert.Error(err) {
+		assert.Contains(err.Error(), `table dwarf_steps is owned by role "pg_monitor"`)
+	}
+}

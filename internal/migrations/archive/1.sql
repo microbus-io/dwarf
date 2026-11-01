@@ -1,11 +1,11 @@
 -- Copyright (c) 2026 Microbus LLC and various contributors
--- 
+--
 -- Licensed under the Apache License, Version 2.0 (the "License");
 -- you may not use this file except in compliance with the License.
 -- You may obtain a copy of the License at
--- 
+--
 -- 	http://www.apache.org/licenses/LICENSE-2.0
--- 
+--
 -- Unless required by applicable law or agreed to in writing, software
 -- distributed under the License is distributed on an "AS IS" BASIS,
 -- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -13,8 +13,8 @@
 -- limitations under the License.
 
 -- DRIVER: mysql
-CREATE TABLE IF NOT EXISTS dwarf_flows (
-    flow_id              BIGINT       NOT NULL AUTO_INCREMENT,
+CREATE TABLE IF NOT EXISTS dwarf_flows_archive (
+    flow_id              BIGINT       NOT NULL,
     flow_token           VARCHAR(16)  NOT NULL,
     workflow_url         VARCHAR(512) NOT NULL,
     workflow_name        VARCHAR(512) NOT NULL,
@@ -46,17 +46,17 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     updated_at           DATETIME(3)  NOT NULL DEFAULT NOW_UTC(),
     touch                TINYINT      NOT NULL DEFAULT 0,
     PRIMARY KEY (flow_id),
-    INDEX idx_dwarf_flows_status (status, updated_at),
-    INDEX idx_dwarf_flows_workflow_url (workflow_url),
-    INDEX idx_dwarf_flows_surgraph (surgraph_flow_id),
-    INDEX idx_dwarf_flows_surgraph_step (surgraph_step_id),
-    INDEX idx_dwarf_flows_root (root_flow_id),
-    INDEX idx_dwarf_flows_delete_after (delete_after_ms)
+    INDEX idx_dwarf_flows_archive_status (status, updated_at),
+    INDEX idx_dwarf_flows_archive_workflow_url (workflow_url),
+    INDEX idx_dwarf_flows_archive_surgraph (surgraph_flow_id),
+    INDEX idx_dwarf_flows_archive_surgraph_step (surgraph_step_id),
+    INDEX idx_dwarf_flows_archive_root (root_flow_id),
+    INDEX idx_dwarf_flows_archive_updated (updated_at)
 );
 
 -- DRIVER: pgx
-CREATE TABLE IF NOT EXISTS dwarf_flows (
-    flow_id              BIGSERIAL        NOT NULL,
+CREATE TABLE IF NOT EXISTS dwarf_flows_archive (
+    flow_id              BIGINT           NOT NULL,
     flow_token           VARCHAR(16)      NOT NULL,
     workflow_url         VARCHAR(512)     NOT NULL,
     workflow_name        VARCHAR(512)     NOT NULL,
@@ -91,26 +91,29 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
 );
 
 -- DRIVER: pgx
-CREATE INDEX idx_dwarf_flows_status ON dwarf_flows (status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_status ON dwarf_flows_archive (status, updated_at);
 
 -- DRIVER: pgx
-CREATE INDEX idx_dwarf_flows_workflow_url ON dwarf_flows (workflow_url);
+CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_workflow_url ON dwarf_flows_archive (workflow_url);
 
 -- DRIVER: pgx
-CREATE INDEX idx_dwarf_flows_surgraph ON dwarf_flows (surgraph_flow_id) WHERE surgraph_flow_id > 0;
+CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_surgraph ON dwarf_flows_archive (surgraph_flow_id) WHERE surgraph_flow_id > 0;
 
 -- DRIVER: pgx
-CREATE INDEX idx_dwarf_flows_surgraph_step ON dwarf_flows (surgraph_step_id) WHERE surgraph_step_id > 0;
+CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_surgraph_step ON dwarf_flows_archive (surgraph_step_id) WHERE surgraph_step_id > 0;
 
 -- DRIVER: pgx
-CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id);
+CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_root ON dwarf_flows_archive (root_flow_id);
 
 -- DRIVER: pgx
-CREATE INDEX idx_dwarf_flows_delete_after ON dwarf_flows (delete_after_ms) WHERE delete_after_ms > 0;
+CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_updated ON dwarf_flows_archive (updated_at);
+
+-- DRIVER: pgx
+ALTER TABLE dwarf_flows_archive SET (autovacuum_freeze_min_age = 0, autovacuum_vacuum_insert_scale_factor = 0.01, toast.autovacuum_freeze_min_age = 0, toast.autovacuum_vacuum_insert_scale_factor = 0.01);
 
 -- DRIVER: mssql
-CREATE TABLE dwarf_flows (
-    flow_id              BIGINT        NOT NULL IDENTITY(1,1),
+IF OBJECT_ID(N'dwarf_flows_archive', N'U') IS NULL CREATE TABLE dwarf_flows_archive (
+    flow_id              BIGINT        NOT NULL,
     flow_token           NVARCHAR(16)  NOT NULL,
     workflow_url         NVARCHAR(512) NOT NULL,
     workflow_name        NVARCHAR(512) NOT NULL,
@@ -145,26 +148,26 @@ CREATE TABLE dwarf_flows (
 );
 
 -- DRIVER: mssql
-CREATE INDEX idx_dwarf_flows_status ON dwarf_flows (status, updated_at);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_dwarf_flows_archive_status' AND object_id = OBJECT_ID(N'dwarf_flows_archive')) CREATE INDEX idx_dwarf_flows_archive_status ON dwarf_flows_archive (status, updated_at);
 
 -- DRIVER: mssql
-CREATE INDEX idx_dwarf_flows_workflow_url ON dwarf_flows (workflow_url);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_dwarf_flows_archive_workflow_url' AND object_id = OBJECT_ID(N'dwarf_flows_archive')) CREATE INDEX idx_dwarf_flows_archive_workflow_url ON dwarf_flows_archive (workflow_url);
 
 -- DRIVER: mssql
-CREATE INDEX idx_dwarf_flows_surgraph ON dwarf_flows (surgraph_flow_id) WHERE surgraph_flow_id > 0;
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_dwarf_flows_archive_surgraph' AND object_id = OBJECT_ID(N'dwarf_flows_archive')) CREATE INDEX idx_dwarf_flows_archive_surgraph ON dwarf_flows_archive (surgraph_flow_id) WHERE surgraph_flow_id > 0;
 
 -- DRIVER: mssql
-CREATE INDEX idx_dwarf_flows_surgraph_step ON dwarf_flows (surgraph_step_id) WHERE surgraph_step_id > 0;
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_dwarf_flows_archive_surgraph_step' AND object_id = OBJECT_ID(N'dwarf_flows_archive')) CREATE INDEX idx_dwarf_flows_archive_surgraph_step ON dwarf_flows_archive (surgraph_step_id) WHERE surgraph_step_id > 0;
 
 -- DRIVER: mssql
-CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_dwarf_flows_archive_root' AND object_id = OBJECT_ID(N'dwarf_flows_archive')) CREATE INDEX idx_dwarf_flows_archive_root ON dwarf_flows_archive (root_flow_id);
 
 -- DRIVER: mssql
-CREATE INDEX idx_dwarf_flows_delete_after ON dwarf_flows (delete_after_ms) WHERE delete_after_ms > 0;
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_dwarf_flows_archive_updated' AND object_id = OBJECT_ID(N'dwarf_flows_archive')) CREATE INDEX idx_dwarf_flows_archive_updated ON dwarf_flows_archive (updated_at);
 
 -- DRIVER: sqlite
-CREATE TABLE IF NOT EXISTS dwarf_flows (
-    flow_id              INTEGER  NOT NULL PRIMARY KEY AUTOINCREMENT,
+CREATE TABLE IF NOT EXISTS dwarf_flows_archive (
+    flow_id              INTEGER  NOT NULL PRIMARY KEY,
     flow_token           TEXT     NOT NULL,
     workflow_url         TEXT     NOT NULL,
     workflow_name        TEXT     NOT NULL,
@@ -198,19 +201,19 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
 );
 
 -- DRIVER: sqlite
-CREATE INDEX idx_dwarf_flows_status ON dwarf_flows (status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_status ON dwarf_flows_archive (status, updated_at);
 
 -- DRIVER: sqlite
-CREATE INDEX idx_dwarf_flows_workflow_url ON dwarf_flows (workflow_url);
+CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_workflow_url ON dwarf_flows_archive (workflow_url);
 
 -- DRIVER: sqlite
-CREATE INDEX idx_dwarf_flows_surgraph ON dwarf_flows (surgraph_flow_id) WHERE surgraph_flow_id > 0;
+CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_surgraph ON dwarf_flows_archive (surgraph_flow_id) WHERE surgraph_flow_id > 0;
 
 -- DRIVER: sqlite
-CREATE INDEX idx_dwarf_flows_surgraph_step ON dwarf_flows (surgraph_step_id) WHERE surgraph_step_id > 0;
+CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_surgraph_step ON dwarf_flows_archive (surgraph_step_id) WHERE surgraph_step_id > 0;
 
 -- DRIVER: sqlite
-CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id);
+CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_root ON dwarf_flows_archive (root_flow_id);
 
 -- DRIVER: sqlite
-CREATE INDEX idx_dwarf_flows_delete_after ON dwarf_flows (delete_after_ms) WHERE delete_after_ms > 0;
+CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_updated ON dwarf_flows_archive (updated_at);

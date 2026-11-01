@@ -3479,6 +3479,43 @@ engine-native `f.fairness_key` (the host typically sets it to the tenant, so "li
 `fairness_key = X`"); `Query.Priority` narrows to one scheduling band. Empty key / zero priority disable their
 filters. The engine models no tenant concept of its own.
 
+### The archive (`archive.go`, `internal/archiver`)
+
+Each shard keeps a pair of archive tables per UTC day (the mechanism and its traps are in
+`internal/archiver/CLAUDE.md`). The engine's side:
+
+- **`SetRetention(days)`, construction-time, default 30.** A day is dropped once it ended `days` days ago. **0 keeps
+  no archive**: ended roots are deleted rather than archived, and every day before today is dropped, but today's and
+  tomorrow's tables are still made - nothing writes them - so the shape of a shard does not depend on the setting. Keeping it indefinitely is a large number of days,
+  never a sentinel. Any replica's pass may drop a day, so the smallest retention in the fleet wins.
+- **Startup does not serve before today's tables exist on every shard**, whatever the retention (`startArchives`, right after the shards
+  open and before the fleet join, so a failure has only the shards to close), and tomorrow's. It
+  takes no turn: no worker exists yet. The
+  same pass then brings the existing days within the retention up to the archive migrations (`MigrateDays`), so a
+  later archive migration reaches them before anything reads them; a day whose migration fails fails Startup. Startup
+  costs one `Migrate` per retained day per shard, which is what keeps the default retention at 30 days.
+- **The loop (`archiveLoop`) passes once when it starts, then 24 times a day** (`archivePassInterval`, at least a second
+  apart): today's and tomorrow's tables, then the expired days. The first pass is at once because Startup
+  makes days but drops none, so a fleet whose replicas live shorter than an interval would never drop one. Like every
+  background sweep it runs only on shards this replica dispatches and takes a turn per shard. The turn is held across
+  sequel's polls for a peer's migration lock and, off PostgreSQL, across a drop's unbounded lock wait: one turn, 24
+  times a day.
+- **A drain waits for a day being made.** sequel's `Migrate` takes no context, so a `Shutdown` landing in a pass's
+  `ensure` waits for that migration - up to sequel's 15-second lock lease when a peer that died holding the day's
+  migration lock has left it to expire. The cancel stops the pass between statements everywhere else. The
+  `Shutdown` godoc says so; do not wrap the migration in a goroutine to escape the wait, since the abandoned
+  migration would then run against a pool the drain is closing.
+- **`PurgeBefore(t)` drops every day before t's on every shard, whatever the retention**, through one operation turn
+  per shard; a 503 for a shard with no archive in the run its set came from (a call straddling a restart that
+  changed the shards), and a 400 for a t after today: a dropped day is never made again (`internal/archiver/CLAUDE.md`),
+  and only the oldest days go, so it leaves no gaps.
+- **`DWARF_ARCHIVE_DAY` shortens the day, for the benchmark rig only.** It is read at every Startup, before the
+  shards open (whole seconds, logged as a warning when set): the engine's test seams are inert in a bench binary, so
+  a rig cannot reach a test-only override, and a day of minutes is the only way to see rollover and retention under
+  load in one run. Engine tests set `testArchiveDay`.
+- **The run's archives are published whole** (`archives`, an `atomic.Pointer`), like the role flags: a `PurgeBefore`
+  straddling a Shutdown/Startup restart must read one run's set, never a map being assigned.
+
 ## Concurrency and Crash Recovery
 
 The engine uses SQL transactions for multi-statement operations and `lease_expires` for crash recovery.

@@ -109,6 +109,8 @@ matching one before working there:**
 - **`internal/graphcache/CLAUDE.md`** - the two-layer parsed-graph cache: why a per-flow layer of weak pointers
   sits over a shared layer that owns one parse per graph, why the shared layer has no TTL, and why its key is
   SHA-256.
+- **`internal/archiver/CLAUDE.md`** - one shard's archive day tables: why a day is made by its own migration
+  sequence, why the catalog and not the migration records says which days exist, and retention by days.
 - **`internal/candidates/CLAUDE.md`** - the bounded hint-cache mechanism; its driving refiller algorithm is in
   `engine/CLAUDE.md`. (`internal/lru` is a textbook LRU+TTL, bounded by count or by weight - godoc only, no
   design doc.)

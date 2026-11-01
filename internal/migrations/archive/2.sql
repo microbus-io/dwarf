@@ -1,11 +1,11 @@
 -- Copyright (c) 2026 Microbus LLC and various contributors
--- 
+--
 -- Licensed under the Apache License, Version 2.0 (the "License");
 -- you may not use this file except in compliance with the License.
 -- You may obtain a copy of the License at
--- 
+--
 -- 	http://www.apache.org/licenses/LICENSE-2.0
--- 
+--
 -- Unless required by applicable law or agreed to in writing, software
 -- distributed under the License is distributed on an "AS IS" BASIS,
 -- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -13,8 +13,8 @@
 -- limitations under the License.
 
 -- DRIVER: mysql
-CREATE TABLE IF NOT EXISTS dwarf_steps (
-    step_id           BIGINT       NOT NULL AUTO_INCREMENT,
+CREATE TABLE IF NOT EXISTS dwarf_steps_archive (
+    step_id           BIGINT       NOT NULL,
     flow_id           BIGINT       NOT NULL,
     step_depth        INT          NOT NULL,
     step_token        VARCHAR(16)  NOT NULL,
@@ -61,14 +61,12 @@ CREATE TABLE IF NOT EXISTS dwarf_steps (
     started_at        DATETIME(3)  NOT NULL DEFAULT NOW_UTC(),
     updated_at        DATETIME(3)  NOT NULL DEFAULT NOW_UTC(),
     PRIMARY KEY (step_id),
-    INDEX idx_dwarf_steps_flow_id (flow_id, step_id),
-    INDEX idx_dwarf_steps_selection (status, parked, priority, fairness_key, created_at, step_id, not_before, lease_expires, fairness_weight),
-    INDEX idx_dwarf_steps_due (status, parked, priority, not_before, fairness_key, created_at, step_id, lease_expires, fairness_weight)
+    INDEX idx_dwarf_steps_archive_flow_id (flow_id, step_id)
 );
 
 -- DRIVER: pgx
-CREATE TABLE IF NOT EXISTS dwarf_steps (
-    step_id           BIGSERIAL        NOT NULL,
+CREATE TABLE IF NOT EXISTS dwarf_steps_archive (
+    step_id           BIGINT           NOT NULL,
     flow_id           BIGINT           NOT NULL,
     step_depth        INT              NOT NULL,
     step_token        VARCHAR(16)      NOT NULL,
@@ -118,17 +116,14 @@ CREATE TABLE IF NOT EXISTS dwarf_steps (
 );
 
 -- DRIVER: pgx
-CREATE INDEX idx_dwarf_steps_flow_id ON dwarf_steps (flow_id);
+CREATE INDEX IF NOT EXISTS idx_dwarf_steps_archive_flow_id ON dwarf_steps_archive (flow_id);
 
 -- DRIVER: pgx
-CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority, fairness_key, created_at, step_id) INCLUDE (not_before, lease_expires, fairness_weight) WHERE status IN ('pending', 'running');
-
--- DRIVER: pgx
-CREATE INDEX idx_dwarf_steps_due ON dwarf_steps (parked, priority, not_before) INCLUDE (fairness_key, created_at, step_id, lease_expires, fairness_weight) WHERE status = 'pending' AND step_id <> 0;
+ALTER TABLE dwarf_steps_archive SET (autovacuum_freeze_min_age = 0, autovacuum_vacuum_insert_scale_factor = 0.01, toast.autovacuum_freeze_min_age = 0, toast.autovacuum_vacuum_insert_scale_factor = 0.01);
 
 -- DRIVER: mssql
-CREATE TABLE dwarf_steps (
-    step_id           BIGINT        NOT NULL IDENTITY(1,1),
+IF OBJECT_ID(N'dwarf_steps_archive', N'U') IS NULL CREATE TABLE dwarf_steps_archive (
+    step_id           BIGINT        NOT NULL,
     flow_id           BIGINT        NOT NULL,
     step_depth        INT           NOT NULL,
     step_token        NVARCHAR(16)  NOT NULL,
@@ -178,17 +173,11 @@ CREATE TABLE dwarf_steps (
 );
 
 -- DRIVER: mssql
-CREATE INDEX idx_dwarf_steps_flow_id ON dwarf_steps (flow_id);
-
--- DRIVER: mssql
-CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority, fairness_key, created_at, step_id) INCLUDE (not_before, lease_expires, fairness_weight) WHERE status IN ('pending', 'running');
-
--- DRIVER: mssql
-CREATE INDEX idx_dwarf_steps_due ON dwarf_steps (status, parked, priority, not_before) INCLUDE (fairness_key, created_at, step_id, lease_expires, fairness_weight) WHERE status = 'pending' AND step_id <> 0;
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_dwarf_steps_archive_flow_id' AND object_id = OBJECT_ID(N'dwarf_steps_archive')) CREATE INDEX idx_dwarf_steps_archive_flow_id ON dwarf_steps_archive (flow_id);
 
 -- DRIVER: sqlite
-CREATE TABLE IF NOT EXISTS dwarf_steps (
-    step_id           INTEGER  NOT NULL PRIMARY KEY AUTOINCREMENT,
+CREATE TABLE IF NOT EXISTS dwarf_steps_archive (
+    step_id           INTEGER  NOT NULL PRIMARY KEY,
     flow_id           INTEGER  NOT NULL,
     step_depth        INTEGER  NOT NULL,
     step_token        TEXT     NOT NULL,
@@ -237,10 +226,4 @@ CREATE TABLE IF NOT EXISTS dwarf_steps (
 );
 
 -- DRIVER: sqlite
-CREATE INDEX idx_dwarf_steps_flow_id ON dwarf_steps (flow_id, step_id);
-
--- DRIVER: sqlite
-CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority, fairness_key, created_at, step_id, not_before, lease_expires, fairness_weight) WHERE status IN ('pending', 'running');
-
--- DRIVER: sqlite
-CREATE INDEX idx_dwarf_steps_due ON dwarf_steps (parked, priority, not_before, fairness_key, created_at, step_id, lease_expires, fairness_weight) WHERE status = 'pending' AND step_id <> 0;
+CREATE INDEX IF NOT EXISTS idx_dwarf_steps_archive_flow_id ON dwarf_steps_archive (flow_id, step_id);

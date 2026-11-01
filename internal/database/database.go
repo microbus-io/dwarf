@@ -140,7 +140,7 @@ func (s *ShardSet) Open(ctx context.Context, cfg Config) error {
 			return errors.New("shards %d and %d resolve to the same DSN", prev, idx, http.StatusBadRequest)
 		}
 		seen[dsn] = idx
-		db, err := openShard(cfg, dsn, shards[idx])
+		db, err := openShard(ctx, cfg, dsn, shards[idx])
 		if err != nil {
 			closeAll()
 			return errors.Trace(err)
@@ -185,7 +185,7 @@ func resolveShardDSN(cfg Config, shardIndex int, dsn string) string {
 
 // openShard opens and migrates one shard from its resolved DSN, in test mode first wrapping it via
 // sequel.CreateTestingDatabase into an isolated, auto-dropped database.
-func openShard(cfg Config, dsn string, sc ShardConfig) (*sequel.DB, error) {
+func openShard(ctx context.Context, cfg Config, dsn string, sc ShardConfig) (*sequel.DB, error) {
 	if cfg.TestID != "" {
 		var err error
 		dsn, err = sequel.CreateTestingDatabase("", dsn, cfg.TestID)
@@ -193,15 +193,16 @@ func openShard(cfg Config, dsn string, sc ShardConfig) (*sequel.DB, error) {
 			return nil, errors.Trace(err)
 		}
 	}
-	db, err := openAndMigrate(cfg, dsn, sc)
+	db, err := openAndMigrate(ctx, cfg, dsn, sc)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	return db, nil
 }
 
-// openAndMigrate opens a single connection, applies pool sizes and telemetry, and runs schema migrations.
-func openAndMigrate(cfg Config, dsn string, sc ShardConfig) (*sequel.DB, error) {
+// openAndMigrate opens a single connection, applies pool sizes and telemetry, runs schema migrations, and checks that
+// the connection's role owns the tables.
+func openAndMigrate(ctx context.Context, cfg Config, dsn string, sc ShardConfig) (*sequel.DB, error) {
 	const driverName = ""
 	db, err := sequel.Open(driverName, dsn)
 	if err != nil {
@@ -223,11 +224,38 @@ func openAndMigrate(cfg Config, dsn string, sc ShardConfig) (*sequel.DB, error) 
 		db.SetConnMaxLifetime(1 * time.Hour)
 	}
 	applyTelemetry(cfg, db)
-	err = db.Migrate(sequenceName, migrations.FS)
+	err = db.Migrate(sequenceName, migrations.Live())
+	if err == nil {
+		err = checkOwner(ctx, db)
+	}
 	if err != nil {
+		db.Close()
 		return nil, errors.Trace(err)
 	}
 	return db, nil
+}
+
+// checkOwner fails unless the connection's role owns the live flow and step tables, on PostgreSQL, where a table
+// belongs to the role that made it: a replica connecting as another role makes archive day tables its peers cannot
+// drop, and runs later migrations that cannot alter the tables. It is not retried; nothing short of a different
+// role clears it.
+func checkOwner(ctx context.Context, db *sequel.DB) error {
+	if db.DriverName() != "pgx" {
+		return nil
+	}
+	for _, table := range []string{"dwarf_flows", "dwarf_steps"} {
+		var owner, user string
+		err := db.QueryRowContext(ctx,
+			"SELECT pg_get_userbyid(relowner), current_user FROM pg_class WHERE oid=?::regclass", table).Scan(&owner, &user)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if owner != user {
+			return errors.New("table %s is owned by role %q, but this replica connects as %q; every replica of a shard must"+
+				" connect as the role that owns its tables", table, owner, user)
+		}
+	}
+	return nil
 }
 
 // applyTelemetry points a shard's sequel DB at the configured logger, tracer, and meter providers, defaulting
