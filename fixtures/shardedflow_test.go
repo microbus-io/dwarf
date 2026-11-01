@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -44,34 +43,31 @@ func TestShardedflow(t *testing.T) {
 	graph.AddTransition("Record", workflow.End)
 	mux.HandleGraph("shardedflow.verify:428/sharded", graph)
 
-	var mu sync.Mutex
-	var order []string
-
-	// A `hold` flow occupies the single worker until the test releases it, and reports the moment it has it.
-	// Both halves are rendezvous rather than sleeps because both are waits on engine progress: "the worker is
-	// mine" is a dispatch, and the release must not happen until the fleet's cache partitions have been
-	// reconciled - a condition that is not a duration at all (see awaitShardCycles).
-	var holdOnce sync.Once
-	holderRunning := make(chan struct{})
-	releaseHolder := make(chan struct{})
+	// Every flow of the ordering subtest is GATED: its task reports that it has the single worker, then holds
+	// it until the test lets go. Both halves are rendezvous rather than durations, because both are waits on
+	// engine progress - "the worker is mine" is a dispatch, and the release must wait until every shard's
+	// cache partition has been reconciled against a plan that already knows about that dispatch (see the
+	// subtest).
+	started := make(chan string, 16)
+	proceed := make(chan struct{})
+	done := make(chan struct{})
 
 	mux.HandleTask("shardedflow.verify:428/record", func(ctx context.Context, f *workflow.Flow) error {
-		if f.GetBool("hold") {
-			holdOnce.Do(func() { close(holderRunning) })
-			<-releaseHolder
+		if f.GetBool("gated") {
+			started <- f.GetString("tag")
+			select {
+			case <-proceed:
+			case <-done:
+			}
 		}
-		delayMs := f.GetInt("delayMs")
-		if delayMs > 0 {
-			time.Sleep(time.Duration(delayMs) * time.Millisecond)
-		}
-		mu.Lock()
-		order = append(order, f.GetString("tag"))
-		mu.Unlock()
 		return nil
 	})
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
+	// Closed here, after the Shutdown defer, so it unwinds FIRST: Shutdown drains the workers, and one still
+	// holding a gated task would never return.
+	defer close(done)
 	eng.SetHost(mux)
 	eng.SetWorkers(1)
 	eng.SetMaxPriority(10) // the ordering below spans more bands than the default five
@@ -82,66 +78,74 @@ func TestShardedflow(t *testing.T) {
 
 	t.Run("strict_priority_across_shards", func(t *testing.T) {
 		assert := testarossa.For(t)
-		mu.Lock()
-		order = nil
-		mu.Unlock()
+
+		next := func() string {
+			select {
+			case tag := <-started:
+				return tag
+			case <-time.After(time.Minute * enginetest.TimeoutScale()):
+				t.Fatal("no gated flow reached its task, so the worker was never occupied")
+				return ""
+			}
+		}
 
 		// The holder takes the one worker and keeps it until released, so every p-flow below is created while
 		// nothing can be dispatched.
-		holderKey, _ := eng.Create(ctx, "shardedflow.verify:428/sharded",
-			map[string]any{"hold": true, "tag": "holder"},
+		holderKey, err := eng.Create(ctx, "shardedflow.verify:428/sharded",
+			map[string]any{"gated": true, "tag": "holder"},
 			&workflow.FlowOptions{Priority: 1})
-		select {
-		case <-holderRunning:
-		case <-time.After(time.Minute * enginetest.TimeoutScale()):
-			t.Fatal("the holder flow never reached its task, so the worker was never occupied")
+		if !assert.NoError(err) {
+			return
 		}
+		got := []string{next()}
 
-		var keys []string
+		keys := []string{holderKey}
 		placement := map[string]string{}
 		for i := range 8 {
 			p := i + 2
 			tag := fmt.Sprintf("p%d", p)
-			k, _ := eng.Create(ctx, "shardedflow.verify:428/sharded",
-				map[string]any{"delayMs": 50, "tag": tag},
+			k, err := eng.Create(ctx, "shardedflow.verify:428/sharded",
+				map[string]any{"gated": true, "tag": tag},
 				&workflow.FlowOptions{Priority: p})
+			if !assert.NoError(err) {
+				return
+			}
 			keys = append(keys, k)
 			placement[tag] = strings.SplitN(k, "-", 2)[0]
 		}
 
-		// Every p-flow was doorbell-admitted into its shard's EMPTY partition on creation, which no plan chose -
-		// and `Cache.Pop` ranks partitions by the bands they hold without ever consulting the current plan.
-		// Until each shard's piston has run a cycle, the
-		// cache therefore holds eight hints that no plan chose, and which one Pop takes depends on which
-		// pistons have got round to reconciling. Releasing the worker into that state is what makes the
-		// ordering below a race: it is won by whichever shards happen to have cycled, not by priority.
+		// Strict priority across shards is a promise about a SETTLED fleet, not about every instant of a
+		// drain. Each shard's Supplier keeps only its own slice of the global plan, re-planned on its own
+		// cadence from the planner's last tally of every shard, and Pop takes the best band any partition
+		// holds without consulting a plan. So in the moment after a dispatch, the shard holding the next band
+		// may still be holding the empty slice of a plan built from tallies that predate the dispatch - it
+		// saw a better band still due and planned its own step out - while another shard has already
+		// re-planned and holds the band after it. A worker freed in that moment runs the worse band. Holding
+		// each flow for a fixed time instead (50ms, under one cycle) failed ~1 run in 75 under six parallel
+		// PostgreSQL processes with no engine error logged: an adjacent swap across two shards.
 		//
-		// Two cycles per shard, not one: a cycle already in flight when these Creates committed may have
-		// scanned before they existed, so its push proves nothing about them. The second is the one whose
-		// scan is guaranteed to have seen them.
-		enginetest.AwaitShardCycles(t, eng, 2)
-		close(releaseHolder)
-
-		eng.Await(ctx, holderKey)
+		// So every release, the holder's included, waits for each shard to scan and then push twice since
+		// the dispatch it frees - not once: a cycle already in flight when the claim committed may have
+		// scanned before it. Every partition then holds a slice of a plan that already knows the released
+		// flow is running, and the next pop is decided by priority alone.
+		for i := range keys {
+			enginetest.AwaitShardCycles(t, eng, 2)
+			proceed <- struct{}{}
+			if i < len(keys)-1 {
+				got = append(got, next())
+			}
+		}
 		for _, k := range keys {
-			eng.Await(ctx, k)
+			enginetest.AwaitAndAssertComplete(t, eng, k)
 		}
 
-		mu.Lock()
-		got := make([]string, len(order))
-		copy(got, order)
-		mu.Unlock()
-
-		assert.Equal("holder", got[0])
 		expected := []string{"holder", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9"}
 		// Report SHARD PLACEMENT alongside the order. Placement is capacity-weighted random, so the eight
 		// flows do not land one per shard and which pair shares one differs every run - yet it is the first
 		// thing an out-of-order dispatch has to be read against, and it is unrecoverable once the test
-		// database is dropped. Two flows competing ACROSS shards is a tally/plan question (the planner holds
-		// each shard's LAST report, and a shard publishes a band only by scanning); two on the SAME shard is
-		// a partition-ordering question (`Offer` sets the band from the first arrival and declines anything
-		// worse). An observed inversion was a single adjacent swap (p5 before p4) with no refill-scan error
-		// in the run's log, so neither the publish gap nor a planner Clear explains it.
+		// database is dropped. Two flows competing ACROSS shards is a tally/plan question; two on the SAME
+		// shard is a partition-ordering question (`Offer` sets the band from the first arrival and declines
+		// anything worse).
 		assert.Equal(expected, got, "dispatch order; shard placement: %v", placement)
 	})
 
