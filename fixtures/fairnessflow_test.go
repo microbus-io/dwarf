@@ -80,7 +80,7 @@ func TestFairnessflow(t *testing.T) {
 	t.Run("weighted_share_and_liveness", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		// The holder takes the one worker and keeps it until released, so all 80 test flows below are
+		// The holder takes the one worker and keeps it until released, so all the test flows below are
 		// created while nothing can be dispatched - which is what makes the drain a single weighted lottery
 		// over a settled backlog rather than a race between arrival and dispatch.
 		holderKey, err := eng.Create(ctx, "fairnessflow.verify:428/fairness",
@@ -94,20 +94,26 @@ func TestFairnessflow(t *testing.T) {
 			t.Fatal("the holder flow never reached its task, so the worker was never occupied")
 		}
 
-		// 40 heavy (weight 4) and 40 light (weight 1), interleaved, same priority.
+		// 60 heavy (weight 4) and 60 light (weight 1), interleaved, same priority. The count is sized for the
+		// share assertion below, not for speed - see there.
+		const perKey = 60
 		var keys []string
-		for i := range 40 {
-			hk, _ := eng.Create(ctx, "fairnessflow.verify:428/fairness",
+		for range perKey {
+			hk, err := eng.Create(ctx, "fairnessflow.verify:428/fairness",
 				map[string]any{"delayMs": 8, "tag": "heavy"},
 				&workflow.FlowOptions{Priority: 5, FairnessKey: "heavy", FairnessWeight: 4})
+			if !assert.NoError(err) {
+				return
+			}
 			keys = append(keys, hk)
 
-			lk, _ := eng.Create(ctx, "fairnessflow.verify:428/fairness",
+			lk, err := eng.Create(ctx, "fairnessflow.verify:428/fairness",
 				map[string]any{"delayMs": 8, "tag": "light"},
 				&workflow.FlowOptions{Priority: 5, FairnessKey: "light", FairnessWeight: 1})
+			if !assert.NoError(err) {
+				return
+			}
 			keys = append(keys, lk)
-
-			_ = i
 		}
 
 		// Both keys are committed pending; now let the cache be reconciled against the plan before the
@@ -117,9 +123,9 @@ func TestFairnessflow(t *testing.T) {
 		enginetest.AwaitShardCycles(t, eng, 2)
 		release()
 
-		eng.Await(ctx, holderKey)
+		enginetest.AwaitAndAssertComplete(t, eng, holderKey)
 		for _, k := range keys {
-			eng.Await(ctx, k)
+			enginetest.AwaitAndAssertComplete(t, eng, k)
 		}
 
 		mu.Lock()
@@ -127,7 +133,6 @@ func TestFairnessflow(t *testing.T) {
 		copy(got, order)
 		mu.Unlock()
 
-		// Count heavy and light.
 		var heavyCount, lightCount int
 		for _, tag := range got {
 			switch tag {
@@ -137,55 +142,37 @@ func TestFairnessflow(t *testing.T) {
 				lightCount++
 			}
 		}
-		assert.Equal(40, heavyCount)
-		assert.Equal(40, lightCount)
+		assert.Equal(perKey, heavyCount)
+		assert.Equal(perKey, lightCount)
 
-		// Light key makes progress before heavy key exhausted.
-		firstLight := -1
+		// The share and the liveness are both read off ONE statistic: how many light flows were dispatched
+		// before heavy's last. While both keys have backlog every dispatch is an independent weighted draw
+		// (heavy with p=4/5), so that count is negative-binomial - heavy's 60 successes against light's 1-in-5
+		// - with mean 15. A key whose weight were ignored (1:1) would put it near 56; weight acting as strict
+		// precedence would make it 0, light starved until heavy ran dry. The lottery is genuinely random, so
+		// the bounds are chosen from its exact distribution, not from observed runs: at 4:1 each side fails
+		// spuriously ~1.5e-6 of the time, while a 1:1 regression still passes only ~3% of runs and starvation
+		// never. Do not tighten them toward the observed spread, and do not add a check on an early window or
+		// a mean-index gap: over a backlog this size either one fails ~1 run in 1,000 by chance alone, and
+		// still misses a 1:1 regression more often than this one. More flows is the only lever that narrows
+		// both errors at once. Counting only BEFORE heavy's last dispatch also keeps the tail out of it, where a
+		// stale tally can plan a slot for an exhausted key.
 		lastHeavy := -1
 		for i, tag := range got {
-			if tag == "light" && firstLight < 0 {
-				firstLight = i
-			}
 			if tag == "heavy" {
 				lastHeavy = i
 			}
 		}
-		assert.True(firstLight < lastHeavy)
-
-		// Weighted 4:1 share (the point of FairnessWeight): heavy (weight 4) is dispatched preferentially
-		// over light (weight 1), so heavy work clusters earlier in the dispatch order. The earlier assertions
-		// (all 80 complete, some interleaving) would still pass if weights were ignored and the two keys
-		// interleaved evenly. The mean-dispatch-index gap is the primary ratio guard: if the 4:1 semantics
-		// regressed to 1:1 the means would converge (~39.5 each, gap ~0), far below the >=10 threshold
-		// (observed gap ~28, with 25-run range ~20..37, so ordinary jitter never trips it). The early-window
-		// check is a secondary, non-brittle confirmation that heavy *leads* early: with weighted sampling the
-		// first-25 counts are noisy (heavy 14..24, light 0..10 across runs), so a fixed 2:1 ratio there flaked
-		// when heavy dipped to ~14-15; only the direction (heavy > light early, observed gap always >=4) is
-		// asserted, leaving the ratio magnitude to the robust mean gap above.
-		var sumHeavy, sumLight int
-		var earlyHeavy, earlyLight int
-		const earlyWindow = 25
-		for i, tag := range got {
-			switch tag {
-			case "heavy":
-				sumHeavy += i
-				if i < earlyWindow {
-					earlyHeavy++
-				}
-			case "light":
-				sumLight += i
-				if i < earlyWindow {
-					earlyLight++
-				}
+		var lightBeforeLastHeavy int
+		for _, tag := range got[:lastHeavy+1] {
+			if tag == "light" {
+				lightBeforeLastHeavy++
 			}
 		}
-		meanHeavy := float64(sumHeavy) / float64(heavyCount)
-		meanLight := float64(sumLight) / float64(lightCount)
-		t.Logf("meanHeavyIdx=%.1f meanLightIdx=%.1f earlyHeavy=%d earlyLight=%d", meanHeavy, meanLight, earlyHeavy, earlyLight)
-		assert.True(meanLight-meanHeavy >= 10,
-			"weighted 4:1 share too weak (may have regressed toward 1:1): meanHeavyIdx=%.1f meanLightIdx=%.1f", meanHeavy, meanLight)
-		assert.True(earlyHeavy > earlyLight,
-			"heavy (weight 4) should lead light in the first %d dispatches: earlyHeavy=%d earlyLight=%d", earlyWindow, earlyHeavy, earlyLight)
+		t.Logf("light dispatched before heavy's last: %d (expected ~15 at 4:1)", lightBeforeLastHeavy)
+		assert.True(lightBeforeLastHeavy >= 1,
+			"light (weight 1) was starved until heavy (weight 4) ran out: weight is acting as precedence, not share")
+		assert.True(lightBeforeLastHeavy <= 40,
+			"weighted 4:1 share too weak (may have regressed toward 1:1): %d light dispatched before heavy's last, expected ~15", lightBeforeLastHeavy)
 	})
 }
