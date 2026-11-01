@@ -183,7 +183,7 @@ Rules:
   new flow on a shard it dispatches, so flows land where they are created; any weight other than 1 switches
   every replica to placement over all non-cordoned shards in proportion to their weights. In a fleet of
   unequal databases, give a larger one a larger weight (see [Resharding](resharding.md)).
-  Subgraph flows, thread continuations and forks all stay on their originating shard.
+  Subgraph flows, continuations and forks all stay on their originating shard.
 
 ```go
 eng.SetShard(engine.ShardSpec{Index: 1, DSN: "postgres://user:pass@db-a.internal:5432/dwarf?sslmode=disable"})

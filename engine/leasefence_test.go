@@ -52,8 +52,8 @@ func TestLeaseFence_FailStep(t *testing.T) {
 		assert.NoError(err)
 		// flow_id is auto-increment; the first insert on a fresh per-test DB is flow_id=1 on every driver.
 		_, err = db.ExecContext(ctx,
-			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, thread_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			"ftok", "u", "W", []byte("{}"), "", workflow.StatusRunning, 1, 1, 1000,
+			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			"ftok", "u", "W", []byte("{}"), "", workflow.StatusRunning, 1, 1000,
 		)
 		assert.NoError(err)
 		// lease_expires is set well into the future so the test engine's own lease-recovery poll does not
@@ -681,8 +681,8 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 		db, err := e.db.Shard(1)
 		assert.NoError(err)
 		_, err = db.ExecContext(ctx,
-			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, thread_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			"ftok", "u", "W", []byte("{}"), "", flowStatus, 1, 1, 1000,
+			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			"ftok", "u", "W", []byte("{}"), "", flowStatus, 1, 1000,
 		)
 		assert.NoError(err)
 		_, err = db.ExecContext(ctx,
@@ -784,8 +784,8 @@ func TestFailStep_HeldStates(t *testing.T) {
 			if tc.row.parentStepState != "" {
 				// The parent flow (flow_id=1) and its caller step (step_id=1), parked on the child.
 				_, err = db.ExecContext(ctx,
-					"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, thread_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-					"ptok", "u", "W", []byte("{}"), "", workflow.StatusRunning, 1, 1, 1000,
+					"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+					"ptok", "u", "W", []byte("{}"), "", workflow.StatusRunning, 1, 1000,
 				)
 				assert.NoError(err)
 				_, err = db.ExecContext(ctx,
@@ -796,8 +796,8 @@ func TestFailStep_HeldStates(t *testing.T) {
 				surgraphFlowID, surgraphStepID = 1, 1
 			}
 			_, err = db.ExecContext(ctx,
-				"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, thread_id, time_budget_ms, surgraph_flow_id, surgraph_step_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-				"ftok", "u", "W", []byte("{}"), "", flowStatus, 0, 0, 1000, surgraphFlowID, surgraphStepID,
+				"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, time_budget_ms, surgraph_flow_id, surgraph_step_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+				"ftok", "u", "W", []byte("{}"), "", flowStatus, 0, 1000, surgraphFlowID, surgraphStepID,
 			)
 			assert.NoError(err)
 			var flowID int

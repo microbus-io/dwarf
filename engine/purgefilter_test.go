@@ -73,7 +73,7 @@ func TestPurge_EveryListFilterNarrows(t *testing.T) {
 	assert.Contains(keys, tenantB)
 
 	for _, q := range []workflow.Query{
-		{ThreadKey: tenantB}, {StoppedTaskName: "Work"}, {Priority: 99}, {NewerThan: time.Hour}, {Search: "no-such-flow"},
+		{StoppedTaskName: "Work"}, {Priority: 99}, {NewerThan: time.Hour}, {Search: "no-such-flow"},
 	} {
 		_, err := e.Purge(ctx, q)
 		assert.NoError(err, "%+v", q)

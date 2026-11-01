@@ -241,10 +241,6 @@ func TestCreatedHour_EveryRowCarriesItsFlowsHour(t *testing.T) {
 	for _, s := range summaries {
 		flowID, h := keyHour(s.FlowKey)
 		assert.Equal(hourByFlow[flowID], h, "flow key %s", s.FlowKey)
-		// Every root here is on the original's thread, so every thread key is the moved root's.
-		threadID, threadHour := keyHour(s.ThreadKey)
-		assert.Equal(rootID, threadID, "thread key %s", s.ThreadKey)
-		assert.Equal(movedHour, threadHour, "thread key %s", s.ThreadKey)
 	}
 }
 
@@ -323,10 +319,6 @@ func TestCreatedHour_WrongHourIsNotFound(t *testing.T) {
 	notFound("Fork", err)
 	_, err = e.Continue(ctx, wrongDone, nil)
 	notFound("Continue", err)
-	_, err = e.Create(ctx, "wronghour/done", nil, &workflow.FlowOptions{ThreadKey: wrongDone})
-	notFound("Create with a ThreadKey", err)
-	_, _, err = e.List(ctx, workflow.Query{ThreadKey: wrongDone})
-	notFound("List by ThreadKey", err)
 	err = e.Delete(ctx, wrongDone)
 	notFound("Delete", err)
 	err = e.Resume(ctx, wrongParked, nil)

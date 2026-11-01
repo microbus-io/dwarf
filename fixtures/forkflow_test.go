@@ -192,16 +192,16 @@ func TestForkflow_RecoverFailedStep(t *testing.T) {
 	assert.Equal(workflow.StatusFailed, origAfter.Status)
 }
 
-// TestForkflow_ContinueExcludesFork confirms a fork shares the thread for List grouping but is invisible
-// to Continue, which bases the next turn on the original completed flow, not the fork.
-func TestForkflow_ContinueExcludesFork(t *testing.T) {
+// TestForkflow_ContinueBuildsOnTheNamedFlow confirms Continue builds on the flow it names, whether that is the
+// origin of a fork or the fork itself.
+func TestForkflow_ContinueBuildsOnTheNamedFlow(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	mux := hosts.NewMux()
 
-	g := workflow.NewGraph("Threaded")
+	g := workflow.NewGraph("Continued")
 	g.SetURL("A", "forkflow3.verify:428/a")
 	g.SetURL("B", "forkflow3.verify:428/b")
 	g.AddTransitionChain("A", "B", workflow.End)
@@ -223,7 +223,7 @@ func TestForkflow_ContinueExcludesFork(t *testing.T) {
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 	assert.Equal("origin", stateVal(outcome.State, "tag"))
 
-	// Fork the origin at B with a distinct override; it completes in the same thread.
+	// Fork the origin at B with a distinct override.
 	bKey := stepKeyByTask(t, eng, originKey, "B")
 	forkKey, err := eng.Fork(ctx, bKey, map[string]any{"seed": "forked"})
 	assert.NoError(err)
@@ -232,14 +232,16 @@ func TestForkflow_ContinueExcludesFork(t *testing.T) {
 	assert.Equal(workflow.StatusCompleted, forkOutcome.Status)
 	assert.Equal("forked", stateVal(forkOutcome.State, "tag"))
 
-	// Continue on the thread must base on the ORIGIN (tag=origin), not the later fork (tag=forked).
-	contKey, err := eng.Continue(ctx, originKey, map[string]any{})
-	assert.NoError(err)
-	contOutcome, err := eng.Await(ctx, contKey)
-	assert.NoError(err)
-	assert.Equal(workflow.StatusCompleted, contOutcome.Status)
-	// B re-ran in the continuation reading the carried-over seed from the origin's final state.
-	assert.Equal("origin", stateVal(contOutcome.State, "tag"))
+	// Continuing the origin builds on the origin (tag=origin), continuing the fork on the fork (tag=forked): B
+	// re-runs in each continuation reading the seed carried over from the final state it continues.
+	for key, want := range map[string]string{originKey: "origin", forkKey: "forked"} {
+		contKey, err := eng.Continue(ctx, key, map[string]any{})
+		assert.NoError(err)
+		contOutcome, err := eng.Await(ctx, contKey)
+		assert.NoError(err)
+		assert.Equal(workflow.StatusCompleted, contOutcome.Status)
+		assert.Equal(want, stateVal(contOutcome.State, "tag"))
+	}
 }
 
 // TestForkflow_FanoutForkOfFork forks a partially-failed fan-out one failed branch at a time. The first

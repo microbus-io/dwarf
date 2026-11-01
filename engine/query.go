@@ -40,10 +40,11 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 	}
 	indices, pos := e.shardOrdinals()
 
-	joinSQL, whereSQL, baseArgs, restrictShardNum, err := e.queryClauses(ctx, query, subgraphCondition(query.IncludeSubgraphs))
+	joinSQL, whereSQL, baseArgs, err := e.queryClauses(query, subgraphCondition(query.IncludeSubgraphs))
 	if err != nil {
 		return nil, "", errors.Trace(err)
 	}
+	restrictShardNum := query.Shard
 
 	perShardCursor := map[int]int{}
 	if query.Cursor != "" {
@@ -93,10 +94,8 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 			args = append(args, scArgs...)
 		}
 		args = append(args, perShardLimit)
-		// The thread key is the thread's anchor flow's key, so it takes that row's creation hour. An anchor that was
-		// deleted leaves the key unresolvable whatever its hour, as it always was.
-		stmt := "SELECT f.flow_id, f.flow_token, f.created_hour, f.thread_id, f.thread_token, COALESCE(t.created_hour, 0), f.workflow_url, f.workflow_name, f.status, s.task_name, f.error, f.cancel_reason, f.created_at, f.started_at, f.updated_at, f.priority, f.fairness_key, f.surgraph_flow_id, f.trace_parent" +
-			" FROM dwarf_flows f LEFT JOIN dwarf_flows t ON t.flow_id=f.thread_id" + joinSQL +
+		stmt := "SELECT f.flow_id, f.flow_token, f.created_hour, f.workflow_url, f.workflow_name, f.status, s.task_name, f.error, f.cancel_reason, f.created_at, f.started_at, f.updated_at, f.priority, f.fairness_key, f.surgraph_flow_id, f.trace_parent" +
+			" FROM dwarf_flows f" + joinSQL +
 			" WHERE " + strings.Join(conditions, " AND ") +
 			" ORDER BY f.flow_id DESC LIMIT_OFFSET(?, 0)"
 		rows, err := db.QueryContext(ctx, stmt, args...)
@@ -107,17 +106,16 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 		var shardRows []listRow
 		for rows.Next() {
 			var lr listRow
-			var flowToken, threadToken, flowError, cancelReason, traceParent string
-			var flowHour, threadID, threadHour, surgraphFlowID int
+			var flowToken, flowError, cancelReason, traceParent string
+			var flowHour, surgraphFlowID int
 			var taskName sql.NullString
-			err = rows.Scan(&lr.flowID, &flowToken, &flowHour, &threadID, &threadToken, &threadHour, &lr.summary.WorkflowURL, &lr.summary.WorkflowName, &lr.summary.Status, &taskName, &flowError, &cancelReason, &lr.summary.CreatedAt, &lr.summary.StartedAt, &lr.summary.UpdatedAt, &lr.summary.Priority, &lr.summary.FairnessKey, &surgraphFlowID, &traceParent)
+			err = rows.Scan(&lr.flowID, &flowToken, &flowHour, &lr.summary.WorkflowURL, &lr.summary.WorkflowName, &lr.summary.Status, &taskName, &flowError, &cancelReason, &lr.summary.CreatedAt, &lr.summary.StartedAt, &lr.summary.UpdatedAt, &lr.summary.Priority, &lr.summary.FairnessKey, &surgraphFlowID, &traceParent)
 			if err != nil {
 				return errors.Trace(err)
 			}
 			lr.summary.Subgraph = surgraphFlowID != 0
 			lr.summary.TraceID = traceIDFromParent(traceParent)
 			lr.summary.FlowKey = keys.NewFlowKey(shardIdx, flowHour, lr.flowID, flowToken)
-			lr.summary.ThreadKey = keys.NewFlowKey(shardIdx, threadHour, threadID, threadToken)
 			lr.summary.StoppedTaskName = taskName.String
 			lr.summary.Error = strings.TrimSpace(flowError)
 			// cancel_reason is the shared reason column both Terminate and Cancel write into;
@@ -213,15 +211,14 @@ func subgraphCondition(includeSubgraphs bool) string {
 
 // queryClauses builds the shared WHERE/JOIN for list and purge. subgraphCond is the surgraph_flow_id
 // predicate the caller chose: list honors Query.IncludeSubgraphs, purge always passes roots-only.
-func (e *Engine) queryClauses(ctx context.Context, query workflow.Query, subgraphCond string) (string, string, []any, int, error) {
+func (e *Engine) queryClauses(query workflow.Query, subgraphCond string) (string, string, []any, error) {
 	if query.Shard != 0 && !e.db.Has(query.Shard) {
-		return "", "", nil, 0, errors.New("invalid shard", http.StatusBadRequest)
+		return "", "", nil, errors.New("invalid shard", http.StatusBadRequest)
 	}
-	restrictShardNum := query.Shard
 	// A negative duration would otherwise add no condition, and Purge's guard counts it as a filter: it would
 	// purge every flow (a time.Until on a past time yields one).
 	if query.OlderThan < 0 || query.NewerThan < 0 {
-		return "", "", nil, 0, errors.New("OlderThan and NewerThan cannot be negative", http.StatusBadRequest)
+		return "", "", nil, errors.New("OlderThan and NewerThan cannot be negative", http.StatusBadRequest)
 	}
 
 	conditions := []string{subgraphCond}
@@ -232,7 +229,7 @@ func (e *Engine) queryClauses(ctx context.Context, query workflow.Query, subgrap
 		// flow_id DESC + LIMIT under a parameter's density-average estimate. Validated against the known
 		// set first, so only an engine constant - never caller input - is concatenated (no injection).
 		if !workflow.IsValidStatus(query.Status) {
-			return "", "", nil, 0, errors.New("invalid status filter: %q", query.Status, http.StatusBadRequest)
+			return "", "", nil, errors.New("invalid status filter: %q", query.Status, http.StatusBadRequest)
 		}
 		conditions = append(conditions, "f.status='"+query.Status+"'")
 	}
@@ -243,31 +240,6 @@ func (e *Engine) queryClauses(ctx context.Context, query workflow.Query, subgrap
 	if query.WorkflowName != "" {
 		conditions = append(conditions, "f.workflow_name=?")
 		args = append(args, query.WorkflowName)
-	}
-	if query.ThreadKey != "" {
-		threadShardNum, threadFlowHour, threadFlowID, threadFlowToken, parseErr := keys.ParseFlowKey(query.ThreadKey)
-		if parseErr != nil {
-			return "", "", nil, 0, errors.Trace(parseErr)
-		}
-		db, dErr := e.db.Shard(threadShardNum)
-		if dErr != nil {
-			return "", "", nil, 0, errors.Trace(dErr)
-		}
-		// Its own turn: this resolve runs BEFORE the per-shard fan-out below takes one, so it would
-		// otherwise be the one read of the operation that goes unordered.
-		tctx, doneTurn := e.dbTurn(ctx, threadShardNum)
-		var resolvedThreadID int
-		err := db.QueryRowContext(tctx, "SELECT thread_id FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?", threadFlowID, threadFlowToken, threadFlowHour).Scan(&resolvedThreadID)
-		doneTurn()
-		if err == sql.ErrNoRows {
-			return "", "", nil, 0, errors.New("flow not found", http.StatusNotFound)
-		}
-		if err != nil {
-			return "", "", nil, 0, errors.Trace(err)
-		}
-		conditions = append(conditions, "f.thread_id=?")
-		args = append(args, resolvedThreadID)
-		restrictShardNum = threadShardNum
 	}
 	if query.StoppedTaskName != "" {
 		conditions = append(conditions, "s.task_name=?")
@@ -292,7 +264,7 @@ func (e *Engine) queryClauses(ctx context.Context, query workflow.Query, subgrap
 
 	joinSQL := " LEFT JOIN dwarf_steps s ON f.stopped_step_id = s.step_id"
 	whereSQL := strings.Join(conditions, " AND ")
-	return joinSQL, whereSQL, args, restrictShardNum, nil
+	return joinSQL, whereSQL, args, nil
 }
 
 // intCSV renders ids as a comma-separated list for direct embedding in a SQL IN (...) clause. The ids are

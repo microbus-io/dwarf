@@ -164,7 +164,7 @@ Full guides live in [`docs/`](docs/), split by who they are written for — star
 **Building workflows:**
 
 - [Getting started](docs/getting-started.md) — install, wiring, your first flow
-- [Concepts](docs/concepts.md) — graph, task, flow, step, thread, reducer, lifecycle
+- [Concepts](docs/concepts.md) — graph, task, flow, step, reducer, lifecycle
 - [Building graphs](docs/graphs.md) — transitions, conditions, fan-out, error handling, reducers
 - [Writing tasks](docs/tasks.md) — the Flow carrier, state, control signals, baggage, error handling
 - [Driving flows](docs/flows.md) — create, run, inspect, resume, terminate, fork, continue, retain, error codes

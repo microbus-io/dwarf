@@ -32,7 +32,7 @@ import (
 // TestInsertFlowTx_ConcurrentCreates pins flow creation, whose writes after an INSERT name the new row in SQL on
 // PostgreSQL rather than by a bind. Flows are created concurrently, so inserts from different sessions interleave:
 // an id that is not the session's own would point a flow at another flow's rows. Every new top-level flow must be
-// its own thread and root, own exactly one entry step, and record no stopped step while it has not stopped.
+// its own root, own exactly one entry step, and record no stopped step while it has not stopped.
 func TestInsertFlowTx_ConcurrentCreates(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
@@ -67,16 +67,17 @@ func TestInsertFlowTx_ConcurrentCreates(t *testing.T) {
 	assert.Equal(flows, created)
 	assert.NoError(db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM dwarf_flows f"+
-			" WHERE f.thread_id<>f.flow_id OR f.root_flow_id<>f.flow_id OR f.stopped_step_id<>0"+
+			" WHERE f.root_flow_id<>f.flow_id OR f.stopped_step_id<>0"+
 			" OR (SELECT COUNT(*) FROM dwarf_steps s WHERE s.flow_id=f.flow_id AND s.task_name='Entry')<>1").Scan(&strays))
-	assert.Zero(strays, "every flow is its own thread and root, owns its own entry step, and has not stopped")
+	assert.Zero(strays, "every flow is its own root, owns its own entry step, and has not stopped")
 }
 
-// TestInsertFlowTx_SelfColumnsInTheInsert pins how every creation path writes a flow's thread and root ids: a new
-// thread's thread_id and a new tree's root_flow_id are the row's own flow_id, and on PostgreSQL the INSERT writes
-// them itself, so no UPDATE of dwarf_flows follows - an UPDATE there changes indexed columns and is never HOT.
-// Elsewhere a fix-up UPDATE writes them. It covers Create, a subgraph spawn, Continue and Fork (the clone of a
-// root and of a subgraph flow), reading the statements off sequel's debug log, and checks every row's ids.
+// TestInsertFlowTx_SelfColumnsInTheInsert pins how every creation path writes a flow's root id: a new tree's
+// root_flow_id is the row's own flow_id, and on PostgreSQL the INSERT writes it itself, so no UPDATE of dwarf_flows
+// follows - an UPDATE there changes an indexed column and is never HOT. Elsewhere a fix-up UPDATE writes it, and
+// only for a new root: a subgraph flow binds its parent's. It covers Create, a subgraph spawn, Continue and Fork
+// (the clone of a root and of a subgraph flow), reading the statements off sequel's debug log, and checks every
+// row's root id.
 func TestInsertFlowTx_SelfColumnsInTheInsert(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -143,22 +144,20 @@ func TestInsertFlowTx_SelfColumnsInTheInsert(t *testing.T) {
 	}
 
 	// Six flows: the root and its child, the Continue turn and its child, the fork and the clone of the root's
-	// child. Only off PostgreSQL does an UPDATE write a thread or root id. The counts are lower bounds, since a
-	// transaction retry logs its rolled-back attempt's statements too.
+	// child. Only off PostgreSQL does an UPDATE write a root id, and only for the three roots. The counts are lower
+	// bounds, since a transaction retry logs its rolled-back attempt's statements too.
 	inserts, fixups := log.flowWrites()
 	assert.True(inserts >= 6, "%d INSERTs into dwarf_flows logged, want at least 6", inserts)
 	if db.DriverName() == "pgx" {
-		assert.Zero(fixups, "UPDATEs of a flow's thread or root id")
+		assert.Zero(fixups, "UPDATEs of a flow's root id")
 	} else {
-		assert.True(fixups >= 6, "%d UPDATEs of a flow's thread or root id logged, want at least 6", fixups)
+		assert.True(fixups >= 3, "%d UPDATEs of a flow's root id logged, want at least 3", fixups)
 	}
 
-	_, _, rootID, rootToken, err := keys.ParseFlowKey(rootKey)
-	assert.NoError(err)
 	_, _, forkID, forkToken, err := keys.ParseFlowKey(forkKey)
 	assert.NoError(err)
 	rows, err := db.QueryContext(ctx,
-		"SELECT f.flow_id, f.flow_token, f.thread_id, f.thread_token, f.root_flow_id, f.surgraph_flow_id, COALESCE(p.root_flow_id, 0)"+
+		"SELECT f.flow_id, f.flow_token, f.root_flow_id, f.surgraph_flow_id, COALESCE(p.root_flow_id, 0)"+
 			" FROM dwarf_flows f LEFT JOIN dwarf_flows p ON p.flow_id=f.surgraph_flow_id ORDER BY f.flow_id")
 	if !assert.NoError(err) {
 		return
@@ -166,19 +165,15 @@ func TestInsertFlowTx_SelfColumnsInTheInsert(t *testing.T) {
 	defer rows.Close()
 	var flows int
 	for rows.Next() {
-		var flowID, threadID, rootFlowID, surgraphFlowID, parentRoot int
-		var flowToken, threadToken string
-		assert.NoError(rows.Scan(&flowID, &flowToken, &threadID, &threadToken, &rootFlowID, &surgraphFlowID, &parentRoot))
+		var flowID, rootFlowID, surgraphFlowID, parentRoot int
+		var flowToken string
+		assert.NoError(rows.Scan(&flowID, &flowToken, &rootFlowID, &surgraphFlowID, &parentRoot))
 		flows++
 		if surgraphFlowID == 0 {
-			// The root, the Continue turn and the fork: each its own root, all on the root's thread.
+			// The root, the Continue turn and the fork: each its own root.
 			assert.Equal(flowID, rootFlowID, "flow %d is its own root", flowID)
-			assert.Equal(rootID, threadID, "flow %d is on the root's thread", flowID)
-			assert.Equal(rootToken, threadToken, "flow %d carries the root's thread token", flowID)
 		} else {
-			// A subgraph flow: its own thread, in its parent's tree.
-			assert.Equal(flowID, threadID, "subgraph flow %d is its own thread", flowID)
-			assert.Equal(flowToken, threadToken, "subgraph flow %d carries its own token as the thread's", flowID)
+			// A subgraph flow: in its parent's tree.
 			assert.Equal(parentRoot, rootFlowID, "subgraph flow %d is in its parent's tree", flowID)
 			assert.NotZero(rootFlowID)
 		}
@@ -215,8 +210,8 @@ func (l *queryLog) Handle(_ context.Context, r slog.Record) error {
 	return nil
 }
 
-// flowWrites counts the logged INSERTs into dwarf_flows, and the UPDATEs of dwarf_flows that set a thread or root
-// id, whatever their spelling.
+// flowWrites counts the logged INSERTs into dwarf_flows, and the UPDATEs of dwarf_flows that set a root id,
+// whatever their spelling.
 func (l *queryLog) flowWrites() (inserts, fixups int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -226,7 +221,7 @@ func (l *queryLog) flowWrites() (inserts, fixups int) {
 			inserts++
 		case strings.HasPrefix(q, "UPDATE dwarf_flows "):
 			set, _, _ := strings.Cut(strings.ReplaceAll(q, " ", ""), "WHERE")
-			if strings.Contains(set, "thread_id=") || strings.Contains(set, "root_flow_id=") {
+			if strings.Contains(set, "root_flow_id=") {
 				fixups++
 			}
 		}

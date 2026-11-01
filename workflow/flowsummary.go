@@ -21,7 +21,6 @@ import "time"
 // FlowSummary is a summary of a flow for listing purposes.
 type FlowSummary struct {
 	FlowKey      string `json:"flowKey,omitzero"`
-	ThreadKey    string `json:"threadKey,omitzero"`
 	WorkflowURL  string `json:"workflowURL,omitzero"`
 	WorkflowName string `json:"workflowName,omitzero"`
 	Status       string `json:"status,omitzero"`

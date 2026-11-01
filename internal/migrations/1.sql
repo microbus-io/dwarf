@@ -28,8 +28,6 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     surgraph_step_id     BIGINT       NOT NULL DEFAULT 0,
     root_flow_id         BIGINT       NOT NULL DEFAULT 0,
     forked_from_step     BIGINT       NOT NULL DEFAULT 0,
-    thread_id            BIGINT       NOT NULL DEFAULT 0,
-    thread_token         VARCHAR(16)  NOT NULL DEFAULT '',
     trace_parent         VARCHAR(128) NOT NULL DEFAULT '',
     delete_on_completion TINYINT      NOT NULL DEFAULT 0,
     delete_after_ms      INT          NOT NULL DEFAULT 0,
@@ -53,8 +51,7 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     INDEX idx_dwarf_flows_surgraph (surgraph_flow_id),
     INDEX idx_dwarf_flows_surgraph_step (surgraph_step_id),
     INDEX idx_dwarf_flows_root (root_flow_id),
-    INDEX idx_dwarf_flows_delete_after (delete_after_ms),
-    INDEX idx_dwarf_flows_thread (thread_id, flow_id)
+    INDEX idx_dwarf_flows_delete_after (delete_after_ms)
 );
 
 -- DRIVER: pgx
@@ -73,8 +70,6 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     surgraph_step_id     BIGINT           NOT NULL DEFAULT 0,
     root_flow_id         BIGINT           NOT NULL DEFAULT 0,
     forked_from_step     BIGINT           NOT NULL DEFAULT 0,
-    thread_id            BIGINT           NOT NULL DEFAULT 0,
-    thread_token         VARCHAR(16)      NOT NULL DEFAULT '',
     trace_parent         VARCHAR(128)     NOT NULL DEFAULT '',
     delete_on_completion SMALLINT         NOT NULL DEFAULT 0,
     delete_after_ms      INT              NOT NULL DEFAULT 0,
@@ -113,9 +108,6 @@ CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id);
 -- DRIVER: pgx
 CREATE INDEX idx_dwarf_flows_delete_after ON dwarf_flows (delete_after_ms) WHERE delete_after_ms > 0;
 
--- DRIVER: pgx
-CREATE INDEX idx_dwarf_flows_thread ON dwarf_flows (thread_id, flow_id);
-
 -- DRIVER: mssql
 CREATE TABLE dwarf_flows (
     flow_id              BIGINT        NOT NULL IDENTITY(1,1),
@@ -132,8 +124,6 @@ CREATE TABLE dwarf_flows (
     surgraph_step_id     BIGINT        NOT NULL DEFAULT 0,
     root_flow_id         BIGINT        NOT NULL DEFAULT 0,
     forked_from_step     BIGINT        NOT NULL DEFAULT 0,
-    thread_id            BIGINT        NOT NULL DEFAULT 0,
-    thread_token         NVARCHAR(16)  NOT NULL DEFAULT '',
     trace_parent         NVARCHAR(128) NOT NULL DEFAULT '',
     delete_on_completion TINYINT       NOT NULL DEFAULT 0,
     delete_after_ms      INT           NOT NULL DEFAULT 0,
@@ -172,9 +162,6 @@ CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id);
 -- DRIVER: mssql
 CREATE INDEX idx_dwarf_flows_delete_after ON dwarf_flows (delete_after_ms) WHERE delete_after_ms > 0;
 
--- DRIVER: mssql
-CREATE INDEX idx_dwarf_flows_thread ON dwarf_flows (thread_id, flow_id);
-
 -- DRIVER: sqlite
 CREATE TABLE IF NOT EXISTS dwarf_flows (
     flow_id              INTEGER  NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -191,8 +178,6 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     surgraph_step_id     INTEGER  NOT NULL DEFAULT 0,
     root_flow_id         INTEGER  NOT NULL DEFAULT 0,
     forked_from_step     INTEGER  NOT NULL DEFAULT 0,
-    thread_id            INTEGER  NOT NULL DEFAULT 0,
-    thread_token         TEXT     NOT NULL DEFAULT '',
     trace_parent         TEXT     NOT NULL DEFAULT '',
     delete_on_completion INTEGER  NOT NULL DEFAULT 0,
     delete_after_ms      INTEGER  NOT NULL DEFAULT 0,
@@ -229,6 +214,3 @@ CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id);
 
 -- DRIVER: sqlite
 CREATE INDEX idx_dwarf_flows_delete_after ON dwarf_flows (delete_after_ms) WHERE delete_after_ms > 0;
-
--- DRIVER: sqlite
-CREATE INDEX idx_dwarf_flows_thread ON dwarf_flows (thread_id, flow_id);

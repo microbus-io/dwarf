@@ -303,7 +303,7 @@ faster than fixing the server, and flows cannot be moved between shards. For a s
 - **Cordon it** (`ShardSpec.Cordoned`) to stop new-flow placement on it entirely while everything resident
   keeps running. Its resident flows' `Continue` turns, subgraph children and forks still land on it.
 - **Size your callers for the slow case.** Give each `Create` a context deadline (a call queued at a shard
-  with no free turn returns at the deadline, and a retry that does not join a thread is placed afresh), and
+  with no free turn returns at the deadline, and a retry is placed afresh), and
   size creator concurrency for the latency of the slowest shard rather than the average.
 
 Weight and cordon are configuration changes requiring a restart; see [Resharding](resharding.md).

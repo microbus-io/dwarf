@@ -105,7 +105,7 @@ func runSoak(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 
 	// Submitters: each is pinned to one replica (a client behind a load balancer) and loops picking a
 	// weighted-random operation until stopped. Disposable flows dominate (the create-complete-reap steady
-	// state); slices of interrupt/resume, continue-chain, and fork exercise the parked-step, thread, and
+	// state); slices of interrupt/resume, continue-chain, and fork exercise the parked-step, continue, and
 	// clone paths. Execution still distributes cluster-wide because any replica can claim any pending
 	// step. k=0 spawns no submitters (drain/observe mode).
 	for i := range k {
@@ -308,8 +308,8 @@ func runInterruptResume(ctx context.Context, eng *engine.Engine, url string) err
 	return nil
 }
 
-// runContinueChain runs a linear flow, reads its History, then continues the thread two more turns -
-// exercising Continue/threads and the History reader. These flows are not disposable; the retention sweep
+// runContinueChain runs a linear flow, reads its History, then continues it two more turns, each from the
+// last - exercising Continue and the History reader. These flows are not disposable; the retention sweep
 // purges them once they age.
 func runContinueChain(ctx context.Context, eng *engine.Engine) error {
 	cctx, cancel := context.WithTimeout(ctx, 45*time.Second)

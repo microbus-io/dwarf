@@ -8,7 +8,7 @@
 
 **A flow's shard is part of its identity and never changes.** Every flow key is `{shard}-{hour}-{id}-{token}`, so
 the shard index is encoded in the handle your callers hold, and it is what routes every subsequent operation.
-Everything derived from a flow stays on its shard for life: subgraph children, thread continuations, and
+Everything derived from a flow stays on its shard for life: subgraph children, continuations, and
 forks are all shard-pinned.
 
 Three rules follow, and they are the whole of this page:

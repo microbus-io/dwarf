@@ -147,8 +147,8 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 
 		// Parent (root) flow and its caller step, parked on the subgraph.
 		_, err = db.ExecContext(ctx,
-			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, thread_id, surgraph_flow_id, surgraph_step_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			"ptok", "u", "P", []byte("{}"), "", workflow.StatusRunning, 1, 1, 0, 0, 1000,
+			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, surgraph_flow_id, surgraph_step_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			"ptok", "u", "P", []byte("{}"), "", workflow.StatusRunning, 1, 0, 0, 1000,
 		)
 		assert.NoError(err)
 		_, err = db.ExecContext(ctx,
@@ -160,8 +160,8 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 
 		// Child flow (points back at the caller) and its leaf step in the requested status.
 		_, err = db.ExecContext(ctx,
-			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, thread_id, surgraph_flow_id, surgraph_step_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			"ctok", "u", "C", []byte("{}"), "", workflow.StatusRunning, 1, 2, 1, 1, 1000,
+			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, surgraph_flow_id, surgraph_step_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			"ctok", "u", "C", []byte("{}"), "", workflow.StatusRunning, 1, 1, 1, 1000,
 		)
 		assert.NoError(err)
 		_, err = db.ExecContext(ctx,

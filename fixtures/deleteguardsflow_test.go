@@ -131,13 +131,10 @@ func TestDeleteguardsflow_ForkRejectsADoomedFlow(t *testing.T) {
 	})
 }
 
-// TestDeleteguardsflow_ContinueSkipsADeletedTurn pins that Continue builds on the latest UNDELETED turn.
-//
-// Continue searches for a base rather than naming one, so a doomed turn is skipped, not an error (the
-// opposite disposition from Fork above, and deliberately so). Without the delete_after_ms=0 clause, Continue
-// would seed the next turn from a flow that the reaper removes moments later - the thread silently continues
-// from a doomed base, and its carried state is whatever that vanishing turn happened to hold.
-func TestDeleteguardsflow_ContinueSkipsADeletedTurn(t *testing.T) {
+// TestDeleteguardsflow_ContinueRejectsADoomedFlow pins that Continue of a flow scheduled for deletion is a 409, as
+// Fork's is. The flow's row survives until the reaper sweeps it, so an unguarded Continue would build a new flow
+// on one that is logically gone.
+func TestDeleteguardsflow_ContinueRejectsADoomedFlow(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -152,51 +149,21 @@ func TestDeleteguardsflow_ContinueSkipsADeletedTurn(t *testing.T) {
 	graph.SetURL("Turn", "deleteguardsflow2.verify:428/turn")
 	graph.AddTransitionChain("Turn", workflow.End)
 	mux.HandleGraph("deleteguardsflow2.verify:428/g", graph)
-	// Each turn stamps which base it was built from, so the surviving base is identifiable in the outcome.
 	mux.HandleTask("deleteguardsflow2.verify:428/turn", func(ctx context.Context, f *workflow.Flow) error {
-		f.SetString("builtOn", f.GetString("marker"))
-		f.SetString("marker", f.GetString("next"))
 		return nil
 	})
 
-	// Turn 1 settles marker="one".
-	threadKey, outcome, err := eng.Run(ctx, "deleteguardsflow2.verify:428/g",
-		map[string]any{"marker": "seed", "next": "one"}, nil)
+	flowKey, outcome, err := eng.Run(ctx, "deleteguardsflow2.verify:428/g", nil, nil)
 	if !assert.NoError(err) {
 		return
 	}
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
-	assert.Equal("one", stateVal(outcome.State, "marker"))
-
-	// Turn 2 settles marker="two".
-	turn2Key, err := eng.Continue(ctx, threadKey, map[string]any{"next": "two"})
-	if !assert.NoError(err) {
-		return
-	}
-	out2, err := eng.Await(ctx, turn2Key)
-	if !assert.NoError(err) {
-		return
-	}
-	assert.Equal(workflow.StatusCompleted, out2.Status)
-	assert.Equal("one", stateVal(out2.State, "builtOn")) // it built on turn 1, as expected
-	assert.Equal("two", stateVal(out2.State, "marker"))
-
-	// Delete turn 2 - the LATEST turn. Its row survives until the reaper sweeps, so an unguarded Continue
-	// would happily pick it as the base.
-	if !assert.NoError(eng.Delete(ctx, turn2Key)) {
+	if !assert.NoError(eng.Delete(ctx, flowKey)) {
 		return
 	}
 
-	// Turn 3 must build on turn 1 (marker "one"), NOT the doomed turn 2 (marker "two").
-	turn3Key, err := eng.Continue(ctx, threadKey, map[string]any{"next": "three"})
-	if !assert.NoError(err) {
-		return
+	_, err = eng.Continue(ctx, flowKey, nil)
+	if assert.Error(err) {
+		assert.Equal(http.StatusConflict, errors.StatusCode(err), "%v", err)
 	}
-	out3, err := eng.Await(ctx, turn3Key)
-	if !assert.NoError(err) {
-		return
-	}
-	assert.Equal(workflow.StatusCompleted, out3.Status)
-	assert.Equal("one", stateVal(out3.State, "builtOn"),
-		"Continue must skip the delete-marked turn and build on the latest UNDELETED one")
 }

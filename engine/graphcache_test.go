@@ -75,7 +75,7 @@ func TestCreate_SeedsGraphCache(t *testing.T) {
 	state, _ := workflow.NewState()
 	cachedBefore := e.graphs.Flows()
 	tctx, doneTurn := e.dbTurn(ctx, shard)
-	_, err = e.createWithGraph(tctx, shard, "seedcache/g", graph, state, 0, "", "", e.resolveFlowOptions(nil), 0, 0, 0, 0,
+	_, err = e.createWithGraph(tctx, shard, "seedcache/g", graph, state, "", e.resolveFlowOptions(nil), 0, 0, 0, 0,
 		func(tx *sequel.Tx) error { return errors.New("rolled back") })
 	doneTurn()
 	assert.Error(err)

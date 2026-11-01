@@ -67,7 +67,7 @@ func Example() {
 	fmt.Println(out.State.GetString("greeting"))
 }
 
-// Create makes and runs a flow, and accepts FlowOptions for scheduling, thread membership, and the opaque
+// Create makes and runs a flow, and accepts FlowOptions for scheduling and the opaque
 // host baggage carried with the flow.
 func ExampleEngine_Create() {
 	var eng *engine.Engine // obtained from NewEngine().…Startup(ctx)

@@ -20,7 +20,7 @@ value that came back decoded from the database (Go sorts a map's keys, but marsh
 declaration order). Continue's additionalState is the one reducer input that skips the database - it is
 the caller's raw Go value - so it is canonicalized at the door. Without that, a caller passing a struct
 whose fields are not declared alphabetically folds a second, byte-different spelling of an element that
-is already in the thread's accumulated state, and a union reducer keeps both.
+is already in the continued flow's accumulated state, and a union reducer keeps both.
 */
 package fixtures
 
@@ -54,7 +54,7 @@ func TestContinuecanonicalflow(t *testing.T) {
 	graph.SetReducer("tags", workflow.ReducerUnion)
 	mux.HandleGraph("continuecanonical.verify:428/g", graph)
 
-	// The task is a pass-through: the interesting merge is Continue's, between the thread's accumulated
+	// The task is a pass-through: the interesting merge is Continue's, between the continued flow's accumulated
 	// state and the caller's additionalState.
 	mux.HandleTask("continuecanonical.verify:428/tag", func(ctx context.Context, f *workflow.Flow) error {
 		return nil

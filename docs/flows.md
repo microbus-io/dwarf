@@ -6,7 +6,7 @@
 > [Operating dwarf](operations.md).
 
 Every interaction with a flow is a method on `*engine.Engine`. They fall into a few groups: creating &
-running, inspecting, pausing & resuming, terminating & recovering, threading, and retention. Flows are
+running, inspecting, pausing & resuming, terminating & recovering, continuing, and retention. Flows are
 addressed by their **flow key** (`{shard}-{hour}-{flowID}-{token}`), returned at creation; steps by their **step
 key** (`{shard}-{hour}-{flowID}-{stepID}-{token}`), which names its flow too.
 
@@ -33,15 +33,8 @@ part of the outcome — you need it for later `History`/`Resume`/`Fork`).
     FairnessKey: "tenant-42",                    // fair-scheduling bucket
     FairnessWeight: 4,                           // relative share within the key
     Baggage:     map[string]any{"actor": "ada"}, // opaque host context; read with BaggageFrom(ctx)
-    ThreadKey:   threadKey,                      // join an existing thread (any flow key in it)
 }
 ```
-
-Setting `ThreadKey` joins the new flow into an existing thread (identified by any flow key in that thread)
-while specifying its scheduling/baggage explicitly — the explicit-policy counterpart to `Continue`, which
-inherits the thread's policy. A nonexistent `ThreadKey` is rejected with a 404, and a *subgraph child's* key with a
-400 — a child runs on its own private thread so it cannot contaminate its parent's continuation chain, so address the
-root flow instead.
 
 To run a single unit of work with the engine's durability and scheduling, declare a one-task workflow and
 create a flow for it like any other. A task only ever runs as part of a graph, not as an independently
@@ -145,7 +138,7 @@ summaries, next, err := eng.List(ctx, query)           // paginated flow listing
 use `Step` to read a single step's `state`/`changes`. Subgraph-executing
 steps carry nested `SubHistory` and the child flow's `SubgraphKey`: pass it to `Snapshot` for what the child
 returned, or to `Await`, `Poll`, `Fingerprint` or `History`. It is a read handle - operations that change a flow
-take the root's key. `List` takes a `workflow.Query` (status, workflow name, thread, the task a flow stopped at,
+take the root's key. `List` takes a `workflow.Query` (status, workflow name, the task a flow stopped at,
 fairness key, priority, time window, shard, free-text `Search`, `Limit`) and returns newest-first with an
 opaque pagination cursor as its second return; see [Retention](#retention) for the same query shape.
 
@@ -249,22 +242,25 @@ newFlowKey, err := eng.Fork(ctx, hist[0].StepKey, map[string]any{"amount": 0})
 This is still a fork: it reuses the original's graph, scheduling and baggage. To start over with the graph
 loaded fresh, or with different options, call `Create` instead.
 
-## Continue a thread
+## Continue a flow
 
-`Continue` starts a new flow from the latest completed flow in a thread, carrying its final state and
-identity forward — the basis for multi-turn conversations and iterative processes:
+`Continue` starts a new flow from a completed flow, carrying its final state and identity forward — the basis
+for multi-turn conversations and iterative processes:
 
 ```go
-nextKey, err := eng.Continue(ctx, threadKey, additionalState)
+nextKey, err := eng.Continue(ctx, flowKey, additionalState)
 ```
 
-The `threadKey` is any flow key in the thread (the original `Create` key works). The prior turn's final
-state passes through, combined with `additionalState` through the graph's reducers: a reduced field adds what
-you pass, and a `nil` there adds nothing, so a new turn cannot clear a reduced field this way (the turn's first
-task can, with `Overwrite`); on any other field a value replaces and a `nil` deletes. `Continue` inherits the
-thread's policy from the latest completed flow — priority, fairness, time budget, and baggage. The new flow
-is returned already `running`. (To join a thread but set policy explicitly
-instead of inheriting it, use `Create`/`Run` with `FlowOptions.ThreadKey`.)
+`flowKey` is the completed flow to build on. Its final state passes through, combined with `additionalState`
+through the graph's reducers: a reduced field adds what you pass, and a `nil` there adds nothing, so a new flow
+cannot clear a reduced field this way (its first task can, with `Overwrite`); on any other field a value replaces
+and a `nil` deletes. The new flow runs the same graph and inherits the policy of the flow it continues —
+priority, fairness, time budget, and baggage. It is returned already `running`. To start the next flow with
+different options instead, call `Create` with the previous flow's final state (from `Snapshot`).
+
+Continue builds on exactly the flow you name, so a conversation is a chain of keys your application keeps:
+continue the key the last `Continue` returned. Continuing one flow twice gives two flows, each built on it. Like
+`Create`, `Continue` is not idempotent: a call retried after a lost response makes a second flow.
 
 ## Retention
 
@@ -329,16 +325,16 @@ Each operation adds these to the 503 and 500 every call can return:
 
 | Operation | 400 | 404 | 408 | 409 |
 |---|---|---|---|---|
-| `Create`, `Run` | invalid options, state or baggage; invalid graph; `ThreadKey` malformed or a subgraph child's | no graph for the URL; unknown `ThreadKey` | `Run` only: timed out awaiting the flow | |
+| `Create`, `Run` | invalid options, state or baggage; invalid graph | no graph for the URL | `Run` only: timed out awaiting the flow | |
 | `Await`, `Poll` | malformed key | unknown flow | `Await` only: timed out | |
 | `Snapshot`, `Fingerprint` | malformed key | unknown flow | | |
 | `History` | malformed key | unknown flow, or one scheduled for deletion | | |
 | `Step` | malformed key | unknown step | | |
-| `List`, `Purge` | malformed `ThreadKey`, invalid status or shard, a negative `OlderThan` or `NewerThan`; `List` with a malformed cursor; `Purge` with no filter (`Shard` and `Limit` are not filters) or with `IncludeSubgraphs` | unknown `ThreadKey` | | |
+| `List`, `Purge` | invalid status or shard, a negative `OlderThan` or `NewerThan`; `List` with a malformed cursor; `Purge` with no filter (`Shard` and `Limit` are not filters) or with `IncludeSubgraphs` | | | |
 | `Resume` | malformed key, a subgraph child's key, data not JSON-marshalable | unknown flow | | the flow is not interrupted, including when a `Delete` or `Terminate` won the race |
 | `Cancel`, `Terminate` | malformed key, a subgraph child's key, a reason over 4,096 bytes or not valid UTF-8 without NUL | unknown flow | | |
 | `Fork` | malformed key, overrides not JSON-marshalable | unknown step | | the flow is not terminal, is scheduled for deletion, or holds an unresolved interrupt off the fork path |
-| `Continue` | malformed key, a subgraph child's key, `additionalState` not JSON-marshalable | unknown flow | | the thread's latest flow is not completed, including when a concurrent `Continue` won |
+| `Continue` | malformed key, a subgraph child's key, `additionalState` not JSON-marshalable | unknown flow | | the flow is not completed, or is scheduled for deletion |
 | `Delete` | malformed key, a subgraph child's key | unknown flow | | the flow is running, including when a `Resume` won the race |
 
 A 413 comes from the operations that take a value in: `Create` and `Run` (the initial state or the baggage),

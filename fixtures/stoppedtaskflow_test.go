@@ -31,7 +31,7 @@ import (
 // listedTask returns the StoppedTaskName List reports for flowKey.
 func listedTask(t *testing.T, eng *engine.Engine, flowKey string) string {
 	assert := testarossa.For(t)
-	flows, _, err := eng.List(context.Background(), workflow.Query{ThreadKey: flowKey})
+	flows, _, err := eng.List(context.Background(), workflow.Query{Search: flowKey})
 	if !assert.NoError(err) {
 		return ""
 	}

@@ -55,9 +55,4 @@ type FlowOptions struct {
 	// context - read it with BaggageFrom(ctx). Any JSON-marshalable object (a struct or map); the host
 	// receives it back as a workflow.State, exactly like flow state. A non-object value is delivered as an empty State.
 	Baggage any `json:"baggage,omitzero"`
-	// ThreadKey places the new flow into an existing thread (multi-turn conversation) instead of starting
-	// its own. It is any FlowKey in that thread; the engine reads its thread id and routes the new flow to
-	// the thread's shard. Empty starts a fresh thread. This is the explicit-policy way to add a turn to a
-	// thread (Continue is the inherit-everything convenience); the host can mix the two.
-	ThreadKey string `json:"threadKey,omitzero"`
 }

@@ -130,6 +130,6 @@ Not registering a host (`SetHost`) makes `Startup` return an error.
 
 ## Where to go next
 
-- The [Concepts](concepts.md) guide explains flows, steps, threads, and reducers — the vocabulary the rest
+- The [Concepts](concepts.md) guide explains flows, steps, and reducers — the vocabulary the rest
   of the docs assume.
 - [Building graphs](graphs.md) and [Writing tasks](tasks.md) are the two day-to-day authoring guides.

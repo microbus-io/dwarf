@@ -186,12 +186,12 @@ pick - and there, indexing the empty index slice (`rand.IntN(0)`) **panicked the
 Pinned by `TestPoolSizing_NoOpenShardsIs503`.
 
 **Policy is set once at genesis and inherited by derivation; the operation is the inherit-vs-default selector.**
-A flow's policy (priority, fairness, time budget, baggage, thread membership) is authored
+A flow's policy (priority, fairness, time budget, baggage) is authored
 explicitly via `FlowOptions` only at **genesis** - `Create`/`Run`. **Derived** operations carry policy from
-their source rather than taking `FlowOptions`: `Continue` inherits the thread's policy, `Fork` inherits the
-origin flow's, and subgraph children inherit the parent's. So there is no `opts` on `Continue`/`Fork`; choosing
-one of those operations *is* choosing "inherit." The explicit-policy escape hatch for a continuation is
-`Create` with `FlowOptions.ThreadKey` set (join an existing thread but specify policy yourself).
+their source rather than taking `FlowOptions`: `Continue` inherits the policy of the flow it continues, `Fork`
+inherits the origin flow's, and subgraph children inherit the parent's. So there is no `opts` on
+`Continue`/`Fork`; choosing one of those operations *is* choosing "inherit." The explicit-policy escape hatch for
+a continuation is `Create` with the previous flow's final state (from `Snapshot`).
 
 **Create** - Creates a flow **and runs it**. Calls `LoadGraph` to fetch the graph, **validates it**
 (`graph.Validate()` after a nil check), then inserts the flow row (already `running`) and its entry-point
@@ -219,8 +219,7 @@ itself is an engine-side optimization derived at dispatch from the frozen defini
 validates identically (a nil/invalid child graph fails the caller step like any `LoadGraph` error). One
 consequence for graph authors: a graph with no explicit transition to `END` (relying on "no matching
 transition completes the flow") is rejected at `Create` - `Validate` requires an explicit `END` edge.
-`FlowOptions.ThreadKey` (optional) joins the new flow into an existing thread
-(any **root** flowKey in that thread; a bad/stale key 404s, a **subgraph-child key 400s**). The engine has **no creation-time delay** (no `StartAt`):
+The engine has **no creation-time delay** (no `StartAt`):
 every flow runs as soon as it is created. A flow that should wait runs author-side - an entry **gate** task that
 calls `flow.Sleep(until)` for a one-shot durable delay, or an interrupt-first entry task + `Resume` (staged
 start) - and recurring schedules are an external concern (a host/cron service that calls `Create`/`Run` on a
@@ -451,12 +450,12 @@ keeping the origin's would fold every post-`Subgraph` contribution twice. The fo
 not the origin's runs plus one (pinned by `TestForkflow_InsideSubgraphCallerFoldsOnce`). Chain flows are set `running`;
 off-path prefix subgraphs keep their `completed` status.
 
-*Scheduling, identity, threading.* Scheduling (priority/fairness/time-budget) is inherited from the **root's
+*Scheduling and identity.* Scheduling (priority/fairness/time-budget) is inherited from the **root's
 frozen values**, resolved once and applied **uniformly to every cloned flow and step**, because the original
 tree is uniform (subgraph children inherit the parent's scheduling) and a deep-subgraph fork's re-running leaf
 lives in a descendant, so it must carry the same values. The new root mints a fresh detached trace (like
-`Continue`), sets `forked_from_step` to the *original* fork step's id (provenance + Continue exclusion), copies
-the origin's `thread_id` (so it groups in `List`) but does **not** notify or auto-delete. A failed-fan-out
+`Continue`), sets `forked_from_step` to the *original* fork step's id (provenance), and does **not** notify or
+auto-delete. A failed-fan-out
 fork-of-fork is the partial-recovery path: fork one failed branch at a time; the first fork re-fails cleanly via
 cohort accounting (no limbo) until every failed branch is fixed. **A branch lost to a graceful `Cancel` is kept
 exactly like a failed one** - Fork has one rewind point, so it re-runs the chosen step and inherits every sibling's
@@ -484,53 +483,41 @@ steps have `Subgraph=true` with nested `SubHistory` and the child's `SubgraphKey
 retry, the same one `SubHistory` shows), so a caller can `Snapshot` what the child returned. `Step` returns one step by key **with** its `state`/`changes`
 (refs resolved) - it is the payload-bearing reader; use it when you need a step's actual data.
 
-**List** - Queries flows by status, workflow URL, or thread key, with cursor pagination (newest first **per shard**
+**List** - Queries flows by status, workflow URL and the other `Query` filters, with cursor pagination (newest first **per shard**
 - see "`List` uses per-shard pagination" under Database Sharding; single-shard, the default, is globally
 newest-first - default 100).
-Returns `ThreadKey` and a `Subgraph` bool in each `workflow.FlowSummary`. By default it returns **root flows only**;
+Returns a `Subgraph` bool in each `workflow.FlowSummary`. By default it returns **root flows only**;
 `Query.IncludeSubgraphs` adds subgraph children to the results. Combined with `WorkflowURL` (a graph that runs only
 as a subgraph has no root flows under that URL) this locates every run of a graph that executed as a subgraph.
 `Purge` **rejects** the flag with a 400 (`purge cannot include subgraphs`) rather than silently ignoring it, and
 always targets roots only (deleting a subgraph child directly would strand its parent's surgraph step).
 
-**Continue** - `Continue(threadKey, additionalState)` creates and runs a new flow from the latest completed flow
-in a thread, merged with `additionalState` using the graph's reducers - sugar over `Create` for the multi-turn
-case. The `threadKey` accepts any **root** flowKey in the thread (400 on a subgraph-child key);
-`Continue` resolves the thread via `thread_id`, finds the
-latest **non-fork** flow (`ORDER BY flow_id DESC` with `forked_from_step=0`), validates it is completed, and
-creates the new flow in the same thread with the same graph, returned **`running`** (like `Create`). The fork
-exclusion keeps a debug `Fork` (which shares the thread's `thread_id` for `List` grouping) from ever becoming a
-production continuation base. The prior turn's `final_state` passes through unfiltered as the new flow's initial
-state; a workflow author wanting narrower carryover scrubs with an entry adapter task using
-`flow.Del`. As a **derived** operation `Continue` takes no `FlowOptions`: it **inherits the
-thread's policy** (priority/fairness/budget/baggage) from the latest turn; a caller wanting different policy
-uses `Create` with `FlowOptions.ThreadKey` (explicit policy, same thread).
+**Continue** - `Continue(flowKey, additionalState)` creates and runs a new flow from the completed root flow
+`flowKey` names, its `final_state` merged with `additionalState` through the graph's reducers - sugar over
+`Create` for the multi-turn case. 404 on an unknown key, 400 on a subgraph-child key, 409 on a flow that is not
+`completed` or is scheduled for deletion (as for `Fork`: the caller names a flow that is logically gone). The new
+flow runs the same stored graph (its bytes and `graph_hash` copied, never reloaded) and is returned **`running`**
+(like `Create`). The prior flow's `final_state` passes through unfiltered as the new flow's initial state; a
+workflow author wanting narrower carryover scrubs with an entry adapter task using `flow.Del`. As a **derived**
+operation `Continue` takes no `FlowOptions`: it **inherits the source's policy** (priority/fairness/budget/
+baggage); a caller wanting different policy uses `Create` with the source's final state (from `Snapshot`).
 
-*`additionalState` is marshalled at the door* (`workflow.NewState`, outside the transaction), per the root
-landmine: a caller's struct re-contributing an element the thread already holds would otherwise `union` into a
-second copy, since `DeepEqual` of a struct and its decoded `map[string]any` twin is false (pinned by
+*The engine keeps no chain.* Continue builds on exactly the flow it is given, so the caller holds the latest key,
+and continuing one flow twice gives two successors (`TestContinue_BuildsOnTheNamedFlow`). **Do not add a chain
+record** - a grouping column, a search for the latest turn, a threads table: the engine cannot know when a
+chain is finished, so such a record can never be trimmed, and a search for the latest turn needs a lock on the
+chain to keep two concurrent Continues from branching it. A Continue retried after a lost response makes a second
+flow, as a retried `Create` does; neither is deduplicated.
+
+*The source is read with no lock and outside the insert's transaction* (`continueFlow`): a completed flow is
+immutable, and the new flow copies its state, graph and policy rather than referencing it, so a deletion racing
+the read leaves the copy valid. The insert is `insertFlowTx` in a bare transaction, the one copy of the
+flow+entry-step INSERTs it shares with `Create` and subgraph spawn.
+
+*`additionalState` is marshalled at the door* (`workflow.NewState`), per the root landmine: a caller's struct
+re-contributing an element the source already holds would otherwise `union` into a second copy, since
+`DeepEqual` of a struct and its decoded `map[string]any` twin is false (pinned by
 `fixtures/continuecanonicalflow_test.go`). A `NewState` fast path for a raw `map[string]any` would reopen it.
-
-*Concurrent Continue is serialized by a thread-anchor lock, so exactly one wins.* The latest-turn read
-(`find latest non-fork flow`), the completed-check, and the new-turn insert run in **one transaction**
-(`continueFlow`), opened **write-first on the thread anchor row** (`lockFlowRows` on `flow_id=threadID` - the same
-lock grab as the flow-advancing transactions). Without the lock, two
-concurrent `Continue`s on one thread can both read turn N as the latest completed turn and both insert a
-successor, **silently branching a thread that is meant to be linear** - a benign-but-wrong TOCTOU hole between
-check and insert (no corruption; the invariant sweep stays clean, but the thread's continuation base becomes
-ambiguous for the *next* Continue). The anchor lock closes it deterministically: the winner inserts its new
-`running` turn; every other concurrent Continue then reads **that** running turn as the latest, fails the
-completed-check, and returns **409**. So the outcome is "exactly one succeeds per race," not timing-dependent.
-The grab writes no `updated_at`, so the anchor's stays frozen (it is a terminal flow), and because interrupt/terminate/resume never lock a thread *sibling*'s rows, this anchor lock cannot cycle with
-them. Determinism caveat: it also requires the winner's turn to still be `running` when the losers re-check - it
-is, because the new turn is inserted `running` and only completes after its entry task runs; a test proving the
-"exactly one" contract must keep that entry task from completing during the race (see
-`fixtures/concurrentcontinueflow_test.go`). The insert half is shared with `Create`/subgraph spawn via
-`insertFlowTx` (one copy of the flow+entry-step INSERTs); `Continue` differs only by wrapping it in the
-lock-and-recheck transaction. Edge case: if the thread anchor row (`flow_id == thread_id`) was `Delete`d while
-later turns remain, the anchor lock matches no row and the serialization degrades to the unlocked race
-above for that thread - still safe, just non-deterministic; continuing via a deleted anchor *key* already
-404s, so this only affects continuing via a surviving later-turn key on a thread whose original root was deleted.
 
 **Run** - Create + Await in one call, returning `(flowKey string, *workflow.FlowOutcome, error)` -
 the new flow's key alongside its outcome (the key is the flow's identity, not part of the outcome; callers
@@ -561,17 +548,14 @@ A subgraph child flow has a real flowKey (a task inside it reads its own via `fl
 `IncludeSubgraphs` surfaces it), but that key is a **read** handle, not a write unit: a child cannot be mutated
 independently because its parent is parked waiting on it, and the unit for any lifecycle change is the whole tree.
 So the **lifecycle mutations reject a subgraph-child key with 400** (`surgraph_flow_id != 0`): `Resume`, `Terminate`,
-`Cancel`, `Delete`, `Continue`, and `Create` with `FlowOptions.ThreadKey` (in `resolveThread`). The rejection is folded into
+`Cancel`, `Delete` and `Continue`. The rejection is folded into
 each operation's existing flow-row SELECT (no extra round-trip;
 the 404-not-found check still takes precedence). The caller addresses the tree by the **root** key instead - which
 it always holds (it came from `Create`/`Run`/`Continue`, or from `List` of roots). The rationale per op: `Resume`/
 `Terminate` are inherently tree-wide (they walk up to the root and down), so a child key is just a confusing alias for
 the root (and `Cancel` likewise covers the whole tree); `Delete` cascades *down* only, so deleting a child directly would strand the parent's surgraph step; and
-`Continue` on a child's own (private) thread would spin up a detached top-level flow from the subgraph's final state,
-not a thread turn. **`Create(ThreadKey: childKey)` is the subtlest of the six** - it does not mutate the child at
-all, it *joins its thread*, and a child gets its own thread precisely so it cannot contaminate the parent's
-continuation chain: the new flow would be a top-level root grouped under a subgraph's thread (polluting `List` by
-thread), and a later `Continue` of it would build on the subgraph's turns. **Reject, not silently widen** - widening
+`Continue` of a child would spin up a detached top-level flow from the subgraph's final state. **Reject, not
+silently widen** - widening
 `Delete(childKey)` into a whole-tree delete is a
 surprising blast radius, so the engine makes the caller name the root.
 
@@ -579,7 +563,7 @@ History hands a child key out on its caller step (`FlowStep.SubgraphKey`, read f
 already makes). That grants a root-key holder nothing new: `History` already returns every child step's key, and
 `Step` reads any of them. What a subgraph-child key *is* good for: **introspection** - `Snapshot`, `Fingerprint`, `History`,
 `Step` all operate on that child's own subtree - and **`Fork`**, which intentionally accepts any recorded step,
-including one deep inside a subgraph. `fixtures/subflowguardflow_test.go` pins both halves (the `Resume`/`Terminate`/`Delete`/`Continue`/`ThreadKey`
+including one deep inside a subgraph. `fixtures/subflowguardflow_test.go` pins both halves (the `Resume`/`Terminate`/`Delete`/`Continue`
 400 rejections, introspection + `List`-by-subgraph-URL still working); `fixtures/gracefulcancelflow_test.go` pins
 `Cancel`'s.
 
@@ -1047,17 +1031,17 @@ not parallelism:
   merge, so it cannot join the batch; the fallback read of any tails, and a ref resolution, follow only when
   needed.
 - **Creating a flow** (`insertFlowTx`, shared by `Create`, `Continue` and a subgraph spawn) is [flow INSERT,
-  entry-step INSERT naming the flow by `insertedID`]: BEGIN, one batch, COMMIT on PostgreSQL. A new thread's
-  `thread_id` and a new tree's `root_flow_id` are the row's own `flow_id`; a known thread (Continue, or Create
-  with `FlowOptions.ThreadKey`) or root (a subgraph child) is bound. **On PostgreSQL the INSERT writes the self columns itself** (`selfFlowInsertSQL`:
-  `INSERT ... SELECT n, n, ... FROM (SELECT nextval(...) AS n) s`), so the row is written once. **Do not write
-  them with an UPDATE after the INSERT there:** `thread_id` and `root_flow_id` are indexed, so that UPDATE can
+  entry-step INSERT naming the flow by `insertedID`]: BEGIN, one batch, COMMIT on PostgreSQL. A new tree's
+  `root_flow_id` is the row's own `flow_id`; a known root (a subgraph child) is bound. **On PostgreSQL the INSERT
+  writes the self column itself** (`selfFlowInsertSQL`: `INSERT ... SELECT n, n, ... FROM (SELECT nextval(...) AS
+  n) s`), so the row is written once. **Do not write it with an UPDATE after the INSERT there:** `root_flow_id` is
+  indexed, so that UPDATE can
   never be HOT: a dead row version, and a new entry in each of the row's indexes, for every flow. The other
   dialects keep that fix-up UPDATE, which updates in place, after the entry step; it writes only the self
-  columns, since the INSERT stamped `updated_at` in the same transaction. Fork's clone builds its flow rows with
-  the same helper. Pinned by `TestInsertFlowTx_ConcurrentCreates` (every new flow's thread and root ids point at
-  its own row, and its entry step belongs to it) and `TestInsertFlowTx_SelfColumnsInTheInsert` (no fix-up on
-  PostgreSQL; the thread and root ids of Create, a subgraph spawn, Continue and both kinds of Fork clone).
+  column, since the INSERT stamped `updated_at` in the same transaction. Fork's clone builds its flow rows with
+  the same helper. Pinned by `TestInsertFlowTx_ConcurrentCreates` (every new flow's root id points at its own
+  row, and its entry step belongs to it) and `TestInsertFlowTx_SelfColumnsInTheInsert` (no fix-up on PostgreSQL;
+  the root ids of Create, a subgraph spawn, Continue and both kinds of Fork clone).
 - **A batch reader scans with the PostgreSQL driver's own type conversions** when the batch is pipelined, and
   they are stricter than `database/sql`'s: **scan a column into the Go type it is stored as.** A `SMALLINT` flag
   (`delete_on_completion`, `cancelling`, `advancing`, ...) does not scan into a `bool` - it scans into an `int`.
@@ -1726,7 +1710,7 @@ level, with and without a write to an inner `as` name; it fails against either s
 `computeFinalState` also reads the DAG, not `step_depth`. The terminal state is the merge of the tail steps -
 completed steps with `successor_id = 0` (`mergeTerminalSteps`) - for a flow that is *not* a failed fan-out. **Do not
 pick the terminal step by `MAX(step_depth)`**: it is wrong for
-any graph where an intra-thread `flow.Goto` self-loop sits inside a fan-out: each loop iteration pushes
+any graph where a `flow.Goto` self-loop sits inside a fan-out: each loop iteration pushes
 `step_depth + 1`, so the looping branch can outrun the fan-in/terminal step in depth, and `MAX(step_depth)` selected
 the dangling loop step (empty state). The tail-step merge is depth-agnostic: loop iterations carry
 `successor_id = <fan-in step>` (set by the cohort-exit UPDATE), so only the real terminal step qualifies. Two-tier
@@ -1745,7 +1729,7 @@ wants a tighter per-task bound enforces it inside its `ExecuteTask` (or the task
 narrowing the deadline at dispatch is always allowed. The engine's budget is the outer ceiling.
 
 It is immutable for the flow's life, like `priority`, and **inherited by subgraph children** (`createSubgraphFlow` reads the parent's `time_budget_ms` alongside priority/fairness) and by
-`Continue` (the thread's latest turn, since it takes no `FlowOptions`). A later `SetTimeBudget` change does not
+`Continue` (from the flow it continues, since it takes no `FlowOptions`). A later `SetTimeBudget` change does not
 retro-edit existing flows; it only seeds flows created afterward. On a subgraph spawn the child's `LoadGraph` is
 bounded by the caller flow's budget; the create-time `LoadGraph` runs on the caller's own request context instead.
 
@@ -2200,10 +2184,10 @@ dispatch **context** to every `LoadGraph` and `ExecuteTask` call for the flow's 
 long after creation - the host reads it with `workflow.BaggageFrom(ctx)`. The engine never interprets it; a host
 uses it to carry the original caller's identity (e.g. mint a fresh token inside its `ExecuteTask`). It is
 **inherited** by subgraph flows (`createSubgraphFlow` copies the parent's `baggage`) and by `Continue` (the next
-turn reads the prior flow's `baggage` column and carries it forward - `Continue` takes no options, so the thread's
+turn reads the prior flow's `baggage` column and carries it forward - `Continue` takes no options, so the
 baggage always flows on), so a multi-turn conversation keeps the caller's identity across turns. A turn wanting
-narrower context scrubs it in an entry adapter task, or starts a fresh flow with `Create` (with
-`FlowOptions.ThreadKey` to stay in the thread) and its own `FlowOptions.Baggage`.
+narrower context scrubs it in an entry adapter task, or starts a fresh flow with `Create` and its own
+`FlowOptions.Baggage`.
 
 **Delivery is context, authoring is `FlowOptions`.** Baggage is *set* explicitly and visibly (a typed
 `FlowOptions` field on `Create`/`Run`) but *read* ambiently (off ctx), so the value the engine never
@@ -3005,7 +2989,7 @@ midpoint of `1..max` (`SetMaxPriority`), the fairness key to `""`, the weight to
 `SetTimeBudget` (no ceiling; see "Time Budgets"). These values are immutable for the flow's life (switching a flow's
 fairness key mid-run would be a self-promotion abuse vector). This is the **genesis** path (`Create`/`Run`); the
 **derived** operations inherit instead - `createSubgraphFlow` from the parent (so a high-priority parent never
-silently spawns default-priority descendants), `Continue` from the thread's latest turn, `Fork` from the origin. See
+silently spawns default-priority descendants), `Continue` from the flow it continues, `Fork` from the origin. See
 "Policy is set once at genesis" under Engine Operations.
 
 Propagation onto step rows: where the resolved values are in hand (the entry step), they are literal bind parameters;
@@ -3493,9 +3477,7 @@ distinct from the `→running` chain-flow update, which legitimately matches 0 r
 still holds the flow (fan-out resume-one-at-a-time), so it cannot serve as the race gate.
 
 **Reads/derivations of a `delete_after_ms > 0` flow.** `Snapshot`/`Await` serve the outcome (the observability win);
-`List` and `History` exclude it; `Continue` **skips** deleting turns (its latest-turn query adds `delete_after_ms=0`,
-so it builds on the latest *undeleted* turn - the copy is safe even if the source is later reaped); `Fork` **409s**
-(it names a specific doomed flow, unlike `Continue`'s search); `Resume` 409s and `Terminate` is a nil no-op
+`List` and `History` exclude it; `Continue` and `Fork` **409** (each names a specific doomed flow); `Resume` 409s and `Terminate` is a nil no-op
 (terminal); `Delete` is idempotent-success.
 
 Both share filter clauses with `List`. The `Query.StoppedTaskName` filter joins `dwarf_steps` and matches the `task_name`
@@ -3682,8 +3664,8 @@ ordering:
   which walk the *same* surgraph chain, so the two never lock that chain's flow+step rows in opposite order (a
   flow-first `handleInterrupt` forms a deadlock cycle with `Resume` - see below).
 
-`Create` inserts the flow row (already `running`), then the entry step, then - off PostgreSQL - fixes the flow's
-thread/root ids - flow-row-first in statement order, but into a **brand-new** flow whose rows no concurrent transaction can reach until commit, so it
+`Create` inserts the flow row (already `running`), then the entry step, then - off PostgreSQL - fixes a new root's
+root id - flow-row-first in statement order, but into a **brand-new** flow whose rows no concurrent transaction can reach until commit, so it
 honors no existing-row lock order and cannot cycle. `Fork` performs its entire tree clone (an iterative worklist) in one
 transaction (so a crash mid-clone rolls back), and the leaf fork step is held `created` until the mapping is complete.
 **Fork's transaction opens with `lockFlowRows` on the origin root, because the clone reads before it writes.** On
@@ -3955,7 +3937,7 @@ timeout also kills transactions that sit idle while a busy replica is slow.
 ### Per-Function Crash Analysis
 
 - **Create** - one transaction: insert flow (`running`) -> insert entry step (`pending`) -> off PostgreSQL, set
-  the flow's own-id `thread_id`/`root_flow_id`, then ring the doorbell. A pre-commit crash rolls back entirely (no partial flow); after a
+  a new root's own-id `root_flow_id`, then ring the doorbell. A pre-commit crash rolls back entirely (no partial flow); after a
   post-commit crash before the doorbell, the committed `pending` entry step is due, so its shard's next piston cycle
   selects it.
   There is no separate `Start`, so no inert `created` window. Self-healing.
@@ -4006,7 +3988,7 @@ weighted random pick over the non-cordoned shards this replica dispatches, when 
 "Dispatchers").
 
 **New-flow placement is weighted by `ShardSpec.Weight` (`pickShard`, default 1).** Placement is the engine's
-only load-balancing moment - flows are shard-pinned for life (subgraph affinity, thread continuations, forks)
+only load-balancing moment - flows are shard-pinned for life (subgraph affinity, continuations, forks)
 - so a heterogeneous fleet must be weighted or the smallest shard saturates first while larger ones idle. The
 weight is DECLARED, not inferred from the server's size: capacity is not proportional to vCPUs (16 -> 32 vCPU
 measured x2.46, 32 -> 64 x1.2), so a vCPU-derived weight would misplace exactly the mixed fleets that need

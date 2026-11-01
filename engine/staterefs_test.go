@@ -108,8 +108,8 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
 	_, err = db.ExecContext(ctx,
-		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, thread_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		"ftok", "u", "W", []byte("{}"), "", workflow.StatusRunning, 1, 1, 60000,
+		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		"ftok", "u", "W", []byte("{}"), "", workflow.StatusRunning, 1, 60000,
 	)
 	assert.NoError(err)
 	// An anchor holding one field in `state` (an initial input nobody produced) and another in `changes` (a
@@ -623,8 +623,8 @@ func TestStateRefs_DispatchResolveTakesATurnOnlyToRead(t *testing.T) {
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
 	_, err = db.ExecContext(ctx,
-		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, thread_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		"ftok", "u", "W", []byte("{}"), "", workflow.StatusRunning, 1, 1, 60000,
+		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		"ftok", "u", "W", []byte("{}"), "", workflow.StatusRunning, 1, 60000,
 	)
 	assert.NoError(err)
 	_, err = db.ExecContext(ctx,

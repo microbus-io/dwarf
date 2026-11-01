@@ -17,7 +17,7 @@ limitations under the License.
 /*
 The opaque baggage set in FlowOptions.Baggage at Create is stored on the flow row and delivered, via
 the dispatch context, to every GraphLoader and TaskExecutor call for the flow's lifetime - including
-subgraph flows, which inherit the parent's baggage, and Continue turns, which inherit the thread's.
+subgraph flows, which inherit the parent's baggage, and Continue turns, which inherit the continued flow's.
 The engine never interprets it; the host reads it with workflow.BaggageFrom(ctx). This wires capturing
 loader/executor shims to assert baggage reaches every call site identically, across a subgraph boundary
 and a Continue.

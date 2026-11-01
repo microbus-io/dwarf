@@ -196,8 +196,8 @@ func TestTerminate_UnreadableTailDoesNotBlockTerminate(t *testing.T) {
 	}
 }
 
-// TestContinue_ReducerErrorIs400 pins that a Continue whose additionalState a reducer cannot fold onto the thread's
-// state is rejected as the caller's mistake - a 400 naming the field - and starts no turn.
+// TestContinue_ReducerErrorIs400 pins that a Continue whose additionalState a reducer cannot fold onto the continued
+// flow's state is rejected as the caller's mistake - a 400 naming the field - and starts no turn.
 func TestContinue_ReducerErrorIs400(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)

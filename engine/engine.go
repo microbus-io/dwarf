@@ -436,7 +436,7 @@ type ShardSpec struct {
 	// mixed fleet.
 	Weight float64
 	// Cordoned excludes the shard from new-flow placement. Everything already resident proceeds
-	// normally: existing flows keep executing, and subgraph children, thread continuations (Continue),
+	// normally: existing flows keep executing, and subgraph children, continuations (Continue),
 	// and forks - all shard-pinned - are still created on it. Use for retiring or overloaded shards.
 	Cordoned bool
 }
@@ -1279,7 +1279,6 @@ func (e *Engine) resolveFlowOptions(opts *workflow.FlowOptions) *workflow.FlowOp
 		resolved.FairnessKey = opts.FairnessKey
 		resolved.Baggage = opts.Baggage
 		resolved.DeleteOnCompletion = opts.DeleteOnCompletion
-		resolved.ThreadKey = opts.ThreadKey
 		if opts.TimeBudget > 0 {
 			resolved.TimeBudget = opts.TimeBudget
 		}
@@ -1309,7 +1308,7 @@ func (e *Engine) ensureStarted() error {
 }
 
 // Create creates a new flow for a workflow and starts it, returning the running flow's key. opts carries
-// the flow's policy (scheduling, DeleteOnCompletion, Baggage, ThreadKey); nil uses defaults.
+// the flow's policy (scheduling, DeleteOnCompletion, Baggage); nil uses defaults.
 // For a flow that must wait for an external trigger, have the entry task call flow.Interrupt and resume it
 // with Resume (which, unlike a separate start, also delivers a payload).
 func (e *Engine) Create(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
@@ -1408,7 +1407,7 @@ func (e *Engine) Step(ctx context.Context, stepKey string) (step *workflow.FlowS
 	return e.step(ctx, stepKey)
 }
 
-// List queries flows by status, workflow name, or thread key, newest first, with cursor pagination
+// List queries flows by status, workflow name, and the other Query filters, newest first, with cursor pagination
 // (Query.Limit, default 100; the returned cursor fetches the next page). Query.Limit is a per-shard cap
 // divided across shards, not a hard ceiling on the total: a multi-shard page can hold up to
 // shards*ceil(Limit/shards) summaries (see Query.Limit). Pass Query.Shard, or truncate the page, for a
@@ -1514,12 +1513,18 @@ func (e *Engine) Run(ctx context.Context, workflowURL string, initialState any, 
 	return e.run(ctx, workflowURL, initialState, opts)
 }
 
-// Continue creates a new flow from the latest completed flow in a thread, inheriting that flow's policy
-// (scheduling, baggage) - it does not take FlowOptions. For a turn with different policy,
-// use Create with FlowOptions.ThreadKey.
-func (e *Engine) Continue(ctx context.Context, threadKey string, additionalState any) (flowKey string, err error) {
+// Continue creates and runs a new flow from the completed root flow flowKey names: the new flow starts from that
+// flow's final state with additionalState folded in through the graph's reducers, runs the same graph, and
+// inherits its policy (scheduling, baggage) - it does not take FlowOptions. For a next flow with different
+// policy, use Create with the final state from Snapshot.
+//
+// Continue builds on the flow it is given, so continuing one flow twice makes two successors; a caller that
+// chains flows continues the key each Continue returns. Like Create, it is not idempotent: a Continue retried
+// after a lost response makes a second flow. It returns 404 for an unknown key, 400 for a subgraph child's
+// key, and 409 for a flow that is not completed or is scheduled for deletion.
+func (e *Engine) Continue(ctx context.Context, flowKey string, additionalState any) (nextKey string, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return "", errors.Trace(err)
 	}
-	return e.continueFlow(ctx, threadKey, additionalState)
+	return e.continueFlow(ctx, flowKey, additionalState)
 }

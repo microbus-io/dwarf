@@ -142,7 +142,7 @@ are not ones:
 - **`Fork` carries the frozen graph forward.** It clones the origin flow's stored graph verbatim into the
   new flow — it does not re-fetch the definition. A fork of a flow frozen against the old graph is still
   running the old graph.
-- **`Continue` does the same.** A new turn in a thread runs the same graph the thread was created with.
+- **`Continue` does the same.** A flow made by `Continue` runs the same graph as the flow it continues.
 
 **A graph is loaded only when a flow is created** — by `Create`, or by a subgraph spawn, which loads the
 child workflow's current definition — so the only way to get a flow onto a new definition is to start a new

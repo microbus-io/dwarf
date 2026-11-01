@@ -68,7 +68,7 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 	// can never complete before its parent pointer is set or before the caller is parked (either would lose the
 	// parent's revive). The child's "workflow" span is parented to the caller step's span (callerTraceParent),
 	// nesting the subtree under the launching task.
-	childKey, err := e.createWithGraph(ctx, shardNum, subgraphWorkflowURL, subgraphGraph, childState, 0, "", callerTraceParent, &inherited, surgraphFlowID, callerStepDepth, surgraphStepID, rootFlowID, parkCaller)
+	childKey, err := e.createWithGraph(ctx, shardNum, subgraphWorkflowURL, subgraphGraph, childState, callerTraceParent, &inherited, surgraphFlowID, callerStepDepth, surgraphStepID, rootFlowID, parkCaller)
 	// engineseams.FaultSubgraphSpawnCommitLost reports an error for a spawn whose transaction COMMITTED - a commit
 	// whose acknowledgement was lost - so a test can prove a retried spawn does not create a second child.
 	if err == nil && e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultSubgraphSpawnCommitLost, subgraphWorkflowURL)) {

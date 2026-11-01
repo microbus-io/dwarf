@@ -63,14 +63,13 @@ forking, and crash recovery possible — every step is a durable, replayable rec
 
 The full step-by-step record is available with `History`; one step with `Step`.
 
-## Thread
+## Continuing a flow
 
-A **thread** groups flows that form a multi-turn conversation, linked by `Continue`. Each flow has a
-thread key; by default a flow is its own thread. `Continue` starts a new flow that inherits the previous
-flow's final state and identity, so you can model a chat or an iterative process as a chain of flows that
-share history.
+`Continue` starts a new flow from a completed one: the new flow inherits the previous flow's final state and
+identity, so you can model a chat or an iterative process as a chain of flows that share history. Your
+application keeps the chain, by continuing the key the last `Continue` returned.
 
-See [Continue](flows.md#continue-a-thread).
+See [Continue](flows.md#continue-a-flow).
 
 ## Reducer
 
@@ -93,7 +92,7 @@ field already holds wherever the task runs. Reading the field returns the combin
 
 - A step's write combines with the value it was handed, and the next step reads the result.
 - Parallel branches' writes combine at their fan-in, in branch order.
-- `Continue`'s additional state combines with the thread's state.
+- `Continue`'s additional state combines with the final state of the flow it continues.
 
 So a task writes only its contribution — the message to append, the amount to add — never the value it read,
 which would count it again. To replace or clear a reduced field, a task calls `Overwrite` or `Del`, which are
@@ -116,7 +115,7 @@ or recover a crashed flow without ambiguity about "what did this task see?".
 ## How it fits together
 
 > You define a **graph** of **tasks**. The engine creates a **flow** for each execution, runs one **step**
-> per task, persisting **state** between them and combining writes to a field with **reducers**. Related
-> flows form a **thread**.
+> per task, persisting **state** between them and combining writes to a field with **reducers**. `Continue`
+> starts a new flow from a completed one.
 
 Next: [Building graphs](graphs.md).

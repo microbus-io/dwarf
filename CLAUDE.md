@@ -212,11 +212,6 @@ siblings share a `step_depth`. Once terminal (`completed`/`failed`/`terminated`/
 every hand-off; `Overwrite`/`Del` replace instead (`workflow/CLAUDE.md`). Each non-default field is wired with
 `graph.SetReducer`; nothing is inferred from a field's name, so an unwired `sum*` field silently takes `replace`.
 
-**Thread** - A chain of flows linked by `Continue`. Each flow has a `thread_id` grouping it with others in the same
-multi-turn conversation; defaults to `flow_id` (each flow its own thread). `Continue` inherits the thread's
-`thread_id`. Subgraph flows always start their own thread to avoid contaminating the parent's continuation chain. The
-flowKey returned by the initial `Create` doubles as the threadKey.
-
 ### Terminal flows are immutable
 
 **A terminal flow (`completed`/`failed`/`terminated`/`cancelled`) is immutable.** Its outcome (`status`, `final_state`,

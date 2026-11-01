@@ -89,22 +89,21 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	}
 
 	// Validate the root (the fork's identity) is terminal and gather the root-flow overrides.
-	var rootStatus, rootWorkflowURL, rootThreadToken string
-	var rootThreadID, rootPriority, rootTimeBudgetMs, rootDeleteAfterMs int
+	var rootStatus, rootWorkflowURL string
+	var rootPriority, rootTimeBudgetMs, rootDeleteAfterMs int
 	var rootFairnessKey string
 	var rootFairnessWeight float64
 	err = db.QueryRowContext(ctx,
-		"SELECT status, workflow_url, thread_id, thread_token, priority, fairness_key, fairness_weight, time_budget_ms, delete_after_ms FROM dwarf_flows WHERE flow_id=?",
+		"SELECT status, workflow_url, priority, fairness_key, fairness_weight, time_budget_ms, delete_after_ms FROM dwarf_flows WHERE flow_id=?",
 		rootFlowID,
-	).Scan(&rootStatus, &rootWorkflowURL, &rootThreadID, &rootThreadToken, &rootPriority, &rootFairnessKey, &rootFairnessWeight, &rootTimeBudgetMs, &rootDeleteAfterMs)
+	).Scan(&rootStatus, &rootWorkflowURL, &rootPriority, &rootFairnessKey, &rootFairnessWeight, &rootTimeBudgetMs, &rootDeleteAfterMs)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
 	if !workflow.IsTerminalStatus(rootStatus) {
 		return "", errors.New("can only fork a terminal flow (status: %s)", rootStatus, http.StatusConflict)
 	}
-	// A flow scheduled for deletion is on its way out; unlike Continue (which searches for a base), Fork names
-	// a specific step, so naming a doomed flow is an error, not a fallback.
+	// A flow scheduled for deletion is on its way out, so naming it is an error, as for Continue.
 	if rootDeleteAfterMs > 0 {
 		return "", errors.New("cannot fork a flow scheduled for deletion", http.StatusConflict)
 	}
@@ -138,8 +137,6 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 		rewindByFlow:    rewindByFlow,
 		rootFlowToken:   keys.RandomIdentifier(16),
 		rootTraceParent: e.mintWorkflowSpan(ctx, rootWorkflowURL, ""), // detached, like Continue
-		threadID:        rootThreadID,
-		threadToken:     rootThreadToken,
 		priority:        rootPriority,
 		fairnessKey:     rootFairnessKey,
 		fairnessWeight:  rootFairnessWeight,
@@ -218,8 +215,6 @@ type forkClone struct {
 	rewindByFlow    map[int]int
 	rootFlowToken   string
 	rootTraceParent string
-	threadID        int
-	threadToken     string
 	priority        int
 	fairnessKey     string
 	fairnessWeight  float64
@@ -317,36 +312,33 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		deleteOnCompletion = 0
 	}
 
-	// The cloned root takes cc.rootFlowToken, the token in the key returned to the caller, and joins the origin's
-	// thread; it is its own root, and its descendants inherit its id as their root_flow_id. A subgraph flow is its
-	// own thread - thread_token echoes its own minted token, or List builds a malformed ThreadKey
-	// ("{shard}-{hour}-{id}-") that the API's thread resolution then 404s on - and shares the cloned root's tree.
+	// The cloned root takes cc.rootFlowToken, the token in the key returned to the caller; it is its own root, and
+	// its descendants inherit its id as their root_flow_id.
 	// The origin's cancel reason comes along: a kept fan-out branch lost to the origin's cancellation is a loss
 	// the clone inherits, and a fork whose only losses are such branches resolves cancelled - so it reports the
 	// reason that explains it, rather than a cancellation nobody gave a reason for. cancel_watermark is
 	// deliberately NOT copied: the fork is not under cancellation, so none of its steps may pass one on.
-	columns := "flow_token, thread_token, workflow_url, workflow_name, graph, graph_hash, baggage, status, surgraph_flow_id, surgraph_step_id, forked_from_step, trace_parent, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, cancel_reason, payload_ver"
-	values := "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
-	var flowToken, threadToken, self string
-	var known int
-	if isRoot {
-		flowToken, threadToken = cc.rootFlowToken, cc.threadToken
-		columns, values, self, known = columns+", thread_id", values+", ?", "root_flow_id", cc.threadID
-	} else {
+	columns := "flow_token, workflow_url, workflow_name, graph, graph_hash, baggage, status, surgraph_flow_id, surgraph_step_id, forked_from_step, trace_parent, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, cancel_reason, payload_ver"
+	values := "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
+	flowToken := cc.rootFlowToken
+	if !isRoot {
 		flowToken = keys.RandomIdentifier(16)
-		threadToken = flowToken
-		columns, values, self, known = columns+", root_flow_id", values+", ?", "thread_id", cc.newRootFlowID
 	}
-	insert, fixup := selfFlowInsertSQL(tx.DriverName(), columns, values, self)
-	newFlowID64, err := tx.InsertReturnID(ctx, "flow_id", insert,
-		flowToken, threadToken, workflowURL, workflowName, graphJSON, graphHash, baggageJSON, newStatus, newSurgFlowID, newSurgStepID, forkedFromStep, newTrace, deleteOnCompletion, flowPriority, flowFairnessKey, flowFairnessWeight, flowBudget, e.engineID, cancelReason, originPayloadVer, known,
-	)
+	args := []any{flowToken, workflowURL, workflowName, graphJSON, graphHash, baggageJSON, newStatus, newSurgFlowID, newSurgStepID, forkedFromStep, newTrace, deleteOnCompletion, flowPriority, flowFairnessKey, flowFairnessWeight, flowBudget, e.engineID, cancelReason, originPayloadVer}
+	var self []string
+	if isRoot {
+		self = append(self, "root_flow_id")
+	} else {
+		columns, values, args = columns+", root_flow_id", values+", ?", append(args, cc.newRootFlowID)
+	}
+	insert, fixup := selfFlowInsertSQL(tx.DriverName(), columns, values, self...)
+	newFlowID64, err := tx.InsertReturnID(ctx, "flow_id", insert, args...)
 	if err != nil {
 		return 0, nil, errors.Trace(err)
 	}
 	newFlowID := int(newFlowID64)
 	if fixup != "" {
-		_, err = tx.ExecContext(ctx, fixup, selfFlowFixupArgs(newFlowID64, 1)...)
+		_, err = tx.ExecContext(ctx, fixup, selfFlowFixupArgs(newFlowID64, len(self))...)
 		if err != nil {
 			return 0, nil, errors.Trace(err)
 		}

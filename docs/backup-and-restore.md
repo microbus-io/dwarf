@@ -20,7 +20,7 @@ Two things worth confirming rather than assuming:
 
 ## Restore all shards to the same point, or none
 
-A flow lives entirely on one shard, and subgraph trees, threads and forks are all shard-local. So a partial
+A flow lives entirely on one shard, and subgraph trees, continuations and forks are all shard-local. So a partial
 restore does not corrupt individual flows — nothing is split across a boundary.
 
 What it does produce is worse in a quieter way: **a fleet where some tenants are days behind others, with no

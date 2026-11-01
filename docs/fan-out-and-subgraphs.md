@@ -158,8 +158,8 @@ ever runs as part of a graph, never as an independently invocable child on its o
   `Set`ting the history the child returns would add it twice.
 - Pass a struct or `map[string]any` as `in` to hand the child exactly the fields it expects — no need to
   reshape the parent's state first.
-- Subgraphs inherit the parent's baggage and run on the parent's shard. They start their own thread, so
-  they don't contaminate the parent's `Continue` chain.
+- Subgraphs inherit the parent's baggage and run on the parent's shard. A subgraph child cannot
+  be continued: `Continue` takes a root flow's key.
 - Subgraphs can interrupt: an interrupt inside a child propagates up so the caller awaiting the top-level
   flow sees `interrupted`, and a single `Resume` continues the leaf.
 

@@ -28,7 +28,7 @@ If you're new, read in this order:
 
 1. **[Getting started](getting-started.md)** — install, the dependency-injection model, and your first
    running flow with the in-process test harness.
-2. **[Concepts](concepts.md)** — the mental model: graph, task, flow, step, thread, reducer, and the flow
+2. **[Concepts](concepts.md)** — the mental model: graph, task, flow, step, reducer, and the flow
    lifecycle. Read this once and the rest will click.
 3. **[Building graphs](graphs.md)** — the `workflow.Graph` API: tasks, transitions, conditions, fan-out,
    error handling, and reducers.
@@ -38,7 +38,7 @@ If you're new, read in this order:
 Then dip into the topic guides as you need them:
 
 - **[Driving flows](flows.md)** — every method on the engine: creating, running, inspecting,
-  pausing/resuming, terminating, forking, continuing a thread, retention, and the error codes each returns.
+  pausing/resuming, terminating, forking, continuing a flow, retention, and the error codes each returns.
 - **[Detecting completion](detecting-completion.md)** — the ways to learn a flow's outcome (`Await` vs.
   orchestration) and how to make follow-up delivery reliable.
 - **[Fan-out & subgraphs](fan-out-and-subgraphs.md)** — running work in parallel and calling

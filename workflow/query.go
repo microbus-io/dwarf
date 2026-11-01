@@ -26,7 +26,6 @@ type Query struct {
 	// NewGraph) equals this value. Distinct from WorkflowURL, which matches the resolve key. Empty
 	// disables the filter; composes with WorkflowURL.
 	WorkflowName string `json:"workflowName,omitzero"`
-	ThreadKey    string `json:"threadKey,omitzero"`
 	// StoppedTaskName filters to flows that stopped at the named task: the step that completed, failed or
 	// cancelled the flow, or the step it is interrupted at (which a Terminate of an interrupted flow keeps). It
 	// matches no running flow.

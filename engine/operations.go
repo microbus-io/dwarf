@@ -99,20 +99,9 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 		return "", errors.New("invalid workflow graph %s: %v", workflowURL, verr, http.StatusBadRequest)
 	}
 
-	// FlowOptions.ThreadKey joins an existing thread: the shard is encoded in the key, and the new flow
-	// adopts that flow's thread_id/thread_token (a mid-thread flow's thread_id is not its own flow_id).
-	// Empty starts a fresh thread on a random shard.
-	shardNum, threadID, threadToken := 0, 0, ""
-	if opts.ThreadKey != "" {
-		shardNum, threadID, threadToken, err = e.resolveThread(ctx, opts.ThreadKey)
-		if err != nil {
-			return "", errors.Trace(err)
-		}
-	} else {
-		shardNum, err = e.pickShard()
-		if err != nil {
-			return "", errors.Trace(err)
-		}
+	shardNum, err := e.pickShard()
+	if err != nil {
+		return "", errors.Trace(err)
 	}
 	// Normalize the caller's initialState (a struct, map, or nil) into a State at the door. A nil yields
 	// empty state (NewState's nil case), so a marshaled "null" never reaches the strict object parser.
@@ -135,46 +124,8 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 	// second turn deadlock against each other.
 	ctx, doneTurn := e.opTurn(ctx, shardNum, "create")
 	defer doneTurn()
-	flowKey, err = e.createWithGraph(ctx, shardNum, workflowURL, graph, state, threadID, threadToken, "", opts, 0, 0, 0, 0, nil)
+	flowKey, err = e.createWithGraph(ctx, shardNum, workflowURL, graph, state, "", opts, 0, 0, 0, 0, nil)
 	return flowKey, errors.Trace(err)
-}
-
-// resolveThread parses a FlowKey identifying a thread and returns the thread's shard, id, and token. The
-// shard is encoded in the key; the thread_id/thread_token are read from the referenced flow (which may be
-// mid-thread, so its thread_id differs from its own flow_id). Verifies the flow exists (token-checked).
-func (e *Engine) resolveThread(ctx context.Context, threadKey string) (shardNum, threadID int, threadToken string, err error) {
-	shardNum, flowHour, flowID, flowToken, err := keys.ParseFlowKey(threadKey)
-	if err != nil {
-		return 0, 0, "", errors.Trace(err)
-	}
-	db, err := e.db.Shard(shardNum)
-	if err != nil {
-		return 0, 0, "", errors.Trace(err)
-	}
-	// Its own turn: create resolves the thread BEFORE picking up the turn that covers the insert, so this
-	// read would otherwise be the one part of creation that jumps the queue.
-	tctx, doneTurn := e.dbTurn(ctx, shardNum)
-	var surgraphFlowID int
-	err = db.QueryRowContext(tctx,
-		"SELECT thread_id, thread_token, surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?",
-		flowID, flowToken, flowHour,
-	).Scan(&threadID, &threadToken, &surgraphFlowID)
-	doneTurn()
-	if err == sql.ErrNoRows {
-		return 0, 0, "", errors.New("flow not found", http.StatusNotFound)
-	}
-	if err != nil {
-		return 0, 0, "", errors.Trace(err)
-	}
-	// A subgraph child key is read-only, like everywhere else (Resume/Terminate/Cancel/Delete/Continue all 400 it).
-	// A child runs on its own private thread precisely so it cannot contaminate the parent's continuation
-	// chain, so joining that thread is never what a caller means: the new flow would be a top-level root
-	// grouped under a subgraph's thread, and a later Continue of it would build on the subgraph's turns.
-	// Reject rather than silently widen to the child's root - the caller must name the root it means.
-	if surgraphFlowID != 0 {
-		return 0, 0, "", errors.New("thread key is a subgraph flow; address the root flow", http.StatusBadRequest)
-	}
-	return shardNum, threadID, threadToken, nil
 }
 
 // flowSeed carries the precomputed, retry-stable values for inserting one new flow plus its entry step.
@@ -197,8 +148,6 @@ type flowSeed struct {
 	surgraphFlowID     int
 	surgraphStepID     int
 	callerStepDepth    int
-	threadID           int
-	threadToken        string
 	rootFlowID         int
 	priority           int
 	fairnessKey        string
@@ -208,27 +157,18 @@ type flowSeed struct {
 
 // insertFlowTx inserts the flow row (already `running`) and its entry step (`pending`, immediately
 // claimable) - the shared write-half of every creation path, run inside the caller's transaction. Returns the
-// new flow and step ids. createWithGraph wraps it in a bare transaction; continueFlow wraps it in a transaction
-// that first locks the thread and re-checks the latest turn, so both share exactly one copy of the insert SQL.
+// new flow and step ids. createWithGraph and continueFlow each wrap it in a bare transaction, so they share
+// exactly one copy of the insert SQL.
 func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, newStepID int64, newFlowHour int, err error) {
-	// A top-level flow starts its own thread; a Continue joins the thread it continues. root_flow_id is the
-	// denormalized tree-membership index: a top-level flow is its own root; a subgraph child inherits the
-	// parent's. Written once here, immutable thereafter, so a whole tree is reachable by `WHERE root_flow_id=?`
-	// without a recursive surgraph walk. A known thread or root is bound; a "self" column takes the new row's own
-	// id (selfFlowInsertSQL), so a retry, with a new flow_id, recomputes it rather than reusing the prior attempt's.
-	threadToken := s.threadToken
-	columns := "flow_token, workflow_url, workflow_name, graph, graph_hash, baggage, trace_parent, status, surgraph_flow_id, surgraph_step_id, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, payload_ver, started_at, thread_token"
-	values := "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC(), ?"
-	if s.threadID == 0 {
-		threadToken = s.flowToken
-	}
-	args := []any{s.flowToken, s.workflowURL, s.workflowName, s.graphJSON, s.graphHash, s.baggageJSON, s.traceParent, workflow.StatusRunning, s.surgraphFlowID, s.surgraphStepID, s.deleteOnCompletion, s.priority, s.fairnessKey, s.fairnessWeight, s.timeBudgetMs, s.engineID, payloadVer, threadToken}
+	// root_flow_id is the denormalized tree-membership index: a top-level flow is its own root; a subgraph child
+	// inherits the parent's. Written once here, immutable thereafter, so a whole tree is reachable by
+	// `WHERE root_flow_id=?` without a recursive surgraph walk. A known root is bound; a new root's is a "self"
+	// column, taking the new row's own id (selfFlowInsertSQL), so a retry, with a new flow_id, recomputes it
+	// rather than reusing the prior attempt's.
+	columns := "flow_token, workflow_url, workflow_name, graph, graph_hash, baggage, trace_parent, status, surgraph_flow_id, surgraph_step_id, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, payload_ver, started_at"
+	values := "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC()"
+	args := []any{s.flowToken, s.workflowURL, s.workflowName, s.graphJSON, s.graphHash, s.baggageJSON, s.traceParent, workflow.StatusRunning, s.surgraphFlowID, s.surgraphStepID, s.deleteOnCompletion, s.priority, s.fairnessKey, s.fairnessWeight, s.timeBudgetMs, s.engineID, payloadVer}
 	var self []string
-	if s.threadID == 0 {
-		self = append(self, "thread_id")
-	} else {
-		columns, values, args = columns+", thread_id", values+", ?", append(args, s.threadID)
-	}
 	if s.rootFlowID == 0 {
 		self = append(self, "root_flow_id")
 	} else {
@@ -272,12 +212,12 @@ func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, ne
 
 /*
 selfFlowInsertSQL returns the INSERT of one dwarf_flows row of the given columns and VALUES expressions whose self
-columns - a new thread's thread_id, a new tree's root_flow_id - hold the row's own flow_id, and the fix-up UPDATE that
-writes them, or "" when the INSERT writes them itself. Bind the fix-up with selfFlowFixupArgs.
+columns - a new tree's root_flow_id - hold the row's own flow_id, and the fix-up UPDATE that writes them, or "" when
+the INSERT writes them itself or there are none. Bind the fix-up with selfFlowFixupArgs.
 
 On PostgreSQL the INSERT draws the id from the sequence in a subselect and writes it to flow_id and every self
-column, so no UPDATE has to follow. A fix-up there is an UPDATE of the indexed thread_id and root_flow_id, which can
-never be HOT: a dead row version and a new entry in each of the row's indexes, per flow. nextval also sets currval, so
+column, so no UPDATE has to follow. A fix-up there is an UPDATE of the indexed root_flow_id, which can never be
+HOT: a dead row version and a new entry in each of the row's indexes, per flow. nextval also sets currval, so
 lastFlowIDSQL names the row as it does after a default-filled flow_id. Keep the subselect: in a VALUES list,
 nextval(...) and currval(...) side by side have no evaluation order PostgreSQL promises, while a subselect whose
 target list is volatile is never pulled up into the outer query, so its nextval runs once.
@@ -326,7 +266,7 @@ func selfFlowFixupArgs(flowID int64, selfColumns int) []any {
 // that ordering.) callerStepDepth is the caller step's step_depth (0 for a top-level flow): the entry step
 // is created at callerStepDepth+1, so a subgraph's depths continue from the caller (informational only).
 // beforeInsert, when not nil, runs first in the insert's transaction; an error from it rolls the insert back.
-func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL string, graph *workflow.Graph, initialState workflow.State, threadID int, threadToken string, parentTraceParent string, opts *workflow.FlowOptions, surgraphFlowID, callerStepDepth, surgraphStepID, rootFlowID int, beforeInsert func(tx *sequel.Tx) error) (flowKey string, err error) {
+func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL string, graph *workflow.Graph, initialState workflow.State, parentTraceParent string, opts *workflow.FlowOptions, surgraphFlowID, callerStepDepth, surgraphStepID, rootFlowID int, beforeInsert func(tx *sequel.Tx) error) (flowKey string, err error) {
 	entryPoint := graph.EntryPoint()
 	if entryPoint == "" {
 		return "", errors.New("workflow has no entry point", http.StatusBadRequest)
@@ -398,8 +338,6 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 		surgraphFlowID:     surgraphFlowID,
 		surgraphStepID:     surgraphStepID,
 		callerStepDepth:    callerStepDepth,
-		threadID:           threadID,
-		threadToken:        threadToken,
 		rootFlowID:         rootFlowID,
 		priority:           opts.Priority,
 		fairnessKey:        opts.FairnessKey,
@@ -1282,7 +1220,7 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 
 func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 	// Shard and Limit bound a purge but select every flow they reach, so neither counts as a filter.
-	narrowed := query.Status != "" || query.WorkflowURL != "" || query.WorkflowName != "" || query.ThreadKey != "" ||
+	narrowed := query.Status != "" || query.WorkflowURL != "" || query.WorkflowName != "" ||
 		query.StoppedTaskName != "" || query.FairnessKey != "" || query.Priority != 0 || query.OlderThan != 0 ||
 		query.NewerThan != 0 || query.Search != ""
 	if !narrowed {
@@ -1311,10 +1249,11 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 
 	// Purge selects root flows only and marks each matched root for deletion; the reaper removes its whole
 	// subgraph subtree.
-	joinSQL, whereSQL, baseArgs, restrictShardNum, err := e.queryClauses(ctx, query, "f.surgraph_flow_id=0")
+	joinSQL, whereSQL, baseArgs, err := e.queryClauses(query, "f.surgraph_flow_id=0")
 	if err != nil {
 		return 0, errors.Trace(err)
 	}
+	restrictShardNum := query.Shard
 
 	singleShard := restrictShardNum != 0
 	perShardLimit := limit
@@ -1411,8 +1350,8 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 	return total, nil
 }
 
-func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalState any) (string, error) {
-	shardNum, flowHour, flowID, flowToken, err := keys.ParseFlowKey(threadKey)
+func (e *Engine) continueFlow(ctx context.Context, flowKey string, additionalState any) (nextKey string, err error) {
+	shardNum, flowHour, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -1430,149 +1369,117 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	// The caller's raw Go value is the only reducer input that does not arrive decoded from the database, so
 	// canonicalize it: NewState JSON-round-trips a map/struct, so a struct's declaration-order fields become
 	// sorted-key map form and a fold never compares two spellings of the same value (reducers compare
-	// marshalled bytes). Done before the transaction: a lock-contention retry re-runs the closure, invariant.
+	// marshalled bytes).
 	additional, err := workflow.NewState(additionalState)
 	if err != nil {
 		return "", errors.Trace(err, http.StatusBadRequest)
 	}
 
-	var threadID int
-	var threadToken string
-	var surgraphFlowID int
-	err = db.QueryRowContext(ctx, "SELECT thread_id, thread_token, surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?", flowID, flowToken, flowHour).Scan(&threadID, &threadToken, &surgraphFlowID)
+	// The source is read with no lock and outside the insert's transaction: a completed flow is immutable, and the
+	// new flow copies its state, graph and policy rather than referencing it, so a deletion racing this read leaves
+	// the copy valid.
+	var flowStatus, workflowURL, fairnessKey, graphHash string
+	var finalStateJSON, graphJSON, baggageJSON []byte
+	var surgraphFlowID, deleteAfterMs, priority, timeBudgetMs int
+	var fairnessWeight float64
+	err = db.QueryRowContext(ctx,
+		"SELECT status, surgraph_flow_id, delete_after_ms, final_state, graph, graph_hash, workflow_url, baggage, priority, fairness_key, fairness_weight, time_budget_ms FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?",
+		flowID, flowToken, flowHour,
+	).Scan(&flowStatus, &surgraphFlowID, &deleteAfterMs, &finalStateJSON, &graphJSON, &graphHash, &workflowURL, &baggageJSON, &priority, &fairnessKey, &fairnessWeight, &timeBudgetMs)
 	if err == sql.ErrNoRows {
 		return "", errors.New("flow not found", http.StatusNotFound)
 	}
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	// A subgraph child runs in its own thread (subgraphs never join the parent's continuation chain), so
-	// continuing one would spin up a detached top-level flow from the subgraph's final state - not a thread
-	// turn. Continue must be addressed by a root flow's key.
+	// Continuing a subgraph child would spin up a detached top-level flow from the subgraph's final state, which
+	// is never what a caller means: Continue must be addressed by a root flow's key.
 	if surgraphFlowID != 0 {
 		return "", errors.New("cannot continue a subgraph child; use a root flow key", http.StatusBadRequest)
 	}
+	if flowStatus != workflow.StatusCompleted {
+		return "", errors.New("flow is not completed (status: %s)", flowStatus, http.StatusConflict)
+	}
+	// A flow scheduled for deletion is logically gone, as for Fork.
+	if deleteAfterMs > 0 {
+		return "", errors.New("flow is scheduled for deletion", http.StatusConflict)
+	}
 
-	// Create the new turn atomically with a re-check of the thread's latest turn, all under a write-first
-	// lock on the thread anchor row (flow_id == threadID). Without the lock, two concurrent Continues on
-	// one thread could both read turn N as the latest completed turn and both insert a successor - silently
-	// branching a thread that is meant to be linear. The lock serializes them: the winner inserts its new
-	// (running) turn; every other concurrent Continue then reads THAT running turn as the latest and is
-	// rejected with 409 (a next turn is already in flight). This makes the outcome deterministic - exactly
-	// one Continue succeeds per race - rather than timing-dependent. The lock writes no updated_at, so the
-	// anchor's stays frozen at its own last status transition; and because interrupt/terminate/resume never
-	// lock a thread SIBLING's rows, this anchor lock cannot cycle with them.
+	finalState, err := workflow.NewState(finalStateJSON)
+	if err != nil {
+		return "", errors.Trace(err)
+	}
+	var graph workflow.Graph
+	if err := json.Unmarshal(graphJSON, &graph); err != nil {
+		return "", errors.Trace(err)
+	}
+	entryPoint := graph.EntryPoint()
+	if entryPoint == "" {
+		return "", errors.New("workflow has no entry point", http.StatusBadRequest)
+	}
+	// Fold the caller's additionalState onto the source's final_state through the graph's reducers. A nil
+	// deletes a plain field and contributes nothing to a reduced one, so a new flow cannot reset a reduced
+	// field; its first task can, with Overwrite.
+	if err := finalState.Apply(workflow.ChangesOf(additional), graph.Reducers()); err != nil {
+		// A value that will not fold onto the source's state is the caller's mistake, not a server fault.
+		return "", errors.Trace(err, http.StatusBadRequest)
+	}
+	mergedStateJSON, err := json.Marshal(finalState)
+	if err != nil {
+		return "", errors.Trace(err)
+	}
+	if err := e.checkPayloadSize("initial state", mergedStateJSON); err != nil {
+		return "", err
+	}
+
+	// Inherit the source's baggage; DeleteOnCompletion is forced off (a disposable flow deletes itself, so it
+	// could never have been a Continue source). A flow wanting different policy is made with Create instead.
+	inheritedBaggage, _ := workflow.NewState(baggageJSON)
+	baggageOut, err := json.Marshal(inheritedBaggage)
+	if err != nil {
+		return "", errors.Trace(err)
+	}
+	timeBudget := time.Duration(timeBudgetMs) * time.Millisecond
+	if timeBudget <= 0 {
+		timeBudget = e.taskTimeBudget()
+	}
+
+	// The new flow starts its own trace (fresh detached root span, empty parent) and is its own root.
 	newFlowToken := keys.RandomIdentifier(16)
-	newStepToken := keys.RandomIdentifier(16)
+	seed := flowSeed{
+		workflowURL:    workflowURL,
+		workflowName:   graph.Name(),
+		graphJSON:      graphJSON,
+		graphHash:      graphHash,
+		baggageJSON:    baggageOut,
+		stateJSON:      mergedStateJSON,
+		traceParent:    e.mintWorkflowSpan(ctx, workflowURL, ""),
+		flowToken:      newFlowToken,
+		stepToken:      keys.RandomIdentifier(16),
+		entryPoint:     entryPoint,
+		entryURL:       dispatchURLOf(&graph, entryPoint),
+		timeBudgetMs:   timeBudget.Milliseconds(),
+		priority:       priority,
+		fairnessKey:    fairnessKey,
+		fairnessWeight: fairnessWeight,
+		engineID:       e.engineID,
+	}
 	var newFlowID, newStepID int64
 	var newFlowHour int
-	var newPriority int
-	var newWorkflowURL string
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
-		// Write-first: grab the thread anchor's row lock to serialize concurrent Continues on this thread.
-		if _, err := lockFlowRows(ctx, tx, "flow_id=?", threadID); err != nil {
-			return err
-		}
-
-		// The new turn inherits the latest completed turn's full policy (scheduling, baggage).
-		// Exclude debug forks: a Fork shares the thread_id for List grouping but must never become a
-		// production Continue's base (forked_from_step<>0 marks a fork).
-		var flowStatus, workflowURL, fairnessKey, graphHash string
-		var finalStateJSON, graphJSON, baggageJSON []byte
-		var priority, timeBudgetMs int
-		var fairnessWeight float64
-		err := tx.QueryRowContext(ctx,
-			// delete_after_ms=0 skips turns scheduled for deletion, so Continue builds on the latest UNDELETED
-			// turn even when the newest turn is on its way out (its state was copied here before the reap).
-			"SELECT status, final_state, graph, graph_hash, workflow_url, baggage, priority, fairness_key, fairness_weight, time_budget_ms FROM dwarf_flows WHERE thread_id=? AND forked_from_step=0 AND delete_after_ms=0 ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
-			threadID,
-		).Scan(&flowStatus, &finalStateJSON, &graphJSON, &graphHash, &workflowURL, &baggageJSON, &priority, &fairnessKey, &fairnessWeight, &timeBudgetMs)
-		if err == sql.ErrNoRows {
-			return errors.New("no flows found in thread", http.StatusNotFound)
-		}
-		if err != nil {
-			return errors.Trace(err)
-		}
-		if flowStatus != workflow.StatusCompleted {
-			return errors.New("latest flow in thread is not completed (status: %s)", flowStatus, http.StatusConflict)
-		}
-
-		finalState, err := workflow.NewState(finalStateJSON)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		var graph workflow.Graph
-		if err := json.Unmarshal(graphJSON, &graph); err != nil {
-			return errors.Trace(err)
-		}
-		entryPoint := graph.EntryPoint()
-		if entryPoint == "" {
-			return errors.New("workflow has no entry point", http.StatusBadRequest)
-		}
-		// Fold the caller's additionalState onto the prior turn's final_state through the graph's reducers. A nil
-		// deletes a plain field and contributes nothing to a reduced one, so a new turn cannot reset a reduced
-		// field; the turn's first task can, with Overwrite.
-		if err := finalState.Apply(workflow.ChangesOf(additional), graph.Reducers()); err != nil {
-			// A value that will not fold onto the thread's state is the caller's mistake, not a server fault.
-			return errors.Trace(err, http.StatusBadRequest)
-		}
-		mergedStateJSON, err := json.Marshal(finalState)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		if err := e.checkPayloadSize("initial state", mergedStateJSON); err != nil {
-			return err
-		}
-
-		// Inherit the thread's baggage; DeleteOnCompletion is forced off (a disposable flow deletes itself,
-		// so it could never have been a Continue source). A turn wanting different policy uses Create with
-		// FlowOptions.ThreadKey instead.
-		inheritedBaggage, _ := workflow.NewState(baggageJSON)
-		baggageOut, err := json.Marshal(inheritedBaggage)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		timeBudget := time.Duration(timeBudgetMs) * time.Millisecond
-		if timeBudget <= 0 {
-			timeBudget = e.taskTimeBudget()
-		}
-		newWorkflowURL = workflowURL
-
-		// A Continue turn starts its own trace (fresh detached root span, empty parent) and no surgraph
-		// linkage (threadID/threadToken carried, surgraph/root ids left 0 to self-root).
-		seed := flowSeed{
-			workflowURL:    workflowURL,
-			workflowName:   graph.Name(),
-			graphJSON:      graphJSON,
-			graphHash:      graphHash,
-			baggageJSON:    baggageOut,
-			stateJSON:      mergedStateJSON,
-			traceParent:    e.mintWorkflowSpan(ctx, workflowURL, ""),
-			flowToken:      newFlowToken,
-			stepToken:      newStepToken,
-			entryPoint:     entryPoint,
-			entryURL:       dispatchURLOf(&graph, entryPoint),
-			timeBudgetMs:   timeBudget.Milliseconds(),
-			threadID:       threadID,
-			threadToken:    threadToken,
-			priority:       priority,
-			fairnessKey:    fairnessKey,
-			fairnessWeight: fairnessWeight,
-			engineID:       e.engineID,
-		}
+		var err error
 		newFlowID, newStepID, newFlowHour, err = insertFlowTx(ctx, tx, seed)
-		newPriority = priority
 		return err
 	})
 	if err != nil {
 		return "", errors.Trace(err)
 	}
 
-	flowKey := keys.NewFlowKey(shardNum, newFlowHour, int(newFlowID), newFlowToken)
-	e.logger.DebugContext(ctx, "Flow continued and started", "workflow", newWorkflowURL)
-	e.metricFlowStarted(ctx, newWorkflowURL, newPriority, shardNum)
+	nextKey = keys.NewFlowKey(shardNum, newFlowHour, int(newFlowID), newFlowToken)
+	e.logger.DebugContext(ctx, "Flow continued and started", "workflow", workflowURL)
+	e.metricFlowStarted(ctx, workflowURL, priority, shardNum)
 	// Ring the local doorbell so this replica claims the entry step without waiting for a refiller scan. The
 	// entry step is due now and its priority is in hand, so no lookup is needed.
-	e.enqueueStepDue(ctx, shardNum, int(newStepID), newPriority)
-	return flowKey, nil
+	e.enqueueStepDue(ctx, shardNum, int(newStepID), priority)
+	return nextKey, nil
 }

@@ -154,11 +154,11 @@ func TestStaterefsflow(t *testing.T) {
 		// The prior turn's final_state seeds the next turn's INITIAL state - so the document crosses a flow
 		// boundary (materialized) and is then re-anchored in the new flow's entry step. This is the second of
 		// the three anchor locations, reached the way real multi-turn workflows reach it.
-		threadKey, outcome, err := eng.Run(ctx, "staterefsflow.verify:429/doc-refs", initialState, nil)
+		flowKey, outcome, err := eng.Run(ctx, "staterefsflow.verify:429/doc-refs", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 
-		next, err := eng.Continue(ctx, threadKey, map[string]any{"pages": []string{"q1", "q2"}})
+		next, err := eng.Continue(ctx, flowKey, map[string]any{"pages": []string{"q1", "q2"}})
 		assert.NoError(err)
 		turn2, err := eng.Await(ctx, next)
 		assert.NoError(err)

@@ -18,7 +18,10 @@ package fixtures
 
 import (
 	"context"
+	"net/http"
 	"testing"
+
+	"github.com/microbus-io/errors"
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
@@ -63,7 +66,7 @@ func TestContinueflow(t *testing.T) {
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(1.0, stateVal(outcome.State, "counter")) // JSON round-trip: int -> float64
 
-		// Turn 2: continue from the thread, no additional state.
+		// Turn 2: continue turn 1, no additional state.
 		flowKey2, err := eng.Continue(ctx, flowKey, map[string]any{})
 		if !assert.NoError(err) {
 			return
@@ -77,9 +80,9 @@ func TestContinueflow(t *testing.T) {
 	})
 }
 
-// TestContinueInheritsThreadPolicy verifies a Continue turn (which takes no FlowOptions) inherits
-// the thread's policy: scheduling priority (not reset to the engine default).
-func TestContinueInheritsThreadPolicy(t *testing.T) {
+// TestContinueInheritsPolicy verifies a flow made by Continue (which takes no FlowOptions) inherits the policy of
+// the flow it continues: scheduling priority (not reset to the engine default).
+func TestContinueInheritsPolicy(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -103,66 +106,109 @@ func TestContinueInheritsThreadPolicy(t *testing.T) {
 	_, err = eng.Await(ctx, turn1)
 	assert.NoError(err)
 
-	// Turn 2 via Continue (no opts) inherits the thread's policy.
+	// Turn 2 via Continue (no opts) inherits turn 1's policy.
 	turn2, err := eng.Continue(ctx, turn1, map[string]any{})
 	assert.NoError(err)
 	_, err = eng.Await(ctx, turn2)
 	assert.NoError(err)
 
 	// Priority inherited (4), not reset to the engine default.
-	summaries, _, err := eng.List(ctx, workflow.Query{ThreadKey: turn1})
+	summaries, _, err := eng.List(ctx, workflow.Query{Search: turn2})
 	assert.NoError(err)
-	var found bool
-	for _, s := range summaries {
-		if s.FlowKey == turn2 {
-			found = true
-			assert.Equal(4, s.Priority)
-		}
+	if assert.Len(summaries, 1) {
+		assert.Equal(4, summaries[0].Priority)
 	}
-	assert.True(found)
 }
 
-// TestCreateWithThreadKeyJoinsThread verifies FlowOptions.ThreadKey places a new flow into an existing
-// thread (the explicit-policy counterpart to Continue), and that a bad key is rejected.
-func TestCreateWithThreadKeyJoinsThread(t *testing.T) {
+// TestContinue_BuildsOnTheNamedFlow pins that Continue builds on exactly the flow its key names, whatever else
+// was made from it: continuing one flow twice gives two successors, each built on it, and continuing a successor
+// builds on that successor. Only a completed flow can be continued.
+func TestContinue_BuildsOnTheNamedFlow(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	mux := hosts.NewMux()
-	g := workflow.NewGraph("Join")
-	g.SetURL("T", "threadjoin.verify:428/t")
-	g.AddTransition("T", workflow.End)
-	mux.HandleGraph("threadjoin.verify:428/g", g)
-	mux.HandleTask("threadjoin.verify:428/t", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	g := workflow.NewGraph("Named")
+	g.SetURL("Step", "continuenamed.verify:428/step")
+	g.AddTransition("Step", workflow.End)
+	mux.HandleGraph("continuenamed.verify:428/g", g)
+	release := make(chan struct{})
+	mux.HandleTask("continuenamed.verify:428/step", func(ctx context.Context, f *workflow.Flow) error {
+		switch f.GetString("mode") {
+		case "fail":
+			return errors.New("failed on purpose")
+		case "park":
+			if yield, err := f.Interrupt(nil, nil); yield || err != nil {
+				return err
+			}
+		case "block":
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		}
+		// builtOn records which flow this one was continued from; label names this one.
+		f.SetString("builtOn", f.GetString("label"))
+		f.SetString("label", f.GetString("next"))
+		return nil
+	})
 
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
-	// Flow A starts its own thread.
-	a, _, err := eng.Run(ctx, "threadjoin.verify:428/g", map[string]any{}, nil)
-	assert.NoError(err)
-
-	// Flow B joins A's thread via FlowOptions.ThreadKey.
-	b, _, err := eng.Run(ctx, "threadjoin.verify:428/g", map[string]any{}, &workflow.FlowOptions{ThreadKey: a})
-	assert.NoError(err)
-	assert.NotEqual(a, b)
-
-	// Both flows are grouped in A's thread.
-	summaries, _, err := eng.List(ctx, workflow.Query{ThreadKey: a})
-	assert.NoError(err)
-	keys := map[string]bool{}
-	for _, s := range summaries {
-		keys[s.FlowKey] = true
+	run := func(key string, err error) *workflow.FlowOutcome {
+		if !assert.NoError(err) {
+			return &workflow.FlowOutcome{}
+		}
+		outcome, err := eng.Await(ctx, key)
+		assert.NoError(err)
+		return outcome
 	}
-	assert.True(keys[a])
-	assert.True(keys[b])
-	assert.Equal(2, len(summaries))
 
-	// A non-existent ThreadKey is rejected (404).
-	_, _, err = eng.Run(ctx, "threadjoin.verify:428/g", map[string]any{},
-		&workflow.FlowOptions{ThreadKey: "1-0-99999-0000000000000000"})
-	assert.Error(err)
+	turn1, outcome, err := eng.Run(ctx, "continuenamed.verify:428/g", map[string]any{"next": "one"}, nil)
+	assert.NoError(err)
+	assert.Equal("one", stateVal(outcome.State, "label"))
+
+	// Two successors of turn 1, each built on it: Continue does not look for a later flow.
+	turn2a, err := eng.Continue(ctx, turn1, map[string]any{"next": "two-a"})
+	outcome = run(turn2a, err)
+	assert.Equal("one", stateVal(outcome.State, "builtOn"))
+	turn2b, err := eng.Continue(ctx, turn1, map[string]any{"next": "two-b"})
+	outcome = run(turn2b, err)
+	assert.Equal("one", stateVal(outcome.State, "builtOn"))
+	assert.NotEqual(turn2a, turn2b)
+
+	// Continuing a successor builds on that successor.
+	turn3, err := eng.Continue(ctx, turn2a, map[string]any{"next": "three"})
+	outcome = run(turn3, err)
+	assert.Equal("two-a", stateVal(outcome.State, "builtOn"))
+
+	conflict := func(name, key string) {
+		_, err := eng.Continue(ctx, key, nil)
+		if assert.Error(err, name) {
+			assert.Equal(http.StatusConflict, errors.StatusCode(err), "%s: %v", name, err)
+		}
+	}
+	failed, outcome, err := eng.Run(ctx, "continuenamed.verify:428/g", map[string]any{"mode": "fail"}, nil)
+	assert.NoError(err)
+	assert.Equal(workflow.StatusFailed, outcome.Status)
+	conflict("failed", failed)
+	parked, outcome, err := eng.Run(ctx, "continuenamed.verify:428/g", map[string]any{"mode": "park"}, nil)
+	assert.NoError(err)
+	assert.Equal(workflow.StatusInterrupted, outcome.Status)
+	conflict("interrupted", parked)
+	running, err := eng.Create(ctx, "continuenamed.verify:428/g", map[string]any{"mode": "block"}, nil)
+	assert.NoError(err)
+	conflict("running", running)
+	close(release)
+	_, err = eng.Await(ctx, running)
+	assert.NoError(err)
+
+	_, err = eng.Continue(ctx, "1-0-99999-0000000000000000", nil)
+	if assert.Error(err) {
+		assert.Equal(http.StatusNotFound, errors.StatusCode(err))
+	}
 }
