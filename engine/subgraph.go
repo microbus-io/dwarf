@@ -646,15 +646,20 @@ func (e *Engine) surgraphChain(ctx context.Context, shardNum int, flowID int, fl
 	if err != nil {
 		return nil, nil, nil, errors.Trace(err)
 	}
+	return e.surgraphChainIn(ctx, db, liveTables, shardNum, flowID, flowHour, flowToken)
+}
+
+// surgraphChainIn is surgraphChain on q, over the flows table of t.
+func (e *Engine) surgraphChainIn(ctx context.Context, q sequel.Executor, t flowTables, shardNum int, flowID int, flowHour int, flowToken string) (flowIDs []any, stepIDs []any, compositeFlowIDs []string, err error) {
 	flowIDs = []any{flowID}
 	compositeFlowIDs = []string{keys.NewFlowKey(shardNum, flowHour, flowID, flowToken)}
 	cur := flowID
 	for {
 		var surgFlowID, surgStepID, surgHour, nextSurgFlowID int
 		var surgToken string
-		err := db.QueryRowContext(ctx,
+		err := q.QueryRowContext(ctx,
 			"SELECT f.surgraph_flow_id, f.surgraph_step_id, COALESCE(p.flow_token, ''), COALESCE(p.created_hour, 0), COALESCE(p.surgraph_flow_id, 0)"+
-				" FROM dwarf_flows f LEFT JOIN dwarf_flows p ON p.flow_id=f.surgraph_flow_id WHERE f.flow_id=?",
+				" FROM "+t.flows+" f LEFT JOIN "+t.flows+" p ON p.flow_id=f.surgraph_flow_id WHERE f.flow_id=?",
 			cur,
 		).Scan(&surgFlowID, &surgStepID, &surgToken, &surgHour, &nextSurgFlowID)
 		if errors.Is(err, sql.ErrNoRows) || (err == nil && surgFlowID == 0) {

@@ -93,13 +93,18 @@ func (r *claimRow) destinations() (step, flow []any) {
 // a SHARED lock, and two readers deadlock on the upgrade. On SQL Server a locking read is UPDLOCK, whose reads
 // under READ_COMMITTED_SNAPSHOT are unverified.
 func lockFlowRowsSQL(driverName string, where string) string {
+	return lockRowsSQL(driverName, liveTables.flows, where)
+}
+
+// lockRowsSQL is lockFlowRowsSQL over the given flows table: the live one, or an archive day's.
+func lockRowsSQL(driverName string, flows string, where string) string {
 	switch driverName {
 	case "pgx":
-		return "SELECT 1 FROM dwarf_flows WHERE " + where + " FOR NO KEY UPDATE"
+		return "SELECT 1 FROM " + flows + " WHERE " + where + " FOR NO KEY UPDATE"
 	case "mysql":
-		return "SELECT 1 FROM dwarf_flows WHERE " + where + " FOR UPDATE"
+		return "SELECT 1 FROM " + flows + " WHERE " + where + " FOR UPDATE"
 	}
-	return "UPDATE dwarf_flows SET touch=1-touch WHERE " + where
+	return "UPDATE " + flows + " SET touch=1-touch WHERE " + where
 }
 
 // locksByReading reports whether lockFlowRowsSQL is a locking read on the driver.
@@ -109,7 +114,12 @@ func locksByReading(driverName string) bool {
 
 // lockFlowRows takes the write lock on the dwarf_flows rows that match where and returns how many it locked.
 func lockFlowRows(ctx context.Context, tx *sequel.Tx, where string, args ...any) (int64, error) {
-	query := lockFlowRowsSQL(tx.DriverName(), where)
+	return lockRows(ctx, tx, liveTables.flows, where, args...)
+}
+
+// lockRows is lockFlowRows over the given flows table: the live one, or an archive day's.
+func lockRows(ctx context.Context, tx *sequel.Tx, flows string, where string, args ...any) (int64, error) {
+	query := lockRowsSQL(tx.DriverName(), flows, where)
 	if !locksByReading(tx.DriverName()) {
 		res, err := tx.ExecContext(ctx, query, args...)
 		if err != nil {

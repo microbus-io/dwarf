@@ -140,8 +140,10 @@ func TestPeerFault_BlindnessIsPerShard(t *testing.T) {
 	assert.Equal(shareOf(2), awaitPoolSize(t, db1, shareOf(2)))
 	assert.Equal(shareOf(2), awaitPoolSize(t, db2, shareOf(2)))
 
-	// Blind shard 1 only, then take the peer away everywhere.
+	// Blind shard 1 only, then take the peer away everywhere. Shard 1 must be blind before the peer goes: a reading
+	// begun before the fault can still succeed, and one landing after the delete would see the fleet shrink.
 	e.seams.InjectN(engineseams.Join(engineseams.FaultPeerReadErr, "1"), 1<<20)
+	awaitBlind(t, e, 1, 10*testPeerCadence)
 	assert.NoError(e.db.OnEach(context.Background(), func(ctx context.Context, sdb *sequel.DB, shard int) error {
 		_, derr := sdb.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id=6001")
 		return derr

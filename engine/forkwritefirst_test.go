@@ -33,7 +33,7 @@ import (
 // retry; fixtures/forkconcurrentflow_test.go shows that under load, but only now and then. This reads the order
 // of the statements off the database spans instead, so it fails every time the opening write is dropped, moved
 // after a read, or replaced by a plain read. On PostgreSQL and MySQL the lock is a locking read, which a span does
-// not tell apart from a plain one; TestFork_DeletionAfterThePreCheck pins that it is taken.
+// not tell apart from a plain one; TestArchivedReads_ForkHoldsTheReaperOffItsSource pins that it is taken.
 func TestFork_TransactionOpensWithAWrite(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)

@@ -131,7 +131,8 @@ const (
 	CheckpointArchivePassDone           = "archivePassDone"           // the archive loop, after each pass over the shards
 	CheckpointBeforeTransitionTx        = "beforeTransitionTx"        // step execution, after the step is marked completed, before whichever transaction transitions it
 	CheckpointCancelBeforeMark          = "cancelBeforeMark"          // Cancel, after its watermark transaction commits, before it marks the steps
-	CheckpointForkBeforeClone           = "forkBeforeClone"           // Fork, after its pre-transaction checks, before its clone transaction
+	CheckpointForkBeforeClone           = "forkBeforeClone"           // Fork, before its first clone transaction
+	CheckpointForkRootLocked            = "forkRootLocked"            // Fork, in a clone transaction, after it locked the source root and before it reads the source
 	CheckpointBeforeSubgraphSpawn       = "beforeSubgraphSpawn"       // step execution, before the transaction that parks a subgraph caller and creates its child
 	CheckpointTerminateAfterScan        = "terminateAfterScan"        // Terminate, after its pre-transaction scan of the tree, before its transaction
 	CheckpointTerminateAfterStepsLocked = "terminateAfterStepsLocked" // Terminate, in its transaction, after its first step UPDATE and before it locks the flow rows

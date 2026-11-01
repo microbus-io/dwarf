@@ -233,13 +233,15 @@ func (e *Engine) resolveReducedRefs(ctx context.Context, tx sequel.Executor, sha
 // resolvedStepState materializes a step's state column into JSON with every ref'd field spliced back in -
 // the flatten used where a state snapshot must stand on its own, detached from the anchors that backed it
 // (Fork's leaf step, whose anchor ids are about to be remapped into a different flow).
-func (e *Engine) resolvedStepState(ctx context.Context, db sequel.Executor, shardNum int, flowToken string, stateJSON, refsJSON []byte, workflowURL string) ([]byte, error) {
+//
+// steps is the table the step's anchors are in: the live one, or its archive day's.
+func (e *Engine) resolvedStepState(ctx context.Context, db sequel.Executor, steps string, shardNum int, flowToken string, stateJSON, refsJSON []byte, workflowURL string) ([]byte, error) {
 	refs, err := staterefs.Parse(refsJSON)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	var readBytes int
-	resolved, err := e.linkerFor(shardNum).Flatten(ctx, flowToken, stateJSON, refs, anchorLoader(db, &readBytes))
+	resolved, err := e.linkerFor(shardNum).Flatten(ctx, flowToken, stateJSON, refs, anchorLoaderIn(db, steps, &readBytes))
 	if readBytes > 0 {
 		e.metricStateReadBytes(ctx, workflowURL, "state_ref", readBytes)
 	}

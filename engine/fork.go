@@ -25,6 +25,7 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/keys"
+	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -58,125 +59,67 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	ctx, doneTurn := e.opTurn(ctx, shardNum, "fork")
 	defer doneTurn()
 
-	// Resolve the fork step, its owning flow, and that flow's token (needed to walk the surgraph chain).
-	var leafFlowID, leafFlowPayloadVer int
-	var forkStepState, forkStepRefs, forkStepReduced []byte
-	var leafFlowToken string
-	err = db.QueryRowContext(ctx,
-		"SELECT s.flow_id, s.state, s.state_refs, s.state_reduced, f.payload_ver, f.flow_token FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.flow_id=? AND s.step_token=? AND s.flow_created_hour=?",
-		forkStepID, forkFlowID, forkStepToken, forkStepHour,
-	).Scan(&leafFlowID, &forkStepState, &forkStepRefs, &forkStepReduced, &leafFlowPayloadVer, &leafFlowToken)
-	if err == sql.ErrNoRows {
+	// The live tables first, then the day the tree was archived in. Each pass opens its transaction by locking the
+	// source root, and reads the source only under that lock: the reaper locks a root before it moves the tree, so a
+	// tree the live pass locked stays live for the whole clone, and a live pass that locks nothing finds the tree
+	// archived or never there. Nothing moves back out of the archive. The fork's root span is minted once, by
+	// whichever pass first gets that far.
+	e.seams.Checkpoint(ctx, engineseams.CheckpointForkBeforeClone)
+	var traceParent string
+	flowKey, err := e.forkFrom(ctx, db, liveTables, shardNum, forkFlowID, forkStepID, forkStepToken, forkStepHour, overrides, &traceParent)
+	if !errors.Is(err, errForkSourceNotHere) {
+		return flowKey, errors.Trace(err)
+	}
+	set := e.archives.Load()
+	if set == nil || set.byShard[shardNum] == nil {
 		return "", errors.New("step not found", http.StatusNotFound)
 	}
-	if err == nil {
-		err = checkPayloadVer(leafFlowPayloadVer)
+	day, err := set.byShard[shardNum].LocateFlow(ctx, forkFlowID, forkStepHour)
+	if errors.StatusCode(err) == http.StatusNotFound {
+		return "", errors.New("step not found", http.StatusNotFound)
 	}
 	if err != nil {
 		return "", errors.Trace(err)
 	}
+	src := flowTables{flows: migrations.FlowsTable(day), steps: migrations.StepsTable(day)}
+	flowKey, err = e.forkFrom(ctx, db, src, shardNum, forkFlowID, forkStepID, forkStepToken, forkStepHour, overrides, &traceParent)
+	// A day dropped since the locate, or a directory row outliving its day, fails on its missing table: the source is
+	// gone.
+	if errors.Is(err, errForkSourceNotHere) || sequel.IsUndefinedTableError(err) {
+		return "", errors.New("step not found", http.StatusNotFound)
+	}
+	return flowKey, errors.Trace(err)
+}
 
-	// Walk up to the root, recording each flow's rewind step: the leaf fork step in its own flow, and the
-	// caller step that spawned the lower flow in each ancestor.
-	chainFlowIDs, chainStepIDs, _, err := e.surgraphChain(ctx, shardNum, leafFlowID, forkStepHour, leafFlowToken)
-	if err != nil {
-		return "", errors.Trace(err)
-	}
-	rootFlowID := chainFlowIDs[len(chainFlowIDs)-1].(int)
-	rewindByFlow := map[int]int{leafFlowID: forkStepID}
-	for i, callerStep := range chainStepIDs {
-		rewindByFlow[chainFlowIDs[i+1].(int)] = callerStep.(int)
-	}
+// errForkSourceNotHere is forkFrom's report that the tables it was given do not hold the fork step's flow.
+var errForkSourceNotHere = errors.New("fork source not in these tables")
 
-	// Validate the root (the fork's identity) is terminal and gather the root-flow overrides.
-	var rootStatus, rootWorkflowURL string
-	var rootPriority, rootTimeBudgetMs, rootDeleteAfterMs int
-	var rootFairnessKey string
-	var rootFairnessWeight float64
-	err = db.QueryRowContext(ctx,
-		"SELECT status, workflow_url, priority, fairness_key, fairness_weight, time_budget_ms, delete_after_ms FROM dwarf_flows WHERE flow_id=?",
-		rootFlowID,
-	).Scan(&rootStatus, &rootWorkflowURL, &rootPriority, &rootFairnessKey, &rootFairnessWeight, &rootTimeBudgetMs, &rootDeleteAfterMs)
-	if err != nil {
-		return "", errors.Trace(err)
-	}
-	if !workflow.IsTerminalStatus(rootStatus) {
-		return "", errors.New("can only fork a terminal flow (status: %s)", rootStatus, http.StatusConflict)
-	}
-	// A flow scheduled for deletion is on its way out, so naming it is an error, as for Continue.
-	if rootDeleteAfterMs > 0 {
-		return "", errors.New("cannot fork a flow scheduled for deletion", http.StatusConflict)
-	}
-
-	// The fork's leaf step is rewritten with fully MATERIALIZED state (and state_refs cleared below): the
-	// caller's overrides merge onto the real values, and the leaf is the one row the fork re-runs from, so it
-	// must not depend on anchors whose ids are about to be remapped. Its successors re-mint refs normally.
-	resolvedLeafState, err := e.resolvedStepState(ctx, db, shardNum, leafFlowToken, forkStepState, forkStepRefs, rootWorkflowURL)
-	if err != nil {
-		return "", errors.Trace(err)
-	}
-	leafReduced, err := e.forkLeafReduced(ctx, db, shardNum, leafFlowID, leafFlowToken, resolvedLeafState, forkStepReduced)
-	if err != nil {
-		return "", errors.Trace(err)
-	}
-	mergedLeafState, err := mergeWithOverrides(resolvedLeafState, overrides)
-	if err != nil {
-		return "", errors.Trace(err)
-	}
-	if err := e.checkPayloadSize("state of the fork step", mergedLeafState); err != nil {
-		return "", err
-	}
-
-	// The fork inherits the origin root's scheduling and baggage (no FlowOptions), applied uniformly to
-	// every cloned flow and step.
-	cc := &forkClone{
-		leafFlowID:      leafFlowID,
-		leafStepID:      forkStepID,
-		mergedLeafState: mergedLeafState,
-		leafReduced:     leafReduced,
-		rewindByFlow:    rewindByFlow,
-		rootFlowToken:   keys.RandomIdentifier(16),
-		rootTraceParent: e.mintWorkflowSpan(ctx, rootWorkflowURL, ""), // detached, like Continue
-		priority:        rootPriority,
-		fairnessKey:     rootFairnessKey,
-		fairnessWeight:  rootFairnessWeight,
-		timeBudgetMs:    rootTimeBudgetMs,
-	}
-
-	e.seams.Checkpoint(ctx, engineseams.CheckpointForkBeforeClone)
-	var newRootFlowID int
-	err = db.Transact(ctx, func(tx *sequel.Tx) error {
-		cc.newLeafStepID = 0
-		cc.startedURLs = cc.startedURLs[:0]
+// forkFrom forks the tree of the fork step read from src - the live tables, or the archive day's tables the tree is
+// in - into a new tree in the live tables, in one transaction. It returns errForkSourceNotHere when src does not
+// hold the step's flow. traceParent holds the fork's root span once minted.
+func (e *Engine) forkFrom(ctx context.Context, db *sequel.DB, src flowTables, shardNum, forkFlowID, forkStepID int,
+	forkStepToken string, forkStepHour int, overrides workflow.State, traceParent *string) (string, error) {
+	var cc *forkClone
+	var rootFlowID, newRootFlowID int
+	err := db.Transact(ctx, func(tx *sequel.Tx) error {
 		// engineseams.FaultForkCommit fails this transaction once, before the clone runs, so the test proves the whole
 		// clone rolls back atomically (origin byte-identical, zero partial clone rows) and a retry then
 		// forks cleanly - pinning Fork's "crash mid-clone rolls back, origin never mutated" claim.
 		if e.seams.IsFault(engineseams.FaultForkCommit) {
 			return errors.New("injected fault: " + engineseams.FaultForkCommit)
 		}
-		// Write-first. The clone reads the origin before its first write, and on SQLite a transaction that reads
-		// first holds a SHARED lock it must upgrade at that write: against a concurrent writer the upgrade cannot
-		// wait, so SQLite returns SQLITE_BUSY (SQLITE_LOCKED under a shared cache) at once whatever the busy
-		// timeout, and every Transact retry is
-		// read-first again (measured: ~1 Fork in 8 failed under the bench soak). Locking the origin root first
-		// makes the first statement a write there; on the server dialects it is a locking read, which also holds
-		// off a Delete or Purge of the origin while it is cloned. The lock re-checks what was read before the
-		// transaction: a Delete or Purge stamp that landed in between is a 409 as it would have been then, and an
-		// origin the reaper removed since is the 404 an unknown key gets, not a missing row deep in the clone.
-		locked, err := lockFlowRows(ctx, tx, "flow_id=? AND delete_after_ms=0", rootFlowID)
-		if err != nil {
-			return err
-		}
-		if locked == 0 {
-			var exists int
-			err := tx.QueryRowContext(ctx, "SELECT 1 FROM dwarf_flows WHERE flow_id=?", rootFlowID).Scan(&exists)
-			if err == sql.ErrNoRows {
-				return errors.New("flow not found", http.StatusNotFound)
-			}
-			if err != nil {
-				return errors.Trace(err)
-			}
-			return errors.New("cannot fork a flow scheduled for deletion", http.StatusConflict)
+		// Write-first, on the source root named by the fork step's flow. The clone reads the source before its first
+		// write, and on SQLite a transaction that reads first holds a SHARED lock it must upgrade at that write:
+		// against a concurrent writer the upgrade cannot wait, so SQLite returns SQLITE_BUSY (SQLITE_LOCKED under a
+		// shared cache) at once whatever the busy timeout, and every Transact retry is read-first again (measured:
+		// ~1 Fork in 8 failed under the bench soak). Locking the source root first makes the first statement a write
+		// there; on the server dialects it is a locking read, which holds off the reaper and a Delete or Purge of
+		// the source while it is cloned. An archived source is locked in its day's table by the same statement: on
+		// SQLite and SQL Server it flips the archived root's touch, the one write an archived row takes.
+		var cerr error
+		cc, rootFlowID, cerr = e.forkSource(ctx, tx, src, shardNum, forkFlowID, forkStepID, forkStepToken, forkStepHour, overrides, traceParent)
+		if cerr != nil {
+			return errors.Trace(cerr)
 		}
 		id, cloneErr := e.cloneTree(ctx, tx, cc, rootFlowID)
 		if cloneErr != nil {
@@ -190,6 +133,9 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 		)
 		return errors.Trace(txErr)
 	})
+	if errors.Is(err, errForkSourceNotHere) {
+		return "", errForkSourceNotHere
+	}
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -206,8 +152,128 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	return newFlowKey, nil
 }
 
+// forkSource locks the source root in src, as tx's first statement, then reads on tx what the clone of the fork
+// step's tree needs: the step, the surgraph chain above it, and the root's scheduling, with the leaf's state
+// materialized and overridden. It returns the clone's shared state and the source root's id, and
+// errForkSourceNotHere when src holds no flow the key names.
+func (e *Engine) forkSource(ctx context.Context, tx *sequel.Tx, src flowTables, shardNum, forkFlowID, forkStepID int,
+	forkStepToken string, forkStepHour int, overrides workflow.State, traceParent *string) (*forkClone, int, error) {
+	// The root is locked only if it has ended and is not marked for deletion, tested on the row the lock takes: that is
+	// the row as it stands once the lock is granted, where a later plain read on MySQL would see the snapshot taken
+	// when this statement began - before a Delete that committed while it waited. A root not ended is not locked at
+	// all, so a Fork refused for it crosses no lock order with Terminate.
+	rootOf := "flow_id=(SELECT root_flow_id FROM " + src.flows + " WHERE flow_id=? AND created_hour=?)"
+	locked, err := lockRows(ctx, tx, src.flows, rootOf+" AND status IN ("+terminalStatusesSQL+") AND delete_after_ms=0",
+		forkFlowID, forkStepHour)
+	if err != nil {
+		return nil, 0, errors.Trace(err)
+	}
+	if locked == 0 {
+		var rootStatus string
+		var rootDeleteAfterMs int
+		err := tx.QueryRowContext(ctx, "SELECT status, delete_after_ms FROM "+src.flows+" WHERE "+rootOf, forkFlowID, forkStepHour).
+			Scan(&rootStatus, &rootDeleteAfterMs)
+		if err == sql.ErrNoRows {
+			return nil, 0, errForkSourceNotHere
+		}
+		if err != nil {
+			return nil, 0, errors.Trace(err)
+		}
+		if !workflow.IsTerminalStatus(rootStatus) {
+			return nil, 0, errors.New("can only fork a terminal flow (status: %s)", rootStatus, http.StatusConflict)
+		}
+		// A flow scheduled for deletion is on its way out, so naming it is an error, as for Continue.
+		return nil, 0, errors.New("cannot fork a flow scheduled for deletion", http.StatusConflict)
+	}
+	e.seams.Checkpoint(ctx, engineseams.CheckpointForkRootLocked)
+
+	// Resolve the fork step, its owning flow, and that flow's token (needed to walk the surgraph chain).
+	var leafFlowID, leafFlowPayloadVer int
+	var forkStepState, forkStepRefs, forkStepReduced []byte
+	var leafFlowToken string
+	err = tx.QueryRowContext(ctx,
+		"SELECT s.flow_id, s.state, s.state_refs, s.state_reduced, f.payload_ver, f.flow_token FROM "+src.steps+" s JOIN "+src.flows+" f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.flow_id=? AND s.step_token=? AND s.flow_created_hour=?",
+		forkStepID, forkFlowID, forkStepToken, forkStepHour,
+	).Scan(&leafFlowID, &forkStepState, &forkStepRefs, &forkStepReduced, &leafFlowPayloadVer, &leafFlowToken)
+	if err == sql.ErrNoRows {
+		return nil, 0, errors.New("step not found", http.StatusNotFound)
+	}
+	if err == nil {
+		err = checkPayloadVer(leafFlowPayloadVer)
+	}
+	if err != nil {
+		return nil, 0, errors.Trace(err)
+	}
+
+	// Walk up to the root, recording each flow's rewind step: the leaf fork step in its own flow, and the
+	// caller step that spawned the lower flow in each ancestor.
+	chainFlowIDs, chainStepIDs, _, err := e.surgraphChainIn(ctx, tx, src, shardNum, leafFlowID, forkStepHour, leafFlowToken)
+	if err != nil {
+		return nil, 0, errors.Trace(err)
+	}
+	rootFlowID := chainFlowIDs[len(chainFlowIDs)-1].(int)
+	rewindByFlow := map[int]int{leafFlowID: forkStepID}
+	for i, callerStep := range chainStepIDs {
+		rewindByFlow[chainFlowIDs[i+1].(int)] = callerStep.(int)
+	}
+
+	// Gather the root-flow overrides.
+	// The root's status and deletion stamp were tested by the lock.
+	var rootWorkflowURL string
+	var rootPriority, rootTimeBudgetMs int
+	var rootFairnessKey string
+	var rootFairnessWeight float64
+	err = tx.QueryRowContext(ctx,
+		"SELECT workflow_url, priority, fairness_key, fairness_weight, time_budget_ms FROM "+src.flows+" WHERE flow_id=?",
+		rootFlowID,
+	).Scan(&rootWorkflowURL, &rootPriority, &rootFairnessKey, &rootFairnessWeight, &rootTimeBudgetMs)
+	if err != nil {
+		return nil, 0, errors.Trace(err)
+	}
+
+	// The fork's leaf step is rewritten with fully MATERIALIZED state (and state_refs cleared below): the
+	// caller's overrides merge onto the real values, and the leaf is the one row the fork re-runs from, so it
+	// must not depend on anchors whose ids are about to be remapped. Its successors re-mint refs normally.
+	resolvedLeafState, err := e.resolvedStepState(ctx, tx, src.steps, shardNum, leafFlowToken, forkStepState, forkStepRefs, rootWorkflowURL)
+	if err != nil {
+		return nil, 0, errors.Trace(err)
+	}
+	leafReduced, err := e.forkLeafReduced(ctx, tx, src, shardNum, leafFlowID, leafFlowToken, resolvedLeafState, forkStepReduced)
+	if err != nil {
+		return nil, 0, errors.Trace(err)
+	}
+	mergedLeafState, err := mergeWithOverrides(resolvedLeafState, overrides)
+	if err != nil {
+		return nil, 0, errors.Trace(err)
+	}
+	if err := e.checkPayloadSize("state of the fork step", mergedLeafState); err != nil {
+		return nil, 0, err
+	}
+
+	if *traceParent == "" {
+		*traceParent = e.mintWorkflowSpan(ctx, rootWorkflowURL, "") // detached, like Continue
+	}
+	// The fork inherits the origin root's scheduling and baggage (no FlowOptions), applied uniformly to
+	// every cloned flow and step.
+	return &forkClone{
+		src:             src,
+		leafFlowID:      leafFlowID,
+		leafStepID:      forkStepID,
+		mergedLeafState: mergedLeafState,
+		leafReduced:     leafReduced,
+		rewindByFlow:    rewindByFlow,
+		rootFlowToken:   keys.RandomIdentifier(16),
+		rootTraceParent: *traceParent,
+		priority:        rootPriority,
+		fairnessKey:     rootFairnessKey,
+		fairnessWeight:  rootFairnessWeight,
+		timeBudgetMs:    rootTimeBudgetMs,
+	}, rootFlowID, nil
+}
+
 // forkClone carries the state shared across the flows of one Fork clone.
 type forkClone struct {
+	src             flowTables // the tables the origin tree is read from: the live ones, or its archive day's
 	leafFlowID      int
 	leafStepID      int
 	mergedLeafState []byte
@@ -272,7 +338,7 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 
 	pruned := map[int]bool{}
 	if rewind != 0 {
-		sub, err := e.collectDAGSubtree(ctx, tx, originFlowID, rewind)
+		sub, err := e.collectDAGSubtree(ctx, tx, cc.src.steps, originFlowID, rewind)
 		if err != nil {
 			return 0, nil, errors.Trace(err)
 		}
@@ -285,7 +351,7 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	var graphJSON, baggageJSON []byte
 	var deleteOnCompletion, originStoppedStepID, originPayloadVer int
 	err := tx.QueryRowContext(ctx,
-		"SELECT status, workflow_url, workflow_name, graph, graph_hash, baggage, trace_parent, delete_on_completion, stopped_step_id, cancel_reason, payload_ver FROM dwarf_flows WHERE flow_id=?",
+		"SELECT status, workflow_url, workflow_name, graph, graph_hash, baggage, trace_parent, delete_on_completion, stopped_step_id, cancel_reason, payload_ver FROM "+cc.src.flows+" WHERE flow_id=?",
 		originFlowID,
 	).Scan(&status, &workflowURL, &workflowName, &graphJSON, &graphHash, &baggageJSON, &traceParent, &deleteOnCompletion, &originStoppedStepID, &cancelReason, &originPayloadVer)
 	if err == nil {
@@ -356,7 +422,7 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 
 	// Direct subgraph children of this flow, keyed by caller step (latest child per caller).
 	childByCaller := map[int]int{}
-	crows, err := tx.QueryContext(ctx, "SELECT flow_id, surgraph_step_id FROM dwarf_flows WHERE surgraph_flow_id=? ORDER BY flow_id", originFlowID)
+	crows, err := tx.QueryContext(ctx, "SELECT flow_id, surgraph_step_id FROM "+cc.src.flows+" WHERE surgraph_flow_id=? ORDER BY flow_id", originFlowID)
 	if err != nil {
 		return 0, nil, errors.Trace(err)
 	}
@@ -379,7 +445,7 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		refs                                         staterefs.Refs
 	}
 	mrows, err := tx.QueryContext(ctx,
-		"SELECT step_id, predecessor_id, successor_id, lineage_id, cohort_size, status, state_refs FROM dwarf_steps WHERE flow_id=? ORDER BY step_id",
+		"SELECT step_id, predecessor_id, successor_id, lineage_id, cohort_size, status, state_refs FROM "+cc.src.steps+" WHERE flow_id=? ORDER BY step_id",
 		originFlowID,
 	)
 	if err != nil {
@@ -449,13 +515,13 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		if isLeafFlow && s.oldID == cc.leafStepID {
 			newID, err = tx.InsertReturnID(ctx, "step_id",
 				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, state_reduced, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key, fairness_weight, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, engine_id, flow_created_hour)"+
-					" SELECT ?, step_depth, ?, task_name, task_url, state, state_refs, state_reduced, changes, interrupt_payload, ?, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, ?, ? FROM dwarf_steps WHERE step_id=?",
+					" SELECT ?, step_depth, ?, task_name, task_url, state, state_refs, state_reduced, changes, interrupt_payload, ?, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, ?, ? FROM "+cc.src.steps+" WHERE step_id=?",
 				newFlowID, keys.RandomIdentifier(16), workflow.StatusCreated, flowPriority, flowFairnessKey, flowFairnessWeight, e.engineID, newFlowHour, s.oldID,
 			)
 		} else {
 			newID, err = tx.InsertReturnID(ctx, "step_id",
 				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, state_reduced, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key, fairness_weight, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, engine_id, flow_created_hour)"+
-					" SELECT ?, step_depth, ?, task_name, task_url, state, state_refs, state_reduced, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, ?, ? FROM dwarf_steps WHERE step_id=?",
+					" SELECT ?, step_depth, ?, task_name, task_url, state, state_refs, state_reduced, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, ?, ? FROM "+cc.src.steps+" WHERE step_id=?",
 				newFlowID, keys.RandomIdentifier(16), flowPriority, flowFairnessKey, flowFairnessWeight, e.engineID, newFlowHour, s.oldID,
 			)
 		}
@@ -703,7 +769,7 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 // forkLeafReduced is the state_reduced column for a Fork's leaf: the original record, if any, frozen against the
 // overrides about to replace the state it describes (frozenReduced). stateJSON is the leaf's original state,
 // resolved.
-func (e *Engine) forkLeafReduced(ctx context.Context, db sequel.Executor, shardNum, flowID int, flowToken string, stateJSON, reducedJSON []byte) ([]byte, error) {
+func (e *Engine) forkLeafReduced(ctx context.Context, db sequel.Executor, src flowTables, shardNum, flowID int, flowToken string, stateJSON, reducedJSON []byte) ([]byte, error) {
 	var rec map[string]*reduced
 	if err := json.Unmarshal(reducedJSON, &rec); err != nil {
 		return nil, errors.Trace(err)
@@ -711,7 +777,7 @@ func (e *Engine) forkLeafReduced(ctx context.Context, db sequel.Executor, shardN
 	if len(rec) == 0 {
 		return emptyJSON, nil
 	}
-	graph, _, err := e.flowGraph(ctx, db, shardNum, flowID, flowToken)
+	graph, _, err := e.flowGraphIn(ctx, db, src, shardNum, flowID, flowToken)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -745,7 +811,7 @@ type sweptMember struct {
 	status    string
 }
 
-func (e *Engine) collectDAGSubtree(ctx context.Context, db sequel.Executor, flowID, startStepID int) ([]sweptMember, error) {
+func (e *Engine) collectDAGSubtree(ctx context.Context, db sequel.Executor, steps string, flowID, startStepID int) ([]sweptMember, error) {
 	visited := map[int]bool{startStepID: true}
 	var collected []sweptMember
 	frontier := []int{startStepID}
@@ -757,8 +823,8 @@ func (e *Engine) collectDAGSubtree(ctx context.Context, db sequel.Executor, flow
 			args := append([]any{flowID}, ids...)
 			args = append(args, ids...)
 			rows, err := db.QueryContext(ctx,
-				"SELECT step_id, lineage_id, status FROM dwarf_steps WHERE flow_id=? AND ("+
-					"step_id IN (SELECT successor_id FROM dwarf_steps WHERE step_id IN ("+ph+") AND successor_id<>0)"+
+				"SELECT step_id, lineage_id, status FROM "+steps+" WHERE flow_id=? AND ("+
+					"step_id IN (SELECT successor_id FROM "+steps+" WHERE step_id IN ("+ph+") AND successor_id<>0)"+
 					" OR predecessor_id IN ("+ph+"))",
 				args...)
 			if err != nil {

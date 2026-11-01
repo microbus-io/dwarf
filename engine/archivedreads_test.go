@@ -19,6 +19,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"testing"
@@ -32,6 +33,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/workflow"
 	merrors "github.com/microbus-io/errors"
+	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -237,33 +239,36 @@ func TestArchivedReads_FingerprintStraddlingTheMoveReadsOneSide(t *testing.T) {
 // tree deleted rather than archived - at a retention of 0 - is not found.
 func TestArchivedReads_NotFound(t *testing.T) {
 	t.Parallel()
-	assert := testarossa.For(t)
 	ctx := t.Context()
 	for _, retention := range []int{30, 0} {
-		e := archiveEngine(t, treeMux(), retention)
-		fk, err := e.Create(ctx, "arch/parent", nil, nil)
-		assert.NoError(err)
-		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
-		e.reapDueFlows(ctx)
-		shard, hour, id, _, err := keys.ParseFlowKey(fk)
-		assert.NoError(err)
-
-		keysToMiss := []string{
-			keys.NewFlowKey(shard, hour, id, "fedcba9876543210"),
-			keys.NewFlowKey(shard, hour+1, id, "fedcba9876543210"),
-		}
-		if retention == 0 {
-			keysToMiss = append(keysToMiss, fk)
-		} else {
-			_, err = e.Snapshot(ctx, fk)
+		// An engine of its own each: two of one name share a database, and split its due roots between them.
+		t.Run(fmt.Sprintf("retention_%d", retention), func(t *testing.T) {
+			assert := testarossa.For(t)
+			e := archiveEngine(t, treeMux(), retention)
+			fk, err := e.Create(ctx, "arch/parent", nil, nil)
 			assert.NoError(err)
-		}
-		for _, k := range keysToMiss {
-			_, err = e.Snapshot(ctx, k)
-			assert.Equal(http.StatusNotFound, merrors.StatusCode(err), "retention %d, %s: %v", retention, k, err)
-			_, _, err = e.Fingerprint(ctx, k)
-			assert.Equal(http.StatusNotFound, merrors.StatusCode(err), "retention %d, %s: %v", retention, k, err)
-		}
+			enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
+			e.reapDueFlows(ctx)
+			shard, hour, id, _, err := keys.ParseFlowKey(fk)
+			assert.NoError(err)
+
+			keysToMiss := []string{
+				keys.NewFlowKey(shard, hour, id, "fedcba9876543210"),
+				keys.NewFlowKey(shard, hour+1, id, "fedcba9876543210"),
+			}
+			if retention == 0 {
+				keysToMiss = append(keysToMiss, fk)
+			} else {
+				_, err = e.Snapshot(ctx, fk)
+				assert.NoError(err)
+			}
+			for _, k := range keysToMiss {
+				_, err = e.Snapshot(ctx, k)
+				assert.Equal(http.StatusNotFound, merrors.StatusCode(err), "retention %d, %s: %v", retention, k, err)
+				_, _, err = e.Fingerprint(ctx, k)
+				assert.Equal(http.StatusNotFound, merrors.StatusCode(err), "retention %d, %s: %v", retention, k, err)
+			}
+		})
 	}
 }
 
@@ -576,8 +581,7 @@ func TestArchivedReads_ADayDroppedMidReadIsNotFound(t *testing.T) {
 			go func() { done <- read(e, fk, history[0].StepKey) }()
 			assert.True(e.seams.WaitTimeout(ctx, cp, 10*time.Second), cp)
 			for _, table := range []string{tables.flows, tables.steps} {
-				_, err = db.ExecContext(ctx, "ALTER TABLE "+table+" RENAME TO "+table+"_away")
-				assert.NoError(err)
+				assert.NoError(renameTable(ctx, db, table, table+"_away"))
 			}
 			e.seams.Resume(cp)
 			err = <-done
@@ -731,4 +735,445 @@ func TestArchivedReads_AChildsFingerprintCoversItsSubtree(t *testing.T) {
 	got, _, err := e.Fingerprint(ctx, child)
 	assert.NoError(err)
 	assert.Equal(want, got)
+}
+
+// fanFailMux serves a fan-out whose second branch fails unless its state says fix, joined by a fan-in: a tree whose
+// failed branch a Fork repairs with an override.
+func fanFailMux() *hosts.Mux {
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("Fan")
+	g.SetURL("Seed", "fan/seed")
+	g.SetURL("Branch", "fan/branch")
+	g.SetURL("Join", "fan/join")
+	g.AddTransitionForEach("Seed", "Branch", "items", "item")
+	g.AddTransition("Branch", "Join")
+	g.SetFanIn("Join")
+	g.AddTransition("Join", workflow.End)
+	g.SetReducer("seen", workflow.ReducerAppend)
+	mux.HandleGraph("fan/root", g)
+	mux.HandleTask("fan/seed", func(ctx context.Context, f *workflow.Flow) error {
+		return f.Set("items", []int{1, 2, 3})
+	})
+	mux.HandleTask("fan/branch", func(ctx context.Context, f *workflow.Flow) error {
+		if f.GetInt("item") == 2 && !f.GetBool("fix") {
+			return errors.New("branch 2 broke")
+		}
+		return f.Set("seen", []int{f.GetInt("item")})
+	})
+	mux.HandleTask("fan/join", func(ctx context.Context, f *workflow.Flow) error {
+		return f.Set("joined", true)
+	})
+	return mux
+}
+
+// nestedMux serves three levels: a root that calls a child that calls a grandchild, each with a step after its call,
+// so a Fork clones a middle flow's own children.
+func nestedMux() *hosts.Mux {
+	mux := hosts.NewMux()
+	for _, level := range []struct{ name, next string }{{"root", "mid"}, {"mid", "leaf"}} {
+		g := workflow.NewGraph(level.name)
+		g.SetURL("Call", "nest/call/"+level.name)
+		g.SetURL("After", "nest/after/"+level.name)
+		g.AddTransitionChain("Call", "After", workflow.End)
+		mux.HandleGraph("nest/"+level.name, g)
+		next := level.next
+		mux.HandleTask("nest/call/"+level.name, func(ctx context.Context, f *workflow.Flow) error {
+			yield, err := f.Subgraph("nest/"+next, nil, nil)
+			if yield || err != nil {
+				return err
+			}
+			return nil
+		})
+		name := level.name
+		mux.HandleTask("nest/after/"+level.name, func(ctx context.Context, f *workflow.Flow) error {
+			return f.Set("after_"+name, true)
+		})
+	}
+	leaf := workflow.NewGraph("leaf")
+	leaf.SetURL("Work", "nest/work")
+	leaf.AddTransition("Work", workflow.End)
+	mux.HandleGraph("nest/leaf", leaf)
+	mux.HandleTask("nest/work", func(ctx context.Context, f *workflow.Flow) error {
+		return f.Set("done", true)
+	})
+	return mux
+}
+
+// forkOutcome forks at stepKey with overrides, awaits the fork, and returns its outcome and the task names of its
+// history, subgraphs included, for comparing two forks of one tree.
+func forkOutcome(t *testing.T, e *Engine, stepKey string, overrides any) (*workflow.FlowOutcome, []string) {
+	t.Helper()
+	assert := testarossa.For(t)
+	fk, err := e.Fork(t.Context(), stepKey, overrides)
+	if !assert.NoError(err, stepKey) {
+		return nil, nil
+	}
+	out, err := enginetest.BoundedAwait(t, e, fk)
+	assert.NoError(err)
+	history, err := e.History(t.Context(), fk)
+	assert.NoError(err)
+	var names func([]workflow.FlowStep) []string
+	names = func(h []workflow.FlowStep) []string {
+		var out []string
+		for _, s := range h {
+			out = append(out, s.TaskName+":"+s.Status)
+			out = append(out, names(s.SubHistory)...)
+		}
+		return out
+	}
+	return out, names(history)
+}
+
+// TestArchivedReads_ForkFromAnArchivedSource pins Fork with an archived source: the clone reads the day's tables and
+// writes the live ones, and a fork of the archived tree runs as a fork of the same tree did while it was live - at
+// each step of a root, at a step inside a subgraph, through a step whose input carries a ref, and at a failed fan-out
+// branch repaired by an override.
+func TestArchivedReads_ForkFromAnArchivedSource(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	t.Run("tree", func(t *testing.T) {
+		t.Parallel()
+		assert := testarossa.For(t)
+		e := refEngine(t)
+		fk, err := e.Create(ctx, "refs/parent", nil, nil)
+		assert.NoError(err)
+		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
+		history, err := e.History(ctx, fk)
+		assert.NoError(err)
+		stepKeys := stepKeysOf(history)
+		type forked struct {
+			out   *workflow.FlowOutcome
+			names []string
+		}
+		live := map[string]forked{}
+		for _, k := range stepKeys {
+			out, names := forkOutcome(t, e, k, map[string]any{"forked": true})
+			live[k] = forked{out, names}
+		}
+		e.reapDueFlows(ctx)
+		_, _, rootID, _, err := keys.ParseFlowKey(fk)
+		assert.NoError(err)
+		flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", rootID)
+		assert.Zero(flows)
+		for _, k := range stepKeys {
+			out, names := forkOutcome(t, e, k, map[string]any{"forked": true})
+			assert.Equal(live[k].out, out, k)
+			assert.Equal(live[k].names, names, k)
+		}
+		enginetest.AssertInvariants(t, e)
+	})
+	t.Run("nested", func(t *testing.T) {
+		t.Parallel()
+		assert := testarossa.For(t)
+		e := NewEngineUnderTest(t.Name())
+		t.Cleanup(func() { e.Shutdown(context.Background()) })
+		e.SetHost(nestedMux())
+		e.archiveGrace = 0
+		e.reapInterval = time.Hour
+		assert.NoError(e.SetRetention(30))
+		assert.NoError(e.Startup(ctx))
+		fk, err := e.Create(ctx, "nest/root", nil, nil)
+		assert.NoError(err)
+		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
+		history, err := e.History(ctx, fk)
+		assert.NoError(err)
+		stepKeys := stepKeysOf(history)
+		assert.Len(stepKeys, 5)
+		type forked struct {
+			out   *workflow.FlowOutcome
+			names []string
+		}
+		live := map[string]forked{}
+		for _, k := range stepKeys {
+			out, names := forkOutcome(t, e, k, nil)
+			live[k] = forked{out, names}
+		}
+		e.reapDueFlows(ctx)
+		for _, k := range stepKeys {
+			out, names := forkOutcome(t, e, k, nil)
+			assert.Equal(live[k].out, out, k)
+			assert.Equal(live[k].names, names, k)
+		}
+		enginetest.AssertInvariants(t, e)
+	})
+	t.Run("failed_branch", func(t *testing.T) {
+		t.Parallel()
+		assert := testarossa.For(t)
+		e := NewEngineUnderTest(t.Name())
+		t.Cleanup(func() { e.Shutdown(context.Background()) })
+		e.SetHost(fanFailMux())
+		e.archiveGrace = 0
+		e.reapInterval = time.Hour
+		assert.NoError(e.SetRetention(30))
+		assert.NoError(e.Startup(ctx))
+		fk, err := e.Create(ctx, "fan/root", nil, nil)
+		assert.NoError(err)
+		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusFailed, time.Minute)
+		history, err := e.History(ctx, fk)
+		assert.NoError(err)
+		var failed string
+		for _, s := range history {
+			if s.Status == workflow.StatusFailed {
+				failed = s.StepKey
+			}
+		}
+		if !assert.NotEqual("", failed) {
+			return
+		}
+		want, wantNames := forkOutcome(t, e, failed, map[string]any{"fix": true})
+		assert.Equal(workflow.StatusCompleted, want.Status)
+		e.reapDueFlows(ctx)
+		got, gotNames := forkOutcome(t, e, failed, map[string]any{"fix": true})
+		assert.Equal(want, got)
+		assert.Equal(wantNames, gotNames)
+		enginetest.AssertInvariants(t, e)
+	})
+}
+
+// TestArchivedReads_ForkWhoseSourceIsArchivedMeanwhile pins Fork against the reaper: a source archived before the lock
+// that opens Fork's live pass - the source is terminal, so it can be - is forked from the archive; and a source whose
+// day is gone by the archive pass is not found.
+func TestArchivedReads_ForkWhoseSourceIsArchivedMeanwhile(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	held := func(t *testing.T, e *Engine, during func(), fork func() (string, error)) (string, error) {
+		e.seams.Break(engineseams.CheckpointForkBeforeClone)
+		type result struct {
+			fk  string
+			err error
+		}
+		done := make(chan result, 1)
+		go func() {
+			fk, err := fork()
+			done <- result{fk, err}
+		}()
+		assert := testarossa.For(t)
+		assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointForkBeforeClone, 10*time.Second))
+		during()
+		e.seams.Resume(engineseams.CheckpointForkBeforeClone)
+		r := <-done
+		return r.fk, r.err
+	}
+	t.Run("archived", func(t *testing.T) {
+		t.Parallel()
+		assert := testarossa.For(t)
+		e := refEngine(t)
+		fk, err := e.Create(ctx, "refs/parent", nil, nil)
+		assert.NoError(err)
+		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
+		history, err := e.History(ctx, fk)
+		assert.NoError(err)
+		use := history[1].StepKey
+		want, wantNames := forkOutcome(t, e, use, nil)
+
+		forked, err := held(t, e, func() { e.reapDueFlows(ctx) }, func() (string, error) { return e.Fork(ctx, use, nil) })
+		if !assert.NoError(err) {
+			return
+		}
+		_, _, rootID, _, err := keys.ParseFlowKey(fk)
+		assert.NoError(err)
+		flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", rootID)
+		assert.Zero(flows, "the source was archived")
+		out, err := enginetest.BoundedAwait(t, e, forked)
+		assert.NoError(err)
+		assert.Equal(want, out)
+		_, gotNames := forkOutcome(t, e, use, nil)
+		assert.Equal(wantNames, gotNames)
+	})
+	t.Run("day_gone", func(t *testing.T) {
+		t.Parallel()
+		assert := testarossa.For(t)
+		e := refEngine(t)
+		fk, err := e.Create(ctx, "refs/parent", nil, nil)
+		assert.NoError(err)
+		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
+		history, err := e.History(ctx, fk)
+		assert.NoError(err)
+		e.reapDueFlows(ctx)
+		tables := archivedDay(t, e, fk)
+		db, err := e.db.Shard(1)
+		assert.NoError(err)
+		_, err = held(t, e, func() {
+			for _, table := range []string{tables.flows, tables.steps} {
+				assert.NoError(renameTable(ctx, db, table, table+"_away"))
+			}
+		}, func() (string, error) { return e.Fork(ctx, history[1].StepKey, nil) })
+		assert.Equal(http.StatusNotFound, merrors.StatusCode(err), err)
+	})
+	t.Run("directory_day_gone", func(t *testing.T) {
+		// The locate names a day with no tables - a directory row outliving its day - so the fork's own statements
+		// meet the missing table.
+		t.Parallel()
+		assert := testarossa.For(t)
+		e := refEngine(t)
+		fk, err := e.Create(ctx, "refs/parent", nil, nil)
+		assert.NoError(err)
+		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
+		history, err := e.History(ctx, fk)
+		assert.NoError(err)
+		e.reapDueFlows(ctx)
+		tables := archivedDay(t, e, fk)
+		db, err := e.db.Shard(1)
+		assert.NoError(err)
+		_, _, rootID, _, err := keys.ParseFlowKey(fk)
+		assert.NoError(err)
+		_, err = db.ExecContext(ctx, "DELETE FROM "+tables.steps+" WHERE flow_id IN (SELECT flow_id FROM "+tables.flows+" WHERE root_flow_id=?)", rootID)
+		assert.NoError(err)
+		_, err = db.ExecContext(ctx, "DELETE FROM "+tables.flows+" WHERE root_flow_id=?", rootID)
+		assert.NoError(err)
+		_, err = db.ExecContext(ctx, "INSERT INTO "+archiver.DirectoryTable+" (flow_id, day) VALUES (?, 1)", rootID)
+		assert.NoError(err)
+		_, err = e.Fork(ctx, history[1].StepKey, nil)
+		assert.Equal(http.StatusNotFound, merrors.StatusCode(err), err)
+	})
+}
+
+// nestedFanMux serves a fan-out of fan-outs under an append reducer, so each inner fan-in records what its cohort
+// added (state_reduced) and a Fork at one reads its flow's graph to freeze that record.
+func nestedFanMux() *hosts.Mux {
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("NestedFan")
+	g.SetURL("Seed", "nf/seed")
+	g.SetURL("Cell", "nf/cell")
+	g.SetURL("Chunk", "nf/chunk")
+	g.SetURL("JoinChunk", "nf/joinchunk")
+	g.SetURL("JoinCell", "nf/joincell")
+	g.SetFanIn("JoinChunk")
+	g.SetFanIn("JoinCell")
+	g.SetReducer("seen", workflow.ReducerAppend)
+	g.AddTransitionForEach("Seed", "Cell", "cells", "cell")
+	g.AddTransitionForEach("Cell", "Chunk", "chunks", "chunk")
+	g.AddTransition("Chunk", "JoinChunk")
+	g.AddTransition("JoinChunk", "JoinCell")
+	g.AddTransition("JoinCell", workflow.End)
+	mux.HandleGraph("nf/root", g)
+	mux.HandleTask("nf/seed", func(ctx context.Context, f *workflow.Flow) error {
+		return f.Set("cells", []int{1, 2})
+	})
+	mux.HandleTask("nf/cell", func(ctx context.Context, f *workflow.Flow) error {
+		return f.Set("chunks", []int{f.GetInt("cell") * 10, f.GetInt("cell")*10 + 1})
+	})
+	mux.HandleTask("nf/chunk", func(ctx context.Context, f *workflow.Flow) error {
+		return f.Set("seen", []int{f.GetInt("chunk")})
+	})
+	noop := func(ctx context.Context, f *workflow.Flow) error { return nil }
+	mux.HandleTask("nf/joinchunk", noop)
+	mux.HandleTask("nf/joincell", noop)
+	return mux
+}
+
+// TestArchivedReads_ForkReadsTheArchivedGraph pins the graph read behind a Fork at an inner fan-in: its fan-in record
+// is frozen against the flow's reducers, and a replica that never ran the flow has no parsed graph to take them from,
+// so it reads the graph from the table the flow is in. The fork is made by a second engine on the same database,
+// whose graph cache is cold.
+func TestArchivedReads_ForkReadsTheArchivedGraph(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	start := func() *Engine {
+		e := NewEngineUnderTest(t.Name())
+		t.Cleanup(func() { e.Shutdown(context.Background()) })
+		e.SetHost(nestedFanMux())
+		e.archiveGrace = 0
+		e.reapInterval = time.Hour
+		assert.NoError(e.SetRetention(30))
+		assert.NoError(e.Startup(ctx))
+		return e
+	}
+	e := start()
+	fk, err := e.Create(ctx, "nf/root", nil, nil)
+	assert.NoError(err)
+	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
+	history, err := e.History(ctx, fk)
+	assert.NoError(err)
+	var joinChunk string
+	for _, s := range history {
+		if s.TaskName == "JoinChunk" {
+			joinChunk = s.StepKey
+			break
+		}
+	}
+	if !assert.NotEqual("", joinChunk) {
+		return
+	}
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	var reduced string
+	assert.NoError(db.QueryRowContext(ctx, "SELECT state_reduced FROM dwarf_steps WHERE step_id=?", keyID(t, joinChunk)).Scan(&reduced))
+	assert.NotEqual("{}", reduced, "the inner fan-in records its cohort's part")
+	want, wantNames := forkOutcome(t, e, joinChunk, nil)
+	e.reapDueFlows(ctx)
+
+	cold := start()
+	got, gotNames := forkOutcome(t, cold, joinChunk, nil)
+	assert.Equal(want, got)
+	assert.Equal(wantNames, gotNames)
+}
+
+// TestArchivedReads_ForkHoldsTheReaperOffItsSource pins the lock Fork's clone rests on: while the transaction holds
+// the source root, a reaper pass waits rather than moving the tree, so the clone reads it whole; the tree is archived
+// once the fork commits. The fork is at a step inside the subgraph, whose own flow is not the root: the lock must be
+// the root's, which is what the reaper locks.
+func TestArchivedReads_ForkHoldsTheReaperOffItsSource(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e := refEngine(t)
+	fk, err := e.Create(ctx, "refs/parent", nil, nil)
+	assert.NoError(err)
+	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
+	history, err := e.History(ctx, fk)
+	assert.NoError(err)
+	use := history[2].SubHistory[0].StepKey // the child's Work
+	want, wantNames := forkOutcome(t, e, use, nil)
+
+	e.seams.Break(engineseams.CheckpointForkRootLocked)
+	type result struct {
+		fk  string
+		err error
+	}
+	forked := make(chan result, 1)
+	go func() {
+		fk, err := e.Fork(ctx, use, nil)
+		forked <- result{fk, err}
+	}()
+	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointForkRootLocked, 10*time.Second))
+	reaped := make(chan struct{})
+	go func() {
+		e.reapDueFlows(ctx)
+		close(reaped)
+	}()
+	// Long enough for a reaper that is not held off to move the tree.
+	time.Sleep(500 * time.Millisecond)
+	select {
+	case <-reaped:
+		t.Error("the reaper finished while Fork held the source root")
+	default:
+	}
+	e.seams.Resume(engineseams.CheckpointForkRootLocked)
+	r := <-forked
+	<-reaped
+	if !assert.NoError(r.err) {
+		return
+	}
+	out, err := enginetest.BoundedAwait(t, e, r.fk)
+	assert.NoError(err)
+	assert.Equal(want, out)
+	_, gotNames := forkOutcome(t, e, use, nil)
+	assert.Equal(wantNames, gotNames)
+	e.reapDueFlows(ctx)
+	_, _, rootID, _, err := keys.ParseFlowKey(fk)
+	assert.NoError(err)
+	flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", rootID)
+	assert.Zero(flows, "archived once the fork let go")
+}
+
+// renameTable renames a table, as a drop would leave a day missing: SQL Server has no ALTER TABLE ... RENAME.
+func renameTable(ctx context.Context, db *sequel.DB, from, to string) error {
+	stmt := "ALTER TABLE " + from + " RENAME TO " + to
+	if db.DriverName() == "mssql" {
+		stmt = "EXEC sp_rename '" + from + "', '" + to + "'"
+	}
+	_, err := db.ExecContext(ctx, stmt)
+	return err
 }

@@ -1580,7 +1580,7 @@ format" is decided once, at the claim, and holds for everything the dispatch rea
   to `running`, before anything decodes it. The reads of a flow's steps that are not one of its dispatches -
   `Snapshot` (interrupted), `Step`, `Fork` and the final-state tails (Terminate, the wedge sweep, a `failStep` past
   the bound) - cannot wait and return a `permanentError` via `checkPayloadVer`. Fork checks twice: the fork step's
-  flow at the leaf read in `forkFlow`, before the leaf is decoded, and every cloned flow in `cloneOneFlow`, since a
+  flow at the leaf read in `forkSource`, before the leaf is decoded, and every cloned flow in `cloneOneFlow`, since a
   tree can mix formats. Permanent is load-bearing: `terminalFinalState` and `failFlowTx` take it as `{}`, so a
   newer flow can still be stopped. The tails query joins the flow row for its version rather than paying a read.
 - **Nothing routes a deferred step to a newer replica.** It keeps its `step_id`, so it stays in this replica's
@@ -1615,7 +1615,7 @@ at version 1; the release that first needs it does all of this:
    flow can rest for months. The writers and where each gets the flow's version:
    - **everything a dispatch writes** - the completion, retry and interrupt writes, successors, fan-in rows,
      `fireFanInDirect` - from the claim (`claimRow.flowPayloadVer`);
-   - **Fork's leaf rewrite** (`mergedLeafState`, `forkLeafReduced`, computed in `forkFlow`) from the leaf read
+   - **Fork's leaf rewrite** (`mergedLeafState`, `forkLeafReduced`, computed in `forkSource`) from the leaf read
      there;
    - **Fork's ref remap** in `cloneOneFlow`, which re-marshals every kept step's `state_refs` with this build's
      encoder, from that function's per-flow read - a respelled ref form would otherwise land in a clone stamped
@@ -3385,8 +3385,8 @@ are deterministically flushed by then. Not an engine concern: a real exporter ke
 tick adds up to that on top): the reaper moves its whole tree into today's archive day tables, and retention drops
 whole days (see "The archive" below). A flow that has not ended - running, sleeping, interrupted for a human - stays
 in the live tables for as long as it takes, so nothing reaps a row a `Resume` could still revive. The read API reads an
-archived flow as it read it live ("Reading an archived flow" below); `List` reads the live tables only, so an archived
-flow drops out of it, and `Fork` of an archived source is a 404.
+archived flow as it read it live ("Reading an archived flow" below), and `Fork` clones an archived source; `List`
+reads the live tables only, so an archived flow drops out of it.
 
 Deleting without archiving is either operator-driven (`Delete`, `Purge`) or an explicit author opt-in
 (`DeleteOnCompletion`): a flow whose output and history are not needed. `Delete` and `Purge` reach only the live
@@ -3613,10 +3613,26 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
   - **State refs resolve from the table the step was read from** (`resolveStateRefsIn`): an anchor never crosses a
     flow, so it is in the same day. The ref cache is keyed by step id, which the move keeps, so a cached anchor stays
     right.
+  - **Fork reads its source from either side and writes the clone into the live tables** (`forkFrom`, once per
+    side). Each pass is one transaction that opens by locking the source root - named by the step key's flow, in
+    that side's flows table - and reads the source only under the lock (`forkSource`). The reaper locks a root
+    before it moves its tree, so a root the live pass locked stays live for the whole clone; a live pass that locks
+    nothing (`errForkSourceNotHere`) means the tree is archived or never existed, and the archive pass forks from
+    the day. An archived root is locked in its day's table: a `touch` flip on SQLite and SQL Server, and on
+    PostgreSQL a `FOR NO KEY UPDATE` that marks the row too, clearing its page's all-frozen bit in a table set to
+    freeze early - a small cost a Fork of an archived source pays. **The lock tests the root's status and deletion
+    mark itself** (`AND status IN (terminal) AND delete_after_ms=0` on the locked row): on MySQL a plain read after
+    it sees the snapshot taken when the lock statement began, before a Delete that committed while it waited, so a
+    post-lock check would miss it. A root that has not ended is never locked, so a refused Fork crosses no lock order
+    with `Terminate`. The fork's root span is minted once across the two passes. Fork does not use
+    `queryLiveOrArchive`: its read is under a lock, so it cannot straddle the move, and it is a write.
   Pinned by `archivedreads_test.go`: every read the same before and after the move, for every way a flow ends and for
   a subgraph child's key; `Fingerprint`, `History` and `Step` straddling the move reading one side; a parked `Await`
   getting its outcome from the archive; `Continue` from an archived flow; an unended archived flow an error; a day
-  dropped mid-read, a directory day dropped and a tree removed mid-read each a 404.
+  dropped mid-read, a directory day dropped and a tree removed mid-read each a 404; a Fork of an archived source at
+  every step (a root's, a subgraph's, through a ref, a failed branch repaired) running as it did live, one whose
+  source is archived meanwhile, one reading the archived graph on a cold replica, and the reaper held off a source
+  Fork has locked.
 - **The run's archives are published whole** (`archives`, an `atomic.Pointer`), like the role flags: a `PurgeBefore`
   straddling a Shutdown/Startup restart must read one run's set, never a map being assigned.
 
@@ -3802,7 +3818,7 @@ ordering:
 root id - flow-row-first in statement order, but into a **brand-new** flow whose rows no concurrent transaction can reach until commit, so it
 honors no existing-row lock order and cannot cycle. `Fork` performs its entire tree clone (an iterative worklist) in one
 transaction (so a crash mid-clone rolls back), and the leaf fork step is held `created` until the mapping is complete.
-**Fork's transaction opens with `lockFlowRows` on the origin root, because the clone reads before it writes.** On
+**Fork's transaction opens by locking the origin root (`lockRows`), because the clone reads before it writes.** On
 SQLite a read-first transaction cannot upgrade against a concurrent writer and gets `SQLITE_BUSY` (`SQLITE_LOCKED`
 under a shared cache, as in the test suite) at once on every `Transact` retry - measured as ~1 Fork in 8 failing under the bench soak. Pinned by
 `TestFork_TransactionOpensWithAWrite`, which reads each attempt's first statement off the database spans; the soak
@@ -3810,9 +3826,8 @@ in `fixtures/forkconcurrentflow_test.go` catches a read-first Fork only now and 
 deterministic with a checkpoint inside the clone: modernc waits on a shared-cache lock with `sqlite3_unlock_notify`,
 which cannot be interrupted, so a probing writer blocks rather than being refused, and blocked cannot be told from
 held without a timer. Every other `Transact` in the engine already opens with a write; a new one
-that reads first needs the same. The lock also re-checks what Fork read before its transaction: it matches only
-`delete_after_ms=0`, so a Delete or Purge that stamped the origin in between is still a 409, and an origin the
-reaper removed is a 404 (`TestFork_DeletionAfterThePreCheck`).
+that reads first needs the same. Fork reads its origin only under that lock, so a Delete or Purge that stamped the
+origin after Fork was called is a 409, and an origin the reaper removed is a 404 (`TestFork_DeletedBeforeItsLock`).
 
 **The two disciplines still cross in one place on row-locking engines, and that is tolerated, not eliminated.**
 On MySQL `REPEATABLE READ` and SQL Server without RCSI, a flow-row-first transaction and a steps-first one can

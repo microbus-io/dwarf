@@ -48,8 +48,8 @@ func name(t *testing.T, db *sequel.DB, flowID, day int) {
 func archive(t *testing.T, db *sequel.DB, flowID, day int) {
 	t.Helper()
 	_, err := db.ExecContext(t.Context(), "INSERT INTO "+migrations.FlowsTable(day)+
-		" (flow_id, flow_token, workflow_url, workflow_name, graph, graph_hash, status) VALUES (?, 'tok', 'u', 'W', '{}', 'h', 'completed')",
-		flowID)
+		" (flow_id, flow_token, workflow_url, workflow_name, graph, graph_hash, status) VALUES (?, 'tok', 'u', 'W', ?, 'h', 'completed')",
+		flowID, []byte("{}")) // bound: graph is binary on SQL Server
 	if err != nil {
 		t.Fatal(err)
 	}

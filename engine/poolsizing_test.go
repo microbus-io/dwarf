@@ -551,6 +551,10 @@ func TestPoolSizing_SaturationDoesNotGrowThePool(t *testing.T) {
 	assert.Equal(int32(400), done.Load(), "the backlog drained")
 	assert.Equal(resident, int32(e.crew.Resident()),
 		"saturation must not grow the pool (was %d, now %d)", resident, int32(e.crew.Resident()))
+	// The last Run returns once its flow completes, which can be before the worker that completed it goes idle.
+	for deadline := time.Now().Add(10 * time.Second); e.crew.Idle() < e.crew.Resident() && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
 	assert.Equal(e.crew.Resident(), e.crew.Idle(), "every worker is idle once the backlog drains")
 }
 

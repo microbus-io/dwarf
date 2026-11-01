@@ -209,13 +209,18 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, sha
 // dispatched on this replica and from its row otherwise. The returned graph may be shared with concurrent
 // dispatches and must not be mutated. A cache hit reads nothing, so it does not prove the flow row still exists.
 func (e *Engine) flowGraph(ctx context.Context, db sequel.Executor, shardNum, flowID int, flowToken string) (*workflow.Graph, string, error) {
+	return e.flowGraphIn(ctx, db, liveTables, shardNum, flowID, flowToken)
+}
+
+// flowGraphIn is flowGraph reading the row, on a cache miss, from the flows table of t.
+func (e *Engine) flowGraphIn(ctx context.Context, db sequel.Executor, t flowTables, shardNum, flowID int, flowToken string) (*workflow.Graph, string, error) {
 	if cg, ok := e.graphs.Flow(graphcache.Key{Shard: shardNum, FlowID: flowID, Token: flowToken}); ok {
 		return cg.Graph, cg.WorkflowURL, nil
 	}
 	var workflowURL, graphHash string
 	var graphJSON []byte
 	err := db.QueryRowContext(ctx,
-		"SELECT graph, graph_hash, workflow_url FROM dwarf_flows WHERE flow_id=?",
+		"SELECT graph, graph_hash, workflow_url FROM "+t.flows+" WHERE flow_id=?",
 		flowID,
 	).Scan(&graphJSON, &graphHash, &workflowURL)
 	if err != nil {

@@ -30,11 +30,11 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestFork_DeletionAfterThePreCheck pins that Fork re-checks the origin under its lock. A Delete that lands after
-// Fork's pre-transaction read and before its clone must still make the Fork a 409, as it would have been had it
-// landed first; and an origin the reaper removed in that window is the 404 of an unknown key, not a missing row
-// surfacing from deep in the clone.
-func TestFork_DeletionAfterThePreCheck(t *testing.T) {
+// TestFork_DeletedBeforeItsLock pins that Fork reads its origin under the lock that opens its transaction. A Delete
+// that lands after Fork was called and before the lock makes the Fork a 409; and an origin the reaper removed in that
+// window is the 404 of an unknown key, not a missing row surfacing from deep in the clone. A fork at a step inside a
+// subgraph sees the Delete too: only the root carries the mark, so the lock is the root's.
+func TestFork_DeletedBeforeItsLock(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
@@ -44,6 +44,17 @@ func TestFork_DeletionAfterThePreCheck(t *testing.T) {
 	g.AddTransition("A", workflow.End)
 	mux.HandleGraph("forkdel/g", g)
 	mux.HandleTask("forkdel/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	parent := workflow.NewGraph("ForkDeletionParent")
+	parent.SetURL("Call", "forkdel/call")
+	parent.AddTransition("Call", workflow.End)
+	mux.HandleGraph("forkdel/parent", parent)
+	mux.HandleTask("forkdel/call", func(ctx context.Context, f *workflow.Flow) error {
+		yield, err := f.Subgraph("forkdel/g", nil, nil)
+		if yield || err != nil {
+			return err
+		}
+		return nil
+	})
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
@@ -54,22 +65,31 @@ func TestFork_DeletionAfterThePreCheck(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name   string
-		reaped bool
-		status int
+		name     string
+		subgraph bool
+		reaped   bool
+		status   int
 	}{
-		{"scheduled_for_deletion", false, http.StatusConflict},
-		{"reaped", true, http.StatusNotFound},
+		{"scheduled_for_deletion", false, false, http.StatusConflict},
+		{"scheduled_for_deletion_at_a_subgraph_step", true, false, http.StatusConflict},
+		{"reaped", false, true, http.StatusNotFound},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert := testarossa.For(t)
-			fk, outcome, err := e.Run(ctx, "forkdel/g", nil, nil)
+			workflowURL := "forkdel/g"
+			if tc.subgraph {
+				workflowURL = "forkdel/parent"
+			}
+			fk, outcome, err := e.Run(ctx, workflowURL, nil, nil)
 			if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, outcome.Status) {
 				return
 			}
 			steps, err := e.History(ctx, fk)
 			if !assert.NoError(err) || !assert.Len(steps, 1) {
 				return
+			}
+			if tc.subgraph {
+				steps = steps[0].SubHistory
 			}
 
 			e.seams.Break(engineseams.CheckpointForkBeforeClone)
