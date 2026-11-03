@@ -30,20 +30,51 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// moveInto archives the tree rooted at rootID into day, as a reaper pass whose day is day would.
-func moveInto(t *testing.T, e *Engine, rootID, day int) {
+// moveInto archives the tree rooted at rootID as a reaper pass would: into the day its root ended.
+func moveInto(t *testing.T, e *Engine, rootID int) {
 	t.Helper()
+	ctx := t.Context()
 	db, err := e.db.Shard(1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	moved, err := e.reapBatchOf(t.Context(), db, []int{rootID}, e.endedDue(0),
-		&reapDay{day: day, ends: time.Now().Add(time.Hour), archive: e.archives.Load().byShard[1]})
+	day := &reapDay{}
+	if err := e.refreshReapDay(ctx, e.archives.Load().byShard[1], day); err != nil {
+		t.Fatal(err)
+	}
+	cut, ended, err := e.rootsWithinRows(ctx, db, []int{rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := e.planBatch(day, cut, ended)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved, err := e.reapBatchOf(ctx, db, cut, e.endedDue(0), day, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if moved != 2 {
 		t.Fatalf("moved %d flows of tree %d, want the root and its child", moved, rootID)
+	}
+}
+
+// shiftTree moves the tree rooted at rootID back in time, as if it had been created createdDaysAgo and its root had
+// ended endedDaysAgo: every flow's creation hour, and the root's updated_at, on the database clock.
+func shiftTree(t *testing.T, e *Engine, rootID, createdDaysAgo, endedDaysAgo int) {
+	t.Helper()
+	db, err := e.db.Shard(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.ExecContext(t.Context(), "UPDATE dwarf_flows SET created_hour=created_hour-? WHERE root_flow_id=?", createdDaysAgo*24, rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.ExecContext(t.Context(), "UPDATE dwarf_flows SET updated_at=DATE_ADD_MILLIS(updated_at, ?) WHERE flow_id=?",
+		-endedDaysAgo*24*int(time.Hour/time.Millisecond), rootID)
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -58,9 +89,9 @@ func located(t *testing.T, e *Engine, flowKey string) (int, error) {
 }
 
 // TestDirectory_NamesOnlyWhatTheLocateCannotFind pins the directory's rule, through the reaper's own move: a tree
-// archived on its creation day or the day after gets no row - the locate finds it by its key's hour - while one
-// archived two or more days after its creation day, or on a day before it, has every flow named. The locate finds
-// each in the day it was archived on.
+// archived - in the day its root ended - on its creation day or the day after gets no row, the locate finding it by
+// its key's hour, while one that ended two or more days after its creation day has every flow named. The locate finds
+// each in the day it ended on, a past one included.
 func TestDirectory_NamesOnlyWhatTheLocateCannotFind(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -68,44 +99,40 @@ func TestDirectory_NamesOnlyWhatTheLocateCannotFind(t *testing.T) {
 	e := archiveEngine(t, treeMux(), 30)
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
-	assert.NoError(makeArchiveDay(t, e, today-1))
-	assert.NoError(makeArchiveDay(t, e, today+2))
+	madeDay(t, e, today-1)
 	roots := endedRoots(t, e, 4)
-	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
-		t.Skip("midnight passed while the flows ran")
-	}
-	keyOf := map[int]string{}
-	for _, id := range roots {
-		db, err := e.db.Shard(1)
-		assert.NoError(err)
-		var token string
-		var hour int
-		assert.NoError(db.QueryRowContext(ctx, "SELECT flow_token, created_hour FROM dwarf_flows WHERE flow_id=?", id).Scan(&token, &hour))
-		keyOf[id] = keys.NewFlowKey(1, hour, id, token)
-	}
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
 
 	for i, c := range []struct {
-		day   int
-		named bool
+		createdDaysAgo, endedDaysAgo int
+		named                        bool
 	}{
-		{today, false},     // the creation day
-		{today + 1, false}, // the day after
-		{today + 2, true},  // two days after
-		{today - 1, true},  // a day before: a batch still writing the day that ended
+		{0, 0, false}, // ended on its creation day
+		{1, 0, false}, // the day after
+		{2, 0, true},  // two days after
+		{3, 1, true},  // two days after, filed in yesterday's table
 	} {
-		moveInto(t, e, roots[i], c.day)
-		db, err := e.db.Shard(1)
-		assert.NoError(err)
-		var named int
-		assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+archiver.DirectoryTable+" WHERE day=?", c.day).Scan(&named))
-		if c.named {
-			assert.Equal(2, named, "day %d: the root and its child are named", c.day)
-		} else {
-			assert.Equal(0, named, "day %d: nothing is named", c.day)
+		shiftTree(t, e, roots[i], c.createdDaysAgo, c.endedDaysAgo)
+		if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
+			t.Skip("midnight passed during the test")
 		}
-		day, err := located(t, e, keyOf[roots[i]])
+		var token string
+		var hour int
+		assert.NoError(db.QueryRowContext(ctx, "SELECT flow_token, created_hour FROM dwarf_flows WHERE flow_id=?", roots[i]).Scan(&token, &hour))
+		moveInto(t, e, roots[i])
+		endDay := today - c.endedDaysAgo
+		var named int
+		assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+archiver.DirectoryTable+" d JOIN "+
+			migrations.FlowsTable(endDay)+" f ON f.flow_id=d.flow_id WHERE f.root_flow_id=?", roots[i]).Scan(&named))
+		if c.named {
+			assert.Equal(2, named, "case %d: the root and its child are named", i)
+		} else {
+			assert.Equal(0, named, "case %d: nothing is named", i)
+		}
+		day, err := located(t, e, keys.NewFlowKey(1, hour, roots[i], token))
 		assert.NoError(err)
-		assert.Equal(c.day, day, "located in the day it was archived on")
+		assert.Equal(endDay, day, "case %d: located in the day it ended", i)
 	}
 }
 
@@ -192,7 +219,7 @@ func TestDirectory_TheReapersBounds(t *testing.T) {
 	} {
 		_, err := db.ExecContext(ctx, "UPDATE dwarf_flows SET created_hour=? WHERE root_flow_id=?", c.hour, roots[i])
 		assert.NoError(err)
-		moveInto(t, e, roots[i], today)
+		moveInto(t, e, roots[i])
 		var named int
 		assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+archiver.DirectoryTable+" d JOIN "+
 			migrations.FlowsTable(today)+" f ON f.flow_id=d.flow_id WHERE f.root_flow_id=?", roots[i]).Scan(&named))

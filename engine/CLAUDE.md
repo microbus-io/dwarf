@@ -3382,8 +3382,8 @@ are deterministically flushed by then. Not an engine concern: a real exporter ke
 ## Data Retention
 
 **An ended root leaves the live tables about a minute after it ends** (`archiveGrace`, a minimum; the reaper's 15 s
-tick adds up to that on top): the reaper moves its whole tree into today's archive day tables, and retention drops
-whole days (see "The archive" below). A flow that has not ended - running, sleeping, interrupted for a human - stays
+tick adds up to that on top): the reaper moves its whole tree into the archive day tables of the day its root ended
+(today when that day is not there), and retention drops whole days (see "The archive" below). A flow that has not ended - running, sleeping, interrupted for a human - stays
 in the live tables for as long as it takes, so nothing reaps a row a `Resume` could still revive. The read API reads an
 archived flow as it read it live ("Reading an archived flow" below), and `Fork` clones an archived source; `List`
 reads the live tables only, so an archived flow drops out of it.
@@ -3434,15 +3434,14 @@ inherently non-overlapping), stopped by `drainRuntime` cancelling its ctx. On ea
 reader replica reaps nothing), on one turn, it removes two kinds of due roots, each in batches until its due set
 drains (`reapDue`):
 - **Stamped roots** (`delete_after_ms>0`, due at `updated_at + delete_after_ms`): deleted, never archived.
-- **Ended roots** (terminal, unstamped, `updated_at` older than `archiveGrace`): copied into today's day tables
-  (`INSERT ... SELECT *`, the day tables carrying the live columns in order) and deleted, in one transaction; at a
-  retention of 0, deleted only. The tables of today and the two days ahead are made sure of once per pass
-  (`EnsureToday`, the backstop for a maintenance pass that failed to make them, and only a clock read once the archive
-  has seen them whole that day) and today is then read from the database clock. **While today cannot be
-  made, it is an archive failure like any other** (below): ended flows wait in the live tables for the failure grace
-  and are then deleted unarchived; stamped roots, which need no archive, are deleted throughout. Pinned by
-  `TestArchiving_NoEndedTreeMovesWhileTodayCannotBeMade`. Making sure of the days ahead as well is deliberate: a pass
-  that crosses midnight then finds the new day already made. Do not refuse new work over an archive fault: that would
+- **Ended roots** (terminal, unstamped, `updated_at` older than `archiveGrace`): copied into the day tables of the
+  day the root ended (`INSERT ... SELECT *`, the day tables carrying the live columns in order) and deleted, in one
+  transaction; at a retention of 0, or when that day is past the retention, deleted only. **The reaper makes no
+  table**: today and the two days ahead are the archive's maintenance's (Startup and every pass), and the reaper reads
+  only the clock and the archive's record of whole days. **While today or tomorrow is not whole, it is an archive
+  failure like any other** (below): ended flows wait in the live tables for the failure grace and are then deleted
+  unarchived; stamped roots, which need no archive, are deleted throughout. Pinned by
+  `TestArchiving_NoEndedTreeMovesWhileTodayCannotBeMade`. Do not refuse new work over an archive fault: that would
   turn it into an outage at once.
 
 One scan feeds several batches: its candidates, own class first, are consumed `reapBatch` (512) at a time and
@@ -3458,7 +3457,7 @@ MySQL, the strength a `DELETE` takes; a `touch` flip with `RETURNING`/`OUTPUT` e
   other dialects copy, then delete, and archive such a descendant as it was at the copy; SQL Server's
   `DELETE ... OUTPUT deleted.* INTO` would close it there.
 - **The live tables come before the archive: an archive failure that lasts `archiveFailureGrace` (1 min) deletes
-  the ended trees unarchived.** A failed move, or a today that cannot be made, starts a per-shard timer
+  the ended trees unarchived.** A failed move, or a today or tomorrow not whole, starts a per-shard timer
   (`archiveFailures`, in memory, reset at Startup) and ends the pass with nothing deleted; while it runs, each
   failing pass ends the same way; once it has run the grace, each batch whose move fails is deleted without
   archiving. A pass that archives without failing clears it, so a later failure gets a full grace again. A stop is
@@ -3478,14 +3477,25 @@ MySQL, the strength a `DELETE` takes; a `touch` flip with `RETURNING`/`OUTPUT` e
 - **A tree goes in one transaction however large.** A fan-out of a million branches is a million-row move: it
   holds the vacuum horizon and the shard's turn for its length, and on SQL Server it escalates past 5,000 locks to
   a table lock on `dwarf_steps`. Moving such a tree in chunks, root last, is not built.
-- **The day is read once per pass and again when it ends** (`refreshReapDay`, `TodayLeft`), so a pass that crosses
-  midnight writes the new day from its next batch on.
+- **Each tree goes into the day its root ended, when that day and the next are whole** (`planBatch`, from the roots'
+  `updated_at` read with their sizes, outside the transaction - an ended root's end never moves - as epoch seconds
+  computed on the database), so a batch that spans midnight moves in two groups. Yesterday's last minute goes into
+  yesterday, and a weekend's leftovers into the day they ended, since a stopped server made the days ahead before it
+  went. A day not whole - never made (an upgrade's leftovers ended before the archive existed), or purged - sends its
+  trees into today instead, which a list of ended flows by time window then does not find; a day past the retention
+  (the bound Maintain drops by) deletes them. **The record of whole days is this replica's last catalog read**, so a
+  day a peer purged since still reads as whole: the move into it fails on its missing table, and the reaper reads the
+  catalog again and plans the batch afresh, once, rather than fail the whole batch - every day group shares its
+  transaction, so failing it would hold back, then delete, the trees bound for today too
+  (`TestArchiving_APeersPurgeSeenLateFilesIntoToday`). **Do not have the reaper make a past day** to file a tree in: a day made
+  after the fact is unknown to peers' locates until their next catalog read, a dropped one is never made again, and
+  each makes a failure path of its own. Pinned by `TestArchiving_EachTreeGoesIntoTheDayItEnded`,
+  `TestArchiving_APurgedEndDayFilesIntoToday` and `TestArchiving_TheRetentionBoundIsMaintains`.
 - **A flow a locate would not find by its creation hour is named in the directory** (`dwarf_flow_days`) in the
   move's own transaction, from the same rows: on PostgreSQL a data-modifying CTE over the moved rows in the flows
   statement, elsewhere an `INSERT ... SELECT` before the delete. Which flows is the archiver's rule
-  (`DirectoryHours`): those archived two or more days after their creation day, or on a day before it - the batch in
-  flight at midnight writes the day just ended, and with days shorter than an hour a straggler's creation day can
-  fall after it (`internal/archiver/CLAUDE.md`, "Locating an archived row"). Pinned by `directory_test.go`.
+  (`DirectoryHours`, of the day each group is filed in): those filed two or more days after their creation day, or
+  before it (`internal/archiver/CLAUDE.md`, "Locating an archived row"). Pinned by `directory_test.go`.
 - **The ended scan is one branch per terminal status**, each `ORDER BY updated_at LIMIT` on
   `idx_dwarf_flows_status (status, updated_at)`. One scan over all four statuses has no index order, so every scan
   would read and sort the whole due set. A long-lived root's ended subgraph children still sit oldest-first in the
