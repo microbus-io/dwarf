@@ -343,10 +343,10 @@ type Engine struct {
 	// purgeChunk is how many roots one Purge statement names, a field so a test can drive several chunks. A literal
 	// IN list in the tens of thousands of terms can fail to plan outright on SQL Server (errors 8623 / 8632); 4,096
 	// keeps an order of magnitude under it.
-	purgeChunk int
-	reapInterval        time.Duration // reaper goroutine tick; read once at Startup (15s)
-	leaseRecoveryBatch  int           // ids per lease-recovery reset, embedded as a literal IN list (1024)
-	maxPayloadBytes     int           // largest JSON value written into one payload column (maxPayloadBytes)
+	purgeChunk         int
+	reapInterval       time.Duration // reaper goroutine tick; read once at Startup (15s)
+	leaseRecoveryBatch int           // ids per lease-recovery reset, embedded as a literal IN list (1024)
+	maxPayloadBytes    int           // largest JSON value written into one payload column (maxPayloadBytes)
 	// persistBackoff is the outcome-write retry schedule (1s doubling to 32s, a minute in all), exponential
 	// because the errors it exists for - a dropped connection, a failover - clear in seconds to tens of seconds. A
 	// longer ladder would be slow to report a permanent failure. A per-engine field (not a package var) so a test
@@ -1392,9 +1392,8 @@ func (e *Engine) Resume(ctx context.Context, flowKey string, resumeData any) err
 
 // Terminate forcefully, unconditionally stops a flow. In-flight work is abandoned immediately - it is not
 // awaited, and no handler runs. The flow reads "terminated" as soon as this returns. Terminating a flow that
-// has already ended is a no-op that returns nil and leaves its outcome as it was; once it has moved to the archive,
-// about a minute after it ended, it returns 404. The reason is a human-readable
-// note of at most 4,096 bytes of UTF-8 text with no NUL; any other reason is refused with a 400.
+// has already ended is a no-op that returns nil and leaves its outcome as it was, archived or not; an unknown or
+// deleted flow is a 404. The reason is a human-readable note of at most 4,096 bytes of UTF-8 text with no NUL; any other reason is refused with a 400.
 func (e *Engine) Terminate(ctx context.Context, flowKey string, reason string) error {
 	if err := e.ensureStarted(); err != nil {
 		return errors.Trace(err)

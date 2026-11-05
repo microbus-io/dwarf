@@ -3622,7 +3622,10 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
 - **Reading an archived flow** (`queryLiveOrArchive`, `archive.go`). Only the read API reads the archive - `Snapshot`,
   `Fingerprint` (and so `Await`/`Poll`/`Run`, which build their outcome with `Snapshot`), `History`, `Step` and
   `Continue`'s source; dispatch and every write path never do, a moved tree being answered there by the zero-row
-  guards they already have. Every read is written once against a `flowTables` pair, run on the live tables and then,
+  guards they already have. Beside them, `Fork` clones an archived source (below), `Delete` and `Purge` delete there
+  (`purge.go`), and `Resume`, `Terminate` and `Cancel`, when their live read misses, read the flow's status from its
+  day (`archivedFlowRow`) and give the answer any ended flow gets - 409, nil, nil - a subgraph child's key still a
+  400 (`TestLifecycle_AnArchivedFlowAnswersAsAnEndedOne`). Every read is written once against a `flowTables` pair, run on the live tables and then,
   when the flow is not there, on the day `LocateFlow` names.
   - **A read of several statements closes with a primary-key read of the flow's row** (`flowRowThere`). A tree moves
     in one transaction and each plain statement sees only what had committed when it began, so the row still there

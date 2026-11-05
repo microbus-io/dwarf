@@ -786,7 +786,8 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 		flowID, flowToken, flowHour,
 	).Scan(&flowStatus, &surgraphFlowID)
 	if err == sql.ErrNoRows {
-		return errors.New("flow not found", http.StatusNotFound)
+		// An archived flow has ended, so it answers below as any ended flow does: a no-op.
+		_, flowStatus, surgraphFlowID, err = e.archivedFlowRow(ctx, db, shardNum, flowID, flowToken, flowHour)
 	}
 	if err != nil {
 		return errors.Trace(err)
@@ -856,7 +857,8 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 		flowID, flowToken, flowHour,
 	).Scan(&surgraphFlowID, &watermark, &status)
 	if err == sql.ErrNoRows {
-		return errors.New("flow not found", http.StatusNotFound)
+		// An archived flow has ended, so it answers below as any ended flow does: a no-op.
+		_, status, surgraphFlowID, err = e.archivedFlowRow(ctx, db, shardNum, flowID, flowToken, flowHour)
 	}
 	if err != nil {
 		return errors.Trace(err)
@@ -1046,29 +1048,40 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	return errors.New("the flow changed while it was being deleted; try again", http.StatusConflict)
 }
 
-// deleteArchivedFlow deletes an archived flow's tree at once in its day's tables (deleteArchivedTrees): it is not
-// marked, since the reaper reads only the live tables and an archived tree has nothing left to race. The flow is
-// found by the archive's locate and read with its token; a subgraph child's key is a 400, as on the live side.
-func (e *Engine) deleteArchivedFlow(ctx context.Context, db *sequel.DB, shardNum, flowID int, flowToken string, flowHour int) error {
+// archivedFlowRow reads an archived flow's status and surgraph link from the day the archive's locate finds it in,
+// with its token, for an operation whose live read missed: the day, or a 404 when neither side holds the flow - never
+// archived, deleted, or on a day dropped since.
+func (e *Engine) archivedFlowRow(ctx context.Context, db *sequel.DB, shardNum, flowID int, flowToken string, flowHour int) (
+	day int, status string, surgraphFlowID int, err error) {
 	notFound := errors.New("flow not found", http.StatusNotFound)
 	set := e.archives.Load()
 	if set == nil || set.byShard[shardNum] == nil {
-		return notFound
+		return 0, "", 0, notFound
 	}
-	day, err := set.byShard[shardNum].LocateFlow(ctx, flowID, flowHour)
+	day, err = set.byShard[shardNum].LocateFlow(ctx, flowID, flowHour)
 	if errors.StatusCode(err) == http.StatusNotFound {
-		return notFound
+		return 0, "", 0, notFound
 	}
 	if err != nil {
-		return errors.Trace(err)
+		return 0, "", 0, errors.Trace(err)
 	}
-	var surgraphFlowID int
-	err = db.QueryRowContext(ctx, "SELECT surgraph_flow_id FROM "+migrations.FlowsTable(day)+
-		" WHERE flow_id=? AND flow_token=? AND created_hour=?", flowID, flowToken, flowHour).Scan(&surgraphFlowID)
+	err = db.QueryRowContext(ctx, "SELECT status, surgraph_flow_id FROM "+migrations.FlowsTable(day)+
+		" WHERE flow_id=? AND flow_token=? AND created_hour=?", flowID, flowToken, flowHour).Scan(&status, &surgraphFlowID)
 	// A day dropped since the locate, or a directory row outliving its day, is a missing table: the flow is gone.
 	if err == sql.ErrNoRows || sequel.IsUndefinedTableError(err) {
-		return notFound
+		return 0, "", 0, notFound
 	}
+	if err != nil {
+		return 0, "", 0, errors.Trace(err)
+	}
+	return day, status, surgraphFlowID, nil
+}
+
+// deleteArchivedFlow deletes an archived flow's tree at once in its day's tables (deleteArchivedTrees): it is not
+// marked, since the reaper reads only the live tables and an archived tree has nothing left to race. A subgraph
+// child's key is a 400, as on the live side.
+func (e *Engine) deleteArchivedFlow(ctx context.Context, db *sequel.DB, shardNum, flowID int, flowToken string, flowHour int) error {
+	day, _, surgraphFlowID, err := e.archivedFlowRow(ctx, db, shardNum, flowID, flowToken, flowHour)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -1077,7 +1090,7 @@ func (e *Engine) deleteArchivedFlow(ctx context.Context, db *sequel.DB, shardNum
 	}
 	n, err := deleteArchivedTrees(ctx, db, day, []int{flowID})
 	if sequel.IsUndefinedTableError(err) || (err == nil && n == 0) {
-		return notFound // dropped, or deleted by a racing Delete or Purge
+		return errors.New("flow not found", http.StatusNotFound) // dropped, or deleted by a racing Delete or Purge
 	}
 	return errors.Trace(err)
 }
@@ -1155,7 +1168,8 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	var surgraphFlowID int
 	err = db.QueryRowContext(ctx, "SELECT status, surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?", flowID, flowToken, flowHour).Scan(&flowStatus, &surgraphFlowID)
 	if err == sql.ErrNoRows {
-		return errors.New("flow not found", http.StatusNotFound)
+		// An archived flow has ended, so it answers below as any ended flow does: not interrupted.
+		_, flowStatus, surgraphFlowID, err = e.archivedFlowRow(ctx, db, shardNum, flowID, flowToken, flowHour)
 	}
 	if err != nil {
 		return errors.Trace(err)

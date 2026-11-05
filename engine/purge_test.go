@@ -216,3 +216,40 @@ func TestPurge_TheRefusals(t *testing.T) {
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), name)
 	}
 }
+
+// TestLifecycle_AnArchivedFlowAnswersAsAnEndedOne pins Resume, Terminate and Cancel on an archived flow, found in the
+// archive when the live read misses: the answer any ended flow gets - Resume a 409, Terminate and Cancel a no-op that
+// leaves the outcome as it was - a subgraph child's key a 400, and an unknown token a 404.
+func TestLifecycle_AnArchivedFlowAnswersAsAnEndedOne(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e := archiveEngine(t, treeMux(), 30)
+	today, err := e.archives.Load().byShard[1].Today(ctx)
+	assert.NoError(err)
+	root := endedRoots(t, e, 1)[0]
+	rootKey, childKey := archivedTreeKeys(t, e, root, today)
+	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
+		t.Skip("midnight passed during the test")
+	}
+	flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", root)
+	assert.Zero(flows, "archived")
+
+	assert.Equal(http.StatusConflict, errors.StatusCode(e.Resume(ctx, rootKey, nil)), "Resume: not interrupted")
+	assert.NoError(e.Terminate(ctx, rootKey, "late"), "Terminate: a no-op")
+	assert.NoError(e.Cancel(ctx, rootKey, "late"), "Cancel: a no-op")
+	outcome, err := e.Snapshot(ctx, rootKey)
+	assert.NoError(err)
+	assert.Equal(workflow.StatusCompleted, outcome.Status, "the outcome as it was")
+
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.Resume(ctx, childKey, nil)))
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.Terminate(ctx, childKey, "x")))
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.Cancel(ctx, childKey, "x")))
+
+	shard, hour, id, _, err := keys.ParseFlowKey(rootKey)
+	assert.NoError(err)
+	wrong := keys.NewFlowKey(shard, hour, id, "0000000000000000")
+	assert.Equal(http.StatusNotFound, errors.StatusCode(e.Resume(ctx, wrong, nil)))
+	assert.Equal(http.StatusNotFound, errors.StatusCode(e.Terminate(ctx, wrong, "x")))
+	assert.Equal(http.StatusNotFound, errors.StatusCode(e.Cancel(ctx, wrong, "x")))
+}
