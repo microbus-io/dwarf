@@ -27,13 +27,13 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
+	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -71,6 +71,9 @@ func archiveEngine(t *testing.T, mux *hosts.Mux, retention int) *Engine {
 	if err := e.Startup(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+	// The archive loop passes once as it starts, on its own goroutine; waited out here, it cannot land in the middle of
+	// a test and read the catalog - learning a day the test made - at a moment the test does not choose.
+	enginetest.AwaitVisitCount(t, e.seams, 1, 10*time.Second, engineseams.CheckpointArchivePassDone)
 	return e
 }
 
@@ -425,10 +428,11 @@ func endedRoots(t *testing.T, e *Engine, n int) []int {
 	return roots
 }
 
-// TestArchiving_NoEndedTreeMovesWhileTodayCannotBeMade pins that while today's or a day ahead's tables cannot be made, the
-// ended trees wait in the live tables, neither archived nor deleted, while the stamped ones are still deleted: they
-// need no archive. Once that has lasted the failure grace, the ended trees are deleted unarchived.
-func TestArchiving_NoEndedTreeMovesWhileTodayCannotBeMade(t *testing.T) {
+// TestArchiving_NoEndedTreeMovesWhileTomorrowIsNotWhole pins that while tomorrow's tables are missing - so today, whose
+// own tables are there, must not be written, or a locate would leave out a day that holds the flow - the ended trees
+// wait in the live tables, neither archived nor deleted, while the stamped ones are still deleted: they need no
+// archive. Once that has lasted the failure grace, the ended trees are deleted unarchived.
+func TestArchiving_NoEndedTreeMovesWhileTomorrowIsNotWhole(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -450,6 +454,7 @@ func TestArchiving_NoEndedTreeMovesWhileTodayCannotBeMade(t *testing.T) {
 		assert.NoError(err)
 	}
 	assert.NoError(e.archives.Load().byShard[1].Refresh(ctx))
+	assert.True(e.archives.Load().byShard[1].Whole(today), "today is there")
 
 	e.reapDueFlows(ctx)
 	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
@@ -666,65 +671,84 @@ func TestArchiving_AStopIsNotAFailureAndARestartForgetsThem(t *testing.T) {
 	assert.Len(e.archiveFailures.byID, 0, "a restart forgets the failures")
 }
 
-// madeDay makes day's tables and has the shard's archive read the catalog, as a day the archive's maintenance made
-// would be known.
-func madeDay(t *testing.T, e *Engine, day int) {
-	t.Helper()
-	if err := makeArchiveDay(t, e, day); err != nil {
-		t.Fatal(err)
-	}
-	if err := e.archives.Load().byShard[1].Refresh(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// TestArchiving_EachTreeGoesIntoTheDayItEnded pins where a pass files the trees of one batch: one that ended today in
-// today's tables; one that ended yesterday in yesterday's, the day and the next being whole; one that ended on a day
-// never made in today's, since the reaper makes no table, and so one whose day was made but not the next; and one
-// that ended before the retention deleted, its day never made.
-func TestArchiving_EachTreeGoesIntoTheDayItEnded(t *testing.T) {
+// TestArchiving_TheMoveNamesEveryFlowsColumn pins the move's column list against the flows table: every live column
+// but archived_at, in table order, so a column added to dwarf_flows without being added to the list fails here rather
+// than being dropped from the archive. The day's flows table has the live columns.
+func TestArchiving_TheMoveNamesEveryFlowsColumn(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
-	madeDay(t, e, today-1)
-	madeDay(t, e, today-6)
-	roots := endedRoots(t, e, 5)
-	shiftTree(t, e, roots[1], 1, 1)
-	shiftTree(t, e, roots[2], 3, 3)
-	shiftTree(t, e, roots[3], 40, 40)
-	shiftTree(t, e, roots[4], 6, 6)
-
-	e.reapDueFlows(ctx)
-	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
-		t.Skip("midnight passed during the pass")
-	}
-	for _, id := range roots {
-		flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", id)
-		assert.Zero(flows, "tree %d left the live tables", id)
-	}
-	flows, steps := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), roots[0])
-	assert.Equal(2, flows, "ended today: today's tables")
-	assert.True(steps > 0)
-	flows, _ = treeCount(t, e, migrations.FlowsTable(today-1), migrations.StepsTable(today-1), roots[1])
-	assert.Equal(2, flows, "ended yesterday: yesterday's tables")
-	flows, _ = treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), roots[2])
-	assert.Equal(2, flows, "ended on a day never made: today's tables")
-	assert.False(hasArchiveDay(t, e, today-3), "the reaper makes no day")
-	flows, _ = treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), roots[4])
-	assert.Equal(2, flows, "ended on a day whose next day was never made: today's tables")
-	for _, d := range []int{today, today - 1} {
-		flows, _ = treeCount(t, e, migrations.FlowsTable(d), migrations.StepsTable(d), roots[3])
-		assert.Zero(flows, "ended past the retention: deleted, day %d", d)
-	}
-	assert.False(hasArchiveDay(t, e, today-40))
+	want := append(strings.Split(archivedFlowColumns, ", "), "archived_at")
+	assert.Equal(want, columnNames(t, db, "dwarf_flows"))
+	assert.Equal(want, columnNames(t, db, migrations.FlowsTable(today)))
 }
 
-// TestArchiving_APurgedEndDayFilesIntoToday pins a tree that ended on a day PurgeBefore has dropped: the day is not
-// made again, and the tree goes into today's tables.
-func TestArchiving_APurgedEndDayFilesIntoToday(t *testing.T) {
+// columnNames returns a table's columns in order.
+func columnNames(t *testing.T, db *sequel.DB, table string) []string {
+	t.Helper()
+	rows, err := db.QueryContext(t.Context(), "SELECT * FROM "+table+" WHERE 1=0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cols
+}
+
+// TestArchiving_EveryArchivedFlowIsStampedWhenItWasArchived pins archived_at: a live flow holds the not-archived value,
+// and every flow of an archived tree - the root and its subgraph child - the database's time of the move.
+func TestArchiving_EveryArchivedFlowIsStampedWhenItWasArchived(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e := archiveEngine(t, treeMux(), 30)
+	root := endedRoots(t, e, 1)[0]
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	// Ended an hour ago, so a stamp copied from when it ended - rather than taken when it moved - is an hour old.
+	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=DATE_ADD_MILLIS(updated_at, ?) WHERE root_flow_id=?",
+		-time.Hour.Milliseconds(), root)
+	assert.NoError(err)
+	unset, unsetArg := sqlTime(db.DriverName(), time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC))
+	var live int
+	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE root_flow_id=? AND archived_at="+unset,
+		root, unsetArg).Scan(&live))
+	assert.Equal(2, live, "not archived")
+
+	today, err := e.archives.Load().byShard[1].Today(ctx)
+	assert.NoError(err)
+	e.reapDueFlows(ctx)
+	flows, _ := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), root)
+	if flows == 0 {
+		t.Skip("midnight passed during the pass")
+	}
+	rows, err := db.QueryContext(ctx, "SELECT DATE_DIFF_MILLIS(NOW_UTC(), archived_at) FROM "+migrations.FlowsTable(today)+
+		" WHERE root_flow_id=?", root)
+	assert.NoError(err)
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var ago float64 // fractional on SQLite
+		assert.NoError(rows.Scan(&ago))
+		assert.True(ago >= 0 && ago < float64(time.Minute.Milliseconds()), "archived %vms ago", ago)
+		n++
+	}
+	assert.NoError(rows.Err())
+	assert.Equal(2, n)
+}
+
+// TestArchiving_AMoveAfterItsDayEndedIsStampedWithinTheDay pins the archive time's clamp: a move into a day that has
+// already ended - a pass that read the day before midnight and moves after it - stamps the day's last millisecond,
+// never a time of the next day, so a day holds only rows archived on it.
+func TestArchiving_AMoveAfterItsDayEndedIsStampedWithinTheDay(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -732,83 +756,72 @@ func TestArchiving_APurgedEndDayFilesIntoToday(t *testing.T) {
 	a := e.archives.Load().byShard[1]
 	today, err := a.Today(ctx)
 	assert.NoError(err)
-	madeDay(t, e, today-2)
-	madeDay(t, e, today-1)
-	_, err = a.DropBefore(ctx, today-1)
-	assert.NoError(err)
+	assert.NoError(makeArchiveDay(t, e, today-1))
 	root := endedRoots(t, e, 1)[0]
-	shiftTree(t, e, root, 2, 2)
-
-	e.reapDueFlows(ctx)
-	if now, _ := a.Today(ctx); now != today {
-		t.Skip("midnight passed during the test")
-	}
-	flows, _ := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), root)
-	assert.Equal(2, flows, "into today")
-	assert.False(hasArchiveDay(t, e, today-2), "a dropped day is not made again")
-}
-
-// TestArchiving_APeersPurgeSeenLateFilesIntoToday pins a day a peer purged after this replica last read the catalog:
-// its record still lists the day, so the move into it fails on the missing table; the reaper reads the catalog again
-// and plans the batch afresh, so the purged day's tree goes into today and the rest of the batch is archived - none
-// of it held back or deleted.
-func TestArchiving_APeersPurgeSeenLateFilesIntoToday(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	ctx := t.Context()
-	e := archiveEngine(t, treeMux(), 30)
-	today, err := e.archives.Load().byShard[1].Today(ctx)
-	assert.NoError(err)
-	madeDay(t, e, today-2)
-	madeDay(t, e, today-1)
+	moveInto(t, e, root, today-1)
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
-	peer := archiver.New(db, archiver.DefaultDayLength, migrations.Archive())
-	_, err = peer.DropBefore(ctx, today-1)
-	assert.NoError(err)
-	assert.True(e.archives.Load().byShard[1].Whole(today-2), "this replica's record is stale")
-	roots := endedRoots(t, e, 3)
-	shiftTree(t, e, roots[2], 2, 2)
-
-	e.reapDueFlows(ctx)
-	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
-		t.Skip("midnight passed during the test")
-	}
-	for _, id := range roots {
-		flows, _ := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), id)
-		assert.Equal(2, flows, "tree %d archived into today", id)
-	}
-	e.archiveFailures.mu.Lock()
-	_, failing := e.archiveFailures.byID[1]
-	e.archiveFailures.mu.Unlock()
-	assert.False(failing, "not an archive failure")
+	last, lastArg := sqlTime(db.DriverName(), a.DayEnds(today-1).Add(-time.Millisecond))
+	var stamped int
+	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+migrations.FlowsTable(today-1)+
+		" WHERE root_flow_id=? AND archived_at="+last, root, lastArg).Scan(&stamped))
+	assert.Equal(2, stamped, "the day's last millisecond")
 }
 
-// TestArchiving_TheRetentionBoundIsMaintains pins that the reaper deletes rather than files exactly the trees whose
-// end day Maintain would drop: one that ended the retention's days ago is archived, one a day earlier is deleted.
-func TestArchiving_TheRetentionBoundIsMaintains(t *testing.T) {
+// TestArchiving_NoTreeMovesInTheDaysLastMoments pins the reaper's quiet margin: a pass with less than the margin left
+// in today archives nothing, and the trees go into the next day's tables at its first pass. Days of 16 seconds, so the
+// margin is two, and the pass runs with one to two left: before the margin it would archive.
+func TestArchiving_NoTreeMovesInTheDaysLastMoments(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
-	e := archiveEngine(t, treeMux(), 5)
-	today, err := e.archives.Load().byShard[1].Today(ctx)
-	assert.NoError(err)
-	madeDay(t, e, today-5)
-	madeDay(t, e, today-4)
-	roots := endedRoots(t, e, 2)
-	shiftTree(t, e, roots[0], 5, 5)
-	shiftTree(t, e, roots[1], 6, 6)
+	e := NewEngineUnderTest(t.Name())
+	t.Cleanup(func() { e.Shutdown(context.Background()) })
+	e.SetHost(treeMux())
+	e.archiveGrace = 0
+	e.reapInterval = time.Hour
+	e.testArchiveDay = 16 * time.Second
+	e.noReapQuiet = false
+	assert.NoError(e.SetRetention(100))
+	assert.NoError(e.Startup(ctx))
+	a := e.archives.Load().byShard[1]
+	assert.Equal(2*time.Second, reapQuietMargin(a.DayLength()))
+	assert.Equal(time.Minute, reapQuietMargin(24*time.Hour))
+	assert.Zero(reapQuietMargin(8*time.Second), "a day too short for a margin")
+	root := endedRoots(t, e, 1)[0]
 
+	// TodayLeft rounds down, so 1 left means between one and two seconds to go: inside the margin, not past the day.
+	deadline := time.Now().Add(time.Minute)
+	var day int
+	for {
+		d, left, err := a.TodayLeft(ctx)
+		assert.NoError(err)
+		if left == time.Second {
+			day = d
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("never saw a day's last second")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	e.reapDueFlows(ctx)
-	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
-		t.Skip("midnight passed during the test")
+	if now, _ := a.Today(ctx); now != day {
+		t.Skip("the day ended during the pass")
 	}
-	flows, _ := treeCount(t, e, migrations.FlowsTable(today-5), migrations.StepsTable(today-5), roots[0])
-	assert.Equal(2, flows, "ended the retention's days ago: kept, as Maintain keeps its day")
-	flows, _ = treeCount(t, e, "dwarf_flows", "dwarf_steps", roots[1])
-	assert.Zero(flows, "a day earlier: deleted")
-	for _, d := range []int{today, today - 5} {
-		flows, _ = treeCount(t, e, migrations.FlowsTable(d), migrations.StepsTable(d), roots[1])
-		assert.Zero(flows, "and not archived, day %d", d)
+	flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", root)
+	assert.Equal(2, flows, "left in the live tables")
+
+	for {
+		if now, _ := a.Today(ctx); now > day {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
+	assert.NoError(a.Refresh(ctx))
+	e.reapDueFlows(ctx)
+	flows, _ = treeCount(t, e, "dwarf_flows", "dwarf_steps", root)
+	assert.Zero(flows, "archived on the next day")
+	flows, _ = treeCount(t, e, migrations.FlowsTable(day), migrations.StepsTable(day), root)
+	assert.Zero(flows, "not into the day that ended")
 }

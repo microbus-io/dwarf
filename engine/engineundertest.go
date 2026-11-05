@@ -78,6 +78,9 @@ func NewEngineUnderTest(testName string) *Engine {
 	// switches the ShardSet's open path onto the isolated-test path; it is set on a fresh engine, so it is in
 	// place long before any shard opens.
 	e.testHashedID = database.TestID(testName)
+	// A pass in a day's last moments archives as at any other time: the quiet margin is pinned by its own test, and
+	// left on it would hold back every archiving test that runs then.
+	e.noReapQuiet = true
 	return e
 }
 

@@ -184,18 +184,31 @@ func ownFirst(ids []int, count, ordinal, n int) []int {
 	return ids[:min(n, len(ids))]
 }
 
-// reapDay is the day a pass reads as today - what a tree's end day is checked against for the retention - and when
-// it ends by this process's clock, so a pass that outlasts the day reads it again.
+// reapDay is the archive day a pass writes into, and until when, by this process's clock, it archives into it: a margin
+// before the day ends (reapQuietMargin), so a pass near midnight leaves its trees to the first pass of the next day.
+// A zero stop never stops - test mode, or a day too short for a margin - where a move after midnight is stamped within
+// its day all the same.
 type reapDay struct {
-	today int
-	ends  time.Time
+	day  int
+	stop time.Time
 	// archive is the shard's, whose directory hours say which moved flows the directory must name.
 	archive *archiver.Archive
 }
 
+// reapQuietMargin is how long before a day ends the reaper stops archiving into it, for days of dayLength: a minute,
+// or an eighth of a shorter day - and none for a day under 16 seconds, where the margin would be within two of the
+// archive clock's whole-second steps (TodayLeft rounds down), which can leave no moment of the day to archive in.
+// A move that commits after midnight still stamps the day it is filed in (archivedAtSQL), so the margin only makes
+// that rare; it is not what keeps a day's rows in order.
+func reapQuietMargin(dayLength time.Duration) time.Duration {
+	if dayLength < 16*time.Second {
+		return 0
+	}
+	return min(time.Minute, dayLength/8)
+}
+
 // reapDueFlows removes, per shard this replica dispatches, every due tree: first the roots stamped for deletion,
-// then the roots that ended archiveGrace ago, each archived into the day it ended (or deleted, at a retention of 0
-// or when that day is past the retention).
+// then the roots that ended archiveGrace ago, archived into today's day tables (or deleted, at a retention of 0).
 // A tree is a root and every subgraph descendant, found by root_flow_id, and goes in one transaction with its steps.
 // Each kind loops batches until its due set drains, all on one turn.
 //
@@ -234,13 +247,8 @@ func (e *Engine) reapDueFlows(ctx context.Context) {
 		archiving := day != nil
 		passStart := time.Now()
 		ok := e.reapDue(ctx, db, shard, e.endedDue(steal), func() (*reapDay, bool) {
-			if day != nil && !time.Now().Before(day.ends) {
-				if err := e.refreshReapDay(ctx, set.byShard[shard], day); err != nil {
-					if !e.archiveFailed(ctx, shard, "reading today's archive day", err) {
-						return nil, false
-					}
-					day, archiving = nil, false
-				}
+			if day != nil && !day.stop.IsZero() && !time.Now().Before(day.stop) {
+				return nil, false // the day's last moments: the trees wait for the next day's first pass
 			}
 			return day, true
 		})
@@ -252,14 +260,23 @@ func (e *Engine) reapDueFlows(ctx context.Context) {
 	})
 }
 
-// refreshReapDay reads today from the database clock into day, and when it ends. The reaper makes no table: today and
-// the days ahead are the archive's maintenance's to make, at Startup and on every pass.
+// refreshReapDay reads today from the database clock into day, and when to stop archiving into it. The reaper makes
+// no table: today and the days ahead are the archive's maintenance's to make, at Startup and on every pass. Tomorrow
+// not whole is an error, an archive failure like a failed move: a row goes into a day only once the day after it is
+// whole, which a locate relies on. Today missing fails the move itself.
 func (e *Engine) refreshReapDay(ctx context.Context, a *archiver.Archive, day *reapDay) error {
 	today, left, err := a.TodayLeft(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	day.today, day.ends, day.archive = today, time.Now().Add(left), a
+	if !a.Whole(today + 1) {
+		return errors.New("tomorrow's archive tables (day %d) are not whole", today+1)
+	}
+	day.day, day.archive = today, a
+	day.stop = time.Time{}
+	if quiet := reapQuietMargin(a.DayLength()); quiet > 0 && !e.noReapQuiet {
+		day.stop = time.Now().Add(left - quiet)
+	}
 	return nil
 }
 
@@ -334,9 +351,8 @@ func (f *archiveFailures) reset() {
 	f.mu.Unlock()
 }
 
-// reapDue removes the due roots of one kind on one shard, batch by batch. dayOf returns the pass's day - its today and
-// the archive it files each batch's trees in - or nil to delete only, and false to end the pass (an archive failure
-// within its grace). It reports
+// reapDue removes the due roots of one kind on one shard, batch by batch. dayOf returns the archive day each batch
+// moves into, or nil to delete only, and false to end the pass (an archive failure within its grace). It reports
 // false when it stopped on an error, or on an archive failure within its grace.
 //
 // One scan feeds several batches: the candidates it returns, own class first, are consumed a batch at a time, and
@@ -372,25 +388,10 @@ func (e *Engine) reapDue(
 				return false
 			}
 			batch := slices.Sorted(slices.Values(candidates[:min(e.reapBatch, len(candidates))]))
-			cut, ended, err := e.rootsWithinRows(ctx, db, batch)
-			var plan *reapPlan
-			if err == nil && day != nil {
-				plan, err = e.planBatch(day, cut, ended)
-			}
+			cut, err := e.rootsWithinRows(ctx, db, batch)
 			if err == nil {
 				var moved int
-				moved, err = e.reapBatchOf(ctx, db, cut, kind, day, plan)
-				// The archive's record of whole days is this replica's last catalog read, so a day a peer has purged
-				// since can still read as whole, and the move into it fails on its missing table. Read the catalog and
-				// plan the batch again, once: the purged day's trees then go into today.
-				if day != nil && sequel.IsUndefinedTableError(err) {
-					if err = day.archive.Refresh(ctx); err == nil {
-						plan, err = e.planBatch(day, cut, ended)
-					}
-					if err == nil {
-						moved, err = e.reapBatchOf(ctx, db, cut, kind, day, plan)
-					}
-				}
+				moved, err = e.reapBatchOf(ctx, db, cut, kind, day)
 				progress = progress || moved > 0
 			}
 			// A batch that cannot be archived waits for the next tick, and is deleted unarchived once archiving has been
@@ -400,7 +401,7 @@ func (e *Engine) reapDue(
 					return false
 				}
 				var moved int
-				moved, err = e.reapBatchOf(ctx, db, cut, kind, nil, nil)
+				moved, err = e.reapBatchOf(ctx, db, cut, kind, nil)
 				progress = progress || moved > 0
 			}
 			if err != nil {
@@ -445,55 +446,13 @@ func (e *Engine) scanDue(
 	return ids, errors.Trace(rows.Err())
 }
 
-// reapPlan is where a batch's trees go: the day each root's tree is filed in, and the days whose trees are deleted
-// rather than archived.
-type reapPlan struct {
-	dayOf     map[int]int
-	deleteDay map[int]bool
-}
-
-// planBatch files each root of roots in the day it ended (ended, in seconds since the Unix epoch) when that day and
-// the next are whole, so a day keeps the trees that ended on it - yesterday's last minute, and a weekend's leftovers
-// after a server was stopped, the days ahead having been made before it went. A tree whose day is not whole (one that
-// ended before the archive existed, or on a purged day) goes into today, which is; a tree that ended before the
-// retention is deleted, as the archive's maintenance drops its day. The reaper never makes a table, so today not
-// being whole is an error, an archive failure like a failed move. A root missing from ended has gone since it was
-// scanned, and is left out.
-func (e *Engine) planBatch(day *reapDay, roots []int, ended map[int]int64) (*reapPlan, error) {
-	a := day.archive
-	// A day is written only once the day after it is whole, which a locate relies on.
-	if !a.Whole(day.today) || !a.Whole(day.today+1) {
-		return nil, errors.New("today's archive tables (day %d) or tomorrow's are not whole", day.today)
-	}
-	plan := &reapPlan{dayOf: make(map[int]int, len(roots)), deleteDay: map[int]bool{}}
-	for _, root := range roots {
-		secs, ok := ended[root]
-		if !ok {
-			continue
-		}
-		d := a.DayOfEpochSeconds(secs)
-		switch {
-		case d < day.today-e.retentionDays:
-			// The bound the archive's maintenance drops by, written on d so that a retention near the largest int
-			// cannot overflow.
-			plan.deleteDay[d] = true
-		case d > day.today || !a.Whole(d) || !a.Whole(d+1):
-			d = day.today
-		}
-		plan.dayOf[root] = d
-	}
-	return plan, nil
-}
-
-// reapBatchOf removes the trees of the roots it can lock among rootIDs (ascending) in one transaction: each moved
-// into the archive tables of the day its root ended, as plan says, unless day is nil or plan deletes that day's trees,
-// and deleted otherwise. A root plan does not place is left for a later pass. It returns how many flow rows it
-// removed.
+// reapBatchOf removes the trees of the roots it can lock among rootIDs (ascending) in one transaction: moved into
+// day's archive tables unless day is nil, deleted otherwise. It returns how many flow rows it removed.
 //
 // The roots are locked first, in flow_id order and re-checked, so two reapers that meet on a root - a stolen one, or
 // a dispatcher handoff - wait on each other rather than deadlock, and the later finds the root gone.
 func (e *Engine) reapBatchOf(
-	ctx context.Context, db *sequel.DB, rootIDs []int, kind reapKind, day *reapDay, plan *reapPlan,
+	ctx context.Context, db *sequel.DB, rootIDs []int, kind reapKind, day *reapDay,
 ) (int, error) {
 	var moved int
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
@@ -502,105 +461,95 @@ func (e *Engine) reapBatchOf(
 		if err != nil || len(locked) == 0 {
 			return errors.Trace(err)
 		}
-		if day == nil {
-			n, err := e.removeTrees(ctx, tx, locked, nil, 0)
-			moved = n
-			return errors.Trace(err)
-		}
+		// ids are trusted integers embedded as literals to dodge the per-driver bind-param ceiling.
+		ids := intCSV(locked)
+		trees := "SELECT flow_id FROM dwarf_flows WHERE root_flow_id IN (" + ids + ")"
+		steps := "DELETE FROM dwarf_steps WHERE flow_id IN (" + trees + ")"
+		flows := "DELETE FROM dwarf_flows WHERE root_flow_id IN (" + ids + ")"
 		// engineseams.FaultReapContention fails every attempt of an archive move on lock contention.
-		if e.seams.IsFault(engineseams.FaultReapContention) {
+		if day != nil && e.seams.IsFault(engineseams.FaultReapContention) {
 			return errors.Trace(&pgconn.PgError{Code: "40P01", Message: "injected fault: " + engineseams.FaultReapContention})
 		}
 		// engineseams.FaultReapArchiveErr fails an archive move with an error that is not lock contention.
-		if e.seams.IsFault(engineseams.FaultReapArchiveErr) {
+		if day != nil && e.seams.IsFault(engineseams.FaultReapArchiveErr) {
 			return errors.New("injected fault: " + engineseams.FaultReapArchiveErr)
 		}
-		// A day keeps only the trees that ended on it, so a batch that spans midnight is moved in two groups.
-		byDay := map[int][]int{}
-		var days []int
-		for _, root := range locked {
-			d, ok := plan.dayOf[root]
-			if !ok {
-				continue
-			}
-			if _, ok := byDay[d]; !ok {
-				days = append(days, d)
-			}
-			byDay[d] = append(byDay[d], root)
+		// A flow a locate would not find by its creation hour alone - archived two or more days after its creation
+		// day, or on a day before it (a straggler created while a batch begun before midnight ran) - is named in the
+		// directory, in this transaction, from the same rows the move takes.
+		var directory, archivedAt string
+		var archivedAtArgs []any
+		if day != nil {
+			archivedAt, archivedAtArgs = archivedAtSQL(tx.DriverName(), day.archive.DayEnds(day.day))
+			before, from := day.archive.DirectoryHours(day.day)
+			directory = "INSERT INTO " + archiver.DirectoryTable + " (flow_id, day) SELECT flow_id, " + strconv.Itoa(day.day) +
+				" FROM %s WHERE (created_hour<" + strconv.Itoa(before) + " OR created_hour>=" + strconv.Itoa(from) + ")"
 		}
-		slices.Sort(days)
-		for _, d := range days {
-			var a *archiver.Archive
-			if !plan.deleteDay[d] {
-				a = day.archive
-			}
-			n, err := e.removeTrees(ctx, tx, byDay[d], a, d)
-			if err != nil {
-				return errors.Trace(err)
-			}
-			moved += n
+		var flowsStmt string
+		var flowsArgs []any
+		switch {
+		case day == nil:
+			flowsStmt = flows
+		case tx.DriverName() == "pgx":
+			// Each table moves in one statement, so what is archived is exactly what is deleted, whatever a
+			// descendant does between statements - only the roots are locked. RETURNING * is in column order, and
+			// the day tables carry the live columns in the same order; the flows name theirs, to stamp archived_at.
+			// The directory's rows come from the same moved rows, in the same statement.
+			steps = "WITH moved AS (" + steps + " RETURNING *)" +
+				" INSERT INTO " + migrations.StepsTable(day.day) + " SELECT * FROM moved"
+			flowsStmt = "WITH moved AS (" + flows + " RETURNING *)," +
+				" named AS (" + fmt.Sprintf(directory, "moved") + ")" +
+				" INSERT INTO " + migrations.FlowsTable(day.day) + " (" + archivedFlowColumns + ", archived_at)" +
+				" SELECT " + archivedFlowColumns + ", " + archivedAt + " FROM moved"
+			flowsArgs = archivedAtArgs
+		default:
+			// Copied, then deleted. A descendant that changes between the copy and the delete - only a fan-out
+			// straggler settling, or an orphan a bug left - is archived as it was at the copy.
+			tx.ExecContext(ctx, "INSERT INTO "+migrations.FlowsTable(day.day)+" ("+archivedFlowColumns+", archived_at)"+
+				" SELECT "+archivedFlowColumns+", "+archivedAt+" FROM dwarf_flows WHERE root_flow_id IN ("+ids+")", archivedAtArgs...)
+			tx.ExecContext(ctx, "INSERT INTO "+migrations.StepsTable(day.day)+
+				" SELECT * FROM dwarf_steps WHERE flow_id IN ("+trees+")")
+			tx.ExecContext(ctx, fmt.Sprintf(directory, "dwarf_flows")+" AND root_flow_id IN ("+ids+")")
+			flowsStmt = flows
 		}
+		// Steps before flows: the subquery reads the flow rows.
+		if _, err := tx.ExecContext(ctx, steps); err != nil {
+			return errors.Trace(err)
+		}
+		// engineseams.FaultReapMidTree aborts after the steps go but before the flows do, so the whole batch rolls
+		// back atomically. The test proves a mid-tree failure leaves the tree intact (not a half-deleted flow with
+		// no steps) and the next reap pass removes it cleanly.
+		if e.seams.IsFault(engineseams.FaultReapMidTree) {
+			return errors.New("injected fault: " + engineseams.FaultReapMidTree)
+		}
+		res, err := tx.ExecContext(ctx, flowsStmt, flowsArgs...)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		n, _ := res.RowsAffected()
+		moved = int(n)
 		return nil
 	})
 	return moved, errors.Trace(err)
 }
 
-// removeTrees moves the trees of roots, locked, into day's archive tables when a is the shard's archive, and deletes
-// them when a is nil. It returns how many flow rows it removed.
-func (e *Engine) removeTrees(ctx context.Context, tx *sequel.Tx, roots []int, a *archiver.Archive, day int) (int, error) {
-	// ids are trusted integers embedded as literals to dodge the per-driver bind-param ceiling.
-	ids := intCSV(roots)
-	trees := "SELECT flow_id FROM dwarf_flows WHERE root_flow_id IN (" + ids + ")"
-	steps := "DELETE FROM dwarf_steps WHERE flow_id IN (" + trees + ")"
-	flows := "DELETE FROM dwarf_flows WHERE root_flow_id IN (" + ids + ")"
-	// A flow a locate would not find by its creation hour alone - its tree filed two or more days after its creation
-	// day, or before it - is named in the directory, in this transaction, from the same rows the move takes.
-	var directory string
-	if a != nil {
-		before, from := a.DirectoryHours(day)
-		directory = "INSERT INTO " + archiver.DirectoryTable + " (flow_id, day) SELECT flow_id, " + strconv.Itoa(day) +
-			" FROM %s WHERE (created_hour<" + strconv.Itoa(before) + " OR created_hour>=" + strconv.Itoa(from) + ")"
-	}
-	var flowsStmt string
-	switch {
-	case a == nil:
-		flowsStmt = flows
-	case tx.DriverName() == "pgx":
-		// Each table moves in one statement, so what is archived is exactly what is deleted, whatever a descendant
-		// does between statements - only the roots are locked. RETURNING * is in column order, and the day tables
-		// carry the live columns in the same order. The directory's rows come from the same moved rows, in the same
-		// statement.
-		steps = "WITH moved AS (" + steps + " RETURNING *)" +
-			" INSERT INTO " + migrations.StepsTable(day) + " SELECT * FROM moved"
-		flowsStmt = "WITH moved AS (" + flows + " RETURNING *)," +
-			" named AS (" + fmt.Sprintf(directory, "moved") + ")" +
-			" INSERT INTO " + migrations.FlowsTable(day) + " SELECT * FROM moved"
-	default:
-		// Copied, then deleted. A descendant that changes between the copy and the delete - only a fan-out straggler
-		// settling, or an orphan a bug left - is archived as it was at the copy.
-		tx.ExecContext(ctx, "INSERT INTO "+migrations.FlowsTable(day)+
-			" SELECT * FROM dwarf_flows WHERE root_flow_id IN ("+ids+")")
-		tx.ExecContext(ctx, "INSERT INTO "+migrations.StepsTable(day)+
-			" SELECT * FROM dwarf_steps WHERE flow_id IN ("+trees+")")
-		tx.ExecContext(ctx, fmt.Sprintf(directory, "dwarf_flows")+" AND root_flow_id IN ("+ids+")")
-		flowsStmt = flows
-	}
-	// Steps before flows: the subquery reads the flow rows.
-	if _, err := tx.ExecContext(ctx, steps); err != nil {
-		return 0, errors.Trace(err)
-	}
-	// engineseams.FaultReapMidTree aborts after the steps go but before the flows do, so the whole batch rolls back
-	// atomically. The test proves a mid-tree failure leaves the tree intact (not a half-deleted flow with no steps)
-	// and the next reap pass removes it cleanly.
-	if e.seams.IsFault(engineseams.FaultReapMidTree) {
-		return 0, errors.New("injected fault: " + engineseams.FaultReapMidTree)
-	}
-	res, err := tx.ExecContext(ctx, flowsStmt)
-	if err != nil {
-		return 0, errors.Trace(err)
-	}
-	n, _ := res.RowsAffected()
-	return int(n), nil
+// archivedFlowColumns are the columns of dwarf_flows but archived_at, in table order. A move names them, so the
+// archive's row takes its archive time in place of the live row's "not archived" value. A column added to dwarf_flows
+// must be added here too, or the archive drops it: TestArchiving_TheMoveNamesEveryFlowsColumn compares the list with
+// the table.
+const archivedFlowColumns = "flow_id, flow_token, workflow_url, workflow_name, graph, graph_hash, payload_ver, baggage," +
+	" status, stopped_step_id, surgraph_flow_id, surgraph_step_id, root_flow_id, forked_from_step, trace_parent," +
+	" delete_on_completion, delete_after_ms, final_state, error, cancel_reason, cancel_watermark, priority, fairness_key," +
+	" fairness_weight, time_budget_ms, engine_id, created_hour, created_at, started_at, updated_at, touch"
+
+// archivedAtSQL returns the archive time a move into the day that ends at dayEnds stamps, and its arguments: the
+// database's now, or the day's last millisecond if the move commits after midnight - so a day holds only rows archived
+// on it, and a later day only later ones: the days are in archive order. On PostgreSQL now is
+// the transaction's start, so every tree a batch moves is stamped alike. CASE rather than LEAST: SQL Server 2019 has
+// none.
+func archivedAtSQL(driverName string, dayEnds time.Time) (expr string, args []any) {
+	last, arg := sqlTime(driverName, dayEnds.Add(-time.Millisecond))
+	return "CASE WHEN NOW_UTC()<" + last + " THEN NOW_UTC() ELSE " + last + " END", []any{arg, arg}
 }
 
 // lockDueRoots locks the roots among rootIDs that are still due, and returns them ascending. The rows are about to
@@ -638,33 +587,28 @@ func lockDueRoots(ctx context.Context, tx *sequel.Tx, rootIDs []int, kind reapKi
 }
 
 // rootsWithinRows returns the leading roots of roots (ascending) whose trees fit in about reapBatchRows rows, and at
-// least the first, with when each root ended (its updated_at, in seconds since the Unix epoch). A tree's rows are counted as its flows' joined steps,
-// one for a flow with none. It reads outside the batch's transaction - an ended tree's size and end do not move - so
-// the batch locks only the roots it takes, and its transaction still opens with a write, which SQLite needs.
-func (e *Engine) rootsWithinRows(ctx context.Context, db *sequel.DB, roots []int) ([]int, map[int]int64, error) {
-	// The end is read in seconds since the Unix epoch, computed on the database from the column's UTC wall time, so
-	// no driver's parsing of it into Go - MySQL's follows the DSN's loc - moves the day it falls in.
-	rows, err := db.QueryContext(ctx, "SELECT r.flow_id, "+archiver.EpochSecondsSQL(db.DriverName(), "r.updated_at")+", COUNT(*) FROM dwarf_flows r"+
-		" JOIN dwarf_flows f ON f.root_flow_id=r.flow_id LEFT JOIN dwarf_steps s ON s.flow_id=f.flow_id"+
-		" WHERE r.flow_id IN ("+intCSV(roots)+") GROUP BY r.flow_id, r.updated_at")
+// least the first. A tree's rows are counted as its flows' joined steps, one for a flow with none. It reads outside
+// the batch's transaction - an ended tree's size does not move - so the batch locks only the roots it takes, and its
+// transaction still opens with a write, which SQLite needs.
+func (e *Engine) rootsWithinRows(ctx context.Context, db *sequel.DB, roots []int) ([]int, error) {
+	rows, err := db.QueryContext(ctx, "SELECT f.root_flow_id, COUNT(*) FROM dwarf_flows f"+
+		" LEFT JOIN dwarf_steps s ON s.flow_id=f.flow_id WHERE f.root_flow_id IN ("+intCSV(roots)+") GROUP BY f.root_flow_id")
 	if err != nil {
-		return nil, nil, errors.Trace(err)
+		return nil, errors.Trace(err)
 	}
 	defer rows.Close()
 	size := make(map[int]int, len(roots))
-	ended := make(map[int]int64, len(roots))
 	for rows.Next() {
 		var root, n int
-		var updated int64
-		if err := rows.Scan(&root, &updated, &n); err != nil {
-			return nil, nil, errors.Trace(err)
+		if err := rows.Scan(&root, &n); err != nil {
+			return nil, errors.Trace(err)
 		}
-		size[root], ended[root] = n, updated
+		size[root] = n
 	}
 	if err := rows.Err(); err != nil {
-		return nil, nil, errors.Trace(err)
+		return nil, errors.Trace(err)
 	}
-	return withinRows(roots, size, e.reapBatchRows), ended, nil
+	return withinRows(roots, size, e.reapBatchRows), nil
 }
 
 // withinRows returns the leading roots whose sizes sum to at most limit, and at least the first.

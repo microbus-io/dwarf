@@ -192,36 +192,6 @@ func (a *Archive) EnsureToday(ctx context.Context) error {
 	}
 }
 
-// Whole reports whether the archive knows both of day's tables to exist: from its last catalog read, or from making
-// the day since. A day is written only if it and the next are whole; the archive never makes a past day.
-func (a *Archive) Whole(day int) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	_, ok := slices.BinarySearch(a.known, day)
-	return ok
-}
-
-// DayOfEpochSeconds returns the day a time falls in, given in whole seconds since the Unix epoch.
-func (a *Archive) DayOfEpochSeconds(secs int64) int {
-	return floorDiv(secs-epochUnix, dayLengthSeconds(a.dayLength))
-}
-
-// EpochSecondsSQL returns the SQL expression, for the given driver, of a time column's value in whole seconds since
-// the Unix epoch, rounded down. It reads the column's UTC wall time on the database, so neither the session's time
-// zone nor the driver's parsing of the value into Go is involved.
-func EpochSecondsSQL(driverName string, column string) string {
-	switch driverName {
-	case "pgx":
-		return "CAST(FLOOR(EXTRACT(EPOCH FROM " + column + ")) AS BIGINT)"
-	case "mysql":
-		return "TIMESTAMPDIFF(SECOND, '1970-01-01 00:00:00', " + column + ")"
-	case "mssql":
-		return "DATEDIFF_BIG(SECOND, '1970-01-01', " + column + ")"
-	default:
-		return "CAST(STRFTIME('%s', " + column + ") AS INTEGER)"
-	}
-}
-
 // ensureCurrent makes sure the tables of today, as the caller read it, and of the two days after it exist - each only
 // once the day before is whole, so days are always made in order. Days seen whole stay whole - nothing drops today or a
 // day after it - so once they are, it does nothing until the day changes.
@@ -387,6 +357,25 @@ func (a *Archive) dropDay(ctx context.Context, day int) error {
 		}
 	}
 	return errors.Trace(err)
+}
+
+// Whole reports whether the archive knows both of day's tables to exist: from its last catalog read, or from making
+// the day since.
+func (a *Archive) Whole(day int) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, ok := slices.BinarySearch(a.known, day)
+	return ok
+}
+
+// DayLength returns how long the archive's days are.
+func (a *Archive) DayLength() time.Duration {
+	return a.dayLength
+}
+
+// DayEnds returns the instant day ends, which is the instant the next day begins.
+func (a *Archive) DayEnds(day int) time.Time {
+	return time.Unix(epochUnix+int64(day+1)*dayLengthSeconds(a.dayLength), 0).UTC()
 }
 
 // Refresh reads which days exist, for LocateFlow. Maintain and DropBefore read them too, so a replica that runs neither

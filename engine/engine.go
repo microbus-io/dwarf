@@ -292,11 +292,14 @@ type Engine struct {
 
 	// Archive goroutine: keeps each shard's archive day tables - today's and the two days ahead made, expired days
 	// dropped. archives is the run's set, published at Startup; testArchiveDay, when set, replaces the day's
-	// length for a test (archiveDayLength). archiveCancel stops the loop between its statements.
+	// length for a test (archiveDayLength). noReapQuiet, set in test mode, lets a reaper pass archive into its day
+	// however late it runs (reapQuietMargin), so a test's pass near midnight, or on a day of seconds, does what it does
+	// at noon. archiveCancel stops the loop between its statements.
 	archives atomic.Pointer[archiveSet]
 	// archiveFailures is, per shard, since when the reaper's archiving has been failing (reaper.go).
 	archiveFailures archiveFailures
 	testArchiveDay  time.Duration
+	noReapQuiet     bool
 	archiveCancel   context.CancelFunc
 	archiveWorker   sync.WaitGroup
 

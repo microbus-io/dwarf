@@ -56,18 +56,12 @@ its schema differs by dialect, and a sequel release may change it. Two consequen
   drops and the `OBJECT_ID` guards resolve to. Listed across schemas, as a bare `sys.tables` does on SQL Server, a
   second deployment's tables would be migrated - made, here - and dropped as if they were this one's.
 
-**A day keeps the trees whose root ended on it, when it can.** The reaper files each tree in its root's end day if
-that day and the next are whole (`Whole`, from the archive's record), and in today otherwise; it never makes a table.
-So a day table is a slice of end times - yesterday's last minute, a weekend's leftovers, all land in the day they ended,
-whose tables were made two days ahead - except for trees that ended on a day never made or purged, which go into today.
-The end day is computed on the database (`EpochSecondsSQL` over `updated_at`, then `DayOfEpochSeconds`), as `Today`
-is: a `time.Time` scanned into Go follows the driver's parsing - MySQL's the DSN's `loc` - and would move a tree's day
-by the zone's offset.
-
-**Today and the two days after it must exist; nothing else is made.** A past day is written only if it is already
-whole, so nothing makes one: a day never made stays so, and holds nothing. At a retention of 1 or more yesterday is
-kept through the whole of today; at 0 nothing is archived. `EnsureToday` (Startup) and `Maintain`
-(every maintenance pass) make the three days, so a day exists a whole day before it begins, and is missing at its start
+**Today and the two days after it must exist; nothing else is made.** Rows are archived into the day they are
+archived, so no past day is written - but for the batch a pass has in flight when the day turns, which lands in the day
+that just ended, its `archived_at` clamped to that day's last millisecond (`DayEnds`; the engine's reaper also stops a
+margin before midnight, so this is rare). At a retention of 1 or more that day is kept through the whole of the next;
+at 0 nothing is archived. The reaper makes no table, and archives only while the archive's record holds tomorrow
+whole (`Whole`). `EnsureToday` (Startup) and `Maintain` (every maintenance pass) make the three days, so a day exists a whole day before it begins, and is missing at its start
 only after two days of failed passes. **The day after tomorrow keeps a locate's `created+1` in place**: for a flow
 created just after midnight, `created+1` is the new tomorrow, made the day before as the day after tomorrow. Making
 only tomorrow leaves it missing from midnight until the first pass after it, and every locate of such a key would
@@ -78,8 +72,10 @@ full database, which the drops free, and a drop never reaches a day being writte
 
 **A day seen whole is not checked again** (`ensured`, the today of the last `ensureCurrent` that saw all three whole).
 Nothing drops today or a day after it - `Maintain` drops days before today minus the retention, `DropBefore` refuses a
-day after today - so maintenance's pass reads only the clock until the day changes, rather than a `Migrate` and a
-catalog read per day. The record is per Archive, so each replica, and each Startup, checks once.
+day after today - so a maintenance pass reads only the clock until the day changes, rather than a `Migrate` and a
+catalog read per day. The record is per Archive, so each replica, and each Startup, checks once. What it misses is a
+current day's tables dropped by hand; the reaper's move then fails, and the failure grace deletes the ended trees
+unarchived until the day changes.
 
 **A day that cannot be dropped does not hold back the next.** `dropDays` goes on past a failed day - its lock held
 past PostgreSQL's 2-second timeout - and returns the failures joined, so the next pass retries it.
@@ -141,8 +137,8 @@ most three relations.
   statement locks a relation per day on PostgreSQL until the statement ends: about 160 at 30 days, and about 40% of
   connections doing it exhausts the shared lock table. Three relations are not many.
 - **The directory (`dwarf_flow_days`, a live table: `flow_id` to `day`) names only what the probes cannot find**: a
-  flow filed two or more days after its creation day - a long runner, or a tree filed into today because its end day
-  was not whole - or on a day before it (a subgraph child created after its root ended: an orphan only a bug leaves). `DirectoryHours(day)` gives the
+  flow archived two or more days after its creation day, or on a day before it (a straggler created while a batch
+  begun before midnight ran, reachable only when a day is shorter than an hour). `DirectoryHours(day)` gives the
   creation hours outside which a flow archived on `day` is named, and the reaper writes the rows in the move's own
   transaction from the same rows it moves. Keeping both halves of the rule here - the probes and the hours - is what
   keeps them agreeing. So the directory holds the flows that ran about a day or longer (long approvals, long sleeps),
@@ -167,7 +163,7 @@ most three relations.
   statement again - the day after, then the directory alone, which a drop cannot reach. The statement does not say
   which table was missing, and need not. Days drop oldest first, so a missing creation day is the usual case; and **a
   row goes into a day only once the day after it is whole** (`ensureCurrent` makes the three days in order and records
-  them only together, and the reaper files a tree in a day only when it and the next are `Whole`), so when the day after the creation day is missing, the
+  them only together, and the reaper archives only after it), so when the day after the creation day is missing, the
   creation day holds nothing of the flow either. Keep that order: an archive into a day whose next day may be missing
   would make this leave out a day that holds the flow. A flow created on day 1 and archived on day 5 is still found
   once days 1 and 2 are gone.
@@ -191,7 +187,7 @@ most three relations.
   found. On MySQL a probe of a table being dropped waits behind the `DROP`'s metadata lock, which can itself wait on a
   long statement; only a locate of a day being dropped meets it, and the caller's deadline bounds it.
 - **A day with one table** - half made, or off PostgreSQL half dropped - holds no row a locate may find (the reaper
-  writes only into a day its record says is whole, and a drop is of an expired day or a purged one). With its flows table gone it reads as
+  writes only into a day `ensure` saw whole, and a drop is of an expired day). With its flows table gone it reads as
   dropped; with its steps table gone its flows table answers, empty.
 - **Retention deletes a day's directory rows** (`forgetDaysBefore`, every `Maintain` pass and `DropBefore`), by a bound
   rather than per day dropped, so rows a failed pass left behind go with the next, `forgetBatch` (4,096) rows at a time -

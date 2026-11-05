@@ -45,13 +45,14 @@ CREATE TABLE IF NOT EXISTS dwarf_flows_archive (
     started_at           DATETIME(3)  NOT NULL DEFAULT NOW_UTC(),
     updated_at           DATETIME(3)  NOT NULL DEFAULT NOW_UTC(),
     touch                TINYINT      NOT NULL DEFAULT 0,
+    archived_at          DATETIME(3)  NOT NULL DEFAULT '9999-12-31 23:59:59',
     PRIMARY KEY (flow_id),
-    INDEX idx_dwarf_flows_archive_status (status, updated_at),
+    INDEX idx_dwarf_flows_archive_status (status, archived_at),
     INDEX idx_dwarf_flows_archive_workflow_url (workflow_url),
     INDEX idx_dwarf_flows_archive_surgraph (surgraph_flow_id),
     INDEX idx_dwarf_flows_archive_surgraph_step (surgraph_step_id),
     INDEX idx_dwarf_flows_archive_root (root_flow_id),
-    INDEX idx_dwarf_flows_archive_updated (updated_at)
+    INDEX idx_dwarf_flows_archive_archived (archived_at)
 );
 
 -- DRIVER: pgx
@@ -87,11 +88,12 @@ CREATE TABLE IF NOT EXISTS dwarf_flows_archive (
     started_at           TIMESTAMP        NOT NULL DEFAULT NOW_UTC(),
     updated_at           TIMESTAMP        NOT NULL DEFAULT NOW_UTC(),
     touch                SMALLINT         NOT NULL DEFAULT 0,
+    archived_at          TIMESTAMP        NOT NULL DEFAULT '9999-12-31 23:59:59',
     PRIMARY KEY (flow_id)
 );
 
 -- DRIVER: pgx
-CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_status ON dwarf_flows_archive (status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_status ON dwarf_flows_archive (status, archived_at);
 
 -- DRIVER: pgx
 CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_workflow_url ON dwarf_flows_archive (workflow_url);
@@ -106,7 +108,7 @@ CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_surgraph_step ON dwarf_flows_
 CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_root ON dwarf_flows_archive (root_flow_id);
 
 -- DRIVER: pgx
-CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_updated ON dwarf_flows_archive (updated_at);
+CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_archived ON dwarf_flows_archive (archived_at);
 
 -- DRIVER: pgx
 ALTER TABLE dwarf_flows_archive SET (autovacuum_freeze_min_age = 0, autovacuum_vacuum_insert_scale_factor = 0.01, toast.autovacuum_freeze_min_age = 0, toast.autovacuum_vacuum_insert_scale_factor = 0.01);
@@ -144,11 +146,12 @@ IF OBJECT_ID(N'dwarf_flows_archive', N'U') IS NULL CREATE TABLE dwarf_flows_arch
     started_at           DATETIME2(3)  NOT NULL DEFAULT NOW_UTC(),
     updated_at           DATETIME2(3)  NOT NULL DEFAULT NOW_UTC(),
     touch                TINYINT       NOT NULL DEFAULT 0,
+    archived_at          DATETIME2(3)  NOT NULL DEFAULT '9999-12-31 23:59:59',
     PRIMARY KEY (flow_id)
 );
 
 -- DRIVER: mssql
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_dwarf_flows_archive_status' AND object_id = OBJECT_ID(N'dwarf_flows_archive')) CREATE INDEX idx_dwarf_flows_archive_status ON dwarf_flows_archive (status, updated_at);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_dwarf_flows_archive_status' AND object_id = OBJECT_ID(N'dwarf_flows_archive')) CREATE INDEX idx_dwarf_flows_archive_status ON dwarf_flows_archive (status, archived_at);
 
 -- DRIVER: mssql
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_dwarf_flows_archive_workflow_url' AND object_id = OBJECT_ID(N'dwarf_flows_archive')) CREATE INDEX idx_dwarf_flows_archive_workflow_url ON dwarf_flows_archive (workflow_url);
@@ -163,7 +166,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_dwarf_flows_archive_
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_dwarf_flows_archive_root' AND object_id = OBJECT_ID(N'dwarf_flows_archive')) CREATE INDEX idx_dwarf_flows_archive_root ON dwarf_flows_archive (root_flow_id);
 
 -- DRIVER: mssql
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_dwarf_flows_archive_updated' AND object_id = OBJECT_ID(N'dwarf_flows_archive')) CREATE INDEX idx_dwarf_flows_archive_updated ON dwarf_flows_archive (updated_at);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_dwarf_flows_archive_archived' AND object_id = OBJECT_ID(N'dwarf_flows_archive')) CREATE INDEX idx_dwarf_flows_archive_archived ON dwarf_flows_archive (archived_at);
 
 -- DRIVER: sqlite
 CREATE TABLE IF NOT EXISTS dwarf_flows_archive (
@@ -197,11 +200,12 @@ CREATE TABLE IF NOT EXISTS dwarf_flows_archive (
     created_at           DATETIME NOT NULL DEFAULT NOW_UTC(),
     started_at           DATETIME NOT NULL DEFAULT NOW_UTC(),
     updated_at           DATETIME NOT NULL DEFAULT NOW_UTC(),
-    touch                INTEGER  NOT NULL DEFAULT 0
+    touch                INTEGER  NOT NULL DEFAULT 0,
+    archived_at          DATETIME NOT NULL DEFAULT '9999-12-31 23:59:59.000'
 );
 
 -- DRIVER: sqlite
-CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_status ON dwarf_flows_archive (status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_status ON dwarf_flows_archive (status, archived_at);
 
 -- DRIVER: sqlite
 CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_workflow_url ON dwarf_flows_archive (workflow_url);
@@ -216,4 +220,4 @@ CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_surgraph_step ON dwarf_flows_
 CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_root ON dwarf_flows_archive (root_flow_id);
 
 -- DRIVER: sqlite
-CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_updated ON dwarf_flows_archive (updated_at);
+CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_archived ON dwarf_flows_archive (archived_at);
