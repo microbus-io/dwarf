@@ -970,9 +970,9 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	return nil
 }
 
-// deleteFlow schedules an ended flow (and its subgraph subtree) for deletion by the reaper - it does NOT delete
-// rows inline. It stamps delete_after_ms=1 (due immediately) on the root; the reaper removes the whole tree on its
-// next pass. A flow that has not ended is a 409: the caller terminates it first, so a live delete_after_ms never
+// deleteFlow removes an ended flow and its subgraph subtree. A live one is scheduled for deletion by the reaper - its
+// rows are not deleted inline: it stamps delete_after_ms=1 (due immediately) on the root, and the reaper removes the
+// whole tree on its next pass. An archived one is deleted at once in its day (deleteArchivedFlow). A flow that has not ended is a 409: the caller terminates it first, so a live delete_after_ms never
 // coexists with a resumable flow, and nothing a Delete does can race a Resume.
 func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	shardNum, flowHour, flowID, flowToken, err := keys.ParseFlowKey(flowKey)

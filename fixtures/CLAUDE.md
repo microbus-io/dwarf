@@ -195,7 +195,7 @@ loops over (arm, check, block) - a rendezvous per occurrence, not a spin on an o
 Each fixture owns its own engine *and* its own `hosts.Mux`, so there is no cross-test sharing to coordinate. `hosts.Mux`
 still guards its handler maps with a `RWMutex` because the engine's own worker goroutines dispatch concurrently while
 the test registers handlers; fixture task/graph URLs are namespaced per file (`<fixture>.verify:428/<task>`) by
-convention. A fixture asserting over the **full** flow set (`List`/`Purge`/`ShardInfo`) gets a clean database for free
+convention. A fixture asserting over the **full** flow set (the lists/`Purge`/`ShardInfo`) gets a clean database for free
 - its engine sees only its own flows.
 
 A fixture needing a **non-default topology** (multiple `SetShard`s, `SetTimeBudget`, a specific `SetWorkers` count) or

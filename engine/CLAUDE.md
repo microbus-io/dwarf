@@ -3638,8 +3638,8 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
     ends, which cycles with the reaper's move. A read must have no side effect and tolerate rows vanishing, since it
     may run on both sides.
   - **The archive pass closes the same way**, so a tree removed from its day mid-read is a 404 rather than what the
-    read gathered by then. Only a whole day's drop removes archived rows today; the guard is in place before
-    `Delete` and `Purge` reach the archive and remove single trees. A missing table there (`sequel.IsUndefinedTableError`: a day dropped since the locate, or a directory row outliving
+    read gathered by then: `Delete` and `Purge` remove single trees from a day, and retention drops whole days. A
+    missing table there (`sequel.IsUndefinedTableError`: a day dropped since the locate, or a directory row outliving
     its day, which the locate returns unchecked) is a 404. Any other error is returned.
   - **An archived flow that has not ended is a 500 from `Snapshot`**: only a bug leaves one, and reported as running
     it would hold an `Await` until its deadline. An interrupted flow is never archived, so `Snapshot`'s interrupted
@@ -4239,8 +4239,9 @@ call (the per-shard debug path is `ShardInfo` + `Query.Shard`). `Limit` is requi
   tie can reach shards x `reapBatchRows`: at 16 shards, the whole maximum. And **commit order is not stamp order** - a
   long batch stamped earlier can commit after a later one - so the godoc tells a walk to keep its newest bound a few
   seconds behind now. Neither list has a cursor or a promise of a stable walk.
-- **`Purge` still divides `Limit`**: `ceil(Limit/shards)` per shard, results concatenated, so a call can mark up
-  to `shards * ceil(Limit/shards)` roots. Its godoc and `docs/flows.md` say so.
+- **`Purge` takes the exact oldest `Limit` across shards**, through the same merge (ascending), and inherits the
+  31-day cap: a retention purge goes a month at a time, as the godoc and `docs/flows.md` say, rather than `Purge`
+  walking a longer window itself - the cap bounds what one call touches.
 
 Pinned by `fixtures/listorder_test.go` (`ListLive`: globally descending, and a smaller `Limit` returns exactly the
 prefix) and `engine/list_test.go` (each list reading its own tables, `ListArchived`'s order, window, clamp and cap,

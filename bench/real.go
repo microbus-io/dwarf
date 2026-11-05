@@ -480,8 +480,10 @@ func runReal(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 				case <-tick.C:
 				}
 				for runCtx.Err() == nil {
+					// A month at a time: a Purge's window reaches at most 31 days of the archive.
+					to := time.Now().Add(-cfg.retention)
 					n, done, err := engines[0].Purge(runCtx, workflow.Query{Status: workflow.StatusCompleted,
-						FromTime: time.Unix(0, 0), ToTime: time.Now().Add(-cfg.retention), Limit: 4096})
+						FromTime: to.Add(-30 * 24 * time.Hour), ToTime: to, Limit: 4096})
 					purged.Add(int64(n))
 					if err != nil || done {
 						break

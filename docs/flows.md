@@ -176,8 +176,8 @@ split a longer range. A search over many days wants a low `Limit`; a walk throug
 filters or the window. An archived flow never changes, so you can walk `ListArchived` back through a range a window at
 a time, each ending just after the oldest `ArchivedAt` you hold, dropping the flows you already have: flows archived
 together share an `ArchivedAt`. Polling forward from your last check up to now sees each flow once, about a minute
-after it ended. Keep a walk's newest bound a few seconds behind now: a batch archived together can appear a moment
-after a later one. Each shard records its own times, so flows within the clock skew between two shard servers may be
+after it ended, provided a walk's newest bound stays behind now by more than an archiving batch takes - seconds,
+longer for a very large tree: a batch archived together can appear after a later one. Each shard records its own times, so flows within the clock skew between two shard servers may be
 listed out of order.
 
 ## Pausing and resuming
@@ -311,7 +311,8 @@ to delete it. `Delete` of a flow already deleted from the archive returns 404.
 `Purge` takes the same `workflow.Query` as the lists, and needs `Limit` (at most 65,536) and both ends of a window.
 It removes the oldest first, the archived ones before the ones not archived yet, at most `Limit` roots in a call,
 and says when it is done: call it until it is. Its window is on `ArchivedAt` for an archived flow, cut and capped at
-31 days as for `ListArchived`, and on `UpdatedAt`, when it ended, for one not archived yet. A `Status` that has not
+31 days as for `ListArchived` - purge a longer range a month at a time - and on `UpdatedAt`, when it ended, for one
+not archived yet. A `Status` that has not
 ended (`running`, `interrupted`) is a 400.
 
 ```go

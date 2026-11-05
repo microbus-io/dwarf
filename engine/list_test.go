@@ -256,6 +256,8 @@ func TestListArchived_TheWindowIsClampedToTheArchive(t *testing.T) {
 		assert.NoError(err, "31 days, all in the past")
 		_, err = long.ListArchived(ctx, workflow.Query{FromTime: time.Now().Add(-(20 * 24 * time.Hour)), ToTime: time.Now().Add(60 * 24 * time.Hour), Limit: 10})
 		assert.NoError(err, "a window reaching 60 days ahead is cut to today")
+		_, err = long.ListArchived(ctx, workflow.Query{FromTime: time.Now().Add(-(30 * 24 * time.Hour)), ToTime: time.Now().Add(48 * time.Hour), Limit: 10})
+		assert.NoError(err, "31 days, and the day past today it reads beside them uncounted")
 	})
 }
 
@@ -418,4 +420,23 @@ func TestSQLTime_RoundsUpToTheColumnsPrecision(t *testing.T) {
 	assert.Equal("2026-11-04 01:02:03.123", arg, "an exact millisecond is kept")
 	_, arg = sqlTime("pgx", time.Date(2026, 11, 4, 1, 2, 3, 123456700, time.UTC))
 	assert.Equal("2026-11-04 01:02:03.123457", arg)
+}
+
+// TestListArchived_RetentionZeroStillReadsToday pins the archived list at a retention of 0: today's tables are still
+// read, holding what a run with a retention archived before a restart.
+func TestListArchived_RetentionZeroStillReadsToday(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e := archiveEngine(t, treeMux(), 0)
+	today, err := e.archives.Load().byShard[1].Today(ctx)
+	assert.NoError(err)
+	root := endedRoots(t, e, 1)[0]
+	moveInto(t, e, root, today)
+	got, err := e.ListArchived(ctx, workflow.Query{FromTime: time.Now().Add(-time.Hour), ToTime: time.Now().Add(time.Hour), Limit: 10})
+	assert.NoError(err)
+	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
+		t.Skip("midnight passed during the test")
+	}
+	assert.Equal([]int{root}, idsOf(t, got))
 }

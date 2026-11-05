@@ -200,7 +200,7 @@ without fragmentation or excessive write amplification.
 | Index | Columns | Purpose |
 |---|---|---|
 | PK | `(flow_id)` | Row lookups by flow ID |
-| `idx_dwarf_flows_status` | `(status, updated_at)` | The `FromTime`/`ToTime` range of `ListLive` and `Purge` given a status (a range seek on this exact prefix), and the orphan sweep's `status='running'` equality (`recoverOrphanedFlows`). It is **not** an index for the lists' `flow_id` order (see below). Its running band does not churn per step: no step writes the flow row, and a lock grab never moves `updated_at`, so a running flow's entry moves only on a genuine status transition (see the `updated_at`/`touch` catalog rows) |
+| `idx_dwarf_flows_status` | `(status, updated_at)` | The `FromTime`/`ToTime` range of `ListLive` and `Purge` given a status (a range seek on this exact prefix), and the orphan sweep's `status='running'` equality (`recoverOrphanedFlows`). It serves the live reads' `updated_at` order only for one status (see "The lists get no live indexes of their own"). Its running band does not churn per step: no step writes the flow row, and a lock grab never moves `updated_at`, so a running flow's entry moves only on a genuine status transition (see the `updated_at`/`touch` catalog rows) |
 | `idx_dwarf_flows_workflow_url` | `(workflow_url)` | The lists by workflow URL |
 | `idx_dwarf_flows_surgraph` | `(surgraph_flow_id)`, partial `WHERE surgraph_flow_id > 0` on pgx/sqlite/mssql | Walking the subgraph chain |
 | `idx_dwarf_flows_surgraph_step` | `(surgraph_step_id)`, partial `WHERE surgraph_step_id > 0` on pgx/sqlite/mssql | Point lookups on the caller-step link (`WHERE surgraph_step_id=?`): the `flow.Retry` reap (`fork.go`), the parked-step wedge sweep, and `Step`-navigation. Cheap to carry: `surgraph_step_id` is write-once at insert (no update churn/fragmentation) and `0` for every root flow, so the partial index covers only subgraph children. Without it, the retry-reap's unindexed predicate is the SQL-Server clustered-index-scan U-lock **deadlock** class (the same one the fan-in `successor_id` write avoids by targeting primary keys; see that write in `dispatch.go`). Same profile as `idx_dwarf_flows_surgraph` above. **Deliberately single-column**, not `(surgraph_step_id, flow_id)`: the `ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)` probes on this column - the wedge sweep's latest-child lookup (`wedge.go`) and `Step`-navigation's descent into a child subgraph (`history.go`: the own-child probe and `skipSurgraphForward`/`skipSurgraphBackward`) - each match only the handful of retry-attempt children of one caller step, and History's subgraph walk is one batched `root_flow_id` scan (`loadSubgraphChildren`), not a per-step probe. A second key column would only widen every subgraph-child insert against the write-amplification budget for no measurable gain |
@@ -387,26 +387,12 @@ set that covers a cross-product, and adding one per filter would tax the write p
 screen. So most list filters are deliberately unindexed (see the `fairness_key` catalog row), and that is a
 decision, not an omission.
 
-**In particular, `idx_dwarf_flows_status` cannot serve an `ORDER BY f.flow_id DESC LIMIT` - `Purge`'s selection - and
-does not need to.** Do not add `(status, flow_id)` for it. Measured on
-Postgres (500k flows: 499,600 `completed`, 400 `failed`), the two plans the planner actually picks are
-self-balancing:
-
-| Live read | Plan | Cost |
-|---|---|---|
-| no status filter | backward PK scan | 6 buffers |
-| `Status: completed` (common) | backward PK scan, `Rows Removed by Filter: 1` | 6 buffers |
-| `Status: failed` (rare) | index seek -> 400-row band -> top-N heapsort | 404 buffers |
-
-A **rare** status has a small band, so sorting it is cheap. A **common** status makes the backward PK scan
-optimal - it finds the first 100 matches in ~101 rows, and is **~67x cheaper** than the index path would be. The
-planner *chooses* the PK scan there; it is not "falling back." Cost is
-bounded by `min(band, ~limit/selectivity)`; the only genuinely expensive case is a status band that is large in absolute terms (e.g. 100k `interrupted`), on a cold operator path.
-
-`ListLive` orders the live table by `updated_at DESC` within its window. Given a status, `(status, updated_at)` serves
-it as one range, already in order; given none, nothing serves the order and every live row matching the filters and
-the window is sorted for the top `Limit` - cheap while the live table holds what is running plus about a minute of
-ended flows, not when ended flows pile up behind a failing archive. Its plan at scale is not measured.
+**The live reads order by `updated_at`**: `ListLive` descending within its window, `Purge`'s live side ascending
+over the ended statuses. Given one status, `(status, updated_at)` serves it as one range, already in order; given
+several or none, nothing serves the order and every live row matching the filters and the window is sorted for the
+top `Limit` - cheap while the live table holds what is running plus about a minute of ended flows, not when ended
+flows pile up behind a failing archive. Their plans at scale are not measured. Do not add an index for them before a
+measurement says one pays for its write cost.
 An archive day's read orders by `archived_at`, which the day tables index for it (`(status, archived_at)`,
 `(archived_at)`): a day is written once and read in that order, so the index costs no status churn there.
 
@@ -436,9 +422,9 @@ rather than binding it (`status=?`). This is load-bearing for index usability, n
   never arbitrary input - reaches the SQL string; there is no injection surface. Inlining is the fix chosen over
   unfiltering the mssql indexes, which would bloat them with the unbounded terminal-step history the partial
   index exists to exclude. Note the lists' win is *not* the filtered-index case (`idx_dwarf_flows_status` is
-  unfiltered): there a parameter defeats the seek because the `ORDER BY flow_id DESC` + `LIMIT` under a
-  density-average estimate makes the optimizer clustered-scan for a *rare* status; the literal lets it read the
-  histogram and seek. Same fix, different reason.
+  unfiltered): there a parameter defeats the seek because an `ORDER BY ... LIMIT` under a density-average
+  estimate makes the optimizer scan for a *rare* status; the literal lets it read the histogram and seek. Same fix,
+  different reason.
 
 **Two deliberate exceptions stay bound (`?`):** (1) `SET status=?` **assignments** (an assignment is not a
 predicate and never selects an index); (2) a `WHERE` predicate whose status is a runtime *variable* on a

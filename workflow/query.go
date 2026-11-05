@@ -20,10 +20,11 @@ import "time"
 
 // Query specifies the filters, the time window and the limit for listing or purging flows.
 //
-// The window is FromTime, inclusive, to ToTime, exclusive. ListArchived needs both; for ListLive and Purge each is
+// The window is FromTime, inclusive, to ToTime, exclusive. ListArchived and Purge need both; for ListLive each is
 // optional. Times compare at the database's precision: microseconds on PostgreSQL, milliseconds elsewhere.
-// ListLive's and Purge's window is on when a flow last changed status (FlowSummary.UpdatedAt) - for an ended flow,
-// when it ended; ListArchived's is on when a flow was archived (FlowSummary.ArchivedAt).
+// ListLive's window is on when a flow last changed status (FlowSummary.UpdatedAt); ListArchived's on when a flow was
+// archived (FlowSummary.ArchivedAt); Purge's on the archive time for an archived flow and on when it ended for one not
+// archived yet. On the archive, a window may reach at most 31 days.
 type Query struct {
 	Status      string `json:"status,omitzero"`
 	WorkflowURL string `json:"workflowURL,omitzero"`
@@ -63,9 +64,8 @@ type Query struct {
 	// the flow key. Any '%' or '_' in the value is matched literally, not as a wildcard, so "a_b" matches only
 	// "a_b" (not "axb") and "50%" matches only a literal "50%".
 	Search string `json:"search,omitzero"`
-	// Limit is the most flows ListLive and ListArchived return: required, at most 65,536. The result is the first
-	// Limit flows in the list's order across every shard queried. A search over many days wants a low Limit; a walk
-	// through a time range wants short windows. Purge takes at most min(Limit, 4096) roots, divided across shards:
-	// each shard marks up to ceil(Limit/shards), so a call can mark as many as shards*ceil(Limit/shards).
+	// Limit is the most flows ListLive and ListArchived return, and the most roots Purge removes: required, at most
+	// 65,536. The result is the first Limit in the call's order across every shard queried. A search over many days
+	// wants a low Limit; a walk through a time range wants short windows.
 	Limit int `json:"limit,omitzero"`
 }

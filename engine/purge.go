@@ -76,7 +76,14 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (removed int, 
 	if err != nil {
 		return gone, false, errors.Trace(err)
 	}
-	return gone, len(live) < limit-took && gone == took+len(live), nil
+	return gone, purgeDone(limit, took, len(live), gone), nil
+}
+
+// purgeDone reports whether a Purge call that took took archived and live live roots, removing gone of them, left
+// nothing matching: neither side had more than it took, and every root it took was removed - a live root archived
+// between its selection and its mark was not, and the next call finds it in the archive.
+func purgeDone(limit, took, live, gone int) bool {
+	return took < limit && live < limit-took && gone == took+live
 }
 
 // oldestLiveEndedRoots returns the ended roots in the live tables matching query, not marked for deletion, the oldest
@@ -142,7 +149,7 @@ func (e *Engine) markLiveRoots(ctx context.Context, roots []listRow) (int, error
 	return int(marked.Load()), errors.Trace(err)
 }
 
-// deleteArchivedRoots deletes the trees of the archived roots, each in the day its archived_at falls in, a transaction
+// deleteArchivedRoots deletes the trees of the archived roots, each in the day the list read it from, a transaction
 // per run of trees that fits in about reapBatchRows rows (at most purgeChunk roots), and returns how many roots it
 // deleted.
 func (e *Engine) deleteArchivedRoots(ctx context.Context, roots []listRow) (int, error) {
@@ -152,12 +159,10 @@ func (e *Engine) deleteArchivedRoots(ctx context.Context, roots []listRow) (int,
 	}
 	var deleted atomic.Int64
 	err := e.onShardsOf(ctx, roots, func(ctx context.Context, db *sequel.DB, rows []listRow) error {
-		// The day a tree is in is the day its archived_at falls in: the reaper stamps no time past the end of the day
-		// it files in.
+		// Each row carries the day its list branch read it from.
 		byDay := map[int][]int{}
 		for _, lr := range rows {
-			d := archiver.DayOf(lr.at, set.dayLength)
-			byDay[d] = append(byDay[d], lr.flowID)
+			byDay[lr.day] = append(byDay[lr.day], lr.flowID)
 		}
 		for day, dayIDs := range byDay {
 			slices.Sort(dayIDs)

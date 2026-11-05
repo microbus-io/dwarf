@@ -1486,9 +1486,9 @@ func (e *Engine) ListLive(ctx context.Context, query workflow.Query) (summaries 
 //
 // It has no pagination and no cursor. An archived flow never changes, so a caller can walk a time range in windows,
 // each ending just after the oldest ArchivedAt it holds, dropping the flows already held: flows archived together
-// share one ArchivedAt. A caller polling forward from its last check up to now sees each flow once. Keep the newest
-// bound a few seconds behind now: flows archived together are stamped with their batch's start, so they can appear a
-// moment after a later stamp has. Archive times come from each shard's database and the window is cut by this
+// share one ArchivedAt. A caller polling forward from its last check up to now sees each flow once, provided its newest
+// bound stays behind now by more than an archiving batch takes - seconds, longer for a very large tree: flows archived
+// together are stamped with their batch's start, so they can appear after a later stamp has. Archive times come from each shard's database and the window is cut by this
 // process's clock, so flows within the skew between them may be listed out of order, or, at a window's edge, missed.
 func (e *Engine) ListArchived(ctx context.Context, query workflow.Query) (summaries []workflow.FlowSummary, err error) {
 	if err := e.ensureStarted(); err != nil {
@@ -1527,7 +1527,7 @@ func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 //
 // Query.Limit (at most 65,536) and both bounds of the window are required. The window is on when a flow was archived
 // for an archived flow and on when it ended for one not archived yet; on the archive it is cut, and may reach at
-// most 31 days, as for ListArchived. Returns how many roots it removed, and whether it is done: call it again until
+// most 31 days, as for ListArchived, or the call is a 400: purge a longer range a month at a time. Returns how many roots it removed, and whether it is done: call it again until
 // done is true, with a fresh ToTime each time. A flow still live when one call reads it can be archived before the
 // next, with an archive time of when it moved: a ToTime fixed before then no longer reaches it.
 //

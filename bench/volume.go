@@ -376,7 +376,7 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 	pctx, pcancel := context.WithTimeout(ctx, 2*time.Minute)
 	markStart := time.Now()
 	marked, _, err := engines[0].Purge(pctx, workflow.Query{Status: workflow.StatusCompleted,
-		FromTime: time.Unix(0, 0), ToTime: time.Now().Add(time.Hour), Limit: 4096})
+		FromTime: time.Now().Add(-30 * 24 * time.Hour), ToTime: time.Now().Add(time.Hour), Limit: 4096})
 	report.PurgeMarkMs = float64(time.Since(markStart)) / float64(time.Millisecond)
 	pcancel()
 	if err == nil {

@@ -54,6 +54,7 @@ type listRow struct {
 	shard   int
 	flowID  int
 	at      time.Time // archived_at for an archived flow, updated_at for a live one
+	day     int       // the archive day the flow was read from; 0 for a live one
 }
 
 // summaryColumns are what a list reads of a flow, f being its flows table and s its steps table. The names are unique,
@@ -62,16 +63,21 @@ const summaryColumns = "f.flow_id, f.flow_token, f.created_hour, f.workflow_url,
 	" f.error, f.cancel_reason, f.created_at, f.started_at, f.updated_at, f.priority, f.fairness_key, f.surgraph_flow_id," +
 	" f.trace_parent, f.archived_at"
 
-// scanListRow reads one row of summaryColumns from shardIdx.
+// scanListRow reads one row of summaryColumns from shardIdx - followed, for an archived flow, by the archive day its
+// branch selected.
 func scanListRow(rows *sequel.Rows, shardIdx int, archived bool) (listRow, error) {
 	lr := listRow{shard: shardIdx}
 	var flowToken, flowError, cancelReason, traceParent string
 	var flowHour, surgraphFlowID int
 	var taskName sql.NullString
 	var archivedAt time.Time
-	err := rows.Scan(&lr.flowID, &flowToken, &flowHour, &lr.summary.WorkflowURL, &lr.summary.WorkflowName,
+	dest := []any{&lr.flowID, &flowToken, &flowHour, &lr.summary.WorkflowURL, &lr.summary.WorkflowName,
 		&lr.summary.Status, &taskName, &flowError, &cancelReason, &lr.summary.CreatedAt, &lr.summary.StartedAt,
-		&lr.summary.UpdatedAt, &lr.summary.Priority, &lr.summary.FairnessKey, &surgraphFlowID, &traceParent, &archivedAt)
+		&lr.summary.UpdatedAt, &lr.summary.Priority, &lr.summary.FairnessKey, &surgraphFlowID, &traceParent, &archivedAt}
+	if archived {
+		dest = append(dest, &lr.day)
+	}
+	err := rows.Scan(dest...)
 	if err != nil {
 		return lr, errors.Trace(err)
 	}
@@ -220,12 +226,14 @@ func (e *Engine) listArchived(ctx context.Context, query workflow.Query, limit i
 	// The window's archive days, clamped to the retention's first day and to today: nothing is archived before the one
 	// or after the other. One more day past today is read when the window reaches it, for a database clock ahead of
 	// this process's across midnight.
+	// At a retention of 0 that is today alone: nothing is archived then, but today's tables can still hold what a run
+	// with a retention archived before a restart.
 	set := e.archives.Load()
-	if set == nil || e.retentionDays <= 0 {
+	if set == nil {
 		return nil, nil
 	}
 	today := archiver.DayOf(now, set.dayLength)
-	fromDay := max(archiver.DayOf(w.lower, set.dayLength), today-e.retentionDays)
+	fromDay := max(archiver.DayOf(w.lower, set.dayLength), today-max(e.retentionDays, 0))
 	toDay := min(archiver.DayOf(w.upper.Add(-time.Nanosecond), set.dayLength), today)
 	if span := toDay - fromDay + 1; span > maxEndedWindowDays {
 		return nil, errors.New("the time window reaches %d days of the archive; a call reads at most %d", span,
@@ -270,7 +278,10 @@ func (e *Engine) listArchived(ctx context.Context, query workflow.Query, limit i
 				// Each branch is a derived table so it can carry its own ORDER BY and limit on every dialect: SQLite
 				// allows neither on a compound member, and SQL Server allows an ORDER BY in a derived table only with
 				// OFFSET/FETCH, which LIMIT_OFFSET is there.
-				branches[i] = "SELECT * FROM (SELECT " + summaryColumns + " FROM " + migrations.FlowsTable(d) + " f" +
+				// The branch names its own day, so a caller acting on a row (Purge) finds its table without reading the
+				// day back from archived_at as the driver parsed it, which on MySQL follows the DSN's loc.
+				branches[i] = "SELECT * FROM (SELECT " + summaryColumns + ", " + strconv.Itoa(d) + " AS archive_day FROM " +
+					migrations.FlowsTable(d) + " f" +
 					stepsJoin(migrations.StepsTable(d)) + " WHERE " + branchWhere +
 					" ORDER BY f.archived_at " + order + ", f.flow_id " + idOrder + " LIMIT_OFFSET(?, 0)) b" + strconv.Itoa(i)
 				args = append(append(args, branchArgs...), limit)

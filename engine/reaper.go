@@ -34,7 +34,7 @@ import (
 )
 
 // The batch sizes are Engine fields (reapBatch, reapBatchRows) so a test can drive a pass of several batches. A
-// batch considers up to reapBatch due roots, which keeps each IN (...) literal list plannable, as purgeCap does, and
+// batch considers up to reapBatch due roots, which keeps each IN (...) literal list plannable, as purgeChunk does, and
 // moves about reapBatchRows rows - a tree's joined steps - so it takes many small trees or few large ones in a
 // transaction of about the same size, and always at least one tree. For as long as a batch's transaction runs,
 // vacuum cannot remove any row that died after it began.
