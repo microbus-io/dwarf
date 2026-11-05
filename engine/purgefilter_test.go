@@ -29,8 +29,8 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestPurge_EveryListFilterNarrows pins that Purge accepts any filter the lists do, on its own, and still rejects a
-// query that names nothing to narrow by: Shard and Limit bound a purge but select every flow they reach.
+// TestPurge_EveryListFilterNarrows pins that Purge accepts any filter the lists do, beside the window and the Limit it
+// requires, and rejects a query missing either end of the window or the Limit.
 func TestPurge_EveryListFilterNarrows(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -55,13 +55,19 @@ func TestPurge_EveryListFilterNarrows(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 
-	for _, q := range []workflow.Query{{}, {Shard: 1}, {Limit: 10}, {Shard: 1, Limit: 10}} {
-		_, err := e.Purge(ctx, q)
+	now := time.Now()
+	for _, q := range []workflow.Query{
+		{}, {Shard: 1}, {Limit: 10},
+		{FromTime: now.Add(-time.Hour), Limit: 10},
+		{ToTime: now.Add(time.Hour), Limit: 10},
+		{FromTime: now.Add(-time.Hour), ToTime: now.Add(time.Hour)},
+	} {
+		_, _, err := e.Purge(ctx, q)
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "%+v must be rejected", q)
 	}
 
 	// The tenant erasure the docs describe: a FairnessKey alone marks that tenant's flows and no other's.
-	n, err := e.Purge(ctx, workflow.Query{FairnessKey: "tenantA"})
+	n, _, err := e.Purge(ctx, enginetest.Recent(workflow.Query{FairnessKey: "tenantA"}))
 	assert.NoError(err)
 	assert.Equal(1, n)
 	summaries, err := enginetest.ListAll(ctx, e, workflow.Query{WorkflowURL: "pf/g"})
@@ -76,7 +82,7 @@ func TestPurge_EveryListFilterNarrows(t *testing.T) {
 	for _, q := range []workflow.Query{
 		{StoppedTaskName: "Work"}, {Priority: 99}, {FromTime: time.Now().Add(-time.Hour)}, {Search: "no-such-flow"},
 	} {
-		_, err := e.Purge(ctx, q)
+		_, _, err := e.Purge(ctx, enginetest.Recent(q))
 		assert.NoError(err, "%+v", q)
 	}
 }

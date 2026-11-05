@@ -138,16 +138,16 @@ func TestPurgeLoopflow(t *testing.T) {
 	defer releaseTask()
 	<-running // ensure it is actually running before we purge
 
-	// Drain loop: Purge completed roots two at a time until it returns 0.
+	// Drain loop: Purge completed roots two at a time until it says it is done.
 	totalDeleted := 0
 	iterations := 0
 	for {
-		n, err := eng.Purge(ctx, workflow.Query{Status: workflow.StatusCompleted, Limit: 2})
+		n, done, err := eng.Purge(ctx, enginetest.Recent(workflow.Query{Status: workflow.StatusCompleted, Limit: 2}))
 		if !assert.NoError(err) {
 			return
 		}
 		totalDeleted += n
-		if n == 0 {
+		if done {
 			break
 		}
 		iterations++

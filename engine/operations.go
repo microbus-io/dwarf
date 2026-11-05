@@ -33,6 +33,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/graphcache"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/latch"
+	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -994,7 +995,7 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 		flowID, flowToken, flowHour,
 	).Scan(&flowStatus, &surgraphFlowID, &deleteAfterMs)
 	if err == sql.ErrNoRows {
-		return errors.New("flow not found", http.StatusNotFound)
+		return e.deleteArchivedFlow(ctx, db, shardNum, flowID, flowToken, flowHour)
 	}
 	if err != nil {
 		return errors.Trace(err)
@@ -1027,14 +1028,14 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	if n, _ := res.RowsAffected(); n > 0 {
 		return nil
 	}
-	// The stamp matched nothing, so the row moved since the read: the reaper archived the tree (gone from the live
-	// tables, which are all Delete reaches: a 404), or a racing Delete or Purge stamped it first (success).
+	// The stamp matched nothing, so the row moved since the read: the reaper archived the tree (deleted from the
+	// archive instead), or a racing Delete or Purge stamped it first (success).
 	err = db.QueryRowContext(ctx,
 		"SELECT delete_after_ms FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?",
 		flowID, flowToken, flowHour,
 	).Scan(&deleteAfterMs)
 	if err == sql.ErrNoRows {
-		return errors.New("flow not found", http.StatusNotFound)
+		return e.deleteArchivedFlow(ctx, db, shardNum, flowID, flowToken, flowHour)
 	}
 	if err != nil {
 		return errors.Trace(err)
@@ -1043,6 +1044,42 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 		return nil
 	}
 	return errors.New("the flow changed while it was being deleted; try again", http.StatusConflict)
+}
+
+// deleteArchivedFlow deletes an archived flow's tree at once in its day's tables (deleteArchivedTrees): it is not
+// marked, since the reaper reads only the live tables and an archived tree has nothing left to race. The flow is
+// found by the archive's locate and read with its token; a subgraph child's key is a 400, as on the live side.
+func (e *Engine) deleteArchivedFlow(ctx context.Context, db *sequel.DB, shardNum, flowID int, flowToken string, flowHour int) error {
+	notFound := errors.New("flow not found", http.StatusNotFound)
+	set := e.archives.Load()
+	if set == nil || set.byShard[shardNum] == nil {
+		return notFound
+	}
+	day, err := set.byShard[shardNum].LocateFlow(ctx, flowID, flowHour)
+	if errors.StatusCode(err) == http.StatusNotFound {
+		return notFound
+	}
+	if err != nil {
+		return errors.Trace(err)
+	}
+	var surgraphFlowID int
+	err = db.QueryRowContext(ctx, "SELECT surgraph_flow_id FROM "+migrations.FlowsTable(day)+
+		" WHERE flow_id=? AND flow_token=? AND created_hour=?", flowID, flowToken, flowHour).Scan(&surgraphFlowID)
+	// A day dropped since the locate, or a directory row outliving its day, is a missing table: the flow is gone.
+	if err == sql.ErrNoRows || sequel.IsUndefinedTableError(err) {
+		return notFound
+	}
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if surgraphFlowID != 0 {
+		return errors.New("cannot delete a subgraph child; use the root flow key", http.StatusBadRequest)
+	}
+	n, err := deleteArchivedTrees(ctx, db, day, []int{flowID})
+	if sequel.IsUndefinedTableError(err) || (err == nil && n == 0) {
+		return notFound // dropped, or deleted by a racing Delete or Purge
+	}
+	return errors.Trace(err)
 }
 
 // run creates, starts, and awaits a flow in one call.
@@ -1234,122 +1271,6 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	// while the flow was running is waiting for it to SETTLE, which resuming is the opposite of.
 	e.enqueueStep(ctx, shardNum, leafStepID.(int))
 	return nil
-}
-
-func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
-	// Shard and Limit bound a purge but select every flow they reach, so neither counts as a filter.
-	narrowed := query.Status != "" || query.WorkflowURL != "" || query.WorkflowName != "" ||
-		query.StoppedTaskName != "" || query.FairnessKey != "" || query.Priority != 0 ||
-		!query.FromTime.IsZero() || !query.ToTime.IsZero() || query.Search != ""
-	if !narrowed {
-		return 0, errors.New("purge requires at least one filter; Shard and Limit do not narrow it", http.StatusBadRequest)
-	}
-	// A subgraph child cannot be purged independently - it is removed as part of its root's subtree. Reject
-	// IncludeSubgraphs rather than silently ignoring it, so a caller is not surprised the flag did nothing.
-	if query.IncludeSubgraphs {
-		return 0, errors.New("purge cannot include subgraphs; a subgraph child is purged with its root", http.StatusBadRequest)
-	}
-	// Purge removes only ended flows, so a status filter naming any other status could only ever match nothing.
-	if query.Status != "" && workflow.IsValidStatus(query.Status) && !workflow.IsTerminalStatus(query.Status) {
-		return 0, errors.New("purge removes only ended flows; status %q has not ended", query.Status, http.StatusBadRequest)
-	}
-	// Cap the matched-root count per call so the per-shard id list embedded into each DELETE's `IN (...)`
-	// predicate stays well under the size where the optimizer struggles. This is not just a slow-plan concern:
-	// on SQL Server a large enough literal IN-list can *fail* to plan outright (errors 8623 "query processor
-	// ran out of internal resources" / 8632 "expression services limit reached"), a hard error rather than a
-	// slow query - which is why there is a hard cap. That failure regime is in the tens of thousands of terms;
-	// 4096 keeps an order-of-magnitude of headroom under it while still purging in useful batches. It is a
-	// single unbatched statement (ids embedded as integer literals via intCSV, so the per-driver bind-param
-	// ceiling - SQL Server 2100 / older SQLite 999 - does not apply; the ceiling here is IN-list planning, not
-	// statement size). A caller trimming more loops Purge until it returns 0.
-	const purgeCap = 4096
-	limit := query.Limit
-	if limit <= 0 || limit > purgeCap {
-		limit = purgeCap
-	}
-	indices, pos := e.shardOrdinals()
-
-	// Purge selects root flows only and marks each matched root for deletion; the reaper removes its whole
-	// subgraph subtree.
-	joinSQL, whereSQL, baseArgs, err := e.queryClauses(query, "f.surgraph_flow_id=0")
-	if err != nil {
-		return 0, errors.Trace(err)
-	}
-	restrictShardNum := query.Shard
-
-	singleShard := restrictShardNum != 0
-	perShardLimit := limit
-	if !singleShard && len(indices) > 0 {
-		perShardLimit = max((limit+len(indices)-1)/len(indices), 1)
-	}
-
-	perShardDeleted := make([]int, len(pos))
-	err = e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
-		if restrictShardNum != 0 && shardIdx != restrictShardNum {
-			return nil
-		}
-		// A turn on each shard it reads, so this queues for that shard's connections like any other caller
-		// instead of taking them from work already under way.
-		ctx, doneTurn := e.opTurn(ctx, shardIdx, "purge")
-		defer doneTurn()
-		where := whereSQL
-		args := append([]any(nil), baseArgs...)
-		if sc, scArgs := searchClause(db.DriverName(), shardIdx, query.Search); sc != "" {
-			where += " AND " + sc
-			args = append(args, scArgs...)
-		}
-		if timeConds, timeArgs := timeConditions(db.DriverName(), "f.updated_at", query); len(timeConds) > 0 {
-			where += " AND " + strings.Join(timeConds, " AND ")
-			args = append(args, timeArgs...)
-		}
-		args = append(args, perShardLimit)
-		// Purge MARKS, it does not delete: select ended candidate roots not already scheduled, then stamp
-		// delete_after_ms=1 (due immediately) so the reaper removes each tree on its next pass.
-		selectIDs := "SELECT DISTINCT f.flow_id FROM dwarf_flows f" + joinSQL +
-			" WHERE " + where + " AND f.status IN (" + terminalStatusesSQL + ") AND f.delete_after_ms=0 ORDER BY f.flow_id LIMIT_OFFSET(?, 0)"
-		rows, err := db.QueryContext(ctx, selectIDs, args...)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		var flowIDs []int
-		for rows.Next() {
-			var fid int
-			if err := rows.Scan(&fid); err != nil {
-				rows.Close()
-				return errors.Trace(err)
-			}
-			flowIDs = append(flowIDs, fid)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return errors.Trace(err)
-		}
-		if len(flowIDs) == 0 {
-			return nil
-		}
-
-		// One set-based UPDATE per shard. ids are trusted integers embedded as literals to dodge the per-driver
-		// bind-param ceiling. The count returned is roots MARKED (reaped shortly after). An ended flow never changes
-		// status again, so no re-check against the query is needed; the terminal guard is defense in depth.
-		res, err := db.ExecContext(ctx,
-			"UPDATE dwarf_flows SET delete_after_ms=1"+
-				" WHERE flow_id IN ("+intCSV(flowIDs)+") AND status IN ("+terminalStatusesSQL+") AND delete_after_ms=0",
-		)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		n, _ := res.RowsAffected()
-		perShardDeleted[pos[shardIdx]] = int(n)
-		return nil
-	})
-	if err != nil {
-		return 0, errors.Trace(err)
-	}
-	total := 0
-	for _, n := range perShardDeleted {
-		total += n
-	}
-	return total, nil
 }
 
 func (e *Engine) continueFlow(ctx context.Context, flowKey string, additionalState any) (nextKey string, err error) {

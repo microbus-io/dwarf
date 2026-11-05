@@ -225,7 +225,7 @@ func TestPurge_ReaperRemovesTree(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(2, shardFlowCount(t, e, shardNum)) // root + subgraph child
 
-	n, err := e.Purge(ctx, workflow.Query{WorkflowURL: "pr/parent"})
+	n, _, err := e.Purge(ctx, enginetest.Recent(workflow.Query{WorkflowURL: "pr/parent"}))
 	assert.NoError(err)
 	assert.Equal(1, n) // one root marked
 

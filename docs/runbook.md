@@ -419,7 +419,8 @@ recommended production dialect; see [Deployment](deployment.md).
 
 ## Disk did not shrink after a purge
 
-**Expected on PostgreSQL.** `Delete` and `Purge` mark flows; a reaper removes the rows within about a minute.
+**Expected on PostgreSQL.** `Delete` and `Purge` delete archived flows at once, and mark live ones for a reaper that
+removes the rows within about a minute.
 But PostgreSQL holds its high-water mark — freed space is reused for new rows rather than returned to the
 filesystem. Measured on one rig: 198 MB still allocated for 37 remaining rows.
 

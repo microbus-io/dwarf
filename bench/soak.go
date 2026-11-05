@@ -143,7 +143,8 @@ func runSoak(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 			case <-t.C:
 				pctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 				_, _ = engines[0].ListArchived(pctx, workflow.Query{FromTime: time.Now().Add(-time.Hour), ToTime: time.Now().Add(time.Hour), Limit: 100})
-				n, err := engines[0].Purge(pctx, workflow.Query{Status: workflow.StatusCompleted, ToTime: time.Now().Add(-90 * time.Second)})
+				n, _, err := engines[0].Purge(pctx, workflow.Query{Status: workflow.StatusCompleted,
+					FromTime: time.Unix(0, 0), ToTime: time.Now().Add(-90 * time.Second), Limit: 4096})
 				cancel()
 				if err == nil {
 					purged.Add(int64(n))

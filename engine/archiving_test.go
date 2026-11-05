@@ -355,9 +355,9 @@ func TestArchiving_APassDrainsInSeveralBatches(t *testing.T) {
 	}
 }
 
-// TestArchiving_DeleteOfATreeArchivedMeanwhileIs404 pins Delete against the reaper: a tree archived between Delete's
-// read and its stamp is reported not found, never as deleted - it sits in the archive, which Delete cannot reach.
-func TestArchiving_DeleteOfATreeArchivedMeanwhileIs404(t *testing.T) {
+// TestArchiving_DeleteOfATreeArchivedMeanwhileDeletesItThere pins Delete against the reaper: a tree archived between
+// Delete's read and its stamp is deleted from the archive instead, never reported deleted while it stays there.
+func TestArchiving_DeleteOfATreeArchivedMeanwhileDeletesItThere(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -370,9 +370,22 @@ func TestArchiving_DeleteOfATreeArchivedMeanwhileIs404(t *testing.T) {
 	deleted := make(chan error, 1)
 	go func() { deleted <- e.Delete(ctx, fk) }()
 	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeDeleteStamp, 10*time.Second))
+	today, err := e.archives.Load().byShard[1].Today(ctx)
+	assert.NoError(err)
 	e.reapDueFlows(ctx)
+	_, _, rootID, _, err := keys.ParseFlowKey(fk)
+	assert.NoError(err)
+	flows, _ := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), rootID)
+	if flows == 0 {
+		t.Skip("midnight passed during the pass")
+	}
 	e.seams.Resume(engineseams.CheckpointBeforeDeleteStamp)
-	assert.Equal(http.StatusNotFound, errors.StatusCode(<-deleted))
+	assert.NoError(<-deleted)
+	flows, steps := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), rootID)
+	assert.Zero(flows, "deleted from the archive")
+	assert.Zero(steps)
+	_, err = e.Snapshot(ctx, fk)
+	assert.Equal(http.StatusNotFound, errors.StatusCode(err))
 }
 
 // TestArchiving_ABatchThatMeetsContentionWaitsForTheNextPass pins that lock contention past Transact's retries is an

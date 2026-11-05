@@ -103,8 +103,8 @@ A cap that fits a small control flow would reject a document-processing workflow
 tens of megabytes of state per flow, and picking one number for both is impossible - so the engine refuses to
 own the number. The host holds the caller/tenant identity a quota turns on, so it enforces limits where that
 context lives: reject an over-large `initialState`/`Baggage` before `Create`, cap a `forEach` source array in
-an author-space entry task, bound retention (`Purge` marks at most `purgeCap`, 4096, roots per call, so a
-retention job loops). For a **pass-through host** that adds no policy of its own, the obligation flows through to the
+an author-space entry task, bound retention (`Purge` takes at most its `Limit` roots per call, so a
+retention job loops until it is done). For a **pass-through host** that adds no policy of its own, the obligation flows through to the
 application using that host - it is not silently absorbed anywhere.
 
 **The one bound the engine does enforce is what one column can store** (`maxPayloadBytes`, 256,000,000 bytes,
@@ -3391,11 +3391,11 @@ lists it. **Retention counts from archiving, not from the
 end**: a tree archived late - after an outage, say - is kept its full retention from then.
 
 Deleting without archiving is either operator-driven (`Delete`, `Purge`) or an explicit author opt-in
-(`DeleteOnCompletion`): a flow whose output and history are not needed. `Delete` and `Purge` reach only the live
-tables - an ended flow inside its `archiveGrace` - and an archived flow is removed by the retention or `PurgeBefore`.
+(`DeleteOnCompletion`): a flow whose output and history are not needed. `Delete` and `Purge` reach both sides: an
+ended flow still live is marked, an archived one deleted at once in its day (`purge.go`, `deleteArchivedTrees`).
 
-**Deletion is deferred: mark, then reap.** No path deletes rows inline. `DeleteOnCompletion`, `Delete`, and `Purge`
-all **stamp `delete_after_ms`** on the target **root** flow (`0`=keep; `>0`=reap at `updated_at + delete_after_ms`);
+**On the live side, deletion is deferred: mark, then reap.** No path deletes live rows inline. `DeleteOnCompletion`,
+`Delete`, and `Purge` all **stamp `delete_after_ms`** on the target **root** flow (`0`=keep; `>0`=reap at `updated_at + delete_after_ms`);
 a dedicated **reaper** goroutine (`reaperLoop`, 15 s ticker) later removes the whole subtree set-based, keyed on
 `root_flow_id`. Only an ended root is ever stamped, so no rows are deleted where a lifecycle op could interleave
 (see "Deletion race gate" below), and a disposable flow's **outcome is observable** during its grace window.
@@ -3413,7 +3413,7 @@ a dedicated **reaper** goroutine (`reaperLoop`, 15 s ticker) later removes the w
   window the reaper removes it and reads 404. (`Snapshot`/`Await` deliberately serve the outcome rather than 404 - a
   hard-immediate-404 for a redaction-critical `Delete` is a deferred sub-decision.)
 
-For operator-driven retention (both mark, do not delete inline):
+For operator-driven removal:
 
 Both remove **only ended flows**. An unended flow is the caller's to `Terminate` first: deleting it would hide a
 terminate inside a delete, and nothing either operation does can then race a `Resume`.
@@ -3421,15 +3421,28 @@ terminate inside a delete, and nothing either operation does can then race a `Re
 - **`Delete(flowKey)`** stamps `delete_after_ms = 1` (due immediately) on the root after the read-guards (404 on
   unknown key, 400 on a subgraph-child key, 409 on any status that is not terminal). The stamp's own
   terminal-status guard is defense in depth. Already-scheduled (`delete_after_ms > 0`) is idempotent-success. The
-  reaper sweeps the subtree.
-- **`Purge(Query)`** marks matching ended roots with one set-based UPDATE per shard: it `SELECT DISTINCT`s candidate
-  roots (`f.surgraph_flow_id=0 AND f.status IN (terminal) AND f.delete_after_ms=0`, capped at `purgeCap` **4096**,
-  ids embedded as integer literals to dodge the per-driver bind-param ceiling), then `UPDATE ... SET
-  delete_after_ms=1 WHERE flow_id IN (ids) AND status IN (terminal) AND delete_after_ms=0`. **Keep the terminal
-  filter in the SELECT**, not only in the UPDATE: the SELECT is `LIMIT`ed, so unended candidates selected ahead of
-  ended ones would use up the limit, mark nothing, and end a caller's purge loop early
-  (`TestDeleteUnendedflow`). A `Query.Status` naming an unended status is a 400. Returns the count **marked**
-  (reaped shortly after). Same `Query` shape as the lists; **rejects** `IncludeSubgraphs` with 400.
+  reaper sweeps the subtree. **When the live read misses** - or the stamp finds the row gone, the reaper having
+  archived the tree between the read and the stamp - it locates the archive day and deletes the tree there
+  (`deleteArchivedFlow`): the root read with its token (a subgraph child's key a 400), then `deleteArchivedTrees`,
+  one transaction that locks the root first with the strength a `DELETE` takes (`lockRootsIn`: `FOR UPDATE`, or the
+  `touch` flip) - which serializes with Fork's lock on an archived source - then deletes the directory's rows for
+  the tree's flows, their steps, and the flows. Not marked: the reaper reads only the live tables, and an archived
+  tree has no `Resume` to race. A repeat is a 404, the tree gone. Pinned by `TestDelete_AnArchivedFlowIsDeletedInItsDay`
+  and `TestArchiving_DeleteOfATreeArchivedMeanwhileDeletesItThere`.
+- **`Purge(Query)`** (`purge.go`) needs `Limit` (at most `maxListLimit`) and both window bounds, and removes the
+  matching ended roots oldest first, at most `Limit` in all: **the archived ones first**, from the internal
+  ascending `listArchived` (so its window is on `archived_at`, cut and capped as there), each tree deleted at once
+  in the day its `archived_at` falls in - which the reaper's clamp makes exact - by `deleteArchivedTrees`; **then**,
+  with what `Limit` leaves, the live ended roots oldest ended first (`oldestLiveEndedRoots`, its window on
+  `updated_at`), merged across shards in Go and marked (`delete_after_ms=1`). Both sides go in chunks of
+  `purgeChunk` (4,096) roots per statement: a literal `IN` list in the tens of thousands of terms can fail to plan
+  outright on SQL Server (errors 8623 / 8632). **Keep the terminal filter in the live selection**, not only in the
+  mark: the selection is limited, so unended candidates selected ahead of ended ones would use up the limit and mark
+  nothing (`TestDeleteUnendedflow`). It returns `(removed, done)`: `done` when neither side had more than it took
+  and every root it took was removed - a live root archived between the selection and its mark is not, and the next
+  call finds it in the archive. A `Query.Status` naming an unended status, and `IncludeSubgraphs`, are a 400. Its
+  turns record `op=purge` once per stage per shard, not once per shard: one turn across the stages would hold a
+  shard's turn while the call merges the other shards. Pinned by `TestPurge_OldestArchivedFirstThenTheLive`.
 
 **The reaper** (`reapDueFlows`, `reaper.go`) runs on its own dedicated goroutine + a 15 s ticker (a single goroutine,
 inherently non-overlapping), stopped by `drainRuntime` cancelling its ctx. On each shard this replica DISPATCHES (a
@@ -3564,7 +3577,7 @@ The lists and `History` exclude it; `Continue` and `Fork` **409** (each names a 
 (terminal); `Delete` is idempotent-success.
 
 Both share filter clauses with the lists. The `Query.StoppedTaskName` filter joins `dwarf_steps` and matches the `task_name`
-of the step the flow stopped at, so it matches no running flow. `Query.FromTime`/`ToTime` filter `f.updated_at`,
+of the step the flow stopped at, so it matches no running flow. `Query.FromTime`/`ToTime` filter `f.updated_at` on the live side and `f.archived_at` on the archive's,
 bound as text (`timeConditions`). `Query.FairnessKey` filters on the
 engine-native `f.fairness_key` (the host typically sets it to the tenant, so "list tenant X" is "list
 `fairness_key = X`"); `Query.Priority` narrows to one scheduling band. Empty key / zero priority disable their

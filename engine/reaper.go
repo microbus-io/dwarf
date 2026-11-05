@@ -552,21 +552,26 @@ func archivedAtSQL(driverName string, dayEnds time.Time) (expr string, args []an
 	return "CASE WHEN NOW_UTC()<" + last + " THEN NOW_UTC() ELSE " + last + " END", []any{arg, arg}
 }
 
-// lockDueRoots locks the roots among rootIDs that are still due, and returns them ascending. The rows are about to
-// be deleted, so on PostgreSQL and MySQL the lock is FOR UPDATE, the strength a DELETE takes; SQLite and SQL Server
-// take it by flipping touch, as lockFlowRows does.
+// lockDueRoots locks the roots among rootIDs that are still due, and returns them ascending.
 func lockDueRoots(ctx context.Context, tx *sequel.Tx, rootIDs []int, kind reapKind) ([]int, error) {
-	where := "flow_id IN (" + intCSV(rootIDs) + ") AND " + kind.due
+	return lockRootsIn(ctx, tx, liveTables.flows, "flow_id IN ("+intCSV(rootIDs)+") AND "+kind.due, kind.dueArgs...)
+}
+
+// lockRootsIn locks the rows of flows that match where and returns their flow ids, ascending. The rows are about to be
+// deleted, so on PostgreSQL and MySQL the lock is FOR UPDATE, the strength a DELETE takes; SQLite and SQL Server take
+// it by flipping touch, as lockFlowRows does. It serializes with Fork's lock on the same root (lockRows), which on
+// PostgreSQL is FOR NO KEY UPDATE and conflicts with it.
+func lockRootsIn(ctx context.Context, tx *sequel.Tx, flows, where string, args ...any) ([]int, error) {
 	var stmt string
 	switch tx.DriverName() {
 	case "pgx", "mysql":
-		stmt = "SELECT flow_id FROM dwarf_flows WHERE " + where + " ORDER BY flow_id FOR UPDATE"
+		stmt = "SELECT flow_id FROM " + flows + " WHERE " + where + " ORDER BY flow_id FOR UPDATE"
 	case "mssql":
-		stmt = "UPDATE dwarf_flows SET touch=1-touch OUTPUT inserted.flow_id WHERE " + where
+		stmt = "UPDATE " + flows + " SET touch=1-touch OUTPUT inserted.flow_id WHERE " + where
 	default:
-		stmt = "UPDATE dwarf_flows SET touch=1-touch WHERE " + where + " RETURNING flow_id"
+		stmt = "UPDATE " + flows + " SET touch=1-touch WHERE " + where + " RETURNING flow_id"
 	}
-	rows, err := tx.QueryContext(ctx, stmt, kind.dueArgs...)
+	rows, err := tx.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -591,8 +596,13 @@ func lockDueRoots(ctx context.Context, tx *sequel.Tx, rootIDs []int, kind reapKi
 // the batch's transaction - an ended tree's size does not move - so the batch locks only the roots it takes, and its
 // transaction still opens with a write, which SQLite needs.
 func (e *Engine) rootsWithinRows(ctx context.Context, db *sequel.DB, roots []int) ([]int, error) {
-	rows, err := db.QueryContext(ctx, "SELECT f.root_flow_id, COUNT(*) FROM dwarf_flows f"+
-		" LEFT JOIN dwarf_steps s ON s.flow_id=f.flow_id WHERE f.root_flow_id IN ("+intCSV(roots)+") GROUP BY f.root_flow_id")
+	return e.rootsWithinRowsIn(ctx, db, liveTables, roots)
+}
+
+// rootsWithinRowsIn is rootsWithinRows over the given tables: the live ones, or an archive day's.
+func (e *Engine) rootsWithinRowsIn(ctx context.Context, db *sequel.DB, t flowTables, roots []int) ([]int, error) {
+	rows, err := db.QueryContext(ctx, "SELECT f.root_flow_id, COUNT(*) FROM "+t.flows+" f"+
+		" LEFT JOIN "+t.steps+" s ON s.flow_id=f.flow_id WHERE f.root_flow_id IN ("+intCSV(roots)+") GROUP BY f.root_flow_id")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

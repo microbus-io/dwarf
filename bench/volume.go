@@ -365,16 +365,18 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 	report.FlowsSubmitted = flows.Load()
 	report.Errors = errCount.Load()
 
-	// Retention at size, in two separately-measured halves: Purge only STAMPS delete_after_ms (bounded by
-	// purgeCap, 4096 roots per call), and the reaper's own ticker does the set-based delete afterwards. A
-	// failed row count invalidates the reap rate, which is a difference of two of them.
+	// Retention at size, in two separately-measured halves: Purge (4096 roots a call) deletes the archived trees it
+	// takes at once and stamps delete_after_ms on the live ones, and the reaper's own ticker does the set-based
+	// delete of those afterwards. PurgeMarkMs therefore includes the archive's deletes. A failed row count
+	// invalidates the reap rate, which is a difference of two of them.
 	before, _, err := rowCounts(ctx, engines[0])
 	if err != nil {
 		invalid("row count before the purge", err.Error())
 	}
 	pctx, pcancel := context.WithTimeout(ctx, 2*time.Minute)
 	markStart := time.Now()
-	marked, err := engines[0].Purge(pctx, workflow.Query{Status: workflow.StatusCompleted, Limit: 4096})
+	marked, _, err := engines[0].Purge(pctx, workflow.Query{Status: workflow.StatusCompleted,
+		FromTime: time.Unix(0, 0), ToTime: time.Now().Add(time.Hour), Limit: 4096})
 	report.PurgeMarkMs = float64(time.Since(markStart)) / float64(time.Millisecond)
 	pcancel()
 	if err == nil {

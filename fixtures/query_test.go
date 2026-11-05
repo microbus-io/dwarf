@@ -94,7 +94,7 @@ func TestQuery_WorkflowName(t *testing.T) {
 	assert.Equal(betas, len(searched))
 
 	// Purge accepts WorkflowName as a sole filter and deletes only the matching flows.
-	deleted, err := e.Purge(ctx, workflow.Query{WorkflowName: "AlphaFlow"})
+	deleted, _, err := e.Purge(ctx, enginetest.Recent(workflow.Query{WorkflowName: "AlphaFlow"}))
 	assert.NoError(err)
 	assert.Equal(alphas, deleted)
 	remaining, err := enginetest.ListAll(ctx, e, workflow.Query{})
@@ -245,7 +245,7 @@ func TestQuery_SearchByFlowKey(t *testing.T) {
 	if assert.NoError(err) && assert.Len(found, 1) {
 		assert.Equal(flowKeys[1], found[0].FlowKey)
 	}
-	marked, err := e.Purge(ctx, workflow.Query{Search: flowKeys[2]})
+	marked, _, err := e.Purge(ctx, enginetest.Recent(workflow.Query{Search: flowKeys[2]}))
 	assert.NoError(err)
 	assert.Equal(1, marked)
 	rest, err := enginetest.ListAll(ctx, e, workflow.Query{})

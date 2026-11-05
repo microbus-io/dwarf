@@ -465,7 +465,7 @@ cohort, a subgraph tree or a fan-out goes out with `slices.Chunk(ids, inListChun
 `CASE WHEN id=? THEN ?` per row binds two per id and overruns at ~700, so bind a per-row value in a per-row statement
 instead. Only SQL Server shows the overrun, so `fixtures/wideflow_test.go` is the pin there. A list bounded by
 construction (a surgraph chain, a step's DAG neighbours) needs no chunking; `intCSV` inlines trusted integers and binds
-nothing, for a list already capped at `purgeCap`.
+nothing, for a list already capped (`purgeChunk`, the reaper's batches).
 
 ### MySQL Column Defaults
 

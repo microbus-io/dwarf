@@ -296,30 +296,40 @@ An archived flow reads as it did before it moved: `Snapshot`, `Fingerprint`, `Aw
 reads as not found.
 
 ```go
-err := eng.Delete(ctx, flowKey)          // schedule one ended flow (and its subtree) for deletion
-count, err := eng.Purge(ctx, query)      // schedule the matching ended flows for deletion, capped at 4096
-err = eng.PurgeBefore(ctx, t)            // drop every archived day before t's, on every shard
+err := eng.Delete(ctx, flowKey)                // remove one ended flow and its subtree
+removed, done, err := eng.Purge(ctx, query)    // remove the matching ended flows, oldest first, Limit at a time
+err = eng.PurgeBefore(ctx, t)                  // drop every archived day before t's, on every shard
 ```
 
-`Delete` and `Purge` remove an ended flow sooner, in the minute before it is archived. They **mark** flows for
-deletion (they do not delete inline); a background reaper removes each flow's whole subgraph subtree shortly
-after, without archiving it. The marked flow drops out of the lists and `History` immediately, so it is logically
-gone even though the row lingers briefly. Both remove only flows that have ended: `Delete` of a running or
-interrupted flow returns 409 and `Purge` skips one, so `Terminate` a flow first to delete it. A `Purge` whose
-`Status` names a status that has not ended (`running`, `interrupted`) returns 400. `Delete` of a flow already
-archived returns 404. `Purge` returns the count of roots marked, at most 4096 per call (fewer if `Query.Limit`
-is lower). `Purge` divides `Limit` across shards, each marking up to `ceil(Limit/shards)`, so a multi-shard call
-can mark slightly more.
+`Delete` and `Purge` remove ended flows sooner than the retention, each with its whole subgraph subtree. An
+archived flow is deleted at once. One not archived yet, in the minute after it ends, is **marked** for deletion: a
+background reaper removes it shortly after, without archiving it, and the marked flow drops out of the lists and
+`History` immediately, so it is logically gone even though the row lingers briefly. Both remove only flows that
+have ended: `Delete` of a running or interrupted flow returns 409 and `Purge` skips one, so `Terminate` a flow first
+to delete it. `Delete` of a flow already deleted from the archive returns 404.
 
-`Purge` takes the same `workflow.Query` as the lists; its time bounds are on when a flow last changed status - for
-an ended flow, when it ended:
+`Purge` takes the same `workflow.Query` as the lists, and needs `Limit` (at most 65,536) and both ends of a window.
+It removes the oldest first, the archived ones before the ones not archived yet, at most `Limit` roots in a call,
+and says when it is done: call it until it is. Its window is on `ArchivedAt` for an archived flow, cut and capped at
+31 days as for `ListArchived`, and on `UpdatedAt`, when it ended, for one not archived yet. A `Status` that has not
+ended (`running`, `interrupted`) is a 400.
 
 ```go
-eng.Purge(ctx, workflow.Query{
-    Status: workflow.StatusFailed,
-    ToTime: time.Now().Add(-7 * 24 * time.Hour), // failed more than a week ago
-})
+for {
+    _, done, err := eng.Purge(ctx, workflow.Query{
+        Status:   workflow.StatusFailed,
+        FromTime: time.Now().Add(-30 * 24 * time.Hour),
+        ToTime:   time.Now().Add(-7 * 24 * time.Hour), // failed and archived more than a week ago
+        Limit:    4096,
+    })
+    if err != nil || done {
+        break
+    }
+}
 ```
+
+A row delete writes in proportion to the rows and leaves dead rows for the database to vacuum: `Delete` and `Purge`
+are for removing specific records, and bulk removal is the retention's and `PurgeBefore`'s, which drop whole days.
 
 A flow created with `FlowOptions.DeleteOnCompletion` schedules its own deletion when it completes successfully
 (a failed, terminated or cancelled flow is archived like any other). Its outcome stays observable via `Await`/`Snapshot` for a short grace window
@@ -362,7 +372,7 @@ Each operation adds these to the 503 and 500 every call can return:
 | `History` | malformed key | unknown flow, or one scheduled for deletion | | |
 | `Step` | malformed key | unknown step | | |
 | `ListLive`, `ListArchived` | invalid status or shard, no `Limit` or one over 65,536, a `FromTime` not before `ToTime`; `ListArchived` with a status that has not ended, no `FromTime` or `ToTime`, or a window reaching more than 31 days of the archive | | | |
-| `Purge` | invalid status or shard, no filter (`Shard` and `Limit` are not filters), `IncludeSubgraphs`, or a `Status` that has not ended | | | |
+| `Purge` | invalid status or shard, no `Limit` or one over 65,536, no `FromTime` or `ToTime`, `IncludeSubgraphs`, a `Status` that has not ended, or a window reaching more than 31 days of the archive | | | |
 | `Resume` | malformed key, a subgraph child's key, data not JSON-marshalable | unknown flow | | the flow is not interrupted, including when a `Terminate` won the race |
 | `Cancel`, `Terminate` | malformed key, a subgraph child's key, a reason over 4,096 bytes or not valid UTF-8 without NUL | unknown flow | | |
 | `Fork` | malformed key, overrides not JSON-marshalable | unknown step | | the flow is not terminal, is scheduled for deletion, or holds an unresolved interrupt off the fork path |

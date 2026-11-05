@@ -158,14 +158,14 @@ func TestList_EachListReadsItsOwnTables(t *testing.T) {
 	assert.NoError(err)
 	assert.Len(before, 0, "ToTime is exclusive")
 
-	rows, err := e.listArchived(ctx, window, 100, true)
+	rows, err := e.listArchived(ctx, window, 100, true, "list_archived")
 	assert.NoError(err)
 	ascending := make([]int, len(rows))
 	for i, lr := range rows {
 		ascending[i] = lr.flowID
 	}
 	assert.Equal([]int{roots[0], roots[5], roots[1], roots[2]}, ascending, "oldest archived first")
-	rows, err = e.listArchived(ctx, window, 1, true)
+	rows, err = e.listArchived(ctx, window, 1, true, "list_archived")
 	assert.NoError(err)
 	if assert.Len(rows, 1) {
 		assert.Equal(roots[0], rows[0].flowID, "ascending, each day's read keeps its oldest")

@@ -93,12 +93,12 @@ func TestDeleteUnendedflow(t *testing.T) {
 	statusIs("Delete of a running flow", http.StatusConflict, eng.Delete(ctx, running))
 	statusIs("Delete of an interrupted flow", http.StatusConflict, eng.Delete(ctx, parked))
 	for _, status := range []string{workflow.StatusRunning, workflow.StatusInterrupted} {
-		_, err := eng.Purge(ctx, workflow.Query{Status: status})
+		_, _, err := eng.Purge(ctx, enginetest.Recent(workflow.Query{Status: status}))
 		statusIs("Purge by status "+status, http.StatusBadRequest, err)
 	}
 
 	// A Purge matching all three marks only the ended flow, and only ended flows count against its limit.
-	marked, err := eng.Purge(ctx, workflow.Query{WorkflowURL: "deleteunendedflow.verify:428/g", Limit: 1})
+	marked, _, err := eng.Purge(ctx, enginetest.Recent(workflow.Query{WorkflowURL: "deleteunendedflow.verify:428/g", Limit: 1}))
 	assert.NoError(err)
 	assert.Equal(1, marked)
 	_, err = eng.History(ctx, ended)

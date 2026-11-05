@@ -112,7 +112,7 @@ type listWindow struct {
 // FromTime and ToTime.
 func listWindowOf(query workflow.Query, required bool) (listWindow, error) {
 	if required && (query.FromTime.IsZero() || query.ToTime.IsZero()) {
-		return listWindow{}, errors.New("ListArchived needs a lower bound (FromTime) and an upper bound (ToTime)", http.StatusBadRequest)
+		return listWindow{}, errors.New("the call needs a window: a lower bound (FromTime) and an upper bound (ToTime)", http.StatusBadRequest)
 	}
 	w := listWindow{lower: query.FromTime, upper: query.ToTime}
 	if !w.lower.IsZero() && !w.upper.IsZero() && !w.lower.Before(w.upper) {
@@ -202,9 +202,9 @@ func (e *Engine) listLive(ctx context.Context, query workflow.Query) ([]workflow
 }
 
 // listArchived lists the archived flows, at most limit of them across shards, in mergeByTime's order on archived_at:
-// newest first, or ascending. Each shard reads every archive day the window reaches in one UNION ALL, each table's
+// newest first, or ascending. op names the operation for its turn's metric. Each shard reads every archive day the window reaches in one UNION ALL, each table's
 // newest (or oldest) limit under an outer limit; the live tables are never read.
-func (e *Engine) listArchived(ctx context.Context, query workflow.Query, limit int, ascending bool) ([]listRow, error) {
+func (e *Engine) listArchived(ctx context.Context, query workflow.Query, limit int, ascending bool, op string) ([]listRow, error) {
 	now := time.Now()
 	w, err := listWindowOf(query, true)
 	if err != nil {
@@ -251,7 +251,7 @@ func (e *Engine) listArchived(ctx context.Context, query workflow.Query, limit i
 		if a == nil {
 			return nil
 		}
-		ctx, doneTurn := e.opTurn(ctx, shardIdx, "list_archived")
+		ctx, doneTurn := e.opTurn(ctx, shardIdx, op)
 		defer doneTurn()
 		// Every archived flow has ended, so no status condition is added when the query names none: one would only
 		// steer the planner to the status index rather than the archive-time one the order wants.

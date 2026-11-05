@@ -737,7 +737,7 @@ func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
 	is503("ListLive", err)
 	_, err = e2.ListArchived(ctx, enginetest.Recent(workflow.Query{}))
 	is503("ListArchived", err)
-	_, err = e2.Purge(ctx, workflow.Query{}) // unguarded, it returns 0 marked and no error
+	_, _, err = e2.Purge(ctx, enginetest.Recent(workflow.Query{})) // unguarded, it returns 0 marked and no error
 	is503("Purge", err)
 	_, err = e2.ShardInfo(ctx)
 	is503("ShardInfo", err)

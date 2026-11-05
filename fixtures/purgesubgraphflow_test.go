@@ -90,14 +90,14 @@ func TestPurgeSubgraphflow(t *testing.T) {
 
 	t.Run("purge_rejects_include_subgraphs", func(t *testing.T) {
 		assert := testarossa.For(t)
-		_, err := eng.Purge(ctx, workflow.Query{WorkflowURL: "purgesub.verify:428/inner", IncludeSubgraphs: true})
+		_, _, err := eng.Purge(ctx, enginetest.Recent(workflow.Query{WorkflowURL: "purgesub.verify:428/inner", IncludeSubgraphs: true}))
 		assert.Error(err)
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
 	})
 
 	t.Run("purge_root_deletes_whole_tree", func(t *testing.T) {
 		assert := testarossa.For(t)
-		deleted, err := eng.Purge(ctx, workflow.Query{WorkflowURL: "purgesub.verify:428/parent"})
+		deleted, _, err := eng.Purge(ctx, enginetest.Recent(workflow.Query{WorkflowURL: "purgesub.verify:428/parent"}))
 		assert.NoError(err)
 		assert.Equal(1, deleted) // the count is the root flow marked, not its descendants
 

@@ -1168,7 +1168,7 @@ func TestMetrics_OperationSeconds(t *testing.T) {
 	_, err = eng.ShardInfo(ctx)
 	assert.NoError(err)
 	assert.NoError(eng.Delete(ctx, flowKey))
-	_, err = eng.Purge(ctx, workflow.Query{Status: workflow.StatusTerminated})
+	_, _, err = eng.Purge(ctx, enginetest.Recent(workflow.Query{Status: workflow.StatusTerminated}))
 	assert.NoError(err)
 	assert.NoError(eng.PurgeBefore(ctx, time.Now().Add(-48*time.Hour)))
 
@@ -1193,14 +1193,16 @@ func TestMetrics_OperationSeconds(t *testing.T) {
 	if !assert.NoError(reader.Collect(ctx, &rm)) {
 		return
 	}
-	once := []string{"history", "step", "fingerprint", "fork", "continue", "list_live", "list_archived", "shard_info", "delete", "purge",
+	once := []string{"history", "step", "fingerprint", "fork", "continue", "list_live", "list_archived", "shard_info", "delete",
 		"purge_before", "resume", "terminate", "cancel"}
 	for _, op := range once {
 		n, ok := histCount(rm, "dwarf_operation_seconds", map[string]string{"op": op, "shard": "1"})
 		assert.True(ok, "op=%s should be recorded on shard 1", op)
 		assert.Equal(uint64(1), n, "op=%s records one sample per call per shard", op)
 	}
-	n, _ := histCount(rm, "dwarf_operation_seconds", map[string]string{"op": "create", "shard": "1"})
+	n, _ := histCount(rm, "dwarf_operation_seconds", map[string]string{"op": "purge", "shard": "1"})
+	assert.True(n >= 1, "Purge records one sample per stage it runs on a shard")
+	n, _ = histCount(rm, "dwarf_operation_seconds", map[string]string{"op": "create", "shard": "1"})
 	assert.Equal(uint64(4), n, "Run's create half and the three Creates")
 	n, _ = histCount(rm, "dwarf_operation_seconds", map[string]string{"op": "snapshot", "shard": "1"})
 	assert.True(n >= 2, "Await reads the flow before and after it parks, and those reads are snapshots")
