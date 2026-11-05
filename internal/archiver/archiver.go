@@ -368,6 +368,21 @@ func (a *Archive) Whole(day int) bool {
 	return ok
 }
 
+// DaysIn returns the days from through to, inclusive and ascending, whose tables the archive knows to exist: from its
+// last catalog read, or from making the day since. A day dropped since by a peer is still listed until the next read
+// (Refresh), and a read of it then fails on its missing table.
+func (a *Archive) DaysIn(from, to int) []int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var days []int
+	for _, d := range a.known {
+		if d >= from && d <= to {
+			days = append(days, d)
+		}
+	}
+	return days
+}
+
 // DayLength returns how long the archive's days are.
 func (a *Archive) DayLength() time.Duration {
 	return a.dayLength

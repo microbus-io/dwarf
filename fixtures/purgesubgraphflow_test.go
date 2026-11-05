@@ -24,6 +24,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -83,7 +84,7 @@ func TestPurgeSubgraphflow(t *testing.T) {
 
 	// The child exists before the purge.
 	includeSubs := workflow.Query{WorkflowURL: "purgesub.verify:428/inner", IncludeSubgraphs: true}
-	subs, err := eng.List(ctx, includeSubs)
+	subs, err := enginetest.ListAll(ctx, eng, includeSubs)
 	assert.NoError(err)
 	assert.Equal(1, len(subs))
 
@@ -108,7 +109,7 @@ func TestPurgeSubgraphflow(t *testing.T) {
 		if assert.Error(err) {
 			assert.Equal(http.StatusNotFound, errors.StatusCode(err))
 		}
-		roots, err := eng.List(ctx, workflow.Query{WorkflowURL: "purgesub.verify:428/parent"})
+		roots, err := enginetest.ListAll(ctx, eng, workflow.Query{WorkflowURL: "purgesub.verify:428/parent"})
 		assert.NoError(err)
 		assert.Equal(0, len(roots))
 	})

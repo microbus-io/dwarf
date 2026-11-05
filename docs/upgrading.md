@@ -126,7 +126,7 @@ deploy:
 **Retiring a task safely:**
 
 1. Stop creating flows whose graphs reference it.
-2. Wait out the longest lifetime any existing flow can have. If you do not know it, find out: `List` on
+2. Wait out the longest lifetime any existing flow can have. If you do not know it, find out: `ListLive` on
    `Status: running` and on `Status: interrupted` shows what is still alive.
 3. Confirm nothing is left — including `interrupted` flows, which wait indefinitely and are the ones most
    likely to outlive your assumption.

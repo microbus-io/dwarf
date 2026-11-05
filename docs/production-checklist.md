@@ -93,8 +93,8 @@
 - [ ] **Backups cover every shard on the same schedule**, and a restore has been rehearsed against a staging
   fleet — the part worth testing is what your workflows do when they re-run.
   → [Backup and restore](backup-and-restore.md)
-- [ ] **`List` (and its `Query.Search`) is gated by credential** in your host. The engine has no notion of a caller, and
-  `List` is the one operation that returns flow keys wholesale — which are capabilities.
+- [ ] **`ListLive` and `ListArchived` (and their `Query.Search`) are gated by credential** in your host. The engine has
+  no notion of a caller, and the lists are the operations that return flow keys wholesale — which are capabilities.
   → [Data handling](data-handling.md#access-control-is-the-hosts-job)
 - [ ] **Quotas enforced before `Create`.** Beyond refusing any single value over 256 MB, the engine bounds
   nothing: not initial state size, not baggage, not fan-out width, not subgraph depth.
@@ -110,9 +110,9 @@
   at-least-once and two attempts can overlap. → [Writing tasks](tasks.md#idempotency)
 - [ ] **Tasks respect their context deadline.** A task that overruns its `TimeBudget` loses its lease to a
   peer and runs twice concurrently.
-- [ ] **No PII in error text or terminate/cancel reasons.** Error text is returned by both `List` and
+- [ ] **No PII in error text or terminate/cancel reasons.** Error text is returned by both the lists and
   `History` — the readers that otherwise expose no state payloads — and the terminate or cancel reason by
-  `List`. Both are substring-searchable. → [Writing tasks](tasks.md#keep-payload-data-out-of-error-text)
+  the lists. Both are substring-searchable. → [Writing tasks](tasks.md#keep-payload-data-out-of-error-text)
 - [ ] **Large integers read with typed accessors, or carried as strings.** Beyond ±2^53 storage is exact and
   `GetInt` and `when` expressions are exact, but an untyped read rounds. And **binary data base64-encoded** —
   a `NUL` byte is rejected by PostgreSQL and accepted by everything else.

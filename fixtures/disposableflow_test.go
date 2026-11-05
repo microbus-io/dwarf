@@ -33,6 +33,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -100,7 +101,7 @@ func TestDisposableflow(t *testing.T) {
 	if assert.Error(err) {
 		assert.Equal(http.StatusNotFound, errors.StatusCode(err))
 	}
-	roots, err := eng.List(ctx, workflow.Query{WorkflowURL: "disposable.verify:428/parent"})
+	roots, err := enginetest.ListAll(ctx, eng, workflow.Query{WorkflowURL: "disposable.verify:428/parent"})
 	if assert.NoError(err) {
 		assert.Equal(0, len(roots))
 	}

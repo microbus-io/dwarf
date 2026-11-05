@@ -131,23 +131,54 @@ outcome,  err := eng.Snapshot(ctx, flowKey)            // current status + state
 fp, status, err := eng.Fingerprint(ctx, flowKey)       // cheap change-detection token + status
 steps,    err := eng.History(ctx, flowKey)             // []workflow.FlowStep, the full execution record
 step,     err := eng.Step(ctx, stepKey)                // one step by key
-summaries, err := eng.List(ctx, query)                 // the newest matching flows, at most query.Limit
+live,     err := eng.ListLive(ctx, query)              // flows in the live tables, the most recently updated first
+archived, err := eng.ListArchived(ctx, query)          // archived flows, the most recently archived first
 ```
 
 `History` returns each step's task, depth, status, error, and timings — metadata only, **not** `state`/`changes`;
 use `Step` to read a single step's `state`/`changes`. Subgraph-executing
 steps carry nested `SubHistory` and the child flow's `SubgraphKey`: pass it to `Snapshot` for what the child
 returned, or to `Await`, `Poll`, `Fingerprint` or `History`. It is a read handle - operations that change a flow
-take the root's key. `List` takes a `workflow.Query` (status, workflow name, the task a flow stopped at,
-fairness key, priority, time window, shard, free-text `Search`, `Limit`) and returns the matching flows, newest
-created first; see [Retention](#retention) for the same query shape.
+take the root's key.
 
-**`List` returns at most `Limit` flows (default 100): the newest that match, across every shard.** It has no
-pagination, because flows change constantly: to see other flows, narrow the filters or the time window.
-`OlderThan` filters on when a flow last changed status, not on when it was created, so it is not a next page:
-set from the oldest `UpdatedAt` you hold, it reaches flows last updated before then, and can skip or repeat
-flows. The order across shards compares the creation times each shard's database recorded,
-so flows created within the clock skew between two shard servers may be listed out of order.
+### Listing flows
+
+Two lists take a `workflow.Query` (status, workflow name, the task a flow stopped at, fairness key, priority, time
+window, shard, free-text `Search`, `Limit`) and return the matching flows, at most `Limit` of them across every
+shard. Each reads one side of where flows are kept:
+
+- **`ListLive`** lists the flows in the live tables: running, sleeping, interrupted, and ended flows not archived
+  yet - an ended flow stays live about a minute before it moves to the archive. Any status may be asked for. The
+  most recently updated first; its window, optional, is on `UpdatedAt`, when a flow last changed status.
+- **`ListArchived`** lists the archived flows, the most recently archived first. Its window, required, is on
+  `ArchivedAt`, when a flow moved to the archive; a status that has not ended is a 400, since no such flow is ever
+  archived.
+
+Ties go by shard, then the newest flow. Every call needs `Limit` (at most 65,536). `ListArchived`'s window needs both
+ends: a lower bound, `FromTime` or `NewerThan`, and an upper bound, `ToTime` (exclusive) or `OlderThan`. To see live
+and archived flows both, call `ListLive`, then `ListArchived`: a flow archived between the two calls is then listed
+twice, never missed, so drop it by its key.
+
+```go
+failed, err := eng.ListArchived(ctx, workflow.Query{
+    Status:    workflow.StatusFailed,
+    NewerThan: 24 * time.Hour,
+    ToTime:    time.Now(),
+    Limit:     100,
+})
+```
+
+`ListArchived` reads every archive day its window reaches, on every shard. A window is cut to what the archive can
+hold - nothing before the retention's first day, nothing after now - and what is left may reach at most 31 days:
+split a longer range. A search over many days wants a low `Limit`; a walk through a time range wants short windows.
+
+**Neither list has pagination or a cursor.** A live flow changes under you, so to see other live flows, narrow the
+filters or the window. An archived flow never changes, so you can walk `ListArchived` back through a range a window at
+a time, each ending just after the oldest `ArchivedAt` you hold, dropping the flows you already have: flows archived
+together share an `ArchivedAt`. Polling forward from your last check up to now sees each flow once, about a minute
+after it ended. Keep a walk's newest bound a few seconds behind now: a batch archived together can appear a moment
+after a later one. Each shard records its own times, so flows within the clock skew between two shard servers may be
+listed out of order.
 
 ## Pausing and resuming
 
@@ -261,8 +292,8 @@ A flow that has not ended is never removed by the engine. About a minute after i
 which keeps each day's ended flows for `SetRetention` days (30 by default) and then drops the day whole;
 `PurgeBefore(t)` drops every archived day before t's. With a retention of 0 an ended flow is deleted instead.
 An archived flow reads as it did before it moved: `Snapshot`, `Fingerprint`, `Await`, `Poll`, `Run`, `History`,
-`Step` and `Continue` find it by its key, `Fork` clones it, and a flow whose day was dropped reads as not found.
-`List` shows only flows not yet archived.
+`Step` and `Continue` find it by its key, `Fork` clones it, `ListArchived` lists it, and a flow whose day was dropped
+reads as not found.
 
 ```go
 err := eng.Delete(ctx, flowKey)          // schedule one ended flow (and its subtree) for deletion
@@ -272,7 +303,7 @@ err = eng.PurgeBefore(ctx, t)            // drop every archived day before t's, 
 
 `Delete` and `Purge` remove an ended flow sooner, in the minute before it is archived. They **mark** flows for
 deletion (they do not delete inline); a background reaper removes each flow's whole subgraph subtree shortly
-after, without archiving it. The marked flow drops out of `List` and `History` immediately, so it is logically
+after, without archiving it. The marked flow drops out of the lists and `History` immediately, so it is logically
 gone even though the row lingers briefly. Both remove only flows that have ended: `Delete` of a running or
 interrupted flow returns 409 and `Purge` skips one, so `Terminate` a flow first to delete it. A `Purge` whose
 `Status` names a status that has not ended (`running`, `interrupted`) returns 400. `Delete` of a flow already
@@ -280,8 +311,8 @@ archived returns 404. `Purge` returns the count of roots marked, at most 4096 pe
 is lower). `Purge` divides `Limit` across shards, each marking up to `ceil(Limit/shards)`, so a multi-shard call
 can mark slightly more.
 
-`Purge` takes the same `workflow.Query` as `List`. `OlderThan` / `NewerThan` are database-anchored and
-compose:
+`Purge` takes the same `workflow.Query` as the lists; its time bounds are on when a flow last changed status.
+`OlderThan` / `NewerThan` are database-anchored and compose:
 
 ```go
 eng.Purge(ctx, workflow.Query{
@@ -330,7 +361,8 @@ Each operation adds these to the 503 and 500 every call can return:
 | `Snapshot`, `Fingerprint` | malformed key | unknown flow | | |
 | `History` | malformed key | unknown flow, or one scheduled for deletion | | |
 | `Step` | malformed key | unknown step | | |
-| `List`, `Purge` | invalid status or shard, a negative `OlderThan` or `NewerThan`; `Purge` with no filter (`Shard` and `Limit` are not filters), with `IncludeSubgraphs`, or with a `Status` that has not ended | | | |
+| `ListLive`, `ListArchived` | invalid status or shard, a negative `OlderThan` or `NewerThan`, no `Limit` or one over 65,536, an empty window; `ListArchived` with a status that has not ended, a missing lower or upper bound, or a window reaching more than 31 days of the archive | | | |
+| `Purge` | invalid status or shard, a negative `OlderThan` or `NewerThan`, no filter (`Shard` and `Limit` are not filters), `IncludeSubgraphs`, or a `Status` that has not ended | | | |
 | `Resume` | malformed key, a subgraph child's key, data not JSON-marshalable | unknown flow | | the flow is not interrupted, including when a `Terminate` won the race |
 | `Cancel`, `Terminate` | malformed key, a subgraph child's key, a reason over 4,096 bytes or not valid UTF-8 without NUL | unknown flow | | |
 | `Fork` | malformed key, overrides not JSON-marshalable | unknown step | | the flow is not terminal, is scheduled for deletion, or holds an unresolved interrupt off the fork path |

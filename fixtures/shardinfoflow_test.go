@@ -28,6 +28,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -86,7 +87,7 @@ func TestShardinfoflow(t *testing.T) {
 		totalFlows := 0
 		nonEmptyShards := 0
 		for i := 1; i <= numShards; i++ {
-			flows, err := eng.List(ctx, workflow.Query{Shard: i, Limit: total})
+			flows, err := enginetest.ListAll(ctx, eng, workflow.Query{Shard: i, Limit: total})
 			if !assert.NoError(err) {
 				return
 			}

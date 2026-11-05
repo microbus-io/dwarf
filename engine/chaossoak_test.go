@@ -179,9 +179,9 @@ func TestChaosSoak(t *testing.T) {
 	for _, k := range all {
 		_ = eng.Terminate(ctx, k, "drain")
 	}
-	// A final List sweep catches any non-terminal root not in `live` (e.g. a subgraph child promoted nowhere).
+	// A final ListLive sweep catches any non-terminal root not in `live` (e.g. a subgraph child promoted nowhere).
 	for _, st := range []string{workflow.StatusRunning, workflow.StatusInterrupted} {
-		summaries, err := eng.List(ctx, workflow.Query{Status: st, Limit: 200})
+		summaries, err := enginetest.ListAll(ctx, eng, workflow.Query{Status: st, Limit: 200})
 		if err == nil {
 			for _, s := range summaries {
 				_ = eng.Terminate(ctx, s.FlowKey, "drain")
@@ -538,9 +538,9 @@ func TestChaosSoak_Faults(t *testing.T) {
 	for _, k := range all {
 		_ = eng.Terminate(ctx, k, "drain")
 	}
-	// A List sweep catches any non-terminal root not in `live`.
+	// A ListLive sweep catches any non-terminal root not in `live`.
 	for _, st := range []string{workflow.StatusRunning, workflow.StatusInterrupted} {
-		summaries, err := eng.List(ctx, workflow.Query{Status: st, Limit: 200})
+		summaries, err := enginetest.ListAll(ctx, eng, workflow.Query{Status: st, Limit: 200})
 		if err == nil {
 			for _, s := range summaries {
 				_ = eng.Terminate(ctx, s.FlowKey, "drain")

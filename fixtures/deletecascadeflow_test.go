@@ -23,6 +23,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -133,7 +134,7 @@ func TestDeletecascadeflow(t *testing.T) {
 	if assert.Error(err) {
 		assert.Equal(404, errors.StatusCode(err))
 	}
-	roots, err := eng.List(ctx, workflow.Query{IncludeSubgraphs: true})
+	roots, err := enginetest.ListAll(ctx, eng, workflow.Query{IncludeSubgraphs: true})
 	if assert.NoError(err) {
 		for _, s := range roots {
 			assert.NotEqual(flowKey, s.FlowKey)

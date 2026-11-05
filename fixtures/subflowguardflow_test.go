@@ -24,6 +24,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -127,13 +128,13 @@ func TestSubflowGuardflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		// Default List by the inner URL finds nothing - subgraph children are excluded by default.
-		roots, err := eng.List(ctx, workflow.Query{WorkflowURL: "subflowguard.verify:428/inner"})
+		roots, err := enginetest.ListAll(ctx, eng, workflow.Query{WorkflowURL: "subflowguard.verify:428/inner"})
 		assert.NoError(err)
 		assert.Equal(0, len(roots))
 
 		// IncludeSubgraphs + the inner URL (which only ever runs as a subgraph) locates the child, marked
 		// Subgraph=true.
-		subs, err := eng.List(ctx, workflow.Query{WorkflowURL: "subflowguard.verify:428/inner", IncludeSubgraphs: true})
+		subs, err := enginetest.ListAll(ctx, eng, workflow.Query{WorkflowURL: "subflowguard.verify:428/inner", IncludeSubgraphs: true})
 		assert.NoError(err)
 		assert.Equal(1, len(subs))
 		if len(subs) == 1 {
@@ -142,7 +143,7 @@ func TestSubflowGuardflow(t *testing.T) {
 		}
 
 		// The parent (root) lists by default and is marked Subgraph=false.
-		parents, err := eng.List(ctx, workflow.Query{WorkflowURL: "subflowguard.verify:428/parent"})
+		parents, err := enginetest.ListAll(ctx, eng, workflow.Query{WorkflowURL: "subflowguard.verify:428/parent"})
 		assert.NoError(err)
 		assert.Equal(1, len(parents))
 		if len(parents) == 1 {

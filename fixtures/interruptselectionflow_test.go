@@ -238,7 +238,7 @@ func TestInterruptSnapshotFollowsTheRecordedInterrupt(t *testing.T) {
 		"UPDATE dwarf_steps SET updated_at=DATE_ADD_MILLIS(NOW_UTC(), -60000) WHERE flow_id=? AND task_name='B'", flowID)
 	assert.NoError(err)
 
-	summaries, err := eng.List(ctx, workflow.Query{WorkflowURL: "snaprecord.verify:428/g"})
+	summaries, err := enginetest.ListAll(ctx, eng, workflow.Query{WorkflowURL: "snaprecord.verify:428/g"})
 	if assert.NoError(err) && assert.Len(summaries, 1) {
 		assert.Equal("A", summaries[0].StoppedTaskName)
 	}

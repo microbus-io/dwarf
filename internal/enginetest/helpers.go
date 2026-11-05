@@ -79,3 +79,51 @@ func CountRows(t *testing.T, e Engine, shard int, query string, args ...any) int
 	assert.NoError(db.QueryRowContext(context.Background(), query, args...).Scan(&n))
 	return n
 }
+
+// Lister is the slice of *engine.Engine's exported surface the list helpers use.
+type Lister interface {
+	ListLive(ctx context.Context, query workflow.Query) ([]workflow.FlowSummary, error)
+	ListArchived(ctx context.Context, query workflow.Query) ([]workflow.FlowSummary, error)
+}
+
+// Recent returns query with a window over the last day, reaching an hour past now, and a Limit of 1,000, each only where
+// the query sets none of its own.
+func Recent(query workflow.Query) workflow.Query {
+	if query.FromTime.IsZero() && query.NewerThan == 0 {
+		query.NewerThan = 24 * time.Hour
+	}
+	if query.ToTime.IsZero() && query.OlderThan == 0 {
+		query.ToTime = time.Now().Add(time.Hour)
+	}
+	if query.Limit == 0 {
+		query.Limit = 1000
+	}
+	return query
+}
+
+// ListAll returns the flows Recent(query) matches, live and archived: ListLive's, then ListArchived's, a flow archived
+// between the two calls listed once. ListArchived is asked only for a status that may be archived, or none.
+func ListAll(ctx context.Context, e Lister, query workflow.Query) ([]workflow.FlowSummary, error) {
+	query = Recent(query)
+	all, err := e.ListLive(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	if query.Status != "" && !workflow.IsTerminalStatus(query.Status) {
+		return all, nil
+	}
+	archived, err := e.ListArchived(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(all))
+	for _, f := range all {
+		seen[f.FlowKey] = true
+	}
+	for _, f := range archived {
+		if !seen[f.FlowKey] {
+			all = append(all, f)
+		}
+	}
+	return all, nil
+}

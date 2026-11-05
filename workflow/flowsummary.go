@@ -39,6 +39,9 @@ type FlowSummary struct {
 	// when this attempt began dispatching, distinct from CreatedAt, when the flow was first created.
 	StartedAt time.Time `json:"startedAt,omitzero"`
 	UpdatedAt time.Time `json:"updatedAt,omitzero"`
+	// ArchivedAt is when the flow moved to the archive, normally about a minute after it ended, by the database's
+	// clock; zero for a flow still live. ListArchived orders by it.
+	ArchivedAt time.Time `json:"archivedAt,omitzero"`
 	// Priority is the flow's scheduling priority (>= 1, lower runs first), resolved at Create.
 	Priority int `json:"priority,omitzero"`
 	// FairnessKey is the flow's scheduling fairness bucket, resolved at Create.

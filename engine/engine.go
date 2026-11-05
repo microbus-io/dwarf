@@ -1335,7 +1335,7 @@ func (e *Engine) resolveFlowOptions(opts *workflow.FlowOptions) *workflow.FlowOp
 // It is not merely a nicety: without it the failure is a LIE rather than an error. Every key-addressed
 // operation routes through ShardSet.Shard, which returns "flow not found" (404) when no shard is open, so a
 // stopped engine tells the caller its flow does not exist - and a caller may act on that (stop retrying,
-// recreate the work). The cross-shard operations are worse: List/Purge/ShardInfo fan out over an EMPTY index
+// recreate the work). The cross-shard operations are worse: the lists, Purge and ShardInfo fan out over an EMPTY index
 // set and return SUCCESS with an empty result - "you have no flows". Both are indistinguishable from the
 // truth. 503 says the one true thing: the engine is not available, come back later.
 //
@@ -1451,22 +1451,58 @@ func (e *Engine) Step(ctx context.Context, stepKey string) (step *workflow.FlowS
 	return e.step(ctx, stepKey)
 }
 
-// List returns the newest flows matching query's filters, at most Query.Limit of them (default 100), newest
-// created first across every shard queried. It has no pagination: flows change constantly, so a caller wanting
-// different flows narrows the filters or the time window. OlderThan filters on when a flow last changed status, not
-// on its creation, so it is not a next page: it can skip or repeat flows.
+// ListLive returns the flows in the live tables matching query's filters, and its window on when each last changed
+// status (FlowSummary.UpdatedAt) if it sets one: flows running, sleeping or interrupted, and ended flows not archived
+// yet - an ended flow stays live about a minute before it moves to the archive. At most Query.Limit of them, the most
+// recently updated first, ties broken by shard and then newest flow. Query.Limit is required; the window's bounds are
+// not, and any status may be asked for.
 //
-// The order across shards compares the creation times recorded by each shard's own database, so flows created
-// within the clock skew between two shard servers may be listed out of order.
-func (e *Engine) List(ctx context.Context, query workflow.Query) (summaries []workflow.FlowSummary, err error) {
+// It has no pagination: a live flow changes under the caller, so a caller wanting other flows narrows the filters or
+// the window. The order across shards compares the times recorded by each shard's own database, so flows updated
+// within the clock skew between two shard servers may be listed out of order. To see live and archived flows both,
+// call ListLive, then ListArchived: a flow archived between the two calls is then listed twice, never missed, so drop
+// it by its key.
+func (e *Engine) ListLive(ctx context.Context, query workflow.Query) (summaries []workflow.FlowSummary, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
 	}
-	return e.list(ctx, query)
+	return e.listLive(ctx, query)
+}
+
+// ListArchived returns the archived flows matching query's filters within its window on when each was archived
+// (FlowSummary.ArchivedAt): at most Query.Limit of them, the most recently archived first, ties broken by shard and
+// then newest flow. A flow is archived about a minute after it ends; until then it is ListLive's. Query.Limit and both
+// of the window's bounds are required, and a Query.Status that has not ended is a 400.
+//
+// A window is cut to what the archive can hold: nothing before the retention's first day (SetRetention), nothing
+// archived after now; a window outside both returns no flows. What is left may reach at most 31 days of the archive -
+// today and the 30 before it, as much as the default retention keeps - or the call is a 400; split a longer range into
+// windows. Each day the window reaches is read on every shard, so a search over many days wants a low Limit. Times
+// compare at the database's precision: microseconds on PostgreSQL, milliseconds elsewhere.
+//
+// It has no pagination and no cursor. An archived flow never changes, so a caller can walk a time range in windows,
+// each ending just after the oldest ArchivedAt it holds, dropping the flows already held: flows archived together
+// share one ArchivedAt. A caller polling forward from its last check up to now sees each flow once. Keep the newest
+// bound a few seconds behind now: flows archived together are stamped with their batch's start, so they can appear a
+// moment after a later stamp has. Archive times come from each shard's database and the window is cut by this
+// process's clock, so flows within the skew between them may be listed out of order, or, at a window's edge, missed.
+func (e *Engine) ListArchived(ctx context.Context, query workflow.Query) (summaries []workflow.FlowSummary, err error) {
+	if err := e.ensureStarted(); err != nil {
+		return nil, errors.Trace(err)
+	}
+	limit, err := listLimit(query)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	rows, err := e.listArchived(ctx, query, limit, false)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return summariesOf(rows), nil
 }
 
 // Delete marks an ended flow (and its subgraph subtree) for deletion; a background reaper removes it shortly
-// after, without archiving it. The flow is excluded from List/History immediately, though Snapshot/Await/Run still
+// after, without archiving it. The flow is excluded from the lists and History immediately, though Snapshot/Await/Run still
 // report its outcome until the reaper removes it. It reaches a flow in the minute after it ends: an ended flow then
 // moves to the archive, which only the retention (SetRetention) and PurgeBefore remove, and Delete reports 404 for
 // it. Returns 404 for an unknown key, 400 for a subgraph-child key (address the root instead), and 409 for a flow
@@ -1479,12 +1515,12 @@ func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 }
 
 // Purge marks the ended flows matching a query (and their subgraph subtrees) for deletion; a background reaper
-// removes them shortly after, without archiving them. Marked flows are excluded from List/History immediately. It
+// removes them shortly after, without archiving them. Marked flows are excluded from the lists and History immediately. It
 // reaches flows in the minute after they end, before they move to the archive, which only the retention
 // (SetRetention) and PurgeBefore remove. Flows that have not ended are skipped, and a Query.Status naming a status
 // that has not ended is a 400. Returns the count of roots marked. A call marks at most min(Query.Limit, 4096)
 // roots, divided across shards (up to ceil(n/shards) per shard), so a multi-shard call can mark slightly more;
-// iterate until it returns 0 to mark everything. The query takes any filter List does; one that sets none (only
+// iterate until it returns 0 to mark everything. The query takes any filter the lists do; one that sets none (only
 // Shard or Limit, or nothing) is a 400.
 func (e *Engine) Purge(ctx context.Context, query workflow.Query) (marked int, err error) {
 	if err := e.ensureStarted(); err != nil {

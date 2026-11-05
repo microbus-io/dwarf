@@ -23,12 +23,13 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
 
-// TestPurge_EveryListFilterNarrows pins that Purge accepts any filter List does, on its own, and still rejects a
+// TestPurge_EveryListFilterNarrows pins that Purge accepts any filter the lists do, on its own, and still rejects a
 // query that names nothing to narrow by: Shard and Limit bound a purge but select every flow they reach.
 func TestPurge_EveryListFilterNarrows(t *testing.T) {
 	t.Parallel()
@@ -63,7 +64,7 @@ func TestPurge_EveryListFilterNarrows(t *testing.T) {
 	n, err := e.Purge(ctx, workflow.Query{FairnessKey: "tenantA"})
 	assert.NoError(err)
 	assert.Equal(1, n)
-	summaries, err := e.List(ctx, workflow.Query{WorkflowURL: "pf/g"})
+	summaries, err := enginetest.ListAll(ctx, e, workflow.Query{WorkflowURL: "pf/g"})
 	assert.NoError(err)
 	var keys []string
 	for _, s := range summaries {
@@ -80,7 +81,7 @@ func TestPurge_EveryListFilterNarrows(t *testing.T) {
 	}
 }
 
-// TestPurge_NegativeDurationIsRejected pins that a negative OlderThan or NewerThan is a 400 on both List and
+// TestPurge_NegativeDurationIsRejected pins that a negative OlderThan or NewerThan is a 400 on both the lists and
 // Purge. It adds no condition, so it would pass Purge's filter guard and purge every flow.
 func TestPurge_NegativeDurationIsRejected(t *testing.T) {
 	t.Parallel()
@@ -108,10 +109,10 @@ func TestPurge_NegativeDurationIsRejected(t *testing.T) {
 	} {
 		_, err := e.Purge(ctx, q)
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "Purge %+v", q)
-		_, err = e.List(ctx, q)
-		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "List %+v", q)
+		_, err = enginetest.ListAll(ctx, e, q)
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "lists %+v", q)
 	}
-	summaries, err := e.List(ctx, workflow.Query{WorkflowURL: "pn/g"})
+	summaries, err := enginetest.ListAll(ctx, e, workflow.Query{WorkflowURL: "pn/g"})
 	assert.NoError(err)
 	if assert.Len(summaries, 1) {
 		assert.Equal(flowKey, summaries[0].FlowKey, "nothing was marked")

@@ -34,7 +34,8 @@ import (
 // Every DATE_ADD_MILLIS the engine writes must survive it: run these against SQL Server.
 const month = 30 * 24 * time.Hour
 
-// TestLongDuration_QueryFilters pins List and Purge with an age filter past 2^31 ms, the documented
+// TestLongDuration_QueryFilters pins the lists and Purge with an age filter past 2^31 ms (ListArchived's runs in an
+// archive branch only for the window reaching today), the documented
 // OlderThan: 30 days.
 func TestLongDuration_QueryFilters(t *testing.T) {
 	t.Parallel()
@@ -57,10 +58,10 @@ func TestLongDuration_QueryFilters(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 
-	older, err := e.List(ctx, workflow.Query{OlderThan: month})
+	older, err := enginetest.ListAll(ctx, e, workflow.Query{NewerThan: 12 * month, OlderThan: month})
 	assert.NoError(err)
 	assert.Len(older, 0)
-	newer, err := e.List(ctx, workflow.Query{NewerThan: 12 * month})
+	newer, err := enginetest.ListAll(ctx, e, workflow.Query{NewerThan: 12 * month})
 	assert.NoError(err)
 	assert.Len(newer, 1)
 	marked, err := e.Purge(ctx, workflow.Query{OlderThan: month})

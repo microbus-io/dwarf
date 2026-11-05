@@ -77,14 +77,17 @@ which means both:
 
 ```go
 // no live work
-running, _ := eng.List(ctx, workflow.Query{Shard: 3, Status: workflow.StatusRunning})
-interrupted, _ := eng.List(ctx, workflow.Query{Shard: 3, Status: workflow.StatusInterrupted})
+all := workflow.Query{Shard: 3, Limit: 100}
+all.Status = workflow.StatusRunning
+running, _ := eng.ListLive(ctx, all)
+all.Status = workflow.StatusInterrupted
+interrupted, _ := eng.ListLive(ctx, all)
 ```
 
 and no ended flow you still want readable: the shard's ended flows sit in its archive until the retention drops
 their day, so the shard is empty once the retention has passed since its last flow ended.
 
-`Query.Shard` scopes both lists to one shard. Watch `interrupted` flows especially — they wait indefinitely and are
+`Query.Shard` scopes a list to one shard. Watch `interrupted` flows especially — they wait indefinitely and are
 the ones that will still be there when you assumed the shard was empty. Either resume them, terminate them, or
 wait.
 
@@ -123,7 +126,7 @@ See [Deployment → Sharding](deployment.md#sharding) for the sizing table, and
 
 ## When a shard is down
 
-Shards multiply capacity, not availability — each shard's own availability is its database's. `List` and
-`Purge` fail as a whole if any shard errors. `ShardInfo` is built to answer anyway: it returns a row per
+Shards multiply capacity, not availability — each shard's own availability is its database's. `ListLive`,
+`ListArchived` and `Purge` fail as a whole if any shard errors. `ShardInfo` is built to answer anyway: it returns a row per
 shard with that shard's error recorded on it, so it is the diagnostic to reach for in exactly that
 situation.

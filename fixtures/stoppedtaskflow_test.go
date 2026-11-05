@@ -24,6 +24,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -31,7 +32,7 @@ import (
 // listedTask returns the StoppedTaskName List reports for flowKey.
 func listedTask(t *testing.T, eng *engine.Engine, flowKey string) string {
 	assert := testarossa.For(t)
-	flows, err := eng.List(context.Background(), workflow.Query{Search: flowKey})
+	flows, err := enginetest.ListAll(context.Background(), eng, workflow.Query{Search: flowKey})
 	if !assert.NoError(err) {
 		return ""
 	}
@@ -181,7 +182,7 @@ func TestStoppedTask_Linear(t *testing.T) {
 		assert.Equal(workflow.StatusFailed, out.Status)
 		assert.Equal("Second", listedTask(t, eng, flowKey))
 
-		flows, err := eng.List(ctx, workflow.Query{WorkflowURL: "stoppedtask.verify:428/linear", Status: workflow.StatusFailed, StoppedTaskName: "Second"})
+		flows, err := enginetest.ListAll(ctx, eng, workflow.Query{WorkflowURL: "stoppedtask.verify:428/linear", Status: workflow.StatusFailed, StoppedTaskName: "Second"})
 		assert.NoError(err)
 		if assert.Len(flows, 1) {
 			assert.Equal(flowKey, flows[0].FlowKey)

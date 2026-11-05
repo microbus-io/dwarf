@@ -26,6 +26,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -66,7 +67,7 @@ func TestListflow(t *testing.T) {
 	t.Run("list_by_workflow_url_returns_all", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flows, err := eng.List(ctx, workflow.Query{WorkflowURL: "listflow.verify:428/list"})
+		flows, err := enginetest.ListAll(ctx, eng, workflow.Query{WorkflowURL: "listflow.verify:428/list"})
 		if !assert.NoError(err) {
 			return
 		}
@@ -83,7 +84,7 @@ func TestListflow(t *testing.T) {
 	t.Run("list_by_status_completed", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flows, err := eng.List(ctx, workflow.Query{
+		flows, err := enginetest.ListAll(ctx, eng, workflow.Query{
 			WorkflowURL: "listflow.verify:428/list",
 			Status:      workflow.StatusCompleted,
 		})
@@ -115,14 +116,14 @@ func TestListflow(t *testing.T) {
 		assert.NoError(err)
 
 		// FairnessKey narrows to that key only.
-		flows, err := eng.List(ctx, workflow.Query{FairnessKey: "tenantA"})
+		flows, err := enginetest.ListAll(ctx, eng, workflow.Query{FairnessKey: "tenantA"})
 		if !assert.NoError(err) {
 			return
 		}
 		assert.Equal(2, len(flows))
 
 		// Priority combines with FairnessKey for an exact slice.
-		flows, err = eng.List(ctx, workflow.Query{FairnessKey: "tenantB", Priority: 4})
+		flows, err = enginetest.ListAll(ctx, eng, workflow.Query{FairnessKey: "tenantB", Priority: 4})
 		if !assert.NoError(err) {
 			return
 		}
@@ -130,7 +131,7 @@ func TestListflow(t *testing.T) {
 		assert.Equal(fkB, flows[0].FlowKey)
 
 		// A key/priority combination with no flows yields nothing.
-		flows, err = eng.List(ctx, workflow.Query{FairnessKey: "tenantA", Priority: 4})
+		flows, err = enginetest.ListAll(ctx, eng, workflow.Query{FairnessKey: "tenantA", Priority: 4})
 		if !assert.NoError(err) {
 			return
 		}

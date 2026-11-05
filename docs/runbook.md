@@ -52,9 +52,10 @@ bug, or at rows edited by hand.
 **Confirm.** The counter carries a `workflow` label, which narrows the search. Find the candidates:
 
 ```go
-flows, err := eng.List(ctx, workflow.Query{
+flows, err := eng.ListLive(ctx, workflow.Query{
     Status:    workflow.StatusRunning,
     OlderThan: 10 * time.Minute,
+    Limit:     1000,
 })
 ```
 
@@ -283,8 +284,8 @@ and look at the server before concluding it is overloaded. `dwarf_refill_query_d
 `shard` is the same comparison for dispatch. `dwarf_peer_blind_seconds` non-zero for a shard means replicas
 cannot read its registry at all.
 
-**Understand the blast radius.** Dwarf is **not** shard-fault-tolerant: `List` and
-`Purge` fail as a whole if any shard errors. Flows resident on a healthy shard keep executing
+**Understand the blast radius.** Dwarf is **not** shard-fault-tolerant: `ListLive`,
+`ListArchived` and `Purge` fail as a whole if any shard errors. Flows resident on a healthy shard keep executing
 normally; flows on the failed shard are unreachable until it returns. Each shard's selection runs on its own
 cycle, so a slow shard does not slow its peers' **dispatch**.
 
@@ -427,8 +428,8 @@ filesystem. Measured on one rig: 198 MB still allocated for 37 remaining rows.
 `VACUUM FULL` takes an exclusive lock on the table and should be treated as a maintenance window.
 
 **One thing to check:** confirm the reaper is actually running. Marked-but-unreaped flows disappear from
-`List` and `History` immediately, so a growing gap between "rows in `dwarf_flows`" and "flows visible to
-`List`" means marking is working and reaping is not.
+the lists and `History` immediately, so a growing gap between "rows in `dwarf_flows`" and "flows visible to
+`ListLive`" means marking is working and reaping is not.
 
 ---
 
@@ -452,7 +453,7 @@ Both must be addressed by the **root** flow key. A subgraph child's key is read-
 and is rejected — address the root and the engine threads the resume down to the right leaf.
 
 **If a flow has been interrupted longer than your business process allows**, that is a policy question rather
-than an engine fault: the engine imposes no flow lifetime. Find them with `List` filtered on
+than an engine fault: the engine imposes no flow lifetime. Find them with `ListLive` filtered on
 `Status: interrupted` and `OlderThan`, and terminate or escalate per your own rules.
 
 ---

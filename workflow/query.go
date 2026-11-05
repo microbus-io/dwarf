@@ -18,7 +18,13 @@ package workflow
 
 import "time"
 
-// Query specifies the filters and the limit for listing or purging flows.
+// Query specifies the filters, the time window and the limit for listing or purging flows.
+//
+// ListArchived needs a window: a lower bound, FromTime or NewerThan, and an upper bound, ToTime or OlderThan; for
+// ListLive and Purge it is optional, Purge taking its bounds as filters on when a flow ended. Given both an absolute and a relative bound on one side, the narrower applies. Times
+// compare at the database's precision: microseconds on PostgreSQL, milliseconds elsewhere. ListLive's window is on
+// when a flow last changed status (FlowSummary.UpdatedAt); ListArchived's is on when a flow was archived
+// (FlowSummary.ArchivedAt).
 type Query struct {
 	Status      string `json:"status,omitzero"`
 	WorkflowURL string `json:"workflowURL,omitzero"`
@@ -37,12 +43,17 @@ type Query struct {
 	// Priority filters to flows at this scheduling priority band. Zero disables the filter
 	// (valid priorities are >= 1).
 	Priority int `json:"priority,omitzero"`
-	// OlderThan filters to flows last updated longer ago than this duration.
-	// Zero disables the filter; a negative value is rejected.
+	// FromTime is the window's lower bound, inclusive: ListLive lists flows last updated at or after it,
+	// ListArchived flows archived at or after it. Zero disables it.
+	FromTime time.Time `json:"fromTime,omitzero"`
+	// ToTime is the window's upper bound, exclusive: ListLive lists flows last updated before it, ListArchived flows
+	// archived before it. Zero disables it.
+	ToTime time.Time `json:"toTime,omitzero"`
+	// OlderThan is an upper bound relative to now: flows last updated (ListArchived: archived) longer ago than this
+	// duration. Zero disables it; a negative value is rejected.
 	OlderThan time.Duration `json:"olderThan,omitzero"`
-	// NewerThan filters to flows last updated within this duration of now.
-	// Zero disables the filter; a negative value is rejected. Composes with OlderThan to express "between X
-	// and Y ago."
+	// NewerThan is a lower bound relative to now: flows last updated (ListArchived: archived) within this duration of
+	// now. Zero disables it; a negative value is rejected. Composes with OlderThan to express "between X and Y ago."
 	NewerThan time.Duration `json:"newerThan,omitzero"`
 	// IncludeSubgraphs adds subgraph-child flows to the results alongside roots. They are excluded by default -
 	// a subgraph child is an internal execution detail most callers never want in a list. Pair it with
@@ -59,8 +70,9 @@ type Query struct {
 	// the flow key. Any '%' or '_' in the value is matched literally, not as a wildcard, so "a_b" matches only
 	// "a_b" (not "axb") and "50%" matches only a literal "50%".
 	Search string `json:"search,omitzero"`
-	// Limit caps the flows List returns (default 100): the newest Limit flows that match, by creation time,
-	// across every shard queried. Purge divides it across shards instead: each shard marks up to
-	// ceil(Limit/shards) roots, so a call can mark as many as shards*ceil(Limit/shards).
+	// Limit is the most flows ListLive and ListArchived return: required, at most 65,536. The result is the first
+	// Limit flows in the list's order across every shard queried. A search over many days wants a low Limit; a walk
+	// through a time range wants short windows. Purge takes at most min(Limit, 4096) roots, divided across shards:
+	// each shard marks up to ceil(Limit/shards), so a call can mark as many as shards*ceil(Limit/shards).
 	Limit int `json:"limit,omitzero"`
 }

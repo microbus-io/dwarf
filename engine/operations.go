@@ -1240,7 +1240,7 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 	// Shard and Limit bound a purge but select every flow they reach, so neither counts as a filter.
 	narrowed := query.Status != "" || query.WorkflowURL != "" || query.WorkflowName != "" ||
 		query.StoppedTaskName != "" || query.FairnessKey != "" || query.Priority != 0 || query.OlderThan != 0 ||
-		query.NewerThan != 0 || query.Search != ""
+		query.NewerThan != 0 || !query.FromTime.IsZero() || !query.ToTime.IsZero() || query.Search != ""
 	if !narrowed {
 		return 0, errors.New("purge requires at least one filter; Shard and Limit do not narrow it", http.StatusBadRequest)
 	}
@@ -1297,6 +1297,10 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 		if sc, scArgs := searchClause(db.DriverName(), shardIdx, query.Search); sc != "" {
 			where += " AND " + sc
 			args = append(args, scArgs...)
+		}
+		if timeConds, timeArgs := timeConditions(db.DriverName(), "f.updated_at", query); len(timeConds) > 0 {
+			where += " AND " + strings.Join(timeConds, " AND ")
+			args = append(args, timeArgs...)
 		}
 		args = append(args, perShardLimit)
 		// Purge MARKS, it does not delete: select ended candidate roots not already scheduled, then stamp

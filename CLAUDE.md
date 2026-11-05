@@ -179,8 +179,8 @@ matching one before working there:**
   re-execution. Execution is at-least-once; the fence protects *state*, not side effects. (`engine/CLAUDE.md`)
 - **Status literals, not binds:** in a `WHERE` clause, inline the status constant
   (`"...WHERE status='"+workflow.StatusRunning+"'..."`), never bind it (`status=?`) - a bound status defeats the
-  SQL Server / SQLite filtered index (and, for `List`'s `ORDER BY ... LIMIT`, the cardinality estimate). A
-  caller-supplied status (`List`/`Query.Status`) is validated with `workflow.IsValidStatus` then inlined.
+  SQL Server / SQLite filtered index (and, for the lists' `ORDER BY ... LIMIT`, the cardinality estimate). A
+  caller-supplied status (`Query.Status`) is validated with `workflow.IsValidStatus` then inlined.
   Exception: `SET status=?` assignments stay bound. (`internal/migrations/CLAUDE.md`)
 
 ### Core Concepts

@@ -291,7 +291,7 @@ func (e *Engine) failOnPersistError(ctx context.Context, d *dispatch, writeErr e
 }
 
 // maxErrorBytes bounds an error message stored in a text column. MySQL's TEXT holds 65,535 bytes and refuses
-// more under its default strict mode; well below that, every List row and History step carries the message.
+// more under its default strict mode; well below that, every listed flow and History step carries the message.
 const maxErrorBytes = 16 << 10
 
 // truncatedMark ends a message cut to maxErrorBytes.

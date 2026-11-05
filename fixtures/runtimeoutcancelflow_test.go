@@ -23,6 +23,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -78,7 +79,7 @@ func TestRuntimeoutcancelflow(t *testing.T) {
 	assert.Nil(outcome)
 
 	// Run left the flow running - it never cancels on the caller's behalf.
-	flows, listErr := eng.List(ctx, workflow.Query{WorkflowURL: "runtimeoutcancelflow.verify:428/run-timeout-cancel"})
+	flows, listErr := enginetest.ListAll(ctx, eng, workflow.Query{WorkflowURL: "runtimeoutcancelflow.verify:428/run-timeout-cancel"})
 	assert.NoError(listErr)
 	if assert.Equal(1, len(flows)) {
 		assert.Equal(workflow.StatusRunning, flows[0].Status)
@@ -89,7 +90,7 @@ func TestRuntimeoutcancelflow(t *testing.T) {
 	assert.NoError(eng.Terminate(ctx, flowKey, "caller gave up waiting"))
 	var status string
 	for range 100 {
-		flows, listErr := eng.List(ctx, workflow.Query{WorkflowURL: "runtimeoutcancelflow.verify:428/run-timeout-cancel"})
+		flows, listErr := enginetest.ListAll(ctx, eng, workflow.Query{WorkflowURL: "runtimeoutcancelflow.verify:428/run-timeout-cancel"})
 		assert.NoError(listErr)
 		if len(flows) == 1 {
 			status = flows[0].Status

@@ -177,7 +177,7 @@ These are methods on `*engine.Engine`.
 stopped engine *lies*. The key-addressed operations all route through `ShardSet.Shard`, which returns
 **"flow not found" (404)** when no shard is open - so a stopped engine tells the caller its flow does not
 exist, and the caller may act on that (stop retrying, recreate the work). The cross-shard operations are
-worse: `List`/`Purge`/`ShardInfo` fan out over an **empty index set** and return **success with an empty
+worse: `ListLive`/`ListArchived`/`Purge`/`ShardInfo` fan out over an **empty index set** and return **success with an empty
 result** - "you have no flows." Both are indistinguishable from the truth; 503 says the one true thing. The
 state is reachable in production, not just by API misuse: `Shutdown` -> `ShardSet.Close` nils the index set,
 so a host still serving while it tears the engine down (or a request in flight when `Shutdown` lands) hits
@@ -369,7 +369,7 @@ call (with `endLostFlow` as the shared post-commit tail), so the two paths canno
 cancellation; a failed flow delivers a REAL failure even when the loss that resolved it was a cancellation (it
 samples a `failed` step's error) - a cancellation marker on a failed flow would have `IsCancelled` report true
 for it. The flow's own `error` column gets that failure's text for a failed flow and nothing for a cancelled
-one (`flowErrorText`), whose explanation is its `cancel_reason` - as a terminated flow's is - so `List` and
+one (`flowErrorText`), whose explanation is its `cancel_reason` - as a terminated flow's is - so the lists and
 `Snapshot` agree that a cancelled flow carries no error.
 
 *`subgraph_error` holds the delivered error's `TracedError` JSON, stack stripped, not its message*, and
@@ -483,9 +483,10 @@ steps have `Subgraph=true` with nested `SubHistory` and the child's `SubgraphKey
 retry, the same one `SubHistory` shows), so a caller can `Snapshot` what the child returned. `Step` returns one step by key **with** its `state`/`changes`
 (refs resolved) - it is the payload-bearing reader; use it when you need a step's actual data.
 
-**List** - Returns at most `Query.Limit` (default 100) flows matching the `Query` filters, newest created first
-across shards, with no pagination (see "`List` is a cross-shard top-N" under Database Sharding).
-Returns a `Subgraph` bool in each `workflow.FlowSummary`. By default it returns **root flows only**;
+**ListLive / ListArchived** - Return at most `Query.Limit` flows matching the `Query` filters within its window:
+`ListLive` the flows in the live tables (any status, ended ones not archived yet included), the most recently updated
+first; `ListArchived` the archived ones, the most recently archived first. No pagination (see "`ListLive` and `ListArchived` are cross-shard
+top-Ns" under Database Sharding). Each returns a `Subgraph` bool in each `workflow.FlowSummary`. By default it returns **root flows only**;
 `Query.IncludeSubgraphs` adds subgraph children to the results. Combined with `WorkflowURL` (a graph that runs only
 as a subgraph has no root flows under that URL) this locates every run of a graph that executed as a subgraph.
 `Purge` **rejects** the flag with a 400 (`purge cannot include subgraphs`) rather than silently ignoring it, and
@@ -543,14 +544,14 @@ holds a snapshot for its whole run, feeding the vacuum slowdown below, on the ca
 
 ### Subgraph keys are read-only
 
-A subgraph child flow has a real flowKey (a task inside it reads its own via `flow.FlowKey()`, and `List` with
+A subgraph child flow has a real flowKey (a task inside it reads its own via `flow.FlowKey()`, and the lists with
 `IncludeSubgraphs` surfaces it), but that key is a **read** handle, not a write unit: a child cannot be mutated
 independently because its parent is parked waiting on it, and the unit for any lifecycle change is the whole tree.
 So the **lifecycle mutations reject a subgraph-child key with 400** (`surgraph_flow_id != 0`): `Resume`, `Terminate`,
 `Cancel`, `Delete` and `Continue`. The rejection is folded into
 each operation's existing flow-row SELECT (no extra round-trip;
 the 404-not-found check still takes precedence). The caller addresses the tree by the **root** key instead - which
-it always holds (it came from `Create`/`Run`/`Continue`, or from `List` of roots). The rationale per op: `Resume`/
+it always holds (it came from `Create`/`Run`/`Continue`, or from a list of roots). The rationale per op: `Resume`/
 `Terminate` are inherently tree-wide (they walk up to the root and down), so a child key is just a confusing alias for
 the root (and `Cancel` likewise covers the whole tree); `Delete` cascades *down* only, so deleting a child directly would strand the parent's surgraph step; and
 `Continue` of a child would spin up a detached top-level flow from the subgraph's final state. **Reject, not
@@ -563,7 +564,7 @@ already makes). That grants a root-key holder nothing new: `History` already ret
 `Step` reads any of them. What a subgraph-child key *is* good for: **introspection** - `Snapshot`, `Fingerprint`, `History`,
 `Step` all operate on that child's own subtree - and **`Fork`**, which intentionally accepts any recorded step,
 including one deep inside a subgraph. `fixtures/subflowguardflow_test.go` pins both halves (the `Resume`/`Terminate`/`Delete`/`Continue`
-400 rejections, introspection + `List`-by-subgraph-URL still working); `fixtures/gracefulcancelflow_test.go` pins
+400 rejections, introspection + listing by subgraph URL still working); `fixtures/gracefulcancelflow_test.go` pins
 `Cancel`'s.
 
 ### FlowOutcome and side-channel signals
@@ -996,7 +997,7 @@ not parallelism:
   it. A running flow records 0. `FlowSummary.StoppedTaskName` and `Query.StoppedTaskName` read it. **Do not advance it per step:** on
   PostgreSQL every UPDATE writes a full new copy of the row, and the flow row is ~1.2 KB with the graph held inline
   (TOAST moves a value out of line only past a ~2 KB row), so a per-step advance is a row version per step on the
-  flow's hottest row - for a pointer `List` shows and that is stale by the time anyone reads it.
+  flow's hottest row - for a pointer the lists show and that is stale by the time anyone reads it.
 - **A fan-in arrival flushes the transition first**: the cohort bump runs alone, on no open batch, because whether
   the cohort resolved is decided from it. The ARRIVAL THAT RESOLVES the cohort then sends [the deferred flow-row
   grab + the spawn read + the cohort-members read (`queueCohortRead`)], folds them in Go (`fanInRow`), and queues
@@ -1960,7 +1961,7 @@ other transition (an `error` transition carries no `when` or `forEach`, so it is
 serialized as a `TracedError` into state field `onErr` **with its stack frames stripped** (`Stack=nil` on a
 shallow copy, so the shared error object keeps its stack for logs) - `onErr` rides into `changes`->`final_state`
 and is readable by a state-bearing flow reader (`Snapshot`'s `final_state`, `Step`'s `state`/`changes` - not
-`History` or `List`, which carry no state), and internal stack traces are code-structure
+`History` or the lists, which carry no state), and internal stack traces are code-structure
 disclosure; the handler still gets the message, status code, trace id and properties for routing. The handler task
 becomes the next step, and the failed step is marked `completed` - **with the task's own changes DROPPED**. (The
 `error` *column* already carries only `err.Error()` - the message, no frames.)
@@ -2218,9 +2219,9 @@ given," so a host authz bug alone is not sufficient to walk the table (you would
 token): two independent failures, not one. It also preserves the no-existence-oracle property (every
 operation on an unknown-or-mismatched key returns a uniform not-found - verified) and enables opaque
 capability-URL patterns (a "resume your approval" link). What it is **not** is access control: a leaked,
-logged, or shared key is a full write capability for that one flow. The amplifier is therefore `List` - the only
-operation that returns keys wholesale (a separate concern) - not the token itself. (There is no `Search` operation;
-free-text search is a field on `workflow.Query` that `List` consumes.)
+logged, or shared key is a full write capability for that one flow. The amplifier is therefore the lists - the only
+operations that return keys wholesale (a separate concern) - not the token itself. (There is no `Search` operation;
+free-text search is a field on `workflow.Query` that the lists consume.)
 
 **Token entropy (64-bit) and the every-gate-is-`flow_id`+`flow_token`+`created_hour` invariant that makes it adequate** live in
 `internal/keys/CLAUDE.md`.
@@ -3154,7 +3155,7 @@ for totals),
 so a chart can split task data from engine snapshots from human-in-the-loop payloads. Counted: the claim
 read (state+changes+resume_data+subgraph_result), completion/retry/park/interrupt `changes` writes, the
 interrupt payload write, successor/fan-in `state` snapshot and `state_refs` writes, the entry `state` write, and the fan-in merge's cohort
-reads. Deliberately NOT counted: introspection reads (`List`/`History`/`Snapshot`), flow-row payloads
+reads. Deliberately NOT counted: introspection reads (the lists/`History`/`Snapshot`), flow-row payloads
 (`final_state`, `baggage`, `graph` - per-flow context, not per-step data), Fork's clone (a DB-side
 `INSERT…SELECT`; the bytes never pass through the engine - though its leaf's flatten does count, as `state_ref`
 reads), and the `Resume`/surgraph-revive *writes* of
@@ -3337,7 +3338,7 @@ labels: the token appears only on the task carrier (`flow.SetFlowKey`, trusted t
 in-memory waiter-match key (`signalStop`, never leaves the process). No log line emits a
 flow key at all. Any new span/log/metric that names a flow must use `keys.CorrelationID`, never the raw key.
 
-**`List` surfaces the flow's trace id.** `FlowSummary.TraceID` is the 32-hex W3C trace-id parsed from the
+**The lists surface the flow's trace id.** `FlowSummary.TraceID` is the 32-hex W3C trace-id parsed from the
 `trace_parent` column (`traceIDFromParent`), empty when no tracer was configured. It is a **token-free
 correlation value** (like `keys.CorrelationID`, not a capability), safe to surface so an operator can pivot from
 a listed flow to its trace backend - consistent with the trace-read < data-read privilege boundary above. It is
@@ -3385,8 +3386,8 @@ are deterministically flushed by then. Not an engine concern: a real exporter ke
 tick adds up to that on top): the reaper moves its whole tree into today's archive day tables, and retention drops
 whole days (see "The archive" below). A flow that has not ended - running, sleeping, interrupted for a human - stays
 in the live tables for as long as it takes, so nothing reaps a row a `Resume` could still revive. The read API reads an
-archived flow as it read it live ("Reading an archived flow" below), and `Fork` clones an archived source; `List`
-reads the live tables only, so an archived flow drops out of it. **Retention counts from archiving, not from the
+archived flow as it read it live ("Reading an archived flow" below), and `Fork` clones an archived source; `ListArchived`
+lists it. **Retention counts from archiving, not from the
 end**: a tree archived late - after an outage, say - is kept its full retention from then.
 
 Deleting without archiving is either operator-driven (`Delete`, `Purge`) or an explicit author opt-in
@@ -3408,7 +3409,7 @@ a dedicated **reaper** goroutine (`reaperLoop`, 15 s ticker) later removes the w
   not inherited by children (the reaper sweeps descendants via `root_flow_id`). During the grace window the flow stays
   `completed` and its **outcome is observable**: `Snapshot`/`Await`/`Run` return the completed `FlowOutcome` - this is
   how a caller learns a disposable flow's result, since there is no stop callback. It is nonetheless *logically*
-  gone: excluded from `List`, and `History` 404s (the full step detail is what the flow is discarding). After the
+  gone: excluded from the lists, and `History` 404s (the full step detail is what the flow is discarding). After the
   window the reaper removes it and reads 404. (`Snapshot`/`Await` deliberately serve the outcome rather than 404 - a
   hard-immediate-404 for a redaction-critical `Delete` is a deferred sub-decision.)
 
@@ -3428,7 +3429,7 @@ terminate inside a delete, and nothing either operation does can then race a `Re
   filter in the SELECT**, not only in the UPDATE: the SELECT is `LIMIT`ed, so unended candidates selected ahead of
   ended ones would use up the limit, mark nothing, and end a caller's purge loop early
   (`TestDeleteUnendedflow`). A `Query.Status` naming an unended status is a 400. Returns the count **marked**
-  (reaped shortly after). Same `Query` shape as `List`; **rejects** `IncludeSubgraphs` with 400.
+  (reaped shortly after). Same `Query` shape as the lists; **rejects** `IncludeSubgraphs` with 400.
 
 **The reaper** (`reapDueFlows`, `reaper.go`) runs on its own dedicated goroutine + a 15 s ticker (a single goroutine,
 inherently non-overlapping), stopped by `drainRuntime` cancelling its ctx. On each shard this replica DISPATCHES (a
@@ -3539,7 +3540,7 @@ reaper therefore does **not** reguard on descendant status. Backed by a
 partial index `idx_dwarf_flows_delete_after WHERE delete_after_ms > 0` (full on mysql) that narrows the due scan to
 the small in-window subset. (`deletionGrace`/`reapInterval` are Engine fields, not constants, only so a test can
 shorten them -
-engine-package tests force a reap via `reapDueFlows`; fixtures verify the observable public contract via `List`/
+engine-package tests force a reap via `reapDueFlows`; fixtures verify the observable public contract via the lists/
 `History`/`Snapshot`.)
 
 **Deletion race gate.** Because deletion is an *orthogonal column*, not a status, the invariant that keeps a
@@ -3559,10 +3560,10 @@ chain-flow update, which legitimately matches 0 rows when a *sibling* interrupt 
 resume-one-at-a-time), so it cannot serve as the race gate. Pinned by `TestResumeLosesToTerminate_Deterministic`.
 
 **Reads/derivations of a `delete_after_ms > 0` flow.** `Snapshot`/`Await` serve the outcome (the observability win);
-`List` and `History` exclude it; `Continue` and `Fork` **409** (each names a specific doomed flow); `Resume` 409s and `Terminate` is a nil no-op
+The lists and `History` exclude it; `Continue` and `Fork` **409** (each names a specific doomed flow); `Resume` 409s and `Terminate` is a nil no-op
 (terminal); `Delete` is idempotent-success.
 
-Both share filter clauses with `List`. The `Query.StoppedTaskName` filter joins `dwarf_steps` and matches the `task_name`
+Both share filter clauses with the lists. The `Query.StoppedTaskName` filter joins `dwarf_steps` and matches the `task_name`
 of the step the flow stopped at, so it matches no running flow. `Query.OlderThan`/`NewerThan` are database-anchored
 (`f.updated_at < DATE_ADD_MILLIS(NOW_UTC(), -ms)` etc.) and compose. `Query.FairnessKey` filters on the
 engine-native `f.fairness_key` (the host typically sets it to the tenant, so "list tenant X" is "list
@@ -4174,24 +4175,60 @@ operator's to weight down; `dwarf_operation_seconds{op,shard}` is what lets them
 placement entirely (everything resident proceeds - execution, subgraph children, `Continue`, `Fork`); all
 shards cordoned is a loud 503 at `Create`. Pinned by `engine/poolsizing_test.go`.
 
-**`List` is a cross-shard top-N, merged by `created_at`.** Each shard reads its own newest `Limit` by `flow_id DESC`
-(the PK scan); the engine sorts the union by `created_at` DESC (ties: shard, then `flow_id` DESC) and keeps the
-first `Limit`. `List` is strict: any shard error fails the whole call (the per-shard debug path is `ShardInfo` +
-`List(Shard=N)`).
-
-- **Do not divide `Limit` across shards to read less.** A per-shard share drops a shard's flows that are newer
-  than everything another shard returned. The cost of the full read is `shards x Limit` rows per call, accepted
-  because `List` is an operator and UI call off the hot path.
-- **`created_at` compares two servers' clocks, so the order is only as good as their skew.** Flows created within
-  the skew of each other can swap, or swap across the cut. That is harmless for "the newest N now", and the godoc
-  says it; it is why `List` must not grow a cursor or any promise of a stable walk over this merge: a cursor
-  keyed on a skewed order would skip or repeat flows between pages. `flow_id` cannot order across shards at all
-  (a shard with fewer flows has lower ids).
+**`ListLive` and `ListArchived` are cross-shard top-Ns, split by where a flow is kept, not by its state**
+(`query.go`). Each table they read on each shard returns its own first `Limit` in the list's order, and the engine
+merges the shards in Go (`mergeByTime`) and keeps the first `Limit`. Both are strict: any shard error fails the whole
+call (the per-shard debug path is `ShardInfo` + `Query.Shard`). `Limit` is required, at most `maxListLimit` (65,536).
+- **`ListLive`** reads the live tables only, any status - an ended flow is live until the reaper archives it, about
+  a minute after it ends. Ordered by `updated_at DESC`, ties by shard, then `flow_id DESC`. Its window, optional
+  (one table per shard however wide), filters `updated_at`.
+- **`ListArchived`** reads the archive's day tables only, never the live ones, ordered by `archived_at DESC`, ties
+  likewise. Per shard it is one `UNION ALL` over every day the window reaches, each branch a derived table carrying
+  its own `ORDER BY` and `LIMIT_OFFSET` (SQLite allows neither on a compound member; SQL Server allows an `ORDER BY`
+  in a derived table only with `OFFSET/FETCH`), under an outer `ORDER BY ... LIMIT`, so only `Limit` rows per shard
+  cross the wire. A day a peer dropped since the last catalog read fails the statement on its missing table: the
+  shard reads the catalog (`Refresh`) and runs it once more. A status that has not ended is a 400.
+- **Do not mix the two sides in one list.** It puts two time axes in one window - `updated_at` for the unarchived,
+  `archived_at` for the rest - and each way of placing the unarchived flows breaks a caller: counted as archived
+  after now, a window ending at now misses the last minute; windowed by their end, a forward poll sees each flow
+  twice. Split, an archived flow is in exactly one window of a forward poll, and a caller wanting both sides calls
+  `ListLive` first, then `ListArchived`, so a tree archived between the calls is seen twice (dropped by key), never
+  missed.
+- **`ListArchived`'s window is required and clamped, not refused**: both ends are required, since the window decides
+  how many tables a statement reads. Its days are cut to the retention's first day and to today (plus one day past
+  today when the window reaches it, for a database clock ahead of this process's), and the days a shard's record
+  lacks are not read. **After the cut it may reach at most `maxEndedWindowDays` (31) days**, today and the 30 the
+  default retention keeps, or the call is a 400 - checked before the extra day past today, so a statement can read
+  32. The bound is PostgreSQL's lock table: a statement locks every index of each table it plans, about 11 locks a
+  day (the day's flows table and its 7 indexes counting the key, its steps table and its 2), so 31 days are about
+  340 - some 5% of the default shared lock table (`max_locks_per_transaction` 64 x `max_connections`). A 30-day
+  locate walk touched about 160 relations and exhausted that table only with about 40% of connections running it at
+  once.
+- **The time bounds are bound as text** (`sqlTime`, `timeConditions`): `FromTime`/`ToTime` rounded UP to the
+  column's unit - microseconds on PostgreSQL, whose `TIMESTAMP` holds them, milliseconds elsewhere - which is exact
+  for an inclusive lower and an exclusive upper bound alike (truncating drops the values just below an exclusive
+  bound), formatted in UTC and cast to the column's type, never a `time.Time`, so no session time zone is involved; the
+  relative bounds read the database clock. Pinned by `TestSQLTime_ReadsAsTheInstantItNames` (every dialect, and a
+  PostgreSQL session in Tokyo) and `TestSQLTime_RoundsUpToTheColumnsPrecision`.
+- **Do not divide `Limit` across shards to read less.** A per-shard share drops a shard's flows that are newer than
+  everything another shard returned. The cost is shards x tables x `Limit` rows read on the servers, shards x
+  `Limit` on the wire.
+- **The merge compares two servers' clocks**, so flows within the skew of each other can swap, or swap across the
+  cut; the godocs say so. And `ListArchived`'s days are cut by this process's clock while its bounds compare the
+  database's, so a tree archived in the skew at the window's newer edge can be missed. **A tie is a reaper batch**
+  (`archived_at` is the move's transaction start), which is why `maxListLimit` must stay above `reapBatchRows`
+  (`TestList_TheLimitIsAboveAReaperBatch`): a caller paging by window cannot page across a tie larger than its
+  `Limit`. That bounds a roots-only list (`reapBatch`, 512 roots); with `IncludeSubgraphs` a batch's one tree, which it
+  takes however large, can be a tie of more flows than any `Limit`. On the dialects storing milliseconds (all but PostgreSQL) batches on different shards can share one, so a
+  tie can reach shards x `reapBatchRows`: at 16 shards, the whole maximum. And **commit order is not stamp order** - a
+  long batch stamped earlier can commit after a later one - so the godoc tells a walk to keep its newest bound a few
+  seconds behind now. Neither list has a cursor or a promise of a stable walk.
 - **`Purge` still divides `Limit`**: `ceil(Limit/shards)` per shard, results concatenated, so a call can mark up
   to `shards * ceil(Limit/shards)` roots. Its godoc and `docs/flows.md` say so.
 
-Pinned by `TestList_NewestFirstAcrossShards` (globally descending, and a smaller `Limit` returns exactly the
-newest `Limit`).
+Pinned by `fixtures/listorder_test.go` (`ListLive`: globally descending, and a smaller `Limit` returns exactly the
+prefix) and `engine/list_test.go` (each list reading its own tables, `ListArchived`'s order, window, clamp and cap,
+the stale day, the merge across shards, and the 400s of both).
 
 **The shard set is immutable at runtime.** `SetShard` is construction-time only: it records index->DSN pairs before
 `Startup` (which opens+migrates exactly those shards) and is **rejected** on a running engine, so the set never

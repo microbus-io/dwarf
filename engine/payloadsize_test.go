@@ -98,7 +98,7 @@ func TestPayloadSize_CreateRejectsWithoutInserting(t *testing.T) {
 	assert.Error(err)
 	assert.Equal(http.StatusRequestEntityTooLarge, errors.StatusCode(err))
 
-	flows, err := e.List(ctx, workflow.Query{})
+	flows, err := enginetest.ListAll(ctx, e, workflow.Query{})
 	assert.NoError(err)
 	assert.Len(flows, 0, "a rejected Create must insert nothing")
 }

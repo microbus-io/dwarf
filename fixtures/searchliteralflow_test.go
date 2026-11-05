@@ -28,6 +28,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -69,7 +70,7 @@ func TestSearchLiteralflow(t *testing.T) {
 
 	// searchURLs returns the set of workflow URLs matched by a Search term.
 	searchURLs := func(term string) map[string]bool {
-		flows, err := eng.List(ctx, workflow.Query{Search: term})
+		flows, err := enginetest.ListAll(ctx, eng, workflow.Query{Search: term})
 		assert.NoError(err)
 		got := map[string]bool{}
 		for _, s := range flows {

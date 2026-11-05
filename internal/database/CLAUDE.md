@@ -4,7 +4,7 @@
 > test-mode DSN resolution.
 > Coupled with: `engine/CLAUDE.md` §"Connection pool sizing" (the engine computes the two pool sizes this package
 > applies) and §"Database Sharding" (the engine-side *semantics* — flow-key shard encoding, subgraph shard
-> affinity, `List`'s cross-shard merge); `internal/migrations/CLAUDE.md` (the schema this package migrates);
+> affinity, the lists' cross-shard merge); `internal/migrations/CLAUDE.md` (the schema this package migrates);
 > `fixtures/CLAUDE.md` (the test-harness rationale behind the DSN resolution `Open` performs).
 
 `ShardSet` owns the shard `map[int]*sequel.DB`: it opens+migrates every shard, routes by index (`Shard`), fans an

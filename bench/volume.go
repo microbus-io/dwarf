@@ -41,7 +41,7 @@ import (
 //   - fill steps/s        - the refiller's band scan and the claim CAS at depth. Flat = the selection
 //     index still seeks; a decay = the hot path started scanning the accumulated backlog.
 //   - History latency     - the root_flow_id tree scan plus the per-flow step scan on a real tree.
-//   - List latency        - the newest 100 flows, a primary-key scan per shard however large the table.
+//   - List latency        - ListLive's newest 100 flows, the live table per shard however large.
 //   - disk MB             - the "append-only terminal sections" fragmentation claim against a real B-tree.
 //   - throughput (with -volume-probe) - the fill pauses at each checkpoint, including the empty database at
 //     the start, for an open-loop SATURATED window and then one at 2/3 of the flows/s it measured, both at
@@ -417,14 +417,14 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 	return report
 }
 
-// drainRunning waits until no flow is running, polling List, so a window opens on a database with no
+// drainRunning waits until no flow is running, polling ListLive, so a window opens on a database with no
 // backlog left over from the one before. It gives up after ten minutes rather than hang a campaign; a
 // backlog that does not drain in that time is itself the finding, and the next window's numbers show it.
 func drainRunning(ctx context.Context, eng *engine.Engine) {
 	deadline := time.Now().Add(10 * time.Minute)
 	for time.Now().Before(deadline) {
 		lctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		running, err := eng.List(lctx, workflow.Query{Status: workflow.StatusRunning, Limit: 1})
+		running, err := eng.ListLive(lctx, workflow.Query{Status: workflow.StatusRunning, NewerThan: 365 * 24 * time.Hour, ToTime: time.Now().Add(time.Hour), Limit: 1})
 		cancel()
 		if err == nil && len(running) == 0 {
 			return
@@ -461,7 +461,7 @@ func rowCounts(ctx context.Context, eng *engine.Engine) (steps, flows int, err e
 	return steps, flows, nil
 }
 
-// probeReads times the read paths at the current volume: History on one real flow, and List.
+// probeReads times the read paths at the current volume: History on one real flow, and ListLive.
 func probeReads(ctx context.Context, eng *engine.Engine, flowKey string) (historyMs, listMs float64) {
 	pctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
@@ -474,7 +474,7 @@ func probeReads(ctx context.Context, eng *engine.Engine, flowKey string) (histor
 	}
 
 	t := time.Now()
-	if _, err := eng.List(pctx, workflow.Query{Limit: 100}); err == nil {
+	if _, err := eng.ListLive(pctx, workflow.Query{Limit: 100}); err == nil {
 		listMs = float64(time.Since(t)) / float64(time.Millisecond)
 	}
 	return historyMs, listMs

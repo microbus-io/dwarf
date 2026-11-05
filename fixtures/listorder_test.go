@@ -19,18 +19,21 @@ package fixtures
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
-// TestList_NewestFirstAcrossShards pins List's top-N: at most Limit flows, the newest by creation time across every
-// shard. Each shard reads its own newest Limit and the union is cut to Limit, so a page is neither grouped by shard
-// nor a per-shard share of Limit: a shard holding all of the newest flows supplies all of them.
-func TestList_NewestFirstAcrossShards(t *testing.T) {
+// TestListLive_NewestFirstAcrossShards pins ListLive's top-N: at most Limit flows, the most recently updated
+// across every shard, ties by shard then newest flow. Each shard reads its own newest Limit and the union is cut to
+// Limit, so a page is neither grouped by shard nor a per-shard share of Limit: a shard holding all of the newest flows
+// supplies all of them. The flows rest interrupted, so they stay active and their order stays put.
+func TestListLive_NewestFirstAcrossShards(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -40,7 +43,10 @@ func TestList_NewestFirstAcrossShards(t *testing.T) {
 	g.SetURL("A", "listorder/a")
 	g.AddTransition("A", workflow.End)
 	mux.HandleGraph("listorder/g", g)
-	mux.HandleTask("listorder/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("listorder/a", func(ctx context.Context, f *workflow.Flow) error {
+		_, err := f.Interrupt(nil, nil)
+		return err
+	})
 
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
@@ -52,13 +58,14 @@ func TestList_NewestFirstAcrossShards(t *testing.T) {
 	// Enough flows that placement (a weighted-random pick) lands some on each shard with overwhelming odds.
 	const total = 30
 	for range total {
-		_, err := e.Create(ctx, "listorder/g", nil, nil)
+		fk, err := e.Create(ctx, "listorder/g", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}
+		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusInterrupted, time.Minute)
 	}
 
-	all, err := e.List(ctx, workflow.Query{Limit: 100})
+	all, err := e.ListLive(ctx, enginetest.Recent(workflow.Query{Limit: 100}))
 	if !assert.NoError(err) || !assert.Len(all, total) {
 		return
 	}
@@ -68,7 +75,13 @@ func TestList_NewestFirstAcrossShards(t *testing.T) {
 		assert.NoError(err)
 		shards[shard] = true
 		if i > 0 {
-			assert.False(f.CreatedAt.After(all[i-1].CreatedAt), "row %d is newer than the one before it", i)
+			prev := all[i-1]
+			assert.False(f.UpdatedAt.After(prev.UpdatedAt), "row %d is newer than the one before it", i)
+			if f.UpdatedAt.Equal(prev.UpdatedAt) {
+				prevShard, _, prevID, _, _ := keys.ParseFlowKey(prev.FlowKey)
+				_, _, id, _, _ := keys.ParseFlowKey(f.FlowKey)
+				assert.True(prevShard < shard || (prevShard == shard && prevID > id), "row %d breaks the tie by shard, then newest flow", i)
+			}
 		}
 	}
 	assert.Len(shards, 2, "both shards must contribute (placement is random; 30 flows over 2 shards)")
@@ -77,7 +90,7 @@ func TestList_NewestFirstAcrossShards(t *testing.T) {
 	// list. Checking every prefix, not one, is what catches a Limit divided across shards: that passes a single
 	// limit whenever the newest flows happen to split evenly between the shards, but not every prefix.
 	for limit := 1; limit <= total; limit++ {
-		newest, err := e.List(ctx, workflow.Query{Limit: limit})
+		newest, err := e.ListLive(ctx, enginetest.Recent(workflow.Query{Limit: limit}))
 		if !assert.NoError(err) || !assert.Len(newest, limit) {
 			return
 		}
@@ -95,7 +108,7 @@ func TestList_NewestFirstAcrossShards(t *testing.T) {
 			}
 		}
 		limit := min(5, len(onShard))
-		got, err := e.List(ctx, workflow.Query{Shard: shard, Limit: limit})
+		got, err := e.ListLive(ctx, enginetest.Recent(workflow.Query{Shard: shard, Limit: limit}))
 		if !assert.NoError(err) || !assert.Len(got, limit) {
 			return
 		}

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -235,7 +236,7 @@ func TestCreatedHour_EveryRowCarriesItsFlowsHour(t *testing.T) {
 		assert.Equal(stepHours[stepID], h, "step key %s", s.StepKey)
 		assert.Equal(movedHour, h, "step key %s is the root's", s.StepKey)
 	}
-	summaries, err := e.List(ctx, workflow.Query{})
+	summaries, err := enginetest.ListAll(ctx, e, workflow.Query{})
 	assert.NoError(err)
 	assert.Len(summaries, 3) // the roots: the original, its turn and the fork
 	for _, s := range summaries {

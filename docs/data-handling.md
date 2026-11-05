@@ -44,7 +44,7 @@ neither hides data from a query nor exposes any.
 
 ## Free-text search reaches errors
 
-`Query.Search`, consumed by `List`, is a case-insensitive substring match. It covers exactly:
+`Query.Search`, consumed by `ListLive` and `ListArchived`, is a case-insensitive substring match. It covers exactly:
 
 - the workflow URL and display name
 - the name of the task the flow stopped at (`StoppedTaskName`), so a running flow never matches on a task
@@ -57,7 +57,7 @@ payloads are not searchable.
 
 The exposure to weigh is the error text, and it has two layers.
 
-**Errors are returned outright.** `List` returns each flow's error and terminate or cancel reason, and `History` returns
+**Errors are returned outright.** The lists return each flow's error and terminate or cancel reason, and `History` returns
 each step's error — including in the payload-free readers. Task errors routinely quote the input that caused
 them (an address, an account number, a downstream API's rejection message quoting the record it rejected),
 so whatever your tasks interpolate into an error string is visible to anyone who can list flows, whether or
@@ -76,7 +76,7 @@ two obligations outside the engine:
   an internal identifier instead of by its value. See
   [Writing tasks → Keep payload data out of error text](tasks.md#keep-payload-data-out-of-error-text) for
   the rule and examples. The same applies to whatever you pass as a terminate or cancel reason, which is stored verbatim.
-- **Your host restricts who may call what.** The engine has no notion of a caller, so gating `List` — and
+- **Your host restricts who may call what.** The engine has no notion of a caller, so gating the lists — and
   `Search` in particular — by credential is yours to do, in the layer that holds the principal.
 
 **This costs you nothing in diagnosability.** Errors that name a *class* (`charge declined`,
@@ -85,7 +85,7 @@ unique payload values match a single flow each, making them simultaneously the l
 the most sensitive to expose. Keeping payload data out improves triage and closes the exposure at once.
 
 If you inherit a system whose errors already quote payloads, treat that as a task-code fix rather than an
-access-control one: the text is returned by `List` and `History` regardless of whether search is available,
+access-control one: the text is returned by the lists and `History` regardless of whether search is available,
 so restricting search alone does not close it.
 
 ## Access control is the host's job
@@ -101,8 +101,9 @@ is not enough to walk the table — you would also need each flow's token. What 
 **Anyone holding a flow key can resume, terminate, fork and read that flow.** Treat a leaked, logged, or
 forwarded key as a full write capability for that one flow.
 
-**`List` is the amplifier.** It is the only operation that returns keys wholesale, so it converts "can call
-the engine" into "holds a capability for every flow returned." Gate it accordingly, and prefer scoping it —
+**The lists are the amplifier.** `ListLive` and `ListArchived` are the only operations that return keys wholesale, so
+they convert "can call the engine" into "holds a capability for every flow returned." Gate them accordingly, and
+prefer scoping them —
 `Query.FairnessKey` is how a tenant-scoped listing is normally expressed, since hosts typically set the
 fairness key to the tenant.
 
@@ -110,12 +111,12 @@ fairness key to the tenant.
 
 | Operation | Returns state payloads? | Returns error text? |
 |---|---|---|
-| `List` | No — summaries only | **Yes** — the flow's `Error`, `TerminateReason` and `CancelReason` |
+| `ListLive`, `ListArchived` | No — summaries only | **Yes** — the flow's `Error`, `TerminateReason` and `CancelReason` |
 | `History` | No — `State` and `Changes` are left empty | **Yes** — each step's `Error` |
 | `Step` | **Yes** — that step's input state and changes | **Yes** |
 | `Snapshot` / `Await` / `Run` | **Yes** — final state, or the interrupt payload | **Yes** |
 
-So a read-only operator console built on `List` and `History` shows structure and failures without exposing
+So a read-only operator console built on the lists and `History` shows structure and failures without exposing
 state payloads; adding `Step` or `Snapshot` exposes the payloads too.
 
 **But note the second column.** Error text is returned by *every* reader, including the two that are
@@ -137,7 +138,7 @@ is, and stamping keys onto spans would hand a write capability for every traced 
 - **There is no operation that converts a correlation id back into a key.** That is deliberate: such a
   lookup would mint capabilities. Resolving "the flow I found in a trace" happens outside the engine — from
   your own record of the keys you minted, under your own authorization.
-- **`List` surfaces the trace id** on each summary so an operator can pivot to a trace backend. Like the
+- **The lists surface the trace id** on each summary so an operator can pivot to a trace backend. Like the
   correlation id, it grants nothing.
 
 Metric labels are bounded on purpose: there are no per-fairness-key labels, so tenant identifiers never reach
@@ -150,7 +151,7 @@ your metrics backend as label cardinality.
 archive, which keeps each day's ended flows for `SetRetention` days (30 by default) and then drops the day whole;
 `PurgeBefore(t)` drops every archived day before t's at once. With a retention of 0 an ended flow is deleted
 instead of archived. An archived flow's outcome, history and steps stay readable by its key until its day is
-dropped; `List` shows only flows not yet archived.
+dropped, and `ListArchived` lists it.
 
 Three ways to remove an ended flow sooner, in the minute before it is archived:
 
@@ -171,7 +172,7 @@ count, err := eng.Purge(ctx, workflow.Query{
 ```
 
 **Deletion is marked, then reaped.** No path deletes rows inline: the flow is stamped for deletion, drops out
-of `List` and `History` immediately, and a background reaper removes the whole subgraph tree within about 15
+of the lists and `History` immediately, and a background reaper removes the whole subgraph tree within about 15
 seconds. A flow marked by `DeleteOnCompletion` keeps serving its outcome to `Snapshot` and `Await` for a
 one-minute grace window first, so a fire-and-forget caller can still read its result.
 
