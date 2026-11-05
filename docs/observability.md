@@ -44,7 +44,7 @@ It defaults to the global `otel.GetMeterProvider()` — the no-op provider unles
 OpenTelemetry SDK. The engine builds its instruments under the scope `github.com/microbus-io/dwarf`;
 service identity comes from the provider's Resource, not from per-metric attributes.
 
-The engine emits 37 instruments — 17 counters, 15 gauges, and 5 histograms. Counter instrument names carry **no** `_total`
+The engine emits 47 instruments — 22 counters, 19 gauges, and 6 histograms. Counter instrument names carry **no** `_total`
 suffix; a Prometheus exporter appends it at the scrape boundary, so the names below are what you query in
 PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried as `dwarf_flows_started_total`):
 
@@ -87,6 +87,16 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_state_in_flight_bytes` | gauge | — | state payload this replica is holding across host calls right now, summed over the tasks currently inside a task call | `dwarf_state_in_flight_bytes` |
 | `dwarf_state_in_flight_steps` | gauge | — | tasks currently inside a task call — the denominator for the line above | `dwarf_state_in_flight_steps` |
 | `dwarf_state_cache_bytes` | gauge | — | memory the state cache is charged for right now. Each field counts as its size plus a few hundred bytes. The cache is bounded by `SetStateCacheSize` and by 1,048,576 fields, so it is full when this is pinned at that size, or below it once 1,048,576 small fields are held | `dwarf_state_cache_bytes` |
+| `dwarf_flows_archived` | counter | `shard` | flows moved into the archive: each root and every subgraph flow of its tree | `dwarf_flows_archived_total` |
+| `dwarf_flows_reaped` | counter | `shard`, `reason` | flows deleted from the live tables without being archived. `reason` is `deleted` (scheduled for deletion by `Delete`, `Purge` or `DeleteOnCompletion`), `no_retention` (a retention of 0) or `archive_failed` (archiving had been failing for a minute, so ended flows were deleted rather than left to fill the live tables). `archive_failed` is records lost from the archive: expect zero | `dwarf_flows_reaped_total` |
+| `dwarf_flows_removed` | counter | `shard`, `op`, `side` | root flows `Delete` and `Purge` removed. `op` is `delete` or `purge`; `side` is `archive` for a flow deleted from the archive, or `live` for an ended flow not archived yet, which is scheduled for deletion and then counted in `dwarf_flows_reaped{reason="deleted"}`, there by flow rather than by root | `dwarf_flows_removed_total` |
+| `dwarf_archive_days_dropped` | counter | `shard` | archive days dropped, by the retention or by `PurgeBefore`. At a steady retention, one per shard a day; two replicas dropping the same day at the same moment can each count it | `dwarf_archive_days_dropped_total` |
+| `dwarf_archive_maintain_failed` | counter | `shard` | archive maintenance passes that failed. A pass runs 24 times a day, makes the days ahead and drops the expired ones; a failure is retried by the next | `dwarf_archive_maintain_failed_total` |
+| `dwarf_reap_pass_seconds` | histogram | `shard` | one pass of the background reaper on a shard, which runs every 15 seconds: the flows scheduled for deletion removed, then the ended flows archived | `dwarf_reap_pass_seconds` |
+| `dwarf_archive_lag_seconds` | gauge | `shard` | how long the oldest ended flow waiting to be archived (deleted, at a retention of 0) had waited beyond the minute every ended flow waits, at the reaper's last pass. Near zero while the reaper keeps up, except in the last minute of each UTC day, when archiving pauses and the reading rises to about 75 seconds | `dwarf_archive_lag_seconds` |
+| `dwarf_archive_failing_seconds` | gauge | `shard` | 0, or how long archiving has been failing on the shard | `dwarf_archive_failing_seconds` |
+| `dwarf_archive_days` | gauge | `shard` | archive days whose tables exist on the shard: the retained days, today and the two days ahead, so the retention plus 3 once a full retention has been kept | `dwarf_archive_days` |
+| `dwarf_archive_oldest_day_age_seconds` | gauge | `shard` | how long ago the oldest archive day on the shard began. About the retention plus a day while expired days are dropped; days drop on passes an hour apart, so allow up to two hours more | `dwarf_archive_oldest_day_age_seconds` |
 
 The counters increment inline at their event sites; the gauges are observable (async) and read engine state
 at collection time. No gauge queries the database when it is collected, so a short scrape interval costs
@@ -130,6 +140,30 @@ nothing else reports — a task holds no database connection while it runs, so t
 for long tasks, and held state times pool size is a memory ceiling `dwarf_workers_resident` cannot show on
 its own.
 
+### The archive
+
+Every ended flow waits in the live tables for about a minute and then moves to the archive
+(`dwarf_flows_archived`), unless it was scheduled for deletion or the retention is 0 (`dwarf_flows_reaped`). Two
+readings say whether that is keeping up. `dwarf_archive_lag_seconds` is how far behind the move is: rising means
+flows end faster than they are archived, and the live tables, which every dispatch reads, grow with it. Archiving
+pauses for the last minute of each UTC day, so the reading rises to about 75 seconds then and falls back after
+midnight: set an alert above that.
+`dwarf_reap_pass_seconds` approaching its 15-second interval says the same from the other side.
+
+**Alert on `dwarf_flows_reaped{reason="archive_failed"}`.** While archiving fails, ended flows wait; after a minute of
+failure they are deleted unarchived, so that a fault in the archive cannot fill the live tables. Each one counted
+there is a record the archive does not have. `dwarf_archive_failing_seconds` rises from the first failure, a minute
+before any loss. See [Archiving is failing](runbook.md#archiving-is-failing).
+
+`dwarf_archive_days` and `dwarf_archive_oldest_day_age_seconds` show the retention being kept: both settle once
+a full retention has accumulated, and both climbing past it means expired days are not being dropped
+(`dwarf_archive_maintain_failed`).
+
+None of these costs a query: each is counted from work the engine does anyway. The sizes of the tables, and on
+PostgreSQL their dead rows, are the database's to report. Watch them with your database's own exporter: the
+`dwarf_flows` and `dwarf_steps` sizes against the flows in flight, and the `dwarf_*_archive_*` tables against the
+retention.
+
 **Aggregating the gauges across replicas — two kinds, and mixing them up inflates your dashboard by the
 replica count:**
 
@@ -147,11 +181,16 @@ replica count:**
 | `dwarf_steps_pending` | **per-shard** (reported by the shard's leading replica) | `max` per shard and priority, then `sum` across shards |
 | `dwarf_steps_oldest_pending_age_seconds` | **per-shard** (reported by the shard's leading replica) | `max` |
 | `dwarf_steps_dispatch_lag_seconds` | **per-shard** (reported by each replica dispatching the shard) | `max` |
+| `dwarf_archive_lag_seconds` | **per-shard** (reported by each replica dispatching the shard) | `max` |
+| `dwarf_archive_failing_seconds` | **per-shard** (reported by each replica dispatching the shard) | `max` |
+| `dwarf_archive_days` | **per-shard** (reported by every replica) | `max` |
+| `dwarf_archive_oldest_day_age_seconds` | **per-shard** (reported by every replica) | `max` |
 
-The per-shard three describe a shard's database, and only the replicas responsible for a shard report them:
-each replica dispatching the shard reports the lag, and one of them, the shard's leader, reports the per-band
-pair. More than one replica can report the same shard: two dispatchers, or an outgoing and an incoming leader
-for a moment while the lead passes. So never `sum` across replicas. Take the `max` per shard first:
+The per-shard gauges describe a shard's database. Each replica dispatching a shard reports its dispatch lag and
+the two reaper readings, one of them, the shard's leader, reports the per-band pair, and every replica reports the
+two archive day readings. More than one replica can report the same shard: two dispatchers, or an outgoing and an
+incoming leader for a moment while the lead passes. So never `sum` across replicas. Take the `max` per shard
+first:
 
 ```promql
 sum by (priority) (max by (shard, priority) (dwarf_steps_pending))
@@ -232,7 +271,7 @@ workflows shows up in the same pipeline: per-operation spans (nested under the a
 logs, and nine `sequel_*` instruments — all under the scope `github.com/microbus-io/sequel`. The logger is
 forwarded only when you explicitly set one, so an unconfigured engine stays silent here too.
 
-**These are not dwarf's instruments and are not part of the 37 above**, but you will see them on the same
+**These are not dwarf's instruments and are not part of the 47 above**, but you will see them on the same
 scrape, and two of them answer questions no `dwarf_*` metric can:
 
 | `sequel_*` instrument | Type | Labels | Measures |

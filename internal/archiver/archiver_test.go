@@ -275,18 +275,24 @@ func TestArchiver_MaintainKeepsTheRetention(t *testing.T) {
 	}
 	archiver.SetClock(a, atHour(today, 12))
 
-	assert.NoError(a.Maintain(ctx, 2))
+	dropped, err := a.Maintain(ctx, 2)
+	assert.NoError(err)
+	assert.Equal(2, dropped)
 	days, err := archiver.Days(ctx, a)
 	assert.NoError(err)
 	assert.Equal([]int{today - 2, today - 1, today, today + 1, today + 2}, days)
 
 	// A retention as long as an int is the documented way to keep everything: it drops nothing, and no error.
-	assert.NoError(a.Maintain(ctx, math.MaxInt))
+	dropped, err = a.Maintain(ctx, math.MaxInt)
+	assert.NoError(err)
+	assert.Zero(dropped)
 	days, err = archiver.Days(ctx, a)
 	assert.NoError(err)
 	assert.Len(days, 5)
 
-	assert.NoError(a.Maintain(ctx, 0))
+	dropped, err = a.Maintain(ctx, 0)
+	assert.NoError(err)
+	assert.Equal(2, dropped)
 	days, err = archiver.Days(ctx, a)
 	assert.NoError(err)
 	assert.Equal([]int{today, today + 1, today + 2}, days)
@@ -310,7 +316,8 @@ func TestArchiver_TheDaysAheadComeWithToday(t *testing.T) {
 
 	catalogs := archiver.Catalogs(a)
 	assert.NoError(a.EnsureToday(ctx))
-	assert.NoError(a.Maintain(ctx, 30))
+	_, err = a.Maintain(ctx, 30)
+	assert.NoError(err)
 	assert.Equal(catalogs+1, archiver.Catalogs(a), "only the drops read the catalog")
 
 	hour += 24

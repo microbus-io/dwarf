@@ -298,10 +298,12 @@ type Engine struct {
 	archives atomic.Pointer[archiveSet]
 	// archiveFailures is, per shard, since when the reaper's archiving has been failing (reaper.go).
 	archiveFailures archiveFailures
-	testArchiveDay  time.Duration
-	noReapQuiet     bool
-	archiveCancel   context.CancelFunc
-	archiveWorker   sync.WaitGroup
+	// archiveLag is, per shard, how far past the grace the oldest due ended root was at the reaper's last scan.
+	archiveLag     archiveLag
+	testArchiveDay time.Duration
+	noReapQuiet    bool
+	archiveCancel  context.CancelFunc
+	archiveWorker  sync.WaitGroup
 
 	// Await latch: the board callers park on, and the detector goroutine that asks the shards which of
 	// those flows have settled. A stop this replica commits reaches the board instantly through

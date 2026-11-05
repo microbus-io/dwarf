@@ -67,7 +67,8 @@ func (e *Engine) PurgeBefore(ctx context.Context, before time.Time) error {
 		if a == nil {
 			return errors.New("shard %d has no archive in this run; the engine is restarting", shard, http.StatusServiceUnavailable)
 		}
-		_, err := a.DropBefore(ctx, day)
+		n, err := a.DropBefore(ctx, day)
+		e.metricArchiveDaysDropped(ctx, shard, n)
 		return errors.Trace(err)
 	}))
 }
@@ -194,6 +195,7 @@ func (e *Engine) startArchives(ctx context.Context, dayLength time.Duration) err
 	}
 	e.archives.Store(set)
 	e.archiveFailures.reset()
+	e.archiveLag.reset()
 	return errors.Trace(e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		a := set.byShard[shard]
 		err := a.EnsureToday(ctx)
@@ -245,7 +247,16 @@ func (e *Engine) maintainArchives(ctx context.Context, set *archiveSet) {
 			}
 			return nil
 		}
-		err := set.byShard[shard].Maintain(ctx, e.retentionDays)
+		dropped, err := set.byShard[shard].Maintain(ctx, e.retentionDays)
+		// engineseams.FaultArchiveMaintainErr fails the pass after its work, as a failed drop or make does.
+		if err == nil && e.seams.IsFault(engineseams.FaultArchiveMaintainErr) {
+			err = errors.New("injected fault: " + engineseams.FaultArchiveMaintainErr)
+		}
+		e.metricArchiveDaysDropped(ctx, shard, dropped)
+		// A pass cut short by Shutdown is not a failure: logSweepError does not log it either.
+		if err != nil && ctx.Err() == nil {
+			e.metricArchiveMaintainFailed(ctx, shard)
+		}
 		if err != nil {
 			e.logSweepError(ctx, "Maintaining the archive tables; the next pass retries", "shard", shard, "error", err)
 		}

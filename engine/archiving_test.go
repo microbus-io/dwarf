@@ -278,7 +278,8 @@ func TestArchiving_ResidencySplitsTheDueRoots(t *testing.T) {
 		var ids []int
 		for rows.Next() {
 			var id int
-			assert.NoError(rows.Scan(&id))
+			var ageMs float64
+			assert.NoError(rows.Scan(&id, &ageMs))
 			ids = append(ids, id)
 		}
 		return ids

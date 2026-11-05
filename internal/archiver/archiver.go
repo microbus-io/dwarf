@@ -27,8 +27,8 @@ limitations under the License.
 //	a := archiver.New(db, archiver.DefaultDayLength, migrations.Archive())
 //	err := a.EnsureToday(ctx)             // at Startup: the tables of today and the two days after must exist
 //	err = a.MigrateDays(ctx, retention)   // at Startup: the existing days within the retention brought up to date
-//	err = a.Maintain(ctx, retention)      // periodically: the days ahead made, expired days dropped
-//	n, err := a.DropBefore(ctx, day)      // an operator's purge of every day before one
+//	n, err := a.Maintain(ctx, retention)  // periodically: the days ahead made, expired days dropped
+//	n, err = a.DropBefore(ctx, day)       // an operator's purge of every day before one
 //	err = a.Refresh(ctx)                  // periodically, where Maintain does not run: the days LocateFlow probes
 //	day, err := a.LocateFlow(ctx, id, hour) // the day an archived flow is in, or a 404
 //
@@ -275,21 +275,21 @@ func (a *Archive) migrateExisting(ctx context.Context, day int) error {
 
 // Maintain makes sure the tables of today and of the two days after it exist, and drops every day that ended at least
 // retention days ago. A retention of 0 keeps today's tables and those ahead, which nothing writes, and drops every day
-// before today.
-func (a *Archive) Maintain(ctx context.Context, retention int) error {
+// before today. It returns how many days it dropped, which a failure does not undo.
+func (a *Archive) Maintain(ctx context.Context, retention int) (dropped int, err error) {
 	// Negative would reach today, which is being written.
 	retention = max(retention, 0)
 	today, err := a.Today(ctx)
 	if err != nil {
-		return errors.Trace(err)
+		return 0, errors.Trace(err)
 	}
 	// The days ahead are made before the expired days go, from the same reading of today. A failure to make them does
 	// not hold back the drops: the likeliest cause is a full database, which they free.
 	err = a.ensureCurrent(ctx, today)
 	// A day ends at the start of the next, so day d has been over for retention days once d+1+retention <= today.
 	// Written as a bound on d so that a retention near the largest int cannot overflow.
-	_, dropErr := a.dropDays(ctx, func(d int) bool { return d < today-retention })
-	return errors.Join(err, dropErr, a.forgetDaysBefore(ctx, today-retention))
+	dropped, dropErr := a.dropDays(ctx, func(d int) bool { return d < today-retention })
+	return dropped, errors.Join(err, dropErr, a.forgetDaysBefore(ctx, today-retention))
 }
 
 // DropBefore drops the tables of every day before day, and returns how many days it dropped. It returns a 400 for a

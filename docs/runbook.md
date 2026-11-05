@@ -31,6 +31,8 @@ registry.
 | [The database was down](#the-database-was-down) | Usually no action |
 | [Tasks are running more than once](#tasks-are-running-more-than-once) | Correctness of side effects |
 | [Deadlock errors on MySQL or SQL Server](#deadlock-errors-on-mysql-or-sql-server) | Throughput |
+| [Archiving is failing](#archiving-is-failing) | Ended flows deleted unarchived after a minute |
+| [The archive is falling behind](#the-archive-is-falling-behind) | The live tables grow |
 | [Disk did not shrink after a purge](#disk-did-not-shrink-after-a-purge) | Usually no action |
 | [A flow is stuck `interrupted`](#a-flow-is-stuck-interrupted) | Usually not a fault |
 
@@ -414,6 +416,48 @@ ALTER DATABASE [yourdb] SET READ_COMMITTED_SNAPSHOT ON;
 
 Both changes remove the lock cycle outright rather than reducing it. PostgreSQL needs neither and is the
 recommended production dialect; see [Deployment](deployment.md).
+
+---
+
+## Archiving is failing
+
+**What it means.** `dwarf_archive_failing_seconds` is above zero: the reaper could not move ended flows into the
+archive on that shard. They wait in the live tables while it retries every 15 seconds. Once archiving has been
+failing for a minute, ended flows are deleted without archiving, so that the fault cannot fill the live tables, and
+each one is counted in `dwarf_flows_reaped{reason="archive_failed"}`. **Those flows are gone**: no copy of them is
+kept, and nothing can bring them back.
+
+**Cause.** The log says which, at error level, once when the failure begins and once when the deletions begin
+("Reaper: ... failed"):
+
+- **The archive's days are not being made.** Archiving needs today's archive tables and tomorrow's. They are made
+  ahead, by maintenance passes that run every hour; a pass that cannot create a table (the database full, the role
+  without the privilege) logs "Maintaining the archive tables" and counts `dwarf_archive_maintain_failed`. Between
+  one and two days of such failures leave a day missing.
+- **The move itself fails**: the database full or read-only, or a lock wait on an archive table that runs past
+  the database's timeout.
+- **An archive table was dropped outside dwarf.** A day's tables are never made again once dropped, so the
+  failure lasts until the day they belong to has passed.
+
+**Respond.** Fix the cause: free the space, restore the privilege. Archiving resumes on the next reaper pass, and
+the gauge returns to zero once a pass archives without failing.
+
+---
+
+## The archive is falling behind
+
+**What it means.** `dwarf_archive_lag_seconds` is rising: ended flows are waiting longer than their minute to be
+archived. A rise to about 75 seconds in the last minute of a UTC day is expected - archiving pauses then - and
+clears after midnight. They stay readable throughout. But the live tables, which every dispatch reads, hold them meanwhile, so a
+lag that keeps rising slows dispatch.
+
+**Confirm.** `dwarf_reap_pass_seconds` near or above its 15-second interval says the reaper is busy the whole time.
+Read the rate flows end (`dwarf_flows_ended_total`) against the rate they leave the live tables, archived or
+deleted (`dwarf_flows_archived_total` plus `dwarf_flows_reaped_total`): a sustained gap is the backlog growing.
+
+**Respond.** A burst of ended flows clears on its own once the burst ends. A lag that grows with steady load means
+the shard's database cannot move flows as fast as they end: [One shard is slow or
+unreachable](#one-shard-is-slow-or-unreachable) applies, and more shards spread the load.
 
 ---
 

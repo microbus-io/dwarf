@@ -3048,7 +3048,7 @@ all other cloned steps to `parkedNone`), so cloned rows never inherit a stale no
 
 ## Metrics (`engine/metrics.go`)
 
-The engine emits 37 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
+The engine emits 47 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
 injects the provider; it defaults to the global `otel.GetMeterProvider()` - no-op unless the host configures the
 SDK, so unconfigured/standalone/test use pays nothing. Instruments are built once in `initMetrics` (from
 `initRuntime`, so every `Startup` gets them) from `mp.Meter("github.com/microbus-io/dwarf")` - that
@@ -3056,7 +3056,8 @@ scope distinguishes dwarf's metrics; **service identity lives in the provider's 
 attributes** (no `service.name` on data points - cardinality explosion, off-spec). The only attributes attached are
 the metric-specific labels: `workflow`, `status`, `task_name` (on `dwarf_steps_executed`), `priority` (on the
 flow lifecycle counters and the per-band backlog gauges), `park_type`, `role` (on the db-phase pair), `op` (on
-`dwarf_operation_seconds`), `shard`, and `column` (on the byte counters). `priority` and `workflow` assume the host uses a bounded set of each;
+`dwarf_operation_seconds` and `dwarf_flows_removed`), `shard`, `column` (on the byte counters), `reason` (on `dwarf_flows_reaped`) and `side`
+(on `dwarf_flows_removed`). `priority` and `workflow` assume the host uses a bounded set of each;
 the host drops either with a metric View if it does not.
 
 **8 counters, incremented inline** at their logical event sites: `dwarf_flows_started`
@@ -3068,6 +3069,26 @@ because no step carries the `advancing` flag - the flow-level sibling of `dwarf_
 same site as its error log; the flows it does repair count in `dwarf_steps_recovered`),
 and the two persist alarms `dwarf_steps_write_retried` / `dwarf_steps_write_failed` (detailed under "Persisting
 a step's outcome"). The inline helpers no-op when `e.metrics == nil` (before Startup).
+
+**The archive's 10 instruments cost no statement**: each counts work already done or reads memory.
+`dwarf_flows_archived` and `dwarf_flows_reaped{reason}` count a batch's `RowsAffected` (flow rows, roots and
+subgraph flows alike) only after `reapBatchOf` returns nil - a failed commit returns its count with the error. The
+reason is `reapDue`'s `unarchived` for a batch `dayOf` gives no day (`deleted` for the stamped kind; `no_retention`,
+or `archive_failed` when `refreshReapDay` failed past the grace), and `archive_failed` for the fallback after a
+failed move. `dwarf_archive_lag_seconds` rides the ended scan: each branch also selects
+`DATE_DIFF_MILLIS(NOW_UTC(), updated_at)` (scanned as a float64 - fractional on SQLite), and only a pass's FIRST
+scan sets the reading, since its first row per status is that status's oldest due root and a later scan sees what
+the batches left (`TestArchiveMetrics_TheReaperCountsWhatItMoves` pins it with two roots of different ages and a
+batch of one, under a non-zero grace). A pass that bails before scanning - today's day unreadable within the grace -
+leaves the last reading; `dwarf_archive_failing_seconds` (from `archiveFailures.since`) covers that. The two reaper
+gauges are reported only while dispatching, like the dispatch lag, and a pass on a shard this replica does not
+dispatch forgets both its readings (`forgetReaping`): a replica that resumes dispatching hours later must not report
+the old failure, nor take its next failure as already past the grace and delete unarchived at once. A maintenance
+error under a cancelled ctx (a Shutdown mid-pass) is not counted, as `logSweepError` does not log it; the two day gauges by every replica from `DaysIn`, the
+archive's record, which a reader refreshes every archive pass. `dwarf_flows_removed` counts roots, at the stamp or
+the archived delete. **Do not add exact live or archive counts by status, or the database's own statistics**: a
+`GROUP BY` linear in the tables on every collection, and a privileged read (`VIEW DATABASE STATE` on SQL Server) in
+four dialect shapes, which a least-privileged role may lack and the server's exporter reports anyway.
 
 **3 refiller counters + 1 refiller histogram**, built by the PISTONS (`internal/piston`) from the meter
 this engine resolves once and hands each of them - one instrumentation scope per engine, whoever records
@@ -3142,8 +3163,8 @@ end is load-bearing (`internal/piston/CLAUDE.md`).
   cost by deepening the backlog moved throughput -1% (noise). Do not narrow the selection index or revive
   skip-scans on throughput grounds; they need another justification (server CPU headroom).
 
-**17 counters** in total: the 8 event counters above, plus `dwarf_steps_offered` /
-`dwarf_steps_claim_preempted` / `dwarf_steps_claim_lost` / `dwarf_peer_changes`, plus the three the pistons
+**22 counters** in total: the 8 event counters above, plus `dwarf_steps_offered` /
+`dwarf_steps_claim_preempted` / `dwarf_steps_claim_lost` / `dwarf_peer_changes`, plus the archive's five (below), plus the three the pistons
 own (`dwarf_refill_candidates_selected` / `_discarded`, `dwarf_steps_stolen`), plus the two byte counters,
 `dwarf_state_write_bytes` / `dwarf_state_read_bytes` (labels `workflow` + `column`, unit `By`) - payload
 bytes the engine writes to / reads from **step rows on the execution path**. The `column` label is the
@@ -3173,7 +3194,7 @@ de-duplicates, so a name already ending in `_total` is not doubled), while the O
 instrument name verbatim. So the instruments are named `dwarf_flows_started` etc., and a Prometheus query
 references them as `dwarf_flows_started_total`. Do not bake `_total` into a counter's instrument name.
 
-**15 gauges, observable (async)** via a single `RegisterCallback`. The callback runs at metric-collection
+**19 gauges, observable (async)** via a single `RegisterCallback`. The callback runs at metric-collection
 time and reads engine state from memory only - **it makes no query, and must not.** A collector may scrape at
 any rate and every replica runs the callback, so a query here costs `R x shards x scrape rate`: an O(backlog)
 aggregate at the bench's 50 ms collection is 20 aggregates a second per replica per shard, against the database

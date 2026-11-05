@@ -19,6 +19,7 @@ package engine
 import (
 	"context"
 	"maps"
+	"math"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -58,6 +59,12 @@ type engineMetrics struct {
 	dbPhaseSeconds      metric.Float64Histogram
 	operationSeconds    metric.Float64Histogram
 	peerChanges         metric.Int64Counter
+	flowsArchived       metric.Int64Counter
+	flowsReaped         metric.Int64Counter
+	flowsRemoved        metric.Int64Counter
+	daysDropped         metric.Int64Counter
+	maintainFailed      metric.Int64Counter
+	reapPassSeconds     metric.Float64Histogram
 
 	reg metric.Registration // the observable-gauge callback registration, unregistered at Shutdown
 
@@ -250,6 +257,23 @@ func (e *Engine) initMetrics() error {
 	m.peerChanges = ctr("dwarf_peer_changes", "Counts times a shard's observed replica count MOVED, by shard. In a settled fleet this must be ZERO for the whole run: every increment past the initial join re-divides that shard's connection pool and re-seats every replica's residue class of step ids, so a nonzero rate means the fleet is churning and the two divisors are chasing it. The usual cause is not a real join or departure but a stale registry row - a replica that died without deleting its row inflates the count until it ages out, and a crash-loop with random ids accumulates them faster than that.")
 	m.stepsClaimLost = ctr("dwarf_steps_claim_lost", "Counts claim attempts whose CAS matched no row - the step was already claimed by a peer, or left the claimable state (terminated, cancelled, resumed, parked) between selection and claim. The lease-contention signal: measured against dwarf_steps_executed it is the share of dispatch round trips that produced no work, and it rises with the replica count when replicas select overlapping candidates. Not an error - the step is simply someone else's - but a high ratio means the fleet is paying for round trips it cannot use.")
 
+	// The archive's instruments count work the reaper, the archive's maintenance and the removals do anyway: none costs
+	// a statement. Exact counts of the live or archive tables by status (a GROUP BY linear in the tables) and the
+	// database's own statistics (a privileged read in four dialect shapes) are left to the server's exporter.
+	m.flowsArchived = ctr("dwarf_flows_archived", "Counts flows the reaper moved from the live tables into the archive, by shard: each root and every subgraph flow of its tree. Its rate plus dwarf_flows_reaped's, against dwarf_flows_ended, is the reaper keeping up - an ended root waits the archive grace (a minute) in the live tables, so the two track each other a minute apart.")
+	m.flowsReaped = ctr("dwarf_flows_reaped", "Counts flows the reaper deleted from the live tables WITHOUT archiving them, by shard and by reason: deleted (a tree Delete, Purge or DeleteOnCompletion scheduled for deletion), no_retention (a retention of 0 keeps no archive), and archive_failed (archiving had been failing for the failure grace, so ended trees were deleted rather than left to fill the live tables). archive_failed is records LOST from the archive and must stay zero; dwarf_archive_failing_seconds says since when it has been failing, and the logs say why.")
+	m.flowsRemoved = ctr("dwarf_flows_removed", "Counts root flows Delete and Purge removed, by shard, by operation (op: delete, purge) and by side: archive for a tree deleted from the archive at once, live for an ended tree in the live tables scheduled for deletion, which the reaper then deletes within a tick and counts as dwarf_flows_reaped{reason=\"deleted\"}.")
+	m.daysDropped = ctr("dwarf_archive_days_dropped", "Counts archive days dropped, by shard: by retention, or by PurgeBefore. At a steady retention it rises by one per shard a day; two dispatchers dropping the same day at once can each count it.")
+	m.maintainFailed = ctr("dwarf_archive_maintain_failed", "Counts archive maintenance passes that failed, by shard: the pass that makes the days ahead and drops the expired days, run 24 times a day by a dispatcher of the shard. One failure is retried by the next pass; a run of them leaves the days ahead unmade, and one to two days of them stop archiving (dwarf_archive_failing_seconds). A pass cut short by Shutdown is not counted.")
+	reapPassSeconds, err := meter.Float64Histogram("dwarf_reap_pass_seconds",
+		metric.WithUnit("s"),
+		metric.WithDescription("Time one reaper pass spent on a shard, by shard: from its turn at the shard to the end of its work - the trees scheduled for deletion removed, then the ended trees archived, each batch by batch until none is due. A pass runs every 15 seconds on each dispatcher of the shard. Passes that grow toward that interval mean the reaper is falling behind the rate flows end; read dwarf_archive_lag_seconds for how far."),
+		metric.WithExplicitBucketBoundaries(0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 15, 60, 300))
+	if err != nil {
+		errs = append(errs, errors.Trace(err))
+	}
+	m.reapPassSeconds = reapPassSeconds
+
 	gauge := func(name, desc, unit string) metric.Int64ObservableGauge {
 		g, err := meter.Int64ObservableGauge(name, metric.WithDescription(desc), metric.WithUnit(unit))
 		if err != nil {
@@ -310,6 +334,13 @@ func (e *Engine) initMetrics() error {
 	inFlightBytes := gauge("dwarf_state_in_flight_bytes", "Per-replica: state payload this replica is holding across host calls right now - the JSON each in-flight task's carrier was built from, summed over the tasks currently inside ExecuteTask. Divide by dwarf_state_in_flight_steps for the mean state a task carries: a large mean says state SIZE is what loads this replica, a small mean against a large count says fan-out WIDTH is. It measures the wire form, not the decoded maps that occupy the heap - read against Go heap to get the decode expansion factor, which is the number that says whether holding state in decoded form is worth what it costs. This is the one instrument for a cost the engine otherwise cannot see at all: workers hold no connection during a host call, so the crew grows freely for long tasks, and held state times crew size is the memory ceiling nothing else reports. Sum across replicas.", "By")
 	inFlightSteps := gauge("dwarf_state_in_flight_steps", "Per-replica: tasks currently inside a host call - the denominator for dwarf_state_in_flight_bytes. It is NOT dwarf_workers_resident (workers that EXIST, most of which are idle or in a database phase) and NOT dwarf_db_phase_workers (workers in a database phase, which is the opposite population - a task inside a host call holds no connection); neither can serve as this denominator. Sum across replicas.", "")
 
+	// The archive gauges. The two reaper readings are reported by each replica dispatching the shard, the two day
+	// readings by every replica, from the days its archive last read; all four are per-shard facts, aggregated with max.
+	archiveFailing := gaugeF("dwarf_archive_failing_seconds", "Per-shard: 0, or how long archiving has been failing on that shard, as seen by each replica dispatching it. While it is below the failure grace (a minute) ended trees wait in the live tables; past it they are deleted without archiving, counted as dwarf_flows_reaped{reason=\"archive_failed\"}. Aggregate with max.", "s")
+	archiveLagG := gaugeF("dwarf_archive_lag_seconds", "Per-shard: how long past the archive grace the oldest ended root waiting to be archived had waited, at the reaper's last scan of that shard, as seen by each replica dispatching it - or waiting to be deleted, at a retention of 0. Near zero in a fleet that keeps up, but for the last minute of each UTC day, when archiving pauses and the reading rises to about 75s; rising beyond that means flows end faster than the reaper removes them, and the live tables grow. A pass that cannot read today's archive day scans nothing and leaves the last reading; dwarf_archive_failing_seconds covers that. Aggregate with max.", "s")
+	archiveDays := gauge("dwarf_archive_days", "Per-shard: the archive days whose tables exist on that shard, by each replica's last reading of them (every archive pass, 24 times a day): the retained days, today, and the two days ahead made early - the retention plus 3 once the shard has kept a full retention. More means expired days are not being dropped (dwarf_archive_maintain_failed). Aggregate with max.", "")
+	archiveOldest := gaugeF("dwarf_archive_oldest_day_age_seconds", "Per-shard: how long ago the oldest archive day on that shard began, by each replica's last reading of the days. About the retention plus a day once maintenance keeps up, and up to two hours more, since days drop on hourly passes; beyond that, expired days are not being dropped. Aggregate with max.", "s")
+
 	stateCacheBytes := gauge("dwarf_state_cache_bytes", "Per-replica: memory the state cache is charged for right now - the large state fields this replica keeps for the steps that read them next, each counted at its size plus a per-entry overhead of a few hundred bytes. It is bounded by SetStateCacheSize (a tenth of the memory limit by default) and by 1,048,576 fields, so the cache is full - evicting its least recently used fields - when this is pinned at that size, OR below it once 1,048,576 small fields are held. A field unread for 5 minutes expires, but it is counted until a later store or a lookup of it removes it, so on a replica that has gone quiet the reading holds at its last level rather than falling with the working set. Sum across replicas.", "By")
 
 	reg, err := meter.RegisterCallback(
@@ -330,11 +361,15 @@ func (e *Engine) initMetrics() error {
 				inFlightBytes:    inFlightBytes,
 				inFlightSteps:    inFlightSteps,
 				stateCacheBytes:  stateCacheBytes,
+				archiveFailing:   archiveFailing,
+				archiveLag:       archiveLagG,
+				archiveDays:      archiveDays,
+				archiveOldest:    archiveOldest,
 			})
 		},
 		queueDepth, stepsPending, oldestAge, dispatchLag, peerReplicas, shardDispatching, peerBlind, tallyAge,
 		turnstileAvail, turnstileWaiting, workersResident, inFlightBytes, inFlightSteps, stateCacheBytes,
-		dbPhaseWorkers,
+		dbPhaseWorkers, archiveFailing, archiveLagG, archiveDays, archiveOldest,
 	)
 	if err != nil {
 		errs = append(errs, errors.Trace(err))
@@ -374,6 +409,10 @@ type observableGauges struct {
 	inFlightBytes   metric.Int64ObservableGauge
 	inFlightSteps   metric.Int64ObservableGauge
 	stateCacheBytes metric.Int64ObservableGauge
+	archiveFailing  metric.Float64ObservableGauge
+	archiveLag      metric.Float64ObservableGauge
+	archiveDays     metric.Int64ObservableGauge
+	archiveOldest   metric.Float64ObservableGauge
 }
 
 // observeGauges is the observable-gauge callback. Every reading is from memory: it makes no query, so a
@@ -405,6 +444,8 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 			metric.WithAttributes(attribute.String("role", role)))
 	}
 
+	now := time.Now()
+	archives := e.archives.Load()
 	// Peer readings, per shard: atomic reads of what each Sonar last published, so this costs no round trip
 	// and stays honest while a shard is unreadable (the count holds, and blindFor is what says why).
 	for _, idx := range e.db.Indices() {
@@ -425,6 +466,23 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 		}
 		if n, ok := waitingBy[idx]; ok {
 			o.ObserveInt64(g.turnstileWaiting, int64(n), shard)
+		}
+		// The reaper's readings only while dispatching, for the same reason as the dispatch lag below: only a
+		// dispatcher reaps, and a replica that stopped must not keep reporting a shard it no longer reaps.
+		if dispatching == 1 {
+			o.ObserveFloat64(g.archiveFailing, e.archiveFailures.failingFor(idx, now).Seconds(), shard)
+			if lag, ok := e.archiveLag.of(idx); ok {
+				o.ObserveFloat64(g.archiveLag, lag.Seconds(), shard)
+			}
+		}
+		if archives != nil && archives.byShard[idx] != nil {
+			a := archives.byShard[idx]
+			days := a.DaysIn(math.MinInt, math.MaxInt)
+			o.ObserveInt64(g.archiveDays, int64(len(days)), shard)
+			if len(days) > 0 {
+				// A day begins where the one before it ends.
+				o.ObserveFloat64(g.archiveOldest, max(now.Sub(a.DayEnds(days[0]-1)), 0).Seconds(), shard)
+			}
 		}
 		// Only while dispatching: a reader's piston is idle and has no reading, and a replica that just
 		// stopped dispatching must not keep reporting the lag of a shard it no longer looks at.
@@ -631,4 +689,72 @@ func (e *Engine) metricOrphanedFlow(ctx context.Context, workflowURL string) {
 		return
 	}
 	e.metrics.flowsOrphaned.Add(ctx, 1, metric.WithAttributes(attribute.String("workflow", workflowURL)))
+}
+
+// shardAttr is the shard attribute alone, for the archive's cold-path recorders.
+func shardAttr(shardNum int) attribute.KeyValue {
+	return attribute.String("shard", strconv.Itoa(shardNum))
+}
+
+// metricFlowsArchived counts the flows one reaper batch moved into the archive.
+func (e *Engine) metricFlowsArchived(ctx context.Context, shardNum, n int) {
+	if e.metrics == nil || n <= 0 {
+		return
+	}
+	e.metrics.flowsArchived.Add(ctx, int64(n), metric.WithAttributes(shardAttr(shardNum)))
+}
+
+// The reasons a reaper deletes flows without archiving them (dwarf_flows_reaped).
+const (
+	reapReasonDeleted       = "deleted"
+	reapReasonNoRetention   = "no_retention"
+	reapReasonArchiveFailed = "archive_failed"
+)
+
+// metricFlowsReaped counts the flows one reaper batch deleted without archiving, for reason.
+func (e *Engine) metricFlowsReaped(ctx context.Context, shardNum int, reason string, n int) {
+	if e.metrics == nil || n <= 0 {
+		return
+	}
+	e.metrics.flowsReaped.Add(ctx, int64(n), metric.WithAttributes(shardAttr(shardNum), attribute.String("reason", reason)))
+}
+
+// The sides a Delete or Purge removes from (dwarf_flows_removed).
+const (
+	removedFromLive    = "live"
+	removedFromArchive = "archive"
+)
+
+// metricFlowsRemoved counts the roots a Delete or Purge (op) removed from side: the archive, deleted at once, or the
+// live tables, scheduled for the reaper.
+func (e *Engine) metricFlowsRemoved(ctx context.Context, shardNum int, side, op string, n int) {
+	if e.metrics == nil || n <= 0 {
+		return
+	}
+	e.metrics.flowsRemoved.Add(ctx, int64(n), metric.WithAttributes(shardAttr(shardNum),
+		attribute.String("side", side), attribute.String("op", op)))
+}
+
+// metricArchiveDaysDropped counts the archive days a maintenance pass or a PurgeBefore dropped.
+func (e *Engine) metricArchiveDaysDropped(ctx context.Context, shardNum, n int) {
+	if e.metrics == nil || n <= 0 {
+		return
+	}
+	e.metrics.daysDropped.Add(ctx, int64(n), metric.WithAttributes(shardAttr(shardNum)))
+}
+
+// metricArchiveMaintainFailed counts a failed archive maintenance pass.
+func (e *Engine) metricArchiveMaintainFailed(ctx context.Context, shardNum int) {
+	if e.metrics == nil {
+		return
+	}
+	e.metrics.maintainFailed.Add(ctx, 1, metric.WithAttributes(shardAttr(shardNum)))
+}
+
+// metricReapPass records one reaper pass's time on a shard.
+func (e *Engine) metricReapPass(ctx context.Context, shardNum int, d time.Duration) {
+	if e.metrics == nil || e.metrics.reapPassSeconds == nil {
+		return
+	}
+	e.metrics.reapPassSeconds.Record(ctx, d.Seconds(), metric.WithAttributes(shardAttr(shardNum)))
 }

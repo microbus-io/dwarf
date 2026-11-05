@@ -111,6 +111,7 @@ const (
 	FaultReapSelectErr       = "reapSelectErr"       // the reaper's due-root SELECT errors
 	FaultReapContention      = "reapContention"      // the reaper's archive move fails on lock contention (a deadlock victim)
 	FaultReapArchiveErr      = "reapArchiveErr"      // the reaper's archive move fails with an error that is not lock contention
+	FaultArchiveMaintainErr  = "archiveMaintainErr"  // an archive maintenance pass fails after its work
 	FaultRefillScanErr       = piston.FaultScanErr   // the piston's priority-band scan errors (its name, so there is one catalogue)
 	FaultPeerReadErr         = peers.FaultReadErr    // a shard's peer-registry reading fails: this replica goes BLIND on that shard (their names, so there is one catalogue)
 	FaultPeerBeatErr         = peers.FaultBeatErr    // a shard's peer-registry beat writes nothing: this replica stops proving its liveness THERE, while running on

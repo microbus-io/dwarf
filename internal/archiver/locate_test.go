@@ -326,9 +326,10 @@ func TestArchiver_RetentionForgetsTheDirectorysExpiredDays(t *testing.T) {
 	name(t, db, 104, 9010)
 	name(t, db, 105, 9005)
 
-	assert.NoError(a.Maintain(ctx, 5)) // keeps 9005 on
+	_, err := a.Maintain(ctx, 5) // keeps 9005 on
+	assert.NoError(err)
 	assert.Equal(map[int]int{103: 9008, 104: 9010, 105: 9005}, directoryDays(t, db))
-	_, err := a.DropBefore(ctx, 9009)
+	_, err = a.DropBefore(ctx, 9009)
 	assert.NoError(err)
 	assert.Equal(map[int]int{104: 9010}, directoryDays(t, db))
 }
@@ -353,7 +354,8 @@ func TestArchiver_RetentionForgetsManyRowsInBatches(t *testing.T) {
 	}
 	name(t, db, 99, 9009)
 
-	assert.NoError(a.Maintain(ctx, 5))
+	_, err := a.Maintain(ctx, 5)
+	assert.NoError(err)
 	assert.Equal(map[int]int{99: 9009}, directoryDays(t, db))
 }
 

@@ -1028,6 +1028,7 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 		return errors.Trace(err)
 	}
 	if n, _ := res.RowsAffected(); n > 0 {
+		e.metricFlowsRemoved(ctx, shardNum, removedFromLive, "delete", 1)
 		return nil
 	}
 	// The stamp matched nothing, so the row moved since the read: the reaper archived the tree (deleted from the
@@ -1092,7 +1093,11 @@ func (e *Engine) deleteArchivedFlow(ctx context.Context, db *sequel.DB, shardNum
 	if sequel.IsUndefinedTableError(err) || (err == nil && n == 0) {
 		return errors.New("flow not found", http.StatusNotFound) // dropped, or deleted by a racing Delete or Purge
 	}
-	return errors.Trace(err)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	e.metricFlowsRemoved(ctx, shardNum, removedFromArchive, "delete", n)
+	return nil
 }
 
 // run creates, starts, and awaits a flow in one call.

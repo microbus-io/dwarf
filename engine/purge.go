@@ -143,6 +143,7 @@ func (e *Engine) markLiveRoots(ctx context.Context, roots []listRow) (int, error
 			}
 			n, _ := res.RowsAffected()
 			marked.Add(n)
+			e.metricFlowsRemoved(ctx, rows[0].shard, removedFromLive, "purge", int(n))
 		}
 		return nil
 	})
@@ -180,6 +181,7 @@ func (e *Engine) deleteArchivedRoots(ctx context.Context, roots []listRow) (int,
 				}
 				n, err := deleteArchivedTrees(ctx, db, day, cut)
 				deleted.Add(int64(n))
+				e.metricFlowsRemoved(ctx, rows[0].shard, removedFromArchive, "purge", n)
 				if sequel.IsUndefinedTableError(err) {
 					break
 				}
