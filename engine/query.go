@@ -102,37 +102,27 @@ func listLimit(query workflow.Query) (int, error) {
 	return query.Limit, nil
 }
 
-// listWindow is a query's time window by this process's clock: from lower, inclusive, to upper, exclusive. Each of the
-// query's bounds narrows it, an absolute one and a relative one alike.
+// listWindow is a query's time window: from lower, inclusive, to upper, exclusive. A bound the query leaves out is
+// zero.
 type listWindow struct {
 	lower, upper time.Time
 }
 
-// listWindowOf returns the query's window as of now, the lower bound before the upper. With bounds required, it needs a
-// lower bound (FromTime or NewerThan) and an upper bound (ToTime or OlderThan); otherwise a missing one is zero.
-func listWindowOf(query workflow.Query, now time.Time, required bool) (listWindow, error) {
-	if query.OlderThan < 0 || query.NewerThan < 0 {
-		return listWindow{}, errors.New("OlderThan and NewerThan cannot be negative", http.StatusBadRequest)
-	}
-	if required && ((query.FromTime.IsZero() && query.NewerThan == 0) || (query.ToTime.IsZero() && query.OlderThan == 0)) {
-		return listWindow{}, errors.New("a list needs a lower bound (FromTime or NewerThan) and an upper bound (ToTime or OlderThan)",
-			http.StatusBadRequest)
+// listWindowOf returns the query's window, the lower bound before the upper. With bounds required, it needs both
+// FromTime and ToTime.
+func listWindowOf(query workflow.Query, required bool) (listWindow, error) {
+	if required && (query.FromTime.IsZero() || query.ToTime.IsZero()) {
+		return listWindow{}, errors.New("ListArchived needs a lower bound (FromTime) and an upper bound (ToTime)", http.StatusBadRequest)
 	}
 	w := listWindow{lower: query.FromTime, upper: query.ToTime}
-	if t := now.Add(-query.NewerThan); query.NewerThan > 0 && (w.lower.IsZero() || t.After(w.lower)) {
-		w.lower = t
-	}
-	if t := now.Add(-query.OlderThan); query.OlderThan > 0 && (w.upper.IsZero() || t.Before(w.upper)) {
-		w.upper = t
-	}
 	if !w.lower.IsZero() && !w.upper.IsZero() && !w.lower.Before(w.upper) {
-		return listWindow{}, errors.New("the time window is empty: its lower bound is not before its upper bound", http.StatusBadRequest)
+		return listWindow{}, errors.New("the time window is empty: FromTime is not before ToTime", http.StatusBadRequest)
 	}
 	return w, nil
 }
 
-// timeConditions returns the query's time bounds as conditions on column, and their arguments: the absolute ones bound
-// as text (sqlTime), the relative ones from the database's clock.
+// timeConditions returns the query's time bounds as conditions on column, and their arguments, bound as text
+// (sqlTime).
 func timeConditions(driverName, column string, query workflow.Query) (conds []string, args []any) {
 	if !query.FromTime.IsZero() {
 		expr, arg := sqlTime(driverName, query.FromTime)
@@ -141,12 +131,6 @@ func timeConditions(driverName, column string, query workflow.Query) (conds []st
 	if !query.ToTime.IsZero() {
 		expr, arg := sqlTime(driverName, query.ToTime)
 		conds, args = append(conds, column+"<"+expr), append(args, arg)
-	}
-	if query.NewerThan > 0 {
-		conds, args = append(conds, column+">=DATE_ADD_MILLIS(NOW_UTC(), ?)"), append(args, -query.NewerThan.Milliseconds())
-	}
-	if query.OlderThan > 0 {
-		conds, args = append(conds, column+"<DATE_ADD_MILLIS(NOW_UTC(), ?)"), append(args, -query.OlderThan.Milliseconds())
 	}
 	return conds, args
 }
@@ -174,7 +158,7 @@ func (e *Engine) listLive(ctx context.Context, query workflow.Query) ([]workflow
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	if _, err := listWindowOf(query, time.Now(), false); err != nil {
+	if _, err := listWindowOf(query, false); err != nil {
 		return nil, errors.Trace(err)
 	}
 	if _, _, _, err := e.queryClauses(query, "1=1"); err != nil {
@@ -222,7 +206,7 @@ func (e *Engine) listLive(ctx context.Context, query workflow.Query) ([]workflow
 // newest (or oldest) limit under an outer limit; the live tables are never read.
 func (e *Engine) listArchived(ctx context.Context, query workflow.Query, limit int, ascending bool) ([]listRow, error) {
 	now := time.Now()
-	w, err := listWindowOf(query, now, true)
+	w, err := listWindowOf(query, true)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -395,11 +379,6 @@ func subgraphCondition(includeSubgraphs bool) string {
 func (e *Engine) queryClauses(query workflow.Query, subgraphCond string) (string, string, []any, error) {
 	if query.Shard != 0 && !e.db.Has(query.Shard) {
 		return "", "", nil, errors.New("invalid shard", http.StatusBadRequest)
-	}
-	// A negative duration would otherwise add no condition, and Purge's guard counts it as a filter: it would
-	// purge every flow (a time.Until on a past time yields one).
-	if query.OlderThan < 0 || query.NewerThan < 0 {
-		return "", "", nil, errors.New("OlderThan and NewerThan cannot be negative", http.StatusBadRequest)
 	}
 
 	conditions := []string{subgraphCond}

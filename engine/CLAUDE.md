@@ -3564,8 +3564,8 @@ The lists and `History` exclude it; `Continue` and `Fork` **409** (each names a 
 (terminal); `Delete` is idempotent-success.
 
 Both share filter clauses with the lists. The `Query.StoppedTaskName` filter joins `dwarf_steps` and matches the `task_name`
-of the step the flow stopped at, so it matches no running flow. `Query.OlderThan`/`NewerThan` are database-anchored
-(`f.updated_at < DATE_ADD_MILLIS(NOW_UTC(), -ms)` etc.) and compose. `Query.FairnessKey` filters on the
+of the step the flow stopped at, so it matches no running flow. `Query.FromTime`/`ToTime` filter `f.updated_at`,
+bound as text (`timeConditions`). `Query.FairnessKey` filters on the
 engine-native `f.fairness_key` (the host typically sets it to the tenant, so "list tenant X" is "list
 `fairness_key = X`"); `Query.Priority` narrows to one scheduling band. Empty key / zero priority disable their
 filters. The engine models no tenant concept of its own.

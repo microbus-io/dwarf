@@ -424,7 +424,7 @@ func drainRunning(ctx context.Context, eng *engine.Engine) {
 	deadline := time.Now().Add(10 * time.Minute)
 	for time.Now().Before(deadline) {
 		lctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		running, err := eng.ListLive(lctx, workflow.Query{Status: workflow.StatusRunning, NewerThan: 365 * 24 * time.Hour, ToTime: time.Now().Add(time.Hour), Limit: 1})
+		running, err := eng.ListLive(lctx, workflow.Query{Status: workflow.StatusRunning, Limit: 1})
 		cancel()
 		if err == nil && len(running) == 0 {
 			return

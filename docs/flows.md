@@ -155,16 +155,16 @@ shard. Each reads one side of where flows are kept:
   archived.
 
 Ties go by shard, then the newest flow. Every call needs `Limit` (at most 65,536). `ListArchived`'s window needs both
-ends: a lower bound, `FromTime` or `NewerThan`, and an upper bound, `ToTime` (exclusive) or `OlderThan`. To see live
+ends: `FromTime`, inclusive, and `ToTime`, exclusive. To see live
 and archived flows both, call `ListLive`, then `ListArchived`: a flow archived between the two calls is then listed
 twice, never missed, so drop it by its key.
 
 ```go
 failed, err := eng.ListArchived(ctx, workflow.Query{
-    Status:    workflow.StatusFailed,
-    NewerThan: 24 * time.Hour,
-    ToTime:    time.Now(),
-    Limit:     100,
+    Status:   workflow.StatusFailed,
+    FromTime: time.Now().Add(-24 * time.Hour),
+    ToTime:   time.Now(),
+    Limit:    100,
 })
 ```
 
@@ -311,13 +311,13 @@ archived returns 404. `Purge` returns the count of roots marked, at most 4096 pe
 is lower). `Purge` divides `Limit` across shards, each marking up to `ceil(Limit/shards)`, so a multi-shard call
 can mark slightly more.
 
-`Purge` takes the same `workflow.Query` as the lists; its time bounds are on when a flow last changed status.
-`OlderThan` / `NewerThan` are database-anchored and compose:
+`Purge` takes the same `workflow.Query` as the lists; its time bounds are on when a flow last changed status - for
+an ended flow, when it ended:
 
 ```go
 eng.Purge(ctx, workflow.Query{
-    Status:    workflow.StatusFailed,
-    NewerThan: time.Minute,
+    Status: workflow.StatusFailed,
+    ToTime: time.Now().Add(-7 * 24 * time.Hour), // failed more than a week ago
 })
 ```
 
@@ -361,8 +361,8 @@ Each operation adds these to the 503 and 500 every call can return:
 | `Snapshot`, `Fingerprint` | malformed key | unknown flow | | |
 | `History` | malformed key | unknown flow, or one scheduled for deletion | | |
 | `Step` | malformed key | unknown step | | |
-| `ListLive`, `ListArchived` | invalid status or shard, a negative `OlderThan` or `NewerThan`, no `Limit` or one over 65,536, an empty window; `ListArchived` with a status that has not ended, a missing lower or upper bound, or a window reaching more than 31 days of the archive | | | |
-| `Purge` | invalid status or shard, a negative `OlderThan` or `NewerThan`, no filter (`Shard` and `Limit` are not filters), `IncludeSubgraphs`, or a `Status` that has not ended | | | |
+| `ListLive`, `ListArchived` | invalid status or shard, no `Limit` or one over 65,536, a `FromTime` not before `ToTime`; `ListArchived` with a status that has not ended, no `FromTime` or `ToTime`, or a window reaching more than 31 days of the archive | | | |
+| `Purge` | invalid status or shard, no filter (`Shard` and `Limit` are not filters), `IncludeSubgraphs`, or a `Status` that has not ended | | | |
 | `Resume` | malformed key, a subgraph child's key, data not JSON-marshalable | unknown flow | | the flow is not interrupted, including when a `Terminate` won the race |
 | `Cancel`, `Terminate` | malformed key, a subgraph child's key, a reason over 4,096 bytes or not valid UTF-8 without NUL | unknown flow | | |
 | `Fork` | malformed key, overrides not JSON-marshalable | unknown step | | the flow is not terminal, is scheduled for deletion, or holds an unresolved interrupt off the fork path |

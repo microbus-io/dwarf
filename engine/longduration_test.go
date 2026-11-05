@@ -34,41 +34,6 @@ import (
 // Every DATE_ADD_MILLIS the engine writes must survive it: run these against SQL Server.
 const month = 30 * 24 * time.Hour
 
-// TestLongDuration_QueryFilters pins the lists and Purge with an age filter past 2^31 ms (ListArchived's runs in an
-// archive branch only for the window reaching today), the documented
-// OlderThan: 30 days.
-func TestLongDuration_QueryFilters(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	ctx := context.Background()
-
-	mux := hosts.NewMux()
-	g := workflow.NewGraph("LongQuery")
-	g.SetURL("Work", "longquery/work")
-	g.AddTransition("Work", workflow.End)
-	mux.HandleGraph("longquery/g", g)
-	mux.HandleTask("longquery/work", func(ctx context.Context, f *workflow.Flow) error { return nil })
-
-	e := NewEngineUnderTest(t.Name())
-	defer e.Shutdown(ctx)
-	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
-
-	_, outcome, err := e.Run(ctx, "longquery/g", nil, nil)
-	assert.NoError(err)
-	assert.Equal(workflow.StatusCompleted, outcome.Status)
-
-	older, err := enginetest.ListAll(ctx, e, workflow.Query{NewerThan: 12 * month, OlderThan: month})
-	assert.NoError(err)
-	assert.Len(older, 0)
-	newer, err := enginetest.ListAll(ctx, e, workflow.Query{NewerThan: 12 * month})
-	assert.NoError(err)
-	assert.Len(newer, 1)
-	marked, err := e.Purge(ctx, workflow.Query{OlderThan: month})
-	assert.NoError(err)
-	assert.Equal(0, marked)
-}
-
 // TestLongDuration_SleepAndRetryBackoff pins a step whose wake time is past 2^31 ms away: a flow.Sleep, which
 // sets its successor's not_before, and a flow.Retry backoff, which sets its own. Each write must land, leaving the
 // step pending for a month rather than failing the flow.

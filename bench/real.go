@@ -480,7 +480,7 @@ func runReal(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 				case <-tick.C:
 				}
 				for runCtx.Err() == nil {
-					n, err := engines[0].Purge(runCtx, workflow.Query{Status: workflow.StatusCompleted, OlderThan: cfg.retention, Limit: 4096})
+					n, err := engines[0].Purge(runCtx, workflow.Query{Status: workflow.StatusCompleted, ToTime: time.Now().Add(-cfg.retention), Limit: 4096})
 					purged.Add(int64(n))
 					if err != nil || n < 4096 {
 						break
@@ -655,7 +655,7 @@ func drainFleet(ctx context.Context, engines []*engine.Engine, quiet time.Durati
 	}
 	lastEnded, lastTasks, lastMove := ended(), tasksStarted.Load(), time.Now()
 	for ctx.Err() == nil {
-		page, err := engines[0].ListLive(ctx, workflow.Query{Status: workflow.StatusRunning, NewerThan: 365 * 24 * time.Hour, ToTime: time.Now().Add(time.Hour), Limit: 1})
+		page, err := engines[0].ListLive(ctx, workflow.Query{Status: workflow.StatusRunning, Limit: 1})
 		if err == nil && len(page) == 0 {
 			return time.Since(start).Seconds(), false
 		}

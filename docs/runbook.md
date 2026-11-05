@@ -53,9 +53,9 @@ bug, or at rows edited by hand.
 
 ```go
 flows, err := eng.ListLive(ctx, workflow.Query{
-    Status:    workflow.StatusRunning,
-    OlderThan: 10 * time.Minute,
-    Limit:     1000,
+    Status: workflow.StatusRunning,
+    ToTime: time.Now().Add(-10 * time.Minute), // running, unchanged for 10 minutes
+    Limit:  1000,
 })
 ```
 
@@ -454,7 +454,7 @@ and is rejected — address the root and the engine threads the resume down to t
 
 **If a flow has been interrupted longer than your business process allows**, that is a policy question rather
 than an engine fault: the engine imposes no flow lifetime. Find them with `ListLive` filtered on
-`Status: interrupted` and `OlderThan`, and terminate or escalate per your own rules.
+`Status: interrupted` and a `ToTime` that far back, and terminate or escalate per your own rules.
 
 ---
 

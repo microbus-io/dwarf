@@ -89,7 +89,7 @@ func TestList_EachListReadsItsOwnTables(t *testing.T) {
 		t.Skip("midnight passed during the test")
 	}
 
-	window := workflow.Query{NewerThan: 3 * 24 * time.Hour, ToTime: time.Now().Add(time.Hour), Limit: 100}
+	window := workflow.Query{FromTime: time.Now().Add(-(3 * 24 * time.Hour)), ToTime: time.Now().Add(time.Hour), Limit: 100}
 	all, err := e.ListArchived(ctx, window)
 	assert.NoError(err)
 	assert.Equal([]int{roots[2], roots[1], roots[5], roots[0]}, idsOf(t, all), "the archive alone, newest archived first")
@@ -219,7 +219,7 @@ func TestListArchived_ADayAPeerDroppedIsReadAgain(t *testing.T) {
 	assert.NoError(err)
 	assert.True(a.Whole(today-2), "this replica's record is stale")
 
-	got, err := e.ListArchived(ctx, workflow.Query{NewerThan: 3 * 24 * time.Hour, ToTime: time.Now().Add(time.Hour), Limit: 100})
+	got, err := e.ListArchived(ctx, workflow.Query{FromTime: time.Now().Add(-(3 * 24 * time.Hour)), ToTime: time.Now().Add(time.Hour), Limit: 100})
 	assert.NoError(err)
 	assert.Equal([]int{root}, idsOf(t, got))
 	assert.False(a.Whole(today-2), "the record was read again")
@@ -237,10 +237,10 @@ func TestListArchived_TheWindowIsClampedToTheArchive(t *testing.T) {
 	assert.NoError(err)
 	root := endedRoots(t, e, 1)[0]
 	moveInto(t, e, root, today)
-	got, err := e.ListArchived(ctx, workflow.Query{NewerThan: 400 * 24 * time.Hour, ToTime: time.Now().Add(time.Hour), Limit: 10})
+	got, err := e.ListArchived(ctx, workflow.Query{FromTime: time.Now().Add(-(400 * 24 * time.Hour)), ToTime: time.Now().Add(time.Hour), Limit: 10})
 	assert.NoError(err, "a window past the retention is cut to it")
 	assert.Equal([]int{root}, idsOf(t, got))
-	got, err = e.ListArchived(ctx, workflow.Query{NewerThan: 400 * 24 * time.Hour, OlderThan: 40 * 24 * time.Hour, Limit: 10})
+	got, err = e.ListArchived(ctx, workflow.Query{FromTime: time.Now().Add(-(400 * 24 * time.Hour)), ToTime: time.Now().Add(-(40 * 24 * time.Hour)), Limit: 10})
 	assert.NoError(err)
 	assert.Len(got, 0, "a window wholly before the retention")
 
@@ -248,13 +248,13 @@ func TestListArchived_TheWindowIsClampedToTheArchive(t *testing.T) {
 	t.Run("retention_100", func(t *testing.T) {
 		assert := testarossa.For(t)
 		long := archiveEngine(t, treeMux(), 100)
-		_, err := long.ListArchived(ctx, workflow.Query{NewerThan: 30 * 24 * time.Hour, ToTime: time.Now().Add(time.Hour), Limit: 10})
+		_, err := long.ListArchived(ctx, workflow.Query{FromTime: time.Now().Add(-(30 * 24 * time.Hour)), ToTime: time.Now().Add(time.Hour), Limit: 10})
 		assert.NoError(err, "31 days, today included")
-		_, err = long.ListArchived(ctx, workflow.Query{NewerThan: 31 * 24 * time.Hour, ToTime: time.Now().Add(time.Hour), Limit: 10})
+		_, err = long.ListArchived(ctx, workflow.Query{FromTime: time.Now().Add(-(31 * 24 * time.Hour)), ToTime: time.Now().Add(time.Hour), Limit: 10})
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "32 days")
-		_, err = long.ListArchived(ctx, workflow.Query{NewerThan: 60 * 24 * time.Hour, OlderThan: 30 * 24 * time.Hour, Limit: 10})
+		_, err = long.ListArchived(ctx, workflow.Query{FromTime: time.Now().Add(-(60 * 24 * time.Hour)), ToTime: time.Now().Add(-(30 * 24 * time.Hour)), Limit: 10})
 		assert.NoError(err, "31 days, all in the past")
-		_, err = long.ListArchived(ctx, workflow.Query{NewerThan: 20 * 24 * time.Hour, ToTime: time.Now().Add(60 * 24 * time.Hour), Limit: 10})
+		_, err = long.ListArchived(ctx, workflow.Query{FromTime: time.Now().Add(-(20 * 24 * time.Hour)), ToTime: time.Now().Add(60 * 24 * time.Hour), Limit: 10})
 		assert.NoError(err, "a window reaching 60 days ahead is cut to today")
 	})
 }
@@ -268,15 +268,14 @@ func TestList_RequiredInputsAndStatuses(t *testing.T) {
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
 	now := time.Now()
-	ok := workflow.Query{NewerThan: time.Hour, ToTime: now.Add(time.Hour), Limit: 10}
+	ok := workflow.Query{FromTime: time.Now().Add(-time.Hour), ToTime: now.Add(time.Hour), Limit: 10}
 	bad := map[string]workflow.Query{
-		"no limit":        {NewerThan: time.Hour, ToTime: now.Add(time.Hour)},
-		"limit over":      {NewerThan: time.Hour, ToTime: now.Add(time.Hour), Limit: maxListLimit + 1},
+		"no limit":        {FromTime: time.Now().Add(-time.Hour), ToTime: now.Add(time.Hour)},
+		"limit over":      {FromTime: time.Now().Add(-time.Hour), ToTime: now.Add(time.Hour), Limit: maxListLimit + 1},
 		"empty window":    {FromTime: now, ToTime: now, Limit: 10},
-		"inverted window": {NewerThan: time.Hour, OlderThan: 2 * time.Hour, Limit: 10},
-		"negative":        {NewerThan: -time.Hour, ToTime: now.Add(time.Hour), Limit: 10},
-		"unknown status":  {NewerThan: time.Hour, ToTime: now.Add(time.Hour), Limit: 10, Status: "bogus"},
-		"invalid shard":   {NewerThan: time.Hour, ToTime: now.Add(time.Hour), Limit: 10, Shard: 99},
+		"inverted window": {FromTime: time.Now().Add(-time.Hour), ToTime: time.Now().Add(-(2 * time.Hour)), Limit: 10},
+		"unknown status":  {FromTime: time.Now().Add(-time.Hour), ToTime: now.Add(time.Hour), Limit: 10, Status: "bogus"},
+		"invalid shard":   {FromTime: time.Now().Add(-time.Hour), ToTime: now.Add(time.Hour), Limit: 10, Shard: 99},
 	}
 	for name, q := range bad {
 		_, err := e.ListLive(ctx, q)
@@ -286,7 +285,7 @@ func TestList_RequiredInputsAndStatuses(t *testing.T) {
 	}
 	for name, q := range map[string]workflow.Query{
 		"no lower bound": {ToTime: now.Add(time.Hour), Limit: 10},
-		"no upper bound": {NewerThan: time.Hour, Limit: 10},
+		"no upper bound": {FromTime: time.Now().Add(-time.Hour), Limit: 10},
 		"no bound":       {Limit: 10},
 	} {
 		_, err := e.ListArchived(ctx, q)
@@ -375,7 +374,7 @@ func TestListArchived_TheDayAfterTodayIsRead(t *testing.T) {
 	assert.NoError(err)
 	root := endedRoots(t, e, 1)[0]
 	moveInto(t, e, root, today+1) // as a pass on a database clock already past midnight would
-	got, err := e.ListArchived(ctx, workflow.Query{NewerThan: time.Hour, ToTime: time.Now().Add(48 * time.Hour), Limit: 10})
+	got, err := e.ListArchived(ctx, workflow.Query{FromTime: time.Now().Add(-time.Hour), ToTime: time.Now().Add(48 * time.Hour), Limit: 10})
 	assert.NoError(err)
 	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
 		t.Skip("midnight passed during the test")

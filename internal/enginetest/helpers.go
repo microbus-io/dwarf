@@ -89,10 +89,10 @@ type Lister interface {
 // Recent returns query with a window over the last day, reaching an hour past now, and a Limit of 1,000, each only where
 // the query sets none of its own.
 func Recent(query workflow.Query) workflow.Query {
-	if query.FromTime.IsZero() && query.NewerThan == 0 {
-		query.NewerThan = 24 * time.Hour
+	if query.FromTime.IsZero() {
+		query.FromTime = time.Now().Add(-24 * time.Hour)
 	}
-	if query.ToTime.IsZero() && query.OlderThan == 0 {
+	if query.ToTime.IsZero() {
 		query.ToTime = time.Now().Add(time.Hour)
 	}
 	if query.Limit == 0 {

@@ -20,11 +20,10 @@ import "time"
 
 // Query specifies the filters, the time window and the limit for listing or purging flows.
 //
-// ListArchived needs a window: a lower bound, FromTime or NewerThan, and an upper bound, ToTime or OlderThan; for
-// ListLive and Purge it is optional, Purge taking its bounds as filters on when a flow ended. Given both an absolute and a relative bound on one side, the narrower applies. Times
-// compare at the database's precision: microseconds on PostgreSQL, milliseconds elsewhere. ListLive's window is on
-// when a flow last changed status (FlowSummary.UpdatedAt); ListArchived's is on when a flow was archived
-// (FlowSummary.ArchivedAt).
+// The window is FromTime, inclusive, to ToTime, exclusive. ListArchived needs both; for ListLive and Purge each is
+// optional. Times compare at the database's precision: microseconds on PostgreSQL, milliseconds elsewhere.
+// ListLive's and Purge's window is on when a flow last changed status (FlowSummary.UpdatedAt) - for an ended flow,
+// when it ended; ListArchived's is on when a flow was archived (FlowSummary.ArchivedAt).
 type Query struct {
 	Status      string `json:"status,omitzero"`
 	WorkflowURL string `json:"workflowURL,omitzero"`
@@ -49,12 +48,6 @@ type Query struct {
 	// ToTime is the window's upper bound, exclusive: ListLive lists flows last updated before it, ListArchived flows
 	// archived before it. Zero disables it.
 	ToTime time.Time `json:"toTime,omitzero"`
-	// OlderThan is an upper bound relative to now: flows last updated (ListArchived: archived) longer ago than this
-	// duration. Zero disables it; a negative value is rejected.
-	OlderThan time.Duration `json:"olderThan,omitzero"`
-	// NewerThan is a lower bound relative to now: flows last updated (ListArchived: archived) within this duration of
-	// now. Zero disables it; a negative value is rejected. Composes with OlderThan to express "between X and Y ago."
-	NewerThan time.Duration `json:"newerThan,omitzero"`
 	// IncludeSubgraphs adds subgraph-child flows to the results alongside roots. They are excluded by default -
 	// a subgraph child is an internal execution detail most callers never want in a list. Pair it with
 	// WorkflowURL (a graph that runs only as a subgraph has no root flows under that URL) to locate every run
