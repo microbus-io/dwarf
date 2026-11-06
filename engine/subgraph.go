@@ -77,9 +77,9 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 	return childKey, errors.Trace(err)
 }
 
-// errTreeSettled is an in-transaction sentinel: every flow of the tree was already terminal, so terminateSubtree
+// errTreeClosed is an in-transaction sentinel: every flow of the tree was already closed, so terminateSubtree
 // rolls back and reports success.
-var errTreeSettled = errors.New("tree already terminal")
+var errTreeClosed = errors.New("tree already closed")
 
 // errTreeGrew is an in-transaction sentinel: terminateSubtree's scan found flows its write set did not cover, so
 // the transaction rolls back and re-runs over the larger set.
@@ -169,7 +169,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 			}
 			if locked == 0 {
 				settled = true
-				return errTreeSettled
+				return errTreeClosed
 			}
 			terminateSteps()
 			// The scan before this transaction misses a child spawned since. A spawn parks its caller step in the
@@ -184,7 +184,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 				return errors.Trace(err)
 			}
 			e.seams.Checkpoint(ctx, engineseams.CheckpointTerminateAfterRescan)
-			// The scan returns the tree's live flows. A flow of the set that is missing from it ended or was
+			// The scan returns the tree's open flows. A flow of the set that is missing from it ended or was
 			// removed after the first scan - a flow.Retry on a subgraph caller deletes its old child - and is
 			// dropped, so the final-state reads below do not look for a row that is gone. The root stays: its own
 			// status is what the flow UPDATE's guard settles.
@@ -258,7 +258,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 			}
 			if ended == 0 {
 				settled = true
-				return errTreeSettled
+				return errTreeClosed
 			}
 			return nil
 		})
@@ -294,7 +294,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 // completeSurgraphFlow re-dispatches a parked surgraph step after its child completes.
 func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, surgraphStepID int, subgraphFinalStateJSON []byte) error {
 	// engineseams.FaultSubgraphReviveLost simulates the revive being lost after the child went terminal (the wedge the
-	// parked-step sweep exists to catch): the caller step stays running+parkedSubgraph with no live child,
+	// parked-step sweep exists to catch): the caller step stays running+parkedSubgraph with no open child,
 	// so the test proves recoverWedgedSubgraphParks re-drives the release. Returns nil so the caller path
 	// believes it succeeded, exactly as a lost revive would look.
 	if e.seams.IsFault(engineseams.FaultSubgraphReviveLost) {

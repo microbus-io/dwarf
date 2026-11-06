@@ -875,7 +875,7 @@ func TestMetrics_ClosedCountsEveryTerminalStatus(t *testing.T) {
 		return
 	}
 	// Await returns on any stop, and `interrupted` is one - so this parks until the entry task has actually
-	// interrupted, which is what gives Terminate a live flow to terminate rather than a racing one.
+	// interrupted, which is what gives Terminate a open flow to terminate rather than a racing one.
 	parked, err := eng.Await(ctx, terminateKey)
 	if !assert.NoError(err) {
 		return

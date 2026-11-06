@@ -59,9 +59,9 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (removed int, 
 	return gone, purgeDone(limit, len(archived), gone), nil
 }
 
-// purgeDone reports whether a Purge call that took took roots, removing gone of them, left nothing matching: the
-// archive had fewer than the limit, and every root taken was removed - one deleted by a racing Delete was not, and a
-// call after finds whether anything is left.
+// purgeDone reports whether a Purge call left nothing archived that matches, given its limit, the roots it took from
+// the archive and the roots it removed of them: it took fewer than the limit, and removed every one - a root a racing
+// Delete took first was not, and a call after finds whether anything is left.
 func purgeDone(limit, took, gone int) bool {
 	return took < limit && gone == took
 }

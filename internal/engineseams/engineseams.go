@@ -159,7 +159,7 @@ const (
 	CheckpointClaimedDispatchDone       = "claimedDispatchDone"       // step execution returned after winning its claim, recovery reset included; fired bare and targeted by (shard, step id)
 	CheckpointLeaseRecoverySelected     = "leaseRecoverySelected"     // lease recovery, after it selected expired steps and before its by-id reset; reached only when it found some
 	CheckpointPoolPushHeld              = "poolPushHeld"              // recomputePools, inside poolsLock between reading the roles and pushing the sizes; reached only by the recompute FaultSlowPoolPush picks
-	CheckpointWedgeSweepSelected        = "wedgeSweepSelected"        // the wedged-park sweep, after it selected parked callers with no live child and before it reads each one's latest child; reached only when it found some
+	CheckpointWedgeSweepSelected        = "wedgeSweepSelected"        // the wedged-park sweep, after it selected parked callers with no open child and before it reads each one's latest child; reached only when it found some
 	CheckpointFingerprintFlowRead       = "fingerprintFlowRead"       // Fingerprint, on each side it reads, after the flow row and before it counts the steps
 	CheckpointHistoryFlowRead           = "historyFlowRead"           // History, on each side it reads, after the flow row and before the tree
 	CheckpointStepRead                  = "stepRead"                  // Step, on each side it reads, after the step row and before its refs and navigation

@@ -265,7 +265,7 @@ func (e *Engine) releaseLease(ctx context.Context, db *sequel.DB, stepID, leaseS
 //     point of view the step never ran.
 //
 // The two attempts are milliseconds apart and differ only in what they carry, which is what makes the
-// classification sound. Guessing the other way - terminalizing on any unknown error - would kill live flows on
+// classification sound. Guessing the other way - terminalizing on any unknown error - would kill open flows on
 // every routine failover, and a closed flow is immutable (recovery is a human running Fork).
 func (e *Engine) failOnPersistError(ctx context.Context, d *dispatch, writeErr error, held stepHeld) error {
 	stepID, taskName := d.stepID, d.row.taskName
@@ -337,7 +337,7 @@ func (e *Engine) persistStep(ctx context.Context, d *dispatch, held stepHeld, wr
 // on a value of the wrong type under a combining reducer is one. persist does not retry it, and
 // settlePersist fails the step with it without counting a write that could not be stored. Wrap only a failure
 // that is a pure function of stored data: a database error from the same computation is transient, and wrapping
-// it would fail a live flow over a blip.
+// it would fail a open flow over a blip.
 //
 // It is a Go type rather than an error property (the marker workflow.IsCancelled reads) because it must NOT
 // survive serialization: it is raised inside the write and inspected by persist and settlePersist in the same
@@ -359,7 +359,7 @@ func isPermanentError(err error) bool {
 
 // settlePersist applies persistStep's disposition to the error persist returned, and reports whether the write
 // landed - the only case in which the caller goes on. Contention is NOT a persistence failure and must never be
-// classified as one: terminalizing on it would kill live flows during a contention storm. It was already retried
+// classified as one: terminalizing on it would kill open flows during a contention storm. It was already retried
 // to exhaustion (by Transact, or by retryContention), so it goes to the recovery defer, which rewinds the step
 // and re-polls.
 func (e *Engine) settlePersist(ctx context.Context, d *dispatch, err error, held stepHeld) (landed bool, _ error) {

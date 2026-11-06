@@ -512,10 +512,10 @@ func archivedDay(t *testing.T, e *Engine, flowKey string) flowTables {
 	return flowTables{flows: migrations.FlowsTable(day), steps: migrations.StepsTable(day)}
 }
 
-// TestArchivedReads_AnUnstoppedArchivedFlowIsAnError pins Snapshot on a flow the archive holds unstopped - an orphan
+// TestArchivedReads_AnOpenArchivedFlowIsAnError pins Snapshot on a flow the archive holds open - an orphan
 // the move took, which only a bug leaves: nothing will change it again, so it is an error, and an Await on it returns
 // that error at once rather than waiting out its deadline. History still reads it.
-func TestArchivedReads_AnUnstoppedArchivedFlowIsAnError(t *testing.T) {
+func TestArchivedReads_AnOpenArchivedFlowIsAnError(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()

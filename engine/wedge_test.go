@@ -256,7 +256,7 @@ func TestWedgeSweep_SubgraphCallerWithNoChildFails(t *testing.T) {
 // TestWedgeSweep_ChildLiveAgainIsLeftAlone pins the sweep's skip of a caller whose latest child is live again by
 // the time it is read: a spawn that landed between the sweep's scan and its per-caller read. The caller is not
 // wedged, so the sweep must leave it parked. Handed to the terminal-child branch instead, it delivered
-// "subgraph running" as an error and failed the caller under its live child.
+// "subgraph running" as an error and failed the caller under its open child.
 func TestWedgeSweep_ChildLiveAgainIsLeftAlone(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -321,7 +321,7 @@ func TestWedgeSweep_ChildLiveAgainIsLeftAlone(t *testing.T) {
 		return
 	}
 
-	// The scan must see no live child, so the child reads terminal while the sweep selects.
+	// The scan must see no open child, so the child reads terminal while the sweep selects.
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET status=? WHERE flow_id=?", workflow.StatusCompleted, childFlowID)
 	assert.NoError(err)
 	e.seams.Break(engineseams.CheckpointWedgeSweepSelected)

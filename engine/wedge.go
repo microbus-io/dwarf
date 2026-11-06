@@ -290,7 +290,7 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 		case err != nil:
 			e.logSweepError(ctx, "Wedge sweep: reading child flow", "shard", shard, "step", w.stepID, "error", err)
 		case !workflow.IsTerminalStatus(childStatus):
-			// The scan found no live child, so a live one now is a spawn that landed since - the caller was
+			// The scan found no open child, so an open one now is a spawn that landed since - the caller was
 			// revived and parked again. It is not wedged.
 		default:
 			e.logger.ErrorContext(ctx, "Wedge sweep: reviving wedged subgraph caller",
@@ -322,7 +322,7 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 
 // recoverOrphanedSubgraphChildren finds non-terminal subgraph child flows whose parent flow has already gone
 // terminal - the mirror image of recoverWedgedSubgraphParks (which handles a parked caller whose child is gone;
-// this handles a live child whose caller/parent is gone). Such a child is orphaned: its parent can never process
+// this handles a open child whose caller/parent is gone). Such a child is orphaned: its parent can never process
 // its completion or interrupt, and no lifecycle op reaches it - the root key 409s (the root is terminal), the
 // child's own key is read-only (Resume/Terminate 400), and recoverWedgedSubgraphParks is blind to it (the caller
 // step is terminal, not running+parked). Nothing in the engine leaves one: a spawn parks its caller and inserts

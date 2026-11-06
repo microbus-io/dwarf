@@ -39,7 +39,7 @@ Create ──► running ──► completed
 ```
 
 - **running** — `Create` makes a flow and immediately runs it; a task is being dispatched/executed.
-- **interrupted** — parked for external input (a task called `Interrupt`).
+- **interrupted** — waiting for external input (a task called `Interrupt`).
 - **completed** — finished; no transition matched.
 - **failed** — a task returned an error with no matching error handler.
 - **terminated** — forcefully stopped by `Terminate`.

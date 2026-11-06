@@ -103,7 +103,7 @@ func TestWideflow(t *testing.T) {
 			assert.Equal(fp1, fp2)
 		}
 
-		// Cancel marks every live flow of the tree. Its interrupted steps consume the mark only on resume,
+		// Cancel marks every open flow of the tree. Its interrupted steps consume the mark only on resume,
 		// so the tree stays interrupted here.
 		assert.NoError(eng.Cancel(ctx, flowKey, "too wide"))
 

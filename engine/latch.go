@@ -91,7 +91,7 @@ func (e *Engine) latchLoop(ctx context.Context) {
 //   - A SHARD ERROR IS NOT A FAILED PASS. Whatever the other shards resolved is returned alongside the
 //     error, so one sick shard cannot hold up awaiters whose flows live elsewhere. This is also why
 //     "no row came back" may be read as absence only for a chunk that FULLY succeeded - on a failed
-//     chunk every row is missing, and calling those keys unresolved would 404 live flows on a blip.
+//     chunk every row is missing, and calling those keys unresolved would 404 existing flows on a blip.
 func (e *Engine) resolveStoppedFlows(ctx context.Context, flowKeys []string) (map[string]string, error) {
 	// The parked keys, grouped by the shard each one names. Nothing else is indexed: a key already carries
 	// its flow id and its token (keys.ParseFlowKey), and the token is what makes a row the caller's - two

@@ -69,7 +69,7 @@ exist.
 6. **Start the remainder**, one at a time, letting the fleet settle between each.
 
 Flows survive all of this untouched. A stopped fleet means work stops moving, not that anything is lost:
-pending steps stay pending, `interrupted` flows stay parked, and leases on steps that were in flight lapse
+pending steps stay pending, `interrupted` flows stay waiting for `Resume`, and leases on steps that were in flight lapse
 and re-dispatch once workers are back.
 
 ## Deploying your own application
