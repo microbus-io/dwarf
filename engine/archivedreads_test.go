@@ -180,7 +180,7 @@ func readAcrossTheMove(t *testing.T, e *Engine, flowKey, cp string, read func() 
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	e.seams.Break(cp)
 	type result struct {
 		v   any
@@ -527,7 +527,7 @@ func TestArchivedReads_AnOpenArchivedFlowIsAnError(t *testing.T) {
 	e.reapDueFlows(ctx)
 	tables := archivedDay(t, e, fk)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	_, _, childID, _, err := keys.ParseFlowKey(child)
 	assert.NoError(err)
 	_, err = db.ExecContext(ctx, "UPDATE "+tables.flows+" SET status='"+workflow.StatusRunning+"' WHERE flow_id=?", childID)
@@ -565,7 +565,7 @@ func TestArchivedReads_ADayDroppedMidReadIsNotFound(t *testing.T) {
 			assert := testarossa.For(t)
 			e := archiveEngine(t, treeMux(), 30)
 			db, err := e.db.Shard(1)
-			assert.NoError(err)
+			assert.Must(assert.NoError(err))
 			fk, err := e.Create(ctx, "arch/parent", nil, nil)
 			assert.NoError(err)
 			enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
@@ -632,7 +632,7 @@ func TestArchivedReads_ADirectoryDayDroppedIsNotFound(t *testing.T) {
 	_, _, rootID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	// The tree out of the day its key names, and the directory pointing at a day long gone.
 	_, err = db.ExecContext(ctx, "DELETE FROM "+tables.steps+" WHERE flow_id IN (SELECT flow_id FROM "+tables.flows+" WHERE root_flow_id=?)", rootID)
 	assert.NoError(err)
@@ -667,7 +667,7 @@ func TestArchivedReads_AnArchivedTreeRemovedMidReadIsNotFound(t *testing.T) {
 	_, _, rootID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 
 	e.seams.Break(engineseams.CheckpointHistoryFlowRead)
 	done := make(chan error, 1)
@@ -721,7 +721,7 @@ func TestArchivedReads_AChildsFingerprintCoversItsSubtree(t *testing.T) {
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
 	child := childKey(t, e, fk)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	// Without the grandchild's step the child's digest would count one step, as with no descendant walk at all.
 	_, _, childID, _, err := keys.ParseFlowKey(child)
 	assert.NoError(err)
@@ -992,7 +992,7 @@ func TestArchivedReads_ForkWhoseSourceIsArchivedMeanwhile(t *testing.T) {
 		e.reapDueFlows(ctx)
 		tables := archivedDay(t, e, fk)
 		db, err := e.db.Shard(1)
-		assert.NoError(err)
+		assert.Must(assert.NoError(err))
 		_, err = held(t, e, func() {
 			for _, table := range []string{tables.flows, tables.steps} {
 				assert.NoError(renameTable(ctx, db, table, table+"_away"))
@@ -1014,7 +1014,7 @@ func TestArchivedReads_ForkWhoseSourceIsArchivedMeanwhile(t *testing.T) {
 		e.reapDueFlows(ctx)
 		tables := archivedDay(t, e, fk)
 		db, err := e.db.Shard(1)
-		assert.NoError(err)
+		assert.Must(assert.NoError(err))
 		_, _, rootID, _, err := keys.ParseFlowKey(fk)
 		assert.NoError(err)
 		_, err = db.ExecContext(ctx, "DELETE FROM "+tables.steps+" WHERE flow_id IN (SELECT flow_id FROM "+tables.flows+" WHERE root_flow_id=?)", rootID)
@@ -1097,7 +1097,7 @@ func TestArchivedReads_ForkReadsTheArchivedGraph(t *testing.T) {
 		return
 	}
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	var reduced string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT state_reduced FROM dwarf_steps WHERE step_id=?", keyID(t, joinChunk)).Scan(&reduced))
 	assert.NotEqual("{}", reduced, "the inner fan-in records its cohort's part")
@@ -1144,7 +1144,7 @@ func TestArchivedReads_ForkHoldsTheReaperOffItsSource(t *testing.T) {
 		close(reaped)
 	}()
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	skips := db.DriverName() == "pgx" || db.DriverName() == "mysql"
 	if skips {
 		// The pass skips the root Fork holds and moves the rest (forkOutcome's fork among them), so it finishes with

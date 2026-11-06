@@ -67,7 +67,7 @@ func TestStepKey_NamesItsFlow(t *testing.T) {
 	history, err := e.History(ctx, fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 
 	var check func(h []workflow.FlowStep)
 	check = func(h []workflow.FlowStep) {

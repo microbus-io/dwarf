@@ -967,7 +967,7 @@ func TestMetrics_TerminateCountsOnlyTheFlowsItClosed(t *testing.T) {
 	}
 	shardNum, _, rootID, _, _ := keys.ParseFlowKey(fk)
 	db, err := eng.db.Shard(shardNum)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET status=? WHERE flow_id=?", workflow.StatusCompleted, rootID)
 	assert.NoError(err)
 	eng.seams.Resume(engineseams.CheckpointTerminateAfterScan)

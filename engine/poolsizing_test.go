@@ -310,7 +310,7 @@ func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	assert.Equal(declaredBudget, db.DB.Stats().MaxOpenConnections, "full budget while alone (R=1)")
 	assert.Equal(1, e.replicasOn(1))
 
@@ -365,7 +365,7 @@ func TestPoolSizing_IdleCoreTracksTheDerivedPool(t *testing.T) {
 	}
 
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	assert.Equal(declaredBudget, db.DB.Stats().MaxOpenConnections, "full budget while alone (R=1)")
 	assert.Equal(shareOf(1), idle(), "idle equals the open pool at R=1")
 
@@ -408,7 +408,7 @@ func TestPoolSizing_PeerExpiry(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 
 	// A peer registers a fresh row but then never heartbeats again (crashed).
 	addPeerRow(t, e, 2001)
@@ -417,7 +417,7 @@ func TestPoolSizing_PeerExpiry(t *testing.T) {
 	// Its row ages out. Written with the database's own clock, never a bound Go time, so this is stale by
 	// exactly the measure the Sonar applies.
 	shardDB, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	_, err = shardDB.ExecContext(t.Context(),
 		"UPDATE dwarf_peers SET seen_at=DATE_ADD_MILLIS(NOW_UTC(), ?), dispatched_at=DATE_ADD_MILLIS(NOW_UTC(), ?)"+
 			" WHERE engine_id=?", -600000, -600000, 2001)
@@ -909,7 +909,7 @@ func TestPoolSizing_StartupSizesSoloFull(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	assert.Equal(1, e.replicasOn(1), "solo replica reads R=1 from the registry at startup")
 	assert.Equal(declaredBudget, db.DB.Stats().MaxOpenConnections, "the full derived pool is in place the moment Startup returns")
 }
@@ -933,7 +933,7 @@ func TestPoolSizing_StartupSizesFromRegisteredFleet(t *testing.T) {
 	assert.NoError(eng1.Startup(ctx))
 
 	db1, err := eng1.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	assert.Equal(declaredBudget, db1.DB.Stats().MaxOpenConnections, "solo eng1 holds the full budget")
 
 	// eng2 starts against the SAME databases (shared test-DB key, both keyed by t.Name()). At its Startup
@@ -947,7 +947,7 @@ func TestPoolSizing_StartupSizesFromRegisteredFleet(t *testing.T) {
 	assert.NoError(eng2.Startup(ctx))
 
 	db2, err := eng2.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	assert.Equal(2, eng2.replicasOn(1), "eng2 sees the registered fleet at startup")
 	assert.Equal(shareOf(2), db2.DB.Stats().MaxOpenConnections, "eng2 sizes for R=2 immediately - no partial over-connect")
 

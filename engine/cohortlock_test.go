@@ -209,7 +209,7 @@ func TestCohortStripe_QueuedArrivalsKeepTheirLeases(t *testing.T) {
 	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	var spawnID int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&spawnID))
 

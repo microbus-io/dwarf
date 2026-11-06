@@ -124,7 +124,7 @@ func TestArchiving_ClosedTreeMovesToTodaysTables(t *testing.T) {
 	assert.Equal(2, liveFlows, "the root and its subgraph child")
 	assert.True(liveSteps >= 2)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	var finalState string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT final_state FROM dwarf_flows WHERE flow_id=?", rootID).Scan(&finalState))
 
@@ -266,7 +266,7 @@ func TestArchiving_ResidencySplitsTheDueRoots(t *testing.T) {
 		}
 	}
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	selectWith := func(kind reapKind, ordinal int) []int {
 		residency, residencyArgs, count, _ := residencyClause(2, ordinal, true, kind)
 		stmt, args := kind.selectDue(residency, residencyArgs, reapFetch(count, e.reapBatch))
@@ -458,7 +458,7 @@ func TestArchiving_NoClosedTreeMovesWhileTomorrowIsNotWhole(t *testing.T) {
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	// Stamped a second ago, so it is due whatever the clock's millisecond.
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1, updated_at=DATE_ADD_MILLIS(NOW_UTC(), -1000)"+
 		" WHERE flow_id=?", stamped)
@@ -530,7 +530,7 @@ func TestArchiving_ABatchThatCannotBeArchivedIsDeletedAfterTheGrace(t *testing.T
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	_, err = db.ExecContext(ctx, "INSERT INTO "+migrations.FlowsTable(today)+" SELECT * FROM dwarf_flows WHERE flow_id IN ("+
 		intCSV(roots[:3])+")")
 	assert.NoError(err)
@@ -696,7 +696,7 @@ func TestArchiving_TheMoveNamesEveryFlowsColumn(t *testing.T) {
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
 	want := append(strings.Split(archivedFlowColumns, ", "), "archived_at")
@@ -728,7 +728,7 @@ func TestArchiving_EveryArchivedFlowIsStampedWhenItWasArchived(t *testing.T) {
 	e := archiveEngine(t, treeMux(), 30)
 	root := closedRoots(t, e, 1)[0]
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	// Ended an hour ago, so a stamp copied from when it ended - rather than taken when it moved - is an hour old.
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=DATE_ADD_MILLIS(updated_at, ?) WHERE root_flow_id=?",
 		-time.Hour.Milliseconds(), root)
@@ -777,7 +777,7 @@ func TestArchiving_AMoveAfterItsDayEndedIsStampedWithinTheDay(t *testing.T) {
 	root := closedRoots(t, e, 1)[0]
 	moveInto(t, e, root, today-1)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	last, lastArg := sqlTime(db.DriverName(), a.DayEnds(today-1).Add(-time.Millisecond))
 	var stamped int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+migrations.FlowsTable(today-1)+
@@ -857,7 +857,7 @@ func TestArchiving_AHeldRootIsSkippedNotWaitedFor(t *testing.T) {
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	if d := db.DriverName(); d != "pgx" && d != "mysql" {
 		t.Skip("a held root is waited for on " + d)
 	}

@@ -58,7 +58,7 @@ func flowRows(t *testing.T, e *Engine, fk string) (*sequel.DB, int, int) {
 	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	var stepID int
 	assert.NoError(db.QueryRowContext(t.Context(), "SELECT step_id FROM dwarf_steps WHERE flow_id=?", flowID).Scan(&stepID))
 	return db, flowID, stepID
@@ -293,7 +293,7 @@ func TestPayloadVer_ForkRefusesANewerSubgraph(t *testing.T) {
 	shard, hour, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	var childID, doneID int
 	var doneToken string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE surgraph_flow_id=?", flowID).Scan(&childID))

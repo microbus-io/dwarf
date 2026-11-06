@@ -77,7 +77,7 @@ func TestDirectory_NamesOnlyWhatTheLocateCannotFind(t *testing.T) {
 	keyOf := map[int]string{}
 	for _, id := range roots {
 		db, err := e.db.Shard(1)
-		assert.NoError(err)
+		assert.Must(assert.NoError(err))
 		var token string
 		var hour int
 		assert.NoError(db.QueryRowContext(ctx, "SELECT flow_token, created_hour FROM dwarf_flows WHERE flow_id=?", id).Scan(&token, &hour))
@@ -95,7 +95,7 @@ func TestDirectory_NamesOnlyWhatTheLocateCannotFind(t *testing.T) {
 	} {
 		moveInto(t, e, roots[i], c.day)
 		db, err := e.db.Shard(1)
-		assert.NoError(err)
+		assert.Must(assert.NoError(err))
 		var named int
 		assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+archiver.DirectoryTable+" WHERE day=?", c.day).Scan(&named))
 		if c.named {
@@ -136,7 +136,7 @@ func TestDirectory_ShortDaysNameMovesFarFromTheHour(t *testing.T) {
 	day, err := located(t, e, fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	var named int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+archiver.DirectoryTable+" WHERE day=?", day).Scan(&named))
 	before, from := e.archives.Load().byShard[1].DirectoryHours(day)
@@ -159,7 +159,7 @@ func TestDirectory_RetentionZeroNamesNothing(t *testing.T) {
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
 	e.reapDueFlows(ctx)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	var named int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+archiver.DirectoryTable).Scan(&named))
 	assert.Zero(named)
@@ -179,7 +179,7 @@ func TestDirectory_TheReapersBounds(t *testing.T) {
 	assert.NoError(err)
 	before, from := e.archives.Load().byShard[1].DirectoryHours(today)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	roots := closedRoots(t, e, 4)
 	for i, c := range []struct {
 		hour  int
@@ -216,7 +216,7 @@ func TestDirectory_AReaderRefreshesTheDaysItLocates(t *testing.T) {
 	assert.NoError(err)
 	assert.NoError(makeArchiveDay(t, e, today-3))
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	_, err = db.ExecContext(ctx, "INSERT INTO "+migrations.FlowsTable(today-3)+
 		" (flow_id, flow_token, workflow_url, workflow_name, graph, graph_hash, status) VALUES (999999, 'tok', 'u', 'W', ?, 'h', 'completed')",
 		[]byte("{}")) // bound: graph is binary on SQL Server

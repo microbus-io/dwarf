@@ -148,7 +148,7 @@ func TestPurge_OldestArchivedFirstAndOnlyTheArchive(t *testing.T) {
 		t.Skip("midnight passed during the test")
 	}
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	directory := func() int {
 		var n int
 		assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+archiver.DirectoryTable).Scan(&n))
@@ -162,7 +162,7 @@ func TestPurge_OldestArchivedFirstAndOnlyTheArchive(t *testing.T) {
 	}
 	marked := func(root int) bool {
 		db, err := e.db.Shard(1)
-		assert.NoError(err)
+		assert.Must(assert.NoError(err))
 		var after int
 		assert.NoError(db.QueryRowContext(ctx, "SELECT delete_after_ms FROM dwarf_flows WHERE flow_id=?", root).Scan(&after))
 		return after > 0

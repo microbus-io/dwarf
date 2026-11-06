@@ -98,7 +98,7 @@ func loopRows(t *testing.T, e *Engine, flowKey string) []loopRow {
 	shard, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	rows, err := db.QueryContext(t.Context(), "SELECT step_id, task_name, state, state_refs FROM dwarf_steps WHERE flow_id=? ORDER BY step_id", flowID)
 	assert.NoError(err)
 	defer rows.Close()
@@ -283,7 +283,8 @@ func TestArrayRefs_ForkAndContinueMidLoop(t *testing.T) {
 				continue
 			}
 			var flowOf int
-			db, _ := e.db.Shard(1)
+			db, err := e.db.Shard(1)
+			assert.Must(assert.NoError(err))
 			assert.NoError(db.QueryRowContext(ctx, "SELECT flow_id FROM dwarf_steps WHERE step_id=?", entry.Anchor).Scan(&flowOf))
 			assert.Equal(forkedFlowID, flowOf, "a cloned list names the clone's own rows")
 		}
@@ -346,7 +347,8 @@ func TestArrayRefs_ReplaceLoopStoresOnlyWhatEachStepAdds(t *testing.T) {
 	awaitLoop(t, e, fk, steps+1)
 	rows := loopRows(t, e, fk)
 	changesOfStep := func(stepID int) workflow.Changes {
-		db, _ := e.db.Shard(1)
+		db, err := e.db.Shard(1)
+		assert.Must(assert.NoError(err))
 		var changesJSON []byte
 		assert.NoError(db.QueryRowContext(ctx, "SELECT changes FROM dwarf_steps WHERE step_id=?", stepID).Scan(&changesJSON))
 		c, err := changesOf(changesJSON)

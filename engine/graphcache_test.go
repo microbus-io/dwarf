@@ -67,7 +67,7 @@ func TestCreate_SeedsGraphCache(t *testing.T) {
 
 	// A create that rolls back caches nothing under the id it would have taken.
 	db, err := e.db.Shard(shard)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	var maxID int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT MAX(flow_id) FROM dwarf_flows").Scan(&maxID))
 	graph, err := mux.LoadGraph(ctx, "seedcache/g")
@@ -110,7 +110,7 @@ func TestGraphCache_FlowsShareOneParse(t *testing.T) {
 		// The column read path (a cold flow, or completion's flowGraph) interns under the row's graph_hash, so it
 		// lands on Create's entry even where the dialect re-spells the stored bytes.
 		db, err := e.db.Shard(shard)
-		assert.NoError(err)
+		assert.Must(assert.NoError(err))
 		var graphJSON []byte
 		var graphHash string
 		assert.NoError(db.QueryRowContext(ctx, "SELECT graph, graph_hash FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&graphJSON, &graphHash))

@@ -90,7 +90,7 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 			orphanShapeCount(t, e, shard) == 1
 	}
 	db, err := e.db.Shard(shard)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	// The failed reset is the last thing A's dispatch does. Once it has returned, let every shard's piston scan
 	// and push twice: nothing else may move the step, since lease recovery never touches a completed one.
 	var aStepID int
@@ -332,7 +332,7 @@ func TestFaultSite_ForkCommit(t *testing.T) {
 
 	// The fork step: the completed entry step A.
 	db, err := e.db.Shard(shard)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	var aStepID, aStepHour int
 	var aStepToken string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id, flow_created_hour, step_token FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStepID, &aStepHour, &aStepToken))
@@ -393,7 +393,7 @@ func TestFaultSite_DeliverFailureErr(t *testing.T) {
 	shard, _, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 
 	// Wait for the wedge to form: the child flow gone terminal (failed), the parent still running.
 	got := enginetest.WaitUntil(t, 5*time.Second, func() bool {
@@ -472,7 +472,7 @@ func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
 	shard, _, rootFlowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 
 	// First wedge forms during normal execution: the leaf child fails, but its delivery to Call2 is lost, so
 	// Call2 (in the mid child) is stuck running+parkedSubgraph with a terminal child.

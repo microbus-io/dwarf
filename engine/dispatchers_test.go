@@ -271,7 +271,7 @@ func TestDispatchers_ReaderReplicaHoldsTheReaderPoolAndRunsNothing(t *testing.T)
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 24}))
 	assert.NoError(e.Startup(t.Context()))
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	assert.True(e.dispatchesOn(1), "alone, the replica dispatches")
 
 	joinFakeFleet(t, e)
@@ -370,7 +370,7 @@ func TestDispatchers_DemotedReplicaHoldsItsPoolUntilInFlightStepsFinish(t *testi
 	assert.NoError(e.SetShard(spec))
 	assert.NoError(e.Startup(t.Context()))
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	assert.True(e.dispatchesOn(1), "alone, the replica dispatches")
 	// Held, it drains alongside a 2-slot cut, so the budget divides three ways.
 	_, heldOpen := shardPool(spec.MaxConnections, 3)
@@ -458,7 +458,7 @@ func TestDispatchers_PromotionWhileHeldClearsTheHold(t *testing.T) {
 	assert.NoError(e.SetShard(spec))
 	assert.NoError(e.Startup(t.Context()))
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	_, soloOpen := shardPool(spec.MaxConnections, 1)
 	_, heldOpen := shardPool(spec.MaxConnections, 3)
 
@@ -519,7 +519,7 @@ func TestDispatchers_RankedReplicaSplitsTheBudget(t *testing.T) {
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.NoError(e.Startup(t.Context()))
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 
 	joinFakeFleet(t, e)
 	slots := dispatcherSlots(len(fakeFleet) + 1)
@@ -547,7 +547,7 @@ func TestDispatchers_DrainingReplicasDivideTheBudget(t *testing.T) {
 	assert.NoError(e.SetShard(spec))
 	assert.NoError(e.Startup(t.Context()))
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 
 	joinFakeFleet(t, e)
 	slots := dispatcherSlots(len(fakeFleet) + 1)
@@ -583,7 +583,7 @@ func TestDispatchers_ZeroWorkersReplicaRegistersButNeverRanks(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	var working int
 	var rttUs int64
 	assert.NoError(db.QueryRowContext(t.Context(),
@@ -608,7 +608,7 @@ func TestDispatchers_ZeroWorkersPeersDoNotDivideTheBudget(t *testing.T) {
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.NoError(e.Startup(t.Context()))
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 
 	for _, id := range []int64{3001, 3002, 3003} {
 		_, err := db.ExecContext(t.Context(),
@@ -761,7 +761,7 @@ func TestDispatchers_DrainGivesUpTheSlotBeforeWaiting(t *testing.T) {
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	_, err = e.Create(ctx, "drain/g", nil, nil)
 	assert.NoError(err)
 	<-started
@@ -812,7 +812,7 @@ func TestDispatchers_DrainStopsClaimingDispatch(t *testing.T) {
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	_, err = e.Create(ctx, "drainidle/g", nil, nil)
 	assert.NoError(err)
 	<-started
@@ -911,7 +911,7 @@ func TestDispatchers_DrainingReplicasClassPassesToAPeer(t *testing.T) {
 	assert.NoError(err)
 	<-started
 	db, err := creator.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	// The held task must be the drainer's, or nothing holds its drain open and the handoff is never exercised.
 	var claimer int64
 	assert.NoError(db.QueryRowContext(ctx, "SELECT engine_id FROM dwarf_steps WHERE flow_id=?", heldFlowID).Scan(&claimer))
@@ -1000,7 +1000,7 @@ func twoReplicaFleet(t *testing.T, dispHost, readHost Host) (disp, reader *Engin
 	disp = mk(dispatcherID, dispHost)
 	assert.NoError(disp.Startup(t.Context()))
 	db, err := disp.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	_, err = db.ExecContext(t.Context(), "INSERT INTO dwarf_peers (engine_id, seen_at, ordering_seq) VALUES (1002, NOW_UTC(), ?)", time.Now().UnixMilli()-3600000)
 	assert.NoError(err)
 	reader = mk(readerID, readHost)
@@ -1135,7 +1135,7 @@ func TestDispatchers_RecoverySweepSkipsShardsThisReplicaOnlyReads(t *testing.T) 
 	awaitStartupRecoverySweep(t, e)
 
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -1000) WHERE status='"+workflow.StatusRunning+"'")
 	assert.NoError(err)
 	expired := func() int {

@@ -91,7 +91,7 @@ func newRig(t *testing.T) *rig {
 	}))
 	t.Cleanup(set.Close)
 	db, err := set.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	s, err := New(selfID, 1, db)
 	assert.NoError(err)
 	clk := newFakeClock()

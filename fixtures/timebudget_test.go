@@ -37,7 +37,7 @@ func flowBudgetMs(t *testing.T, e *engine.Engine, flowKey string) int {
 	shardNum, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
 	db, err := engineseams.DB(e).Shard(shardNum)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	var ms int
 	err = db.QueryRowContext(context.Background(), "SELECT time_budget_ms FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&ms)
 	assert.NoError(err)
@@ -51,7 +51,7 @@ func entryStepBudgetMs(t *testing.T, e *engine.Engine, flowKey string) int {
 	shardNum, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
 	db, err := engineseams.DB(e).Shard(shardNum)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	var ms int
 	err = db.QueryRowContext(context.Background(), "SELECT time_budget_ms FROM dwarf_steps WHERE flow_id=? ORDER BY step_id LIMIT_OFFSET(1, 0)", flowID).Scan(&ms)
 	assert.NoError(err)
@@ -137,7 +137,7 @@ func TestTimeBudget_LeaseSizedFromRow(t *testing.T) {
 	shardNum, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := engineseams.DB(e).Shard(shardNum)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	var leaseRemainingMs float64
 	var budgetMs int
 	err = db.QueryRowContext(ctx,
@@ -197,7 +197,7 @@ func TestTimeBudget_InheritedBySubgraph(t *testing.T) {
 	shardNum, _, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := engineseams.DB(e).Shard(shardNum)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	var childBudgetMs int
 	err = db.QueryRowContext(ctx, "SELECT time_budget_ms FROM dwarf_flows WHERE surgraph_flow_id > 0 ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)").Scan(&childBudgetMs)
 	assert.NoError(err)

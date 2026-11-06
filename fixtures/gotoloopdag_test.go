@@ -88,7 +88,7 @@ func TestFanIn_GotoLoopBranchKeepsInteriorDAGEdges(t *testing.T) {
 
 	shard, _ := parseFlowShard(flowKey)
 	db, err := engineseams.DB(eng).Shard(shard)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	var joinStepID int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE task_name='Join'").Scan(&joinStepID))
 

@@ -181,7 +181,7 @@ func TestExpiration_TerminatesTheOldOpenRoots(t *testing.T) {
 
 	// The walk keeps the open roots only: not the child, not the younger flow.
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	roots, _, reachedYoung, err := e.expiredPage(ctx, db, 0)
 	assert.NoError(err)
 	assert.True(reachedYoung, "it reached the younger flow")

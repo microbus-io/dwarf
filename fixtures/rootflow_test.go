@@ -92,7 +92,8 @@ func TestRootFlowID_CreateAndSubgraph(t *testing.T) {
 	assert.Equal(parentFlowID, rootFlowIDOf(t, e, shard, parentFlowID))
 
 	// The subgraph child inherits the parent's root_flow_id.
-	db, _ := engineseams.DB(e).Shard(shard)
+	db, err := engineseams.DB(e).Shard(shard)
+	assert.Must(assert.NoError(err))
 	var childFlowID, childRoot int
 	err = db.QueryRowContext(ctx,
 		"SELECT flow_id, root_flow_id FROM dwarf_flows WHERE surgraph_flow_id=?", parentFlowID,

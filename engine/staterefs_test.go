@@ -55,7 +55,7 @@ func stepRefsOf(t *testing.T, e *Engine, stepID int) (state workflow.State, refs
 	t.Helper()
 	assert := testarossa.For(t)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	var stateJSON, refsJSON []byte
 	err = db.QueryRowContext(context.Background(),
 		"SELECT state, state_refs FROM dwarf_steps WHERE step_id=?", stepID,
@@ -72,7 +72,7 @@ func stepIDsByTask(t *testing.T, e *Engine, taskName string) []int {
 	t.Helper()
 	assert := testarossa.For(t)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	rows, err := db.QueryContext(context.Background(),
 		"SELECT step_id FROM dwarf_steps WHERE task_name=? ORDER BY step_id", taskName)
 	assert.NoError(err)
@@ -106,7 +106,7 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	_, err = db.ExecContext(ctx,
 		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 		"ftok", "u", "W", []byte("{}"), "", workflow.StatusRunning, 1, 60000,
@@ -188,7 +188,7 @@ func TestStateRefs_UnreadableStateFailsTheStep(t *testing.T) {
 	bIDs := stepIDsByTask(t, e, "B")
 	assert.Len(bIDs, 1)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET state=? WHERE step_id=?", []byte(`[1]`), bIDs[0])
 	assert.NoError(err)
 
@@ -234,7 +234,7 @@ func TestStateRefs_UnreadableInterruptedStateFailsSnapshot(t *testing.T) {
 	bIDs := stepIDsByTask(t, e, "B")
 	assert.Len(bIDs, 1)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET state=? WHERE step_id=?", []byte(`[1]`), bIDs[0])
 	assert.NoError(err)
 
@@ -270,7 +270,7 @@ func TestStateRefs_UnreadableSideColumnFailsTheStep(t *testing.T) {
 	e.SetHost(mux)
 	assert.NoError(e.Startup(t.Context()))
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 
 	for _, column := range []string{"resume data", "baggage"} {
 		runs.Store(0)
@@ -621,7 +621,7 @@ func TestStateRefs_DispatchResolveTakesATurnOnlyToRead(t *testing.T) {
 	e.SetHost(hosts.NewMux())
 	assert.NoError(e.Startup(t.Context()))
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	_, err = db.ExecContext(ctx,
 		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 		"ftok", "u", "W", []byte("{}"), "", workflow.StatusRunning, 1, 60000,
@@ -691,7 +691,7 @@ func TestStateRefs_UnreadableRefsFailTheStep(t *testing.T) {
 	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET state_refs=? WHERE flow_id=?", []byte(`{"doc":{"v":9}}`), flowID)
 	assert.NoError(err)
 
@@ -899,7 +899,7 @@ func TestStateRefs_AnchorLoaderChunksPastTheParameterCeiling(t *testing.T) {
 	}
 	reads = append(reads, staterefs.Read{ID: real, State: true, Changes: true})
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	var readBytes int
 	fetched, err := anchorLoader(db, &readBytes)(ctx, reads)
 	assert.NoError(err)

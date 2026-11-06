@@ -470,7 +470,7 @@ func TestFault_SubgraphReviveLost(t *testing.T) {
 	shard, _, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 
 	// The child has now gone terminal; its revive is (faultily) lost, so the caller is wedged.
 	waitChild()

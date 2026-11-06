@@ -311,7 +311,7 @@ func TestArchiveMetrics_AnUnreadableDayIsAnArchiveFailure(t *testing.T) {
 	today, err := a.Today(ctx)
 	assert.NoError(err)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	for _, table := range []string{migrations.FlowsTable(today + 1), migrations.StepsTable(today + 1)} {
 		_, err = db.ExecContext(ctx, "DROP TABLE "+table)
 		assert.NoError(err)

@@ -204,7 +204,7 @@ func TestListClosed_ADayAPeerDroppedIsReadAgain(t *testing.T) {
 	root := closedRoots(t, e, 1)[0]
 	moveInto(t, e, root, today-1)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	peer := archiver.New(db, e.archives.Load().dayLength, migrations.Archive())
 	_, err = peer.DropBefore(ctx, today-1)
 	assert.NoError(err)
@@ -330,7 +330,7 @@ func TestSQLTime_ReadsAsTheInstantItNames(t *testing.T) {
 	ctx := context.Background()
 	e := archiveEngine(t, treeMux(), 30)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	diff := func(x sequel.Executor) float64 {
 		expr, arg := sqlTime(db.DriverName(), time.Now())
 		var ms float64
@@ -388,7 +388,9 @@ func TestSQLTime_RoundsUpToTheColumnsPrecision(t *testing.T) {
 	root := closedRoots(t, e, 1)[0]
 	moveInto(t, e, root, today)
 	unit := time.Millisecond
-	if db, _ := e.db.Shard(1); db.DriverName() == "pgx" {
+	db, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	if db.DriverName() == "pgx" {
 		unit = time.Microsecond
 	}
 	stored := time.Now().Add(-time.Minute).Truncate(unit)
@@ -446,7 +448,7 @@ func TestListOpen_NewestUpdatedFirstAcrossStatuses(t *testing.T) {
 	closed := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
 	assert.NoError(e.Terminate(ctx, closed, "closed"))
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	// The two newest are both interrupted, the second branch: an outer limit that did not order the branches' union
 	// would keep the running flow, which comes first in it.
 	for fk, ahead := range map[string]int{first: 3000, last: 2000, napping: 1000} {

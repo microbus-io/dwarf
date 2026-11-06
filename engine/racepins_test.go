@@ -77,7 +77,7 @@ func TestResumeLosesToTerminate_Deterministic(t *testing.T) {
 	shardNum, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shardNum)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 
 	// Freeze resume at the checkpoint before its transaction, then launch it. The wait returns once resume is
 	// frozen there, whether it arrives before or after the wait is armed.
@@ -160,7 +160,7 @@ func TestReaperDeletesRunningDescendant(t *testing.T) {
 	shardNum, _, rootID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shardNum)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	assert.Equal(2, shardFlowCount(t, e, shardNum)) // root + child
 
 	// Forge an orphan: flip the completed child to `running` (a live descendant under a closed root, a state
@@ -229,7 +229,7 @@ func TestTerminateVsTransition_Deterministic(t *testing.T) {
 	shardNum, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shardNum)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	var bSteps int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND task_name='B'", flowID).Scan(&bSteps))
 	assert.Equal(0, bSteps)           // no successor inserted into the terminated flow
@@ -304,7 +304,8 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 	assertAllTerminated := func(t *testing.T, e *Engine, fk string) {
 		assert := testarossa.For(t)
 		shardNum, _, _, _, _ := keys.ParseFlowKey(fk)
-		db, _ := e.db.Shard(shardNum)
+		db, err := e.db.Shard(shardNum)
+		assert.Must(assert.NoError(err))
 		rows, err := db.QueryContext(t.Context(), "SELECT flow_id, workflow_url, status FROM dwarf_flows ORDER BY flow_id")
 		if !assert.NoError(err) {
 			return
@@ -320,7 +321,8 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 	}
 	countFlows := func(t *testing.T, e *Engine, fk, workflowURL string) int {
 		shardNum, _, _, _, _ := keys.ParseFlowKey(fk)
-		db, _ := e.db.Shard(shardNum)
+		db, err := e.db.Shard(shardNum)
+		testarossa.Must(t, testarossa.NoError(t, err))
 		var n int
 		db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dwarf_flows WHERE workflow_url=?", workflowURL).Scan(&n)
 		return n
@@ -509,7 +511,8 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		go func() { terminated <- r.e.Terminate(ctx, fk, "test") }()
 		assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointTerminateAfterScan, 10*time.Second), "Terminate never finished its scan")
 		shardNum, _, parentFlowID, _, _ := keys.ParseFlowKey(fk)
-		db, _ := r.e.db.Shard(shardNum)
+		db, err := r.e.db.Shard(shardNum)
+		assert.Must(assert.NoError(err))
 		_, err = db.ExecContext(ctx, "DELETE FROM dwarf_steps WHERE flow_id IN (SELECT flow_id FROM dwarf_flows WHERE surgraph_flow_id=?)", parentFlowID)
 		assert.NoError(err)
 		_, err = db.ExecContext(ctx, "DELETE FROM dwarf_flows WHERE surgraph_flow_id=?", parentFlowID)
@@ -580,7 +583,8 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		// claimed while Terminate is frozen. Elsewhere the outcome depends on the locks (and on MySQL's isolation
 		// level), and not claiming Call is legitimate.
 		shardNum, _, _, _, _ := keys.ParseFlowKey(fk)
-		db, _ := r.e.db.Shard(shardNum)
+		db, err := r.e.db.Shard(shardNum)
+		assert.Must(assert.NoError(err))
 		if driver := db.DriverName(); driver == "pgx" || driver == "mssql" {
 			assert.True(claimed, "Call was not claimed in time, so the race was not exercised")
 		}
@@ -631,7 +635,7 @@ func TestRetryRewindVsTerminate_Deterministic(t *testing.T) {
 	shardNum, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shardNum)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	var stepStatus string
 	var attempt int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status, attempt FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&stepStatus, &attempt))

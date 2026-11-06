@@ -54,8 +54,8 @@ github.com/microbus-io/seamster v0.4.0 h1:CCBmoyBChBP5pehnc2zh9kLQifbr6r+BrYUw9p
 github.com/microbus-io/seamster v0.4.0/go.mod h1:IlCTdnLEOqfaFXd+ctNVC7tmn2GFQquQVcUYljbzZjw=
 github.com/microbus-io/sequel v1.15.4 h1:m7J/B3oGJrxYPrqxUdKbnxflGFexUib3JjjVYQgYkuk=
 github.com/microbus-io/sequel v1.15.4/go.mod h1:hAM9K2HwAW+Lurl8tqX3pUjRWEyM3/9nfESDegej3mU=
-github.com/microbus-io/testarossa v0.7.3 h1:CsLpfjFG1/+rl0FqT1jJpjBiXZBydEe7CZOnQWbob9A=
-github.com/microbus-io/testarossa v0.7.3/go.mod h1:VNzOPk+3EQSXb4bmV7ZXC1wOAOPKock3H/eYJqxUqBg=
+github.com/microbus-io/testarossa v0.7.4 h1:q0gM+4mIY3EGDRe3TFcm1+Z0D3QQGmidpE6wqK7J78s=
+github.com/microbus-io/testarossa v0.7.4/go.mod h1:Sbv4Fon51vYNIpWMPn3fbjMLFQMeMR4B9mh+Y+xxhZo=
 github.com/modocache/gover v0.0.0-20171022184752-b58185e213c5/go.mod h1:caMODM3PzxT8aQXRPkAt8xlV/e7d7w8GM5g0fa5F0D8=
 github.com/ncruces/go-strftime v1.1.0 h1:vtPmPWMkb539RGV9WpWT9EwJGvrOCKvMNI4obWL47Hk=
 github.com/ncruces/go-strftime v1.1.0/go.mod h1:yVaq7iwCN09vHRrKBrrflXT0M9tTMG2KmZ9Fj7xeG/g=

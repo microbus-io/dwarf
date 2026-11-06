@@ -56,7 +56,7 @@ func TestFork_TransactionOpensWithAWrite(t *testing.T) {
 	e.SetTracerProvider(tp)
 	assert.NoError(e.Startup(t.Context()))
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	if locksByReading(db.DriverName()) {
 		t.Skip("the lock is a locking read on " + db.DriverName())
 	}

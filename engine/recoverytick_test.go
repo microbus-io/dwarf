@@ -81,7 +81,7 @@ func TestRecoveryTick_LightPassRecoversLeases(t *testing.T) {
 		t.Fatal("A was never dispatched")
 	}
 	db, err := e.db.Shard(shard)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -1000) WHERE flow_id=?", flowID)
 	assert.NoError(err)
 
@@ -141,7 +141,7 @@ func TestRecoveryTick_ExpiredLeaseRecoveredOnTheTick(t *testing.T) {
 		t.Fatal("A was never dispatched")
 	}
 	db, err := e.db.Shard(shard)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -1000) WHERE flow_id=?", flowID)
 	assert.NoError(err)
 

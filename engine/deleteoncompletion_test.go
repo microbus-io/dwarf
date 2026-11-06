@@ -37,7 +37,7 @@ func shardFlowCount(t *testing.T, e *Engine, shardNum int) int {
 	t.Helper()
 	assert := testarossa.For(t)
 	db, err := e.db.Shard(shardNum)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	n := -1
 	assert.NoError(db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM dwarf_flows").Scan(&n))
 	return n
@@ -55,7 +55,7 @@ func waitFlowDeleted(t *testing.T, e *Engine, flowKey string, timeout time.Durat
 	shardNum, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
 	db, err := e.db.Shard(shardNum)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	deadline := time.Now().Add(timeout * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
 		n := -1 // a failed count must not read as deleted
@@ -355,7 +355,7 @@ func TestDeleteOnCompletion_HistoryOfAChildHidesWithItsRoot(t *testing.T) {
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
 
 	db, err := e.db.Shard(shardNum)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	var childID, childHour int
 	var childToken string
 	assert.NoError(db.QueryRowContext(ctx,

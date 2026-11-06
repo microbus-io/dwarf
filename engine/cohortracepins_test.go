@@ -101,7 +101,7 @@ func newCohortRaceRig(t *testing.T, prefix string) *cohortRaceRig {
 	r.shard, _, r.flowID, _, err = keys.ParseFlowKey(r.fk)
 	assert.NoError(err)
 	r.db, err = r.e.db.Shard(r.shard)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 
 	// Both branches inside their tasks means A's transition has committed, so A is past the checkpoint a test
 	// arms next and will never freeze there.

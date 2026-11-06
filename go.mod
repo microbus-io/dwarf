@@ -10,7 +10,7 @@ require (
 	github.com/microbus-io/errors v1.0.1
 	github.com/microbus-io/seamster v0.4.0
 	github.com/microbus-io/sequel v1.15.4
-	github.com/microbus-io/testarossa v0.7.3
+	github.com/microbus-io/testarossa v0.7.4
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/metric v1.47.0
 	go.opentelemetry.io/otel/sdk v1.47.0

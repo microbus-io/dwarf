@@ -72,7 +72,7 @@ func TestRoundTrips_LinearStep(t *testing.T) {
 
 	run(5) // warm the statement caches on the connections before timing
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	db.SimulateRTT(rtt)
 	defer db.SimulateRTT(0)
 	// What one simulated round trip really costs: the timer oversleeps by an amount that varies by platform, and
@@ -136,7 +136,7 @@ func TestRoundTrips_FanInCycle(t *testing.T) {
 	run(3) // warm the statement caches on the connections before timing
 	run(9)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	db.SimulateRTT(rtt)
 	defer db.SimulateRTT(0)
 	const probes = 30
@@ -188,7 +188,7 @@ func TestRoundTrips_OneStepFlow(t *testing.T) {
 
 	run(10) // warm the statement caches on the connections before timing
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	db.SimulateRTT(rtt)
 	defer db.SimulateRTT(0)
 	const probes = 30

@@ -37,7 +37,7 @@ func stepColumn(t *testing.T, e *Engine, taskName, column string) []string {
 	t.Helper()
 	assert := testarossa.For(t)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	var out []string
 	for _, id := range stepIDsByTask(t, e, taskName) {
 		var v []byte

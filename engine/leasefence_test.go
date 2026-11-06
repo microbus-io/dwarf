@@ -49,7 +49,7 @@ func TestLeaseFence_FailStep(t *testing.T) {
 	setup := func(t *testing.T, e *Engine, ownerSeq int) {
 		assert := testarossa.For(t)
 		db, err := e.db.Shard(1)
-		assert.NoError(err)
+		assert.Must(assert.NoError(err))
 		// flow_id is auto-increment; the first insert on a fresh per-test DB is flow_id=1 on every driver.
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -68,7 +68,7 @@ func TestLeaseFence_FailStep(t *testing.T) {
 	statuses := func(t *testing.T, e *Engine) (flowStatus, stepStatus string) {
 		assert := testarossa.For(t)
 		db, err := e.db.Shard(1)
-		assert.NoError(err)
+		assert.Must(assert.NoError(err))
 		db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=1").Scan(&flowStatus)
 		db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE step_id=1").Scan(&stepStatus)
 		return flowStatus, stepStatus
@@ -679,7 +679,7 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 		e.SetHost(hosts.NewMux())
 		assert.NoError(e.Startup(t.Context()))
 		db, err := e.db.Shard(1)
-		assert.NoError(err)
+		assert.Must(assert.NoError(err))
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 			"ftok", "u", "W", []byte("{}"), "", flowStatus, 1, 1000,
@@ -774,7 +774,7 @@ func TestFailStep_HeldStates(t *testing.T) {
 			e.SetHost(hosts.NewMux())
 			assert.NoError(e.Startup(t.Context()))
 			db, err := e.db.Shard(1)
-			assert.NoError(err)
+			assert.Must(assert.NoError(err))
 
 			flowStatus := tc.row.flowStatus
 			if flowStatus == "" {
@@ -842,7 +842,7 @@ func createdHourOf(t *testing.T, e *Engine, flowID int) int {
 	t.Helper()
 	assert := testarossa.For(t)
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	var hour int
 	assert.NoError(db.QueryRowContext(t.Context(), "SELECT created_hour FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&hour))
 	return hour

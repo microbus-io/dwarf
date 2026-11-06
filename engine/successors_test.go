@@ -81,7 +81,7 @@ func TestSuccessorBatch_WideFanOutKeepsBranchOrder(t *testing.T) {
 
 	// Every branch row carries its own element's ordinal, and they all hang off the one spawn.
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	seed := stepIDsByTask(t, e, "Seed")[0]
 	rows, err := db.QueryContext(ctx,
 		"SELECT state, fan_out_ordinal, predecessor_id, lineage_id FROM dwarf_steps WHERE task_name='Work'")
@@ -156,7 +156,7 @@ func TestSuccessorBatch_LoneSuccessorLinks(t *testing.T) {
 	wg.Wait()
 
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	rows, err := db.QueryContext(ctx,
 		"SELECT s.step_id, s.flow_id, s.task_name, s.successor_id, n.flow_id, n.predecessor_id, n.task_name"+
 			" FROM dwarf_steps s LEFT JOIN dwarf_steps n ON n.step_id=s.successor_id")
@@ -263,7 +263,7 @@ func TestSuccessorBatch_ByteBoundedFanOutKeepsBranchOrder(t *testing.T) {
 	}
 
 	db, err := e.db.Shard(1)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	rows, err := db.QueryContext(ctx, "SELECT state, state_refs, fan_out_ordinal FROM dwarf_steps WHERE task_name='Work'")
 	assert.NoError(err)
 	defer rows.Close()
