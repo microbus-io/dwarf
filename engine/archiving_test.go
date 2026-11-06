@@ -56,7 +56,7 @@ func treeCount(t *testing.T, e *Engine, flowsTable, stepsTable string, rootID in
 	return flows, steps
 }
 
-// archiveEngine starts an engine whose ended roots are due at once and whose own reaper stays out of the way, so a
+// archiveEngine starts an engine whose closed roots are due at once and whose own reaper stays out of the way, so a
 // test drives each pass itself.
 func archiveEngine(t *testing.T, mux *hosts.Mux, retention int) *Engine {
 	t.Helper()
@@ -106,10 +106,10 @@ func treeMux() *hosts.Mux {
 	return mux
 }
 
-// TestArchiving_EndedTreeMovesToTodaysTables pins the archiver: once its root has ended, a whole tree - the root, its
+// TestArchiving_ClosedTreeMovesToTodaysTables pins the archiver: once its root has closed, a whole tree - the root, its
 // subgraph descendant and every step - leaves the live tables for today's archive tables in one pass, with its ids
 // and its outcome as they were.
-func TestArchiving_EndedTreeMovesToTodaysTables(t *testing.T) {
+func TestArchiving_ClosedTreeMovesToTodaysTables(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -148,7 +148,7 @@ func TestArchiving_EndedTreeMovesToTodaysTables(t *testing.T) {
 	assert.Equal(finalState, archived)
 }
 
-// TestArchiving_RetentionZeroDeletes pins that a retention of 0 deletes an ended tree rather than archiving it.
+// TestArchiving_RetentionZeroDeletes pins that a retention of 0 deletes a closed tree rather than archiving it.
 func TestArchiving_RetentionZeroDeletes(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -173,10 +173,10 @@ func TestArchiving_RetentionZeroDeletes(t *testing.T) {
 	assert.Equal(0, archFlows, "a retention of 0 archives nothing")
 }
 
-// TestArchiving_OnlyEndedRootsPastTheGraceLeave pins what the archiver leaves alone: a flow that has not ended (an
-// interrupted one waits for a human), and an ended one inside its grace. A DeleteOnCompletion root is deleted, not
+// TestArchiving_OnlyClosedRootsPastTheGraceLeave pins what the archiver leaves alone: a flow that has not closed (an
+// interrupted one waits for a human), and a closed one inside its grace. A DeleteOnCompletion root is deleted, not
 // archived.
-func TestArchiving_OnlyEndedRootsPastTheGraceLeave(t *testing.T) {
+func TestArchiving_OnlyClosedRootsPastTheGraceLeave(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -216,7 +216,7 @@ func TestArchiving_OnlyEndedRootsPastTheGraceLeave(t *testing.T) {
 	assert.Equal(0, flows, "a DeleteOnCompletion root is deleted")
 	_, _, askedID, _, _ := keys.ParseFlowKey(asked)
 	flows, _ = treeCount(t, e, "dwarf_flows", "dwarf_steps", askedID)
-	assert.Equal(1, flows, "an interrupted flow has not ended")
+	assert.Equal(1, flows, "an interrupted flow has not closed")
 	if now, _ := e.archives.Load().byShard[1].Today(ctx); now == today {
 		archFlows, _ := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), disposableID)
 		assert.Equal(0, archFlows, "and not archived")
@@ -286,7 +286,7 @@ func TestArchiving_ResidencySplitsTheDueRoots(t *testing.T) {
 	}
 	var both []int
 	for _, ordinal := range []int{0, 1} {
-		for _, id := range selectWith(e.endedDue(time.Hour), ordinal) {
+		for _, id := range selectWith(e.closedDue(time.Hour), ordinal) {
 			assert.Equal(ordinal, id%2, "a fresh root is selected only by its own class")
 			both = append(both, id)
 		}
@@ -295,7 +295,7 @@ func TestArchiving_ResidencySplitsTheDueRoots(t *testing.T) {
 	assert.Equal(roots, both, "and the two classes cover every root once")
 	assert.True(slices.ContainsFunc(roots, func(id int) bool { return id%2 == 0 }) &&
 		slices.ContainsFunc(roots, func(id int) bool { return id%2 == 1 }), "both classes hold roots: %v", roots)
-	all := selectWith(e.endedDue(0), 0)
+	all := selectWith(e.closedDue(0), 0)
 	for _, id := range roots {
 		assert.True(slices.Contains(all, id), "an overdue root %d is selected by any class", id)
 	}
@@ -325,7 +325,7 @@ func TestArchiving_ABatchTakesItsOwnClassFirst(t *testing.T) {
 }
 
 // TestArchiving_APassDrainsInSeveralBatches pins the loop of one pass: with batches far smaller than the due set, and
-// a row budget that cuts them further, one pass still moves every ended tree, consuming one scan's candidates
+// a row budget that cuts them further, one pass still moves every closed tree, consuming one scan's candidates
 // across batches and scanning again when they run out.
 func TestArchiving_APassDrainsInSeveralBatches(t *testing.T) {
 	t.Parallel()
@@ -427,8 +427,8 @@ func TestArchiving_ABatchThatMeetsContentionWaitsForTheNextPass(t *testing.T) {
 	}
 }
 
-// endedRoots creates n ended trees and returns their roots.
-func endedRoots(t *testing.T, e *Engine, n int) []int {
+// closedRoots creates n closed trees and returns their roots.
+func closedRoots(t *testing.T, e *Engine, n int) []int {
 	t.Helper()
 	assert := testarossa.For(t)
 	var roots []int
@@ -442,17 +442,17 @@ func endedRoots(t *testing.T, e *Engine, n int) []int {
 	return roots
 }
 
-// TestArchiving_NoEndedTreeMovesWhileTomorrowIsNotWhole pins that while tomorrow's tables are missing - so today, whose
-// own tables are there, must not be written, or a locate would leave out a day that holds the flow - the ended trees
+// TestArchiving_NoClosedTreeMovesWhileTomorrowIsNotWhole pins that while tomorrow's tables are missing - so today, whose
+// own tables are there, must not be written, or a locate would leave out a day that holds the flow - the closed trees
 // wait in the live tables, neither archived nor deleted, while the stamped ones are still deleted: they need no
-// archive. Once that has lasted the failure grace, the ended trees are deleted unarchived.
-func TestArchiving_NoEndedTreeMovesWhileTomorrowIsNotWhole(t *testing.T) {
+// archive. Once that has lasted the failure grace, the closed trees are deleted unarchived.
+func TestArchiving_NoClosedTreeMovesWhileTomorrowIsNotWhole(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
-	roots := endedRoots(t, e, 3)
-	stamped := endedRoots(t, e, 1)[0]
+	roots := closedRoots(t, e, 3)
+	stamped := closedRoots(t, e, 1)[0]
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
 	db, err := e.db.Shard(1)
@@ -492,13 +492,13 @@ func TestArchiving_NoEndedTreeMovesWhileTomorrowIsNotWhole(t *testing.T) {
 }
 
 // TestArchiving_AFailedDeletionScanDoesNotHoldBackArchiving pins that the stamped kind failing does not keep the
-// ended kind from its pass.
+// closed kind from its pass.
 func TestArchiving_AFailedDeletionScanDoesNotHoldBackArchiving(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
-	roots := endedRoots(t, e, 2)
+	roots := closedRoots(t, e, 2)
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
 
@@ -524,7 +524,7 @@ func TestArchiving_ABatchThatCannotBeArchivedIsDeletedAfterTheGrace(t *testing.T
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
 	e.archiveFailureGrace = 0
-	roots := endedRoots(t, e, 6)
+	roots := closedRoots(t, e, 6)
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
 	db, err := e.db.Shard(1)
@@ -561,7 +561,7 @@ func TestArchiving_AFailureWaitsForTheGraceAndASuccessClearsIt(t *testing.T) {
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
 	e.archiveFailureGrace = time.Hour
-	roots := endedRoots(t, e, 3)
+	roots := closedRoots(t, e, 3)
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
 
@@ -585,7 +585,7 @@ func TestArchiving_AFailureWaitsForTheGraceAndASuccessClearsIt(t *testing.T) {
 
 	// The grace is over, but the success cleared the failure: the next failure waits again.
 	e.archiveFailureGrace = 0
-	more := endedRoots(t, e, 2)
+	more := closedRoots(t, e, 2)
 	e.seams.InjectN(engineseams.FaultReapArchiveErr, 1)
 	e.reapDueFlows(ctx)
 	for _, id := range more {
@@ -644,7 +644,7 @@ func TestArchiving_ALastingFaultDeletesAndLogsOnce(t *testing.T) {
 			assert.NoError(e.Startup(ctx))
 			e.seams.InjectN(fault, 100000)
 
-			first := endedRoots(t, e, 2)
+			first := closedRoots(t, e, 2)
 			e.reapDueFlows(ctx)
 			for _, id := range first {
 				flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", id)
@@ -656,12 +656,12 @@ func TestArchiving_ALastingFaultDeletesAndLogsOnce(t *testing.T) {
 				assert.Equal(0, flows, "tree %d deleted after the grace", id)
 			}
 			for range 3 {
-				more := endedRoots(t, e, 1)
+				more := closedRoots(t, e, 1)
 				e.reapDueFlows(ctx)
 				flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", more[0])
 				assert.Equal(0, flows, "tree %d deleted: the deletions go on", more[0])
 			}
-			assert.Equal(1, logs.count("Reaper: archiving ended trees failed"), "the failure is logged once")
+			assert.Equal(1, logs.count("Reaper: archiving closed trees failed"), "the failure is logged once")
 			assert.Equal(1, logs.count("Reaper: archiving has failed for the grace"), "the deletions' start is logged once")
 		})
 	}
@@ -675,10 +675,10 @@ func TestArchiving_AStopIsNotAFailureAndARestartForgetsThem(t *testing.T) {
 	e := archiveEngine(t, treeMux(), 30)
 	stopped, cancel := context.WithCancel(t.Context())
 	cancel()
-	assert.False(e.archiveFailed(stopped, 1, "archiving ended trees", errors.New("stopped")))
+	assert.False(e.archiveFailed(stopped, 1, "archiving closed trees", errors.New("stopped")))
 	assert.Len(e.archiveFailures.byID, 0, "a stop records no failure")
 
-	assert.False(e.archiveFailed(t.Context(), 1, "archiving ended trees", errors.New("failed")))
+	assert.False(e.archiveFailed(t.Context(), 1, "archiving closed trees", errors.New("failed")))
 	assert.Len(e.archiveFailures.byID, 1)
 	assert.NoError(e.Shutdown(t.Context()))
 	assert.NoError(e.Startup(t.Context()))
@@ -724,7 +724,7 @@ func TestArchiving_EveryArchivedFlowIsStampedWhenItWasArchived(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
-	root := endedRoots(t, e, 1)[0]
+	root := closedRoots(t, e, 1)[0]
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
 	// Ended an hour ago, so a stamp copied from when it ended - rather than taken when it moved - is an hour old.
@@ -771,7 +771,7 @@ func TestArchiving_AMoveAfterItsDayEndedIsStampedWithinTheDay(t *testing.T) {
 	today, err := a.Today(ctx)
 	assert.NoError(err)
 	assert.NoError(makeArchiveDay(t, e, today-1))
-	root := endedRoots(t, e, 1)[0]
+	root := closedRoots(t, e, 1)[0]
 	moveInto(t, e, root, today-1)
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
@@ -802,7 +802,7 @@ func TestArchiving_NoTreeMovesInTheDaysLastMoments(t *testing.T) {
 	assert.Equal(2*time.Second, reapQuietMargin(a.DayLength()))
 	assert.Equal(time.Minute, reapQuietMargin(24*time.Hour))
 	assert.Zero(reapQuietMargin(8*time.Second), "a day too short for a margin")
-	root := endedRoots(t, e, 1)[0]
+	root := closedRoots(t, e, 1)[0]
 
 	// TodayLeft rounds down, so 1 left means between one and two seconds to go: inside the margin, not past the day.
 	deadline := time.Now().Add(time.Minute)

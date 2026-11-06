@@ -18,7 +18,7 @@ limitations under the License.
 //   - Resume-loses-to-Terminate: a checkpoint holds resume() before its transaction so a Terminate can win the
 //     race every run, proving resume 409s and rolls its step writes back.
 //   - Reaper-deletes-a-running-descendant: the reaper removes the whole root_flow_id tree regardless of
-//     descendant status, so a live orphan under a terminal root is reaped (deleteFlow guards only the root).
+//     descendant status, so a live orphan under a closed root is reaped (deleteFlow guards only the root).
 package engine
 
 import (
@@ -122,7 +122,7 @@ func TestResumeLosesToTerminate_Deterministic(t *testing.T) {
 // TestReaperDeletesRunningDescendant pins the reaper's tree-delete: it removes the whole root_flow_id tree regardless of
 // descendant status. deleteFlow 409s only on a running *root*; a running subgraph *descendant* (an orphan, a
 // state only a bug leaves) is deleted anyway. Here the descendant is forged into `running` under a
-// terminal root, then the reaper removes it along with the root.
+// closed root, then the reaper removes it along with the root.
 func TestReaperDeletesRunningDescendant(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -163,7 +163,7 @@ func TestReaperDeletesRunningDescendant(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(2, shardFlowCount(t, e, shardNum)) // root + child
 
-	// Forge an orphan: flip the completed child to `running` (a live descendant under a terminal root, a state
+	// Forge an orphan: flip the completed child to `running` (a live descendant under a closed root, a state
 	// only a bug leaves - here it inherits root_flow_id = rootID).
 	res, err := db.ExecContext(ctx, "UPDATE dwarf_flows SET status='"+workflow.StatusRunning+"' WHERE root_flow_id=? AND surgraph_flow_id<>0", rootID)
 	assert.NoError(err)
@@ -173,7 +173,7 @@ func TestReaperDeletesRunningDescendant(t *testing.T) {
 		assert.Equal(1, running) // a running descendant now exists
 	}
 
-	// Stamp the terminal root due (as Delete/DeleteOnCompletion would) and reap. The reaper only selects roots
+	// Stamp the closed root due (as Delete/DeleteOnCompletion would) and reap. The reaper only selects roots
 	// where `DATE_ADD_MILLIS(updated_at, delete_after_ms) <= NOW_UTC()`, so backdate updated_at 60s to put the
 	// due moment unconditionally in the past (delete_after_ms=1 alone hinges on sub-ms timing - flaky). The
 	// reaper then deletes by root_flow_id, so the running descendant goes too - no reguard on descendant status.
@@ -238,7 +238,7 @@ func TestTerminateVsTransition_Deterministic(t *testing.T) {
 }
 
 // TestTerminateVsSubgraphSpawn_Deterministic pins that a Terminate racing a subgraph spawn never leaves a live
-// flow, or a live step, under an ended parent. A spawn parks its caller step in the transaction that inserts the
+// flow, or a live step, under a closed parent. A spawn parks its caller step in the transaction that inserts the
 // child; Terminate terminates the tree's steps, locks its flow rows, terminates the steps again, scans for children
 // once, and re-runs over the larger set if the scan found any. Each subtest drives one ordering:
 //

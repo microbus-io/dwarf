@@ -353,7 +353,7 @@ func TestOrphanSweep_ReplaysSlowWorkersStep_OtherTransitions(t *testing.T) {
 		assert.Equal(int32(1), runsA.Load(), "A ran again instead of being replayed")
 		assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=?", flowID))
 		// The stalled worker's completion, unfenced, may win and complete the flow while A sits rewound: A is then
-		// pending on a terminal flow until a claim reaps it to the flow's status (after this replica's 1-2s claim
+		// pending on a closed flow until a claim reaps it to the flow's status (after this replica's 1-2s claim
 		// reservation on it lapses). Transient, and the outcome is single, so wait it out before the invariants.
 		assert.True(enginetest.WaitUntil(t, 10*time.Second, func() bool {
 			return enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusCompleted+"'", flowID) == 1

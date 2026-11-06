@@ -71,11 +71,11 @@ its schedule.
 outcome, err := eng.Await(ctx, flowKey)
 ```
 
-Blocks until the flow stops — `completed`, `failed`, `terminated`, `cancelled`, or `interrupted` — and returns the
-outcome, or returns without it when the caller's context ends first. The wait is bounded by a short internal
-cadence rather than by anything the caller or the host has to arrange: a flow that stops on another replica
-wakes its waiters just as one that stops locally does, and nothing has to be delivered between replicas for
-that to happen.
+Blocks until the flow stops — closes (`completed`, `failed`, `terminated`, `cancelled`) or is `interrupted`, waiting
+for `Resume` — and returns the outcome, or returns without it when the caller's context ends first. The wait is
+bounded by a short internal cadence rather than by anything the caller or the host has to arrange: a flow that stops
+on another replica wakes its waiters just as one that stops locally does, and nothing has to be delivered between
+replicas for that to happen.
 
 If the ctx deadline fires first, `Await` returns the error and the flow **keeps running** — it is durable and
 not bound to your call. You still hold the key, so you can `Await` again.
@@ -93,8 +93,8 @@ if !outcome.Stopped() {
 }
 ```
 
-`Poll` waits exactly like `Await`, but a **ctx timeout is not an error**: it returns the flow's current,
-non-terminal outcome, whose `Stopped()` reports `false`. That makes it the right call for a caller bounded by
+`Poll` waits exactly like `Await`, but a **ctx timeout is not an error**: it returns the flow's current outcome, which
+has not stopped (`Stopped()` reports `false`). That makes it the right call for a caller bounded by
 its own deadline — an HTTP status endpoint long-polling a flow that may run for hours — without hand-rolling a
 `Snapshot` loop. A genuine failure (unknown flow, database down) still returns an error.
 
@@ -105,7 +105,7 @@ its own deadline — an HTTP status endpoint long-polling a flow that may run fo
 ```go
 type FlowOutcome struct {
     Status           string
-    State            workflow.State  // the final state when terminal; the interrupted step's merged snapshot when interrupted; empty while running
+    State            workflow.State  // the final state when closed; the interrupted step's merged snapshot when interrupted; empty while running
     Error            string          // set when Status == "failed"
     InterruptPayload workflow.State  // set when Status == "interrupted"
     TerminateReason  string          // set when Status == "terminated"
@@ -156,7 +156,8 @@ terminated or been cancelled:
 
 **A flow that closed in the last minute is in neither list** - longer while archiving lags behind - and one deleted
 without archiving (`DeleteOnCompletion`, a retention of 0) is never in `ListClosed`. It is still read by its key
-meanwhile: `Snapshot`, `Await` and `History` find it, and `Delete` removes it. To learn when one flow closes, `Await` it rather than polling a list.
+meanwhile: `Snapshot`, `Await` and `History` find it, and `Delete` removes it. To learn when one flow closes, `Await`
+it rather than polling a list.
 
 Ties go by shard, then the newest flow. Every call needs `Limit` (at most 65,536). `ListClosed`'s window needs both
 ends: `FromTime`, inclusive, and `ToTime`, exclusive.
@@ -176,12 +177,12 @@ split a longer range. A search over many days wants a low `Limit`; a walk throug
 At a retention of 0 nothing is archived, so `ListClosed` lists nothing new.
 
 **Neither list has pagination or a cursor.** An open flow changes under you, so to see other open flows, narrow the
-filters or the window. A closed flow never changes, so you can walk `ListClosed` back through a range a window at
-a time, each ending just after the oldest `ArchivedAt` you hold, dropping the flows you already have: flows archived
+filters or the window. A closed flow never changes, so you can walk `ListClosed` back through a range a window at a
+time, each ending just after the oldest `ArchivedAt` you hold, dropping the flows you already have: flows archived
 together share an `ArchivedAt`. Polling forward from your last check up to now sees each flow once, about a minute
-after it ended, provided a walk's newest bound stays behind now by more than an archiving batch takes - seconds,
-longer for a very large tree: a batch archived together can appear after a later one. Each shard records its own times, so flows within the clock skew between two shard servers may be
-listed out of order.
+after it closed, provided a walk's newest bound stays behind now by more than an archiving batch takes - seconds,
+longer for a very large tree: a batch archived together can appear after a later one. Each shard records its own
+times, so flows within the clock skew between two shard servers may be listed out of order.
 
 ## Pausing and resuming
 
@@ -222,7 +223,7 @@ err := eng.Cancel(ctx, flowKey, "customer withdrew the order") // surfaced as Ca
 - **There is no deadline.** `Cancel` returns once the request is recorded - `Await` the flow to see it stop. A
   sleeping or backed-off step is reached when it next wakes, and an interrupted flow stays `interrupted` until
   someone calls `Resume` or `Terminate`.
-- Address the flow by its root key; calling `Cancel` on a flow that has already ended does nothing.
+- Address the flow by its root key; calling `Cancel` on a flow that has already closed does nothing.
 - **A flow is cancelled once.** A second `Cancel` on a flow already cancelled records nothing new: the first
   reason stands, and a flow whose `onError` handler caught the first cancellation and carried on is left
   alone. It does finish delivering the first cancellation, so a `Cancel` that returned an error, or whose
@@ -230,8 +231,8 @@ err := eng.Cancel(ctx, flowKey, "customer withdrew the order") // surfaced as Ca
 
 ## Terminating, and recovering with Fork
 
-A terminal flow (`completed`/`failed`/`terminated`/`cancelled`) is **immutable** — it is never re-run in
-place. To recover or explore, `Fork` clones a terminal flow up to a chosen step into a *new*, self-contained
+A closed flow (`completed`/`failed`/`terminated`/`cancelled`) is **immutable** — it is never re-run in
+place. To recover or explore, `Fork` clones a closed flow up to a chosen step into a *new*, self-contained
 flow and re-runs from there, optionally with state overrides; the original is never touched.
 
 ```go
@@ -257,7 +258,7 @@ that keeps it ends `failed`. To re-run it, fork at or before a fan-out step whos
 `Terminate` stopped - in a nested fan-out, the outermost one when stopped branches sit under different outer
 branches. Everything after the step you choose re-runs, every branch of that fan-out included.
 
-To re-run a terminal flow from the beginning, fork it at its first step. `History` lists steps in execution
+To re-run a closed flow from the beginning, fork it at its first step. `History` lists steps in execution
 order, so the first entry is the flow's entry step, and the fork starts from the original's initial state with
 your overrides applied:
 
@@ -291,15 +292,16 @@ continue the key the last `Continue` returned. Continuing one flow twice gives t
 
 ## Retention
 
-A flow that has not ended is never removed by the engine, unless the engine is set to expire flows (below). About a
-minute after it ends it moves to the archive, which keeps each day's ended flows for `SetRetention` days (30 by
-default) and then drops the day whole; `PurgeBefore(t)` drops every archived day before t's. With a retention of 0 an ended flow is deleted instead.
+An open flow is never removed by the engine, unless the engine is set to expire flows (below). About a minute after a
+flow closes it moves to the archive, which keeps each day's closed flows for `SetRetention` days (30 by default) and
+then drops the day whole; `PurgeBefore(t)` drops every archived day before t's. With a retention of 0 a closed flow
+is deleted instead.
 An archived flow reads as it did before it moved: `Snapshot`, `Fingerprint`, `Await`, `Poll`, `Run`, `History`,
 `Step` and `Continue` find it by its key, `Fork` clones it, `ListClosed` lists it, and a flow whose day was dropped
 reads as not found.
 
 ```go
-err := eng.Delete(ctx, flowKey)                // remove one ended flow and its subtree
+err := eng.Delete(ctx, flowKey)                // remove one closed flow and its subtree
 removed, done, err := eng.Purge(ctx, query)    // remove what ListClosed lists for query, oldest first, Limit at a time
 err = eng.PurgeBefore(ctx, t)                  // drop every archived day before t's, on every shard
 ```
@@ -347,11 +349,11 @@ before the reaper removes it — so a fire-and-forget caller can still `Run` it 
 ### Expiring flows that never end
 
 `SetFlowExpiration(d)` caps how long after its creation a flow may still be running or interrupted. A flow still
-running or interrupted once it is older than `d` is terminated, with its subgraphs, and its `TerminateReason` says it expired;
-it is then archived like any other terminated flow. It bounds what an abandoned interrupt or a flow polling forever
-leaves in the live tables. The check runs every 5 minutes, so a flow ends up to about that long after it expires. It
-is off by default, and a flow created by `Continue` or `Fork` counts from its own creation, so a long conversation
-carried on with `Continue` is never expired as a whole.
+running or interrupted once it is older than `d` is terminated, with its subgraphs, and its `TerminateReason` says it
+expired; it is then archived like any other terminated flow. It bounds what an abandoned interrupt or a flow polling
+forever leaves in the live tables. The check runs every 5 minutes, so a flow is terminated up to about 5 minutes
+after it expires. It is off by default, and a flow created by `Continue` or `Fork` counts from its own creation, so a
+long conversation carried on with `Continue` is never expired as a whole.
 
 ```go
 err := eng.SetFlowExpiration(30 * 24 * time.Hour) // before Startup; the same value on every replica
@@ -397,12 +399,12 @@ Each operation adds these to the 503 and 500 every call can return:
 | `History` | malformed key | unknown flow, or one scheduled for deletion | | |
 | `Step` | malformed key | unknown step | | |
 | `ListOpen`, `ListClosed` | invalid status or shard, no `Limit` or one over 65,536, a `FromTime` not before `ToTime`; `ListOpen` with a status that is not open; `ListClosed` with a status that is not closed, no `FromTime` or `ToTime`, or a window reaching more than 31 days of the archive | | | |
-| `Purge` | invalid status or shard, no `Limit` or one over 65,536, no `FromTime` or `ToTime`, `IncludeSubgraphs`, a `Status` that has not ended, or a window reaching more than 31 days of the archive | | | |
+| `Purge` | invalid status or shard, no `Limit` or one over 65,536, no `FromTime` or `ToTime`, `IncludeSubgraphs`, a `Status` that is not closed, or a window reaching more than 31 days of the archive | | | |
 | `Resume` | malformed key, a subgraph child's key, data not JSON-marshalable | unknown flow | | the flow is not interrupted, including when a `Terminate` won the race |
 | `Cancel`, `Terminate` | malformed key, a subgraph child's key, a reason over 4,096 bytes or not valid UTF-8 without NUL | unknown flow | | |
-| `Fork` | malformed key, overrides not JSON-marshalable | unknown step | | the flow is not terminal, is scheduled for deletion, or holds an unresolved interrupt off the fork path |
+| `Fork` | malformed key, overrides not JSON-marshalable | unknown step | | the flow is not closed, is scheduled for deletion, or holds an unresolved interrupt off the fork path |
 | `Continue` | malformed key, a subgraph child's key, `additionalState` not JSON-marshalable | unknown flow | | the flow is not completed, or is scheduled for deletion |
-| `Delete` | malformed key, a subgraph child's key | unknown flow | | the flow has not ended |
+| `Delete` | malformed key, a subgraph child's key | unknown flow | | the flow is open |
 
 A 413 comes from the operations that take a value in: `Create` and `Run` (the initial state or the baggage),
 `Continue` (the new flow's initial state, with `additionalState` folded in), `Resume` (the resume data) and
@@ -411,8 +413,8 @@ A 413 comes from the operations that take a value in: `Create` and `Run` (the in
 A 501 comes from the operations that read a flow's step data: `Step`, `Fork`, and `Snapshot`, `Await`, `Poll`
 and `Run` on an interrupted flow.
 
-Stopping or deleting what is already stopped or deleted is not an error. `Cancel` and `Terminate` on a flow
-that has ended, and `Delete` on a flow already scheduled for deletion, return nil and change nothing, so a
+Ending or deleting what has already closed or been deleted is not an error. `Cancel` and `Terminate` on a closed
+flow, and `Delete` on a flow already scheduled for deletion, return nil and change nothing, so a
 call whose response was lost is safe to repeat.
 
 Configuration returns 400 for an invalid value (a setter's argument, a `ShardSpec`, a missing host at

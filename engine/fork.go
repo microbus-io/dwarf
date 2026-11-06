@@ -32,9 +32,9 @@ import (
 	"github.com/microbus-io/sequel"
 )
 
-// forkFlow clones a terminal flow's execution tree up to a chosen step into a brand-new, self-contained
+// forkFlow clones a closed flow's execution tree up to a chosen step into a brand-new, self-contained
 // root flow, then re-runs from that step with optional state overrides. The fork point may be ANY recorded
-// step - in the root flow or deep inside a subgraph. The original is never mutated (terminal flows are
+// step - in the root flow or deep inside a subgraph. The original is never mutated (closed flows are
 // immutable); recovery/exploration is non-destructive.
 //
 // The design is a copy-only-keep clone, re-parking ancestor callers up the surgraph chain, a created->pending
@@ -180,7 +180,7 @@ func (e *Engine) forkSource(ctx context.Context, tx *sequel.Tx, src flowTables, 
 			return nil, 0, errors.Trace(err)
 		}
 		if !workflow.IsTerminalStatus(rootStatus) {
-			return nil, 0, errors.New("can only fork a terminal flow (status: %s)", rootStatus, http.StatusConflict)
+			return nil, 0, errors.New("can only fork a closed flow (status: %s)", rootStatus, http.StatusConflict)
 		}
 		// A flow scheduled for deletion is on its way out, so naming it is an error, as for Continue.
 		return nil, 0, errors.New("cannot fork a flow scheduled for deletion", http.StatusConflict)
@@ -301,7 +301,7 @@ type forkChild struct {
 	isRoot        bool
 }
 
-// cloneTree clones the whole terminal tree rooted at rootFlowID into a fresh flow tree and returns the new
+// cloneTree clones the whole closed tree rooted at rootFlowID into a fresh flow tree and returns the new
 // root's flow id. It walks the tree with an explicit LIFO worklist rather than recursion: each flow is cloned
 // to completion by cloneOneFlow, which returns its kept subgraph-caller children to enqueue. Only ONE flow's
 // clone state (its step metadata, id map, and that flow's graph/baggage JSON) is live at a time, and the
@@ -475,8 +475,8 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		return 0, nil, errors.Trace(err)
 	}
 
-	// A terminal fork origin never holds an interrupted step (interrupt forces the whole surgraph chain -
-	// up to the root - non-terminal, and Fork rejects a non-terminal root), so a KEPT interrupted step (one
+	// A closed fork origin never holds an interrupted step (interrupt forces the whole surgraph chain -
+	// up to the root - open, and Fork rejects an open root), so a KEPT interrupted step (one
 	// not on this flow's rewind path, which is reset/re-parked below) can only arise from a broken invariant.
 	// Copied verbatim it would clone into the running fork as an orphan: it can never be resumed (resume needs
 	// flow status interrupted, but the fork is running) and, if a cohort member, its cohort can never fully

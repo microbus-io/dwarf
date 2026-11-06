@@ -215,17 +215,17 @@ siblings share a `step_depth`. Once terminal (`completed`/`failed`/`terminated`/
 every hand-off; `Overwrite`/`Del` replace instead (`workflow/CLAUDE.md`). Each non-default field is wired with
 `graph.SetReducer`; nothing is inferred from a field's name, so an unwired `sum*` field silently takes `replace`.
 
-### Terminal flows are immutable
+### Closed flows are immutable
 
-**A terminal flow (`completed`/`failed`/`terminated`/`cancelled`) is immutable.** Its outcome (`status`, `final_state`,
+**A closed flow (`completed`/`failed`/`terminated`/`cancelled`) is immutable.** Its outcome (`status`, `final_state`,
 `error`/`cancel_reason`) is frozen; the only operations on it are **read** (Snapshot/History/Continue-source/
-Fork-source) and **removal** (Delete/Purge). There is **no in-place re-run of a terminal flow** - recovery and
-exploration happen only via **`Fork`**, which clones a terminal flow up to a chosen step into a *new*
+Fork-source) and **removal** (Delete/Purge). There is **no in-place re-run of a closed flow** - recovery and
+exploration happen only via **`Fork`**, which clones a closed flow up to a chosen step into a *new*
 self-contained flow and never mutates the original. This invariant governs which operations may exist: there is
 no `Restart`/`RestartFrom`/`Recover`, and no in-place rewind may be added, because any of them would mutate a
 frozen outcome.
 
-Two clarifications: *immutable ≠ permanent* - Delete/Purge/DeleteOnCompletion still **remove** terminal flows.
+Two clarifications: *immutable ≠ permanent* - Delete/Purge/DeleteOnCompletion still **remove** closed flows.
 And *outcome*-frozen, not byte-frozen - a straggler fan-out sibling can still settle to terminal after its
 flow terminalizes (convergence to the frozen outcome), and `flow.Retry` rewinds a step in place but only while
 the flow is `running` (pre-terminal). `interrupted` is **not** terminal - `Resume` still mutates it.
@@ -246,7 +246,7 @@ Create --> running --> completed   (terminal, immutable)
 
   cancelled  (terminal, immutable, via Cancel when every unrecovered loss was a cancellation)
 
-Recovery/exploration: Fork clones a terminal flow up to a chosen step into a NEW flow.
+Recovery/exploration: Fork clones a closed flow up to a chosen step into a NEW flow.
 ```
 
 1. **Create** inserts a flow and its entry step and starts them in one transaction - the flow is returned
@@ -259,6 +259,6 @@ Recovery/exploration: Fork clones a terminal flow up to a chosen step into a NEW
 4. Tasks can call `flow.Interrupt()` to pause for external input; `Resume` continues. A flow that should
    *wait* before doing work uses this as **staged start**: an entry task that interrupts, resumed when ready
    (such a flow rests as `interrupted`, not `created`).
-5. A terminal flow is never re-run in place. To re-run from a chosen step (optionally with state overrides),
+5. A closed flow is never re-run in place. To re-run from a chosen step (optionally with state overrides),
    `Fork` clones it into a new flow. A task can re-run *itself* in place via `flow.Retry` while still running.
 

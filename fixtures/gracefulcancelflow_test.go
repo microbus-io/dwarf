@@ -800,7 +800,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 	})
 
 	// guards: an unknown key is a 404, a subgraph child's key a 400 (the tree is addressed by its root), and
-	// a terminal flow is a benign no-op rather than a conflict.
+	// a closed flow is a benign no-op rather than a conflict.
 	t.Run("guards", func(t *testing.T) {
 		assert := testarossa.For(t)
 		graph := workflow.NewGraph("Guards")
@@ -841,7 +841,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		err = eng.Cancel(ctx, childKey.Load().(string), "x")
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
 
-		assert.NoError(eng.Cancel(ctx, flowKey, "x"), "cancelling a terminal flow is a no-op")
+		assert.NoError(eng.Cancel(ctx, flowKey, "x"), "cancelling a closed flow is a no-op")
 		outcome, err = eng.Snapshot(ctx, flowKey)
 		if assert.NoError(err) {
 			assert.Equal(workflow.StatusCompleted, outcome.Status, "a terminal outcome is never rewritten")

@@ -83,12 +83,12 @@ func AssertInvariants(t *testing.T, e Engine) {
 			assert.Equal(0, n, "shard %d: invariant violated: %s (%d offending rows)", shard, label, n)
 		}
 
-		// 1. No terminal flow retains a non-terminal step. Delete-marked flows (delete_after_ms>0) are excluded:
+		// 1. No closed flow retains a non-terminal step. Delete-marked flows (delete_after_ms>0) are excluded:
 		// Delete flips an interrupted flow to cancelled but leaves its interrupted leaf for the reaper to remove
 		// with the whole tree (deferred deletion), so a doomed row legitimately carries a non-terminal step
 		// until reaped - inert meanwhile (selection/lease-recovery ignore interrupted; Resume 409s the cancelled
 		// flow).
-		check("terminal flow with a non-terminal step",
+		check("closed flow with a non-terminal step",
 			"SELECT COUNT(*) FROM dwarf_steps s JOIN dwarf_flows f ON s.flow_id=f.flow_id"+
 				" WHERE f.status IN "+terminal+" AND f.delete_after_ms=0 AND s.status IN "+nonTerminal)
 
@@ -125,7 +125,7 @@ func AssertInvariants(t *testing.T, e Engine) {
 
 		// 8. A quiesced live flow holds no completed step still flagged advancing. Every transition that commits
 		// while the flow stays live clears the flag, so a survivor is a transition path that forgot to - and one
-		// the orphan sweep would replay, double-advancing the flow. A terminal flow keeps the flag on its tail;
+		// the orphan sweep would replay, double-advancing the flow. A closed flow keeps the flag on its tail;
 		// that is never read, and excluded.
 		check("completed step still advancing on a live flow",
 			"SELECT COUNT(*) FROM dwarf_steps s JOIN dwarf_flows f ON s.flow_id=f.flow_id"+

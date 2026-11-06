@@ -31,23 +31,23 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestDeleteUnendedflow pins that Delete and Purge remove only ended flows. Delete of a running or an interrupted
+// TestDeleteOpenflow pins that Delete and Purge remove only closed flows. Delete of a running or an interrupted
 // flow is a 409 and leaves it as it was - the interrupted one still resumes to completion - while Purge over a mix
-// marks only the ended flow, and a Purge whose status filter names an unended status is a 400. Nothing is
-// terminated on the caller's behalf: an unended flow is the caller's to Terminate first.
-func TestDeleteUnendedflow(t *testing.T) {
+// marks only the closed flow, and a Purge whose status filter names an open status is a 400. Nothing is
+// terminated on the caller's behalf: an open flow is the caller's to Terminate first.
+func TestDeleteOpenflow(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	mux := hosts.NewMux()
-	graph := workflow.NewGraph("Unended")
-	graph.SetURL("Work", "deleteunendedflow.verify:428/work")
+	graph := workflow.NewGraph("Open")
+	graph.SetURL("Work", "deleteopenflow.verify:428/work")
 	graph.AddTransition("Work", workflow.End)
-	mux.HandleGraph("deleteunendedflow.verify:428/g", graph)
+	mux.HandleGraph("deleteopenflow.verify:428/g", graph)
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
-	mux.HandleTask("deleteunendedflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
+	mux.HandleTask("deleteopenflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		switch f.GetString("mode") {
 		case "block":
 			started <- struct{}{}
@@ -68,10 +68,10 @@ func TestDeleteUnendedflow(t *testing.T) {
 	eng.SetHost(mux)
 	assert.NoError(eng.Startup(t.Context()))
 
-	parked, outcome, err := eng.Run(ctx, "deleteunendedflow.verify:428/g", map[string]any{"mode": "park"}, nil)
+	parked, outcome, err := eng.Run(ctx, "deleteopenflow.verify:428/g", map[string]any{"mode": "park"}, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusInterrupted, outcome.Status)
-	running, err := eng.Create(ctx, "deleteunendedflow.verify:428/g", map[string]any{"mode": "block"}, nil)
+	running, err := eng.Create(ctx, "deleteopenflow.verify:428/g", map[string]any{"mode": "block"}, nil)
 	assert.NoError(err)
 	select {
 	case <-started:
@@ -79,9 +79,9 @@ func TestDeleteUnendedflow(t *testing.T) {
 		assert.True(false, "task never started")
 		return
 	}
-	// The ended flow is created last, so it has the highest id: Purge selects in id order, and an unended flow
+	// The closed flow is created last, so it has the highest id: Purge selects in id order, and an open flow
 	// selected ahead of it would use up the limit below and mark nothing.
-	ended, outcome, err := eng.Run(ctx, "deleteunendedflow.verify:428/g", nil, nil)
+	ended, outcome, err := eng.Run(ctx, "deleteopenflow.verify:428/g", nil, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 
@@ -100,13 +100,13 @@ func TestDeleteUnendedflow(t *testing.T) {
 	// A Purge matching all three removes only the closed flow, once archived, and only closed flows count against its
 	// limit.
 	enginetest.ArchiveNow(ctx, eng)
-	marked, _, err := eng.Purge(ctx, enginetest.Recent(workflow.Query{WorkflowURL: "deleteunendedflow.verify:428/g", Limit: 1}))
+	marked, _, err := eng.Purge(ctx, enginetest.Recent(workflow.Query{WorkflowURL: "deleteopenflow.verify:428/g", Limit: 1}))
 	assert.NoError(err)
 	assert.Equal(1, marked)
 	_, err = eng.History(ctx, ended)
 	statusIs("History of the purged flow", http.StatusNotFound, err)
 
-	// Neither unended flow was touched: the running one finishes, the interrupted one resumes to completion.
+	// Neither open flow was touched: the running one finishes, the interrupted one resumes to completion.
 	releaseOnce()
 	outcome, err = eng.Await(ctx, running)
 	if assert.NoError(err) {

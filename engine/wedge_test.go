@@ -369,7 +369,7 @@ func TestWedgeSweep_ChildLiveAgainIsLeftAlone(t *testing.T) {
 // TestWedgeSweep_OrphanedSubgraphChildTerminated forges the zombie a Terminate racing a subgraph spawn leaves -
 // a non-terminal subgraph child whose parent tree was terminated in the window after the caller step parked but
 // before the child was inserted, so the teardown missed it. The child rests interrupted with no path out
-// (root-key ops 409 on the terminal root, the child's own key is read-only, and recoverWedgedSubgraphParks is
+// (root-key ops 409 on the closed root, the child's own key is read-only, and recoverWedgedSubgraphParks is
 // blind because the caller step is terminated, not running+parked). recoverOrphanedSubgraphChildren must
 // terminate it, while leaving a healthy subgraph child (running under a still-running parent) untouched. Its age
 // guard is anchored on the PARENT's terminal write: a child whose own row has been still for longer than the guard

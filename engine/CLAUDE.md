@@ -274,7 +274,7 @@ it as ended a second time.
 
 **Cancel** - The graceful counterpart of Terminate: a cancellation is delivered as an error on each covered
 step's ordinary `onError` transition (detectable with `workflow.IsCancelled`), so an author can catch it and
-recover. Root-only (400 on a subgraph-child key), 404 on an unknown key, a no-op on a terminal flow.
+recover. Root-only (400 on a subgraph-child key), 404 on an unknown key, a no-op on a closed flow.
 
 *The mechanism is a per-step mark, consumed lazily.* `cancel()` writes the tree's `cancel_reason` and
 `cancel_watermark`, then sets `dwarf_steps.cancelling=1` on every `pending`/`running`/`interrupted` step of the tree,
@@ -389,8 +389,8 @@ lost its marker. Pass the text as an argument, `errors.New("%s", msg, ...)`.
 Pinned by `fixtures/gracefulcancelflow_test.go`, which the SQLite suite alone cannot vouch for - run it against
 a MySQL-family server as well.
 
-**Fork** - The sole recovery/exploration operation, given terminal-flow immutability. `Fork(stepKey,
-stateOverrides)` clones a terminal flow's execution tree up to a chosen step into a brand-new,
+**Fork** - The sole recovery/exploration operation, given closed-flow immutability. `Fork(stepKey,
+stateOverrides)` clones a closed flow's execution tree up to a chosen step into a brand-new,
 self-contained **root** flow, then re-runs from that step (optionally with `stateOverrides` merged onto it). The
 original is never mutated. It takes no `FlowOptions` - as a derived operation it inherits the origin flow's
 scheduling and baggage. The fork point may be **any recorded step** - in the
@@ -432,8 +432,8 @@ iterative rather than recursive so nesting depth costs O(1) goroutine stack (see
 step would clone into the running fork as an orphan - unresumable (`Resume` needs the flow `interrupted`, but the
 fork is `running`) and, as a cohort member, uncountable at fan-in (the cohort recompute scores `interrupted` as
 neither arrival nor failure), wedging the fork permanently. This *cannot* arise from a valid origin: an interrupt
-forces the whole surgraph chain non-terminal (up to the root), and Fork rejects a non-terminal root - so a
-terminal fork origin never holds an interrupted step (a failed branch of a cohort that also has an interrupted
+keeps the whole surgraph chain open (up to the root), and Fork rejects an open root - so a
+closed fork origin never holds an interrupted step (a failed branch of a cohort that also has an interrupted
 branch rests the flow `interrupted`, not `failed`, because the cohort can never fully arrive). The guard is
 therefore defense-in-depth against a broken invariant: cloneOneFlow rejects the fork with 409 if any kept
 (non-rewind) step is `interrupted`, turning a would-be silent permanent wedge into a loud, clean, transactional
@@ -533,7 +533,7 @@ already-expired await ctx, so the termination would silently never run.)
 **Await** - Blocks until the flow stops (see "Await" below).
 
 **Poll** - Await bounded by the caller's ctx deadline: a deadline expiring is not an error, it returns the
-current non-terminal outcome (`Stopped()` false) so the caller can answer within its budget and re-poll.
+current outcome, which has not stopped (`Stopped()` false), so the caller can answer within its budget and re-poll.
 
 **Delete / Purge** - Operator-driven retention (see "Data Retention").
 
@@ -618,7 +618,7 @@ refiller wholesale-replaces its own partition; workers pop from the lowest-floor
 
 1. Reserve the step (atomic CAS `UPDATE ... WHERE step_id=? AND status='pending' AND parked=parkedNone AND
    not_before<=NOW AND lease_expires<=NOW`).
-2. Check for terminal flow status (abort if terminated/cancelled/failed/completed).
+2. Check for closed flow status (abort if terminated/cancelled/failed/completed).
 3. Load the flow's graph, config, and baggage.
 4. Execute the task via the host's `ExecuteTask` with a time budget on the call context.
 5. Persist changes, evaluate transitions, create next steps (in a transaction), ring the doorbell.
@@ -900,7 +900,7 @@ repair; its worst case is `budget + leaseMargin + recoveryInterval`, and the con
 
 `processStep` is a sequence of stages - `claim`, `load`, `startTask`, `execute`, `outcome`, then one of
 `parkInterrupt`/`parkSubgraph`/`retry`, or `complete` then `transition` - each an `Engine` method taking the run's
-`*dispatch`. A stage returning `done` ends the dispatch (a lost claim, a terminal flow, a deferral, a failed step).
+`*dispatch`. A stage returning `done` ends the dispatch (a lost claim, a closed flow, a deferral, a failed step).
 
 - **`dispatch` is data only: no methods.** Its fields are grouped by the stage that sets them; a later stage reads a
   group and does not rewrite it, except where a field's comment says so. The claimed columns are the named field
@@ -983,7 +983,7 @@ not parallelism:
     reports the first, the others the last). Do not replace the read with a lookup by `step_token`: the column is
     in no index, so the lookup visits every step of the flow created after the source - every concurrently
     committed step of a wide cohort - and run from every branch step it is quadratic.
-  - The terminal-status guard is read after the statements batched with the grab ran, so a terminal flow bails by
+  - The terminal-status guard is read after the statements batched with the grab ran, so a closed flow bails by
     **rolling back** (`errTransitionFlowTerminal`, mapped to nil after `Transact`), and the bail shows in
     telemetry as a rolled-back transaction, as a lease-fenced one does. The DEFERRED grab of a resolving fan-in
     arrival is the exception: its bail returns nil, because that transaction's cohort bump must commit (below).
@@ -1809,7 +1809,7 @@ attempts the **clean** terminal write (`failStep` - a status and an error messag
 
 The two attempts are milliseconds apart and differ only in what they carry, which is what makes the classification
 sound. It needs **no per-driver error taxonomy** (the part that would rot). Guessing the other way - terminalizing
-on any unknown error - would kill live flows on every routine failover, and a terminal flow is **immutable**
+on any unknown error - would kill live flows on every routine failover, and a closed flow is **immutable**
 (recovery is a human running `Fork`).
 
 **Lock contention is excluded, and that exclusion is load-bearing.** It is retried to exhaustion before it
@@ -1905,7 +1905,7 @@ has exactly one fenced write to the dispatched step, and everything after it is 
   flow" from the same state, and whichever commits second no-ops on the flow-row guard. Were the re-dispatch to
   re-run the task instead, a non-deterministic task could route to a successor the slow worker's completion then
   strands - a flow completed early, its decision from one run and its state from another. One transient remains:
-  if the slow worker completes the flow while the step sits rewound, the step is `pending` on a terminal flow until
+  if the slow worker completes the flow while the step sits rewound, the step is `pending` on a closed flow until
   a claim reaps it to the flow's status (seconds). Fencing the flow completion instead would close it at one more
   statement on every flow completion, for a case that needs a worker stalled past its lease; declined.
   `completeFlowSequential` in particular makes **no step write at all**: the gate already completed the step.
@@ -2056,7 +2056,7 @@ top-level flow runs (`failStep` for a failing last-arriver, the `processStep` co
 completing last-arriver; both call `deliverFlowFailureToParent` when `failFlow` becomes true). It is **not** an
 eager terminalization on the first branch error. **Do not fail the child eagerly** (a `failStep` short-circuit
 straight into `deliverSubgraphError`, bypassing cohort accounting): it strands the child's *other* live branches
-and any subgraph descendants they parked on, because every tree walk skips a terminal flow (`Resume`'s down-walk
+and any subgraph descendants they parked on, because every tree walk skips a closed flow (`Resume`'s down-walk
 descends only `interrupted` children; `Terminate`/`allSubgraphFlows` stop at terminal nodes; the parked-caller
 wedge sweep sees a *terminal* caller step, not `running`+`parkedSubgraph`), so the stranded sub-tree has no path
 out but `Delete`. Deferring the child's failure to cohort resolution means every branch has settled (completed or failed)
@@ -2067,7 +2067,7 @@ by the wedge sweep (a wedged caller whose child already went terminal); the live
 Defense in depth for any residual orphan is
 `recoverOrphanedSubgraphChildren` (see "Background Recovery"). `fixtures`/`engine`
 `TestSubgraphCohortFail_NoStrandOnBranchFailure` pins the child staying `running` after one branch failed while a
-sibling is parked on a live grandchild, then converging to a clean terminal tree with the branch error surfaced
+sibling is parked on a live grandchild, then converging to a clean closed tree with the branch error surfaced
 to the root. `fixtures/subgrapherrorwaitflow_test.go` pins the `Await(childKey)` wake: with an `Await` parked on a
 still-running child, the child's failure fires the targeted `CheckpointFlowStopped` for `(childKey, failed)` and
 the `Await` returns that failure. The checkpoint proves `signalStop` was RAISED for the child's key - it fires at
@@ -3078,7 +3078,7 @@ a step's outcome"). The inline helpers no-op when `e.metrics == nil` (before Sta
 subgraph flows alike) only after `reapBatchOf` returns nil - a failed commit returns its count with the error. The
 reason is `reapDue`'s `unarchived` for a batch `dayOf` gives no day (`deleted` for the stamped kind; `no_retention`,
 or `archive_failed` when `refreshReapDay` failed past the grace), and `archive_failed` for the fallback after a
-failed move. `dwarf_archive_lag_seconds` rides the ended scan: each branch also selects
+failed move. `dwarf_archive_lag_seconds` rides the closed scan: each branch also selects
 `DATE_DIFF_MILLIS(NOW_UTC(), updated_at)` (scanned as a float64 - fractional on SQLite), and only a pass's FIRST
 scan sets the reading, since its first row per status is that status's oldest due root and a later scan sees what
 the batches left (`TestArchiveMetrics_TheReaperCountsWhatItMoves` pins it with two roots of different ages and a
@@ -3288,19 +3288,19 @@ without going through it), and terminated (`terminateSubtree`, per flow of the t
 narrow it to `completed`: that breaks it in two ways at once - the `status` attribute has a single value, so
 `sum by (status)` silently answers a completed/failed/terminated question with completions alone, and the
 in-flight panel this metric exists for - `flows_started` minus this - drifts upward permanently by every flow
-that did not finish cleanly. Both halves are pinned by `TestMetrics_EndedCountsEveryTerminalStatus`, which
+that did not finish cleanly. Both halves are pinned by `TestMetrics_ClosedCountsEveryTerminalStatus`, which
 fails on all three of its assertions against a completions-only counter (it exercises the
 completed/failed/terminated shape). The terminate path counts only the flows whose own UPDATE matched (the
 batch reads each flow's `RowsAffected`), so a flow that completed between the tree scan and the lock is counted
-once, by its own path (`TestMetrics_TerminateCountsOnlyTheFlowsItEnded`).
+once, by its own path (`TestMetrics_TerminateCountsOnlyTheFlowsItClosed`).
 `cancelled` (a graceful `Cancel` whose every loss was a cancellation) is tallied the same way, from both
 `failStep` and the cohort-fail path. **Every path that starts a flow must call
 `metricFlowStarted`** - `Create`, `Continue`, AND `Fork` (which builds its new root through its own
 `INSERT...SELECT` clone and so is the easy one to miss): a fork's completion runs through the same `completeFlow`
 that increments `dwarf_flows_closed`, so a missing start makes the standard in-flight panel
-(`started - ended`) drift negative by one per fork. **Fork counts every flow it clones `running`** - the new root
+(`started - closed`) drift negative by one per fork. **Fork counts every flow it clones `running`** - the new root
 AND each subgraph flow on the path down to a fork step inside a subgraph, since each of them ends through
-`completeFlow` (`TestMetrics_StartedAndEndedBalanceAcrossTrees`). Subgraph flows are counted too - the start
+`completeFlow` (`TestMetrics_StartedAndClosedBalanceAcrossTrees`). Subgraph flows are counted too - the start
 path and `completeFlow` run for them - so no `surgraph_flow_id` filter; the `workflow` label lets dashboards
 slice root-vs-subgraph. `TestMetrics_EmittedOnRun` pins emission with an in-memory SDK `ManualReader`.
 Both lifecycle counters carry the flow's `priority`, which is immutable for the flow's life, so the panel
@@ -3406,9 +3406,9 @@ are deterministically flushed by then. Not an engine concern: a real exporter ke
 
 ## Data Retention
 
-**An ended root leaves the live tables about a minute after it ends** (`archiveGrace`, a minimum; the reaper's 15 s
+**A closed root leaves the live tables about a minute after it closes** (`archiveGrace`, a minimum; the reaper's 15 s
 tick adds up to that on top): the reaper moves its whole tree into today's archive day tables, and retention drops
-whole days (see "The archive" below). A flow that has not ended - running, sleeping, interrupted for a human - stays
+whole days (see "The archive" below). A flow that has not closed - running, sleeping, interrupted for a human - stays
 in the live tables for as long as it takes, so nothing reaps a row a `Resume` could still revive. The read API reads an
 archived flow as it read it live ("Reading an archived flow" below), and `Fork` clones an archived source; `ListClosed`
 lists it. **Retention counts from archiving, not from the
@@ -3422,7 +3422,7 @@ archive and deletes there (`purge.go`).
 **On the live side, deletion is deferred: mark, then reap.** No path deletes live rows inline. `DeleteOnCompletion`
 and `Delete` **stamp `delete_after_ms`** on the target **root** flow (`0`=keep; `>0`=reap at `updated_at + delete_after_ms`);
 a dedicated **reaper** goroutine (`reaperLoop`, 15 s ticker) later removes the whole subtree set-based, keyed on
-`root_flow_id`. Only an ended root is ever stamped, so no rows are deleted where a lifecycle op could interleave
+`root_flow_id`. Only a closed root is ever stamped, so no rows are deleted where a lifecycle op could interleave
 (see "Deletion race gate" below), and a disposable flow's **outcome is observable** during its grace window.
 
 - **`FlowOptions.DeleteOnCompletion`** - the author declares a flow fire-and-forget (durable-execution jobs whose
@@ -3440,7 +3440,7 @@ a dedicated **reaper** goroutine (`reaperLoop`, 15 s ticker) later removes the w
 
 For operator-driven removal:
 
-Both remove **only ended flows**. An unended flow is the caller's to `Terminate` first: deleting it would hide a
+Both remove **only closed flows**. An open flow is the caller's to `Terminate` first: deleting it would hide a
 terminate inside a delete, and nothing either operation does can then race a `Resume`.
 
 - **`Delete(flowKey)`** stamps `delete_after_ms = 1` (due immediately) on the root after the read-guards (404 on
@@ -3471,16 +3471,16 @@ inherently non-overlapping), stopped by `drainRuntime` cancelling its ctx. On ea
 reader replica reaps nothing), on one turn, it removes two kinds of due roots, each in batches until its due set
 drains (`reapDue`):
 - **Stamped roots** (`delete_after_ms>0`, due at `updated_at + delete_after_ms`): deleted, never archived.
-- **Ended roots** (terminal, unstamped, `updated_at` older than `archiveGrace`): copied into **today's** day tables
+- **Closed roots** (terminal, unstamped, `updated_at` older than `archiveGrace`): copied into **today's** day tables
   and deleted, in one transaction; at a retention of 0, deleted only. Every tree goes into the day it is archived,
   whenever it ended, so a day holds exactly the rows archived on it and a later day only later ones: the days are in
   `archived_at` order. **The reaper makes no table**: today and the two days
   ahead are maintenance's (`EnsureToday` at Startup, `Maintain` every archive pass), and today is read from the
   database clock (`refreshReapDay`). **Tomorrow not whole in the archive's record is an archive failure like any
   other** (below), checked before the move: a row goes into a day only once the day after it is whole, which a
-  locate's leave-the-oldest-out retry relies on; today missing fails the move itself. Ended flows then wait in the
+  locate's leave-the-oldest-out retry relies on; today missing fails the move itself. Closed flows then wait in the
   live tables for the failure grace and are deleted unarchived; stamped roots, which need no archive, are deleted
-  throughout. Pinned by `TestArchiving_NoEndedTreeMovesWhileTomorrowIsNotWhole`. Do not refuse new work over an
+  throughout. Pinned by `TestArchiving_NoClosedTreeMovesWhileTomorrowIsNotWhole`. Do not refuse new work over an
   archive fault: that would turn it into an outage at once.
 - **`archived_at` is stamped by the move**, and is `9999-12-31 23:59:59` on every live row (not archived, sorting
   ahead of every archived one). The live and archive flows tables both have the column, last, so the flows move
@@ -3497,7 +3497,7 @@ drains (`reapDue`):
 
 One scan feeds several batches: its candidates, own class first, are consumed `reapBatch` (512) at a time and
 only an exhausted list is scanned again. Each batch sizes its trees with a plain read (`rootsWithinRows`, outside the
-transaction - an ended tree's size does not move, and the transaction must still open with a write for SQLite) and
+transaction - a closed tree's size does not move, and the transaction must still open with a write for SQLite) and
 keeps the leading trees that fit about `reapBatchRows` (4096) rows, always at least one; its transaction then locks
 just those roots in `flow_id` order with the due predicate re-checked (`lockDueRoots`: `FOR UPDATE` on PostgreSQL and
 MySQL, the strength a `DELETE` takes; a `touch` flip with `RETURNING`/`OUTPUT` elsewhere) and moves them set-based by
@@ -3508,20 +3508,20 @@ MySQL, the strength a `DELETE` takes; a `touch` flip with `RETURNING`/`OUTPUT` e
   other dialects copy, then delete, and archive such a descendant as it was at the copy; SQL Server's
   `DELETE ... OUTPUT deleted.* INTO` would close it there.
 - **The live tables come before the archive: an archive failure that lasts `archiveFailureGrace` (1 min) deletes
-  the ended trees unarchived.** A failed move, tomorrow not whole in the archive's record, or a failed read of today
+  the closed trees unarchived.** A failed move, tomorrow not whole in the archive's record, or a failed read of today
   starts a per-shard timer
   (`archiveFailures`, in memory, reset at Startup) and ends the pass with nothing deleted; while it runs, each
   failing pass ends the same way; once it has run the grace, each batch whose move fails is deleted without
   archiving. A pass that archives without failing clears it, so a later failure gets a full grace again. A stop is
   not a failure. Lock contention counts like any other error. It logs twice per failure - when archiving starts
   failing and when it starts deleting - never every tick. What the deletes lose is the archive, never work: the
-  trees ended and their outcomes were recorded. The grace covers what clears on its own - a lost connection,
+  trees closed and their outcomes were recorded. The grace covers what clears on its own - a lost connection,
   contention, a rollout's window between a live migration and its archive counterpart - and a fault that lasts
   longer would otherwise fill the live tables, which the dispatch path cannot afford and the archive can. **Do not
   remove the fallback to keep the archive whole**: a lasting fault (a schema mismatch, a key collision) would then
-  hold every ended tree in the live tables until an operator fixed it. Raise the grace, or bound it by how many ended
+  hold every closed tree in the live tables until an operator fixed it. Raise the grace, or bound it by how many closed
   rows the live tables hold, if a minute proves too short. A batch that cannot be deleted either ends the pass, and
-  the next tick tries again. A failure of the stamped kind does not hold back the ended kind. Pinned by
+  the next tick tries again. A failure of the stamped kind does not hold back the closed kind. Pinned by
   `TestArchiving_ABatchThatCannotBeArchivedIsDeletedAfterTheGrace`,
   `TestArchiving_AFailureWaitsForTheGraceAndASuccessClearsIt`,
   `TestArchiving_ABatchThatMeetsContentionWaitsForTheNextPass` and
@@ -3541,10 +3541,10 @@ MySQL, the strength a `DELETE` takes; a `touch` flip with `RETURNING`/`OUTPUT` e
   statement, elsewhere an `INSERT ... SELECT` before the delete. Which flows is the archiver's rule
   (`DirectoryHours`): those archived two or more days after their creation day, or on a day before it - with days
   shorter than an hour a straggler's creation day can fall after the day its batch writes (`internal/archiver/CLAUDE.md`, "Locating an archived row"). Pinned by `directory_test.go`.
-- **The ended scan is one branch per terminal status**, each `ORDER BY updated_at LIMIT` on
+- **The closed scan is one branch per terminal status**, each `ORDER BY updated_at LIMIT` on
   `idx_dwarf_flows_status (status, updated_at)`. One scan over all four statuses has no index order, so every scan
-  would read and sort the whole due set. A long-lived root's ended subgraph children still sit oldest-first in the
-  `completed` range until the root ends, and each scan steps over them.
+  would read and sort the whole due set. A long-lived root's closed subgraph children still sit oldest-first in the
+  `completed` range until the root closes, and each scan steps over them.
 - **A shard's dispatchers split the due roots** (`reapResidency`): `flow_id % count = ordinal` from the piston's
   own pair (`partitionOn`), plus any root overdue by `reapStealGrace` (two ticks), so two reapers take disjoint
   roots while both keep up and a slow or departed one's are taken after the grace. Without it both select the same
@@ -3564,7 +3564,7 @@ steps, the reverse of `failStep`'s steps-then-flow order; the two meet only on a
 flow ended, which `Transact`'s contention retry absorbs.
 
 **The tree delete is unconditional on descendant status, deliberately** - do not 409 on a `running` subgraph
-descendant. The deferred path stamps only the root (whose own status is 409-guarded, so a non-terminal root is never
+descendant. The deferred path stamps only the root (whose own status is 409-guarded, so an open root is never
 stamped) and the reaper deletes the whole
 `root_flow_id` tree regardless of descendant status. The only running descendant a terminal-rooted tree can hold is
 an **orphaned child** (a live child whose parent already terminalized, which only a bug leaves - see
@@ -3580,8 +3580,8 @@ engine-package tests force a reap via `reapDueFlows`; fixtures verify the observ
 
 **Deletion race gate.** Because deletion is an *orthogonal column*, not a status, the invariant that keeps a
 deletion from racing a lifecycle op is **`delete_after_ms > 0 ⟹ terminal status`**, and the reaper reaps only
-terminal-rooted trees. Every stamp holds it by stamping only an ended root: DeleteOnCompletion stamps the root it
-completes, and `Delete` refuses an open one. An ended flow never changes status again, so a live
+terminal-rooted trees. Every stamp holds it by stamping only a closed root: DeleteOnCompletion stamps the root it
+completes, and `Delete` refuses an open one. A closed flow never changes status again, so a live
 `delete_after_ms` never coexists with a resumable flow.
 
 **`Resume` still carries a root-flow gate, against `Terminate`.** A `Terminate` that commits between `resume`'s
@@ -3611,7 +3611,7 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
 `internal/archiver/CLAUDE.md`). The engine's side:
 
 - **`SetRetention(days)`, construction-time, default 30.** A day is dropped once it ended `days` days ago. **0 keeps
-  no archive**: ended roots are deleted rather than archived, and every day before today is dropped, but the tables of
+  no archive**: closed roots are deleted rather than archived, and every day before today is dropped, but the tables of
   today and the days ahead are still made - nothing writes them - so the shape of a shard does not depend on the setting. Keeping it indefinitely is a large number of days,
   never a sentinel. Any replica's pass may drop a day, so the smallest retention in the fleet wins.
 - **`SetFlowExpiration(d)`, construction-time, default off** (`expiration.go`): a root still `running` or `interrupted`
@@ -3621,7 +3621,7 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
   `created_at` is the column default - Fork's clone writes none (it lists its columns), and `Continue` is a Create.
   Keep it so: a flow insert that copied an older `created_at` would sit past a young row and never expire. **Do not
   add a `(status, created_at)` index for it**: one more index entry, and its WAL, on every flow insert and every
-  flow-row update (none is HOT, since nearly every one sets the indexed `updated_at`). The walk passes over ended flows waiting for the reaper and subgraph children (ended with their
+  flow-row update (none is HOT, since nearly every one sets the indexed `updated_at`). The walk passes over closed flows waiting for the reaper and subgraph children (ended with their
   root), a page (`expirePage`, 256) at a time. It runs in the reaper's goroutine, after the reap of any tick
   `expireInterval` (5 min) after the last, per shard on its dispatchers, on a turn; **its time budget**
   (`expireBudget`, 30 s, checked after the first termination so a pass always progresses) is what keeps a first-time
@@ -3667,8 +3667,8 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
   `Continue`'s source; dispatch and every write path never do, a moved tree being answered there by the zero-row
   guards they already have. Beside them, `Fork` clones an archived source (below), `Delete` and `Purge` delete there
   (`purge.go`), and `Resume`, `Terminate` and `Cancel`, when their live read misses, read the flow's status from its
-  day (`archivedFlowRow`) and give the answer any ended flow gets - 409, nil, nil - a subgraph child's key still a
-  400 (`TestLifecycle_AnArchivedFlowAnswersAsAnEndedOne`). Every read is written once against a `flowTables` pair, run on the live tables and then,
+  day (`archivedFlowRow`) and give the answer any closed flow gets - 409, nil, nil - a subgraph child's key still a
+  400 (`TestLifecycle_AnArchivedFlowAnswersAsAClosedOne`). Every read is written once against a `flowTables` pair, run on the live tables and then,
   when the flow is not there, on the day `LocateFlow` names.
   - **A read of several statements closes with a primary-key read of the flow's row** (`flowRowThere`). A tree moves
     in one transaction and each plain statement sees only what had committed when it began, so the row still there
@@ -3684,7 +3684,7 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
     read gathered by then: `Delete` and `Purge` remove single trees from a day, and retention drops whole days. A
     missing table there (`sequel.IsUndefinedTableError`: a day dropped since the locate, or a directory row outliving
     its day, which the locate returns unchecked) is a 404. Any other error is returned.
-  - **An archived flow that has not ended is a 500 from `Snapshot`**: only a bug leaves one, and reported as running
+  - **An archived flow that has not closed is a 500 from `Snapshot`**: only a bug leaves one, and reported as running
     it would hold an `Await` until its deadline. An interrupted flow is never archived, so `Snapshot`'s interrupted
     branch reads the live tables only.
   - **The latch detector reads only the live tables.** It settles a key naming no row as unresolved, and the woken
@@ -3702,12 +3702,12 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
     freeze early - a small cost a Fork of an archived source pays. **The lock tests the root's status and deletion
     mark itself** (`AND status IN (terminal) AND delete_after_ms=0` on the locked row): on MySQL a plain read after
     it sees the snapshot taken when the lock statement began, before a Delete that committed while it waited, so a
-    post-lock check would miss it. A root that has not ended is never locked, so a refused Fork crosses no lock order
+    post-lock check would miss it. A root that has not closed is never locked, so a refused Fork crosses no lock order
     with `Terminate`. The fork's root span is minted once across the two passes. Fork does not use
     `queryLiveOrArchive`: its read is under a lock, so it cannot straddle the move, and it is a write.
   Pinned by `archivedreads_test.go`: every read the same before and after the move, for every way a flow ends and for
   a subgraph child's key; `Fingerprint`, `History` and `Step` straddling the move reading one side; a parked `Await`
-  getting its outcome from the archive; `Continue` from an archived flow; an unended archived flow an error; a day
+  getting its outcome from the archive; `Continue` from an archived flow; an open archived flow an error; a day
   dropped mid-read, a directory day dropped and a tree removed mid-read each a 404; a Fork of an archived source at
   every step (a root's, a subgraph's, through a ref, a failed branch repaired) running as it did live, one whose
   source is archived meanwhile, one reading the archived graph on a cold replica, and the reaper held off a source
@@ -3948,9 +3948,9 @@ terminalized. Whenever the race resolves in `Terminate`'s favor - or the transit
 contention rollback against a since-terminated flow - its opening flow-row lock grab (`lockFlowRows`) is **guarded on
 non-terminal status** (`AND status NOT IN (completed, failed, terminated, cancelled)`) and bails on zero rows. Without the
 guard it would insert `pending` successors (and bump `cohort_arrivals` / write a fan-in step) into the terminal
-flow - orphan work reaped only later by the claim-time terminal-flow guard. The already-`completed` step is left
+flow - orphan work reaped only later by the claim-time closed-flow check. The already-`completed` step is left
 as a harmless tail on the final flow. The guard passes `interrupted` (a sibling interrupt must not stop a
-completing sibling's transition), so it short-circuits only genuinely-terminal flows.
+completing sibling's transition), so it short-circuits only genuinely-closed flows.
 
 ### Lease-Based Crash Recovery
 
@@ -3965,7 +3965,7 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
 1. **`recoverExpiredLeases`** (`wedge.go`) - resets `running` steps whose lease expired to `pending`: a plain SELECT
    of the expired ids per shard, then a by-id UPDATE that repeats the predicate. It rings no doorbell: a reset step is due and `pending`, so its shard's next piston cycle selects it
    like any other. Runs on `recoveryLoop` with everything else here - there is no timer goroutine.
-2. **Terminal flow check** in `processStep` - after loading flow data, if the flow is `terminated`/`cancelled`/`failed`/
+2. **Closed flow check** in `processStep` - after loading flow data, if the flow is `terminated`/`cancelled`/`failed`/
    `completed`, sets the step to that status and returns. Catches races where the flow went terminal before the step
    was updated.
 3. **Orphan flow repair** (`recoverOrphanedFlows`, `wedge.go`) - finds a `running` flow that is stranded:
@@ -3978,7 +3978,7 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
    *The `advancing` flag is what makes this safe, and it costs no round trip.* The completion write sets it in the
    statement it already runs; every transition transaction that commits while the flow stays live clears it in a
    statement that already writes the dispatched row (see "Lease fencing"), and the transaction that terminalizes
-   the flow leaves it - harmless, since the sweep only rewinds a `running` flow and a terminal flow never becomes
+   the flow leaves it - harmless, since the sweep only rewinds a `running` flow and a closed flow never becomes
    running again. So `advancing=1` on a completed step of a running flow means exactly "this transition never
    committed", and the sweep re-derives nothing: it never decides which transition should have been taken, and a
    flow with no flagged step is never touched, so a false positive cannot double-advance it. **Do not re-drive a
@@ -4102,7 +4102,7 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
      `TestTerminateVsSubgraphSpawn_Deterministic` has a subtest that fails with each rule removed. (A fan-out sibling's
      `failStep` does not produce an orphan either: a subgraph child fails via cohort accounting after every branch
      settles, never eagerly while a sibling is live - see "Failure back to the parent".) The orphan has no path out on its
-     own: the terminal root 409s `Resume` and makes `Terminate` a no-op, the child's own key is read-only (400), and
+     own: the closed root 409s `Resume` and makes `Terminate` a no-op, the child's own key is read-only (400), and
      `recoverWedgedSubgraphParks` is blind because the caller step is *terminal*, not `running`+`parkedSubgraph`.
      The sweep terminates the orphan's whole subtree (`terminateOrphanedSubtree`, which *shares* `Terminate`'s
      transaction via `terminateSubtree` rather than cloning it - no surgraph up-walk is wanted or exists, since the
@@ -4257,7 +4257,7 @@ call (the per-shard debug path is `ShardInfo` + `Query.Shard`). `Limit` is requi
 - **`ListClosed`'s window is required and clamped, not refused**: both ends are required, since the window decides
   how many tables a statement reads. Its days are cut to the retention's first day and to today (plus one day past
   today when the window reaches it, for a database clock ahead of this process's), and the days a shard's record
-  lacks are not read. **After the cut it may reach at most `maxEndedWindowDays` (31) days**, today and the 30 the
+  lacks are not read. **After the cut it may reach at most `maxArchiveWindowDays` (31) days**, today and the 30 the
   default retention keeps, or the call is a 400 - checked before the extra day past today, so a statement can read
   32. The bound is PostgreSQL's lock table: a statement locks every index of each table it plans, about 11 locks a
   day (the day's flows table and its 7 indexes counting the key, its steps table and its 2), so 31 days are about

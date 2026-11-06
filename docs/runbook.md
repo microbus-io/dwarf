@@ -31,7 +31,7 @@ registry.
 | [The database was down](#the-database-was-down) | Usually no action |
 | [Tasks are running more than once](#tasks-are-running-more-than-once) | Correctness of side effects |
 | [Deadlock errors on MySQL or SQL Server](#deadlock-errors-on-mysql-or-sql-server) | Throughput |
-| [Archiving is failing](#archiving-is-failing) | Ended flows deleted unarchived after a minute |
+| [Archiving is failing](#archiving-is-failing) | Closed flows deleted unarchived after a minute |
 | [The archive is falling behind](#the-archive-is-falling-behind) | The live tables grow |
 | [An expired flow cannot be terminated](#an-expired-flow-cannot-be-terminated) | The flow stays in the live tables |
 | [Disk did not shrink after a purge](#disk-did-not-shrink-after-a-purge) | Usually no action |
@@ -65,7 +65,7 @@ flows, err := eng.ListOpen(ctx, workflow.Query{
 For each, `eng.History(ctx, flowKey)` — an orphan shows every step terminal with no `pending` or `running`
 step anywhere, including inside subgraphs.
 
-**Recover.** A terminal flow is immutable and a running flow cannot be forked, so recovery is two steps:
+**Recover.** A closed flow is immutable and a running flow cannot be forked, so recovery is two steps:
 
 ```go
 // 1. Terminalize the orphan. It stops being running and becomes a valid fork source.
@@ -91,8 +91,8 @@ released it. **The flow itself is fine** — the sweep re-drives the normal rele
 and no manual recovery is needed. What the counter tells you is that a step reached a state it should not
 have been able to reach.
 
-**Respond.** Nothing urgent. The `park_type` label distinguishes the two cases: `orphaned_child` is a live
-subgraph child whose parent already ended, and anything else is a caller whose child vanished. Neither is
+**Respond.** Nothing urgent. The `park_type` label distinguishes the two cases: `orphaned_child` is an open
+subgraph child whose parent already closed, and anything else is a caller whose child vanished. Neither is
 expected in normal operation, including under heavy use of `Terminate`, so either is worth reporting.
 
 **Escalate** with the `park_type` label and the timing if the rate is sustained rather than occasional.
@@ -422,9 +422,9 @@ recommended production dialect; see [Deployment](deployment.md).
 
 ## Archiving is failing
 
-**What it means.** `dwarf_archive_failing_seconds` is above zero: the reaper could not move ended flows into the
+**What it means.** `dwarf_archive_failing_seconds` is above zero: the reaper could not move closed flows into the
 archive on that shard. They wait in the live tables while it retries every 15 seconds. Once archiving has been
-failing for a minute, ended flows are deleted without archiving, so that the fault cannot fill the live tables, and
+failing for a minute, closed flows are deleted without archiving, so that the fault cannot fill the live tables, and
 each one is counted in `dwarf_flows_reaped{reason="archive_failed"}`. **Those flows are gone**: no copy of them is
 kept, and nothing can bring them back.
 
@@ -447,17 +447,17 @@ the gauge returns to zero once a pass archives without failing.
 
 ## The archive is falling behind
 
-**What it means.** `dwarf_archive_lag_seconds` is rising: ended flows are waiting longer than their minute to be
+**What it means.** `dwarf_archive_lag_seconds` is rising: closed flows are waiting longer than their minute to be
 archived. A rise to about 75 seconds in the last minute of a UTC day is expected - archiving pauses then - and
-clears after midnight. They stay readable throughout. But the live tables, which every dispatch reads, hold them meanwhile, so a
+clears after midnight. They stay readable by key throughout, though in neither list until archived. But the live tables, which every dispatch reads, hold them meanwhile, so a
 lag that keeps rising slows dispatch.
 
 **Confirm.** `dwarf_reap_pass_seconds` near or above its 15-second interval says the reaper is busy the whole time.
-Read the rate flows end (`dwarf_flows_closed_total`) against the rate they leave the live tables, archived or
+Read the rate flows close (`dwarf_flows_closed_total`) against the rate they leave the live tables, archived or
 deleted (`dwarf_flows_archived_total` plus `dwarf_flows_reaped_total`): a sustained gap is the backlog growing.
 
-**Respond.** A burst of ended flows clears on its own once the burst ends. A lag that grows with steady load means
-the shard's database cannot move flows as fast as they end: [One shard is slow or
+**Respond.** A burst of closed flows clears on its own once the burst ends. A lag that grows with steady load means
+the shard's database cannot move flows as fast as they close: [One shard is slow or
 unreachable](#one-shard-is-slow-or-unreachable) applies, and more shards spread the load.
 
 ---
@@ -495,7 +495,7 @@ filesystem. Measured on one rig: 198 MB still allocated for 37 remaining rows.
 `VACUUM FULL` takes an exclusive lock on the table and should be treated as a maintenance window.
 
 **One thing to check:** confirm the reaper is actually running. `dwarf_reap_pass_seconds` records a pass every 15
-seconds on each shard's dispatchers; no new samples there, or flows ending (`dwarf_flows_closed_total`) faster than
+seconds on each shard's dispatchers; no new samples there, or flows closing (`dwarf_flows_closed_total`) faster than
 they leave the live tables (`dwarf_flows_archived_total` plus `dwarf_flows_reaped_total`), means the reaper is not
 keeping up - see [The archive is falling behind](#the-archive-is-falling-behind).
 
@@ -504,7 +504,7 @@ keeping up - see [The archive is falling behind](#the-archive-is-falling-behind)
 ## A flow is stuck `interrupted`
 
 **This is almost always correct behaviour.** `interrupted` is a parked state, not a fault — a task called for
-external input and the flow is waiting for someone to provide it. It is not terminal, consumes no worker, and
+external input and the flow is waiting for someone to provide it. It is open, not closed, consumes no worker, and
 will wait indefinitely.
 
 **Confirm what it is waiting for** with `eng.Snapshot(ctx, flowKey)` — `InterruptPayload` carries whatever the

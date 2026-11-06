@@ -817,7 +817,7 @@ func TestMetrics_InFlightStateGauges(t *testing.T) {
 	assert.Equal(int64(0), bytes, "held bytes must return to zero - a nonzero reading here is a leaked bracket")
 }
 
-// TestMetrics_EndedCountsEveryTerminalStatus pins that dwarf_flows_closed counts FAILED and
+// TestMetrics_ClosedCountsEveryTerminalStatus pins that dwarf_flows_closed counts FAILED and
 // TERMINATED flows, not only completed ones.
 //
 // It regressed silently and cost nothing to miss: the instrument carried a `status` attribute and was
@@ -829,7 +829,7 @@ func TestMetrics_InFlightStateGauges(t *testing.T) {
 //
 // Both halves are asserted per status rather than in aggregate, because a single total would pass against
 // a build that counted one of them twice.
-func TestMetrics_EndedCountsEveryTerminalStatus(t *testing.T) {
+func TestMetrics_ClosedCountsEveryTerminalStatus(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -903,11 +903,11 @@ func TestMetrics_EndedCountsEveryTerminalStatus(t *testing.T) {
 	assert.Equal(started, allEnded, "started minus ended must not drift when flows fail or terminate")
 }
 
-// TestMetrics_TerminateCountsOnlyTheFlowsItEnded pins that Terminate counts and signals a flow only when its own
+// TestMetrics_TerminateCountsOnlyTheFlowsItClosed pins that Terminate counts and signals a flow only when its own
 // UPDATE ended it. The root of the tree is kept in the set whatever its status, so a root that terminalized after
 // Terminate's scan - here written straight to the row, standing in for the root's own path - matches nothing in
 // the batch, and counting it anyway would end it a second time.
-func TestMetrics_TerminateCountsOnlyTheFlowsItEnded(t *testing.T) {
+func TestMetrics_TerminateCountsOnlyTheFlowsItClosed(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -982,11 +982,11 @@ func TestMetrics_TerminateCountsOnlyTheFlowsItEnded(t *testing.T) {
 	assert.Equal(int64(1), ended, "only the child was terminated by this Terminate")
 }
 
-// TestMetrics_StartedAndEndedBalanceAcrossTrees pins that every flow counted in dwarf_flows_started is counted
+// TestMetrics_StartedAndClosedBalanceAcrossTrees pins that every flow counted in dwarf_flows_started is counted
 // once in dwarf_flows_closed, for the paths that start or end a whole subgraph tree at once: a Fork at a step
 // inside a subgraph (which clones every flow on the path to it running), and a Terminate of an interrupted root,
 // which ends its interrupted subgraph child too.
-func TestMetrics_StartedAndEndedBalanceAcrossTrees(t *testing.T) {
+func TestMetrics_StartedAndClosedBalanceAcrossTrees(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -1061,7 +1061,7 @@ func TestMetrics_StartedAndEndedBalanceAcrossTrees(t *testing.T) {
 		flowKey := parkedTree(t)
 		assert.NoError(eng.Terminate(ctx, flowKey, "stop"))
 		balanced(t)
-		// Deleting the ended tree counts nothing more.
+		// Deleting the closed tree counts nothing more.
 		assert.NoError(eng.Delete(ctx, flowKey))
 		balanced(t)
 	})

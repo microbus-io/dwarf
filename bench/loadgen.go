@@ -148,7 +148,7 @@ type progressWatch struct {
 	cancel  context.CancelFunc
 }
 
-// watchProgress starts a watchdog over the engines' ended flows and the hosts' started tasks. With
+// watchProgress starts a watchdog over the engines' closed flows and the hosts' started tasks. With
 // -stall-timeout 0 it never fires.
 func watchProgress(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric.ManualReader, busy func() int64) *progressWatch {
 	w := &progressWatch{stalled: make(chan struct{})}
@@ -256,7 +256,7 @@ func (w *progressWatch) await(wait func()) bool {
 type drainResult struct {
 	OutstandingAtWindowEnd int64   `json:"outstandingAtWindowEnd"`
 	Sec                    float64 `json:"sec"`         // how long the drain took, up to the point it gave up
-	FlowsPerSec            float64 `json:"flowsPerSec"` // the rate it ended flows at, with creation stopped
+	FlowsPerSec            float64 `json:"flowsPerSec"` // the rate it closed flows at, with creation stopped
 	Created                int64   `json:"created"`     // flows created in the step, warmup included
 	// Completed and EndedOther count flows that ended over the whole step, by terminal status. With the drain
 	// on, a sweep's previous step drained to zero before this one began, so these are this step's flows.

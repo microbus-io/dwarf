@@ -38,9 +38,9 @@ type FlowOutcome struct {
 	CancelReason string `json:"cancelReason,omitzero"`
 }
 
-// Stopped reports whether the flow has stopped - reached any status other than not-yet-started (created,
-// pending) or actively running. A running outcome returned by Poll (Stopped() == false) means the flow has
-// not stopped yet and the caller should poll again.
+// Stopped reports whether the flow has stopped: it is closed (completed, failed, terminated or cancelled) or
+// interrupted, waiting for Resume - the statuses Await returns on. A running outcome returned by Poll
+// (Stopped() == false) means the flow has not stopped yet and the caller should poll again.
 func (o *FlowOutcome) Stopped() bool {
 	if o == nil {
 		return false

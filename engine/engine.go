@@ -299,7 +299,7 @@ type Engine struct {
 	archives atomic.Pointer[archiveSet]
 	// archiveFailures is, per shard, since when the reaper's archiving has been failing (reaper.go).
 	archiveFailures archiveFailures
-	// archiveLag is, per shard, how far past the grace the oldest due ended root was at the reaper's last scan.
+	// archiveLag is, per shard, how far past the grace the oldest due closed root was at the reaper's last scan.
 	archiveLag     archiveLag
 	testArchiveDay time.Duration
 	noReapQuiet    bool
@@ -339,8 +339,8 @@ type Engine struct {
 	parkWedgeThreshold  time.Duration // min age before a parked step is treated as wedged (5m)
 	orphanFlowThreshold time.Duration // quiet time before a stranded flow with no step to replay is reported orphaned (5m)
 	deletionGrace       time.Duration // DeleteOnCompletion linger window before reap (1m)
-	archiveGrace        time.Duration // how long an ended root stays in the live tables before it is archived (1m)
-	archiveFailureGrace time.Duration // how long archiving may fail before ended trees are deleted unarchived (1m)
+	archiveGrace        time.Duration // how long a closed root stays in the live tables before it is archived (1m)
+	archiveFailureGrace time.Duration // how long archiving may fail before closed trees are deleted unarchived (1m)
 	reapBatch           int           // due roots one reaper batch considers (512)
 	reapBatchRows       int           // about how many rows one reaper batch moves, at least one tree (4096)
 	// purgeChunk is how many roots one Purge statement names, a field so a test can drive several chunks. A literal
@@ -1404,7 +1404,7 @@ func (e *Engine) Resume(ctx context.Context, flowKey string, resumeData any) err
 
 // Terminate forcefully, unconditionally stops a flow. In-flight work is abandoned immediately - it is not
 // awaited, and no handler runs. The flow reads "terminated" as soon as this returns. Terminating a flow that
-// has already ended is a no-op that returns nil and leaves its outcome as it was, archived or not; an unknown or
+// has already closed is a no-op that returns nil and leaves its outcome as it was, archived or not; an unknown or
 // deleted flow is a 404. The reason is a human-readable note of at most 4,096 bytes of UTF-8 text with no NUL; any other reason is refused with a 400.
 func (e *Engine) Terminate(ctx context.Context, flowKey string, reason string) error {
 	if err := e.ensureStarted(); err != nil {
@@ -1440,7 +1440,7 @@ func (e *Engine) Cancel(ctx context.Context, flowKey string, reason string) erro
 	return e.cancel(ctx, flowKey, reason)
 }
 
-// Fork clones a terminal flow's prefix up to the given step into a new, self-contained running flow and
+// Fork clones a closed flow's prefix up to the given step into a new, self-contained running flow and
 // re-executes from that step with optional stateOverrides applied to it. The original flow is never
 // modified. The fork inherits the original's scheduling and baggage (it does not take FlowOptions).
 // Returns the new flow's key.
@@ -1520,12 +1520,12 @@ func (e *Engine) ListClosed(ctx context.Context, query workflow.Query) (summarie
 	return summariesOf(rows), nil
 }
 
-// Delete removes an ended flow and its subgraph subtree. An archived flow is deleted at once. One not archived yet -
-// the minute after it ends - is marked for deletion, and a background reaper removes it shortly after, without
+// Delete removes a closed flow and its subgraph subtree. An archived flow is deleted at once. One not archived yet -
+// the minute after it closes - is marked for deletion, and a background reaper removes it shortly after, without
 // archiving it: History returns 404 for it immediately, though Snapshot/Await/Run still report its
 // outcome until the reaper removes it, and calling Delete on it again is success. Returns 404 for an unknown key,
 // including a flow already deleted from the archive; 400 for a subgraph-child key (address the root instead); and 409
-// for a flow that has not ended: Terminate it first.
+// for an open flow: Terminate it first.
 func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 	if err := e.ensureStarted(); err != nil {
 		return errors.Trace(err)
@@ -1583,8 +1583,8 @@ func (e *Engine) Await(ctx context.Context, flowKey string) (outcome *workflow.F
 }
 
 // Poll returns a flow's current outcome, blocking up to the ctx deadline for it to stop. Unlike Await, a ctx
-// timeout is not an error: it returns the current non-terminal outcome, whose Stopped() reports false, so a
-// caller bridging an open-ended flow to a bounded request (e.g. an HTTP poll) can answer within its budget and
+// timeout is not an error: it returns the current outcome, which has not stopped (Stopped() reports false), so a
+// caller bridging a long-running flow to a bounded request (e.g. an HTTP poll) can answer within its budget and
 // re-poll. A real failure still returns an error.
 //
 // The ctx deadline IS the budget, so pass one; without it Poll blocks on the same long fallback budget as

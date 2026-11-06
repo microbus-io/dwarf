@@ -41,12 +41,12 @@ import (
 // least one tree however large, so with IncludeSubgraphs one tree of more flows than this is a tie no walk pages across.
 const maxListLimit = 65536
 
-// maxEndedWindowDays is the most archive days a ListClosed window may reach, after clamping: today and the 30 before
+// maxArchiveWindowDays is the most archive days a ListClosed window may reach, after clamping: today and the 30 before
 // it, the days the default retention keeps. Each day is one more pair of tables in the shard's statement, and
 // PostgreSQL locks every index of a table it plans: about 11 locks a day (the flows table and its 7 indexes counting
 // the key, the steps table and its 2), so 31 days are about 340 - some 5% of the default shared lock table (64 per
 // connection) for one statement.
-const maxEndedWindowDays = 31
+const maxArchiveWindowDays = 31
 
 // listRow is one flow a list read, with what the merge orders it by.
 type listRow struct {
@@ -267,9 +267,9 @@ func (e *Engine) listArchived(ctx context.Context, query workflow.Query, limit i
 	today := archiver.DayOf(now, set.dayLength)
 	fromDay := max(archiver.DayOf(w.lower, set.dayLength), today-max(e.retentionDays, 0))
 	toDay := min(archiver.DayOf(w.upper.Add(-time.Nanosecond), set.dayLength), today)
-	if span := toDay - fromDay + 1; span > maxEndedWindowDays {
+	if span := toDay - fromDay + 1; span > maxArchiveWindowDays {
 		return nil, errors.New("the time window reaches %d days of the archive; a call reads at most %d", span,
-			maxEndedWindowDays, http.StatusBadRequest)
+			maxArchiveWindowDays, http.StatusBadRequest)
 	}
 	if toDay == today && archiver.DayOf(w.upper.Add(-time.Nanosecond), set.dayLength) > today {
 		toDay++
@@ -293,7 +293,7 @@ func (e *Engine) listArchived(ctx context.Context, query workflow.Query, limit i
 		}
 		ctx, doneTurn := e.opTurn(ctx, shardIdx, op)
 		defer doneTurn()
-		// Every archived flow has ended, so no status condition is added when the query names none: one would only
+		// Every archived flow is closed, so no status condition is added when the query names none: one would only
 		// steer the planner to the status index rather than the archive-time one the order wants.
 		conds, condArgs := e.listFilters(db.DriverName(), shardIdx, query)
 		timeConds, timeArgs := timeConditions(db.DriverName(), "f.archived_at", query)

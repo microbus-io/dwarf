@@ -37,7 +37,7 @@ func moveInto(t *testing.T, e *Engine, rootID, day int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	moved, err := e.reapBatchOf(t.Context(), db, []int{rootID}, e.endedDue(0),
+	moved, err := e.reapBatchOf(t.Context(), db, []int{rootID}, e.closedDue(0),
 		&reapDay{day: day, stop: time.Now().Add(time.Hour), archive: e.archives.Load().byShard[1]})
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +70,7 @@ func TestDirectory_NamesOnlyWhatTheLocateCannotFind(t *testing.T) {
 	assert.NoError(err)
 	assert.NoError(makeArchiveDay(t, e, today-1))
 	assert.NoError(makeArchiveDay(t, e, today+2))
-	roots := endedRoots(t, e, 4)
+	roots := closedRoots(t, e, 4)
 	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
 		t.Skip("midnight passed while the flows ran")
 	}
@@ -180,7 +180,7 @@ func TestDirectory_TheReapersBounds(t *testing.T) {
 	before, from := e.archives.Load().byShard[1].DirectoryHours(today)
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
-	roots := endedRoots(t, e, 4)
+	roots := closedRoots(t, e, 4)
 	for i, c := range []struct {
 		hour  int
 		named bool

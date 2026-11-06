@@ -34,7 +34,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
-// expiryMux serves the flows the expiration tests leave unended: one interrupted, one running (asleep for an hour),
+// expiryMux serves the flows the expiration tests leave open: one interrupted, one running (asleep for an hour),
 // and a root parked on an interrupted subgraph child.
 func expiryMux() *hosts.Mux {
 	mux := hosts.NewMux()
@@ -97,9 +97,9 @@ func expiryEngine(t *testing.T, expiration time.Duration) (*Engine, *sdkmetric.M
 	return e, reader, logs
 }
 
-// startUnended creates a flow of workflowURL and waits for it to rest in status: interrupted, or running asleep -
+// startOpen creates a flow of workflowURL and waits for it to rest in status: interrupted, or running asleep -
 // its first step done and the next one waiting out the sleep.
-func startUnended(t *testing.T, e *Engine, workflowURL, status string) string {
+func startOpen(t *testing.T, e *Engine, workflowURL, status string) string {
 	t.Helper()
 	fk, err := e.Create(t.Context(), workflowURL, nil, nil)
 	if err != nil {
@@ -153,19 +153,19 @@ func statusOf(t *testing.T, e *Engine, fk string) (status, reason string) {
 	return outcome.Status, outcome.TerminateReason
 }
 
-// TestExpiration_TerminatesTheOldUnendedRoots pins the pass: a running root and an interrupted one older than the
+// TestExpiration_TerminatesTheOldOpenRoots pins the pass: a running root and an interrupted one older than the
 // expiration are terminated with the expiration's reason, a root parked on a subgraph with its child, and a root
 // younger than it is left alone; the counter counts the roots.
-func TestExpiration_TerminatesTheOldUnendedRoots(t *testing.T) {
+func TestExpiration_TerminatesTheOldOpenRoots(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e, reader, _ := expiryEngine(t, time.Hour)
 
-	asking := startUnended(t, e, "exp/ask", workflow.StatusInterrupted)
-	napping := startUnended(t, e, "exp/nap", workflow.StatusRunning)
-	parent := startUnended(t, e, "exp/parent", workflow.StatusInterrupted)
-	young := startUnended(t, e, "exp/ask", workflow.StatusInterrupted)
+	asking := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
+	napping := startOpen(t, e, "exp/nap", workflow.StatusRunning)
+	parent := startOpen(t, e, "exp/parent", workflow.StatusInterrupted)
+	young := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
 	for _, fk := range []string{asking, napping, parent} {
 		age(t, e, fk, 2*time.Hour)
 	}
@@ -179,7 +179,7 @@ func TestExpiration_TerminatesTheOldUnendedRoots(t *testing.T) {
 	}
 	assert.NotEqual("", child, "the parent called its child")
 
-	// The walk keeps the unended roots only: not the child, not the younger flow.
+	// The walk keeps the open roots only: not the child, not the younger flow.
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
 	roots, _, reachedYoung, err := e.expiredPage(ctx, db, 0)
@@ -218,9 +218,9 @@ func TestExpiration_TheWalkStopsAtTheFirstYoungFlow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e, _, _ := expiryEngine(t, time.Hour)
-	old := startUnended(t, e, "exp/ask", workflow.StatusInterrupted)
-	young := startUnended(t, e, "exp/ask", workflow.StatusInterrupted)
-	beyond := startUnended(t, e, "exp/ask", workflow.StatusInterrupted)
+	old := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
+	young := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
+	beyond := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
 	age(t, e, old, 2*time.Hour)
 	age(t, e, beyond, 2*time.Hour)
 
@@ -234,17 +234,17 @@ func TestExpiration_TheWalkStopsAtTheFirstYoungFlow(t *testing.T) {
 }
 
 // TestExpiration_PagesPastWhatItDoesNotEnd pins the paging: a page that holds only flows the pass does not end - an
-// ended flow, a subgraph child - leads to the next page rather than ending the walk.
+// closed flow, a subgraph child - leads to the next page rather than ending the walk.
 func TestExpiration_PagesPastWhatItDoesNotEnd(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e, _, _ := expiryEngine(t, time.Hour)
 	e.expirePage = 1
-	parent := startUnended(t, e, "exp/parent", workflow.StatusInterrupted) // the root, then its child
-	ended := startUnended(t, e, "exp/ask", workflow.StatusInterrupted)
+	parent := startOpen(t, e, "exp/parent", workflow.StatusInterrupted) // the root, then its child
+	ended := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
 	assert.NoError(e.Terminate(ctx, ended, "ended before the pass"))
-	last := startUnended(t, e, "exp/nap", workflow.StatusRunning)
+	last := startOpen(t, e, "exp/nap", workflow.StatusRunning)
 	for _, fk := range []string{parent, ended, last} {
 		age(t, e, fk, 2*time.Hour)
 	}
@@ -253,10 +253,10 @@ func TestExpiration_PagesPastWhatItDoesNotEnd(t *testing.T) {
 	status, _ := statusOf(t, e, parent)
 	assert.Equal(workflow.StatusTerminated, status)
 	status, reason := statusOf(t, e, ended)
-	assert.Equal("ended before the pass", reason, "an ended flow keeps its outcome")
+	assert.Equal("ended before the pass", reason, "a closed flow keeps its outcome")
 	assert.Equal(workflow.StatusTerminated, status)
 	status, _ = statusOf(t, e, last)
-	assert.Equal(workflow.StatusTerminated, status, "reached past a page of a child and a page of an ended flow")
+	assert.Equal(workflow.StatusTerminated, status, "reached past a page of a child and a page of a closed flow")
 }
 
 // TestExpiration_ThePassKeepsToItsBudget pins the time budget: a pass past it starts no further termination, after
@@ -267,8 +267,8 @@ func TestExpiration_ThePassKeepsToItsBudget(t *testing.T) {
 	ctx := t.Context()
 	e, reader, logs := expiryEngine(t, time.Hour)
 	e.expireBudget = time.Nanosecond
-	first := startUnended(t, e, "exp/ask", workflow.StatusInterrupted)
-	second := startUnended(t, e, "exp/ask", workflow.StatusInterrupted)
+	first := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
+	second := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
 	age(t, e, first, 2*time.Hour)
 	age(t, e, second, 2*time.Hour)
 
@@ -292,7 +292,7 @@ func TestExpiration_OffByDefault(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e, _, _ := expiryEngine(t, 0)
-	old := startUnended(t, e, "exp/ask", workflow.StatusInterrupted)
+	old := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
 	age(t, e, old, 1000*time.Hour)
 	e.expireFlows(ctx)
 	status, _ := statusOf(t, e, old)
@@ -323,14 +323,14 @@ func TestExpiration_SetterRules(t *testing.T) {
 	assert.True(err != nil && strings.Contains(err.Error(), "flow expiration"))
 }
 
-// TestExpiration_TerminateSubtreeReportsWhatItEnded pins what the pass counts by: terminateSubtree reports ending a
-// flow that was unended, and not one that had ended already.
-func TestExpiration_TerminateSubtreeReportsWhatItEnded(t *testing.T) {
+// TestExpiration_TerminateSubtreeReportsWhatItClosed pins what the pass counts by: terminateSubtree reports ending a
+// flow that was open, and not one that had closed already.
+func TestExpiration_TerminateSubtreeReportsWhatItClosed(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e, _, _ := expiryEngine(t, 0)
-	fk := startUnended(t, e, "exp/ask", workflow.StatusInterrupted)
+	fk := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
 	shard, hour, id, token, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	ended, err := e.terminateSubtree(ctx, shard, id, hour, token, "first", "")
@@ -349,8 +349,8 @@ func TestExpiration_AFailingRootIsPassedOver(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e, reader, _ := expiryEngine(t, time.Hour)
-	first := startUnended(t, e, "exp/ask", workflow.StatusInterrupted)
-	second := startUnended(t, e, "exp/ask", workflow.StatusInterrupted)
+	first := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
+	second := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
 	age(t, e, first, 2*time.Hour)
 	age(t, e, second, 2*time.Hour)
 
@@ -393,7 +393,7 @@ func TestExpiration_TheReaperRunsThePassAtOnce(t *testing.T) {
 	e.expireInterval = time.Hour
 	started := time.Now()
 	assert.NoError(e.Startup(t.Context()))
-	old := startUnended(t, e, "exp/ask", workflow.StatusInterrupted)
+	old := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
 	age(t, e, old, 2*time.Hour)
 	if time.Since(started) >= tick {
 		t.Skip("the setup outlasted the reaper's first tick")

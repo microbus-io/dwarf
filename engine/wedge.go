@@ -422,7 +422,7 @@ func (e *Engine) terminateOrphanedSubtree(ctx context.Context, shard int, childF
 // leaseMargin, or the database clock jumping forward by more than the leaseMargin: the completion write leaves the lease as the claim set it, so a task that returns within its budget
 // reaches its transition with leaseMargin left, and the two waits that can outlast that - persist's retry backoff and
 // the cohort stripe - extend the lease first. The rewind runs behind a write-first lock on the flow row, guarded on
-// `running`, so a Terminate landing between the scan and the rewind wins and the terminal flow is left as it is.
+// `running`, so a Terminate landing between the scan and the rewind wins and the closed flow is left as it is.
 //
 // A stranded flow with no flagged step is a bug signal - some other path stranded it - logged at error level and
 // counted by dwarf_flows_orphaned, and not repaired. That verdict is re-taken under the flow-row lock, so a flow

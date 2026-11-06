@@ -146,19 +146,19 @@ your metrics backend as label cardinality.
 
 ## Retention and deletion
 
-**A flow is kept for as long as it has not ended, and for the retention after it ends.** A running, sleeping or
-`interrupted` flow is never removed by the engine, however old, unless `SetFlowExpiration` is set: then a flow that has
-not ended within that time of its creation is terminated, and archived as any other
-([Expiring flows that never end](flows.md#expiring-flows-that-never-end)). About a minute after a flow ends, it moves to the
-archive, which keeps each day's ended flows for `SetRetention` days (30 by default) and then drops the day whole;
-`PurgeBefore(t)` drops every archived day before t's at once. With a retention of 0 an ended flow is deleted
-instead of archived. An archived flow's outcome, history and steps stay readable by its key until its day is
+**A flow is kept for as long as it is open, and for the retention after it closes.** An open flow - running,
+sleeping or `interrupted` - is never removed by the engine, however old, unless `SetFlowExpiration` is set: then a
+flow still open that long after its creation is terminated, and archived as any other
+([Expiring flows that never end](flows.md#expiring-flows-that-never-end)). About a minute after a flow closes, it
+moves to the archive, which keeps each day's closed flows for `SetRetention` days (30 by default) and then drops the
+day whole; `PurgeBefore(t)` drops every archived day before t's at once. With a retention of 0 a closed flow is
+deleted instead of archived. An archived flow's outcome, history and steps stay readable by its key until its day is
 dropped, and `ListClosed` lists it.
 
-Three ways to remove an ended flow sooner than the retention, archived or not:
+Three ways to remove a closed flow sooner than the retention, archived or not:
 
 ```go
-// One ended flow and its whole subgraph tree. Refuses a flow that has not ended: Terminate it first.
+// One closed flow and its whole subgraph tree. Refuses an open flow: Terminate it first.
 eng.Delete(ctx, flowKey)
 
 // The archived flows ListClosed lists for a query, oldest archived first, Limit at a time.

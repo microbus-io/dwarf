@@ -34,8 +34,8 @@ import (
 // fork's rewind path) must make Fork reject loudly rather than clone the interrupted step verbatim into a
 // running fork and wedge it (unresumable, and - as a cohort member - unable to ever fan-in).
 //
-// A terminal flow can never legitimately hold an interrupted step (interrupt forces the root non-terminal,
-// and Fork already rejects a non-terminal root), so the test manufactures the broken invariant directly by
+// A closed flow can never legitimately hold an interrupted step (interrupt keeps the root open,
+// and Fork already rejects an open root), so the test manufactures the broken invariant directly by
 // doctoring a completed cohort member to `interrupted`, then forks a sibling.
 func TestFork_RejectsInterruptedKeptStep(t *testing.T) {
 	t.Parallel()
@@ -79,7 +79,7 @@ func TestFork_RejectsInterruptedKeptStep(t *testing.T) {
 		return
 	}
 
-	// Manufacture the invariant break: cohort member A -> interrupted (a state a terminal flow can't hold).
+	// Manufacture the invariant break: cohort member A -> interrupted (a state a closed flow can't hold).
 	res, err := db.ExecContext(ctx,
 		"UPDATE dwarf_steps SET status=?, interrupt_done=1 WHERE flow_id=(SELECT flow_id FROM dwarf_flows WHERE flow_token=?) AND task_name=?",
 		workflow.StatusInterrupted, mustFlowToken(t, flowKey), "A",

@@ -113,12 +113,12 @@ The frozen graph binds each task to its dispatch URL (`SetURL`), and the URL is 
 `ExecuteTask` receives. That makes task URLs a **long-lived compatibility surface**, longer-lived than any
 deploy:
 
-- **A URL that any live flow's frozen graph can still reach must remain dispatchable.** If your host can no
+- **A URL that any open flow's frozen graph can still reach must remain dispatchable.** If your host can no
   longer route a URL, every flow whose frozen graph reaches it fails at that step — and it fails when the
   flow gets there, which may be weeks after you removed the task.
-- **Changing a task's URL is a breaking change** for every in-flight flow. Bind the new URL and keep the old
-  one routable until no live flow can reach it. Renaming a task within the graph does not affect routing, but
-  task code that calls `flow.Goto` by name must still find that name in the graphs live flows froze.
+- **Changing a task's URL is a breaking change** for every open flow. Bind the new URL and keep the old
+  one routable until no open flow can reach it. Renaming a task within the graph does not affect routing, but
+  task code that calls `flow.Goto` by name must still find that name in the graphs open flows froze.
 - **Changing what a task *does* is generally safe**, because the frozen graph pins the URL and the routing,
   not the behaviour. Changing what a task *expects in state* is not: a flow that started under the old shape
   will arrive at the new code carrying the old state.

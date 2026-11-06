@@ -51,7 +51,7 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_*` instrument | Type | Labels | Measures | PromQL name |
 |---|---|---|---|---|
 | `dwarf_flows_started` | counter | `workflow`, `shard`, `priority` | flows started. `shard` is where the flow was **placed**, so a skew across shards means work is not spread the way the capacity weights intended | `dwarf_flows_started_total` |
-| `dwarf_flows_closed` | counter | `workflow`, `status`, `shard`, `priority` | flows closing: completed, failed, terminated or cancelled. All four are counted, so `started − closed` does not drift up by every flow that did not finish cleanly; see [Flows in flight](#flows-in-flight) | `dwarf_flows_closed_total` |
+| `dwarf_flows_closed` | counter | `workflow`, `status`, `shard`, `priority` | flows closing: completed, failed, terminated or cancelled. All four are counted, so `started − closed` does not drift up by every flow that did not finish cleanly; see [Open flows](#open-flows) | `dwarf_flows_closed_total` |
 | `dwarf_steps_executed` | counter | `task_name`, `status`, `shard` | steps executed, by disposition. `shard` makes this per-shard dispatch throughput — selection, the connection pool and the work split are all per shard, so a fleet-wide total hides one shard falling behind | `dwarf_steps_executed_total` |
 | `dwarf_steps_recovered` | counter | — | steps recovered because their worker was lost: a lease that expired (the task re-runs), or a completed step whose successor was never created (the step is resumed from its recorded output; the task does not re-run) | `dwarf_steps_recovered_total` |
 | `dwarf_steps_unwedged` | counter | `park_type` | wedged subgraph parks recovered by the sweep (nonzero = latent bug) | `dwarf_steps_unwedged_total` |
@@ -88,14 +88,14 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_state_in_flight_steps` | gauge | — | tasks currently inside a task call — the denominator for the line above | `dwarf_state_in_flight_steps` |
 | `dwarf_state_cache_bytes` | gauge | — | memory the state cache is charged for right now. Each field counts as its size plus a few hundred bytes. The cache is bounded by `SetStateCacheSize` and by 1,048,576 fields, so it is full when this is pinned at that size, or below it once 1,048,576 small fields are held | `dwarf_state_cache_bytes` |
 | `dwarf_flows_archived` | counter | `shard` | flows moved into the archive: each root and every subgraph flow of its tree | `dwarf_flows_archived_total` |
-| `dwarf_flows_reaped` | counter | `shard`, `reason` | flows deleted from the live tables without being archived. `reason` is `deleted` (scheduled for deletion by `Delete` or `DeleteOnCompletion`), `no_retention` (a retention of 0) or `archive_failed` (archiving had been failing for a minute, so ended flows were deleted rather than left to fill the live tables). `archive_failed` is records lost from the archive: expect zero | `dwarf_flows_reaped_total` |
+| `dwarf_flows_reaped` | counter | `shard`, `reason` | flows deleted from the live tables without being archived. `reason` is `deleted` (scheduled for deletion by `Delete` or `DeleteOnCompletion`), `no_retention` (a retention of 0) or `archive_failed` (archiving had been failing for a minute, so closed flows were deleted rather than left to fill the live tables). `archive_failed` is records lost from the archive: expect zero | `dwarf_flows_reaped_total` |
 | `dwarf_flows_removed` | counter | `shard`, `op`, `side` | root flows `Delete` and `Purge` removed. `op` is `delete` or `purge`; `side` is `archive` for a flow deleted from the archive, or `live` for a closed flow not archived yet that `Delete` scheduled for deletion, then counted in `dwarf_flows_reaped{reason="deleted"}`, there by flow rather than by root. `Purge` reads only the archive, so it counts on the archive side only | `dwarf_flows_removed_total` |
 | `dwarf_flows_expired` | counter | `shard` | root flows terminated because they were still running or interrupted `SetFlowExpiration` after their creation. Each is also counted in `dwarf_flows_closed{status="terminated"}`, with its subgraph flows | `dwarf_flows_expired_total` |
 | `dwarf_flows_expire_failed` | counter | `shard` | attempts to terminate an expired flow that failed. It counts attempts, not flows: a flow that fails again is counted every 5 minutes until it is terminated. Expect zero; see [An expired flow cannot be terminated](runbook.md#an-expired-flow-cannot-be-terminated) | `dwarf_flows_expire_failed_total` |
 | `dwarf_archive_days_dropped` | counter | `shard` | archive days dropped, by the retention or by `PurgeBefore`. At a steady retention, one per shard a day; two replicas dropping the same day at the same moment can each count it | `dwarf_archive_days_dropped_total` |
 | `dwarf_archive_maintain_failed` | counter | `shard` | archive maintenance passes that failed. A pass runs 24 times a day, makes the days ahead and drops the expired ones; a failure is retried by the next | `dwarf_archive_maintain_failed_total` |
-| `dwarf_reap_pass_seconds` | histogram | `shard` | one pass of the background reaper on a shard, which runs every 15 seconds: the flows scheduled for deletion removed, then the ended flows archived | `dwarf_reap_pass_seconds` |
-| `dwarf_archive_lag_seconds` | gauge | `shard` | how long the oldest ended flow waiting to be archived (deleted, at a retention of 0) had waited beyond the minute every ended flow waits, at the reaper's last pass. Near zero while the reaper keeps up, except in the last minute of each UTC day, when archiving pauses and the reading rises to about 75 seconds | `dwarf_archive_lag_seconds` |
+| `dwarf_reap_pass_seconds` | histogram | `shard` | one pass of the background reaper on a shard, which runs every 15 seconds: the flows scheduled for deletion removed, then the closed flows archived | `dwarf_reap_pass_seconds` |
+| `dwarf_archive_lag_seconds` | gauge | `shard` | how long the oldest closed flow waiting to be archived (deleted, at a retention of 0) had waited beyond the minute every closed flow waits, at the reaper's last pass. Near zero while the reaper keeps up, except in the last minute of each UTC day, when archiving pauses and the reading rises to about 75 seconds | `dwarf_archive_lag_seconds` |
 | `dwarf_archive_failing_seconds` | gauge | `shard` | 0, or how long archiving has been failing on the shard | `dwarf_archive_failing_seconds` |
 | `dwarf_archive_days` | gauge | `shard` | archive days whose tables exist on the shard: the retained days, today and the two days ahead, so the retention plus 3 once a full retention has been kept | `dwarf_archive_days` |
 | `dwarf_archive_oldest_day_age_seconds` | gauge | `shard` | how long ago the oldest archive day on the shard began. About the retention plus a day while expired days are dropped; days drop on passes an hour apart, so allow up to two hours more | `dwarf_archive_oldest_day_age_seconds` |
@@ -115,10 +115,10 @@ read it beside the per-band ages. Strict priority holds those bands back by desi
 one reading per band, refreshed every 30 seconds along with `dwarf_steps_pending`. While the lead for a shard
 passes from one replica to another, those two may be missing for up to 30 seconds.
 
-### Flows in flight
+### Open flows
 
 `dwarf_flows_started` and `dwarf_flows_closed` carry the same `shard` and `priority`, so the difference of their
-increases over a window is how many flows each band gained or shed in flight:
+increases over a window is how many open flows each band gained or shed:
 
 ```promql
 sum by (priority) (increase(dwarf_flows_started_total[5m]))
@@ -126,8 +126,8 @@ sum by (priority) (increase(dwarf_flows_started_total[5m]))
 ```
 
 Read it as a trend, not as a level. Each replica's counters start from zero when the replica does, so a running
-total of `started − ended` drifts across restarts. It also counts flows rather than steps: a flow waiting on a
-sleep, an interrupt or a long task is in flight without being in any backlog.
+total of `started − closed` drifts across restarts. It also counts flows rather than steps: a flow waiting on a
+sleep, an interrupt or a long task is open without being in any backlog.
 
 **Read the two in-flight state gauges as a quotient, not separately.** `bytes / steps` is the mean state a
 task carries, and that is what distinguishes the two ways a replica ends up holding a lot: a few tasks each
@@ -144,15 +144,15 @@ its own.
 
 ### The archive
 
-Every ended flow waits in the live tables for about a minute and then moves to the archive
+Every closed flow waits in the live tables for about a minute and then moves to the archive
 (`dwarf_flows_archived`), unless it was scheduled for deletion or the retention is 0 (`dwarf_flows_reaped`). Two
 readings say whether that is keeping up. `dwarf_archive_lag_seconds` is how far behind the move is: rising means
-flows end faster than they are archived, and the live tables, which every dispatch reads, grow with it. Archiving
+flows close faster than they are archived, and the live tables, which every dispatch reads, grow with it. Archiving
 pauses for the last minute of each UTC day, so the reading rises to about 75 seconds then and falls back after
 midnight: set an alert above that.
 `dwarf_reap_pass_seconds` approaching its 15-second interval says the same from the other side.
 
-**Alert on `dwarf_flows_reaped{reason="archive_failed"}`.** While archiving fails, ended flows wait; after a minute of
+**Alert on `dwarf_flows_reaped{reason="archive_failed"}`.** While archiving fails, closed flows wait; after a minute of
 failure they are deleted unarchived, so that a fault in the archive cannot fill the live tables. Each one counted
 there is a record the archive does not have. `dwarf_archive_failing_seconds` rises from the first failure, a minute
 before any loss. See [Archiving is failing](runbook.md#archiving-is-failing).
@@ -163,7 +163,7 @@ a full retention has accumulated, and both climbing past it means expired days a
 
 None of these costs a query: each is counted from work the engine does anyway. The sizes of the tables, and on
 PostgreSQL their dead rows, are the database's to report. Watch them with your database's own exporter: the
-`dwarf_flows` and `dwarf_steps` sizes against the flows in flight, and the `dwarf_*_archive_*` tables against the
+`dwarf_flows` and `dwarf_steps` sizes against the open flows, and the `dwarf_*_archive_*` tables against the
 retention.
 
 **Aggregating the gauges across replicas — two kinds, and mixing them up inflates your dashboard by the

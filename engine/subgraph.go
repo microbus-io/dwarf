@@ -90,7 +90,7 @@ var errTreeGrew = errors.New("tree grew during terminate")
 // failing then is safe, since every run rolls back cleanly, and the caller may retry.
 const maxTerminateRuns = 16
 
-// terminateSubtree forcefully stops a flow and every non-terminal flow beneath it, in one transaction, and signals
+// terminateSubtree forcefully stops a flow and every open flow beneath it, in one transaction, and signals
 // every flow it stopped. Inside the transaction it terminates the tree's steps (write-first, per the
 // flow-terminating-transaction rule), locks the tree's flow rows, terminates the steps again, scans for flows its
 // set does not cover, and only then writes each flow's `final_state` and terminal status. A scan that finds new

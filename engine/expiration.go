@@ -29,8 +29,8 @@ import (
 
 // SetFlowExpiration sets how long after its creation a flow may still be running or interrupted. A flow still running or
 // interrupted once it is older than d is terminated, with its subgraphs, and its TerminateReason says it expired; it is
-// then archived like any other terminated flow. The check runs every 5 minutes, so a flow ends up to about that long
-// after it expires. 0, the default, never expires a flow.
+// then archived like any other terminated flow. The check runs every 5 minutes, so a flow is terminated up to about 5
+// minutes after it expires. 0, the default, never expires a flow.
 //
 // A flow created by Continue or Fork counts from its own creation. Use the same value on every replica sharing a
 // database: any replica dispatching a shard may expire its flows, so the smallest value in the fleet wins. A value
@@ -51,7 +51,7 @@ func expirationReason(d time.Duration) string {
 	return "expired: still running or interrupted after the flow expiration (" + d.String() + ")"
 }
 
-// expireFlows terminates, per shard this replica dispatches, every root that has not ended and was created longer
+// expireFlows terminates, per shard this replica dispatches, every root that has not closed and was created longer
 // than the flow expiration ago. It reads no index of its own: flow_id is assigned in creation order, and every flow
 // row's created_at is the column default (Fork's clones and Continue's flows included), so the oldest flows by id are
 // the oldest by creation, and the walk stops at the first row that has not expired - one row when none has. Ids
@@ -129,8 +129,8 @@ type expiredRoot struct {
 }
 
 // expiredPage reads the page of flow rows after flowID after, in flow_id order, up to the first that has not expired,
-// and returns the unended roots among them, the last id it read (0 for none), and whether it reached a row that has
-// not expired. Ended flows waiting for the reaper, and subgraph children - ended with their roots - are passed over.
+// and returns the open roots among them, the last id it read (0 for none), and whether it reached a row that has
+// not expired. Closed flows waiting for the reaper, and subgraph children - ended with their roots - are passed over.
 func (e *Engine) expiredPage(ctx context.Context, db *sequel.DB, after int) (roots []expiredRoot, last int, young bool, err error) {
 	// ORDER BY flow_id is REQUIRED: LIMIT_OFFSET is OFFSET/FETCH on SQL Server, which needs one. The age is compared
 	// on the database clock, never bound as a Go time.

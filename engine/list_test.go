@@ -75,7 +75,7 @@ func TestList_EachListReadsItsOwnTables(t *testing.T) {
 	assert.NoError(makeArchiveDay(t, e, today-2))
 	assert.NoError(makeArchiveDay(t, e, today-1))
 	assert.NoError(a.Refresh(ctx))
-	roots := endedRoots(t, e, 6)
+	roots := closedRoots(t, e, 6)
 	moveInto(t, e, roots[0], today-2)
 	moveInto(t, e, roots[1], today-1)
 	moveInto(t, e, roots[5], today-1) // a second in that day, archived before roots[1]
@@ -201,7 +201,7 @@ func TestListClosed_ADayAPeerDroppedIsReadAgain(t *testing.T) {
 	assert.NoError(makeArchiveDay(t, e, today-2))
 	assert.NoError(makeArchiveDay(t, e, today-1))
 	assert.NoError(a.Refresh(ctx))
-	root := endedRoots(t, e, 1)[0]
+	root := closedRoots(t, e, 1)[0]
 	moveInto(t, e, root, today-1)
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
@@ -226,7 +226,7 @@ func TestListClosed_TheWindowIsClampedToTheArchive(t *testing.T) {
 	e := archiveEngine(t, treeMux(), 30)
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
-	root := endedRoots(t, e, 1)[0]
+	root := closedRoots(t, e, 1)[0]
 	moveInto(t, e, root, today)
 	got, err := e.ListClosed(ctx, workflow.Query{FromTime: time.Now().Add(-(400 * 24 * time.Hour)), ToTime: time.Now().Add(time.Hour), Limit: 10})
 	assert.NoError(err, "a window past the retention is cut to it")
@@ -365,7 +365,7 @@ func TestListClosed_TheDayAfterTodayIsRead(t *testing.T) {
 	e := archiveEngine(t, treeMux(), 30)
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
-	root := endedRoots(t, e, 1)[0]
+	root := closedRoots(t, e, 1)[0]
 	moveInto(t, e, root, today+1) // as a pass on a database clock already past midnight would
 	got, err := e.ListClosed(ctx, workflow.Query{FromTime: time.Now().Add(-time.Hour), ToTime: time.Now().Add(48 * time.Hour), Limit: 10})
 	assert.NoError(err)
@@ -385,7 +385,7 @@ func TestSQLTime_RoundsUpToTheColumnsPrecision(t *testing.T) {
 	e := archiveEngine(t, treeMux(), 30)
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
-	root := endedRoots(t, e, 1)[0]
+	root := closedRoots(t, e, 1)[0]
 	moveInto(t, e, root, today)
 	unit := time.Millisecond
 	if db, _ := e.db.Shard(1); db.DriverName() == "pgx" {
@@ -422,7 +422,7 @@ func TestListClosed_RetentionZeroStillReadsToday(t *testing.T) {
 	e := archiveEngine(t, treeMux(), 0)
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
-	root := endedRoots(t, e, 1)[0]
+	root := closedRoots(t, e, 1)[0]
 	moveInto(t, e, root, today)
 	got, err := e.ListClosed(ctx, workflow.Query{FromTime: time.Now().Add(-time.Hour), ToTime: time.Now().Add(time.Hour), Limit: 10})
 	assert.NoError(err)
@@ -440,10 +440,10 @@ func TestListOpen_NewestUpdatedFirstAcrossStatuses(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e, _, _ := expiryEngine(t, 0)
-	first := startUnended(t, e, "exp/ask", workflow.StatusInterrupted)
-	napping := startUnended(t, e, "exp/nap", workflow.StatusRunning)
-	last := startUnended(t, e, "exp/ask", workflow.StatusInterrupted)
-	closed := startUnended(t, e, "exp/ask", workflow.StatusInterrupted)
+	first := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
+	napping := startOpen(t, e, "exp/nap", workflow.StatusRunning)
+	last := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
+	closed := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
 	assert.NoError(e.Terminate(ctx, closed, "closed"))
 	db, err := e.db.Shard(1)
 	assert.NoError(err)

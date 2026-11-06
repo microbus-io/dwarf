@@ -37,7 +37,8 @@ func IsValidStatus(s string) bool {
 	return false
 }
 
-// IsTerminalStatus reports whether s is one of the terminal flow/step statuses.
+// IsTerminalStatus reports whether s is one of the terminal flow/step statuses: completed, failed, terminated or
+// cancelled. A flow whose status is terminal is closed; a running or interrupted one is open.
 func IsTerminalStatus(s string) bool {
 	switch s {
 	case StatusCompleted, StatusFailed, StatusTerminated, StatusCancelled:

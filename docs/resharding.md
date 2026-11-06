@@ -80,8 +80,8 @@ which means both:
 open, _ := eng.ListOpen(ctx, workflow.Query{Shard: 3, Limit: 100})
 ```
 
-and no ended flow you still want readable: the shard's ended flows sit in its archive until the retention drops
-their day, so the shard is empty once the retention has passed since its last flow ended.
+and no closed flow you still want readable: the shard's closed flows sit in its archive until the retention drops
+their day, so the shard is empty once the retention has passed since its last flow closed.
 
 `Query.Shard` scopes a list to one shard. Watch `interrupted` flows especially — they wait indefinitely and are
 the ones that will still be there when you assumed the shard was empty. Either resume them, terminate them, or

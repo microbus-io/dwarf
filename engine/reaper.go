@@ -39,7 +39,7 @@ import (
 // transaction of about the same size, and always at least one tree. For as long as a batch's transaction runs,
 // vacuum cannot remove any row that died after it began.
 
-// reaperLoop removes ended trees from the live tables on its own plain ticker: it archives every root that ended
+// reaperLoop removes closed trees from the live tables on its own plain ticker: it archives every root that ended
 // archiveGrace ago, and deletes, without archiving, every root whose delete_after_ms window has elapsed. A single
 // goroutine is inherently non-overlapping - a slow pass just delays the next tick. It is latency-tolerant, so there
 // is no wake/startup/shutdown special pass: a tree that came due while a replica was down is removed on the next tick
@@ -106,20 +106,20 @@ func (e *Engine) deletionDue(steal time.Duration) reapKind {
 	}
 }
 
-// endedDue is the roots that ended archiveGrace ago and were not stamped for deletion: they are archived, or deleted
+// closedDue is the roots that ended archiveGrace ago and were not stamped for deletion: they are archived, or deleted
 // at a retention of 0.
-func (e *Engine) endedDue(steal time.Duration) reapKind {
-	return e.endedDueAfter(steal, e.archiveGrace)
+func (e *Engine) closedDue(steal time.Duration) reapKind {
+	return e.closedDueAfter(steal, e.archiveGrace)
 }
 
-// endedDueAfter is endedDue for roots that ended grace ago.
-func (e *Engine) endedDueAfter(steal, grace time.Duration) reapKind {
+// closedDueAfter is closedDue for roots that ended grace ago.
+func (e *Engine) closedDueAfter(steal, grace time.Duration) reapKind {
 	graceMs := grace.Milliseconds()
 	statuses := []string{
 		workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusTerminated, workflow.StatusCancelled,
 	}
 	return reapKind{
-		name: "ended",
+		name: "closed",
 		selectDue: func(residency string, args []any, limit int) (string, []any) {
 			// One branch per terminal status, each a range of idx_dwarf_flows_status (status, updated_at) that stops
 			// at the batch: one scan over all four statuses has no index order, so it would read and sort every due
@@ -262,7 +262,7 @@ func (e *Engine) reapPass(ctx context.Context, grace time.Duration) {
 		defer doneTurn()
 		passStart := time.Now()
 		defer func() { e.metricReapPass(ctx, shard, time.Since(passStart)) }()
-		// A failure of the stamped kind, logged, does not hold back the ended kind.
+		// A failure of the stamped kind, logged, does not hold back the closed kind.
 		e.reapDue(ctx, db, shard, e.deletionDue(steal), func() (*reapDay, bool) { return nil, true }, reapReasonDeleted)
 		var day *reapDay
 		unarchived := reapReasonNoRetention
@@ -280,7 +280,7 @@ func (e *Engine) reapPass(ctx context.Context, grace time.Duration) {
 		}
 		archiving := day != nil
 		endedStart := time.Now()
-		ok := e.reapDue(ctx, db, shard, e.endedDueAfter(steal, grace), func() (*reapDay, bool) {
+		ok := e.reapDue(ctx, db, shard, e.closedDueAfter(steal, grace), func() (*reapDay, bool) {
 			if day != nil && !day.stop.IsZero() && !time.Now().Before(day.stop) {
 				return nil, false // the day's last moments: the trees wait for the next day's first pass
 			}
@@ -314,7 +314,7 @@ func (e *Engine) refreshReapDay(ctx context.Context, a *archiver.Archive, day *r
 	return nil
 }
 
-// archiveFailed records that archiving failed on shard and reports whether to delete the ended trees unarchived
+// archiveFailed records that archiving failed on shard and reports whether to delete the closed trees unarchived
 // instead: only once archiving has been failing for archiveFailureGrace, which keeps the live tables from filling
 // while an archive fault lasts, at the cost of those trees' archive. Until then the caller ends its pass and the trees
 // wait. It logs the first failure and the start of the deletions, never every tick. A stop is not a failure.
@@ -325,11 +325,11 @@ func (e *Engine) archiveFailed(ctx context.Context, shard int, what string, err 
 	first, expired, firstExpired := e.archiveFailures.fail(shard, time.Now(), e.archiveFailureGrace)
 	switch {
 	case first:
-		e.logger.ErrorContext(ctx, "Reaper: "+what+" failed; ended trees wait in the live tables, and are deleted"+
+		e.logger.ErrorContext(ctx, "Reaper: "+what+" failed; closed trees wait in the live tables, and are deleted"+
 			" without archiving if archiving still fails after the grace", "shard", shard, "grace", e.archiveFailureGrace,
 			"error", err)
 	case firstExpired:
-		e.logger.ErrorContext(ctx, "Reaper: archiving has failed for the grace; deleting ended trees without archiving"+
+		e.logger.ErrorContext(ctx, "Reaper: archiving has failed for the grace; deleting closed trees without archiving"+
 			" until it succeeds", "shard", shard, "grace", e.archiveFailureGrace, "error", err)
 	}
 	return expired
@@ -403,7 +403,7 @@ func (f *archiveFailures) reset() {
 	f.mu.Unlock()
 }
 
-// archiveLag is, per shard, how long past the archive grace the oldest due ended root had waited at the reaper's last
+// archiveLag is, per shard, how long past the archive grace the oldest due closed root had waited at the reaper's last
 // scan: the dwarf_archive_lag_seconds reading. It lives as long as the engine's run.
 type archiveLag struct {
 	mu   sync.Mutex
@@ -504,7 +504,7 @@ func (e *Engine) reapDue(
 			// A batch that cannot be archived waits for the next tick, and is deleted unarchived once archiving has been
 			// failing for the grace (archiveFailed).
 			if err != nil && day != nil && len(cut) > 0 && ctx.Err() == nil {
-				if !e.archiveFailed(ctx, shard, "archiving ended trees", err) {
+				if !e.archiveFailed(ctx, shard, "archiving closed trees", err) {
 					return false
 				}
 				var moved int
@@ -528,7 +528,7 @@ func (e *Engine) reapDue(
 	}
 }
 
-// scanDue selects up to fetch due roots of kind (per terminal status, for the ended kind), and the age of the oldest
+// scanDue selects up to fetch due roots of kind (per terminal status, for the closed kind), and the age of the oldest
 // of them for a lagged kind (0 for none).
 func (e *Engine) scanDue(
 	ctx context.Context, db *sequel.DB, kind reapKind, residency string, residencyArgs []any, fetch int,
@@ -706,7 +706,7 @@ func lockRootsIn(ctx context.Context, tx *sequel.Tx, flows, where string, args .
 
 // rootsWithinRows returns the leading roots of roots (ascending) whose trees fit in about reapBatchRows rows, and at
 // least the first. A tree's rows are counted as its flows' joined steps, one for a flow with none. It reads outside
-// the batch's transaction - an ended tree's size does not move - so the batch locks only the roots it takes, and its
+// the batch's transaction - a closed tree's size does not move - so the batch locks only the roots it takes, and its
 // transaction still opens with a write, which SQLite needs.
 func (e *Engine) rootsWithinRows(ctx context.Context, db *sequel.DB, roots []int) ([]int, error) {
 	return e.rootsWithinRowsIn(ctx, db, liveTables, roots)

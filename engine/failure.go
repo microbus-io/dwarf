@@ -90,7 +90,7 @@ func (e *Engine) failStep(ctx context.Context, d *dispatch, taskErr error, held 
 	// which for a child with a fan-out is after its cohort fully resolves (the same cohort accounting below
 	// that governs a top-level flow), never eagerly on the first branch error. Failing the child eagerly
 	// while a sibling branch is still live would strand that sibling and any subgraph descendants it parked
-	// on: the interrupt/resume/terminate tree walks all skip a terminal flow, so nothing could ever release
+	// on: the interrupt/resume/terminate tree walks all skip a closed flow, so nothing could ever release
 	// them. parentStepID>0 iff this flow is a subgraph child.
 	parentStepID, lostLabel, err := e.dynamicSubgraphParent(ctx, db, flowID)
 	if err != nil {

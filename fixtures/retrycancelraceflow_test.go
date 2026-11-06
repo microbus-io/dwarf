@@ -31,7 +31,7 @@ import (
 
 // TestRetryCancelRaceflow pins the retry rewind's status guard. A Terminate landing mid-task terminalizes the
 // running step (terminated); if the task then arms flow.Retry, an unguarded rewind would flip the immutable
-// terminated step back to `pending` (with a backoff not_before minutes out) and reap the now-terminal tree's
+// terminated step back to `pending` (with a backoff not_before minutes out) and reap the now-closed tree's
 // subgraph children - a transient zombie plus an immutability violation. With the guard, the rewind is a
 // no-op against the terminated step: it stays terminated and is never re-dispatched.
 func TestRetryCancelRaceflow(t *testing.T) {

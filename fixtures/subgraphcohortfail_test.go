@@ -190,8 +190,8 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 		case workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusTerminated, workflow.StatusCancelled:
 		default:
 			nonTerminal++
-			t.Logf("non-terminal flow left in tree: %s status=%s", url, status)
+			t.Logf("open flow left in tree: %s status=%s", url, status)
 		}
 	}
-	assert.Equal(0, nonTerminal, "no flow in the tree may be left non-terminal (stranded)")
+	assert.Equal(0, nonTerminal, "no flow in the tree may be left open (stranded)")
 }

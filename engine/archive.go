@@ -35,7 +35,7 @@ import (
 const defaultRetentionDays = 30
 
 // SetRetention sets how many days the archive keeps each UTC day's records, counted from the end of that day: a day is
-// dropped as a whole once it ended at least days days ago. The default is 30. 0 keeps no archive: an ended flow is
+// dropped as a whole once it ended at least days days ago. The default is 30. 0 keeps no archive: a closed flow is
 // deleted rather than archived. To keep the archive indefinitely, pass a large number of days.
 //
 // Use the same value on every replica sharing a database: any of them may drop an expired day. Construction-time

@@ -94,7 +94,7 @@ func TestDelete_AnArchivedFlowIsDeletedInItsDay(t *testing.T) {
 	e := archiveEngine(t, treeMux(), 30)
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
-	root := endedRoots(t, e, 1)[0]
+	root := closedRoots(t, e, 1)[0]
 	rootKey, childKey := archivedTreeKeys(t, e, root, today)
 	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
 		t.Skip("midnight passed during the test")
@@ -135,7 +135,7 @@ func TestPurge_OldestArchivedFirstAndOnlyTheArchive(t *testing.T) {
 	assert.NoError(makeArchiveDay(t, e, today-2))
 	assert.NoError(makeArchiveDay(t, e, today-1))
 	assert.NoError(a.Refresh(ctx))
-	roots := endedRoots(t, e, 7)
+	roots := closedRoots(t, e, 7)
 	moveInto(t, e, roots[0], today-2)
 	moveInto(t, e, roots[1], today-1)
 	moveInto(t, e, roots[2], today-1)
@@ -202,7 +202,7 @@ func TestPurge_OldestArchivedFirstAndOnlyTheArchive(t *testing.T) {
 }
 
 // TestPurge_TheRefusals pins what Purge refuses with a 400 beside a missing window or Limit (TestPurge_EveryListFilterNarrows):
-// IncludeSubgraphs, a status that has not ended, and a Limit over the most a call takes.
+// IncludeSubgraphs, a status that has not closed, and a Limit over the most a call takes.
 func TestPurge_TheRefusals(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -219,17 +219,17 @@ func TestPurge_TheRefusals(t *testing.T) {
 	}
 }
 
-// TestLifecycle_AnArchivedFlowAnswersAsAnEndedOne pins Resume, Terminate and Cancel on an archived flow, found in the
-// archive when the live read misses: the answer any ended flow gets - Resume a 409, Terminate and Cancel a no-op that
+// TestLifecycle_AnArchivedFlowAnswersAsAClosedOne pins Resume, Terminate and Cancel on an archived flow, found in the
+// archive when the live read misses: the answer any closed flow gets - Resume a 409, Terminate and Cancel a no-op that
 // leaves the outcome as it was - a subgraph child's key a 400, and an unknown token a 404.
-func TestLifecycle_AnArchivedFlowAnswersAsAnEndedOne(t *testing.T) {
+func TestLifecycle_AnArchivedFlowAnswersAsAClosedOne(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
-	root := endedRoots(t, e, 1)[0]
+	root := closedRoots(t, e, 1)[0]
 	rootKey, childKey := archivedTreeKeys(t, e, root, today)
 	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
 		t.Skip("midnight passed during the test")
@@ -266,7 +266,7 @@ func TestDelete_AnArchivedTreeWaitsForAForkOfIt(t *testing.T) {
 	e := archiveEngine(t, treeMux(), 30)
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
-	root := endedRoots(t, e, 1)[0]
+	root := closedRoots(t, e, 1)[0]
 	rootKey, _ := archivedTreeKeys(t, e, root, today)
 	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
 		t.Skip("midnight passed during the test")

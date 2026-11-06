@@ -56,8 +56,8 @@ if !outcome.Stopped() {
 return respond(http.StatusOK, outcome)
 ```
 
-`Poll` waits exactly like `Await`, but **a ctx timeout is not an error**: it returns the flow's current,
-non-terminal outcome, whose `Stopped()` reports `false`. So it settles the "flow outlives the caller's
+`Poll` waits exactly like `Await`, but **a ctx timeout is not an error**: it returns the flow's current outcome,
+which has not stopped (`Stopped()` reports `false`). So it settles the "flow outlives the caller's
 deadline" problem in `Await`'s limits above without a hand-rolled `Snapshot` loop — and it still returns
 promptly the moment the flow stops, rather than sleeping out a fixed interval.
 
@@ -137,7 +137,7 @@ external party for you).
 
 ### A note on interrupts
 
-The orchestrator observes the subgraph's **terminal** outcome — success (normal transition) or failure
+The orchestrator observes the subgraph's **closed** outcome — success (normal transition) or failure
 (`onError`). It cannot react to the subgraph *interrupting*: an interrupt parks the whole chain, including the
 orchestrator's `CallSubgraph` step, so no task runs at that moment. To notify that a flow is **waiting for
 input**, put a notify task **before** the interrupting step — the task that is about to `flow.Interrupt`

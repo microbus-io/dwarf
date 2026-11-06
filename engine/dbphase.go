@@ -30,7 +30,7 @@ const (
 
 // enterDBPhase records that a worker has entered a metered database phase and returns the closer for it. The
 // closer is idempotent, because the entry phase ends at one specific line (immediately before the host call)
-// while every early return before it - a lost claim, a terminal flow, a failed load - must close it too.
+// while every early return before it - a lost claim, a closed flow, a failed load - must close it too.
 //
 // WHY THIS EXISTS. It answers two questions nothing else can:
 //

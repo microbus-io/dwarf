@@ -86,14 +86,14 @@
 
 ## Data and retention
 
-- [ ] **The retention is set to what you must keep.** Ended flows are archived and kept for `SetRetention` days
-  (30 by default), then dropped a day at a time; flows that have not ended are never removed by the engine, unless
-  they expire (below).
+- [ ] **The retention is set to what you must keep.** Closed flows are archived and kept for `SetRetention` days
+  (30 by default), then dropped a day at a time; open flows are never removed by the engine, unless they expire
+  (below).
   → [Data handling](data-handling.md#retention-and-deletion)
 - [ ] **Abandoned flows are bounded, if they can occur.** A flow left interrupted, or polling forever, stays in the
-  live tables until it ends. `SetFlowExpiration` terminates any flow older than it.
+  live tables until it closes. `SetFlowExpiration` terminates any flow older than it.
   → [Expiring flows that never end](flows.md#expiring-flows-that-never-end)
-- [ ] **The archive's disk is sized for the retention**: a day's ended flows times the retention, per shard.
+- [ ] **The archive's disk is sized for the retention**: a day's closed flows times the retention, per shard.
 - [ ] **Backups cover every shard on the same schedule**, and a restore has been rehearsed against a staging
   fleet — the part worth testing is what your workflows do when they re-run.
   → [Backup and restore](backup-and-restore.md)

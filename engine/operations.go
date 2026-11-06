@@ -440,7 +440,7 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 	if !found {
 		return nil, errors.New("flow not found", http.StatusNotFound)
 	}
-	// Only ended trees are archived. An archived flow that has not ended is one only a bug leaves, and reported as it
+	// Only closed trees are archived. An archived flow that has not closed is one only a bug leaves, and reported as it
 	// stands it would hold an Await until its deadline.
 	if archived && !workflow.IsTerminalStatus(flowStatus) {
 		return nil, errors.New("archived flow is %s", flowStatus, http.StatusInternalServerError)
@@ -486,7 +486,7 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 			return nil, errors.Trace(err)
 		}
 		if err == nil {
-			// A terminal flow's final_state is plain JSON, readable in any format; an interrupted one's state is
+			// A closed flow's final_state is plain JSON, readable in any format; an interrupted one's state is
 			// read from its step rows.
 			if err := checkPayloadVer(flowPayloadVer); err != nil {
 				return nil, errors.Trace(err)
@@ -786,7 +786,7 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 		flowID, flowToken, flowHour,
 	).Scan(&flowStatus, &surgraphFlowID)
 	if err == sql.ErrNoRows {
-		// An archived flow has ended, so it answers below as any ended flow does: a no-op.
+		// An archived flow is closed, so it answers below as any closed flow does: a no-op.
 		_, flowStatus, surgraphFlowID, err = e.archivedFlowRow(ctx, db, shardNum, flowID, flowToken, flowHour)
 	}
 	if err != nil {
@@ -796,7 +796,7 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 		return errors.New("cannot terminate a subgraph child; use the root flow key", http.StatusBadRequest)
 	}
 	if workflow.IsTerminalStatus(flowStatus) {
-		return nil // already ended: stopping a stopped flow is a no-op, as for Cancel
+		return nil // already closed: terminating a closed flow is a no-op, as for Cancel
 	}
 
 	// The root has no ancestors by construction, so this walks DOWN only - see terminateSubtree, which the orphan
@@ -833,7 +833,7 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 // inserted after it, and a flow that recovered is left alone; a flow that recovered and must still stop is
 // Terminated. Raising the watermark again would reach that handler, which is why a repeat never does. The
 // watermark write is itself guarded on cancel_watermark=0, so two concurrent calls that both read zero raise
-// it once. A no-op on a terminal flow, rather than a 409: the flow write is guarded to non-terminal flows, so
+// it once. A no-op on a closed flow, rather than a 409: the flow write is guarded to open flows, so
 // it can never rewrite a recorded outcome.
 func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) error {
 	if err := checkReason(reason); err != nil {
@@ -858,7 +858,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 		flowID, flowToken, flowHour,
 	).Scan(&surgraphFlowID, &watermark, &status)
 	if err == sql.ErrNoRows {
-		// An archived flow has ended, so it answers below as any ended flow does: a no-op.
+		// An archived flow is closed, so it answers below as any closed flow does: a no-op.
 		_, status, surgraphFlowID, err = e.archivedFlowRow(ctx, db, shardNum, flowID, flowToken, flowHour)
 	}
 	if err != nil {
@@ -868,7 +868,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 		return errors.New("cannot cancel a subgraph child; use the root flow key", http.StatusBadRequest)
 	}
 	if workflow.IsTerminalStatus(status) {
-		return nil // already ended - see above. The writes below re-guard it.
+		return nil // already closed - see above. The writes below re-guard it.
 	}
 
 	// Same tree-membership shape Terminate's descendant walk uses (root_flow_id scan, non-terminal nodes
@@ -971,9 +971,9 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	return nil
 }
 
-// deleteFlow removes an ended flow and its subgraph subtree. A live one is scheduled for deletion by the reaper - its
+// deleteFlow removes a closed flow and its subgraph subtree. A live one is scheduled for deletion by the reaper - its
 // rows are not deleted inline: it stamps delete_after_ms=1 (due immediately) on the root, and the reaper removes the
-// whole tree on its next pass. An archived one is deleted at once in its day (deleteArchivedFlow). A flow that has not ended is a 409: the caller terminates it first, so a live delete_after_ms never
+// whole tree on its next pass. An archived one is deleted at once in its day (deleteArchivedFlow). A flow that has not closed is a 409: the caller terminates it first, so a live delete_after_ms never
 // coexists with a resumable flow, and nothing a Delete does can race a Resume.
 func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	shardNum, flowHour, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
@@ -1008,13 +1008,13 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	if surgraphFlowID != 0 {
 		return errors.New("cannot delete a subgraph child; use the root flow key", http.StatusBadRequest)
 	}
-	// The 409 guards only the ROOT's status; a running subgraph descendant of a terminal root does not block the
+	// The 409 guards only the ROOT's status; a running subgraph descendant of a closed root does not block the
 	// delete. The reaper later removes the whole root_flow_id tree regardless of descendant status - safe because
 	// the only running descendant a terminal-rooted tree can hold is a live orphan (which only a bug leaves) the
 	// wedge sweep would terminate anyway, and a worker mid-dispatch on it no-ops via the lease fence (see
 	// reapDueFlows).
 	if !workflow.IsTerminalStatus(flowStatus) {
-		return errors.New("flow has not ended (status: %s); terminate it first", flowStatus, http.StatusConflict)
+		return errors.New("flow is open (status: %s); terminate it first", flowStatus, http.StatusConflict)
 	}
 	if deleteAfterMs > 0 {
 		return nil // already scheduled - idempotent
@@ -1174,7 +1174,7 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	var surgraphFlowID int
 	err = db.QueryRowContext(ctx, "SELECT status, surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?", flowID, flowToken, flowHour).Scan(&flowStatus, &surgraphFlowID)
 	if err == sql.ErrNoRows {
-		// An archived flow has ended, so it answers below as any ended flow does: not interrupted.
+		// An archived flow is closed, so it answers below as any closed flow does: not interrupted.
 		_, flowStatus, surgraphFlowID, err = e.archivedFlowRow(ctx, db, shardNum, flowID, flowToken, flowHour)
 	}
 	if err != nil {

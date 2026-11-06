@@ -74,7 +74,7 @@ full database, which the drops free, and a drop never reaches a day being writte
 Nothing drops today or a day after it - `Maintain` drops days before today minus the retention, `DropBefore` refuses a
 day after today - so a maintenance pass reads only the clock until the day changes, rather than a `Migrate` and a
 catalog read per day. The record is per Archive, so each replica, and each Startup, checks once. What it misses is a
-current day's tables dropped by hand; the reaper's move then fails, and the failure grace deletes the ended trees
+current day's tables dropped by hand; the reaper's move then fails, and the failure grace deletes the closed trees
 unarchived until the day changes.
 
 **A day that cannot be dropped does not hold back the next.** `dropDays` goes on past a failed day - its lock held

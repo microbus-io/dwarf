@@ -97,7 +97,7 @@ func TestCompleteFlowVsTerminate_BothOrders(t *testing.T) {
 		engineseams.Seams(e).Resume(engineseams.CheckpointBeforeCompleteFlowWrite)
 		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
 
-		// Terminate now arrives on a terminal flow: a no-op, and the flow stays completed.
+		// Terminate now arrives on a closed flow: a no-op, and the flow stays completed.
 		assert.NoError(e.Terminate(ctx, fk, "test"))
 		assert.Equal(workflow.StatusCompleted, enginetest.FlowStatus(t, e, fk))
 		enginetest.AssertInvariants(t, e)

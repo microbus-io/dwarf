@@ -266,7 +266,7 @@ func (e *Engine) releaseLease(ctx context.Context, db *sequel.DB, stepID, leaseS
 //
 // The two attempts are milliseconds apart and differ only in what they carry, which is what makes the
 // classification sound. Guessing the other way - terminalizing on any unknown error - would kill live flows on
-// every routine failover, and a terminal flow is immutable (recovery is a human running Fork).
+// every routine failover, and a closed flow is immutable (recovery is a human running Fork).
 func (e *Engine) failOnPersistError(ctx context.Context, d *dispatch, writeErr error, held stepHeld) error {
 	stepID, taskName := d.stepID, d.row.taskName
 	fenced, ferr := e.failStep(ctx, d, writeErr, held)

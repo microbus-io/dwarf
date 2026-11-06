@@ -92,5 +92,5 @@ func TestCompleteFlow_TransientReviveErrorIsRetriedNotLost(t *testing.T) {
 
 	assert.Equal(int32(1), xRuns.Load(), "the child task runs once; persist retries the WRITE, not the task")
 	assert.Equal(int32(2), callRuns.Load(), "the caller parks, then re-enters exactly once after the revive lands")
-	enginetest.AssertInvariants(t, e) // no strand: no terminal flow left with a live parked caller
+	enginetest.AssertInvariants(t, e) // no strand: no closed flow left with a live parked caller
 }

@@ -26,7 +26,7 @@ import (
 
 // TestTerminalStatusesSQL_MatchesIsTerminalStatus pins that the terminal-status list the engine inlines into
 // SQL holds exactly the statuses workflow.IsTerminalStatus calls terminal. A status added to one and not the
-// other would let a guarded write rewrite a terminal flow, or keep a live one out of a selection.
+// other would let a guarded write rewrite a closed flow, or keep an open one out of a selection.
 func TestTerminalStatusesSQL_MatchesIsTerminalStatus(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)

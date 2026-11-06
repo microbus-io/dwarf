@@ -126,7 +126,7 @@ type dispatch struct {
 // every early return below is covered and a double call is a no-op.
 func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, returnGateTurn func()) (err error) {
 	// The ENTRY phase runs from here to the host call. Closed through the returned closure rather than at
-	// that one line, because every early return in between - a lost claim, a terminal flow, a failed load -
+	// that one line, because every early return in between - a lost claim, a closed flow, a failed load -
 	// must close it too, and a missed close leaks the count upward for the life of the process. Idempotent,
 	// so closing it explicitly at the boundary AND deferring costs nothing.
 	closeEntryPhase := e.enterDBPhase(phaseEnter)
@@ -285,7 +285,7 @@ func (e *Engine) recoverStep(ctx context.Context, d *dispatch, err error) {
 	e.claims.RelinquishClaim(d.shard, d.stepID)
 }
 
-// claim claims the step and reads its row and its flow's, then gates on the flow: a terminal flow reaps the step,
+// claim claims the step and reads its row and its flow's, then gates on the flow: a closed flow reaps the step,
 // and a flow in a newer payload format defers it. done means the dispatch ends here.
 func (e *Engine) claim(ctx context.Context, d *dispatch) (done bool, err error) {
 	db, err := e.db.Shard(d.shard)
@@ -919,7 +919,7 @@ func (e *Engine) retry(ctx context.Context, d *dispatch) error {
 	// cohort is untouched.
 	// The rewind is guarded to status='running': a Terminate landing mid-task flips this step terminal
 	// (terminated), and an unguarded rewind would both revive an immutable terminal step and, via the reap,
-	// delete the now-terminal tree's subgraph children. So rewind first under the guard and reap (and
+	// delete the now-closed tree's subgraph children. So rewind first under the guard and reap (and
 	// re-dispatch) only when it actually rewound a still-running step; a lost guard (n==0) leaves the step
 	// terminal - Terminate already terminated its children - and returns without reaping or re-dispatching.
 	// Test checkpoint: a breakpoint here freezes the worker before the rewind, so a test can Terminate the
@@ -1494,7 +1494,7 @@ func (e *Engine) transitionTx(ctx context.Context, d *dispatch, tx *sequel.Tx) e
 	// pipelines.
 	batch := newTxBatch(ctx, tx)
 
-	// A transition on a terminal flow rolls back what was batched with the grab, which leaves it the same
+	// A transition on a closed flow rolls back what was batched with the grab, which leaves it the same
 	// clean no-op as a bail before any write.
 	if !pureArrival {
 		e.queueFlowGrab(ctx, d, batch, errTransitionFlowTerminal)
@@ -1625,8 +1625,8 @@ func (e *Engine) transitionTx(ctx context.Context, d *dispatch, tx *sequel.Tx) e
 
 // queueFlowGrab queues the transition's write-first grab of the flow row's lock, before any step is written (except
 // the deferred grab of a cohort arrival), guarded on non-terminal status, so a transition racing a Terminate or
-// failStep inserts nothing into a terminal flow. It is batched with what follows it, so its guard is read only after
-// those statements ran: a terminal flow matches no row, and its reader returns bail and leaves d.flowRowLocked false.
+// failStep inserts nothing into a closed flow. It is batched with what follows it, so its guard is read only after
+// those statements ran: a closed flow matches no row, and its reader returns bail and leaves d.flowRowLocked false.
 func (e *Engine) queueFlowGrab(ctx context.Context, d *dispatch, batch *txBatch, bail error) {
 	if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
 		e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(d.row.flowID)))

@@ -111,7 +111,7 @@ func TestArchiveMetrics_TheReaperCountsWhatItMoves(t *testing.T) {
 	e, reader := meteredArchiveEngine(t, treeMux(), 30)
 	shard1 := map[string]string{"shard": "1"}
 
-	roots := endedRoots(t, e, 2)
+	roots := closedRoots(t, e, 2)
 	// The older root is taken by the first batch, so a lag read from a later scan would be the younger one's; the lag
 	// is past the grace, so read without it, it would be 150.
 	e.archiveGrace = 30 * time.Second
@@ -138,7 +138,7 @@ func TestArchiveMetrics_TheReaperCountsWhatItMoves(t *testing.T) {
 
 	// Archiving fails: the first pass waits, and the next, past a grace of 0, deletes the tree unarchived.
 	e.archiveFailureGrace = 0
-	endedRoots(t, e, 1)
+	closedRoots(t, e, 1)
 	e.seams.InjectN(engineseams.FaultReapArchiveErr, 1000)
 	defer e.seams.Withdraw(engineseams.FaultReapArchiveErr)
 	e.reapDueFlows(ctx)
@@ -152,7 +152,7 @@ func TestArchiveMetrics_TheReaperCountsWhatItMoves(t *testing.T) {
 }
 
 // TestArchiveMetrics_DeletionsAreCountedByReason pins dwarf_flows_reaped's other two reasons - a tree scheduled for
-// deletion, and any ended tree at a retention of 0 - and dwarf_flows_removed for a Delete of a live root.
+// deletion, and any closed tree at a retention of 0 - and dwarf_flows_removed for a Delete of a live root.
 func TestArchiveMetrics_DeletionsAreCountedByReason(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -163,7 +163,7 @@ func TestArchiveMetrics_DeletionsAreCountedByReason(t *testing.T) {
 	assert.NoError(err)
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
 	assert.NoError(e.Delete(ctx, fk))
-	endedRoots(t, e, 1)
+	closedRoots(t, e, 1)
 	e.reapDueFlows(ctx)
 
 	rm := collect(t, reader)
@@ -181,11 +181,11 @@ func TestArchiveMetrics_RemovalsAreCountedBySide(t *testing.T) {
 	ctx := t.Context()
 	e, reader := meteredArchiveEngine(t, treeMux(), 30)
 
-	deleted := endedKeys(t, e, 1)
-	purged := endedKeys(t, e, 1)
+	deleted := closedKeys(t, e, 1)
+	purged := closedKeys(t, e, 1)
 	e.reapDueFlows(ctx)
 	assert.NoError(e.Delete(ctx, deleted[0]))
-	live := endedKeys(t, e, 1) // left in the live tables: the reaper does not pass again
+	live := closedKeys(t, e, 1) // left in the live tables: the reaper does not pass again
 	removed, _, err := e.Purge(ctx, workflow.Query{FromTime: time.Now().Add(-time.Hour), ToTime: time.Now().Add(time.Hour), Limit: 10})
 	assert.NoError(err)
 	assert.Equal(1, removed, "the archived root %s, not the live one %s", purged[0], live[0])
@@ -200,8 +200,8 @@ func TestArchiveMetrics_RemovalsAreCountedBySide(t *testing.T) {
 	assert.Zero(at(removedFromLive, "delete"))
 }
 
-// endedKeys runs n trees to completion and returns their root keys.
-func endedKeys(t *testing.T, e *Engine, n int) []string {
+// closedKeys runs n trees to completion and returns their root keys.
+func closedKeys(t *testing.T, e *Engine, n int) []string {
 	t.Helper()
 	var fks []string
 	for range n {
@@ -271,7 +271,7 @@ func TestArchiveMetrics_AReplicaThatStopsReapingForgets(t *testing.T) {
 	e, reader := meteredArchiveEngine(t, treeMux(), 30)
 	shard1 := map[string]string{"shard": "1"}
 	e.archiveFailureGrace = time.Hour
-	endedRoots(t, e, 1)
+	closedRoots(t, e, 1)
 	e.seams.InjectN(engineseams.FaultReapArchiveErr, 1000)
 	defer e.seams.Withdraw(engineseams.FaultReapArchiveErr)
 	e.reapDueFlows(ctx)
@@ -303,7 +303,7 @@ func TestArchiveMetrics_AnUnreadableDayIsAnArchiveFailure(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e, reader := meteredArchiveEngine(t, treeMux(), 30)
-	endedRoots(t, e, 1)
+	closedRoots(t, e, 1)
 	a := e.archives.Load().byShard[1]
 	today, err := a.Today(ctx)
 	assert.NoError(err)

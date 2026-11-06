@@ -33,7 +33,7 @@ import (
 // TestForkInterruptedCohortFlow pins why forking a failed branch of a cohort that also holds an interrupted
 // branch is not exploitable: the origin can never be terminal. A cohort can only fail-escalate once it fully
 // arrives, but an interrupted branch never arrives, so the flow rests `interrupted` (not `failed`), and Fork
-// rejects a non-terminal root. This is the structural guarantee behind the fork.go cloneSubtree guard - the
+// rejects an open root. This is the structural guarantee behind the fork.go cloneSubtree guard - the
 // interrupted step never reaches a fork clone in the first place.
 func TestForkInterruptedCohortFlow(t *testing.T) {
 	t.Parallel()
