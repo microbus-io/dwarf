@@ -136,6 +136,8 @@ func TestCrossShardPriorityflow(t *testing.T) {
 		assert.NoError(err)
 		highKeys = append(highKeys, k)
 	}
+	// Reported with the latency below, so a slow run says whether the database or the reaction took the time.
+	creating := time.Since(urgentAt)
 	releaseOnce.Do(func() { close(release) })
 
 	deadline, cancel := context.WithTimeout(ctx, 60*time.Second*enginetest.TimeoutScale())
@@ -161,7 +163,8 @@ func TestCrossShardPriorityflow(t *testing.T) {
 	// jitter while still failing loudly if the urgent bypass is lost or the floor is raised into
 	// dispatch latency.
 	assert.True(urgentLatency < 3*time.Second,
-		"urgent band-1 burst took %v to clear; it must be served on a band change, not held for scan floors", urgentLatency)
+		"urgent band-1 burst took %v to clear (%v of it creating the burst); it must be served on a band change, not held for scan floors",
+		urgentLatency, creating)
 
 	for _, k := range lowKeys {
 		outcome, err := eng.Await(deadline, k)
