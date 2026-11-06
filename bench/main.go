@@ -85,6 +85,7 @@ func run() error {
 		dsns         shardFlags
 		workloadName = flag.String("workload", "linear", "workload: linear, fanout, scatter, state, carry, carryfanout, loop, loopreplace, llm, mixed")
 		payload      = flag.Int("payload", 0, "payload size in bytes: fresh bytes written by every `linear`/`fanout` task, the size of each `scatter` element, rewritten every step by `state`, written once and then carried by `carry`/`carryfanout`, the message each `loop`/`loopreplace` step adds. 0 = no payload for linear/fanout/scatter, 64KB for state/carry, 1KB for loop")
+		payloadJSON  = flag.Bool("payload-json", false, "linear/fanout only, with -payload: write a JSON array of records of about that size instead of random characters. Its keys and words repeat, so it compresses as real JSON does (about 3x with flate) - the payload for measuring TOAST compression and wal_compression, where -payload's incompressible bytes measure raw write volume")
 		taskDelay    = flag.Duration("task-delay", 0, "per-task sleep simulating remote executor latency (the exec term)")
 		taskBurst    = flag.Duration("task-burst", 0, "bursty profile: apply -task-delay for this long, then drop it to zero for -task-quiet, repeating. 0 (with -task-quiet) keeps -task-delay constant for the whole run. A constant delay cannot see a crew that only shrinks once load FALLS - see taskProfile")
 		taskQuiet    = flag.Duration("task-quiet", 0, "bursty profile: the quiet half of the cycle, during which tasks do not sleep. Flows keep arriving at the same rate, so only the exec term moves")
@@ -265,6 +266,9 @@ func run() error {
 				*linearStepsFlag, effectivePayload(*workloadName, *payload), history, maxFinalState)
 		}
 	}
+	if *payloadJSON && (*payload <= 0 || (*workloadName != "linear" && *workloadName != "fanout") || *mixFlag != "") {
+		return fmt.Errorf("-payload-json needs -payload above 0 and -workload linear or fanout, without -mix")
+	}
 	regHost := &benchHost{
 		graphs:       map[string]*workflow.Graph{},
 		tasks:        map[string]func(context.Context, *workflow.Flow) error{},
@@ -273,7 +277,7 @@ func run() error {
 		delayDist:    dist,
 		bytesWritten: sharedBytes,
 	}
-	workloads := registerWorkloads(regHost, "", *payload, *fanOutWidth, *linearStepsFlag, *branchDepth, *carryRead)
+	workloads := registerWorkloads(regHost, "", *payload, *payloadJSON, *fanOutWidth, *linearStepsFlag, *branchDepth, *carryRead)
 	pick, err := chooseWorkload(workloads, *workloadName)
 	if err != nil {
 		return err
@@ -406,6 +410,7 @@ func run() error {
 			// What the workload actually writes: -payload 0 means none for linear/fanout/scatter but the
 			// 64KB default for state/carry, and an artifact must not record 0 for a run that wrote 64KB.
 			"payloadBytes": effectivePayload(*workloadName, *payload),
+			"payloadJSON":  *payloadJSON,
 			"taskDelayMs":  taskDelay.Milliseconds(),
 			// Recorded even when zero: an artifact that does not say whether the exec term was constant
 			// cannot be compared with one where it alternated, and the two measure different things.

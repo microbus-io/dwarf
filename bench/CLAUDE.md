@@ -498,7 +498,10 @@ at a size where it outlasts its timeout the fill never reaches a checkpoint at a
 ## Flags worth knowing
 
 `-payload P` (fresh incompressible bytes per `linear`/`fanout` task, the element size of `scatter`; 0 = none
-for those three, 64 KB for `state`/`carry`), `-workload scatter -branch-depth D` (the doc -> pages shape that
+for those three, 64 KB for `state`/`carry`), `-payload-json` (with `-payload` on `linear`/`fanout`: a JSON array
+of records of about that size whose keys and words repeat, ~3.4x under flate, so TOAST compression and
+`wal_compression` act on it as on real documents; the incompressible default measures raw write volume and hides
+what either compression buys), `-workload scatter -branch-depth D` (the doc -> pages shape that
 item refs change; each branch checks its element arrived whole), `-volume-probe D` (a saturated and a 2/3
 window at each `-volume` checkpoint, the backlog drained between them), `-print-pool RTT -server-max-connections N` (the
 budget the engine derives at that RTT against that server limit, for a script to pin), `-open-loop -arrival-rate N -max-outstanding M` (commanded rate + backpressure bound), `-replica-workers`

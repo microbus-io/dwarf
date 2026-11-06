@@ -137,7 +137,8 @@ func (f *freshBytes) nextN(n int) []string {
 // prefixes every graph and task URL under "bench/" (empty for the run's own set, "m1/" and so on for -mix classes).
 //
 //   - linear: a 10-step chain - the steps/s floor (pure dispatch + transaction cost). With -payload, every
-//     task writes fresh bytes of that size to `data`.
+//     task writes fresh bytes of that size to `data`, or with payloadJSON a compressible JSON document of about
+//     that size.
 //   - fanout: forEach over -fanout-width elements converging on a fan-in - cohort accounting + flow-row
 //     contention. With -payload, Split, every branch and Join each write fresh bytes to `data`, the same
 //     per-step write as linear, so at equal steps per flow the only difference between the two is the shape.
@@ -164,7 +165,7 @@ func (f *freshBytes) nextN(n int) []string {
 // reads a field is the case an engine can decline to materialize, and a task that reads every field is the
 // case where it cannot. Both arms store identically, so a storage measurement should not vary with it - if
 // one does, the workload is not carrying what it thinks it is.
-func registerWorkloads(h *benchHost, ns string, payloadBytes, fanOutWidth, chainSteps, branchDepth int, carryReadsDoc bool) map[string]*workload {
+func registerWorkloads(h *benchHost, ns string, payloadBytes int, payloadJSON bool, fanOutWidth, chainSteps, branchDepth int, carryReadsDoc bool) map[string]*workload {
 	// pre namespaces every graph and task URL, so -mix can register one set per payload and shape side by side.
 	pre := "bench/" + ns
 	if chainSteps < 1 {
@@ -181,15 +182,30 @@ func registerWorkloads(h *benchHost, ns string, payloadBytes, fanOutWidth, chain
 	// run: at -payload 250MB that is a 500MB fresh buffer (x -fanout-width), the 250MB state payload and ~2GB
 	// of unused carry records, which would read as engine memory in exactly the run that measures it.
 	fresh := sync.OnceValue(func() *freshBytes { return newFreshBytes(payloadBytes, max(1, fanOutWidth)) })
+	docs := sync.OnceValue(func() *jsonPayloads { return newJSONPayloads(payloadBytes) })
 	buildFresh := func() {
 		if payloadBytes > 0 {
 			fresh()
 		}
 	}
+	buildWrite := func() {
+		if payloadBytes > 0 && payloadJSON {
+			docs()
+		} else {
+			buildFresh()
+		}
+	}
 
 	// write: the linear and fanout task. -payload 0 makes it a no-op, the dispatch-cost floor.
 	h.tasks[pre+"write"] = func(ctx context.Context, f *workflow.Flow) error {
-		if payloadBytes > 0 {
+		switch {
+		case payloadBytes > 0 && payloadJSON:
+			doc := docs().next()
+			if err := f.Set("data", doc); err != nil {
+				return err
+			}
+			h.bytesWritten.Add(int64(len(doc)))
+		case payloadBytes > 0:
 			f.SetString("data", fresh().next())
 			h.bytesWritten.Add(int64(payloadBytes))
 		}
@@ -501,13 +517,13 @@ func registerWorkloads(h *benchHost, ns string, payloadBytes, fanOutWidth, chain
 			graphURL:     pre + "linear",
 			initialState: func() map[string]any { return nil },
 			stepsPerFlow: chainSteps,
-			build:        buildFresh,
+			build:        buildWrite,
 		},
 		"fanout": {
 			graphURL:     pre + "fanout",
 			initialState: func() map[string]any { return map[string]any{"items": fanoutItems} },
 			stepsPerFlow: fanOutWidth + 2,
-			build:        buildFresh,
+			build:        buildWrite,
 		},
 		"scatter": {
 			graphURL:     pre + "scatter",

@@ -111,7 +111,7 @@ func buildMix(h *benchHost, classes []mixClass, chainSteps int) (pick func() *wo
 		key := shape{c.payload, c.width, c.depth}
 		set := sets[key]
 		if set == nil {
-			set = registerWorkloads(h, fmt.Sprintf("m%d/", len(sets)+1), c.payload, c.width, chainSteps, c.depth, false)
+			set = registerWorkloads(h, fmt.Sprintf("m%d/", len(sets)+1), c.payload, false, c.width, chainSteps, c.depth, false)
 			sets[key] = set
 		}
 		w := *set[c.workload]
