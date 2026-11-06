@@ -26,7 +26,8 @@ vmssh() { local vm=$1 i; for i in 1 2 3 4 5; do
 pull() { local vm; for vm in "${VMS[@]}"; do mkdir -p "$OUT/$vm"
   ( vmssh "$vm" 'tar czf /tmp/out.tgz out 2>/dev/null' && gc compute scp --zone=$ZONE "$vm":/tmp/out.tgz "$OUT/$vm/out.tgz" >/dev/null 2>&1 &&
     (cd "$OUT/$vm" && tar xzf out.tgz && rm out.tgz) ) && log "artifacts from $vm saved" || log "ARTIFACT PULL FAILED: $vm"; done; }
-teardown() { log "teardown ${VMS[*]} $DB"
+teardown() { log "teardown in ${TEARDOWN_GRACE:-30}s (kill -9 $$ keeps the rig)"; sleep "${TEARDOWN_GRACE:-30}"
+  log "teardown ${VMS[*]} $DB"
   gc compute instances delete "${VMS[@]}" --zone=$ZONE --quiet >/dev/null 2>&1
   gc sql instances delete "$DB" --quiet --async >/dev/null 2>&1; }
 trap 'pull; teardown; log EXIT' EXIT

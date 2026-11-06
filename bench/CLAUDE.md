@@ -196,7 +196,8 @@ not the pool. Size the rig under the regime the experiment will actually run in.
 ## Running the cloud rig
 
 **The kit is `bench/gcp/rig/`.** Each orchestrator creates its rig, sources a step script, pulls the artifacts
-into `bench/results/redo-<name>-<date>/`, and tears everything down on exit, failures included.
+into `bench/results/redo-<name>-<date>/`, and tears everything down on exit, failures included, after a 30 s grace
+(`TEARDOWN_GRACE`) in which `kill -9` of the orchestrator keeps the rig for another arm.
 - **`x-rig.sh <name> <disk-gb> <step>`:** one Cloud SQL instance (`TIER`, default 32 vCPU) and one engine/admin VM
   (`VMTYPE`, default c4a-16).
 - **`xp-rig.sh <name> <tier> <vm-type> <tag>`:** the tier table's pairing, two engine hosts sharing one database,

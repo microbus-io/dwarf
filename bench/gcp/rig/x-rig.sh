@@ -26,7 +26,8 @@ vmssh() { local vm=$1 i; for i in 1 2 3 4 5; do
   gc compute ssh "$vm" --zone="$ZONE" --command "$2" -- -o ConnectTimeout=20 2>/dev/null && return 0; fw; sleep 15; done; return 1; }
 pull() { ( vmssh "$ADMIN" 'tar czf /tmp/out.tgz out 2>/dev/null' && gc compute scp --zone=$ZONE "$ADMIN":/tmp/out.tgz "$OUT/out.tgz" >/dev/null 2>&1 &&
   (cd "$OUT" && tar xzf out.tgz && rm out.tgz) ) && log "artifacts saved to $OUT" || log "ARTIFACT PULL FAILED"; }
-teardown() { log "teardown ${VMS[*]} ${DBS[*]}"
+teardown() { log "teardown in ${TEARDOWN_GRACE:-30}s (kill -9 $$ keeps the rig)"; sleep "${TEARDOWN_GRACE:-30}"
+  log "teardown ${VMS[*]} ${DBS[*]}"
   gc compute instances delete "${VMS[@]}" --zone=$ZONE --quiet >/dev/null 2>&1
   gc sql instances delete "$DB" --quiet --async >/dev/null 2>&1; }
 trap 'pull; teardown; log EXIT' EXIT

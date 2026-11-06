@@ -52,7 +52,8 @@ delvms() { local vm p=(); for vm in "$@"; do pullvm "$vm" & p+=($!); done; wait 
 delinst() { local n; for n in "$@"; do gc sql instances delete "$n" --quiet --async >/dev/null 2>&1
   INSTS=($(without "$n" "${INSTS[@]+"${INSTS[@]}"}")); done; log "deleting instances $*"; }
 # The final wait also lets the delayed dbcpu.sh readings land; nothing billable is left by then.
-teardown() { local vm n p=(); log "teardown: VMs ${VMS[*]+"${VMS[*]}"} instances ${INSTS[*]+"${INSTS[*]}"}"
+teardown() { local vm n p=(); log "teardown in ${TEARDOWN_GRACE:-30}s (kill -9 $$ keeps the rig)"; sleep "${TEARDOWN_GRACE:-30}"
+  log "teardown: VMs ${VMS[*]+"${VMS[*]}"} instances ${INSTS[*]+"${INSTS[*]}"}"
   for vm in "${VMS[@]+"${VMS[@]}"}"; do pullvm "$vm" & p+=($!); done; [ ${#p[@]} -gt 0 ] && wait "${p[@]}"
   [ ${#VMS[@]} -gt 0 ] && gc compute instances delete "${VMS[@]}" --zone=$ZONE --quiet >/dev/null 2>&1
   for n in "${INSTS[@]+"${INSTS[@]}"}"; do gc sql instances delete "$n" --quiet --async >/dev/null 2>&1; done; wait; }
