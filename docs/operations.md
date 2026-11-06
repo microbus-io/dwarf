@@ -121,7 +121,8 @@ Sizing is measured rather than guessed, and the numbers live with the measuremen
 - **[Cloud benchmarks](benchmark-cloud.md)** — the measurements: throughput, cost and failover against
   managed PostgreSQL across a real network hop.
 
-The rules to carry into a capacity plan: plan a 32-vCPU database at **~19,000 steps/s** of average load, check
+The rules to carry into a capacity plan: plan a 32-vCPU database at **~19,000 steps/s** of average load for steps
+with little state ([less with payloads](benchmark-cloud.md#payload-size)), size its checkpoints, check
 what your peaks cost in waiting ([planning for peaks](deployment.md#planning-for-peaks)), and give each shard
 **two engine replicas at half its vCPU**, either of which can carry the shard alone. Both assume your tasks
 are cheap; a host dispatching tasks over a network transport pays more engine CPU per step and should

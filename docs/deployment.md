@@ -60,6 +60,25 @@ many managed services default to, a long pass rescans the indexes many times and
 server setting: `postgresql.conf` or `ALTER SYSTEM`, or a database flag on a managed service. PostgreSQL 17 and
 later store dead rows far more compactly and need much less.
 
+**Size checkpoints for the write load.** PostgreSQL starts a checkpoint each time it has written about
+`max_wal_size / 1.9` of write-ahead log, and after each one the first change to every page writes the whole page to
+the log again. Under the 1.5 GB default many managed services use, a busy shard checkpoints every few seconds and
+spends much of its log on those page images. Set:
+
+- **`max_wal_size` ≈ 2 × peak WAL MB/s × 60 s**, so checkpoints at peak come about a minute apart. Read the WAL rate
+  from `pg_stat_wal.wal_bytes` (or the provider's WAL metric) over a peak interval, or estimate it from the
+  [WAL per step against payload](benchmark-cloud.md#payload-size).
+- **`checkpoint_timeout` to 15 minutes**, so WAL volume, not the clock, starts checkpoints.
+- **`wal_compression = lz4`** (PostgreSQL 15 and later). It compresses the page images.
+
+Measured on one 32 vCPU PostgreSQL 16 shard with 8 KB JSON payloads, saturated: 20 GB ran **47% more steps/s** than
+the 1.5 GB default (10,335 against 7,042), with half the page images per step, and `lz4` added 5% (against 9,829
+with it off). Larger settings cost recovery time and disk: crash recovery replays up to `max_wal_size` of log, and
+`pg_wal` holds that much. To check, turn on `log_checkpoints`: checkpoints requested by WAL volume more often than
+once a minute at peak (`pg_stat_bgwriter.checkpoints_req`; `pg_stat_checkpointer.num_requested` from PostgreSQL 17)
+mean `max_wal_size` is too small. These are PostgreSQL settings; MySQL sizes its redo log and SQL Server its
+recovery interval in their own ways.
+
 ### SQL Server
 
 Enable `READ_COMMITTED_SNAPSHOT ON` per shard database for Postgres-like non-blocking reads and near-zero
@@ -139,11 +158,15 @@ throughput is repeatable, the disk has enough headroom; provisioning past that p
 
 **The archive writes each closed flow's rows again.** Moving a flow copies its rows into the day's archive tables and
 deletes them from the live ones, and on PostgreSQL every archived row is frozen once more before the transaction-id
-counter wraps: a flow is written about three times over its life. So size the database's write throughput - its
-write-ahead log on PostgreSQL - in MB/s, at about three times what your flows write while they run. Measured on one
-32 vCPU PostgreSQL 16 shard under a realistic mix of workflows, the shard was bound by its write-ahead log at about
-210-225 MB/s, and archiving brought its sustained ceiling to about 68% of the same load with no archive (about 5,950
-against 8,750 steps/s).
+counter wraps. With little state per step this costs nothing measurable: one 32 vCPU PostgreSQL 16 shard ran ~24,100
+steps/s with the archive on. With payloads, the write-ahead log sets the pace: measured with JSON payloads, a step
+logged about 3.4 KB with no payload and about 10 KB plus 1.5 times its payload from 4 KB up
+([the table](benchmark-cloud.md#payload-size)). Size the database's write throughput in MB/s, from that.
+
+**On PostgreSQL the ceiling is the log's flush.** Each commit waits for the log to reach the disk, and the database
+flushes many commits together. Across 15 saturated runs on one 32 vCPU shard, every flush took about 0.8 ms plus its
+bytes at about 320 MB/s, so a step's log bytes and the disk's write latency and bandwidth set the shard's rate, not
+its CPU, which averaged 41–66%.
 
 ## Network distance to the database
 
@@ -388,8 +411,10 @@ measure your own workload: task shape, payload size and round-trip time all move
    `shards = average steps/s ÷ 19,000`, rounded up, then check that each peak's backlog drains in time and adds
    a wait you accept, or put the work that cannot wait in a higher priority band. Below one shard's worth,
    a 16 vCPU database (~6,700 sustained) or an 8 vCPU database (~4,000) costs less in total, at a higher
-   price per step. These figures were measured with no archive; with one, plan about two thirds of them
-   ([Disk throughput](#disk-throughput)).
+   price per step. These figures are for steps that carry little state. With payloads, plan from the
+   [payload table](benchmark-cloud.md#payload-size), 95% of its saturated rate: at 8 KB per step a 32 vCPU database
+   runs ~10,300 steps/s, at 64 KB ~2,800. Size its checkpoints too
+   ([PostgreSQL](#postgresql--recommended-for-production)).
 2. **Engine replicas.** Two per shard at half the database's vCPU: `2S` replicas of 8 vCPU for 32 vCPU
    shards. Each runs at about a third of its CPU and can carry its shard alone. A larger host can serve
    several shards instead: give its engine about one core per 3,300 steps/s its shards can deliver at
@@ -451,6 +476,7 @@ fresh database, averaged over a 16-minute window. The full conditions are in the
 | 1 × 8 | 2 × 2 vCPU | 4,186 |
 | 1 × 16 | 2 × 4 vCPU | 7,015–7,122 |
 | 1 × 32 | 1 × 16 vCPU | 21,878–21,952 |
+| 1 × 32, archive on, checkpoints sized (6-minute windows) | 1 × 16 vCPU | 23,938–24,262 |
 | 1 × 64 (`MaxConnections: 500`) | 1 × 16 vCPU | 29,415 |
 | 1 × 32 | 2 × 8 vCPU | 21,267 |
 | 2 × 32 | 4 × 8 vCPU | 43,135 |

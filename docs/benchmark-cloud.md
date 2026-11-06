@@ -8,15 +8,21 @@
 
 **What it delivers**
 
-- **One 32 vCPU PostgreSQL database runs ~21,900 steps/s**, about 1.9 billion steps a day, at the engine's
-  shipped defaults. Instances of the same size differ: others ran 20,000–24,100 steps/s on the same engine.
+- **One 32 vCPU PostgreSQL database runs ~24,100 steps/s with the archive on**, about 2.1 billion steps a day, at
+  the engine's shipped defaults and with the database's checkpoints sized as recommended. Instances of the same size
+  differ, so check yours ([method notes](#method-notes)).
+- **Payload is paid in write-ahead log.** With 8 KB of JSON per step the same database runs ~10,300 steps/s, with
+  64 KB ~2,800 (~176 MB/s of payload). Every flush of the log costs about 0.8 ms plus its bytes, so the bytes a step
+  logs set the rate.
+- **Size the database's checkpoints.** With 8 KB payloads, a 20 GB `max_wal_size` ran 47% more steps/s than the
+  1.5 GB default.
 - **32 vCPU is the most economical database size**, about $0.04 per million steps at full load. Smaller
   databases run out of CPU, larger ones are held back by the write-ahead log, so past 32 vCPU you add shards.
 - **The engine is cheap.** A shard's work takes about 5 engine cores. Two 8 vCPU engine hosts per
   32 vCPU database serve it at about a third of their CPU each, and either can carry it alone.
 - **Shards add throughput linearly.** Four 32 vCPU shards ran 81,530 steps/s, 3.8 times one shard, with
   each shard at ~95% of what its database runs alone.
-- **No flow failed in any run.** In the 226 runs behind this page, across 38 sessions, no flow errored and no
+- **No flow failed in any run.** In the 242 runs behind this page, across 39 sessions, no flow errored and no
   step was left stuck. The engine recovered a crashed worker's step only in the runs that killed engines on
   purpose.
 - **Failover takes about 40 seconds and loses nothing.** With every dispatcher killed at once, dispatch
@@ -55,11 +61,13 @@
 |---|---|
 | Cloud | Google Cloud, one zone; engine-to-database round trip ~0.06 ms |
 | Database | Cloud SQL for PostgreSQL 16, **32 vCPU**, 128 GB RAM, 1 TB SSD, default `max_connections` (1,000), unless a section says otherwise |
+| Database settings | From 2026-11-06: `max_wal_size` 20 GB, `checkpoint_timeout` 15 min, `wal_compression = lz4` ([why](#checkpoints)). Earlier runs: the service's defaults |
+| Archive | From 2026-11-06: on, at the default retention, so each closed flow moves to the archive about a minute after it closes. Earlier runs predate the archive and kept closed flows in the live tables |
 | Engine host | c4a-standard-16 (16 vCPU Arm), one replica per host, unless a section says otherwise |
 | Engine configuration | Shipped defaults: no pool size, no `MaxConnections`, no `Weight` |
 | Workload | `linear`: a 10-step chain of no-op tasks, no payload. It isolates the engine and database cost per step. |
 | Load | Saturated: flows are created as fast as the backlog allows, up to **2,000 in flight per shard** |
-| Window | 2 minutes of warmup, then a **16-minute measurement window**. Throughput is the window mean. |
+| Window | 2 minutes of warmup, then a **16-minute measurement window**; **6 minutes** from 2026-11-06, after a 16-minute run on that build held its rate to the end. Throughput is the window mean. |
 | Database | A fresh database for every run |
 | Outcome | No flow errors in any run |
 
@@ -80,15 +88,15 @@ Throughput, cost and behavior under failure, measured. Each section dates its ru
 
 ### One database
 
-On one 32 vCPU database, one engine replica ran **21,952, 21,931 and 21,878 steps/s** in three runs, about
-2,190 flows/s and 1.9 billion steps a day, steady from the first minute of each window to the last
-([minute by minute](#minute-by-minute)). A saturated flow waited in the 2,000-flow backlog, so it completed in
-a median of ~0.94 s, with a p99 of ~2.0 s. The engine used 5.1–5.3 cores of its 16 vCPU host.
-*(Measured 2026-10-17.)*
+On one 32 vCPU database with the archive on, one engine replica ran **24,242, 23,938 and 24,262 steps/s** in three
+runs (one 16-minute window, two 6-minute), about 2,410 flows/s and 2.1 billion steps a day. A saturated flow waited
+in the 2,000-flow backlog, so it completed in a median of ~0.89 s, with a p99 of 1.3 s. The engine used 5.5 cores
+of its 16 vCPU host, ~4,400 steps/s per core. The archive moved closed flows out as fast as they closed and kept
+the live tables at about a minute's worth of rows, 1.5 million steps.
+*(Measured 2026-11-06.)*
 
-Other instances of the same size, on the same engine, ran 19,960 and 24,107 steps/s, and two ran near 16,000.
-Those two spent ~40% more database CPU per step, so the difference is in the instance, not the load
-([method notes](#method-notes) describe how to check an instance).
+This instance spent 0.87 ms of database CPU per step. Instances of the same size differ, and a slow one spends more
+database CPU per step for the same load ([method notes](#method-notes) describe how to check an instance).
 
 ### Database size: what limits each
 
@@ -147,7 +155,7 @@ not raise it far:
   waits were ~0.
 - **Removing the top of the stack exposes the next one about 5% higher.** Turning off `synchronous_commit`
   eliminated write-lock waits and bought **+4%**, because buffer-page contention more than doubled.
-  `wal_compression` cost 5%: it reduces the log's bytes, and bytes are not what is scarce.
+  [Checkpoints](#checkpoints) covers the settings that cut the log's bytes.
 
 **So a shard must be its own server.** A PostgreSQL server has one write-ahead log, shared by every database on
 it. Same total connections, measured directly:
@@ -158,6 +166,33 @@ it. Same total connections, measured directly:
 | 2 databases, **two** servers | 13,995 | **×2.08** |
 
 *(Measured on 16 vCPU instances; these are properties of PostgreSQL, not of the engine.)*
+
+**Every flush costs a fixed time plus its bytes.** Across 15 saturated runs on one 32 vCPU database, at payloads
+from none to 64 KB, a flush of the log took about **0.8 ms plus its bytes at ~320 MB/s**. With no payload a flush
+carried ~65 commits of ~70 KB and took ~0.85 ms, about 1,200 a second; at 64 KB it carried ~2.2 MB and took ~7.5 ms.
+That is the disk's write latency and bandwidth, and it is why a step's log bytes set its shard's rate
+([Payload size](#payload-size)): the database's mean CPU stayed at 41–66% in every run. *(Measured 2026-11-06.)*
+
+### Checkpoints
+
+PostgreSQL starts a checkpoint each time it has written about `max_wal_size / 1.9` of log, and after it the first
+change to each page logs the whole page. One 32 vCPU database, 8 KB of JSON per step, saturated, 16 minutes each:
+
+| `max_wal_size` | `wal_compression` | steps/s | checkpoints | log per step | whole pages logged per step | flow p99 |
+|---|---|---|---|---|---|---|
+| 20 GB | `lz4` | **10,335** | every ~50 s | 21.7 KB | 1.83 | 6.0 s |
+| 20 GB | off | 9,829 | every ~50 s | 22.7 KB | 1.80 | 6.9 s |
+| 1.5 GB (the service's default) | `lz4` | 7,042 | every 5–10 s | 28.2 KB | 3.60 | 11.0 s |
+
+- **The checkpoint size is the large lever:** +47%. At the default the database checkpoints every few seconds,
+  logs twice the whole pages per step, and its rate swings from one 10-second sample to the next.
+- **`lz4` is a small one:** +5%. The pages it compresses already hold PostgreSQL's compressed copies of the
+  payloads, so it finds little left to remove.
+- **Size it from the WAL rate:** `max_wal_size` ≈ 2 × peak WAL MB/s × 60 s puts checkpoints about a minute apart
+  at peak. With no payload this database logged ~83 MB/s and checkpointed every ~135 s at 20 GB. The settings are
+  in [Deployment](deployment.md#postgresql--recommended-for-production).
+
+*(Measured 2026-11-06.)*
 
 ### Shards: throughput adds up
 
@@ -283,6 +318,11 @@ starts at is the rate to plan on. Over hours and a growing database, [Database v
 
 *(Measured 2026-10-17.)*
 
+With the archive on, the 16-minute run held 23,800–25,300 steps/s from its fourth minute to its last
+*(2026-11-06)*. Its first three minutes ran ~8% lower, on a database server created minutes before: until its
+first checkpoints complete, a new server creates each 16 MB log file instead of reusing one, and every commit waits
+behind that. Runs later on the same server started at full rate.
+
 ### Sustained load
 
 ![Commanded at 100% and at 95% of a database's saturated rate](benchmark-cloud-headroom.png)
@@ -393,71 +433,46 @@ orchestrator would. Admission stops at minute 18.
   admission stopped 4 minutes later, and they completed within 3 minutes. A fleet with more headroom
   catches up faster.
 
-### Workload shape and payload
+### Payload size
 
-Three workflow shapes on one 32 vCPU database, at payloads from 0 to 1 MB. Every flow has 10 steps:
+The 10-step `linear` workflow on one 32 vCPU database with the archive on, each task writing a fresh JSON document
+of the given size: an array of records whose keys and words repeat, like real documents. It compresses about
+3.4 times, so the database stores and logs it compressed, as it would yours. Saturated, 6-minute windows (8 KB:
+16 minutes), checkpoints sized as recommended:
 
-- **Linear:** a chain of 10 tasks, each writing a fresh payload of the given size to the flow's state.
-- **Fan-out:** a task splits into 8 parallel branches that join again. Every step, branches included, writes a
-  fresh payload: the same per-step write as linear, so the two differ only in shape.
-- **Scatter:** the first task writes an array of 8 elements of the given size. Each of the 8 branches reads its
-  own element and writes nothing, and the join does nothing. This is the shape of a document split into pages.
+| Payload | steps/s | Payload MB/s | Log MB/s | Log per step | Whole pages logged per step | Flow p50 | Flow p99 |
+|---|---|---|---|---|---|---|---|
+| none | ~24,100 | — | 83 | 3.4 KB | 0.11 | 0.89 s | 1.3 s |
+| 1 KB | 15,240 | 13 | 187 | 12.0 KB | 1.16 | 1.4 s | 2.8 s |
+| 2 KB | 17,333 | 33 | 161 | 9.1 KB | 0.61 | 1.2 s | 2.7 s |
+| 4 KB | 13,828 | 52 | 202 | 14.3 KB | 1.22 | 1.4 s | 3.9 s |
+| 8 KB | 10,335 | 78 | 229 | 21.7 KB | 1.83 | 1.8 s | 6.0 s |
+| 16 KB | 6,701 | 105 | 254 | 37.0 KB | 3.32 | 2.3 s | 11.2 s |
+| 64 KB | 2,819 | 176 | 306 | 105.9 KB | 8.59 | 6.4 s | 23.5 s |
 
-Payloads are incompressible. One run per cell, saturated, 16-minute window.
+- **From 4 KB up, a step logs about 10 KB plus 1.5 times its payload**, and throughput follows the log: each
+  flush costs ~0.8 ms plus its bytes ([above](#the-write-ahead-log-and-why-a-shard-is-its-own-server)). Plan
+  large payloads in log MB/s, not steps/s.
+- **Small payloads cost the most per byte, and 1 KB ran slower than 2 KB.** The likely reason: PostgreSQL
+  compresses a row's large values only once the row passes about 2 KB, so a 1 KB payload is stored and logged
+  whole, while a 2 KB one is compressed to less.
+- **Fan-out costs the same.** The 8-branch fan-out, also 10 steps per flow, ran 23,459 steps/s with no payload,
+  12,764 at 4 KB and 2,679 at 64 KB: 3–8% below `linear` at each.
+- **Saturated latency grows with the payload.** At 64 KB a flow's p99 was 23.5 s. These are saturated runs; a
+  database offered 95% of its rate keeps flows far shorter ([Sustained load](#sustained-load)).
 
-| Payload | Linear, steps/s | Fan-out, steps/s | Scatter, steps/s |
-|---|---|---|---|
-| none | 20,352 | 20,961 | — |
-| 1 KB | 15,901 | 16,093 | 19,443 |
-| 4 KB | 15,635 | 15,945 | 14,990 |
-| 64 KB | 3,445 | 2,958 | 2,392 |
-| 256 KB | — | — | 655 |
-| 1 MB | 271 | 249 | 176 |
+*(Measured 2026-11-06.)*
 
-*These runs come from one session of their own on an earlier engine (2026-10-13/14), except scatter at 1 MB,
-measured in a later session. Its no-payload rows ran ~4–7% below the current [headline](#one-database), so
-compare rows within this table.*
+### Engine memory with large payloads
 
-**Small payloads, measured 2026-10-14.** For 1 KB and 4 KB, read this table rather than the rows above, which
-come from an earlier build. `linear`, one session:
-
-| Payload | steps/s | vs no payload | Last 5 minutes |
-|---|---|---|---|
-| none | 19,154 | — | 18,400 |
-| 1 KB | 17,543 | −8% | 17,100 |
-| 2 KB | 17,021 | −11% | 16,500 |
-| 4 KB | 15,387 | −20% | 14,800 |
-
-**Throughput falls with payload in two regimes:**
-
-- **Up to a few KB per step, rows are the limit.** 1 KB costs 8%, and each further KB about 4%.
-- **From ~64 KB up, bytes are the limit:** about 230–280 MB/s of payload per 32 vCPU database. Plan large-payload
-  throughput as steps/s ≈ 250 MB/s ÷ payload per step: 64 KB gives ~3,900 (3,445 measured), 1 MB gives ~240
-  (271 measured).
-
-Across the shapes:
-
-- **The byte ceiling by shape.** Linear wrote ~226 MB/s of payload at 64 KB and ~284 MB/s at
-  1 MB, and fan-out ~194 and ~261 MB/s. Scatter writes each array once, so its rate is lower: ~125 MB/s at
-  64 KB and ~137 MB/s at 256 KB.
-- **Little is written beyond the payload.** At 64 KB and 1 MB, the write-ahead log grew by 1.2–1.3 times the
-  payload, and stored data by about 1.15 times.
-- **Shape matters little.** Fan-out ran within 2% of linear up to 4 KB, and 8–14% below it at 64 KB and 1 MB.
-- **Scatter branches read only their own element.** At 1 KB per element, the engine read about the same
-  ~2.2 KB per branch with 64 branches as with 8. Widening the fan-out from 8 to 64 branches cost 20% of
-  steps/s (15,592 vs 19,443).
-- **Deeper scatter branches cost nothing extra.** 4 branches two steps deep ran 19,033 steps/s at 1 KB.
-- **Many fairness keys cost nothing on fan-out.** Spreading flows over 512 fairness keys instead of one ran
-  22,454 steps/s against 20,961.
-- **The database is the limit at every payload.** The engine host stayed at 25–41% of its CPU in every run.
-
-**Engine memory with large payloads.** The engine keeps recently written and read large state fields in memory,
-so the steps that read them next do not go back to the database. That cache, not the work in progress, is most
+The engine keeps recently written and read large state fields in memory, so the steps that read them next do not
+go back to the database. That cache, not the work in progress, is most
 of the engine's memory with large payloads. State inside running tasks never exceeded 25 MB.
 
 The cache is sized in bytes: by default a tenth of the memory the engine's process may use, `GOMEMLIMIT` when it
-is set ([`SetStateCacheSize`](deployment.md) chooses another size). Scatter on one 32 vCPU database and a 64 GB
-engine host, with the cache at several sizes:
+is set ([`SetStateCacheSize`](deployment.md) chooses another size). One 32 vCPU database and a 64 GB engine host, a
+scatter workflow (a task writes an array of 8 incompressible elements; each of 8 branches reads its own), with the
+cache at several sizes:
 
 | Workload | Cache | steps/s | Engine heap, mean | Engine heap, peak |
 |---|---|---|---|---|
@@ -595,8 +610,12 @@ all:
 - **Size disk IOPS to the write rate.** Cloud SQL provisions ~30 IOPS per GB, so a 100 GB disk gives ~3,000
   IOPS (~23 MB/s of random writes) and a write-heavy workload measures the disk. Every run here used 1 TB, except
   the stored-data fill, which used 2 TB to hold it.
-- **Use incompressible payloads.** PostgreSQL compresses large values, and repetitive test payloads measured
-  ~3 times higher than real ones.
+- **Know what your test payload compresses to.** PostgreSQL compresses large values. A repetitive payload, such as
+  one character repeated, compresses far more than real data and measured ~3 times higher than incompressible
+  bytes. These runs used incompressible bytes to measure raw write volume and, for [Payload size](#payload-size),
+  JSON that compresses about 3.4 times, like real documents.
+- **Warm a new database server past its first checkpoints.** Until then it creates its log files rather than
+  reusing them, and a saturated run's first minutes measured ~8% lower ([Minute by minute](#minute-by-minute)).
 - **Record the round trip beside every throughput number**, and compare runs only within one instance:
   placement within a zone varies the round trip.
 - **Check each instance before trusting its numbers.** On one engine and one rig setup, 32 vCPU instances ran
@@ -614,6 +633,7 @@ GOOS=linux GOARCH=arm64 go build -o dwarf-bench ./bench
   -workload linear -payload 0 -open-loop -arrival-rate 0 -concurrency 256 -max-outstanding 2000 \
   -warmup 2m -window 16m -stats-interval 10s -label saturated
 
+# Compressible JSON payloads of about 8 KB per task: -payload 8192 -payload-json
 # A fixed offered rate instead (flows/s): -arrival-rate 1000
 # More shards: repeat -dsn with 2=..., 3=...; replicas are separate processes on separate hosts.
 # Long tasks: -task-delay 8s, or -workload llm -task-delay 60s -concurrency 10000 for closed-loop in-flight.

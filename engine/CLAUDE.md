@@ -3414,6 +3414,15 @@ archived flow as it read it live ("Reading an archived flow" below), and `Fork` 
 lists it. **Retention counts from archiving, not from the
 end**: a tree archived late - after an outage, say - is kept its full retention from then.
 
+**Do not shorten `archiveGrace` to cut the archive's WAL.** A shorter grace does log less - a row that leaves the live
+tables sooner outlives fewer checkpoints, so fewer of its pages are logged whole - but the reaper then deletes from
+pages the hot path is still inserting into and updating, and the shard pays for it in CPU. Measured on one 32 vCPU
+PG16 shard, 8 KB JSON per step, saturated, `max_wal_size` 20 GB: 1 min / 30 s / 15 s ran 10,335 / 10,214 / 9,680
+steps/s, with whole pages logged per step 1.83 / 1.26 / 1.03 and database CPU per step 1.52 / 1.78 / 1.88 ms; at 15 s
+`BufferContent` waits rose and the refill fetch averaged 197 ms against 17. Throughput was set by the WAL flush cycle
+in every arm, so neither trade moved it far, and 1 min is best on both CPU and throughput. The grace is also the
+window in which a disposable flow's outcome stays readable.
+
 Deleting without archiving is either operator-driven (`Delete`, `Purge`) or an explicit author opt-in
 (`DeleteOnCompletion`): a flow whose output and history are not needed. `Delete` reaches both sides: a closed flow
 still live is marked, an archived one deleted at once in its day (`deleteArchivedTrees`); `Purge` reads only the
