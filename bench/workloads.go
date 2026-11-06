@@ -470,8 +470,9 @@ func registerWorkloads(h *benchHost, ns string, payloadBytes, fanOutWidth, chain
 	h.graphs[pre+"interrupt"] = interrupt
 
 	// hold: -volume-side live. It runs a workload's graph as its subgraph, then interrupts and is never resumed, so
-	// the whole tree stays open - in the live tables - however the workload's own flow ends: the archive moves a tree
-	// only once its root closes. Two tasks, because a step parks once, for a subgraph or an interrupt.
+	// the whole tree stays open - in the live tables - once the workload's own flow completes: the archive moves a tree
+	// only once its root closes. A workload flow that fails fails the root, which then closes and is archived, and the
+	// fill counts it as an error. Two tasks, because a step parks once, for a subgraph or an interrupt.
 	h.tasks[pre+"holdrun"] = func(ctx context.Context, f *workflow.Flow) error {
 		var in map[string]any
 		if _, err := f.Get("holdIn", &in); err != nil {

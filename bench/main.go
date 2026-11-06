@@ -122,7 +122,7 @@ func run() error {
 		// engine so its registry rows go stale, not silencing anything.
 		replicas        = flag.Int("replicas", 1, "number of in-process engine replicas sharing the database(s) (1 = single engine)")
 		replicaWorkers  = flag.String("replica-workers", "", "comma-separated per-replica worker counts overriding -workers (e.g. '0,4' = replica 1 awaits only)")
-		volume          = flag.Int("volume", 0, "volume mode: fill to this many step rows with NO deletion, probing the read paths at checkpoints, then measure one Purge (0 = disabled)")
+		volume          = flag.Int("volume", 0, "volume mode: fill to this many step rows with NO deletion, probing the read paths at checkpoints, then, on the archive side, measure one Purge (0 = disabled)")
 		volumeSide      = flag.String("volume-side", volumeArchive, "-volume only: which tables the fill grows - archive (flows close and are archived; the rows counted are both sides') or live (every flow is held open under a root that interrupts, so the live tables grow)")
 		volumeCheckpt   = flag.Int("volume-checkpoint", 0, "probe every this many step rows during -volume (0 = one fifth of the target)")
 		volumeMB        = flag.String("volume-checkpoints-mb", "", "volume mode by stored size, PostgreSQL only: comma-separated MB of dwarf_steps on disk to probe at, ascending; the fill stops at the last. Takes the place of -volume, which then only caps the rows")
@@ -131,7 +131,7 @@ func run() error {
 		printPool       = flag.Float64("print-pool", 0, "print the budget the engine derives for one PostgreSQL shard at this round-trip time in ms against -server-max-connections, and exit - what a driver script pins with -max-connections, so every arm runs the pool that ships")
 		serverMaxConns  = flag.Int("server-max-connections", 0, "-print-pool only: the server's max_connections the budget is clamped to half of (0 = unknown, no clamp)")
 		volumeProbeWL   = flag.String("volume-probe-workload", "linear", "-volume-probe only: the workload the probe windows run, which need not be the fill's - a bytes-axis fill is `state` while its probes measure `linear`")
-		volumeProbe     = flag.Duration("volume-probe", 0, "-volume only: at each checkpoint (and on the empty database first), pause the fill for an open-loop saturated window of this length and then one at 2/3 of its flows/s, at the pinned pool (0 = no throughput probe)")
+		volumeProbe     = flag.Duration("volume-probe", 0, "-volume only: at each checkpoint (and on the empty database first), pause the fill for an open-loop saturated window of this length and then one at 2/3 of the flow rate it served, at the pinned pool (0 = no throughput probe)")
 		fairnessKeys    = flag.Int("fairness-keys", 1, "spread flows across this many distinct fairness keys (1 = all on the single default key, the degenerate case for the refiller's per-key scan bound)")
 		linearStepsFlag = flag.Int("linear-steps", linearSteps, "linear workload chain length, and the number of messages a `loop`/`loopreplace` flow ends with; sweeping it separates a slow replica's share of STEPS from its share of FLOWS (see workloads.go)")
 		fanOutWidth     = flag.Int("fanout-width", 16, "forEach branch count for the fanout, scatter and carryfanout workloads - the knob that decouples pending-step backlog from submitter concurrency (backlog ~= concurrency x width)")
@@ -559,7 +559,7 @@ func run() error {
 		for _, n := range report.OpErrors {
 			totalErrs += n
 		}
-		fmt.Printf("soak ops: %v  errors: %v  purged: %d\n", report.Ops, report.OpErrors, report.Purged)
+		fmt.Printf("soak ops: %v  errors: %v  purged: %d  sweep errors: %d\n", report.Ops, report.OpErrors, report.Purged, report.SweepErrors)
 		switch {
 		case report.Stalled != "":
 			art.Valid = false
@@ -573,6 +573,10 @@ func run() error {
 			art.Valid = false
 			art.Invalidity = fmt.Sprintf("soak: opErrors=%d unwedged=%d orphaned=%d writeFailed=%d",
 				totalErrs, final.Unwedged, final.Orphaned, final.WriteFailed)
+		case report.SweepErrors != 0:
+			// A retention sweep that fails leaves the archive growing, which is what the soak watches for.
+			art.Valid = false
+			art.Invalidity = fmt.Sprintf("soak: the retention sweep failed %d times", report.SweepErrors)
 		}
 	} else {
 		fmt.Printf("%-6s %10s %10s %10s %8s %8s %8s %7s %7s %9s %8s %8s %7s\n",

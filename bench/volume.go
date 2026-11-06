@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,6 +28,7 @@ import (
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
@@ -68,12 +70,15 @@ type volumeCheckpoint struct {
 	StepsDiskMB     float64 `json:"stepsDiskMB"`
 	FlowsDiskMB     float64 `json:"flowsDiskMB"`
 	// The archive side's probes and sizes: History and Step of the fill's first flow, read from the archive's
-	// oldest day; ListClosed's newest 100 of the last day; and the day tables' size, every day summed.
+	// oldest day (a newer flow once a retention drops that day); ListClosed's newest 100 of the last day; and the day tables' size, every day summed.
 	ArchivedHistoryMs  float64 `json:"archivedHistoryMs,omitzero"`
 	ArchivedStepMs     float64 `json:"archivedStepMs,omitzero"`
 	ListClosedMs       float64 `json:"listClosedMs,omitzero"`
 	ArchiveStepsDiskMB float64 `json:"archiveStepsDiskMB,omitzero"`
 	ArchiveFlowsDiskMB float64 `json:"archiveFlowsDiskMB,omitzero"`
+	// ArchivedProbeMoved says the archived reads moved to a newer flow at this checkpoint: the flow probed until
+	// then was dropped with its day by the retention.
+	ArchivedProbeMoved bool `json:"archivedProbeMoved,omitzero"`
 	// RowCountError is why the exact row count failed at this checkpoint; StepRows is then the estimate that
 	// triggered it and FlowRows is 0.
 	RowCountError string `json:"rowCountError,omitzero"`
@@ -189,10 +194,18 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 	}
 	// exactRows takes the exact count and rebases the estimate on it. On a failed count it keeps the old base,
 	// records the failure and returns the estimate.
-	var baseRows, baseExec int64
+	//
+	// On the live side every fill flow's Run step executes twice - once to start its subgraph, once when the
+	// subgraph returns - for one row, so the estimate takes one execution off per finished fill flow. Flows in
+	// flight overcount it by at most the concurrency until the next exact count.
+	var baseRows, baseExec, baseFlows int64
 	estimate := func() int64 {
 		if n := executed(); n >= 0 {
-			return baseRows + n - baseExec
+			est := baseRows + n - baseExec
+			if side == volumeLive {
+				est -= flows.Load() - baseFlows
+			}
+			return est
 		}
 		return -1
 	}
@@ -203,7 +216,7 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 			return int(max(0, estimate())), 0, err
 		}
 		if n := executed(); n >= 0 {
-			baseRows, baseExec = int64(steps), n
+			baseRows, baseExec, baseFlows = int64(steps), n, flows.Load()
 		}
 		return steps, flowRows, nil
 	}
@@ -258,6 +271,7 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 	}
 	steps, flowRows, _ := exactRows("at the start")
 	lastRows, lastT := steps, start
+	prevKey := "" // the flow the read probe sampled at the previous checkpoint
 	if probe != nil {
 		// The empty-database baseline every later checkpoint is read against. The fill rate to the first
 		// checkpoint starts after it, so it is not charged with the probe's windows, drains or rows.
@@ -328,6 +342,11 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 		}
 		now := time.Now()
 		steps, flowRows, cerr := exactRows(fmt.Sprintf("near %d step rows", next))
+		if cerr == nil && len(checkpointsMB) == 0 && steps < next && steps < targetSteps {
+			// The estimate ran ahead of the rows. The exact count has rebased it, so the fill goes on to the same
+			// checkpoint rather than taking it short - and then again once it is reached.
+			continue
+		}
 		cp := volumeCheckpoint{
 			TSec:            now.Sub(start).Seconds(),
 			StepRows:        steps,
@@ -337,10 +356,25 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 		if cerr != nil {
 			cp.RowCountError = cerr.Error()
 		}
-		cp.HistoryMs, cp.ListFirstMs = probeReads(ctx, engines[0], recentKey.Load().(string))
-		if side == volumeArchive {
-			cp.ArchivedHistoryMs, cp.ArchivedStepMs, cp.ListClosedMs = probeArchivedReads(ctx, engines[0], firstKey.Load().(string))
+		var perr error
+		cp.HistoryMs, cp.ListFirstMs, perr = probeReads(ctx, engines[0], recentKey.Load().(string))
+		if perr != nil {
+			invalid(fmt.Sprintf("read probe at %d step rows", steps), perr.Error())
 		}
+		if side == volumeArchive {
+			cp.ArchivedHistoryMs, cp.ArchivedStepMs, cp.ListClosedMs, perr = probeArchivedReads(ctx, engines[0], firstKey.Load().(string))
+			if errors.StatusCode(perr) == http.StatusNotFound && prevKey != "" {
+				// The first flow's day was dropped by the retention (a short DWARF_ARCHIVE_DAY reaches it within a
+				// run): the archived probe moves to the flow sampled at the previous checkpoint, archived since.
+				cp.ArchivedProbeMoved = true
+				firstKey.Store(prevKey)
+				cp.ArchivedHistoryMs, cp.ArchivedStepMs, cp.ListClosedMs, perr = probeArchivedReads(ctx, engines[0], prevKey)
+			}
+			if perr != nil {
+				invalid(fmt.Sprintf("archived read probe at %d step rows", steps), perr.Error())
+			}
+		}
+		prevKey = recentKey.Load().(string)
 		st := dbs.sample(ctx)
 		cp.StepsDiskMB = float64(st.StepsBytes) / (1 << 20)
 		cp.FlowsDiskMB = float64(st.FlowsBytes) / (1 << 20)
@@ -396,7 +430,12 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 	report.Errors = errCount.Load()
 
 	// Retention at size: one Purge call (4,096 roots) deletes the oldest archived trees at once. Purge reads only the
-	// archive, so the trees closed within the archive grace are not among them.
+	// archive, so the trees closed within the archive grace are not among them - and on the live side, which closes
+	// no fill flow, there is nothing of the fill's to purge.
+	if side == volumeLive {
+		fmt.Println("purge: not measured on the live side, whose fill closes no flow")
+		return report
+	}
 	pctx, pcancel := context.WithTimeout(ctx, 2*time.Minute)
 	purgeStart := time.Now()
 	purged, _, err := engines[0].Purge(pctx, workflow.Query{Status: workflow.StatusCompleted,
@@ -429,10 +468,6 @@ func drainRunning(ctx context.Context, eng *engine.Engine) {
 	fmt.Println("drain: flows still running after 10m; the next window opens on a backlog")
 }
 
-// rowCounts counts the live step and flow rows across every shard, exactly, with a COUNT(*) on each table:
-// dialect-agnostic, unlike the catalog queries the disk sampler uses. It is a full scan of both tables per
-// shard, which the bench can afford against databases it owns, but not on a poll. It fails if any shard fails
-// to count: a zero would read as an empty database.
 // The two -volume-side values.
 const (
 	volumeLive    = "live"
@@ -440,8 +475,11 @@ const (
 )
 
 // rowCounts returns the step and flow rows in the live tables on every shard, and with archive those in every archive
-// day's tables too. The tables are counted one after another, not in one snapshot, so a tree the reaper moves between
-// two counts is counted twice or missed: a count is exact to within a reaper batch.
+// day's tables too, with a COUNT(*) on each table: dialect-agnostic, unlike the catalog queries the disk sampler uses.
+// Each is a full scan, which the bench can afford against databases it owns, but not on a poll. The tables are counted
+// one after another, not in one snapshot, so a tree the reaper moves between two counts is counted twice or missed: a
+// count is exact to within a reaper batch. It fails if any shard fails to count: a zero would read as an empty
+// database.
 func rowCounts(ctx context.Context, eng *engine.Engine, archive bool) (steps, flows int, err error) {
 	sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -479,46 +517,55 @@ func rowCounts(ctx context.Context, eng *engine.Engine, archive bool) (steps, fl
 	return steps, flows, nil
 }
 
-// probeReads times the read paths at the current volume: History on one real flow, and ListOpen.
-func probeReads(ctx context.Context, eng *engine.Engine, flowKey string) (historyMs, listMs float64) {
+// probeReads times the read paths at the current volume: History on one real flow, and ListOpen. A failed read is
+// returned, and leaves its time at zero.
+func probeReads(ctx context.Context, eng *engine.Engine, flowKey string) (historyMs, listMs float64, err error) {
 	pctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
 	if flowKey != "" {
 		t := time.Now()
-		if _, err := eng.History(pctx, flowKey); err == nil {
-			historyMs = float64(time.Since(t)) / float64(time.Millisecond)
+		if _, err := eng.History(pctx, flowKey); err != nil {
+			return 0, 0, fmt.Errorf("History: %w", err)
 		}
+		historyMs = float64(time.Since(t)) / float64(time.Millisecond)
 	}
 
 	t := time.Now()
-	if _, err := eng.ListOpen(pctx, workflow.Query{Limit: 100}); err == nil {
-		listMs = float64(time.Since(t)) / float64(time.Millisecond)
+	if _, err := eng.ListOpen(pctx, workflow.Query{Limit: 100}); err != nil {
+		return historyMs, 0, fmt.Errorf("ListOpen: %w", err)
 	}
-	return historyMs, listMs
+	listMs = float64(time.Since(t)) / float64(time.Millisecond)
+	return historyMs, listMs, nil
 }
 
 // probeArchivedReads times the archive's read paths at the current volume: History and Step of flowKey, the fill's
 // first flow, which the archive holds in its oldest day by then, and ListClosed's newest 100 of the last day.
-func probeArchivedReads(ctx context.Context, eng *engine.Engine, flowKey string) (historyMs, stepMs, listMs float64) {
+//
+// A failed read is returned, and leaves its time at zero; History's error is returned as is, so a caller can tell a
+// flow whose day was dropped (a 404) from a read that failed.
+func probeArchivedReads(ctx context.Context, eng *engine.Engine, flowKey string) (historyMs, stepMs, listMs float64, err error) {
 	pctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	if flowKey != "" {
 		t := time.Now()
 		hist, err := eng.History(pctx, flowKey)
-		if err == nil {
-			historyMs = float64(time.Since(t)) / float64(time.Millisecond)
+		if err != nil {
+			return 0, 0, 0, err
 		}
-		if err == nil && len(hist) > 0 {
+		historyMs = float64(time.Since(t)) / float64(time.Millisecond)
+		if len(hist) > 0 {
 			t = time.Now()
-			if _, err := eng.Step(pctx, hist[0].StepKey); err == nil {
-				stepMs = float64(time.Since(t)) / float64(time.Millisecond)
+			if _, err := eng.Step(pctx, hist[0].StepKey); err != nil {
+				return historyMs, 0, 0, fmt.Errorf("Step: %w", err)
 			}
+			stepMs = float64(time.Since(t)) / float64(time.Millisecond)
 		}
 	}
 	t := time.Now()
-	if _, err := eng.ListClosed(pctx, workflow.Query{FromTime: time.Now().Add(-24 * time.Hour), ToTime: time.Now(), Limit: 100}); err == nil {
-		listMs = float64(time.Since(t)) / float64(time.Millisecond)
+	if _, err := eng.ListClosed(pctx, workflow.Query{FromTime: time.Now().Add(-24 * time.Hour), ToTime: time.Now(), Limit: 100}); err != nil {
+		return historyMs, stepMs, 0, fmt.Errorf("ListClosed: %w", err)
 	}
-	return historyMs, stepMs, listMs
+	listMs = float64(time.Since(t)) / float64(time.Millisecond)
+	return historyMs, stepMs, listMs, nil
 }
