@@ -103,7 +103,7 @@ func TestPurgeLoopflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	// 6 plain completed flows + 1 parent-with-subgraph = 7 completed roots.
 	const roots = 7

@@ -43,7 +43,7 @@ func TestPanicflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	// Graph 1: a bare panicking task with no onError -> the flow fails.
 	bare := workflow.NewGraph("Bare")

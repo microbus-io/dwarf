@@ -90,7 +90,7 @@ func newCohortRaceRig(t *testing.T, prefix string) *cohortRaceRig {
 	r.e = NewEngineUnderTest(t.Name())
 	assert.NoError(r.e.SetWorkers(4)) // both branches must be in their tasks at once
 	r.e.SetHost(mux)
-	assert.NoError(r.e.Startup(t.Context()))
+	assert.Must(assert.NoError(r.e.Startup(t.Context())))
 	// Cleanups run LIFO: the gates open first, so no worker is left blocked in a task when Shutdown drains.
 	t.Cleanup(func() { r.e.Shutdown(context.Background()) })
 	t.Cleanup(func() { r.releaseX(); r.releaseY() })

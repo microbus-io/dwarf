@@ -40,7 +40,7 @@ func TestOverrideFanInFlow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	// Goto is the branch's ONLY route to the fan-in.
 	gotoGraph := workflow.NewGraph("GotoIntoFanIn")

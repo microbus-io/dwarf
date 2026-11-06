@@ -76,7 +76,7 @@ func TestCompletionRaceflow(t *testing.T) {
 	eng.SetShard(engine.ShardSpec{Index: 1})
 	eng.SetShard(engine.ShardSpec{Index: 2})
 	eng.SetWorkers(4)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	t.Run("every_flow_terminates", func(t *testing.T) {
 		assert := testarossa.For(t)

@@ -88,8 +88,8 @@ func TestCrossShardReplicaAwait(t *testing.T) {
 		assert.NoError(eng1.SetShard(engine.ShardSpec{Index: shard}))
 		assert.NoError(eng2.SetShard(engine.ShardSpec{Index: shard}))
 	}
-	assert.NoError(eng1.Startup(ctx))
-	assert.NoError(eng2.Startup(ctx))
+	assert.Must(assert.NoError(eng1.Startup(ctx)))
+	assert.Must(assert.NoError(eng2.Startup(ctx)))
 
 	// Placement is a weighted random pick, so create until every shard holds at least one flow rather than
 	// assuming a spread. The bound fails loudly instead of looping if placement ever stops covering them.

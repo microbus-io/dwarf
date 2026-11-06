@@ -51,7 +51,7 @@ func TestListflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	const total = 5
 	created := make(map[string]bool, total)

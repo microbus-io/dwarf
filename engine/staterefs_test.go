@@ -103,7 +103,7 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
@@ -180,7 +180,7 @@ func TestStateRefs_UnreadableStateFailsTheStep(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	flowKey, err := e.Create(ctx, "unreadable/g", map[string]any{"doc": "keep"}, nil)
 	assert.NoError(err)
@@ -226,7 +226,7 @@ func TestStateRefs_UnreadableInterruptedStateFailsSnapshot(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	flowKey, err := e.Create(ctx, "unreadablesnap/g", map[string]any{"doc": "keep"}, nil)
 	assert.NoError(err)
@@ -268,7 +268,7 @@ func TestStateRefs_UnreadableSideColumnFailsTheStep(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 
@@ -315,7 +315,7 @@ func TestStateRefs_ManyLargeWritersStayByRef(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	const writers = 6
 	const field = 4000
@@ -376,7 +376,7 @@ func TestStateRefs_CarryAcrossFanOut(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	const doc = 20000
 	g := workflow.NewGraph("Refs")
@@ -459,7 +459,7 @@ func TestStateRefs_ReducedFieldIsResolvedAndReanchored(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	g := workflow.NewGraph("Reduced")
 	g.SetURL("Seed", "red/seed")
@@ -527,7 +527,7 @@ func TestStateRefs_SpawnWrittenReducedFieldIsItsOwnValue(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	g := workflow.NewGraph("SpawnWritten")
 	g.SetURL("Seed", "sc/seed")
@@ -619,7 +619,7 @@ func TestStateRefs_DispatchResolveTakesATurnOnlyToRead(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(hosts.NewMux())
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	_, err = db.ExecContext(ctx,
@@ -685,7 +685,7 @@ func TestStateRefs_UnreadableRefsFailTheStep(t *testing.T) {
 	e := unseeded(NewEngineUnderTest(t.Name()))
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk := createInterruptedFlow(t, e, "badrefs/g")
 	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
@@ -715,7 +715,7 @@ func TestStateRefs_FoldedFieldIsStoredInline(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	g := workflow.NewGraph("Folded")
 	for _, n := range []string{"A", "B", "C"} {
@@ -752,7 +752,7 @@ func TestStateRefs_EmptyForEachFoldsAReffedBase(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	g := workflow.NewGraph("EmptyForEachRef")
 	for _, n := range []string{"Seed", "Src", "Work", "Join"} {
@@ -805,7 +805,7 @@ func TestStateRefs_DeletesAndNullsOfCarriedFields(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	t.Run("branch_delete_of_a_carried_plain_field", func(t *testing.T) {
 		assert := testarossa.For(t)
@@ -881,7 +881,7 @@ func TestStateRefs_AnchorLoaderChunksPastTheParameterCeiling(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	g := workflow.NewGraph("One")
 	g.SetURL("A", "chunked/a")
 	g.AddTransition("A", workflow.End)

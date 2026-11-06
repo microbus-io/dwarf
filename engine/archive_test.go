@@ -78,7 +78,7 @@ func TestRetention_SetRetentionRules(t *testing.T) {
 	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.SetRetention(-1)))
 	assert.NoError(e.SetRetention(0))
 	assert.NoError(e.SetRetention(30))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	assert.Equal(http.StatusConflict, errors.StatusCode(e.SetRetention(7)))
 }
 
@@ -90,7 +90,7 @@ func TestRetention_StartupMakesTodaysArchive(t *testing.T) {
 	defer e.Shutdown(t.Context())
 	e.SetHost(hosts.NewMux())
 	before := archiver.DayOf(time.Now(), archiver.DefaultDayLength)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	today, err := e.archives.Load().byShard[1].Today(t.Context())
 	assert.NoError(err)
 	if today != before {
@@ -112,7 +112,7 @@ func TestRetention_ZeroStillMakesToday(t *testing.T) {
 	e.SetHost(hosts.NewMux())
 	assert.NoError(e.SetRetention(0))
 	before := archiver.DayOf(time.Now(), archiver.DefaultDayLength)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	today, err := e.archives.Load().byShard[1].Today(t.Context())
 	assert.NoError(err)
 	if today != before {
@@ -130,7 +130,7 @@ func TestRetention_PurgeBeforeDropsTheOlderDays(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(hosts.NewMux())
-	assert.NoError(e.Startup(ctx))
+	assert.Must(assert.NoError(e.Startup(ctx)))
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
 	for day := today - 3; day < today; day++ {
@@ -156,7 +156,7 @@ func TestRetention_TheLoopDropsExpiredDays(t *testing.T) {
 	e.SetHost(hosts.NewMux())
 	e.testArchiveDay = 2 * time.Second
 	assert.NoError(e.SetRetention(1))
-	assert.NoError(e.Startup(ctx))
+	assert.Must(assert.NoError(e.Startup(ctx)))
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
 	// The loop passes every second at this day length, so it may drop the day while it is being made, and the
@@ -185,7 +185,7 @@ func TestRetention_ReadersKeepNoArchive(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(hosts.NewMux())
 	assert.NoError(e.SetRetention(1))
-	assert.NoError(e.Startup(ctx))
+	assert.Must(assert.NoError(e.Startup(ctx)))
 	// The loop passes once at its start, then an hour later; the day is made once that first pass is done.
 	enginetest.AwaitVisitCount(t, e.seams, 1, 10*time.Second, engineseams.CheckpointArchivePassDone)
 	set := e.archives.Load()
@@ -216,7 +216,7 @@ func TestRetention_ABadDayLengthFailsStartup(t *testing.T) {
 		assert.Len(e.db.Indices(), 0, "%q left shards open", bad)
 	}
 	t.Setenv(archiveDayEnv, "10s")
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	assert.Equal(10*time.Second, e.archives.Load().dayLength)
 }
 
@@ -235,6 +235,6 @@ func TestRetention_TheGraceFromTheEnvironment(t *testing.T) {
 		assert.Len(e.db.Indices(), 0, "%q left shards open", bad)
 	}
 	t.Setenv(archiveGraceEnv, "5s")
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	assert.Equal(5*time.Second, e.archiveGrace)
 }

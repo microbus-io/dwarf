@@ -291,7 +291,7 @@ func TestArchivedReads_AwaitParkedAcrossTheMoveGetsTheOutcome(t *testing.T) {
 	e.reapInterval = time.Hour
 	e.latchSweepInterval = time.Hour // the test sweeps
 	assert.NoError(e.SetRetention(30))
-	assert.NoError(e.Startup(ctx))
+	assert.Must(assert.NoError(e.Startup(ctx)))
 
 	fk, err := e.Create(ctx, "read/block", nil, nil)
 	assert.NoError(err)
@@ -871,7 +871,7 @@ func TestArchivedReads_ForkFromAnArchivedSource(t *testing.T) {
 		e.archiveGrace = 0
 		e.reapInterval = time.Hour
 		assert.NoError(e.SetRetention(30))
-		assert.NoError(e.Startup(ctx))
+		assert.Must(assert.NoError(e.Startup(ctx)))
 		fk, err := e.Create(ctx, "nest/root", nil, nil)
 		assert.NoError(err)
 		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
@@ -905,7 +905,7 @@ func TestArchivedReads_ForkFromAnArchivedSource(t *testing.T) {
 		e.archiveGrace = 0
 		e.reapInterval = time.Hour
 		assert.NoError(e.SetRetention(30))
-		assert.NoError(e.Startup(ctx))
+		assert.Must(assert.NoError(e.Startup(ctx)))
 		fk, err := e.Create(ctx, "fan/root", nil, nil)
 		assert.NoError(err)
 		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusFailed, time.Minute)
@@ -1077,7 +1077,7 @@ func TestArchivedReads_ForkReadsTheArchivedGraph(t *testing.T) {
 		e.archiveGrace = 0
 		e.reapInterval = time.Hour
 		assert.NoError(e.SetRetention(30))
-		assert.NoError(e.Startup(ctx))
+		assert.Must(assert.NoError(e.Startup(ctx)))
 		return e
 	}
 	e := start()

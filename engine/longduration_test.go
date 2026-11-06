@@ -67,7 +67,7 @@ func TestLongDuration_SleepAndRetryBackoff(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	for _, tc := range []struct {
 		name, workflowURL, task, status string

@@ -97,7 +97,7 @@ func TestCrossShardPriorityflow(t *testing.T) {
 	// One worker: dispatch order is then observable directly as completion order, with no interleaving
 	// to reason around.
 	assertSetup.NoError(eng.SetWorkers(1))
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	// A deep low-priority backlog, created first and spread across all three shards.
 	const lowCount = 24

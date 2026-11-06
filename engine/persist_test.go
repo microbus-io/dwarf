@@ -71,7 +71,7 @@ func TestPersist_TransientWriteErrorIsAbsorbedWithoutReExecution(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	e.persistBackoff = shortPersistBackoff
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistErr, "A"), 1) // ONE failing attempt, then the database is fine again
 
 	_, outcome, err := e.Run(ctx, "p/transient/wf", nil, nil)
@@ -107,7 +107,7 @@ func TestPersist_CompletionWriteContentionIsAbsorbedWithoutReExecution(t *testin
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	e.seams.InjectN(engineseams.Join(engineseams.FaultCompletionContention, "A"), 3) // three lost deadlocks, then the write lands
 
 	runCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
@@ -153,7 +153,7 @@ func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testi
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	e.persistBackoff = shortPersistBackoff
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistErr, "A"), 1000) // every attempt fails: the payload, not the database
 
 	_, outcome, err := e.Run(ctx, "p/permanent/wf", nil, nil)
@@ -223,7 +223,7 @@ func TestPersist_LeaseExtensionStatusGuard(t *testing.T) {
 		e := NewEngineUnderTest(t.Name())
 		e.SetHost(hosts.NewMux())
 		e.persistBackoff = shortPersistBackoff
-		assert.NoError(e.Startup(t.Context()))
+		assert.Must(assert.NoError(e.Startup(t.Context())))
 		db, err := e.db.Shard(1)
 		assert.Must(assert.NoError(err))
 		_, err = db.ExecContext(ctx,
@@ -312,7 +312,7 @@ func TestPersist_PermanentErrorOnARetryStopsTheLadder(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(hosts.NewMux())
 	e.persistBackoff = shortPersistBackoff
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	// A running step this worker holds under generation 5, out of the engine's own reach (see
@@ -374,7 +374,7 @@ func TestPersist_FencedRerouteWriteAbandons(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	reader := withManualReader(e)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	e.seams.Inject(engineseams.Join(engineseams.FaultRerouteStaleWrite, "Work"))
 
 	fk, err := e.Create(ctx, "p/fencedreroute/wf", nil, nil)
@@ -438,7 +438,7 @@ func TestPersist_CancelRerouteWriteIsPersisted(t *testing.T) {
 		e.SetHost(mux)
 		e.persistBackoff = shortPersistBackoff
 		reader := withManualReader(e)
-		assert.NoError(e.Startup(t.Context()))
+		assert.Must(assert.NoError(e.Startup(t.Context())))
 		e.seams.InjectN(engineseams.Join(engineseams.FaultRerouteWriteErr, "Work"), faults)
 
 		fk, err := e.Create(ctx, "p/reroute/wf", nil, nil)
@@ -522,7 +522,7 @@ func TestPersist_DrainReleasesTheLeaseInsteadOfSleepingItOut(t *testing.T) {
 	// A long backoff, so the worker is provably ASLEEP in the retry loop when the drain lands. If it did not
 	// select on drainStop, Shutdown would block for this long.
 	e.persistBackoff = []time.Duration{30 * time.Second}
-	assert.NoError(e.Startup(ctx))
+	assert.Must(assert.NoError(e.Startup(ctx)))
 	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistErr, "A"), 1000)
 
 	_, err := e.Create(ctx, "p/drain/wf", nil, nil)
@@ -552,7 +552,7 @@ func TestPersist_FailedRenewalStillRetries(t *testing.T) {
 	var runs atomic.Int32
 	e, reader := countingEngine(t, "p/renewout", &runs)
 	defer e.Shutdown(ctx)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	e.seams.InjectN(engineseams.FaultExtendLeaseErr, 1000)
 	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistErr, "A"), 1)
 
@@ -585,7 +585,7 @@ func TestPersist_LandedWriteReportingAnErrorIsNotFailed(t *testing.T) {
 	e.persistLeaseExtension = 200 * time.Millisecond
 	e.leaseMargin = 200 * time.Millisecond
 	e.recoveryInterval = 200 * time.Millisecond
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistLandedErr, "A"), 1+len(shortPersistBackoff))
 
 	_, outcome, err := e.Run(ctx, "p/landed/wf", nil, &workflow.FlowOptions{TimeBudget: 500 * time.Millisecond})

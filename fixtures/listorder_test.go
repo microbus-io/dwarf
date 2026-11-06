@@ -53,7 +53,7 @@ func TestListOpen_NewestFirstAcrossShards(t *testing.T) {
 	e.SetHost(mux)
 	assert.NoError(e.SetShard(engine.ShardSpec{Index: 1}))
 	assert.NoError(e.SetShard(engine.ShardSpec{Index: 2}))
-	assert.NoError(e.Startup(ctx))
+	assert.Must(assert.NoError(e.Startup(ctx)))
 
 	// Enough flows that placement (a weighted-random pick) lands some on each shard with overwhelming odds.
 	const total = 30

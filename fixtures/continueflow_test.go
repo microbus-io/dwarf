@@ -50,7 +50,7 @@ func TestContinueflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	t.Run("counter_persists_across_continue_turns", func(t *testing.T) {
 		assert := testarossa.For(t)
@@ -98,7 +98,7 @@ func TestContinueInheritsPolicy(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	// Turn 1 with a distinctive priority (4, not the engine default of 3).
 	turn1, err := eng.Create(ctx, "continuepolicy.verify:428/g", map[string]any{},
@@ -158,7 +158,7 @@ func TestContinue_BuildsOnTheNamedFlow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	run := func(key string, err error) *workflow.FlowOutcome {
 		if !assert.NoError(err) {

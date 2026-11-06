@@ -63,7 +63,7 @@ func TestResumeLosesToTerminate_Deterministic(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Create and wait for it to rest interrupted.
 	fk, err := e.Create(ctx, "rld/g", nil, nil)
@@ -149,7 +149,7 @@ func TestReaperDeletesRunningDescendant(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Run parent to completion; the subgraph child completes too, giving a two-flow tree (root + child).
 	fk, out, err := e.Run(ctx, "rdd/parent", nil, nil)
@@ -211,7 +211,7 @@ func TestTerminateVsTransition_Deterministic(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Freeze A after it is marked completed, before it inserts B.
 	e.seams.Break(engineseams.CheckpointBeforeTransitionTx)
@@ -353,7 +353,7 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		r, done := newRig(t)
 		defer done()
 		parentGraph(t, r)
-		assert.NoError(r.e.Startup(ctx))
+		assert.Must(assert.NoError(r.e.Startup(ctx)))
 
 		r.e.seams.Break(engineseams.CheckpointBeforeSubgraphSpawn)
 		fk, err := r.e.Create(ctx, "cvs/parent", nil, nil)
@@ -377,7 +377,7 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		r, done := newRig(t)
 		defer done()
 		parentGraph(t, r)
-		assert.NoError(r.e.Startup(ctx))
+		assert.Must(assert.NoError(r.e.Startup(ctx)))
 
 		// The spawn's transaction parks the caller and freezes before inserting the child.
 		r.e.seams.Break(engineseams.CheckpointSubgraphSpawnParked)
@@ -407,7 +407,7 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		r, done := newRig(t)
 		defer done()
 		parentGraph(t, r)
-		assert.NoError(r.e.Startup(ctx))
+		assert.Must(assert.NoError(r.e.Startup(ctx)))
 
 		r.e.seams.Break(engineseams.CheckpointBeforeSubgraphSpawn)
 		fk, err := r.e.Create(ctx, "cvs/parent", nil, nil)
@@ -451,7 +451,7 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 			}
 			<-gate
 		}))
-		assert.NoError(r.e.Startup(ctx))
+		assert.Must(assert.NoError(r.e.Startup(ctx)))
 
 		r.e.seams.Break(engineseams.CheckpointBeforeSubgraphSpawn)
 		fk, err := r.e.Create(ctx, "cvs/parent", nil, nil)
@@ -493,7 +493,7 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		r, done := newRig(t)
 		defer done()
 		parentGraph(t, r)
-		assert.NoError(r.e.Startup(ctx))
+		assert.Must(assert.NoError(r.e.Startup(ctx)))
 
 		fk, err := r.e.Create(ctx, "cvs/parent", nil, nil)
 		assert.NoError(err)
@@ -543,7 +543,7 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 			}
 			<-gate
 		}))
-		assert.NoError(r.e.Startup(ctx))
+		assert.Must(assert.NoError(r.e.Startup(ctx)))
 
 		// A completes and freezes before the transition that creates Call.
 		r.e.seams.Break(engineseams.CheckpointBeforeTransitionTx)
@@ -617,7 +617,7 @@ func TestRetryRewindVsTerminate_Deterministic(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Freeze A before its retry rewind.
 	e.seams.Break(engineseams.CheckpointBeforeRetryRewind)

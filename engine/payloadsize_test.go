@@ -57,7 +57,7 @@ func TestPayloadSize_OversizedChangesFailTheStepOnce(t *testing.T) {
 	e.SetHost(mux)
 	e.persistBackoff = shortPersistBackoff
 	e.maxPayloadBytes = 1000
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	_, outcome, err := e.Run(ctx, "ps/changes/wf", nil, nil)
 	assert.NoError(err)
@@ -88,7 +88,7 @@ func TestPayloadSize_CreateRejectsWithoutInserting(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	e.maxPayloadBytes = 1000
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	big := map[string]any{"doc": strings.Repeat("d", 2000)}
 	_, err := e.Create(ctx, "ps/create/wf", big, nil)
@@ -143,7 +143,7 @@ func TestPayloadSize_RefsCarryStateTheFinalStateCannotHold(t *testing.T) {
 	e.SetHost(mux)
 	e.persistBackoff = shortPersistBackoff
 	e.maxPayloadBytes = 3000
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	_, outcome, err := e.Run(ctx, "ps/final/wf", nil, nil)
 	assert.NoError(err)
@@ -191,7 +191,7 @@ func TestPayloadSize_CancelRerouteIsChecked(t *testing.T) {
 	e.SetHost(mux)
 	e.persistBackoff = shortPersistBackoff
 	e.maxPayloadBytes = 1000
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk, err := e.Create(ctx, "ps/reroute/wf", nil, nil)
 	if !assert.NoError(err) {
@@ -236,7 +236,7 @@ func TestPayloadSize_PercentInTaskName(t *testing.T) {
 	e.SetHost(mux)
 	e.persistBackoff = shortPersistBackoff
 	e.maxPayloadBytes = 1000
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	_, outcome, err := e.Run(ctx, "ps/percent/wf", nil, nil)
 	assert.NoError(err)

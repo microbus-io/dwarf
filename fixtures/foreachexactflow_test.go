@@ -55,7 +55,7 @@ func TestForEachExactFlow(t *testing.T) {
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	t.Run("elements_are_exact", func(t *testing.T) {
 		assert := testarossa.For(t)

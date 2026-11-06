@@ -43,7 +43,7 @@ func TestInterruptpersistflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	graph := workflow.NewGraph("InterruptPersist")
 	graph.SetURL("ParkAfterWrite", "interruptpersistflow.verify:428/park-after-write")

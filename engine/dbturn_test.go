@@ -92,7 +92,7 @@ func TestRecoveryReset_TakesATurn(t *testing.T) {
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	// Contention through one full round of the transition's Transact retries sends the completed step to the
 	// defer's reset.
@@ -139,7 +139,7 @@ func TestLatchResolve_SkipsShardsWithNoParkedKey(t *testing.T) {
 	assert.NoError(e.SetShard(ShardSpec{Index: 1}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 2}))
 	e.SetHost(hosts.NewMux())
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	size := e.turnstiles.Turnstile(2).Size()
 	e.turnstiles.Resize(2, 0)

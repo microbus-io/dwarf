@@ -40,7 +40,7 @@ func TestSuccessorBatch_WideFanOutKeepsBranchOrder(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	const width = 150
 	g := workflow.NewGraph("Wide")
@@ -123,7 +123,7 @@ func TestSuccessorBatch_LoneSuccessorLinks(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	const steps, flows = 6, 8
 	g := workflow.NewGraph("Chain")
@@ -226,7 +226,7 @@ func TestSuccessorBatch_ByteBoundedFanOutKeepsBranchOrder(t *testing.T) {
 	mux := hosts.NewMux()
 	e.SetHost(mux)
 	e.maxPayloadBytes = 110
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	const width = 9
 	g := workflow.NewGraph("ByteBounded")

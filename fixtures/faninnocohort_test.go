@@ -84,7 +84,7 @@ func TestFanInNoCohort_FailsInsteadOfHotLooping(t *testing.T) {
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	flowKey, err := e.Create(ctx, "nocohort/g", map[string]any{"items": []int{1}}, nil)
 	if !assert.NoError(err) {

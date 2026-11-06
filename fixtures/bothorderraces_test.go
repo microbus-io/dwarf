@@ -56,7 +56,7 @@ func TestCompleteFlowVsTerminate_BothOrders(t *testing.T) {
 		mux.HandleTask(prefix+"/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 		e := engine.NewEngineUnderTest(t.Name())
 		e.SetHost(mux)
-		assert.NoError(e.Startup(t.Context()))
+		assert.Must(assert.NoError(e.Startup(t.Context())))
 		return e, prefix + "/g"
 	}
 
@@ -173,7 +173,7 @@ func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 	// still parked on yGate would never return.
 	defer release()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk, err := e.Create(ctx, "cip/parent", nil, nil)
 	assert.NoError(err)

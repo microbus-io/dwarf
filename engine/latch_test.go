@@ -96,7 +96,7 @@ func TestLatchResolve_ReportsStoppedFlowsOnly(t *testing.T) {
 	// Two shards, so the resolver's per-shard grouping is exercised rather than assumed.
 	assert.NoError(e.SetShard(ShardSpec{Index: 1}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 2}))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	stoppedKey, _, err := e.Run(ctx, "latchresolve.verify:0/done", nil, nil)
 	if !assert.NoError(err) {
@@ -143,7 +143,7 @@ func TestLatchResolve_ChunksWithoutDroppingKeys(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	assert.NoError(e.SetHost(mux))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	stoppedKey, _, err := e.Run(ctx, "latchchunk.verify:0/done", nil, nil)
 	if !assert.NoError(err) {
@@ -199,7 +199,7 @@ func TestLatchResolve_RecentStopScanIsOnlyAnOptimization(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	assert.NoError(e.SetHost(mux))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	freshKey, _, err := e.Run(ctx, "latchrecent.verify:0/done", nil, nil)
 	if !assert.NoError(err) {

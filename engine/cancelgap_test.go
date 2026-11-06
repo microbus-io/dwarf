@@ -56,7 +56,7 @@ func TestCancelInTransitionGap(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Freeze A after its completion write, before the transition inserts B.
 	e.seams.Break(engineseams.CheckpointBeforeTransitionTx)
@@ -103,7 +103,7 @@ func TestCancelInTransitionGap_WideFanOut(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	items := make([]int, 150)
 	e.seams.Break(engineseams.CheckpointBeforeTransitionTx)
@@ -162,7 +162,7 @@ func TestCancelMarkSparesAHandlerInsertedAfterTheWatermark(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk, err := e.Create(ctx, "cmark/g", nil, nil)
 	assert.NoError(err)
@@ -235,7 +235,7 @@ func TestCancelOncePerFlow(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk, err := e.Create(ctx, "conce/g", nil, nil)
 	assert.NoError(err)
@@ -282,7 +282,7 @@ func TestCancel_RetryFinishesAFailedMark(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	release := sync.OnceFunc(func() { close(aGo) })
 	defer release() // below the Shutdown defer, so it unwinds first
 
@@ -337,7 +337,7 @@ func TestCancelPreempt_ReasonReadErrorReleasesTheInFlightGauges(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	e.seams.InjectN(engineseams.FaultCancelReasonReadErr, 1)
 
 	aDone := e.seams.Waiter(engineseams.CheckpointClaimedDispatchDone)
@@ -404,7 +404,7 @@ func TestCancelWatermark_TakesNoStepLocks(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	defer close(release)
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))

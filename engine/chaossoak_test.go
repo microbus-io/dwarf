@@ -69,7 +69,7 @@ func TestChaosSoak(t *testing.T) {
 	assert.NoError(eng.SetWorkers(8))
 	eng.SetHost(mux)
 	eng.SetMeterProvider(mp)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	// Shapes: (a) linear, (b) fan-out+fan-in, (c) parent+subgraph child with a random interrupt/retry.
 	shapes := []struct {
@@ -355,7 +355,7 @@ func TestChaosSoak_Faults(t *testing.T) {
 	assert.NoError(eng.SetWorkers(8))
 	eng.SetHost(mux)
 	eng.SetMeterProvider(mp)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	shapes := []string{
 		"chaossoak.verify:428/linear",

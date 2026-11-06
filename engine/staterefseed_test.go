@@ -70,7 +70,7 @@ func TestStateRefs_LinearSuccessorIsServedFromTheSeed(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	e.SetMeterProvider(mp)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	_, outcome, err := e.Run(ctx, "seeded/wf", nil, nil)
 	if !assert.NoError(err) {

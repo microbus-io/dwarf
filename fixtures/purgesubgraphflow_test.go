@@ -42,7 +42,7 @@ func TestPurgeSubgraphflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetURL("TaskA", "purgesub.verify:428/task-a")

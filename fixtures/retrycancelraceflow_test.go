@@ -43,7 +43,7 @@ func TestRetryCancelRaceflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})

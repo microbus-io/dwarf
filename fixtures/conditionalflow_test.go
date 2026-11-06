@@ -35,7 +35,7 @@ func TestConditionalflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	graph := workflow.NewGraph("Conditional")
 	graph.SetURL("TaskA", "conditionalflow.verify:428/task-a")
@@ -106,7 +106,7 @@ func TestConditionalflow_ExactIntegerComparison(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	const id = 1234567890123456789
 	const neighbor = 1234567890123456788

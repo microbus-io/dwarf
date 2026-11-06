@@ -54,7 +54,7 @@ func TestClaim_NoPartialIndexPlan(t *testing.T) {
 	defer e.Shutdown(ctx)
 	assert.NoError(e.SetHost(mux))
 	assert.NoError(e.SetWorkers(0)) // nothing dispatches: the entry step stays pending
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	_, err := e.Create(ctx, "claimplan/g", nil, nil)
 	if !assert.NoError(err) {
 		return

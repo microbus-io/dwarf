@@ -79,7 +79,7 @@ func TestSubgraphError_ReachesTheCallerWhole(t *testing.T) {
 		defer e.Shutdown(ctx)
 		e.SetHost(mux)
 		e.maxPayloadBytes = 1000
-		assert.NoError(e.Startup(t.Context()))
+		assert.Must(assert.NoError(e.Startup(t.Context())))
 
 		runCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 		defer cancel()

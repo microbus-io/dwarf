@@ -68,7 +68,7 @@ func TestRecoveryTick_LightPassRecoversLeases(t *testing.T) {
 	defer e.Shutdown(ctx)
 	defer close(release) // before Shutdown, which waits for the held worker
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	awaitStartupRecoverySweep(t, e) // the next background pass is a minute away
 
 	fk, err := e.Create(ctx, "ticklight/g", nil, nil)
@@ -129,7 +129,7 @@ func TestRecoveryTick_ExpiredLeaseRecoveredOnTheTick(t *testing.T) {
 	defer close(release)
 	e.recoveryInterval = 2 * time.Second
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk, err := e.Create(ctx, "tickloop/g", nil, nil)
 	assert.NoError(err)

@@ -184,7 +184,7 @@ func TestFault_ExecuteTask(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// No onError -> the injected failure fails the flow.
 	e.seams.Inject(engineseams.Join(engineseams.FaultExecuteTask, "Work"))
@@ -216,7 +216,7 @@ func TestFault_PanicExecuteTask(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// A panic in the host call is caught at the boundary and fails the step (no wedge/crash-loop).
 	e.seams.Inject(engineseams.Join(engineseams.FaultPanicExecuteTask, "Boom"))
@@ -242,7 +242,7 @@ func TestFault_LoadGraph(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Armed: Create fails (the graph "cannot be loaded"). Disarmed: it creates and completes.
 	e.seams.Inject(engineseams.Join(engineseams.FaultLoadGraph, "floadg/g"))
@@ -267,7 +267,7 @@ func TestFault_TransitionCommit(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// A's transition transaction fails once with a non-contention error, after A was marked completed. It is
 	// retried IN PLACE (see persist), so it lands on the next attempt and the flow completes - and A runs ONCE.
@@ -292,7 +292,7 @@ func TestFault_Contention(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// A's transition transaction returns a lock-contention error once: Transact retries the closure to a
 	// clean commit, transparently - the flow completes and A ran only once (retry is inside the tx).
@@ -318,7 +318,7 @@ func TestFault_CompleteFlowCommit(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// The flow-completion transaction fails once after the terminal step was marked completed with a
 	// non-contention error: persist retries the transaction in place, so the flow still completes (no `running`
@@ -346,7 +346,7 @@ func TestFault_LeaseStaleWrite(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// A's completion write carries a stale lease generation (a zombie): the fence rejects it (no-op), so the
 	// step stays claimable and lease recovery re-runs it cleanly - a stale write never corrupts or
@@ -388,7 +388,7 @@ func TestFault_DropSignalStop(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// The terminal wake is dropped, so Await cannot rely on the signal; it must return via the latch
 	// detector reading the DB-committed stop.
@@ -412,7 +412,7 @@ func TestFault_DropDoorbell(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// The create-time doorbell is dropped, so nothing hands the entry step to a worker directly. It is
 	// `pending` and due, so the shard's next piston cycle selects it on its own - which is the whole
@@ -451,7 +451,7 @@ func TestFault_SubgraphReviveLost(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// The child's revive of the parked caller is lost: the caller wedges running+parkedSubgraph with a
 	// terminal child. The wedge sweep must re-drive the release. Arm, create, wait for the wedge, then
@@ -498,7 +498,7 @@ func TestFault_ReapMidTree(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	shortenDeletion(e, time.Millisecond, time.Hour) // due immediately; the test drives reaps
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	waitDone := awaitNextStop(t, e) // rendezvous on completion instead of polling status
 	fk, err := e.Create(ctx, "freap/g", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
@@ -533,7 +533,7 @@ func TestFault_RefillScanErr(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// The refiller's band scan errors once. Instead of refilling empty and idling every worker forever, it
 	// logs and shortens the next poll, so the flow is still dispatched and completes (just after a re-scan).
@@ -558,7 +558,7 @@ func TestFault_RefillScanErrPreservesCache(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(hosts.NewMux())
 	assert.NoError(e.SetWorkers(0)) // no workers, so nothing drains the cache underneath the assertion
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Seed the cache as a healthy cycle would have, then make every scan fail (sticky, so a background
 	// cycle cannot slip a legitimate empty refill in and wipe the cache on its own).

@@ -40,7 +40,7 @@ func TestReducehandoffflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	// handle registers a graph chaining the named tasks to END, every task bound to its own handler. The
 	// first task in the chain is the entry point.

@@ -130,7 +130,7 @@ func superflowSetup(t *testing.T, numShards int) (*engine.Engine, *hosts.Mux, *v
 	for i := 1; i <= numShards; i++ {
 		eng.SetShard(engine.ShardSpec{Index: i})
 	}
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	return eng, mux, visits
 }

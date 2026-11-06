@@ -255,7 +255,7 @@ func TestPoolSizing_StartupDerivesTheBudget(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.Startup(ctx))
+	assert.Must(assert.NoError(e.Startup(ctx)))
 	db, err := e.db.Shard(1)
 	if !assert.NoError(err) {
 		return
@@ -307,7 +307,7 @@ func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
 	e.testConnCap = 0 // assert the real derived pool sizes, not the test-mode connection cap
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
@@ -353,7 +353,7 @@ func TestPoolSizing_IdleCoreTracksTheDerivedPool(t *testing.T) {
 	e.testConnCap = 0 // assert the real derived sizes, not the test-mode connection cap
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	idle := func() int {
 		t.Helper()
@@ -405,7 +405,7 @@ func TestPoolSizing_PeerExpiry(t *testing.T) {
 	e.testConnCap = 0 // assert the real pool sizes, not the test-mode connection cap
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
@@ -460,7 +460,7 @@ func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
 	defer e.Shutdown(ctx)
 	assert.NoError(e.SetHost(mux))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 8})) // a resident set of 64 keeps the flow count small
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	resident := int32(e.crew.Resident())
 	assert.Equal(int32(max(64, residentWorkersPerConn*sizingOf(e, 1).budget)), resident,
 		"resident set is the connection-derived floor")
@@ -496,7 +496,7 @@ func TestPoolSizing_CeilingFollowsLivePoolChange(t *testing.T) {
 	e.testConnCap = 0 // assert the real pool sizes, not the test-mode connection cap
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: declaredBudget}))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	solo := int(e.workers.Load())
 	assert.True(solo > 1000, "the derived ceiling is large (got %d)", solo)
@@ -538,7 +538,7 @@ func TestPoolSizing_SaturationDoesNotGrowThePool(t *testing.T) {
 	assert.NoError(e.SetHost(mux))
 	// A deliberately tiny pool makes the connection the binding resource: workers WILL queue on it.
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 2}))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	resident := int32(e.crew.Resident())
 
 	// A deep backlog of DB-bound steps: every worker is contending for 2 connections, continuously.
@@ -628,7 +628,7 @@ func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
 	e.testConnCap = 0 // assert the real pool sizes, not the test-mode connection cap
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	db, err := e.db.Shard(1)
 	if !assert.NoError(err) {
@@ -711,7 +711,7 @@ func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
 	defer e2.Shutdown(ctx)
 	e2.SetHost(mux)
 	// Shutdown is idempotent, so shutting down early here leaves the deferred one a no-op.
-	assert.NoError(e2.Startup(t.Context()))
+	assert.Must(assert.NoError(e2.Startup(t.Context())))
 	flowKey, err := e2.Create(ctx, "shutdownrace/g", nil, nil)
 	assert.NoError(err) // sanity: it works while live
 	assert.NoError(e2.Shutdown(ctx))
@@ -797,7 +797,7 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	e := newSolo(t, "e")
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.Startup(context.Background()))
+	assert.Must(assert.NoError(e.Startup(context.Background())))
 	zeroConfig := sizingOf(e, 1).budget
 	assert.Equal(max(64, workersPerConnBudget*zeroConfig), e.workersDispatch, "resident/dispatch set stays connection-derived")
 	assert.Equal(2*max(64, workersPerConnBudget*zeroConfig), e.cache.Capacity(), "cache is 2x the dispatch count, never 2x the ceiling")
@@ -818,7 +818,7 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	assert.NoError(e2.SetHost(noopHost{}))
 	assert.NoError(e2.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.NoError(e2.SetShard(ShardSpec{Index: 2, MaxConnections: 8}))
-	assert.NoError(e2.Startup(context.Background()))
+	assert.Must(assert.NoError(e2.Startup(context.Background())))
 	assert.Equal(workersPerConnBudget*(declaredBudget+8), e2.workersDispatch)
 	// Each shard's ceiling is taken at its own pool AND its own probed RTT, so the small pool's is the lower one
 	// only when the two probes are close. Two probes of a loaded server need not be: shard 1 at 4ms against
@@ -836,7 +836,7 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	assert.NoError(eBig.SetHost(noopHost{}))
 	assert.NoError(eBig.SetShard(ShardSpec{Index: 1, MaxConnections: 8})) // a dispatch count of 64, under 300
 	assert.NoError(eBig.SetWorkers(300))
-	assert.NoError(eBig.Startup(context.Background()))
+	assert.Must(assert.NoError(eBig.Startup(context.Background())))
 	assert.Equal(int32(300), int32(eBig.crew.Resident()), "an explicit SetWorkers is spawned in full")
 	assert.Equal(2*max(64, workersPerConnBudget*sizingOf(eBig, 1).budget), eBig.cache.Capacity(),
 		"but the cache still follows the dispatch count")
@@ -847,7 +847,7 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	assert.NoError(e3.SetHost(noopHost{}))
 	assert.NoError(e3.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.NoError(e3.SetWorkers(2))
-	assert.NoError(e3.Startup(context.Background()))
+	assert.Must(assert.NoError(e3.Startup(context.Background())))
 	assert.Equal(2, int(e3.workers.Load()))
 }
 
@@ -869,7 +869,7 @@ func TestPoolSizing_CacheFollowsTheReplicaSplit(t *testing.T) {
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48})) // open = 48 at R=1
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	assert.Equal(1, e.replicasOn(1))
 	solo := e.cache.Capacity()
@@ -906,7 +906,7 @@ func TestPoolSizing_StartupSizesSoloFull(t *testing.T) {
 	e.testConnCap = 0 // assert the real pool sizes, not the test-mode connection cap
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48})) // 48 at R=1
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
@@ -930,7 +930,7 @@ func TestPoolSizing_StartupSizesFromRegisteredFleet(t *testing.T) {
 	eng1.testConnCap = 0 // assert the real pool sizes, not the test-mode connection cap
 	assert.NoError(eng1.SetHost(noopHost{}))
 	assert.NoError(eng1.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
-	assert.NoError(eng1.Startup(ctx))
+	assert.Must(assert.NoError(eng1.Startup(ctx)))
 
 	db1, err := eng1.db.Shard(1)
 	assert.Must(assert.NoError(err))
@@ -944,7 +944,7 @@ func TestPoolSizing_StartupSizesFromRegisteredFleet(t *testing.T) {
 	eng2.testConnCap = 0 // assert the real pool sizes, not the test-mode connection cap
 	assert.NoError(eng2.SetHost(noopHost{}))
 	assert.NoError(eng2.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
-	assert.NoError(eng2.Startup(ctx))
+	assert.Must(assert.NoError(eng2.Startup(ctx)))
 
 	db2, err := eng2.db.Shard(1)
 	assert.Must(assert.NoError(err))

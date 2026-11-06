@@ -66,7 +66,7 @@ func TestSubgraphKeyflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	flowKey, out, err := eng.Run(ctx, "subgraphkey.verify:428/parent", nil, nil)
 	if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, out.Status) {

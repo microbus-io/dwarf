@@ -187,7 +187,7 @@ func TestDispatchers_ShardsStaggerTheirCuts(t *testing.T) {
 		assert.NoError(e.SetEngineID(c.id))
 		assert.NoError(e.SetShard(ShardSpec{Index: 1}))
 		assert.NoError(e.SetShard(ShardSpec{Index: 3}))
-		assert.NoError(e.Startup(t.Context()))
+		assert.Must(assert.NoError(e.Startup(t.Context())))
 		joinFakeFleet(t, e)
 		assert.Equal(c.on1, e.dispatchesOn(1), "id %d on shard 1", c.id)
 		assert.Equal(c.on3, e.dispatchesOn(3), "id %d on shard 3", c.id)
@@ -206,7 +206,7 @@ func TestDispatchers_EveryShardSharesTheOrder(t *testing.T) {
 	for _, idx := range []int{1, 2, 3, 4} {
 		assert.NoError(e.SetShard(ShardSpec{Index: idx}))
 	}
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	defer e.Shutdown(t.Context())
 
 	var mu sync.Mutex
@@ -269,7 +269,7 @@ func TestDispatchers_ReaderReplicaHoldsTheReaderPoolAndRunsNothing(t *testing.T)
 	assert.NoError(e.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
 	assert.NoError(e.SetEngineID(readerID))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 24}))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	assert.True(e.dispatchesOn(1), "alone, the replica dispatches")
@@ -319,7 +319,7 @@ func TestDispatchers_PromotedReaderTakesADispatcherSizedCache(t *testing.T) {
 	assert.NoError(e.SetHost(hosts.NewMux()))
 	assert.NoError(e.SetEngineID(readerID))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 24}))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	solo := e.cache.Capacity()
 
 	joinFakeFleet(t, e)
@@ -368,7 +368,7 @@ func TestDispatchers_DemotedReplicaHoldsItsPoolUntilInFlightStepsFinish(t *testi
 	assert.NoError(e.SetEngineID(readerID))
 	spec := ShardSpec{Index: 1, MaxConnections: 24} // two dispatcher slots, and a budget whose 3-way share beats the reader pool
 	assert.NoError(e.SetShard(spec))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	assert.True(e.dispatchesOn(1), "alone, the replica dispatches")
@@ -456,7 +456,7 @@ func TestDispatchers_PromotionWhileHeldClearsTheHold(t *testing.T) {
 	assert.NoError(e.SetEngineID(readerID))
 	spec := ShardSpec{Index: 1, MaxConnections: 24} // two dispatcher slots, and a budget whose 3-way share beats the reader pool
 	assert.NoError(e.SetShard(spec))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	_, soloOpen := shardPool(spec.MaxConnections, 1)
@@ -517,7 +517,7 @@ func TestDispatchers_RankedReplicaSplitsTheBudget(t *testing.T) {
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetEngineID(dispatcherID))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 
@@ -545,7 +545,7 @@ func TestDispatchers_DrainingReplicasDivideTheBudget(t *testing.T) {
 	assert.NoError(e.SetEngineID(dispatcherID))
 	spec := ShardSpec{Index: 1, MaxConnections: 48}
 	assert.NoError(e.SetShard(spec))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 
@@ -580,7 +580,7 @@ func TestDispatchers_ZeroWorkersReplicaRegistersButNeverRanks(t *testing.T) {
 	e.testConnCap = 0
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetWorkers(0))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
@@ -606,7 +606,7 @@ func TestDispatchers_ZeroWorkersPeersDoNotDivideTheBudget(t *testing.T) {
 	e.testConnCap = 0
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 
@@ -633,7 +633,7 @@ func TestDispatchers_DoorbellRingsOnlyForDispatchedShards(t *testing.T) {
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetWorkers(0)) // no crew draining the cache while the test looks at it
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	e.dispatchFlag(1).Store(false)
 	e.enqueueStepDue(t.Context(), 1, 999, 100)
@@ -655,7 +655,7 @@ func TestDispatchers_PlacementPrefersDispatchedShards(t *testing.T) {
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 24}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 2, MaxConnections: 24}))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	e.dispatchFlag(2).Store(false)
 	for range 50 {
@@ -683,7 +683,7 @@ func TestDispatchers_FleetLimitWarnsOnTheEdge(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	spec := ShardSpec{Index: 1, MaxConnections: 48}
 
 	e.poolsLock.Lock()
@@ -715,7 +715,7 @@ func TestDispatchers_SweepsSkipShardsThisReplicaOnlyReads(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	shortenDeletion(e, time.Millisecond, time.Hour) // due immediately; the test drives reaps
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	waitDone := awaitNextStop(t, e)
 	fk, err := e.Create(ctx, "sweep/g", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
@@ -759,7 +759,7 @@ func TestDispatchers_DrainGivesUpTheSlotBeforeWaiting(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	_, err = e.Create(ctx, "drain/g", nil, nil)
@@ -810,7 +810,7 @@ func TestDispatchers_DrainStopsClaimingDispatch(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	_, err = e.Create(ctx, "drainidle/g", nil, nil)
@@ -889,9 +889,9 @@ func TestDispatchers_DrainingReplicasClassPassesToAPeer(t *testing.T) {
 	drainer, peer, creator := mk(-1), mk(-1), mk(0)
 	defer creator.Shutdown(ctx)
 	defer peer.Shutdown(ctx)
-	assert.NoError(drainer.Startup(t.Context()))
-	assert.NoError(peer.Startup(t.Context()))
-	assert.NoError(creator.Startup(t.Context()))
+	assert.Must(assert.NoError(drainer.Startup(t.Context())))
+	assert.Must(assert.NoError(peer.Startup(t.Context())))
+	assert.Must(assert.NoError(creator.Startup(t.Context())))
 	for _, p := range peer.pistons {
 		p.SetStealAfter(0) // the class can reach the peer only through the partition
 	}
@@ -962,7 +962,7 @@ func TestDispatchers_RoleFlagsSurviveARestartUnderLoad(t *testing.T) {
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 24}))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	var stop atomic.Bool
 	var wg sync.WaitGroup
@@ -974,7 +974,7 @@ func TestDispatchers_RoleFlagsSurviveARestartUnderLoad(t *testing.T) {
 	})
 	for range 3 {
 		assert.NoError(e.Shutdown(t.Context()))
-		assert.NoError(e.Startup(t.Context()))
+		assert.Must(assert.NoError(e.Startup(t.Context())))
 	}
 	stop.Store(true)
 	wg.Wait()
@@ -998,13 +998,13 @@ func twoReplicaFleet(t *testing.T, dispHost, readHost Host) (disp, reader *Engin
 		return e
 	}
 	disp = mk(dispatcherID, dispHost)
-	assert.NoError(disp.Startup(t.Context()))
+	assert.Must(assert.NoError(disp.Startup(t.Context())))
 	db, err := disp.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	_, err = db.ExecContext(t.Context(), "INSERT INTO dwarf_peers (engine_id, seen_at, ordering_seq) VALUES (1002, NOW_UTC(), ?)", time.Now().UnixMilli()-3600000)
 	assert.NoError(err)
 	reader = mk(readerID, readHost)
-	assert.NoError(reader.Startup(t.Context()))
+	assert.Must(assert.NoError(reader.Startup(t.Context())))
 	for _, e := range []*Engine{disp, reader} {
 		awaitPeerCount(t, e, 1, 3)
 		e.recomputePools()
@@ -1126,7 +1126,7 @@ func TestDispatchers_RecoverySweepSkipsShardsThisReplicaOnlyReads(t *testing.T) 
 	defer e.Shutdown(ctx)
 	defer close(release) // below the Shutdown defer, so it unwinds first and frees the drain
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	_, err := e.Create(ctx, "rsweep/g", nil, nil)
 	assert.NoError(err)
 	<-started
@@ -1173,7 +1173,7 @@ func TestDispatchers_WeightsOverrideTheOwnShardPreference(t *testing.T) {
 		assert.NoError(e.SetEngineID(dispatcherID))
 		assert.NoError(e.SetShard(ShardSpec{Index: 1, Weight: c.w1}))
 		assert.NoError(e.SetShard(ShardSpec{Index: 2, Weight: c.w2}))
-		assert.NoError(e.Startup(t.Context()))
+		assert.Must(assert.NoError(e.Startup(t.Context())))
 		joinFakeFleet(t, e)
 		if !assert.True(e.dispatchesOn(1) && !e.dispatchesOn(2), "fixture: dispatcherID dispatches shard 1 alone") {
 			e.Shutdown(t.Context())

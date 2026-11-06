@@ -42,7 +42,7 @@ func TestSubflowGuardflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	// Parent: A -> RunInner. Inner: X (captures its own - the child's - flow key).
 	parent := workflow.NewGraph("Parent")

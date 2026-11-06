@@ -56,7 +56,7 @@ func TestRefillDecoupled_MultiShardDrains(t *testing.T) {
 	assert.NoError(e.SetHost(mux))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 2}))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	keys := make([]string, 24)
 	for i := range keys {
@@ -96,7 +96,7 @@ func TestRefillInterval_OneCyclePerPistonNoTrigger(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	assert.NoError(e.SetHost(mux))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// engineseams.FaultDropDoorbell removes the local Offer entirely, so nothing but a cycle can discover this step.
 	e.seams.InjectN(engineseams.FaultDropDoorbell, 1<<20)
@@ -123,7 +123,7 @@ func TestRefillInterval_OverridePinsAndRestores(t *testing.T) {
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(hosts.NewMux()))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	derived, tallyGap := e.pistons[1].TallyCadence()
 	assert.True(derived > 0, "a started engine derives and pushes a period")
@@ -245,7 +245,7 @@ func TestRefillInterval_IndependentOfShardCount(t *testing.T) {
 		for idx := 1; idx <= shards; idx++ {
 			assert.NoError(e.SetShard(ShardSpec{Index: idx, MaxConnections: 48}))
 		}
-		assert.NoError(e.Startup(t.Context()))
+		assert.Must(assert.NoError(e.Startup(t.Context())))
 	}
 
 	one := newSolo(t, "one")
@@ -286,7 +286,7 @@ func TestRefillInterval_DeepBacklogLiveness(t *testing.T) {
 	e.SetHost(mux)
 	e.SetWorkers(1)                                            // capacity 2, against a backlog of 10
 	assert.NoError(e.setRefillInterval(50 * time.Millisecond)) // the over-limiting regime; must still drain, just slower
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	keys := make([]string, 10)
 	for i := range keys {
@@ -328,7 +328,7 @@ func TestRefillScan_BoundedPerFairnessKey(t *testing.T) {
 	defer e.Shutdown(ctx)
 	assert.NoError(e.SetHost(mux))
 	assert.NoError(e.SetWorkers(0))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// A deep backlog on two tenants: 40 steps each, far past any per-key limit used below.
 	const perTenant = 40
@@ -411,7 +411,7 @@ func TestRefillInterval_OverrideSerializesWithAPoolRecompute(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	derived, _ := e.pistons[1].SupplyCadence()
 	const pinned = 42 * time.Millisecond
 	if !assert.NotEqual(pinned, derived, "fixture: the pin must differ from the derived period") {

@@ -317,7 +317,7 @@ func TestExpiration_SetterRules(t *testing.T) {
 	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.SetFlowExpiration(-time.Second)))
 	assert.NoError(e.SetFlowExpiration(0))
 	assert.NoError(e.SetFlowExpiration(time.Millisecond))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	err := e.SetFlowExpiration(time.Hour)
 	assert.Equal(http.StatusConflict, errors.StatusCode(err))
 	assert.True(err != nil && strings.Contains(err.Error(), "flow expiration"))
@@ -392,7 +392,7 @@ func TestExpiration_TheReaperRunsThePassAtOnce(t *testing.T) {
 	e.reapInterval = tick
 	e.expireInterval = time.Hour
 	started := time.Now()
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	old := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
 	age(t, e, old, 2*time.Hour)
 	if time.Since(started) >= tick {

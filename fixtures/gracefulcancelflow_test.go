@@ -131,7 +131,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		defer eng.Shutdown(ctx)
 		eng.SetHost(mux)
 		eng.SetWorkers(1)
-		assert.NoError(eng.Startup(t.Context()))
+		assert.Must(assert.NoError(eng.Startup(t.Context())))
 		release := holdWorker(t, eng)
 		defer release()
 
@@ -175,7 +175,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		defer eng.Shutdown(ctx)
 		eng.SetHost(mux)
 		eng.SetWorkers(1)
-		assert.NoError(eng.Startup(t.Context()))
+		assert.Must(assert.NoError(eng.Startup(t.Context())))
 		release := holdWorker(t, eng)
 		defer release()
 
@@ -223,7 +223,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		defer eng.Shutdown(ctx)
 		defer releaseOnce.Do(func() { close(release) })
 		eng.SetHost(mux)
-		assert.NoError(eng.Startup(t.Context()))
+		assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 		flowKey, err := eng.Create(ctx, "gracefulcancelflow.verify:428/ran-covered-no-onerror", nil, nil)
 		if !assert.NoError(err) {
@@ -286,7 +286,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		defer eng.Shutdown(ctx)
 		defer releaseOnce.Do(func() { close(release) })
 		eng.SetHost(mux)
-		assert.NoError(eng.Startup(t.Context()))
+		assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 		flowKey, err := eng.Create(ctx, "gracefulcancelflow.verify:428/ran-covered-with-onerror", nil, nil)
 		if !assert.NoError(err) {
@@ -343,7 +343,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		defer eng.Shutdown(ctx)
 		defer releaseOnce.Do(func() { close(release) })
 		eng.SetHost(mux)
-		assert.NoError(eng.Startup(t.Context()))
+		assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 		flowKey, err := eng.Create(ctx, "gracefulcancelflow.verify:428/retry-then-preempted", nil, nil)
 		if !assert.NoError(err) {
@@ -413,7 +413,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		defer eng.Shutdown(ctx)
 		defer releaseOnce.Do(func() { close(release) })
 		eng.SetHost(mux)
-		assert.NoError(eng.Startup(t.Context()))
+		assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 		flowKey, err := eng.Create(ctx, "gracefulcancelflow.verify:428/subgraph-caller-sees-child-result", nil, nil)
 		if !assert.NoError(err) {
@@ -484,7 +484,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		defer eng.Shutdown(ctx)
 		defer releaseOnce.Do(func() { close(release) })
 		eng.SetHost(mux)
-		assert.NoError(eng.Startup(t.Context()))
+		assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 		flowKey, err := eng.Create(ctx, "gracefulcancelflow.verify:428/subgraph-cancelled-while-child-runs", nil, nil)
 		if !assert.NoError(err) {
@@ -534,7 +534,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
 		eng.SetHost(mux)
-		assert.NoError(eng.Startup(t.Context()))
+		assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 		flowKey, err := eng.Create(ctx, "gracefulcancelflow.verify:428/interrupt-resumed-is-preempted", nil, nil)
 		if !assert.NoError(err) {
@@ -615,7 +615,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		defer eng.Shutdown(ctx)
 		defer releaseOnce.Do(func() { close(release) })
 		eng.SetHost(mux)
-		assert.NoError(eng.Startup(t.Context()))
+		assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 		flowKey, err := eng.Create(ctx, url, nil, nil)
 		if !assert.NoError(err) {
@@ -659,7 +659,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		defer eng.Shutdown(ctx)
 		defer releaseOnce.Do(func() { close(release) })
 		eng.SetHost(mux)
-		assert.NoError(eng.Startup(t.Context()))
+		assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 		flowKey, err := eng.Create(ctx, url, nil, nil)
 		if !assert.NoError(err) {
@@ -740,7 +740,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		defer eng.Shutdown(ctx)
 		defer releaseOnce.Do(func() { close(release) })
 		eng.SetHost(mux)
-		assert.NoError(eng.Startup(t.Context()))
+		assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 		flowKey, err := eng.Create(ctx, "gracefulcancelflow.verify:428/subgraph-child-cancellation-propagates", nil, nil)
 		if !assert.NoError(err) {
@@ -787,7 +787,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
 		eng.SetHost(mux)
-		assert.NoError(eng.Startup(t.Context()))
+		assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 		_, outcome, err := eng.Run(ctx, "gracefulcancelflow.verify:428/subgraph-error-keeps-status-code", nil, nil)
 		if !assert.NoError(err) {
@@ -827,7 +827,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
 		eng.SetHost(mux)
-		assert.NoError(eng.Startup(t.Context()))
+		assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 		flowKey, outcome, err := eng.Run(ctx, "gracefulcancelflow.verify:428/guards", nil, nil)
 		if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, outcome.Status) {

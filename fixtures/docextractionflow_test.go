@@ -107,7 +107,7 @@ func TestDocextractionflow(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
 	eng.SetWorkers(4)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	t.Run("extracts_every_page", func(t *testing.T) {
 		assert := testarossa.For(t)

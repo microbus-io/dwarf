@@ -123,7 +123,7 @@ func TestDirectory_ShortDaysNameMovesFarFromTheHour(t *testing.T) {
 	e.reapInterval = time.Hour
 	e.testArchiveDay = 2 * time.Second
 	assert.NoError(e.SetRetention(100))
-	assert.NoError(e.Startup(ctx))
+	assert.Must(assert.NoError(e.Startup(ctx)))
 
 	fk, err := e.Create(ctx, "arch/parent", nil, nil)
 	assert.NoError(err)

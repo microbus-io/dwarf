@@ -118,7 +118,7 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 	// one still holding this would never return.
 	defer releaseGC()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	flowKey, err := e.Create(ctx, parentURL, nil, nil)
 	if !assert.NoError(err) {

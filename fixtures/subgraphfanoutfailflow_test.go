@@ -36,7 +36,7 @@ func TestSubgraphFanOutFailflow(t *testing.T) {
 		mux := hosts.NewMux()
 		eng := engine.NewEngineUnderTest(t.Name())
 		eng.SetHost(mux)
-		assert.NoError(eng.Startup(t.Context()))
+		assert.Must(assert.NoError(eng.Startup(t.Context())))
 		return eng, mux
 	}
 

@@ -35,7 +35,7 @@ func TestInterruptflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	graph := workflow.NewGraph("Interrupt")
 	graph.SetURL("TaskA", "interruptflow.verify:428/task-a")

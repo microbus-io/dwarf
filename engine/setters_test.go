@@ -44,7 +44,7 @@ func TestSetters_ConstructionTimeOnly(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	e.SetHost(noopHost{})
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Construction-time-only: rejected after Startup, as a wrong-state 409.
 	for _, err := range []error{
@@ -105,7 +105,7 @@ func TestOperations_UnmarshalableInputIs400(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	e.SetHost(noopHost{})
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// The key is well-formed and unknown: with valid input each call is a 404, so a 400 is the input's.
 	const key = "1-0-1-0123456789abcdef"
@@ -164,7 +164,7 @@ func TestDefaultPriority_IsTheMidpoint(t *testing.T) {
 	e2 := NewEngineUnderTest(t.Name())
 	defer e2.Shutdown(t.Context())
 	assert.NoError(e2.SetHost(mux))
-	assert.NoError(e2.Startup(t.Context()))
+	assert.Must(assert.NoError(e2.Startup(t.Context())))
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*enginetest.TimeoutScale()) // bounds only a hang
 	defer cancel()
@@ -191,7 +191,7 @@ func TestSetStateCacheSize_SharedByShards(t *testing.T) {
 	assert.NoError(e.SetShard(ShardSpec{Index: 1}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 2}))
 	assert.NoError(e.SetStateCacheSize(8 << 20))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	total, source := e.stateCacheBudget()
 	assert.Equal(int64(8<<20), total)
@@ -243,7 +243,7 @@ func TestCreate_RejectsValuesTheColumnsCannotHold(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	for name, opts := range map[string]*workflow.FlowOptions{
 		"priority":    {Priority: math.MaxInt32 + 1},
@@ -284,7 +284,7 @@ func TestSetMaxPriority(t *testing.T) {
 	defer e2.Shutdown(t.Context())
 	assert.NoError(e2.SetHost(mux))
 	assert.NoError(e2.SetMaxPriority(3))
-	assert.NoError(e2.Startup(t.Context()))
+	assert.Must(assert.NoError(e2.Startup(t.Context())))
 	assert.Error(e2.SetMaxPriority(4), "construction-time only")
 
 	for _, p := range e2.pistons {

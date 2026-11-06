@@ -63,7 +63,7 @@ func TestContinuecanonicalflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	// Turn 1 establishes the element in state, via the ordinary (decoded) path.
 	flowKey, outcome, err := eng.Run(ctx, "continuecanonical.verify:428/g",

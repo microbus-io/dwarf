@@ -48,7 +48,7 @@ func TestCohortDeadEndFlow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	// A sibling that runs to completion while the dead-end branch is being disposed of. A dead end that
 	// completes the flow makes Run return before this fires.
@@ -118,7 +118,7 @@ func TestCohortDeadEndFlow_TrunkStillCompletes(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	graph := workflow.NewGraph("CohortConverges")
 	graph.SetURL("Spawn", "cohortdeadendflow.verify:664/c-spawn")

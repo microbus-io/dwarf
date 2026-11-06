@@ -84,7 +84,7 @@ func TestStepDepth_SubgraphContinuesFromCaller(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	flowKey, _, err := eng.Run(ctx, "depthsub.verify:428/parent", map[string]any{}, nil)
 	assert.NoError(err)
@@ -157,7 +157,7 @@ func TestStepDepth_FanInIsMaxCohortDepthPlus1(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(4)) // so the gated shallow branch doesn't starve the deep one
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	flowKey, err := eng.Create(ctx, "depthfanin.verify:428/g", map[string]any{}, nil)
 	assert.NoError(err)

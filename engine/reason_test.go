@@ -50,7 +50,7 @@ func TestReason_TerminateAndCancelRefuseAnUnstorableReason(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	bad := map[string]string{
 		"too_long":     strings.Repeat("r", maxReasonBytes+1),

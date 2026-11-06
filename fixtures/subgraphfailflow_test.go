@@ -46,7 +46,7 @@ func TestSubgraphfailflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	// Inner: X -> boom (fails)
 	inner := workflow.NewGraph("Inner")

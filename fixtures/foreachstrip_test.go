@@ -50,7 +50,7 @@ func TestForEachStrip_ScopedToItsOwnCohort(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	g := workflow.NewGraph("Collide")
 	g.SetURL("Split", "c/split")
@@ -103,7 +103,7 @@ func TestForEachStrip_NestedOuterSurvivesInnerFanIn(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Split -forEach(pages, as=page)-> Page -forEach(chunks, as=chunk)-> Chunk -> JoinChunk -> JoinPage
 	g := workflow.NewGraph("Nested")
@@ -178,7 +178,7 @@ func TestForEachStrip_FailedFanOutStillStrips(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	g := workflow.NewGraph("FailFan")
 	g.SetURL("Split", "ff/split")
@@ -230,7 +230,7 @@ func TestFailedFanOut_KeepsEveryBranchesIntermediateOutput(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Two-STEP branches: Cell writes, then Enrich writes. Cell's output survives only in Enrich's `state`.
 	g := workflow.NewGraph("MultiStepBranch")
@@ -307,7 +307,7 @@ func TestForEachStrip_FailedNestedFanOutMatchesConvergence(t *testing.T) {
 		defer e.Shutdown(ctx)
 		mux := hosts.NewMux()
 		e.SetHost(mux)
-		assert.NoError(e.Startup(t.Context()))
+		assert.Must(assert.NoError(e.Startup(t.Context())))
 
 		g := bookGraph(map[string]workflow.Reducer{"collection": workflow.ReducerAppend})
 		assert.NoError(g.Validate())
@@ -431,7 +431,7 @@ func TestForEachStrip_FailedNestedFanOutMatchesConvergenceForEveryReducer(t *tes
 		defer e.Shutdown(ctx)
 		mux := hosts.NewMux()
 		e.SetHost(mux)
-		assert.NoError(e.Startup(t.Context()))
+		assert.Must(assert.NoError(e.Startup(t.Context())))
 
 		g := bookGraph(map[string]workflow.Reducer{
 			"app": workflow.ReducerAppend, "uni": workflow.ReducerUnion, "cat": workflow.ReducerConcat,
@@ -553,7 +553,7 @@ func TestForEachStrip_TerminatedNestedFanOutKeepsCompletedBranches(t *testing.T)
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	g := bookGraph(map[string]workflow.Reducer{"collection": workflow.ReducerAppend})
 	assert.NoError(g.Validate())

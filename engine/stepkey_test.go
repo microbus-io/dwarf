@@ -59,7 +59,7 @@ func TestStepKey_NamesItsFlow(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(context.Background())
 	e.SetHost(mux)
-	assert.NoError(e.Startup(ctx))
+	assert.Must(assert.NoError(e.Startup(ctx)))
 
 	fk, err := e.Create(ctx, "stepkey/parent", nil, nil)
 	assert.NoError(err)

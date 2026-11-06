@@ -46,7 +46,7 @@ func TestPurge_EveryListFilterNarrows(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	tenantA, outcome, err := e.Run(ctx, "pf/g", nil, &workflow.FlowOptions{FairnessKey: "tenantA"})
 	assert.NoError(err)

@@ -65,7 +65,7 @@ func TestItemRefs_BranchPointsIntoTheArray(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	const width, size = 8, 2000
 	g := workflow.NewGraph("ItemRefs")
@@ -144,7 +144,7 @@ func TestItemRefs_NestedFanOut(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	const pages, pageSize, lines, lineSize = 3, 2000, 8, 400
 	g := workflow.NewGraph("NestedItemRefs")
@@ -212,7 +212,7 @@ func TestItemRefs_FailedFanOut(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	const width, size = 4, 2000
 	g := workflow.NewGraph("FailedItemRefs")
@@ -259,7 +259,7 @@ func TestItemRefs_InnerFanInStripsASharedAs(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	const pages, pageSize, lines, lineSize = 3, 2000, 4, 400
 	g := workflow.NewGraph("SharedAs")
@@ -311,7 +311,7 @@ func TestItemRefs_TwoDimensionalArray(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	const rows, cols, size = 3, 6, 400
 	data := make([]any, rows)

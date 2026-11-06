@@ -68,7 +68,7 @@ func TestFanInFlowLock_NonFinalArrivalTakesNoFlowRowWrite(t *testing.T) {
 		mux := hosts.NewMux()
 		e.SetHost(mux)
 		e.SetWorkers(1) // determinism: one worker, so no sibling races and no contention retries
-		assert.NoError(e.Startup(t.Context()))
+		assert.Must(assert.NoError(e.Startup(t.Context())))
 
 		g := workflow.NewGraph("Fan")
 		g.SetURL("Split", "fl/split")

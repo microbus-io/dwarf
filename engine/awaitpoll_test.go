@@ -68,7 +68,7 @@ func TestAwait_WakesWhenNoSignalIsDelivered(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	flowKey, err := e.Create(ctx, "awaitpoll.verify:0/g", nil, nil)
 	if !assert.NoError(err) {
@@ -154,7 +154,7 @@ func TestAwait_DefaultBudgetIsADeadlineError(t *testing.T) {
 	defer close(release) // before Shutdown, which waits for the blocked task
 	e.SetHost(mux)
 	e.awaitDefaultBudget = 200 * time.Millisecond
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	flowKey, err := e.Create(ctx, "awaitpoll.verify:0/g", nil, nil)
 	if !assert.NoError(err) {
@@ -201,7 +201,7 @@ func TestPoll_RunningThenStopped(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	flowKey, err := e.Create(ctx, "polltest.verify:0/g", nil, nil)
 	if !assert.NoError(err) {
@@ -262,7 +262,7 @@ func TestAwait_IgnoresANonSettledWake(t *testing.T) {
 	defer e.Shutdown(ctx)
 	defer rel() // below the Shutdown defer, so it unwinds first and the drain never waits on the held task
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	flowKey, err := e.Create(ctx, "nonsettled.verify:0/g", nil, nil)
 	if !assert.NoError(err) {
@@ -347,7 +347,7 @@ func TestAwait_StaleStopReparks(t *testing.T) {
 	defer e.Shutdown(ctx)
 	defer rel() // below the Shutdown defer, so it unwinds first and the drain never waits on the held task
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	flowKey, err := e.Create(ctx, "stalestop.verify:0/g", nil, nil)
 	if !assert.NoError(err) {
@@ -431,7 +431,7 @@ func TestAwait_ReadAfterReleasePastTheDeadline(t *testing.T) {
 	defer e.Shutdown(ctx)
 	defer rel() // below the Shutdown defer, so it unwinds first and the drain never waits on the held task
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	flowKey, err := e.Create(ctx, "releasedeadline.verify:0/g", nil, nil)
 	if !assert.NoError(err) {

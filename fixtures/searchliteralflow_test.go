@@ -56,7 +56,7 @@ func TestSearchLiteralflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	byURL := map[string]string{} // workflow_url -> flowKey
 	for _, u := range urls {

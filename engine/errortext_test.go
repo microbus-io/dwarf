@@ -82,7 +82,7 @@ func TestErrorText_OversizedTaskErrorFailsTheStepOnce(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	e.persistBackoff = shortPersistBackoff
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Bounded, so a step left for lease recovery fails the test rather than hanging it.
 	runCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())

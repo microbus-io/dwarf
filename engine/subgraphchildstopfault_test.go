@@ -87,7 +87,7 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 	// drain waits on forever.
 	defer releaseBoom()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Run the parent (root) in the background; Run blocks until the root flow stops.
 	rootDone := make(chan struct{})

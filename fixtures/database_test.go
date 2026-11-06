@@ -48,7 +48,7 @@ func TestDatabase_TestModeCreatesSchema(t *testing.T) {
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	e.SetHost(enginetest.NoopHost{})
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Verify the schema was created by querying the flows table.
 	db, err := engineseams.DB(e).Shard(1)
@@ -88,7 +88,7 @@ func TestSetShard(t *testing.T) {
 	e.SetHost(oneTaskHost{})
 	assert.NoError(e.SetShard(engine.ShardSpec{Index: 2}))
 	assert.NoError(e.SetShard(engine.ShardSpec{Index: 99}))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	assert.Equal(2, engineseams.DB(e).NumShards())
 	assert.Equal([]int{2, 99}, engineseams.DB(e).Indices())
 
@@ -123,7 +123,7 @@ func TestDatabase_ShardOutOfRange(t *testing.T) {
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	e.SetHost(enginetest.NoopHost{})
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	_, err := engineseams.DB(e).Shard(0)
 	assert.Error(err)
@@ -140,7 +140,7 @@ func TestDatabase_EachShardSingleShard(t *testing.T) {
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	e.SetHost(enginetest.NoopHost{})
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	var visited []int
 	err := engineseams.DB(e).OnEach(context.Background(), func(ctx context.Context, db *sequel.DB, shard int) error {

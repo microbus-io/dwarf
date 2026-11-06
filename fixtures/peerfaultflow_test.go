@@ -82,7 +82,7 @@ func peerFleet(t *testing.T, name string) (creator, eng1, eng2 *engine.Engine, r
 		}
 	}
 	for _, e := range fleet {
-		assert.NoError(e.Startup(ctx))
+		assert.Must(assert.NoError(e.Startup(ctx)))
 	}
 	return creator, eng1, eng2, ran, shutdown
 }

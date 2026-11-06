@@ -86,7 +86,7 @@ func TestPayloadVer_NewerFlowIsDeferredUnrun(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk := createInterruptedFlow(t, e, "newerpayload/g")
 	assert.Equal(int32(1), runs.Load())
@@ -145,7 +145,7 @@ func TestPayloadVer_DeferralBoundFailsTheStep(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// A flow with state of its own, so an empty final state shows the tails were refused rather than empty.
 	fk, err := e.Create(ctx, "payloadbound/g", map[string]any{"kept": 1}, nil)
@@ -185,7 +185,7 @@ func TestPayloadVer_ReadersRefuseNewerFlows(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// A flow with state of its own, so an empty final state shows the tails were refused rather than empty.
 	fk, err := e.Create(ctx, "payloadreads/g", map[string]any{"kept": 1}, nil)
@@ -234,7 +234,7 @@ func TestPayloadVer_ForkRefusesANewerFlow(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk, out, err := e.Run(ctx, "forknewer/g", nil, nil)
 	assert.NoError(err)
@@ -285,7 +285,7 @@ func TestPayloadVer_ForkRefusesANewerSubgraph(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk, out, err := e.Run(ctx, "forknewersub/parent", nil, nil)
 	assert.NoError(err)
@@ -324,7 +324,7 @@ func TestPayloadVer_CreateStampsForkCopies(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk, out, err := e.Run(ctx, "forkcopies/g", nil, nil)
 	assert.NoError(err)

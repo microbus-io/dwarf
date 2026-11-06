@@ -74,7 +74,7 @@ func TestCompleteFlow_TransientReviveErrorIsRetriedNotLost(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	e.persistBackoff = shortPersistBackoff
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// The first completeSurgraphFlow (driven by the child's completion) errors; persist must re-drive it.
 	e.seams.InjectN(engineseams.FaultCompleteSurgraphErr, 1)

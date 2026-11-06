@@ -75,8 +75,8 @@ func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
 	worker.SetHost(muxWorker)
 	assert.NoError(worker.SetWorkers(2))
 
-	assert.NoError(awaiter.Startup(ctx))
-	assert.NoError(worker.Startup(ctx))
+	assert.Must(assert.NoError(awaiter.Startup(ctx)))
+	assert.Must(assert.NoError(worker.Startup(ctx)))
 
 	// Break the worker's terminal wake for the rest of the test: every signalStop on the worker delivers
 	// nothing, so the awaiter can learn the outcome only by reading the flow row. Nothing crosses between the
@@ -135,7 +135,7 @@ func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
 	assert.NoError(repA.SetWorkers(2))
 	assert.NoError(repA.SetTimeBudget(300 * time.Millisecond))
 	repA.leaseMargin = 100 * time.Millisecond // lease = budget+margin = 400ms
-	assert.NoError(repA.Startup(ctx))
+	assert.Must(assert.NoError(repA.Startup(ctx)))
 
 	repA.seams.Inject(engineseams.Join(engineseams.FaultLeaseStaleWrite, "A"))
 	fk, err := repA.Create(ctx, "xrrec/g", nil, nil)
@@ -158,7 +158,7 @@ func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
 	repB.SetHost(buildMux())
 	assert.NoError(repB.SetShard(ShardSpec{Index: 1, DSN: dsn}))
 	assert.NoError(repB.SetWorkers(2))
-	assert.NoError(repB.Startup(ctx))
+	assert.Must(assert.NoError(repB.Startup(ctx)))
 
 	// While A's lease is still valid (just claimed), the flow is stranded `running` - B cannot yet recover a
 	// live lease, so this read is stable.

@@ -75,7 +75,7 @@ func TestFanInDirectTerminate_NoExtendTerminatedFlow(t *testing.T) {
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Empty forEach source: the spawn produces no branches, so processStep reaches the empty-cohort fan-in.
 	flowKey, err := e.Create(ctx, "fidc/g", map[string]any{"items": []string{}}, nil)

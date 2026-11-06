@@ -35,7 +35,7 @@ func TestDynamicfanoutflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	graph := workflow.NewGraph("DynamicFanOut")
 	graph.SetURL("TaskA", "dynamicfanoutflow.verify:428/task-a")

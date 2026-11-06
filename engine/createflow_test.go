@@ -42,7 +42,7 @@ func TestInsertFlowTx_ConcurrentCreates(t *testing.T) {
 	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.SetWorkers(0)) // the entry steps stay as created
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	g := workflow.NewGraph("Entry")
 	g.SetURL("Entry", "create/entry")
@@ -108,7 +108,7 @@ func TestInsertFlowTx_SelfColumnsInTheInsert(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	assert.NoError(e.SetLogger(slog.New(log)))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 

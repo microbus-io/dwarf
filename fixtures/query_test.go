@@ -53,7 +53,7 @@ func TestQuery_WorkflowName(t *testing.T) {
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(ctx))
+	assert.Must(assert.NoError(e.Startup(ctx)))
 
 	const alphas, betas = 3, 2
 	var keys []string
@@ -121,7 +121,7 @@ func TestQuery_StatusFilter(t *testing.T) {
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(ctx))
+	assert.Must(assert.NoError(e.Startup(ctx)))
 
 	const n = 3
 	for range n {
@@ -176,7 +176,7 @@ func TestQuery_SearchEscapesWildcards(t *testing.T) {
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(ctx))
+	assert.Must(assert.NoError(e.Startup(ctx)))
 
 	var keys []string
 	for range 3 {
@@ -231,7 +231,7 @@ func TestQuery_SearchByFlowKey(t *testing.T) {
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(ctx))
+	assert.Must(assert.NoError(e.Startup(ctx)))
 
 	var flowKeys []string
 	for range 3 {

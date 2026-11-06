@@ -74,8 +74,8 @@ func TestBandSpillflow(t *testing.T) {
 	defer creator.Shutdown(ctx)
 	assert.NoError(creator.SetHost(buildMux()))
 	assert.NoError(creator.SetWorkers(0))
-	assert.NoError(eng.Startup(ctx))
-	assert.NoError(creator.Startup(ctx))
+	assert.Must(assert.NoError(eng.Startup(ctx)))
+	assert.Must(assert.NoError(creator.Startup(ctx)))
 
 	seams := engineseams.Seams(eng)
 	loops := []string{engineseams.CheckpointRefillTallyDone, engineseams.CheckpointRefillCycleDone}

@@ -46,7 +46,7 @@ func TestRoundTrips_LinearStep(t *testing.T) {
 	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.SetWorkers(1))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	run := func(steps int) time.Duration {
 		name := "rt/linear" + strconv.Itoa(steps)
@@ -107,7 +107,7 @@ func TestRoundTrips_FanInCycle(t *testing.T) {
 	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.SetWorkers(1))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Cycle i: Src<i> -forEach-> Work<i> -> Join<i>, and Join<i> is Src<i+1>.
 	run := func(cycles int) time.Duration {
@@ -168,7 +168,7 @@ func TestRoundTrips_OneStepFlow(t *testing.T) {
 	mux := hosts.NewMux()
 	e.SetHost(mux)
 	assert.NoError(e.SetWorkers(1))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	g := workflow.NewGraph("One")
 	g.SetURL("S", "rt/s")

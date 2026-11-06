@@ -86,7 +86,7 @@ func TestCompleteSurgraph_vs_TerminateRoot_BothOrders(t *testing.T) {
 
 		e = engine.NewEngineUnderTest(t.Name())
 		e.SetHost(mux)
-		assert.NoError(e.Startup(t.Context()))
+		assert.Must(assert.NoError(e.Startup(t.Context())))
 		return e, prefix + "/parent", callResumed, callBlock
 	}
 

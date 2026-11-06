@@ -46,7 +46,7 @@ func TestCreate_SeedsGraphCache(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk, err := e.Create(ctx, "seedcache/g", nil, nil)
 	assert.NoError(err)
@@ -95,7 +95,7 @@ func TestGraphCache_FlowsShareOneParse(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	var entries []*graphcache.Entry
 	for range 2 {
@@ -155,11 +155,11 @@ func TestGraphCache_DispatchMissInterns(t *testing.T) {
 	defer creator.Shutdown(ctx)
 	creator.SetHost(mux)
 	assert.NoError(creator.SetWorkers(0))
-	assert.NoError(creator.Startup(t.Context()))
+	assert.Must(assert.NoError(creator.Startup(t.Context())))
 	runner := NewEngineUnderTest(t.Name()) // same name, same database
 	defer runner.Shutdown(ctx)
 	runner.SetHost(mux)
-	assert.NoError(runner.Startup(t.Context()))
+	assert.Must(assert.NoError(runner.Startup(t.Context())))
 
 	var entries []*graphcache.Entry
 	for range 2 {
@@ -215,13 +215,13 @@ func TestGraphCache_HashHitReadsNoGraph(t *testing.T) {
 	defer creator.Shutdown(ctx)
 	creator.SetHost(mux)
 	assert.NoError(creator.SetWorkers(0))
-	assert.NoError(creator.Startup(t.Context()))
+	assert.Must(assert.NoError(creator.Startup(t.Context())))
 	reads := &graphReadCounter{}
 	runner := NewEngineUnderTest(t.Name()) // same name, same database
 	defer runner.Shutdown(ctx)
 	runner.SetHost(mux)
 	assert.NoError(runner.SetLogger(slog.New(reads)))
-	assert.NoError(runner.Startup(t.Context()))
+	assert.Must(assert.NoError(runner.Startup(t.Context())))
 
 	// One at a time, so no two first dispatches race to parse the graph.
 	for range 3 {

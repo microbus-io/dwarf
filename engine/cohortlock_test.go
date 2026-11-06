@@ -200,7 +200,7 @@ func TestCohortStripe_QueuedArrivalsKeepTheirLeases(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	e.leaseMargin = 200 * time.Millisecond // waiters tick every 100ms
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	awaitStartupRecoverySweep(t, e) // it runs the orphan repair this test drives itself
 
 	fk, err := e.Create(ctx, "queue/g", nil, nil)

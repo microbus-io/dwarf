@@ -39,7 +39,7 @@ func TestRetry_NegativeDelayFailsTheStep(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	g := workflow.NewGraph("NegativeRetry")
 	g.SetURL("Only", "negativeretry/only")

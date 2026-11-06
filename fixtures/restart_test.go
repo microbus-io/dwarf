@@ -92,7 +92,7 @@ func TestRestartSurvival(t *testing.T) {
 		// Engine 1 has ZERO workers: Create inserts a pending entry step and rings a doorbell nobody consumes,
 		// then dies. The step must be recovered by engine 2's poll with no doorbell of its own.
 		e1 := mkEngine(t, mux, dir, 0)
-		assert.NoError(e1.Startup(ctx))
+		assert.Must(assert.NoError(e1.Startup(ctx)))
 		flowKey, err := e1.Create(ctx, "r1/g", nil, nil)
 		if !assert.NoError(err) {
 			return
@@ -101,7 +101,7 @@ func TestRestartSurvival(t *testing.T) {
 		assert.Equal(int64(0), aCalls.Load()) // engine 1 never ran it (no workers)
 
 		e2 := mkEngine(t, mux, dir, 2)
-		assert.NoError(e2.Startup(ctx))
+		assert.Must(assert.NoError(e2.Startup(ctx)))
 		defer func() { assert.NoError(e2.Shutdown(ctx)) }()
 
 		enginetest.AwaitAndAssertComplete(t, e2, flowKey)
@@ -132,7 +132,7 @@ func TestRestartSurvival(t *testing.T) {
 		mux.HandleTask("r2/b", func(ctx context.Context, f *workflow.Flow) error { bCalls.Add(1); return nil })
 
 		e1 := mkEngine(t, mux, dir, 2)
-		assert.NoError(e1.Startup(ctx))
+		assert.Must(assert.NoError(e1.Startup(ctx)))
 		flowKey, err := e1.Create(ctx, "r2/g", nil, nil)
 		if !assert.NoError(err) {
 			return
@@ -148,7 +148,7 @@ func TestRestartSurvival(t *testing.T) {
 		assert.NoError(e1.Shutdown(ctx))
 
 		e2 := mkEngine(t, mux, dir, 2)
-		assert.NoError(e2.Startup(ctx))
+		assert.Must(assert.NoError(e2.Startup(ctx)))
 		defer func() { assert.NoError(e2.Shutdown(ctx)) }()
 
 		enginetest.AwaitAndAssertComplete(t, e2, flowKey)
@@ -194,7 +194,7 @@ func TestRestartSurvival(t *testing.T) {
 		mux.HandleTask("r3/cb", func(ctx context.Context, f *workflow.Flow) error { cbCalls.Add(1); return nil })
 
 		e1 := mkEngine(t, mux, dir, 2)
-		assert.NoError(e1.Startup(ctx))
+		assert.Must(assert.NoError(e1.Startup(ctx)))
 		flowKey, err := e1.Create(ctx, "r3/parent", nil, nil)
 		if !assert.NoError(err) {
 			return
@@ -206,7 +206,7 @@ func TestRestartSurvival(t *testing.T) {
 		assert.NoError(e1.Shutdown(ctx))
 
 		e2 := mkEngine(t, mux, dir, 2)
-		assert.NoError(e2.Startup(ctx))
+		assert.Must(assert.NoError(e2.Startup(ctx)))
 		defer func() { assert.NoError(e2.Shutdown(ctx)) }()
 
 		enginetest.AwaitAndAssertComplete(t, e2, flowKey)
@@ -242,7 +242,7 @@ func TestRestartSurvival(t *testing.T) {
 		mux.HandleTask("r4/done", func(ctx context.Context, f *workflow.Flow) error { doneCalls.Add(1); return nil })
 
 		e1 := mkEngine(t, mux, dir, 2)
-		assert.NoError(e1.Startup(ctx))
+		assert.Must(assert.NoError(e1.Startup(ctx)))
 		flowKey, err := e1.Create(ctx, "r4/g", nil, nil)
 		if !assert.NoError(err) {
 			return
@@ -255,7 +255,7 @@ func TestRestartSurvival(t *testing.T) {
 		assert.NoError(e1.Shutdown(ctx))
 
 		e2 := mkEngine(t, mux, dir, 2)
-		assert.NoError(e2.Startup(ctx))
+		assert.Must(assert.NoError(e2.Startup(ctx)))
 		defer func() { assert.NoError(e2.Shutdown(ctx)) }()
 
 		// Resume on the fresh engine drives the flow to completion.

@@ -112,7 +112,7 @@ func newFaultBatteryEngine(t *testing.T, prefix string, cfg func(*Engine)) (*Eng
 	if cfg != nil {
 		cfg(e)
 	}
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	return e, reader, calls
 }
 

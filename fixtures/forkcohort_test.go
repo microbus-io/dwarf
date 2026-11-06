@@ -74,7 +74,7 @@ func TestForkCohort_MultiStepBranchCountsBranchesNotMembers(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	originKey, outcome, err := eng.Run(ctx, "fkc/g", map[string]any{"cells": []any{"a", "b", "c"}}, nil)
 	if !assert.NoError(err) {
@@ -163,7 +163,7 @@ func TestForkCohort_RewindMidBranchExcludesWholeBranch(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	originKey, outcome, err := eng.Run(ctx, "fkm/g",
 		map[string]any{"cells": []any{"a", "b"}, "suffix": "!"}, nil)
@@ -272,7 +272,7 @@ func TestForkCohort_NestedRewindExcludesTheWholeOuterBranch(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	originKey, outcome, err := eng.Run(ctx, "nfk/g", map[string]any{"cells": []any{"a", "b", "c"}}, nil)
 	if !assert.NoError(err) {
@@ -325,7 +325,7 @@ func TestForkCohort_NestedFailureInAKeptBranchStillFailsTheFork(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	originKey, outcome, err := eng.Run(ctx, "nfk/g", map[string]any{"cells": []any{"a", "b", "c"}}, nil)
 	if !assert.NoError(err) {
@@ -406,7 +406,7 @@ func TestForkCohort_SourceEdgeIntoItsOwnFanIn(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	originKey, outcome, err := eng.Run(ctx, "fkcd/g", nil, nil)
 	if !assert.NoError(err) {
@@ -445,7 +445,7 @@ func TestForkCohort_TerminatedBranchIsALoss(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	g := bookGraph(map[string]workflow.Reducer{"collection": workflow.ReducerAppend})
 	assert.NoError(g.Validate())

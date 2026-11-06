@@ -100,7 +100,7 @@ func TestDeleteOnCompletion_ReaperDeletesOnSuccess(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	shortenDeletion(e, time.Millisecond, 20*time.Millisecond)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk, err := e.Create(ctx, "doc/solo", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
@@ -132,7 +132,7 @@ func TestDeleteOnCompletion_OutcomeObservableThenReaped(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	shortenDeletion(e, time.Millisecond, time.Hour) // due ~immediately, but only the manual reap fires
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk, err := e.Create(ctx, "doc/await", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
@@ -176,7 +176,7 @@ func TestDeleteOnCompletion_RunReturnsOutcome(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	shortenDeletion(e, time.Millisecond, time.Hour)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	_, out, err := e.Run(ctx, "doc/run", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
@@ -217,7 +217,7 @@ func TestDelete_ReaperRemovesTree(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	shortenDeletion(e, time.Millisecond, time.Hour)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk, _, err := e.Run(ctx, "pr/parent", nil, nil)
 	assert.NoError(err)
@@ -252,7 +252,7 @@ func TestDeleteOnCompletion_KeepsFailedFlow(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk, err := e.Create(ctx, "doc/failing", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
@@ -299,7 +299,7 @@ func TestDeleteOnCompletion_ReaperCascadesSubgraph(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	shortenDeletion(e, time.Millisecond, time.Hour) // due ~immediately, but only the manual reap fires
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk, err := e.Create(ctx, "doc/sg-parent", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
@@ -346,7 +346,7 @@ func TestDeleteOnCompletion_HistoryOfAChildHidesWithItsRoot(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	shortenDeletion(e, time.Hour, time.Hour) // the grace window outlasts the test
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk, err := e.Create(ctx, "doc/hc-parent", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
@@ -394,7 +394,7 @@ func TestDeleteOnCompletion_OutcomeObservableUnderConcurrency(t *testing.T) {
 	// Keep grace at the production default and the reaper effectively off, so no flow is removed mid-test
 	// and a missing/errored outcome would signal a real defect.
 	shortenDeletion(e, time.Minute, time.Hour)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	const workers = 8
 	const perWorker = 25

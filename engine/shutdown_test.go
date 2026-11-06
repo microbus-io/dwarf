@@ -92,7 +92,7 @@ func TestShutdown_AbandonsASweepInFlight(t *testing.T) {
 		e.SetHost(mux)
 		assert.NoError(e.SetLogger(slog.New(log)))
 		e.recoveryInterval = 100 * time.Millisecond
-		assert.NoError(e.Startup(t.Context()))
+		assert.Must(assert.NoError(e.Startup(t.Context())))
 
 		fk, out, err := e.Run(ctx, "sweepstop/g", nil, nil)
 		if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, out.Status) {

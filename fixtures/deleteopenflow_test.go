@@ -66,7 +66,7 @@ func TestDeleteOpenflow(t *testing.T) {
 	releaseOnce := func() { once.Do(func() { close(release) }) }
 	defer releaseOnce() // declared after the Shutdown defer, so it unwinds first and the drain is not left waiting
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	parked, outcome, err := eng.Run(ctx, "deleteopenflow.verify:428/g", map[string]any{"mode": "park"}, nil)
 	assert.NoError(err)

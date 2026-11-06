@@ -77,7 +77,7 @@ func TestPeerFault_BlindHoldsThePoolsAndFailsOpen(t *testing.T) {
 	e.testConnCap = 0 // assert the real derived sizes, not the test-mode cap
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	db, err := e.db.Shard(1)
 	if !assert.NoError(err) {
@@ -126,7 +126,7 @@ func TestPeerFault_BlindnessIsPerShard(t *testing.T) {
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 2, MaxConnections: 48}))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	db1, err := e.db.Shard(1)
 	if !assert.NoError(err) {
@@ -175,13 +175,13 @@ func TestPeerFault_BeatFailureEvictsFromTheDispatchers(t *testing.T) {
 	defer worker.Shutdown(ctx)
 	assert.NoError(worker.SetHost(noopHost{}))
 	assert.NoError(worker.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
-	assert.NoError(worker.Startup(t.Context()))
+	assert.Must(assert.NoError(worker.Startup(t.Context())))
 
 	peer := NewEngineUnderTest(t.Name())
 	defer peer.Shutdown(ctx)
 	assert.NoError(peer.SetHost(noopHost{}))
 	assert.NoError(peer.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
-	assert.NoError(peer.Startup(ctx))
+	assert.Must(assert.NoError(peer.Startup(ctx)))
 
 	// Both dispatching: two divisors, and each holds an ordinal in the other's view.
 	awaitPartition(t, worker, 1, 2, -1)

@@ -36,7 +36,7 @@ func TestFanouterrorflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	graph := workflow.NewGraph("FanOutError")
 	graph.SetURL("TaskA", "fanouterrorflow.verify:428/task-a")

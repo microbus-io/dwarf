@@ -213,7 +213,7 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
 	eng.SetMeterProvider(mp)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	_, outcome, err := eng.Run(ctx, "metricsflow.verify:428/g", nil, nil)
 	if !assert.NoError(err) {
@@ -350,7 +350,7 @@ func TestMetrics_BacklogGauges(t *testing.T) {
 	assert.NoError(e.SetHost(mux))
 	assert.NoError(e.SetMeterProvider(mp))
 	assert.NoError(e.SetWorkers(1)) // one worker, held inside the first task: the rest stay pending
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	var flowKeys []string
 	for range 4 {
 		flowKey, err := e.Create(ctx, "backloggauges/g", nil, nil)
@@ -425,7 +425,7 @@ func TestMetrics_BacklogLeaderOnly(t *testing.T) {
 	defer e.Shutdown(ctx)
 	assert.NoError(e.SetHost(hosts.NewMux()))
 	assert.NoError(e.SetMeterProvider(mp))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	assert.True(e.leadsBacklog(1), "a solo dispatcher leads its shard")
 	e.refreshBacklog(ctx)
 	e.backlogMu.Lock()
@@ -475,7 +475,7 @@ func TestBacklog_ResumeStampsNotBefore(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	assert.NoError(e.SetHost(mux))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	flowKey, err := e.Create(ctx, "resumestamps/g", nil, nil)
 	if !assert.NoError(err) {
 		return
@@ -535,7 +535,7 @@ func TestMetrics_RefillInstrumented(t *testing.T) {
 	assert.NoError(e.SetHost(mux))
 	assert.NoError(e.SetMeterProvider(mp))
 	assert.NoError(e.SetWorkers(0)) // nothing dispatches: the backlog stays put
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	for range 8 {
 		_, err := e.Create(ctx, "refillmetrics/g", nil, &workflow.FlowOptions{FairnessKey: "tenant"})
@@ -613,7 +613,7 @@ func TestMetrics_ForkCountsAsStarted(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
 	eng.SetMeterProvider(mp)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	// One flow, run to completion: started=1, ended=1.
 	flowKey, outcome, err := eng.Run(ctx, "forkmetric.verify:428/g", nil, nil)
@@ -680,7 +680,7 @@ func TestOrphanDetection_EmitsMetric(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
 	eng.SetMeterProvider(mp)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	key, err := eng.Create(ctx, "orphanmetric.verify:428/g", nil, nil)
 	if !assert.NoError(err) {
@@ -763,7 +763,7 @@ func TestMetrics_InFlightStateGauges(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
 	eng.SetMeterProvider(mp)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	done := make(chan *workflow.FlowOutcome, 1)
 	go func() {
@@ -862,7 +862,7 @@ func TestMetrics_ClosedCountsEveryTerminalStatus(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
 	eng.SetMeterProvider(mp)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	_, outcome, err := eng.Run(ctx, "termmetrics.verify:429/failing", nil, nil)
 	if !assert.NoError(err) {
@@ -946,7 +946,7 @@ func TestMetrics_TerminateCountsOnlyTheFlowsItClosed(t *testing.T) {
 	defer close(release)
 	eng.SetHost(mux)
 	eng.SetMeterProvider(mp)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	fk, err := eng.Create(ctx, "tcoe/parent", nil, nil)
 	if !assert.NoError(err) {
@@ -1144,7 +1144,7 @@ func TestMetrics_OperationSeconds(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	eng.SetHost(slowGraphHost{Mux: mux, url: "opmetric.verify:428/g", delay: slow})
 	eng.SetMeterProvider(mp)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	flowKey, outcome, err := eng.Run(ctx, "opmetric.verify:428/g", nil, nil)
 	if !assert.NoError(err) {

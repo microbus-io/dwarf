@@ -74,7 +74,7 @@ func TestShardedflow(t *testing.T) {
 	for i := 1; i <= 8; i++ {
 		eng.SetShard(engine.ShardSpec{Index: i})
 	}
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	t.Run("strict_priority_across_shards", func(t *testing.T) {
 		assert := testarossa.For(t)

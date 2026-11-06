@@ -139,7 +139,7 @@ func TestTracing_SpansEmittedOnRun(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
 	eng.SetTracerProvider(tp)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	flowKey, outcome, err := eng.Run(ctx, "tracingflow.verify:428/parent", nil, nil)
 	if !assert.NoError(err) {

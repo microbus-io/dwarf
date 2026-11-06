@@ -212,7 +212,7 @@ func TestPeerRollingRestart_FleetNeverExceedsTheShardBudget(t *testing.T) {
 		fleet.add(e)
 		originals = append(originals, e)
 		started = append(started, e)
-		assert.NoError(e.Startup(ctx))
+		assert.Must(assert.NoError(e.Startup(ctx)))
 	}
 	awaitFleetSettled(t, fleet, shard, replicas, budget)
 
@@ -252,7 +252,7 @@ func TestPeerRollingRestart_FleetNeverExceedsTheShardBudget(t *testing.T) {
 		fresh := build()
 		fleet.add(fresh)
 		started = append(started, fresh)
-		assert.NoError(fresh.Startup(ctx), "replacement %d failed to start", i)
+		assert.Must(assert.NoError(fresh.Startup(ctx), "replacement %d failed to start", i))
 		awaitFleetSettled(t, fleet, shard, replicas, budget)
 	}
 
@@ -307,7 +307,7 @@ func TestPeerRollingRestart_ShardsStayOnBudgetAndRebalance(t *testing.T) {
 		fleet.add(e)
 		originals = append(originals, e)
 		started = append(started, e)
-		assert.NoError(e.Startup(ctx))
+		assert.Must(assert.NoError(e.Startup(ctx)))
 	}
 	settle(replicas)
 
@@ -340,7 +340,7 @@ func TestPeerRollingRestart_ShardsStayOnBudgetAndRebalance(t *testing.T) {
 		fresh := build()
 		fleet.add(fresh)
 		started = append(started, fresh)
-		assert.NoError(fresh.Startup(ctx), "replacement %d failed to start", i)
+		assert.Must(assert.NoError(fresh.Startup(ctx), "replacement %d failed to start", i))
 		settle(replicas)
 	}
 	close(samplerStop)

@@ -79,7 +79,7 @@ func TestUnvalidatedGraphflow(t *testing.T) {
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
 		eng.SetHost(mux)
-		assert.NoError(eng.Startup(t.Context()))
+		assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 		_, outcome, err := eng.Run(ctx, "unvalidated.verify:428/g", map[string]any{"items": []int{}}, nil)
 		if !assert.NoError(err) {
@@ -97,7 +97,7 @@ func TestUnvalidatedGraphflow(t *testing.T) {
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
 		eng.SetHost(nilGraphHost{hosts.NewMux()})
-		assert.NoError(eng.Startup(t.Context()))
+		assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 		_, err := eng.Create(ctx, "anything", nil, nil)
 		if !assert.Error(err) {
@@ -121,7 +121,7 @@ func TestUnvalidatedGraphflow(t *testing.T) {
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
 		eng.SetHost(mux)
-		assert.NoError(eng.Startup(t.Context()))
+		assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 		_, err := eng.Create(ctx, "invalid.verify:428/g", nil, nil)
 		if !assert.Error(err) {

@@ -139,7 +139,7 @@ func TestInterruptSnapshotMatchesResume(t *testing.T) {
 	// Several workers so B's gate-block doesn't starve A on a single worker.
 	assert.NoError(eng.SetWorkers(4))
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	flowKey, err := eng.Create(ctx, "snapresume.verify:428/g", nil, nil)
 	assert.NoError(err)
@@ -225,7 +225,7 @@ func TestInterruptSnapshotFollowsTheRecordedInterrupt(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(4))
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	flowKey, err := eng.Create(ctx, "snaprecord.verify:428/g", nil, nil)
 	if !assert.NoError(err) {
@@ -322,7 +322,7 @@ func TestInterruptParallelSubgraphResume(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(4))
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	flowKey, err := eng.Create(ctx, "psub.verify:428/parent", nil, nil)
 	assert.NoError(err)

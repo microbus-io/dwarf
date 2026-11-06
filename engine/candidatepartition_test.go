@@ -80,7 +80,7 @@ func TestPartition_AppliedFromRegistry(t *testing.T) {
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Solo: registered, but nothing to divide.
 	_, _, ok := e.partitionOn(1)
@@ -120,7 +120,7 @@ func TestPartition_AwaitOnlyPeerOwnsNoSlice(t *testing.T) {
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// A peer that holds connections but dispatches nothing.
 	addPeerRowWithDispatch(t, e, 4242, false)

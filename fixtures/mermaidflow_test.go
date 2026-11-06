@@ -41,7 +41,7 @@ func TestMermaidflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	// Parent: Start -> (forEach items -> Work) -> Collect (fan-in) -> CallSub (subgraph) -> Finish -> END
 	parent := workflow.NewGraph("MermaidParent")

@@ -75,7 +75,7 @@ func TestFairnessflow(t *testing.T) {
 	defer release()
 	eng.SetHost(mux)
 	eng.SetWorkers(1)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	t.Run("weighted_share_and_liveness", func(t *testing.T) {
 		assert := testarossa.For(t)

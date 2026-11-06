@@ -110,8 +110,8 @@ func TestFanInReplicaflow(t *testing.T) {
 	defer eng2.Shutdown(ctx)
 	eng2.SetHost(mux2)
 	assert.NoError(eng2.SetWorkers(4))
-	assert.NoError(eng1.Startup(ctx))
-	assert.NoError(eng2.Startup(ctx))
+	assert.Must(assert.NoError(eng1.Startup(ctx)))
+	assert.Must(assert.NoError(eng2.Startup(ctx)))
 
 	const flows = 50
 	engines := []*engine.Engine{eng1, eng2}

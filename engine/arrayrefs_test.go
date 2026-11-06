@@ -151,7 +151,7 @@ func TestArrayRefs_AppendLoopStoresEachElementOnce(t *testing.T) {
 	e := unseeded(NewEngineUnderTest(t.Name()))
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk, outcome, err := e.Run(ctx, "arrayloop/wf", nil, nil)
 	assert.NoError(err)
@@ -218,7 +218,7 @@ func TestArrayRefs_ForEachOverAList(t *testing.T) {
 	e := unseeded(NewEngineUnderTest(t.Name()))
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk, outcome, err := e.Run(ctx, "arrayeach/wf", nil, nil)
 	assert.NoError(err)
@@ -258,7 +258,7 @@ func TestArrayRefs_ForkAndContinueMidLoop(t *testing.T) {
 	e := unseeded(NewEngineUnderTest(t.Name()))
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk, outcome, err := e.Run(ctx, "arrayfork/wf", nil, nil)
 	assert.NoError(err)
@@ -339,7 +339,7 @@ func TestArrayRefs_ReplaceLoopStoresOnlyWhatEachStepAdds(t *testing.T) {
 	e := unseeded(NewEngineUnderTest(t.Name()))
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk, err := e.Create(ctx, "replaceloop/wf", map[string]any{"pages": []string{"a", "b"}}, nil)
 	assert.NoError(err)
@@ -520,7 +520,7 @@ func TestArrayRefs_FanOutSourceAddition(t *testing.T) {
 			e := unseeded(NewEngineUnderTest(t.Name()))
 			defer e.Shutdown(ctx)
 			e.SetHost(mux)
-			assert.NoError(e.Startup(t.Context()))
+			assert.Must(assert.NoError(e.Startup(t.Context())))
 
 			fk, err := e.Create(ctx, prefix+"/wf", map[string]any{"pages": []string{"a", "b", "c"}}, nil)
 			assert.NoError(err)
@@ -573,7 +573,7 @@ func TestArrayRefs_BranchRewriteOfASpawnAddition(t *testing.T) {
 	e := unseeded(NewEngineUnderTest(t.Name()))
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	_, out, err := e.Run(ctx, "branchrewrite/wf", map[string]any{"pages": []string{"a", "b", "c"}}, nil)
 	assert.NoError(err)
@@ -634,7 +634,7 @@ func TestArrayRefs_ListAtTrunkFanInAfterInnerCohort(t *testing.T) {
 	e := unseeded(NewEngineUnderTest(t.Name()))
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk, out, err := e.Run(ctx, "trunklist/wf", map[string]any{"groups": []string{"A", "B"}, "items": []string{"1", "2", "3"}}, nil)
 	assert.NoError(err)

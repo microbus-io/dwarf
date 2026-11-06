@@ -62,7 +62,7 @@ func TestFork_RejectsInterruptedKeptStep(t *testing.T) {
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	flowKey, out, err := e.Run(ctx, "forkguard.verify:0/g", nil, nil)
 	if !assert.NoError(err) {

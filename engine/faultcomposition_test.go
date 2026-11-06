@@ -98,7 +98,7 @@ func TestFaultComposition_FanOutBranch(t *testing.T) {
 	assert.NoError(e.SetWorkers(4))
 	e.SetHost(mux)
 	reader := withManualReader(e)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// X's transition transaction fails once after X was marked completed with a non-contention error: persist
 	// retries the transaction in place, so X's task runs only ONCE and the cohort arrival is still bumped
@@ -157,7 +157,7 @@ func TestFaultComposition_SubgraphChild(t *testing.T) {
 	defer e.Shutdown(t.Context())
 	e.SetHost(mux)
 	reader := withManualReader(e)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// X's transition (X->Y) inside the child fails once after X was marked completed: persist retries the
 	// transaction in place, so the child proceeds to Y->END and completes without re-running X, and the parent
@@ -222,7 +222,7 @@ func TestFaultComposition_CompoundWakeLoss(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	reader := withManualReader(e)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Drop the create-time doorbell AND the terminal signalStop: neither wake reaches its consumer.
 	e.seams.Inject(engineseams.FaultDropDoorbell)
@@ -292,7 +292,7 @@ func TestFaultComposition_DeepSubgraphReviveLoss(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	reader := withManualReader(e)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// The first completeSurgraphFlow to run is the deepest (l3 reviving l2's caller): drop that one revive so
 	// l2's caller wedges running+parkedSubgraph with a terminal child.

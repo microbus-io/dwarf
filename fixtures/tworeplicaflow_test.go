@@ -83,8 +83,8 @@ func TestTwoReplicaflow(t *testing.T) {
 	defer eng2.Shutdown(ctx)
 	eng2.SetHost(mux2)
 	assert.NoError(eng2.SetWorkers(4))
-	assert.NoError(eng1.Startup(ctx))
-	assert.NoError(eng2.Startup(ctx))
+	assert.Must(assert.NoError(eng1.Startup(ctx)))
+	assert.Must(assert.NoError(eng2.Startup(ctx)))
 
 	t.Run("exactly_once_under_contention", func(t *testing.T) {
 		assert := testarossa.For(t)
@@ -158,8 +158,8 @@ func TestTwoReplicaflow(t *testing.T) {
 		defer worker.Shutdown(ctx)
 		worker.SetHost(pb)
 		assert.NoError(worker.SetWorkers(2))
-		assert.NoError(awaiter.Startup(ctx))
-		assert.NoError(worker.Startup(ctx))
+		assert.Must(assert.NoError(awaiter.Startup(ctx)))
+		assert.Must(assert.NoError(worker.Startup(ctx)))
 
 		k, err := awaiter.Create(ctx, "tworeplicawake.verify:428/g", nil, nil)
 		if !assert.NoError(err) {

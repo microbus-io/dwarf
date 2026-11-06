@@ -58,7 +58,7 @@ func TestStaterefsflow(t *testing.T) {
 	eng := unseededEngine(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	// Big enough to be worth an anchor at any fan-out width, and distinctive enough that a truncated or
 	// mis-resolved carry is impossible to mistake for the real thing.
@@ -276,7 +276,7 @@ func TestStaterefs_SingleFieldEntirelyByReference(t *testing.T) {
 	eng := unseededEngine(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	const docLen = 40000
 	pdf := strings.Repeat("P", docLen)

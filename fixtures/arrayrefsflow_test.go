@@ -79,7 +79,7 @@ func TestArrayrefsflow(t *testing.T) {
 			eng := unseededEngine(t.Name())
 			defer eng.Shutdown(ctx)
 			eng.SetHost(mux)
-			assert.NoError(eng.Startup(t.Context()))
+			assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 			prefix := "arrayrefsflow.loop" + name
 			child := workflow.NewGraph("Child")
@@ -183,7 +183,7 @@ func TestArrayrefsflow(t *testing.T) {
 		eng := unseededEngine(t.Name())
 		defer eng.Shutdown(ctx)
 		eng.SetHost(mux)
-		assert.NoError(eng.Startup(t.Context()))
+		assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 		const prefix = "arrayrefsflow.failed"
 		g := workflow.NewGraph("FailedFanOut")
@@ -235,7 +235,7 @@ func TestArrayrefsflow(t *testing.T) {
 		eng := unseededEngine(t.Name())
 		defer eng.Shutdown(ctx)
 		eng.SetHost(mux)
-		assert.NoError(eng.Startup(t.Context()))
+		assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 		const prefix = "arrayrefsflow.nested"
 		g := workflow.NewGraph("Nested")

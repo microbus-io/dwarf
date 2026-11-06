@@ -44,7 +44,7 @@ func TestGotoFanInFlow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	graph := workflow.NewGraph("GotoFanIn")
 	graph.SetURL("Split", "gotofaninflow.verify:645/split")
@@ -116,7 +116,7 @@ func TestGotoFanInFlow_NestedStaysInOuterCohort(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	graph := workflow.NewGraph("NestedGotoFanIn")
 	graph.SetURL("Seed", "gotofaninflow.verify:645/n-seed")

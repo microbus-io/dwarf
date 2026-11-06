@@ -83,7 +83,7 @@ func TestFault_InterruptStaleWriteRollback(t *testing.T) {
 	reader := withManualReader(e)
 	e.SetTimeBudget(200 * time.Millisecond)
 	e.leaseMargin = 100 * time.Millisecond // lease = budget+margin = 300ms, so lease recovery re-dispatches fast
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	e.seams.Inject(engineseams.FaultInterruptStaleWrite)
 	fk, err := e.Create(ctx, "fisw/parent", nil, nil)
@@ -141,7 +141,7 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 		assert := testarossa.For(t)
 		e := NewEngineUnderTest(t.Name())
 		e.SetHost(hosts.NewMux())
-		assert.NoError(e.Startup(t.Context()))
+		assert.Must(assert.NoError(e.Startup(t.Context())))
 		db, err := e.db.Shard(1)
 		assert.Must(assert.NoError(err))
 

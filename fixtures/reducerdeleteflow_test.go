@@ -79,7 +79,7 @@ func TestReducerDeleteflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	t.Run("a_branch_cannot_delete_a_reduced_field", func(t *testing.T) {
 		assert := testarossa.For(t)

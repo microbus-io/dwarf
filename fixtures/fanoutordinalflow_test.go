@@ -46,7 +46,7 @@ func TestFanOutOrdinalFlow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	graph := workflow.NewGraph("FanOutOrdinal")
 	graph.SetURL("Split", "fanoutordinalflow.verify:828/split")
@@ -103,7 +103,7 @@ func TestFanOutOrdinalFlow_Nested(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	graph := workflow.NewGraph("NestedOrdinal")
 	graph.SetURL("Seed", "fanoutordinalflow.verify:828/n-seed")

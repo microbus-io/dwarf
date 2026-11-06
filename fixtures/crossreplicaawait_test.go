@@ -75,9 +75,9 @@ func TestCrossReplicaAwait(t *testing.T) {
 	eng2.SetHost(mux2)
 	eng2.SetWorkers(2)
 	err := eng1.Startup(ctx)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 	err = eng2.Startup(ctx)
-	assert.NoError(err)
+	assert.Must(assert.NoError(err))
 
 	// Create (auto-starts) on the awaiter replica. eng1 has no workers, so eng2 (reached via the relayed
 	// Enqueue doorbell, or its own poll) is the only replica that can run the step.

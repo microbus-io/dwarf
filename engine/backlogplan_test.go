@@ -42,7 +42,7 @@ func TestBacklogSQL_UsesTheDueIndex(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(hosts.NewMux())
 	assert.NoError(e.SetWorkers(0))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	db, err := e.db.Shard(1)
 	if !assert.NoError(err) {
 		return

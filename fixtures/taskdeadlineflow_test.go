@@ -72,7 +72,7 @@ func TestTaskdeadlineflow(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
 	eng.SetTimeBudget(budget)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	start := time.Now()
 	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())

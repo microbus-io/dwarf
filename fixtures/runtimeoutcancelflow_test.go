@@ -44,7 +44,7 @@ func TestRuntimeoutcancelflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	// A blocked task holds the flow running past the end of Run's ctx. Released at test teardown before the
 	// engine drains (declared after the Shutdown defer, so LIFO unwinding runs this one first).

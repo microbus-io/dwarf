@@ -79,7 +79,7 @@ func TestLeaseFence_FailStep(t *testing.T) {
 		e := NewEngineUnderTest(t.Name())
 		defer e.Shutdown(ctx)
 		e.SetHost(hosts.NewMux())
-		assert.NoError(e.Startup(t.Context()))
+		assert.Must(assert.NoError(e.Startup(t.Context())))
 		setup(t, e, 5) // the owner holds generation 5
 
 		// A zombie holding the prior generation 4 returns an error late. It must write nothing.
@@ -97,7 +97,7 @@ func TestLeaseFence_FailStep(t *testing.T) {
 		e := NewEngineUnderTest(t.Name())
 		defer e.Shutdown(ctx)
 		e.SetHost(hosts.NewMux())
-		assert.NoError(e.Startup(t.Context()))
+		assert.Must(assert.NoError(e.Startup(t.Context())))
 		setup(t, e, 5)
 
 		// The current owner (generation 5) fails the step normally.
@@ -219,7 +219,7 @@ func TestLeaseFence_CompletionNoDuplicateSuccessor(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(3))
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	flowKey, outcome, unblock := zombieDispatch(t, eng, "lfb/g", "A", &aCalls, aStarted, aRelease)
 	defer unblock()
@@ -292,7 +292,7 @@ func TestLeaseFence_CohortNoDoubleArrival(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(4))
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	flowKey, outcome, unblock := zombieDispatch(t, eng, "lfc/g", "X", &xCalls, xStarted, xRelease)
 	defer unblock()
@@ -357,7 +357,7 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(3))
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	// The first (zombie) dispatch of A completes, its transition tx fails, and the recovery defer freezes at the
 	// reset checkpoint with A `completed` under generation N.
@@ -472,7 +472,7 @@ func TestLeaseFence_RetryRewindFenced(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(3))
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	flowKey, outcome, unblock := zombieDispatch(t, eng, "lfr/g", "A", &aCalls, aStarted, aRelease)
 	defer unblock()
@@ -551,7 +551,7 @@ func TestLeaseFence_SubgraphParkFenced(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(3))
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	flowKey, outcome, unblock := zombieDispatch(t, eng, "lfs/g", "A", &aCalls, aStarted, aRelease)
 	defer unblock()
@@ -620,7 +620,7 @@ func TestLeaseRecovery_EndToEnd(t *testing.T) {
 	assert.NoError(eng.SetWorkers(3))
 	eng.SetHost(mux)
 	eng.SetMeterProvider(mp)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	flowKey, outcome, unblock := zombieDispatch(t, eng, "lr/g", "A", &aCalls, aStarted, aRelease)
 	defer unblock()
@@ -677,7 +677,7 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 		assert := testarossa.For(t)
 		e := NewEngineUnderTest(t.Name())
 		e.SetHost(hosts.NewMux())
-		assert.NoError(e.Startup(t.Context()))
+		assert.Must(assert.NoError(e.Startup(t.Context())))
 		db, err := e.db.Shard(1)
 		assert.Must(assert.NoError(err))
 		_, err = db.ExecContext(ctx,
@@ -772,7 +772,7 @@ func TestFailStep_HeldStates(t *testing.T) {
 			e := NewEngineUnderTest(t.Name())
 			defer e.Shutdown(ctx)
 			e.SetHost(hosts.NewMux())
-			assert.NoError(e.Startup(t.Context()))
+			assert.Must(assert.NoError(e.Startup(t.Context())))
 			db, err := e.db.Shard(1)
 			assert.Must(assert.NoError(err))
 

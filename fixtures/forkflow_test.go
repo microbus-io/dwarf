@@ -107,7 +107,7 @@ func TestForkflow_LinearWithOverride(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	originKey, outcome, err := eng.Run(ctx, "forkflow.verify:428/linear", map[string]any{"seed": "orig"}, nil)
 	assert.NoError(err)
@@ -169,7 +169,7 @@ func TestForkflow_RecoverFailedStep(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	originKey, outcome, err := eng.Run(ctx, "forkflow2.verify:428/g", map[string]any{}, nil)
 	assert.NoError(err)
@@ -216,7 +216,7 @@ func TestForkflow_ContinueBuildsOnTheNamedFlow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	originKey, outcome, err := eng.Run(ctx, "forkflow3.verify:428/g", map[string]any{"seed": "origin"}, nil)
 	assert.NoError(err)
@@ -289,7 +289,7 @@ func TestForkflow_FanoutForkOfFork(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	originKey, outcome, err := eng.Run(ctx, "forkflow4.verify:428/g", map[string]any{}, nil)
 	assert.NoError(err)
@@ -375,7 +375,7 @@ func TestForkflow_AtSubgraphCaller(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	originKey, outcome, err := eng.Run(ctx, "forksub.verify:428/parent", map[string]any{"seed": "orig"}, nil)
 	assert.NoError(err)
@@ -426,7 +426,7 @@ func TestForkflow_InsideSubgraph(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	originKey, outcome, err := eng.Run(ctx, "forksub.verify:428/parent", map[string]any{"seed": "orig"}, nil)
 	assert.NoError(err)
@@ -603,7 +603,7 @@ func TestForkflow_NestedSubgraphBudgetInherited(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	// Original runs with a distinctive 75s budget (inherited by every nested subgraph).
 	originKey, outcome, err := eng.Run(ctx, "forknest.verify:428/outer",
@@ -689,7 +689,7 @@ func TestForkflow_InsideSubgraphCallerFoldsOnce(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	originKey, outcome, err := eng.Run(ctx, "forkfold.verify:428/outer", map[string]any{"seed": "one"}, nil)
 	assert.NoError(err)

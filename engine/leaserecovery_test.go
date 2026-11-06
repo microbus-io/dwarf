@@ -79,7 +79,7 @@ func TestLeaseRecovery_StepCompletedBetweenSelectAndResetIsLeftAlone(t *testing.
 	defer unblock()
 	e.SetHost(mux)
 	assert.NoError(e.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	awaitStartupRecoverySweep(t, e) // the Break below must catch only the sweep this test drives
 
 	fk, err := e.Create(ctx, "leasegap/g", nil, nil)
@@ -145,7 +145,7 @@ func TestLeaseRecovery_RecoversAStepNeitherWriteCouldRecord(t *testing.T) {
 	e.SetHost(mux)
 	e.persistBackoff = shortPersistBackoff
 	assert.NoError(e.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	awaitStartupRecoverySweep(t, e)
 	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistErr, "A"), math.MaxInt)
 	e.seams.Inject(engineseams.Join(engineseams.FaultFailStepErr, "A"))
@@ -209,7 +209,7 @@ func TestLeaseRecovery_ResetsPastOneBatch(t *testing.T) {
 	e.SetHost(mux)
 	e.leaseRecoveryBatch = 2 // three batches for five steps
 	assert.NoError(e.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	awaitStartupRecoverySweep(t, e)
 
 	var fks []string

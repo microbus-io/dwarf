@@ -643,7 +643,7 @@ func TestArchiving_ALastingFaultDeletesAndLogsOnce(t *testing.T) {
 			e.archiveGrace = 0
 			e.reapInterval = time.Hour
 			e.archiveFailureGrace = 0
-			assert.NoError(e.Startup(ctx))
+			assert.Must(assert.NoError(e.Startup(ctx)))
 			e.seams.InjectN(fault, 100000)
 
 			first := closedRoots(t, e, 2)
@@ -683,7 +683,7 @@ func TestArchiving_AStopIsNotAFailureAndARestartForgetsThem(t *testing.T) {
 	assert.False(e.archiveFailed(t.Context(), 1, "archiving closed trees", errors.New("failed")))
 	assert.Len(e.archiveFailures.byID, 1)
 	assert.NoError(e.Shutdown(t.Context()))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	assert.Len(e.archiveFailures.byID, 0, "a restart forgets the failures")
 }
 
@@ -800,7 +800,7 @@ func TestArchiving_NoTreeMovesInTheDaysLastMoments(t *testing.T) {
 	e.testArchiveDay = 16 * time.Second
 	e.noReapQuiet = false
 	assert.NoError(e.SetRetention(100))
-	assert.NoError(e.Startup(ctx))
+	assert.Must(assert.NoError(e.Startup(ctx)))
 	a := e.archives.Load().byShard[1]
 	assert.Equal(2*time.Second, reapQuietMargin(a.DayLength()))
 	assert.Equal(time.Minute, reapQuietMargin(24*time.Hour))

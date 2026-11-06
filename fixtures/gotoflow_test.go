@@ -61,7 +61,7 @@ func TestGotoflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	t.Run("loops_one_then_falls_through", func(t *testing.T) {
 		assert := testarossa.For(t)
@@ -105,7 +105,7 @@ func TestGotoflow_BadGoto(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	t.Run("goto_to_unregistered_target_fails_flow", func(t *testing.T) {
 		assert := testarossa.For(t)

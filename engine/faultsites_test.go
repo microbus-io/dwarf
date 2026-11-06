@@ -71,7 +71,7 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	awaitStartupRecoverySweep(t, e) // it runs the orphan repair this test drives itself
 
 	// InjectN(8) is one full round of Transact's retries (transactMaxAttempts), so the transition gives up with a
@@ -262,7 +262,7 @@ func TestFaultSite_TerminateCommit(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	reader := withManualReader(e)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk := createInterruptedFlow(t, e, "ftbcancel/g")
 	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
@@ -293,7 +293,7 @@ func TestFaultSite_ResumeCommit(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	reader := withManualReader(e)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk := createInterruptedFlow(t, e, "ftbresume/g")
 	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
@@ -383,7 +383,7 @@ func TestFaultSite_DeliverFailureErr(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	reader := withManualReader(e)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// The child fails, but its re-dispatch of the parked caller is lost: the caller wedges running+parkedSubgraph
 	// with a terminal (failed) child.
@@ -461,7 +461,7 @@ func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
 	assert.NoError(e.SetWorkers(4))
 	e.SetHost(mux)
 	reader := withManualReader(e)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Drop each level's FIRST failure-delivery independently (scoped by the parked caller's task name). Each
 	// caller's sweep-driven re-delivery (the second consult of its scope) succeeds, so the sweep can recover it.
@@ -520,7 +520,7 @@ func TestFaultSite_ReapSelectErr(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	shortenDeletion(e, time.Millisecond, time.Hour) // due immediately; the test drives reaps
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	fk, err := e.Create(ctx, "ftbreapsel/g", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
@@ -562,7 +562,7 @@ func TestFaultSite_RetryRewindErr(t *testing.T) {
 	e.SetHost(mux)
 	e.persistBackoff = []time.Duration{time.Millisecond}
 	reader := withManualReader(e)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	e.seams.Inject(engineseams.Join(engineseams.FaultRetryRewindErr, "Work"))
 	_, out := batteryRun(t, e, "ftbretry/g")
@@ -593,7 +593,7 @@ func TestFaultSite_InterruptWriteRetried(t *testing.T) {
 	defer e.Shutdown(t.Context())
 	e.SetHost(mux)
 	e.persistBackoff = []time.Duration{time.Millisecond}
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	e.seams.Inject(engineseams.FaultInterruptChainWrite)
 	defer e.seams.Withdraw(engineseams.FaultInterruptChainWrite)
@@ -629,11 +629,11 @@ func TestFaultSite_InitRuntimeFailureLeavesTheFleet(t *testing.T) {
 	peer := NewEngineUnderTest(t.Name())
 	defer peer.Shutdown(ctx)
 	assert.NoError(peer.SetHost(noopHost{}))
-	assert.NoError(peer.Startup(ctx))
+	assert.Must(assert.NoError(peer.Startup(ctx)))
 	assert.Equal(0, enginetest.CountRows(t, peer, 1, "SELECT COUNT(*) FROM dwarf_peers WHERE engine_id=?", e.engineID),
 		"the failed replica is still registered")
 
-	assert.NoError(e.Startup(ctx))
+	assert.Must(assert.NoError(e.Startup(ctx)))
 	assert.True(e.started.Load())
 }
 

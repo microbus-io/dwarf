@@ -72,7 +72,7 @@ func TestFanIn_ReducerErrorFailsTheFlow(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
 	reader := withManualReader(eng)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	_, outcome, err := eng.Run(ctx, "reducererror.verify:429/g", map[string]any{"items": []string{"a", "bad", "b"}}, nil)
 	if !assert.NoError(err) || !assert.NotNil(outcome) {
@@ -131,7 +131,7 @@ func TestTerminate_ReducerErrorDoesNotBlockTerminate(t *testing.T) {
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	flowKey, outcome, err := eng.Run(ctx, "reducererror.verify:429/terminate", map[string]any{"items": []string{"bad", "wait"}, "total": 0}, nil)
 	if !assert.NoError(err) || !assert.NotNil(outcome) {
@@ -171,7 +171,7 @@ func TestTerminate_UnreadableTailDoesNotBlockTerminate(t *testing.T) {
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 	db, err := eng.db.Shard(1)
 	assert.Must(assert.NoError(err))
 
@@ -217,7 +217,7 @@ func TestContinue_ReducerErrorIs400(t *testing.T) {
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	flowKey, outcome, err := eng.Run(ctx, "reducererror.verify:429/continue", map[string]any{"total": 10}, nil)
 	if !assert.NoError(err) || !assert.NotNil(outcome) {
@@ -262,7 +262,7 @@ func TestHandOff_ReducerErrorFailsTheStep(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
 	reader := withManualReader(eng)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	_, outcome, err := eng.Run(ctx, "handofferror.verify:429/g", map[string]any{"total": 10}, nil)
 	if !assert.NoError(err) || !assert.NotNil(outcome) {
@@ -305,7 +305,7 @@ func TestTerminate_UnresolvableRefDoesNotBlockTerminate(t *testing.T) {
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 	db, err := eng.db.Shard(1)
 	assert.Must(assert.NoError(err))
 

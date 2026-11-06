@@ -48,7 +48,7 @@ func TestFailedforeachstateflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	graph := workflow.NewGraph("FailedForEachState")
 	graph.SetURL("Seed", "failedforeachstateflow.verify:428/seed")

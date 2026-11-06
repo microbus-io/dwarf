@@ -58,7 +58,7 @@ func TestDuplicateEdge_WhenFanOutWidthTracksMatchingClauses(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	var workRuns atomic.Int32
 
@@ -192,7 +192,7 @@ func TestDuplicateEdge_TrunkSourceIntoFanInIsDegenerate(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	var joinRuns atomic.Int32
 

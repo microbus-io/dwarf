@@ -114,7 +114,7 @@ func TestBaggageflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(host)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	t.Run("baggage_reaches_loader_and_every_task_including_subgraph", func(t *testing.T) {
 		assert := testarossa.For(t)

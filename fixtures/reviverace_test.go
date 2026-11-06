@@ -65,7 +65,7 @@ func TestReviveVsTerminate_Deterministic(t *testing.T) {
 	e := engine.NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Freeze the worker at the caller revive, after the child completed (its completion transaction committed).
 	engineseams.Seams(e).Break(engineseams.CheckpointBeforeReviveWrite)

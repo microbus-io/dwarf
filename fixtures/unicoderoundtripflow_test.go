@@ -60,7 +60,7 @@ func TestUnicoderoundtripflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	graph := workflow.NewGraph("Ünicödé 日本語 Graph") // the graph itself is a stored payload (the `graph` column)
 	graph.SetURL("Write", "unicoderoundtripflow.verify:428/write")

@@ -89,7 +89,7 @@ func TestChanges_ReducersComeFromTheGraph(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	g := workflow.NewGraph("Reducers")
 	g.SetURL("Seed", "changes/seed")
@@ -183,7 +183,7 @@ func TestChanges_ReducedStaysWithTheInnerFanIn(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	g := workflow.NewGraph("Reduced")
 	for _, n := range []string{"Seed", "Cell", "Chunk", "Inner", "After", "Outer"} {
@@ -248,7 +248,7 @@ func TestChanges_RemoteResultIsChecked(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	var changes string
 	returning := func(f *workflow.Flow) error {
@@ -345,7 +345,7 @@ func TestChanges_InterruptedSnapshotFoldsThroughTheReducers(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	g := workflow.NewGraph("Snapshot")
 	g.SetURL("Ask", "changessnap/ask")
@@ -380,7 +380,7 @@ func TestChanges_ErrorRouteComposesThroughTheReducers(t *testing.T) {
 	defer e.Shutdown(ctx)
 	mux := hosts.NewMux()
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	g := workflow.NewGraph("ErrorRoute")
 	g.SetURL("Work", "changeserr/work")
@@ -441,7 +441,7 @@ func TestChanges_UnreadableColumnIsAnErrorNotNoChanges(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	db, err := e.db.Shard(1)
 	if !assert.NoError(err) {
 		return

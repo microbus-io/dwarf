@@ -103,7 +103,7 @@ func TestCreatedHour_EveryRowCarriesItsFlowsHour(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 
@@ -275,7 +275,7 @@ func TestCreatedHour_WrongHourIsNotFound(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	doneKey, outcome, err := e.Run(ctx, "wronghour/done", nil, nil)
 	if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, outcome.Status, outcome.Error) {

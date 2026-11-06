@@ -107,7 +107,7 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	defer close(release)
 
 	flowKey, err := e.Create(ctx, "wedgesub.verify:0/parent", nil, nil)
@@ -202,7 +202,7 @@ func TestWedgeSweep_SubgraphCallerWithNoChildFails(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	defer close(release)
 
 	flowKey, err := e.Create(ctx, "wedgenochild.verify:0/parent", nil, nil)
@@ -290,7 +290,7 @@ func TestWedgeSweep_ChildLiveAgainIsLeftAlone(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	var releaseOnce sync.Once
 	releaseChild := func() { releaseOnce.Do(func() { close(release) }) }
 	// Below the Shutdown defer, so it unwinds first; the test also releases the child itself, so it runs once.
@@ -426,7 +426,7 @@ func TestWedgeSweep_OrphanedSubgraphChildTerminated(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	defer close(release)
 
 	// Orphan: create, await the interrupt, then forge a Terminate that raced the spawn - the parent tree is
@@ -555,7 +555,7 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	assert.NoError(e.SetLogger(slog.New(capture)))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 	defer close(release)
 
 	// A flow run to completion, then forged back to `running`: its step stays `completed`, so the flow is now
@@ -646,7 +646,7 @@ func TestOrphanDetection_ChecksEveryChunk(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	assert.NoError(e.SetLogger(slog.New(capture)))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// A completed flow is the template every forged row copies its required columns from.
 	key, err := e.Create(ctx, "orphanchunk.verify:0/solo", nil, nil)
@@ -752,7 +752,7 @@ func TestOrphanDetection_IgnoresCompletedSuccessorWindow(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	assert.NoError(e.SetLogger(slog.New(capture)))
-	assert.NoError(e.Startup(t.Context()))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	key, err := e.Create(ctx, "orphanwin.verify:0/solo", nil, nil)
 	if !assert.NoError(err) {

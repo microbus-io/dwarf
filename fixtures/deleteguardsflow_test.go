@@ -47,7 +47,7 @@ func TestDeleteguardsflow_ForkRejectsADoomedFlow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	graph := workflow.NewGraph("ForkGuard")
 	graph.SetURL("A", "deleteguardsflow.verify:428/a")
@@ -143,7 +143,7 @@ func TestDeleteguardsflow_ContinueRejectsADoomedFlow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	graph := workflow.NewGraph("ContinueGuard")
 	graph.SetURL("Turn", "deleteguardsflow2.verify:428/turn")

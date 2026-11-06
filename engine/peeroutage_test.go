@@ -210,7 +210,7 @@ func runFleetOutage(t *testing.T, outage time.Duration) (worstOpen, settledOpen,
 		assert.NoError(e.SetWorkers(1))
 		assert.NoError(e.SetShard(ShardSpec{Index: shard, DSN: proxied, MaxConnections: budget}))
 		fleet.add(e)
-		assert.NoError(e.Startup(t.Context()))
+		assert.Must(assert.NoError(e.Startup(t.Context())))
 	}
 	awaitFleetSettled(t, fleet, shard, replicas, budget)
 

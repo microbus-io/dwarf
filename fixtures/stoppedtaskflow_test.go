@@ -92,7 +92,7 @@ func TestStoppedTask_FanOutInterrupts(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(4))
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	flowKey, err := eng.Create(ctx, "stoppedtask.verify:428/fan", nil, nil)
 	assert.NoError(err)
@@ -160,7 +160,7 @@ func TestStoppedTask_Linear(t *testing.T) {
 	defer releaseOnce.Do(func() { close(release) }) // declared after Shutdown, so it unwinds first
 	assert.NoError(eng.SetWorkers(4))
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	t.Run("running_records_none", func(t *testing.T) {
 		assert := testarossa.For(t)

@@ -49,7 +49,7 @@ func TestErrorchangesflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
-	assert.NoError(eng.Startup(t.Context()))
+	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
 	// Handled: Work errors after writing, and an onError handler runs next.
 	handled := workflow.NewGraph("HandledErrorChanges")

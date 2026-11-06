@@ -117,7 +117,7 @@ func stealFleet(t *testing.T, name string, crippledWorkers int, crippledDelay ti
 		}
 	}
 	for _, e := range fleet {
-		assert.NoError(e.Startup(ctx))
+		assert.Must(assert.NoError(e.Startup(ctx)))
 	}
 	return creator, healthy, crippled, ran, shutdown
 }
