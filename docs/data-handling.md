@@ -198,6 +198,18 @@ at most `Query.Limit` roots per call, oldest first across all shards, so a purge
 says it is done; give each call a fresh `ToTime`, since a flow archived during the loop is stamped with the time it
 moved.
 
+**A long retention costs a little per day kept, not per flow.** Any retention is allowed - a very large number keeps
+the archive indefinitely - and a lookup by key reads at most three archive tables however many days are kept, while
+`ListClosed` and `Purge` read at most 31 days a call. What grows with the days kept is:
+
+- **Tables.** Each day is a pair of tables, with their indexes, on every shard: 730 tables a year. PostgreSQL and SQL
+  Server manage that many; on MySQL and MariaDB, raise `table_open_cache` and the open-files limit to match.
+- **Startup.** Every retained day is brought up to the archive's schema on every start, one check per day per shard,
+  and a release that changes the archive's tables changes every retained day on its first start.
+- **Disk**, with the closed flows themselves.
+
+Up to a few months needs no planning. Records kept for years belong outside the database.
+
 **Deleting a flow deletes its whole subgraph tree**, keyed on the tree root — children are not left behind.
 You cannot delete a subgraph child on its own; that would strand its parent.
 

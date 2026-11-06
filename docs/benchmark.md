@@ -116,7 +116,7 @@ differences under ~25% as noise and never quote a single pass.
 
 - **Dialect ranking (1 shard):** PostgreSQL is the fastest real server (≈1152 steps/s), then MariaDB (≈848),
   then SQL Server (≈441) — consistent with the deployment guidance that recommends PostgreSQL for production.
-  SQLite in-memory is fastest of all but is single-instance dev/test only.
+  SQLite in-memory is fastest of all, for one replica: it cannot be shared between hosts.
 
 - **Sharding on a single host neither helps nor hurts much for server databases.** Across three rounds every
   server dialect stayed within ~15% of its own 1-shard median at 2 and 3 shards, with no consistent direction:

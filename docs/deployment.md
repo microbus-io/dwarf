@@ -89,10 +89,30 @@ task that produced it has run.
 
 MariaDB 10.5+ for `JSON`.
 
-### SQLite — testing and single-instance dev only
+### SQLite — one replica, low throughput
 
-Single-writer, so deadlocks are structurally impossible but throughput tops out at one transaction at a
-time. Used automatically by `NewEngineUnderTest`. Do not run SQLite in production.
+SQLite writes one transaction at a time, so a shard's throughput is that of one writer: about 1,400 steps/s for
+an in-memory database on a laptop ([Benchmark](benchmark.md)), less on disk, where every commit is a write to the
+file. It suits an application that runs **one replica** and a modest flow rate. It cannot be shared between hosts,
+so it gives no failover and no second replica. Each shard is its own file with its own writer, so a few shards
+raise the ceiling. `NewEngineUnderTest` uses it automatically.
+
+**For durable flows, use a file with write-ahead logging:**
+
+```go
+eng.SetShard(engine.ShardSpec{Index: 1, DSN: "file:/var/lib/myapp/dwarf_1.db?_pragma=journal_mode(WAL)"})
+```
+
+WAL lets reads run while a transaction writes, and a committed step survives the process. Add
+`&_pragma=auto_vacuum(FULL)` to have the file shrink as the archive drops its days. Without it, a dropped day's
+pages are reused but never returned to the filesystem. `auto_vacuum` takes effect only on a database with no tables
+yet, so set it on the first start; on an existing file, a `VACUUM` turns it on. Back the file up with `VACUUM INTO`
+or SQLite's backup API, never by copying it while it is being written.
+
+**In memory** (`file:dwarf_1?mode=memory&cache=shared`), execution is durable only while the process lives: a
+restart or a crash loses every flow, and an interrupted flow does not survive a deploy. `cache=shared` is what lets
+the engine's connections see one database; its table locks make writers wait in turn, and the engine retries
+them.
 
 ## Disk throughput
 
@@ -115,6 +135,14 @@ log write on top of the step payload, so the disk sees more than `dwarf_state_wr
 strongly workload-dependent — a carry-heavy or fan-out graph writes far more per step than a small-state
 one — which is exactly why the right disk size is something you measure rather than guess. When
 throughput is repeatable, the disk has enough headroom; provisioning past that point buys nothing.
+
+**The archive writes each closed flow's rows again.** Moving a flow copies its rows into the day's archive tables and
+deletes them from the live ones, and on PostgreSQL every archived row is frozen once more before the transaction-id
+counter wraps: a flow is written about three times over its life. So size the database's write throughput - its
+write-ahead log on PostgreSQL - in MB/s, at about three times what your flows write while they run. Measured on one
+32 vCPU PostgreSQL 16 shard under a realistic mix of workflows, the shard was bound by its write-ahead log at about
+210-225 MB/s, and archiving brought its sustained ceiling to about 68% of the same load with no archive (about 5,950
+against 8,750 steps/s).
 
 ## Network distance to the database
 
@@ -359,7 +387,8 @@ measure your own workload: task shape, payload size and round-trip time all move
    `shards = average steps/s ÷ 19,000`, rounded up, then check that each peak's backlog drains in time and adds
    a wait you accept, or put the work that cannot wait in a higher priority band. Below one shard's worth,
    a 16 vCPU database (~6,700 sustained) or an 8 vCPU database (~4,000) costs less in total, at a higher
-   price per step.
+   price per step. These figures were measured with no archive; with one, plan about two thirds of them
+   ([Disk throughput](#disk-throughput)).
 2. **Engine replicas.** Two per shard at half the database's vCPU: `2S` replicas of 8 vCPU for 32 vCPU
    shards. Each runs at about a third of its CPU and can carry its shard alone. A larger host can serve
    several shards instead: give its engine about one core per 3,300 steps/s its shards can deliver at

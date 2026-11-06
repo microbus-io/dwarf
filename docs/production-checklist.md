@@ -8,8 +8,8 @@
 
 - [ ] **PostgreSQL**, unless you have a reason. It needs no isolation-level tuning and runs fan-out
   deadlock-free at any concurrency. → [Deployment](deployment.md#choosing-a-database)
-- [ ] **Not SQLite.** It is single-writer and used automatically by the test harness; it is not a production
-  database.
+- [ ] **SQLite only for one replica at a modest flow rate**, on a file with `journal_mode(WAL)` if flows must survive
+  a restart; in memory they last only as long as the process. → [Deployment](deployment.md#sqlite--one-replica-low-throughput)
 - [ ] **MySQL/MariaDB only:** `transaction-isolation = READ-COMMITTED`, `innodb_autoinc_lock_mode = 2` with
   `binlog_format = ROW`. Without the first, concurrent flow creation deadlocks on gap locks.
   → [Runbook](runbook.md#deadlock-errors-on-mysql-or-sql-server)
