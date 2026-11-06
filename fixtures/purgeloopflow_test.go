@@ -138,7 +138,9 @@ func TestPurgeLoopflow(t *testing.T) {
 	defer releaseTask()
 	<-running // ensure it is actually running before we purge
 
-	// Drain loop: Purge completed roots two at a time until it says it is done.
+	// Drain loop: Purge completed roots two at a time until it says it is done. Purge reads the archive, so archive
+	// what just closed first.
+	enginetest.ArchiveNow(ctx, eng)
 	totalDeleted := 0
 	iterations := 0
 	for {
@@ -156,10 +158,8 @@ func TestPurgeLoopflow(t *testing.T) {
 		}
 	}
 
-	// Exactly the 7 roots were counted (marked for deletion); the subgraph child is not counted separately.
-	// Purge marks (delete_after_ms=1), it does not delete inline; the reaper removes the trees. The observable
-	// public contract is that the completed roots drop out of List. Per-flow physical removal (and the subtree
-	// cascade) is covered by the engine-package reaper tests.
+	// Exactly the 7 roots were counted, each deleted from the archive with its tree; the subgraph child is not
+	// counted separately.
 	assert.Equal(roots, totalDeleted)
 
 	// No completed root of the batch is listable any more.

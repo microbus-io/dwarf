@@ -93,7 +93,8 @@ func TestQuery_WorkflowName(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(betas, len(searched))
 
-	// Purge accepts WorkflowName as a sole filter and deletes only the matching flows.
+	// Purge accepts WorkflowName as a sole filter and deletes only the matching flows, once archived.
+	enginetest.ArchiveNow(ctx, e)
 	deleted, _, err := e.Purge(ctx, enginetest.Recent(workflow.Query{WorkflowName: "AlphaFlow"}))
 	assert.NoError(err)
 	assert.Equal(alphas, deleted)
@@ -245,11 +246,12 @@ func TestQuery_SearchByFlowKey(t *testing.T) {
 	if assert.NoError(err) && assert.Len(found, 1) {
 		assert.Equal(flowKeys[1], found[0].FlowKey)
 	}
-	marked, _, err := e.Purge(ctx, enginetest.Recent(workflow.Query{Search: flowKeys[2]}))
+	enginetest.ArchiveNow(ctx, e)
+	purged, _, err := e.Purge(ctx, enginetest.Recent(workflow.Query{Search: flowKeys[2]}))
 	assert.NoError(err)
-	assert.Equal(1, marked)
+	assert.Equal(1, purged)
 	rest, err := enginetest.ListAll(ctx, e, workflow.Query{})
 	if assert.NoError(err) {
-		assert.Len(rest, 2) // a flow marked for deletion is out of List at once
+		assert.Len(rest, 2)
 	}
 }

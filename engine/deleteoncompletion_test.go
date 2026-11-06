@@ -186,10 +186,10 @@ func TestDeleteOnCompletion_RunReturnsOutcome(t *testing.T) {
 	}
 }
 
-// TestPurge_ReaperRemovesTree pins the operator path: Purge marks a root (it does not delete inline), and the
-// reaper then removes the root AND its subgraph child (keyed on root_flow_id) - the no-orphan guarantee. A
-// long reapInterval keeps the background reaper out; the test forces one reap pass.
-func TestPurge_ReaperRemovesTree(t *testing.T) {
+// TestDelete_ReaperRemovesTree pins the operator path for a flow closed but not archived yet: Delete marks the root
+// (it does not delete inline), and the reaper then removes the root AND its subgraph child (keyed on root_flow_id) -
+// the no-orphan guarantee. A long reapInterval keeps the background reaper out; the test forces one reap pass.
+func TestDelete_ReaperRemovesTree(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -225,9 +225,8 @@ func TestPurge_ReaperRemovesTree(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(2, shardFlowCount(t, e, shardNum)) // root + subgraph child
 
-	n, _, err := e.Purge(ctx, enginetest.Recent(workflow.Query{WorkflowURL: "pr/parent"}))
-	assert.NoError(err)
-	assert.Equal(1, n) // one root marked
+	assert.NoError(e.Delete(ctx, fk))
+	assert.Equal(2, shardFlowCount(t, e, shardNum), "marked, not deleted inline")
 
 	time.Sleep(5 * time.Millisecond) // let the 1ms delete_after_ms elapse (in-memory SQLite is sub-ms)
 	e.reapDueFlows(ctx)

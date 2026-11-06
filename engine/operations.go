@@ -1033,7 +1033,7 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 		return nil
 	}
 	// The stamp matched nothing, so the row moved since the read: the reaper archived the tree (deleted from the
-	// archive instead), or a racing Delete or Purge stamped it first (success).
+	// archive instead), or a racing Delete stamped it first (success).
 	err = db.QueryRowContext(ctx,
 		"SELECT delete_after_ms FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?",
 		flowID, flowToken, flowHour,

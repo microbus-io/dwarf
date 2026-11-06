@@ -177,7 +177,7 @@ These are methods on `*engine.Engine`.
 stopped engine *lies*. The key-addressed operations all route through `ShardSet.Shard`, which returns
 **"flow not found" (404)** when no shard is open - so a stopped engine tells the caller its flow does not
 exist, and the caller may act on that (stop retrying, recreate the work). The cross-shard operations are
-worse: `ListLive`/`ListArchived`/`Purge`/`ShardInfo` fan out over an **empty index set** and return **success with an empty
+worse: `ListOpen`/`ListClosed`/`Purge`/`ShardInfo` fan out over an **empty index set** and return **success with an empty
 result** - "you have no flows." Both are indistinguishable from the truth; 503 says the one true thing. The
 state is reachable in production, not just by API misuse: `Shutdown` -> `ShardSet.Close` nils the index set,
 so a host still serving while it tears the engine down (or a request in flight when `Shutdown` lands) hits
@@ -483,9 +483,10 @@ steps have `Subgraph=true` with nested `SubHistory` and the child's `SubgraphKey
 retry, the same one `SubHistory` shows), so a caller can `Snapshot` what the child returned. `Step` returns one step by key **with** its `state`/`changes`
 (refs resolved) - it is the payload-bearing reader; use it when you need a step's actual data.
 
-**ListLive / ListArchived** - Return at most `Query.Limit` flows matching the `Query` filters within its window:
-`ListLive` the flows in the live tables (any status, ended ones not archived yet included), the most recently updated
-first; `ListArchived` the archived ones, the most recently archived first. No pagination (see "`ListLive` and `ListArchived` are cross-shard
+**ListOpen / ListClosed** - Return at most `Query.Limit` flows matching the `Query` filters within its window:
+`ListOpen` the open flows (`running`, `interrupted`) in the live tables, the most recently updated first; `ListClosed`
+the archived ones, the most recently archived first. A flow closed but not archived yet, about a minute, is in
+neither. No pagination (see "`ListOpen` and `ListClosed` are cross-shard
 top-Ns" under Database Sharding). Each returns a `Subgraph` bool in each `workflow.FlowSummary`. By default it returns **root flows only**;
 `Query.IncludeSubgraphs` adds subgraph children to the results. Combined with `WorkflowURL` (a graph that runs only
 as a subgraph has no root flows under that URL) this locates every run of a graph that executed as a subgraph.
@@ -3409,16 +3410,17 @@ are deterministically flushed by then. Not an engine concern: a real exporter ke
 tick adds up to that on top): the reaper moves its whole tree into today's archive day tables, and retention drops
 whole days (see "The archive" below). A flow that has not ended - running, sleeping, interrupted for a human - stays
 in the live tables for as long as it takes, so nothing reaps a row a `Resume` could still revive. The read API reads an
-archived flow as it read it live ("Reading an archived flow" below), and `Fork` clones an archived source; `ListArchived`
+archived flow as it read it live ("Reading an archived flow" below), and `Fork` clones an archived source; `ListClosed`
 lists it. **Retention counts from archiving, not from the
 end**: a tree archived late - after an outage, say - is kept its full retention from then.
 
 Deleting without archiving is either operator-driven (`Delete`, `Purge`) or an explicit author opt-in
-(`DeleteOnCompletion`): a flow whose output and history are not needed. `Delete` and `Purge` reach both sides: an
-ended flow still live is marked, an archived one deleted at once in its day (`purge.go`, `deleteArchivedTrees`).
+(`DeleteOnCompletion`): a flow whose output and history are not needed. `Delete` reaches both sides: a closed flow
+still live is marked, an archived one deleted at once in its day (`deleteArchivedTrees`); `Purge` reads only the
+archive and deletes there (`purge.go`).
 
-**On the live side, deletion is deferred: mark, then reap.** No path deletes live rows inline. `DeleteOnCompletion`,
-`Delete`, and `Purge` all **stamp `delete_after_ms`** on the target **root** flow (`0`=keep; `>0`=reap at `updated_at + delete_after_ms`);
+**On the live side, deletion is deferred: mark, then reap.** No path deletes live rows inline. `DeleteOnCompletion`
+and `Delete` **stamp `delete_after_ms`** on the target **root** flow (`0`=keep; `>0`=reap at `updated_at + delete_after_ms`);
 a dedicated **reaper** goroutine (`reaperLoop`, 15 s ticker) later removes the whole subtree set-based, keyed on
 `root_flow_id`. Only an ended root is ever stamped, so no rows are deleted where a lifecycle op could interleave
 (see "Deletion race gate" below), and a disposable flow's **outcome is observable** during its grace window.
@@ -3452,20 +3454,17 @@ terminate inside a delete, and nothing either operation does can then race a `Re
   the tree's flows, their steps, and the flows. Not marked: the reaper reads only the live tables, and an archived
   tree has no `Resume` to race. A repeat is a 404, the tree gone. Pinned by `TestDelete_AnArchivedFlowIsDeletedInItsDay`
   and `TestArchiving_DeleteOfATreeArchivedMeanwhileDeletesItThere`.
-- **`Purge(Query)`** (`purge.go`) needs `Limit` (at most `maxListLimit`) and both window bounds, and removes the
-  matching ended roots oldest first, at most `Limit` in all: **the archived ones first**, from the internal
-  ascending `listArchived` (so its window is on `archived_at`, cut and capped as there), each tree deleted at once
-  in the day its `archived_at` falls in - which the reaper's clamp makes exact - by `deleteArchivedTrees`; **then**,
-  with what `Limit` leaves, the live ended roots oldest ended first (`oldestLiveEndedRoots`, its window on
-  `updated_at`), merged across shards in Go and marked (`delete_after_ms=1`). Both sides go in chunks of
-  `purgeChunk` (4,096) roots per statement: a literal `IN` list in the tens of thousands of terms can fail to plan
-  outright on SQL Server (errors 8623 / 8632). **Keep the terminal filter in the live selection**, not only in the
-  mark: the selection is limited, so unended candidates selected ahead of ended ones would use up the limit and mark
-  nothing (`TestDeleteUnendedflow`). It returns `(removed, done)`: `done` when neither side had more than it took
-  and every root it took was removed - a live root archived between the selection and its mark is not, and the next
-  call finds it in the archive. A `Query.Status` naming an unended status, and `IncludeSubgraphs`, are a 400. Its
-  turns record `op=purge` once per stage per shard, not once per shard: one turn across the stages would hold a
-  shard's turn while the call merges the other shards. Pinned by `TestPurge_OldestArchivedFirstThenTheLive`.
+- **`Purge(Query)`** (`purge.go`) needs `Limit` (at most `maxListLimit`) and both window bounds, and removes what
+  `ListClosed` lists for the query, oldest archived first, at most `Limit` roots: the internal ascending
+  `listArchived` (so its window is on `archived_at`, cut and capped as there), each tree deleted at once in the day
+  its branch read it from, by `deleteArchivedTrees`, in transactions of about `reapBatchRows` rows and at most
+  `purgeChunk` (4,096) roots: a literal `IN` list in the tens of thousands of terms can fail to plan outright on SQL
+  Server (errors 8623 / 8632). **It reads only the archive**, as `ListClosed` does: a root closed in the last minute
+  is left for a later call, and `Delete` removes one by key. It returns `(removed, done)`: `done` when the archive
+  had fewer than `Limit` and every root taken was removed - one a racing `Delete` took first was not. A
+  `Query.Status` that is not closed, and `IncludeSubgraphs`, are a 400. Its turns record `op=purge` once per stage
+  per shard (the read, the deletes), not once per shard: one turn across the stages would hold a shard's turn while
+  the call merges the other shards. Pinned by `TestPurge_OldestArchivedFirstAndOnlyTheArchive`.
 
 **The reaper** (`reapDueFlows`, `reaper.go`) runs on its own dedicated goroutine + a 15 s ticker (a single goroutine,
 inherently non-overlapping), stopped by `drainRuntime` cancelling its ctx. On each shard this replica DISPATCHES (a
@@ -3582,7 +3581,7 @@ engine-package tests force a reap via `reapDueFlows`; fixtures verify the observ
 **Deletion race gate.** Because deletion is an *orthogonal column*, not a status, the invariant that keeps a
 deletion from racing a lifecycle op is **`delete_after_ms > 0 ⟹ terminal status`**, and the reaper reaps only
 terminal-rooted trees. Every stamp holds it by stamping only an ended root: DeleteOnCompletion stamps the root it
-completes, and `Delete`/`Purge` refuse or skip an unended one. An ended flow never changes status again, so a live
+completes, and `Delete` refuses an open one. An ended flow never changes status again, so a live
 `delete_after_ms` never coexists with a resumable flow.
 
 **`Resume` still carries a root-flow gate, against `Terminate`.** A `Terminate` that commits between `resume`'s
@@ -3906,7 +3905,7 @@ in `fixtures/forkconcurrentflow_test.go` catches a read-first Fork only now and 
 deterministic with a checkpoint inside the clone: modernc waits on a shared-cache lock with `sqlite3_unlock_notify`,
 which cannot be interrupted, so a probing writer blocks rather than being refused, and blocked cannot be told from
 held without a timer. Every other `Transact` in the engine already opens with a write; a new one
-that reads first needs the same. Fork reads its origin only under that lock, so a Delete or Purge that stamped the
+that reads first needs the same. Fork reads its origin only under that lock, so a Delete that stamped the
 origin after Fork was called is a 409, and an origin the reaper removed is a 404 (`TestFork_DeletedBeforeItsLock`).
 
 **The two disciplines still cross in one place on row-locking engines, and that is tolerated, not eliminated.**
@@ -4235,26 +4234,27 @@ operator's to weight down; `dwarf_operation_seconds{op,shard}` is what lets them
 placement entirely (everything resident proceeds - execution, subgraph children, `Continue`, `Fork`); all
 shards cordoned is a loud 503 at `Create`. Pinned by `engine/poolsizing_test.go`.
 
-**`ListLive` and `ListArchived` are cross-shard top-Ns, split by where a flow is kept, not by its state**
-(`query.go`). Each table they read on each shard returns its own first `Limit` in the list's order, and the engine
+**`ListOpen` and `ListClosed` are cross-shard top-Ns, named by a flow's state, each reading one side of where flows
+are kept** (`query.go`). Each table they read on each shard returns its own first `Limit` in the list's order, and the engine
 merges the shards in Go (`mergeByTime`) and keeps the first `Limit`. Both are strict: any shard error fails the whole
 call (the per-shard debug path is `ShardInfo` + `Query.Shard`). `Limit` is required, at most `maxListLimit` (65,536).
-- **`ListLive`** reads the live tables only, any status - an ended flow is live until the reaper archives it, about
-  a minute after it ends. Ordered by `updated_at DESC`, ties by shard, then `flow_id DESC`. Its window, optional
-  (one table per shard however wide), filters `updated_at`.
-- **`ListArchived`** reads the archive's day tables only, never the live ones, ordered by `archived_at DESC`, ties
+- **`ListOpen`** reads the live tables only, the open statuses only. Ordered by `updated_at DESC`, ties by shard,
+  then `flow_id DESC`. Its window, optional (one table per shard however wide), filters `updated_at`. Per shard it is
+  one `UNION ALL` branch per open status (`listLive`), each a range of `(status, updated_at)` that stops at `Limit`:
+  one scan over both statuses has no index order and would sort every open flow of the shard on every call. The
+  same code with every status serves the tests (`engineseams.ListLive`).
+- **`ListClosed`** reads the archive's day tables only, never the live ones, ordered by `archived_at DESC`, ties
   likewise. Per shard it is one `UNION ALL` over every day the window reaches, each branch a derived table carrying
   its own `ORDER BY` and `LIMIT_OFFSET` (SQLite allows neither on a compound member; SQL Server allows an `ORDER BY`
   in a derived table only with `OFFSET/FETCH`), under an outer `ORDER BY ... LIMIT`, so only `Limit` rows per shard
   cross the wire. A day a peer dropped since the last catalog read fails the statement on its missing table: the
-  shard reads the catalog (`Refresh`) and runs it once more. A status that has not ended is a 400.
-- **Do not mix the two sides in one list.** It puts two time axes in one window - `updated_at` for the unarchived,
-  `archived_at` for the rest - and each way of placing the unarchived flows breaks a caller: counted as archived
-  after now, a window ending at now misses the last minute; windowed by their end, a forward poll sees each flow
-  twice. Split, an archived flow is in exactly one window of a forward poll, and a caller wanting both sides calls
-  `ListLive` first, then `ListArchived`, so a tree archived between the calls is seen twice (dropped by key), never
-  missed.
-- **`ListArchived`'s window is required and clamped, not refused**: both ends are required, since the window decides
+  shard reads the catalog (`Refresh`) and runs it once more. A status that is not closed is a 400.
+- **Do not mix the two sides in one list, and do not make `ListClosed` read the live tables for the last minute.**
+  It puts two time axes in one window - `updated_at` for the unarchived, `archived_at` for the rest - and each way of
+  placing the unarchived flows breaks a caller: counted as archived after now, a window ending at now misses the last
+  minute; windowed by their end, a forward poll sees each flow twice. So a flow closed in the last minute is in
+  neither list; it is read by key meanwhile. The godocs and `docs/flows.md` say so.
+- **`ListClosed`'s window is required and clamped, not refused**: both ends are required, since the window decides
   how many tables a statement reads. Its days are cut to the retention's first day and to today (plus one day past
   today when the window reaches it, for a database clock ahead of this process's), and the days a shard's record
   lacks are not read. **After the cut it may reach at most `maxEndedWindowDays` (31) days**, today and the 30 the
@@ -4274,7 +4274,7 @@ call (the per-shard debug path is `ShardInfo` + `Query.Shard`). `Limit` is requi
   everything another shard returned. The cost is shards x tables x `Limit` rows read on the servers, shards x
   `Limit` on the wire.
 - **The merge compares two servers' clocks**, so flows within the skew of each other can swap, or swap across the
-  cut; the godocs say so. And `ListArchived`'s days are cut by this process's clock while its bounds compare the
+  cut; the godocs say so. And `ListClosed`'s days are cut by this process's clock while its bounds compare the
   database's, so a tree archived in the skew at the window's newer edge can be missed. **A tie is a reaper batch**
   (`archived_at` is the move's transaction start), which is why `maxListLimit` must stay above `reapBatchRows`
   (`TestList_TheLimitIsAboveAReaperBatch`): a caller paging by window cannot page across a tie larger than its
@@ -4283,13 +4283,13 @@ call (the per-shard debug path is `ShardInfo` + `Query.Shard`). `Limit` is requi
   tie can reach shards x `reapBatchRows`: at 16 shards, the whole maximum. And **commit order is not stamp order** - a
   long batch stamped earlier can commit after a later one - so the godoc tells a walk to keep its newest bound a few
   seconds behind now. Neither list has a cursor or a promise of a stable walk.
-- **`Purge` takes the exact oldest `Limit` across shards**, through the same merge (ascending), and inherits the
-  31-day cap: a retention purge goes a month at a time, as the godoc and `docs/flows.md` say, rather than `Purge`
+- **`Purge` takes the exact oldest `Limit` across shards from the archive only**, through the same merge (ascending),
+  so it removes what `ListClosed` lists, and inherits the 31-day cap: a retention purge goes a month at a time, as the godoc and `docs/flows.md` say, rather than `Purge`
   walking a longer window itself - the cap bounds what one call touches.
 
-Pinned by `fixtures/listorder_test.go` (`ListLive`: globally descending, and a smaller `Limit` returns exactly the
-prefix) and `engine/list_test.go` (each list reading its own tables, `ListArchived`'s order, window, clamp and cap,
-the stale day, the merge across shards, and the 400s of both).
+Pinned by `fixtures/listorder_test.go` (`ListOpen`: globally descending, and a smaller `Limit` returns exactly the
+prefix) and `engine/list_test.go` (each list reading its own tables, `ListOpen`'s order across its status branches,
+`ListClosed`'s order, window, clamp and cap, the stale day, the merge across shards, and the 400s of both).
 
 **The shard set is immutable at runtime.** `SetShard` is construction-time only: it records index->DSN pairs before
 `Startup` (which opens+migrates exactly those shards) and is **rejected** on a running engine, so the set never

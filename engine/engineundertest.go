@@ -17,19 +17,23 @@ limitations under the License.
 package engine
 
 import (
+	"context"
 	"log/slog"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/seamster"
 )
 
 // This file is the engine's test-support surface. NewEngineUnderTest wires an engine for isolated testing,
-// and init registers the internal/engineseams accessors that reach the two internals a black-box test (one
-// in another package, e.g. fixtures) legitimately needs - the shard set for row inspection and the
-// instrumentation seams for deterministic race control. The seam names live in internal/engineseams too, so
+// and init registers the internal/engineseams accessors that reach the internals a black-box test (one
+// in another package, e.g. fixtures) legitimately needs - the shard set for row inspection, the
+// instrumentation seams for deterministic race control, and the live tables in every status and an archiving
+// pass with no grace, for a test that lists or purges what it just closed. The seam names live in internal/engineseams too, so
 // none of this is on the engine's exported surface. A test that needs to drive an unexported method or forge
 // internal columns directly (failStep, the refiller, pool sizing, ...) stays a white-box test in package
 // engine, where it reaches those directly.
@@ -88,5 +92,15 @@ func init() {
 	engineseams.DB = func(eng any) *database.ShardSet { return &eng.(*Engine).db }
 	engineseams.Seams = func(eng any) *seamster.Seamster { return eng.(*Engine).seams }
 	engineseams.SetRefillInterval = func(eng any, d time.Duration) error { return eng.(*Engine).setRefillInterval(d) }
+	engineseams.ListLive = func(eng any, ctx context.Context, query workflow.Query) ([]workflow.FlowSummary, error) {
+		e := eng.(*Engine)
+		if err := e.ensureStarted(); err != nil {
+			return nil, err
+		}
+		all := append(slices.Clone(openStatuses), workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusTerminated,
+			workflow.StatusCancelled)
+		return e.listLive(ctx, query, all, "list_open")
+	}
+	engineseams.ArchiveNow = func(eng any, ctx context.Context) { eng.(*Engine).reapPass(ctx, 0) }
 	engineseams.ShardBudget = func(rttMs float64, serverMax int) int { return shardBudget(ShardSpec{}, rttMs, serverMax, "pgx") }
 }

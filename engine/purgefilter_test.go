@@ -66,7 +66,9 @@ func TestPurge_EveryListFilterNarrows(t *testing.T) {
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "%+v must be rejected", q)
 	}
 
-	// The tenant erasure the docs describe: a FairnessKey alone marks that tenant's flows and no other's.
+	// The tenant erasure the docs describe: a FairnessKey alone removes that tenant's flows and no other's, once they
+	// are archived.
+	enginetest.ArchiveNow(ctx, e)
 	n, _, err := e.Purge(ctx, enginetest.Recent(workflow.Query{FairnessKey: "tenantA"}))
 	assert.NoError(err)
 	assert.Equal(1, n)

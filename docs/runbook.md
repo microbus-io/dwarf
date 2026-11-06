@@ -55,7 +55,7 @@ bug, or at rows edited by hand.
 **Confirm.** The counter carries a `workflow` label, which narrows the search. Find the candidates:
 
 ```go
-flows, err := eng.ListLive(ctx, workflow.Query{
+flows, err := eng.ListOpen(ctx, workflow.Query{
     Status: workflow.StatusRunning,
     ToTime: time.Now().Add(-10 * time.Minute), // running, unchanged for 10 minutes
     Limit:  1000,
@@ -287,8 +287,8 @@ and look at the server before concluding it is overloaded. `dwarf_refill_query_d
 `shard` is the same comparison for dispatch. `dwarf_peer_blind_seconds` non-zero for a shard means replicas
 cannot read its registry at all.
 
-**Understand the blast radius.** Dwarf is **not** shard-fault-tolerant: `ListLive`,
-`ListArchived` and `Purge` fail as a whole if any shard errors. Flows resident on a healthy shard keep executing
+**Understand the blast radius.** Dwarf is **not** shard-fault-tolerant: `ListOpen`,
+`ListClosed` and `Purge` fail as a whole if any shard errors. Flows resident on a healthy shard keep executing
 normally; flows on the failed shard are unreachable until it returns. Each shard's selection runs on its own
 cycle, so a slow shard does not slow its peers' **dispatch**.
 
@@ -485,8 +485,8 @@ let the next pass terminate it. Report it with the flow's key if no workflow exp
 
 ## Disk did not shrink after a purge
 
-**Expected on PostgreSQL.** `Delete` and `Purge` delete archived flows at once, and mark live ones for a reaper that
-removes the rows within about 15 seconds.
+**Expected on PostgreSQL.** `Delete` and `Purge` delete archived flows at once; `Delete` marks a closed flow not
+archived yet for a reaper that removes the rows within about 15 seconds.
 But PostgreSQL holds its high-water mark — freed space is reused for new rows rather than returned to the
 filesystem. Measured on one rig: 198 MB still allocated for 37 remaining rows.
 
@@ -494,9 +494,10 @@ filesystem. Measured on one rig: 198 MB still allocated for 37 remaining rows.
 = live data" dashboard will mislead you; track row counts instead. If you must reclaim the filesystem space,
 `VACUUM FULL` takes an exclusive lock on the table and should be treated as a maintenance window.
 
-**One thing to check:** confirm the reaper is actually running. Marked-but-unreaped flows disappear from
-the lists and `History` immediately, so a growing gap between "rows in `dwarf_flows`" and "flows visible to
-`ListLive`" means marking is working and reaping is not.
+**One thing to check:** confirm the reaper is actually running. `dwarf_reap_pass_seconds` records a pass every 15
+seconds on each shard's dispatchers; no new samples there, or flows ending (`dwarf_flows_ended_total`) faster than
+they leave the live tables (`dwarf_flows_archived_total` plus `dwarf_flows_reaped_total`), means the reaper is not
+keeping up - see [The archive is falling behind](#the-archive-is-falling-behind).
 
 ---
 
@@ -520,7 +521,7 @@ Both must be addressed by the **root** flow key. A subgraph child's key is read-
 and is rejected — address the root and the engine threads the resume down to the right leaf.
 
 **If a flow has been interrupted longer than your business process allows**, that is a policy question rather
-than an engine fault. Find them with `ListLive` filtered on `Status: interrupted` and a `ToTime` that far back, and
+than an engine fault. Find them with `ListOpen` filtered on `Status: interrupted` and a `ToTime` that far back, and
 terminate or escalate per your own rules. To have the engine terminate every flow older than a bound, set
 [`SetFlowExpiration`](flows.md#expiring-flows-that-never-end).
 

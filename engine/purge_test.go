@@ -17,7 +17,6 @@ limitations under the License.
 package engine
 
 import (
-	"context"
 	"net/http"
 	"testing"
 	"time"
@@ -120,11 +119,11 @@ func TestDelete_AnArchivedFlowIsDeletedInItsDay(t *testing.T) {
 	assert.Equal(http.StatusNotFound, errors.StatusCode(e.Delete(ctx, rootKey)), "deleted already")
 }
 
-// TestPurge_OldestArchivedFirstThenTheLive pins Purge's order and its done flag over three archive days and the live
-// tables: the archived roots oldest archived first, each tree deleted at once in its day - a chunk of one root to a
-// statement here - then, with what the limit leaves, the live ended roots oldest ended first, marked for the reaper;
-// done only on the call that took less than it could on both sides.
-func TestPurge_OldestArchivedFirstThenTheLive(t *testing.T) {
+// TestPurge_OldestArchivedFirstAndOnlyTheArchive pins Purge's order and its done flag over three archive days: the
+// archived roots oldest archived first, each tree deleted at once in its day - a chunk of one root to a statement here
+// - done on the call that took less than its limit; and the roots closed but not archived yet left as they are, for a
+// later call once they are archived.
+func TestPurge_OldestArchivedFirstAndOnlyTheArchive(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -144,7 +143,7 @@ func TestPurge_OldestArchivedFirstThenTheLive(t *testing.T) {
 	stampArchived(t, e, today-2, roots[0], a.DayEnds(today-2).Add(-time.Hour))
 	stampArchived(t, e, today-1, roots[1], a.DayEnds(today-1).Add(-2*time.Hour))
 	stampArchived(t, e, today-1, roots[2], a.DayEnds(today-1).Add(-time.Hour))
-	// roots[4..6] stay live: ended, not archived yet, oldest ended first.
+	// roots[4..6] stay live: closed, not archived yet.
 	if now, _ := a.Today(ctx); now != today {
 		t.Skip("midnight passed during the test")
 	}
@@ -184,26 +183,22 @@ func TestPurge_OldestArchivedFirstThenTheLive(t *testing.T) {
 	q.Limit = 2
 	removed, done, err = e.Purge(ctx, q)
 	assert.NoError(err)
-	assert.Equal(2, removed)
-	assert.False(done, "the live side may hold more")
+	assert.Equal(1, removed, "the last archived root")
+	assert.True(done, "the archive held fewer than the limit")
 	assert.Zero(inDay(today, roots[3]))
-	assert.True(marked(roots[4]), "the oldest live ended, marked for the reaper")
-	assert.False(marked(roots[5]), "not yet")
+	for _, root := range roots[4:] {
+		flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", root)
+		assert.Equal(2, flows, "root %d closed but not archived: left in the live tables", root)
+		assert.False(marked(root), "and not marked")
+	}
 
+	// Once they are archived, the next call takes them.
+	e.reapDueFlows(ctx)
 	q.Limit = 10
 	removed, done, err = e.Purge(ctx, q)
 	assert.NoError(err)
-	assert.Equal(2, removed, "the two live ones left")
+	assert.Equal(3, removed)
 	assert.True(done)
-	assert.True(marked(roots[5]) && marked(roots[6]))
-
-	removed, done, err = e.Purge(ctx, q)
-	assert.NoError(err)
-	assert.Zero(removed)
-	assert.True(done, "nothing left")
-	live, err := e.ListLive(ctx, workflow.Query{Limit: 10})
-	assert.NoError(err)
-	assert.Len(live, 0, "marked flows are out of the lists at once")
 }
 
 // TestPurge_TheRefusals pins what Purge refuses with a 400 beside a missing window or Limit (TestPurge_EveryListFilterNarrows):
@@ -314,97 +309,13 @@ func TestDelete_AnArchivedTreeWaitsForAForkOfIt(t *testing.T) {
 	}
 }
 
-// TestPurge_Done pins Purge's done flag: true only when neither side had more than it took and every root it took
-// was removed.
+// TestPurge_Done pins Purge's done flag: true only when the archive had fewer than the limit and every root taken was
+// removed.
 func TestPurge_Done(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	assert.True(purgeDone(10, 3, 2, 5), "both sides short, all removed")
-	assert.False(purgeDone(10, 10, 0, 10), "the archive filled the limit")
-	assert.False(purgeDone(10, 3, 7, 10), "the live side filled what was left")
-	assert.False(purgeDone(10, 3, 2, 4), "a live root went before its mark")
-	assert.True(purgeDone(10, 0, 0, 0), "nothing matched")
-}
-
-// TestPurge_AMarkCountsOnlyWhatItStamps pins the live mark's guard: a root already stamped - by a Delete racing the
-// Purge between its selection and its mark - is not counted again.
-func TestPurge_AMarkCountsOnlyWhatItStamps(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	ctx := t.Context()
-	e := archiveEngine(t, treeMux(), 30)
-	roots := endedRoots(t, e, 2)
-	keyOf := func(id int) string {
-		db, err := e.db.Shard(1)
-		assert.NoError(err)
-		var token string
-		var hour int
-		assert.NoError(db.QueryRowContext(ctx, "SELECT flow_token, created_hour FROM dwarf_flows WHERE flow_id=?", id).Scan(&token, &hour))
-		return keys.NewFlowKey(1, hour, id, token)
-	}
-	assert.NoError(e.Delete(ctx, keyOf(roots[0])))
-	n, err := e.markLiveRoots(ctx, []listRow{{shard: 1, flowID: roots[0]}, {shard: 1, flowID: roots[1]}})
-	assert.NoError(err)
-	assert.Equal(1, n, "the one Delete stamped first is not counted")
-}
-
-// TestPurge_TheLiveSideTakesTheOldestAcrossShards pins the live side's merge: with the oldest ended root on the second
-// shard, a Purge of one marks it, not the first shard's oldest.
-func TestPurge_TheLiveSideTakesTheOldestAcrossShards(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	ctx := t.Context()
-	e := NewEngineUnderTest(t.Name())
-	t.Cleanup(func() { e.Shutdown(context.Background()) })
-	e.SetHost(treeMux())
-	e.archiveGrace = time.Hour // the ended roots stay live
-	e.reapInterval = time.Hour
-	assert.NoError(e.SetShard(ShardSpec{Index: 1}))
-	assert.NoError(e.SetShard(ShardSpec{Index: 2}))
-	assert.NoError(e.SetRetention(30))
-	assert.NoError(e.Startup(ctx))
-
-	type root struct{ shard, id int }
-	var roots []root
-	for i := 0; i < 40 && (len(roots) < 2 || roots[len(roots)-1].shard == roots[0].shard); i++ {
-		fk, err := e.Create(ctx, "arch/parent", nil, nil)
-		assert.NoError(err)
-		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
-		shard, _, id, _, err := keys.ParseFlowKey(fk)
-		assert.NoError(err)
-		roots = append(roots, root{shard, id})
-	}
-	var on1, on2 *root
-	for i := range roots {
-		if roots[i].shard == 1 && on1 == nil {
-			on1 = &roots[i]
-		}
-		if roots[i].shard == 2 && on2 == nil {
-			on2 = &roots[i]
-		}
-	}
-	if on1 == nil || on2 == nil {
-		t.Skip("placement put every flow on one shard")
-	}
-	// Every root ended a minute ago, but the second shard's, which ended an hour ago: the oldest.
-	for _, r := range roots {
-		db, err := e.db.Shard(r.shard)
-		assert.NoError(err)
-		ago := time.Minute
-		if r == *on2 {
-			ago = time.Hour
-		}
-		_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE flow_id=?", -ago.Milliseconds(), r.id)
-		assert.NoError(err)
-	}
-	removed, _, err := e.Purge(ctx, workflow.Query{FromTime: time.Now().Add(-24 * time.Hour), ToTime: time.Now(), Limit: 1})
-	assert.NoError(err)
-	assert.Equal(1, removed)
-	for _, r := range []*root{on1, on2} {
-		db, err := e.db.Shard(r.shard)
-		assert.NoError(err)
-		var after int
-		assert.NoError(db.QueryRowContext(ctx, "SELECT delete_after_ms FROM dwarf_flows WHERE flow_id=?", r.id).Scan(&after))
-		assert.Equal(r == on2, after > 0, "shard %d's root marked: %v", r.shard, after > 0)
-	}
+	assert.True(purgeDone(10, 3, 3), "short of the limit, all removed")
+	assert.False(purgeDone(10, 10, 10), "the archive filled the limit")
+	assert.False(purgeDone(10, 3, 2), "a root went to a racing Delete first")
+	assert.True(purgeDone(10, 0, 0), "nothing matched")
 }

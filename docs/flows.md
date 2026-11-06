@@ -131,8 +131,8 @@ outcome,  err := eng.Snapshot(ctx, flowKey)            // current status + state
 fp, status, err := eng.Fingerprint(ctx, flowKey)       // cheap change-detection token + status
 steps,    err := eng.History(ctx, flowKey)             // []workflow.FlowStep, the full execution record
 step,     err := eng.Step(ctx, stepKey)                // one step by key
-live,     err := eng.ListLive(ctx, query)              // flows in the live tables, the most recently updated first
-archived, err := eng.ListArchived(ctx, query)          // archived flows, the most recently archived first
+open,     err := eng.ListOpen(ctx, query)              // running and interrupted flows, the most recently updated first
+closed,   err := eng.ListClosed(ctx, query)            // closed flows, the most recently archived first
 ```
 
 `History` returns each step's task, depth, status, error, and timings — metadata only, **not** `state`/`changes`;
@@ -145,22 +145,24 @@ take the root's key.
 
 Two lists take a `workflow.Query` (status, workflow name, the task a flow stopped at, fairness key, priority, time
 window, shard, free-text `Search`, `Limit`) and return the matching flows, at most `Limit` of them across every
-shard. Each reads one side of where flows are kept:
+shard. A flow is **open** while it is running or interrupted, and **closed** once it has completed, failed, been
+terminated or been cancelled:
 
-- **`ListLive`** lists the flows in the live tables: running, sleeping, interrupted, and ended flows not archived
-  yet - an ended flow stays live about a minute before it moves to the archive. Any status may be asked for. The
-  most recently updated first; its window, optional, is on `UpdatedAt`, when a flow last changed status.
-- **`ListArchived`** lists the archived flows, the most recently archived first. Its window, required, is on
-  `ArchivedAt`, when a flow moved to the archive; a status that has not ended is a 400, since no such flow is ever
-  archived.
+- **`ListOpen`** lists the open flows, the most recently updated first. Its window, optional, is on `UpdatedAt`,
+  when a flow last changed status. A `Status` that is not open is a 400.
+- **`ListClosed`** lists the closed flows, the most recently archived first. A closed flow is archived about a
+  minute after it closes, and appears here then. Its window, required, is on `ArchivedAt`, when the flow was
+  archived. A `Status` that is not closed is a 400.
 
-Ties go by shard, then the newest flow. Every call needs `Limit` (at most 65,536). `ListArchived`'s window needs both
-ends: `FromTime`, inclusive, and `ToTime`, exclusive. To see live
-and archived flows both, call `ListLive`, then `ListArchived`: a flow archived between the two calls is then listed
-twice, never missed, so drop it by its key.
+**A flow that closed in the last minute is in neither list** - longer while archiving lags behind - and one deleted
+without archiving (`DeleteOnCompletion`, a retention of 0) is never in `ListClosed`. It is still read by its key
+meanwhile: `Snapshot`, `Await` and `History` find it, and `Delete` removes it. To learn when one flow closes, `Await` it rather than polling a list.
+
+Ties go by shard, then the newest flow. Every call needs `Limit` (at most 65,536). `ListClosed`'s window needs both
+ends: `FromTime`, inclusive, and `ToTime`, exclusive.
 
 ```go
-failed, err := eng.ListArchived(ctx, workflow.Query{
+failed, err := eng.ListClosed(ctx, workflow.Query{
     Status:   workflow.StatusFailed,
     FromTime: time.Now().Add(-24 * time.Hour),
     ToTime:   time.Now(),
@@ -168,12 +170,13 @@ failed, err := eng.ListArchived(ctx, workflow.Query{
 })
 ```
 
-`ListArchived` reads every archive day its window reaches, on every shard. A window is cut to what the archive can
+`ListClosed` reads every archive day its window reaches, on every shard. A window is cut to what the archive can
 hold - nothing before the retention's first day, nothing after now - and what is left may reach at most 31 days:
 split a longer range. A search over many days wants a low `Limit`; a walk through a time range wants short windows.
+At a retention of 0 nothing is archived, so `ListClosed` lists nothing new.
 
-**Neither list has pagination or a cursor.** A live flow changes under you, so to see other live flows, narrow the
-filters or the window. An archived flow never changes, so you can walk `ListArchived` back through a range a window at
+**Neither list has pagination or a cursor.** An open flow changes under you, so to see other open flows, narrow the
+filters or the window. A closed flow never changes, so you can walk `ListClosed` back through a range a window at
 a time, each ending just after the oldest `ArchivedAt` you hold, dropping the flows you already have: flows archived
 together share an `ArchivedAt`. Polling forward from your last check up to now sees each flow once, about a minute
 after it ended, provided a walk's newest bound stays behind now by more than an archiving batch takes - seconds,
@@ -292,28 +295,33 @@ A flow that has not ended is never removed by the engine, unless the engine is s
 minute after it ends it moves to the archive, which keeps each day's ended flows for `SetRetention` days (30 by
 default) and then drops the day whole; `PurgeBefore(t)` drops every archived day before t's. With a retention of 0 an ended flow is deleted instead.
 An archived flow reads as it did before it moved: `Snapshot`, `Fingerprint`, `Await`, `Poll`, `Run`, `History`,
-`Step` and `Continue` find it by its key, `Fork` clones it, `ListArchived` lists it, and a flow whose day was dropped
+`Step` and `Continue` find it by its key, `Fork` clones it, `ListClosed` lists it, and a flow whose day was dropped
 reads as not found.
 
 ```go
 err := eng.Delete(ctx, flowKey)                // remove one ended flow and its subtree
-removed, done, err := eng.Purge(ctx, query)    // remove the matching ended flows, oldest first, Limit at a time
+removed, done, err := eng.Purge(ctx, query)    // remove what ListClosed lists for query, oldest first, Limit at a time
 err = eng.PurgeBefore(ctx, t)                  // drop every archived day before t's, on every shard
 ```
 
-`Delete` and `Purge` remove ended flows sooner than the retention, each with its whole subgraph subtree. An
-archived flow is deleted at once. One not archived yet, in the minute after it ends, is **marked** for deletion: a
-background reaper removes it shortly after, without archiving it, and the marked flow drops out of the lists and
-`History` immediately, so it is logically gone even though the row lingers briefly. Both remove only flows that
-have ended: `Delete` of a running or interrupted flow returns 409 and `Purge` skips one, so `Terminate` a flow first
-to delete it. `Delete` of a flow already deleted from the archive returns 404.
+`Delete` and `Purge` remove closed flows sooner than the retention, each with its whole subgraph subtree. Both
+remove only closed flows: `Delete` of a running or interrupted flow returns 409, so `Terminate` a flow first to
+delete it.
 
-`Purge` takes the same `workflow.Query` as the lists, and needs `Limit` (at most 65,536) and both ends of a window.
-It removes the oldest first, the archived ones before the ones not archived yet, at most `Limit` roots in a call,
-and says when it is done: call it until it is. Its window is on `ArchivedAt` for an archived flow, cut and capped at
-31 days as for `ListArchived` - purge a longer range a month at a time - and on `UpdatedAt`, when it ended, for one
-not archived yet. A `Status` that has not
-ended (`running`, `interrupted`) is a 400.
+`Delete` takes one flow by its key, archived or not. An archived flow is deleted at once. One not archived yet, in the
+minute after it closes, is **marked** for deletion: a background reaper removes it shortly after, without archiving
+it, and `History` returns 404 for it at once, so it is logically gone even though the row lingers briefly. `Delete` of
+a flow already deleted from the archive returns 404.
+
+`Purge` removes what `ListClosed` would list for the same `workflow.Query`, oldest archived first, at most `Limit`
+roots in a call, each deleted at once, and says when it is done: call it until it is. It needs `Limit` (at most
+65,536) and both ends of the window, which is `ListClosed`'s, on `ArchivedAt`, cut and capped at 31 days - purge a
+longer range a month at a time. A `Status` that is not closed (`running`, `interrupted`) is a 400.
+
+**`Purge` removes only what is archived, and `done` covers only that.** A flow that closed shortly before the call,
+still on its way to the archive, is not purged until a call after it is archived. For an erasure that must take every
+flow - a tenant's, say, after terminating its open ones - wait a minute after the last of them closed and call `Purge`
+again, or `Delete` them by key.
 
 ```go
 for {
@@ -388,7 +396,7 @@ Each operation adds these to the 503 and 500 every call can return:
 | `Snapshot`, `Fingerprint` | malformed key | unknown flow | | |
 | `History` | malformed key | unknown flow, or one scheduled for deletion | | |
 | `Step` | malformed key | unknown step | | |
-| `ListLive`, `ListArchived` | invalid status or shard, no `Limit` or one over 65,536, a `FromTime` not before `ToTime`; `ListArchived` with a status that has not ended, no `FromTime` or `ToTime`, or a window reaching more than 31 days of the archive | | | |
+| `ListOpen`, `ListClosed` | invalid status or shard, no `Limit` or one over 65,536, a `FromTime` not before `ToTime`; `ListOpen` with a status that is not open; `ListClosed` with a status that is not closed, no `FromTime` or `ToTime`, or a window reaching more than 31 days of the archive | | | |
 | `Purge` | invalid status or shard, no `Limit` or one over 65,536, no `FromTime` or `ToTime`, `IncludeSubgraphs`, a `Status` that has not ended, or a window reaching more than 31 days of the archive | | | |
 | `Resume` | malformed key, a subgraph child's key, data not JSON-marshalable | unknown flow | | the flow is not interrupted, including when a `Terminate` won the race |
 | `Cancel`, `Terminate` | malformed key, a subgraph child's key, a reason over 4,096 bytes or not valid UTF-8 without NUL | unknown flow | | |

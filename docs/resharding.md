@@ -76,12 +76,8 @@ immediately. Everything resident continues normally: flows keep executing, and t
 which means both:
 
 ```go
-// no live work
-all := workflow.Query{Shard: 3, Limit: 100}
-all.Status = workflow.StatusRunning
-running, _ := eng.ListLive(ctx, all)
-all.Status = workflow.StatusInterrupted
-interrupted, _ := eng.ListLive(ctx, all)
+// no open flow, running or interrupted
+open, _ := eng.ListOpen(ctx, workflow.Query{Shard: 3, Limit: 100})
 ```
 
 and no ended flow you still want readable: the shard's ended flows sit in its archive until the retention drops
@@ -126,7 +122,7 @@ See [Deployment → Sharding](deployment.md#sharding) for the sizing table, and
 
 ## When a shard is down
 
-Shards multiply capacity, not availability — each shard's own availability is its database's. `ListLive`,
-`ListArchived` and `Purge` fail as a whole if any shard errors. `ShardInfo` is built to answer anyway: it returns a row per
+Shards multiply capacity, not availability — each shard's own availability is its database's. `ListOpen`,
+`ListClosed` and `Purge` fail as a whole if any shard errors. `ShardInfo` is built to answer anyway: it returns a row per
 shard with that shard's error recorded on it, so it is the diagnostic to reach for in exactly that
 situation.

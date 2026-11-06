@@ -344,7 +344,7 @@ The retry bound is wall-clock, not a count; see [Retry](#retry).
 **An error message is not a private log line.** Whatever you return is stored on the flow and the step, and
 it comes back from the two readers that expose no state payloads at all:
 
-- **`ListLive` and `ListArchived`** return each flow's error and terminate reason on the summary.
+- **`ListOpen` and `ListClosed`** return each flow's error and terminate reason on the summary.
 - **`History`** returns each step's error, alongside metadata — it deliberately omits `state` and `changes`,
   but not the error.
 - **`Query.Search`** substring-matches the error text, so flows can be *found* by what their errors contain.

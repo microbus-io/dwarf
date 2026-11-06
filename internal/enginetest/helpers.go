@@ -82,8 +82,8 @@ func CountRows(t *testing.T, e Engine, shard int, query string, args ...any) int
 
 // Lister is the slice of *engine.Engine's exported surface the list helpers use.
 type Lister interface {
-	ListLive(ctx context.Context, query workflow.Query) ([]workflow.FlowSummary, error)
-	ListArchived(ctx context.Context, query workflow.Query) ([]workflow.FlowSummary, error)
+	ListOpen(ctx context.Context, query workflow.Query) ([]workflow.FlowSummary, error)
+	ListClosed(ctx context.Context, query workflow.Query) ([]workflow.FlowSummary, error)
 }
 
 // Recent returns query with a window over the last day, reaching an hour past now, and a Limit of 1,000, each only where
@@ -101,18 +101,19 @@ func Recent(query workflow.Query) workflow.Query {
 	return query
 }
 
-// ListAll returns the flows Recent(query) matches, live and archived: ListLive's, then ListArchived's, a flow archived
-// between the two calls listed once. ListArchived is asked only for a status that may be archived, or none.
+// ListAll returns the flows Recent(query) matches in every status: the live tables' (engineseams.ListLive), then
+// ListClosed's, a flow archived between the two calls listed once. ListClosed is asked only for a status that may be
+// archived, or none. A test sees in it a flow it just closed, which is in neither public list until it is archived.
 func ListAll(ctx context.Context, e Lister, query workflow.Query) ([]workflow.FlowSummary, error) {
 	query = Recent(query)
-	all, err := e.ListLive(ctx, query)
+	all, err := engineseams.ListLive(e, ctx, query)
 	if err != nil {
 		return nil, err
 	}
 	if query.Status != "" && !workflow.IsTerminalStatus(query.Status) {
 		return all, nil
 	}
-	archived, err := e.ListArchived(ctx, query)
+	archived, err := e.ListClosed(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -126,4 +127,10 @@ func ListAll(ctx context.Context, e Lister, query workflow.Query) ([]workflow.Fl
 		}
 	}
 	return all, nil
+}
+
+// ArchiveNow archives every flow the engine has closed, however recently, and removes the flows scheduled for deletion
+// whose time has come, for a test that purges what it just closed: Purge reads only the archive.
+func ArchiveNow(ctx context.Context, e Lister) {
+	engineseams.ArchiveNow(e, ctx)
 }

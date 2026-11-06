@@ -40,7 +40,7 @@ type FlowSummary struct {
 	StartedAt time.Time `json:"startedAt,omitzero"`
 	UpdatedAt time.Time `json:"updatedAt,omitzero"`
 	// ArchivedAt is when the flow moved to the archive, normally about a minute after it ended, by the database's
-	// clock; zero for a flow still live. ListArchived orders by it.
+	// clock; zero for a flow not archived. ListClosed orders by it.
 	ArchivedAt time.Time `json:"archivedAt,omitzero"`
 	// Priority is the flow's scheduling priority (>= 1, lower runs first), resolved at Create.
 	Priority int `json:"priority,omitzero"`

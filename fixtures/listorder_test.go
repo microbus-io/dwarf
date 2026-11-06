@@ -29,11 +29,11 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestListLive_NewestFirstAcrossShards pins ListLive's top-N: at most Limit flows, the most recently updated
+// TestListOpen_NewestFirstAcrossShards pins ListOpen's top-N: at most Limit flows, the most recently updated
 // across every shard, ties by shard then newest flow. Each shard reads its own newest Limit and the union is cut to
 // Limit, so a page is neither grouped by shard nor a per-shard share of Limit: a shard holding all of the newest flows
-// supplies all of them. The flows rest interrupted, so they stay active and their order stays put.
-func TestListLive_NewestFirstAcrossShards(t *testing.T) {
+// supplies all of them. The flows rest interrupted, so they stay open and their order stays put.
+func TestListOpen_NewestFirstAcrossShards(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -65,7 +65,7 @@ func TestListLive_NewestFirstAcrossShards(t *testing.T) {
 		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusInterrupted, time.Minute)
 	}
 
-	all, err := e.ListLive(ctx, enginetest.Recent(workflow.Query{Limit: 100}))
+	all, err := e.ListOpen(ctx, enginetest.Recent(workflow.Query{Limit: 100}))
 	if !assert.NoError(err) || !assert.Len(all, total) {
 		return
 	}
@@ -90,7 +90,7 @@ func TestListLive_NewestFirstAcrossShards(t *testing.T) {
 	// list. Checking every prefix, not one, is what catches a Limit divided across shards: that passes a single
 	// limit whenever the newest flows happen to split evenly between the shards, but not every prefix.
 	for limit := 1; limit <= total; limit++ {
-		newest, err := e.ListLive(ctx, enginetest.Recent(workflow.Query{Limit: limit}))
+		newest, err := e.ListOpen(ctx, enginetest.Recent(workflow.Query{Limit: limit}))
 		if !assert.NoError(err) || !assert.Len(newest, limit) {
 			return
 		}
@@ -108,7 +108,7 @@ func TestListLive_NewestFirstAcrossShards(t *testing.T) {
 			}
 		}
 		limit := min(5, len(onShard))
-		got, err := e.ListLive(ctx, enginetest.Recent(workflow.Query{Shard: shard, Limit: limit}))
+		got, err := e.ListOpen(ctx, enginetest.Recent(workflow.Query{Shard: shard, Limit: limit}))
 		if !assert.NoError(err) || !assert.Len(got, limit) {
 			return
 		}

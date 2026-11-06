@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/archiver"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/workflow"
@@ -60,10 +61,9 @@ func stampArchived(t *testing.T, e *Engine, day, rootID int, at time.Time) {
 }
 
 // TestList_EachListReadsItsOwnTables pins the split between the two lists over the live tables and three archive days:
-// ListArchived reads the archive alone, newest archived first, windowed on the archive time from inclusive to
-// exclusive, with ArchivedAt on every flow, a Limit that keeps the order's prefix, the subgraph children with
-// IncludeSubgraphs, and Purge's ascending order the same list reversed; ListLive reads the live tables alone, the
-// ended flows not archived yet included, with a zero ArchivedAt.
+// ListClosed reads the archive alone, newest archived first, windowed on the archive time from inclusive to exclusive,
+// with ArchivedAt on every flow, a Limit that keeps the order's prefix, the subgraph children with IncludeSubgraphs,
+// and Purge's ascending order the same list reversed; a flow closed but not archived yet is in neither list.
 func TestList_EachListReadsItsOwnTables(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -90,7 +90,7 @@ func TestList_EachListReadsItsOwnTables(t *testing.T) {
 	}
 
 	window := workflow.Query{FromTime: time.Now().Add(-(3 * 24 * time.Hour)), ToTime: time.Now().Add(time.Hour), Limit: 100}
-	all, err := e.ListArchived(ctx, window)
+	all, err := e.ListClosed(ctx, window)
 	assert.NoError(err)
 	assert.Equal([]int{roots[2], roots[1], roots[5], roots[0]}, idsOf(t, all), "the archive alone, newest archived first")
 	if assert.Len(all, 4) {
@@ -100,72 +100,63 @@ func TestList_EachListReadsItsOwnTables(t *testing.T) {
 		assert.True(all[3].ArchivedAt.Equal(oldest), "archived at %v, not %v", all[3].ArchivedAt, oldest)
 		assert.False(all[0].Subgraph)
 	}
-	live, err := e.ListLive(ctx, workflow.Query{Limit: 100})
+	open, err := e.ListOpen(ctx, workflow.Query{Limit: 100})
 	assert.NoError(err)
-	assert.Equal([]int{roots[4], roots[3]}, idsOf(t, live), "the live tables alone: the ended flows not archived yet")
-	for _, f := range live {
-		assert.True(f.ArchivedAt.IsZero(), "not archived")
-		assert.Equal(workflow.StatusCompleted, f.Status)
-	}
-	// The older flow updated last comes first, and is the one a Limit of 1 keeps: the order is by update, not by id.
-	db, err := e.db.Shard(1)
+	assert.Len(open, 0, "the flows closed but not archived yet are in neither list")
+	live, err := engineseams.ListLive(e, ctx, workflow.Query{Limit: 100})
 	assert.NoError(err)
-	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=DATE_ADD_MILLIS(NOW_UTC(), 1000) WHERE flow_id=?", roots[3])
-	assert.NoError(err)
-	live, err = e.ListLive(ctx, workflow.Query{Limit: 1})
-	assert.NoError(err)
-	assert.Equal([]int{roots[3]}, idsOf(t, live), "the most recently updated first")
+	assert.Equal([]int{roots[4], roots[3]}, idsOf(t, live), "they are in the live tables")
 
 	for limit := 1; limit <= 4; limit++ {
 		q := window
 		q.Limit = limit
-		got, err := e.ListArchived(ctx, q)
+		got, err := e.ListClosed(ctx, q)
 		assert.NoError(err)
 		assert.Equal(idsOf(t, all)[:limit], idsOf(t, got), "limit %d", limit)
 	}
 
 	q := window
 	q.IncludeSubgraphs = true
-	withChildren, err := e.ListArchived(ctx, q)
+	withChildren, err := e.ListClosed(ctx, q)
 	assert.NoError(err)
 	assert.Len(withChildren, 8, "every archived root and its subgraph child")
 
 	q = window
 	q.ToTime = time.Now().Add(-time.Minute)
-	past, err := e.ListArchived(ctx, q)
+	past, err := e.ListClosed(ctx, q)
 	assert.NoError(err)
 	assert.Equal([]int{roots[1], roots[5], roots[0]}, idsOf(t, past), "a window ending a minute ago: not the one archived since")
 	// A limit below a day's rows keeps that day's newest: each day's own read is ordered and limited too.
 	q.Limit = 1
-	past, err = e.ListArchived(ctx, q)
+	past, err = e.ListClosed(ctx, q)
 	assert.NoError(err)
 	assert.Equal([]int{roots[1]}, idsOf(t, past))
 
 	q = window
 	q.FromTime, q.ToTime = time.Now().Add(time.Hour), time.Now().Add(2*time.Hour)
-	future, err := e.ListArchived(ctx, q)
+	future, err := e.ListClosed(ctx, q)
 	assert.NoError(err)
 	assert.Len(future, 0, "a window wholly after now")
 
 	q = window
 	q.FromTime, q.ToTime = oldest, oldest.Add(time.Millisecond)
-	at, err := e.ListArchived(ctx, q)
+	at, err := e.ListClosed(ctx, q)
 	assert.NoError(err)
 	assert.Equal([]int{roots[0]}, idsOf(t, at), "FromTime is inclusive")
 	q.ToTime = oldest
 	q.FromTime = oldest.Add(-time.Hour)
-	before, err := e.ListArchived(ctx, q)
+	before, err := e.ListClosed(ctx, q)
 	assert.NoError(err)
 	assert.Len(before, 0, "ToTime is exclusive")
 
-	rows, err := e.listArchived(ctx, window, 100, true, "list_archived")
+	rows, err := e.listArchived(ctx, window, 100, true, "purge")
 	assert.NoError(err)
 	ascending := make([]int, len(rows))
 	for i, lr := range rows {
 		ascending[i] = lr.flowID
 	}
 	assert.Equal([]int{roots[0], roots[5], roots[1], roots[2]}, ascending, "oldest archived first")
-	rows, err = e.listArchived(ctx, window, 1, true, "list_archived")
+	rows, err = e.listArchived(ctx, window, 1, true, "purge")
 	assert.NoError(err)
 	if assert.Len(rows, 1) {
 		assert.Equal(roots[0], rows[0].flowID, "ascending, each day's read keeps its oldest")
@@ -196,10 +187,10 @@ func TestList_MergeOrdersAcrossShards(t *testing.T) {
 	assert.Equal([][2]int{{2, 2}, {1, 3}, {1, 9}, {2, 7}, {1, 4}}, key(mergeByTime(append([]listRow(nil), rows...), true)))
 }
 
-// TestListArchived_ADayAPeerDroppedIsReadAgain pins the list over a stale record of the days: a day a peer dropped since
+// TestListClosed_ADayAPeerDroppedIsReadAgain pins the list over a stale record of the days: a day a peer dropped since
 // this replica's last catalog read fails the shard's statement on its missing table, and the list reads the catalog
 // and runs it again, without the day.
-func TestListArchived_ADayAPeerDroppedIsReadAgain(t *testing.T) {
+func TestListClosed_ADayAPeerDroppedIsReadAgain(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -219,16 +210,16 @@ func TestListArchived_ADayAPeerDroppedIsReadAgain(t *testing.T) {
 	assert.NoError(err)
 	assert.True(a.Whole(today-2), "this replica's record is stale")
 
-	got, err := e.ListArchived(ctx, workflow.Query{FromTime: time.Now().Add(-(3 * 24 * time.Hour)), ToTime: time.Now().Add(time.Hour), Limit: 100})
+	got, err := e.ListClosed(ctx, workflow.Query{FromTime: time.Now().Add(-(3 * 24 * time.Hour)), ToTime: time.Now().Add(time.Hour), Limit: 100})
 	assert.NoError(err)
 	assert.Equal([]int{root}, idsOf(t, got))
 	assert.False(a.Whole(today-2), "the record was read again")
 }
 
-// TestListArchived_TheWindowIsClampedToTheArchive pins the window's cut: a lower bound before the retention reads from
+// TestListClosed_TheWindowIsClampedToTheArchive pins the window's cut: a lower bound before the retention reads from
 // the retention's first day, a window wholly before it lists nothing, and what is left after the cut may reach at most
 // 31 days - today and the 30 before it - or the call is a 400.
-func TestListArchived_TheWindowIsClampedToTheArchive(t *testing.T) {
+func TestListClosed_TheWindowIsClampedToTheArchive(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -237,10 +228,10 @@ func TestListArchived_TheWindowIsClampedToTheArchive(t *testing.T) {
 	assert.NoError(err)
 	root := endedRoots(t, e, 1)[0]
 	moveInto(t, e, root, today)
-	got, err := e.ListArchived(ctx, workflow.Query{FromTime: time.Now().Add(-(400 * 24 * time.Hour)), ToTime: time.Now().Add(time.Hour), Limit: 10})
+	got, err := e.ListClosed(ctx, workflow.Query{FromTime: time.Now().Add(-(400 * 24 * time.Hour)), ToTime: time.Now().Add(time.Hour), Limit: 10})
 	assert.NoError(err, "a window past the retention is cut to it")
 	assert.Equal([]int{root}, idsOf(t, got))
-	got, err = e.ListArchived(ctx, workflow.Query{FromTime: time.Now().Add(-(400 * 24 * time.Hour)), ToTime: time.Now().Add(-(40 * 24 * time.Hour)), Limit: 10})
+	got, err = e.ListClosed(ctx, workflow.Query{FromTime: time.Now().Add(-(400 * 24 * time.Hour)), ToTime: time.Now().Add(-(40 * 24 * time.Hour)), Limit: 10})
 	assert.NoError(err)
 	assert.Len(got, 0, "a window wholly before the retention")
 
@@ -248,22 +239,22 @@ func TestListArchived_TheWindowIsClampedToTheArchive(t *testing.T) {
 	t.Run("retention_100", func(t *testing.T) {
 		assert := testarossa.For(t)
 		long := archiveEngine(t, treeMux(), 100)
-		_, err := long.ListArchived(ctx, workflow.Query{FromTime: time.Now().Add(-(30 * 24 * time.Hour)), ToTime: time.Now().Add(time.Hour), Limit: 10})
+		_, err := long.ListClosed(ctx, workflow.Query{FromTime: time.Now().Add(-(30 * 24 * time.Hour)), ToTime: time.Now().Add(time.Hour), Limit: 10})
 		assert.NoError(err, "31 days, today included")
-		_, err = long.ListArchived(ctx, workflow.Query{FromTime: time.Now().Add(-(31 * 24 * time.Hour)), ToTime: time.Now().Add(time.Hour), Limit: 10})
+		_, err = long.ListClosed(ctx, workflow.Query{FromTime: time.Now().Add(-(31 * 24 * time.Hour)), ToTime: time.Now().Add(time.Hour), Limit: 10})
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "32 days")
-		_, err = long.ListArchived(ctx, workflow.Query{FromTime: time.Now().Add(-(60 * 24 * time.Hour)), ToTime: time.Now().Add(-(30 * 24 * time.Hour)), Limit: 10})
+		_, err = long.ListClosed(ctx, workflow.Query{FromTime: time.Now().Add(-(60 * 24 * time.Hour)), ToTime: time.Now().Add(-(30 * 24 * time.Hour)), Limit: 10})
 		assert.NoError(err, "31 days, all in the past")
-		_, err = long.ListArchived(ctx, workflow.Query{FromTime: time.Now().Add(-(20 * 24 * time.Hour)), ToTime: time.Now().Add(60 * 24 * time.Hour), Limit: 10})
+		_, err = long.ListClosed(ctx, workflow.Query{FromTime: time.Now().Add(-(20 * 24 * time.Hour)), ToTime: time.Now().Add(60 * 24 * time.Hour), Limit: 10})
 		assert.NoError(err, "a window reaching 60 days ahead is cut to today")
-		_, err = long.ListArchived(ctx, workflow.Query{FromTime: time.Now().Add(-(30 * 24 * time.Hour)), ToTime: time.Now().Add(48 * time.Hour), Limit: 10})
+		_, err = long.ListClosed(ctx, workflow.Query{FromTime: time.Now().Add(-(30 * 24 * time.Hour)), ToTime: time.Now().Add(48 * time.Hour), Limit: 10})
 		assert.NoError(err, "31 days, and the day past today it reads beside them uncounted")
 	})
 }
 
 // TestList_RequiredInputsAndStatuses pins what the two lists refuse with a 400: no Limit, a Limit over the most a call
-// returns, an empty window, a negative duration, and an unknown status or shard; ListArchived a missing bound on either
-// side, which ListLive takes as no bound there, and a status that has not ended, which ListLive takes like any other.
+// returns, an empty window, a negative duration, and an unknown status or shard; ListClosed a missing bound on either
+// side, which ListOpen takes as no bound there; and each list a status of the other's.
 func TestList_RequiredInputsAndStatuses(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -280,48 +271,48 @@ func TestList_RequiredInputsAndStatuses(t *testing.T) {
 		"invalid shard":   {FromTime: time.Now().Add(-time.Hour), ToTime: now.Add(time.Hour), Limit: 10, Shard: 99},
 	}
 	for name, q := range bad {
-		_, err := e.ListLive(ctx, q)
-		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "ListLive: %s", name)
-		_, err = e.ListArchived(ctx, q)
-		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "ListArchived: %s", name)
+		_, err := e.ListOpen(ctx, q)
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "ListOpen: %s", name)
+		_, err = e.ListClosed(ctx, q)
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "ListClosed: %s", name)
 	}
 	for name, q := range map[string]workflow.Query{
 		"no lower bound": {ToTime: now.Add(time.Hour), Limit: 10},
 		"no upper bound": {FromTime: time.Now().Add(-time.Hour), Limit: 10},
 		"no bound":       {Limit: 10},
 	} {
-		_, err := e.ListArchived(ctx, q)
-		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "ListArchived: %s", name)
-		_, err = e.ListLive(ctx, q)
-		assert.NoError(err, "ListLive: %s", name)
+		_, err := e.ListClosed(ctx, q)
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "ListClosed: %s", name)
+		_, err = e.ListOpen(ctx, q)
+		assert.NoError(err, "ListOpen: %s", name)
 	}
 	max := ok
 	max.Limit = maxListLimit
-	_, err := e.ListLive(ctx, max)
+	_, err := e.ListOpen(ctx, max)
 	assert.NoError(err)
-	_, err = e.ListArchived(ctx, max)
+	_, err = e.ListClosed(ctx, max)
 	assert.NoError(err)
 
 	for _, status := range []string{workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusTerminated, workflow.StatusCancelled} {
 		q := ok
 		q.Status = status
-		_, err := e.ListLive(ctx, q)
-		assert.NoError(err, "ListLive of %s: an ended flow is live until it is archived", status)
-		_, err = e.ListArchived(ctx, q)
-		assert.NoError(err, "ListArchived of %s", status)
+		_, err := e.ListOpen(ctx, q)
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "ListOpen of %s", status)
+		_, err = e.ListClosed(ctx, q)
+		assert.NoError(err, "ListClosed of %s", status)
 	}
 	for _, status := range []string{workflow.StatusRunning, workflow.StatusInterrupted} {
 		q := ok
 		q.Status = status
-		_, err := e.ListArchived(ctx, q)
-		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "ListArchived of %s", status)
-		_, err = e.ListLive(ctx, q)
-		assert.NoError(err, "ListLive of %s", status)
+		_, err := e.ListClosed(ctx, q)
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "ListClosed of %s", status)
+		_, err = e.ListOpen(ctx, q)
+		assert.NoError(err, "ListOpen of %s", status)
 	}
 }
 
 // TestList_TheLimitIsAboveAReaperBatch pins that the lists' maximum Limit stays above the reaper's batch: a batch's
-// trees share one archive time, and a caller paging ListArchived by window cannot page across a tie larger than its Limit.
+// trees share one archive time, and a caller paging ListClosed by window cannot page across a tie larger than its Limit.
 func TestList_TheLimitIsAboveAReaperBatch(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -365,9 +356,9 @@ func TestSQLTime_ReadsAsTheInstantItNames(t *testing.T) {
 	assert.True(ms > -1000 && ms < 1000, "%vms off on a session in Tokyo", ms)
 }
 
-// TestListArchived_TheDayAfterTodayIsRead pins the one day past today a window reaching past now reads, for a database
+// TestListClosed_TheDayAfterTodayIsRead pins the one day past today a window reaching past now reads, for a database
 // clock ahead of this process's across midnight: a tree there is listed.
-func TestListArchived_TheDayAfterTodayIsRead(t *testing.T) {
+func TestListClosed_TheDayAfterTodayIsRead(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -376,7 +367,7 @@ func TestListArchived_TheDayAfterTodayIsRead(t *testing.T) {
 	assert.NoError(err)
 	root := endedRoots(t, e, 1)[0]
 	moveInto(t, e, root, today+1) // as a pass on a database clock already past midnight would
-	got, err := e.ListArchived(ctx, workflow.Query{FromTime: time.Now().Add(-time.Hour), ToTime: time.Now().Add(48 * time.Hour), Limit: 10})
+	got, err := e.ListClosed(ctx, workflow.Query{FromTime: time.Now().Add(-time.Hour), ToTime: time.Now().Add(48 * time.Hour), Limit: 10})
 	assert.NoError(err)
 	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
 		t.Skip("midnight passed during the test")
@@ -406,10 +397,10 @@ func TestSQLTime_RoundsUpToTheColumnsPrecision(t *testing.T) {
 		t.Skip("midnight is too close")
 	}
 	half := unit / 2
-	got, err := e.ListArchived(ctx, workflow.Query{FromTime: stored.Add(-time.Hour), ToTime: stored.Add(half), Limit: 10})
+	got, err := e.ListClosed(ctx, workflow.Query{FromTime: stored.Add(-time.Hour), ToTime: stored.Add(half), Limit: 10})
 	assert.NoError(err)
 	assert.Equal([]int{root}, idsOf(t, got), "before the upper bound")
-	got, err = e.ListArchived(ctx, workflow.Query{FromTime: stored.Add(half), ToTime: stored.Add(time.Hour), Limit: 10})
+	got, err = e.ListClosed(ctx, workflow.Query{FromTime: stored.Add(half), ToTime: stored.Add(time.Hour), Limit: 10})
 	assert.NoError(err)
 	assert.Len(got, 0, "before the lower bound")
 
@@ -422,9 +413,9 @@ func TestSQLTime_RoundsUpToTheColumnsPrecision(t *testing.T) {
 	assert.Equal("2026-11-04 01:02:03.123457", arg)
 }
 
-// TestListArchived_RetentionZeroStillReadsToday pins the archived list at a retention of 0: today's tables are still
+// TestListClosed_RetentionZeroStillReadsToday pins the archived list at a retention of 0: today's tables are still
 // read, holding what a run with a retention archived before a restart.
-func TestListArchived_RetentionZeroStillReadsToday(t *testing.T) {
+func TestListClosed_RetentionZeroStillReadsToday(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -433,10 +424,54 @@ func TestListArchived_RetentionZeroStillReadsToday(t *testing.T) {
 	assert.NoError(err)
 	root := endedRoots(t, e, 1)[0]
 	moveInto(t, e, root, today)
-	got, err := e.ListArchived(ctx, workflow.Query{FromTime: time.Now().Add(-time.Hour), ToTime: time.Now().Add(time.Hour), Limit: 10})
+	got, err := e.ListClosed(ctx, workflow.Query{FromTime: time.Now().Add(-time.Hour), ToTime: time.Now().Add(time.Hour), Limit: 10})
 	assert.NoError(err)
 	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
 		t.Skip("midnight passed during the test")
 	}
 	assert.Equal([]int{root}, idsOf(t, got))
+}
+
+// TestListOpen_NewestUpdatedFirstAcrossStatuses pins ListOpen: the running and interrupted flows, not a closed one, the
+// most recently updated first across statuses - each status is its own branch of the statement, so the ordered union
+// of the branches is what a Limit cuts - a Limit keeping that order's prefix, and a status filter.
+func TestListOpen_NewestUpdatedFirstAcrossStatuses(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e, _, _ := expiryEngine(t, 0)
+	first := startUnended(t, e, "exp/ask", workflow.StatusInterrupted)
+	napping := startUnended(t, e, "exp/nap", workflow.StatusRunning)
+	last := startUnended(t, e, "exp/ask", workflow.StatusInterrupted)
+	closed := startUnended(t, e, "exp/ask", workflow.StatusInterrupted)
+	assert.NoError(e.Terminate(ctx, closed, "closed"))
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	// The two newest are both interrupted, the second branch: an outer limit that did not order the branches' union
+	// would keep the running flow, which comes first in it.
+	for fk, ahead := range map[string]int{first: 3000, last: 2000, napping: 1000} {
+		_, _, id, _, _ := keys.ParseFlowKey(fk)
+		_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE flow_id=?", ahead, id)
+		assert.NoError(err)
+	}
+	keysOf := func(flows []workflow.FlowSummary) []string {
+		var got []string
+		for _, f := range flows {
+			got = append(got, f.FlowKey)
+		}
+		return got
+	}
+
+	all, err := e.ListOpen(ctx, workflow.Query{Limit: 100})
+	assert.NoError(err)
+	assert.Equal([]string{first, last, napping}, keysOf(all), "newest updated first, across statuses; not the closed flow")
+	two, err := e.ListOpen(ctx, workflow.Query{Limit: 2})
+	assert.NoError(err)
+	assert.Equal([]string{first, last}, keysOf(two))
+	running, err := e.ListOpen(ctx, workflow.Query{Status: workflow.StatusRunning, Limit: 100})
+	assert.NoError(err)
+	assert.Equal([]string{napping}, keysOf(running))
+	interrupted, err := e.ListOpen(ctx, workflow.Query{Status: workflow.StatusInterrupted, Limit: 100})
+	assert.NoError(err)
+	assert.Equal([]string{first, last}, keysOf(interrupted))
 }

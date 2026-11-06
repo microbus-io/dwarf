@@ -46,8 +46,8 @@ type FlowOptions struct {
 	// successfully - for fire-and-forget jobs whose output is not retained. A failed, terminated or
 	// cancelled flow is archived like any other. Deletion is deferred: the flow lingers for a short grace window during
 	// which its outcome stays observable (Await/Snapshot return the completed FlowOutcome), then a
-	// background reaper removes it and reads return "flow not found". During the window the flow is
-	// excluded from List and History 404s.
+	// background reaper removes it and reads return "flow not found". During the window the flow is in
+	// no list, since it is never archived, and History 404s.
 	DeleteOnCompletion bool `json:"deleteOnCompletion,omitzero"`
 	// Baggage is opaque, host-defined context (identity/claims, tenant, locale, ...) carried with the
 	// flow. The engine never interprets it: it is set once here, stored on the flow, inherited by

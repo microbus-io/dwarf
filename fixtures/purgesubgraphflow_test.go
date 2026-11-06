@@ -97,14 +97,12 @@ func TestPurgeSubgraphflow(t *testing.T) {
 
 	t.Run("purge_root_deletes_whole_tree", func(t *testing.T) {
 		assert := testarossa.For(t)
+		enginetest.ArchiveNow(ctx, eng) // Purge reads the archive
 		deleted, _, err := eng.Purge(ctx, enginetest.Recent(workflow.Query{WorkflowURL: "purgesub.verify:428/parent"}))
 		assert.NoError(err)
-		assert.Equal(1, deleted) // the count is the root flow marked, not its descendants
+		assert.Equal(1, deleted) // the count is the root flow, not its descendants
 
-		// Purge marks the root for the reaper (it does not delete inline). The observable public contract is
-		// that the root is logically gone: History 404s and it drops out of the roots List. The reaper then
-		// removes the root AND its subgraph child (keyed on root_flow_id) - that physical cascade, and the
-		// no-orphan guarantee, are pinned in the engine-package reaper tests.
+		// The root is gone with its tree: History 404s and it drops out of the roots list.
 		_, err = eng.History(ctx, rootKey)
 		if assert.Error(err) {
 			assert.Equal(http.StatusNotFound, errors.StatusCode(err))

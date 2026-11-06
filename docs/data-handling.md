@@ -44,7 +44,7 @@ neither hides data from a query nor exposes any.
 
 ## Free-text search reaches errors
 
-`Query.Search`, consumed by `ListLive` and `ListArchived`, is a case-insensitive substring match. It covers exactly:
+`Query.Search`, consumed by `ListOpen` and `ListClosed`, is a case-insensitive substring match. It covers exactly:
 
 - the workflow URL and display name
 - the name of the task the flow stopped at (`StoppedTaskName`), so a running flow never matches on a task
@@ -101,7 +101,7 @@ is not enough to walk the table — you would also need each flow's token. What 
 **Anyone holding a flow key can resume, terminate, fork and read that flow.** Treat a leaked, logged, or
 forwarded key as a full write capability for that one flow.
 
-**The lists are the amplifier.** `ListLive` and `ListArchived` are the only operations that return keys wholesale, so
+**The lists are the amplifier.** `ListOpen` and `ListClosed` are the only operations that return keys wholesale, so
 they convert "can call the engine" into "holds a capability for every flow returned." Gate them accordingly, and
 prefer scoping them —
 `Query.FairnessKey` is how a tenant-scoped listing is normally expressed, since hosts typically set the
@@ -111,7 +111,7 @@ fairness key to the tenant.
 
 | Operation | Returns state payloads? | Returns error text? |
 |---|---|---|
-| `ListLive`, `ListArchived` | No — summaries only | **Yes** — the flow's `Error`, `TerminateReason` and `CancelReason` |
+| `ListOpen`, `ListClosed` | No — summaries only | **Yes** — the flow's `Error`, `TerminateReason` and `CancelReason` |
 | `History` | No — `State` and `Changes` are left empty | **Yes** — each step's `Error` |
 | `Step` | **Yes** — that step's input state and changes | **Yes** |
 | `Snapshot` / `Await` / `Run` | **Yes** — final state, or the interrupt payload | **Yes** |
@@ -153,7 +153,7 @@ not ended within that time of its creation is terminated, and archived as any ot
 archive, which keeps each day's ended flows for `SetRetention` days (30 by default) and then drops the day whole;
 `PurgeBefore(t)` drops every archived day before t's at once. With a retention of 0 an ended flow is deleted
 instead of archived. An archived flow's outcome, history and steps stay readable by its key until its day is
-dropped, and `ListArchived` lists it.
+dropped, and `ListClosed` lists it.
 
 Three ways to remove an ended flow sooner than the retention, archived or not:
 
@@ -161,7 +161,7 @@ Three ways to remove an ended flow sooner than the retention, archived or not:
 // One ended flow and its whole subgraph tree. Refuses a flow that has not ended: Terminate it first.
 eng.Delete(ctx, flowKey)
 
-// The ended flows matching a query, oldest first, Limit at a time; flows that have not ended are skipped.
+// The archived flows ListClosed lists for a query, oldest archived first, Limit at a time.
 for {
     _, done, err := eng.Purge(ctx, workflow.Query{
         WorkflowName: "Report",
@@ -180,8 +180,11 @@ for {
 &workflow.FlowOptions{DeleteOnCompletion: true}
 ```
 
-**An archived flow is deleted at once; one not archived yet is marked, then reaped.** The marked flow is stamped
-for deletion, drops out of the lists and `History` immediately, and a background reaper removes the whole subgraph
+**`Delete` deletes an archived flow at once, and marks one not archived yet, which is then reaped.** `Purge` removes
+only what is archived, so it deletes at once, and its `done` covers only that: a flow closed shortly before the call
+is purged by a later call, once archived. For an erasure, wait a minute after the last matching flow closed and call
+`Purge` again, or `Delete` such flows by key. A marked flow is
+stamped for deletion, `History` returns 404 for it immediately, and a background reaper removes the whole subgraph
 tree within about 15 seconds. A flow marked by `DeleteOnCompletion` keeps serving its outcome to `Snapshot` and `Await` for a
 one-minute grace window first, so a fire-and-forget caller can still read its result.
 

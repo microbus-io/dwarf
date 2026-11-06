@@ -97,7 +97,9 @@ func TestDeleteUnendedflow(t *testing.T) {
 		statusIs("Purge by status "+status, http.StatusBadRequest, err)
 	}
 
-	// A Purge matching all three marks only the ended flow, and only ended flows count against its limit.
+	// A Purge matching all three removes only the closed flow, once archived, and only closed flows count against its
+	// limit.
+	enginetest.ArchiveNow(ctx, eng)
 	marked, _, err := eng.Purge(ctx, enginetest.Recent(workflow.Query{WorkflowURL: "deleteunendedflow.verify:428/g", Limit: 1}))
 	assert.NoError(err)
 	assert.Equal(1, marked)

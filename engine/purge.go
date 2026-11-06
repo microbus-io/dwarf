@@ -20,7 +20,6 @@ import (
 	"context"
 	"net/http"
 	"slices"
-	"strings"
 	"sync/atomic"
 
 	"github.com/microbus-io/dwarf/internal/archiver"
@@ -30,124 +29,41 @@ import (
 	"github.com/microbus-io/sequel"
 )
 
-// purge removes the ended roots matching query, oldest first, at most query.Limit of them: the archived ones first,
-// from the internal ascending ListArchived, each deleted at once in its day; then, with what the limit leaves, the ended
-// roots still in the live tables, the oldest ended first, each marked for the reaper. Each side windows on its own
-// column, archived_at and updated_at. done is true when neither side had more than it took and every root it took
-// was removed: a root archived between the live selection and its mark is not, and is found in the archive next time.
+// purge removes the closed roots matching query from the archive, oldest archived first, at most query.Limit of them:
+// the internal ascending ListClosed, each tree deleted at once in its day. It reads only the archive, as ListClosed
+// does, so a call removes what the same ListClosed would list; a root closed in the last minute, not archived yet, is
+// left for a later call, and Delete removes one by its key. done is true when the archive had fewer than it took and
+// every root it took was removed.
 func (e *Engine) purge(ctx context.Context, query workflow.Query) (removed int, done bool, err error) {
 	// A subgraph child cannot be purged independently - it is removed as part of its root's subtree. Reject
 	// IncludeSubgraphs rather than silently ignoring it, so a caller is not surprised the flag did nothing.
 	if query.IncludeSubgraphs {
 		return 0, false, errors.New("purge cannot include subgraphs; a subgraph child is purged with its root", http.StatusBadRequest)
 	}
-	// Purge removes only ended flows, so a status filter naming any other status could only ever match nothing.
+	// Purge removes only closed flows, so a status filter naming any other status could only ever match nothing.
 	if query.Status != "" && workflow.IsValidStatus(query.Status) && !workflow.IsTerminalStatus(query.Status) {
-		return 0, false, errors.New("purge removes only ended flows; status %q has not ended", query.Status, http.StatusBadRequest)
+		return 0, false, errors.New("purge removes only closed flows; status %q is not closed", query.Status, http.StatusBadRequest)
 	}
 	limit, err := listLimit(query)
 	if err != nil {
 		return 0, false, errors.Trace(err)
 	}
-	if _, err := listWindowOf(query, true); err != nil {
-		return 0, false, errors.Trace(err)
-	}
-
 	archived, err := e.listArchived(ctx, query, limit, true, "purge")
 	if err != nil {
 		return 0, false, errors.Trace(err)
 	}
-	took, gone := len(archived), 0
-	n, err := e.deleteArchivedRoots(ctx, archived)
-	gone += n
+	gone, err := e.deleteArchivedRoots(ctx, archived)
 	if err != nil {
 		return gone, false, errors.Trace(err)
 	}
-	if took == limit {
-		return gone, false, nil // the archive may hold more
-	}
-
-	live, err := e.oldestLiveEndedRoots(ctx, query, limit-took)
-	if err != nil {
-		return gone, false, errors.Trace(err)
-	}
-	n, err = e.markLiveRoots(ctx, live)
-	gone += n
-	if err != nil {
-		return gone, false, errors.Trace(err)
-	}
-	return gone, purgeDone(limit, took, len(live), gone), nil
+	return gone, purgeDone(limit, len(archived), gone), nil
 }
 
-// purgeDone reports whether a Purge call that took took archived and live live roots, removing gone of them, left
-// nothing matching: neither side had more than it took, and every root it took was removed - a live root archived
-// between its selection and its mark was not, and the next call finds it in the archive.
-func purgeDone(limit, took, live, gone int) bool {
-	return took < limit && live < limit-took && gone == took+live
-}
-
-// oldestLiveEndedRoots returns the ended roots in the live tables matching query, not marked for deletion, the oldest
-// ended first across shards, at most limit of them.
-func (e *Engine) oldestLiveEndedRoots(ctx context.Context, query workflow.Query, limit int) ([]listRow, error) {
-	indices, pos := e.shardOrdinals()
-	perShard := make([][]listRow, len(indices))
-	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
-		if query.Shard != 0 && shardIdx != query.Shard {
-			return nil
-		}
-		ctx, doneTurn := e.opTurn(ctx, shardIdx, "purge")
-		defer doneTurn()
-		conds, args := e.listFilters(db.DriverName(), shardIdx, query, terminalStatusesSQL)
-		timeConds, timeArgs := timeConditions(db.DriverName(), "f.updated_at", query)
-		conds, args = append(conds, timeConds...), append(append(args, timeArgs...), limit)
-		// Keep the terminal filter in the selection, not only in the mark: the selection is limited, so unended
-		// candidates selected ahead of ended ones would use up the limit and mark nothing.
-		rows, err := db.QueryContext(ctx, "SELECT f.flow_id, f.updated_at FROM dwarf_flows f"+stepsJoin("dwarf_steps")+
-			" WHERE "+strings.Join(conds, " AND ")+" ORDER BY f.updated_at ASC, f.flow_id ASC LIMIT_OFFSET(?, 0)", args...)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		defer rows.Close()
-		for rows.Next() {
-			lr := listRow{shard: shardIdx}
-			if err := rows.Scan(&lr.flowID, &lr.at); err != nil {
-				return errors.Trace(err)
-			}
-			perShard[pos[shardIdx]] = append(perShard[pos[shardIdx]], lr)
-		}
-		return errors.Trace(rows.Err())
-	})
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	merged := mergeByTime(slices.Concat(perShard...), true)
-	return merged[:min(len(merged), limit)], nil
-}
-
-// markLiveRoots stamps the ended live roots for the reaper (delete_after_ms=1, due at once), a chunk of purgeChunk at
-// a time, and returns how many it stamped. A root that has been archived since, or stamped by a racing Delete or
-// Purge, is not counted.
-func (e *Engine) markLiveRoots(ctx context.Context, roots []listRow) (int, error) {
-	var marked atomic.Int64
-	err := e.onShardsOf(ctx, roots, func(ctx context.Context, db *sequel.DB, rows []listRow) error {
-		ids := make([]int, len(rows))
-		for i, lr := range rows {
-			ids[i] = lr.flowID
-		}
-		for chunk := range slices.Chunk(ids, e.purgeChunk) {
-			// ids are trusted integers embedded as literals to dodge the per-driver bind-param ceiling.
-			res, err := db.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1"+
-				" WHERE flow_id IN ("+intCSV(chunk)+") AND status IN ("+terminalStatusesSQL+") AND delete_after_ms=0")
-			if err != nil {
-				return errors.Trace(err)
-			}
-			n, _ := res.RowsAffected()
-			marked.Add(n)
-			e.metricFlowsRemoved(ctx, rows[0].shard, removedFromLive, "purge", int(n))
-		}
-		return nil
-	})
-	return int(marked.Load()), errors.Trace(err)
+// purgeDone reports whether a Purge call that took took roots, removing gone of them, left nothing matching: the
+// archive had fewer than the limit, and every root taken was removed - one deleted by a racing Delete was not, and a
+// call after finds whether anything is left.
+func purgeDone(limit, took, gone int) bool {
+	return took < limit && gone == took
 }
 
 // deleteArchivedRoots deletes the trees of the archived roots, each in the day the list read it from, a transaction

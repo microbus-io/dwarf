@@ -16,9 +16,9 @@ limitations under the License.
 
 // Package engineseams is the engine's test and benchmark surface for code in this module outside package
 // engine: the names of the engine's fault-injection, checkpoint and recorded-variable seams, Join for their
-// targeted forms, DB and Seams, which reach a running engine's shard set and seam registry,
-// SetRefillInterval, the benchmark override of the refill cycle period, and ShardBudget, the pool the engine
-// derives for a shard.
+// targeted forms, DB and Seams, which reach a running engine's shard set and seam registry, ListLive and
+// ArchiveNow, which list the live tables in every status and archive what just closed, SetRefillInterval, the
+// benchmark override of the refill cycle period, and ShardBudget, the pool the engine derives for a shard.
 //
 // The engine fires these seams from its own production code and consults one seamster.Seamster per engine,
 // enabled only under testing.Testing(); the mechanism (arming, scoping, Wait/Break/Resume) is the seamster
@@ -31,12 +31,14 @@ limitations under the License.
 package engineseams
 
 import (
+	"context"
 	"strings"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/peers"
 	"github.com/microbus-io/dwarf/internal/piston"
+	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/seamster"
 )
 
@@ -45,6 +47,15 @@ var DB func(eng any) *database.ShardSet
 
 // Seams returns the engine's seam registry, for a test to arm faults and checkpoints and wait on them.
 var Seams func(eng any) *seamster.Seamster
+
+// ListLive lists the flows in the engine's live tables in every status, open and closed - what ListOpen lists plus the
+// closed flows not archived yet - with ListOpen's rules otherwise, for a test that must see a flow it just closed.
+var ListLive func(eng any, ctx context.Context, query workflow.Query) ([]workflow.FlowSummary, error)
+
+// ArchiveNow runs one reaper pass that archives every closed root, however recently it closed, and removes the roots
+// scheduled for deletion whose time has come (not a DeleteOnCompletion root inside its grace), for a test that lists
+// or purges what it just closed.
+var ArchiveNow func(eng any, ctx context.Context)
 
 // SetRefillInterval pins every shard's refill cycle period to d on a running or configured engine, for a
 // benchmark sweep to hold the period at fixed values, or a fixture whose backlog makes the derived period too

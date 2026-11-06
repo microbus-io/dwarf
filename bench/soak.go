@@ -127,7 +127,7 @@ func runSoak(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 		})
 	}
 
-	// Retention sweep: ListArchived a page of flows (the cross-shard read path under load), then Purge
+	// Retention sweep: ListClosed a page of flows (the cross-shard read path under load), then Purge
 	// completed non-disposable flows (continue chains, fork sources) once they age past the grace
 	// window, so their rows don't grow unbounded and the operator-driven Purge path is exercised
 	// alongside the DeleteOnCompletion reaper.
@@ -142,7 +142,7 @@ func runSoak(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 				return
 			case <-t.C:
 				pctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-				_, _ = engines[0].ListArchived(pctx, workflow.Query{FromTime: time.Now().Add(-time.Hour), ToTime: time.Now().Add(time.Hour), Limit: 100})
+				_, _ = engines[0].ListClosed(pctx, workflow.Query{FromTime: time.Now().Add(-time.Hour), ToTime: time.Now().Add(time.Hour), Limit: 100})
 				n, _, err := engines[0].Purge(pctx, workflow.Query{Status: workflow.StatusCompleted,
 					FromTime: time.Now().Add(-30 * 24 * time.Hour), ToTime: time.Now().Add(-90 * time.Second), Limit: 4096})
 				cancel()

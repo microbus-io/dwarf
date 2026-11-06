@@ -1466,42 +1466,45 @@ func (e *Engine) Step(ctx context.Context, stepKey string) (step *workflow.FlowS
 	return e.step(ctx, stepKey)
 }
 
-// ListLive returns the flows in the live tables matching query's filters, and its window on when each last changed
-// status (FlowSummary.UpdatedAt) if it sets one: flows running, sleeping or interrupted, and ended flows not archived
-// yet - an ended flow stays live about a minute before it moves to the archive. At most Query.Limit of them, the most
-// recently updated first, ties broken by shard and then newest flow. Query.Limit is required; the window's bounds are
-// not, and any status may be asked for.
+// ListOpen returns the open flows - running or interrupted - matching query's filters, and its window on when each
+// last changed status (FlowSummary.UpdatedAt) if it sets one: at most Query.Limit of them, the most recently updated
+// first, ties broken by shard and then newest flow. Query.Limit is required; the window's bounds are not. A
+// Query.Status that is not open is a 400.
 //
-// It has no pagination: a live flow changes under the caller, so a caller wanting other flows narrows the filters or
+// It has no pagination: an open flow changes under the caller, so a caller wanting other flows narrows the filters or
 // the window. The order across shards compares the times recorded by each shard's own database, so flows updated
-// within the clock skew between two shard servers may be listed out of order. To see live and archived flows both,
-// call ListLive, then ListArchived: a flow archived between the two calls is then listed twice, never missed, so drop
-// it by its key.
-func (e *Engine) ListLive(ctx context.Context, query workflow.Query) (summaries []workflow.FlowSummary, err error) {
+// within the clock skew between two shard servers may be listed out of order. A flow that closes leaves this list at
+// once and appears in ListClosed when it is archived, about a minute later, longer while archiving lags; in between it
+// is in neither, and still read by its key. A flow deleted without archiving - DeleteOnCompletion, a retention of 0 -
+// is never in ListClosed.
+func (e *Engine) ListOpen(ctx context.Context, query workflow.Query) (summaries []workflow.FlowSummary, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
 	}
-	return e.listLive(ctx, query)
+	return e.listOpen(ctx, query)
 }
 
-// ListArchived returns the archived flows matching query's filters within its window on when each was archived
-// (FlowSummary.ArchivedAt): at most Query.Limit of them, the most recently archived first, ties broken by shard and
-// then newest flow. A flow is archived about a minute after it ends; until then it is ListLive's. Query.Limit and both
-// of the window's bounds are required, and a Query.Status that has not ended is a 400.
+// ListClosed returns the closed flows - completed, failed, terminated or cancelled - matching query's filters within
+// its window on when each was archived (FlowSummary.ArchivedAt): at most Query.Limit of them, the most recently
+// archived first, ties broken by shard and then newest flow. A flow is archived, and so listed here, about a minute
+// after it closes; until then it is in no list, though Snapshot, Await and History read it by its key. Query.Limit and
+// both of the window's bounds are required, and a Query.Status that is not closed is a 400.
 //
 // A window is cut to what the archive can hold: nothing before the retention's first day (SetRetention), nothing
 // archived after now; a window outside both returns no flows. What is left may reach at most 31 days of the archive -
 // today and the 30 before it, as much as the default retention keeps - or the call is a 400; split a longer range into
 // windows. Each day the window reaches is read on every shard, so a search over many days wants a low Limit. Times
-// compare at the database's precision: microseconds on PostgreSQL, milliseconds elsewhere.
+// compare at the database's precision: microseconds on PostgreSQL, milliseconds elsewhere. At a retention of 0 nothing
+// is archived, so nothing new is listed.
 //
 // It has no pagination and no cursor. An archived flow never changes, so a caller can walk a time range in windows,
 // each ending just after the oldest ArchivedAt it holds, dropping the flows already held: flows archived together
 // share one ArchivedAt. A caller polling forward from its last check up to now sees each flow once, provided its newest
 // bound stays behind now by more than an archiving batch takes - seconds, longer for a very large tree: flows archived
-// together are stamped with their batch's start, so they can appear after a later stamp has. Archive times come from each shard's database and the window is cut by this
-// process's clock, so flows within the skew between them may be listed out of order, or, at a window's edge, missed.
-func (e *Engine) ListArchived(ctx context.Context, query workflow.Query) (summaries []workflow.FlowSummary, err error) {
+// together are stamped with their batch's start, so they can appear after a later stamp has. Archive times come from
+// each shard's database and the window is cut by this process's clock, so flows within the skew between them may be
+// listed out of order, or, at a window's edge, missed.
+func (e *Engine) ListClosed(ctx context.Context, query workflow.Query) (summaries []workflow.FlowSummary, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -1509,7 +1512,7 @@ func (e *Engine) ListArchived(ctx context.Context, query workflow.Query) (summar
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	rows, err := e.listArchived(ctx, query, limit, false, "list_archived")
+	rows, err := e.listArchived(ctx, query, limit, false, "list_closed")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -1518,7 +1521,7 @@ func (e *Engine) ListArchived(ctx context.Context, query workflow.Query) (summar
 
 // Delete removes an ended flow and its subgraph subtree. An archived flow is deleted at once. One not archived yet -
 // the minute after it ends - is marked for deletion, and a background reaper removes it shortly after, without
-// archiving it: it is excluded from the lists and History immediately, though Snapshot/Await/Run still report its
+// archiving it: History returns 404 for it immediately, though Snapshot/Await/Run still report its
 // outcome until the reaper removes it, and calling Delete on it again is success. Returns 404 for an unknown key,
 // including a flow already deleted from the archive; 400 for a subgraph-child key (address the root instead); and 409
 // for a flow that has not ended: Terminate it first.
@@ -1529,18 +1532,18 @@ func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 	return e.deleteFlow(ctx, flowKey)
 }
 
-// Purge removes the ended flows matching a query, and their subgraph subtrees, oldest first: at most Query.Limit
-// roots in a call. It takes the archived ones first, oldest archived first, and deletes each at once; then, with what
-// the limit leaves, the ended flows not archived yet, oldest ended first, which it marks for deletion - a background
-// reaper removes them shortly after, without archiving them, and they are excluded from the lists and History at
-// once. Flows that have not ended are never touched, and a Query.Status naming a status that has not ended is a 400,
-// as is IncludeSubgraphs (a subgraph child is removed with its root).
+// Purge removes the closed flows ListClosed would list for a query, and their subgraph subtrees, oldest archived
+// first: at most Query.Limit roots in a call, each deleted at once. A flow closed in the last minute is not archived
+// yet, so it is not in ListClosed and Purge leaves it; a later call takes it, and Delete removes one by its key. Open
+// flows are never touched, and a Query.Status that is not closed is a 400, as is IncludeSubgraphs (a subgraph child is
+// removed with its root).
 //
-// Query.Limit (at most 65,536) and both bounds of the window are required. The window is on when a flow was archived
-// for an archived flow and on when it ended for one not archived yet; on the archive it is cut, and may reach at
-// most 31 days, as for ListArchived, or the call is a 400: purge a longer range a month at a time. Returns how many roots it removed, and whether it is done: call it again until
-// done is true, with a fresh ToTime each time. A flow still live when one call reads it can be archived before the
-// next, with an archive time of when it moved: a ToTime fixed before then no longer reaches it.
+// Query.Limit (at most 65,536) and both bounds of the window are required; the window is ListClosed's, on when a flow
+// was archived, and may reach at most 31 days of the archive, or the call is a 400: purge a longer range a month at a
+// time. Returns how many roots it removed, and whether it is done: call it again until done is true. done covers only
+// what is archived: a flow closed shortly before the call, still on its way to the archive, is not purged until a call
+// after it is archived. For an erasure that must also take those, wait a minute after the last flow closed and call
+// again, or Delete them by key.
 //
 // Deleting rows writes in proportion to them and leaves dead rows for the database to vacuum; Purge is for removing
 // specific records, and bulk removal is the retention's (SetRetention) and PurgeBefore's, which drop whole days.

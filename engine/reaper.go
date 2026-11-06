@@ -88,7 +88,7 @@ type reapKind struct {
 	grace  time.Duration
 }
 
-// deletionDue is the roots DeleteOnCompletion, Delete and Purge stamped: they are deleted, never archived. Only
+// deletionDue is the roots DeleteOnCompletion and Delete stamped: they are deleted, never archived. Only
 // roots ever carry delete_after_ms > 0, and the surgraph_flow_id=0 guard makes that explicit.
 func (e *Engine) deletionDue(steal time.Duration) reapKind {
 	const due = "delete_after_ms>0 AND surgraph_flow_id=0 AND DATE_ADD_MILLIS(updated_at, delete_after_ms)<=NOW_UTC()"
@@ -109,7 +109,12 @@ func (e *Engine) deletionDue(steal time.Duration) reapKind {
 // endedDue is the roots that ended archiveGrace ago and were not stamped for deletion: they are archived, or deleted
 // at a retention of 0.
 func (e *Engine) endedDue(steal time.Duration) reapKind {
-	graceMs := e.archiveGrace.Milliseconds()
+	return e.endedDueAfter(steal, e.archiveGrace)
+}
+
+// endedDueAfter is endedDue for roots that ended grace ago.
+func (e *Engine) endedDueAfter(steal, grace time.Duration) reapKind {
+	graceMs := grace.Milliseconds()
 	statuses := []string{
 		workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusTerminated, workflow.StatusCancelled,
 	}
@@ -141,9 +146,9 @@ func (e *Engine) endedDue(steal time.Duration) reapKind {
 			" AND updated_at<=DATE_ADD_MILLIS(NOW_UTC(), ?)",
 		dueArgs:    []any{-graceMs},
 		stealWhere: "updated_at<=DATE_ADD_MILLIS(NOW_UTC(), ?)",
-		stealArgs:  []any{-(e.archiveGrace + steal).Milliseconds()},
+		stealArgs:  []any{-(grace + steal).Milliseconds()},
 		lagged:     true,
-		grace:      e.archiveGrace,
+		grace:      grace,
 	}
 }
 
@@ -236,6 +241,12 @@ func reapQuietMargin(dayLength time.Duration) time.Duration {
 // mid-dispatch on it no-ops via the lease fence (its claim/write matches zero rows once the row is gone), so the
 // reaper does not reguard on descendant status.
 func (e *Engine) reapDueFlows(ctx context.Context) {
+	e.reapPass(ctx, e.archiveGrace)
+}
+
+// reapPass is reapDueFlows archiving the roots that ended grace ago: the archive grace, or 0 for a test archiving
+// what it just ended (engineseams.ArchiveNow).
+func (e *Engine) reapPass(ctx context.Context, grace time.Duration) {
 	set := e.archives.Load()
 	steal := e.reapStealGrace()
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
@@ -269,7 +280,7 @@ func (e *Engine) reapDueFlows(ctx context.Context) {
 		}
 		archiving := day != nil
 		endedStart := time.Now()
-		ok := e.reapDue(ctx, db, shard, e.endedDue(steal), func() (*reapDay, bool) {
+		ok := e.reapDue(ctx, db, shard, e.endedDueAfter(steal, grace), func() (*reapDay, bool) {
 			if day != nil && !day.stop.IsZero() && !time.Now().Before(day.stop) {
 				return nil, false // the day's last moments: the trees wait for the next day's first pass
 			}

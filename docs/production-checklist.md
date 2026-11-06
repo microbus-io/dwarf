@@ -97,7 +97,7 @@
 - [ ] **Backups cover every shard on the same schedule**, and a restore has been rehearsed against a staging
   fleet — the part worth testing is what your workflows do when they re-run.
   → [Backup and restore](backup-and-restore.md)
-- [ ] **`ListLive` and `ListArchived` (and their `Query.Search`) are gated by credential** in your host. The engine has
+- [ ] **`ListOpen` and `ListClosed` (and their `Query.Search`) are gated by credential** in your host. The engine has
   no notion of a caller, and the lists are the operations that return flow keys wholesale — which are capabilities.
   → [Data handling](data-handling.md#access-control-is-the-hosts-job)
 - [ ] **Quotas enforced before `Create`.** Beyond refusing any single value over 256 MB, the engine bounds

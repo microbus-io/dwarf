@@ -35,13 +35,13 @@ import (
 	"github.com/microbus-io/sequel"
 )
 
-// maxListLimit is the most flows ListLive and ListArchived return in a call. It must stay above the reaper's batch
-// (reapBatch roots, about reapBatchRows flows): a batch's trees share one archived_at, and a caller paging ListArchived
+// maxListLimit is the most flows ListOpen and ListClosed return in a call. It must stay above the reaper's batch
+// (reapBatch roots, about reapBatchRows flows): a batch's trees share one archived_at, and a caller paging ListClosed
 // by window cannot page across a tie larger than its Limit (TestList_TheLimitIsAboveAReaperBatch). A batch takes at
 // least one tree however large, so with IncludeSubgraphs one tree of more flows than this is a tie no walk pages across.
 const maxListLimit = 65536
 
-// maxEndedWindowDays is the most archive days a ListArchived window may reach, after clamping: today and the 30 before
+// maxEndedWindowDays is the most archive days a ListClosed window may reach, after clamping: today and the 30 before
 // it, the days the default retention keeps. Each day is one more pair of tables in the shard's statement, and
 // PostgreSQL locks every index of a table it plans: about 11 locks a day (the flows table and its 7 indexes counting
 // the key, the steps table and its 2), so 31 days are about 340 - some 5% of the default shared lock table (64 per
@@ -142,24 +142,38 @@ func timeConditions(driverName, column string, query workflow.Query) (conds []st
 }
 
 // listFilters returns a list's WHERE conditions on one shard, and their arguments, but for the time bounds: the
-// query's filters, the status condition (statuses, if any, when the query names none), the exclusion of flows marked
-// for deletion, and the search.
-func (e *Engine) listFilters(driverName string, shardIdx int, query workflow.Query, statuses string) (conds []string, args []any) {
+// query's filters, the exclusion of flows marked for deletion, and the search.
+func (e *Engine) listFilters(driverName string, shardIdx int, query workflow.Query) (conds []string, args []any) {
 	_, where, args, _ := e.queryClauses(query, subgraphCondition(query.IncludeSubgraphs))
 	conds = []string{where, "f.delete_after_ms=0"}
-	if query.Status == "" && statuses != "" {
-		conds = append(conds, "f.status IN ("+statuses+")")
-	}
 	if sc, scArgs := searchClause(driverName, shardIdx, query.Search); sc != "" {
 		conds, args = append(conds, sc), append(args, scArgs...)
 	}
 	return conds, args
 }
 
-// listLive lists the flows in the live tables, any status - running, interrupted, and ended ones not archived yet -
-// newest updated first across shards. Its window is optional: the live tables are one table per shard, however wide
-// the window.
-func (e *Engine) listLive(ctx context.Context, query workflow.Query) ([]workflow.FlowSummary, error) {
+// openStatuses are the statuses of a flow that has not closed, each a branch of ListOpen's statement. created is not
+// among them: it is only ever seen inside Fork's uncommitted clone.
+var openStatuses = []string{workflow.StatusRunning, workflow.StatusInterrupted}
+
+// listOpen lists the open flows - running or interrupted - in the live tables, newest updated first across shards. Its
+// window is optional: the live tables are one table per shard, however wide the window.
+//
+// Each shard's statement is one branch per open status, each a range of idx_dwarf_flows_status (status, updated_at)
+// that stops at the limit, under an outer limit: a single scan over both statuses has no index order, so it would
+// read and sort every open flow of the shard on every call. The status is inlined, never bound.
+func (e *Engine) listOpen(ctx context.Context, query workflow.Query) ([]workflow.FlowSummary, error) {
+	if query.Status != "" && !slices.Contains(openStatuses, query.Status) && workflow.IsValidStatus(query.Status) {
+		return nil, errors.New("ListOpen lists open flows, running or interrupted; status %q is not open", query.Status,
+			http.StatusBadRequest)
+	}
+	return e.listLive(ctx, query, openStatuses, "list_open")
+}
+
+// listLive lists the flows in the live tables whose status is among statuses - or is query.Status, which must be one -
+// newest updated first across shards, with listOpen's statement. op names the operation for its turn's metric. Beside
+// ListOpen it serves the tests (engineseams.ListLive), which list the closed flows not archived yet as well.
+func (e *Engine) listLive(ctx context.Context, query workflow.Query, statuses []string, op string) ([]workflow.FlowSummary, error) {
 	limit, err := listLimit(query)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -170,6 +184,14 @@ func (e *Engine) listLive(ctx context.Context, query workflow.Query) ([]workflow
 	if _, _, _, err := e.queryClauses(query, "1=1"); err != nil {
 		return nil, errors.Trace(err)
 	}
+	if query.Status != "" {
+		if !slices.Contains(statuses, query.Status) {
+			return nil, nil
+		}
+		statuses = []string{query.Status}
+	}
+	branchQuery := query
+	branchQuery.Status = "" // each branch names its own
 	indices, pos := e.shardOrdinals()
 	perShard := make([][]listRow, len(indices))
 	err = e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
@@ -178,13 +200,23 @@ func (e *Engine) listLive(ctx context.Context, query workflow.Query) ([]workflow
 		}
 		// A turn on each shard it reads, so this queues for that shard's connections like any other caller instead of
 		// taking them from work already under way.
-		ctx, doneTurn := e.opTurn(ctx, shardIdx, "list_live")
+		ctx, doneTurn := e.opTurn(ctx, shardIdx, op)
 		defer doneTurn()
-		conds, args := e.listFilters(db.DriverName(), shardIdx, query, "")
+		conds, condArgs := e.listFilters(db.DriverName(), shardIdx, branchQuery)
 		timeConds, timeArgs := timeConditions(db.DriverName(), "f.updated_at", query)
-		conds, args = append(conds, timeConds...), append(append(args, timeArgs...), limit)
-		rows, err := db.QueryContext(ctx, "SELECT "+summaryColumns+" FROM dwarf_flows f"+stepsJoin("dwarf_steps")+
-			" WHERE "+strings.Join(conds, " AND ")+" ORDER BY f.updated_at DESC, f.flow_id DESC LIMIT_OFFSET(?, 0)", args...)
+		branchWhere := strings.Join(append(conds, timeConds...), " AND ")
+		branchArgs := append(condArgs, timeArgs...)
+		branches := make([]string, len(statuses))
+		var args []any
+		for i, status := range statuses {
+			// A derived table, so the branch carries its own ORDER BY and limit on every dialect (see listArchived).
+			branches[i] = "SELECT * FROM (SELECT " + summaryColumns + " FROM dwarf_flows f" + stepsJoin("dwarf_steps") +
+				" WHERE " + branchWhere + " AND f.status='" + status + "'" +
+				" ORDER BY f.updated_at DESC, f.flow_id DESC LIMIT_OFFSET(?, 0)) b" + strconv.Itoa(i)
+			args = append(append(args, branchArgs...), limit)
+		}
+		rows, err := db.QueryContext(ctx, "SELECT * FROM ("+strings.Join(branches, " UNION ALL ")+") u"+
+			" ORDER BY updated_at DESC, flow_id DESC LIMIT_OFFSET(?, 0)", append(args, limit)...)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -207,8 +239,8 @@ func (e *Engine) listLive(ctx context.Context, query workflow.Query) ([]workflow
 	return summariesOf(merged[:min(len(merged), limit)]), nil
 }
 
-// listArchived lists the archived flows, at most limit of them across shards, in mergeByTime's order on archived_at:
-// newest first, or ascending. op names the operation for its turn's metric. Each shard reads every archive day the window reaches in one UNION ALL, each table's
+// listArchived lists the archived flows - ListClosed, and Purge's selection - at most limit of them across shards, in
+// mergeByTime's order on archived_at: newest first, or ascending. op names the operation for its turn's metric. Each shard reads every archive day the window reaches in one UNION ALL, each table's
 // newest (or oldest) limit under an outer limit; the live tables are never read.
 func (e *Engine) listArchived(ctx context.Context, query workflow.Query, limit int, ascending bool, op string) ([]listRow, error) {
 	now := time.Now()
@@ -217,7 +249,7 @@ func (e *Engine) listArchived(ctx context.Context, query workflow.Query, limit i
 		return nil, errors.Trace(err)
 	}
 	if query.Status != "" && workflow.IsValidStatus(query.Status) && !workflow.IsTerminalStatus(query.Status) {
-		return nil, errors.New("ListArchived lists archived flows, which have all ended; status %q has not", query.Status,
+		return nil, errors.New("ListClosed lists closed flows; status %q is not closed", query.Status,
 			http.StatusBadRequest)
 	}
 	if _, _, _, err := e.queryClauses(query, "1=1"); err != nil {
@@ -263,7 +295,7 @@ func (e *Engine) listArchived(ctx context.Context, query workflow.Query, limit i
 		defer doneTurn()
 		// Every archived flow has ended, so no status condition is added when the query names none: one would only
 		// steer the planner to the status index rather than the archive-time one the order wants.
-		conds, condArgs := e.listFilters(db.DriverName(), shardIdx, query, "")
+		conds, condArgs := e.listFilters(db.DriverName(), shardIdx, query)
 		timeConds, timeArgs := timeConditions(db.DriverName(), "f.archived_at", query)
 		branchWhere := strings.Join(append(conds, timeConds...), " AND ")
 		branchArgs := append(condArgs, timeArgs...)
@@ -320,8 +352,8 @@ func (e *Engine) listArchived(ctx context.Context, query workflow.Query, limit i
 	return merged[:min(len(merged), limit)], nil
 }
 
-// mergeByTime orders a list's rows from every shard by their time (updated_at for the live list, archived_at for the
-// archived one): newest first, or ascending. Ties go by shard ascending, then flow id (descending when newest first).
+// mergeByTime orders a list's rows from every shard by their time (updated_at for ListOpen, archived_at for
+// ListClosed): newest first, or ascending. Ties go by shard ascending, then flow id (descending when newest first).
 func mergeByTime(rows []listRow, ascending bool) []listRow {
 	dir := -1
 	if ascending {

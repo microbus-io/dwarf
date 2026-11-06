@@ -41,7 +41,7 @@ import (
 //   - fill steps/s        - the refiller's band scan and the claim CAS at depth. Flat = the selection
 //     index still seeks; a decay = the hot path started scanning the accumulated backlog.
 //   - History latency     - the root_flow_id tree scan plus the per-flow step scan on a real tree.
-//   - List latency        - ListLive's newest 100 flows, the live table per shard however large.
+//   - List latency        - ListOpen's newest 100 flows, the live table per shard however large.
 //   - disk MB             - the "append-only terminal sections" fragmentation claim against a real B-tree.
 //   - throughput (with -volume-probe) - the fill pauses at each checkpoint, including the empty database at
 //     the start, for an open-loop SATURATED window and then one at 2/3 of the flows/s it measured, both at
@@ -49,9 +49,7 @@ import (
 //     and how does latency look at a normal operating point - which the fill rate alone cannot answer: a
 //     closed-loop fill measures its own concurrency, not the database's ceiling.
 //
-// The finish measures retention at size: how fast Purge MARKS roots, and then how fast the reaper
-// actually DELETES the rows it marked (the two are separate - Purge stamps delete_after_ms, the reaper
-// does the set-based delete on its own ticker).
+// The finish measures retention at size: how fast one Purge call deletes the oldest archived trees (4,096 roots).
 
 // volumeCheckpoint is one probe taken during the fill.
 type volumeCheckpoint struct {
@@ -73,17 +71,14 @@ type volumeCheckpoint struct {
 
 // volumeReport is the volume run's artifact section.
 type volumeReport struct {
-	TargetStepRows   int                `json:"targetStepRows"`
-	DurationSec      float64            `json:"durationSec"`
-	Concurrency      int                `json:"concurrency"`
-	FlowsSubmitted   int64              `json:"flowsSubmitted"`
-	Errors           int64              `json:"errors"`
-	Checkpoints      []volumeCheckpoint `json:"checkpoints"`
-	PurgeMarkedRoots int                `json:"purgeMarkedRoots"`
-	PurgeMarkMs      float64            `json:"purgeMarkMs"`
-	ReapedRows       int                `json:"reapedRows"`
-	ReapSec          float64            `json:"reapSec"`
-	ReapRowsPerSec   float64            `json:"reapRowsPerSec"`
+	TargetStepRows int                `json:"targetStepRows"`
+	DurationSec    float64            `json:"durationSec"`
+	Concurrency    int                `json:"concurrency"`
+	FlowsSubmitted int64              `json:"flowsSubmitted"`
+	Errors         int64              `json:"errors"`
+	Checkpoints    []volumeCheckpoint `json:"checkpoints"`
+	PurgedRoots    int                `json:"purgedRoots"`
+	PurgeMs        float64            `json:"purgeMs"`
 	// Invalidity names the first probe window that was not a measurement (windowInvalidity), "" when every
 	// one was. A volume run carrying one is invalid, like a sweep with an invalid step.
 	Invalidity string `json:"invalidity,omitzero"`
@@ -365,68 +360,31 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 	report.FlowsSubmitted = flows.Load()
 	report.Errors = errCount.Load()
 
-	// Retention at size, in two separately-measured halves: Purge (4096 roots a call) deletes the archived trees it
-	// takes at once and stamps delete_after_ms on the live ones, and the reaper's own ticker does the set-based
-	// delete of those afterwards. PurgeMarkMs therefore includes the archive's deletes. A failed row count
-	// invalidates the reap rate, which is a difference of two of them.
-	before, _, err := rowCounts(ctx, engines[0])
-	if err != nil {
-		invalid("row count before the purge", err.Error())
-	}
+	// Retention at size: one Purge call (4,096 roots) deletes the oldest archived trees at once. Purge reads only the
+	// archive, so the trees closed within the archive grace are not among them.
 	pctx, pcancel := context.WithTimeout(ctx, 2*time.Minute)
-	markStart := time.Now()
-	marked, _, err := engines[0].Purge(pctx, workflow.Query{Status: workflow.StatusCompleted,
+	purgeStart := time.Now()
+	purged, _, err := engines[0].Purge(pctx, workflow.Query{Status: workflow.StatusCompleted,
 		FromTime: time.Now().Add(-30 * 24 * time.Hour), ToTime: time.Now().Add(time.Hour), Limit: 4096})
-	report.PurgeMarkMs = float64(time.Since(markStart)) / float64(time.Millisecond)
+	report.PurgeMs = float64(time.Since(purgeStart)) / float64(time.Millisecond)
 	pcancel()
-	if err == nil {
-		report.PurgeMarkedRoots = marked
-	}
-	fmt.Printf("purge: marked %d roots in %.0fms; waiting for the reaper...\n", report.PurgeMarkedRoots, report.PurgeMarkMs)
-
-	// Watch the rows actually drain. The reaper ticks ~1min, so give it a few cycles and measure the
-	// drop; a plateau means it finished.
-	reapStart := time.Now()
-	prev := before
-	stable := 0
-	for time.Since(reapStart) < 5*time.Minute {
-		time.Sleep(15 * time.Second)
-		cur, _, err := rowCounts(ctx, engines[0])
-		if err != nil {
-			continue
-		}
-		if cur < prev {
-			stable = 0
-		} else if prev-cur == 0 && cur < before {
-			stable++
-			if stable >= 2 {
-				break
-			}
-		}
-		prev = cur
-	}
-	after, _, err := rowCounts(ctx, engines[0])
 	if err != nil {
-		invalid("row count after the reap", err.Error())
+		invalid("purge", err.Error())
+	} else {
+		report.PurgedRoots = purged
 	}
-	report.ReapedRows = before - after
-	report.ReapSec = time.Since(reapStart).Seconds()
-	if report.ReapSec > 0 {
-		report.ReapRowsPerSec = float64(report.ReapedRows) / report.ReapSec
-	}
-	fmt.Printf("reaper: deleted %d rows in %.0fs (%.0f rows/s)\n",
-		report.ReapedRows, report.ReapSec, report.ReapRowsPerSec)
+	fmt.Printf("purge: deleted %d archived roots in %.0fms\n", report.PurgedRoots, report.PurgeMs)
 	return report
 }
 
-// drainRunning waits until no flow is running, polling ListLive, so a window opens on a database with no
+// drainRunning waits until no flow is running, polling ListOpen, so a window opens on a database with no
 // backlog left over from the one before. It gives up after ten minutes rather than hang a campaign; a
 // backlog that does not drain in that time is itself the finding, and the next window's numbers show it.
 func drainRunning(ctx context.Context, eng *engine.Engine) {
 	deadline := time.Now().Add(10 * time.Minute)
 	for time.Now().Before(deadline) {
 		lctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		running, err := eng.ListLive(lctx, workflow.Query{Status: workflow.StatusRunning, Limit: 1})
+		running, err := eng.ListOpen(lctx, workflow.Query{Status: workflow.StatusRunning, Limit: 1})
 		cancel()
 		if err == nil && len(running) == 0 {
 			return
@@ -463,7 +421,7 @@ func rowCounts(ctx context.Context, eng *engine.Engine) (steps, flows int, err e
 	return steps, flows, nil
 }
 
-// probeReads times the read paths at the current volume: History on one real flow, and ListLive.
+// probeReads times the read paths at the current volume: History on one real flow, and ListOpen.
 func probeReads(ctx context.Context, eng *engine.Engine, flowKey string) (historyMs, listMs float64) {
 	pctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
@@ -476,7 +434,7 @@ func probeReads(ctx context.Context, eng *engine.Engine, flowKey string) (histor
 	}
 
 	t := time.Now()
-	if _, err := eng.ListLive(pctx, workflow.Query{Limit: 100}); err == nil {
+	if _, err := eng.ListOpen(pctx, workflow.Query{Limit: 100}); err == nil {
 		listMs = float64(time.Since(t)) / float64(time.Millisecond)
 	}
 	return historyMs, listMs

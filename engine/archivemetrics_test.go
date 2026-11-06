@@ -174,7 +174,7 @@ func TestArchiveMetrics_DeletionsAreCountedByReason(t *testing.T) {
 }
 
 // TestArchiveMetrics_RemovalsAreCountedBySide pins dwarf_flows_removed for what Delete and Purge take from the
-// archive, deleted at once, and what Purge schedules in the live tables.
+// archive, deleted at once; Purge leaves a flow not archived yet, so nothing is counted on the live side for it.
 func TestArchiveMetrics_RemovalsAreCountedBySide(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -188,7 +188,7 @@ func TestArchiveMetrics_RemovalsAreCountedBySide(t *testing.T) {
 	live := endedKeys(t, e, 1) // left in the live tables: the reaper does not pass again
 	removed, _, err := e.Purge(ctx, workflow.Query{FromTime: time.Now().Add(-time.Hour), ToTime: time.Now().Add(time.Hour), Limit: 10})
 	assert.NoError(err)
-	assert.Equal(2, removed, "the archived root %s and the live one %s", purged[0], live[0])
+	assert.Equal(1, removed, "the archived root %s, not the live one %s", purged[0], live[0])
 
 	rm := collect(t, reader)
 	at := func(side, op string) int64 {
@@ -196,7 +196,7 @@ func TestArchiveMetrics_RemovalsAreCountedBySide(t *testing.T) {
 	}
 	assert.Equal(int64(1), at(removedFromArchive, "delete"))
 	assert.Equal(int64(1), at(removedFromArchive, "purge"))
-	assert.Equal(int64(1), at(removedFromLive, "purge"))
+	assert.Zero(at(removedFromLive, "purge"))
 	assert.Zero(at(removedFromLive, "delete"))
 }
 
