@@ -59,7 +59,12 @@ func awaitPropagatedInterrupts(t *testing.T, eng *engine.Engine, flowKey string,
 		select {
 		case <-reached:
 		case <-time.After(time.Minute * enginetest.TimeoutScale()):
-			t.Fatalf("only %d of %d interrupts propagated to the root flow", got, want)
+			// The flow's own state tells a stalled tree from one that ended before its interrupts arrived.
+			snap, err := eng.Snapshot(context.Background(), flowKey)
+			if err != nil {
+				t.Fatalf("only %d of %d interrupts propagated to the root flow; snapshot: %v", got, want, err)
+			}
+			t.Fatalf("only %d of %d interrupts propagated to the root flow, which is %s %s", got, want, snap.Status, snap.Error)
 		}
 	}
 }
