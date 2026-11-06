@@ -305,8 +305,10 @@ over dead tuples is that fragmentation persists while latency recovers.
 
 - **Autovacuum off** (`autovacuum_enabled=false` on `dwarf_steps`): 1,708 against 6,837 steps/s. The claim CAS
   climbed steadily to 395ms and never recovered. Vacuum is the cure, not the contention.
-- **Aggressive autovacuum** (`scale_factor=0.02`, `cost_delay=0`): 5,702 steps/s with a 115-second p99. Neither
-  direction away from the defaults helps.
+- **Aggressive autovacuum as the cure for this stall** (`scale_factor=0.02`, `cost_delay=0`, 120s windows on a
+  `dwarf_steps` that kept every closed flow): 5,702 steps/s with a 115-second p99; it does not relieve the
+  split stall. It is no evidence against the live tables' settings above, which exist to reclaim dead rows in
+  tables that stay small while they churn at the full write rate.
 - **`fillfactor` below 100 on `dwarf_steps`, to get HOT updates:** made no difference to throughput at 70 or 90,
   and the HOT ratio moved only 25.7% -> 29.8%. A local sweep (linear workload, ~1,000 steps/s, 60s per setting) read
   30.7 / 30.8 / 31.0 / 31.0% HOT on `dwarf_steps` at 100 / 90 / 80 / 70. It cannot work by construction: HOT
