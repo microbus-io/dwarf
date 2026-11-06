@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"math"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -108,118 +107,6 @@ func TestFlow_SetTracksChanges(t *testing.T) {
 	f.Set("b", "2")
 	assert.Equal(2, f.changes.Contributions().Len())
 	assert.Equal("1", stateVal(f.changes.Contributions(), "a")) // stored decoded, not as raw JSON bytes
-}
-
-// TestFlow_SetChangesIsSetPerField pins that SetChanges sets every field the source marshals, as Set would one by
-// one: an unchanged field too, an empty omitempty/omitzero field not at all, and a null field as a delete.
-func TestFlow_SetChangesIsSetPerField(t *testing.T) {
-	assert := testarossa.For(t)
-	f := NewFlow()
-	f.Set("name", "Alice")
-	f.Set("score", 10)
-	f.Set("gone", "x")
-	f.Set("extra", "untouched")
-	f.changes = NewChanges()
-
-	var out struct {
-		Name    string   `json:"name"`
-		Score   int      `json:"score"`
-		Skipped []string `json:"skipped,omitempty"`
-		Zero    int      `json:"zero,omitzero"`
-		Gone    *string  `json:"gone"`
-	}
-	assert.NoError(f.Parse(&out))
-	out.Score = 25
-	out.Gone = nil
-	assert.NoError(f.SetChanges(out))
-
-	assert.Equal("Alice", f.changes.Contributions().GetString("name"), "an unchanged field is set too")
-	assert.Equal(25, f.changes.Contributions().GetInt("score"))
-	assert.False(f.changes.Contributions().Has("skipped"), "an empty omitempty field is not set")
-	assert.False(f.changes.Contributions().Has("zero"), "an empty omitzero field is not set")
-	assert.True(f.changes.IsDeleted("gone"), "a null field deletes, as Set(name, nil) does")
-	assert.False(f.Has("gone"))
-	assert.Equal("untouched", f.GetString("extra"))
-	assert.Len(slices.Collect(f.changes.Names()), 3)
-
-	assert.Error(f.SetChanges([]int{1}), "a source that is not an object")
-	assert.Error(f.SetChanges((*struct{})(nil)), "a nil pointer marshals to null")
-}
-
-// upperName marshals itself, so SetChanges must take its bytes as encoding/json writes them.
-type upperName string
-
-func (u upperName) MarshalJSON() ([]byte, error) {
-	return json.Marshal(strings.ToUpper(string(u)))
-}
-
-// TestFlow_SetChangesTakesWhatEncodingJSONEmits pins that SetChanges accepts any source that marshals to an object
-// - a map as well as a struct - and records each field as encoding/json spells it: a custom MarshalJSON's output,
-// and a json.RawMessage field's bytes, copied rather than aliased.
-func TestFlow_SetChangesTakesWhatEncodingJSONEmits(t *testing.T) {
-	assert := testarossa.For(t)
-
-	f := NewFlow()
-	assert.NoError(f.SetChanges(map[string]any{"a": 1, "b": []string{"x"}}))
-	assert.Equal(1, f.GetInt("a"))
-	assert.Equal([]string{"x"}, f.GetStrings("b"))
-
-	raw := json.RawMessage(`{"k":1}`)
-	var src struct {
-		Name upperName       `json:"name"`
-		Raw  json.RawMessage `json:"raw"`
-	}
-	src.Name = "alice"
-	src.Raw = raw
-	assert.NoError(f.SetChanges(src))
-	assert.Equal("ALICE", f.GetString("name"))
-	raw[2] = 'j' // the caller's buffer is not the stored value
-	var got map[string]int
-	_, err := f.Get("raw", &got)
-	assert.NoError(err)
-	assert.Equal(map[string]int{"k": 1}, got)
-}
-
-// TestFlow_SetChangesNamesFieldsLikeParse pins that SetChanges writes every field Parse reads: an untagged
-// field under its Go name, an option-only tag, and the fields of an embedded struct. A field skipped here is
-// read by Parse, mutated by the task and then silently dropped.
-func TestFlow_SetChangesNamesFieldsLikeParse(t *testing.T) {
-	assert := testarossa.For(t)
-
-	type Base struct {
-		Region string `json:"region"`
-	}
-	type Order struct {
-		Base
-		Status  string
-		Total   int    `json:",omitempty"`
-		Skipped string `json:"-"`
-		secret  string
-	}
-	f := NewFlow()
-	f.Set("Status", "new")
-	f.Set("Total", 1)
-	f.Set("region", "us")
-	f.changes = NewChanges()
-
-	var order Order
-	assert.NoError(f.Parse(&order))
-	assert.Equal("new", order.Status)
-	assert.Equal("us", order.Region)
-	order.Status = "charged"
-	order.Total = 2
-	order.Region = "eu"
-	order.Skipped = "x"
-	order.secret = "y"
-	assert.NoError(f.SetChanges(order))
-
-	assert.Equal("charged", f.changes.Contributions().GetString("Status"))
-	assert.Equal(2, f.changes.Contributions().GetInt("Total"))
-	assert.Equal("eu", f.changes.Contributions().GetString("region"))
-	assert.False(f.changes.Contributions().Has("Skipped"))
-	assert.False(f.changes.Contributions().Has("secret"))
-	assert.False(f.changes.Contributions().Has("Base"))
-	assert.Equal(3, f.changes.Contributions().Len())
 }
 
 func TestFlow_Has(t *testing.T) {
@@ -568,11 +455,6 @@ func TestFlow_ZeroValueTakesEveryWrite(t *testing.T) {
 		"Set":       func(f *Flow) error { return f.Set("x", 1) },
 		"SetString": func(f *Flow) error { f.SetString("x", "v"); return nil },
 		"Overwrite": func(f *Flow) error { return f.Overwrite("x", 1) },
-		"SetChanges": func(f *Flow) error {
-			return f.SetChanges(struct {
-				X int `json:"x"`
-			}{1})
-		},
 		"reduced Set": func(f *Flow) error {
 			f.reducers = map[string]Reducer{"x": ReducerAppend}
 			return f.Set("x", []any{1})
@@ -590,34 +472,6 @@ func TestFlow_ZeroValueTakesEveryWrite(t *testing.T) {
 	f.Del("x")
 	assert.False(f.Has("x"))
 	assert.True(f.changes.IsDeleted("x"))
-}
-
-// TestFlow_SetChangesResolvesNamesLikeEncodingJSON pins that when an embedded struct and the outer struct
-// declare the same JSON name, the shallower field is the one recorded - as encoding/json marshals it - whatever
-// the declaration order; and that a ",string" field is recorded in the quoted form Parse reads back.
-func TestFlow_SetChangesResolvesNamesLikeEncodingJSON(t *testing.T) {
-	assert := testarossa.For(t)
-
-	type Base struct {
-		Region string `json:"region"`
-	}
-	type Order struct {
-		Region string `json:"region"`
-		Base
-		Count int `json:"count,string"`
-	}
-	f := NewFlow()
-	f.Set("region", "us")
-	f.changes = NewChanges()
-
-	order := Order{Region: "eu", Base: Base{Region: "stale"}, Count: 7}
-	assert.NoError(f.SetChanges(order))
-	assert.Equal("eu", f.changes.Contributions().GetString("region"))
-
-	var back Order
-	assert.NoError(f.Parse(&back))
-	assert.Equal("eu", back.Region)
-	assert.Equal(7, back.Count)
 }
 
 func TestFlow_ReducersAndChangesCrossTheWire(t *testing.T) {

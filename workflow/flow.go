@@ -382,30 +382,6 @@ func (f *Flow) Snapshot() State {
 	return f.state.Clone()
 }
 
-// SetChanges sets each field of source exactly as Set would, one by one. source is any value that marshals to a
-// JSON object - typically a struct, or a pointer to one - and its fields are those encoding/json emits, under the
-// names it emits them: a json tag's name, else the Go name, with an untagged embedded struct's fields promoted, a
-// "-" or unexported field skipped, and an omitempty or omitzero field skipped when empty. A field that marshals
-// to null is Set(name, nil): it deletes a field with no reducer and contributes nothing to a reduced one. It
-// returns an error if source cannot be marshalled or is not an object, in which case no field is set, or if a
-// field's reducer cannot combine its value, in which case some of the other fields may already be set.
-func (f *Flow) SetChanges(source any) error {
-	data, err := json.Marshal(source)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil || fields == nil {
-		return errors.New("SetChanges: source must marshal to a JSON object")
-	}
-	for name, value := range fields {
-		if err := f.Set(name, value); err != nil {
-			return errors.Trace(err)
-		}
-	}
-	return nil
-}
-
 // --- Control ---
 
 // Goto overrides transition routing. The orchestrator skips condition evaluation and follows the specified

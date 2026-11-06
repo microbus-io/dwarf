@@ -28,13 +28,11 @@ write - and the result is **silent, inconsistent data loss**: `processStep` sees
 the *prior* attempt's, so the write never reaches the next step's `state` nor `final_state`. A task writes with `Set` and the typed setters. `RawFlow.SetRawState` is the engine's own seeding
 path, not task-facing.
 
-**`SetChanges(source)` is `Set` for each field `json.Marshal(source)` emits, and nothing more.** It exists for a
-host's generated task wrappers, which write a typed output struct (decode -> parse the input -> handler ->
-`SetChanges(out)`). It marshals the struct once and `Set`s each key, so encoding/json alone decides the names and
-which fields are included (`omitempty`/`omitzero`, `,string`, embedded promotion, a custom `MarshalJSON`). **Do not
-diff against a snapshot.** A diff dropped a branch's contribution that happened to equal the accumulated value
-(`total` 5 under `add`, contribution 5). It also recorded an empty `omitzero` output field as null - a delete - so
-a host returning "no new items" wiped the field. Pinned by `TestFlow_SetChangesIsSetPerField`.
+**A task writes field by field; do not add a typed-struct writer** (the write-side twin of `Parse`). Marshalling
+the struct decides which fields are written, so an `omitzero`/`omitempty` field left at zero is never written and
+a task cannot reset it to `false`, `0` or nil; a host's generated wrappers write each output with `Set`. Nor may a
+writer diff against a snapshot: a diff drops a branch's contribution that happens to equal the accumulated value
+(`total` 5 under `add`, contribution 5).
 
 **A step's runs compose:** on `flow.Retry()`, a resumed `Interrupt` or a `Subgraph` re-entry, the re-dispatched
 carrier's view is `state` with the earlier runs' `changes` folded in, and its `changes` are seeded with them, so
@@ -286,7 +284,7 @@ preserves the writer's Go type through the database), needs a reflect-walker for
 buys exactness for a value an author can carry losslessly as a string anyway.
 
 **Two *external/authored* values are unstorable and are NOT guarded - a deliberate, backlogged punt.**
-Nothing on the write side checks them: not `Flow.Set`/`set`/`SetChanges`/`Interrupt`/`Subgraph`, and not the
+Nothing on the write side checks them: not `Flow.Set`/`set`/`Interrupt`/`Subgraph`, and not the
 engine's `Create`/`Continue`/`Fork`/`resume` ingress. Both fail *silently*, which is why the punt is a real
 exposure to revisit, not a non-issue:
 
