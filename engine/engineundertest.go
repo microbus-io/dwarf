@@ -19,6 +19,7 @@ package engine
 import (
 	"context"
 	"log/slog"
+	"math"
 	"os"
 	"slices"
 	"time"
@@ -102,5 +103,16 @@ func init() {
 		return e.listLive(ctx, query, all, "list_open")
 	}
 	engineseams.ArchiveNow = func(eng any, ctx context.Context) { eng.(*Engine).reapPass(ctx, 0) }
+	engineseams.ArchiveDays = func(eng any, ctx context.Context, shard int) ([]int, error) {
+		set := eng.(*Engine).archives.Load()
+		if set == nil || set.byShard[shard] == nil {
+			return nil, nil
+		}
+		a := set.byShard[shard]
+		if err := a.Refresh(ctx); err != nil {
+			return nil, err
+		}
+		return a.DaysIn(math.MinInt, math.MaxInt), nil
+	}
 	engineseams.ShardBudget = func(rttMs float64, serverMax int) int { return shardBudget(ShardSpec{}, rttMs, serverMax, "pgx") }
 }

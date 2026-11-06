@@ -39,6 +39,9 @@ type workload struct {
 	check func(*workflow.FlowOutcome) error
 	// class names the -mix class a workload was registered for ("linear:1K"), empty outside a mix.
 	class string
+	// holdURL is the graph that runs this workload's flow as its subgraph and then holds the tree open
+	// (-volume-side live).
+	holdURL string
 	// build builds the payload the workload's tasks write or carry, nil for none. It runs once, before any
 	// window (prepare): built by the first task instead, it blocks every concurrent writer on the build -
 	// ~10-20s for the 4GB a -payload 250MB -fanout-width 8 run needs, inside a short warmup's window.
@@ -466,7 +469,28 @@ func registerWorkloads(h *benchHost, ns string, payloadBytes, fanOutWidth, chain
 	interrupt.AddTransitionChain("Gate", "Work", workflow.End)
 	h.graphs[pre+"interrupt"] = interrupt
 
-	return map[string]*workload{
+	// hold: -volume-side live. It runs a workload's graph as its subgraph, then interrupts and is never resumed, so
+	// the whole tree stays open - in the live tables - however the workload's own flow ends: the archive moves a tree
+	// only once its root closes. Two tasks, because a step parks once, for a subgraph or an interrupt.
+	h.tasks[pre+"holdrun"] = func(ctx context.Context, f *workflow.Flow) error {
+		var in map[string]any
+		if _, err := f.Get("holdIn", &in); err != nil {
+			return err
+		}
+		_, err := f.Subgraph(f.GetString("holdGraph"), in, nil)
+		return err
+	}
+	h.tasks[pre+"hold"] = func(ctx context.Context, f *workflow.Flow) error {
+		_, err := f.Interrupt(nil, nil)
+		return err
+	}
+	hold := workflow.NewGraph("Hold")
+	hold.SetURL("Run", pre+"holdrun")
+	hold.SetURL("Hold", pre+"hold")
+	hold.AddTransitionChain("Run", "Hold", workflow.End)
+	h.graphs[pre+"hold"] = hold
+
+	workloads := map[string]*workload{
 		"llm": {
 			graphURL:     pre + "llm",
 			initialState: func() map[string]any { return nil },
@@ -528,6 +552,10 @@ func registerWorkloads(h *benchHost, ns string, payloadBytes, fanOutWidth, chain
 			build:        func() { records() },
 		},
 	}
+	for _, w := range workloads {
+		w.holdURL = pre + "hold"
+	}
+	return workloads
 }
 
 // chooseWorkload resolves the -workload flag to a per-flow picker, and prepares every workload it can pick.

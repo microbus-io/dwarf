@@ -51,7 +51,10 @@ type dbStats struct {
 	Connections int   `json:"connections"`
 	StepsBytes  int64 `json:"stepsBytes"`
 	FlowsBytes  int64 `json:"flowsBytes"`
-	WALBytes    int64 `json:"walBytes"`
+	// ArchiveStepsBytes and ArchiveFlowsBytes are the archive day tables' sizes, every day summed.
+	ArchiveStepsBytes int64 `json:"archiveStepsBytes"`
+	ArchiveFlowsBytes int64 `json:"archiveFlowsBytes"`
+	WALBytes          int64 `json:"walBytes"`
 	// The WAL pressure counters beside it (pg_stat_wal, cluster-wide like WALBytes), and commits across every
 	// database so commits per WAL flush can be formed. The database is WAL-write-bound at its ceiling
 	// (LWLock:WALWrite dominates the waits), so these are the candidates for "past the sustainable rate".
@@ -124,6 +127,11 @@ func (s *dbStatsSampler) sample(ctx context.Context) dbStats {
 	err2 := s.db.QueryRowContext(sctx,
 		"SELECT COALESCE(pg_total_relation_size('dwarf_steps'), 0), COALESCE(pg_total_relation_size('dwarf_flows'), 0)",
 	).Scan(&out.StepsBytes, &out.FlowsBytes)
+	err5 := s.db.QueryRowContext(sctx,
+		"SELECT COALESCE(SUM(pg_total_relation_size(c.oid)) FILTER (WHERE c.relname ~ '^dwarf_steps_archive_[0-9]+$'), 0)::bigint,"+
+			" COALESCE(SUM(pg_total_relation_size(c.oid)) FILTER (WHERE c.relname ~ '^dwarf_flows_archive_[0-9]+$'), 0)::bigint"+
+			" FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relkind='r'",
+	).Scan(&out.ArchiveStepsBytes, &out.ArchiveFlowsBytes)
 	err3 := s.db.QueryRowContext(sctx,
 		"SELECT wal_bytes::bigint, wal_fpi, wal_buffers_full FROM pg_stat_wal",
 	).Scan(&out.WALBytes, &out.WALFPI, &out.WALBuffersFull)
@@ -131,7 +139,7 @@ func (s *dbStatsSampler) sample(ctx context.Context) dbStats {
 	err4 := s.db.QueryRowContext(sctx,
 		"SELECT COALESCE(SUM(xact_commit), 0)::bigint FROM pg_stat_database",
 	).Scan(&out.Commits)
-	out.ok = err1 == nil && err2 == nil && err3 == nil && err4 == nil
+	out.ok = err1 == nil && err2 == nil && err3 == nil && err4 == nil && err5 == nil
 	return out
 }
 

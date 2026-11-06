@@ -3661,7 +3661,9 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
 - **`DWARF_ARCHIVE_DAY` shortens the day, for the benchmark rig only.** It is read at every Startup, before the
   shards open (whole seconds, logged as a warning when set): the engine's test seams are inert in a bench binary, so
   a rig cannot reach a test-only override, and a day of minutes is the only way to see rollover and retention under
-  load in one run. Engine tests set `testArchiveDay`.
+  load in one run. Engine tests set `testArchiveDay`. **`DWARF_ARCHIVE_GRACE`** sets the archive grace the same way
+  (a Go duration of at least 0, logged), for a run that must archive within its window, or hold closed flows live
+  longer; engine tests set `archiveGrace`.
 - **Reading an archived flow** (`queryLiveOrArchive`, `archive.go`). Only the read API reads the archive - `Snapshot`,
   `Fingerprint` (and so `Await`/`Poll`/`Run`, which build their outcome with `Snapshot`), `History`, `Step` and
   `Continue`'s source; dispatch and every write path never do, a moved tree being answered there by the zero-row

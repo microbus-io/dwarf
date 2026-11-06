@@ -57,6 +57,10 @@ var ListLive func(eng any, ctx context.Context, query workflow.Query) ([]workflo
 // or purges what it just closed.
 var ArchiveNow func(eng any, ctx context.Context)
 
+// ArchiveDays reads the archive days whose tables exist on a shard, ascending, for a benchmark that counts or sizes
+// the archive.
+var ArchiveDays func(eng any, ctx context.Context, shard int) ([]int, error)
+
 // SetRefillInterval pins every shard's refill cycle period to d on a running or configured engine, for a
 // benchmark sweep to hold the period at fixed values, or a fixture whose backlog makes the derived period too
 // short under -race; d <= 0 restores the derived period.

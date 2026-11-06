@@ -518,7 +518,10 @@ every replica; 0 derives it from `GOMEMLIMIT` or the host's memory - the artifac
 default; the engine's default logger discards everything, so without it a role change or a stale peer row
 leaves no trace in a rig's log), `-mix "0.85:linear:1K,0.15:fanout:4K:8"` (per-flow classes, each its own
 payload and shape under its own graph URLs; usable in any mode), `-volume-checkpoints` (the step-row counts a
-`-volume` fill probes at), `-volume-checkpoints-mb` (the stored sizes it probes at instead, PostgreSQL only - the
+`-volume` fill probes at), `-volume-side live|archive` (which tables the fill grows: `archive`, the default, lets flows close and counts both
+sides' rows and sizes, probing `History`/`Step` of the fill's first flow from the archive and `ListClosed` beside
+the live probes; `live` runs every flow under a root that interrupts and is never resumed, so the live tables grow -
+the archive moves a tree only once its root closes), `-volume-checkpoints-mb` (the stored sizes it probes at instead, PostgreSQL only - the
 axis for a bytes fill: two 0 B probes on an empty database wrote ~15M small step rows, twice a 512 GB fill of
 64 KB rows, so a row-keyed ladder for bytes is consumed by the probes before the fill starts),
 `-volume-probe-two-thirds=false` (one saturated probe per checkpoint instead of two windows).
@@ -574,6 +577,12 @@ script, because no single artifact holds them; the rest read their artifacts und
 **`bench/results/` is gitignored**, so those charts can be redrawn only on the machine that holds the run's
 local results - a clean checkout cannot rebuild them (`charts_cloud.py` skips a chart whose artifacts are
 missing, with a note).
+
+**Two archive settings come from the environment, for the rig only**, since the bench cannot reach the engine's
+test seams: `DWARF_ARCHIVE_DAY` shortens the archive's day (whole seconds), so one run sees day rollovers, several
+day tables and retention drops under load; `DWARF_ARCHIVE_GRACE` sets how long a closed flow waits before it is
+archived (a Go duration, `0s` and up), so an archived run's warmup can be short or a run can hold closed flows live
+longer. The engine logs a warning when either is set.
 
 Test-only knobs the bench CANNOT reach: the engine's seams are enabled only under `testing.Testing()`, so
 arming one from `internal/engineseams` in a bench binary does nothing, and fault injection and `sequel`'s

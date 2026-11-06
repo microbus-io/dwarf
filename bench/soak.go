@@ -352,7 +352,7 @@ func soakSampleNow(ctx context.Context, eng *engine.Engine, readers []*sdkmetric
 	cur := collectAllCounters(readers)
 	dbst := dbs.sample(ctx)
 
-	steps, flows, rerr := rowCounts(ctx, eng)
+	steps, flows, rerr := rowCounts(ctx, eng, false)
 
 	return soakSample{
 		TSec:             time.Since(start).Seconds(),

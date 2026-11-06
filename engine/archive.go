@@ -163,6 +163,28 @@ func flowRowThere(ctx context.Context, db *sequel.DB, t flowTables, flowID int) 
 // leaves it unset.
 const archiveDayEnv = "DWARF_ARCHIVE_DAY"
 
+// archiveGraceEnv names the environment variable that sets how long a closed root waits in the live tables before it
+// is archived, for the benchmark rig, as a Go duration of at least 0. A rig cannot reach a test-only override, and a
+// run that measures the archive's cost needs every closed flow archived within the window, or one that measures the
+// live tables needs them held longer. Production leaves it unset: the grace is a minute.
+const archiveGraceEnv = "DWARF_ARCHIVE_GRACE"
+
+// applyArchiveGraceEnv sets this run's archive grace from archiveGraceEnv, when it is set.
+func (e *Engine) applyArchiveGraceEnv(ctx context.Context) error {
+	v := os.Getenv(archiveGraceEnv)
+	if v == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return errors.New("%s must be a duration of at least 0, not %q", archiveGraceEnv, v, http.StatusBadRequest)
+	}
+	// Loud, because a grace other than the minute changes when every closed flow leaves the live tables.
+	e.logger.WarnContext(ctx, "The archive's grace is set by "+archiveGraceEnv+"; it is for benchmarks only", "grace", d)
+	e.archiveGrace = d
+	return nil
+}
+
 // archiveDayLength is the length of this run's day: DefaultDayLength, a test's testArchiveDay, or archiveDayEnv.
 func (e *Engine) archiveDayLength(ctx context.Context) (time.Duration, error) {
 	dayLength := archiver.DefaultDayLength

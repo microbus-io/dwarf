@@ -31,11 +31,17 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
-// The volume mode fills a database to a target dwarf_steps row count WITHOUT deleting anything, probing
-// the read paths at checkpoints along the way. It answers the question short benchmarks cannot: does the
-// index story hold at size? Every probe is deliberately taken UNDER the fill load, because that is the
-// shape an operator actually experiences - a big table with work still arriving. The fill uses whatever
-// -workload is set (default linear = 10 steps per flow, so 10M steps is ~1M flows).
+// The volume mode fills a database to a target step row count WITHOUT deleting anything, probing the read
+// paths at checkpoints along the way. It answers the question short benchmarks cannot: does the index story
+// hold at size? Every probe is deliberately taken UNDER the fill load, because that is the shape an operator
+// actually experiences - a big table with work still arriving. The fill uses whatever -workload is set
+// (default linear = 10 steps per flow, so 10M steps is ~1M flows), on one of two sides (-volume-side):
+//   - live: every flow runs under a root that holds it open (an interrupt never resumed), so the rows stay in
+//     the live tables, which grow - the hot path's tables at size, as an unanswered interrupt or a root that
+//     never closes leaves them.
+//   - archive: flows close and are archived, so the rows move to the archive's day tables, which grow; the
+//     live tables hold about a minute of them. The rows counted are both sides', and the probes add the
+//     archived reads.
 //
 // What each probe pins:
 //   - fill steps/s        - the refiller's band scan and the claim CAS at depth. Flat = the selection
@@ -61,6 +67,13 @@ type volumeCheckpoint struct {
 	ListFirstMs     float64 `json:"listFirstMs"`
 	StepsDiskMB     float64 `json:"stepsDiskMB"`
 	FlowsDiskMB     float64 `json:"flowsDiskMB"`
+	// The archive side's probes and sizes: History and Step of the fill's first flow, read from the archive's
+	// oldest day; ListClosed's newest 100 of the last day; and the day tables' size, every day summed.
+	ArchivedHistoryMs  float64 `json:"archivedHistoryMs,omitzero"`
+	ArchivedStepMs     float64 `json:"archivedStepMs,omitzero"`
+	ListClosedMs       float64 `json:"listClosedMs,omitzero"`
+	ArchiveStepsDiskMB float64 `json:"archiveStepsDiskMB,omitzero"`
+	ArchiveFlowsDiskMB float64 `json:"archiveFlowsDiskMB,omitzero"`
 	// RowCountError is why the exact row count failed at this checkpoint; StepRows is then the estimate that
 	// triggered it and FlowRows is 0.
 	RowCountError string `json:"rowCountError,omitzero"`
@@ -71,6 +84,7 @@ type volumeCheckpoint struct {
 
 // volumeReport is the volume run's artifact section.
 type volumeReport struct {
+	Side           string             `json:"side"`
 	TargetStepRows int                `json:"targetStepRows"`
 	DurationSec    float64            `json:"durationSec"`
 	Concurrency    int                `json:"concurrency"`
@@ -107,7 +121,7 @@ type volumeReport struct {
 // saturated window's EXECUTED steps/s in flows, never of its flowsPerSec, which is the admission rate and runs
 // ahead of what was served.
 func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric.ManualReader, dbs *dbStatsSampler,
-	pick func() *workload, k, targetSteps int, checkpoints []int, checkpointsMB []float64,
+	side string, pick func() *workload, k, targetSteps int, checkpoints []int, checkpointsMB []float64,
 	probe func(rate float64) (stepResult, string), probeStepsPerFlow int, twoThirds bool) *volumeReport {
 
 	var (
@@ -115,10 +129,12 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 		inFlight   atomic.Int64
 		flows      atomic.Int64
 		errCount   atomic.Int64
-		recentKey  atomic.Value // string: a completed flow key, for the History probe
+		recentKey  atomic.Value // string: a recent flow key, for the History probe
+		firstKey   atomic.Value // string: the fill's first flow key, for the archive side's archived reads
 		submitters sync.WaitGroup
 	)
 	recentKey.Store("")
+	firstKey.Store("")
 	watch := watchProgress(ctx, engines, readers, inFlight.Load)
 	defer watch.stop()
 
@@ -130,13 +146,19 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 				for !stop.Load() {
 					w := pick()
 					// No FlowOptions: nothing is marked for deletion, so rows accumulate - that is the point.
+					url, state, want := w.graphURL, any(w.initialState()), workflow.StatusCompleted
+					if side == volumeLive {
+						url, want = w.holdURL, workflow.StatusInterrupted
+						state = map[string]any{"holdGraph": w.graphURL, "holdIn": state}
+					}
 					inFlight.Add(1)
-					key, out, err := eng.Run(ctx, w.graphURL, w.initialState(), nil)
+					key, out, err := eng.Run(ctx, url, state, nil)
 					inFlight.Add(-1)
-					if err != nil || out.Status != workflow.StatusCompleted {
+					if err != nil || out.Status != want {
 						errCount.Add(1)
 						continue
 					}
+					firstKey.CompareAndSwap("", key)
 					flows.Add(1)
 					if flows.Load()%64 == 0 {
 						recentKey.Store(key)
@@ -151,7 +173,7 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 		stop.Store(true)
 		return watch.await(submitters.Wait)
 	}
-	report := &volumeReport{TargetStepRows: targetSteps, Concurrency: k}
+	report := &volumeReport{Side: side, TargetStepRows: targetSteps, Concurrency: k}
 	invalid := func(window string, why string) {
 		if why != "" && report.Invalidity == "" {
 			report.Invalidity = window + ": " + why
@@ -175,7 +197,7 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 		return -1
 	}
 	exactRows := func(at string) (steps, flowRows int, err error) {
-		steps, flowRows, err = rowCounts(ctx, engines[0])
+		steps, flowRows, err = rowCounts(ctx, engines[0], side == volumeArchive)
 		if err != nil {
 			invalid("row count "+at, err.Error())
 			return int(max(0, estimate())), 0, err
@@ -261,12 +283,16 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 		return targetSteps
 	}
 	next := nextAfter(lastRows)
-	// storedMB is dwarf_steps' size on disk, or -1 when the reading failed. A size query is a catalog lookup,
-	// cheap enough for every tick, unlike the row count.
+	// storedMB is the steps' size on disk - dwarf_steps, and on the archive side every day's steps table too - or
+	// -1 when the reading failed. A size query is a catalog lookup, cheap enough for every tick, unlike the row
+	// count.
 	storedMB := func() float64 {
 		st := dbs.sample(ctx)
 		if !st.ok {
 			return -1
+		}
+		if side == volumeArchive {
+			return float64(st.StepsBytes+st.ArchiveStepsBytes) / (1 << 20)
 		}
 		return float64(st.StepsBytes) / (1 << 20)
 	}
@@ -312,15 +338,24 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 			cp.RowCountError = cerr.Error()
 		}
 		cp.HistoryMs, cp.ListFirstMs = probeReads(ctx, engines[0], recentKey.Load().(string))
+		if side == volumeArchive {
+			cp.ArchivedHistoryMs, cp.ArchivedStepMs, cp.ListClosedMs = probeArchivedReads(ctx, engines[0], firstKey.Load().(string))
+		}
 		st := dbs.sample(ctx)
 		cp.StepsDiskMB = float64(st.StepsBytes) / (1 << 20)
 		cp.FlowsDiskMB = float64(st.FlowsBytes) / (1 << 20)
+		cp.ArchiveStepsDiskMB = float64(st.ArchiveStepsBytes) / (1 << 20)
+		cp.ArchiveFlowsDiskMB = float64(st.ArchiveFlowsBytes) / (1 << 20)
 		fmt.Printf("%-7.0f %11d %10d %12.0f %10.1f %10.1f %9.1f %9.1f\n",
 			cp.TSec, cp.StepRows, cp.FlowRows, cp.FillStepsPerSec,
 			cp.HistoryMs, cp.ListFirstMs, cp.StepsDiskMB, cp.FlowsDiskMB)
+		if side == volumeArchive {
+			fmt.Printf("        archive: history %.1fms, step %.1fms, ListClosed %.1fms, steps %.1f MB, flows %.1f MB\n",
+				cp.ArchivedHistoryMs, cp.ArchivedStepMs, cp.ListClosedMs, cp.ArchiveStepsDiskMB, cp.ArchiveFlowsDiskMB)
+		}
 		done := steps >= targetSteps
 		if len(checkpointsMB) > 0 {
-			done = done || cp.StepsDiskMB >= checkpointsMB[len(checkpointsMB)-1]
+			done = done || cp.StepsDiskMB+cp.ArchiveStepsDiskMB >= checkpointsMB[len(checkpointsMB)-1]
 		}
 		if probe != nil {
 			if !pause() {
@@ -345,7 +380,7 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 			// The probe's rows count toward the size, so the next checkpoint is the first past where it left it - and
 			// never one at or below the checkpoint just taken, which a failed size reading (-1) would otherwise restart
 			// the ladder from.
-			nextMB = nextMBAfter(max(storedMB(), cp.StepsDiskMB, nextMB))
+			nextMB = nextMBAfter(max(storedMB(), cp.StepsDiskMB+cp.ArchiveStepsDiskMB, nextMB))
 		}
 		if done {
 			break
@@ -398,17 +433,40 @@ func drainRunning(ctx context.Context, eng *engine.Engine) {
 // dialect-agnostic, unlike the catalog queries the disk sampler uses. It is a full scan of both tables per
 // shard, which the bench can afford against databases it owns, but not on a poll. It fails if any shard fails
 // to count: a zero would read as an empty database.
-func rowCounts(ctx context.Context, eng *engine.Engine) (steps, flows int, err error) {
+// The two -volume-side values.
+const (
+	volumeLive    = "live"
+	volumeArchive = "archive"
+)
+
+// rowCounts returns the step and flow rows in the live tables on every shard, and with archive those in every archive
+// day's tables too. The tables are counted one after another, not in one snapshot, so a tree the reaper moves between
+// two counts is counted twice or missed: a count is exact to within a reaper batch.
+func rowCounts(ctx context.Context, eng *engine.Engine, archive bool) (steps, flows int, err error) {
 	sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	var mu sync.Mutex
-	err = engineseams.DB(eng).OnEach(sctx, func(ctx context.Context, db *sequel.DB, _ int) error {
-		var s, f int
-		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps").Scan(&s); err != nil {
-			return err
+	err = engineseams.DB(eng).OnEach(sctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		tables := [][2]string{{"dwarf_steps", "dwarf_flows"}}
+		if archive {
+			days, err := engineseams.ArchiveDays(eng, ctx, shard)
+			if err != nil {
+				return err
+			}
+			for _, d := range days {
+				tables = append(tables, [2]string{fmt.Sprintf("dwarf_steps_archive_%d", d), fmt.Sprintf("dwarf_flows_archive_%d", d)})
+			}
 		}
-		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows").Scan(&f); err != nil {
-			return err
+		var s, f int
+		for _, t := range tables {
+			var n, m int
+			if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+t[0]).Scan(&n); err != nil {
+				return err
+			}
+			if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+t[1]).Scan(&m); err != nil {
+				return err
+			}
+			s, f = s+n, f+m
 		}
 		mu.Lock()
 		steps, flows = steps+s, flows+f
@@ -438,4 +496,29 @@ func probeReads(ctx context.Context, eng *engine.Engine, flowKey string) (histor
 		listMs = float64(time.Since(t)) / float64(time.Millisecond)
 	}
 	return historyMs, listMs
+}
+
+// probeArchivedReads times the archive's read paths at the current volume: History and Step of flowKey, the fill's
+// first flow, which the archive holds in its oldest day by then, and ListClosed's newest 100 of the last day.
+func probeArchivedReads(ctx context.Context, eng *engine.Engine, flowKey string) (historyMs, stepMs, listMs float64) {
+	pctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	if flowKey != "" {
+		t := time.Now()
+		hist, err := eng.History(pctx, flowKey)
+		if err == nil {
+			historyMs = float64(time.Since(t)) / float64(time.Millisecond)
+		}
+		if err == nil && len(hist) > 0 {
+			t = time.Now()
+			if _, err := eng.Step(pctx, hist[0].StepKey); err == nil {
+				stepMs = float64(time.Since(t)) / float64(time.Millisecond)
+			}
+		}
+	}
+	t := time.Now()
+	if _, err := eng.ListClosed(pctx, workflow.Query{FromTime: time.Now().Add(-24 * time.Hour), ToTime: time.Now(), Limit: 100}); err == nil {
+		listMs = float64(time.Since(t)) / float64(time.Millisecond)
+	}
+	return historyMs, stepMs, listMs
 }

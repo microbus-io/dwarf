@@ -219,3 +219,22 @@ func TestRetention_ABadDayLengthFailsStartup(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 	assert.Equal(10*time.Second, e.archives.Load().dayLength)
 }
+
+// TestRetention_TheGraceFromTheEnvironment pins the benchmark's grace override: a value that is not a duration of at
+// least 0 fails Startup with a 400 before any shard opens, and a good one is the grace the reaper uses. Not parallel:
+// it sets an environment variable.
+func TestRetention_TheGraceFromTheEnvironment(t *testing.T) {
+	assert := testarossa.For(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(context.Background())
+	e.SetHost(hosts.NewMux())
+	for _, bad := range []string{"-1s", "soon"} {
+		t.Setenv(archiveGraceEnv, bad)
+		err := e.Startup(t.Context())
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "%q", bad)
+		assert.Len(e.db.Indices(), 0, "%q left shards open", bad)
+	}
+	t.Setenv(archiveGraceEnv, "5s")
+	assert.NoError(e.Startup(t.Context()))
+	assert.Equal(5*time.Second, e.archiveGrace)
+}

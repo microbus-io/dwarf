@@ -122,7 +122,8 @@ func run() error {
 		// engine so its registry rows go stale, not silencing anything.
 		replicas        = flag.Int("replicas", 1, "number of in-process engine replicas sharing the database(s) (1 = single engine)")
 		replicaWorkers  = flag.String("replica-workers", "", "comma-separated per-replica worker counts overriding -workers (e.g. '0,4' = replica 1 awaits only)")
-		volume          = flag.Int("volume", 0, "volume mode: fill to this many dwarf_steps rows with NO deletion, probing the read paths at checkpoints, then measure Purge/reaper throughput (0 = disabled)")
+		volume          = flag.Int("volume", 0, "volume mode: fill to this many step rows with NO deletion, probing the read paths at checkpoints, then measure one Purge (0 = disabled)")
+		volumeSide      = flag.String("volume-side", volumeArchive, "-volume only: which tables the fill grows - archive (flows close and are archived; the rows counted are both sides') or live (every flow is held open under a root that interrupts, so the live tables grow)")
 		volumeCheckpt   = flag.Int("volume-checkpoint", 0, "probe every this many step rows during -volume (0 = one fifth of the target)")
 		volumeMB        = flag.String("volume-checkpoints-mb", "", "volume mode by stored size, PostgreSQL only: comma-separated MB of dwarf_steps on disk to probe at, ascending; the fill stops at the last. Takes the place of -volume, which then only caps the rows")
 		volumeTwoThirds = flag.Bool("volume-probe-two-thirds", true, "-volume-probe only: follow each saturated probe with a window at 2/3 of its rate (doubles each checkpoint's rows and time)")
@@ -490,6 +491,9 @@ func run() error {
 			art.Valid, art.Invalidity = false, fmt.Sprintf("real: -max-outstanding bound for %dms", report.ThrottledMs)
 		}
 	} else if *volume > 0 {
+		if *volumeSide != volumeLive && *volumeSide != volumeArchive {
+			return fmt.Errorf("-volume-side must be %s or %s, not %q", volumeArchive, volumeLive, *volumeSide)
+		}
 		checkpoints, err := volumeCheckpoints(*volumeCheckpts, *volumeCheckpt, *volume)
 		if err != nil {
 			return err
@@ -507,6 +511,7 @@ func run() error {
 		}
 		art.Config["volumeProbeTwoThirds"] = *volumeTwoThirds
 		art.Config["volumeTargetSteps"] = *volume
+		art.Config["volumeSide"] = *volumeSide
 		art.Config["volumeCheckpointRows"] = checkpoints
 		if len(checkpointsMB) > 0 {
 			fmt.Printf("volume: filling by stored size at concurrency %d across %d replica(s), probing at %v MB of dwarf_steps\n",
@@ -533,7 +538,7 @@ func run() error {
 				return res, res.Invalidity
 			}
 		}
-		report := runVolume(ctx, engines, readers, dbs, pick, ks[0], *volume, checkpoints, checkpointsMB, probe, probeSPF, *volumeTwoThirds)
+		report := runVolume(ctx, engines, readers, dbs, *volumeSide, pick, ks[0], *volume, checkpoints, checkpointsMB, probe, probeSPF, *volumeTwoThirds)
 		art.Volume = report
 		if report.Errors != 0 {
 			art.Valid = false
