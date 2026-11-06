@@ -221,7 +221,7 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	}
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 
-	// Run can return before dwarf_flows_ended is recorded: the completing worker counts it after its transaction
+	// Run can return before dwarf_flows_closed is recorded: the completing worker counts it after its transaction
 	// commits, and the await's database poll can see that commit first. Collect until the counter lands.
 	var rm metricdata.ResourceMetrics
 	deadline := time.Now().Add(3 * time.Second * enginetest.TimeoutScale())
@@ -229,7 +229,7 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 		if !assert.NoError(reader.Collect(ctx, &rm)) {
 			return
 		}
-		if _, ok := sumCounter(rm, "dwarf_flows_ended", "status", workflow.StatusCompleted); ok || !time.Now().Before(deadline) {
+		if _, ok := sumCounter(rm, "dwarf_flows_closed", "status", workflow.StatusCompleted); ok || !time.Now().Before(deadline) {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -241,16 +241,16 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	assert.True(ok, "dwarf_flows_started should be present")
 	assert.Equal(int64(1), started)
 
-	ended, ok := sumCounter(rm, "dwarf_flows_ended", "status", workflow.StatusCompleted)
-	assert.True(ok, "dwarf_flows_ended{status=completed} should be present")
+	ended, ok := sumCounter(rm, "dwarf_flows_closed", "status", workflow.StatusCompleted)
+	assert.True(ok, "dwarf_flows_closed{status=completed} should be present")
 	assert.Equal(int64(1), ended)
 
 	// Both lifecycle counters carry the flow's priority, so started minus ended subtracts per band.
 	startedAt, ok := sumCounter(rm, "dwarf_flows_started", "priority", "3")
 	assert.True(ok, "dwarf_flows_started{priority} should be present")
 	assert.Equal(int64(1), startedAt)
-	endedAt, ok := sumCounter(rm, "dwarf_flows_ended", "priority", "3")
-	assert.True(ok, "dwarf_flows_ended{priority} should be present")
+	endedAt, ok := sumCounter(rm, "dwarf_flows_closed", "priority", "3")
+	assert.True(ok, "dwarf_flows_closed{priority} should be present")
 	assert.Equal(int64(1), endedAt)
 
 	// Two steps complete (taskA, taskB), each counted under status=completed.
@@ -590,7 +590,7 @@ func TestMetrics_RefillInstrumented(t *testing.T) {
 
 // TestMetrics_ForkCountsAsStarted pins that a Fork increments dwarf_flows_started. A fork builds its new
 // root flow through its own INSERT...SELECT clone path, which never called metricFlowStarted - but the
-// fork's completion runs through the same completeFlow that increments dwarf_flows_ended. So a fork
+// fork's completion runs through the same completeFlow that increments dwarf_flows_closed. So a fork
 // was counted on the way out and never on the way in: the standard in-flight panel (started - ended)
 // drifts NEGATIVE by one per fork, or permanently understates. Both counters must move together.
 func TestMetrics_ForkCountsAsStarted(t *testing.T) {
@@ -647,8 +647,8 @@ func TestMetrics_ForkCountsAsStarted(t *testing.T) {
 	}
 	started, ok := sumCounter(rm, "dwarf_flows_started", "", "")
 	assert.True(ok, "dwarf_flows_started should be present")
-	ended, ok := sumCounter(rm, "dwarf_flows_ended", "status", workflow.StatusCompleted)
-	assert.True(ok, "dwarf_flows_ended{status=completed} should be present")
+	ended, ok := sumCounter(rm, "dwarf_flows_closed", "status", workflow.StatusCompleted)
+	assert.True(ok, "dwarf_flows_closed{status=completed} should be present")
 
 	// Two flows started (the original and the fork), two ended. The in-flight gauge a dashboard builds
 	// from these - started minus ended - must be 0, not -1.
@@ -817,7 +817,7 @@ func TestMetrics_InFlightStateGauges(t *testing.T) {
 	assert.Equal(int64(0), bytes, "held bytes must return to zero - a nonzero reading here is a leaked bracket")
 }
 
-// TestMetrics_EndedCountsEveryTerminalStatus pins that dwarf_flows_ended counts FAILED and
+// TestMetrics_EndedCountsEveryTerminalStatus pins that dwarf_flows_closed counts FAILED and
 // TERMINATED flows, not only completed ones.
 //
 // It regressed silently and cost nothing to miss: the instrument carried a `status` attribute and was
@@ -888,18 +888,18 @@ func TestMetrics_EndedCountsEveryTerminalStatus(t *testing.T) {
 		return
 	}
 
-	failed, ok := sumCounter(rm, "dwarf_flows_ended", "status", workflow.StatusFailed)
-	assert.True(ok, "dwarf_flows_ended{status=failed} should be present")
+	failed, ok := sumCounter(rm, "dwarf_flows_closed", "status", workflow.StatusFailed)
+	assert.True(ok, "dwarf_flows_closed{status=failed} should be present")
 	assert.Equal(int64(1), failed, "a failed flow must be counted as ended")
 
-	terminated, ok := sumCounter(rm, "dwarf_flows_ended", "status", workflow.StatusTerminated)
-	assert.True(ok, "dwarf_flows_ended{status=terminated} should be present")
+	terminated, ok := sumCounter(rm, "dwarf_flows_closed", "status", workflow.StatusTerminated)
+	assert.True(ok, "dwarf_flows_closed{status=terminated} should be present")
 	assert.Equal(int64(1), terminated, "a terminated flow must be counted as ended")
 
 	// The property the panel actually depends on: over a workload where nothing completed, starts and
 	// terminations still balance.
 	started, _ := sumCounter(rm, "dwarf_flows_started", "", "")
-	allEnded, _ := sumCounter(rm, "dwarf_flows_ended", "", "")
+	allEnded, _ := sumCounter(rm, "dwarf_flows_closed", "", "")
 	assert.Equal(started, allEnded, "started minus ended must not drift when flows fail or terminate")
 }
 
@@ -977,13 +977,13 @@ func TestMetrics_TerminateCountsOnlyTheFlowsItEnded(t *testing.T) {
 	if !assert.NoError(reader.Collect(ctx, &rm)) {
 		return
 	}
-	ended, ok := sumCounter(rm, "dwarf_flows_ended", "status", workflow.StatusTerminated)
-	assert.True(ok, "dwarf_flows_ended{status=terminated} should be present")
+	ended, ok := sumCounter(rm, "dwarf_flows_closed", "status", workflow.StatusTerminated)
+	assert.True(ok, "dwarf_flows_closed{status=terminated} should be present")
 	assert.Equal(int64(1), ended, "only the child was terminated by this Terminate")
 }
 
 // TestMetrics_StartedAndEndedBalanceAcrossTrees pins that every flow counted in dwarf_flows_started is counted
-// once in dwarf_flows_ended, for the paths that start or end a whole subgraph tree at once: a Fork at a step
+// once in dwarf_flows_closed, for the paths that start or end a whole subgraph tree at once: a Fork at a step
 // inside a subgraph (which clones every flow on the path to it running), and a Terminate of an interrupted root,
 // which ends its interrupted subgraph child too.
 func TestMetrics_StartedAndEndedBalanceAcrossTrees(t *testing.T) {
@@ -1023,7 +1023,7 @@ func TestMetrics_StartedAndEndedBalanceAcrossTrees(t *testing.T) {
 	}
 	balanced := func(t *testing.T) {
 		assert := testarossa.For(t)
-		assert.Equal(eng.FlowsStarted(), eng.FlowsEnded(), "started and ended disagree")
+		assert.Equal(eng.FlowsStarted(), eng.FlowsClosed(), "started and ended disagree")
 	}
 
 	t.Run("fork_inside_a_subgraph", func(t *testing.T) {

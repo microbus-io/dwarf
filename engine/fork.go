@@ -143,7 +143,7 @@ func (e *Engine) forkFrom(ctx context.Context, db *sequel.DB, src flowTables, sh
 	newFlowKey := keys.NewFlowKey(shardNum, cc.newRootFlowHour, newRootFlowID, cc.rootFlowToken)
 	e.logger.InfoContext(ctx, "Flow forked", "fromRoot", rootFlowID, "forkStep", forkStepID, "to", newRootFlowID)
 	// Every flow on the rewind chain - the new root and each subgraph flow between it and the fork step - is
-	// cloned running and ends through completeFlow, which counts it in dwarf_flows_ended. Each must be
+	// cloned running and ends through completeFlow, which counts it in dwarf_flows_closed. Each must be
 	// counted as started too, or the in-flight panel (started - ended) drifts by one per flow.
 	for _, workflowURL := range cc.startedURLs {
 		e.metricFlowStarted(ctx, workflowURL, cc.priority, shardNum)

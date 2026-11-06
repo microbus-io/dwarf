@@ -453,7 +453,7 @@ clears after midnight. They stay readable throughout. But the live tables, which
 lag that keeps rising slows dispatch.
 
 **Confirm.** `dwarf_reap_pass_seconds` near or above its 15-second interval says the reaper is busy the whole time.
-Read the rate flows end (`dwarf_flows_ended_total`) against the rate they leave the live tables, archived or
+Read the rate flows end (`dwarf_flows_closed_total`) against the rate they leave the live tables, archived or
 deleted (`dwarf_flows_archived_total` plus `dwarf_flows_reaped_total`): a sustained gap is the backlog growing.
 
 **Respond.** A burst of ended flows clears on its own once the burst ends. A lag that grows with steady load means
@@ -495,7 +495,7 @@ filesystem. Measured on one rig: 198 MB still allocated for 37 remaining rows.
 `VACUUM FULL` takes an exclusive lock on the table and should be treated as a maintenance window.
 
 **One thing to check:** confirm the reaper is actually running. `dwarf_reap_pass_seconds` records a pass every 15
-seconds on each shard's dispatchers; no new samples there, or flows ending (`dwarf_flows_ended_total`) faster than
+seconds on each shard's dispatchers; no new samples there, or flows ending (`dwarf_flows_closed_total`) faster than
 they leave the live tables (`dwarf_flows_archived_total` plus `dwarf_flows_reaped_total`), means the reaper is not
 keeping up - see [The archive is falling behind](#the-archive-is-falling-behind).
 

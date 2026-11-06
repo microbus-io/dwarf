@@ -709,7 +709,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, ste
 	}
 
 	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowID), "to", workflow.StatusCompleted)
-	e.metricFlowEnded(ctx, workflowURL, workflow.StatusCompleted, priority, shardNum)
+	e.metricFlowClosed(ctx, workflowURL, workflow.StatusCompleted, priority, shardNum)
 	compositeID := keys.NewFlowKey(shardNum, flowHour, flowID, flowToken)
 
 	e.signalStop(ctx, compositeID, workflow.StatusCompleted)

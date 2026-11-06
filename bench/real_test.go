@@ -230,8 +230,8 @@ func TestLatencyBucket(t *testing.T) {
 func TestSplitKey(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	name, attrs := splitKey("dwarf_flows_ended|priority=50|shard=1|status=completed|workflow=bench/m1/linear")
-	assert.Equal("dwarf_flows_ended", name)
+	name, attrs := splitKey("dwarf_flows_closed|priority=50|shard=1|status=completed|workflow=bench/m1/linear")
+	assert.Equal("dwarf_flows_closed", name)
 	assert.Equal(map[string]string{"priority": "50", "shard": "1", "status": "completed", "workflow": "bench/m1/linear"}, attrs)
 	name, attrs = splitKey("dwarf_steps_executed")
 	assert.Equal("dwarf_steps_executed", name)

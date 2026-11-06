@@ -36,12 +36,12 @@ func TestEndedByStatus_SplitsTheAttributedSeries(t *testing.T) {
 	assert := testarossa.For(t)
 
 	completed, other := endedByStatus(map[string]int64{
-		"dwarf_flows_ended": 110,
-		"dwarf_flows_ended|priority=100|shard=1|status=completed|workflow=bench/linear": 60,
-		"dwarf_flows_ended|priority=100|shard=2|status=completed|workflow=bench/linear": 40,
-		"dwarf_flows_ended|priority=100|shard=1|status=failed|workflow=bench/linear":    7,
-		"dwarf_flows_ended|priority=100|shard=1|status=cancelled|workflow=bench/linear": 3,
-		"dwarf_flows_started|priority=100|shard=1|workflow=bench/linear":                110,
+		"dwarf_flows_closed": 110,
+		"dwarf_flows_closed|priority=100|shard=1|status=completed|workflow=bench/linear": 60,
+		"dwarf_flows_closed|priority=100|shard=2|status=completed|workflow=bench/linear": 40,
+		"dwarf_flows_closed|priority=100|shard=1|status=failed|workflow=bench/linear":    7,
+		"dwarf_flows_closed|priority=100|shard=1|status=cancelled|workflow=bench/linear": 3,
+		"dwarf_flows_started|priority=100|shard=1|workflow=bench/linear":                 110,
 	})
 	assert.Equal(int64(100), completed)
 	assert.Equal(map[string]int64{"failed": 7, "cancelled": 3}, other)

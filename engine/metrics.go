@@ -42,7 +42,7 @@ const metricScope = "github.com/microbus-io/dwarf"
 // their event sites; the gauges are observable (async) and pulled by observeGauges at collection time.
 type engineMetrics struct {
 	flowsStarted        metric.Int64Counter
-	flowsEnded          metric.Int64Counter
+	flowsClosed         metric.Int64Counter
 	stepsExecuted       metric.Int64Counter
 	stepsRecovered      metric.Int64Counter
 	stepsUnwedged       metric.Int64Counter
@@ -190,8 +190,8 @@ func (e *Engine) initMetrics() error {
 	}
 	// Counter instrument names carry no _total suffix; the Prometheus exporter appends it at scrape time.
 	// Unit-denominated counters end with the unit (…_bytes), per the Prometheus naming convention.
-	m.flowsStarted = ctr("dwarf_flows_started", "Counts flows that have been started, by workflow, by the shard they were placed on, and by priority. The shard attribute measures PLACEMENT: a replica places a new flow on a shard it dispatches, or by each shard's declared Weight once any weight other than 1 is set, so a skew here means the fleet's work is not spread the way the Create calls or the weights intended, and one shard's steps carry more than their share. The increase of this minus that of dwarf_flows_ended over a window is how many flows in flight were gained or lost in it, per shard and per priority; read it as a rate, since each replica's counters restart from zero with the replica. Note a closed-loop caller makes starts and terminations equal by construction - only an open-loop arrival rate lets a shortfall here indict the CALLER rather than the engine.")
-	m.flowsEnded = ctr("dwarf_flows_ended", "Counts flows that have reached a terminal status, by workflow, by the shard holding them, by priority, and BY WHICH terminal status - completed, failed, terminated, or cancelled. All four are counted, so dwarf_flows_started minus this does not drift upward by every flow that did not finish cleanly. Subgraph children are counted here and as starts, so a tree nets to zero. Split by status for the failure/termination/cancellation rates; dwarf_steps_executed{status} is the step-level view of the same thing.")
+	m.flowsStarted = ctr("dwarf_flows_started", "Counts flows that have been started, by workflow, by the shard they were placed on, and by priority. The shard attribute measures PLACEMENT: a replica places a new flow on a shard it dispatches, or by each shard's declared Weight once any weight other than 1 is set, so a skew here means the fleet's work is not spread the way the Create calls or the weights intended, and one shard's steps carry more than their share. The increase of this minus that of dwarf_flows_closed over a window is how many flows in flight were gained or lost in it, per shard and per priority; read it as a rate, since each replica's counters restart from zero with the replica. Note a closed-loop caller makes starts and terminations equal by construction - only an open-loop arrival rate lets a shortfall here indict the CALLER rather than the engine.")
+	m.flowsClosed = ctr("dwarf_flows_closed", "Counts flows that have closed - reached a terminal status - by workflow, by the shard holding them, by priority, and BY WHICH terminal status - completed, failed, terminated, or cancelled. All four are counted, so dwarf_flows_started minus this does not drift upward by every flow that did not finish cleanly. Subgraph children are counted here and as starts, so a tree nets to zero. Split by status for the failure/termination/cancellation rates; dwarf_steps_executed{status} is the step-level view of the same thing.")
 	m.stepsExecuted = ctr("dwarf_steps_executed", "Counts steps that have been executed, by the shard holding them. The shard attribute is what turns this into per-shard dispatch throughput - the quantity a per-shard piston, pool and partition all separately govern, and the one a fleet-wide total hides.")
 	m.stepsRecovered = ctr("dwarf_steps_recovered", "Counts steps reset to pending because their worker is gone - a running step whose lease expired (its task runs again), or a completed step whose transition never committed (it is replayed from its recorded completion; its task does not run again) - the crash-recovery path. A nonzero rate means workers are dying or overrunning their lease.")
 	m.stepsUnwedged = ctr("dwarf_steps_unwedged", "Counts parked steps recovered by the wedge sweep, labelled by park type. A nonzero value signals a latent bug whose effect the sweep papered over.")
@@ -262,12 +262,12 @@ func (e *Engine) initMetrics() error {
 	// The archive's instruments count work the reaper, the archive's maintenance and the removals do anyway: none costs
 	// a statement. Exact counts of the live or archive tables by status (a GROUP BY linear in the tables) and the
 	// database's own statistics (a privileged read in four dialect shapes) are left to the server's exporter.
-	m.flowsArchived = ctr("dwarf_flows_archived", "Counts flows the reaper moved from the live tables into the archive, by shard: each root and every subgraph flow of its tree. Its rate plus dwarf_flows_reaped's, against dwarf_flows_ended, is the reaper keeping up - an ended root waits the archive grace (a minute) in the live tables, so the two track each other a minute apart.")
+	m.flowsArchived = ctr("dwarf_flows_archived", "Counts flows the reaper moved from the live tables into the archive, by shard: each root and every subgraph flow of its tree. Its rate plus dwarf_flows_reaped's, against dwarf_flows_closed, is the reaper keeping up - an ended root waits the archive grace (a minute) in the live tables, so the two track each other a minute apart.")
 	m.flowsReaped = ctr("dwarf_flows_reaped", "Counts flows the reaper deleted from the live tables WITHOUT archiving them, by shard and by reason: deleted (a tree Delete or DeleteOnCompletion scheduled for deletion), no_retention (a retention of 0 keeps no archive), and archive_failed (archiving had been failing for the failure grace, so ended trees were deleted rather than left to fill the live tables). archive_failed is records LOST from the archive and must stay zero; dwarf_archive_failing_seconds says since when it has been failing, and the logs say why.")
 	m.flowsRemoved = ctr("dwarf_flows_removed", "Counts root flows Delete and Purge removed, by shard, by operation (op: delete, purge) and by side: archive for a tree deleted from the archive at once, live for a closed tree not archived yet that Delete scheduled for deletion, which the reaper then deletes within a tick and counts as dwarf_flows_reaped{reason=\"deleted\"}. Purge reads only the archive, so it counts on the archive side only.")
 	m.daysDropped = ctr("dwarf_archive_days_dropped", "Counts archive days dropped, by shard: by retention, or by PurgeBefore. At a steady retention it rises by one per shard a day; two dispatchers dropping the same day at once can each count it.")
 	m.maintainFailed = ctr("dwarf_archive_maintain_failed", "Counts archive maintenance passes that failed, by shard: the pass that makes the days ahead and drops the expired days, run 24 times a day by a dispatcher of the shard. One failure is retried by the next pass; a run of them leaves the days ahead unmade, and one to two days of them stop archiving (dwarf_archive_failing_seconds). A pass cut short by Shutdown is not counted.")
-	m.flowsExpired = ctr("dwarf_flows_expired", "Counts root flows terminated because they had not ended within the flow expiration (SetFlowExpiration), by shard. Each is also counted in dwarf_flows_ended{status=\"terminated\"}, with its subgraph flows. Zero while the expiration is off.")
+	m.flowsExpired = ctr("dwarf_flows_expired", "Counts root flows terminated because they had not ended within the flow expiration (SetFlowExpiration), by shard. Each is also counted in dwarf_flows_closed{status=\"terminated\"}, with its subgraph flows. Zero while the expiration is off.")
 	m.expireFailed = ctr("dwarf_flows_expire_failed", "Counts attempts to terminate an expired root flow that failed, by shard - attempts, not flows: a root that fails again is counted on every pass, 5 minutes apart, until it is terminated. Expect zero: a database failing the termination, or a tree spawning subgraphs faster than it can be stopped. The error log names the flow and the cause.")
 	reapPassSeconds, err := meter.Float64Histogram("dwarf_reap_pass_seconds",
 		metric.WithUnit("s"),
@@ -541,10 +541,10 @@ func (e *Engine) metricFlowStarted(ctx context.Context, workflowURL string, prio
 	e.metrics.flowsStarted.Add(ctx, 1, opts.add...)
 }
 
-// metricFlowEnded counts a flow reaching a terminal status, with the same shard and priority its start was
+// metricFlowClosed counts a flow reaching a terminal status, with the same shard and priority its start was
 // counted under, so the two subtract per attribute.
-func (e *Engine) metricFlowEnded(ctx context.Context, workflowURL, status string, priority, shardNum int) {
-	e.flowsEndedCount.Add(1)
+func (e *Engine) metricFlowClosed(ctx context.Context, workflowURL, status string, priority, shardNum int) {
+	e.flowsClosedCount.Add(1)
 	if e.metrics == nil {
 		return
 	}
@@ -552,7 +552,7 @@ func (e *Engine) metricFlowEnded(ctx context.Context, workflowURL, status string
 		return newAttrOpts(attribute.String("workflow", k.workflow), attribute.String("status", k.status),
 			attribute.String("shard", strconv.Itoa(k.shard)), attribute.String("priority", strconv.Itoa(k.priority)))
 	})
-	e.metrics.flowsEnded.Add(ctx, 1, opts.add...)
+	e.metrics.flowsClosed.Add(ctx, 1, opts.add...)
 }
 
 // The `column` attribute on the byte counters is the dwarf_steps column the bytes moved through -

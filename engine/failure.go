@@ -264,7 +264,7 @@ func (e *Engine) failFlowTx(ctx context.Context, tx sequel.Executor, shardNum, f
 // flow was counted as started - and wakes any Await on it, including on a subgraph child's key (legal read-only
 // introspection), whose failure otherwise travels only to its parent's flow.Subgraph call.
 func (e *Engine) endLostFlow(ctx context.Context, shardNum, flowID, flowHour int, flowToken string, label flowLabel, loss flowLoss) {
-	e.metricFlowEnded(ctx, label.workflowURL, loss.status, label.priority, shardNum)
+	e.metricFlowClosed(ctx, label.workflowURL, loss.status, label.priority, shardNum)
 	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowID), "to", loss.status)
 	e.signalStop(ctx, keys.NewFlowKey(shardNum, flowHour, flowID, flowToken), loss.status)
 	if loss.reDispatchParent {

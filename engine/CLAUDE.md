@@ -1804,7 +1804,7 @@ attempts the **clean** terminal write (`failStep` - a status and an error messag
   matches nothing and lease recovery settles the landed outcome without re-running the task; the broad guard
   matches a landed completion and fails a flow whose outcome is stored. Flow completion writes nothing to the step
   row, so an ambiguous one still fails the step; the flow stays completed, and `failFlowTx`, whose flow UPDATE then
-  matches nothing, returns no loss - no failure delivered to a parent, no second `dwarf_flows_ended`. Pinned by
+  matches nothing, returns no loss - no failure delivered to a parent, no second `dwarf_flows_closed`. Pinned by
   `TestPersist_LandedWriteReportingAnErrorIsNotFailed` (`FaultPersistLandedErr`) and `TestFailStep_HeldStates`.
 
 The two attempts are milliseconds apart and differ only in what they carry, which is what makes the classification
@@ -3064,7 +3064,7 @@ flow lifecycle counters and the per-band backlog gauges), `park_type`, `role` (o
 the host drops either with a metric View if it does not.
 
 **8 counters, incremented inline** at their logical event sites: `dwarf_flows_started`
-(start path), `dwarf_flows_ended` (completeFlow), `dwarf_steps_executed` (every terminal step
+(start path), `dwarf_flows_closed` (completeFlow), `dwarf_steps_executed` (every terminal step
 disposition - completed/failed/interrupted/subgraph/retried/error_routed), `dwarf_steps_recovered`
 (recoverExpiredLeases lease recovery, and the orphan sweep's rewinds), `dwarf_steps_unwedged{park_type}` (the parked-step wedge sweep; a
 nonzero value flags a latent bug), `dwarf_flows_orphaned` (a stranded flow the orphan sweep could NOT repair
@@ -3282,7 +3282,7 @@ nothing about now, while `max_over_time` on the plain gauge gives a WINDOWED pea
 free. It also carried a footgun the gauge does not: the two roles peak at different moments, so summing
 them reported a mark that never occurred.
 
-**Fidelity choices:** `flows_ended` counts every terminal status it is called with - completed
+**Fidelity choices:** `dwarf_flows_closed` counts every terminal status it is called with - completed
 (`completeFlow`), failed (`failStep`, and the cohort-resolution path in `processStep` that fails a flow
 without going through it), and terminated (`terminateSubtree`, per flow of the tree it terminalized). Do not
 narrow it to `completed`: that breaks it in two ways at once - the `status` attribute has a single value, so
@@ -3297,7 +3297,7 @@ once, by its own path (`TestMetrics_TerminateCountsOnlyTheFlowsItEnded`).
 `failStep` and the cohort-fail path. **Every path that starts a flow must call
 `metricFlowStarted`** - `Create`, `Continue`, AND `Fork` (which builds its new root through its own
 `INSERT...SELECT` clone and so is the easy one to miss): a fork's completion runs through the same `completeFlow`
-that increments `flows_ended`, so a missing start makes the standard in-flight panel
+that increments `dwarf_flows_closed`, so a missing start makes the standard in-flight panel
 (`started - ended`) drift negative by one per fork. **Fork counts every flow it clones `running`** - the new root
 AND each subgraph flow on the path down to a fork step inside a subgraph, since each of them ends through
 `completeFlow` (`TestMetrics_StartedAndEndedBalanceAcrossTrees`). Subgraph flows are counted too - the start

@@ -160,7 +160,7 @@ func watchProgress(ctx context.Context, engines []*engine.Engine, readers []*sdk
 	ended := func() int64 {
 		var n int64
 		for _, e := range engines {
-			n += e.FlowsEnded()
+			n += e.FlowsClosed()
 		}
 		return n
 	}
@@ -278,12 +278,12 @@ func (d *drainResult) missing() int64 {
 	return d.Created - d.Completed - other - d.Unfinished
 }
 
-// endedByStatus splits a counter delta's dwarf_flows_ended series by their status attribute.
+// endedByStatus splits a counter delta's dwarf_flows_closed series by their status attribute.
 func endedByStatus(deltas map[string]int64) (completed int64, other map[string]int64) {
 	other = map[string]int64{}
 	for key, n := range deltas {
 		name, attrs, ok := strings.Cut(key, "|")
-		if !ok || name != "dwarf_flows_ended" {
+		if !ok || name != "dwarf_flows_closed" {
 			continue
 		}
 		for attr := range strings.SplitSeq(attrs, "|") {
@@ -438,7 +438,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 // nothing to bind on). Open loop is what puts the refiller under the deep backlog it exists for, and it
 // separates two latencies the closed loop conflates: admission (the Create call) and end-to-end.
 //
-// Outstanding is bounded to maxOutstanding (created - Sum(FlowsEnded) across engines, a cheap
+// Outstanding is bounded to maxOutstanding (created - Sum(FlowsClosed) across engines, a cheap
 // atomic read - no per-flow Await, which under a deep backlog would park tens of thousands of callers and
 // put every one of their flow ids in the latch detector's per-shard lookup). Completion latency is SAMPLED
 // by a small bounded pool of
@@ -457,7 +457,7 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 	ended := func() int64 {
 		var n int64
 		for _, e := range engines {
-			n += e.FlowsEnded()
+			n += e.FlowsClosed()
 		}
 		return n
 	}

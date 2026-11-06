@@ -104,7 +104,7 @@ max by (priority) (dwarf_steps_oldest_pending_age_seconds{priority="3"}) > 600  
   missing for up to 30 seconds after startup or while that duty passes between replicas, and they go absent if
   the refresh keeps failing for 90 seconds. The lag and `dwarf_shard_dispatching` are the liveness signals.
 - **For trend, not paging:**
-  `sum by (priority) (increase(dwarf_flows_started_total[15m])) - sum by (priority) (increase(dwarf_flows_ended_total[15m]))`
+  `sum by (priority) (increase(dwarf_flows_started_total[15m])) - sum by (priority) (increase(dwarf_flows_closed_total[15m]))`
   staying positive means flows are arriving faster than they finish, per band, before any lag shows.
 
 When a rule fires, [Backlog is growing](runbook.md#backlog-is-growing) walks through finding the cause.

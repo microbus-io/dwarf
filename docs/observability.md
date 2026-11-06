@@ -51,7 +51,7 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_*` instrument | Type | Labels | Measures | PromQL name |
 |---|---|---|---|---|
 | `dwarf_flows_started` | counter | `workflow`, `shard`, `priority` | flows started. `shard` is where the flow was **placed**, so a skew across shards means work is not spread the way the capacity weights intended | `dwarf_flows_started_total` |
-| `dwarf_flows_ended` | counter | `workflow`, `status`, `shard`, `priority` | flows reaching a terminal status — completed, failed, terminated or cancelled. All four are counted, so `started − ended` does not drift up by every flow that did not finish cleanly; see [Flows in flight](#flows-in-flight) | `dwarf_flows_ended_total` |
+| `dwarf_flows_closed` | counter | `workflow`, `status`, `shard`, `priority` | flows closing: completed, failed, terminated or cancelled. All four are counted, so `started − closed` does not drift up by every flow that did not finish cleanly; see [Flows in flight](#flows-in-flight) | `dwarf_flows_closed_total` |
 | `dwarf_steps_executed` | counter | `task_name`, `status`, `shard` | steps executed, by disposition. `shard` makes this per-shard dispatch throughput — selection, the connection pool and the work split are all per shard, so a fleet-wide total hides one shard falling behind | `dwarf_steps_executed_total` |
 | `dwarf_steps_recovered` | counter | — | steps recovered because their worker was lost: a lease that expired (the task re-runs), or a completed step whose successor was never created (the step is resumed from its recorded output; the task does not re-run) | `dwarf_steps_recovered_total` |
 | `dwarf_steps_unwedged` | counter | `park_type` | wedged subgraph parks recovered by the sweep (nonzero = latent bug) | `dwarf_steps_unwedged_total` |
@@ -90,7 +90,7 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_flows_archived` | counter | `shard` | flows moved into the archive: each root and every subgraph flow of its tree | `dwarf_flows_archived_total` |
 | `dwarf_flows_reaped` | counter | `shard`, `reason` | flows deleted from the live tables without being archived. `reason` is `deleted` (scheduled for deletion by `Delete` or `DeleteOnCompletion`), `no_retention` (a retention of 0) or `archive_failed` (archiving had been failing for a minute, so ended flows were deleted rather than left to fill the live tables). `archive_failed` is records lost from the archive: expect zero | `dwarf_flows_reaped_total` |
 | `dwarf_flows_removed` | counter | `shard`, `op`, `side` | root flows `Delete` and `Purge` removed. `op` is `delete` or `purge`; `side` is `archive` for a flow deleted from the archive, or `live` for a closed flow not archived yet that `Delete` scheduled for deletion, then counted in `dwarf_flows_reaped{reason="deleted"}`, there by flow rather than by root. `Purge` reads only the archive, so it counts on the archive side only | `dwarf_flows_removed_total` |
-| `dwarf_flows_expired` | counter | `shard` | root flows terminated because they were still running or interrupted `SetFlowExpiration` after their creation. Each is also counted in `dwarf_flows_ended{status="terminated"}`, with its subgraph flows | `dwarf_flows_expired_total` |
+| `dwarf_flows_expired` | counter | `shard` | root flows terminated because they were still running or interrupted `SetFlowExpiration` after their creation. Each is also counted in `dwarf_flows_closed{status="terminated"}`, with its subgraph flows | `dwarf_flows_expired_total` |
 | `dwarf_flows_expire_failed` | counter | `shard` | attempts to terminate an expired flow that failed. It counts attempts, not flows: a flow that fails again is counted every 5 minutes until it is terminated. Expect zero; see [An expired flow cannot be terminated](runbook.md#an-expired-flow-cannot-be-terminated) | `dwarf_flows_expire_failed_total` |
 | `dwarf_archive_days_dropped` | counter | `shard` | archive days dropped, by the retention or by `PurgeBefore`. At a steady retention, one per shard a day; two replicas dropping the same day at the same moment can each count it | `dwarf_archive_days_dropped_total` |
 | `dwarf_archive_maintain_failed` | counter | `shard` | archive maintenance passes that failed. A pass runs 24 times a day, makes the days ahead and drops the expired ones; a failure is retried by the next | `dwarf_archive_maintain_failed_total` |
@@ -117,12 +117,12 @@ passes from one replica to another, those two may be missing for up to 30 second
 
 ### Flows in flight
 
-`dwarf_flows_started` and `dwarf_flows_ended` carry the same `shard` and `priority`, so the difference of their
+`dwarf_flows_started` and `dwarf_flows_closed` carry the same `shard` and `priority`, so the difference of their
 increases over a window is how many flows each band gained or shed in flight:
 
 ```promql
 sum by (priority) (increase(dwarf_flows_started_total[5m]))
-  - sum by (priority) (increase(dwarf_flows_ended_total[5m]))
+  - sum by (priority) (increase(dwarf_flows_closed_total[5m]))
 ```
 
 Read it as a trend, not as a level. Each replica's counters start from zero when the replica does, so a running

@@ -306,7 +306,7 @@ func runReal(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 	ended := func() int64 {
 		var n int64
 		for _, e := range engines {
-			n += e.FlowsEnded()
+			n += e.FlowsClosed()
 		}
 		return n
 	}
@@ -550,7 +550,7 @@ func runReal(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 			p.PeerChange = d["dwarf_peer_changes"]
 			for key, n := range d {
 				name, attrs := splitKey(key)
-				if name != "dwarf_flows_ended" || len(attrs) == 0 {
+				if name != "dwarf_flows_closed" || len(attrs) == 0 {
 					continue
 				}
 				p.EndedBy[band(attrs)] += float64(n) / sec
@@ -652,7 +652,7 @@ func drainFleet(ctx context.Context, engines []*engine.Engine, quiet time.Durati
 	ended := func() int64 {
 		var n int64
 		for _, e := range engines {
-			n += e.FlowsEnded()
+			n += e.FlowsClosed()
 		}
 		return n
 	}

@@ -861,7 +861,7 @@ func perShardLine(res stepResult, dsns shardFlags) string {
 	b.WriteString("  per shard:")
 	for _, sh := range dsns {
 		started := shardCounter(res.EngineCounters, "dwarf_flows_started", sh.index)
-		ended := shardCounter(res.EngineCounters, "dwarf_flows_ended", sh.index)
+		ended := shardCounter(res.EngineCounters, "dwarf_flows_closed", sh.index)
 		fmt.Fprintf(&b, "  %d: %.0f flows/s, backlog %+d", sh.index, float64(ended)/res.WindowSec, started-ended)
 	}
 	return b.String()

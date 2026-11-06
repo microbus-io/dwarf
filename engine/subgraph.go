@@ -285,7 +285,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 		fid := allFlowIDs[i].(int)
 		e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, fid), "to", workflow.StatusTerminated)
 		label := labelByFlowID[fid]
-		e.metricFlowEnded(ctx, label.workflowURL, workflow.StatusTerminated, label.priority, shardNum)
+		e.metricFlowClosed(ctx, label.workflowURL, workflow.StatusTerminated, label.priority, shardNum)
 		e.signalStop(ctx, cid, workflow.StatusTerminated)
 	}
 	return len(terminalized) > 0 && terminalized[0], nil
