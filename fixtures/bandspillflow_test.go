@@ -106,17 +106,31 @@ func TestBandSpillflow(t *testing.T) {
 		}
 		return keys
 	}
+	// await reports, on a miss, why each unfinished flow missed: the Await's error and its one step's status.
+	// The step tells the causes apart - pending at attempt 0 was never claimed (the held loops supplied no
+	// hint for it, or the hint was lost), running was claimed but did not finish, completed was finished but
+	// not observed.
 	await := func(keys []string) bool {
 		awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second*enginetest.TimeoutScale())
 		defer cancel()
+		ok := true
 		for _, k := range keys {
 			out, err := eng.Await(awaitCtx, k)
-			if err != nil {
-				return false
+			if err == nil {
+				assert.Equal(workflow.StatusCompleted, out.Status)
+				continue
 			}
-			assert.Equal(workflow.StatusCompleted, out.Status)
+			ok = false
+			steps, herr := eng.History(ctx, k)
+			if herr != nil {
+				t.Logf("flow %s: await: %v; history: %v", k, err, herr)
+				continue
+			}
+			for _, s := range steps {
+				t.Logf("flow %s: await: %v; step %s status=%s attempt=%d", k, err, s.TaskName, s.Status, s.Attempt)
+			}
 		}
-		return true
+		return ok
 	}
 
 	for _, cp := range loops {
@@ -124,14 +138,14 @@ func TestBandSpillflow(t *testing.T) {
 	}
 	const lowCount = 48
 	lows := create("low", 5, lowCount)
-	for range 30 {
+	for round := range 30 {
 		highs := create("high", 1, 4)
 		for _, cp := range loops {
 			turn(cp)
 		}
 		// The push just planned from a scan that saw this round's better band, which fits, so it carried all of
 		// it; the workers drain the push while the loops are held.
-		if !assert.True(await(highs), "the better band itself was not served") {
+		if !assert.True(await(highs), "the better band itself was not served in round %d", round) {
 			return
 		}
 	}
