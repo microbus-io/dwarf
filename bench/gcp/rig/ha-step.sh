@@ -2,8 +2,9 @@
 # shipped archive grace, 2 min warmup, a fresh database per arm. Launch with the first arm's flags:
 #   BIN=bench-<sha> DBFLAGS=autovacuum_work_mem=1048576,checkpoint_timeout=900,log_checkpoints=on,max_wal_size=20480,wal_compression=lz4 \
 #     x-rig.sh ha 1000 ha-step.sh
-#   ha-1:  0 B, max_wal_size 20 GB + wal_compression lz4, 16 min: the stall check. Minutes 9-16 against 1-8 (mean
-#          within 2%, no minute more than 5% under) decide the later windows: 6 min if it holds, else 16.
+#   ha-1:  0 B, max_wal_size 20 GB + wal_compression lz4, 16 min: the stall check. Minutes 9 on against 1-8 (mean no
+#          more than 2% under, no minute more than 5% under; a run that speeds up holds) decide the later windows: 6 min
+#          if it holds, else 16. The 10 s series of a 16 min window fills 15 whole minutes.
 #   ha-2:  8 KB -payload-json, 20 GB + lz4
 #   ha-3:  8 KB -payload-json, 20 GB, wal_compression off   (one setting changed from ha-2)
 #   ha-4:  8 KB -payload-json, Cloud SQL's default max_wal_size + lz4   (the other)
@@ -38,9 +39,9 @@ import json
 r = json.load(open('out/ha-1.json'))['results'][0]
 ser = [p['stepsPerSec'] for p in (r.get('gauges') or {}).get('series') or []]
 m = [sum(ser[i*6:(i+1)*6]) / 6 for i in range(len(ser) // 6)]
-a, b = sum(m[:8]) / 8, sum(m[8:16]) / max(1, len(m[8:16]))
-ok = len(m) >= 16 and abs(b - a) <= 0.02 * a and min(m[8:16]) >= 0.95 * a
-print('HOLDS' if ok else 'FAILS', 'first8', round(a), 'last8', round(b), 'min-last8', round(min(m[8:16] or [0])), 'minutes', ' '.join(str(round(x)) for x in m))
+a, b = sum(m[:8]) / 8, sum(m[8:]) / max(1, len(m[8:]))
+ok = len(m) >= 15 and b >= 0.98 * a and min(m[8:]) >= 0.95 * a
+print('HOLDS' if ok else 'FAILS', 'first8', round(a), 'rest', round(b), 'min-rest', round(min(m[8:] or [0])), 'minutes', ' '.join(str(round(x)) for x in m))
 \"" | tail -1)
 log "  stall check: $verdict"
 WIN=16; [[ "$verdict" == HOLDS* ]] && WIN=6
