@@ -69,8 +69,8 @@ the old shards' flows complete and age out under your retention policy.
 ## Retiring a shard
 
 **Phase 1 — cordon it.** Set `Cordoned: true` on the shard and roll the fleet. It stops receiving new flows
-immediately. Everything resident continues normally: flows keep executing, and their subgraph children,
-`Continue` turns and forks are still created on it, because those are shard-pinned.
+immediately. Everything resident continues normally: flows keep executing, and the flows made from them -
+subgraph children, `Continue`'s and `Fork`'s - are still created on it, because those are shard-pinned.
 
 **Phase 2 — drain.** Nothing drains automatically. The shard is empty when it holds no flow you still need,
 which means both:
@@ -81,7 +81,8 @@ open, _ := eng.ListOpen(ctx, workflow.Query{Shard: 3, Limit: 100})
 ```
 
 and no closed flow you still want readable: the shard's closed flows sit in its archive until the retention drops
-their day, so the shard is empty once the retention has passed since its last flow closed.
+their day, so the shard is empty once the retention has passed since the end of the UTC day its last flow was
+archived in.
 
 `Query.Shard` scopes a list to one shard. Watch `interrupted` flows especially — they wait indefinitely and are
 the ones that will still be there when you assumed the shard was empty. Either resume them, terminate them, or

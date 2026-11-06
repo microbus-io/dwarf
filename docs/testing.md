@@ -82,6 +82,10 @@ eng.Startup(ctx)
 `SetWorkers(1)` is a common trick for deterministically asserting dispatch order (e.g. fairness or
 priority tests).
 
+A closed flow reaches the archive about a minute after it closes, and only then does `ListClosed` show it or
+`Purge` remove it. A test that waits for a flow to close should `Await` it rather than poll `ListClosed`, and read
+its outcome with `Snapshot` or `Await`, which serve a closed flow at once.
+
 ## Testing the harder paths
 
 The harness drives every engine feature. A few patterns:

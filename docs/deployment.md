@@ -87,7 +87,8 @@ and a step's input state and its changes sit side by side in one row that is rea
 hold two such values. The defaults, 64M on MySQL 8 and 16M on MariaDB, refuse a large value only after the
 task that produced it has run.
 
-MariaDB 10.5+ for `JSON`.
+MySQL 8.0+ or MariaDB 10.6+. Both are needed for `SKIP LOCKED`, which archiving uses so that two replicas never wait
+on the same flow.
 
 ### SQLite — one replica, low throughput
 

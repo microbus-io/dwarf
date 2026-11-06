@@ -36,8 +36,8 @@ Two consequences worth internalising:
 
 Four things, and everything else in this section of the docs is one of them.
 
-1. **An alarm fired.** Three counters are documented as "zero forever in a healthy engine," and a non-zero
-   reading means either a latent bug or a flow that needs manual recovery. → **[Runbook](runbook.md)**
+1. **An alarm fired.** Five counters are documented as zero in a healthy engine, and a non-zero reading means
+   a latent bug, a flow that needs manual recovery, or closed flows deleted without an archive copy. → **[Runbook](runbook.md)**
 2. **You are deploying.** Redeploying your own application is an ordinary rolling restart; moving to a new
    version of **dwarf** is not — while dwarf is v0.x it makes no compatibility promise, and schema migrations
    run at startup. → **[Upgrading](upgrading.md)**
@@ -60,6 +60,8 @@ instrument itself carries no suffix (`dwarf_steps_unwedged`).
 | `dwarf_steps_unwedged_total` | A step wedged and a sweep papered over it. The effect is repaired; the cause is not. |
 | `dwarf_flows_orphaned_total` | A running flow is stranded with every step terminal, and the engine could not repair it. These need manual recovery. |
 | `dwarf_steps_write_failed_total` | A step's outcome could not be stored while the database was reachable, so the payload is at fault. |
+| `dwarf_flows_reaped_total{reason="archive_failed"}` | Archiving failed for over a minute, and closed flows were deleted from the live tables with no copy in the archive. |
+| `dwarf_flows_expire_failed_total` | A flow past `SetFlowExpiration` could not be terminated; it stays open and is tried again every 5 minutes. |
 
 **Health — alert on sustained levels, not on any movement:**
 

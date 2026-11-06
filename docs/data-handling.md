@@ -182,8 +182,9 @@ for {
 
 **`Delete` deletes an archived flow at once, and marks one not archived yet, which is then reaped.** `Purge` removes
 only what is archived, so it deletes at once, and its `done` covers only that: a flow closed shortly before the call
-is purged by a later call, once archived. For an erasure, wait a minute after the last matching flow closed and call
-`Purge` again, or `Delete` such flows by key. A marked flow is
+is purged by a later call, once archived. For an erasure, wait about two minutes after the last matching flow closed
+(a closed flow is archived 60 to 75 seconds after it closes, longer while `dwarf_archive_lag_seconds` is above zero)
+and call `Purge` again, or `Delete` such flows by key. A marked flow is
 stamped for deletion, `History` returns 404 for it immediately, and a background reaper removes the whole subgraph
 tree within about 15 seconds. A flow marked by `DeleteOnCompletion` keeps serving its outcome to `Snapshot` and `Await` for a
 one-minute grace window first, so a fire-and-forget caller can still read its result.
@@ -227,10 +228,10 @@ The one limit is what the database can store. No single JSON value dwarf writes 
   field under `append` is stored as references to the steps that hold its elements once it is past about 1 KB,
   and so is a list with no reducer that a task rewrites each step but only ever extends: each step stores only
   the elements it added. That holds outside a fan-out's branches; a branch that rewrites such a list stores its
-  whole value, as it always did.
+  whole value.
 - **The flow's state when it ends** must fit in 256 MB, because the final state holds every field at once.
-  The same is true wherever a whole state crosses from one flow to another: a `Continue` turn's starting
-  state, a subgraph's input and its result, and the step a `Fork` restarts from. A flow should drop large
+  The same is true wherever a whole state crosses from one flow to another: the starting
+  state of a flow made by `Continue`, a subgraph's input and its result, and the step a `Fork` restarts from. A flow should drop large
   fields it no longer needs (`flow.Del`) before it ends.
 - **Initial state, baggage, resume data and an interrupt payload** must each fit in 256 MB.
 

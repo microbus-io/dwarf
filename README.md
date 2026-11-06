@@ -61,7 +61,7 @@ fmt.Println(out.State.GetString("greeting")) // hello ada
   the databases they already share, with no message bus to run between them.
 - **OTEL-native observability.** Structured logs (`slog`), 49 `dwarf_*` instruments, and distributed tracing,
   all through standard providers you inject.
-- **Four SQL dialects.** PostgreSQL, MySQL/MariaDB, SQL Server, and SQLite (testing / single-instance).
+- **Four SQL dialects.** PostgreSQL, MySQL/MariaDB, SQL Server, and SQLite (single-instance, low throughput).
 - **Free, and cheap at scale.** Apache 2.0 — no license tier, no vendor, no per-operation pricing. One
   32-vCPU PostgreSQL database with two 8-vCPU engine hosts runs [~21,900 steps/s](docs/benchmark-cloud.md),
   about $0.04 per million steps — **billions of steps a month** — and
@@ -151,8 +151,8 @@ construction-time only.
 |---|---|---|
 | **PostgreSQL** 13+ | Recommended for production | MVCC, no gap locks; fan-out runs deadlock-free at any concurrency |
 | **SQL Server** | Production | Enable `READ_COMMITTED_SNAPSHOT` for non-blocking reads |
-| **MySQL / MariaDB** | Production, expect tuning | Prefer `READ-COMMITTED` isolation to drop gap locks; add `interpolateParams=true` to the DSN |
-| **SQLite** | Testing & single-instance dev only | Used automatically by `NewEngineUnderTest`; do not run in production |
+| **MySQL** 8.0+ / **MariaDB** 10.6+ | Production, expect tuning | Prefer `READ-COMMITTED` isolation to drop gap locks; add `interpolateParams=true` to the DSN |
+| **SQLite** | Single-instance, low-throughput production; testing | One engine process per database file; used automatically by `NewEngineUnderTest` |
 
 See [docs/deployment.md](docs/deployment.md) for tuning, sharding, and connection-pool guidance.
 

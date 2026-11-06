@@ -322,8 +322,9 @@ longer range a month at a time. A `Status` that is not closed (`running`, `inter
 
 **`Purge` removes only what is archived, and `done` covers only that.** A flow that closed shortly before the call,
 still on its way to the archive, is not purged until a call after it is archived. For an erasure that must take every
-flow - a tenant's, say, after terminating its open ones - wait a minute after the last of them closed and call `Purge`
-again, or `Delete` them by key.
+flow - a tenant's, say, after terminating its open ones - wait about two minutes after the last of them closed (a closed flow is archived
+60 to 75 seconds after it closes, longer while `dwarf_archive_lag_seconds` is above zero) and call `Purge` again, or
+`Delete` them by key.
 
 ```go
 for {
@@ -404,7 +405,7 @@ Each operation adds these to the 503 and 500 every call can return:
 | `Cancel`, `Terminate` | malformed key, a subgraph child's key, a reason over 4,096 bytes or not valid UTF-8 without NUL | unknown flow | | |
 | `Fork` | malformed key, overrides not JSON-marshalable | unknown step | | the flow is not closed, is scheduled for deletion, or holds an unresolved interrupt off the fork path |
 | `Continue` | malformed key, a subgraph child's key, `additionalState` not JSON-marshalable | unknown flow | | the flow is not completed, or is scheduled for deletion |
-| `Delete` | malformed key, a subgraph child's key | unknown flow | | the flow is open |
+| `Delete` | malformed key, a subgraph child's key | unknown flow | | the flow is open, or it was archived while being deleted (call again) |
 
 A 413 comes from the operations that take a value in: `Create` and `Run` (the initial state or the baggage),
 `Continue` (the new flow's initial state, with `additionalState` folded in), `Resume` (the resume data) and

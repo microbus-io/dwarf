@@ -305,7 +305,7 @@ faster than fixing the server, and flows cannot be moved between shards. For a s
 - **Weight it down** (`ShardSpec.Weight`) if it is slow because it is smaller than its peers, so it receives
   the share of new flows it can carry.
 - **Cordon it** (`ShardSpec.Cordoned`) to stop new-flow placement on it entirely while everything resident
-  keeps running. Its resident flows' `Continue` turns, subgraph children and forks still land on it.
+  keeps running. Flows made from its resident flows - by `Continue`, as subgraph children, or by `Fork` - still land on it.
 - **Size your callers for the slow case.** Give each `Create` a context deadline (a call queued at a shard
   with no free turn returns at the deadline, and a retry is placed afresh), and
   size creator concurrency for the latency of the slowest shard rather than the average.

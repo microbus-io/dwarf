@@ -73,8 +73,9 @@
 
 ## Observability
 
-- [ ] **These three page someone.** Each is documented as zero-forever in a healthy engine:
-  `dwarf_steps_unwedged_total`, `dwarf_flows_orphaned_total`, `dwarf_steps_write_failed_total`.
+- [ ] **These five page someone.** Each is documented as zero in a healthy engine:
+  `dwarf_steps_unwedged_total`, `dwarf_flows_orphaned_total`, `dwarf_steps_write_failed_total`,
+  `dwarf_flows_reaped_total{reason="archive_failed"}` and `dwarf_flows_expire_failed_total`.
   → [Runbook](runbook.md)
 - [ ] **`dwarf_steps_dispatch_lag_seconds` is dashboarded** — it is the honest backlog signal, better
   than a queue count.

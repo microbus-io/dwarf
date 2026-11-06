@@ -46,6 +46,11 @@ Create ──► running ──► completed
 - **cancelled** — gracefully stopped by `Cancel`: every loss the flow could not recover from was a cancellation,
   none a real error.
 
+A flow is **open** while it is `running` or `interrupted`, and **closed** once it is `completed`, `failed`,
+`terminated` or `cancelled`. A closed flow never changes again. About a minute after it closes, it moves to the
+**archive**, where it stays readable by key for the retention (`SetRetention`, 30 days by default) and then is
+deleted. `ListOpen` lists open flows and `ListClosed` archived ones.
+
 A flow's key is a composite string of the form `{shard}-{hour}-{flowID}-{token}`: the shard that holds the flow, the hour
 it was created (counted from 2000-01-01 00:00 UTC), its id on that shard, and a random token. You pass it to every
 operation.

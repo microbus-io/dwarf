@@ -564,7 +564,8 @@ for a 6-minute saturated run of the 10-step `linear` workload with no payload:
 - **Throughput held within 2.5% of the empty database at every size.** At the end the whole database held ~640 GB,
   five times the instance's 128 GB of memory.
 - **The work touches recent rows, so memory is not outgrown.** The buffer-cache hit ratio fell only from 100% to
-  99.2%. Reading a recent flow's `History` took 12–35 ms, and the first and a deep page of `List` 1–9 ms, at every
+  99.2%. Reading a recent flow's `History` took 12–35 ms, and the first and a deep page of
+the flow list (the build measured listed every flow with one `List` call, paged) 1–9 ms, at every
   size.
 - **The tail rose a little; the median did not.** The saturated p99 went from 1.9 s on the empty database to
   2.5–2.7 s from 136 GB up, while the median, which a saturated run's 2,000-flow backlog sets, stayed at
