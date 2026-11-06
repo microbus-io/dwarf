@@ -1143,16 +1143,34 @@ func TestArchivedReads_ForkHoldsTheReaperOffItsSource(t *testing.T) {
 		e.reapDueFlows(ctx)
 		close(reaped)
 	}()
-	// Long enough for a reaper that is not held off to move the tree.
-	time.Sleep(500 * time.Millisecond)
-	select {
-	case <-reaped:
-		t.Error("the reaper finished while Fork held the source root")
-	default:
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	skips := db.DriverName() == "pgx" || db.DriverName() == "mysql"
+	if skips {
+		// The pass skips the root Fork holds and moves the rest (forkOutcome's fork among them), so it finishes with
+		// the source left in the live tables, which is checked once the Fork lets go.
+		select {
+		case <-reaped:
+		case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
+			t.Fatal("the reaper waited on the root Fork held")
+		}
+	} else {
+		// The pass waits on the root Fork holds.
+		select {
+		case <-reaped:
+			t.Error("the reaper finished while Fork held the source root")
+		case <-time.After(500 * time.Millisecond * enginetest.TimeoutScale()):
+		}
 	}
 	e.seams.Resume(engineseams.CheckpointForkRootLocked)
 	r := <-forked
 	<-reaped
+	if skips {
+		_, _, sourceID, _, err := keys.ParseFlowKey(fk)
+		assert.NoError(err)
+		held, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", sourceID)
+		assert.NotZero(held, "the reaper moved the source tree while Fork held it")
+	}
 	if !assert.NoError(r.err) {
 		return
 	}
@@ -1176,4 +1194,88 @@ func renameTable(ctx context.Context, db *sequel.DB, from, to string) error {
 	}
 	_, err := db.ExecContext(ctx, stmt)
 	return err
+}
+
+// TestArchivedReads_ForkWaitingOnTheMoveForksFromTheArchive pins Fork when its lock on the source root waits for a
+// reaper batch moving that tree: once the move commits, the live tables no longer hold the root, and the Fork must
+// find it in the archive rather than answer that the flow is scheduled for deletion - which a plain read of the root
+// after the wait reported on MySQL, whose transaction kept the snapshot from before the wait. The Fork's wait is not
+// observable, so the test gives it a moment to block; a Fork that had not yet blocked passes either way.
+func TestArchivedReads_ForkWaitingOnTheMoveForksFromTheArchive(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e := refEngine(t)
+	fk, err := e.Create(ctx, "refs/parent", nil, nil)
+	assert.NoError(err)
+	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
+	history, err := e.History(ctx, fk)
+	assert.NoError(err)
+
+	e.seams.Break(engineseams.CheckpointReapBatchLocked)
+	reaped := make(chan struct{})
+	go func() {
+		e.reapDueFlows(ctx)
+		close(reaped)
+	}()
+	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointReapBatchLocked, 10*time.Second), "the batch locked the root")
+	type result struct {
+		fk  string
+		err error
+	}
+	forked := make(chan result, 1)
+	go func() {
+		fk, err := e.Fork(ctx, history[1].StepKey, nil)
+		forked <- result{fk, err}
+	}()
+	time.Sleep(200 * time.Millisecond) // the Fork's lock waits on the batch's
+	e.seams.Resume(engineseams.CheckpointReapBatchLocked)
+	<-reaped
+	r := <-forked
+	if assert.NoError(r.err, "forked from the archive") {
+		enginetest.AwaitFlowStatus(t, e, r.fk, workflow.StatusCompleted, time.Minute)
+	}
+	_, _, rootID, _, err := keys.ParseFlowKey(fk)
+	assert.NoError(err)
+	flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", rootID)
+	assert.Zero(flows, "the source was archived")
+}
+
+// TestArchivedReads_ADayPastTheRetentionIsNotRead pins that a read by key does not reach a day past the retention that
+// has not been dropped yet: Startup brings only the retained days up to the archive's migrations, so such a day can be
+// a migration behind. The flow reads as not found, as it will once its day drops; a day within the retention is read.
+func TestArchivedReads_ADayPastTheRetentionIsNotRead(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e := archiveEngine(t, treeMux(), 1)
+	a := e.archives.Load().byShard[1]
+	today, err := a.Today(ctx)
+	assert.NoError(err)
+	assert.NoError(makeArchiveDay(t, e, today-5))
+	assert.NoError(makeArchiveDay(t, e, today-1))
+	assert.NoError(a.Refresh(ctx))
+	var keysOf []string
+	for range 2 {
+		fk, err := e.Create(ctx, "arch/parent", nil, nil)
+		assert.NoError(err)
+		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
+		keysOf = append(keysOf, fk)
+	}
+	_, _, expired, _, _ := keys.ParseFlowKey(keysOf[0])
+	_, _, retained, _, _ := keys.ParseFlowKey(keysOf[1])
+	moveInto(t, e, expired, today-5)
+	moveInto(t, e, retained, today-1)
+	if now, _ := a.Today(ctx); now != today {
+		t.Skip("midnight passed during the test")
+	}
+
+	_, err = e.Snapshot(ctx, keysOf[0])
+	assert.Equal(http.StatusNotFound, merrors.StatusCode(err), "a day past the retention is not read")
+	_, err = e.History(ctx, keysOf[0])
+	assert.Equal(http.StatusNotFound, merrors.StatusCode(err))
+	outcome, err := e.Snapshot(ctx, keysOf[1])
+	if assert.NoError(err, "a day within the retention is read") {
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
+	}
 }

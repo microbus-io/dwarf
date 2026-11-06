@@ -157,11 +157,19 @@ func awaitCutSettled(t *testing.T, e *Engine, shard int) {
 	t.Fatalf("shard %d: the cut never settled", shard)
 }
 
-// peerCounts is what every shard's Sonar currently reports.
-func peerCounts(e *Engine) map[int]int {
-	counts := map[int]int{}
+// peerCount is one shard's Sonar reading as the fleet tests watch it: the replicas, and the candidates for its cut.
+type peerCount struct{ replicas, candidates int }
+
+// peerCounts is what every shard's Sonar currently reports. A caller takes it BEFORE the registry write it is about
+// to wait on: taken after, a reading that already landed would be the baseline, and the wait would never see a move.
+func peerCounts(e *Engine) map[int]peerCount {
+	counts := map[int]peerCount{}
 	for _, idx := range e.db.Indices() {
-		counts[idx] = e.replicasOn(idx)
+		c := peerCount{replicas: e.replicasOn(idx)}
+		if s := e.sonarFor(idx); s != nil {
+			_, c.candidates = s.Rank()
+		}
+		counts[idx] = c
 	}
 	return counts
 }
@@ -173,13 +181,18 @@ func peerCounts(e *Engine) map[int]int {
 // this settles almost at once. The recompute is then driven directly rather than waiting out a second
 // cadence for the reconcile loop, so a test asserting on POOL sizes sees them the moment the count it
 // caused has landed.
-func awaitPeerChange(t *testing.T, e *Engine, before map[int]int) {
+//
+// Both counts must move. Every fake peer is working, so a change moves the candidates with the replicas, and the
+// Sonar publishes the replica count before the standing: a replica count that moved alone is a reading half
+// published, and a recompute from it derives from the standing before the change.
+func awaitPeerChange(t *testing.T, e *Engine, before map[int]peerCount) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
+		now := peerCounts(e)
 		moved := true
 		for idx, was := range before {
-			if e.replicasOn(idx) == was {
+			if now[idx].replicas == was.replicas || (e.sonarFor(idx) != nil && now[idx].candidates == was.candidates) {
 				moved = false
 			}
 		}

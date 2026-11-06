@@ -18,6 +18,9 @@ package engine
 
 import "time"
 
+// maxSQLTime is the latest instant every dialect's time column holds.
+var maxSQLTime = time.Date(9999, 12, 31, 23, 59, 59, 999000000, time.UTC)
+
 // sqlTime returns the SQL that reads t as a value of a time column, holding one placeholder, and the argument to bind
 // to it. The time.Time itself is never bound: SQLite would compare the driver's RFC 3339 text (a T where the column
 // has a space) against the stored text, PostgreSQL would shift a zoned bind by the session's offset against the
@@ -31,6 +34,12 @@ import "time"
 // as NOW_UTC() writes it, to the millisecond: there the comparison is of text, and a longer spelling of the same
 // instant sorts after the stored one.
 func sqlTime(driverName string, t time.Time) (expr string, arg string) {
+	// A bound past the year 9999 is written as its last instant: a five-digit year sorts before every stored time as
+	// text on SQLite, is NULL to MySQL's CAST and an error to SQL Server's, so a far-future sentinel would mean nothing,
+	// or fail, depending on the dialect.
+	if t.After(maxSQLTime) {
+		t = maxSQLTime
+	}
 	unit, layout := time.Millisecond, "2006-01-02 15:04:05.000"
 	if driverName == "pgx" {
 		unit, layout = time.Microsecond, "2006-01-02 15:04:05.000000"

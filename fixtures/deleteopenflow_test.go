@@ -79,8 +79,7 @@ func TestDeleteOpenflow(t *testing.T) {
 		assert.True(false, "task never started")
 		return
 	}
-	// The closed flow is created last, so it has the highest id: Purge selects in id order, and an open flow
-	// selected ahead of it would use up the limit below and mark nothing.
+	// The closed flow is created last, after the open ones, so a Purge reaching the live tables would meet them first.
 	ended, outcome, err := eng.Run(ctx, "deleteopenflow.verify:428/g", nil, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)

@@ -141,7 +141,7 @@ func deleteArchivedTrees(ctx context.Context, db *sequel.DB, day int, roots []in
 	var locked []int
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
 		var err error
-		locked, err = lockRootsIn(ctx, tx, flows, "flow_id IN ("+intCSV(roots)+") AND surgraph_flow_id=0")
+		locked, err = lockRootsIn(ctx, tx, flows, false, "flow_id IN ("+intCSV(roots)+") AND surgraph_flow_id=0")
 		if err != nil || len(locked) == 0 {
 			return errors.Trace(err)
 		}

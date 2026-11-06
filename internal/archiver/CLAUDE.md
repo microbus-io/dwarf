@@ -131,7 +131,10 @@ reaper never takes a day to last past its end.
 and primary-key probes of the flows tables of its creation day and the day after, each branch selecting its day. It
 does not check the token - the caller's read of the day, with the flow's token and hour, says whether the flow is the
 one asked for - and a step is found by its flow (its key names it), so the directory holds no steps. One round trip, at
-most three relations.
+most three tables. Counted in locks it is more: PostgreSQL's planner locks every index of every table it plans, about
+19 relations for the directory and two flows day tables - over the 16 fast-path slots a backend has before PG 18, so
+each locate takes a few locks in the shared lock table. Fewer indexes on the day tables lower that; adding one raises
+it for every archived read.
 
 - **Do not walk days, cache a flow-to-day map, or `UNION ALL` many days.** A walk over the retained days in one
   statement locks a relation per day on PostgreSQL until the statement ends: about 160 at 30 days, and about 40% of

@@ -475,3 +475,22 @@ func TestListOpen_NewestUpdatedFirstAcrossStatuses(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal([]string{first, last}, keysOf(interrupted))
 }
+
+// TestSQLTime_AFarFutureBoundMeansNoBound pins the clamp at the year 9999: a ToTime past it - a "no upper bound"
+// sentinel - lists what a ToTime of the last instant would, on every dialect, rather than nothing (SQLite compares a
+// five-digit year as text, MySQL casts it to NULL) or an error (SQL Server).
+func TestSQLTime_AFarFutureBoundMeansNoBound(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e := archiveEngine(t, treeMux(), 30)
+	roots := closedRoots(t, e, 1)
+	a := e.archives.Load().byShard[1]
+	today, err := a.Today(ctx)
+	assert.NoError(err)
+	moveInto(t, e, roots[0], today)
+	far := time.Date(20000, 1, 1, 0, 0, 0, 0, time.UTC)
+	got, err := e.ListClosed(ctx, workflow.Query{FromTime: time.Now().Add(-time.Hour), ToTime: far, Limit: 10})
+	assert.NoError(err)
+	assert.Equal([]int{roots[0]}, idsOf(t, got))
+}

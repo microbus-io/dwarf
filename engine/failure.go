@@ -345,7 +345,7 @@ func (e *Engine) flowLossError(ctx context.Context, tx sequel.Executor, flowID i
 	sample = strings.TrimSpace(sample)
 	if sample == "" {
 		// No step failed. In a fork, a branch a Terminate stopped in the origin is a loss of its own (Fork's
-		// recount), and a open flow never fails from one: its Terminate already ended it.
+		// recount), and an open flow never fails from one: its Terminate already ended it.
 		var terminated int
 		tx.QueryRowContext(ctx,
 			"SELECT 1 FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusTerminated+"' ORDER BY step_id LIMIT_OFFSET(1, 0)", // ORDER BY: SQL Server's OFFSET/FETCH requires one

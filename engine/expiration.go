@@ -87,6 +87,16 @@ func (e *Engine) expireOn(ctx context.Context, db *sequel.DB, shard int) {
 	defer func() { e.metricFlowsExpired(ctx, shard, ended) }()
 	after := 0
 	for {
+		// Checked per page as well as per root: a page holding no open root - a large tree's subgraph children - would
+		// otherwise walk on past the budget, and past a stop.
+		if ctx.Err() != nil {
+			return
+		}
+		if attempts > 0 && time.Since(start) >= e.expireBudget {
+			e.logger.InfoContext(ctx, "Expiring flows: the pass reached its time budget; the next pass goes on",
+				"shard", shard, "expired", ended, "budget", e.expireBudget)
+			return
+		}
 		roots, last, young, err := e.expiredPage(ctx, db, after)
 		if err != nil {
 			e.logSweepError(ctx, "Expiring flows; the next pass retries", "shard", shard, "error", err)

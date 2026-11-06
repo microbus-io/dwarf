@@ -1060,7 +1060,7 @@ func (e *Engine) archivedFlowRow(ctx context.Context, db *sequel.DB, shardNum, f
 	if set == nil || set.byShard[shardNum] == nil {
 		return 0, "", 0, notFound
 	}
-	day, err = set.byShard[shardNum].LocateFlow(ctx, flowID, flowHour)
+	day, err = e.locateRetained(ctx, set, shardNum, flowID, flowHour)
 	if errors.StatusCode(err) == http.StatusNotFound {
 		return 0, "", 0, notFound
 	}

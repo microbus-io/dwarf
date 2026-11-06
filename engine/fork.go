@@ -74,7 +74,7 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	if set == nil || set.byShard[shardNum] == nil {
 		return "", errors.New("step not found", http.StatusNotFound)
 	}
-	day, err := set.byShard[shardNum].LocateFlow(ctx, forkFlowID, forkStepHour)
+	day, err := e.locateRetained(ctx, set, shardNum, forkFlowID, forkStepHour)
 	if errors.StatusCode(err) == http.StatusNotFound {
 		return "", errors.New("step not found", http.StatusNotFound)
 	}
@@ -158,20 +158,30 @@ func (e *Engine) forkFrom(ctx context.Context, db *sequel.DB, src flowTables, sh
 // errForkSourceNotHere when src holds no flow the key names.
 func (e *Engine) forkSource(ctx context.Context, tx *sequel.Tx, src flowTables, shardNum, forkFlowID, forkStepID int,
 	forkStepToken string, forkStepHour int, overrides workflow.State, traceParent *string) (*forkClone, int, error) {
-	// The root is locked only if it has ended and is not marked for deletion, tested on the row the lock takes: that is
-	// the row as it stands once the lock is granted, where a later plain read on MySQL would see the snapshot taken
-	// when this statement began - before a Delete that committed while it waited. A root not ended is not locked at
-	// all, so a Fork refused for it crosses no lock order with Terminate.
-	rootOf := "flow_id=(SELECT root_flow_id FROM " + src.flows + " WHERE flow_id=? AND created_hour=?)"
+	// The root is locked only if it has closed and is not marked for deletion, tested on the row the lock takes: that is
+	// the row as it stands once the lock is granted. A root not closed is not locked at all, so a Fork refused for it
+	// crosses no lock order with Terminate. The root is named through the fork step and its token, so a key with a
+	// forged token locks nothing: the lock is a write on SQLite and SQL Server, and holds off the reaper everywhere.
+	rootOf := "flow_id=(SELECT f.root_flow_id FROM " + src.flows + " f JOIN " + src.steps + " s ON s.flow_id=f.flow_id" +
+		" WHERE f.flow_id=? AND f.created_hour=? AND s.step_id=? AND s.step_token=? AND s.flow_created_hour=?)"
+	rootArgs := []any{forkFlowID, forkStepHour, forkStepID, forkStepToken, forkStepHour}
 	locked, err := lockRows(ctx, tx, src.flows, rootOf+" AND status IN ("+terminalStatusesSQL+") AND delete_after_ms=0",
-		forkFlowID, forkStepHour)
+		rootArgs...)
 	if err != nil {
 		return nil, 0, errors.Trace(err)
 	}
 	if locked == 0 {
+		// Why nothing was locked is read from the row as it stands now. On MySQL a plain read here would see the
+		// snapshot the transaction's first read took, before a move or a Delete that committed while the lock waited:
+		// it would find the root still there and closed, and answer that the flow is scheduled for deletion where the
+		// tree has in fact moved to the archive. A locking read is a current read there.
+		current := ""
+		if tx.DriverName() == "mysql" {
+			current = " LOCK IN SHARE MODE"
+		}
 		var rootStatus string
 		var rootDeleteAfterMs int
-		err := tx.QueryRowContext(ctx, "SELECT status, delete_after_ms FROM "+src.flows+" WHERE "+rootOf, forkFlowID, forkStepHour).
+		err := tx.QueryRowContext(ctx, "SELECT status, delete_after_ms FROM "+src.flows+" WHERE "+rootOf+current, rootArgs...).
 			Scan(&rootStatus, &rootDeleteAfterMs)
 		if err == sql.ErrNoRows {
 			return nil, 0, errForkSourceNotHere

@@ -203,6 +203,11 @@ A fixture needing a **non-default topology** (multiple `SetShard`s, `SetTimeBudg
 them on its own engine/mux between `NewEngineUnderTest` and `Startup` - the same per-test ownership, just with
 non-default knobs.
 
+**`DWARF_ARCHIVE_DAY` and `DWARF_ARCHIVE_GRACE` override a test engine too.** They are the rig's way in (the engine
+reads them at every Startup, test mode included, and `TestRetention_*` pins them), so either one left set in a shell
+replaces what a test set in `testArchiveDay` or `archiveGrace`, and the archiving tests fail far from the cause.
+Unset them before running the suite.
+
 #### What a sleep is standing in for, and what to use instead
 
 Every duration in a fixture is standing in for something the engine could say directly. Sorting them by

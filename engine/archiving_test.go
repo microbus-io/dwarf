@@ -377,9 +377,11 @@ func TestArchiving_DeleteOfATreeArchivedMeanwhileDeletesItThere(t *testing.T) {
 	_, _, rootID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	flows, _ := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), rootID)
-	if flows == 0 {
+	if now, _ := e.archives.Load().byShard[1].Today(ctx); flows == 0 && now != today {
+		e.seams.Resume(engineseams.CheckpointBeforeDeleteStamp)
 		t.Skip("midnight passed during the pass")
 	}
+	assert.Equal(2, flows, "the reaper archived the tree while the Delete was held")
 	e.seams.Resume(engineseams.CheckpointBeforeDeleteStamp)
 	assert.NoError(<-deleted)
 	flows, steps := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), rootID)
@@ -741,9 +743,10 @@ func TestArchiving_EveryArchivedFlowIsStampedWhenItWasArchived(t *testing.T) {
 	assert.NoError(err)
 	e.reapDueFlows(ctx)
 	flows, _ := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), root)
-	if flows == 0 {
+	if now, _ := e.archives.Load().byShard[1].Today(ctx); flows == 0 && now != today {
 		t.Skip("midnight passed during the pass")
 	}
+	assert.Equal(2, flows, "archived into today")
 	rows, err := db.QueryContext(ctx, "SELECT DATE_DIFF_MILLIS(NOW_UTC(), archived_at) FROM "+migrations.FlowsTable(today)+
 		" WHERE root_flow_id=?", root)
 	assert.NoError(err)
@@ -826,9 +829,13 @@ func TestArchiving_NoTreeMovesInTheDaysLastMoments(t *testing.T) {
 	flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", root)
 	assert.Equal(2, flows, "left in the live tables")
 
+	dayDeadline := time.Now().Add(a.DayLength() + 10*time.Second*enginetest.TimeoutScale())
 	for {
 		if now, _ := a.Today(ctx); now > day {
 			break
+		}
+		if time.Now().After(dayDeadline) {
+			t.Fatal("the next day never came")
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -838,4 +845,57 @@ func TestArchiving_NoTreeMovesInTheDaysLastMoments(t *testing.T) {
 	assert.Zero(flows, "archived on the next day")
 	flows, _ = treeCount(t, e, migrations.FlowsTable(day), migrations.StepsTable(day), root)
 	assert.Zero(flows, "not into the day that ended")
+}
+
+// TestArchiving_AHeldRootIsSkippedNotWaitedFor pins that a batch leaves out a root another transaction holds - a long
+// move by another replica's reaper, here a plain lock - and moves the rest at once. Waiting made the holder fail the
+// whole batch on MySQL, whose lock wait gives up, and a batch that keeps failing is deleted unarchived after the
+// failure grace. SQLite has one writer, and SQL Server waits without a timeout, so both keep the wait (lockRootsIn).
+func TestArchiving_AHeldRootIsSkippedNotWaitedFor(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e := archiveEngine(t, treeMux(), 30)
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	if d := db.DriverName(); d != "pgx" && d != "mysql" {
+		t.Skip("a held root is waited for on " + d)
+	}
+	roots := closedRoots(t, e, 2)
+	held, other := roots[0], roots[1]
+
+	locked := make(chan error, 1)
+	release := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- db.Transact(ctx, func(tx *sequel.Tx) error {
+			_, err := lockRootsIn(ctx, tx, liveTables.flows, false, "flow_id=?", held)
+			locked <- err
+			<-release
+			return err
+		})
+	}()
+	assert.NoError(<-locked)
+
+	a := e.archives.Load().byShard[1]
+	today, err := a.Today(ctx)
+	assert.NoError(err)
+	bounded, cancel := context.WithTimeout(ctx, 5*time.Second*enginetest.TimeoutScale())
+	defer cancel()
+	moved, err := e.reapBatchOf(bounded, db, []int{held, other}, e.closedDue(0),
+		&reapDay{day: today, stop: time.Now().Add(time.Hour), archive: a})
+	close(release)
+	assert.NoError(<-holderDone)
+	if assert.NoError(err, "the batch did not wait on the held root") {
+		assert.Equal(2, moved, "the other tree moved: its root and its child")
+	}
+	flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", held)
+	assert.Equal(2, flows, "the held tree was left in the live tables")
+	flows, _ = treeCount(t, e, "dwarf_flows", "dwarf_steps", other)
+	assert.Zero(flows)
+
+	moved, err = e.reapBatchOf(ctx, db, []int{held}, e.closedDue(0),
+		&reapDay{day: today, stop: time.Now().Add(time.Hour), archive: a})
+	assert.NoError(err)
+	assert.Equal(2, moved, "the held tree moved once it was let go")
 }

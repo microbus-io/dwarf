@@ -518,7 +518,11 @@ func (e *Engine) reapDue(
 				e.logSweepError(ctx, "Reaper: removing due trees", "shard", shard, "kind", kind.name, "error", err)
 				return false
 			}
-			candidates = slices.DeleteFunc(candidates, func(id int) bool { return slices.Contains(cut, id) })
+			taken := make(map[int]bool, len(cut))
+			for _, id := range cut {
+				taken[id] = true
+			}
+			candidates = slices.DeleteFunc(candidates, func(id int) bool { return taken[id] })
 		}
 		// A scan that came back short saw every due root; one whose batches moved nothing found them all changed
 		// since, and would only see the same ones again.
@@ -562,8 +566,9 @@ func (e *Engine) scanDue(
 // reapBatchOf removes the trees of the roots it can lock among rootIDs (ascending) in one transaction: moved into
 // day's archive tables unless day is nil, deleted otherwise. It returns how many flow rows it removed.
 //
-// The roots are locked first, in flow_id order and re-checked, so two reapers that meet on a root - a stolen one, or
-// a dispatcher handoff - wait on each other rather than deadlock, and the later finds the root gone.
+// The roots are locked first, in flow_id order, and re-checked, so two reapers that meet on a root - a stolen one, or
+// a dispatcher handoff - never deadlock: on PostgreSQL and MySQL the later leaves the root out (lockDueRoots), and
+// elsewhere it waits and then finds the root gone.
 func (e *Engine) reapBatchOf(
 	ctx context.Context, db *sequel.DB, rootIDs []int, kind reapKind, day *reapDay,
 ) (int, error) {
@@ -574,6 +579,7 @@ func (e *Engine) reapBatchOf(
 		if err != nil || len(locked) == 0 {
 			return errors.Trace(err)
 		}
+		e.seams.Checkpoint(ctx, engineseams.CheckpointReapBatchLocked)
 		// ids are trusted integers embedded as literals to dodge the per-driver bind-param ceiling.
 		ids := intCSV(locked)
 		trees := "SELECT flow_id FROM dwarf_flows WHERE root_flow_id IN (" + ids + ")"
@@ -665,20 +671,35 @@ func archivedAtSQL(driverName string, dayEnds time.Time) (expr string, args []an
 	return "CASE WHEN NOW_UTC()<" + last + " THEN NOW_UTC() ELSE " + last + " END", []any{arg, arg}
 }
 
-// lockDueRoots locks the roots among rootIDs that are still due, and returns them ascending.
+// lockDueRoots locks the roots among rootIDs that are still due and that no other transaction holds, and returns them
+// ascending.
+//
+// A root held elsewhere is skipped, not waited for, on PostgreSQL and MySQL (see lockRootsIn for the other two):
+// another reaper moving that tree, a Fork cloning it, a Delete stamping it. The holder finishes with it, or the next pass takes it, while the rest of the batch moves now. Waiting
+// made one long holder fail the whole batch on MySQL, whose lock wait gives up (innodb_lock_wait_timeout), and a batch
+// that keeps failing is deleted unarchived after the failure grace - every innocent root in it with the one held.
+// The oldest roots come first in every pass, so the held one was in every batch.
 func lockDueRoots(ctx context.Context, tx *sequel.Tx, rootIDs []int, kind reapKind) ([]int, error) {
-	return lockRootsIn(ctx, tx, liveTables.flows, "flow_id IN ("+intCSV(rootIDs)+") AND "+kind.due, kind.dueArgs...)
+	return lockRootsIn(ctx, tx, liveTables.flows, true, "flow_id IN ("+intCSV(rootIDs)+") AND "+kind.due, kind.dueArgs...)
 }
 
 // lockRootsIn locks the rows of flows that match where and returns their flow ids, ascending. The rows are about to be
 // deleted, so on PostgreSQL and MySQL the lock is FOR UPDATE, the strength a DELETE takes; SQLite and SQL Server take
 // it by flipping touch, as lockFlowRows does. It serializes with Fork's lock on the same root (lockRows), which on
-// PostgreSQL is FOR NO KEY UPDATE and conflicts with it.
-func lockRootsIn(ctx context.Context, tx *sequel.Tx, flows, where string, args ...any) ([]int, error) {
+// PostgreSQL is FOR NO KEY UPDATE and conflicts with it. With skipHeld, a row another transaction holds is left out
+// rather than waited for (SKIP LOCKED) on PostgreSQL and MySQL. SQL Server and SQLite wait as without it: SQLite has
+// one writer, so nothing there is held. On SQL Server a READPAST here does skip the row, but the move's own
+// statements then wait on it - under locking READ COMMITTED a DELETE that scans waits on every locked row it passes,
+// one it would not delete included - and READPAST on those could leave a tree's row out of its copy. SQL Server's
+// lock wait has no timeout by default, so the wait delays the batch and never fails it, which is what the skip is for.
+func lockRootsIn(ctx context.Context, tx *sequel.Tx, flows string, skipHeld bool, where string, args ...any) ([]int, error) {
 	var stmt string
 	switch tx.DriverName() {
 	case "pgx", "mysql":
 		stmt = "SELECT flow_id FROM " + flows + " WHERE " + where + " ORDER BY flow_id FOR UPDATE"
+		if skipHeld {
+			stmt += " SKIP LOCKED"
+		}
 	case "mssql":
 		stmt = "UPDATE " + flows + " SET touch=1-touch OUTPUT inserted.flow_id WHERE " + where
 	default:

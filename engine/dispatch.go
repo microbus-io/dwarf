@@ -1587,7 +1587,7 @@ func (e *Engine) transitionTx(ctx context.Context, d *dispatch, tx *sequel.Tx) e
 	// advancing=1 fences one more case: persist re-running this transaction after a COMMIT that landed but
 	// reported an error finds the flag already cleared, and abandons rather than advancing the flow twice. A
 	// fan-in arrival clears the flag in its cohort bump below instead, so every transaction that commits while
-	// the flow stays live clears it.
+	// the flow stays open clears it.
 	if len(d.normalNexts) > 0 || d.isPushTransition {
 		set, args := "", append([]any{}, successorArgs...)
 		if successor != "" {

@@ -337,7 +337,7 @@ func (e *Engine) persistStep(ctx context.Context, d *dispatch, held stepHeld, wr
 // on a value of the wrong type under a combining reducer is one. persist does not retry it, and
 // settlePersist fails the step with it without counting a write that could not be stored. Wrap only a failure
 // that is a pure function of stored data: a database error from the same computation is transient, and wrapping
-// it would fail a open flow over a blip.
+// it would fail an open flow over a blip.
 //
 // It is a Go type rather than an error property (the marker workflow.IsCancelled reads) because it must NOT
 // survive serialization: it is raised inside the write and inspected by persist and settlePersist in the same

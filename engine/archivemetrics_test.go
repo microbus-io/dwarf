@@ -242,6 +242,9 @@ func TestArchiveMetrics_TheDays(t *testing.T) {
 
 	e.maintainArchives(ctx, set)
 	assert.NoError(e.PurgeBefore(ctx, a.DayEnds(today-1)))
+	if now, _ := a.Today(ctx); now != today {
+		t.Skip("midnight passed during the test")
+	}
 	rm = collect(t, reader)
 	assert.Equal(int64(2), sumAt(rm, "dwarf_archive_days_dropped", shard1), "one by retention, one by PurgeBefore")
 	days, _ = gaugeAt(rm, "dwarf_archive_days", shard1)

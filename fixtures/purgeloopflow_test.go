@@ -176,7 +176,7 @@ func TestPurgeLoopflow(t *testing.T) {
 		assert.Equal(0, len(remaining))
 	}
 
-	// The concurrently-running flow was untouched: it matched no completed filter.
+	// The concurrently-running flow was untouched: it is open, and Purge reads only the archive.
 	snap, err := eng.Snapshot(ctx, blockKey)
 	if assert.NoError(err) {
 		assert.Equal(workflow.StatusRunning, snap.Status)

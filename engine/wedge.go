@@ -322,7 +322,7 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 
 // recoverOrphanedSubgraphChildren finds non-terminal subgraph child flows whose parent flow has already gone
 // terminal - the mirror image of recoverWedgedSubgraphParks (which handles a parked caller whose child is gone;
-// this handles a open child whose caller/parent is gone). Such a child is orphaned: its parent can never process
+// this handles an open child whose caller/parent is gone). Such a child is orphaned: its parent can never process
 // its completion or interrupt, and no lifecycle op reaches it - the root key 409s (the root is terminal), the
 // child's own key is read-only (Resume/Terminate 400), and recoverWedgedSubgraphParks is blind to it (the caller
 // step is terminal, not running+parked). Nothing in the engine leaves one: a spawn parks its caller and inserts
@@ -403,7 +403,7 @@ func (e *Engine) terminateOrphanedSubtree(ctx context.Context, shard int, childF
 // That shape is what a worker leaves when it dies between a step's completion write and its transition
 // transaction: the step is `completed`, so lease recovery (which resets `running` rows only) cannot see it, and
 // nothing else will ever advance the flow. The completion write sets advancing=1, and every transition transaction
-// that commits while the flow stays live clears it, so advancing=1 on a completed step of a running flow means
+// that commits while the flow stays open clears it, so advancing=1 on a completed step of a running flow means
 // exactly "this step's transition never committed". The repair rewinds such a step to `pending` - the same rewind
 // the processStep recovery defer performs for a worker that is still alive - and dispatch REPLAYS it: the claim
 // sees the flag, skips the task, and commits the transition from the output and disposition the completion write

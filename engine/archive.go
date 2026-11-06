@@ -121,7 +121,7 @@ func (e *Engine) queryLiveOrArchive(ctx context.Context, db *sequel.DB, shard, f
 	if set == nil || set.byShard[shard] == nil {
 		return false, nil
 	}
-	day, err := set.byShard[shard].LocateFlow(ctx, flowID, hour)
+	day, err := e.locateRetained(ctx, set, shard, flowID, hour)
 	if errors.StatusCode(err) == http.StatusNotFound {
 		return false, nil
 	}
@@ -145,6 +145,22 @@ func (e *Engine) queryLiveOrArchive(ctx context.Context, db *sequel.DB, shard, f
 		}
 	}
 	return found, errors.Trace(err)
+}
+
+// locateRetained returns the archive day the flow with flowID is in, as LocateFlow does, or a 404 for a day past the
+// retention. Such a day is waiting to be dropped, and nothing reads it: Startup brings only the retained days up to the
+// archive's migrations (MigrateDays), so an expired day's tables can be a migration behind, and a read of them would
+// fail on the schema rather than miss. The lists cut their window the same way. The day is today on this process's
+// clock, as the lists' cut is; a skew of seconds at midnight affects only the oldest day, which is about to drop.
+func (e *Engine) locateRetained(ctx context.Context, set *archiveSet, shard, flowID, hour int) (int, error) {
+	day, err := set.byShard[shard].LocateFlow(ctx, flowID, hour)
+	if err != nil {
+		return 0, errors.Trace(err)
+	}
+	if day < archiver.DayOf(time.Now(), set.dayLength)-max(e.retentionDays, 0) {
+		return 0, errors.New("flow not found", http.StatusNotFound)
+	}
+	return day, nil
 }
 
 // flowRowThere reports whether t's flows table holds the flow with flowID: the closing read of a pass.

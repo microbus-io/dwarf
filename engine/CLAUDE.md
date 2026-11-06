@@ -198,7 +198,7 @@ a continuation is `Create` with the previous flow's final state (from `Snapshot`
 step (`pending`) in one transaction and rings the doorbell - returning a running flow's key. The graph JSON is
 frozen at creation. There is no separate start call; `created` is never an externally-visible resting state.
 
-**The frozen graph is permanent: do not add a way to move a open flow onto a new graph.** A flow's position is a
+**The frozen graph is permanent: do not add a way to move an open flow onto a new graph.** A flow's position is a
 set of step rows naming tasks in the graph it was created with, plus cohort counters sized from that graph's
 edges; under an edited graph a pending step can name a task that no longer exists, a cohort can await branches
 the new graph never spawns, and there is no general rule for where such a flow resumes. Only `Create` and
@@ -1567,7 +1567,7 @@ belongs to the same flow (anchors never cross a flow; a cohort is one flow). So 
 format" is decided once, at the claim, and holds for everything the dispatch reaches afterwards.
 
 - **Stamped at creation, never raised.** `insertFlowTx` (`Create`, `Continue`, subgraph spawn) stamps `payloadVer`;
-  Fork's clone copies its origin's, since it copies the rows. **Do not let a newer replica raise a open flow's
+  Fork's clone copies its origin's, since it copies the rows. **Do not let a newer replica raise an open flow's
   version when it writes**: an older replica that passed the claim check could then meet the newer rows mid-
   transition - at the fan-in, the anchor resolve, the tails - and none of those can wait. **Do not move the version
   onto the step either**: a step's version says nothing about its anchors or its siblings, so every read site needs
@@ -2067,7 +2067,7 @@ by the wedge sweep (a wedged caller whose child already went terminal); the live
 Defense in depth for any residual orphan is
 `recoverOrphanedSubgraphChildren` (see "Background Recovery"). `fixtures`/`engine`
 `TestSubgraphCohortFail_NoStrandOnBranchFailure` pins the child staying `running` after one branch failed while a
-sibling is parked on a open grandchild, then converging to a clean closed tree with the branch error surfaced
+sibling is parked on an open grandchild, then converging to a clean closed tree with the branch error surfaced
 to the root. `fixtures/subgrapherrorwaitflow_test.go` pins the `Await(childKey)` wake: with an `Await` parked on a
 still-running child, the child's failure fires the targeted `CheckpointFlowStopped` for `(childKey, failed)` and
 the `Await` returns that failure. The checkpoint proves `signalStop` was RAISED for the child's key - it fires at
@@ -3513,7 +3513,11 @@ MySQL, the strength a `DELETE` takes; a `touch` flip with `RETURNING`/`OUTPUT` e
   (`archiveFailures`, in memory, reset at Startup) and ends the pass with nothing deleted; while it runs, each
   failing pass ends the same way; once it has run the grace, each batch whose move fails is deleted without
   archiving. A pass that archives without failing clears it, so a later failure gets a full grace again. A stop is
-  not a failure. Lock contention counts like any other error. It logs twice per failure - when archiving starts
+  not a failure. Lock contention counts like any other error, which is why a batch skips a root another
+  transaction holds rather than waiting on it (`lockDueRoots`, PostgreSQL and MySQL): the oldest roots lead every
+  pass, so one long holder - another replica's reaper moving a huge tree - would otherwise fail every batch it is in
+  on MySQL's lock-wait timeout and, after the grace, get the rest of the batch deleted unarchived. Pinned by
+  `TestArchiving_AHeldRootIsSkippedNotWaitedFor`. It logs twice per failure - when archiving starts
   failing and when it starts deleting - never every tick. What the deletes lose is the archive, never work: the
   trees closed and their outcomes were recorded. The grace covers what clears on its own - a lost connection,
   contention, a rollout's window between a live migration and its archive counterpart - and a fault that lasts
@@ -3567,7 +3571,7 @@ flow ended, which `Transact`'s contention retry absorbs.
 descendant. The deferred path stamps only the root (whose own status is 409-guarded, so an open root is never
 stamped) and the reaper deletes the whole
 `root_flow_id` tree regardless of descendant status. The only running descendant a terminal-rooted tree can hold is
-an **orphaned child** (a open child whose parent already terminalized, which only a bug leaves - see
+an **orphaned child** (an open child whose parent already terminalized, which only a bug leaves - see
 `recoverOrphanedSubgraphChildren`), a bug-state row the wedge sweep would terminate anyway. Deleting it is safe: a
 worker mid-dispatch on the orphan no-ops via the lease fence (claim/write matches zero rows once the tree is gone),
 so no strand and no corruption. Whichever of the reaper and the wedge sweep reaches the orphan first wins. The
@@ -3978,7 +3982,7 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
    (see *A rewound step is REPLAYED* below): the task does not run again.
 
    *The `advancing` flag is what makes this safe, and it costs no round trip.* The completion write sets it in the
-   statement it already runs; every transition transaction that commits while the flow stays live clears it in a
+   statement it already runs; every transition transaction that commits while the flow stays open clears it in a
    statement that already writes the dispatched row (see "Lease fencing"), and the transaction that terminalizes
    the flow leaves it - harmless, since the sweep only rewinds a `running` flow and a closed flow never becomes
    running again. So `advancing=1` on a completed step of a running flow means exactly "this transition never
@@ -4073,7 +4077,7 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
      reached terminal but the revive was lost, or the child was deleted. The sweep re-drives the release on the
      latest child (`flow_id DESC`): `completeSurgraphFlow` for a completed child, `deliverSubgraphError` for a
      failed/terminated/cancelled/absent one. `deliverSubgraphError` only re-arms the caller with the error, and
-     its one statement is that write, so it is write-first. It is never handed a open child: the sweep skips a
+     its one statement is that write, so it is write-first. It is never handed an open child: the sweep skips a
      latest child that is non-terminal again (a spawn that landed after its scan), so there is no child to
      terminalize. **The absent-child case** cannot be reached by a crash - the park and the child's insert commit
      in one transaction - so it is defense against a bug or a hand-deleted row; a parked caller carries no lease,
@@ -4085,7 +4089,7 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
      non-terminal child flow (`created`/`running`/`interrupted`) whose *parent flow* is already terminal
      (`completed`/`failed`/`terminated`/`cancelled`). Where the `parkedSubgraph` case is a live caller whose child
      vanished,
-     this is a open child whose caller/parent vanished. **Nothing in the engine leaves one, and the sweep is
+     this is an open child whose caller/parent vanished. **Nothing in the engine leaves one, and the sweep is
      defense in depth for a bug that would.** A `Terminate` racing a subgraph spawn cannot, and four rules hold
      that up:
      - **The spawn parks its caller in the transaction that inserts the child.** A park committed on its own
@@ -4099,7 +4103,7 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
        locked, so a spawn has either committed (the scan sees its child) or will find its caller terminated.
      - **ONE scan per transaction; new flows mean roll back and re-run.** On MySQL's REPEATABLE READ the first
        plain read fixes the transaction's snapshot, so a second scan in the same transaction misses a grandchild
-       spawned in between - measured as a open grandchild under a terminated child on MySQL and MariaDB. The
+       spawned in between - measured as an open grandchild under a terminated child on MySQL and MariaDB. The
        re-run's first write covers the new flows before its own scan takes a fresh snapshot.
      `TestTerminateVsSubgraphSpawn_Deterministic` has a subtest that fails with each rule removed. (A fan-out sibling's
      `failStep` does not produce an orphan either: a subgraph child fails via cohort accounting after every branch
