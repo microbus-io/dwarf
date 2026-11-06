@@ -68,16 +68,20 @@ type dbStats struct {
 }
 
 // dbDelta is what the database stored and logged over one measurement window: the growth of the two dwarf
-// tables (with their indexes and TOAST) and the WAL written. Against the bytes the tasks declared, these are
-// the amplification - stored and logged bytes per task byte.
+// tables and of the archive day tables (each with its indexes and TOAST), and the WAL written. Against the
+// bytes the tasks declared, these are the amplification - stored and logged bytes per task byte. With the
+// archive on, the live tables hold about the grace's worth of rows and barely grow, so what a run stores is
+// in the archive's growth; a day dropped inside the window shows as negative.
 type dbDelta struct {
-	StepsBytes     int64 `json:"stepsBytes"`
-	FlowsBytes     int64 `json:"flowsBytes"`
-	WALBytes       int64 `json:"walBytes"`
-	WALFPI         int64 `json:"walFpi"`
-	WALBuffersFull int64 `json:"walBuffersFull"`
-	WALSyncs       int64 `json:"walSyncs"`
-	Commits        int64 `json:"commits"`
+	StepsBytes        int64 `json:"stepsBytes"`
+	FlowsBytes        int64 `json:"flowsBytes"`
+	ArchiveStepsBytes int64 `json:"archiveStepsBytes"`
+	ArchiveFlowsBytes int64 `json:"archiveFlowsBytes"`
+	WALBytes          int64 `json:"walBytes"`
+	WALFPI            int64 `json:"walFpi"`
+	WALBuffersFull    int64 `json:"walBuffersFull"`
+	WALSyncs          int64 `json:"walSyncs"`
+	Commits           int64 `json:"commits"`
 }
 
 // windowDelta is the change between two readings, or nil when there is no sampler (a non-Postgres DSN) or
@@ -87,13 +91,15 @@ func (s *dbStatsSampler) windowDelta(before, after dbStats) *dbDelta {
 		return nil
 	}
 	return &dbDelta{
-		StepsBytes:     after.StepsBytes - before.StepsBytes,
-		FlowsBytes:     after.FlowsBytes - before.FlowsBytes,
-		WALBytes:       after.WALBytes - before.WALBytes,
-		WALFPI:         after.WALFPI - before.WALFPI,
-		WALBuffersFull: after.WALBuffersFull - before.WALBuffersFull,
-		WALSyncs:       syncDelta(before.WALSyncs, after.WALSyncs),
-		Commits:        after.Commits - before.Commits,
+		StepsBytes:        after.StepsBytes - before.StepsBytes,
+		FlowsBytes:        after.FlowsBytes - before.FlowsBytes,
+		ArchiveStepsBytes: after.ArchiveStepsBytes - before.ArchiveStepsBytes,
+		ArchiveFlowsBytes: after.ArchiveFlowsBytes - before.ArchiveFlowsBytes,
+		WALBytes:          after.WALBytes - before.WALBytes,
+		WALFPI:            after.WALFPI - before.WALFPI,
+		WALBuffersFull:    after.WALBuffersFull - before.WALBuffersFull,
+		WALSyncs:          syncDelta(before.WALSyncs, after.WALSyncs),
+		Commits:           after.Commits - before.Commits,
 	}
 }
 

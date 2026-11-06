@@ -73,6 +73,37 @@ the pooled connection *inside* that operation, so the pause holds no connection 
 only inside a transaction (the connection is held from `BeginTx`). Since RTT's whole effect on throughput
 is that it occupies connections, the bias runs the wrong way: the pool looks less binding than it is.
 
+**The WAL model: payload to steps/s on a saturated PostgreSQL shard with the archive on.** Fitted 2026-11-06 on one
+32 vCPU Cloud SQL PG16 instance (1 TB SSD, `max_wal_size` 20 GB, `wal_compression=lz4`, the 1 min archive grace),
+`linear` saturated at cap 2,000, `-payload-json` (~3.4x under flate) from 0 to 64 KB. Two terms, both read off any
+artifact (`results[].db`: `walBytes`, `walSyncs`, `commits`):
+
+    flush_ms   ≈ 0.82 + KB_per_flush / 316        (fixed latency + the disk's ~316 MB/s; 15 runs, 0.8-7.5 ms)
+    steps/s    ≈ N / (flush_ms / 1000)            N = steps per flush, KB_per_flush = N x W
+    W (KB/step) ≈ 10 + 1.5 x P_KB  for P >= 4 KB  (JSON, TOAST-compressed); 3.4 at 0 B; 12.0 at 1 KB, 9.1 at 2 KB
+
+`N` is group commit, ~28 steps per flush with any payload and ~21 at 0 B (commits per flush / ~3.15 commits per
+step; ~230 backends active). With those it predicts every rung within ~3% (8 KB: 10,288 against 10,335; 64 KB: 2,750
+against 2,819). As `W` grows, steps/s tends to 316 MB/s / `W`: large payloads are bounded by the disk's bandwidth,
+small ones by its 0.8 ms latency. Four things to hold onto:
+- **The constants belong to the storage.** 0.82 ms and 316 MB/s are this instance's disk; re-derive them (fit
+  `1000/syncs_per_s` against `walBytes/walSyncs`) on other storage, another provider or another disk size before
+  predicting from the formula. Throughput tracks commits per flush, so anything that changes `N` (backends, pool,
+  RTT) moves the rate at a fixed `W`.
+- **`W` is not monotonic below ~4 KB.** 2 KB logs LESS than 1 KB: the likely cause is the ~2 KB TOAST threshold
+  (a 1 KB value stays inline and uncompressed, a 2 KB one is compressed). Unconfirmed - those runs' stored bytes
+  were not recorded; `archiveStepsBytes` in `results[].db` now does.
+- **`W` depends on compressibility.** The incompressible default payload logs more per byte; quote which one.
+- **Checkpoint spacing moves `W`, not the flush constants.** At the 1.5 GB default, 8 KB logged 28.2 KB/step (3.6
+  page images) against 21.7 (1.8) at 20 GB, for 7,042 against 10,335 steps/s.
+
+**A NEW SERVER'S FIRST CHECKPOINTS CREATE ITS WAL FILES, and a saturated arm reads ~8% low until they complete.** On a
+fresh Cloud SQL instance (or after raising `max_wal_size`), every 16 MB segment is created and zero-filled under the
+WAL write lock until checkpoints start recycling them: the 2026-11-06 headline arm, first on its instance, ran ~22.5k
+for minutes 1-3 and ~24.5k after, stepping up as its second checkpoint completed, with `IO/WALInitSync` sampled
+behind ~249 `WALWrite` waiters; later arms on the same instance started at full rate. Warm up past two checkpoints
+(`max_wal_size / 1.9` of WAL each) before a fresh instance's first window, or do not quote its first minutes.
+
 **CONNECTIONS BUY BACK DISTANCE — partially, and with a hard ceiling.** Raising the pool as RTT grows
 held throughput at **93-100%** of base across 0.14 → 5.07 ms (16 vCPU), a **5.05x** recovery at 5 ms
 against what a fixed 96-connection pool would have served. But that compares to base at 96; knee to
@@ -417,8 +448,10 @@ heap** and the crew is mostly stacks.
 ## Reading an artifact
 
 - **`results[].db` is what the database stored and logged over the window** - table + index + TOAST growth
-  and `pg_stat_wal` bytes (PostgreSQL 14+, cluster-wide, so only meaningful on an instance nothing else
-  writes to). Divided by the task-declared bytes behind MB/s it is the amplification. Expect `final_state`
+  of the live tables (`stepsBytes`, `flowsBytes`) and of the archive day tables (`archiveStepsBytes`,
+  `archiveFlowsBytes`), and `pg_stat_wal` bytes (PostgreSQL 14+, cluster-wide, so only meaningful on an instance
+  nothing else writes to). With the archive on, the live tables hold about the grace's worth of rows and barely
+  grow: what a run stored is in the archive's growth. Divided by the task-declared bytes behind MB/s it is the amplification. Expect `final_state`
   to hold a second copy of any large field that survives to the end of the flow: a flow-boundary value is
   always flattened.
 - **An open-loop window's `flowsPerSec` is the ADMISSION rate, not what was served.** Flat out, admission
