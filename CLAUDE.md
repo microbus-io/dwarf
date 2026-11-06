@@ -242,7 +242,7 @@ Create --> running --> completed   (terminal, immutable)
             v
   failed   (terminal, immutable)
 
-  terminated (terminal, immutable, via Terminate)
+  terminated (terminal, immutable, via Terminate or flow expiration)
 
   cancelled  (terminal, immutable, via Cancel when every unrecovered loss was a cancellation)
 

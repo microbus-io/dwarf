@@ -48,15 +48,24 @@ import (
 // its two-connection reader pool once per replica. It ends on ctx, which drainRuntime cancels, abandoning a pass in
 // flight: each batch is one transaction, so an abandoned batch lands whole or not at all, and what is left is reaped
 // by a peer or the next start.
+//
+// The expiration pass (expireFlows) rides the same goroutine, after the reap of the first tick and of any tick at least
+// expireInterval after the last: it has no deadline to keep, and its own time budget bounds how long it holds back the
+// next reap. The first is at once, not an interval in, so that a replica living shorter than the interval still expires.
 func (e *Engine) reaperLoop(ctx context.Context) {
 	ticker := time.NewTicker(e.reapInterval)
 	defer ticker.Stop()
+	var lastExpire time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			e.reapDueFlows(ctx)
+			if time.Since(lastExpire) >= e.expireInterval {
+				lastExpire = time.Now()
+				e.expireFlows(ctx)
+			}
 		}
 	}
 }

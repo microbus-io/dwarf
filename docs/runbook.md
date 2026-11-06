@@ -33,6 +33,7 @@ registry.
 | [Deadlock errors on MySQL or SQL Server](#deadlock-errors-on-mysql-or-sql-server) | Throughput |
 | [Archiving is failing](#archiving-is-failing) | Ended flows deleted unarchived after a minute |
 | [The archive is falling behind](#the-archive-is-falling-behind) | The live tables grow |
+| [An expired flow cannot be terminated](#an-expired-flow-cannot-be-terminated) | The flow stays in the live tables |
 | [Disk did not shrink after a purge](#disk-did-not-shrink-after-a-purge) | Usually no action |
 | [A flow is stuck `interrupted`](#a-flow-is-stuck-interrupted) | Usually not a fault |
 
@@ -461,6 +462,27 @@ unreachable](#one-shard-is-slow-or-unreachable) applies, and more shards spread 
 
 ---
 
+## An expired flow cannot be terminated
+
+**What it means.** `dwarf_flows_expire_failed` is above zero: a flow older than `SetFlowExpiration` was due to be
+terminated and the termination failed. The flow is untouched - still running or interrupted, its outcome not
+decided - and every pass, 5 minutes apart, tries again and counts again. It stays in the live tables meanwhile;
+nothing deletes it.
+
+**Cause.** The error log names the flow and why ("Expiring flows: terminating an expired flow"):
+
+- **The database failed the termination**: a lost connection, a lock wait past its timeout, a deadlock. A transient
+  cause clears on its own; the count stops rising once a pass succeeds.
+- **"terminate did not settle"**: the flow's subgraphs keep spawning new ones faster than a termination can stop
+  them. That is a workflow looping on subgraphs, or a bug.
+
+**Respond.** For a database cause, the same as for [One shard is slow or
+unreachable](#one-shard-is-slow-or-unreachable). A flow that will not settle fails a `Terminate` by hand in the same
+way, so the fix is upstream: find what keeps it spawning (`History` shows the subgraph calls), fix the workflow, and
+let the next pass terminate it. Report it with the flow's key if no workflow explains it.
+
+---
+
 ## Disk did not shrink after a purge
 
 **Expected on PostgreSQL.** `Delete` and `Purge` delete archived flows at once, and mark live ones for a reaper that
@@ -498,8 +520,9 @@ Both must be addressed by the **root** flow key. A subgraph child's key is read-
 and is rejected — address the root and the engine threads the resume down to the right leaf.
 
 **If a flow has been interrupted longer than your business process allows**, that is a policy question rather
-than an engine fault: the engine imposes no flow lifetime. Find them with `ListLive` filtered on
-`Status: interrupted` and a `ToTime` that far back, and terminate or escalate per your own rules.
+than an engine fault. Find them with `ListLive` filtered on `Status: interrupted` and a `ToTime` that far back, and
+terminate or escalate per your own rules. To have the engine terminate every flow older than a bound, set
+[`SetFlowExpiration`](flows.md#expiring-flows-that-never-end).
 
 ---
 

@@ -87,8 +87,12 @@
 ## Data and retention
 
 - [ ] **The retention is set to what you must keep.** Ended flows are archived and kept for `SetRetention` days
-  (30 by default), then dropped a day at a time; flows that have not ended are never removed by the engine.
+  (30 by default), then dropped a day at a time; flows that have not ended are never removed by the engine, unless
+  they expire (below).
   → [Data handling](data-handling.md#retention-and-deletion)
+- [ ] **Abandoned flows are bounded, if they can occur.** A flow left interrupted, or polling forever, stays in the
+  live tables until it ends. `SetFlowExpiration` terminates any flow older than it.
+  → [Expiring flows that never end](flows.md#expiring-flows-that-never-end)
 - [ ] **The archive's disk is sized for the retention**: a day's ended flows times the retention, per shard.
 - [ ] **Backups cover every shard on the same schedule**, and a restore has been rehearsed against a staging
   fleet — the part worth testing is what your workflows do when they re-run.
@@ -119,8 +123,8 @@
   → [Writing tasks](tasks.md#large-integers-exact-in-storage-rounded-by-untyped-reads)
 - [ ] **Every field whose writes should combine has an explicit reducer.** There is no inference from a field's name —
   an unwired `sumTotal` silently takes `replace`, not `add`. → [Building graphs](graphs.md)
-- [ ] **Flow lifetimes are bounded in author space** if you need them bounded. The engine imposes no flow
-  deadline, and `interrupted` flows wait indefinitely. → [Writing tasks](tasks.md#timestamps)
+- [ ] **Flow deadlines your workflows rely on are in author space.** An `interrupted` flow waits indefinitely unless
+  `SetFlowExpiration` is set, and that terminates without running any of your code. → [Writing tasks](tasks.md#timestamps)
 
 ## First week
 

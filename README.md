@@ -59,7 +59,7 @@ fmt.Println(out.State.GetString("greeting")) // hello ada
   fairness within a band so one tenant can't starve another.
 - **Scales horizontally.** Run many replicas against sharded databases; they coordinate entirely through
   the databases they already share, with no message bus to run between them.
-- **OTEL-native observability.** Structured logs (`slog`), 47 `dwarf_*` instruments, and distributed tracing,
+- **OTEL-native observability.** Structured logs (`slog`), 49 `dwarf_*` instruments, and distributed tracing,
   all through standard providers you inject.
 - **Four SQL dialects.** PostgreSQL, MySQL/MariaDB, SQL Server, and SQLite (testing / single-instance).
 - **Free, and cheap at scale.** Apache 2.0 — no license tier, no vendor, no per-operation pricing. One

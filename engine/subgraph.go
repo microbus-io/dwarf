@@ -101,16 +101,17 @@ const maxTerminateRuns = 16
 // sweep starts at a child whose whole ancestor chain is already terminal.
 //
 // A tree that went terminal concurrently is a no-op, for every caller: the transaction rolls back so the step
-// writes never touch a frozen tree, and nothing is counted or signalled. commitFault is a test-only seam name,
-// checked before any write so a fired fault proves the whole transaction rolls back atomically; pass "" for none.
-func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHour int, flowToken, reason, commitFault string) error {
+// writes never touch a frozen tree, and nothing is counted or signalled. ended reports whether this call ended the
+// flow at flowID. commitFault is a test-only seam name, checked before any write so a fired fault proves the whole
+// transaction rolls back atomically; pass "" for none.
+func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHour int, flowToken, reason, commitFault string) (ended bool, err error) {
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
-		return errors.Trace(err)
+		return false, errors.Trace(err)
 	}
 	descendantFlowIDs, descendantCompositeIDs, labelByFlowID, err := e.allSubgraphFlows(ctx, db, shardNum, flowID)
 	if err != nil {
-		return errors.Trace(err)
+		return false, errors.Trace(err)
 	}
 	e.seams.Checkpoint(ctx, engineseams.CheckpointTerminateAfterScan)
 	allFlowIDs := append([]any{flowID}, descendantFlowIDs...)
@@ -124,7 +125,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 	var terminalized []bool // per allFlowIDs entry: its UPDATE matched, so this transaction ended it
 	for run := 1; ; run++ {
 		if run > maxTerminateRuns {
-			return errors.New("terminate did not settle after %d runs; the tree kept spawning subgraphs", maxTerminateRuns, http.StatusServiceUnavailable)
+			return false, errors.New("terminate did not settle after %d runs; the tree kept spawning subgraphs", maxTerminateRuns, http.StatusServiceUnavailable)
 		}
 		grew := false
 		err = db.Transact(ctx, func(tx *sequel.Tx) error {
@@ -267,10 +268,10 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 		break
 	}
 	if settled {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return errors.Trace(err)
+		return false, errors.Trace(err)
 	}
 
 	for i, cid := range allCompositeIDs {
@@ -287,7 +288,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 		e.metricFlowEnded(ctx, label.workflowURL, workflow.StatusTerminated, label.priority, shardNum)
 		e.signalStop(ctx, cid, workflow.StatusTerminated)
 	}
-	return nil
+	return len(terminalized) > 0 && terminalized[0], nil
 }
 
 // completeSurgraphFlow re-dispatches a parked surgraph step after its child completes.

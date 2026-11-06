@@ -44,7 +44,7 @@ It defaults to the global `otel.GetMeterProvider()` — the no-op provider unles
 OpenTelemetry SDK. The engine builds its instruments under the scope `github.com/microbus-io/dwarf`;
 service identity comes from the provider's Resource, not from per-metric attributes.
 
-The engine emits 47 instruments — 22 counters, 19 gauges, and 6 histograms. Counter instrument names carry **no** `_total`
+The engine emits 49 instruments — 24 counters, 19 gauges, and 6 histograms. Counter instrument names carry **no** `_total`
 suffix; a Prometheus exporter appends it at the scrape boundary, so the names below are what you query in
 PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried as `dwarf_flows_started_total`):
 
@@ -90,6 +90,8 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_flows_archived` | counter | `shard` | flows moved into the archive: each root and every subgraph flow of its tree | `dwarf_flows_archived_total` |
 | `dwarf_flows_reaped` | counter | `shard`, `reason` | flows deleted from the live tables without being archived. `reason` is `deleted` (scheduled for deletion by `Delete`, `Purge` or `DeleteOnCompletion`), `no_retention` (a retention of 0) or `archive_failed` (archiving had been failing for a minute, so ended flows were deleted rather than left to fill the live tables). `archive_failed` is records lost from the archive: expect zero | `dwarf_flows_reaped_total` |
 | `dwarf_flows_removed` | counter | `shard`, `op`, `side` | root flows `Delete` and `Purge` removed. `op` is `delete` or `purge`; `side` is `archive` for a flow deleted from the archive, or `live` for an ended flow not archived yet, which is scheduled for deletion and then counted in `dwarf_flows_reaped{reason="deleted"}`, there by flow rather than by root | `dwarf_flows_removed_total` |
+| `dwarf_flows_expired` | counter | `shard` | root flows terminated because they were still running or interrupted `SetFlowExpiration` after their creation. Each is also counted in `dwarf_flows_ended{status="terminated"}`, with its subgraph flows | `dwarf_flows_expired_total` |
+| `dwarf_flows_expire_failed` | counter | `shard` | attempts to terminate an expired flow that failed. It counts attempts, not flows: a flow that fails again is counted every 5 minutes until it is terminated. Expect zero; see [An expired flow cannot be terminated](runbook.md#an-expired-flow-cannot-be-terminated) | `dwarf_flows_expire_failed_total` |
 | `dwarf_archive_days_dropped` | counter | `shard` | archive days dropped, by the retention or by `PurgeBefore`. At a steady retention, one per shard a day; two replicas dropping the same day at the same moment can each count it | `dwarf_archive_days_dropped_total` |
 | `dwarf_archive_maintain_failed` | counter | `shard` | archive maintenance passes that failed. A pass runs 24 times a day, makes the days ahead and drops the expired ones; a failure is retried by the next | `dwarf_archive_maintain_failed_total` |
 | `dwarf_reap_pass_seconds` | histogram | `shard` | one pass of the background reaper on a shard, which runs every 15 seconds: the flows scheduled for deletion removed, then the ended flows archived | `dwarf_reap_pass_seconds` |
@@ -271,7 +273,7 @@ workflows shows up in the same pipeline: per-operation spans (nested under the a
 logs, and nine `sequel_*` instruments — all under the scope `github.com/microbus-io/sequel`. The logger is
 forwarded only when you explicitly set one, so an unconfigured engine stays silent here too.
 
-**These are not dwarf's instruments and are not part of the 47 above**, but you will see them on the same
+**These are not dwarf's instruments and are not part of the 49 above**, but you will see them on the same
 scrape, and two of them answer questions no `dwarf_*` metric can:
 
 | `sequel_*` instrument | Type | Labels | Measures |

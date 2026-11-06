@@ -103,9 +103,10 @@ type Engine struct {
 	workers                atomic.Int32
 	workersSet             atomic.Bool // SetWorkers was called: skip the derived default
 	timeBudgetMs           atomic.Int64
-	maxPriority            int          // construction-time only, see SetMaxPriority
-	retentionDays          int          // construction-time only, see SetRetention
-	refillIntervalOverride atomic.Int64 // bench override (nanoseconds): pins every piston's cycle period; <=0 = derive
+	maxPriority            int           // construction-time only, see SetMaxPriority
+	retentionDays          int           // construction-time only, see SetRetention
+	flowExpiration         time.Duration // construction-time only, see SetFlowExpiration; 0 is off
+	refillIntervalOverride atomic.Int64  // bench override (nanoseconds): pins every piston's cycle period; <=0 = derive
 
 	// engineID is a random positive identifier minted per engine instance (fresh on every restart). It is
 	// this replica's identity in the shared dwarf_peers registry - the primary key its Sonars own a row
@@ -345,10 +346,15 @@ type Engine struct {
 	// purgeChunk is how many roots one Purge statement names, a field so a test can drive several chunks. A literal
 	// IN list in the tens of thousands of terms can fail to plan outright on SQL Server (errors 8623 / 8632); 4,096
 	// keeps an order of magnitude under it.
-	purgeChunk         int
-	reapInterval       time.Duration // reaper goroutine tick; read once at Startup (15s)
-	leaseRecoveryBatch int           // ids per lease-recovery reset, embedded as a literal IN list (1024)
-	maxPayloadBytes    int           // largest JSON value written into one payload column (maxPayloadBytes)
+	purgeChunk   int
+	reapInterval time.Duration // reaper goroutine tick; read once at Startup (15s)
+	// The expiration pass (expiration.go): how often it runs in the reaper's goroutine (5m), how long one shard's pass
+	// may keep starting terminations (30s), and how many rows one page of its walk reads (256).
+	expireInterval     time.Duration
+	expireBudget       time.Duration
+	expirePage         int
+	leaseRecoveryBatch int // ids per lease-recovery reset, embedded as a literal IN list (1024)
+	maxPayloadBytes    int // largest JSON value written into one payload column (maxPayloadBytes)
 	// persistBackoff is the outcome-write retry schedule (1s doubling to 32s, a minute in all), exponential
 	// because the errors it exists for - a dropped connection, a failover - clear in seconds to tens of seconds. A
 	// longer ladder would be slow to report a permanent failure. A per-engine field (not a package var) so a test
@@ -414,6 +420,9 @@ func NewEngine() *Engine {
 	e.reapBatchRows = 4096
 	e.purgeChunk = 4096
 	e.reapInterval = 15 * time.Second
+	e.expireInterval = 5 * time.Minute
+	e.expireBudget = 30 * time.Second
+	e.expirePage = 256
 	e.retentionDays = defaultRetentionDays
 	e.leaseRecoveryBatch = 1024
 	e.maxPayloadBytes = maxPayloadBytes

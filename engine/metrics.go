@@ -64,6 +64,8 @@ type engineMetrics struct {
 	flowsRemoved        metric.Int64Counter
 	daysDropped         metric.Int64Counter
 	maintainFailed      metric.Int64Counter
+	flowsExpired        metric.Int64Counter
+	expireFailed        metric.Int64Counter
 	reapPassSeconds     metric.Float64Histogram
 
 	reg metric.Registration // the observable-gauge callback registration, unregistered at Shutdown
@@ -265,6 +267,8 @@ func (e *Engine) initMetrics() error {
 	m.flowsRemoved = ctr("dwarf_flows_removed", "Counts root flows Delete and Purge removed, by shard, by operation (op: delete, purge) and by side: archive for a tree deleted from the archive at once, live for an ended tree in the live tables scheduled for deletion, which the reaper then deletes within a tick and counts as dwarf_flows_reaped{reason=\"deleted\"}.")
 	m.daysDropped = ctr("dwarf_archive_days_dropped", "Counts archive days dropped, by shard: by retention, or by PurgeBefore. At a steady retention it rises by one per shard a day; two dispatchers dropping the same day at once can each count it.")
 	m.maintainFailed = ctr("dwarf_archive_maintain_failed", "Counts archive maintenance passes that failed, by shard: the pass that makes the days ahead and drops the expired days, run 24 times a day by a dispatcher of the shard. One failure is retried by the next pass; a run of them leaves the days ahead unmade, and one to two days of them stop archiving (dwarf_archive_failing_seconds). A pass cut short by Shutdown is not counted.")
+	m.flowsExpired = ctr("dwarf_flows_expired", "Counts root flows terminated because they had not ended within the flow expiration (SetFlowExpiration), by shard. Each is also counted in dwarf_flows_ended{status=\"terminated\"}, with its subgraph flows. Zero while the expiration is off.")
+	m.expireFailed = ctr("dwarf_flows_expire_failed", "Counts attempts to terminate an expired root flow that failed, by shard - attempts, not flows: a root that fails again is counted on every pass, 5 minutes apart, until it is terminated. Expect zero: a database failing the termination, or a tree spawning subgraphs faster than it can be stopped. The error log names the flow and the cause.")
 	reapPassSeconds, err := meter.Float64Histogram("dwarf_reap_pass_seconds",
 		metric.WithUnit("s"),
 		metric.WithDescription("Time one reaper pass spent on a shard, by shard: from its turn at the shard to the end of its work - the trees scheduled for deletion removed, then the ended trees archived, each batch by batch until none is due. A pass runs every 15 seconds on each dispatcher of the shard. Passes that grow toward that interval mean the reaper is falling behind the rate flows end; read dwarf_archive_lag_seconds for how far."),
@@ -757,4 +761,20 @@ func (e *Engine) metricReapPass(ctx context.Context, shardNum int, d time.Durati
 		return
 	}
 	e.metrics.reapPassSeconds.Record(ctx, d.Seconds(), metric.WithAttributes(shardAttr(shardNum)))
+}
+
+// metricFlowsExpired counts the roots one expiration pass terminated on a shard.
+func (e *Engine) metricFlowsExpired(ctx context.Context, shardNum, n int) {
+	if e.metrics == nil || n <= 0 {
+		return
+	}
+	e.metrics.flowsExpired.Add(ctx, int64(n), metric.WithAttributes(shardAttr(shardNum)))
+}
+
+// metricExpireFailed counts one failed attempt to terminate an expired root.
+func (e *Engine) metricExpireFailed(ctx context.Context, shardNum int) {
+	if e.metrics == nil {
+		return
+	}
+	e.metrics.expireFailed.Add(ctx, 1, metric.WithAttributes(shardAttr(shardNum)))
 }

@@ -97,9 +97,11 @@ one, otherwise the engine default from `SetTimeBudget` (2 minutes unless changed
 the flow is created and applies to every step of it, its subgraphs included. It is at most just under 24.8 days
 (a 32-bit count of milliseconds); a step whose replica crashes is not run again until its budget has passed, so a task that waits for
 days should `Sleep` or `Interrupt` rather than hold one long call. Your executor must honor `ctx` cancellation. For a tighter per-task bound,
-enforce it inside your executor (shorten the call context); the engine's budget is the outer ceiling. There
-is no engine-imposed *flow* deadline — implement one in author space with a `CreatedAt()` guard (see
-[Writing tasks → Timestamps](tasks.md#timestamps)).
+enforce it inside your executor (shorten the call context); the engine's budget is the outer ceiling. A
+*flow* deadline is the workflow's own: implement one in author space with a `CreatedAt()` guard (see
+[Writing tasks → Timestamps](tasks.md#timestamps)). `SetFlowExpiration` is an operator's backstop against flows that
+never end, and terminates them without running any task ([Expiring flows that never
+end](flows.md#expiring-flows-that-never-end)).
 
 ## Workers
 

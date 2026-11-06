@@ -288,9 +288,9 @@ continue the key the last `Continue` returned. Continuing one flow twice gives t
 
 ## Retention
 
-A flow that has not ended is never removed by the engine. About a minute after it ends it moves to the archive,
-which keeps each day's ended flows for `SetRetention` days (30 by default) and then drops the day whole;
-`PurgeBefore(t)` drops every archived day before t's. With a retention of 0 an ended flow is deleted instead.
+A flow that has not ended is never removed by the engine, unless the engine is set to expire flows (below). About a
+minute after it ends it moves to the archive, which keeps each day's ended flows for `SetRetention` days (30 by
+default) and then drops the day whole; `PurgeBefore(t)` drops every archived day before t's. With a retention of 0 an ended flow is deleted instead.
 An archived flow reads as it did before it moved: `Snapshot`, `Fingerprint`, `Await`, `Poll`, `Run`, `History`,
 `Step` and `Continue` find it by its key, `Fork` clones it, `ListArchived` lists it, and a flow whose day was dropped
 reads as not found.
@@ -335,6 +335,22 @@ are for removing specific records, and bulk removal is the retention's and `Purg
 A flow created with `FlowOptions.DeleteOnCompletion` schedules its own deletion when it completes successfully
 (a failed, terminated or cancelled flow is archived like any other). Its outcome stays observable via `Await`/`Snapshot` for a short grace window
 before the reaper removes it — so a fire-and-forget caller can still `Run` it and read the result.
+
+### Expiring flows that never end
+
+`SetFlowExpiration(d)` caps how long after its creation a flow may still be running or interrupted. A flow still
+running or interrupted once it is older than `d` is terminated, with its subgraphs, and its `TerminateReason` says it expired;
+it is then archived like any other terminated flow. It bounds what an abandoned interrupt or a flow polling forever
+leaves in the live tables. The check runs every 5 minutes, so a flow ends up to about that long after it expires. It
+is off by default, and a flow created by `Continue` or `Fork` counts from its own creation, so a long conversation
+carried on with `Continue` is never expired as a whole.
+
+```go
+err := eng.SetFlowExpiration(30 * 24 * time.Hour) // before Startup; the same value on every replica
+```
+
+Terminating is forceful: a step running when its flow expires is abandoned, as with `Terminate`. Set `d` well above
+the longest a flow is meant to live.
 
 ## Operational
 

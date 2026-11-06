@@ -1733,7 +1733,7 @@ It is immutable for the flow's life, like `priority`, and **inherited by subgrap
 retro-edit existing flows; it only seeds flows created afterward. On a subgraph spawn the child's `LoadGraph` is
 bounded by the caller flow's budget; the create-time `LoadGraph` runs on the caller's own request context instead.
 
-**No engine-imposed SLA ceiling** on `FlowOptions.TimeBudget`, for the reason it owns no flow-level deadline: a host
+**No engine-imposed SLA ceiling** on `FlowOptions.TimeBudget`, for the reason it owns no deadline an author relies on: a host
 wanting an SLA cap rejects an over-limit budget before `Create`, and a caller setting a very large one owns the
 consequences below. The only bound is storage: `maxTimeBudget`, just under 2^31-1 ms, because the claim's
 `time_budget_ms + ?` is computed as a 32-bit integer on Postgres.
@@ -1935,11 +1935,13 @@ Writes to *other* rows (a shared cohort spawn step, the flow row, child flows) a
 to prove and are already arbitrated by the transition-tx flow-row lock-grab; the terminal-flow reap at claim
 time (`status=flowStatus WHERE step_id=?`) converges to the frozen outcome idempotently and is left unfenced.
 
-### Flow lifetime is the workflow author's responsibility
+### A flow's deadline is the workflow author's; the engine's expiration is a backstop
 
-The engine imposes no flow-level deadline. Picking a max-lifetime that fits both a 1-hour batch and a 30-day approval
-workflow is impossible, and a knob defaulting to "no deadline" is surface area without a customer. Workflows needing a
-bound implement it in author space: a guard task reading `flow.CreatedAt()` that returns a 408 when too much time has
+The engine sets no deadline a flow's author can rely on as part of its behaviour. Picking a lifetime that fits both a
+1-hour batch and a 30-day approval workflow is impossible. `SetFlowExpiration` is not one: it is an operator's backstop
+against flows nobody will end (an abandoned interrupt, a poller looping forever), engine-wide, off by default, and it
+terminates rather than failing through the graph, so no author code sees it coming (see "The archive"). Workflows
+needing a bound implement it in author space: a guard task reading `flow.CreatedAt()` that returns a 408 when too much time has
 elapsed; a `flow.Retry` loop that exhausts after a chosen bound; an `OnError`/timeout transition; or an external
 caller scheduling a `Terminate`. `Flow.CreatedAt()` and `Flow.UpdatedAt()` are populated on every dispatch, so the
 elapsed-time guard is one call away inside any task.
@@ -3048,7 +3050,7 @@ all other cloned steps to `parkedNone`), so cloned rows never inherit a stale no
 
 ## Metrics (`engine/metrics.go`)
 
-The engine emits 47 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
+The engine emits 49 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
 injects the provider; it defaults to the global `otel.GetMeterProvider()` - no-op unless the host configures the
 SDK, so unconfigured/standalone/test use pays nothing. Instruments are built once in `initMetrics` (from
 `initRuntime`, so every `Startup` gets them) from `mp.Meter("github.com/microbus-io/dwarf")` - that
@@ -3163,8 +3165,8 @@ end is load-bearing (`internal/piston/CLAUDE.md`).
   cost by deepening the backlog moved throughput -1% (noise). Do not narrow the selection index or revive
   skip-scans on throughput grounds; they need another justification (server CPU headroom).
 
-**22 counters** in total: the 8 event counters above, plus `dwarf_steps_offered` /
-`dwarf_steps_claim_preempted` / `dwarf_steps_claim_lost` / `dwarf_peer_changes`, plus the archive's five (below), plus the three the pistons
+**24 counters** in total: the 8 event counters above, plus `dwarf_steps_offered` /
+`dwarf_steps_claim_preempted` / `dwarf_steps_claim_lost` / `dwarf_peer_changes`, plus the archive's five (below), plus `dwarf_flows_expired` / `dwarf_flows_expire_failed`, plus the three the pistons
 own (`dwarf_refill_candidates_selected` / `_discarded`, `dwarf_steps_stolen`), plus the two byte counters,
 `dwarf_state_write_bytes` / `dwarf_state_read_bytes` (labels `workflow` + `column`, unit `By`) - payload
 bytes the engine writes to / reads from **step rows on the execution path**. The `column` label is the
@@ -3613,6 +3615,27 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
   no archive**: ended roots are deleted rather than archived, and every day before today is dropped, but the tables of
   today and the days ahead are still made - nothing writes them - so the shape of a shard does not depend on the setting. Keeping it indefinitely is a large number of days,
   never a sentinel. Any replica's pass may drop a day, so the smallest retention in the fleet wins.
+- **`SetFlowExpiration(d)`, construction-time, default off** (`expiration.go`): a root still `running` or `interrupted`
+  `d` after its creation is terminated by `terminateSubtree` with a fixed reason (`expirationReason`), then archives
+  as any terminated tree. **The pass reads no index of its own: it walks the primary key oldest first** and stops at
+  the first row that has not expired, which works because `flow_id` follows creation order and every flow row's
+  `created_at` is the column default - Fork's clone writes none (it lists its columns), and `Continue` is a Create.
+  Keep it so: a flow insert that copied an older `created_at` would sit past a young row and never expire. **Do not
+  add a `(status, created_at)` index for it**: one more index entry, and its WAL, on every flow insert and every
+  flow-row update (none is HOT, since nearly every one sets the indexed `updated_at`). The walk passes over ended flows waiting for the reaper and subgraph children (ended with their
+  root), a page (`expirePage`, 256) at a time. It runs in the reaper's goroutine, after the reap of any tick
+  `expireInterval` (5 min) after the last, per shard on its dispatchers, on a turn; **its time budget**
+  (`expireBudget`, 30 s, checked after the first termination so a pass always progresses) is what keeps a first-time
+  backlog - expiration turned on over months of abandoned flows, thousands of tree transactions - from holding back
+  archiving: the rest waits for the next pass, which logs once per pass that hits it. `dwarf_flows_expired` counts
+  the roots `terminateSubtree` reports it ended (`ended`), so two dispatchers meeting on a root count it once; every
+  dispatcher of a shard walks the same rows, which a duplicate termination makes harmless (the later one is a no-op),
+  and the budget counts attempts, so a dispatcher losing every race to a peer is still cut off. **A root that fails to
+  terminate is logged, counted (`dwarf_flows_expire_failed`, attempts, not under a cancelled ctx) and passed over**,
+  never ends the pass: every pass walks from the oldest, so a root failing every
+  time would otherwise stop expiration on the shard for good. **The first pass runs on the reaper's first tick**, not an
+  interval in, for the archive loop's reason: a replica living shorter than the interval would never expire anything.
+  Pinned by `engine/expiration_test.go`.
 - **Startup does not serve before today's tables exist on every shard**, whatever the retention (`startArchives`, right after the shards
   open and before the fleet join, so a failure has only the shards to close), and those of the two days after. It
   takes no turn: no worker exists yet. The

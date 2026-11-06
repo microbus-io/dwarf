@@ -456,7 +456,8 @@ external store, as above.
 ## Timestamps
 
 `f.CreatedAt()` and `f.UpdatedAt()` are populated on every dispatch. Use `CreatedAt` to implement a
-workflow-level deadline in author space — the engine imposes none:
+workflow-level deadline in author space, where the flow can still act on it — the engine's only limit,
+[`SetFlowExpiration`](flows.md#expiring-flows-that-never-end), terminates without running a task:
 
 ```go
 if time.Since(f.CreatedAt()) > 24*time.Hour {

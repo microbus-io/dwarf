@@ -801,7 +801,8 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 
 	// The root has no ancestors by construction, so this walks DOWN only - see terminateSubtree, which the orphan
 	// sweep shares.
-	return errors.Trace(e.terminateSubtree(ctx, shardNum, flowID, flowHour, flowToken, reason, engineseams.FaultTerminateCommit))
+	_, err = e.terminateSubtree(ctx, shardNum, flowID, flowHour, flowToken, reason, engineseams.FaultTerminateCommit)
+	return errors.Trace(err)
 }
 
 // cancel marks every pending, running or interrupted step in the tree with cancelling=1. Each marked step
