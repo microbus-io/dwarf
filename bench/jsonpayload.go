@@ -30,8 +30,19 @@ import (
 //
 // The documents are built once, before the run, and handed out at random: building one per task would load the
 // engine host the run is measuring. Documents in different rows may repeat, since each is compressed on its own.
+//
+// Each document is also known by its record count and the sum of its records' ids, so a task handed one can check it
+// arrived whole (holds) without comparing bytes, which the database does not keep: PostgreSQL's JSONB reorders keys.
 type jsonPayloads struct {
 	docs []json.RawMessage
+	keys map[jsonDocKey]struct{}
+}
+
+// jsonDocKey identifies a document by its records: ids are random up to 10M, so two documents agreeing on both is
+// a coincidence a run will not meet.
+type jsonDocKey struct {
+	records int
+	idSum   int64
 }
 
 // jsonPayloadPoolBytes bounds the memory the built documents take, so a large -payload builds a few rather than many.
@@ -40,11 +51,50 @@ const jsonPayloadPoolBytes = 64 << 20
 // newJSONPayloads builds the documents for payloads of about size bytes.
 func newJSONPayloads(size int) *jsonPayloads {
 	n := min(1024, max(2, jsonPayloadPoolBytes/max(size, 1)))
-	j := &jsonPayloads{docs: make([]json.RawMessage, n)}
+	j := &jsonPayloads{docs: make([]json.RawMessage, n), keys: make(map[jsonDocKey]struct{}, n)}
 	for i := range j.docs {
 		j.docs[i] = jsonDoc(size)
+		key, err := keyOfJSONDoc(j.docs[i])
+		if err != nil {
+			panic(err)
+		}
+		j.keys[key] = struct{}{}
 	}
 	return j
+}
+
+// nextN returns n of the documents, at random.
+func (j *jsonPayloads) nextN(n int) []json.RawMessage {
+	out := make([]json.RawMessage, n)
+	for i := range out {
+		out[i] = j.next()
+	}
+	return out
+}
+
+// holds reports whether doc is one of the documents, whole: the same records, by count and ids.
+func (j *jsonPayloads) holds(doc []byte) bool {
+	key, err := keyOfJSONDoc(doc)
+	if err != nil {
+		return false
+	}
+	_, ok := j.keys[key]
+	return ok
+}
+
+// keyOfJSONDoc decodes a document's record ids into its key.
+func keyOfJSONDoc(doc []byte) (jsonDocKey, error) {
+	var records []struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(doc, &records); err != nil {
+		return jsonDocKey{}, err
+	}
+	key := jsonDocKey{records: len(records)}
+	for _, r := range records {
+		key.idSum += r.ID
+	}
+	return key, nil
 }
 
 // next returns one of the documents, at random.

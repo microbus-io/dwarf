@@ -564,11 +564,12 @@ at a size where it outlasts its timeout the fill never reaches a checkpoint at a
 ## Flags worth knowing
 
 `-payload P` (fresh incompressible bytes per `linear`/`fanout` task, the element size of `scatter`; 0 = none
-for those three, 64 KB for `state`/`carry`), `-payload-json` (with `-payload` on `linear`/`fanout`: a JSON array
-of records of about that size whose keys and words repeat, ~3.4x under flate, so TOAST compression and
+for those three, 64 KB for `state`/`carry`), `-payload-json` (with `-payload` on `linear`/`fanout`/`scatter`, or with
+`-mix` for every class with a payload: a JSON array of records of about that size whose keys and words repeat, ~3.4x under flate, so TOAST compression and
 `wal_compression` act on it as on real documents; the incompressible default measures raw write volume and hides
 what either compression buys), `-workload scatter -branch-depth D` (the doc -> pages shape that
-item refs change; each branch checks its element arrived whole), `-volume-probe D` (a saturated and a 2/3
+item refs change; each branch checks its element arrived whole - a JSON element by its record count and id sum,
+since JSONB keeps the records but not the bytes), `-volume-probe D` (a saturated and a 2/3
 window at each `-volume` checkpoint, the backlog drained between them), `-print-pool RTT -server-max-connections N` (the
 budget the engine derives at that RTT against that server limit, for a script to pin), `-open-loop -arrival-rate N -max-outstanding M` (commanded rate + backpressure bound), `-replica-workers`
 (per-replica worker counts; `0` = await-only, `1` = capacity-crippled and grow-on-demand disabled),

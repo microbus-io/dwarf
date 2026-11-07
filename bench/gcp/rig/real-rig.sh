@@ -4,6 +4,9 @@
 # generate half the load each, and a c4a-standard-2 admin host (psql, s-mon.sh, v-mon.sh).
 #   0  draw check: both replicas, saturated linear 0 B, 1 + 6 min; dbcpu.sh's core-ms per step above $DRAW_MAX is a slow
 #      draw, redrawn at most $REDRAWS times.
+# $DBFLAGS defaults to docs/deployment.md's settings: max_wal_size 20 GB, checkpoint_timeout 15 min, wal_compression
+# lz4, autovacuum_work_mem 1 GB. Every payload in the calibration and the day is a -payload-json document, which
+# compresses as real JSON does.
 #   1  calibration: the mix, saturated, 2 + 16 min, fresh database. C_mix is the replicas' summed rate over the last 5
 #      minutes of the window. If it is under 14,000 steps/s every level below is scaled to 0.85 x C_mix / 12,000.
 #   2  the day: three 90-minute periods (4.5 h) of night 8,000 / ramp / day 12,000 / ramp, bursts to 16,000 at
@@ -27,7 +30,7 @@ R=$(cd "$D/../../.." && pwd)
 S=${RIG_HOME:-$R/tmp/rig}
 PROJECT=${PROJECT:-dwarf-bench-mbus} ZONE=${ZONE:-us-east4-a} NAME=${NAME:-real}
 TIER=${TIER:-db-custom-32-131072}
-DBFLAGS=${DBFLAGS-cloudsql.enable_auto_explain=on,auto_explain.log_min_duration=10000,log_lock_waits=on,autovacuum_work_mem=1048576}
+DBFLAGS=${DBFLAGS-cloudsql.enable_auto_explain=on,auto_explain.log_min_duration=10000,log_lock_waits=on,autovacuum_work_mem=1048576,max_wal_size=20480,checkpoint_timeout=900,wal_compression=lz4,log_checkpoints=on}
 RTT_MAX=${RTT_MAX:-0.35} DRAW_MAX=${DRAW_MAX:-1.35} REDRAWS=${REDRAWS:-2}
 NIGHT=${NIGHT:-8000} DAY=${DAY:-12000} BURST=${BURST:-16000}
 RESTART_A=${RESTART_A:-137} RESTART_B=${RESTART_B:-141} # minutes into the run: period 2's day phase, clear of its bursts
@@ -149,7 +152,7 @@ stopreq
 authok; late; RUN_DB=dwarf_real_cal; fresh $RUN_DB
 start=$(( $(date +%s) + 30 ))
 log "calibration: the mix saturated, 2 + 16 min"
-both cal "$start" -mix "$MIX" -task-delay-dist "$DIST" -fairness-keys 200 -open-loop -arrival-rate 0 -concurrency 128 -max-outstanding 3000
+both cal "$start" -mix "$MIX" -payload-json -task-delay-dist "$DIST" -fairness-keys 200 -open-loop -arrival-rate 0 -concurrency 128 -max-outstanding 3000
 a=$(steps "$EA" "cal-$EA"); b=$(steps "$EB" "cal-$EB")
 CMIX=$(( ${a##* } + ${b##* } ))
 log "  C_mix $CMIX steps/s over the last 5 min (window means $(( ${a%% *} + ${b%% *} )))"
@@ -170,7 +173,7 @@ PROFILE="25m:$NIGHT,10m:$NIGHT-$DAY,40m:$DAY,15m:$DAY-$NIGHT"
 BURSTS="10m+2m:$BURST,40m+2m:$BURST,58m+5m:$BURST"
 authok; late; RUN_DB=dwarf_real; fresh $RUN_DB
 EPOCH=$(( $(date +%s) + 120 ))
-DAYARGS="-real 270m -arrival-epoch $EPOCH -arrival-share 0.5 -arrival-profile '$PROFILE' -arrival-bursts '$BURSTS' -arrival-noise 0.1 -arrival-seed 1 -mix '$MIX' -task-delay-dist '$DIST' -fairness-keys 200 -fairness-skew 1.1 -priority-mix '$PRIO' -retention 30m -concurrency 128 -max-outstanding 150000"
+DAYARGS="-real 270m -arrival-epoch $EPOCH -arrival-share 0.5 -arrival-profile '$PROFILE' -arrival-bursts '$BURSTS' -arrival-noise 0.1 -arrival-seed 1 -mix '$MIX' -payload-json -task-delay-dist '$DIST' -fairness-keys 200 -fairness-skew 1.1 -priority-mix '$PRIO' -retention 30m -concurrency 128 -max-outstanding 150000"
 echo "$DAYARGS" > "$OUT/day-args.txt"
 log "the day: epoch $(date -r $EPOCH '+%H:%M:%S'), profile $PROFILE, bursts $BURSTS"
 vmssh "$ADMIN" "setsid nohup ./s-mon.sh $(( 300 * 60 )) out/mon-day.log '$(dsn $RUN_DB)' > /dev/null 2>&1 < /dev/null &"

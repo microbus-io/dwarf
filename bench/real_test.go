@@ -138,7 +138,7 @@ func TestBuildMix(t *testing.T) {
 	h := &benchHost{graphs: map[string]*workflow.Graph{}, tasks: map[string]func(context.Context, *workflow.Flow) error{}, bytesWritten: &atomic.Int64{}}
 	classes, err := parseMix("0.75:linear:0,0.25:fanout:1K:8", 16)
 	assert.NoError(err)
-	pick, picked, mean := buildMix(h, classes, 10)
+	pick, picked, mean := buildMix(h, classes, 10, false)
 	assert.Equal(10.0, mean, "both shapes are ten steps")
 	assert.NotEqual(picked[0].graphURL, picked[1].graphURL)
 	counts := map[string]int{}

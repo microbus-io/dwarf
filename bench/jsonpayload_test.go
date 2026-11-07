@@ -66,3 +66,28 @@ func TestJSONPayload_SizedValidAndCompressible(t *testing.T) {
 	// A large size builds only as many documents as the pool bound allows.
 	assert.Len(newJSONPayloads(jsonPayloadPoolBytes/4).docs, 4)
 }
+
+func TestJSONPayload_HoldsKnowsItsDocumentsWhole(t *testing.T) {
+	assert := testarossa.For(t)
+
+	j := newJSONPayloads(4 * 1024)
+	doc := j.docs[0]
+	assert.True(j.holds(doc))
+
+	// The database keeps the document's records, not its bytes: re-encoded with its keys in another order (as
+	// JSONB stores it) it is still the same document.
+	var records []map[string]any
+	assert.NoError(json.Unmarshal(doc, &records))
+	reordered, err := json.Marshal(records)
+	assert.NoError(err)
+	assert.NotEqual(string(doc), string(reordered))
+	assert.True(j.holds(reordered))
+
+	// A record lost, a document that is not one of these, and bytes that are not a document all fail.
+	short, err := json.Marshal(records[:len(records)-1])
+	assert.NoError(err)
+	assert.False(j.holds(short))
+	assert.False(j.holds(jsonDoc(4 * 1024)))
+	assert.False(j.holds([]byte(`"x"`)))
+	assert.Len(j.nextN(5), 5)
+}

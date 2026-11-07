@@ -99,9 +99,9 @@ func parseBytes(s string) (int, error) {
 
 // buildMix registers one workload set per distinct payload and shape in the mix, each under its own namespace so
 // their graphs and tasks do not collide, and returns a picker that draws a class per flow by share. Every class's
-// payload is built up front. meanSteps is the mix's expected steps per flow, which converts a steps/s target into
-// flows/s.
-func buildMix(h *benchHost, classes []mixClass, chainSteps int) (pick func() *workload, picked []*workload, meanSteps float64) {
+// payload is built up front, as JSON documents with payloadJSON. meanSteps is the mix's expected steps per flow,
+// which converts a steps/s target into flows/s.
+func buildMix(h *benchHost, classes []mixClass, chainSteps int, payloadJSON bool) (pick func() *workload, picked []*workload, meanSteps float64) {
 	type shape struct{ payload, width, depth int }
 	sets := map[shape]map[string]*workload{}
 	picked = make([]*workload, len(classes))
@@ -111,7 +111,7 @@ func buildMix(h *benchHost, classes []mixClass, chainSteps int) (pick func() *wo
 		key := shape{c.payload, c.width, c.depth}
 		set := sets[key]
 		if set == nil {
-			set = registerWorkloads(h, fmt.Sprintf("m%d/", len(sets)+1), c.payload, false, c.width, chainSteps, c.depth, false)
+			set = registerWorkloads(h, fmt.Sprintf("m%d/", len(sets)+1), c.payload, payloadJSON, c.width, chainSteps, c.depth, false)
 			sets[key] = set
 		}
 		w := *set[c.workload]

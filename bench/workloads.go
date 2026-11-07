@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand/v2"
 	"sync"
@@ -142,9 +143,9 @@ func (f *freshBytes) nextN(n int) []string {
 //   - fanout: forEach over -fanout-width elements converging on a fan-in - cohort accounting + flow-row
 //     contention. With -payload, Split, every branch and Join each write fresh bytes to `data`, the same
 //     per-step write as linear, so at equal steps per flow the only difference between the two is the shape.
-//   - scatter: Split writes `items`, -fanout-width elements of -payload bytes; each branch, -branch-depth
-//     steps deep, reads its element and writes nothing; Join is a no-op. The doc -> pages shape, where each
-//     branch carries one element of an array.
+//   - scatter: Split writes `items`, -fanout-width elements of -payload bytes (with payloadJSON, JSON documents
+//     of about that size); each branch, -branch-depth steps deep, reads its element and writes nothing; Join is
+//     a no-op. The doc -> pages shape, where each branch carries one element of an array.
 //   - state:  a 5-step chain where every task rewrites a payload of -payload bytes - MB/s throughput.
 //   - carry:  the same payload written ONCE and then only carried - the state-ref shape (see below).
 //   - carryfanout: that payload carried across a fan-out's branches - the N x D case.
@@ -241,12 +242,34 @@ func registerWorkloads(h *benchHost, ns string, payloadBytes int, payloadJSON bo
 	// scatter: Split writes the array the branches fan out over, fresh per flow; each branch step reads its
 	// element and checks it arrived whole. The check is what makes a storage number trustworthy here, as in
 	// carry: an element that went missing would otherwise read as an excellent byte saving.
+	// A JSON element is checked by its records rather than its bytes, which the database does not keep.
+	jsonScatter := payloadJSON && payloadBytes > 0
 	h.tasks[pre+"scatter-split"] = func(ctx context.Context, f *workflow.Flow) error {
+		if jsonScatter {
+			items := docs().nextN(fanOutWidth)
+			if err := f.Set("items", items); err != nil {
+				return err
+			}
+			for _, doc := range items {
+				h.bytesWritten.Add(int64(len(doc)))
+			}
+			return nil
+		}
 		f.Set("items", fresh().nextN(fanOutWidth))
 		h.bytesWritten.Add(int64(fanOutWidth * payloadBytes))
 		return nil
 	}
 	h.tasks[pre+"scatter-read"] = func(ctx context.Context, f *workflow.Flow) error {
+		if jsonScatter {
+			var doc json.RawMessage
+			if _, err := f.Get("item", &doc); err != nil {
+				return fmt.Errorf("scatter: %s reading its element: %w", f.StepKey(), err)
+			}
+			if !docs().holds(doc) {
+				return fmt.Errorf("scatter: %s sees an element that is none of the documents written (%d bytes)", f.StepKey(), len(doc))
+			}
+			return nil
+		}
 		if got := len(f.GetString("item")); got != payloadBytes {
 			return fmt.Errorf("scatter: %s sees a %d-byte element, want %d", f.StepKey(), got, payloadBytes)
 		}
@@ -529,7 +552,7 @@ func registerWorkloads(h *benchHost, ns string, payloadBytes int, payloadJSON bo
 			graphURL:     pre + "scatter",
 			initialState: func() map[string]any { return nil },
 			stepsPerFlow: fanOutWidth*branchDepth + 2,
-			build:        buildFresh,
+			build:        buildWrite,
 		},
 		"state": {
 			graphURL:     pre + "state",
