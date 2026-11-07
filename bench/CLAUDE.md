@@ -533,6 +533,10 @@ every slow cell: 20,000 outstanding 10-step flows need 300s even at ~667 steps/s
 the watchdog's own definition of a hang, met after the watchdog stopped, a drain that gives up ends the run
 too - the next window would start on the hung engines.
 
+**`-drain` defaults to 30 s** of silence (user, 2026-11-06): set it higher only for long tasks (it must exceed the
+longest one, and the flag check refuses it otherwise where a drain runs) or a backlog deep enough to go that long
+between task starts. At 5 min, every multi-host arm below waited out the whole bound (T-A, 2026-11-06).
+
 **The drain's accounting is per PROCESS, so a fleet of bench processes on separate hosts fails it falsely.**
 Each process counts flows created by its own load generator but flows completed by its own engine, and a
 replica completes its peers' flows too. The first process to reach zero exits and finishes more of its peers'

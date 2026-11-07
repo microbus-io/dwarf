@@ -5,6 +5,8 @@
 # 2 min warmup + WIN (default 16m) window (cap 2,000 and 256 creators split evenly), fresh database. The shard's steps/s
 # is the SUM of the two replicas' artifacts. Pulls everything, then tears down. DBFLAGS and TIER work as in x-rig.sh.
 #   ARGS   extra bench flags for both replicas, e.g. "-max-connections 500" (the shard's budget, split between them)
+#   ARGS2  when set, a second arm on the same instance after the first, tagged <tag>-b, with these flags in place of
+#          ARGS - the A/B a fresh instance per arm cannot give (same-spec instances differ by more than most levers)
 #   WARM   minutes of a throwaway run first, on its own database (0 = none): a fresh instance creates its WAL segments
 #          until its second checkpoint completes and reads low until then (bench/CLAUDE.md)
 set -u
@@ -73,7 +75,8 @@ ADM=$(dsn postgres)
 log "ready: $DB $(adm "$ADM" 'SHOW max_connections') max_connections"
 log "flush floor: $(vmssh "$ADMIN" "./fsync.sh '$ADM'" | tail -1 | tee -a "$OUT/fsync.txt")"
 
-SAT="-workload linear -payload 0 -open-loop -arrival-rate 0 -concurrency 128 -max-outstanding 1000 ${ARGS:-}"
+BASE="-workload linear -payload 0 -open-loop -arrival-rate 0 -concurrency 128 -max-outstanding 1000"
+SAT="$BASE ${ARGS:-}"
 WIN=${WIN:-16m} WARM=${WARM:-0}
 if (( WARM > 0 )); then
   authok; late; wdb="dwarf_${TAG//-/_}_warm"
@@ -87,28 +90,36 @@ if (( WARM > 0 )); then
   adm "$ADM" "DROP DATABASE IF EXISTS $wdb WITH (FORCE)" >/dev/null
   sleep 45 # the warm-up's replica rows age out of the peer freshness window (~40 s) before the real run
 fi
-authok; late
-log "flush floor before $TAG: $(vmssh "$ADMIN" "./fsync.sh '$ADM'" | tail -1 | tee -a "$OUT/fsync.txt")"
-db="dwarf_${TAG//-/_}"
-adm "$ADM" "DROP DATABASE IF EXISTS $db WITH (FORCE)" >/dev/null; adm "$ADM" "CREATE DATABASE $db" >/dev/null
-start=$(( $(date +%s) + 45 ))
-log "run $TAG on $EA + $EB: $SAT, window $WIN (start $(date -r $start '+%H:%M:%S'))"
-vmssh "$ADMIN" "setsid nohup ./s-mon.sh $(( 45 + (${WIN%m} + 3) * 60 )) out/mon-$TAG.log '$(dsn "$db")' > /dev/null 2>&1 < /dev/null &"
-for vm in "$EA" "$EB"; do
-  vmssh "$vm" "WINDOW=$WIN setsid nohup ./g-run.sh $TAG $start '$(dsn "$db")' $SAT > /dev/null 2>&1 < /dev/null &"
-done
-for vm in "$EA" "$EB"; do
-  until vmssh "$vm" "test -f out/$TAG.done"; do late; sleep 30; done
-done
-tot=0
-for vm in "$EA" "$EB"; do
-  x=$(vmssh "$vm" "python3 -c \"import json; r=json.load(open('out/$TAG.json'))['results'][0]; print(round(r['stepsPerSec']))\"" | tail -1)
-  log "  $vm: ${x:-?} steps/s"; [[ "$x" =~ ^[0-9]+$ ]] && tot=$(( tot + x ))
-done
-log "run $TAG done: $tot steps/s (sum of both replicas)"
-adm "$(dsn "$db")" "SELECT calls, round(mean_exec_time::numeric,3), round(max_exec_time::numeric,1), left(replace(query, chr(10), ' '),160) FROM pg_stat_statements WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database()) ORDER BY total_exec_time DESC LIMIT 40" > "$OUT/pgss-$TAG.txt" 2>&1
-# The per-process drain verdict is advisory on a multi-host fleet (bench/CLAUDE.md, "Run guards"): the database is
-# the record. Every flow must be completed and no step left non-terminal.
-log "flows by status: $(adm "$(dsn "$db")" "SELECT string_agg(status||'='||n, ' ') FROM (SELECT status, count(*) n FROM dwarf_flows GROUP BY status) x")"
-log "steps not completed: $(adm "$(dsn "$db")" "SELECT count(*) FROM dwarf_steps WHERE status<>'completed'")"
-adm "$ADM" "DROP DATABASE IF EXISTS $db WITH (FORCE)" >/dev/null
+# run_one <tag> <bench args>: one measured arm on a fresh database, both replicas, then its database is checked and dropped.
+run_one() { local tag=$1 SAT=$2 db start vm x tot
+  authok; late
+  log "flush floor before $tag: $(vmssh "$ADMIN" "./fsync.sh '$ADM'" | tail -1 | tee -a "$OUT/fsync.txt")"
+  db="dwarf_${tag//-/_}"
+  adm "$ADM" "DROP DATABASE IF EXISTS $db WITH (FORCE)" >/dev/null; adm "$ADM" "CREATE DATABASE $db" >/dev/null
+  start=$(( $(date +%s) + 45 ))
+  log "run $tag on $EA + $EB: $SAT, window $WIN (start $(date -r $start '+%H:%M:%S'))"
+  vmssh "$ADMIN" "setsid nohup ./s-mon.sh $(( 45 + (${WIN%m} + 3) * 60 )) out/mon-$tag.log '$(dsn "$db")' > /dev/null 2>&1 < /dev/null &"
+  for vm in "$EA" "$EB"; do
+    vmssh "$vm" "WINDOW=$WIN setsid nohup ./g-run.sh $tag $start '$(dsn "$db")' $SAT > /dev/null 2>&1 < /dev/null &"
+  done
+  for vm in "$EA" "$EB"; do
+    until vmssh "$vm" "test -f out/$tag.done"; do late; sleep 30; done
+  done
+  tot=0
+  for vm in "$EA" "$EB"; do
+    x=$(vmssh "$vm" "python3 -c \"import json; r=json.load(open('out/$tag.json'))['results'][0]; print(round(r['stepsPerSec']))\"" | tail -1)
+    log "  $vm: ${x:-?} steps/s"; [[ "$x" =~ ^[0-9]+$ ]] && tot=$(( tot + x ))
+  done
+  log "run $tag done: $tot steps/s (sum of both replicas)"
+  adm "$(dsn "$db")" "SELECT calls, round(mean_exec_time::numeric,3), round(max_exec_time::numeric,1), left(replace(query, chr(10), ' '),160) FROM pg_stat_statements WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database()) ORDER BY total_exec_time DESC LIMIT 40" > "$OUT/pgss-$tag.txt" 2>&1
+  # The per-process drain verdict is advisory on a multi-host fleet (bench/CLAUDE.md, "Run guards"): the database is
+  # the record. Every flow must be completed and no step left non-terminal.
+  log "flows by status: $(adm "$(dsn "$db")" "SELECT string_agg(status||'='||n, ' ') FROM (SELECT status, count(*) n FROM dwarf_flows GROUP BY status) x")"
+  log "steps not completed: $(adm "$(dsn "$db")" "SELECT count(*) FROM dwarf_steps WHERE status<>'completed'")"
+  adm "$ADM" "DROP DATABASE IF EXISTS $db WITH (FORCE)" >/dev/null
+}
+run_one "$TAG" "$SAT"
+if [ -n "${ARGS2:-}" ]; then
+  sleep 45 # the first arm's replica rows age out of the peer freshness window (~40 s)
+  run_one "$TAG-b" "$BASE $ARGS2"
+fi
