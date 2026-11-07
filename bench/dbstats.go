@@ -82,6 +82,26 @@ type dbDelta struct {
 	WALBuffersFull    int64 `json:"walBuffersFull"`
 	WALSyncs          int64 `json:"walSyncs"`
 	Commits           int64 `json:"commits"`
+	// The WAL flush over the window (withFlush): how many a second, how long each took on average (the window over
+	// the count, since a saturated shard flushes back to back), its bytes and its commits. On a flush-bound shard
+	// steps/s x FlushMs is the same on two instances of one spec that differ only in their disk's latency, so it is
+	// what normalizes a throughput across draws (bench/CLAUDE.md, "The WAL model"). Zero when the count is unknown.
+	FlushesPerSec   float64 `json:"flushesPerSec"`
+	FlushMs         float64 `json:"flushMs"`
+	FlushKB         float64 `json:"flushKB"`
+	CommitsPerFlush float64 `json:"commitsPerFlush"`
+}
+
+// withFlush fills the flush figures from a window of sec seconds; nil-safe, and a no-op without a flush count.
+func (d *dbDelta) withFlush(sec float64) *dbDelta {
+	if d == nil || d.WALSyncs <= 0 || sec <= 0 {
+		return d
+	}
+	d.FlushesPerSec = float64(d.WALSyncs) / sec
+	d.FlushMs = 1000 / d.FlushesPerSec
+	d.FlushKB = float64(d.WALBytes) / float64(d.WALSyncs) / 1024
+	d.CommitsPerFlush = float64(d.Commits) / float64(d.WALSyncs)
+	return d
 }
 
 // windowDelta is the change between two readings, or nil when there is no sampler (a non-Postgres DSN) or

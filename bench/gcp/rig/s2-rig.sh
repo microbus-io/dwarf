@@ -82,9 +82,9 @@ mkvms() { # mkvms <type> <name>...: create, then deploy the kit, the binary and 
   for vm in "$@"; do vmssh "$vm" 'test -x g-run.sh && test -x dwarf-bench.bin && command -v psql >/dev/null' ||
     { log "DEPLOY FAILED: $vm"; exit 1; }; done; log "  deployed $*"; }
 deploy() { local vm=$1 i; for i in 1 2 3 4 5 6; do
-  gc compute scp --zone=$ZONE "$D/g-run.sh" "$D/s-mon.sh" "$D/rtt.sh" "$vm":~/ >/dev/null 2>&1 &&
+  gc compute scp --zone=$ZONE "$D/g-run.sh" "$D/s-mon.sh" "$D/rtt.sh" "$D/fsync.sh" "$vm":~/ >/dev/null 2>&1 &&
     gc compute scp --zone=$ZONE "$S/$BIN" "$vm":~/dwarf-bench.bin >/dev/null 2>&1 &&
-    vmssh "$vm" 'ln -sf dwarf-bench.bin dwarf-bench && chmod +x g-run.sh s-mon.sh rtt.sh dwarf-bench.bin && mkdir -p out' && break
+    vmssh "$vm" 'ln -sf dwarf-bench.bin dwarf-bench && chmod +x g-run.sh s-mon.sh rtt.sh fsync.sh dwarf-bench.bin && mkdir -p out' && break
   fw; sleep 20; done
   vmssh "$vm" 'sudo apt-get update -qq >/dev/null 2>&1; sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client >/dev/null 2>&1'; }
 
@@ -102,7 +102,7 @@ rttgate() { # rttgate <vm> <slot>...: every shard under $RTT_MAX from this host 
     for x in $v; do awk -v x="$x" -v m="$RTT_MAX" 'BEGIN { exit !(x != "?" && x + 0 <= m + 0) }' || ok=0; done
     [ -n "$v" ] || ok=0
     echo "$(date '+%H:%M:%S') $vm slots $* ms $v" >> "$OUT/rtt.txt"
-    (( ok )) && { log "  rtt $vm: $v ms"; return 0; }
+    (( ok )) && { log "  rtt $vm: $v ms; flush floor $(vmssh "$vm" "./fsync.sh $dsns" | tee -a "$OUT/fsync.txt" | sed 's/.*flush //' | tr '\n' ' ')ms"; return 0; }
     log "  rtt $vm: $v ms - over $RTT_MAX, try $try"; sleep 30
   done; return 1; }
 

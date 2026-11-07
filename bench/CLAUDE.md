@@ -94,8 +94,21 @@ small ones by its 0.8 ms latency. Four things to hold onto:
   (a 1 KB value stays inline and uncompressed, a 2 KB one is compressed). Unconfirmed - those runs' stored bytes
   were not recorded; `archiveStepsBytes` in `results[].db` now does.
 - **`W` depends on compressibility.** The incompressible default payload logs more per byte; quote which one.
+- **A flush also costs per commit, so a bigger `N` does not pay.** At 0 B on one draw, `-max-connections 500` against
+  the shipped 250 raised commits per flush 62 -> 85 and flush time 1.03 -> 1.38 ms (+34%): ~61,000 commits/s either
+  way, +2% steps/s, the extra backends queued on `WALWrite` (2026-11-06). The two terms above are fitted where bytes
+  and commits per flush rose together, so they hold at the shipped pool; do not predict a gain from more committers.
 - **Checkpoint spacing moves `W`, not the flush constants.** At the 1.5 GB default, 8 KB logged 28.2 KB/step (3.6
   page images) against 21.7 (1.8) at 20 GB, for 7,042 against 10,335 steps/s.
+
+**Normalize a flush-bound throughput by its flush time, and check every draw's flush time.** At equal steps per flush,
+steps/s x flush_ms is a property of the build and the load, not of the instance: two 32 vCPU draws on one build at
+0 B ran 23,938 steps/s at 0.82 ms per flush and 18,852 at 1.03 ms (2026-11-06; 19,629 against 19,418 steps-ms, 1.1%
+apart, both at 62 commits per flush and 0.82-0.89 DB core-ms per step). So `T x flush_ms / flush_ref` puts draws on
+one footing, and the slow draw is invisible to `dbcpu.sh`, which reads CPU per step: read `results[].db.flushMs`
+(printed as the `wal` line) from the first window, and redraw or normalize. It holds only where the flush binds:
+most backends on `LWLock:WALWrite`, database CPU well under its ceiling, the same commits per flush (pool, RTT and
+payload all move that). The 8 and 16 vCPU tiers ran CPU-bound (82-93%): normalize them by core-ms per step instead.
 
 **A NEW SERVER'S FIRST CHECKPOINTS CREATE ITS WAL FILES, and a saturated arm reads ~8% low until they complete.** On a
 fresh Cloud SQL instance (or after raising `max_wal_size`), every 16 MB segment is created and zero-filled under the
@@ -103,6 +116,13 @@ WAL write lock until checkpoints start recycling them: the 2026-11-06 headline a
 for minutes 1-3 and ~24.5k after, stepping up as its second checkpoint completed, with `IO/WALInitSync` sampled
 behind ~249 `WALWrite` waiters; later arms on the same instance started at full rate. Warm up past two checkpoints
 (`max_wal_size / 1.9` of WAL each) before a fresh instance's first window, or do not quote its first minutes.
+
+**A DATABASE-FLAG PATCH RESTARTS THE INSTANCE, and the arm right after it reads low.** After the restart every page's
+next change is logged whole and the buffer cache is cold: an arm started a minute after a `wal_buffers` patch logged
+31 page images per step in its first minute (against ~8) and climbed 1.1k -> 2.5k steps/s (2026-11-06), and the arms
+after the WAL-settings patches ran their first 3 minutes 10-30% low - enough to read lz4 as +5% where minutes 4 on give
+~+3%. Run a 3 min warm-up arm (not read) after every patch, as after creating an instance; `pg_postmaster_start_time()`
+says whether a change restarted it (growing the disk does not).
 
 **CONNECTIONS BUY BACK DISTANCE — partially, and with a hard ceiling.** Raising the pool as RTT grows
 held throughput at **93-100%** of base across 0.14 → 5.07 ms (16 vCPU), a **5.05x** recovery at 5 ms
@@ -243,7 +263,11 @@ into `bench/results/redo-<name>-<date>/`, and tears everything down on exit, fai
   campaign used, with their pass criteria in the header.
 - **What stays out of git** lives in `$RIG_HOME` (default `tmp/rig/`, ignored): `dbpass` and the pinned
   `bench-<sha>` binaries (`CGO_ENABLED=0 GOOS=linux GOARCH=arm64`, built from a clean clone).
-- **Gate every quoted rig on its draw:** run `bench/gcp/dbcpu.sh -live 3` a few minutes into the first window.
+- **Gate every quoted rig on its draw, on both of its axes:** `bench/gcp/dbcpu.sh -live 3` a few minutes into the
+  first window reads CPU per step, and `fsync.sh <dsn>` on the idle instance reads its WAL flush floor (one `psql`
+  session: a commit's time less a `SELECT 1`'s - on Cloud SQL the round trip to its remote disk). A draw can be normal
+  on one and slow on the other: two 32 vCPU draws at 0.82-0.89 core-ms/step flushed in 0.82 and 1.03 ms under load and
+  ran 23,938 and 18,852 steps/s. Record both beside every throughput number.
 
 Operational traps on Cloud SQL + GCE, each of which has cost a run.
 

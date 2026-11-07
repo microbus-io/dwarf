@@ -76,9 +76,9 @@ ipof() { local i; for i in $(seq 1 45); do
     [[ "$(gc sql instances describe "$1" --format='value(state)' 2>/dev/null)" == RUNNABLE ]] &&
       { gc sql instances describe "$1" --format='value(ipAddresses[0].ipAddress)'; return 0; }; sleep 20; done; return 1; }
 deploy() { local vm=$1 i; for i in 1 2 3 4 5 6; do
-  gc compute scp --zone=$ZONE "$D/g-run.sh" "$D/s-mon.sh" "$D/v-mon.sh" "$D/rtt.sh" "$vm":~/ >/dev/null 2>&1 &&
+  gc compute scp --zone=$ZONE "$D/g-run.sh" "$D/s-mon.sh" "$D/v-mon.sh" "$D/rtt.sh" "$D/fsync.sh" "$vm":~/ >/dev/null 2>&1 &&
     gc compute scp --zone=$ZONE "$S/$BIN" "$vm":~/dwarf-bench.bin >/dev/null 2>&1 &&
-    vmssh "$vm" 'ln -sf dwarf-bench.bin dwarf-bench && chmod +x g-run.sh s-mon.sh v-mon.sh rtt.sh dwarf-bench.bin && mkdir -p out' && break
+    vmssh "$vm" 'ln -sf dwarf-bench.bin dwarf-bench && chmod +x g-run.sh s-mon.sh v-mon.sh rtt.sh fsync.sh dwarf-bench.bin && mkdir -p out' && break
   fw; sleep 20; done
   vmssh "$vm" 'sudo apt-get update -qq >/dev/null 2>&1; sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client >/dev/null 2>&1'; }
 mkvm() { local type=$1 vm; shift
@@ -96,7 +96,8 @@ drop() { adm "$(dsn postgres)" "DROP DATABASE IF EXISTS $1 WITH (FORCE)" >/dev/n
 rttgate() { local vm try v; for vm in "$EA" "$EB"; do
     for try in 1 2 3; do v=$(vmssh "$vm" "./rtt.sh '$(dsn postgres)'" | tail -1)
       echo "$(date '+%H:%M:%S') $vm $v" >> "$OUT/rtt.txt"
-      awk -v x="$v" -v m="$RTT_MAX" 'BEGIN { exit !(x != "?" && x + 0 <= m + 0) }' && { log "  rtt $vm: $v ms"; break; }
+      awk -v x="$v" -v m="$RTT_MAX" 'BEGIN { exit !(x != "?" && x + 0 <= m + 0) }' && {
+        log "  rtt $vm: $v ms; $(vmssh "$vm" "./fsync.sh '$(dsn postgres)'" | tail -1 | tee -a "$OUT/fsync.txt")"; break; }
       log "  rtt $vm: $v ms - over $RTT_MAX, try $try"; (( try == 3 )) && { log "RTT GATE FAILED: $vm"; exit 1; }; sleep 30
     done; done; }
 # both <tag> <start epoch> <bench args...>: the same run on both replicas, each with half of the cap and creators

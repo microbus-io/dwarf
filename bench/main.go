@@ -605,6 +605,12 @@ func run() error {
 			}
 			fmt.Printf("  alloc %.1f KB/step, %.0f mallocs/step, %.1f GC/s, %s\n",
 				res.Host.AllocBytesPerStep/1024, res.Host.MallocsPerStep, res.Host.GCPerSec, gcShare)
+			if d := res.DB; d != nil && d.FlushMs > 0 && res.StepsPerSec > 0 {
+				// The draw check a CPU reading cannot make: a slow disk shows as a long flush at a normal CPU per step.
+				fmt.Printf("  wal %.0f MB/s, %.2f KB/step; %.0f flushes/s of %.0f KB, %.2f ms each, %.1f commits each\n",
+					float64(d.WALBytes)/res.WindowSec/1e6, float64(d.WALBytes)/(res.StepsPerSec*res.WindowSec)/1024,
+					d.FlushesPerSec, d.FlushKB, d.FlushMs, d.CommitsPerFlush)
+			}
 			if len(dsns) > 1 {
 				fmt.Println(perShardLine(res, dsns))
 			}

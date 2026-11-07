@@ -36,6 +36,17 @@ func TestDBStats_WindowDeltaCountsTheArchive(t *testing.T) {
 			WALBytes: 20000, WALFPI: 10, WALSyncs: 10, Commits: 400}, *d)
 	}
 
+	// The flush figures, from a 10 s window: 10 flushes of 2,000 bytes carrying 40 commits each.
+	d = d.withFlush(10)
+	assert.Equal(1.0, d.FlushesPerSec)
+	assert.Equal(1000.0, d.FlushMs)
+	assert.Equal(2000.0/1024, d.FlushKB)
+	assert.Equal(40.0, d.CommitsPerFlush)
+	var none *dbDelta
+	assert.Nil(none.withFlush(10))
+	unknown := &dbDelta{WALSyncs: -1}
+	assert.Zero(unknown.withFlush(10).FlushMs)
+
 	// A failed reading on either side yields no delta.
 	before.ok = false
 	assert.Nil(s.windowDelta(before, after))

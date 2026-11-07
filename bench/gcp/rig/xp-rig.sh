@@ -2,8 +2,11 @@
 # Usage: xp-rig.sh <name> <db-tier> <engine-vm-type> <tag>   The tier table's engine pairing: one Cloud SQL Postgres 16
 # instance of <db-tier> (1 TB SSD, Query Insights), TWO engine hosts of <engine-vm-type> each running one replica that
 # also generates half the load, and a c4a-standard-2 admin host for psql and the monitors. One saturated linear 0 B run,
-# 2 + 16 min (cap 2,000 and 256 creators split evenly), fresh database. The shard's steps/s is the SUM of the two
-# replicas' artifacts. Pulls everything, then tears down. DBFLAGS and TIER work as in x-rig.sh.
+# 2 min warmup + WIN (default 16m) window (cap 2,000 and 256 creators split evenly), fresh database. The shard's steps/s
+# is the SUM of the two replicas' artifacts. Pulls everything, then tears down. DBFLAGS and TIER work as in x-rig.sh.
+#   ARGS   extra bench flags for both replicas, e.g. "-max-connections 500" (the shard's budget, split between them)
+#   WARM   minutes of a throwaway run first, on its own database (0 = none): a fresh instance creates its WAL segments
+#          until its second checkpoint completes and reads low until then (bench/CLAUDE.md)
 set -u
 NAME=$1 TIER=$2 ETYPE=$3 TAG=$4 BIN=${BIN:?set BIN to a pinned binary in $RIG_HOME}
 D=$(cd "$(dirname "$0")" && pwd)                      # this kit: the step scripts and the VM-side helpers
@@ -50,9 +53,9 @@ gc compute instances create "$EA" "$EB" --zone=$ZONE --machine-type="$ETYPE" --n
 for vm in "${VMS[@]}"; do
   deployed=""
   for i in 1 2 3 4 5 6; do
-    gc compute scp --zone=$ZONE "$D/g-run.sh" "$D/s-mon.sh" "$vm":~/ >/dev/null 2>&1 &&
+    gc compute scp --zone=$ZONE "$D/g-run.sh" "$D/s-mon.sh" "$D/fsync.sh" "$vm":~/ >/dev/null 2>&1 &&
       gc compute scp --zone=$ZONE "$S/$BIN" "$vm":~/dwarf-bench.bin >/dev/null 2>&1 &&
-      vmssh "$vm" 'ln -sf dwarf-bench.bin dwarf-bench && chmod +x g-run.sh s-mon.sh dwarf-bench.bin && mkdir -p out' && { deployed=1; break; }
+      vmssh "$vm" 'ln -sf dwarf-bench.bin dwarf-bench && chmod +x g-run.sh s-mon.sh fsync.sh dwarf-bench.bin && mkdir -p out' && { deployed=1; break; }
     fw; sleep 20
   done
   [ -n "$deployed" ] || { log "DEPLOY FAILED: $vm"; exit 1; }
@@ -68,16 +71,31 @@ adm() { vmssh "$ADMIN" "psql '$1' -X -q -At -F' ' -c \"$2\""; }
 dsn() { echo "postgres://postgres:${pass}@$IP:5432/$1?sslmode=disable"; }
 ADM=$(dsn postgres)
 log "ready: $DB $(adm "$ADM" 'SHOW max_connections') max_connections"
+log "flush floor: $(vmssh "$ADMIN" "./fsync.sh '$ADM'" | tail -1 | tee -a "$OUT/fsync.txt")"
 
+SAT="-workload linear -payload 0 -open-loop -arrival-rate 0 -concurrency 128 -max-outstanding 1000 ${ARGS:-}"
+WIN=${WIN:-16m} WARM=${WARM:-0}
+if (( WARM > 0 )); then
+  authok; late; wdb="dwarf_${TAG//-/_}_warm"
+  adm "$ADM" "DROP DATABASE IF EXISTS $wdb WITH (FORCE)" >/dev/null; adm "$ADM" "CREATE DATABASE $wdb" >/dev/null
+  start=$(( $(date +%s) + 45 ))
+  log "warm-up $TAG-warm on $EA + $EB, ${WARM} min, not read"
+  for vm in "$EA" "$EB"; do
+    vmssh "$vm" "WARMUP=0s WINDOW=${WARM}m setsid nohup ./g-run.sh $TAG-warm $start '$(dsn "$wdb")' $SAT > /dev/null 2>&1 < /dev/null &"
+  done
+  for vm in "$EA" "$EB"; do until vmssh "$vm" "test -f out/$TAG-warm.done"; do late; sleep 30; done; done
+  adm "$ADM" "DROP DATABASE IF EXISTS $wdb WITH (FORCE)" >/dev/null
+  sleep 45 # the warm-up's replica rows age out of the peer freshness window (~40 s) before the real run
+fi
 authok; late
+log "flush floor before $TAG: $(vmssh "$ADMIN" "./fsync.sh '$ADM'" | tail -1 | tee -a "$OUT/fsync.txt")"
 db="dwarf_${TAG//-/_}"
 adm "$ADM" "DROP DATABASE IF EXISTS $db WITH (FORCE)" >/dev/null; adm "$ADM" "CREATE DATABASE $db" >/dev/null
 start=$(( $(date +%s) + 45 ))
-SAT="-workload linear -payload 0 -open-loop -arrival-rate 0 -concurrency 128 -max-outstanding 1000"
-log "run $TAG on $EA + $EB: $SAT (start $(date -r $start '+%H:%M:%S'))"
-vmssh "$ADMIN" "setsid nohup ./s-mon.sh $(( 45 + 19 * 60 )) out/mon-$TAG.log '$(dsn "$db")' > /dev/null 2>&1 < /dev/null &"
+log "run $TAG on $EA + $EB: $SAT, window $WIN (start $(date -r $start '+%H:%M:%S'))"
+vmssh "$ADMIN" "setsid nohup ./s-mon.sh $(( 45 + (${WIN%m} + 3) * 60 )) out/mon-$TAG.log '$(dsn "$db")' > /dev/null 2>&1 < /dev/null &"
 for vm in "$EA" "$EB"; do
-  vmssh "$vm" "WINDOW=16m setsid nohup ./g-run.sh $TAG $start '$(dsn "$db")' $SAT > /dev/null 2>&1 < /dev/null &"
+  vmssh "$vm" "WINDOW=$WIN setsid nohup ./g-run.sh $TAG $start '$(dsn "$db")' $SAT > /dev/null 2>&1 < /dev/null &"
 done
 for vm in "$EA" "$EB"; do
   until vmssh "$vm" "test -f out/$TAG.done"; do late; sleep 30; done

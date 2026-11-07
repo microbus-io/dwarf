@@ -47,9 +47,9 @@ gc compute instances create "$ADMIN" --zone=$ZONE --machine-type=${VMTYPE:-c4a-s
   { log "VM create failed"; exit 1; }
 deployed=""
 for i in 1 2 3 4 5 6; do
-  gc compute scp --zone=$ZONE "$D/g-run.sh" "$D/s-mon.sh" "$D/v-mon.sh" "$ADMIN":~/ >/dev/null 2>&1 &&
+  gc compute scp --zone=$ZONE "$D/g-run.sh" "$D/s-mon.sh" "$D/v-mon.sh" "$D/fsync.sh" "$ADMIN":~/ >/dev/null 2>&1 &&
     gc compute scp --zone=$ZONE "$S/$BIN" "$ADMIN":~/dwarf-bench.bin >/dev/null 2>&1 &&
-    vmssh "$ADMIN" 'ln -sf dwarf-bench.bin dwarf-bench && chmod +x g-run.sh s-mon.sh v-mon.sh dwarf-bench.bin && mkdir -p out' && { deployed=1; break; }
+    vmssh "$ADMIN" 'ln -sf dwarf-bench.bin dwarf-bench && chmod +x g-run.sh s-mon.sh v-mon.sh fsync.sh dwarf-bench.bin && mkdir -p out' && { deployed=1; break; }
   fw; sleep 20
 done
 [ -n "$deployed" ] || { log "DEPLOY FAILED"; exit 1; }
@@ -67,6 +67,8 @@ admdsn() { echo "postgres://postgres:${pass}@$1:5432/postgres?sslmode=disable"; 
 fresh() { adm "$(admdsn "$1")" "DROP DATABASE IF EXISTS $2 WITH (FORCE)" >/dev/null; adm "$(admdsn "$1")" "CREATE DATABASE $2" >/dev/null; }
 drop() { adm "$(admdsn "$1")" "DROP DATABASE IF EXISTS $2 WITH (FORCE)" >/dev/null; }
 log "ready: $DB $(adm "$(admdsn "${IPS[0]}")" 'SHOW max_connections') max_connections, disk ${DISK} GB"
+# The draw's disk, which a CPU reading cannot see (bench/CLAUDE.md): the idle WAL flush floor, logged and kept.
+log "flush floor: $(vmssh "$ADMIN" "./fsync.sh '$(admdsn "${IPS[0]}")'" | tail -1 | tee -a "$OUT/fsync.txt")"
 source "$D/a-step-lib.sh"
 log "step $STEP"
 source "$D/$STEP"

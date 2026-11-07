@@ -1,10 +1,12 @@
 # Sourced by the L and W steps. one_run <tag> <bench args...>: fresh database on shard 1, the run on the admin host
 # (c4a-16) with the pinned binary, the backend monitor beside it, then the database is dropped. WIN_MIN sets the
 # window in minutes (default 16); RUN_ENV prefixes the run with environment settings (e.g. GOMEMLIMIT=48GiB).
-gc compute scp --zone=$ZONE "$D/g-run.sh" "$ADMIN":~/ >/dev/null 2>&1 && vmssh "$ADMIN" 'chmod +x g-run.sh'
+gc compute scp --zone=$ZONE "$D/g-run.sh" "$D/fsync.sh" "$ADMIN":~/ >/dev/null 2>&1 && vmssh "$ADMIN" 'chmod +x g-run.sh fsync.sh'
 one_run() {
   local tag=$1; shift; local db="dwarf_${tag//-/_}" start x
   authok; late
+  # The idle WAL flush floor before every arm: a flag patch or a disk change can move it (bench/CLAUDE.md).
+  log "  flush floor before $tag: $(vmssh "$ADMIN" "./fsync.sh '$(admdsn "${IPS[0]}")'" | tail -1 | sed "s/^/$tag /" | tee -a "$OUT/fsync.txt" | cut -d' ' -f2-)"
   fresh "${IPS[0]}" "$db"
   start=$(( $(date +%s) + 30 ))
   log "run $tag: $* (start $(date -r $start '+%H:%M:%S'))"
