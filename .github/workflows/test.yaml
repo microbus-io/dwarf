@@ -94,6 +94,34 @@ jobs:
       - name: Test (MySQL)
         run: go test ./... -count=1 -timeout 10m
 
+  # The mariadb:// DSN makes sequel report the `mariadb` driver name, which this job exists to exercise; the MySQL job
+  # covers the MySQL driver's own DSN form. 10.6 is the oldest MariaDB the docs support (SKIP LOCKED).
+  mariadb:
+    name: MariaDB
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      mariadb:
+        image: mariadb:10.6
+        env:
+          MARIADB_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mariadb-admin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      SEQUEL_TESTING_DSN: mariadb://root:root@tcp(127.0.0.1:3306)/dwarf_%d
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test (MariaDB)
+        run: go test ./... -count=1 -timeout 10m
+
   sqlserver:
     name: SQL Server
     runs-on: ubuntu-latest
