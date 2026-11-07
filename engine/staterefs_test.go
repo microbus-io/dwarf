@@ -850,7 +850,7 @@ func TestStateRefs_DeletesAndNullsOfCarriedFields(t *testing.T) {
 		mux.HandleGraph("nullcarried/wf", g)
 		mux.HandleTask("nullcarried/first", func(ctx context.Context, f *workflow.Flow) error {
 			// What a remote host's decoded result can carry; the carrier itself records nothing for a nil.
-			data, _ := json.Marshal(map[string]any{"state": map[string]any{}, "changes": map[string]any{"log": nil}})
+			data, _ := json.Marshal(map[string]any{"v": 1, "state": map[string]any{}, "changes": map[string]any{"log": nil}})
 			return f.UnmarshalJSON(data)
 		})
 		var lastSaw atomic.Int64

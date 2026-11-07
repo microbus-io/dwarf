@@ -107,6 +107,10 @@ type Flow struct {
 	// for correlating logs/traces or calling back into the engine (History/Step) with its own keys.
 	flowKey string
 	stepKey string
+
+	// carrierVersion is the carrier format version the Flow was decoded with, which every encoding of it repeats;
+	// 0 if it was never decoded.
+	carrierVersion int
 }
 
 // NewFlow creates a new Flow with initialized state. The zero Flow is ready to use as well.
@@ -588,104 +592,4 @@ func (f *Flow) Retry(initialDelay time.Duration, delayMultiplier float64, maxInt
 // same instruction, so a computed delay that lands at or below zero needs no guard at the call site.
 func (f *Flow) Sleep(duration time.Duration) {
 	f.sleepDuration = duration
-}
-
-// --- Internal helpers ---
-
-// --- JSON serialization ---
-
-// flowJSON is the wire format for Flow.
-type flowJSON struct {
-	FlowKey                string             `json:"flowKey,omitzero"`
-	StepKey                string             `json:"stepKey,omitzero"`
-	State                  State              `json:"state,omitzero"`
-	Reducers               map[string]Reducer `json:"reducers,omitzero"`
-	Changes                Changes            `json:"changes,omitzero"`
-	Goto                   string             `json:"goto,omitzero"`
-	Retry                  bool               `json:"retry,omitzero"`
-	SleepDuration          time.Duration      `json:"sleepDuration,omitzero"`
-	Interrupt              bool               `json:"interrupt,omitzero"`
-	InterruptPayload       State              `json:"interruptPayload,omitzero"`
-	SubgraphURL            string             `json:"subgraphURL,omitzero"`
-	SubgraphInput          State              `json:"subgraphInput,omitzero"`
-	InterruptDone          bool               `json:"interruptDone,omitzero"`
-	ResumeData             State              `json:"resumeData,omitzero"`
-	SubgraphDone           bool               `json:"subgraphDone,omitzero"`
-	SubgraphResult         State              `json:"subgraphResult,omitzero"`
-	SubgraphError          string             `json:"subgraphError,omitzero"`
-	Attempt                int                `json:"attempt,omitzero"`
-	BackoffInitialDelay    time.Duration      `json:"backoffInitialDelay,omitzero"`
-	BackoffDelayMultiplier float64            `json:"backoffDelayMultiplier,omitzero"`
-	BackoffMaxDelay        time.Duration      `json:"backoffMaxDelay,omitzero"`
-	CreatedAt              time.Time          `json:"createdAt,omitzero"`
-	UpdatedAt              time.Time          `json:"updatedAt,omitzero"`
-	StepCreatedAt          time.Time          `json:"stepCreatedAt,omitzero"`
-	InBranch               bool               `json:"inBranch,omitzero"`
-}
-
-// MarshalJSON serializes the Flow including private fields.
-func (f *Flow) MarshalJSON() ([]byte, error) {
-	return json.Marshal(flowJSON{
-		FlowKey:                f.flowKey,
-		StepKey:                f.stepKey,
-		State:                  f.state,
-		Reducers:               f.reducers,
-		Changes:                f.changes,
-		Goto:                   f.gotoNext,
-		Retry:                  f.retry,
-		SleepDuration:          f.sleepDuration,
-		Interrupt:              f.interrupt,
-		InterruptPayload:       f.interruptPayload,
-		SubgraphURL:            f.subgraphURL,
-		SubgraphInput:          f.subgraphInput,
-		InterruptDone:          f.interruptDone,
-		ResumeData:             f.resumeData,
-		SubgraphDone:           f.subgraphDone,
-		SubgraphResult:         f.subgraphResult,
-		SubgraphError:          f.subgraphError,
-		Attempt:                f.attempt,
-		BackoffInitialDelay:    f.backoffInitialDelay,
-		BackoffDelayMultiplier: f.backoffDelayMultiplier,
-		BackoffMaxDelay:        f.backoffMaxDelay,
-		CreatedAt:              f.createdAt,
-		UpdatedAt:              f.updatedAt,
-		StepCreatedAt:          f.stepCreatedAt,
-		InBranch:               f.inBranch,
-	})
-}
-
-// UnmarshalJSON deserializes the Flow including private fields.
-func (f *Flow) UnmarshalJSON(data []byte) error {
-	var wire flowJSON
-	err := json.Unmarshal(data, &wire)
-	if err != nil {
-		return err
-	}
-	f.flowKey = wire.FlowKey
-	f.stepKey = wire.StepKey
-	f.state = wire.State
-	f.changes = wire.Changes
-	f.ready() // either may be absent from the wire
-	f.reducers = wire.Reducers
-	f.gotoNext = wire.Goto
-	f.retry = wire.Retry
-	f.sleepDuration = wire.SleepDuration
-	f.interrupt = wire.Interrupt
-	f.interruptPayload = wire.InterruptPayload
-	f.subgraphURL = wire.SubgraphURL
-	f.subgraphInput = wire.SubgraphInput
-	f.interruptDone = wire.InterruptDone
-	f.resumeData = wire.ResumeData
-	f.subgraphDone = wire.SubgraphDone
-	f.subgraphResult = wire.SubgraphResult
-	f.subgraphError = wire.SubgraphError
-	f.attempt = wire.Attempt
-	f.backoffInitialDelay = wire.BackoffInitialDelay
-	f.backoffDelayMultiplier = wire.BackoffDelayMultiplier
-	f.backoffMaxDelay = wire.BackoffMaxDelay
-	f.createdAt = wire.CreatedAt
-	f.updatedAt = wire.UpdatedAt
-	f.stepCreatedAt = wire.StepCreatedAt
-	f.inBranch = wire.InBranch
-	return nil
 }

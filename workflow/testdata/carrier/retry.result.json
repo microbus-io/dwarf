@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "changes": {
+    "log": [
+      "b"
+    ]
+  },
+  "retry": true,
+  "backoffInitialDelayMillis": 250,
+  "backoffDelayMultiplier": 2,
+  "backoffMaxDelayMillis": 5000
+}

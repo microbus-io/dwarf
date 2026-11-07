@@ -50,7 +50,7 @@ func TestRetry_NegativeDelayFailsTheStep(t *testing.T) {
 		calls.Add(1)
 		return overWire(f, func(wire map[string]json.RawMessage) {
 			wire["retry"] = json.RawMessage(`true`)
-			wire["backoffInitialDelay"] = json.RawMessage(`-1000000000`)
+			wire["backoffInitialDelayMillis"] = json.RawMessage(`-1000`)
 		})
 	})
 

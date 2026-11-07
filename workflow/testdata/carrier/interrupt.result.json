@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "changes": {
+    "log": [
+      "b"
+    ]
+  },
+  "interrupt": true,
+  "interruptPayload": {
+    "question": "approve?"
+  }
+}

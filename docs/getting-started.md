@@ -128,6 +128,61 @@ defer eng.Shutdown(ctx)
 
 Not registering a host (`SetHost`) makes `Startup` return an error.
 
+## Tasks in another process
+
+A host that reaches its tasks over a network sends the `*workflow.Flow` it is given as JSON, and the task server
+replies with the task's changes and control signals, which the host reads back onto the same `Flow`. Wrap the Flow
+in `workflow.RequestCarrier` going out and `workflow.ResultCarrier` coming back, and use the same pair on the task
+server:
+
+```go
+// host
+func (h *myHost) ExecuteTask(ctx context.Context, taskURL string, f *workflow.Flow) error {
+	body, err := json.Marshal(workflow.RequestCarrier(f))
+	if err != nil {
+		return err
+	}
+	reply, err := post(ctx, taskURL, body) // your transport; a task's error comes back as an error
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(reply, workflow.ResultCarrier(f))
+}
+
+// task server
+func handle(w http.ResponseWriter, r *http.Request) {
+	var f workflow.Flow
+	if err := json.NewDecoder(r.Body).Decode(workflow.RequestCarrier(&f)); err != nil {
+		status := http.StatusBadRequest // malformed JSON, or no version
+		if errors.StatusCode(err) == http.StatusNotImplemented {
+			status = http.StatusNotImplemented // a newer version than this build reads
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	if err := runTask(r.Context(), &f); err != nil {
+		http.Error(w, err.Error(), errors.StatusCode(err))
+		return
+	}
+	json.NewEncoder(w).Encode(workflow.ResultCarrier(&f))
+}
+```
+
+- The engine reads back only the task's changes and control signals. The result carrier leaves out the state and
+  the graph's reducers, so a large state crosses the wire once rather than twice. Plain `json.Marshal(f)` and
+  `json.Unmarshal(reply, f)` also work, sending every field both ways.
+- Every body carries the format's version in `"v"`. Decoding fails when it is missing (status 400) or newer than
+  this build reads (status 501, naming both versions): upgrade that side, or roll out task servers before the
+  engine. A task server replies in the version its request came in, so an older host can always read the reply.
+- The JSON carries the flow, not the call's context. Forward the flow's baggage (`workflow.BaggageFrom(ctx)`) and the
+  context's deadline over your transport, and give the task server's handler a context carrying them
+  (`workflow.ContextWithBaggage`).
+- A result's `changes` are the step's whole delta. On a re-run - after a `Retry`, a resumed `Interrupt` or a returning
+  `Subgraph` - the request already holds what the step's earlier runs wrote, and the result must hand it back with the
+  new writes, as a `workflow.Flow` does on its own. A task server in another language that returns only the new
+  writes loses the earlier ones.
+- Durations go out as whole milliseconds: `sleepMillis`, `backoffInitialDelayMillis`, `backoffMaxDelayMillis`.
+
 ## Where to go next
 
 - The [Concepts](concepts.md) guide explains flows, steps, and reducers — the vocabulary the rest

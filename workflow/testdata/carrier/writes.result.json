@@ -1,0 +1,11 @@
+{
+  "v": 1,
+  "changes": {
+    "greeting": "hello",
+    "log": [
+      "b",
+      "c"
+    ],
+    "total": 2
+  }
+}

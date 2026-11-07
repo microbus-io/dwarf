@@ -436,7 +436,7 @@ func TestFlow_GetReportsPresence(t *testing.T) {
 func TestFlow_DecodedWithoutChangesTakesWrites(t *testing.T) {
 	assert := testarossa.For(t)
 
-	for _, wire := range []string{`{}`, `{"state":{"a":1}}`, `{"changes":{"a":1}}`} {
+	for _, wire := range []string{`{"v":1}`, `{"v":1,"state":{"a":1}}`, `{"v":1,"changes":{"a":1}}`} {
 		var f Flow
 		if !assert.NoError(json.Unmarshal([]byte(wire), &f), wire) {
 			continue

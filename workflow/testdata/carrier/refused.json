@@ -1,0 +1,46 @@
+[
+  {
+    "name": "no_version",
+    "body": {
+      "state": {
+        "a": 1
+      }
+    },
+    "status": 400
+  },
+  {
+    "name": "version_zero",
+    "body": {
+      "v": 0
+    },
+    "status": 400
+  },
+  {
+    "name": "version_negative",
+    "body": {
+      "v": -1
+    },
+    "status": 400
+  },
+  {
+    "name": "version_string",
+    "body": {
+      "v": "1"
+    },
+    "status": 400
+  },
+  {
+    "name": "version_fraction",
+    "body": {
+      "v": 1.5
+    },
+    "status": 400
+  },
+  {
+    "name": "version_newer",
+    "body": {
+      "v": 2
+    },
+    "status": 501
+  }
+]

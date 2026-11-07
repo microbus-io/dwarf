@@ -382,6 +382,62 @@ transition, one `Flow` per branch) is the first-class answer.
 `ready`, which creates both maps, since the setters write to both and a nil map panics. A write path that skips
 it panics on the zero value while its siblings work (`TestFlow_ZeroValueTakesEveryWrite`).
 
+### The carrier's wire format (`carriers.go`)
+
+Everything that turns a `Flow` into JSON and back lives in `carriers.go`: the wire struct (`flowJSON`), the version
+rules, the duration conversion, the `Flow`'s own `MarshalJSON`/`UnmarshalJSON`, and the two direction views,
+`RequestCarrier` and `ResultCarrier`.
+
+- **The `Flow`'s own `MarshalJSON`/`UnmarshalJSON` are the wire format**, every field both ways, and stay valid for
+  good: a host may carry the flow with the default `json` package, and one known host does. So
+  the version check and the duration encoding live there, on the path nothing can skip.
+- **The views are an optimization over the same field names**, each direction's fields and no others, so they add
+  nothing to the frozen format. `RequestCarrier`'s decode clears the control signals (a request cannot arm one);
+  `ResultCarrier`'s decode sets only the changes and signals, leaving the host's state, reducers, keys and attempt.
+  They return the exported `Carrier` interface holding a pointer, because `json.Unmarshal` refuses a non-pointer.
+- **The trust boundary is what the engine READS, not how a reply is decoded.** After `ExecuteTask` the engine reads
+  only `RawChanges()` and the `...Requested` signals (`d.result` in `engine/dispatch.go`); routing folds onto its own
+  input, reducers come from the graph, `attempt` from the step row. A host decoding a reply with the default
+  `UnmarshalJSON` puts a forged state on the carrier, and nothing reads it. **Do not start reading anything else off
+  the returned carrier** - `fixtures/carrierwireflow_test.go`'s `forged` mode (a reply forging state, reducers,
+  attempt, keys and `inBranch`) pins that the outcome cannot tell.
+
+**The version, `v`.** `CarrierVersion` is 1. Every encoding writes `v`; every decode checks it:
+- **Missing: refused (400). Do not default a missing `v` to 1.** A body without `v` is an older sender's, whose
+  durations are integer nanoseconds under `sleepDuration`, `backoffInitialDelay` and `backoffMaxDelay` - names
+  Go's decoder ignores without a word, so read as v1 its sleep and backoff would vanish. Measured: a body carrying
+  `"retry": true` and the old `backoffInitialDelay` re-ran its task 4.7 million times in 15 minutes.
+- **Not a positive integer: refused (400). Newer than `CarrierVersion`: refused (501), naming both versions.**
+  501 matches the engine's own "data in a newer format than this replica reads".
+- **Older and still read: accepted.** N reads 1..N, as `payload_ver` does.
+- **A Flow encodes in the version it was decoded with, or the newest if never decoded** (`carrierVersion`, never
+  persisted). So a task server replies in its request's version and an older engine can read the reply, which
+  makes "task servers first, then the engine" a clean rollout. The echo is in `Flow` itself, not only in
+  `ResultCarrier`, because a task server may reply with the default encoder. `ResultCarrier`'s decode does not
+  record the reply's version: the host's Flow is the engine's and stays in the newest format.
+- **Introducing v2:** bump `CarrierVersion`; make every encoder write the old form for a Flow whose
+  `carrierVersion` is older, failing the encode, naming the feature, when the task used something the old version
+  cannot carry (never dropping it); keep every decoder reading 1..N; add golden files at both versions.
+
+**Durations are whole milliseconds** (`sleepMillis`, `backoffInitialDelayMillis`, `backoffMaxDelayMillis`): the
+engine schedules at millisecond resolution (`d.sleep.Milliseconds()`), so a finer unit carries nothing it reads,
+and an integer millisecond is exact in every language (JavaScript loses integer precision past 2^53 - ~104 days in
+nanoseconds, ~285,000 years in milliseconds). A sleep is truncated, as the engine truncates it. **A backoff delay is
+rounded UP (`millisRoundedUp`), never truncated:** the engine truncates the delay it computes for an attempt, not
+the base, so a truncated 500µs base would arrive as 0, which no multiplier grows, and the retry would run back to
+back where in process it backs off to a minute. Decoding saturates at the `Duration`'s range rather than
+overflowing. Timestamps stay RFC 3339 strings. Field names are case-sensitive to any other implementation, though
+Go's decoder matches them case-insensitively; the golden files spell them exactly.
+
+**The golden files under `testdata/carrier` are the conformance fixtures** (`carriers_test.go`): each direction for
+a task that writes and for each control signal, the bodies every decoder refuses (`refused.json`), and each
+reducer's fold (`reducers.json`). Each body is also decoded with its form's decoder and re-encoded, which must give
+the same bytes (`TestCarrierGolden_Decode`), so a field a decoder drops fails there; the request bodies hold the
+state as the engine sends it, with the earlier runs' changes folded in. Regenerate with
+`go test ./workflow -run 'TestCarrierGolden|TestReducerGolden' -update` and review the diff as a wire change: after
+v1.0, a change to an existing file is a breaking change and needs a new `CarrierVersion`. A carrier implementation
+in another language reads the same files.
+
 ### Task-Initiated Control Signals
 
 Tasks signal the engine via control methods on the `Flow` carrier (distinct from the operations above):

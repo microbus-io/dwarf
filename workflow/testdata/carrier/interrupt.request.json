@@ -1,0 +1,26 @@
+{
+  "v": 1,
+  "flowKey": "1-480000-7-AbCdEfGh",
+  "stepKey": "1-480000-7-42-IjKlMnOp",
+  "state": {
+    "log": [
+      "a",
+      "b"
+    ],
+    "name": "Ada",
+    "total": 1
+  },
+  "reducers": {
+    "log": "append",
+    "total": "add"
+  },
+  "changes": {
+    "log": [
+      "b"
+    ]
+  },
+  "attempt": 1,
+  "createdAt": "2026-11-07T12:00:00Z",
+  "updatedAt": "2026-11-07T12:00:01Z",
+  "stepCreatedAt": "2026-11-07T12:00:00.5Z"
+}

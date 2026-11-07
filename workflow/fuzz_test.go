@@ -234,10 +234,19 @@ func FuzzFlowJSON(f *testing.F) {
 	fl.SetString("k", "v")
 	seed, _ := json.Marshal(fl)
 	f.Add(seed)
-	f.Add([]byte(`{"state":{"a":null},"changes":{"a":null},"attempt":-1}`))
-	f.Add([]byte(`{}`))
-	f.Add([]byte(`{"state":{"a":1}}`))
+	f.Add([]byte(`{"v":1,"state":{"a":null},"changes":{"a":null},"attempt":-1}`))
+	f.Add([]byte(`{}`)) // no version: refused
+	f.Add([]byte(`{"v":1,"state":{"a":1},"retry":true,"backoffInitialDelayMillis":-1,"sleepMillis":9223372036854775807}`))
 	f.Fuzz(func(t *testing.T, data []byte) {
+		// Each direction's carrier must decode and re-encode whatever the Flow's own decoder would, without panicking.
+		for _, view := range []func(*Flow) Carrier{RequestCarrier, ResultCarrier} {
+			var vf Flow
+			if json.Unmarshal(data, view(&vf)) == nil {
+				if _, err := json.Marshal(view(&vf)); err != nil {
+					t.Fatalf("re-marshal of a carrier failed: %v", err)
+				}
+			}
+		}
 		var fl Flow
 		if err := json.Unmarshal(data, &fl); err != nil {
 			return

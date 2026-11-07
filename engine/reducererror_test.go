@@ -250,7 +250,7 @@ func TestHandOff_ReducerErrorFailsTheStep(t *testing.T) {
 	mux.HandleGraph("handofferror.verify:429/g", g)
 	mux.HandleTask("handofferror.verify:429/work", func(ctx context.Context, f *workflow.Flow) error {
 		// What a remote host's decoded result carries; the carrier itself would have refused the write.
-		return f.UnmarshalJSON([]byte(`{"state":{"total":10},"changes":{"total":"not a number"}}`))
+		return f.UnmarshalJSON([]byte(`{"v":1,"state":{"total":10},"changes":{"total":"not a number"}}`))
 	})
 	var nextRan atomic.Bool
 	mux.HandleTask("handofferror.verify:429/next", func(ctx context.Context, f *workflow.Flow) error {

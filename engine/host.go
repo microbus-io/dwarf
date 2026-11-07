@@ -59,6 +59,11 @@ type Host interface {
 	// A host that cannot reach the task's worker may wait for it by arming flow.Retry on the carrier and
 	// returning nil, up to a horizon of its own, and then return an error with status 503. Such a dispatch
 	// still counts toward flow.Attempt, though the task never ran.
+	//
+	// After ExecuteTask returns, the engine reads only the flow's changes and its control signals. A host that
+	// reaches its task across a process boundary carries the flow as JSON - workflow.RequestCarrier going out,
+	// workflow.ResultCarrier coming back - and the reply need not carry the state or the reducers; whatever
+	// else it carries is not read.
 	ExecuteTask(ctx context.Context, taskURL string, flow *workflow.Flow) error
 }
 
