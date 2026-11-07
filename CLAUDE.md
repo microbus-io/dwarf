@@ -155,7 +155,8 @@ matching one before working there:**
 **Landmines that radiate into engine code - obey these; the full detail lives in the named package doc:**
 
 - **Timestamps:** never bind a Go `time.Time` into SQL; write with `NOW_UTC()`/`DATE_ADD_MILLIS`. On PostgreSQL a time
-  column is `TIMESTAMP`, never `TIMESTAMPTZ`, or a non-UTC session shifts every stored instant. (`internal/migrations/CLAUDE.md`)
+  column is `TIMESTAMP(3)`, never `TIMESTAMPTZ` (a non-UTC session shifts every stored instant) nor a bare `TIMESTAMP`
+  (microseconds, finer than the millisecond `NOW_UTC()`). (`internal/migrations/CLAUDE.md`)
 - **MySQL JSON compare:** `json_col = '{}'` never matches on MySQL - use a per-driver `CAST(... AS CHAR)`. (`internal/migrations/CLAUDE.md`)
 - **Stored JSON bytes are not canonical, and nothing compares them.** Every comparison decodes first (`union`
   dedupes decoded values, numbers by value; `Fingerprint` hashes `status|count|max(updated_at)`). What JSON storage buys is Go

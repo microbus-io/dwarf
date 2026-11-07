@@ -114,7 +114,7 @@ func fetchQuery(driverName string, pairs []planner.Slot, perKey int, part string
 			" ORDER BY created_at, step_id LIMIT ?" +
 			") AS s", args, nil
 
-	case "mysql":
+	case "mysql", "mariadb":
 		// THE ONLY BRANCH THAT STILL BINDS PER PAIR (two each), and both halves of that are deliberate.
 		//
 		// No lateral join: the driver name covers MySQL and MariaDB, and MariaDB has none at any version

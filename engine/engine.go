@@ -1499,7 +1499,7 @@ func (e *Engine) ListOpen(ctx context.Context, query workflow.Query) (summaries 
 // archived after now; a window outside both returns no flows. What is left may reach at most 31 days of the archive -
 // today and the 30 before it, as much as the default retention keeps - or the call is a 400; split a longer range into
 // windows. Each day the window reaches is read on every shard, so a search over many days wants a low Limit. Times
-// compare at the database's precision: microseconds on PostgreSQL, milliseconds elsewhere. At a retention of 0 nothing
+// compare to the millisecond. At a retention of 0 nothing
 // is archived, so nothing new is listed.
 //
 // It has no pagination and no cursor. An archived flow never changes, so a caller can walk a time range in windows,

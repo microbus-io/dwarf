@@ -408,7 +408,7 @@ func TestCancelWatermark_TakesNoStepLocks(t *testing.T) {
 	defer close(release)
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
-	if driver := db.DriverName(); driver != "mysql" && driver != "pgx" {
+	if driver := db.DriverName(); driver != "mysql" && driver != "mariadb" && driver != "pgx" {
 		t.Skip("the two writers serialize, or plain reads lock, on " + driver)
 	}
 

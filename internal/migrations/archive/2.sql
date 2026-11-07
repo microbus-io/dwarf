@@ -12,7 +12,7 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 
--- DRIVER: mysql
+-- DRIVER: mysql mariadb
 CREATE TABLE IF NOT EXISTS dwarf_steps_archive (
     step_id           BIGINT       NOT NULL,
     flow_id           BIGINT       NOT NULL,
@@ -102,16 +102,16 @@ CREATE TABLE IF NOT EXISTS dwarf_steps_archive (
     cancelling        SMALLINT         NOT NULL DEFAULT 0,
     advancing         SMALLINT         NOT NULL DEFAULT 0,
     advance_goto      VARCHAR(512)     NOT NULL DEFAULT '',
-    advance_sleep_until TIMESTAMP      NOT NULL DEFAULT NOW_UTC(),
+    advance_sleep_until TIMESTAMP(3)   NOT NULL DEFAULT NOW_UTC(),
     advance_on_error  SMALLINT         NOT NULL DEFAULT 0,
-    not_before        TIMESTAMP        NOT NULL DEFAULT NOW_UTC(),
-    lease_expires     TIMESTAMP        NOT NULL DEFAULT NOW_UTC(),
+    not_before        TIMESTAMP(3)     NOT NULL DEFAULT NOW_UTC(),
+    lease_expires     TIMESTAMP(3)     NOT NULL DEFAULT NOW_UTC(),
     lease_seq         BIGINT           NOT NULL DEFAULT 0,
     engine_id         BIGINT           NOT NULL DEFAULT 0,
     flow_created_hour INT              NOT NULL,
-    created_at        TIMESTAMP        NOT NULL DEFAULT NOW_UTC(),
-    started_at        TIMESTAMP        NOT NULL DEFAULT NOW_UTC(),
-    updated_at        TIMESTAMP        NOT NULL DEFAULT NOW_UTC(),
+    created_at        TIMESTAMP(3)     NOT NULL DEFAULT NOW_UTC(),
+    started_at        TIMESTAMP(3)     NOT NULL DEFAULT NOW_UTC(),
+    updated_at        TIMESTAMP(3)     NOT NULL DEFAULT NOW_UTC(),
     PRIMARY KEY (step_id)
 );
 

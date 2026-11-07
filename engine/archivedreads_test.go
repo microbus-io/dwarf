@@ -1145,7 +1145,7 @@ func TestArchivedReads_ForkHoldsTheReaperOffItsSource(t *testing.T) {
 	}()
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
-	skips := db.DriverName() == "pgx" || db.DriverName() == "mysql"
+	skips := db.DriverName() == "pgx" || db.DriverName() == "mysql" || db.DriverName() == "mariadb"
 	if skips {
 		// The pass skips the root Fork holds and moves the rest (forkOutcome's fork among them), so it finishes with
 		// the source left in the live tables, which is checked once the Fork lets go.

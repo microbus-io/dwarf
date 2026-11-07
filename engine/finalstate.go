@@ -646,7 +646,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, ste
 		switch tx.DriverName() {
 		case "pgx":
 			batch.queue(readLocked, "SELECT "+lockedCols+" FROM dwarf_flows"+lockWhere+" FOR NO KEY UPDATE", flowID)
-		case "mysql":
+		case "mysql", "mariadb":
 			batch.queue(readLocked, "SELECT "+lockedCols+" FROM dwarf_flows"+lockWhere+" FOR UPDATE", flowID)
 		case "mssql":
 			batch.queue(readLocked, lockGrab+" OUTPUT INSERTED.surgraph_flow_id, INSERTED.surgraph_step_id, INSERTED.delete_on_completion, INSERTED.status, INSERTED.priority"+lockWhere, flowID)

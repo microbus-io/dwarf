@@ -238,7 +238,7 @@ func TestArchiver_DropBeforeDropsTheOldestDays(t *testing.T) {
 
 	later := archiver.New(db, archiver.DefaultDayLength, withArchiveMigration(t, "3.sql",
 		"-- DRIVER: mssql\nALTER TABLE dwarf_steps_archive ADD extra INT NOT NULL DEFAULT 0;\n\n"+
-			"-- DRIVER: pgx mysql sqlite\nALTER TABLE dwarf_steps_archive ADD COLUMN extra INT NOT NULL DEFAULT 0;\n"))
+			"-- DRIVER: pgx mysql mariadb sqlite\nALTER TABLE dwarf_steps_archive ADD COLUMN extra INT NOT NULL DEFAULT 0;\n"))
 	archiver.SetClock(later, atHour(9003, 12))
 	assert.NoError(later.EnsureToday(ctx))
 	assert.NoError(later.MigrateDays(ctx, 30))
@@ -343,7 +343,7 @@ func TestArchiver_MigrateDaysAppliesALaterMigration(t *testing.T) {
 
 	later := archiver.New(db, archiver.DefaultDayLength, withArchiveMigration(t, "3.sql",
 		"-- DRIVER: mssql\nALTER TABLE dwarf_steps_archive ADD extra INT NOT NULL DEFAULT 0;\n\n"+
-			"-- DRIVER: pgx mysql sqlite\nALTER TABLE dwarf_steps_archive ADD COLUMN extra INT NOT NULL DEFAULT 0;\n"))
+			"-- DRIVER: pgx mysql mariadb sqlite\nALTER TABLE dwarf_steps_archive ADD COLUMN extra INT NOT NULL DEFAULT 0;\n"))
 	archiver.SetClock(later, atHour(today, 12))
 	assert.NoError(later.MigrateDays(ctx, 30))
 	// Up to date: a second run must run nothing, or the ADD COLUMN, which is not idempotent, would fail.

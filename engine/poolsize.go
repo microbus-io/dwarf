@@ -191,7 +191,7 @@ func completionRoundTrips(driver string) int {
 	switch driver {
 	case "pgx":
 		return 4
-	case "mysql", "mssql":
+	case "mysql", "mariadb", "mssql":
 		return 7
 	}
 	return 6
@@ -474,7 +474,7 @@ func readMaxConnections(ctx context.Context, db *sequel.DB) int {
 	switch db.DriverName() {
 	case "pgx":
 		q = "SELECT CAST(setting AS INTEGER) FROM pg_settings WHERE name='max_connections'"
-	case "mysql":
+	case "mysql", "mariadb":
 		q = "SELECT @@max_connections"
 	case "mssql":
 		q = "SELECT @@MAX_CONNECTIONS"

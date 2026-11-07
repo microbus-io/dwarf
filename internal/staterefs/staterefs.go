@@ -532,9 +532,9 @@ func (l *Linker) store(k cacheKey, value json.RawMessage) *cachedField {
 // of small ints is close to its worst case; the other binary format (MySQL's) packs small integers inline
 // behind variable-width offsets and stays near 1x.
 //
-// One consequence worth knowing: MySQL and MariaDB share the driver name "mysql" and have genuinely
-// different JSON storage engines, so a factor keyed on the driver name could not tell them apart - but
-// both measure ~1x, so the ambiguity is moot and no server-version probe is needed.
+// MySQL and MariaDB have genuinely different JSON storage engines, and a MariaDB opened from a DSN in the
+// MySQL driver's own format reports the driver name "mysql", so a factor keyed on the driver name could not
+// always tell them apart - but both measure ~1x, so no factor and no server-version probe is needed.
 func (l *Linker) inflation(successors int) int {
 	if successors > 1 && l.driver == "pgx" {
 		return postgresInflation

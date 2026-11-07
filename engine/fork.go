@@ -179,7 +179,7 @@ func (e *Engine) forkSource(ctx context.Context, tx *sequel.Tx, src flowTables, 
 		// it would find the root still there and closed, and answer that the flow is scheduled for deletion where the
 		// tree has in fact moved to the archive. A locking read is a current read there.
 		current := ""
-		if tx.DriverName() == "mysql" {
+		if d := tx.DriverName(); d == "mysql" || d == "mariadb" {
 			current = " LOCK IN SHARE MODE"
 		}
 		var rootStatus string

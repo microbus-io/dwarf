@@ -4303,7 +4303,7 @@ call (the per-shard debug path is `ShardInfo` + `Query.Shard`). `Limit` is requi
   locate walk touched about 160 relations and exhausted that table only with about 40% of connections running it at
   once.
 - **The time bounds are bound as text** (`sqlTime`, `timeConditions`): `FromTime`/`ToTime` rounded UP to the
-  column's unit - microseconds on PostgreSQL, whose `TIMESTAMP` holds them, milliseconds elsewhere - which is exact
+  columns' unit, milliseconds on every dialect (`TIMESTAMP(3)` on PostgreSQL), which is exact
   for an inclusive lower and an exclusive upper bound alike (truncating drops the values just below an exclusive
   bound), formatted in UTC and cast to the column's type, never a `time.Time`, so no session time zone is involved; the
   relative bounds read the database clock. Pinned by `TestSQLTime_ReadsAsTheInstantItNames` (every dialect, and a

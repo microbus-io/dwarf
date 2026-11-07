@@ -128,7 +128,7 @@ func (a *Archive) now(ctx context.Context) (int64, error) {
 	switch a.db.DriverName() {
 	case "pgx":
 		stmt = "SELECT CAST(FLOOR(EXTRACT(EPOCH FROM NOW())) AS BIGINT)"
-	case "mysql":
+	case "mysql", "mariadb":
 		stmt = "SELECT UNIX_TIMESTAMP()"
 	case "mssql":
 		stmt = "SELECT DATEDIFF_BIG(SECOND, '1970-01-01', SYSUTCDATETIME())"
@@ -409,7 +409,7 @@ func (a *Archive) catalog(ctx context.Context) (days []int, whole []int, err err
 	switch a.db.DriverName() {
 	case "pgx":
 		stmt = "SELECT tablename FROM pg_tables WHERE schemaname=current_schema() AND tablename LIKE 'dwarf_%_archive_%'"
-	case "mysql":
+	case "mysql", "mariadb":
 		stmt = "SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name LIKE 'dwarf_%_archive_%'"
 	case "mssql":
 		// The default schema only, which the drops and the OBJECT_ID guards resolve to.

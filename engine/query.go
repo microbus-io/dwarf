@@ -397,7 +397,7 @@ func searchClause(driverName string, shardIdx int, search string) (string, []any
 	pattern := "%" + likeEscaper.Replace(strings.ToLower(search)) + "%"
 	var flowKeyExpr string
 	switch driverName {
-	case "mysql", "mssql":
+	case "mysql", "mariadb", "mssql":
 		flowKeyExpr = fmt.Sprintf("CONCAT('%d-', f.created_hour, '-', f.flow_id, '-', TRIM(f.flow_token))", shardIdx)
 	default:
 		flowKeyExpr = fmt.Sprintf("'%d-' || f.created_hour || '-' || f.flow_id || '-' || TRIM(f.flow_token)", shardIdx)

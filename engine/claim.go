@@ -101,7 +101,7 @@ func lockRowsSQL(driverName string, flows string, where string) string {
 	switch driverName {
 	case "pgx":
 		return "SELECT 1 FROM " + flows + " WHERE " + where + " FOR NO KEY UPDATE"
-	case "mysql":
+	case "mysql", "mariadb":
 		return "SELECT 1 FROM " + flows + " WHERE " + where + " FOR UPDATE"
 	}
 	return "UPDATE " + flows + " SET touch=1-touch WHERE " + where
@@ -109,7 +109,7 @@ func lockRowsSQL(driverName string, flows string, where string) string {
 
 // locksByReading reports whether lockFlowRowsSQL is a locking read on the driver.
 func locksByReading(driverName string) bool {
-	return driverName == "pgx" || driverName == "mysql"
+	return driverName == "pgx" || driverName == "mysql" || driverName == "mariadb"
 }
 
 // lockFlowRows takes the write lock on the dwarf_flows rows that match where and returns how many it locked.

@@ -37,7 +37,7 @@ func pairsAt(band int, keys ...string) []planner.Slot {
 // fetchDrivers is every driver name fetchQuery answers to, plus one it does not - an unknown name must
 // land on a working branch rather than an empty statement, since the alternative is a shard that silently
 // supplies nothing.
-var fetchDrivers = []string{"pgx", "mysql", "mssql", "sqlite", "unknown"}
+var fetchDrivers = []string{"pgx", "mysql", "mariadb", "mssql", "sqlite", "unknown"}
 
 // TestFetchQuery_BindCountIsFixed is the regression this file exists for: the chosen (band, key) pairs travel as
 // one or two parameters (arrays on pgx, JSON elsewhere), so the bind count must not move with how many pairs the
@@ -64,8 +64,8 @@ func TestFetchQuery_BindCountIsFixed(t *testing.T) {
 		assert.NoError(err, driver)
 		_, manyArgs, err := fetchQuery(driver, pairsAt(3, many...), 4, "", nil)
 		assert.NoError(err, driver)
-		if driver == "mysql" {
-			// mysql alone still binds per pair - it cannot use a json pair list without tripping a
+		if driver == "mysql" || driver == "mariadb" {
+			// mysql and mariadb alone still bind per pair - it cannot use a json pair list without tripping a
 			// cross-collation comparison, and its 65,535 ceiling is ~10x above any reachable pair count.
 			// Asserted rather than exempted so the exception stays deliberate.
 			assert.True(len(manyArgs) == 2*len(many)+1,

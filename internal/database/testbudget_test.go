@@ -120,6 +120,7 @@ func TestBudget_DriverCaps(t *testing.T) {
 	assert := testarossa.For(t)
 	assert.Equal(int64(80), driverConnCap("pgx"))
 	assert.Equal(int64(120), driverConnCap("mysql"))
+	assert.Equal(int64(120), driverConnCap("mariadb"))
 	assert.Equal(int64(120), driverConnCap("mssql"))
 	assert.Equal(int64(1<<20), driverConnCap("sqlite"))
 	assert.Equal(int64(1<<20), driverConnCap("something-else"))

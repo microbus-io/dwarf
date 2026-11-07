@@ -31,6 +31,13 @@ throughput. To minimize: `transaction-isolation = READ-COMMITTED` (drops gap loc
 `innodb_deadlock_detect = ON`. Per-shard databases: every shard's DB must exist before startup (the engine migrates
 schema but does not `CREATE DATABASE`). MariaDB 10.5+ for `JSON`.
 
+**MariaDB has two driver names, and every MySQL branch must answer to both.** sequel reports `mariadb` for a database
+opened with the `mariadb` driver name or a `mariadb://` URL, and `mysql` for a MariaDB opened from a DSN in the MySQL
+driver's own format. So every dialect switch that names `"mysql"` names `"mariadb"` beside it, and every MySQL
+migration section is `-- DRIVER: mysql mariadb`; a section marked `mysql` alone does not run on a `mariadb` database,
+which then has no tables. A switch whose `default` arm is the MySQL form needs nothing. Test the `mariadb` name with a
+`mariadb://` testing DSN: a MySQL-format DSN to the same server exercises only `mysql`.
+
 **SQL Server.** Enable `READ_COMMITTED_SNAPSHOT ON` per shard database for Postgres-like non-blocking reads and
 near-zero deadlock risk. No other tuning mandatory.
 

@@ -858,7 +858,7 @@ func TestArchiving_AHeldRootIsSkippedNotWaitedFor(t *testing.T) {
 	e := archiveEngine(t, treeMux(), 30)
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
-	if d := db.DriverName(); d != "pgx" && d != "mysql" {
+	if d := db.DriverName(); d != "pgx" && d != "mysql" && d != "mariadb" {
 		t.Skip("a held root is waited for on " + d)
 	}
 	roots := closedRoots(t, e, 2)

@@ -12,7 +12,7 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 
--- DRIVER: mysql
+-- DRIVER: mysql mariadb
 CREATE TABLE IF NOT EXISTS dwarf_flows (
     flow_id              BIGINT       NOT NULL AUTO_INCREMENT,
     flow_token           VARCHAR(16)  NOT NULL,
@@ -84,11 +84,11 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     time_budget_ms       INT              NOT NULL DEFAULT 0,
     engine_id            BIGINT           NOT NULL DEFAULT 0,
     created_hour         INT              NOT NULL DEFAULT (FLOOR(EXTRACT(EPOCH FROM NOW()) / 3600) - 262968),
-    created_at           TIMESTAMP        NOT NULL DEFAULT NOW_UTC(),
-    started_at           TIMESTAMP        NOT NULL DEFAULT NOW_UTC(),
-    updated_at           TIMESTAMP        NOT NULL DEFAULT NOW_UTC(),
+    created_at           TIMESTAMP(3)     NOT NULL DEFAULT NOW_UTC(),
+    started_at           TIMESTAMP(3)     NOT NULL DEFAULT NOW_UTC(),
+    updated_at           TIMESTAMP(3)     NOT NULL DEFAULT NOW_UTC(),
     touch                SMALLINT         NOT NULL DEFAULT 0,
-    archived_at          TIMESTAMP        NOT NULL DEFAULT '9999-12-31 23:59:59',
+    archived_at          TIMESTAMP(3)     NOT NULL DEFAULT '9999-12-31 23:59:59',
     PRIMARY KEY (flow_id)
 );
 

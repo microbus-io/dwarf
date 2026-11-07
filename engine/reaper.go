@@ -695,7 +695,7 @@ func lockDueRoots(ctx context.Context, tx *sequel.Tx, rootIDs []int, kind reapKi
 func lockRootsIn(ctx context.Context, tx *sequel.Tx, flows string, skipHeld bool, where string, args ...any) ([]int, error) {
 	var stmt string
 	switch tx.DriverName() {
-	case "pgx", "mysql":
+	case "pgx", "mysql", "mariadb":
 		stmt = "SELECT flow_id FROM " + flows + " WHERE " + where + " ORDER BY flow_id FOR UPDATE"
 		if skipHeld {
 			stmt += " SKIP LOCKED"

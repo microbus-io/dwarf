@@ -52,8 +52,8 @@ github.com/microbus-io/errors v1.0.1 h1:pujosfRSEqSJi0gcx6d+A7Mf2RZr2vQVMSQz0pG+
 github.com/microbus-io/errors v1.0.1/go.mod h1:NZTmmm+wxKQ8JFCeOMWWj+oqGylYsMKmS1YXysHZASM=
 github.com/microbus-io/seamster v0.4.0 h1:CCBmoyBChBP5pehnc2zh9kLQifbr6r+BrYUw9pDClWI=
 github.com/microbus-io/seamster v0.4.0/go.mod h1:IlCTdnLEOqfaFXd+ctNVC7tmn2GFQquQVcUYljbzZjw=
-github.com/microbus-io/sequel v1.15.4 h1:m7J/B3oGJrxYPrqxUdKbnxflGFexUib3JjjVYQgYkuk=
-github.com/microbus-io/sequel v1.15.4/go.mod h1:hAM9K2HwAW+Lurl8tqX3pUjRWEyM3/9nfESDegej3mU=
+github.com/microbus-io/sequel v1.16.0 h1:o1thZjfcXtf7w2eGr82oScKDN0lNuiZOD238YEV12Ak=
+github.com/microbus-io/sequel v1.16.0/go.mod h1:hAM9K2HwAW+Lurl8tqX3pUjRWEyM3/9nfESDegej3mU=
 github.com/microbus-io/testarossa v0.7.4 h1:q0gM+4mIY3EGDRe3TFcm1+Z0D3QQGmidpE6wqK7J78s=
 github.com/microbus-io/testarossa v0.7.4/go.mod h1:Sbv4Fon51vYNIpWMPn3fbjMLFQMeMR4B9mh+Y+xxhZo=
 github.com/modocache/gover v0.0.0-20171022184752-b58185e213c5/go.mod h1:caMODM3PzxT8aQXRPkAt8xlV/e7d7w8GM5g0fa5F0D8=

@@ -12,7 +12,7 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 
--- DRIVER: mysql
+-- DRIVER: mysql mariadb
 CREATE TABLE IF NOT EXISTS dwarf_peers (
     engine_id     BIGINT      NOT NULL,
     seen_at       DATETIME(3) NOT NULL DEFAULT NOW_UTC(),
@@ -28,10 +28,10 @@ CREATE TABLE IF NOT EXISTS dwarf_peers (
 -- DRIVER: pgx
 CREATE TABLE IF NOT EXISTS dwarf_peers (
     engine_id     BIGINT      NOT NULL,
-    seen_at       TIMESTAMP   NOT NULL DEFAULT NOW_UTC(),
-    joined_at     TIMESTAMP   NOT NULL DEFAULT NOW_UTC(),
+    seen_at       TIMESTAMP(3) NOT NULL DEFAULT NOW_UTC(),
+    joined_at     TIMESTAMP(3) NOT NULL DEFAULT NOW_UTC(),
     ordering_seq  BIGINT      NOT NULL,
-    dispatched_at TIMESTAMP   NOT NULL DEFAULT '2000-01-01 00:00:00',
+    dispatched_at TIMESTAMP(3) NOT NULL DEFAULT '2000-01-01 00:00:00',
     working       SMALLINT    NOT NULL DEFAULT 1,
     draining      SMALLINT    NOT NULL DEFAULT 0,
     rtt_us        BIGINT      NOT NULL DEFAULT 0,

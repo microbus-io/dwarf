@@ -17,6 +17,7 @@ limitations under the License.
 package engine
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -67,24 +68,32 @@ func newStallProxy(t *testing.T, dsn string) (*stallProxy, string) {
 	if !assert.True(end > at+1, "no host:port after the credentials in the base DSN") {
 		return nil, dsn
 	}
+	// The MySQL driver's own form wraps the address in the network, tcp(host:port), with or without a mysql:// or
+	// mariadb:// prefix; the proxy's address goes inside the same wrapper.
+	host, wrap := dsn[at+1:end], "%s"
+	if inner, ok := strings.CutPrefix(host, "tcp("); ok && strings.HasSuffix(inner, ")") {
+		host, wrap = strings.TrimSuffix(inner, ")"), "tcp(%s)"
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if !assert.NoError(err) {
 		return nil, dsn
 	}
-	p := &stallProxy{addr: ln.Addr().String(), upstream: dsn[at+1 : end], ln: ln}
+	p := &stallProxy{addr: ln.Addr().String(), upstream: host, ln: ln}
 	t.Cleanup(p.close)
 	go p.serve()
-	return p, dsn[:at+1] + p.addr + dsn[end:]
+	return p, dsn[:at+1] + fmt.Sprintf(wrap, p.addr) + dsn[end:]
 }
 
 // TestStallProxy_FindsTheHostInEitherDSNShape pins the rewrite against both shapes a server DSN takes, because
 // getting it wrong on one of them does not fail the outage arm - it SKIPS it, silently, on that dialect alone.
 // Runs on every dialect (it opens a listener and rewrites a string; it never connects).
 func TestStallProxy_FindsTheHostInEitherDSNShape(t *testing.T) {
-	for _, tc := range []struct{ name, dsn, upstream, tail string }{
-		{"path", "postgres://u:p@127.0.0.1:5432/dwarf_%d?sslmode=disable", "127.0.0.1:5432", "/dwarf_%d?sslmode=disable"},
-		{"query", "sqlserver://u:p@127.0.0.1:1433?database=dwarf_%d", "127.0.0.1:1433", "?database=dwarf_%d"},
-		{"bare", "sqlserver://u:p@127.0.0.1:1433", "127.0.0.1:1433", ""},
+	for _, tc := range []struct{ name, dsn, upstream, tail, wrap string }{
+		{"path", "postgres://u:p@127.0.0.1:5432/dwarf_%d?sslmode=disable", "127.0.0.1:5432", "/dwarf_%d?sslmode=disable", "%s"},
+		{"query", "sqlserver://u:p@127.0.0.1:1433?database=dwarf_%d", "127.0.0.1:1433", "?database=dwarf_%d", "%s"},
+		{"bare", "sqlserver://u:p@127.0.0.1:1433", "127.0.0.1:1433", "", "%s"},
+		{"mysql", "u:p@tcp(127.0.0.1:3306)/dwarf_%d", "127.0.0.1:3306", "/dwarf_%d", "tcp(%s)"},
+		{"mariadb_url", "mariadb://u:p@tcp(127.0.0.1:3306)/dwarf_%d?parseTime=true", "127.0.0.1:3306", "/dwarf_%d?parseTime=true", "tcp(%s)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert := testarossa.For(t)
@@ -93,7 +102,7 @@ func TestStallProxy_FindsTheHostInEitherDSNShape(t *testing.T) {
 				return
 			}
 			assert.Equal(tc.upstream, p.upstream, "the host must end where the DSN's own syntax ends it")
-			assert.Equal(tc.dsn[:strings.LastIndex(tc.dsn, "@")+1]+p.addr+tc.tail, proxied)
+			assert.Equal(tc.dsn[:strings.LastIndex(tc.dsn, "@")+1]+fmt.Sprintf(tc.wrap, p.addr)+tc.tail, proxied)
 		})
 	}
 }
@@ -310,7 +319,7 @@ func runFleetOutage(t *testing.T, outage time.Duration) (worstOpen, settledOpen,
 // default, whose connections never touch a socket.
 func TestPeerOutage_FleetWideStallGrowsNoPool(t *testing.T) {
 	assert := testarossa.For(t)
-	if !strings.Contains(os.Getenv("SEQUEL_TESTING_DSN"), "://") {
+	if dsn := os.Getenv("SEQUEL_TESTING_DSN"); dsn == "" || strings.HasPrefix(dsn, "file:") {
 		t.Skip("needs a real database server: set SEQUEL_TESTING_DSN")
 	}
 	worstOpen, settledOpen, worstReplicas, blindPartitions := runFleetOutage(t, 4*time.Second)

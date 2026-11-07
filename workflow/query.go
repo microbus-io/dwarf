@@ -21,7 +21,7 @@ import "time"
 // Query specifies the filters, the time window and the limit for listing or purging flows.
 //
 // The window is FromTime, inclusive, to ToTime, exclusive. ListClosed and Purge need both; for ListOpen each is
-// optional. Times compare at the database's precision: microseconds on PostgreSQL, milliseconds elsewhere.
+// optional. Times compare to the millisecond.
 // ListOpen's window is on when a flow last changed status (FlowSummary.UpdatedAt); ListClosed's and Purge's on when a
 // flow was archived (FlowSummary.ArchivedAt), and may reach at most 31 days.
 type Query struct {

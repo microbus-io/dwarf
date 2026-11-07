@@ -178,7 +178,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, d *dispatch, interruptPayl
 			//   - TEXT/JSONB match the literal directly.
 			emptyGuard := "interrupt_payload='{}'"
 			switch db.DriverName() {
-			case "mysql":
+			case "mysql", "mariadb":
 				emptyGuard = "CAST(interrupt_payload AS CHAR)='{}'"
 			case "mssql":
 				emptyGuard = "interrupt_payload=0x7B7D"

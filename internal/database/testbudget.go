@@ -44,7 +44,7 @@ func driverConnCap(driver string) int64 {
 	switch driver {
 	case "pgx":
 		return 80 // PostgreSQL default max_connections = 100
-	case "mysql":
+	case "mysql", "mariadb":
 		return 120 // MySQL / MariaDB default 151
 	case "mssql":
 		// Sized for CONSISTENCY with the other servers rather than from SQL Server's ~32767

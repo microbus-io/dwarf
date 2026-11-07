@@ -456,7 +456,7 @@ nothing, for a list already capped (`purgeChunk`, the reaper's batches).
 
 ### MySQL Column Defaults
 
-In `-- DRIVER: mysql` schema sections, `TEXT`/`BLOB`/`JSON` columns cannot take a bare literal `DEFAULT` (MySQL error
+In `-- DRIVER: mysql mariadb` schema sections, `TEXT`/`BLOB`/`JSON` columns cannot take a bare literal `DEFAULT` (MySQL error
 1101); the value must be a parenthesized expression default, `DEFAULT ('{}')` (MySQL 8.0.13+). The same applies to
 function defaults other than `CURRENT_TIMESTAMP`, which is why `NOW_UTC()` expands parenthesized. `VARCHAR`/`CHAR`
 keep bare literal defaults. Postgres, SQL Server, and SQLite permit bare literal defaults on text/JSON types, so this
@@ -536,9 +536,16 @@ bound Go `time.Time`.** Two reasons, both load-bearing:
    RFC3339 and its age guard silently never matches; backdate with `DATE_ADD_MILLIS(NOW_UTC(), -ms)` - DB clock,
    native format. Never round-trip a timestamp out to Go and back into a `WHERE`/`SET`; recompute it in SQL.
 
-**Time columns hold UTC wall time without a zone: `TIMESTAMP` on PostgreSQL, never `TIMESTAMPTZ`.** It matches
-`DATETIME(3)` on MySQL, `DATETIME2(3)` on SQL Server and sequel's own `sequel_migrations` table. `NOW_UTC()` on
-PostgreSQL is `(NOW() AT TIME ZONE 'UTC')`, a `timestamp` without a zone. Assigned to a `TIMESTAMPTZ` column, or
+**Time columns hold UTC wall time without a zone, to the millisecond: `TIMESTAMP(3)` on PostgreSQL, never
+`TIMESTAMPTZ`.** It matches `DATETIME(3)` on MySQL, `DATETIME2(3)` on SQL Server and sequel's own `sequel_migrations`
+table.
+
+**A column must be exactly as fine as the clock that writes it.** `NOW_UTC()` is milliseconds, truncated, on every
+driver. A finer value stored into a millisecond column is ROUNDED, upward about half the time, so a row written as
+due and checked at once with `col <= NOW_UTC()` reads not yet due for up to half a millisecond. A finer column than
+the clock gains nothing and makes the time bounds dialect-dependent (`sqlTime` would need two units). Declare the
+precision on every new time column; a bare `TIMESTAMP` on PostgreSQL is microseconds. `NOW_UTC()` on
+PostgreSQL is a `timestamp` without a zone. Assigned to a `TIMESTAMPTZ` column, or
 compared with one, it is converted through the SESSION's `TimeZone`:
 - On a UTC session nothing shows.
 - On any other session every stored instant is off by the zone's offset. Comparisons inside SQL stay

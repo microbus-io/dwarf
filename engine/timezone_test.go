@@ -55,6 +55,25 @@ func TestTimestamps_SurviveANonUTCSession(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(0, zoned, "an engine time column is TIMESTAMPTZ")
 
+	// Every engine time column holds milliseconds, as NOW_UTC() writes them: a finer column would store a finer value
+	// rounded, and a bare TIMESTAMP is microseconds.
+	rows, err := db.QueryContext(ctx, "SELECT table_name, column_name, datetime_precision FROM information_schema.columns"+
+		" WHERE table_schema=current_schema() AND (table_name LIKE 'dwarf_%' OR table_name='sequel_migrations')"+
+		" AND data_type LIKE 'timestamp%'")
+	if assert.NoError(err) {
+		columns := 0
+		for rows.Next() {
+			var table, column string
+			var precision int
+			assert.NoError(rows.Scan(&table, &column, &precision))
+			assert.Equal(3, precision, "%s.%s", table, column)
+			columns++
+		}
+		assert.NoError(rows.Err())
+		rows.Close()
+		assert.True(columns >= 20, "found %d time columns", columns)
+	}
+
 	// A write made on a non-UTC session reads back as now.
 	errRollback := errors.New("rollback")
 	var seenAt time.Time

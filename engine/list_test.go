@@ -388,11 +388,6 @@ func TestSQLTime_RoundsUpToTheColumnsPrecision(t *testing.T) {
 	root := closedRoots(t, e, 1)[0]
 	moveInto(t, e, root, today)
 	unit := time.Millisecond
-	db, err := e.db.Shard(1)
-	assert.Must(assert.NoError(err))
-	if db.DriverName() == "pgx" {
-		unit = time.Microsecond
-	}
 	stored := time.Now().Add(-time.Minute).Truncate(unit)
 	stampArchived(t, e, today, root, stored)
 	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today || archiver.DayOf(stored, e.archives.Load().dayLength) != today {
@@ -411,8 +406,9 @@ func TestSQLTime_RoundsUpToTheColumnsPrecision(t *testing.T) {
 	assert.Equal("2026-11-04 01:02:03.124", arg)
 	_, arg = sqlTime("sqlite", time.Date(2026, 11, 4, 1, 2, 3, 123000000, time.UTC))
 	assert.Equal("2026-11-04 01:02:03.123", arg, "an exact millisecond is kept")
-	_, arg = sqlTime("pgx", time.Date(2026, 11, 4, 1, 2, 3, 123456700, time.UTC))
-	assert.Equal("2026-11-04 01:02:03.123457", arg)
+	expr, arg = sqlTime("pgx", time.Date(2026, 11, 4, 1, 2, 3, 123000100, time.UTC))
+	assert.Equal("CAST(? AS TIMESTAMP(3))", expr)
+	assert.Equal("2026-11-04 01:02:03.124", arg, "milliseconds on PostgreSQL too")
 }
 
 // TestListClosed_RetentionZeroStillReadsToday pins the archived list at a retention of 0: today's tables are still

@@ -13,7 +13,7 @@
 -- limitations under the License.
 
 
--- DRIVER: mysql
+-- DRIVER: mysql mariadb
 CREATE TABLE IF NOT EXISTS dwarf_flow_days (
     flow_id BIGINT NOT NULL,
     day     INT    NOT NULL,
