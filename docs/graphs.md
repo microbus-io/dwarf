@@ -324,12 +324,17 @@ See [Writing tasks](tasks.md#contributions-not-totals-on-a-reduced-field) and
 
 ## Field names
 
-The state field names a graph declares — `forEach`, `as`, and the field of `SetReducer` — must be plain
-identifiers: an ASCII letter or underscore, followed by ASCII letters, digits, or underscores
-(`lineItems`, `line_item`). `Validate` rejects a graph that declares any other name. The flow's state itself
-may carry fields under other names too, but a name must not end with `!` or `+`: in the flow's JSON form those
-suffixes mark a field a task replaced and the elements a list gained, and a task cannot write or delete such a
-field.
+A state field name is an ASCII letter or underscore, followed by ASCII letters, digits, underscores or hyphens:
+`lineItems`, `line_item` and `line-item-2` are valid; `2nd`, `-x`, `order.items` and `naïve` are not.
+`workflow.IsValidFieldName` applies the rule.
+
+- `Validate` rejects a graph whose `forEach`, `as` or `SetReducer` names a field any other way.
+- `Create`, `Run`, `Continue` and `Fork` refuse caller state holding such a name with a 400.
+- A task writing one panics, which takes the graph's `onError` transition or fails the step (see
+  [Writing tasks](tasks.md)).
+
+A `when` expression reads names of letters, digits and underscores only, so a field it compares must not contain a
+hyphen.
 
 ## Validation
 

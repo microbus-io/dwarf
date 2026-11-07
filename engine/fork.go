@@ -48,6 +48,9 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	if err != nil {
 		return "", errors.Trace(err, http.StatusBadRequest)
 	}
+	if err := checkFieldNames(overrides); err != nil {
+		return "", errors.Trace(err)
+	}
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return "", errors.New("step not found", http.StatusNotFound) // an unknown shard reads as an unknown step

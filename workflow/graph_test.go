@@ -447,17 +447,6 @@ func TestGraph_ValidateWhenExpression(t *testing.T) {
 	assert.Contains(err.Error(), "invalid 'when' expression")
 }
 
-func TestGraph_IsFieldName(t *testing.T) {
-	assert := testarossa.For(t)
-
-	for _, name := range []string{"x", "_", "_x", "item", "orderID", "order_id", "x1", "X_9_y"} {
-		assert.True(isFieldName(name), "%s", name)
-	}
-	for _, name := range []string{"", "1x", "9", "order-id", "order id", "order.items", "é", "x$", " x", "x\n"} {
-		assert.False(isFieldName(name), "%q", name)
-	}
-}
-
 func TestGraph_ValidateFieldNames(t *testing.T) {
 	assert := testarossa.For(t)
 
@@ -477,9 +466,10 @@ func TestGraph_ValidateFieldNames(t *testing.T) {
 	if assert.Error(err) {
 		assert.Contains(err.Error(), "invalid 'forEach' field name 'order.items'")
 	}
-	err = forEach("orders", "line-item").Validate()
+	assert.NoError(forEach("line-items", "line-item").Validate())
+	err = forEach("orders", "2nd").Validate()
 	if assert.Error(err) {
-		assert.Contains(err.Error(), "invalid 'as' field name 'line-item'")
+		assert.Contains(err.Error(), "invalid 'as' field name '2nd'")
 	}
 
 	g := forEach("orders", "order")

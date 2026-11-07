@@ -99,17 +99,41 @@ told it is in a branch (`RawFlow.SetInBranch`, carried on the wire), and the eng
 may be deleted in a branch; it folds in branch order. Pinned by `fixtures/reducerdeleteflow_test.go` and
 `TestChanges_RemoteResultIsChecked`.
 
+### State field names (`fieldname.go`)
+
+A state field name is an ASCII letter or underscore, then ASCII letters, digits, `_` or `-`
+(`IsValidFieldName`). One rule for every name: graph declarations, caller state at the door (a 400 from
+`Create`/`Run`/`Continue`/`Fork`, `checkFieldNames` in the engine), a subgraph's `in` (`flow.Subgraph`'s error),
+a task's writes, and a remote host's result (`checkChanges`). Resume data and interrupt payloads are not state, so
+they are not checked.
+
+- **Every `Flow` writer PANICS on a bad name** (`mustBeFieldName`), and `Clear` with it through `Del`. A bad name
+  is a typo in the task's code, and `Set`'s error is routinely ignored (`flow.Set("result", result)`), so an
+  error would drop the write silently. The panic takes the typed getters' route (below). `Changes` returns an
+  error instead: it is a value type the engine composes, not task-facing.
+- **ASCII only.** Loosening the rule later is additive; tightening it breaks callers. Non-ASCII names also meet
+  Unicode normalization (`é` as one code point or two is two JSON keys) and cannot be referenced by `when`.
+- **No dots.** `boolexp` flattens nested state into dotted keys, so a top-level `a.b` collides with
+  `{"a": {"b": ...}}`; dots are also the natural spelling of any future nested declaration.
+- **No other punctuation.** `!`/`+` are the `changes` suffixes, `[`, `]` and space are state-ref item-ref
+  syntax, and the rest is `boolexp` operator syntax.
+- **A hyphenated name cannot be referenced from `when`**: `boolexp`'s identifier is `^\w+(\.\w+)*$`. Do not
+  extend `boolexp` to accept `-` without deciding how a future arithmetic `a-b` would parse (CSS `calc()` requires
+  spaces around a binary minus), and do not convert `-` to `_` before evaluation (`line-item` and `line_item`
+  collide, and the expression needs a literal-aware rewrite).
+
+Pinned by `TestIsValidFieldName`, `TestFlow_InvalidNamePanicsInEveryWriter`, `TestChanges_RemoteResultIsChecked`
+and `fixtures/fieldnameflow_test.go`.
+
 ### `Changes` is ONE JSON object, an overwrite named with the `!` suffix
 
 `Changes.MarshalJSON` writes a contribution under the field's name and an overwrite under `name!`
 (`OverwriteSuffix`); a delete is `"name!": null`. That one object is the `changes` column, the carrier's
 `changes` wire field, and a remote host's result. `State`'s JSON stays plain data.
 
-- **The suffix is reserved in the names a task WRITES.** `Changes.Set`/`Overwrite` and `Flow.Set`/`Overwrite`
-  return an error for a name ending in `!`, `Flow.Del` panics (the host-call boundary turns it into a step
-  failure), and the engine re-checks a returned result (`checkChanges`), because a remote host can send `x!!`.
-  Graph-declared names cannot contain `!`. A plain state - input, a step's `state`, `final_state` - may still
-  hold such a name as data.
+- **The suffix can never be part of a field name**: `!` is outside the name rule ("State field names" above), so
+  `x!` is never a field, only the overwrite spelling of `x`. A remote host can still send `x!!`, which decodes as
+  an overwrite of the invalid `x!`; `checkChanges` fails the step.
 - **A row with no `!` key reads as all contributions.** If both spellings of a field appear, the overwrite
   wins.
 - **Every reader of a `changes` column decodes it as `Changes`** (`changesOf` in the engine). A plain `State`
@@ -133,7 +157,7 @@ growing list each step stores each element once. Applying the Changes onto that 
   must win outright; `checkChanges` refuses one there, or on a reduced field.
 - **Compose:** a later replace or overwrite drops it; a later addition joins it; an addition onto an earlier write
   extends that write (`Changes.add`). `Apply` appends it to the field's current value.
-- **`+` is reserved in the names a task writes**, like `!`, and the anchor lookup probes `field+` only for a list
+- **`+` is outside the name rule**, like `!`, and the anchor lookup probes `field+` only for a list
   entry reading the changes column - a whole-field ref never resolves to the elements a step gained.
 - **It reaches a task only on a re-run** (retry, resume, subgraph return), in the earlier runs' changes the carrier
   is seeded with; the task's own `Set` replaces it. Elements compare by bytes, else decoded and re-encoded, since a

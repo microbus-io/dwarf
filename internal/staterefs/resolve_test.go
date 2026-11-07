@@ -93,7 +93,8 @@ func TestLinker_ResolveReadsBothColumns(t *testing.T) {
 }
 
 // TestLinker_ResolveReadsAnOverwriteBySuffix pins how the anchor's changes name a field the task overwrote:
-// with the overwrite suffix. A carried field whose own name ends with the suffix is never read from such a key.
+// with the overwrite suffix. No field name can end with the suffix (workflow.IsValidFieldName); the state's "doc!"
+// below proves only that the lookup never reads such a key as a field of its own.
 func TestLinker_ResolveReadsAnOverwriteBySuffix(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)

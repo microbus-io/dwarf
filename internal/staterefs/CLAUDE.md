@@ -27,7 +27,7 @@ input for large elements, `D/(1+D)` for mid-size ones. Task outputs (`changes`) 
 - **The wire format is owned by `Ref`'s JSON methods, and every form shares one grammar** (see "Lists" below for
   the forms it adds). A plain ref is always a bare JSON number, so a refs column with no other form is readable by
   a reader that knows only plain refs. The string form holds an index path of any depth (`"9 data[3][0]"`). A field
-  is named only for a `forEach` source array, an identifier (`Graph.Validate`'s `isFieldName`), so no `[`, `;` or
+  is named only for a `forEach` source array, a valid state field name (`workflow.IsValidFieldName`), so no `[`, `;` or
   space can occur in one - which is what makes the front-to-back parse unambiguous.
 - **A refs column the reader cannot decode is an error, never "no refs".** `Parse` returns one, and dispatch
   fails the step with it (the same path as a ref it cannot resolve). Degrading to no refs instead runs the task

@@ -71,6 +71,15 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 			return "", errors.New("time budget must be at most %v", maxTimeBudget, http.StatusBadRequest)
 		}
 	}
+	// Normalize the caller's initialState (a struct, map, or nil) into a State at the door, before the host is called. A nil yields
+	// empty state (NewState's nil case), so a marshaled "null" never reaches the strict object parser.
+	state, err := workflow.NewState(initialState)
+	if err != nil {
+		return "", errors.Trace(err, http.StatusBadRequest)
+	}
+	if err := checkFieldNames(state); err != nil {
+		return "", errors.Trace(err)
+	}
 	opts = e.resolveFlowOptions(opts)
 	// The create-time LoadGraph sees the baggage on ctx in the same shape every dispatch will: a State built by
 	// NewState, which marshals the host's Go value to per-field JSON as a dispatch's read of the column does.
@@ -103,12 +112,6 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 	shardNum, err := e.pickShard()
 	if err != nil {
 		return "", errors.Trace(err)
-	}
-	// Normalize the caller's initialState (a struct, map, or nil) into a State at the door. A nil yields
-	// empty state (NewState's nil case), so a marshaled "null" never reaches the strict object parser.
-	state, err := workflow.NewState(initialState)
-	if err != nil {
-		return "", errors.Trace(err, http.StatusBadRequest)
 	}
 	// Creation takes a turn like any other database work, and it is the one caller that most needs to: it
 	// arrives at a rate the caller chooses rather than one dispatch sets, so left unordered it competes for
@@ -1303,12 +1306,6 @@ func (e *Engine) continueFlow(ctx context.Context, flowKey string, additionalSta
 		return "", errors.Trace(err)
 	}
 
-	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
-	// calls has to know about turns. Its age is stamped here, so it queues behind work already running
-	// and ahead of anything arriving after it.
-	ctx, doneTurn := e.opTurn(ctx, shardNum, "continue")
-	defer doneTurn()
-
 	// The caller's raw Go value is the only reducer input that does not arrive decoded from the database, so
 	// canonicalize it: NewState JSON-round-trips a map/struct, so a struct's declaration-order fields become
 	// sorted-key map form and a fold never compares two spellings of the same value (reducers compare
@@ -1317,6 +1314,15 @@ func (e *Engine) continueFlow(ctx context.Context, flowKey string, additionalSta
 	if err != nil {
 		return "", errors.Trace(err, http.StatusBadRequest)
 	}
+	if err := checkFieldNames(additional); err != nil {
+		return "", errors.Trace(err)
+	}
+
+	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
+	// calls has to know about turns. Its age is stamped here, so it queues behind work already running
+	// and ahead of anything arriving after it.
+	ctx, doneTurn := e.opTurn(ctx, shardNum, "continue")
+	defer doneTurn()
 
 	// The source is read with no lock and outside the insert's transaction, from the live tables or the archive: a
 	// completed flow is immutable, and the new flow copies its state, graph and policy rather than referencing it, so

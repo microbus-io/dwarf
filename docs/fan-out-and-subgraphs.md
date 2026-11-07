@@ -161,7 +161,7 @@ comes back the same way, with no child flow created and nothing in `out`. The er
 |---|---|
 | The host's own, `503` by convention | The host's `LoadGraph` could not load the child's graph, for example because the service that serves it is unreachable |
 | `404` | The host's `LoadGraph` returned no graph |
-| `400` | The child's graph is invalid |
+| `400` | The child's graph is invalid, or `in` holds a field whose name is not a valid [field name](graphs.md#field-names) |
 | `500` | The host's `LoadGraph` panicked |
 
 Returning the error takes the task's `onError` transition, if the graph has one, or fails the step. To wait out a

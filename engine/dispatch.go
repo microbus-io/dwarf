@@ -762,7 +762,7 @@ func (e *Engine) outcome(ctx context.Context, d *dispatch, execErr error) (done 
 		return true, errors.Trace(e.failAndReturn(ctx, d, err))
 	}
 
-	// Competing signals and a second park, like a reserved name in the changes above and a negative retry delay, are
+	// Competing signals and a second park, like an invalid name in the changes above and a negative retry delay, are
 	// the task breaking the carrier's contract - its own bug, which a retry repeats and a handler cannot repair - so
 	// they fail the step outright rather than take onError. A failure outside the task's code that it can act on,
 	// such as a subgraph that cannot be spawned, is delivered to the task instead (resolveFailedSpawn).
@@ -810,6 +810,11 @@ func (e *Engine) parkInterrupt(ctx context.Context, d *dispatch, interruptPayloa
 func (e *Engine) parkSubgraph(ctx context.Context, d *dispatch, subgraphURL string, subgraphInput workflow.State) error {
 	taskName := d.row.taskName
 	e.logger.DebugContext(ctx, "Task requested subgraph", "task", taskName, "workflow", d.row.workflowURL, "subgraph", subgraphURL)
+	// The child's input is the caller's state handed across, checked as Create checks its caller's. A bad name is
+	// delivered to the task as the subgraph's error, like a child that cannot be spawned.
+	if err := checkFieldNames(subgraphInput); err != nil {
+		return errors.Trace(e.resolveFailedSpawn(ctx, d, subgraphURL, err))
+	}
 	// Bound the subgraph LoadGraph by the caller flow's budget (the create-time LoadGraph uses the caller's ctx).
 	loadCtx, loadCancel := context.WithTimeout(workflow.ContextWithBaggage(ctx, d.baggage), time.Duration(d.row.flowTimeBudgetMs)*time.Millisecond)
 	var subgraphGraph *workflow.Graph

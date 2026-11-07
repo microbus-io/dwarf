@@ -285,10 +285,11 @@ func (f *Flow) write(name string, one Changes) error {
 // value you read, which would add it again. A nil contributes nothing there; use Del or Overwrite to clear or
 // replace such a field.
 //
-// It returns an error if the value cannot be marshalled to JSON (a NaN, an +Inf, a channel), if the reducer
-// cannot combine it with the field's value (a string under ReducerAdd), or if name ends with OverwriteSuffix or
-// AdditionSuffix.
+// It returns an error if the value cannot be marshalled to JSON (a NaN, an +Inf, a channel) or if the reducer
+// cannot combine it with the field's value (a string under ReducerAdd). It panics if name is not a valid state
+// field name (IsValidFieldName); the orchestrator turns the panic into a failure of the step.
 func (f *Flow) Set(name string, value any) error {
+	mustBeFieldName(name)
 	if r := f.reducers[name]; r == "" || r == ReducerReplace {
 		// No reducer, so nothing to fold: the bytes go straight into the view and the changes.
 		raw, err := marshalWrite(name, value)
@@ -312,8 +313,8 @@ func (f *Flow) Set(name string, value any) error {
 }
 
 // mustSet is Set for the typed setters, which have no error to return. The panic is for a value the field's
-// reducer cannot combine, or SetFloat's NaN or infinity, which does not marshal - either way the orchestrator
-// turns it into a failure of the step, naming the field.
+// reducer cannot combine, or SetFloat's NaN or infinity, which does not marshal (an invalid name panics in Set
+// itself) - either way the orchestrator turns it into a failure of the step, naming the field.
 func (f *Flow) mustSet(name string, value any) {
 	if err := f.Set(name, value); err != nil {
 		panic(errors.New("state field %q: %v", name, err))
@@ -346,9 +347,10 @@ func (f *Flow) SetDuration(name string, value time.Duration) { f.mustSet(name, v
 // Overwriting a reduced field is not allowed inside a fan-out branch, at any depth: the branches are parallel,
 // and a reset in one of them has no defined meaning for the others. There it returns an error and records
 // nothing, so a task that ignores the error keeps the field as it was. A field with no reducer can be overwritten
-// anywhere. It also returns an error if the value cannot be marshalled or name ends with OverwriteSuffix or
-// AdditionSuffix.
+// anywhere. It also returns an error if the value cannot be marshalled, and panics, like Set, if name is not a
+// valid state field name.
 func (f *Flow) Overwrite(name string, value any) error {
+	mustBeFieldName(name)
 	if r := f.reducers[name]; f.inBranch && r != "" && r != ReducerReplace {
 		return errors.New("workflow: cannot overwrite reduced field %q inside a fan-out branch", name)
 	}
@@ -361,10 +363,10 @@ func (f *Flow) Overwrite(name string, value any) error {
 
 // Del deletes the listed state fields, whatever reducer they have: it is Overwrite with nil. Later reads in the
 // task see each field as absent. Deleting a reduced field inside a fan-out branch fails the step, as Overwrite
-// does. A name ending with OverwriteSuffix or AdditionSuffix cannot be written, and panics like a typed setter's
-// error, which the orchestrator turns into a failure of the step.
+// does. It panics, like Set, if a name is not a valid state field name.
 func (f *Flow) Del(names ...string) {
 	for _, n := range names {
+		mustBeFieldName(n)
 		one := NewChanges()
 		if err := one.Overwrite(n, nil); err != nil {
 			panic(errors.Trace(err))
@@ -373,8 +375,8 @@ func (f *Flow) Del(names ...string) {
 	}
 }
 
-// Clear deletes every state field, as Del on each. Useful at workflow boundaries or anywhere a task wants a
-// blank slate before populating it.
+// Clear deletes every state field, as Del on each, so it panics if the state holds a name that is not a valid
+// state field name. Useful at workflow boundaries or anywhere a task wants a blank slate before populating it.
 func (f *Flow) Clear() {
 	for _, k := range slices.Collect(f.state.Names()) {
 		f.Del(k)

@@ -1468,9 +1468,10 @@ and `TestChanges_ErrorRouteComposesThroughTheReducers`, each failing with its si
   (`TestChanges_UnreadableColumnIsAnErrorNotNoChanges`). Write it with `json.Marshal`. The state-refs anchor
   loader is the one raw reader, and `internal/staterefs` looks up `field!` before `field` (and `field+` for a list
   entry reading `changes`).
-- **A task's result is checked, not trusted** (`checkChanges`): no name ending with either suffix, no overwrite
-  or delete of a reduced field inside a fan-out branch, and no addition but one the engine could have recorded
-  (no reducer, outside a cohort). Each fails the step, naming the field. Pinned by
+- **A task's result is checked, not trusted** (`checkChanges`): every name valid (`workflow.IsValidFieldName`,
+  which excludes both suffixes), no overwrite or delete of a reduced field inside a fan-out branch, and no
+  addition but one the engine could have recorded (no reducer, outside a cohort). Each fails the step, naming the
+  field. Pinned by
   `TestChanges_RemoteResultIsChecked`.
 - **An addition is recorded at persist time, outside a cohort** (`recordAdditions` in `processStep`, before
   `changesJSON`): an addition is relative to the step's own input, and the fan-in folds a member onto the spawn's.
@@ -1624,7 +1625,8 @@ format" is decided once, at the claim, and holds for everything the dispatch rea
   change would then have to keep its predecessor's writer alive for as long as an un-upgraded peer might exist,
   fleet-wide; the per-flow rule keeps an old writer alive only for the flows created before the change.
 - **Do not put the version inside a payload column** (`state_refs` included). Those are keyed by state field
-  names, which are unconstrained, so a version key collides with a field of the same name.
+  names, and any key a version could take is also a valid field name, so it would collide with a field of that
+  name.
 
 **Introducing payload format 2 (or any next version) - the checklist.** The mechanism above is built and tested
 at version 1; the release that first needs it does all of this:

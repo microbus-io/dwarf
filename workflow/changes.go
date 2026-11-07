@@ -148,8 +148,8 @@ func (c Changes) IsDeleted(name string) bool {
 // under ReducerAppend becomes a list; onto an overwrite, it folds onto the overwritten value and the field stays
 // overwritten. On a field with no reducer the value replaces, and a nil deletes, which is an overwrite with
 // nothing. On a reduced field a nil contributes nothing. It returns an error if the value cannot be marshalled,
-// if the reducer cannot combine it, or if name ends with OverwriteSuffix or AdditionSuffix; on an error the
-// Changes are unchanged.
+// if the reducer cannot combine it, or if name is not a valid state field name (IsValidFieldName); on an error
+// the Changes are unchanged.
 func (c Changes) Set(name string, value any, reducers map[string]Reducer) error {
 	raw, err := marshalWrite(name, value)
 	if err != nil {
@@ -158,19 +158,17 @@ func (c Changes) Set(name string, value any, reducers map[string]Reducer) error 
 	return c.contribute(name, raw, reducers)
 }
 
-// marshalWrite encodes a value written to a field of these Changes, rejecting a name that ends with
-// OverwriteSuffix or AdditionSuffix.
+// marshalWrite encodes a value written to a field of these Changes, rejecting a name that is not a valid state
+// field name (IsValidFieldName), which also keeps OverwriteSuffix and AdditionSuffix out of every name written.
 func marshalWrite(name string, value any) (json.RawMessage, error) {
-	for _, suffix := range []string{OverwriteSuffix, AdditionSuffix} {
-		if strings.HasSuffix(name, suffix) {
-			return nil, errors.New("workflow: state field %q cannot be written: the name ends with %q", name, suffix)
-		}
+	if err := checkFieldName(name); err != nil {
+		return nil, errors.Trace(err)
 	}
 	return marshalField(name, value)
 }
 
 // Overwrite records that the field is replaced by value, whatever its reducer; a nil value deletes it. It
-// returns an error if the value cannot be marshalled or name ends with OverwriteSuffix or AdditionSuffix.
+// returns an error if the value cannot be marshalled or name is not a valid state field name (IsValidFieldName).
 func (c Changes) Overwrite(name string, value any) error {
 	raw, err := marshalWrite(name, value)
 	if err != nil {

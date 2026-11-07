@@ -1627,7 +1627,7 @@ func (e *Engine) Run(ctx context.Context, workflowURL string, initialState any, 
 // Continue builds on the flow it is given, so continuing one flow twice makes two successors; a caller that
 // chains flows continues the key each Continue returns. Like Create, it is not idempotent: a Continue retried
 // after a lost response makes a second flow. It returns 404 for an unknown key, 400 for a subgraph child's
-// key, and 409 for a flow that is not completed or is scheduled for deletion.
+// key or additionalState holding an invalid field name (workflow.IsValidFieldName), and 409 for a flow that is not completed or is scheduled for deletion.
 func (e *Engine) Continue(ctx context.Context, flowKey string, additionalState any) (nextKey string, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return "", errors.Trace(err)

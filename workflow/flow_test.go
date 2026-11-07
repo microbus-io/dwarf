@@ -535,15 +535,48 @@ func TestFlow_SetOnAReducedFieldContributes(t *testing.T) {
 	assert.Error(add.Set("n", "x"))
 	assert.Equal(1, add.GetInt("n"))
 	assert.False(add.RawChanges().Mentions("n"))
+}
 
-	// A name ending with the overwrite suffix cannot be written.
-	assert.Error(f.Set("x!", 1))
-	assert.Error(f.Overwrite("x!", 1))
-	assert.True(func() (panicked bool) {
+// TestFlow_InvalidNamePanicsInEveryWriter pins that every Flow writer panics on a name that is not a valid state
+// field name, the overwrite and addition suffixes included, and records nothing: a returned error the task ignores
+// would drop the write silently. The orchestrator turns the panic into a failure of the step.
+func TestFlow_InvalidNamePanicsInEveryWriter(t *testing.T) {
+	assert := testarossa.For(t)
+
+	panics := func(write func()) (panicked bool) {
 		defer func() { panicked = recover() != nil }()
-		f.Del("x!")
+		write()
 		return false
-	}(), "Del of a reserved name panics")
+	}
+	for _, name := range []string{"x!", "x+", "a.b", "1x", "-x", "a b", "é", ""} {
+		var f Flow
+		writers := map[string]func(){
+			"Set":         func() { _ = f.Set(name, 1) },
+			"Overwrite":   func() { _ = f.Overwrite(name, 1) },
+			"Del":         func() { f.Del(name) },
+			"SetString":   func() { f.SetString(name, "v") },
+			"SetStrings":  func() { f.SetStrings(name, []string{"v"}) },
+			"SetInt":      func() { f.SetInt(name, 1) },
+			"SetFloat":    func() { f.SetFloat(name, 1.5) },
+			"SetBool":     func() { f.SetBool(name, true) },
+			"SetDuration": func() { f.SetDuration(name, time.Second) },
+		}
+		for writer, write := range writers {
+			assert.True(panics(write), "%s(%q)", writer, name)
+		}
+		assert.Equal(0, f.changes.Len(), "%q", name)
+	}
+
+	// A valid name, hyphen included, writes.
+	var f Flow
+	assert.NoError(f.Set("line-item", 1))
+	assert.Equal(1, f.GetInt("line-item"))
+
+	// Clear deletes every field of the state, so a state holding an invalid name panics there too.
+	bad := NewRawFlow()
+	st, _ := NewState(map[string]any{"ok": 1, "a.b": 2})
+	bad.SetRawState(st)
+	assert.True(panics(func() { bad.Clear() }), "Clear of a state holding an invalid name")
 }
 
 func TestFlow_OverwriteAndDelThenSet(t *testing.T) {

@@ -72,10 +72,13 @@ f.Del("coupon", "scratch") // remove fields
 f.Clear()                     // remove everything (Del on every field)
 ```
 
-A task cannot write a field whose name ends with `!` or `+`: `Set` and `Overwrite` return an error for one, and
-`Del` fails the step. In the flow's JSON form - what a host reaching tasks over a transport exchanges - a written
-name ending with `!` records a field the task replaced rather than added to, and one ending with `+` the elements
-a list gained since the step's input (a task sees one only when its step runs more than once).
+A field name is an ASCII letter or underscore, followed by ASCII letters, digits, underscores or hyphens
+([Field names](graphs.md#field-names)). Every setter and `Del` panic on any other name, and so does `Clear` if the
+state holds one. The panic is the task's error: it takes the graph's `onError` transition, or fails the step. A
+bad name is a typo in the task's code, and an error the task ignored would drop the write without a word. A host
+reaching tasks over a transport is held to the same rule: the step fails if the task's result writes such a name. In that JSON form a written name ending with `!` records a field the task replaced rather than added to,
+and one ending with `+` the elements a list gained since the step's input (a task sees one only when its step runs
+more than once).
 
 ### Binary data must be base64-encoded
 
@@ -293,7 +296,8 @@ for dynamic access, or `nil` to ignore it). Pass `nil` input for "no arguments,"
 the parent's whole state. See [Fan-out & subgraphs → Subgraphs](fan-out-and-subgraphs.md#subgraphs).
 
 `err` carries the child's error when it fails, and the reason when it could not be started (a `503` when its
-graph could not be loaded, a `404` when it does not exist, a `400` when it is invalid). See
+graph could not be loaded, a `404` when it does not exist, a `400` when it is invalid or `in` holds an invalid
+field name). See
 [When the child fails, or cannot start](fan-out-and-subgraphs.md#when-the-child-fails-or-cannot-start).
 
 To invoke a single unit of work as an isolated child, declare a one-task workflow and `Subgraph` it. A task

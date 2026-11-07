@@ -377,7 +377,7 @@ status. A workflow's own failure is not an error: it is the outcome's `Status` (
 
 | Code | Meaning | Retry? |
 |---|---|---|
-| 400 | The request is malformed: a key that does not parse, a subgraph child's key where a root key is required, invalid options or query, a value that is not JSON-marshalable, an invalid graph | No - fix the request |
+| 400 | The request is malformed: a key that does not parse, a subgraph child's key where a root key is required, invalid options or query, a value that is not JSON-marshalable, state holding an invalid [field name](graphs.md#field-names), an invalid graph | No - fix the request |
 | 404 | The key names no flow or step (including one already deleted), or `LoadGraph` found no graph | No |
 | 408 | `Await` or `Run` returned before the flow stopped; the flow keeps running | Await again |
 | 409 | The flow is in the wrong state for the operation, or a concurrent operation got there first | Re-read the flow, then decide |
@@ -405,7 +405,7 @@ Each operation adds these to the 503 and 500 every call can return:
 | `Purge` | invalid status or shard, no `Limit` or one over 65,536, no `FromTime` or `ToTime`, `IncludeSubgraphs`, a `Status` that is not closed, or a window reaching more than 31 days of the archive | | | |
 | `Resume` | malformed key, a subgraph child's key, data not JSON-marshalable | unknown flow | | the flow is not interrupted, including when a `Terminate` won the race |
 | `Cancel`, `Terminate` | malformed key, a subgraph child's key, a reason over 4,096 bytes or not valid UTF-8 without NUL | unknown flow | | |
-| `Fork` | malformed key, overrides not JSON-marshalable | unknown step | | the flow is not closed, is scheduled for deletion, or holds an unresolved interrupt off the fork path |
+| `Fork` | malformed key, overrides not JSON-marshalable or holding an invalid field name | unknown step | | the flow is not closed, is scheduled for deletion, or holds an unresolved interrupt off the fork path |
 | `Continue` | malformed key, a subgraph child's key, `additionalState` not JSON-marshalable | unknown flow | | the flow is not completed, or is scheduled for deletion |
 | `Delete` | malformed key, a subgraph child's key | unknown flow | | the flow is open, or it was archived while being deleted (call again) |
 

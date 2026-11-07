@@ -266,13 +266,13 @@ func TestChanges_RemoteResultIsChecked(t *testing.T) {
 		return returning(f)
 	})
 
-	// A name that ends with the suffix, written either way.
-	for _, forged := range []string{`{"x!!":1}`, `{"x!!!":null}`} {
+	// A name that is not a valid state field name: one ending with a suffix, written either way, and others.
+	for _, forged := range []string{`{"x!!":1}`, `{"x!!!":null}`, `{"a.b":1}`, `{"2nd!":1}`, `{"a b+":[1]}`, `{"é":1}`} {
 		changes = forged
 		_, outcome, err := e.Run(ctx, "changeschecked/wf", nil, nil)
 		if assert.NoError(err) {
 			assert.Equal(workflow.StatusFailed, outcome.Status, forged)
-			assert.Contains(outcome.Error, "cannot be written", forged)
+			assert.Contains(outcome.Error, "invalid state field name", forged)
 		}
 	}
 
@@ -308,7 +308,7 @@ func TestChanges_RemoteResultIsChecked(t *testing.T) {
 	// An addition the engine could never have recorded: a name ending with the addition suffix, an addition on a
 	// reduced field, one whose value is not a list of elements, and one inside a fan-out branch.
 	for _, tc := range []struct{ changes, want string }{
-		{`{"x++":[1]}`, "cannot be written"},
+		{`{"x++":[1]}`, "invalid state field name"},
 		{`{"log+":["b"]}`, "never records there"},
 		{`{"x+":"b"}`, "not a list of elements"},
 		{`{"x+":null}`, "not a list of elements"},

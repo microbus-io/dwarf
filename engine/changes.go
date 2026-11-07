@@ -19,8 +19,8 @@ package engine
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
 	"slices"
-	"strings"
 
 	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
@@ -38,18 +38,16 @@ func changesOf(data []byte) (workflow.Changes, error) {
 	return c, nil
 }
 
-// checkChanges checks what a task wrote, which is untrusted. A reduced field may not be overwritten or deleted
-// inside a fan-out branch: the branches are parallel, so a reset in one of them has no defined meaning for the
-// others. No field written may end with the overwrite or addition suffix, which a remote host can send although
-// the carrier refuses it. And an addition - which only the engine records, and which a re-run hands back to the
-// task with its earlier runs' changes - must be one the engine could have recorded: on a field with no reducer,
-// outside a fan-out cohort.
+// checkChanges checks what a task wrote, which is untrusted. Every field written must have a valid name
+// (workflow.IsValidFieldName), which a remote host can break although the carrier panics on it - a name ending
+// with the overwrite or addition suffix among them. A reduced field may not be overwritten or deleted inside a
+// fan-out branch: the branches are parallel, so a reset in one of them has no defined meaning for the others. And
+// an addition - which only the engine records, and which a re-run hands back to the task with its earlier runs'
+// changes - must be one the engine could have recorded: on a field with no reducer, outside a fan-out cohort.
 func checkChanges(changes workflow.Changes, reducers map[string]workflow.Reducer, inBranch bool) error {
 	for k := range changes.Names() {
-		for _, suffix := range []string{workflow.OverwriteSuffix, workflow.AdditionSuffix} {
-			if strings.HasSuffix(k, suffix) {
-				return errors.New("state field %q cannot be written: the name ends with %q", k, suffix)
-			}
+		if !workflow.IsValidFieldName(k) {
+			return errors.New("invalid state field name %q", k)
 		}
 		r := reducers[k]
 		reduced := r != "" && r != workflow.ReducerReplace
@@ -363,4 +361,19 @@ func changesView(c workflow.Changes, state workflow.State) workflow.State {
 		}
 	}
 	return view
+}
+
+// checkFieldNames returns a 400 naming the first field of the caller's state whose name is not a valid state
+// field name (workflow.IsValidFieldName). Every operation that takes state from a caller checks it at the door.
+func checkFieldNames(state workflow.State) error {
+	var bad []string
+	for k := range state.Names() {
+		if !workflow.IsValidFieldName(k) {
+			bad = append(bad, k)
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	return errors.New("invalid state field name %q", slices.Min(bad), http.StatusBadRequest)
 }

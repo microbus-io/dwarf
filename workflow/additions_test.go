@@ -75,16 +75,14 @@ func TestChanges_AdditionsApplyAndCompose(t *testing.T) {
 	assert.True(c.IsDeleted("f"))
 }
 
-// TestChanges_AdditionSuffixIsReserved pins that a task cannot write a name ending with the addition suffix: it
-// would read back as an addition to another field.
+// TestChanges_AdditionSuffixIsReserved pins that Changes refuse a name ending with the addition suffix: it would
+// read back as an addition to another field. A Flow writer panics on it (TestFlow_InvalidNamePanicsInEveryWriter).
 func TestChanges_AdditionSuffixIsReserved(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	c := NewChanges()
 	assert.Error(c.Set("x+", 1, nil))
 	assert.Error(c.Overwrite("x+", 1))
-	var f Flow
-	assert.Error(f.Set("x+", 1))
 	assert.Equal(0, c.Len())
 }
 
