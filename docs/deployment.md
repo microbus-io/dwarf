@@ -420,11 +420,10 @@ measure your own workload: task shape, payload size and round-trip time all move
    ([PostgreSQL](#postgresql--recommended-for-production)).
 2. **Engine replicas.** Two per shard at half the database's vCPU: `2S` replicas of 8 vCPU for 32 vCPU
    shards. Each runs at about a third of its CPU and can carry its shard alone. A larger host can serve
-   several shards instead: give its engine about one core per 3,300 steps/s its shards can deliver at
-   most - four 32 vCPU shards, ~20–24 cores - and set `GOMAXPROCS` to that plus whatever your tasks use
-   in the same process, rather than leaving it at the host's full count. Run at least two such hosts, so
-   one can fail. Expect less from it: one 48 vCPU engine on four shards ran 81% of what eight 8 vCPU
-   replicas ran on the same databases, so prefer `2S` small replicas where you can.
+   several shards instead: give its engine about one core per 3,700 steps/s its shards can deliver at
+   most - four 32 vCPU shards, ~23–25 cores - plus whatever your tasks use in the same process. Run at least
+   two such hosts, so one can fail. Expect a little less from it: one 48 vCPU engine on four shards ran 92% of
+   what eight 8 vCPU replicas ran on the same databases, and its flows waited longer.
 3. **Your tasks.** Add the CPU and memory your tasks use on the engine hosts. The engine itself holds ~15 KB
    per flow in flight, plus the state of each step it is running - large payloads need far more
    ([State size](benchmark-cloud.md#state-size)); with long tasks, flows in flight = flows/s × flow duration.
@@ -471,9 +470,8 @@ to stay under `C` is then the urgent work alone. Three things to know:
 
 Measured points to start a capacity plan from. All are Cloud SQL for PostgreSQL 16 on a 1 TB SSD, in the
 same zone as the engine (round trip ~0.06 ms), running a 10-step chain of no-op tasks saturated against a
-fresh database. The single-database rows ran with the archive on and checkpoints sized as recommended, averaged
-over a 6-minute window; the multi-shard rows were measured on an earlier build, before the archive, over 16
-minutes. The full conditions are in the [cloud benchmarks](benchmark-cloud.md).
+fresh database, with the archive on and checkpoints sized as recommended, averaged over a 6-minute window. The full
+conditions are in the [cloud benchmarks](benchmark-cloud.md).
 
 | shards × database vCPUs | engine replicas | steps/s |
 |---|---|---|
@@ -483,11 +481,10 @@ minutes. The full conditions are in the [cloud benchmarks](benchmark-cloud.md).
 | 1 × 32 | 1 × 16 vCPU | 18,852–24,262 (two instances) |
 | 1 × 64 | 2 × 16 vCPU | 24,593 |
 | 1 × 64 (`MaxConnections: 500`) | 2 × 16 vCPU | 29,340 |
-| 1 × 32 | 2 × 8 vCPU | 21,267 |
-| 2 × 32 | 4 × 8 vCPU | 43,135 |
-| 4 × 32 | 8 × 8 vCPU | 81,530 |
-| 4 × 32 | 1 × 48 vCPU | 66,250 |
-| 4 × 32 | 4 × 16 vCPU | 69,382 (earlier engine) |
+| 1 × 32 | 2 × 8 vCPU | 24,108 |
+| 2 × 32 | 4 × 8 vCPU | 47,437 |
+| 4 × 32 | 8 × 8 vCPU | 91,800 |
+| 4 × 32 | 1 × 48 vCPU | 84,648 |
 
 ## Shutting down
 

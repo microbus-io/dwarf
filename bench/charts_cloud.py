@@ -142,19 +142,20 @@ def chart_tiers():
 
 
 # ---- Shards: grouped bars by fleet shape, a dashed linear mark over each group ----
-# One session on one set of four 32 vCPU instances, engine 9e5d16b, 2026-10-19 (redo-s2-20261019): the 4-shard
-# arms first, then the two slowest instances removed for 2 shards, then the next for 1. Each bar is the sum of its
-# replicas' artifacts.
-ONE_SHARD = 21267
+# S-A: one session on one set of four 32 vCPU instances, engine e5dbf59, archive on, 20 GB + lz4, 2 + 6 min,
+# 2026-11-06 (redo-sa-20261106): the 4-shard arms first, then the two slowest instances removed for 2 shards, then
+# the next for 1. Each bar is the sum of its replicas' artifacts.
+ONE_SHARD = 24108
 SHARD_GROUPS = [  # (shards, [(steps/s, tick label, colour)])
-    (1, [(21267, "2 replicas\n8 vCPU", S2)]),
-    (2, [(43135, "4 replicas\n8 vCPU", S2)]),
-    (4, [(81530, "8 replicas\n8 vCPU", S2), (66250, "1 replica\n48 vCPU", S3)]),
+    (1, [(24108, "2 replicas\n8 vCPU", S2)]),
+    (2, [(47437, "4 replicas\n8 vCPU", S2)]),
+    (4, [(91800, "8 replicas\n8 vCPU", S2), (84648, "1 replica\n48 vCPU", S3)]),
 ]
 
 
 def chart_shards():
     fig, ax = plt.subplots(figsize=(9, 5.2))
+    ax.set_axisbelow(True)
     w = 0.27
     ticks, ticklabels = [], []
     for g, (n, bars) in enumerate(SHARD_GROUPS):
@@ -173,9 +174,9 @@ def chart_shards():
     ax.set_xticklabels(ticklabels, fontsize=8.5)
     ax.tick_params(axis="x", length=0)
     ax.set_xlim(-0.6, len(SHARD_GROUPS) - 0.4)
-    ax.set_ylim(0, 96000)
+    ax.set_ylim(0, 106000)
     ax.yaxis.set_major_formatter(kilo)
-    ax.set_ylabel("steps/s (16-min window mean)")
+    ax.set_ylabel("steps/s (6-min window mean)")
     ax.set_title("Throughput by shard count and fleet shape")
     ax.legend(handles=[Patch(color=S2, label="two 8 vCPU replicas per shard"),
                        Patch(color=S3, label="one 48 vCPU replica for all shards"),
@@ -185,22 +186,27 @@ def chart_shards():
 
 
 # ---- Engine host size: GC share of engine CPU, and steps per engine core ----
-# One row per engine replica: (engine host vCPU, steps/s, engine cores used, GC % of engine CPU). GC share is
-# the CPU profile's cumulative runtime.gcBgMarkWorker + gcAssistAlloc + bgsweep; steps and cores are the
-# artifact's stepsPerSec and host.cpuCores.
+# One row per engine replica: (engine host vCPU, steps/s, engine cores used, GC % of engine CPU), from the artifact's
+# stepsPerSec, host.cpuCores and host.gcCPUPct (the Go runtime's own GC CPU accounting), all 2026-11-06 on the
+# archive build: 1, 2 and 4 vCPU from T-A (pairs on 4, 8, 16 vCPU databases), 16 vCPU from T-A's 64 vCPU arms and the
+# HA rig's 0 B runs, 8 vCPU from S-A's 8-, 4- and 2-replica arms, 48 vCPU from S-A's one replica on four shards.
 ENGINE_HOSTS = [
-    (16, 17938, 5.43, 11.3), (16, 8404, 2.66, 10.6), (16, 17133, 5.32, 12.1), (16, 16767, 5.27, 11.9),
-    (16, 17502, 5.32, 11.3), (16, 32564, 10.3, 11.7),
-    (8, 8455, 2.47, 14.6), (8, 9684, 2.97, 10.8), (8, 9770, 2.83, 11.4), (8, 9762, 2.86, 11.0),
-    (8, 9491, 2.86, 11.0), (8, 9545, 2.87, 10.8), (8, 9837, 2.75, 11.4), (8, 8385, 2.33, 11.2),
-    (48, 66843, 20.0, 21.3),
-    (2, 2010, 0.71, 10.7), (4, 3816, 1.27, 11.1), (2, 2049, 0.7, 9.7), (4, 3892, 1.32, 10.1),
+    (1, 925, 0.24, 7.8), (1, 925, 0.24, 7.7), (2, 2295, 0.66, 9.7), (2, 2298, 0.60, 10.3),
+    (4, 4106, 1.24, 10.2), (4, 4114, 1.18, 9.9),
+    (8, 11101, 2.77, 9.5), (8, 10915, 2.75, 9.3), (8, 11092, 2.73, 9.9), (8, 11927, 2.85, 9.6),
+    (8, 12036, 2.93, 9.4), (8, 11868, 2.93, 9.5), (8, 11939, 3.13, 10.0), (8, 10922, 2.68, 9.3),
+    (8, 11835, 2.89, 9.4), (8, 11867, 2.98, 9.6), (8, 11822, 2.82, 9.4), (8, 11913, 2.88, 10.1),
+    (8, 12023, 2.94, 9.8), (8, 12085, 2.99, 9.3),
+    (16, 14681, 3.77, 8.2), (16, 12300, 3.13, 8.3), (16, 14659, 3.86, 8.1), (16, 12293, 3.22, 8.0),
+    (16, 23938, 5.70, 8.1), (16, 24262, 5.79, 8.0),
+    (48, 84648, 22.78, 8.6),
 ]
 
 
 def chart_engine_hosts():
-    pos = {2: 0, 4: 1, 8: 2, 16: 3, 48: 4}
-    colour = {2: S5, 4: S4, 8: S2, 16: S1, 48: S3}
+    sizes = [1, 2, 4, 8, 16, 48]
+    pos = {v: i for i, v in enumerate(sizes)}
+    colour = {1: INK2, 2: S5, 4: S4, 8: S2, 16: S1, 48: S3}
     fig, axes = plt.subplots(1, 2, figsize=(10, 4.4))
     for vcpu, steps, cores, gc in ENGINE_HOSTS:
         axes[0].scatter(pos[vcpu], gc, s=46, color=colour[vcpu], zorder=3)
@@ -210,14 +216,15 @@ def chart_engine_hosts():
             axes[0].annotate(f"{steps / 1000:.0f}k steps/s", (pos[vcpu], gc), xytext=(8, -3),
                              textcoords="offset points", fontsize=9, color=INK2)
     for ax in axes:
-        ax.set_xticks([0, 1, 2, 3, 4])
-        ax.set_xticklabels(["2", "4", "8", "16", "48"])
+        ax.set_axisbelow(True)
+        ax.set_xticks(range(len(sizes)))
+        ax.set_xticklabels([str(v) for v in sizes])
         ax.set_xlabel("engine host vCPU")
-        ax.set_xlim(-0.5, 4.9)
-    axes[0].set_ylim(0, 25)
+        ax.set_xlim(-0.5, len(sizes) - 0.1)
+    axes[0].set_ylim(0, 15)
     axes[0].set_ylabel("% of engine CPU")
     axes[0].set_title("Garbage collection")
-    axes[1].set_ylim(0, 4000)
+    axes[1].set_ylim(0, 5000)
     axes[1].yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
     axes[1].set_ylabel("steps/s per engine core used")
     axes[1].set_title("Engine efficiency")
