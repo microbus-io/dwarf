@@ -194,6 +194,52 @@ Reading it:
   only a key through flow state. (A flow's final state can be up to 256 MB on all four dialects — there is
   no 64 KB cap.)
 
+## SQLite on a file
+
+The tables above run SQLite in memory, where nothing reaches the disk. A durable single-replica deployment runs it
+on a file ([Deployment](deployment.md#sqlite--one-replica-low-throughput)), and the journal and sync settings in the
+file's DSN decide what each commit costs. The test harness always opens SQLite in memory, so these runs use the load
+harness in `bench/`, one arm per DSN:
+
+```sh
+go run ./bench -dsn 'file:/tmp/dwarf_1.db?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)' \
+  -workload linear -concurrency 8,32 -window 60s -warmup 15s
+```
+
+| Knob | Value |
+|---|---|
+| Graph | linear, 10 no-op tasks, so 10 steps per flow, empty state |
+| Client concurrency | 8 and 32 closed-loop submitters |
+| Workers, connections | derived by the engine (8 connections per SQLite shard) |
+| Window | 60 s after a 15 s warmup, a fresh file for every run |
+| Hardware | Apple M1 Pro, macOS 15, the internal SSD (APFS) |
+
+**Each cell is the median of three runs**, interleaved across the arms. Throughput in steps/s:
+
+| DSN settings | 8 submitters | 32 submitters | p50 / p99 ms at 32 |
+|---|---|---|---|
+| In memory (reference) | 3,133 | 2,961 | 100 / 267 |
+| File, default rollback journal | 689 | 632 | 459 / 1,407 |
+| File, `journal_mode(WAL)` (`synchronous` FULL, the default) | 2,100 | 1,970 | 142 / 486 |
+| File, `journal_mode(WAL)&synchronous(NORMAL)` | 2,596 | 2,326 | 118 / 456 |
+| Two files as two shards, WAL and NORMAL | 3,668 | 3,834 | 75 / 324 |
+| File, WAL, FULL and `fullfsync(1)` | 60 | 60 | 5,074 / 8,507 |
+
+These runs use a different harness and workload from the tables above, so compare the rows with each other, not
+with those tables. Reading it:
+
+- **Write-ahead logging is the setting that matters most.** The rollback journal blocks readers while a transaction
+  writes: a third of WAL's throughput, multi-second tails, and claims that timed out with `SQLITE_BUSY` (retried, so
+  no step was lost).
+- **`synchronous(NORMAL)` added 18-24%** over the default `FULL`, here. It trades durability for that: under NORMAL,
+  a power loss can roll back the last commits.
+- **macOS understates what `FULL` costs.** A sync on macOS does not flush the drive's cache unless `fullfsync` is
+  on, and with it on a commit waits for the flush: 60 steps/s. On Linux a sync does flush, so `FULL` costs more there
+  than in this table. Measure on the hardware you deploy.
+- **A second file nearly doubles the ceiling** (1.65x at 32 submitters), since each file has its own writer.
+- **A step took about 420 bytes of file** with an empty state, in every file arm: the live and archive tables
+  together, before any retention drops a day.
+
 ## What this does *not* measure
 
 A single-host laptop run cannot show what production hardware does — those dimensions are measured by the

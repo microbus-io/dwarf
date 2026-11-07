@@ -96,6 +96,19 @@ applies to them. **Restart every replica after such a failover**, for the same r
 restore: a replica that kept running holds data from before the failover in memory. A synchronous standby loses
 no committed write, so failing over to one needs no restart.
 
+## SQLite
+
+A SQLite shard is its file, together with the `-wal` file beside it while the engine runs. A copy of the file taken
+while it is being written can be torn, or miss commits still in the `-wal`. Back it up live with either:
+
+- `VACUUM INTO '/backups/dwarf_1.db'`, one statement that writes a consistent copy of the whole database, compacted;
+- SQLite's online backup API (the `sqlite3` shell's `.backup` command), which copies page by page while writers
+  continue.
+
+To restore, stop the replica, **delete the `-wal` and `-shm` files**, put the backup in place of the file, and start
+the replica. A leftover `-wal` belongs to the database it was written against, and SQLite would apply it to the
+restored file. With several shards, restore every file from the same point, as for any dialect.
+
 ## Test the restore, not just the backup
 
 The engine-specific thing worth rehearsing is not whether the bytes come back — your database vendor has

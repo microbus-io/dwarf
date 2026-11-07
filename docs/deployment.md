@@ -111,23 +111,53 @@ on the same flow.
 
 ### SQLite — one replica, low throughput
 
-SQLite writes one transaction at a time, so a shard's throughput is that of one writer: about 1,400 steps/s for
-an in-memory database on a laptop ([Benchmark](benchmark.md)), less on disk, where every commit is a write to the
-file. It suits an application that runs **one replica** and a modest flow rate. It cannot be shared between hosts,
-so it gives no failover and no second replica. Each shard is its own file with its own writer, so a few shards
-raise the ceiling. `NewEngineUnderTest` uses it automatically.
+SQLite writes one transaction at a time, so a shard's throughput is that of one writer: on a laptop, about 2,000 to
+2,600 steps/s for a file with write-ahead logging, and about 3,800 for two such files as two shards
+([Benchmark](benchmark.md#sqlite-on-a-file)). It suits an application that runs **one replica** at a modest flow
+rate, such as an edge or embedded deployment where a small footprint matters. A file cannot be shared between hosts,
+so SQLite gives no failover and no second replica: anything that needs either, or a higher rate, takes PostgreSQL.
+Each shard is its own file with its own writer, so a few shards raise the ceiling. `NewEngineUnderTest` uses SQLite in
+memory automatically.
 
-**For durable flows, use a file with write-ahead logging:**
+**The recommended DSN for durable flows:**
 
 ```go
-eng.SetShard(engine.ShardSpec{Index: 1, DSN: "file:/var/lib/myapp/dwarf_1.db?_pragma=journal_mode(WAL)"})
+eng.SetShard(engine.ShardSpec{
+    Index: 1,
+    DSN:   "file:/var/lib/myapp/dwarf_1.db?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=auto_vacuum(FULL)",
+})
 ```
 
-WAL lets reads run while a transaction writes, and a committed step survives the process. Add
-`&_pragma=auto_vacuum(FULL)` to have the file shrink as the archive drops its days. Without it, a dropped day's
-pages are reused but never returned to the filesystem. `auto_vacuum` takes effect only on a database with no tables
-yet, so set it on the first start; on an existing file, a `VACUUM` turns it on. Back the file up with `VACUUM INTO`
-or SQLite's backup API, never by copying it while it is being written.
+The DSN goes to the driver as written; the engine adds only a 2-second `busy_timeout`, unless the DSN sets one.
+
+- **`journal_mode(WAL)`** lets reads run while a transaction writes. Without it, SQLite's default rollback journal
+  measured a third of the throughput, with multi-second tail latencies.
+- **`synchronous(NORMAL)`** syncs the file at WAL checkpoints rather than at every commit. A committed step survives
+  the process crashing; a power loss or an operating-system crash can roll back the last commits before it. The flows
+  then re-run those steps, as after restoring a backup taken a moment earlier
+  ([What a restore does to flows](backup-and-restore.md#what-a-restore-does-to-flows)). The default, `FULL`, syncs
+  at every commit, so a commit also survives a power loss, at the cost of a flush per commit. On macOS a sync does not
+  flush the drive's cache unless the DSN adds `_pragma=fullfsync(1)`, which measured 60 steps/s on a laptop.
+- **`auto_vacuum(FULL)`** has the file shrink as the archive drops its days. Without it, a dropped day's pages are
+  reused but never returned to the filesystem. It takes effect only on a database with no tables yet, so set it on
+  the first start; on an existing file, a `VACUUM` turns it on.
+- **`busy_timeout`**: a writer waits this long for the lock. If the logs show `SQLITE_BUSY` (slow commits do it, as
+  with the rollback journal or `fullfsync`), raise it with `_pragma=busy_timeout(10000)`. A step whose claim timed out
+  is not lost; it is claimed again later.
+
+**Put the file on a local disk**, never a network filesystem (NFS, SMB, a cloud file share): SQLite's locking relies
+on the local filesystem, and write-ahead logging needs memory shared through the `-shm` file beside the database. In a
+container, mount a volume on the host's local disk at the file's directory. The `-wal` and `-shm` files live beside
+the database and must be on the same volume.
+
+**Size the disk for the retention.** A closed flow moves to the archive, a set of tables in the same file, and is
+dropped with its day once the retention has passed. A step took about 420 bytes of file with an empty state, plus the
+state each step's row holds. At a steady 50 steps/s that is about 1.8 GB a day, or 55 GB at the default 30-day
+retention; set a retention that fits the disk (`SetRetention`). There is no vacuum to tune: SQLite keeps no dead row
+versions, and a dropped day's pages are reused, or returned with `auto_vacuum`.
+
+**Back up the file with `VACUUM INTO` or SQLite's backup API**, never by copying it while it is being written
+([Backup and restore](backup-and-restore.md#sqlite)).
 
 **In memory** (`file:dwarf_1?mode=memory&cache=shared`), execution is durable only while the process lives: a
 restart or a crash loses every flow, and an interrupted flow does not survive a deploy. `cache=shared` is what lets
