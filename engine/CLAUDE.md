@@ -206,6 +206,21 @@ subgraph spawn call `LoadGraph`; `Fork` and `Continue` copy the stored graph ver
 change freely behind stable names - that, and cancel-and-recreate via `Snapshot`, is the whole migration story,
 and `docs/upgrading.md` states it as the position.
 
+**Every flow row holds its own copy of the graph JSON; do not move graphs into a shared table keyed by
+`graph_hash`.** It would save a graph's bytes per flow - a few percent of the WAL at small payloads, less as they
+grow - and costs three things:
+- **Dynamic graphs defeat it.** A host may build a graph per flow, so distinct hashes can approach the flow count:
+  the table dedupes nothing and adds a write to every `Create`. A URL cannot stand in for the hash, since one URL
+  can serve different graphs.
+- **Deleting a graph is a liveness question.** A row is removable only when no flow references it and no `Create`
+  is about to reuse it, which needs an index on `dwarf_flows.graph_hash` and a grace period against that race.
+- **The archive drops a day's tables whole**, taking each flow's graph with it. A shared table outlives the days, so
+  it needs reference counts across them, or each day keeps its own copy of the graphs it references, which is the
+  per-flow copy again.
+
+Retention already bounds the copies along with everything else. Should a workload ever show large graphs repeated
+across many flows, a table can still be added by a new migration.
+
 *Create-time validation is load-bearing, not just doc-hygiene.* A `LoadGraph` returning `(nil, nil)` is a
 clean 404 here (it would otherwise nil-deref in `EntryPoint()`); a structurally invalid graph is a 400. In
 particular `Validate()` rejects a graph whose fan-out branches don't converge on a single fan-in - the shape
