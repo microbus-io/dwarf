@@ -8,13 +8,14 @@
 
 **What it delivers**
 
-- **One 32 vCPU PostgreSQL database runs ~24,100 steps/s with the archive on**, about 2.1 billion steps a day, at
-  the engine's shipped defaults and with the database's checkpoints sized as recommended. Instances of the same size
-  differ, so check yours ([method notes](#method-notes)).
+- **One 32 vCPU PostgreSQL database runs 18,900–24,300 steps/s with the archive on**, 1.6–2.1 billion steps a day,
+  at the engine's shipped defaults and with the database's checkpoints sized as recommended. The range is the
+  instance's disk: at the same CPU per step, the slower one's log flushes took 1.03 ms against 0.82 ms. Check yours
+  ([method notes](#method-notes)).
 - **Payload is paid in write-ahead log.** With 8 KB of JSON per step the same database runs ~10,300 steps/s, with
   64 KB ~2,800 (~176 MB/s of payload). Every flush of the log costs about 0.8 ms plus its bytes, so the bytes a step
   logs set the rate.
-- **Size the database's checkpoints.** With 8 KB payloads, a 20 GB `max_wal_size` ran 47% more steps/s than the
+- **Size the database's checkpoints.** With 8 KB payloads, a 20 GB `max_wal_size` ran 42% more steps/s than the
   1.5 GB default.
 - **32 vCPU is the most economical database size**, about $0.04 per million steps at full load. Smaller
   databases run out of CPU, larger ones are held back by the write-ahead log, so past 32 vCPU you add shards.
@@ -77,7 +78,7 @@
 nothing, so each brings its own write capacity ([measured below](#the-write-ahead-log-and-why-a-shard-is-its-own-server)).
 
 **Absolute numbers belong to the instance that produced them; ratios travel.** Cloud instances of the
-same spec differ: on one engine, 32 vCPU instances ran from ~16,000 to 24,100 steps/s ([method
+same spec differ: on one build, two 32 vCPU instances ran 18,852 and ~24,100 steps/s ([method
 notes](#method-notes)). The runs below span several sessions, engine builds and rig setups, each session on its
 own set of instances. A comparison is made within one session, on one build and one setup, unless a section
 says otherwise, and each section dates its runs.
@@ -95,8 +96,12 @@ of its 16 vCPU host, ~4,400 steps/s per core. The archive moved closed flows out
 the live tables at about a minute's worth of rows, 1.5 million steps.
 *(Measured 2026-11-06.)*
 
-This instance spent 0.87 ms of database CPU per step. Instances of the same size differ, and a slow one spends more
-database CPU per step for the same load ([method notes](#method-notes) describe how to check an instance).
+A second instance of the same size, on the same build, ran **18,852 steps/s** at 250 connections and 19,221 at 500.
+Both spent about the same database CPU per step, 0.87 and 0.89 ms. What differed was the disk: a flush of the log,
+carrying ~62 commits of ~66 KB in both, took 0.82 ms on the first and 1.03 ms on the second. Steps/s times flush
+time agrees within 1% across the two, so the disk's latency explains the gap. More connections did not close it:
+at 500, each flush carried a third more commits and took a third longer. *(Measured 2026-11-06.)*
+([Method notes](#method-notes) describe how to check an instance.)
 
 ### Database size: what limits each
 
@@ -168,7 +173,8 @@ it. Same total connections, measured directly:
 *(Measured on 16 vCPU instances; these are properties of PostgreSQL, not of the engine.)*
 
 **Every flush costs a fixed time plus its bytes.** Across 15 saturated runs on one 32 vCPU database, at payloads
-from none to 64 KB, a flush of the log took about **0.8 ms plus its bytes at ~320 MB/s**. With no payload a flush
+from none to 64 KB, a flush of the log took about **0.8 ms plus its bytes at ~320 MB/s**. The fixed part belongs to
+the instance: another of the same size took 1.03 ms for the same no-payload flush. With no payload a flush
 carried ~65 commits of ~70 KB and took ~0.85 ms, about 1,200 a second; at 64 KB it carried ~2.2 MB and took ~7.5 ms.
 That is the disk's write latency and bandwidth, and it is why a step's log bytes set its shard's rate
 ([Payload size](#payload-size)): the database's mean CPU stayed at 41–66% in every run. *(Measured 2026-11-06.)*
@@ -176,17 +182,19 @@ That is the disk's write latency and bandwidth, and it is why a step's log bytes
 ### Checkpoints
 
 PostgreSQL starts a checkpoint each time it has written about `max_wal_size / 1.9` of log, and after it the first
-change to each page logs the whole page. One 32 vCPU database, 8 KB of JSON per step, saturated, 16 minutes each:
+change to each page logs the whole page. One 32 vCPU database, 8 KB of JSON per step, saturated, 16-minute windows,
+steps/s read from the fourth minute on (changing a setting restarted the database, and the restart costs the first
+minutes after it):
 
 | `max_wal_size` | `wal_compression` | steps/s | checkpoints | log per step | whole pages logged per step | flow p99 |
 |---|---|---|---|---|---|---|
-| 20 GB | `lz4` | **10,335** | every ~50 s | 21.7 KB | 1.83 | 6.0 s |
-| 20 GB | off | 9,829 | every ~50 s | 22.7 KB | 1.80 | 6.9 s |
-| 1.5 GB (the service's default) | `lz4` | 7,042 | every 5–10 s | 28.2 KB | 3.60 | 11.0 s |
+| 20 GB | `lz4` | **10,378** | every ~50 s | 21.7 KB | 1.83 | 6.0 s |
+| 20 GB | off | 10,107 | every ~50 s | 22.7 KB | 1.80 | 6.9 s |
+| 1.5 GB (the service's default) | `lz4` | 7,284 | every 5–10 s | 28.2 KB | 3.60 | 11.0 s |
 
-- **The checkpoint size is the large lever:** +47%. At the default the database checkpoints every few seconds,
+- **The checkpoint size is the large lever:** +42%. At the default the database checkpoints every few seconds,
   logs twice the whole pages per step, and its rate swings from one 10-second sample to the next.
-- **`lz4` is a small one:** +5%. The pages it compresses already hold PostgreSQL's compressed copies of the
+- **`lz4` is a small one:** about +3%. The pages it compresses already hold PostgreSQL's compressed copies of the
   payloads, so it finds little left to remove.
 - **Size it from the WAL rate:** `max_wal_size` ≈ 2 × peak WAL MB/s × 60 s puts checkpoints about a minute apart
   at peak. With no payload this database logged ~83 MB/s and checkpointed every ~135 s at 20 GB. The settings are
@@ -618,10 +626,16 @@ all:
   reusing them, and a saturated run's first minutes measured ~8% lower ([Minute by minute](#minute-by-minute)).
 - **Record the round trip beside every throughput number**, and compare runs only within one instance:
   placement within a zone varies the round trip.
-- **Check each instance before trusting its numbers.** On one engine and one rig setup, 32 vCPU instances ran
-  from ~16,000 to 24,100 steps/s. The slow ones did not look busier: at the same ~77% CPU, they spent ~1.5
-  milliseconds of database CPU per step against ~1.1. Divide the database's CPU (cores busy × 1,000) by the
-  steps/s a few minutes into a run; if it is well above the size's usual figure, use another instance.
+- **Check each instance before trusting its numbers, on two counts.** A slow instance does not look busier.
+  - **Its CPU per step:** divide the database's CPU (cores busy × 1,000) by the steps/s a few minutes into a run.
+    The 32 vCPU instances here spent 0.87–0.89 ms per step.
+  - **Its disk:** time single-row commits against `SELECT 1` in one session while the database is idle; the
+    difference is its log flush, ~0.4 ms on these. Under load, the window divided by the flushes counted in
+    `pg_stat_wal` gives the flush time: one instance took 1.03 ms where another took 0.82, at the same CPU per step,
+    and ran 22% slower.
+- **Let a database settle after a restart.** Changing some settings restarts it, and for the next minutes every
+  page's first change is logged whole and its cache is cold: the arms right after a change ran 10–30% low for
+  their first three minutes.
 
 ### Reproducing
 

@@ -71,9 +71,9 @@ spends much of its log on those page images. Set:
 - **`checkpoint_timeout` to 15 minutes**, so WAL volume, not the clock, starts checkpoints.
 - **`wal_compression = lz4`** (PostgreSQL 15 and later). It compresses the page images.
 
-Measured on one 32 vCPU PostgreSQL 16 shard with 8 KB JSON payloads, saturated: 20 GB ran **47% more steps/s** than
-the 1.5 GB default (10,335 against 7,042), with half the page images per step, and `lz4` added 5% (against 9,829
-with it off). Larger settings cost recovery time and disk: crash recovery replays up to `max_wal_size` of log, and
+Measured on one 32 vCPU PostgreSQL 16 shard with 8 KB JSON payloads, saturated: 20 GB ran **42% more steps/s** than
+the 1.5 GB default (10,378 against 7,284), with half the page images per step, and `lz4` added about 3% (against
+10,107 with it off). Larger settings cost recovery time and disk: crash recovery replays up to `max_wal_size` of log, and
 `pg_wal` holds that much. To check, turn on `log_checkpoints`: checkpoints requested by WAL volume more often than
 once a minute at peak (`pg_stat_bgwriter.checkpoints_req`; `pg_stat_checkpointer.num_requested` from PostgreSQL 17)
 mean `max_wal_size` is too small. These are PostgreSQL settings; MySQL sizes its redo log and SQL Server its
@@ -166,7 +166,9 @@ logged about 3.4 KB with no payload and about 10 KB plus 1.5 times its payload f
 **On PostgreSQL the ceiling is the log's flush.** Each commit waits for the log to reach the disk, and the database
 flushes many commits together. Across 15 saturated runs on one 32 vCPU shard, every flush took about 0.8 ms plus its
 bytes at about 320 MB/s, so a step's log bytes and the disk's write latency and bandwidth set the shard's rate, not
-its CPU, which averaged 41–66%.
+its CPU, which averaged 41–66%. The fixed part varies by instance: another 32 vCPU instance took 1.03 ms for the same
+flush and ran 22% slower with no payload. On a managed database the disk is network storage, so its latency is
+part of what you are given.
 
 ## Network distance to the database
 
@@ -476,7 +478,7 @@ fresh database, averaged over a 16-minute window. The full conditions are in the
 | 1 × 8 | 2 × 2 vCPU | 4,186 |
 | 1 × 16 | 2 × 4 vCPU | 7,015–7,122 |
 | 1 × 32 | 1 × 16 vCPU | 21,878–21,952 |
-| 1 × 32, archive on, checkpoints sized (6-minute windows) | 1 × 16 vCPU | 23,938–24,262 |
+| 1 × 32, archive on, checkpoints sized (6-minute windows; two instances) | 1 × 16 vCPU | 18,852–24,262 |
 | 1 × 64 (`MaxConnections: 500`) | 1 × 16 vCPU | 29,415 |
 | 1 × 32 | 2 × 8 vCPU | 21,267 |
 | 2 × 32 | 4 × 8 vCPU | 43,135 |

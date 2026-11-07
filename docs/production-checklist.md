@@ -26,7 +26,7 @@
   rescans every index each time its memory fills, and falls behind. → [Deployment](deployment.md#postgresql--recommended-for-production)
 - [ ] **PostgreSQL: checkpoints sized for the write load.** `max_wal_size` about 2 × peak WAL MB/s × 60 s,
   `checkpoint_timeout` 15 minutes, `wal_compression = lz4`. At the 1.5 GB default a busy shard checkpoints every few
-  seconds and ran a third slower with payloads. → [Deployment](deployment.md#postgresql--recommended-for-production)
+  seconds and ran 30% slower with 8 KB payloads. → [Deployment](deployment.md#postgresql--recommended-for-production)
 - [ ] **`ANALYZE`/autovacuum tuned for `dwarf_steps`.** It is a high-churn queue table whose row counts swing
   by orders of magnitude, and stale statistics can flip the selection query from an index scan to a
   sequential one. → [Runbook](runbook.md#backlog-is-growing)
