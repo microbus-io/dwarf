@@ -167,8 +167,8 @@ logged about 3.4 KB with no payload and about 10 KB plus 1.5 times its payload f
 flushes many commits together. Across 15 saturated runs on one 32 vCPU shard, every flush took about 0.8 ms plus its
 bytes at about 320 MB/s, so a step's log bytes and the disk's write latency and bandwidth set the shard's rate, not
 its CPU, which averaged 41–66%. The fixed part varies by instance: another 32 vCPU instance took 1.03 ms for the same
-flush and ran 22% slower with no payload. On a managed database the disk is network storage, so its latency is
-part of what you are given.
+flush and ran 22% slower with no payload, spending more CPU per step as well. On a managed database the disk is
+network storage, so its latency, like the host, is part of what you are given.
 
 ## Network distance to the database
 
@@ -277,8 +277,8 @@ the default sits at or near the best of the pools tried on every size:
 | 4 vCPU | 500 | 250 | 125-250 (alike, ~2,050 steps/s) | default |
 | 8 vCPU | 600 | 250 | 150-300 (~4,100-4,500 steps/s) | default |
 | 16 vCPU | 800 | 250 | 200 (~8,500 steps/s) | default |
-| 32 vCPU | 1,000 | 250 | 250 (~20,900 steps/s) | default |
-| 64 vCPU | 1,000 | 250 | 500 (~25,400-29,400 steps/s, +14-22% over 250) | `MaxConnections: 500` |
+| 32 vCPU | 1,000 | 250 | 250 (500 gained 2% on the same instance: 18,852 to 19,221 steps/s) | default |
+| 64 vCPU | 1,000 | 250 | 500 (29,340 against 24,593 at 250 on the same instance, +19%) | `MaxConnections: 500` |
 
 At 1 ms the default rises to 500 (or half the server's limit, if lower), which recovered most of what the
 distance cost where it was measured. Throughput keeps climbing slowly as connections are added - more
@@ -408,11 +408,12 @@ The measurements behind this recipe, with the configuration of every run, are in
 [cloud benchmarks](benchmark-cloud.md). Same-size instances differ, so treat any one figure as a range, and
 measure your own workload: task shape, payload size and round-trip time all move these numbers.
 
-1. **Shards.** Plan each 32 vCPU database at **~19,000 steps/s** sustained, 95% of the slower full-speed
-   instances measured, and size from your load's shape ([Planning for peaks](#planning-for-peaks)):
-   `shards = average steps/s ÷ 19,000`, rounded up, then check that each peak's backlog drains in time and adds
+1. **Shards.** Plan each 32 vCPU database at **~18,000 steps/s** sustained, 95% of the slower instance measured,
+   and size from your load's shape ([Planning for peaks](#planning-for-peaks)):
+   `shards = average steps/s ÷ 18,000`, rounded up, then check that each peak's backlog drains in time and adds
    a wait you accept, or put the work that cannot wait in a higher priority band. Below one shard's worth,
-   a 16 vCPU database (~6,700 sustained) or an 8 vCPU database (~4,000) costs less in total, at a higher
+   a 16 vCPU database (~7,800 sustained), an 8 vCPU database (~4,400) or a 4 vCPU one (~1,750) costs less in
+   total, at a higher
    price per step. These figures are for steps that carry little state. With payloads, plan from the
    [payload table](benchmark-cloud.md#payload-size), 95% of its saturated rate: at 8 KB per step a 32 vCPU database
    runs ~10,300 steps/s, at 64 KB ~2,800. Size its checkpoints too
@@ -432,9 +433,9 @@ measure your own workload: task shape, payload size and round-trip time all move
 5. **Disk.** Size each database's disk for IOPS, not only capacity (see [Disk throughput](#disk-throughput)).
 
 **Worked example.** 50,000 steps/s on average (5,000 flows/s of 10-step flows), with a daily peak of 65,000
-for 10 minutes: 3 × 32 vCPU shards sustain ~57,000, so the average fits. The peak leaves a backlog of
-(65,000 − 57,000) × 600 s = 4.8 million steps, which clears in ~11 minutes once the load falls back to 50,000
-and adds up to ~84 seconds to a flow meanwhile. If that wait is acceptable, the deployment is 3 shards and
+for 10 minutes: 3 × 32 vCPU shards sustain ~54,000, so the average fits. The peak leaves a backlog of
+(65,000 − 54,000) × 600 s = 6.6 million steps, which clears in ~28 minutes once the load falls back to 50,000
+and adds up to ~2 minutes to a flow meanwhile. If that wait is acceptable, the deployment is 3 shards and
 6 × 8 vCPU engine replicas, about $6,900 a month at on-demand list price before your tasks' own cost. If it is
 not, put the latency-sensitive flows in a higher priority band, or plan a fourth shard.
 
@@ -451,8 +452,8 @@ its saturated rate, [measured](benchmark-cloud.md#sustained-load)):
   peaks stay under `C`. If it is acceptable, size for the average, with quiet periods long enough to drain each
   peak before the next.
 
-For example, a shard sustaining 19,000 steps/s that sees two minutes at 24,000 builds a backlog of 600,000 steps.
-With the load back at 17,000 that clears in five minutes, and at its largest it adds about 30 seconds to a flow.
+For example, a shard sustaining 18,000 steps/s that sees two minutes at 23,000 builds a backlog of 600,000 steps.
+With the load back at 16,000 that clears in five minutes, and at its largest it adds about 30 seconds to a flow.
 
 **Priority bands let urgent work skip that wait.** The engine always dispatches a higher band's steps ahead of
 any lower band's, so during a peak the backlog forms in the lowest bands. Flows that cannot wait run in a higher
@@ -470,16 +471,18 @@ to stay under `C` is then the urgent work alone. Three things to know:
 
 Measured points to start a capacity plan from. All are Cloud SQL for PostgreSQL 16 on a 1 TB SSD, in the
 same zone as the engine (round trip ~0.06 ms), running a 10-step chain of no-op tasks saturated against a
-fresh database, averaged over a 16-minute window. The full conditions are in the
-[cloud benchmarks](benchmark-cloud.md).
+fresh database. The single-database rows ran with the archive on and checkpoints sized as recommended, averaged
+over a 6-minute window; the multi-shard rows were measured on an earlier build, before the archive, over 16
+minutes. The full conditions are in the [cloud benchmarks](benchmark-cloud.md).
 
 | shards × database vCPUs | engine replicas | steps/s |
 |---|---|---|
-| 1 × 8 | 2 × 2 vCPU | 4,186 |
-| 1 × 16 | 2 × 4 vCPU | 7,015–7,122 |
-| 1 × 32 | 1 × 16 vCPU | 21,878–21,952 |
-| 1 × 32, archive on, checkpoints sized (6-minute windows; two instances) | 1 × 16 vCPU | 18,852–24,262 |
-| 1 × 64 (`MaxConnections: 500`) | 1 × 16 vCPU | 29,415 |
+| 1 × 4 | 2 × 1 vCPU | 1,850 |
+| 1 × 8 | 2 × 2 vCPU | 4,593 |
+| 1 × 16 | 2 × 4 vCPU | 8,219 |
+| 1 × 32 | 1 × 16 vCPU | 18,852–24,262 (two instances) |
+| 1 × 64 | 2 × 16 vCPU | 24,593 |
+| 1 × 64 (`MaxConnections: 500`) | 2 × 16 vCPU | 29,340 |
 | 1 × 32 | 2 × 8 vCPU | 21,267 |
 | 2 × 32 | 4 × 8 vCPU | 43,135 |
 | 4 × 32 | 8 × 8 vCPU | 81,530 |

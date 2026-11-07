@@ -10,15 +10,16 @@
 
 - **One 32 vCPU PostgreSQL database runs 18,900–24,300 steps/s with the archive on**, 1.6–2.1 billion steps a day,
   at the engine's shipped defaults and with the database's checkpoints sized as recommended. The range is the
-  instance's disk: at the same CPU per step, the slower one's log flushes took 1.03 ms against 0.82 ms. Check yours
+  instance: the slower one spent 22% more database CPU per step and took 25% longer per log flush. Check yours
   ([method notes](#method-notes)).
 - **Payload is paid in write-ahead log.** With 8 KB of JSON per step the same database runs ~10,300 steps/s, with
   64 KB ~2,800 (~176 MB/s of payload). Every flush of the log costs about 0.8 ms plus its bytes, so the bytes a step
   logs set the rate.
 - **Size the database's checkpoints.** With 8 KB payloads, a 20 GB `max_wal_size` ran 42% more steps/s than the
   1.5 GB default.
-- **32 vCPU is the most economical database size**, about $0.04 per million steps at full load. Smaller
-  databases run out of CPU, larger ones are held back by the write-ahead log, so past 32 vCPU you add shards.
+- **32 vCPU is the most economical database size**, $0.036–0.047 per million steps at full load. Smaller
+  databases run out of CPU; larger ones are held back by the write-ahead log's flush, so past 32 vCPU you add
+  shards.
 - **The engine is cheap.** A shard's work takes about 5 engine cores. Two 8 vCPU engine hosts per
   32 vCPU database serve it at about a third of their CPU each, and either can carry it alone.
 - **Shards add throughput linearly.** Four 32 vCPU shards ran 81,530 steps/s, 3.8 times one shard, with
@@ -43,8 +44,9 @@
 
 - **A database sustains ~95% of its saturated rate with low latency.** Offered at 95%, a database delivered the
   full load with a median flow latency of 83 ms; at 100% its backlog grew ([Sustained load](#sustained-load)).
-- **Pair each database with two engines at half its vCPU.** 8 vCPU with 2 × 2 vCPU engines runs ~4,200
-  steps/s, 16 vCPU with 2 × 4 runs ~7,100, 32 vCPU with 2 × 8 runs ~21,900.
+- **Pair each database with two engines at half its vCPU.** 4 vCPU with 2 × 1 vCPU engines runs ~1,850 steps/s,
+  8 vCPU with 2 × 2 ~4,600, 16 vCPU with 2 × 4 ~8,200, 32 vCPU with 2 × 8 18,900–24,300, and 64 vCPU with 2 × 16
+  ~29,300 at `MaxConnections: 500`.
 - **Keep the engine near its database.** A step makes about five round trips, so distance costs throughput;
   the engine opens more connections as distance grows, which recovers most of it out to 1 ms.
 - **Prefer two small engines per shard to one large engine for several.** One 48 vCPU engine ran four
@@ -97,50 +99,49 @@ the live tables at about a minute's worth of rows, 1.5 million steps.
 *(Measured 2026-11-06.)*
 
 A second instance of the same size, on the same build, ran **18,852 steps/s** at 250 connections and 19,221 at 500.
-Both spent about the same database CPU per step, 0.87 and 0.89 ms. What differed was the disk: a flush of the log,
-carrying ~62 commits of ~66 KB in both, took 0.82 ms on the first and 1.03 ms on the second. Steps/s times flush
-time agrees within 1% across the two, so the disk's latency explains the gap. More connections did not close it:
+The second spent more database CPU per step, 1.26 ms against 1.03, at about the same share of its cores busy
+(74% against 77%), and a flush of the log, carrying ~62 commits of ~66 KB in both, took 1.03 ms against 0.82. Steps/s
+times flush time agrees within 1% across the two. Whether its disk or its host was the slower part, these runs do not
+tell: the extra CPU may be backends contending behind the slower flush. More connections did not close the gap:
 at 500, each flush carried a third more commits and took a third longer. *(Measured 2026-11-06.)*
 ([Method notes](#method-notes) describe how to check an instance.)
 
 ### Database size: what limits each
 
-![Database size: throughput, cost per million steps, and where 32 vCPU wins](benchmark-cloud-tiers.png)
+![Database size: throughput, cost per million steps, and what limits each size](benchmark-cloud-tiers.png)
 
-One shard at each database size, saturated:
+One shard at each database size, saturated, each served by two engine hosts totalling half its vCPU:
 
-| Database | Engines | steps/s | Database CPU | Database core-ms per step | Monthly cost | $ per million steps |
-|---|---|---|---|---|---|---|
-| 8 vCPU, 32 GB | 2 × 2 vCPU | 4,186 | 93% | 1.74 | ~$700 | $0.064 |
-| 16 vCPU, 64 GB | 2 × 4 vCPU | 7,015–7,122 | 82–86% | 1.85–1.95 | ~$1,240 | $0.067 |
-| 32 vCPU, 128 GB | 1 × 16 vCPU, priced as 2 × 8 | 21,900 | 74% | 1.08 | ~$2,310 | **$0.040** |
-| 64 vCPU, 256 GB | 1 × 16 vCPU, priced as 2 × 16 | 29,415 | 63% | 1.36 | ~$4,440 | $0.057 |
+| Database | Engines | steps/s | Log flush | Database CPU | Database CPU per step | Monthly cost | $ per million steps |
+|---|---|---|---|---|---|---|---|
+| 4 vCPU, 16 GB | 2 × 1 vCPU | 1,850 | 9.3 ms | 99% | 2.14 ms | ~$435 | $0.089 |
+| 8 vCPU, 32 GB | 2 × 2 vCPU | 4,593 | 3.7 ms | 92% | 1.60 ms | ~$700 | $0.058 |
+| 16 vCPU, 64 GB | 2 × 4 vCPU | 8,219 | 2.4 ms | 83% | 1.61 ms | ~$1,240 | $0.057 |
+| 32 vCPU, 128 GB | 1 × 16 vCPU, priced as 2 × 8 | 18,852–24,262 | 0.82–1.03 ms | 74–77% | 1.03–1.26 ms | ~$2,310 | **$0.036–0.047** |
+| 64 vCPU, 256 GB, `MaxConnections: 500` | 2 × 16 vCPU | 29,340 | 1.31 ms | 60% | 1.32 ms | ~$4,440 | $0.058 |
 
-The 64 vCPU database ran with `MaxConnections: 500`; at the default 250 it ran 24,162. The 32 and 64 vCPU rows
-each ran on one 16 vCPU engine host, which used 5.1–5.3 and 6.8 of its cores: the engine was not the limit at
-either size. Each row is priced with the recommended pairing, two engine hosts totalling half the database's
-vCPU, so either host can carry the shard alone: 2 × 8 vCPU for 32, 2 × 16 for 64. Monthly cost is
-the on-demand list price in one US region: the database (without high availability), its 1 TB SSD, and both
-engine hosts. The cost per million steps assumes the deployment runs at its measured rate around the clock
-(730 hours a month); one that averages half that rate pays twice as much per step.
+The 32 vCPU row is two instances ([One database](#one-database)); the others one each. The 64 vCPU database ran
+24,593 steps/s at the default 250 connections and 29,340 at 500 on the same instance, +19%: each flush of its log
+carried half again as many commits for a quarter more time. At 32 vCPU, 500 connections bought 2%. *Log flush* is
+the time one flush of the write-ahead log took under this load. Monthly cost is the on-demand list price in one US
+region: the database (without high availability), its 1 TB SSD, and both engine hosts. The cost per million steps
+assumes the deployment runs at its measured rate around the clock (730 hours a month); one that averages half that
+rate pays twice as much per step.
 
-- **Below 32 vCPU the database runs out of CPU.** The 8 and 16 vCPU databases ran at 82–93% CPU, and each
-  step cost them 1.7–1.9 milliseconds of database CPU: the same connections share fewer cores, and the
-  database spends more of its time coordinating them. More connections still help these sizes (see
-  [How the connection budget was chosen](#how-the-connection-budget-was-chosen)), so this is a cost of the
-  small instance, not a sign of too many connections.
-- **From 32 vCPU up, the write-ahead log is the limit.** Each step costs about 1.1–1.4 milliseconds of database
-  CPU, and a quarter to a third of the cores sit idle: every commit goes through the database's single
-  write-ahead log ([below](#the-write-ahead-log-and-why-a-shard-is-its-own-server)), and more cores do not
-  widen it.
-- **So 32 vCPU is the most economical size.** Each of its vCPUs delivers ~685 steps/s, against 442–523 for the
-  other sizes. From 16 to 32 vCPU, throughput triples for 1.8 times the price, because the step also gets
-  cheaper. From 32 to 64 vCPU it grows 1.34 times for 1.9 times the price, and only with
-  `MaxConnections: 500`. Past 32 vCPU, add shards, which scale ~1.9–2.0 times per doubling.
-- **The pairing holds at every size.** Each engine runs at about a third of its CPU, so either replica can
-  carry its shard alone if the other fails.
+- **Below 32 vCPU the database runs out of CPU.** The 4, 8 and 16 vCPU databases ran at 83–99% CPU, and each step
+  cost them 1.6–2.1 milliseconds of database CPU. More connections still help these sizes (see
+  [How the connection budget was chosen](#how-the-connection-budget-was-chosen)), so this is a cost of the small
+  instance, not a sign of too many connections.
+- **From 32 vCPU up, the log's flush is the limit.** A quarter to two fifths of the cores sit idle while every
+  commit waits its turn to reach the disk ([below](#the-write-ahead-log-and-why-a-shard-is-its-own-server)), and
+  more cores do not shorten that.
+- **So 32 vCPU is the most economical size.** Each of its vCPUs delivers 590–760 steps/s, against 460–575 for the
+  other sizes. From 16 to 32 vCPU, throughput grows 2.3–3 times for 1.9 times the price. From 32 to 64 vCPU it grows
+  1.2–1.6 times for 1.9 times the price, and only with `MaxConnections: 500`. Past 32 vCPU, add shards.
+- **The pairing holds at every size.** Each engine host ran at a quarter to a third of its CPU, so either replica
+  can carry its shard alone if the other fails.
 
-*(Measured 2026-10-17/18. Same-size instances differ; see [method notes](#method-notes).)*
+*(Measured 2026-11-06. Same-size instances differ; see [method notes](#method-notes).)*
 
 ### The write-ahead log, and why a shard is its own server
 
@@ -320,16 +321,16 @@ hosts and need their own headroom.
 
 *The vertical axis starts at 14,000 steps/s.*
 
-A saturated run holds its rate from the first minute of the window to the last: every minute of the three runs
-above fell between 21,200 and 22,800 steps/s, and no run drifted down over its 16 minutes. The rate a run
-starts at is the rate to plan on. Over hours and a growing database, [Database volume](#database-volume) applies.
+A saturated run holds its rate to the end of its window: from its fourth minute to its last, the 16-minute run
+above held 23,800–25,500 steps/s and did not drift down, and the two 6-minute runs held 23,000–24,500 throughout.
+The rate a run settles at is the rate to plan on. Over hours and a growing database,
+[Database volume](#database-volume) applies.
 
-*(Measured 2026-10-17.)*
+The 16-minute run's first three minutes ran ~8% lower because it was the first on a database server created minutes
+before: until its first checkpoints complete, a new server creates each 16 MB log file instead of reusing one, and
+every commit waits behind that. The runs after it on the same server started at full rate.
 
-With the archive on, the 16-minute run held 23,800–25,300 steps/s from its fourth minute to its last
-*(2026-11-06)*. Its first three minutes ran ~8% lower, on a database server created minutes before: until its
-first checkpoints complete, a new server creates each 16 MB log file instead of reusing one, and every commit waits
-behind that. Runs later on the same server started at full rate.
+*(Measured 2026-11-06.)*
 
 ### Sustained load
 
@@ -442,6 +443,8 @@ orchestrator would. Admission stops at minute 18.
   catches up faster.
 
 ### Payload size
+
+![Throughput, payload moved and the log written per step, against a compressible JSON payload](benchmark-cloud-payload.png)
 
 The 10-step `linear` workflow on one 32 vCPU database with the archive on, each task writing a fresh JSON document
 of the given size: an array of records whose keys and words repeat, like real documents. It compresses about
@@ -627,12 +630,12 @@ all:
 - **Record the round trip beside every throughput number**, and compare runs only within one instance:
   placement within a zone varies the round trip.
 - **Check each instance before trusting its numbers, on two counts.** A slow instance does not look busier.
-  - **Its CPU per step:** divide the database's CPU (cores busy × 1,000) by the steps/s a few minutes into a run.
-    The 32 vCPU instances here spent 0.87–0.89 ms per step.
+  - **Its CPU per step:** divide the database's CPU (cores busy × 1,000) by the steps/s, over the measurement
+    window alone; an average that takes in a warmup or an idle minute reads low. The two 32 vCPU instances here
+    spent 1.03 and 1.26 ms per step.
   - **Its disk:** time single-row commits against `SELECT 1` in one session while the database is idle; the
     difference is its log flush, ~0.4 ms on these. Under load, the window divided by the flushes counted in
-    `pg_stat_wal` gives the flush time: one instance took 1.03 ms where another took 0.82, at the same CPU per step,
-    and ran 22% slower.
+    `pg_stat_wal` gives the flush time: one instance took 1.03 ms where another took 0.82, and ran 22% slower.
 - **Let a database settle after a restart.** Changing some settings restarts it, and for the next minutes every
   page's first change is logged whole and its cache is cold: the arms right after a change ran 10–30% low for
   their first three minutes.
