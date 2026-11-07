@@ -65,8 +65,8 @@ you write in production.
 
 ## Configuring the test engine
 
-Apply any `Set*` settings between `NewEngineUnderTest` and `Startup` — workers, shards, time budget, default
-priority:
+Apply any `Set*` settings between `NewEngineUnderTest` and `Startup` — workers, shards, time budget, the
+priority range:
 
 ```go
 eng := dwarf.NewEngineUnderTest(t.Name())
@@ -132,7 +132,7 @@ for eyeballing what ran in what order.
 ## Multi-replica tests
 
 To test cross-replica behavior, stand up two engines against the same test database. That is all a fleet
-is — they coordinate through the database, so there is no relay to wire between them:
+is — they coordinate through the database:
 
 ```go
 mux1, mux2 := hosts.NewMux(), hosts.NewMux()

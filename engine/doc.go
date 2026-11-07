@@ -59,8 +59,7 @@ limitations under the License.
 //     with the flow.
 //   - ExecuteTask executes one task, given the Flow carrier with its state pre-populated.
 //
-// That is the whole interface: the engine sends nothing between replicas, so a host wires no
-// inter-replica transport for it. Replicas sharing a database coordinate by reading it.
+// That is the whole interface; replicas sharing a database coordinate by reading it.
 //
 // The flow's opaque baggage (host identity/tenant/context, set in workflow.FlowOptions) rides on the
 // dispatch context of every LoadGraph and ExecuteTask call; read it with workflow.BaggageFrom(ctx).
@@ -94,8 +93,7 @@ limitations under the License.
 // a token-free "{shard}-{id}" correlation id), and there is deliberately no operation that resolves a
 // correlation id back to a key, which would be a capability-minting oracle.
 //
-// ListOpen and ListClosed return keys, tokens included — the only key-returning operations (Purge returns a count,
-// not keys; free-text search is a field on workflow.Query consumed by the lists, not a separate operation). Exposing them to a
+// ListOpen and ListClosed return keys, tokens included — the only key-returning operations. Exposing them to a
 // principal is equivalent to granting the
 // write capability for every flow they return, so a host must gate them by ownership and never surface
 // them to less-than-fully-trusted callers. Key exposure is also transitive across an execution tree: Step
@@ -125,6 +123,5 @@ limitations under the License.
 // holds the caller identity and tenancy the engine cannot see. A host enforces quotas where it has that
 // context: reject an over-large initial state or Baggage before Create, cap forEach input arrays in author
 // space, and set its retention (SetRetention). For a pass-through host that adds no policy of its own, this
-// obligation flows through to the application using that host. (Deep subgraph nesting is bounded storage,
-// not a crash vector: Fork clones the tree iteratively, so nesting depth costs no goroutine stack.)
+// obligation flows through to the application using that host. Deep subgraph nesting costs storage only.
 package engine

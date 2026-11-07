@@ -310,8 +310,7 @@ and want these split per shard, give each server's database a distinct name; `dw
 
 All three observability knobs — `SetLogger`, `SetMeterProvider`, `SetTracerProvider` — are
 **construction-time**: set them before `Startup`. The engine resolves the providers and wires them into the
-worker hot path and the shard DBs once at startup, so a call after `Startup` is rejected with a 409 (it
-keeps the hot-path reads lock-free).
+worker hot path and the shard DBs once at startup, so a call after `Startup` is rejected with a 409.
 
 ## Putting it together
 

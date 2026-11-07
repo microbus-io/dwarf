@@ -618,7 +618,7 @@ all:
     difference is its log flush, ~0.4 ms on these. Under load, the window divided by the flushes counted in
     `pg_stat_wal` gives the flush time: one instance took 1.03 ms where another took 0.82, and ran 22% slower.
 - **Let a database settle after a restart.** Changing some settings restarts it, and for the next minutes every
-  page's first change is logged whole and its cache is cold: the arms right after a change ran 10–30% low for
+  page's first change is logged whole and its cache is cold: the runs right after a change ran 10–30% low for
   their first three minutes.
 
 ### Reproducing

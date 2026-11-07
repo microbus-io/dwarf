@@ -600,9 +600,8 @@ func (e *Engine) SetStateCacheSize(bytes int64) error {
 // The lower bound is not cosmetic. The budget is the ExecuteTask call's context deadline and part of the
 // size of the step's crash-recovery lease - so a non-positive default hands every new flow a deadline
 // that has already passed, failing every task instantly, engine-wide and silently. Unlike Priority and
-// FairnessWeight, 0 cannot mean "unset" here: this setter IS the default. The floor is a millisecond
-// rather than a nanosecond because the budget is persisted in MILLISECONDS: a positive duration below
-// 1ms truncates to zero and produces exactly the expired-deadline case.
+// FairnessWeight, 0 cannot mean "unset" here: this setter IS the default. It must be at least a millisecond:
+// a shorter positive duration counts as zero, a deadline already passed.
 //
 // The budget is at most just under 24.8 days: it is stored as a 32-bit count of milliseconds. A step whose replica
 // crashes is not run again until its budget has passed, so a task that waits for days should Sleep or Interrupt
@@ -683,8 +682,7 @@ func (e *Engine) FlowsStarted() int64 { return e.flowsStartedCount.Load() }
 func (e *Engine) FlowsClosed() int64 { return e.flowsClosedCount.Load() }
 
 // SetHost registers the host the engine reaches the outside world through: it loads graphs and executes
-// tasks. Host has exactly two methods, LoadGraph and ExecuteTask, both required; the engine sends nothing
-// to its peers and has no other host callback. Construction-time only.
+// tasks. Host has exactly two methods, LoadGraph and ExecuteTask, both required. Construction-time only.
 func (e *Engine) SetHost(h Host) error {
 	if e.started.Load() {
 		return errSetAfterStartup("host")
@@ -746,8 +744,8 @@ func (e *Engine) SetLogger(l *slog.Logger) error {
 // slog.LevelDebug}))). It is meant for development and test runs where you want to see the engine's (and
 // its sequel DB layer's) internal logging without standing up an OTEL pipeline. Output goes to stderr, not
 // stdout, so it never mixes with a program's data stream - the standard convention for diagnostic logs.
-// Because it routes through SetLogger, it counts as an explicitly-set logger, so it also reaches sequel via
-// the engine's existing SetLogger wiring (sequel's migration logs appear too). Construction-time only.
+// Because it routes through SetLogger, sequel's logs appear too, its migration logs included.
+// Construction-time only.
 func (e *Engine) SetDebugLogger() error {
 	return e.SetLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 }

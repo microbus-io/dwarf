@@ -51,8 +51,8 @@ type stallProxy struct {
 //
 // The host sits between the credentials and whatever ends them, and WHAT ends them is dialect-shaped: a path
 // on PostgreSQL (`...@host:5432/db?...`) but a query string on SQL Server (`...@host:1433?database=...`), which names
-// its database in a parameter and so has no path at all. Ending the host at the first `/` alone therefore found
-// no host on SQL Server and skipped the arm entirely.
+// its database in a parameter and so has no path at all. Ending the host at the first `/` alone finds no host on
+// SQL Server and skips the arm.
 func newStallProxy(t *testing.T, dsn string) (*stallProxy, string) {
 	t.Helper()
 	assert := testarossa.For(t)

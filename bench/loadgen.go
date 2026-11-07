@@ -64,7 +64,7 @@ type stepResult struct {
 	//
 	// THE CAP IS A RUNAWAY GUARD ON ROW COUNT AND RUN LENGTH, NOT AN OOM GUARD. Pending steps are rows,
 	// which Postgres writes to disk - a deep backlog costs disk and scan time, never resident memory,
-	// and no campaign here has taken database memory near saturation. (The one real memory risk, parking
+	// and no measured workload has taken database memory near saturation. (The one real memory risk, parking
 	// a caller per flow, is avoided outright: completion latency is sampled by a bounded Await pool.)
 	// So it earns its place only on a FLAT-OUT run (-arrival-rate 0), where nothing else bounds
 	// creation.

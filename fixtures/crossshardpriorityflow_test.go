@@ -37,9 +37,9 @@ import (
 // cadence and publishes to a shared planner, the fill is merged from those (possibly one pass stale) entries,
 // and a rate floor sits between a band change and the refiller noticing it. Every one of those is a way for a high-priority
 // arrival on one shard to be ignored while other shards keep draining lower-priority work - a silent
-// semantic break that no throughput benchmark can see. (The rig campaigns ran a single band end to end,
-// so this path was entirely unmeasured there; ordering is a correctness property, not a timing one,
-// which is what makes it a fixture rather than a benchmark arm.)
+// semantic break that no throughput benchmark can see. (A throughput benchmark runs one band end to end, so it
+// cannot see this; ordering is a correctness property, not a timing one, which is what makes it a fixture
+// rather than a benchmark arm.)
 //
 // The workload deliberately holds a DEEP low-priority backlog in the caches when the urgent work
 // arrives: that is the case where the caches are full of band-100 candidates and a band-1 arrival must

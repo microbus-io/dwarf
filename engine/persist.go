@@ -126,7 +126,7 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 		// A write that already landed moves the step out of both (a rewind to `pending`, an interrupt to
 		// `interrupted`, a spawn to parked), so a retry after an ambiguous commit finds the step not ours and stops.
 		//
-		// What the guard excludes is the case this closes: lease recovery resets an expired step to `pending` WITHOUT
+		// What the guard excludes: lease recovery resets an expired step to `pending` WITHOUT
 		// bumping `lease_seq` (only a claim grants a new generation), so the generation fence alone still matches a
 		// step recovery has already taken back. Stamping a FUTURE `lease_expires` onto that pending row would strand
 		// it OUTRIGHT: every claim and selection predicate requires `lease_expires<=NOW` on a pending step, so no piston cycle would ever

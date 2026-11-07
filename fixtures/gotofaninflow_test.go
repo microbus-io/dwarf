@@ -105,8 +105,8 @@ func TestGotoFanInFlow(t *testing.T) {
 }
 
 // TestGotoFanInFlow_NestedStaysInOuterCohort pins the dangerous half: a NESTED fan-out source that Goto's its
-// own (inner) fan-in must remain a member of its OUTER cohort, so the outer fan-in still counts it. Before the
-// fix this branch was silently dropped and the flow reported completed with a cell missing from the result.
+// own (inner) fan-in must remain a member of its OUTER cohort, so the outer fan-in still counts it. Dropped from
+// the outer cohort, the branch is lost silently: the flow reports completed with a cell missing from the result.
 func TestGotoFanInFlow_NestedStaysInOuterCohort(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)

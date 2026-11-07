@@ -120,12 +120,11 @@ func TestPersist_CompletionWriteContentionIsAbsorbedWithoutReExecution(t *testin
 	assert.Equal(int32(1), runs.Load(), "contention on the completion write must retry the write, never the task")
 }
 
-// TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever is the bug this closes.
-//
-// A write that will NEVER land (an unstorable payload, a value past a column limit, a constraint violation) used
-// to leave the step `running` with error=” and attempt=0 - reading as perfectly healthy - while lease recovery
-// re-dispatched it every `budget + leaseMargin`, RE-EXECUTING THE TASK and re-firing its side effects, forever.
-// Silent and eternal: recoverOrphanedFlows cannot see it, because a non-terminal step does exist.
+// TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever pins that a write that will NEVER land (an
+// unstorable payload, a value past a column limit, a constraint violation) fails the step. Left `running` with
+// error=” and attempt=0 - reading as perfectly healthy - lease recovery would re-dispatch it every
+// `budget + leaseMargin`, RE-EXECUTING THE TASK and re-firing its side effects, forever. Silent and eternal:
+// recoverOrphanedFlows cannot see it, because a non-terminal step does exist.
 //
 // Now the retries exhaust and the classifier asks the database itself: the CLEAN write (failStep - a status and
 // an error message, none of the payload) lands, which proves the database is reachable and therefore that the

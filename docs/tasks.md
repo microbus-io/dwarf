@@ -75,14 +75,13 @@ f.Clear()                     // remove everything (Del on every field)
 A task cannot write a field whose name ends with `!` or `+`: `Set` and `Overwrite` return an error for one, and
 `Del` fails the step. In the flow's JSON form - what a host reaching tasks over a transport exchanges - a written
 name ending with `!` records a field the task replaced rather than added to, and one ending with `+` the elements
-a list gained since the step's input (the engine stores a rewrite of a list that only grew that way; a task sees
-it again only when its step runs more than once).
+a list gained since the step's input (a task sees one only when its step runs more than once).
 
 ### Binary data must be base64-encoded
 
 **Known limitation:** a **NUL character** (`U+0000`) in a string cannot be stored. It is valid UTF-8 and
 marshals to legal JSON, but PostgreSQL's `JSONB` rejects it outright — so it works on SQLite and kills the flow
-on the recommended production database. Dwarf does **not** currently detect or reject this, so it is your
+on the recommended production database. Dwarf does **not** detect or reject this, so it is your
 responsibility: raw bytes belong in state **base64-encoded**.
 
 ```go
@@ -325,7 +324,7 @@ state, so its numbers are as exact as flow state's. See [Driving flows → Creat
 
 The engine never inspects an error's status code or text. Any error you return is terminal for that
 attempt: the engine routes it via the graph's `onError` transition if one exists, otherwise it fails the
-step. There is no engine-side rate-limit or unavailability handling to engage.
+step.
 
 To back off on a transient failure (a rate limit, a downstream that's momentarily unavailable), detect it
 yourself and arm `flow.Retry` — the task owns the decision because it owns the resource identity:
@@ -379,7 +378,7 @@ actually for. Errors that embed unique payload values match one flow each, so th
 least useful to search and the most sensitive to expose.
 
 One related surface: an error's structured properties ride into the `onErr` state field for handler routing,
-so they land in state like any other field rather than in the error column. Treat them with the same care
+so they land in state like any other field rather than in the error text. Treat them with the same care
 you would give any state value.
 
 ## Idempotency
@@ -413,7 +412,7 @@ func chargeCard(ctx context.Context, f *workflow.Flow) error {
 ```
 
 `f.StepKey()` is `{shard}-{hour}-{flowID}-{stepID}-{token}` and is **stable across every re-execution of one step** — a
-lease recovery, a `flow.Retry`, a re-dispatch after a database blip all rewind the same step row and hand
+lease recovery, a `flow.Retry`, a re-dispatch after a database blip all rewind the same step and hand
 back the same key. It is also unique per step, so two steps of one flow never collide.
 
 The other identifiers are the wrong choice, each for its own reason:
@@ -426,7 +425,7 @@ The other identifiers are the wrong choice, each for its own reason:
 
 **A loop is not a retry.** A branch that revisits a task via `flow.Goto` creates a *new* step each time
 around, so each iteration gets its own `StepKey` and is correctly treated as separate work. Likewise `Fork`
-clones steps into new rows with new keys — a fork is a deliberate re-run and its side effects fire again.
+clones steps with new keys — a fork is a deliberate re-run and its side effects fire again.
 
 ### If the downstream has no idempotency key
 

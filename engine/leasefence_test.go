@@ -362,10 +362,10 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	// The first (zombie) dispatch of A completes, its transition tx fails, and the recovery defer freezes at the
 	// reset checkpoint with A `completed` under generation N.
 	//
-	// The vehicle is LOCK CONTENTION, not an arbitrary write error, and that is now the only thing it can be: a
+	// The vehicle is LOCK CONTENTION, not an arbitrary write error, and that is the only thing it can be: a
 	// non-contention failure is retried in place and then CLASSIFIED (persist / failOnPersistError), so it never
 	// reaches this arm of the defer. Contention deliberately still does - terminalizing a flow because the
-	// database was busy would be exactly backwards - so it is what drives the completed->pending reset now.
+	// database was busy would be exactly backwards - so it is what drives the completed->pending reset.
 	// InjectN(8) is one full round of Transact's retries (transactMaxAttempts), so the transaction gives up and
 	// hands a contention error to the defer; the fault is spent, and the peer's re-dispatch runs clean.
 	eng.seams.InjectN(engineseams.Join(engineseams.FaultContention, "A"), 8)
@@ -660,10 +660,10 @@ func TestLeaseRecovery_EndToEnd(t *testing.T) {
 	assert.Equal(int64(2), aCalls.Load())
 }
 
-// TestFailStep_TerminalStatusGuard pins that failStep's fenced write now carries a status guard
+// TestFailStep_TerminalStatusGuard pins that failStep's fenced write carries a status guard
 // (status IN ('running','completed')), so it fails only a step a worker legitimately holds, never a terminal
 // one. terminateSubtree terminalizes a step to `terminated` WITHOUT bumping lease_seq, so the dispatching
-// worker's generation still matches; without the status guard, failStep rewrote that terminated step to `failed` -
+// worker's generation still matches; without the status guard, failStep would rewrite that terminated step to `failed` -
 // violating step immutability, miscounting dwarf_steps_executed, and (the one that bites) seeding a phantom
 // branch failure that a later Fork re-derives from step status. The guard still admits the `completed` case
 // failOnPersistError relies on (fail an already-completed step whose transition tx could not be persisted).

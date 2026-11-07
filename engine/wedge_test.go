@@ -68,8 +68,8 @@ func (c *orphanLogCapture) seen() []string {
 
 // TestWedgeSweep_SubgraphCallerRevived manufactures a wedged parkedSubgraph caller (child reached terminal
 // but the revive was lost) and asserts the sweep re-drives completeSurgraphFlow so the caller resumes and
-// the flow completes, adopting the child's output. The wedge can't arise naturally (the park-before-spawn
-// fix prevents it), so the test forges the DB state the bug would leave and backdates the caller past
+// the flow completes, adopting the child's output. The wedge can't arise naturally (parking before spawning
+// prevents it), so the test forges the state a lost revive leaves and backdates the caller past
 // parkWedgeThreshold, then calls the recovery directly (bypassing the time gate).
 func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 	t.Parallel()

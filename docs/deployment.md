@@ -384,8 +384,7 @@ same step.
 
 **There is nothing to wire between them.** Replicas coordinate entirely through the databases they already
 share — pending work, flow outcomes and fleet membership are all discovered by reading, on cadences the
-engine sets. No message bus, no peer-to-peer transport, no host method to implement. Running a second
-replica is: point it at the same shards and start it.
+engine sets. Running a second replica is: point it at the same shards and start it.
 
 That has three consequences worth knowing:
 
@@ -498,8 +497,9 @@ runtime's termination grace period, for example), those steps are abandoned mid-
 replica recovers them, and **the tasks run again**. That is safe (execution is at-least-once and tasks must be
 idempotent), but it is wasted work, and it re-fires side effects that had already happened.
 
-The engine imposes no ceiling on `TimeBudget`, so the number is yours: if you cap task budgets in your own layer,
-size the drain window above that cap. If you do not cap them, the drain is bounded only by your slowest task.
+Size the drain window above the longest `TimeBudget` your tasks run with. The engine accepts budgets up to just under
+24.8 days, so if you cap task budgets in your own layer, size it above that cap; if you do not, the drain is bounded
+only by your slowest task.
 
 For example, if your layer caps every task at 15 minutes, set the platform's termination grace period (on
 Kubernetes, `terminationGracePeriodSeconds`) to 15 minutes plus a margin for the process's own shutdown, such

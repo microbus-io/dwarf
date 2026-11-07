@@ -151,8 +151,8 @@ func (e *Engine) failStep(ctx context.Context, d *dispatch, taskErr error, held 
 		// Fence the fail on BOTH our lease generation AND the state the worker holds the step in (held): `running` (a
 		// task error, or the step-completion write itself failing) or `completed` (a transition/eval failure that
 		// failOnPersistError fails the already-completed step for, to escape the re-execution loop). The lease fence
-		// alone guards the zombie "late error → healthy-flow kill" hazard; the status guard - which every sibling post-
-		// execution write carries and this one was missing - closes the rest. Without it a step a racing Terminate just
+		// alone guards the zombie "late error → healthy-flow kill" hazard; the status guard, which every sibling
+		// post-execution write also carries, closes the rest. Without it a step a racing Terminate just
 		// terminated (terminateSubtree does NOT bump lease_seq, so it still matches our generation) is rewritten
 		// terminated→failed, violating step immutability and seeding a phantom branch failure a later Fork re-derives
 		// from step status; and a step recovery reset to `pending` (also lease_seq-preserving) would be terminalized

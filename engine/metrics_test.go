@@ -820,12 +820,11 @@ func TestMetrics_InFlightStateGauges(t *testing.T) {
 // TestMetrics_ClosedCountsEveryTerminalStatus pins that dwarf_flows_closed counts FAILED and
 // TERMINATED flows, not only completed ones.
 //
-// It regressed silently and cost nothing to miss: the instrument carried a `status` attribute and was
-// described as counting "flows that have reached a terminal status", while the only call site passed
-// StatusCompleted. Two things were wrong at once. `sum by (status)` invited a completed/failed/terminated
-// breakdown and answered with completions alone, and the in-flight panel the dwarf_flows_started
-// description recommends - started minus ended - drifted upward permanently by every flow that did
-// not finish cleanly, never recovering.
+// Counting completions alone breaks two things silently, while the instrument carries a `status` attribute
+// and is described as counting "flows that have reached a terminal status": `sum by (status)` invites a
+// completed/failed/terminated breakdown and answers with completions alone, and the in-flight panel the
+// dwarf_flows_started description recommends - started minus ended - drifts upward permanently by every flow
+// that did not finish cleanly, never recovering.
 //
 // Both halves are asserted per status rather than in aggregate, because a single total would pass against
 // a build that counted one of them twice.

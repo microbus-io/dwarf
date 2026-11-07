@@ -97,8 +97,8 @@ scheduler) stay out of those builds.
 ## The host model
 
 The engine reaches the outside world through a single `Host` interface, registered once with `SetHost`.
-Two methods, both required — and that is the whole contract, single-replica or not: the engine sends
-nothing between replicas, so there is no transport for you to wire.
+Two methods, both required — and that is the whole contract, single-replica or not: replicas coordinate
+through the databases they share.
 
 ```go
 type Host interface {
@@ -139,7 +139,7 @@ flowKey, err := eng.Create(ctx, "checkout", initialState, &workflow.FlowOptions{
     FairnessKey: tenantID,
     Baggage:     actorClaims,
 })
-outcome, err := eng.Await(ctx, flowKey) // Create returns a running flow; there is no separate start call
+outcome, err := eng.Await(ctx, flowKey) // Create returns a running flow
 ```
 
 The live `Set*` method (`SetTimeBudget`) may be called after `Startup` for hot reconfiguration; the rest are

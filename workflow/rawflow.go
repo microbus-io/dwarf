@@ -21,8 +21,8 @@ import (
 	"time"
 )
 
-// RawFlow wraps Flow with additional methods used by the orchestrator.
-// Task endpoints should use Flow directly; RawFlow is for internal orchestration use only.
+// RawFlow is the side of a Flow the engine drives: it sets what a task reads and reads back what a task
+// requested. Task code uses Flow.
 type RawFlow struct {
 	Flow
 }

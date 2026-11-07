@@ -192,7 +192,7 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, sha
 	// FLATTEN: final_state is a flow-boundary value (a dwarf_flows column that Continue feeds into the next
 	// turn, and that outlives this flow's steps - DeleteOnCompletion may reap them). A ref that escaped the
 	// flow would dangle, so the terminal merge always materializes, whatever it costs on this one row.
-	// It is not a regression either: a large field surviving to the end is copied into final_state today.
+	// Materializing costs nothing extra here: final_state holds every field inline anyway.
 	// resolveStateRefs mutates the state map in place, so it gets the live map.
 	if _, err := e.resolveStateRefs(ctx, db, shardNum, flowToken, base, baseRefs, nil, workflowURL); err != nil {
 		return workflow.State{}, errors.Trace(err)

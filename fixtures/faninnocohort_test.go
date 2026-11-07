@@ -126,7 +126,7 @@ func TestFanInNoCohort_FailsInsteadOfHotLooping(t *testing.T) {
 		"the failure names the cause (got %q)", out.Error)
 
 	// And the task must not have been re-executed on a loop: the deliberate retry plus its one re-run -
-	// emphatically not thousands (the reviewer measured 2,735 failed transitions in 2 seconds). Two pushing
+	// emphatically not thousands (measured: 2,735 failed transitions in 2 seconds). Two pushing
 	// cycles after the flow has FAILED close the window: a hot loop re-dispatches through the same pending
 	// candidate the cycle scans for, so the dispatcher has demonstrably looked twice and found nothing.
 	enginetest.AwaitShardCycles(t, e, 2)

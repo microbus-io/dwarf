@@ -225,8 +225,8 @@ func TestGraph_ValidateFanOutConvergence(t *testing.T) {
 // into a fan-in node as a cohort arrival, so such an edge from a node with no fan-out frame arrives at a
 // cohort that does not exist: at runtime it bumps cohort_arrivals on step_id=0, the transition tx aborts
 // on the follow-up SELECT, the recovery defer rewinds the step, and the task re-runs - side effects and
-// all - in an unbounded hot loop. validateLineage tested the goto/onError/switch arm FIRST, which skipped
-// the frame-pop check for exactly the edge kinds that can reach a fan-in from outside a cohort.
+// all - in an unbounded hot loop. Testing the goto/onError/switch arm first skips the frame-pop check for
+// exactly the edge kinds that can reach a fan-in from outside a cohort.
 func TestGraph_ValidateFanInFromOutsideCohort(t *testing.T) {
 	assert := testarossa.For(t)
 

@@ -26,11 +26,9 @@ import (
 // transport of its own; it reaches workflow graphs and tasks exclusively through the host. Register it
 // once via Engine.SetHost.
 //
-// THE ENGINE SENDS NOTHING TO ITS PEERS, and a host therefore wires no inter-replica transport for it.
-// Replicas sharing a database coordinate entirely by reading it: pending work, flow outcomes and fleet
-// membership are all discovered by polling, on cadences the engine sets, so a fleet converges with no
-// message passing between replicas at any volume - not per step, not per flow, not per deployment event.
-// What a host must supply is exactly what only it can: the graphs and the task dispatch below.
+// A host supplies only the graphs and the task dispatch below. Replicas sharing a database coordinate by
+// reading it: pending work, flow outcomes and fleet membership are all discovered by polling, on cadences the
+// engine sets.
 type Host interface {
 	// LoadGraph fetches a workflow graph definition by its URL (the addressable resolve key passed to
 	// Create). The flow's opaque baggage rides on ctx; read it with workflow.BaggageFrom(ctx) if loading

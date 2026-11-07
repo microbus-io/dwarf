@@ -240,8 +240,8 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 		assert.Equal(workflow.StatusRunning, flowStatus(t, db, 2), "the child flow must not be interrupted")
 	})
 
-	// Control: a `running` leaf we still own (same generation) interrupts the whole chain normally - the fix must
-	// not over-fence the legitimate case.
+	// Control: a `running` leaf we still own (same generation) interrupts the whole chain normally - the fence must
+	// not catch the legitimate case.
 	t.Run("running_leaf_interrupts_the_chain", func(t *testing.T) {
 		assert := testarossa.For(t)
 		e, db := setup(t, workflow.StatusRunning)

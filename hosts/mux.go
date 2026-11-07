@@ -34,7 +34,7 @@ import (
 // between the engine and its tasks. Pass it to Engine.SetHost.
 //
 // A multi-replica test needs nothing else from it: replicas coordinate through the database they share,
-// so several engines pointed at one test database ARE a fleet, with no relay between them to stand up.
+// so several engines pointed at one test database ARE a fleet.
 type Mux struct {
 	mu     sync.RWMutex
 	graphs map[string]*workflow.Graph

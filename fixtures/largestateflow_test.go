@@ -28,11 +28,11 @@ import (
 )
 
 // TestLargeFinalStateflow pins that a flow's terminal state larger than 64 KB round-trips intact on every
-// dialect. Regression guard: `dwarf_flows.final_state` was `TEXT` on MySQL (a 64 KB cap) while `state`/
-// `changes` were `JSON`, so a large-output flow that completes fine on PostgreSQL / SQL Server / SQLite would
-// silently truncate — or fail to commit under strict mode — on MySQL alone. `final_state` is now `JSON` on
-// MySQL too. This fixture runs against whatever `SEQUEL_TESTING_DSN` points at, so on a regressed schema it
-// fails on MySQL and passes on the other three — a clean four-dialect tripwire.
+// dialect. It guards that `dwarf_flows.final_state` is `JSON` on MySQL like `state`/`changes`: a `TEXT` column
+// caps it at 64 KB, so a large-output flow that completes fine on PostgreSQL / SQL Server / SQLite would
+// silently truncate — or fail to commit under strict mode — on MySQL alone. This fixture runs against whatever
+// `SEQUEL_TESTING_DSN` points at, so on such a schema it fails on MySQL and passes on the other three — a clean
+// four-dialect tripwire.
 func TestLargeFinalStateflow(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)

@@ -35,7 +35,7 @@ import (
 // SetTimeBudget) as the deadline on the context handed to the TaskExecutor. Unlike timebudgetflow,
 // the task here installs NO timeout of its own — it blocks purely on the engine-provided ctx.Done(),
 // the way a host's transport would enforce a per-call deadline and fail when it lapses. If the engine
-// fails to deadline the call (the migration regression), ctx.Done()
+// fails to deadline the call, ctx.Done()
 // never fires, the task only returns when its safety net trips, and the flow completes instead of
 // failing — which this fixture catches.
 // NOT t.Parallel: asserts an upper-bound reaction latency (flow fails at ~budget, elapsed < 3s safety net), which CPU oversubscription

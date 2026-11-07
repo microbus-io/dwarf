@@ -18,8 +18,7 @@ limitations under the License.
 DeleteOnCompletion + subgraph: the deferred-deletion contract. A disposable flow that runs a subgraph child
 completes, then lingers for a grace window (~1 min) before the reaper removes the whole tree. During the
 window its OUTCOME is observable - Run/Await/Snapshot return the completed FlowOutcome (including state merged
-back from the subgraph) - which is how a caller learns a disposable flow's result now that there is no
-FlowStopped callback. The flow is nonetheless logically gone: it is excluded from List and History 404s. The
+back from the subgraph) - which is how a caller learns a disposable flow's result. The flow is nonetheless logically gone: it is excluded from List and History 404s. The
 physical reap (and its cascade to the subgraph child, keyed on root_flow_id) is pinned in the engine-package
 reaper tests (which can shorten the grace and force a pass); a fixture using the public API and the default
 1-min grace verifies the observable window.

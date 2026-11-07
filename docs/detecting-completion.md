@@ -1,11 +1,10 @@
 # Detecting flow completion
 
 > **For developers** whose application needs to know when a flow finished — to answer an HTTP request, send a
-> notification, or trigger downstream work. It explains why there is no completion callback and what to do
-> instead.
+> notification, or trigger downstream work. It explains the three ways to learn a flow's outcome and when to
+> use each.
 
-The engine has **no stop-notification callback**. There are three ways to learn a flow's outcome, and they
-suit different situations:
+There are three ways to learn a flow's outcome, and they suit different situations:
 
 1. **`Await`** — block a live caller until the flow stops, then read the outcome.
 2. **`Poll`** — `Await` with a bounded wait: on a ctx timeout it returns the flow's *current* outcome instead

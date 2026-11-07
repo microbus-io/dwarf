@@ -297,7 +297,7 @@ func TestStaterefs_SingleFieldEntirelyByReference(t *testing.T) {
 		}
 		return nil
 	})
-	// B is dispatched from a "{}" state column - the exact site the bug drops the ref. It too writes nothing,
+	// B is dispatched from a "{}" state column - the site where a carried ref is easiest to drop. It too writes nothing,
 	// so the ref must ride one-hop through to C, still anchored at the entry step.
 	mux.HandleTask("staterefsflow.verify:429/sole-b", func(ctx context.Context, f *workflow.Flow) error {
 		if got := len(f.GetString("pdf")); got != docLen {

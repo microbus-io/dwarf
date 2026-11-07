@@ -133,8 +133,8 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 		return
 	}
 
-	// Wait until Boom has failed AND the grandchild is running (so Slow is parked on it) - the moment the old
-	// eager short-circuit would have terminalized the child.
+	// Wait until Boom has failed AND the grandchild is running (so Slow is parked on it) - the moment an eager
+	// short-circuit would terminalize the child.
 	var childFlowID, childReady int
 	deadline := time.Now().Add(5 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {

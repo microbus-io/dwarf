@@ -85,7 +85,7 @@ type dbDelta struct {
 	// The WAL flush over the window (withFlush): how many a second, how long each took on average (the window over
 	// the count, since a saturated shard flushes back to back), its bytes and its commits. On a flush-bound shard
 	// steps/s x FlushMs is the same on two instances of one spec that differ only in their disk's latency, so it is
-	// what normalizes a throughput across draws (bench/CLAUDE.md, "The WAL model"). Zero when the count is unknown.
+	// what normalizes a throughput across draws. Zero when the count is unknown.
 	FlushesPerSec   float64 `json:"flushesPerSec"`
 	FlushMs         float64 `json:"flushMs"`
 	FlushKB         float64 `json:"flushKB"`

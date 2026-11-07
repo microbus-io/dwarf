@@ -40,7 +40,7 @@ import (
 // engine, where it reaches those directly.
 
 // NewEngineUnderTest constructs an engine wired for testing: isolated, auto-dropped databases keyed by the
-// given test name. It takes no testing.TB - a name is all it needs, so a host driving the engine under its
+// given test name. It takes a name rather than a testing.TB, so a host driving the engine under its
 // own harness (one with no *testing.T to hand over) reaches it the same way a Go test does. The caller
 // configures the engine (SetHost, SetShard, ...), drives Startup, and owns teardown:
 //

@@ -45,7 +45,7 @@ func TestPartition_DisabledBeforeTheFleetIsKnown(t *testing.T) {
 	assert.Equal(1, e.replicasOn(1), "and size for a solo replica, which is the pool-safe direction")
 }
 
-// The predicate this pair drives now lives in internal/piston (partitionPredicate), which validates it a
+// The predicate this pair drives lives in internal/piston (partitionPredicate), which validates it a
 // second time - see TestPiston_PartitionPairIsValidated. Both guards are deliberate: this one is the
 // engine's knowledge of its own fleet, that one is the package's advertised fail-open posture.
 

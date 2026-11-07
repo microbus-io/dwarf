@@ -327,8 +327,9 @@ See [Writing tasks](tasks.md#contributions-not-totals-on-a-reduced-field) and
 The state field names a graph declares — `forEach`, `as`, and the field of `SetReducer` — must be plain
 identifiers: an ASCII letter or underscore, followed by ASCII letters, digits, or underscores
 (`lineItems`, `line_item`). `Validate` rejects a graph that declares any other name. The flow's state itself
-may carry fields under other names too, but a name must not end with `!`: in the flow's JSON form that suffix
-marks a field a task replaced, and a task cannot write or delete such a field.
+may carry fields under other names too, but a name must not end with `!` or `+`: in the flow's JSON form those
+suffixes mark a field a task replaced and the elements a list gained, and a task cannot write or delete such a
+field.
 
 ## Validation
 
@@ -348,6 +349,6 @@ if err != nil {
 
 Read-only inspectors include `Name`, `EntryPoint`, `Tasks`, `Transitions`, `Reducers`, `URLOf`,
 `ErrorTransition`, `IsFanIn`, and `IsFanOutSource`. Graphs marshal to and from JSON
-(`MarshalJSON`/`UnmarshalJSON`), which is how the engine freezes a graph onto a flow.
+(`MarshalJSON`/`UnmarshalJSON`), and a flow keeps the graph it was created with.
 
 Next: [Writing tasks](tasks.md).

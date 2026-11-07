@@ -46,7 +46,7 @@ invocable unit.
 
 ### Detecting completion
 
-The engine has **no** stop-notification callback. To learn a flow's outcome you **`Await`** it (below),
+To learn a flow's outcome you **`Await`** it (below),
 **`Poll`** it when your own deadline is shorter than the flow's (below), or **compose** the notification into
 the workflow itself (an orchestrating graph whose follow-up tasks report the outcome). The three approaches
 and when to use each are covered in [Detecting flow completion](detecting-completion.md).
@@ -312,7 +312,7 @@ delete it.
 
 `Delete` takes one flow by its key, archived or not. An archived flow is deleted at once. One not archived yet, in the
 minute after it closes, is **marked** for deletion: a background reaper removes it shortly after, without archiving
-it, and `History` returns 404 for it at once, so it is logically gone even though the row lingers briefly. `Delete` of
+it, and `History` returns 404 for it at once, so it is logically gone even though its records linger briefly. `Delete` of
 a flow already deleted from the archive returns 404.
 
 `Purge` removes what `ListClosed` would list for the same `workflow.Query`, oldest archived first, at most `Limit`
@@ -352,7 +352,7 @@ before the reaper removes it — so a fire-and-forget caller can still `Run` it 
 `SetFlowExpiration(d)` caps how long after its creation a flow may still be running or interrupted. A flow still
 running or interrupted once it is older than `d` is terminated, with its subgraphs, and its `TerminateReason` says it
 expired; it is then archived like any other terminated flow. It bounds what an abandoned interrupt or a flow polling
-forever leaves in the live tables. The check runs every 5 minutes, so a flow is terminated up to about 5 minutes
+forever leaves open. The check runs every 5 minutes, so a flow is terminated up to about 5 minutes
 after it expires. It is off by default, and a flow created by `Continue` or `Fork` counts from its own creation, so a
 long conversation carried on with `Continue` is never expired as a whole.
 

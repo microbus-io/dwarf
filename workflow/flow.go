@@ -556,10 +556,11 @@ not be retried). Gate it on whatever your task considers transient:
 	result, err := callExternalAPI(ctx)
 	if err != nil {
 	    if isTransient(err) && flow.Retry(1*time.Second, 2.0, 30*time.Second, 1*time.Hour) {
-	        return result, nil // transient failure: retry scheduled, don't report error
+	        return nil // transient failure: retry scheduled, don't report error
 	    }
-	    return result, err // non-retryable, or horizon exceeded
+	    return err // non-retryable, or horizon exceeded
 	}
+	flow.Set("result", result)
 
 To bound by count instead of (or in addition to) time, gate on Attempt: pass giveUpAfter 0 and check
 flow.Attempt() at the call site.
