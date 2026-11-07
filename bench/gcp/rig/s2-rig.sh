@@ -9,9 +9,9 @@
 #   2  s4-r8:   4 shards x 8 c4a-standard-8 replicas (128 creators, cap 1,000 each).
 #   3  s2-r4:   the two slowest instances and four replicas deleted; 2 shards x 4 replicas.
 #   4  s1-r2:   the next instance and two more replicas deleted; 1 shard x 2 replicas.
-# Every arm: saturated linear 0 B, 2 min warmup + 16 min window, the same cap and creators per shard (2,000 and 256),
+# Every arm: saturated linear 0 B, 2 min warmup + $WIN window (default 16m), the same cap and creators per shard (2,000 and 256),
 # an RTT gate from every engine host to every shard it uses, a fresh database on each shard, a dispatcher snapshot at
-# window minute 8, flow/step status counts per shard (a multi-process drain verdict is advisory), and the database
+# mid-window, flow/step status counts per shard (a multi-process drain verdict is advisory), and the database
 # dropped on every surviving instance before the next arm. Resources go as soon as their last arm is done; the EXIT
 # trap pulls what is left and tears everything down. `touch $OUT/stop` ends after the current arm.
 set -u
@@ -20,7 +20,7 @@ D=$(cd "$(dirname "$0")" && pwd)                      # this kit: the VM-side he
 R=$(cd "$D/../../.." && pwd)                          # the repository: dbcpu.sh, and artifacts in $R/bench/results
 S=${RIG_HOME:-$R/tmp/rig}                             # never committed: dbpass and the pinned bench binaries
 PROJECT=${PROJECT:-dwarf-bench-mbus} ZONE=${ZONE:-us-east4-a} NAME=${NAME:-s2}
-TIER=${TIER:-db-custom-32-131072}
+TIER=${TIER:-db-custom-32-131072} WIN=${WIN:-16m}
 DBFLAGS=${DBFLAGS-cloudsql.enable_auto_explain=on,auto_explain.log_min_duration=10000,log_lock_waits=on,autovacuum_work_mem=1048576}
 RTT_MAX=${RTT_MAX:-0.35}                              # ms, the idle RTT gate per engine host and shard
 DRAW_MAX=${DRAW_MAX:-1.35}                            # DB core-ms per step: ~1.1-1.2 normal, ~1.5 slow
@@ -142,17 +142,17 @@ run_arm() { # run_arm <tag> <creators> <cap> <slots, comma-separated> <vm>...: e
     if (( i == 0 )); then d1=${dsns[0]}; else more+=" -dsn '$((i + 1))=$(dsn "${IPS[$s]}" "$db")'"; fi; done
   start=$(( $(date +%s) + 60 ))
   log "arm $tag: ${#slots[@]} shard(s) (${slots[*]}) x ${#vms[@]} replica(s), $conc creators and cap $cap each, start $(date -r $start '+%H:%M:%S')"
-  vmssh "$ADMIN" "setsid nohup ./s-mon.sh $(( 60 + 19 * 60 )) out/mon-$tag.log ${dsns[*]} > /dev/null 2>&1 < /dev/null &"
+  vmssh "$ADMIN" "setsid nohup ./s-mon.sh $(( 60 + (${WIN%m} + 3) * 60 )) out/mon-$tag.log ${dsns[*]} > /dev/null 2>&1 < /dev/null &"
   local p=(); for vm in "${vms[@]}"; do
-    vmssh "$vm" "WINDOW=16m setsid nohup ./g-run.sh $tag-$vm $start $d1 $SAT -concurrency $conc -max-outstanding $cap$more > /dev/null 2>&1 < /dev/null &" & p+=($!)
+    vmssh "$vm" "WINDOW=$WIN setsid nohup ./g-run.sh $tag-$vm $start $d1 $SAT -concurrency $conc -max-outstanding $cap$more > /dev/null 2>&1 < /dev/null &" & p+=($!)
   done; wait "${p[@]}"
-  sleep $(( start + 10 * 60 - $(date +%s) ))
+  sleep $(( start + (2 + ${WIN%m} / 2) * 60 - $(date +%s) )) # the dispatcher snapshot, mid-window
   for i in "${!slots[@]}"; do s=${slots[$i]}
     adm "$(dsn "${IPS[$s]}" "$db")" "SELECT engine_id, to_char(joined_at,'HH24:MI:SS.MS'), (EXTRACT(EPOCH FROM now()-dispatched_at)*1000)::bigint FROM dwarf_peers ORDER BY joined_at, engine_id" |
       sed "s/^/shard $((i + 1)) ${DBN[$s]}: /" >> "$OUT/dispatchers-$tag.txt"
   done
-  # Past the window and a 5-min drain with slack, a VM still running is hung: kill it rather than wait.
-  deadline=$(( start + (2 + 16 + 5 + 4) * 60 ))
+  # Past the window and the drain (-drain, 30 s by default) with slack, a VM still running is hung: kill it.
+  deadline=$(( start + (2 + ${WIN%m} + 1 + 4) * 60 ))
   for vm in "${vms[@]}"; do
     until vmssh "$vm" "test -f out/$tag-$vm.done"; do
       (( $(date +%s) > deadline )) && { log "  $vm HUNG past the drain - killing dwarf-bench"; vmssh "$vm" 'pkill -9 -x dwarf-bench; true'; break; }

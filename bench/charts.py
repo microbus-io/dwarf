@@ -2,7 +2,7 @@
 bench/charts_cloud.py.
 
 Run from the repo root with matplotlib available:
-    python3 -m venv /tmp/viz && /tmp/viz/bin/pip install matplotlib && /tmp/viz/bin/python bench/charts.py
+    python3 -m venv tmp/viz && tmp/viz/bin/pip install matplotlib && tmp/viz/bin/python bench/charts.py
 """
 import matplotlib
 matplotlib.use("Agg")

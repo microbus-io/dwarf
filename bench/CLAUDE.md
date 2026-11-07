@@ -104,9 +104,10 @@ small ones by its 0.8 ms latency. Four things to hold onto:
 **Normalize a flush-bound throughput by its flush time, and check every draw's flush time.** At equal steps per flush,
 steps/s x flush_ms is a property of the build and the load, not of the instance: two 32 vCPU draws on one build at
 0 B ran 23,938 steps/s at 0.82 ms per flush and 18,852 at 1.03 ms (2026-11-06; 19,629 against 19,418 steps-ms, 1.1%
-apart, both at 62 commits per flush and 0.82-0.89 DB core-ms per step). So `T x flush_ms / flush_ref` puts draws on
-one footing, and the slow draw is invisible to `dbcpu.sh`, which reads CPU per step: read `results[].db.flushMs`
-(printed as the `wal` line) from the first window, and redraw or normalize. It holds only where the flush binds:
+apart, both at 62 commits per flush). So `T x flush_ms / flush_ref` puts draws on one footing: read
+`results[].db.flushMs` (printed as the `wal` line) from the first window, and redraw or normalize. The slow draw
+also spent more CPU per step - 1.26 against 1.03 core-ms over the exact window - so the runs do not say whether its
+disk or its host was slower; the extra CPU may be backends contending behind the slower flush. It holds only where the flush binds:
 most backends on `LWLock:WALWrite`, database CPU well under its ceiling, the same commits per flush (pool, RTT and
 payload all move that). The 8 and 16 vCPU tiers ran CPU-bound (82-93%): normalize them by core-ms per step instead.
 
@@ -263,11 +264,14 @@ into `bench/results/redo-<name>-<date>/`, and tears everything down on exit, fai
   campaign used, with their pass criteria in the header.
 - **What stays out of git** lives in `$RIG_HOME` (default `tmp/rig/`, ignored): `dbpass` and the pinned
   `bench-<sha>` binaries (`CGO_ENABLED=0 GOOS=linux GOARCH=arm64`, built from a clean clone).
-- **Gate every quoted rig on its draw, on both of its axes:** `bench/gcp/dbcpu.sh -live 3` a few minutes into the
-  first window reads CPU per step, and `fsync.sh <dsn>` on the idle instance reads its WAL flush floor (one `psql`
-  session: a commit's time less a `SELECT 1`'s - on Cloud SQL the round trip to its remote disk). A draw can be normal
-  on one and slow on the other: two 32 vCPU draws at 0.82-0.89 core-ms/step flushed in 0.82 and 1.03 ms under load and
-  ran 23,938 and 18,852 steps/s. Record both beside every throughput number.
+- **Gate every quoted rig on its draw:** `bench/gcp/dbcpu.sh -live 3` a few minutes into the first window reads CPU
+  per step, `results[].db.flushMs` the flush under load, and `fsync.sh <dsn>` on the idle instance its WAL flush floor
+  (one `psql` session: a commit's time less a `SELECT 1`'s - on Cloud SQL the round trip to its remote disk). Record
+  all three beside every throughput number.
+- **Read CPU per step over the measurement window alone** (`dbcpu.sh -w <start> <end>` with `PAD_SECONDS=0`). The
+  artifact mode spans the artifact's start to end - warmup, window and drain - padded 60 s each side, and the idle
+  edges dilute it: the two 2026-11-06 32 vCPU draws read 0.87 and 0.89 core-ms/step that way and 1.03 and 1.26 over
+  their windows, which hid that the slow one was slower on CPU too.
 
 Operational traps on Cloud SQL + GCE, each of which has cost a run.
 
