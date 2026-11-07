@@ -388,7 +388,9 @@ status. A workflow's own failure is not an error: it is the outcome's `Status` (
 
 A 408 also satisfies `errors.Is(err, context.DeadlineExceeded)`, or wraps the caller's own context error
 when the context was cancelled. An error returned by your host's `LoadGraph` reaches `Create` and `Run` with
-its own status code.
+its own status code; have the host return a 503 when the graph's source is unreachable, so the caller knows to try
+again. At a subgraph spawn the same error reaches the calling task instead (see
+[When the child fails, or cannot start](fan-out-and-subgraphs.md#when-the-child-fails-or-cannot-start)).
 
 Each operation adds these to the 503 and 500 every call can return:
 

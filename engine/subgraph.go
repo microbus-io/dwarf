@@ -444,15 +444,9 @@ func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Execu
 			return false, nil
 		}
 	}
-	delivered := *errors.Convert(childErr)
-	delivered.Stack = nil
-	delivered.Err = errors.New("%s", sanitizeErrorMessage(delivered.Error()))
-	encoded, err := json.Marshal(&delivered)
-	if err != nil || len(encoded) > e.maxPayloadBytes || bytes.Contains(encoded, []byte(`\u0000`)) {
-		encoded, err = json.Marshal(&errors.TracedError{Err: delivered.Err, StatusCode: delivered.StatusCode})
-		if err != nil {
-			return false, errors.Trace(err)
-		}
+	encoded, err := e.encodeSubgraphError(childErr)
+	if err != nil {
+		return false, errors.Trace(err)
 	}
 	res, err := tx.ExecContext(ctx,
 		"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=1, subgraph_error=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=?",
@@ -463,6 +457,23 @@ func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Execu
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
+}
+
+// encodeSubgraphError is the subgraph_error column's value for err: its TracedError JSON, stack stripped. Its
+// writers must not fail on what the error holds, so the message passes sanitizeErrorMessage, and JSON over the
+// payload limit or still holding a NUL keeps only the message and status code.
+func (e *Engine) encodeSubgraphError(err error) ([]byte, error) {
+	delivered := *errors.Convert(err)
+	delivered.Stack = nil
+	delivered.Err = errors.New("%s", sanitizeErrorMessage(delivered.Error()))
+	encoded, merr := json.Marshal(&delivered)
+	if merr != nil || len(encoded) > e.maxPayloadBytes || bytes.Contains(encoded, []byte(`\u0000`)) {
+		encoded, merr = json.Marshal(&errors.TracedError{Err: delivered.Err, StatusCode: delivered.StatusCode})
+		if merr != nil {
+			return nil, errors.Trace(merr)
+		}
+	}
+	return encoded, nil
 }
 
 // subgraphErrorText is what a subgraph_error column delivers to flow.Subgraph: the child's error as TracedError

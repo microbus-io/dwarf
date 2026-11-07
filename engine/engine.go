@@ -1374,6 +1374,9 @@ func (e *Engine) ensureStarted() error {
 // the flow's policy (scheduling, DeleteOnCompletion, Baggage); nil uses defaults.
 // For a flow that must wait for an external trigger, have the entry task call flow.Interrupt and resume it
 // with Resume (which, unlike a separate start, also delivers a payload).
+//
+// An error from the host's LoadGraph is returned with its own status code, so a 503 (the graph's source
+// unreachable) tells the caller to try again; nothing is created.
 func (e *Engine) Create(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return "", errors.Trace(err)
@@ -1604,9 +1607,10 @@ func (e *Engine) Poll(ctx context.Context, flowKey string) (outcome *workflow.Fl
 // Baggage; nil opts uses defaults.
 //
 // Error semantics differ by phase. A create failure returns flowKey "" and a nil outcome - no flow
-// exists. An await failure - most commonly the caller's ctx expiring before the flow stops - leaves the
-// flow running (it is durable and not bound to this call) and returns its flowKey with a nil outcome and
-// the error, so the caller keeps a handle to Await/Snapshot/Terminate it later. Run never terminates the flow
+// exists. An error from the host's LoadGraph is a create failure, returned with its own status code. An
+// await failure - most commonly the caller's ctx expiring before the flow stops - leaves the flow running
+// (it is durable and not bound to this call) and returns its flowKey with a nil outcome and the error, so
+// the caller keeps a handle to Await/Snapshot/Terminate it later. Run never terminates the flow
 // on the caller's behalf; a caller that wants the flow torn down on timeout calls Terminate explicitly. As
 // with Await, a wait that runs out returns a 408 error that satisfies errors.Is(err,
 // context.DeadlineExceeded).

@@ -152,6 +152,34 @@ re-runs and the call returns `yield == false` with the child's final state unmar
 To invoke a single unit of work in isolation, declare a one-task workflow and `Subgraph` it. A task only
 ever runs as part of a graph, never as an independently invocable child on its own.
 
+### When the child fails, or cannot start
+
+If the child fails, the parent re-runs and `Subgraph` returns the child's error. A child that cannot be started
+comes back the same way, with no child flow created and nothing in `out`. The error's status code says why:
+
+| Status | Cause |
+|---|---|
+| The host's own, `503` by convention | The host's `LoadGraph` could not load the child's graph, for example because the service that serves it is unreachable |
+| `404` | The host's `LoadGraph` returned no graph |
+| `400` | The child's graph is invalid |
+| `500` | The host's `LoadGraph` panicked |
+
+Returning the error takes the task's `onError` transition, if the graph has one, or fails the step. To wait out a
+`503`, arm [`flow.Retry`](tasks.md#retry): the task runs again, and its `Subgraph` call starts a new child.
+
+```go
+yield, err := f.Subgraph("enrichment.workflow", in, &out)
+if yield {
+    return nil
+}
+if err != nil {
+    if errors.StatusCode(err) == http.StatusServiceUnavailable && f.Retry(time.Second, 2.0, 30*time.Second, time.Hour) {
+        return nil // try to start the child again after the backoff
+    }
+    return err // onError, or fail the step
+}
+```
+
 - Pass `nil` input for "no arguments"; pass `f.Snapshot()` to forward the parent's entire state.
 - Writing the child's result into a reduced field of the parent is a contribution like any other. So have the
   child return only what it adds — its new messages, say — and `Set` those. Passing the history in and

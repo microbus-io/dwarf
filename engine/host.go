@@ -37,6 +37,11 @@ type Host interface {
 	// is identity-dependent (authz, per-actor graphs). The engine validates the returned graph
 	// (graph.Validate) at Create and at subgraph spawn, so the host need not: returning (nil, nil) yields a
 	// 404 and a structurally invalid graph a 400, rather than a later dispatch-time failure.
+	//
+	// Return (nil, nil) for a graph that does not exist, and an error with status 503 when the graph's source
+	// cannot be reached right now. At Create the error is returned to the caller; at a subgraph spawn it is
+	// returned to the calling task from flow.Subgraph, status code included, so the task can retry a 503 and
+	// give up on a 404. The engine itself reads no status code.
 	LoadGraph(ctx context.Context, workflowURL string) (graph *workflow.Graph, err error)
 
 	// ExecuteTask executes a single task within a workflow. taskURL is the task's dispatch URL (the real
@@ -50,6 +55,10 @@ type Host interface {
 	// persisted state reflects exactly one execution, but exactly-once side effects are the task's
 	// responsibility - tasks must be idempotent. Honor the ctx deadline (it bounds the step's time budget);
 	// a task that ignores it can only be recovered by lease expiry, not cancelled.
+	//
+	// A host that cannot reach the task's worker may wait for it by arming flow.Retry on the carrier and
+	// returning nil, up to a horizon of its own, and then return an error with status 503. Such a dispatch
+	// still counts toward flow.Attempt, though the task never ran.
 	ExecuteTask(ctx context.Context, taskURL string, flow *workflow.Flow) error
 }
 

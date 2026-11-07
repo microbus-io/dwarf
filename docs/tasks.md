@@ -203,6 +203,8 @@ The delay before attempt N is `min(initialDelay * delayMultiplier^N, maxInterval
 `1.0` to hold the delay constant. `initialDelay` and `maxIntervalDelay` must not be negative, and `delayMultiplier`
 must be a finite number that is not negative; otherwise `Retry` returns `false`. Pass `giveUpAfter <= 0` for
 unlimited retry. To bound by count instead, pass `giveUpAfter` `0` and gate on `f.Attempt()` at the call site.
+`Attempt()` also counts the retries your host armed without reaching the task (a worker that was down, a refused or
+dropped connection), so bound retries of a transient failure by time.
 On retry the engine merges the task's prior output back into its input, so the next attempt sees what the last
 one wrote.
 
@@ -290,6 +292,10 @@ func enrich(ctx context.Context, f *workflow.Flow) error {
 The result is unmarshaled into the trailing `out` pointer (a `*struct` for type safety, a `*map[string]any`
 for dynamic access, or `nil` to ignore it). Pass `nil` input for "no arguments," or `f.Snapshot()` to forward
 the parent's whole state. See [Fan-out & subgraphs → Subgraphs](fan-out-and-subgraphs.md#subgraphs).
+
+`err` carries the child's error when it fails, and the reason when it could not be started (a `503` when its
+graph could not be loaded, a `404` when it does not exist, a `400` when it is invalid). See
+[When the child fails, or cannot start](fan-out-and-subgraphs.md#when-the-child-fails-or-cannot-start).
 
 To invoke a single unit of work as an isolated child, declare a one-task workflow and `Subgraph` it. A task
 only ever runs as part of a graph; it is not an independently invocable unit.

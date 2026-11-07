@@ -94,18 +94,19 @@ const (
 	FaultLoadGraph = "loadGraph" // LoadGraph returns a synthetic error
 
 	// Scoped by task name; force the persistence/transition steps of a dispatch to fail:
-	FaultTransitionCommit     = "transitionCommit"     // the post-completion transition transaction errors
-	FaultCompleteFlowCommit   = "completeFlowCommit"   // the flow-completion transaction errors
-	FaultContention           = "contention"           // a dispatch transaction returns a lock-contention error
-	FaultLeaseStaleWrite      = "leaseStaleWrite"      // the completion write carries a stale lease_seq (zombie)
-	FaultPersistErr           = "persistErr"           // the step-completion write returns a non-contention database error (consumed per attempt, so InjectN sets how many attempts fail)
-	FaultPersistLandedErr     = "persistLandedErr"     // the step-completion write lands, then returns a non-contention database error, as when a commit's acknowledgement is lost (consumed per attempt)
-	FaultExtendLeaseErr       = "extendLeaseErr"       // persist's lease renewal returns a database error, as during an outage (consumed per attempt)
-	FaultCompletionContention = "completionContention" // the step-completion write returns a lock-contention error (consumed per attempt, so InjectN sets how many attempts fail)
-	FaultSubgraphSpawnErr     = "subgraphSpawnErr"     // the subgraph spawn errors before its transaction, with the caller step not yet parked
-	FaultRetryRewindErr       = "retryRewindErr"       // the flow.Retry rewind returns a non-contention database error (consumed per attempt)
-	FaultRerouteWriteErr      = "rerouteWriteErr"      // the Cancel-covered reroute's follow-up write returns a non-contention database error (consumed per attempt)
-	FaultRerouteStaleWrite    = "rerouteStaleWrite"    // the Cancel-covered reroute's follow-up write carries a stale lease_seq (zombie)
+	FaultTransitionCommit       = "transitionCommit"       // the post-completion transition transaction errors
+	FaultCompleteFlowCommit     = "completeFlowCommit"     // the flow-completion transaction errors
+	FaultContention             = "contention"             // a dispatch transaction returns a lock-contention error
+	FaultLeaseStaleWrite        = "leaseStaleWrite"        // the completion write carries a stale lease_seq (zombie)
+	FaultPersistErr             = "persistErr"             // the step-completion write returns a non-contention database error (consumed per attempt, so InjectN sets how many attempts fail)
+	FaultPersistLandedErr       = "persistLandedErr"       // the step-completion write lands, then returns a non-contention database error, as when a commit's acknowledgement is lost (consumed per attempt)
+	FaultExtendLeaseErr         = "extendLeaseErr"         // persist's lease renewal returns a database error, as during an outage (consumed per attempt)
+	FaultCompletionContention   = "completionContention"   // the step-completion write returns a lock-contention error (consumed per attempt, so InjectN sets how many attempts fail)
+	FaultSubgraphSpawnErr       = "subgraphSpawnErr"       // the subgraph spawn errors before its transaction, with the caller step not yet parked
+	FaultSpawnResolveContention = "spawnResolveContention" // the write delivering a failed subgraph spawn to its caller returns a lock-contention error (consumed per attempt)
+	FaultRetryRewindErr         = "retryRewindErr"         // the flow.Retry rewind returns a non-contention database error (consumed per attempt)
+	FaultRerouteWriteErr        = "rerouteWriteErr"        // the Cancel-covered reroute's follow-up write returns a non-contention database error (consumed per attempt)
+	FaultRerouteStaleWrite      = "rerouteStaleWrite"      // the Cancel-covered reroute's follow-up write carries a stale lease_seq (zombie)
 
 	// Scoped by workflow URL of the subgraph child:
 	FaultSubgraphSpawnCommitLost = "subgraphSpawnCommitLost" // the subgraph spawn commits but reports an error, as if its acknowledgement were lost
@@ -159,6 +160,7 @@ const (
 	CheckpointSubgraphSpawnParked       = "subgraphSpawnParked"       // step execution, inside the subgraph spawn's transaction, after the caller is parked and before the child is inserted
 	CheckpointSubgraphSpawnAbandoned    = "subgraphSpawnAbandoned"    // step execution, a subgraph spawn rolled back because its caller step is no longer running
 	CheckpointBeforeRetryRewind         = "beforeRetryRewind"         // step execution, before the flow.Retry rewind transaction
+	CheckpointBeforeSpawnResolve        = "beforeSpawnResolve"        // step execution, before a failed subgraph spawn is delivered to its caller
 	CheckpointBeforeCompleteFlowWrite   = "beforeCompleteFlowWrite"   // flow completion, just before its transaction's status-gate write
 	CheckpointBeforeReviveWrite         = "beforeReviveWrite"         // the subgraph-completion path, just before its transaction's caller-revive write
 	CheckpointBeforeRecoveryReset       = "beforeRecoveryReset"       // the post-execution recovery path, just before its fenced step-reset transaction

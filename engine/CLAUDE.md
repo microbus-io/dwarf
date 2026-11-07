@@ -216,7 +216,13 @@ nothing on the graph, so only the author's definition is frozen into the flow's 
 itself is an engine-side optimization derived at dispatch from the frozen definition
 (`internal/faninmap.New`, built beside the parse in the shared graph layer), not persisted - it is a pure
 `O(V+E)` function of the structure, computed once per graph per replica rather than per step. The **subgraph-spawn** path
-validates identically (a nil/invalid child graph fails the caller step like any `LoadGraph` error). One
+validates identically, but a spawn that fails (`LoadGraph`'s error or panic, a nil graph as a 404, an invalid one as
+a 400) does not fail the caller step: `resolveFailedSpawn` resolves the park with no child, the error in
+`subgraph_error`, and re-pends the step, so `flow.Subgraph` returns it exactly as it returns a failed child's. The
+task then returns it (onError included) or `flow.Retry`s, which is how a task rides out a 503 for an absent worker.
+**Do not fail the step at the spawn, nor route it straight to `graph.ErrorTransition`**: both skip the task, so a
+503 cannot be retried and the two kinds of subgraph failure take different paths. Pinned by
+`fixtures/subgraphspawnfailflow_test.go`. One
 consequence for graph authors: a graph with no explicit transition to `END` (relying on "no matching
 transition completes the flow") is rejected at `Create` - `Validate` requires an explicit `END` edge.
 The engine has **no creation-time delay** (no `StartAt`):

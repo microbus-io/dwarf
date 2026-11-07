@@ -214,6 +214,10 @@ func (f *Flow) StepCreatedAt() time.Time {
 // Attempt returns the zero-based retry attempt counter for the current step: 0 on the first
 // execution, incremented by the orchestrator on each Retry. A task can gate on it to bound retries
 // by count (e.g. "if flow.Attempt() < 3") instead of, or alongside, Retry's time-based horizon.
+//
+// It also counts the retries a host armed without reaching the task (an absent worker, a refused or
+// dropped connection), so a count bounds the task's own runs only loosely. Bound retries of a
+// transient failure by time (Retry's giveUpAfter) rather than by count.
 func (f *Flow) Attempt() int {
 	return f.attempt
 }
@@ -463,13 +467,19 @@ On re-entry after the child terminates it unmarshals the child's final state int
 err if the child failed. Does not re-arm on re-entry. Like Interrupt, it returns an error without arming if in cannot
 be marshalled or this step already parked.
 
+A child that could not be started comes back the same way, with no child flow created and nothing in out: err
+carries the host's error when the child's graph could not be loaded (a 503 when its source is unreachable), a 404
+when the graph does not exist, or a 400 when it is invalid. Read the code with errors.StatusCode. Returning err takes
+the task's onError transition, if the graph has one; flow.Retry runs the task again, and its next Subgraph call
+starts a new child.
+
 	var out ChildOut
 	yield, err := flow.Subgraph(childURL, ChildIn{Value: value}, &out)
 	if yield {
 	    return nil // parked, child running
 	}
 	if err != nil {
-	    if flow.Retry(time.Second, 2.0, 30*time.Second, time.Hour) {
+	    if errors.StatusCode(err) == http.StatusServiceUnavailable && flow.Retry(time.Second, 2.0, 30*time.Second, time.Hour) {
 	        return nil
 	    }
 	    return err

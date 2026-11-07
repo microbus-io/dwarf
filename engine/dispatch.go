@@ -762,7 +762,10 @@ func (e *Engine) outcome(ctx context.Context, d *dispatch, execErr error) (done 
 		return true, errors.Trace(e.failAndReturn(ctx, d, err))
 	}
 
-	// Competing signals check
+	// Competing signals and a second park, like a reserved name in the changes above and a negative retry delay, are
+	// the task breaking the carrier's contract - its own bug, which a retry repeats and a handler cannot repair - so
+	// they fail the step outright rather than take onError. A failure outside the task's code that it can act on,
+	// such as a subgraph that cannot be spawned, is delivered to the task instead (resolveFailedSpawn).
 	signalCount := 0
 	if _, interrupted := d.result.InterruptRequested(); interrupted {
 		signalCount++
@@ -823,18 +826,19 @@ func (e *Engine) parkSubgraph(ctx context.Context, d *dispatch, subgraphURL stri
 	if lerr == nil && e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultLoadGraph, subgraphURL)) {
 		lerr = errors.New("injected fault: "+engineseams.FaultLoadGraph+" "+subgraphURL, http.StatusInternalServerError)
 	}
-	loadCancel() // a panic here fails the step like any LoadGraph error rather than wedging it
-	if lerr != nil {
-		return errors.Trace(e.failAndReturn(ctx, d, lerr))
-	}
-	// Same create-time guarantees for a subgraph child: reject a nil or structurally invalid child graph
-	// (failing the caller step like any LoadGraph error). Validation is pure; the child's fan-in map is
+	loadCancel()
+	// A child that cannot be spawned is delivered to the caller as its subgraph's result, the way a failed child
+	// is: LoadGraph's own error (a panic caught as one), a missing graph as a 404 and a structurally invalid one
+	// as a 400, the same create-time guarantees Create gives. Validation is pure; the child's fan-in map is
 	// derived once per graph per replica (internal/faninmap), not frozen into its JSON.
+	if lerr != nil {
+		return errors.Trace(e.resolveFailedSpawn(ctx, d, subgraphURL, lerr))
+	}
 	if subgraphGraph == nil {
-		return errors.Trace(e.failAndReturn(ctx, d, errors.New("subgraph graph not found: %s", subgraphURL, http.StatusNotFound)))
+		return errors.Trace(e.resolveFailedSpawn(ctx, d, subgraphURL, errors.New("subgraph graph not found: %s", subgraphURL, http.StatusNotFound)))
 	}
 	if verr := subgraphGraph.Validate(); verr != nil {
-		return errors.Trace(e.failAndReturn(ctx, d, errors.New("invalid subgraph graph %s: %v", subgraphURL, verr, http.StatusBadRequest)))
+		return errors.Trace(e.resolveFailedSpawn(ctx, d, subgraphURL, errors.New("invalid subgraph graph %s: %v", subgraphURL, verr, http.StatusBadRequest)))
 	}
 	// Persist the task's changes and park the caller step in the SAME transaction that inserts the child.
 	// Two orderings are load-bearing here:
@@ -891,6 +895,58 @@ func (e *Engine) parkSubgraph(ctx context.Context, d *dispatch, subgraphURL stri
 	}
 	e.metricStateWriteBytes(ctx, d.row.workflowURL, "changes", len(d.changesJSON))
 	e.metricStepExecuted(ctx, taskName, "subgraph", d.shard)
+	return nil
+}
+
+// resolveFailedSpawn delivers a subgraph spawn that failed before any child existed as the subgraph's result: the
+// step is resolved and re-pended with the task's changes and the error in subgraph_error, so the re-dispatch's
+// flow.Subgraph returns it and the task decides - return it (onError included) or flow.Retry, which clears the
+// slot and spawns again. Failing the step here instead would skip both, though a spawn failure is the same failure
+// to the author as a failed child.
+//
+// The write is fenced on the lease and guarded to running and unparked, the state the task's outcome finds the
+// step in; a zero-row match (a Terminate, or a peer's re-claim) is a benign no-op. It moves the status, so
+// RowsAffected stays honest on MySQL.
+func (e *Engine) resolveFailedSpawn(ctx context.Context, d *dispatch, subgraphURL string, spawnErr error) error {
+	taskName := d.row.taskName
+	e.logger.DebugContext(ctx, "Subgraph spawn failed", "task", taskName, "workflow", d.row.workflowURL, "subgraph", subgraphURL, "error", spawnErr)
+	encoded, err := e.encodeSubgraphError(spawnErr)
+	if err != nil {
+		return errors.Trace(e.failAndReturn(ctx, d, err))
+	}
+	// Test checkpoint: freezes the worker before the write, so a test can Terminate the flow in the window the
+	// status='running' guard protects.
+	e.seams.Checkpoint(ctx, engineseams.CheckpointBeforeSpawnResolve)
+	var resolved bool
+	landed, err := e.settlePersist(ctx, d, e.persistYielding(ctx, d, func() error {
+		// Not a transaction, so it retries its own contention: one escaping deadlock would rewind the still-running
+		// step and run the task again.
+		return retryContention(ctx, func() error {
+			resolved = false
+			if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultSpawnResolveContention, taskName)) {
+				return errors.New("database is locked (injected fault: " + engineseams.FaultSpawnResolveContention + " " + taskName + ")")
+			}
+			res, err := d.db.ExecContext(ctx,
+				"UPDATE dwarf_steps SET status=?, changes=?, subgraph_done=1, subgraph_result=?, subgraph_error=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=? AND lease_seq=?",
+				workflow.StatusPending, d.changesJSON, emptyJSON, encoded, d.stepID, parkedNone, d.row.leaseSeq,
+			)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			n, _ := res.RowsAffected()
+			resolved = n > 0
+			return nil
+		})
+	}), heldRunning)
+	if !landed || !resolved {
+		return err
+	}
+	// Re-pended in place for re-dispatch; drop this replica's reservation so the offer below is not skipped by its
+	// own still-live entry.
+	e.claims.RelinquishClaim(d.shard, d.stepID)
+	e.metricStateWriteBytes(ctx, d.row.workflowURL, "changes", len(d.changesJSON))
+	e.metricStepExecuted(ctx, taskName, "subgraph", d.shard)
+	e.enqueueStepDue(ctx, d.shard, d.stepID, d.row.flowPriority)
 	return nil
 }
 
