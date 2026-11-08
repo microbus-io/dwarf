@@ -64,6 +64,7 @@ package peers
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -648,6 +649,22 @@ func (s *Sonar) Withdraw(ctx context.Context, draining bool) error {
 	return errors.Trace(err)
 }
 
+// StoredOrderingSeq reads the ordering sequence this replica's row already holds on this shard, if it has one: a
+// replica restarting under a pinned engine id finds the value it ran with, where its row outlived it. An owner
+// with several shards reads every shard's before setting any profile and gives them all one value, since a row
+// may have been pruned on some shards and not others. Registration writes the profile's value either way, so
+// the read decides only which place the replica returns to, never whether its shards agree.
+func (s *Sonar) StoredOrderingSeq(ctx context.Context) (seq int64, found bool, err error) {
+	err = s.db.QueryRowContext(ctx, "SELECT ordering_seq FROM dwarf_peers WHERE engine_id=?", s.engineID).Scan(&seq)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, errors.Trace(err)
+	}
+	return seq, true, nil
+}
+
 // Leave deletes this replica's row, so peers recount without waiting out the freshness window.
 //
 // Call it with a LIVE context after Run has returned. Run cannot do it on the way out - its context is
@@ -689,10 +706,17 @@ func (s *Sonar) register(ctx context.Context) error {
 	if s.draining.Load() {
 		draining = 1
 	}
-	// The UPDATE leaves ordering_seq alone, so a replica restarting under a pinned id keeps its place.
-	res, err := s.db.ExecContext(ctx,
-		"UPDATE dwarf_peers SET seen_at=NOW_UTC(), working=?, draining=?, rtt_us=? WHERE engine_id=?",
-		working, draining, prof.RTT.Microseconds(), s.engineID)
+	// The UPDATE writes the profile's ordering_seq too: a row that outlived this replica's last run holds that
+	// run's value, which a shard that lost the row and gets an INSERT does not, and two values for one replica
+	// rank it differently on different shards. Keeping a restarted replica's place is the owner's choice of
+	// value (StoredOrderingSeq), not the row's. A zero profile value leaves the row's as it is.
+	update, args := "UPDATE dwarf_peers SET seen_at=NOW_UTC(), working=?, draining=?, rtt_us=? WHERE engine_id=?",
+		[]any{working, draining, prof.RTT.Microseconds(), s.engineID}
+	if prof.OrderingSeq != 0 {
+		update, args = "UPDATE dwarf_peers SET seen_at=NOW_UTC(), working=?, draining=?, rtt_us=?, ordering_seq=? WHERE engine_id=?",
+			[]any{working, draining, prof.RTT.Microseconds(), prof.OrderingSeq, s.engineID}
+	}
+	res, err := s.db.ExecContext(ctx, update, args...)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -988,6 +1012,15 @@ func (s *Sonar) observe(ctx context.Context, rows []peer, err error) {
 		// An EMPTY registry lands here too, and must: it is always wrong, since this process is in it by
 		// definition, so reading it as "no peers" and stopping there would leave a whole fleet unregistered.
 		s.logger.Load().WarnContext(ctx, "Peer registry row missing; re-registering", "shard", s.shard)
+		if err := s.register(ctx); err != nil && ctx.Err() == nil {
+			s.logger.Load().ErrorContext(ctx, "Re-registering peer", "shard", s.shard, "error", err)
+		}
+	} else if seq := s.profile.Load().OrderingSeq; seq != 0 && v.selfSeq != seq {
+		// The row is there but holds another run's place in the order: a registration that failed on a row the
+		// last run left behind. The beat never writes the profile, so nothing else would correct it, and this
+		// shard would rank the replica differently from the shards where registration landed.
+		s.logger.Load().WarnContext(ctx, "Peer registry row holds another ordering; re-registering", "shard", s.shard,
+			"held", v.selfSeq, "want", seq)
 		if err := s.register(ctx); err != nil && ctx.Err() == nil {
 			s.logger.Load().ErrorContext(ctx, "Re-registering peer", "shard", s.shard, "error", err)
 		}

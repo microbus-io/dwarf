@@ -1,7 +1,7 @@
 # Dwarf `internal/peers` — one shard's replica registry
 
-> Load when: changing the Sonar's lifecycle, its seven statements (register's UPDATE and INSERT, the beat, the
-> read, `Withdraw`, `Leave`, the prune), the two windows, or the blindness rules.
+> Load when: changing the Sonar's lifecycle, its eight statements (register's UPDATE and INSERT, the beat, the
+> read, `Withdraw`, `Leave`, the prune, `StoredOrderingSeq`'s read), the two windows, or the blindness rules.
 > Coupled with: `internal/migrations/CLAUDE.md` (the `dwarf_peers` columns these statements touch) and
 > `engine/CLAUDE.md` §"Peer discovery" and §"Connection pool sizing" (what the published values are used
 > for).
@@ -38,12 +38,15 @@ registration repair exists (below) and why it cannot be left to the beat.
 way out — its context is cancelled by then, so the DELETE would fail — and `Run` having returned is itself
 the guarantee that no beat follows.
 
-**The API is twenty calls, and keeping it that small is a standing constraint.** Seven inputs (`New`,
+**The API is twenty-one calls, and keeping it that small is a standing constraint.** Seven inputs (`New`,
 `SetProfile`, `SetCut`, `SetEvidence`, `SetTurnFunc`, `SetLogger`, `SetSeams`), five lifecycle calls (`Join`,
 `Run`, `Withdraw`, `Leave`, `SetDraining`), seven published facts (`Replicas`, `Rank`, `Standing`, `InCut`,
-`Draining`, `Partition`, `BlindFor`), and one knob (`SetCadence`). `SetCut` earns its place because the cut needs the
+`Draining`, `Partition`, `BlindFor`), one knob (`SetCadence`), and one read for the owner (`StoredOrderingSeq`).
+`SetCut` earns its place because the cut needs the
 shard's index and the slot rule, which are the owner's, while applying it has to happen here: the hold that
 makes entering the cut wait a reading needs the previous raw reading, which only the Sonar has.
+`StoredOrderingSeq` earns its place the same way: which ordering value a restarted replica returns with is a
+choice across shards, which only the owner can make, while the row it reads is this package's.
 
 The windows and the beat are **constants with plain fields behind them**, not setters, because they are
 this package's policy — derived from which errors are safe in which direction rather than from anything an
@@ -341,6 +344,12 @@ contain self, **including an empty one**: an empty registry is always wrong, sin
 definition, and reading it as "no peers" and stopping there would leave the whole fleet unregistered until a
 restart. Pinned by `TestPeers_EmptyRegistryStillRepairsItself`.
 
+**It also fires on a row that holds another ordering sequence than the profile's** (a non-zero one): a
+registration that failed on a row the last run left behind leaves that run's value there, and since the beat never
+writes the profile, nothing else would correct it while the row stays fresh. That shard would rank the replica
+differently from the shards where registration landed. A repair that keeps failing is attempted once per read,
+like the missing-row one. Pinned by `TestPeers_RepairCorrectsAnOrderingRegistrationMissed`.
+
 `register`'s `RowsAffected` test is safe on MySQL (which counts *changed*, not matched, rows) because
 neither caller can hit the one tripping case — an existing row whose `seen_at` already holds this
 millisecond. At startup nothing has beaten yet; the repair path has just *observed* the row absent, and this
@@ -368,11 +377,19 @@ reorders them on one shard and not another. The windows then stop tiling - measu
 and 8 replicas started at once, one replica held no role on any shard while another held two, and nothing
 re-ranked it while the fleet was unchanged. Pinned by `TestDispatchers_EveryShardSharesTheOrder`.
 
-- `ordering_seq` is written when the row is INSERTed and never by the beat or the registration's UPDATE, so a
-  replica restarting under a pinned id while its old row still exists keeps its place. A registration repair
-  re-INSERTs the same value, so the replica returns to its place on that shard rather than to the end of that
-  shard's order alone (`TestPeers_ReRegistrationKeepsTheOrderingSeq`). A new process takes a new value and joins
-  at the end.
+- `ordering_seq` is written by registration, the UPDATE as well as the INSERT, and never by the beat. **Do not
+  let the UPDATE leave it alone** to keep a restarted replica's place: a replica restarting under a pinned id
+  can find its old row on some shards and not others (a peer pruned it on one while it was down), and keeping the
+  survivors' value while the re-created rows take the new one ranks it differently per shard, which nothing
+  converges. The place is kept by the VALUE instead: the engine reads every shard's stored value first
+  (`StoredOrderingSeq`) and gives every Sonar the oldest it finds, or its start time when there is none
+  (`buildSonars`). A registration that failed on a surviving row is corrected by the registration repair (above: it fires
+  on a row holding another value as well as on a missing one). Pinned by
+  `TestPeers_RegistrationWritesTheProfileOrderingSeq`, `TestPeers_RepairCorrectsAnOrderingRegistrationMissed` and
+  `TestDispatchers_PinnedRestartKeepsOneOrder` (a row pruned on one shard, rows that already disagree, none left).
+  A registration repair re-INSERTs the same value, so the replica returns to its place on that shard rather than
+  to the end of that shard's order alone (`TestPeers_ReRegistrationKeepsTheOrderingSeq`). A new process takes a
+  new value and joins at the end.
 - Clock skew between engine hosts reorders replicas the same way on every shard, so it can cost a demotion
   when a skewed replica joins, never the balance. A zero `OrderingSeq` takes the wall clock at the first INSERT,
   which is right for an owner with one shard and wrong for one with several.

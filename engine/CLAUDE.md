@@ -2739,8 +2739,8 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
   one slow dispatcher the other steals its class; with both slow, nobody healthy looks at the shard and it
   runs at their pace until one leaves the cut. A restart does that only if it is GRACEFUL (`leaveFleet`
   deletes the row; a crash under a pinned `SetEngineID` keeps it) AND a third working replica exists to
-  take the slot - `ordering_seq` is never rewritten, so with exactly two candidates the restarted one ranks
-  straight back in. Replacing the slow host is the general fix. It is degraded, not
+  take the slot - a restart takes back the oldest `ordering_seq` its rows still hold, so with exactly two
+  candidates the restarted one ranks straight back in. Replacing the slow host is the general fix. It is degraded, not
   stranded - each still serves its own class - and it takes two independent replica faults on the same
   pair, while a third dispatcher's refill cost is paid on every shard, all the time. A shared cause (a slow
   database, a bad build) slows every replica and no dispatcher count helps. **Do not demote a replica from

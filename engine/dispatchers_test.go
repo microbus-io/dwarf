@@ -226,6 +226,66 @@ func TestDispatchers_EveryShardSharesTheOrder(t *testing.T) {
 	}
 }
 
+// TestDispatchers_PinnedRestartKeepsOneOrder pins that a replica restarting under a pinned engine id takes one
+// ordering sequence on every shard, the oldest any of its surviving rows held. Its rows can be pruned on some
+// shards and not others while it is down; the survivors kept the old value and the re-created rows took the new
+// start time, so the replica ranked differently per shard and the windows stopped tiling.
+func TestDispatchers_PinnedRestartKeepsOneOrder(t *testing.T) {
+	t.Parallel()
+	const pinned = int64(777)
+	for _, c := range []struct {
+		name   string
+		stored map[int]int64 // the rows the last run left, by shard
+		want   int64         // 0: any one value, the same on both shards
+	}{
+		{"pruned_on_one_shard", map[int]int64{1: 100}, 100},
+		{"diverged_rows", map[int]int64{1: 100, 2: 300}, 100},
+		{"no_rows_left", map[int]int64{}, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			assert := testarossa.For(t)
+			// A peer holds the shards' databases open while the pinned replica is down.
+			keeper := NewEngineUnderTest(t.Name())
+			assert.NoError(keeper.SetHost(noopHost{}))
+			assert.NoError(keeper.SetWorkers(0))
+			assert.NoError(keeper.SetShard(ShardSpec{Index: 1}))
+			assert.NoError(keeper.SetShard(ShardSpec{Index: 2}))
+			assert.Must(assert.NoError(keeper.Startup(t.Context())))
+			defer keeper.Shutdown(t.Context())
+			for shard, seq := range c.stored {
+				db, err := keeper.db.Shard(shard)
+				assert.Must(assert.NoError(err))
+				_, err = db.ExecContext(t.Context(),
+					"INSERT INTO dwarf_peers (engine_id, seen_at, ordering_seq, working, draining, rtt_us) VALUES (?, NOW_UTC(), ?, 1, 0, 0)",
+					pinned, seq)
+				assert.Must(assert.NoError(err))
+			}
+
+			e := NewEngineUnderTest(t.Name())
+			assert.NoError(e.SetHost(noopHost{}))
+			assert.NoError(e.SetEngineID(pinned))
+			assert.NoError(e.SetShard(ShardSpec{Index: 1}))
+			assert.NoError(e.SetShard(ShardSpec{Index: 2}))
+			assert.Must(assert.NoError(e.Startup(t.Context())))
+			defer e.Shutdown(t.Context())
+
+			seqs := map[int]int64{}
+			for _, shard := range []int{1, 2} {
+				db, err := e.db.Shard(shard)
+				assert.Must(assert.NoError(err))
+				var seq int64
+				assert.NoError(db.QueryRowContext(t.Context(), "SELECT ordering_seq FROM dwarf_peers WHERE engine_id=?", pinned).Scan(&seq))
+				seqs[shard] = seq
+			}
+			assert.Equal(seqs[1], seqs[2], "one ordering sequence on every shard")
+			if c.want != 0 {
+				assert.Equal(c.want, seqs[1], "the oldest surviving value")
+			}
+		})
+	}
+}
+
 // TestDispatchers_Slots pins how many replicas dispatch a shard: maxDispatchers, never more than the
 // replicas there are, and never zero.
 func TestDispatchers_Slots(t *testing.T) {

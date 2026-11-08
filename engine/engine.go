@@ -884,7 +884,7 @@ func (e *Engine) Startup(ctx context.Context) error {
 	// momentarily - peers hold pools sized for the fleet WITHOUT this replica until they read again, so it
 	// shrinks them first and grows into the space afterward. It costs one wait for the whole fleet, since the
 	// shards join in parallel.
-	e.buildSonars()
+	e.buildSonars(ctx)
 	e.joinFleet(ctx)
 	// A fresh turnstile set per run, like the cache and the planner: counts left over from a previous
 	// Startup would bound this one against pools it no longer has.

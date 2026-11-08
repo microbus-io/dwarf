@@ -968,6 +968,65 @@ func TestPeers_ReRegistrationKeepsTheOrderingSeq(t *testing.T) {
 	assert.Equal(int64(42), r.row(t, selfID).orderingSeq, "the repair re-creates the row in its old place")
 }
 
+// TestPeers_RegistrationWritesTheProfileOrderingSeq pins that a row this replica's last run left behind takes the
+// profile's ordering sequence when the replica registers again, and that StoredOrderingSeq reports what the row
+// held first. A replica restarting under a pinned id after its row was pruned on some shards and not others
+// otherwise kept the old value where the row survived and took the new one where it was re-created, ranking
+// differently on each.
+func TestPeers_RegistrationWritesTheProfileOrderingSeq(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	_, found, err := r.s.StoredOrderingSeq(ctx)
+	assert.NoError(err)
+	assert.False(found, "no row yet")
+
+	r.s.SetProfile(Profile{Working: true, OrderingSeq: 300})
+	assert.NoError(r.s.register(ctx))
+	seq, found, err := r.s.StoredOrderingSeq(ctx)
+	assert.NoError(err)
+	assert.True(found)
+	assert.Equal(int64(300), seq)
+
+	// The next run chose another value (the oldest its shards held); the surviving row takes it.
+	r.s.SetProfile(Profile{Working: true, OrderingSeq: 100})
+	assert.NoError(r.s.register(ctx))
+	assert.Equal(int64(100), r.row(t, selfID).orderingSeq)
+
+	// A zero profile value leaves the row's as it is.
+	r.s.SetProfile(Profile{Working: true})
+	assert.NoError(r.s.register(ctx))
+	assert.Equal(int64(100), r.row(t, selfID).orderingSeq)
+}
+
+// TestPeers_RepairCorrectsAnOrderingRegistrationMissed pins that a row holding another ordering sequence than the
+// profile's is re-registered, not only a missing one. A registration that fails on a row the last run left behind
+// leaves that run's value there; the beat never writes the profile, so without the repair the shard ranked the
+// replica by the old value for as long as its row stayed fresh.
+func TestPeers_RepairCorrectsAnOrderingRegistrationMissed(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	sm := seamster.New(true)
+	r.s.SetSeams(sm)
+	_, err := r.db.ExecContext(ctx,
+		"INSERT INTO dwarf_peers (engine_id, seen_at, ordering_seq) VALUES (?, NOW_UTC(), ?)", selfID, 300)
+	assert.Must(assert.NoError(err))
+
+	// This run chose 100; its registration writes nothing (the fault stands in for a failed statement).
+	r.s.SetProfile(Profile{Working: true, OrderingSeq: 100})
+	sm.InjectN(FaultBeatErr, 1)
+	assert.NoError(r.s.register(ctx))
+	assert.Equal(int64(300), r.row(t, selfID).orderingSeq, "the registration was missed")
+
+	r.s.pass(ctx)
+	assert.Equal(int64(100), r.row(t, selfID).orderingSeq, "the next reading re-registers the row")
+	r.s.pass(ctx)
+	assert.Equal(int64(100), r.row(t, selfID).orderingSeq)
+}
+
 // TestPeers_PruneWaitsForAHealthyRun pins the most conservative of the three thresholds, and why it is the
 // most conservative: every other decision here is reversible - a wrongly dropped peer returns on the next
 // reading - while a deleted row is refreshed by nobody afterward. Waiting costs nothing, because the

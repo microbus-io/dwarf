@@ -129,15 +129,23 @@ func (e *Engine) partitionOn(shard int) (replicas, ordinal int, ok bool) {
 // where it could otherwise win a dispatcher slot it will never serve, while leaving it counted in the fleet
 // its reader pools are part of.
 //
-// Every Sonar gets the same ordering sequence, taken once here: the windows tile only when every shard orders
-// the fleet the same way.
-func (e *Engine) buildSonars() {
+// Every Sonar gets the same ordering sequence, chosen once here: the windows tile only when every shard orders
+// the fleet the same way. A replica restarting under a pinned engine id takes the oldest value its rows still
+// hold on any shard, so it returns to its place in the order, and takes the start time when no shard has a row.
+// Registration writes the chosen value over whatever a surviving row holds, so shards that disagreed - a row
+// pruned on one and not another while the replica was down - agree again whatever the reads found.
+func (e *Engine) buildSonars(ctx context.Context) {
 	e.sonars = make(map[int]*peers.Sonar, e.db.NumShards())
 	e.shardsLock.Lock()
 	rtts := maps.Clone(e.shardRTTMs)
 	e.shardsLock.Unlock()
 	indices := slices.Sorted(slices.Values(e.db.Indices()))
-	seq := time.Now().UnixMilli()
+	type placed struct {
+		place int
+		sonar *peers.Sonar
+	}
+	var built []placed
+	var seq int64
 	for place, idx := range indices {
 		db, err := e.db.Shard(idx)
 		if err != nil {
@@ -149,6 +157,19 @@ func (e *Engine) buildSonars() {
 			e.logger.Error("Building peer sonar", "shard", idx, "error", err)
 			continue
 		}
+		// A failed read only loses this shard's vote on the place; registration still writes the chosen value.
+		if stored, found, err := s.StoredOrderingSeq(ctx); err != nil {
+			e.logger.Warn("Reading this replica's stored peer ordering", "shard", idx, "error", err)
+		} else if found && stored > 0 && (seq == 0 || stored < seq) {
+			seq = stored
+		}
+		built = append(built, placed{place: place, sonar: s})
+	}
+	if seq == 0 {
+		seq = time.Now().UnixMilli()
+	}
+	for _, b := range built {
+		s, place, idx := b.sonar, b.place, indices[b.place]
 		s.SetProfile(peers.Profile{
 			RTT:         time.Duration(rtts[idx] * float64(time.Millisecond)),
 			Working:     !e.zeroWorkers(),

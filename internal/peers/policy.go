@@ -72,6 +72,8 @@ type view struct {
 	// Distinct from having a FRESH one: a row that exists but has aged out is a liveness problem the beat
 	// fixes on its own, while a missing row is refreshed by nobody.
 	selfSeen bool
+	// selfSeq is the ordering sequence this replica's own row holds, when selfSeen.
+	selfSeq int64
 	// selfFresh reports whether this replica's own row is fresh: whether its beats are landing.
 	selfFresh bool
 	// staleAhead counts the working peers ahead of this replica in the shared order whose rows are stale: rows
@@ -120,6 +122,7 @@ func classify(rows []peer, self int64, selfWorking bool, w windows) view {
 	for _, p := range rows {
 		if p.engineID == self {
 			v.selfSeen = true
+			v.selfSeq = p.orderingSeq
 			selfFresh = p.seenAgeMs <= w.fresh
 		}
 		if p.seenAgeMs > w.straggler && p.engineID != self {
