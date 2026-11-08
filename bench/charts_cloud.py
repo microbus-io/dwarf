@@ -7,9 +7,8 @@ Run from the repo root with matplotlib available:
 PNGs go to out-dir (default docs/). Three charts draw from tables in this file, because their numbers come from
 many runs, from Cloud Monitoring and from CPU profiles rather than from one artifact: database size (tiers), shards,
 and engine host size. The rest read run artifacts under bench/results/, which are kept on the machine that ran
-them: replicas (redo-one-20261009, redo-rs-20261009), minute-by-minute and payload size (redo-ha-20261106), headroom
-(redo-hr4-20261018), failover (redo-fo-20261011), stored volume and row count (redo-vbytes2-20261020,
-redo-vrows-20261020), and the day of varied load (redo-real-20261107, with its monitors and Cloud Monitoring's
+them: replicas (redo-one-20261009, redo-rs-20261009), minute-by-minute and payload size (redo-ha-20261106), failover
+(redo-fo-20261011), headroom and the growing archive (redo-va-20261107, with its monitors), and the day of varied load (redo-real-20261107, with its monitors and Cloud Monitoring's
 database metrics in cloudmon.json). A chart whose artifacts are missing is skipped with a note.
 """
 import collections
@@ -62,17 +61,19 @@ def skip(name, why):
 # ---- Database size: throughput (a candle where a tier has several instances), $ per million steps, database CPU ----
 # One shard per tier, saturated 0 B linear, 2 + 6 min, 20 GB max_wal_size + lz4, the archive on, 250 connections
 # unless stated, engine 284b0f4 (T-A, 2026-11-06, redo-ta{4,8,16,64}-20261106: two engine hosts at half the database's
-# vCPU, a 3 min warm-up) and, for 32 vCPU, the two instances of redo-ha-20261106 (ha-1b) and redo-hb-20261106
-# (hb-0-250), one c4a-16 engine each. Each run is (steps/s, WAL flush ms under load, database CPU busy %, database
-# core-ms per step); CPU is Cloud Monitoring over the measurement window alone (dbcpu.sh -w, PAD_SECONDS=0), never the
-# artifact span, whose warmup and drain edges dilute it.
+# vCPU, a 3 min warm-up) and, for 32 vCPU, four instances: redo-ha-20261106 (ha-1b) and redo-hb-20261106 (hb-0-250),
+# one c4a-16 engine each, redo-sa-20261106 (s1-r2: two c4a-8, engine e5dbf59) and redo-va-20261107 (hr-sat: one
+# c4a-16, engine bbc057a). Each run is (steps/s, WAL flush ms under load, database CPU busy %, database core-ms per
+# step); CPU is Cloud Monitoring over the measurement window alone (dbcpu.sh -w, PAD_SECONDS=0), never the artifact
+# span, whose warmup and drain edges dilute it.
 # Monthly $ = on-demand us-east4, priced with the pairing rule (two engine hosts totalling half the database's vCPU):
 # Cloud SQL ~$0.069/vCPU-h, SSD ~$0.23/h per TB, c4a ~$0.045/vCPU-h, 730 h.
 TIERS = [  # (database vCPU, engines, monthly $, [runs], label of the run quoted for 64)
     (4, "2 x 1 vCPU", 435, [(1850, 9.32, 99, 2.14)]),
     (8, "2 x 2 vCPU", 702, [(4593, 3.68, 92, 1.60)]),
     (16, "2 x 4 vCPU", 1237, [(8219, 2.36, 83, 1.61)]),
-    (32, "2 x 8 vCPU", 2305, [(18852, 1.03, 74, 1.26), (24262, 0.82, 77, 1.03)]),
+    (32, "2 x 8 vCPU", 2305, [(18852, 1.03, 74, 1.26), (21938, 0.92, 77, 1.13), (24108, 0.88, 77, 1.03),
+                              (24262, 0.82, 77, 1.03)]),
     (64, "2 x 16 vCPU", 4443, [(29340, 1.31, 60, 1.32)]),  # MaxConnections 500; at 250 the same instance ran:
 ]
 TIER64_250 = (24593, 1.04, 42, 1.10)
@@ -91,6 +92,8 @@ def chart_tiers():
         left = len(ys) > 1  # a candle's labels go left, clear of the next tier's
         for r in t[3]:
             a0.plot(x, r[0], "o", color=c, ms=8, mec=SURFACE, mew=1.5, zorder=3)
+            if r[0] not in (min(ys), max(ys)):
+                continue  # a candle labels its ends; the instances between are its dots
             a0.annotate(f"{r[0]:,}\n{r[1]:.2f} ms flush", (x, r[0]), xytext=(-9 if left else 9, 0),
                         textcoords="offset points", ha="right" if left else "left", va="center", fontsize=8,
                         color=INK2)
@@ -371,20 +374,22 @@ def chart_payload():
     finish(fig, "benchmark-cloud-payload.png")
 
 
-# ---- Headroom: commanded at 100% and at 95% of the instance's saturated rate (hr4, 2026-10-18) ----
-HR = os.path.join(RESULTS, "redo-hr4-20261018/out")
+# ---- Headroom: offered 100% and 95% of the instance's saturated rate (va, 2026-11-08, archive on) ----
+# hr-sat measured 21,921 steps/s, so the arms offered 2,192 and 2,082 flows/s of 10-step linear 0 B, 16 min each.
+VA = os.path.join(RESULTS, "redo-va-20261107")
 
 
 def chart_headroom():
-    runs = [("h-r100", "100%: 19,960 steps/s", OUTAGE), ("h-r95", "95%: 18,962 steps/s", S2)]
-    if not all(os.path.exists(os.path.join(HR, f"{t}.json")) for t, _, _ in runs):
-        return skip("benchmark-cloud-headroom.png", f"artifacts not in {HR}")
+    runs = [("hr-100", "100%: 21,920 steps/s offered", OUTAGE), ("hr-95", "95%: 20,820 steps/s offered", S2)]
+    out = os.path.join(VA, "out")
+    if not all(os.path.exists(os.path.join(out, f"{t}.json")) for t, _, _ in runs):
+        return skip("benchmark-cloud-headroom.png", f"artifacts not in {out}")
     fig, (a1, a2) = plt.subplots(1, 2, figsize=(12, 4.4))
     for tag, label, colour in runs:
-        ser = series(os.path.join(HR, f"{tag}.json"))
+        ser = series(os.path.join(out, f"{tag}.json"))
         a1.plot([t / 60 for t, _, _ in ser], [s for _, s, _ in ser], color=colour, lw=1.6, label=label)
         a2.plot([t / 60 for t, _, _ in ser], [max(o, 1) for _, _, o in ser], color=colour, lw=1.8, label=label)
-    a1.set_ylim(14000, 22000)
+    a1.set_ylim(16000, 25000)
     a1.yaxis.set_major_formatter(kilo)
     a1.set_ylabel("steps/s delivered (10 s)")
     a1.set_title("Delivered")
@@ -400,78 +405,144 @@ def chart_headroom():
     finish(fig, "benchmark-cloud-headroom.png")
 
 
-# ---- Stored volume: a `state` 64 KB fill probed by 0 B `linear` at a doubling size ladder (vbytes2, 2026-10-20) ----
-VB = os.path.join(RESULTS, "redo-vbytes2-20261020/out/v-bytes.json")
+# ---- Archive volume: one 32 vCPU database saturated with linear 0 B until its archive held 100M step rows, all in
+# one archive day (va-big, 2026-11-08). The fill paused at 0, 25M, 50M and 100M step rows for a 6-min saturated probe
+# and a timing of the archive's reads: History and Step of the fill's first flow, ListClosed's newest 100.
+
+
+def va_big():
+    path = os.path.join(VA, "out", "va-big.json")
+    return json.load(open(path))["volume"]["checkpoints"] if os.path.exists(path) else None
 
 
 def chart_volume():
-    if not os.path.exists(VB):
-        return skip("benchmark-cloud-volume.png", f"artifact {VB} missing")
-    cps = [c for c in json.load(open(VB))["volume"]["checkpoints"] if c.get("saturated")]
-    gb = [c["stepsDiskMB"] / 1024 for c in cps]
-    sat = [c["saturated"]["stepsPerSec"] for c in cps]
-    p99 = [c["saturated"]["p99Ms"] / 1000 for c in cps]
-    p50 = [c["saturated"]["p50Ms"] / 1000 for c in cps]
-    # Categorical positions: the ladder doubles, so even spacing reads each step as one doubling.
+    cps = va_big()
+    if not cps:
+        return skip("benchmark-cloud-volume.png", f"va-big.json not in {VA}/out")
     xs = list(range(len(cps)))
-    labels = ["empty" if g < 1 else f"{g:.0f} GB" for g in gb]
-    fig, (a1, a2) = plt.subplots(1, 2, figsize=(12, 4.4))
+    labels = ["empty" if c["stepRows"] == 0 else
+              f"{c['stepRows'] / 1e6:.0f}M rows\n{(c['archiveStepsDiskMB'] + c['archiveFlowsDiskMB']) / 1024:.0f} GB"
+              for c in cps]
+    sat = [c["saturated"]["stepsPerSec"] for c in cps]
+    fig, (a1, a2, a3) = plt.subplots(1, 3, figsize=(15, 4.6))
     a1.plot(xs, sat, color=S1, lw=2, marker="o", ms=8, markeredgecolor=SURFACE, markeredgewidth=2)
     a1.axhline(sat[0], color=INK2, lw=1.2, ls=(0, (4, 3)))
-    a1.text(xs[-1], sat[0] + 700, f"the empty database: {sat[0]:,.0f}", ha="right", va="bottom", fontsize=9.5, color=INK2)
-    a1.set_ylim(0, 24000)
+    a1.text(xs[-1], sat[0] - 900, f"the empty database: {sat[0]:,.0f}", ha="right", va="top", fontsize=9.5,
+            color=INK2)
+    a1.set_ylim(0, 26000)
     a1.yaxis.set_major_formatter(kilo)
     a1.set_ylabel("steps/s, saturated (6-min probe)")
     a1.set_title("Throughput")
-    for vals, colour, name in ((p99, S1, "p99"), (p50, S2, "p50")):
-        a2.plot(xs, vals, color=colour, lw=2, marker="o", ms=8, markeredgecolor=SURFACE, markeredgewidth=2, label=name)
+    for key, colour, name in (("p99Ms", S1, "p99"), ("p50Ms", S2, "p50")):
+        vals = [c["saturated"][key] / 1000 for c in cps]
+        a2.plot(xs, vals, color=colour, lw=2, marker="o", ms=8, markeredgecolor=SURFACE, markeredgewidth=2)
         a2.text(xs[-1] + 0.15, vals[-1], name, va="center", fontsize=9.5, color=INK)
-    a2.set_xlim(-0.4, xs[-1] + 0.6)
-    a2.set_ylim(0, 3.5)
+    a2.set_ylim(0, 2)
+    a2.yaxis.set_major_locator(matplotlib.ticker.MultipleLocator(0.5))
     a2.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:.1f} s"))
     a2.set_ylabel("flow latency, saturated")
-    a2.legend(frameon=False, fontsize=9.5, loc="upper left")
     a2.set_title("Latency")
-    for ax in (a1, a2):
+    rx = xs[1:]  # the empty database has nothing archived to read
+    ends = {}
+    for key, colour, name in (("archivedHistoryMs", S1, "History"), ("archivedStepMs", S2, "Step"),
+                              ("listClosedMs", S3, "ListClosed")):
+        vals = [c[key] for c in cps[1:]]
+        a3.plot(rx, vals, color=colour, lw=2, marker="o", ms=8, markeredgecolor=SURFACE, markeredgewidth=2)
+        ends[name] = vals[-1]
+    upper, lower = sorted(("History", "Step"), key=ends.get, reverse=True)
+    if ends[upper] - ends[lower] < 1.2:  # two labels this close would print over each other
+        mid = (ends[upper] + ends[lower]) / 2
+        ends[upper], ends[lower] = mid + 0.6, mid - 0.6
+    for name, y in ends.items():
+        a3.text(rx[-1] + 0.15, y, name, va="center", fontsize=9.5, color=INK)
+    a3.set_ylim(0, 25)
+    a3.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:.0f} ms"))
+    a3.set_ylabel("one call, under saturated load")
+    a3.set_title("Reading the archive")
+    for ax in (a1, a2, a3):
         ax.set_xticks(xs)
-        ax.set_xticklabels(labels, fontsize=9.5)
-        ax.set_xlabel("data stored in dwarf_steps")
-    fig.suptitle("One 32 vCPU database as its stored data grows", x=0.01, ha="left", fontsize=13, fontweight="bold")
+        ax.set_xticklabels(labels, fontsize=9)
+        ax.set_xlim(-0.4, xs[-1] + (0.4 if ax is a1 else 0.9))
+        ax.set_xlabel("step rows archived, and the archive's size")
+    fig.suptitle("One 32 vCPU database as its archive grows", x=0.01, ha="left", fontsize=13, fontweight="bold")
     finish(fig, "benchmark-cloud-volume.png")
 
 
-# ---- Row count: one saturated linear 0 B window of 200 minutes, nothing deleted (vrows, 2026-10-20) ----
-VR = os.path.join(RESULTS, "redo-vrows-20261020/out/v-rows.json")
+# ---- The same 85-minute run, minute by minute: steps/s and the database's size against the step rows stored. The
+# run's only steps/s record between probes is the database's commit counter (s-mon), so a minute's steps/s is its
+# commits over the run's commits per step, calibrated on the row counts the checkpoints took; sizes are v-mon's.
+
+
+def va_big_minutes():
+    """(minute end epoch, steps/s, step rows stored) per minute of va-big, from the commit counter."""
+    cps = va_big()
+    art = json.load(open(os.path.join(VA, "out", "va-big.json")))
+    t0 = datetime.fromisoformat(art["startedAt"][:19] + "+00:00").timestamp()
+    ticks = []
+    for line in open(os.path.join(VA, "out", "mon-va-big.log")):
+        f = line.split()
+        if len(f) >= 4 and f[2].isdigit() and float(f[0]) >= t0:
+            ticks.append((float(f[0]), int(f[2])))
+    last = cps[-1]  # checkpoint tSec counts from the run's start
+    at_last = min(ticks, key=lambda tc: abs(tc[0] - (t0 + last["tSec"])))
+    per_step = (at_last[1] - ticks[0][1]) / last["stepRows"]
+    by_min = collections.defaultdict(list)
+    for t, c in ticks:
+        by_min[int((t - t0) // 60)].append((t, c))
+    mins, prev = [], ticks[0]
+    for m in sorted(by_min):
+        t, c = by_min[m][-1]
+        if t - prev[0] > 30:
+            mins.append((t, (c - prev[1]) / (t - prev[0]) / per_step, (c - ticks[0][1]) / per_step))
+        prev = (t, c)
+    full = sorted(p[1] for p in mins)[len(mins) // 2]
+    return [p for p in mins if p[1] > full / 2]  # drop the drain's partial minute after the last probe
 
 
 def chart_volume_rows():
-    if not os.path.exists(VR):
-        return skip("benchmark-cloud-volume-rows.png", f"artifact {VR} missing")
-    r = json.load(open(VR))["results"][0]
-    ser = r["gauges"]["series"]
-    # Every executed step is a new row and nothing is deleted, so the rows stored at a point are the steps executed
-    # up to it, plus the warmup's. A minute's x is the rows at its end.
-    rows, last_t, per_min, mins = 2 * 60 * ser[0]["stepsPerSec"], 0.0, collections.defaultdict(list), []
-    for p in ser:
-        rows += p["stepsPerSec"] * (p["t"] - last_t)
-        last_t = p["t"]
-        per_min[int((p["t"] - 1e-9) // 60)].append((p["stepsPerSec"], rows))
-    for m in sorted(per_min):
-        pts = per_min[m]
-        mins.append((pts[-1][1] / 1e6, sum(s for s, _ in pts) / len(pts)))
-    first = sum(s for _, s in mins[:10]) / 10
-    fig, ax = plt.subplots(figsize=(9, 4.4))
-    ax.plot([x for x, _ in mins], [y for _, y in mins], color=S1, lw=1.6)
-    ax.axhline(first, color=INK2, lw=1.2, ls=(0, (4, 3)))
-    ax.text(mins[-1][0], first + 600, f"the first 10 minutes: {first:,.0f}", ha="right", va="bottom", fontsize=9.5,
-            color=INK2)
-    ax.set_ylim(0, 24000)
-    ax.set_xlim(0, mins[-1][0] * 1.02)
-    ax.yaxis.set_major_formatter(kilo)
-    ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:.0f}M"))
-    ax.set_xlabel("step rows stored, nothing deleted")
-    ax.set_ylabel("steps/s (1-min mean)")
-    ax.set_title("One 32 vCPU database, saturated for 200 minutes")
+    if not va_big() or not os.path.exists(os.path.join(VA, "out", "vmon-va-big.log")):
+        return skip("benchmark-cloud-volume-rows.png", f"va-big artifacts not in {VA}/out")
+    mins = va_big_minutes()
+    first = sum(s for _, s, _ in mins[:10]) / 10
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(13, 4.4))
+    a1.plot([r / 1e6 for _, _, r in mins], [s for _, s, _ in mins], color=S1, lw=1.6)
+    a1.axhline(first, color=INK2, lw=1.2, ls=(0, (4, 3)))
+    a1.text(mins[-1][2] / 1e6, first + 700, f"the first 10 minutes: {first:,.0f}", ha="right", va="bottom",
+            fontsize=9.5, color=INK2)
+    a1.set_ylim(0, 26000)
+    a1.yaxis.set_major_formatter(kilo)
+    a1.set_ylabel("steps/s (1-min mean)")
+    a1.set_title("Throughput")
+    # v-mon, once a minute: database size, dwarf_steps (table + indexes), dwarf_flows; each placed at the rows
+    # stored when it was read.
+    size = []
+    for line in open(os.path.join(VA, "out", "vmon-va-big.log")):
+        f = line.split()
+        if len(f) >= 5 and f[1].isdigit():
+            size.append((float(f[0]), int(f[1]) / 2**30, (int(f[2]) + int(f[4])) / 2**30))
+    ts, rows = [t for t, _, _ in mins], [r for _, _, r in mins]
+
+    def rows_at(t):
+        if t <= ts[0]:
+            return rows[0] * max(t - (ts[0] - 60), 0) / 60
+        for i in range(1, len(ts)):
+            if t <= ts[i]:
+                return rows[i - 1] + (rows[i] - rows[i - 1]) * (t - ts[i - 1]) / (ts[i] - ts[i - 1])
+        return None
+
+    pts = [(rows_at(t), whole, live) for t, whole, live in size if rows_at(t) is not None]
+    a2.plot([r / 1e6 for r, _, _ in pts], [w for _, w, _ in pts], color=S1, lw=2, label="the whole database")
+    a2.plot([r / 1e6 for r, _, _ in pts], [l for _, _, l in pts], color=S2, lw=2, label="the live tables")
+    a2.set_ylabel("GB")
+    a2.set_ylim(0, None)
+    a2.set_title("Storage")
+    a2.legend(frameon=False, fontsize=9.5, loc="upper left")
+    for ax in (a1, a2):
+        ax.set_xlim(0, mins[-1][2] / 1e6 * 1.02)
+        ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:.0f}M"))
+        ax.set_xlabel("step rows stored, nothing deleted")
+    fig.suptitle("One 32 vCPU database, saturated for 85 minutes", x=0.01, ha="left", fontsize=13,
+                 fontweight="bold")
     finish(fig, "benchmark-cloud-volume-rows.png")
 
 

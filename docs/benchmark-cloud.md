@@ -40,14 +40,15 @@
   priorities, with bursts above capacity, a rolling restart and a database restart: flows completed at the rate they
   arrived, bursts cost only the lowest priorities a wait, and the live tables levelled off at 10 GB
   ([A day of varied load](benchmark-day.md)).
-- **Stored data costs little.** Filled from empty to 522 GB, four times its memory, a 32 vCPU database ran within
-  2.5% of its empty rate at every size. 249 million step rows with nothing deleted cost ~11%, as vacuum fell
-  behind.
+- **A growing archive costs nothing measurable.** A 32 vCPU database ran saturated until its archive held 100 million
+  step rows, and ran at its empty rate the whole way, while the live tables stayed at ~3 GB. Archived reads took
+  7–20 ms at every size ([Database volume](#database-volume)).
 
 **What it means for sizing**
 
-- **A database sustains ~95% of its saturated rate with low latency.** Offered at 95%, a database delivered the
-  full load with a median flow latency of 83 ms; at 100% its backlog grew ([Sustained load](#sustained-load)).
+- **Plan on ~95% of a database's saturated rate.** Offered 95%, a database delivered the full load with a median
+  flow latency of 61 ms and a p99 of 1.1 s; at 100% it kept up, with backlogs of thousands of flows after each dip
+  and twice the p99 ([Sustained load](#sustained-load)).
 - **Pair each database with two engines at half its vCPU.** 4 vCPU with 2 × 1 vCPU engines runs ~1,850 steps/s,
   8 vCPU with 2 × 2 ~4,600, 16 vCPU with 2 × 4 ~8,200, 32 vCPU with 2 × 8 18,900–24,300, and 64 vCPU with 2 × 16
   ~29,300 at `MaxConnections: 500`.
@@ -118,10 +119,11 @@ One shard at each database size, saturated, each served by two engine hosts tota
 | 4 vCPU, 16 GB | 2 × 1 vCPU | 1,850 | 9.3 ms | 99% | 2.14 ms | ~$435 | $0.089 |
 | 8 vCPU, 32 GB | 2 × 2 vCPU | 4,593 | 3.7 ms | 92% | 1.60 ms | ~$700 | $0.058 |
 | 16 vCPU, 64 GB | 2 × 4 vCPU | 8,219 | 2.4 ms | 83% | 1.61 ms | ~$1,240 | $0.057 |
-| 32 vCPU, 128 GB | 1 × 16 vCPU, priced as 2 × 8 | 18,852–24,262 | 0.82–1.03 ms | 74–77% | 1.03–1.26 ms | ~$2,310 | **$0.036–0.047** |
+| 32 vCPU, 128 GB | 2 × 8 or 1 × 16 vCPU, priced as 2 × 8 | 18,852–24,262 | 0.82–1.03 ms | 74–77% | 1.03–1.26 ms | ~$2,310 | **$0.036–0.047** |
 | 64 vCPU, 256 GB, `MaxConnections: 500` | 2 × 16 vCPU | 29,340 | 1.31 ms | 60% | 1.32 ms | ~$4,440 | $0.058 |
 
-The 32 vCPU row is two instances ([One database](#one-database)); the others one each. The 64 vCPU database ran
+The 32 vCPU row is four instances, which ran 18,852, 21,938, 24,108 and 24,262 steps/s
+([One database](#one-database)); the others one each. The 64 vCPU database ran
 24,593 steps/s at the default 250 connections and 29,340 at 500 on the same instance, +19%: each flush of its log
 carried half again as many commits for a quarter more time. At 32 vCPU, 500 connections bought 2%. *Log flush* is
 the time one flush of the write-ahead log took under this load. Monthly cost is the on-demand list price in one US
@@ -142,7 +144,7 @@ rate pays twice as much per step.
 - **The pairing holds at every size.** Each engine host ran at a quarter to a third of its CPU, so either replica
   can carry its shard alone if the other fails.
 
-*(Measured 2026-11-06. Same-size instances differ; see [method notes](#method-notes).)*
+*(Measured 2026-11-06 to 2026-11-08. Same-size instances differ; see [method notes](#method-notes).)*
 
 ### The write-ahead log, and why a shard is its own server
 
@@ -196,8 +198,9 @@ minutes after it):
 
 - **The checkpoint size is the large lever:** +42%. At the default the database checkpoints every few seconds,
   logs twice the whole pages per step, and its rate swings from one 10-second sample to the next.
-- **`lz4` is a small one:** about +3%. The pages it compresses already hold PostgreSQL's compressed copies of the
-  payloads, so it finds little left to remove.
+- **`wal_compression` is not worth setting:** `lz4` bought about 3% here, and 1% with 1 MB payloads, where it cost
+  1.5% more database CPU per step (2026-11-08). The pages it compresses already hold PostgreSQL's compressed copies
+  of the payloads, so it finds little left to remove.
 - **Size it from the WAL rate:** `max_wal_size` ≈ 2 × peak WAL MB/s × 60 s puts checkpoints about a minute apart
   at peak. With no payload this database logged ~83 MB/s and checkpointed every ~135 s at 20 GB. The settings are
   in [Deployment](deployment.md#postgresql--recommended-for-production).
@@ -319,23 +322,24 @@ every commit waits behind that. The runs after it on the same server started at 
 
 ### Sustained load
 
-![Commanded at 100% and at 95% of a database's saturated rate](benchmark-cloud-headroom.png)
+![Offered at 100% and at 95% of a database's saturated rate](benchmark-cloud-headroom.png)
 
-**How much a database sustains.** One 32 vCPU database was first run saturated (19,960 steps/s on this
-instance), then offered fixed rates at 100% and at 95% of that, 16 minutes each:
+**How much a database sustains.** One 32 vCPU database with the archive on was first run saturated (21,938 steps/s
+on this instance), then offered fixed rates at 100% and at 95% of that, 16 minutes each:
 
-| offered steps/s | % of saturated | delivered | flows waiting, first → last minutes | flow p50 | flow p99 |
+| offered steps/s | % of saturated | delivered | flows waiting, first → last minute (peak) | flow p50 | flow p99 |
 |---|---|---|---|---|---|
-| 19,960 (saturated) | — | 19,960 | held at 2,000 | 1.04 s | 2.1 s |
-| 19,960 | 100% | 19,684 | 322 → 19,881, still growing | 4.4 s | 14.7 s |
-| 18,962 | 95% | 18,871 | 129 → 173, flat | **83 ms** | **1.4 s** |
+| saturated | — | 21,938 | held at 2,000 | 0.98 s | 1.4 s |
+| 21,920 | 100% | 21,730 | 481 → 305 (5,555) | 200 ms | 2.5 s |
+| 20,820 | 95% | 20,698 | 134 → 139 (2,482) | **61 ms** | **1.1 s** |
 
-- **At 95% the database keeps up, and flows barely wait.** The backlog stayed near 150 flows, and the median
-  10-step flow completed in 83 ms against ~1 s when saturated.
-- **At 100% it does not.** Small dips in the database's rate leave work that the offered rate never gives back
-  time to clear, so the backlog grew for the whole window. The saturated rate is a ceiling, not a target.
+- **At 95% flows barely wait.** The backlog stayed near 130 flows apart from a few short spikes, and the median
+  10-step flow completed in 61 ms against ~1 s when saturated.
+- **At 100% the database keeps up, but only just.** Each dip in its rate left a backlog of a few thousand flows that
+  took a minute or two to clear, and the p99 was more than twice the 95% run's. The saturated rate is a ceiling,
+  not a target.
 
-*(Measured 2026-10-18.)*
+*(Measured 2026-11-08.)*
 
 How to plan for peaks above that rate is in [Planning for peaks](deployment.md#planning-for-peaks).
 
@@ -556,56 +560,62 @@ The budget of 250 connections per shard is measured, not guessed.
 
 ### Database volume
 
-![One 32 vCPU database as its stored data grows](benchmark-cloud-volume.png)
+![One 32 vCPU database as its archive grows](benchmark-cloud-volume.png)
 
-**Stored data.** One 32 vCPU database with a 2 TB disk was filled with steps that each write 64 KB of
-incompressible data, with nothing deleted. At each doubling of the data stored in `dwarf_steps` the fill paused
-for a 6-minute saturated run of the 10-step `linear` workload with no payload:
+**A growing archive.** One 32 vCPU database with a 1 TB disk ran the 10-step `linear` workload with no payload,
+saturated, until its archive held 100 million step rows and 10 million flows, 47 GB, all in one archive day. At
+0, 25, 50 and 100 million step rows the load paused for a 6-minute saturated run and a timing of three archive
+reads: `History` and `Step` of the first flow archived, and `ListClosed`'s newest 100 flows:
 
-| Stored in `dwarf_steps` | Step rows | Saturated steps/s | vs empty | Flow p50 | Flow p99 |
+| Step rows | Archive | Saturated steps/s | vs empty | Flow p50 | Flow p99 | `History` | `Step` | `ListClosed` |
+|---|---|---|---|---|---|---|---|---|
+| empty | — | 21,784 | — | 0.99 s | 1.4 s | — | — | — |
+| 25M | 11 GB | 22,861 | +4.9% | 0.94 s | 1.3 s | 11 ms | 8 ms | 3.5 ms |
+| 50M | 23 GB | 21,915 | +0.6% | 0.98 s | 1.4 s | 7 ms | 11 ms | 3.6 ms |
+| 100M | 47 GB | 22,379 | +2.7% | 0.96 s | 1.4 s | 10 ms | 10 ms | 19.5 ms |
+
+*Each read is one call, timed while the database ran saturated.*
+
+- **Throughput and latency did not move as the archive grew.** Every saturated run was at or above the empty
+  database's rate, with the same median and p99.
+- **Archived reads stay fast.** `History` and `Step` of the oldest flow took 7–11 ms at every size. `ListClosed`
+  took 3.5 ms up to 50 million rows and 19.5 ms at 100 million.
+- **One `Purge` of 4,096 archived flows took 408 ms** at 100 million rows.
+
+![One 32 vCPU database, saturated for 85 minutes](benchmark-cloud-volume-rows.png)
+
+**Minute by minute, the same run held its rate** from the first minute to the last, 85 minutes and ~110 million
+step rows later. Closed flows left the live tables about a minute after closing, so the live tables stayed at
+~3 GB while the database grew by about 0.5 GB per million steps, to 58 GB. The whole database still fit in the
+instance's 128 GB of memory.
+
+**Day rollovers and retention.** On the same database, with archive days shortened to 10 minutes by a test
+setting and a retention of one day, a 30-minute saturated run crossed three day boundaries and dropped a day at
+each: **21,246 steps/s**, no 10-second sample below 87% of the median, and no flow error. Starting a day and
+dropping one cost nothing visible.
+
+**Reading the archive while it runs.** On the same database, saturated, with concurrent readers each calling
+`History` on archived flows in a loop:
+
+| Readers | steps/s | vs no readers | Archived reads/s | Read p50 | Read p99 |
 |---|---|---|---|---|---|
-| empty | 0 | 19,953 | — | 1.07 s | 1.9 s |
-| 18 GB | 8.6M | 19,622 | −1.7% | 1.01 s | 2.2 s |
-| 33 GB | 16.9M | 19,642 | −1.6% | 1.08 s | 2.2 s |
-| 67 GB | 25.5M | 19,452 | −2.5% | 1.14 s | 2.4 s |
-| 136 GB | 34.5M | 19,765 | −0.9% | 1.13 s | 2.5 s |
-| 265 GB | 44.6M | 19,629 | −1.6% | 0.75 s | 2.7 s |
-| 522 GB | 56.6M | 19,992 | +0.2% | 0.78 s | 2.6 s |
+| none | 21,938 | — | — | — | — |
+| 32 | 21,421 | −2% | 856 | 28.5 ms | 122 ms |
+| 128 | 18,539 | −15% | 3,186 | 29 ms | 185 ms |
 
-- **Throughput held within 2.5% of the empty database at every size.** At the end the whole database held ~640 GB,
-  five times the instance's 128 GB of memory.
-- **The work touches recent rows, so memory is not outgrown.** The buffer-cache hit ratio fell only from 100% to
-  99.2%. Reading a recent flow's `History` took 12–35 ms, and the first and a deep page of the flow list 1–9 ms,
-  at every size. (The build measured had one paged list of every flow, where the current engine has `ListOpen` and
-  `ListClosed`.)
-- **The tail rose a little; the median did not.** The saturated p99 went from 1.9 s on the empty database to
-  2.5–2.7 s from 136 GB up, while the median, which a saturated run's 2,000-flow backlog sets, stayed at
-  0.75–1.14 s.
+- **Reads take a share of the database, not a lock.** The locks held outside PostgreSQL's per-backend fast path
+  stayed at ~170–180 with or without readers, and backends waiting on the lock manager stayed near zero. The cost is
+  the reads' own connections and database time.
+- **A read held its latency as readers quadrupled:** a median of ~29 ms at 32 and at 128 readers.
 
-**Row count.** On another 32 vCPU database, with a 1 TB disk, the 10-step `linear` workload with no payload ran
-saturated for 200 minutes with nothing deleted. It wrote 249 million step rows and 24.9 million flows, 391 GB in
-all:
-
-![One 32 vCPU database, saturated for 200 minutes](benchmark-cloud-volume-rows.png)
-
-- **Throughput drifted down ~11%.** The first 10 minutes ran 22,076 steps/s and the last 10 ran 19,666; the
-  200-minute mean was 20,534.
-- **Dips to 14,000–17,500 steps/s** lasted a few minutes each, from ~100 million rows on.
-- **Vacuum fell behind, not memory.** The cache hit ratio stayed above 98.5%. Every step row is updated as it
-  runs, and each update leaves a dead version for vacuum to clear. On the step table vacuum ran almost without a
-  break: one pass took 85 minutes, and the next, PostgreSQL's wraparound-prevention vacuum, which a database
-  committing ~70,000 transactions a second needs within the hour, was still running at the end. Dead versions
-  reached 467 million against 249 million live, and the engine's background maintenance queries slowed with them.
-- **This run deleted nothing.** Retention (`Purge`, `DeleteOnCompletion`) bounds the rows a database carries, and
-  the vacuum work with them.
+*(Measured 2026-11-08.)*
 
 ### Method notes
 
 - **Use a fresh database for every configuration**, so one run's rows and dead tuples are not part of the next
   run's measurement.
 - **Size disk IOPS to the write rate.** Cloud SQL provisions ~30 IOPS per GB, so a 100 GB disk gives ~3,000
-  IOPS (~23 MB/s of random writes) and a write-heavy workload measures the disk. Every run here used 1 TB, except
-  the stored-data fill, which used 2 TB to hold it.
+  IOPS (~23 MB/s of random writes) and a write-heavy workload measures the disk. Every run here used 1 TB.
 - **Know what your test payload compresses to.** PostgreSQL compresses large values. A repetitive payload, such as
   one character repeated, compresses far more than real data and measured ~3 times higher than incompressible
   bytes. These runs used incompressible bytes to measure raw write volume and, for [Payload size](#payload-size),

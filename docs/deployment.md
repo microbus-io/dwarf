@@ -69,12 +69,10 @@ spends much of its log on those page images. Set:
   from `pg_stat_wal.wal_bytes` (or the provider's WAL metric) over a peak interval, or estimate it from the
   [WAL per step against payload](benchmark-cloud.md#payload-size).
 - **`checkpoint_timeout` to 15 minutes**, so WAL volume, not the clock, starts checkpoints.
-- **`wal_compression = lz4`** (PostgreSQL 15 and later). It compresses the page images.
 
 Measured on one 32 vCPU PostgreSQL 16 shard with 8 KB JSON payloads, saturated: 20 GB ran **42% more steps/s** than
-the 1.5 GB default (10,378 against 7,284), with half the page images per step, and `lz4` added about 3% (against
-10,107 with it off). Larger settings cost recovery time and disk: crash recovery replays up to `max_wal_size` of log, and
-`pg_wal` holds that much. To check, turn on `log_checkpoints`: checkpoints requested by WAL volume more often than
+the 1.5 GB default (10,378 against 7,284), with half the page images per step. Larger settings cost recovery time
+and disk: crash recovery replays up to `max_wal_size` of log, and `pg_wal` holds that much. To check, turn on `log_checkpoints`: checkpoints requested by WAL volume more often than
 once a minute at peak (`pg_stat_bgwriter.checkpoints_req`; `pg_stat_checkpointer.num_requested` from PostgreSQL 17)
 mean `max_wal_size` is too small. These are PostgreSQL settings; MySQL sizes its redo log and SQL Server its
 recovery interval in their own ways.
