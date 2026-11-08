@@ -350,12 +350,12 @@ writes the profile, nothing else would correct it while the row stays fresh. Tha
 differently from the shards where registration landed. A repair that keeps failing is attempted once per read,
 like the missing-row one. Pinned by `TestPeers_RepairCorrectsAnOrderingRegistrationMissed`.
 
-`register`'s `RowsAffected` test is safe on MySQL (which counts *changed*, not matched, rows) because
-no caller can hit the one tripping case — an existing row the UPDATE leaves unchanged, its `seen_at` already
-holding this millisecond. At startup nothing has beaten yet. The missing-row repair has just *observed* the row
-absent, and this replica is the only writer of its own row, so that observation cannot be raced. The ordering
-repair fires only on a row holding another `ordering_seq` than the one the UPDATE writes, so the row changes
-whatever `seen_at` holds.
+`register` does not trust a zero `RowsAffected` to mean the row is absent. MySQL and MariaDB count rows an
+UPDATE *changed*, not matched, so a row already holding the values written, its `seen_at` stamped in the same
+millisecond, reports zero; `register` then confirms absence with a read before it INSERTs. **Do not drop the read
+on the argument that no caller registers twice in a millisecond**: a test did, and collided with its own row in
+70 of 200 runs on MariaDB. The read runs only on the INSERT path, a cold start or a missing-row repair. Pinned by
+`TestPeers_RegisterInsertsThenUpdatesAndBeatNeverCreates` on a MySQL-family server.
 
 ## Who dispatches: one shared order, a staggered cut per shard
 
