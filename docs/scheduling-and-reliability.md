@@ -73,7 +73,7 @@ wrap an error with.
 
 Backpressure belongs to the layer that owns the downstream's resource identity, not the engine. A task that
 wants to back off on a transient failure (a `429`, a momentarily unavailable downstream) detects that
-condition itself and arms `flow.Retry`, whose bound is wall-clock rather than a count:
+condition itself and arms `flow.Retry`, whose bound is the total backoff rather than a count:
 
 ```go
 err := callDownstream(ctx)

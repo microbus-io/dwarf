@@ -126,9 +126,6 @@ func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workfl
 				continue
 			}
 			itemKey := tr.As
-			if itemKey == "" {
-				itemKey = "item"
-			}
 			for idx, item := range items {
 				candidates = append(candidates, nextStep{
 					taskName:    tr.To,

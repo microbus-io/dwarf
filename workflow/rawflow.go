@@ -86,8 +86,7 @@ func (f *RawFlow) SetUpdatedAt(updatedAt time.Time) {
 }
 
 // SetStepCreatedAt records when the step was created, preserved across retries. Called by the
-// orchestrator before dispatching a task so Retry can measure its giveUpAfter horizon and the task
-// can read it via Flow.StepCreatedAt().
+// orchestrator before dispatching a task so the task can read it via Flow.StepCreatedAt().
 func (f *RawFlow) SetStepCreatedAt(stepCreatedAt time.Time) {
 	f.stepCreatedAt = stepCreatedAt
 }
@@ -152,15 +151,19 @@ func (f *RawFlow) RetryDelay(attempt int) time.Duration {
 // disables that term. A negative initialDelay, which Retry refuses but a carrier decoded off the wire may hold,
 // comes back as it is, for the engine to refuse. Without a maxDelay the product saturates at the largest Duration:
 // converting a float64 past int64's range is implementation-defined, and a huge delay came out negative on amd64.
+//
+// The loop stops early once the product reaches the ceiling only for a multiplier that cannot bring it back down:
+// a multiplier below 1 decays a delay that starts above the cap, so stopping there returned the cap at every
+// attempt. A decaying product stops once it reaches zero.
 func backoffDelay(initialDelay time.Duration, multiplier float64, maxDelay time.Duration, attempt int) time.Duration {
 	ceiling := time.Duration(math.MaxInt64)
 	if maxDelay > 0 {
 		ceiling = maxDelay
 	}
 	delay := float64(initialDelay)
-	if multiplier > 0 && delay > 0 {
+	if multiplier > 0 && multiplier != 1 && delay > 0 {
 		for range attempt {
-			if delay >= float64(ceiling) {
+			if (multiplier >= 1 && delay >= float64(ceiling)) || delay == 0 {
 				break
 			}
 			delay *= multiplier
@@ -170,6 +173,41 @@ func backoffDelay(initialDelay time.Duration, multiplier float64, maxDelay time.
 		return ceiling
 	}
 	return time.Duration(delay)
+}
+
+// backoffFits checks delays 0..attempt against budget, with inputs validated by Retry. The unrounded product
+// advances once per delay so the sum matches backoffDelay's per-attempt rounding without replaying every prefix.
+// Constant and capped tails use division to avoid overflowing either the sum or attempt+1.
+func backoffFits(initialDelay time.Duration, multiplier float64, maxDelay time.Duration, attempt int, budget time.Duration) bool {
+	if attempt < 0 || initialDelay == 0 {
+		return true
+	}
+	ceiling := time.Duration(math.MaxInt64)
+	if maxDelay > 0 {
+		ceiling = maxDelay
+	}
+	product := float64(initialDelay)
+	for remaining := attempt; ; remaining-- {
+		delay := ceiling
+		if product < float64(ceiling) {
+			delay = time.Duration(product)
+		}
+		if delay == 0 {
+			return true // a decaying product below one nanosecond contributes no more delay
+		}
+		next := product * multiplier
+		if multiplier == 0 || next == product || (multiplier > 1 && delay == ceiling) {
+			return int64(remaining) < int64(budget/delay)
+		}
+		if delay > budget {
+			return false
+		}
+		budget -= delay
+		if remaining == 0 {
+			return true
+		}
+		product = next
+	}
 }
 
 // SleepRequested returns the duration set by Sleep, or zero if none was set. A negative duration - which

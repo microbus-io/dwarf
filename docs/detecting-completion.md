@@ -110,7 +110,7 @@ party, it retries that call as many times as needed within a bounded horizon:
 ```go
 func subgraphSuccess(ctx context.Context, f *workflow.Flow) error {
     if err := notifyUpstream(ctx, f.Snapshot()); err != nil {
-        // Deliver-or-retry: keep trying with exponential backoff, up to an hour.
+        // Deliver-or-retry: keep trying with exponential backoff, up to an hour of total backoff.
         if f.Retry(1*time.Second, 2.0, 1*time.Minute, 1*time.Hour) {
             return nil
         }

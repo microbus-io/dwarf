@@ -612,3 +612,71 @@ func TestForEachStrip_TerminatedNestedFanOutKeepsCompletedBranches(t *testing.T)
 	assert.Equal(635, out.State.GetInt("pageCount"))
 	assert.False(out.State.Has("lineCount"), "the Lines' own writes to lineCount project as a delete, as at their fan-in")
 }
+
+// TestForEachStrip_JSONGraphWithoutAlias pins that a graph decoded from JSON with no forEach `as` strips the default
+// alias's branch-private names exactly as a graph built with AddTransitionForEach does, at a converged fan-in and in
+// a failed fan-out's final state. The alias defaulted only at dispatch, so the strip, keyed on the stored alias,
+// found none, and item, itemIndex and itemCount rode past the cohort.
+func TestForEachStrip_JSONGraphWithoutAlias(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	mux := hosts.NewMux()
+	e.SetHost(mux)
+	assert.Must(assert.NoError(e.Startup(t.Context())))
+
+	built := workflow.NewGraph("NoAlias")
+	built.SetURL("S", "noalias/s")
+	built.SetURL("W", "noalias/w")
+	built.SetURL("J", "noalias/j")
+	built.SetFanIn("J")
+	built.AddTransitionForEach("S", "W", "items", "")
+	built.AddTransitionChain("W", "J", workflow.End)
+	raw, err := json.Marshal(built)
+	assert.Must(assert.NoError(err))
+	var doc map[string]any
+	assert.Must(assert.NoError(json.Unmarshal(raw, &doc)))
+	for _, tr := range doc["transitions"].([]any) {
+		delete(tr.(map[string]any), "as")
+	}
+	raw, err = json.Marshal(doc)
+	assert.Must(assert.NoError(err))
+	assert.False(strings.Contains(string(raw), `"as"`), "the host's JSON carries no alias")
+	var g workflow.Graph
+	assert.Must(assert.NoError(json.Unmarshal(raw, &g)))
+	assert.NoError(g.Validate())
+	mux.HandleGraph("noalias/wf", &g)
+
+	mux.HandleTask("noalias/s", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("noalias/w", func(ctx context.Context, f *workflow.Flow) error {
+		if f.GetInt("item") == 0 {
+			return errors.New("branch failed")
+		}
+		// The branch writes its private names itself, so they are in its changes and would fold into the fan-in.
+		f.SetInt("item", 99)
+		f.SetInt("itemIndex", 99)
+		f.SetInt("itemCount", 99)
+		return nil
+	})
+	mux.HandleTask("noalias/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	for _, tc := range []struct {
+		name   string
+		items  []int
+		status string
+	}{
+		{"converged", []int{1, 2}, workflow.StatusCompleted},
+		{"failed", []int{1, 0, 2}, workflow.StatusFailed},
+	} {
+		_, outcome, err := e.Run(ctx, "noalias/wf", map[string]any{"items": tc.items}, nil)
+		assert.NoError(err)
+		assert.Equal(tc.status, outcome.Status, tc.name)
+		for _, name := range []string{"item", "itemIndex", "itemCount"} {
+			assert.False(outcome.State.Has(name), "%s: %s escaped the cohort", tc.name, name)
+		}
+		assert.True(outcome.State.Has("items"), tc.name)
+	}
+}

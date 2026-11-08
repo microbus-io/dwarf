@@ -467,13 +467,32 @@ in another language reads the same files.
 Tasks signal the engine via control methods on the `Flow` carrier (distinct from the operations above):
 
 - **`flow.Retry(initialDelay, delayMultiplier, maxIntervalDelay, giveUpAfter) bool`** - re-execute this task with
-  exponential backoff. The bound is wall-clock, not a count: returns `true` (task should return `nil`) while the next
-  attempt would still land within `giveUpAfter` of the step's first creation, else `false` (task should return its
-  error) - including when the next backoff delay alone would overshoot the horizon, so a doomed wait is never parked
-  before failing. The give-up check is made client-side in `Retry` against `flow.StepCreatedAt()`; the engine only
-  consumes the backoff shape. `Retry` refuses a negative delay or cap and a negative, NaN or infinite multiplier;
-  a remote host's carrier is not bound by that, so the engine fails a step whose retry delay comes out negative
+  exponential backoff: `true` (task should return `nil`) while the retry is within its bound, else `false` (task
+  should return its error). The check is made client-side in `Retry`; the engine only consumes the backoff shape.
+  `Retry` refuses a negative delay or cap and a negative, NaN or infinite multiplier; a remote host's carrier is not
+  bound by that, so the engine fails a step whose retry delay comes out negative
   (`TestRetry_NegativeDelayFailsTheStep`), and `backoffDelay` saturates at the largest `Duration`.
+  - **`giveUpAfter` bounds the TOTAL BACKOFF - the delays `Retry` itself asks for - and nothing else. This is a
+    design decision; do not move it onto the clock.** `Retry` returns `false` once the delays of attempts
+    `0..Attempt()`, the next included, would sum past `giveUpAfter`, computed from the call's own arguments.
+    - *Not the clock* (time since `StepCreatedAt`). The engine cannot promise when an attempt runs: a step can
+      wait behind higher-priority bands, a loaded fleet or an absent worker, and that time, the attempts' run time
+      and earlier sleeps would all use up retries the task asked for. Measured: a clock-based horizon gave up at
+      attempt 0 against a loaded SQL Server.
+    - *Not the run's `Sleep`*, whichever is called first, although the engine waits Sleep + backoff. A Sleep is
+      the task's explicit wait (a provider's Retry-After, say), which it could have clamped and chose not to; the
+      bound is for the retry. Do not count it, and do not fail a step whose Sleep plus backoff passes the bound.
+    - A task that wants its sleeps, or wall time, bounded too keeps its own budget (a state field) and gates
+      `Retry` on it.
+    - Consequence: a zero `initialDelay` never adds to the total, so immediate retries are bounded only by
+      `Attempt()`. The public docs say so.
+    - Compute the budget with one unrounded running product (`backoffFits`), folding constant and capped tails
+      by division. Summing independently recomputed prefixes is quadratic in `Attempt()`; feeding rounded delays
+      back into the product changes the per-attempt delays. Stop when decay truncates to zero nanoseconds.
+
+    Pinned by `TestFlow_Retry` (a two-hour-old step still retries; the exact give-up attempt),
+    `TestFlow_RetryHorizonIgnoresSleep` and `fixtures/retryhorizonflow_test.go` (gives up at exactly attempt 6).
+
   Pass `giveUpAfter <= 0` for unlimited; to bound by count instead, pass `0` and gate on `flow.Attempt()`. The step row
   is reused. The engine tracks `attempt` and computes the re-dispatch delay `min(initialDelay * delayMultiplier^attempt,
   maxIntervalDelay)`, merging `state + changes` back into `state` so the task sees its prior output. `flow.Retry`

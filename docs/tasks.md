@@ -184,11 +184,12 @@ calling one, the task should return as instructed.
 
 ### Retry
 
-Re-execute this task with exponential backoff. The bound is wall-clock, not a count: `Retry` returns `true`
-(return `nil`) while the next attempt would still land within `giveUpAfter` of the step's first creation, and
-`false` (return your error) once the horizon is reached — including when the next backoff delay alone would
-overshoot it, so a wait already known to be doomed is not parked before failing. It carries no condition of its
-own — you decide what's retryable:
+Re-execute this task with exponential backoff. `giveUpAfter` bounds the total backoff: `Retry` returns `true`
+(return `nil`) while the backoff delays of every attempt so far, the next one included, add up to at most
+`giveUpAfter`, and `false` (return your error) once they would exceed it. The bound counts only the delays `Retry`
+asks for, never the clock, so a step held up behind higher-priority work does not lose its retries. A `Sleep` is
+your own wait and is not counted; to bound your sleeps too, keep your own budget (in a state field, say) and gate
+`Retry` on it. `Retry` carries no condition of its own — you decide what's retryable:
 
 ```go
 err := callFlaky(ctx)
@@ -204,9 +205,10 @@ The delay before attempt N is `min(initialDelay * delayMultiplier^N, maxInterval
 `initialDelay` for immediate retries, a zero `maxIntervalDelay` for no per-interval cap, and `delayMultiplier`
 `1.0` to hold the delay constant. `initialDelay` and `maxIntervalDelay` must not be negative, and `delayMultiplier`
 must be a finite number that is not negative; otherwise `Retry` returns `false`. Pass `giveUpAfter <= 0` for
-unlimited retry. To bound by count instead, pass `giveUpAfter` `0` and gate on `f.Attempt()` at the call site.
+unlimited retry. A zero `initialDelay` never adds to the total, so bound immediate retries by count: gate on
+`f.Attempt()` at the call site (with `giveUpAfter` `0` to bound by count alone).
 `Attempt()` also counts the retries your host armed without reaching the task (a worker that was down, a refused or
-dropped connection), so bound retries of a transient failure by time.
+dropped connection), so bound retries of a transient failure with `giveUpAfter` rather than `Attempt()`.
 On retry the engine merges the task's prior output back into its input, so the next attempt sees what the last
 one wrote.
 
@@ -338,7 +340,7 @@ err := callDownstream(ctx)
 switch {
 case isRateLimited(err), isUnavailable(err): // e.g. HTTP 429 / 503
     if f.Retry(100*time.Millisecond, 2.0, 10*time.Second, time.Hour) {
-        return nil // re-run after wall-clock-bounded backoff
+        return nil // re-run after backoff, bounded by its total
     }
     return err // horizon exceeded: onError or fail
 default:
@@ -346,7 +348,7 @@ default:
 }
 ```
 
-The retry bound is wall-clock, not a count; see [Retry](#retry).
+The retry bound is the total backoff, not a count; see [Retry](#retry).
 
 ### Keep payload data out of error text
 

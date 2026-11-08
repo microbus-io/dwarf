@@ -209,8 +209,8 @@ func (f *Flow) UpdatedAt() time.Time {
 }
 
 // StepCreatedAt returns the wall-clock time at which this step was first created, preserved across
-// retries of the step. It anchors Retry's giveUpAfter horizon, and a task can read it directly to
-// implement a custom elapsed-time guard. Zero when called outside a dispatched task.
+// retries of the step. Retry's giveUpAfter does not use it; a task that wants an elapsed-time bound reads it
+// and gates Retry on it. Zero when called outside a dispatched task.
 func (f *Flow) StepCreatedAt() time.Time {
 	return f.stepCreatedAt
 }
@@ -538,11 +538,17 @@ func decodeSubgraphError(s string) error {
 }
 
 /*
-Retry requests the orchestrator to re-execute this task with exponential backoff. The bound is
-wall-clock, not a count: Retry returns true (the caller should return nil) while the next attempt would
-still land within giveUpAfter of the step's first creation, and false (the caller should return its
-error) once the horizon is reached - including when the next backoff delay alone would overshoot it, so
-a wait we already know is doomed is not parked before failing. Pass giveUpAfter <= 0 for unlimited retry.
+Retry requests the orchestrator to re-execute this task with exponential backoff. giveUpAfter bounds the
+total backoff: Retry returns true (the caller should return nil) while the backoff delays of every attempt so
+far, the next one included, add up to at most giveUpAfter, and false (the caller should return its error) once
+they would exceed it. Pass giveUpAfter <= 0 for unlimited retry.
+
+The bound counts only the delays Retry itself asks for, computed from this call's arguments and Attempt, never
+the clock: the engine cannot promise when an attempt runs, and time a step spends queued behind higher-priority
+work, or running, must not use up its retries. A Sleep is the task's own wait, whichever is called first, and
+is not counted either; a task that wants its sleeps bounded keeps its own budget, for example in a state field,
+and gates Retry on it. With a zero initialDelay the total stays zero and never reaches the bound, so bound
+immediate retries by Attempt.
 
 The delay before attempt N is min(initialDelay * delayMultiplier^N, maxIntervalDelay); pass a zero
 initialDelay for immediate retries, and a zero maxIntervalDelay for no per-interval cap. To hold the
@@ -572,16 +578,9 @@ func (f *Flow) Retry(initialDelay time.Duration, delayMultiplier float64, maxInt
 		f.retry = false
 		return false
 	}
-	if giveUpAfter > 0 && !f.stepCreatedAt.IsZero() {
-		// Give up if we've crossed the horizon, or if the next attempt's delay alone would overshoot it -
-		// no point parking for a wait we already know lands past the deadline. The delay is the one the
-		// engine will apply (see backoffDelay). Compared against the time left, not summed with the time
-		// spent: a saturated delay plus the elapsed time overflows to a negative and never gives up.
-		nextDelay := backoffDelay(initialDelay, delayMultiplier, maxIntervalDelay, f.attempt)
-		if nextDelay >= giveUpAfter-time.Since(f.stepCreatedAt) {
-			f.retry = false
-			return false
-		}
+	if giveUpAfter > 0 && !backoffFits(initialDelay, delayMultiplier, maxIntervalDelay, f.attempt, giveUpAfter) {
+		f.retry = false
+		return false
 	}
 	f.retry = true
 	f.backoffInitialDelay = initialDelay

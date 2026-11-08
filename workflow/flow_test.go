@@ -284,24 +284,32 @@ func TestFlow_Retry(t *testing.T) {
 	assert.True(ok)
 	assert.True(f2.retry)
 
-	// Past the horizon: give up.
+	// The bound is the total backoff, not the clock: a step created two hours ago still retries under a one-hour
+	// bound while its delays (1s, 2s, 4s, 8s, then 10s each) sum within it, and stops on the attempt that would pass
+	// it: through attempt n the total is 15s + (n-3) x 10s, 3595s at attempt 361 and 3605s at attempt 362.
 	f3 := NewFlow()
 	f3.stepCreatedAt = time.Now().Add(-2 * time.Hour)
-	ok = f3.Retry(time.Second, 2.0, 10*time.Second, time.Hour)
-	assert.False(ok)
+	f3.attempt = 0
+	assert.True(f3.Retry(time.Second, 2.0, 10*time.Second, time.Hour), "the clock does not count")
+	f3.attempt = 361
+	assert.True(f3.Retry(time.Second, 2.0, 10*time.Second, time.Hour))
+	f3.attempt = 362
+	assert.False(f3.Retry(time.Second, 2.0, 10*time.Second, time.Hour))
 	assert.False(f3.retry)
 
-	// Within elapsed but the next delay alone overshoots the horizon: give up now rather than park a doomed
-	// wait. Step is fresh (elapsed ~0) but the single delay (1h) exceeds the 1m horizon.
+	// The next delay alone overshoots the bound: give up now rather than park a doomed wait.
 	f4 := NewFlow()
-	f4.stepCreatedAt = time.Now()
 	ok = f4.Retry(time.Hour, 1.0, 0, time.Minute)
 	assert.False(ok)
 	assert.False(f4.retry)
 
-	// A delay that saturates still gives up: summed with the time spent, it would overflow to a negative.
+	// A zero initialDelay never adds to the total, so it never reaches the bound.
+	f4b := NewFlow()
+	f4b.attempt = 1_000_000
+	assert.True(f4b.Retry(0, 2.0, 0, time.Minute))
+
+	// A delay that saturates still gives up: added to the running total, it would overflow to a negative.
 	f5 := NewFlow()
-	f5.stepCreatedAt = time.Now()
 	f5.attempt = 1
 	ok = f5.Retry(time.Second, 1e10, 0, time.Hour)
 	assert.False(ok)
@@ -621,4 +629,67 @@ func TestFlow_OverwriteOfAReducedFieldInABranch(t *testing.T) {
 	var remote Flow
 	assert.NoError(json.Unmarshal(data, &remote))
 	assert.Error(remote.Overwrite("log", nil))
+}
+
+// TestFlow_RetryHorizonIgnoresSleep pins that giveUpAfter bounds Retry's own backoff and not the run's Sleep,
+// whichever is called first: a Sleep is the task's explicit wait, and the engine adds it on top of the backoff. A task
+// that wants its sleeps bounded keeps its own budget.
+func TestFlow_RetryHorizonIgnoresSleep(t *testing.T) {
+	assert := testarossa.For(t)
+
+	before := NewRawFlow()
+	before.Sleep(time.Hour)
+	assert.True(before.Retry(time.Millisecond, 1, 0, time.Minute))
+	assert.Equal(time.Hour, before.SleepRequested())
+
+	after := NewRawFlow()
+	assert.True(after.Retry(time.Millisecond, 1, 0, time.Minute))
+	after.Sleep(time.Hour)
+	_, _, _, requested := after.RetryRequested()
+	assert.True(requested, "a Sleep after Retry does not withdraw the retry")
+}
+
+func TestFlow_RetryBudgetBoundaries(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		initial    time.Duration
+		multiplier float64
+		cap        time.Duration
+		attempt    int
+		total      time.Duration
+	}{
+		{"constant", 10 * time.Millisecond, 1, 0, 100_000, 100_001 * 10 * time.Millisecond},
+		{"disabled multiplier", 10 * time.Millisecond, 0, 0, 3, 40 * time.Millisecond},
+		{"growing capped", 3 * time.Nanosecond, 1.5, 10 * time.Nanosecond, 4, 33 * time.Nanosecond},
+		{"shrinking capped", 10 * time.Second, 0.1, time.Second, 2, 2100 * time.Millisecond},
+		{"fractional decay", 3 * time.Nanosecond, 0.75, 0, math.MaxInt, 7 * time.Nanosecond},
+		{"maximum constant count", time.Nanosecond, 1, 0, math.MaxInt - 1, time.Duration(math.MaxInt)},
+		{"maximum capped count", time.Hour, 2, time.Nanosecond, math.MaxInt - 1, time.Duration(math.MaxInt)},
+		{"duration ceiling", time.Duration(math.MaxInt64), 1, 0, 0, time.Duration(math.MaxInt64)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := NewRawFlow()
+			f.SetAttempt(tc.attempt)
+			if !f.Retry(tc.initial, tc.multiplier, tc.cap, tc.total) {
+				t.Fatal("retry refused at the exact cumulative budget")
+			}
+			if f.Retry(tc.initial, tc.multiplier, tc.cap, tc.total-time.Nanosecond) {
+				t.Fatal("retry accepted one nanosecond beyond the cumulative budget")
+			}
+		})
+	}
+
+	f := NewRawFlow()
+	f.SetAttempt(math.MaxInt)
+	if !f.Retry(0, 2, 0, time.Nanosecond) {
+		t.Fatal("zero delay spent a positive budget")
+	}
+	if f.Retry(time.Nanosecond, 1, 0, time.Duration(math.MaxInt)) {
+		t.Fatal("attempt count overflow admitted a retry beyond the budget")
+	}
+	f.SetAttempt(1)
+	if f.Retry(time.Second, 1e300, 0, time.Duration(math.MaxInt64)) {
+		t.Fatal("saturated delay overflow admitted a retry beyond the budget")
+	}
 }

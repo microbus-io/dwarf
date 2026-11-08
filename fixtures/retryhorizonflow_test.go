@@ -28,11 +28,10 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestRetryHorizonflow pins flow.Retry's wall-clock giveUpAfter horizon (distinct from count-based give-up
-// via Attempt(), which retryflow_test covers). The horizon is measured from the step's first creation:
-// Retry returns true while the next attempt would still land within giveUpAfter, else false - so an
-// always-failing task with a bounded horizon retries a few times and then fails, rather than looping
-// forever or giving up on the first try.
+// TestRetryHorizonflow pins flow.Retry's giveUpAfter bound end to end (distinct from count-based give-up via
+// Attempt(), which retryflow_test covers). The bound is the total backoff: Retry returns true while the delays of
+// every attempt so far, the next included, sum to at most giveUpAfter - so an always-failing task retries a fixed
+// number of times and then fails, however slowly the engine dispatches it.
 func TestRetryHorizonflow(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -51,15 +50,7 @@ func TestRetryHorizonflow(t *testing.T) {
 	mux.HandleGraph("retryhorizonflow.verify:428/retry-horizon", graph)
 
 	// Flaky reads its own policy from state: succeed once Attempt() reaches successAt (0 = never); otherwise
-	// retry against a giveUpAfter horizon read from giveUpMs.
-	//
-	// The backoff is sized against DISPATCH LATENCY, not against how fast the test would like to run. The
-	// horizon is anchored at the step's CREATION, so every millisecond between creating the step and the task
-	// reaching this call is already spent when Retry does its arithmetic - and on the first attempt Retry gives
-	// up outright if `elapsed + initialDelay >= horizon`. So the horizon must dominate the engine's queue and
-	// claim latency, which is unbounded under load: a 250ms horizon with a 20ms initial delay left only 230ms
-	// of headroom, and against a loaded SQL Server the first dispatch outran it, giving up at attempt 0 and
-	// failing the "the horizon is not first-try" assertion below.
+	// retry against a giveUpAfter bound read from giveUpMs.
 	mux.HandleTask("retryhorizonflow.verify:428/flaky", func(ctx context.Context, f *workflow.Flow) error {
 		successAt := f.GetInt("successAt")
 		if successAt > 0 && f.Attempt() >= successAt {
@@ -93,9 +84,9 @@ func TestRetryHorizonflow(t *testing.T) {
 	t.Run("gives_up_after_horizon", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		// Never succeeds; a 2s horizon must stop the retries and fail the flow. Unloaded that is ~6 attempts
-		// (delays 100/200/400/400/400/400 against elapsed-from-creation), so the upper bound below has room;
-		// loaded it is fewer, because dispatch latency spends the same horizon.
+		// Never succeeds; a 2s bound stops the retries and fails the flow. The delays 100/200/400/400/400/400ms sum
+		// to 1.9s through attempt 5, and attempt 6's would take the total to 2.3s, so attempt 6 gives up - whatever
+		// the dispatch latency, which a clock-based bound would have spent.
 		flowKey, err := eng.Create(ctx, "retryhorizonflow.verify:428/retry-horizon",
 			map[string]any{"successAt": 0, "giveUpMs": 2000}, nil)
 		assert.NoError(err)
@@ -105,9 +96,7 @@ func TestRetryHorizonflow(t *testing.T) {
 		assert.Equal(workflow.StatusFailed, outcome.Status)
 
 		attempts := flakyAttempts(t, flowKey)
-		// It must have retried at least once (horizon is not first-try) but still given up (not unbounded).
-		assert.True(attempts >= 1, "expected the horizon to allow retries, got attempt=%d", attempts)
-		assert.True(attempts <= 12, "expected the horizon to bound retries, got attempt=%d", attempts)
+		assert.Equal(6, attempts, "the bound must give up exactly when the total backoff would pass it")
 		assert.True(stateVal(outcome.State, "reachedDone") == nil, "Done must not run when Flaky exhausts its horizon")
 	})
 

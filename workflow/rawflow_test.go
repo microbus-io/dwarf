@@ -36,6 +36,17 @@ func TestRawFlow_RetryDelay(t *testing.T) {
 	assert.Equal(4*time.Second, rf.RetryDelay(2))
 	assert.Equal(5*time.Second, rf.RetryDelay(3))
 	assert.Equal(5*time.Second, rf.RetryDelay(1000))
+
+	// A multiplier below 1 decays a delay that starts above the cap: min(10s x 0.1^N, 1s). Stopping at the cap returned
+	// 1s at every attempt.
+	rf = NewRawFlow()
+	assert.True(rf.Retry(10*time.Second, 0.1, time.Second, 0))
+	assert.Equal(time.Second, rf.RetryDelay(0))
+	assert.Equal(time.Second, rf.RetryDelay(1))
+	assert.Equal(100*time.Millisecond, rf.RetryDelay(2))
+	assert.Equal(10*time.Millisecond, rf.RetryDelay(3))
+	// It decays to zero and stops there, however many attempts.
+	assert.Equal(time.Duration(0), backoffDelay(time.Second, 0.5, 0, 1_000_000))
 }
 
 // TestBackoffDelay_Saturates pins that a delay past the largest Duration saturates rather than converting a float64

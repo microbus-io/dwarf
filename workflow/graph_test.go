@@ -1414,3 +1414,19 @@ func TestStripHostPort_NeverBlank(t *testing.T) {
 	assert.Equal("other/task", stripHostPort("https://other/task", "host"))
 	assert.Equal("Plain", stripHostPort("Plain", "host"))
 }
+
+// TestTransition_ForEachAliasDefaultsOnDecode pins that a forEach transition decoded without an `as` takes "item", as
+// AddTransitionForEach gives it. The engine strips a cohort's branch-private names at its fan-in under the stored
+// alias, so a JSON graph that left it out kept item, itemIndex and itemCount past the fan-in.
+func TestTransition_ForEachAliasDefaultsOnDecode(t *testing.T) {
+	assert := testarossa.For(t)
+
+	var tr Transition
+	assert.NoError(json.Unmarshal([]byte(`{"from":"S","to":"W","forEach":"items"}`), &tr))
+	assert.Equal("item", tr.As)
+	assert.NoError(json.Unmarshal([]byte(`{"from":"S","to":"W","forEach":"items","as":"page"}`), &tr))
+	assert.Equal("page", tr.As)
+	tr = Transition{}
+	assert.NoError(json.Unmarshal([]byte(`{"from":"S","to":"W"}`), &tr))
+	assert.Equal("", tr.As, "a transition with no forEach takes no alias")
+}

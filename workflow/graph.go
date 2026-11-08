@@ -64,7 +64,7 @@ type Transition struct {
 	When string `json:"when,omitzero"`
 	// ForEach names a state array to fan out over, one branch per element, on an ordinary transition.
 	ForEach string `json:"forEach,omitzero"`
-	// As names the element in each forEach branch's state.
+	// As names the element in each forEach branch's state. Empty on a forEach transition means "item".
 	As string `json:"as,omitzero"`
 }
 
@@ -82,6 +82,11 @@ func (t *Transition) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*t = Transition(v.plain)
+	// The alias defaults here, as AddTransitionForEach defaults it, so a decoded graph and a built one mean the
+	// same state: the engine strips the alias's branch-private names at the fan-in only under the name stored.
+	if t.ForEach != "" && t.As == "" {
+		t.As = "item"
+	}
 	if t.Kind == "" {
 		switch {
 		case v.OnError:

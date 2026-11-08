@@ -30,7 +30,7 @@ import (
 // TestTimestamps_SurviveANonUTCSession pins that a time written with NOW_UTC() reads back as the current instant
 // on a PostgreSQL session whose time zone is not UTC. NOW_UTC() is a timestamp WITHOUT time zone holding UTC wall
 // time; stored into a TIMESTAMPTZ column it is converted through the session's time zone, so on such a session
-// every stored instant is off by the zone's offset (a flow.Retry horizon anchored at creation then never expires).
+// every stored instant is off by the zone's offset (a step's due time and a task's StepCreatedAt among them).
 func TestTimestamps_SurviveANonUTCSession(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
