@@ -146,6 +146,7 @@ const (
 
 // --- Execution checkpoints ---
 const (
+	CheckpointResumeLeafSelected        = "resumeLeafSelected"        // Resume, after it selected the leaf interrupt and before it reads the leaf's park record
 	CheckpointResumeBeforeFlowWrite     = "resumeBeforeFlowWrite"     // Resume, just before its transaction's flow-status gate write
 	CheckpointBeforeDeleteStamp         = "beforeDeleteStamp"         // Delete, after it read the root, just before the delete stamp
 	CheckpointArchivePassDone           = "archivePassDone"           // the archive loop, after each pass over the shards

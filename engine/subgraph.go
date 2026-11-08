@@ -578,10 +578,12 @@ type flowLabel struct {
 // comparison), then descends in memory - one round-trip per concern regardless of depth. The leaf is picked the SAME way Snapshot does (earliest updated_at, step_id tiebreak),
 // so a Snapshot reports exactly the interrupt the next Resume resolves. Descent is keyed on surgraph_step_id
 // (the caller step's PK), never depth, which is ambiguous when parallel subgraph callers share a depth.
-func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flowID int, flowHour int, flowToken string) (flowIDs []any, stepIDs []any, compositeFlowIDs []string, err error) {
+// leafLeaseSeq is the leaf's lease_seq as this same query saw it: it names the interrupt selected, which Resume
+// fences on. Read it anywhere later and a Retry that re-interrupted the row in between is taken for the selection.
+func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flowID int, flowHour int, flowToken string) (flowIDs []any, stepIDs []any, compositeFlowIDs []string, leafLeaseSeq int, err error) {
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
-		return nil, nil, nil, errors.Trace(err)
+		return nil, nil, nil, 0, errors.Trace(err)
 	}
 
 	frows, err := db.QueryContext(ctx,
@@ -589,7 +591,7 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 		flowID,
 	)
 	if err != nil {
-		return nil, nil, nil, errors.Trace(err)
+		return nil, nil, nil, 0, errors.Trace(err)
 	}
 	tokenByID := map[int]string{}
 	hourByID := map[int]int{}
@@ -599,7 +601,7 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 		var token, status string
 		if err := frows.Scan(&id, &token, &hour, &ssid, &status); err != nil {
 			frows.Close()
-			return nil, nil, nil, errors.Trace(err)
+			return nil, nil, nil, 0, errors.Trace(err)
 		}
 		tokenByID[id] = token
 		hourByID[id] = hour
@@ -609,35 +611,37 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 	}
 	frows.Close()
 	if err := frows.Err(); err != nil {
-		return nil, nil, nil, errors.Trace(err)
+		return nil, nil, nil, 0, errors.Trace(err)
 	}
 
 	// Each tree flow's interrupted leaf: order in SQL, take the first row per flow_id in memory. The order is
 	// Snapshot's - the step the flow row recorded as the one it stopped at, then the earliest-updated - so Resume
 	// resolves the interrupt Snapshot and StoppedTaskName report.
 	interruptedLeafByFlow := map[int]int{}
+	leaseSeqByStep := map[int]int{}
 	srows, err := db.QueryContext(ctx,
-		"SELECT s.flow_id, s.step_id FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id"+
+		"SELECT s.flow_id, s.step_id, s.lease_seq FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id"+
 			" WHERE s.status='"+workflow.StatusInterrupted+"' AND f.root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)"+
 			" ORDER BY s.flow_id, CASE WHEN s.step_id=f.stopped_step_id THEN 0 ELSE 1 END, s.updated_at, s.step_id",
 		flowID,
 	)
 	if err != nil {
-		return nil, nil, nil, errors.Trace(err)
+		return nil, nil, nil, 0, errors.Trace(err)
 	}
 	for srows.Next() {
-		var fid, sid int
-		if err := srows.Scan(&fid, &sid); err != nil {
+		var fid, sid, seq int
+		if err := srows.Scan(&fid, &sid, &seq); err != nil {
 			srows.Close()
-			return nil, nil, nil, errors.Trace(err)
+			return nil, nil, nil, 0, errors.Trace(err)
 		}
 		if _, seen := interruptedLeafByFlow[fid]; !seen {
 			interruptedLeafByFlow[fid] = sid // first row per flow_id = earliest updated_at, step_id
+			leaseSeqByStep[sid] = seq
 		}
 	}
 	srows.Close()
 	if err := srows.Err(); err != nil {
-		return nil, nil, nil, errors.Trace(err)
+		return nil, nil, nil, 0, errors.Trace(err)
 	}
 
 	flowIDs = []any{flowID}
@@ -649,12 +653,12 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 			// An interrupted flow on the descent always has an interrupted step; its absence means a
 			// concurrent Resume already resolved this leaf (a double-Resume race). Surface it as a 409,
 			// not a raw ErrNoRows (which resume() would trace into an opaque 500).
-			return nil, nil, nil, errors.New("flow is not interrupted", http.StatusConflict)
+			return nil, nil, nil, 0, errors.New("flow is not interrupted", http.StatusConflict)
 		}
 		stepIDs = append(stepIDs, leaf)
 		child, ok := childByCallerStep[leaf]
 		if !ok {
-			return flowIDs, stepIDs, compositeFlowIDs, nil // no interrupted child spawned here - leaf reached
+			return flowIDs, stepIDs, compositeFlowIDs, leaseSeqByStep[leaf], nil // no interrupted child spawned here - leaf reached
 		}
 		flowIDs = append(flowIDs, child)
 		compositeFlowIDs = append(compositeFlowIDs, keys.NewFlowKey(shardNum, hourByID[child], child, tokenByID[child]))

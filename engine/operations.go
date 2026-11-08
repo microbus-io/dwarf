@@ -1207,7 +1207,7 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	downFlowIDs, downStepIDs, downCompositeIDs, err := e.interruptedSubgraphChain(ctx, shardNum, flowID, flowHour, flowToken)
+	downFlowIDs, downStepIDs, downCompositeIDs, leafLeaseSeq, err := e.interruptedSubgraphChain(ctx, shardNum, flowID, flowHour, flowToken)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -1221,9 +1221,14 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	parkStepIDs := append([]any{}, upStepIDs...)
 	parkStepIDs = append(parkStepIDs, downStepIDs[:len(downStepIDs)-1]...)
 
+	// leafLeaseSeq, read by the query that selected the leaf, names the interrupt this Resume selected: the step row
+	// is reused by flow.Retry, and every re-interrupt follows a fresh claim, which raises it. This read and the leaf
+	// flip below are fenced on it, never on a generation read again.
+	e.seams.Checkpoint(ctx, engineseams.CheckpointResumeLeafSelected)
 	var leafInterruptDone bool
-	err = db.QueryRowContext(ctx, "SELECT interrupt_done FROM dwarf_steps WHERE step_id=?", leafStepID).Scan(&leafInterruptDone)
-	// ErrNoRows means the leaf step is gone (a concurrent Resume/state change) - a 409, not a false one.
+	err = db.QueryRowContext(ctx, "SELECT interrupt_done FROM dwarf_steps WHERE step_id=? AND lease_seq=?", leafStepID, leafLeaseSeq).Scan(&leafInterruptDone)
+	// ErrNoRows means the leaf step is gone or has been claimed since it was selected (a concurrent Resume, then a
+	// re-run) - a 409, not a false one.
 	// Any other scan error is a real DB failure; surface it rather than masking it as "not paused" (409).
 	if err == sql.ErrNoRows {
 		return errors.New("flow is not interrupted", http.StatusConflict)
@@ -1264,9 +1269,11 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 		// The leaf flip is this Resume's claim on the interrupt it selected outside the transaction. A zero-row match
 		// means a concurrent Resume (or Terminate) resolved that leaf first, so this one's payload would be discarded:
 		// roll back and 409. The root gate below cannot stand in for it - a sibling leaf still interrupted keeps the
-		// root interrupted, and both Resumes would pass it.
-		leafRes, err := tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, resume_data=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusInterrupted+"'",
-			workflow.StatusPending, resumeDataJSON, leafStepID)
+		// root interrupted, and both Resumes would pass it. The status alone does not name the interrupt: after
+		// another Resume, a flow.Retry re-runs the same row and can interrupt it again, and an unfenced flip would
+		// hand this Resume's payload to that later prompt. So the flip is fenced on the generation it selected.
+		leafRes, err := tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, resume_data=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusInterrupted+"' AND lease_seq=?",
+			workflow.StatusPending, resumeDataJSON, leafStepID, leafLeaseSeq)
 		if err != nil {
 			return errors.Trace(err)
 		}

@@ -19,6 +19,7 @@ limitations under the License.
 //   - A stale completing worker does not complete a flow its replay is still recovering.
 //   - A stale child's outcome does not settle the park a Retry made for a newer child.
 //   - Two Resumes of one leaf: one wins, the other 409s rather than discarding its payload.
+//   - A Resume of an interrupt another Resume already answered does not answer the step's next interrupt.
 package engine
 
 import (
@@ -470,5 +471,148 @@ func TestSubgraphRevive_StaleDeliveryWaitingOnTheRowLock(t *testing.T) {
 	if assert.NoError(err) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 		assert.Equal(2, out.State.GetInt("answer"))
+	}
+}
+
+// TestResume_StaleResumeOfAReinterruptedLeaf pins Resume's fence on the interrupt it SELECTED, not merely on the
+// leaf being interrupted. Resume A selects Gate's first interrupt and freezes; Resume B, on a peer, answers it; Gate
+// retries and interrupts again on the same step row. A must 409 and every prompt must get its own answer. A freezes
+// either right after its selection or just before its transaction, since the generation must be the one the
+// selection saw: read again later, it is the re-interrupt's. With an interrupted sibling, B's Resume records the
+// sibling as the next prompt, so a stale A answering Gate's second interrupt also skips the recorded one.
+func TestResume_StaleResumeOfAReinterruptedLeaf(t *testing.T) {
+	t.Parallel()
+	for _, freeze := range []string{engineseams.CheckpointResumeLeafSelected, engineseams.CheckpointResumeBeforeFlowWrite} {
+		for _, sibling := range []bool{false, true} {
+			name := freeze + "/lone_gate"
+			if sibling {
+				name = freeze + "/with_sibling"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				staleResumeOfAReinterruptedLeaf(t, freeze, sibling)
+			})
+		}
+	}
+}
+
+func staleResumeOfAReinterruptedLeaf(t *testing.T, freeze string, sibling bool) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("Gate")
+	if sibling {
+		g.SetURL("S", "reinterrupt/s") // the entry point: the first task given a URL
+		g.SetURL("Gate", "reinterrupt/gate")
+		g.SetURL("Sibling", "reinterrupt/sibling")
+		g.SetURL("J", "reinterrupt/j")
+		g.AddTransitionFanOut("S", "Gate", "Sibling")
+		g.AddTransition("Gate", "J")
+		g.AddTransition("Sibling", "J")
+		g.SetFanIn("J")
+		g.AddTransition("J", workflow.End)
+	} else {
+		g.SetURL("Gate", "reinterrupt/gate")
+		g.AddTransition("Gate", workflow.End)
+	}
+	mux.HandleGraph("reinterrupt/g", g)
+	type reply struct {
+		Answer string `json:"answer"`
+	}
+	noop := func(context.Context, *workflow.Flow) error { return nil }
+	mux.HandleTask("reinterrupt/s", noop)
+	mux.HandleTask("reinterrupt/j", noop)
+	mux.HandleTask("reinterrupt/gate", func(ctx context.Context, f *workflow.Flow) error {
+		var r reply
+		yield, err := f.Interrupt(map[string]any{"round": f.Attempt()}, &r)
+		if yield || err != nil {
+			return err
+		}
+		if f.Attempt() == 0 {
+			f.Retry(0, 1, 0, 0) // ask again, on the same step row
+			return nil
+		}
+		f.SetString("accepted", r.Answer)
+		return nil
+	})
+	releaseSibling := make(chan struct{})
+	var siblingRuns atomic.Int32
+	mux.HandleTask("reinterrupt/sibling", func(ctx context.Context, f *workflow.Flow) error {
+		var r reply
+		if siblingRuns.Add(1) == 1 {
+			<-releaseSibling // interrupt after Gate, so Gate's interrupt is the recorded one
+		}
+		yield, err := f.Interrupt(nil, &r)
+		if yield || err != nil {
+			return err
+		}
+		f.SetString("sibling", r.Answer)
+		return nil
+	})
+
+	// The frozen Resume runs on e; the one that answers runs on a peer, whose checkpoints are not armed.
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	p := NewEngineUnderTest(t.Name())
+	defer p.Shutdown(ctx)
+	defer close(releaseSibling) // ahead of the Shutdowns, so a held Sibling never blocks a drain
+	for _, eng := range []*Engine{e, p} {
+		eng.SetHost(mux)
+		assert.Must(assert.NoError(eng.Startup(t.Context())))
+	}
+
+	fk, err := e.Create(ctx, "reinterrupt/g", nil, nil)
+	assert.Must(assert.NoError(err))
+	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
+	assert.Must(assert.NoError(err))
+	interrupted := func(task string, attempt int) bool {
+		q := "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND task_name=? AND attempt=? AND status='" + workflow.StatusInterrupted + "'"
+		return enginetest.CountRows(t, e, shard, q, flowID, task, attempt) == 1
+	}
+	assert.Must(assert.True(enginetest.WaitUntil(t, 10*time.Second, func() bool { return interrupted("Gate", 0) }), "Gate never interrupted"))
+	if sibling {
+		releaseSibling <- struct{}{}
+		assert.Must(assert.True(enginetest.WaitUntil(t, 10*time.Second, func() bool { return interrupted("Sibling", 0) }), "Sibling never interrupted"))
+	}
+
+	e.seams.Break(freeze)
+	defer e.seams.Resume(freeze)
+	reached := e.seams.Waiter(freeze)
+	stale := make(chan error, 1)
+	go func() { stale <- e.Resume(ctx, fk, map[string]any{"answer": "stale"}) }()
+	select {
+	case <-reached:
+	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
+		t.Fatal("the stale Resume never reached its checkpoint")
+	}
+	assert.Must(assert.NoError(p.Resume(ctx, fk, map[string]any{"answer": "first"}))) // answers Gate's first interrupt
+	assert.Must(assert.True(enginetest.WaitUntil(t, 10*time.Second, func() bool { return interrupted("Gate", 1) }), "Gate never interrupted again"))
+
+	e.seams.Resume(freeze)
+	select {
+	case err := <-stale:
+		assert.Equal(409, errors.StatusCode(err), "the stale Resume answered a later prompt: %v", err)
+	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
+		t.Fatal("the stale Resume never returned")
+	}
+	snap, err := e.Snapshot(ctx, fk)
+	if assert.NoError(err) {
+		assert.Equal(workflow.StatusInterrupted, snap.Status, "a prompt was answered without a Resume of its own")
+	}
+
+	if sibling {
+		assert.NoError(p.Resume(ctx, fk, map[string]any{"answer": "sibling"})) // the recorded next prompt
+	}
+	assert.NoError(p.Resume(ctx, fk, map[string]any{"answer": "second"}))
+	awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second*enginetest.TimeoutScale())
+	defer cancel()
+	out, err := e.Await(awaitCtx, fk)
+	if assert.NoError(err) {
+		assert.Equal(workflow.StatusCompleted, out.Status)
+		assert.Equal("second", out.State.GetString("accepted"))
+		if sibling {
+			assert.Equal("sibling", out.State.GetString("sibling"))
+		}
 	}
 }

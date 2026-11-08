@@ -268,7 +268,15 @@ re-dispatch the task's `flow.Interrupt` call returns that data with `yield=false
 to `pending`, transitions all flows in the chain to `running`. Propagation goes both directions. Must be addressed
 by the **root** flow key (400 on a subgraph-child key). If
 multiple fan-out siblings interrupt, each `Resume` handles one; the flow returns to `running` only when no
-interrupted steps remain.
+interrupted steps remain. **The leaf flip is fenced on the leaf's `lease_seq` as the query that SELECTED the
+leaf read it** (`interruptedSubgraphChain` returns it), not on `status='interrupted'` alone: `flow.Retry` re-runs
+the same step row, so after another Resume the leaf can be interrupted again, and a status-only flip hands the
+stale Resume's payload to that later prompt. Every re-interrupt follows a claim, which raises `lease_seq`. **Do not
+re-read the generation after the selection**: a re-interrupt in between is then taken for the one selected, and
+with an interrupted sibling the stale payload also skips the prompt the flow recorded as next. A zero-row flip
+rolls back with a 409. Pinned by `TestResume_ConcurrentResumesOfOneLeaf` and
+`TestResume_StaleResumeOfAReinterruptedLeaf` (frozen right after the selection and just before the transaction,
+with and without a sibling).
 
 **Terminate** - Aborts a created, running, or interrupted flow, forcefully and unconditionally: in-flight work is
 abandoned immediately, with no chance for any task to react. Walks **down** (`allSubgraphFlows`) the hierarchy,
