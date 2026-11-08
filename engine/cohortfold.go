@@ -23,7 +23,6 @@ import (
 	"io"
 	"maps"
 	"slices"
-	"strings"
 
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -274,7 +273,7 @@ func memberContribution(part, changes workflow.Changes, reducers map[string]work
 func innerFanInIDs(graph *workflow.Graph, members []cohortMember) []int {
 	var ids []int
 	for _, m := range members {
-		if graph.IsFanIn(strings.TrimSpace(m.taskName)) {
+		if graph.IsFanIn(m.taskName) {
 			ids = append(ids, m.stepID)
 		}
 	}

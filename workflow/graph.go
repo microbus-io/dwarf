@@ -149,7 +149,7 @@ func (g *Graph) Transitions() []Transition {
 // (used by transitions, fan-in, goto); the URL is the opaque downstream endpoint the engine
 // hands to the host's ExecuteTask. The first task bound
 // becomes the default entry point unless SetEntryPoint is called explicitly. End is not
-// registered. The name must not be empty; Validate rejects a task with an empty name.
+// registered. The name must not be empty or begin or end with whitespace; Validate rejects such a task.
 //
 // The same URL may be bound under multiple names. This is how a workflow author reuses the same task
 // code at distinct positions in the graph with different downstream transitions per position.
@@ -438,6 +438,11 @@ func (g *Graph) Validate() error {
 		// name would be skipped, not run.
 		if t.Name == "" {
 			return errors.New("task with URL '%s' in graph '%s' has no name", t.URL, g.name)
+		}
+		// A name is its identity exactly as given. A padded one would differ from its trimmed spelling in Go but not
+		// in a SQL comparison on MySQL or SQL Server, which ignores trailing spaces.
+		if strings.TrimSpace(t.Name) != t.Name {
+			return errors.New("task %q in graph '%s' has leading or trailing whitespace", stripProto(t.Name), g.name)
 		}
 		if taskSet[t.Name] {
 			return errors.New("duplicate task '%s' in graph '%s'", stripProto(t.Name), g.name)

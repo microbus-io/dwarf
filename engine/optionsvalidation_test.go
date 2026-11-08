@@ -191,3 +191,39 @@ func TestSubgraph_EmptyURLFailsTheStep(t *testing.T) {
 	}
 	assert.False(afterRan, "the task after the Subgraph call ran")
 }
+
+// TestCreate_RejectsAPaddedTaskName pins that a graph with a task name padded by whitespace is refused at Create
+// with a 400, before any flow is stored. Accepted, a padded inner fan-in's cohort dropped out of the outer fold
+// wherever the engine trimmed the name it read back from the step row, so the flow completed without that
+// cohort's contributions.
+func TestCreate_RejectsAPaddedTaskName(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("PaddedName")
+	for _, task := range []string{"Start", "Inner", "Part", "JoinOuter"} {
+		g.SetURL(task, "paddedname/"+task)
+	}
+	g.SetURL(" JoinInner ", "paddedname/JoinInner")
+	g.AddTransitionForEach("Start", "Inner", "outer", "o")
+	g.AddTransitionForEach("Inner", "Part", "inner", "i")
+	g.AddTransitionChain("Part", " JoinInner ", "JoinOuter", workflow.End)
+	g.SetFanIn(" JoinInner ")
+	g.SetFanIn("JoinOuter")
+	mux.HandleGraph("paddedname/g", g)
+	ran := false
+	for _, task := range []string{"Start", "Inner", "Part", "JoinInner", "JoinOuter"} {
+		mux.HandleTask("paddedname/"+task, func(ctx context.Context, f *workflow.Flow) error { ran = true; return nil })
+	}
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.Must(assert.NoError(e.Startup(t.Context())))
+
+	_, _, err := e.Run(ctx, "paddedname/g", map[string]any{"outer": []int{1}, "inner": []int{1}}, nil)
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "%v", err)
+	assert.False(ran)
+	assert.Zero(enginetest.CountRows(t, e, 1, "SELECT COUNT(*) FROM dwarf_flows"))
+}

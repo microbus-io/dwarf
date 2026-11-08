@@ -1110,6 +1110,12 @@ not from `Validate`. The arm that completes the flow at the source serves two ca
 unreachable for any graph the engine accepted: `Validate` (run at `Create`) requires a fan-out source to converge on a `SetFanIn`
 task. It is a defensive fallback, not the documented behavior of an empty array.
 
+**A task name read back from a step row matches the graph exactly - never normalize it.** `Validate` refuses a
+name with leading or trailing whitespace, since a SQL comparison on MySQL or SQL Server ignores trailing spaces and
+a Go map does not; past it, `IsFanIn`, the cohort's exit-task set and `stripForEachBookkeeping` look the stored
+name up as it is. A `TrimSpace` at one of those lookups is a no-op for every valid graph, and if the rule is ever
+relaxed it misses the task at that site alone: a padded inner fan-in's cohort dropped out of the outer fold.
+
 **An explicit route to END beats the empty-cohort convergence, and the two are told apart by `routedToEnd`, not
 by the cohort size.** A fan-out source is free to also carry a `Goto`/`onError` edge to `END` - "fan out over
 the array, or end the flow when the task decides there is nothing left to do" is the shape every task-driven

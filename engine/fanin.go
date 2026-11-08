@@ -20,7 +20,6 @@ import (
 	"context"
 	"database/sql"
 	"maps"
-	"strings"
 
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/staterefs"
@@ -397,7 +396,7 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum int,
 		// A cohort member with an exit task name that has not yet recorded a successor is one that transitioned
 		// into the fan-in (see above); a member with the same task name that already has a successor looped or
 		// continued elsewhere and must keep its own forward edge.
-		if exitTaskSet[strings.TrimSpace(m.taskName)] && m.successorID == 0 {
+		if exitTaskSet[m.taskName] && m.successorID == 0 {
 			exitStepIDs = append(exitStepIDs, m.stepID)
 		}
 		contribution, ok, cerr := memberContribution(parts[m.stepID], m.changes, reducers)
@@ -436,7 +435,7 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum int,
 	// A stripped name must also leave the spawn's refs, or the mint carries it forward from there: in a nested
 	// fan-out whose levels share an `as`, the spawn of the inner cohort holds the OUTER element as an item ref,
 	// and re-emitting it would bring that element back past the inner fan-in.
-	for _, k := range stripForEachBookkeeping(merged, graph, strings.TrimSpace(c.spawnTaskName)) {
+	for _, k := range stripForEachBookkeeping(merged, graph, c.spawnTaskName) {
 		delete(spawnRefs, k)
 	}
 

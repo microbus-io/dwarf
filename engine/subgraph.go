@@ -449,7 +449,7 @@ func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Execu
 		if !lost {
 			var taskName string
 			if err := tx.QueryRowContext(ctx, "SELECT task_name FROM dwarf_steps WHERE step_id=?", parentStepID).Scan(&taskName); err == nil {
-				lost = e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultDeliverFailureErr, strings.TrimSpace(taskName)))
+				lost = e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultDeliverFailureErr, taskName))
 			}
 		}
 		if lost {

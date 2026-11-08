@@ -20,7 +20,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"strings"
 
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/graphcache"
@@ -394,7 +393,7 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 	if err := merged.ApplyAll(contributions, graph.Reducers()); err != nil {
 		return workflow.State{}, errors.Trace(&permanentError{err})
 	}
-	stripForEachBookkeeping(merged, graph, strings.TrimSpace(spawnTask))
+	stripForEachBookkeeping(merged, graph, spawnTask)
 	return merged, nil
 }
 
@@ -443,7 +442,7 @@ func (e *Engine) simulatedFanInPart(ctx context.Context, db sequel.Executor, sha
 	if err != nil {
 		return workflow.Changes{}, errors.Trace(&permanentError{err})
 	}
-	stripForEachBookkeeping(merged, graph, strings.TrimSpace(spawnTask))
+	stripForEachBookkeeping(merged, graph, spawnTask)
 	part, err := projectReduced(merged, rec, reducers)
 	if err != nil {
 		return workflow.Changes{}, errors.Trace(&permanentError{err})

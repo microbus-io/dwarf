@@ -1450,3 +1450,31 @@ func TestGraph_ValidateRejectsAnEmptyTaskName(t *testing.T) {
 	assert.Must(assert.NoError(json.Unmarshal(data, &decoded)))
 	assert.Error(decoded.Validate())
 }
+
+// TestGraph_ValidateRejectsAPaddedTaskName pins that a task name beginning or ending with whitespace is refused, in
+// a constructed graph and in one decoded from JSON. A padded name differs from its trimmed spelling in Go but not in
+// a SQL comparison on MySQL or SQL Server, which ignores trailing spaces. Whitespace inside a name is allowed.
+func TestGraph_ValidateRejectsAPaddedTaskName(t *testing.T) {
+	assert := testarossa.For(t)
+
+	for _, name := range []string{" Join", "Join ", " Join ", "\tJoin", "Join\n"} {
+		g := NewGraph("Test")
+		g.SetURL("Start", "svc/start")
+		g.SetURL(name, "svc/join")
+		g.AddTransition("Start", name)
+		g.AddTransition(name, End)
+		assert.Error(g.Validate(), "%q", name)
+
+		data, err := json.Marshal(g)
+		assert.Must(assert.NoError(err))
+		var decoded Graph
+		assert.Must(assert.NoError(json.Unmarshal(data, &decoded)))
+		assert.Error(decoded.Validate(), "%q decoded", name)
+	}
+
+	g := NewGraph("Test")
+	g.SetURL("Start", "svc/start")
+	g.SetURL("Join Them", "svc/join")
+	g.AddTransitionChain("Start", "Join Them", End)
+	assert.NoError(g.Validate())
+}
