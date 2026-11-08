@@ -647,11 +647,11 @@ func run() error {
 	if stopArchivedReaders != nil {
 		r := stopArchivedReaders()
 		art.ArchivedReads = r
-		fmt.Printf("archived reads: %d readers, %.0f reads/s, p50 %.1f ms, p99 %.1f ms, max %.0f ms, %d not found, %d errors\n",
-			r.Readers, r.ReadsPerSec, r.P50Ms, r.P99Ms, r.MaxMs, r.NotFound, r.Errors)
-		if r.Errors > 0 && art.Valid {
+		fmt.Printf("archived reads: %d readers, %.0f reads/s, p50 %.1f ms, p99 %.1f ms, max %.0f ms, %d not found, %d errors, %d list errors\n",
+			r.Readers, r.ReadsPerSec, r.P50Ms, r.P99Ms, r.MaxMs, r.NotFound, r.Errors, r.ListErrors)
+		if (r.Errors > 0 || r.ListErrors > 0) && art.Valid {
 			art.Valid = false
-			art.Invalidity = fmt.Sprintf("archived reads: %d errors", r.Errors)
+			art.Invalidity = fmt.Sprintf("archived reads: %d errors, %d list errors", r.Errors, r.ListErrors)
 			fmt.Println("INVALID RUN:", art.Invalidity)
 		}
 	}
