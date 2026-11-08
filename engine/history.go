@@ -343,7 +343,7 @@ func (e *Engine) stepIn(ctx context.Context, db *sequel.DB, t flowTables, shardN
 	// past it.
 	var ownChildFlow int
 	err = db.QueryRowContext(ctx,
-		"SELECT flow_id FROM "+t.flows+" WHERE surgraph_step_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
+		latestChildSQL(t.flows),
 		stepID,
 	).Scan(&ownChildFlow)
 	if err != nil && err != sql.ErrNoRows {
@@ -421,13 +421,20 @@ func (e *Engine) stepIn(ctx context.Context, db *sequel.DB, t flowTables, shardN
 	return fs, nil
 }
 
+// latestChildSQL selects the latest child flow of a caller step, in the given flows table. The literal
+// surgraph_step_id>0 is what lets the partial index serve a bound id: SQLite and SQL Server use a partial index only
+// for a predicate that implies the index's own, which a bind parameter alone cannot.
+func latestChildSQL(flows string) string {
+	return "SELECT flow_id FROM " + flows + " WHERE surgraph_step_id=? AND surgraph_step_id>0 ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)"
+}
+
 // skipSurgraphForward walks past a surgraph wrapper to the entry step of its child
 // subgraph (predecessor_id=0). Loops for nested subgraphs.
 func (e *Engine) skipSurgraphForward(ctx context.Context, db *sequel.DB, t flowTables, id int) (int, error) {
 	for id > 0 {
 		var childFlow int
 		err := db.QueryRowContext(ctx,
-			"SELECT flow_id FROM "+t.flows+" WHERE surgraph_step_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
+			latestChildSQL(t.flows),
 			id,
 		).Scan(&childFlow)
 		if err == sql.ErrNoRows {
@@ -462,7 +469,7 @@ func (e *Engine) skipSurgraphBackward(ctx context.Context, db *sequel.DB, t flow
 	for id > 0 {
 		var childFlow int
 		err := db.QueryRowContext(ctx,
-			"SELECT flow_id FROM "+t.flows+" WHERE surgraph_step_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
+			latestChildSQL(t.flows),
 			id,
 		).Scan(&childFlow)
 		if err == sql.ErrNoRows {

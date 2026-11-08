@@ -208,6 +208,11 @@ func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, ne
 		// Only where the INSERT could not name its own id, which insertedID has therefore already read.
 		batch.queue(execOnly, fixup, selfFlowFixupArgs(newFlowID, len(self))...)
 	}
+	if s.surgraphStepID != 0 {
+		// A subgraph child names itself as the owner of its caller's park, which the spawn's park hook wrote earlier
+		// in this transaction (so the row is already locked). Every delivery to the caller is fenced on it.
+		batch.queue(execOnly, "UPDATE dwarf_steps SET parked_child_flow_id="+flowID+" WHERE step_id=?", append(append([]any{}, flowArgs...), s.surgraphStepID)...)
+	}
 	if err := batch.flush(); err != nil {
 		return 0, 0, 0, err
 	}
@@ -1250,8 +1255,19 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 			tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE step_id IN ("+parkPlaceholders+") AND status='"+workflow.StatusInterrupted+"'", parkArgs...)
 		}
 
-		tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, resume_data=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusInterrupted+"'",
+		// The leaf flip is this Resume's claim on the interrupt it selected outside the transaction. A zero-row match
+		// means a concurrent Resume (or Terminate) resolved that leaf first, so this one's payload would be discarded:
+		// roll back and 409. The root gate below cannot stand in for it - a sibling leaf still interrupted keeps the
+		// root interrupted, and both Resumes would pass it.
+		leafRes, err := tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, resume_data=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusInterrupted+"'",
 			workflow.StatusPending, resumeDataJSON, leafStepID)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if n, _ := leafRes.RowsAffected(); n == 0 {
+			lost = true
+			return errResumeLost
+		}
 
 		// Race gate against a concurrent Terminate. A Terminate that committed first has terminated the tree's
 		// steps, so the step writes above matched nothing and the flow update below would match nothing too:

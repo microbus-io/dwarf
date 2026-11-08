@@ -218,11 +218,19 @@ func (e *Engine) recoverExpiredLeases(ctx context.Context) {
 	})
 }
 
+// wedgedParksSQL selects the parked callers no open child can revive. The literal f.surgraph_step_id>0 lets the
+// partial index serve the correlated lookup; without it SQLite scans dwarf_flows once per parked step.
+const wedgedParksSQL = "SELECT s.step_id, s.flow_id, s.parked_child_flow_id FROM dwarf_steps s" +
+	" WHERE s.parked=? AND s.status='" + workflow.StatusRunning + "' AND s.updated_at <= DATE_ADD_MILLIS(NOW_UTC(), ?)" +
+	" AND NOT EXISTS (SELECT 1 FROM dwarf_flows f WHERE f.surgraph_step_id=s.step_id AND f.surgraph_step_id>0" +
+	" AND f.status IN ('" + workflow.StatusCreated + "', '" + workflow.StatusRunning + "', '" + workflow.StatusInterrupted + "'))"
+
 // recoverWedgedSubgraphParks finds parkedSubgraph caller steps whose child flow can no longer revive them -
 // the child reached terminal but completeSurgraphFlow's revive was lost, or the child was deleted - and
 // re-drives the release. A healthy caller step has one non-terminal child (created/running/interrupted)
-// bound to it by surgraph_step_id; a fan-out has several such caller steps, each checked independently
-// here, and flow.Retry leaves older terminal children whose latest sibling is still active. completeSurgraphFlow
+// bound to it by surgraph_step_id and named by its parked_child_flow_id; a fan-out has several such caller steps,
+// each checked independently here. The release is fenced on the owner the scan read, so a caller re-parked on a
+// newer child since the scan is left alone. completeSurgraphFlow
 // runs within milliseconds of child completion in steady state, so a step older than parkWedgeThreshold with
 // no non-terminal child is genuinely wedged.
 //
@@ -233,21 +241,16 @@ func (e *Engine) recoverExpiredLeases(ctx context.Context) {
 // The boundary is immaterial at the production threshold (one millisecond either side of five minutes), so
 // `<=` costs nothing there and makes the zero case honest.
 func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, shard int, minAge time.Duration) {
-	rows, err := db.QueryContext(ctx,
-		"SELECT s.step_id, s.flow_id FROM dwarf_steps s"+
-			" WHERE s.parked=? AND s.status='"+workflow.StatusRunning+"' AND s.updated_at <= DATE_ADD_MILLIS(NOW_UTC(), ?)"+
-			" AND NOT EXISTS (SELECT 1 FROM dwarf_flows f WHERE f.surgraph_step_id=s.step_id AND f.status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"'))",
-		parkedSubgraph, -minAge.Milliseconds(),
-	)
+	rows, err := db.QueryContext(ctx, wedgedParksSQL, parkedSubgraph, -minAge.Milliseconds())
 	if err != nil {
 		e.logSweepError(ctx, "Wedge sweep: querying parked subgraph steps", "shard", shard, "error", err)
 		return
 	}
-	type wedgedCaller struct{ stepID, flowID int }
+	type wedgedCaller struct{ stepID, flowID, childFlowID int }
 	var hits []wedgedCaller
 	for rows.Next() {
 		var w wedgedCaller
-		err := rows.Scan(&w.stepID, &w.flowID)
+		err := rows.Scan(&w.stepID, &w.flowID, &w.childFlowID)
 		if err != nil {
 			rows.Close()
 			e.logSweepError(ctx, "Wedge sweep: scanning parked subgraph step", "shard", shard, "error", err)
@@ -268,21 +271,21 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 		if ctx.Err() != nil {
 			return // abandoned by the drain; the next pass finds what is left
 		}
-		// The latest child for this caller step decides the disposition; older children are completed
-		// retry attempts. flow_id DESC mirrors how the live completion path keys the surgraph.
-		var childFlowID int
+		// The child that owns the park, as the scan read it off the caller, decides the disposition, and every
+		// delivery below is fenced on it: a caller re-parked on a newer child since the scan is left alone.
+		childFlowID := w.childFlowID
 		var childStatus, childError, childCancelReason string
 		var childFinalState []byte
 		err := db.QueryRowContext(ctx,
-			"SELECT flow_id, status, final_state, error, cancel_reason FROM dwarf_flows WHERE surgraph_step_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
-			w.stepID,
-		).Scan(&childFlowID, &childStatus, &childFinalState, &childError, &childCancelReason)
+			"SELECT status, final_state, error, cancel_reason FROM dwarf_flows WHERE flow_id=?",
+			childFlowID,
+		).Scan(&childStatus, &childFinalState, &childError, &childCancelReason)
 		switch {
 		case err == sql.ErrNoRows:
 			// The child flow is gone (e.g. deleted/purged): fail the caller so the flow can terminate.
 			e.logger.ErrorContext(ctx, "Wedge sweep: parked subgraph caller has no child flow; failing it",
 				"shard", shard, "step", w.stepID, "flow", keys.CorrelationID(shard, w.flowID))
-			if rerr := e.deliverSubgraphError(ctx, shard, w.stepID, errors.New("subgraph flow not found (wedge recovery)")); rerr != nil {
+			if rerr := e.deliverSubgraphError(ctx, shard, w.stepID, childFlowID, errors.New("subgraph flow not found (wedge recovery)")); rerr != nil {
 				e.logSweepError(ctx, "Wedge sweep: failing orphaned subgraph caller", "shard", shard, "step", w.stepID, "error", rerr)
 				continue
 			}
@@ -298,10 +301,10 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 			var rerr error
 			switch childStatus {
 			case workflow.StatusCompleted:
-				rerr = e.completeSurgraphFlow(ctx, shard, w.flowID, w.stepID, childFinalState)
+				rerr = e.completeSurgraphFlow(ctx, shard, w.flowID, w.stepID, childFlowID, childFinalState)
 			case workflow.StatusCancelled:
 				// Delivered as the cancellation itself, as the live path does, so the caller can recognize it.
-				rerr = e.deliverSubgraphError(ctx, shard, w.stepID, cancelmarker.New(strings.TrimSpace(childCancelReason)))
+				rerr = e.deliverSubgraphError(ctx, shard, w.stepID, childFlowID, cancelmarker.New(strings.TrimSpace(childCancelReason)))
 			default:
 				// failed / terminated: deliver the child's error (or a synthesized one) to the caller. The stored
 				// message is passed as an argument, never as the pattern, which would read any % in it as a verb.
@@ -309,7 +312,7 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 				if msg == "" {
 					msg = "subgraph " + childStatus
 				}
-				rerr = e.deliverSubgraphError(ctx, shard, w.stepID, errors.New("%s", msg))
+				rerr = e.deliverSubgraphError(ctx, shard, w.stepID, childFlowID, errors.New("%s", msg))
 			}
 			if rerr != nil {
 				e.logSweepError(ctx, "Wedge sweep: reviving subgraph caller", "shard", shard, "step", w.stepID, "error", rerr)

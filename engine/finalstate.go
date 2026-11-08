@@ -33,16 +33,16 @@ import (
 
 // completeFlowSequential marks a flow completed when no successor exists.
 //
-// It does NOT touch the step. Both call sites are downstream of processStep's fenced completion UPDATE, which
-// already set status='completed' (and bailed on a zero-row fence match), so the step is terminal before this
-// runs. Do not add a trailing "UPDATE dwarf_steps SET status=completed" here: it re-writes that same value at
-// the cost of a BEGIN/UPDATE/COMMIT on every flow completion, and its only real effect is to bump the step's
-// updated_at to AFTER completeFlow's transaction, inflating the step's recorded task duration (History and the
-// FlowRenderer read updated_at - started_at) by the cost of completing the flow. It would also be a
-// post-execution step write with neither a status guard nor a lease_seq fence.
-func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, flowID int, stepID int, flowHour int, flowToken string, workflowURL string) error {
+// Its only step write is completeFlow's lease fence. Both call sites are downstream of processStep's fenced
+// completion UPDATE, which already set status='completed' (and bailed on a zero-row fence match), so the step is
+// terminal before this runs. Do not add a trailing "UPDATE dwarf_steps SET status=completed" here: it re-writes
+// that same value at the cost of a BEGIN/UPDATE/COMMIT on every flow completion, and its only real effect is to
+// bump the step's updated_at to AFTER completeFlow's transaction, inflating the step's recorded task duration
+// (History and the FlowRenderer read updated_at - started_at) by the cost of completing the flow. It would also
+// be a post-execution step write with neither a status guard nor a lease_seq fence.
+func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, flowID int, stepID int, leaseSeq int, flowHour int, flowToken string, workflowURL string) error {
 	e.logger.DebugContext(ctx, "Flow completed", "workflow", workflowURL)
-	_, err := e.completeFlow(ctx, shardNum, flowID, stepID, flowHour, flowToken)
+	_, err := e.completeFlow(ctx, shardNum, flowID, stepID, leaseSeq, flowHour, flowToken)
 	return errors.Trace(err)
 }
 
@@ -592,8 +592,8 @@ func stripForEachBookkeeping(state workflow.State, graph *workflow.Graph, spawnT
 }
 
 // completeFlow transitions a flow to completed and propagates to surgraph. stepID is the step that completed it,
-// recorded as the step the flow stopped at.
-func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, stepID int, flowHour int, flowToken string) (bool, error) {
+// recorded as the step the flow stopped at, and leaseSeq the generation of the dispatch that completed it.
+func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, stepID int, leaseSeq int, flowHour int, flowToken string) (bool, error) {
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return false, errors.Trace(err)
@@ -653,10 +653,30 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, ste
 		default:
 			batch.queue(readLocked, lockGrab+lockWhere+" RETURNING "+lockedCols, flowID)
 		}
+		// The completing step's own fence, as the successor write's: on this dispatch's lease generation and on
+		// advancing=1. processStep's completion write is not enough, because the orphan sweep can rewind the step
+		// between that write and this transaction, and its replay may already be running an onError handler - a
+		// stale worker completing the flow here would freeze an outcome the replay is still producing. It is
+		// queued after the lock grab so the step is written under the flow-row lock, and read only for a flow
+		// still open: a flow this transaction already completed (a retry after a commit that reported an error)
+		// has cleared the flag, and must still re-drive its revive below.
+		var fenced bool
+		batch.queue(func(res *sequel.BatchResults) error {
+			fence, err := res.Exec()
+			if err != nil {
+				return errors.Trace(err)
+			}
+			n, _ := fence.RowsAffected()
+			fenced = n == 0
+			return nil
+		}, "UPDATE dwarf_steps SET advancing=0 WHERE step_id=? AND lease_seq=? AND advancing=1", stepID, leaseSeq)
 		var tails terminalTails
 		queueCompletedTails(batch, flowID, &tails)
 		if err := batch.flush(); err != nil {
 			return err
+		}
+		if fenced && !workflow.IsTerminalStatus(currentStatus) {
+			return errLeaseFenced
 		}
 		fs, wf, err := e.computeFinalStateFrom(ctx, tx, shardNum, flowID, flowToken, &tails)
 		if err != nil {
@@ -701,7 +721,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, ste
 		// on the attempt that transitioned the flow. A failed/terminated/cancelled flow (status != completed)
 		// gets no revive here; its parent is handled by failure delivery / the Terminate cascade.
 		if currentStatus == workflow.StatusCompleted && surgraphFlowID != 0 {
-			if rerr := e.completeSurgraphFlow(ctx, shardNum, surgraphFlowID, surgraphStepID, finalStateJSON); rerr != nil {
+			if rerr := e.completeSurgraphFlow(ctx, shardNum, surgraphFlowID, surgraphStepID, flowID, finalStateJSON); rerr != nil {
 				return false, errors.Trace(rerr)
 			}
 		}
@@ -715,7 +735,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, ste
 	e.signalStop(ctx, compositeID, workflow.StatusCompleted)
 
 	if surgraphFlowID != 0 {
-		err := e.completeSurgraphFlow(ctx, shardNum, surgraphFlowID, surgraphStepID, finalStateJSON)
+		err := e.completeSurgraphFlow(ctx, shardNum, surgraphFlowID, surgraphStepID, flowID, finalStateJSON)
 		if err != nil {
 			return true, errors.Trace(err)
 		}

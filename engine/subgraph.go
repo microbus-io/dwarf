@@ -291,8 +291,17 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 	return len(terminalized) > 0 && terminalized[0], nil
 }
 
-// completeSurgraphFlow re-dispatches a parked surgraph step after its child completes.
-func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, surgraphStepID int, subgraphFinalStateJSON []byte) error {
+// parkOwnerGuard confines a delivery to a parked caller to the park its child owns: the caller row's
+// parked_child_flow_id, written by the spawn that parked it, must name the delivering child. The park conditions
+// alone (running, parkedSubgraph) do not identify it: a Retry reaps the child and rewinds the same step_id, which
+// can park again on a new child under exactly those conditions, so a stalled worker delivering the old child's
+// outcome late would settle the new park with it. The owner must be a column of the row being updated: a
+// subquery on the child flows reads PostgreSQL's statement snapshot, which a delivery that waited on the row lock
+// rechecks the row against but does not refresh. A delivery that consumes the park clears the owner.
+const parkOwnerGuard = " AND parked_child_flow_id=?"
+
+// completeSurgraphFlow re-dispatches a parked surgraph step after its child, childFlowID, completes.
+func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, surgraphStepID int, childFlowID int, subgraphFinalStateJSON []byte) error {
 	// engineseams.FaultSubgraphReviveLost simulates the revive being lost after the child went terminal (the wedge the
 	// parked-step sweep exists to catch): the caller step stays running+parkedSubgraph with no open child,
 	// so the test proves recoverWedgedSubgraphParks re-drives the release. Returns nil so the caller path
@@ -325,9 +334,10 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 		// completion and this revive) would be resurrected to pending: keying on step_id alone overwrites
 		// the just-terminated row. The guard also subsumes the "step still live" check — a step that is no
 		// longer running/parked matches no row — and the rows-affected gate keeps Enqueue off a no-op.
+		// parkOwnerGuard confines it to the park this child owns.
 		res, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=1, subgraph_result=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=?",
-			workflow.StatusPending, parkedNone, resultJSON, surgraphStepID, parkedSubgraph,
+			"UPDATE dwarf_steps SET status=?, parked=?, parked_child_flow_id=0, subgraph_done=1, subgraph_result=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=?"+parkOwnerGuard,
+			workflow.StatusPending, parkedNone, resultJSON, surgraphStepID, parkedSubgraph, childFlowID,
 		)
 		if err != nil {
 			return errors.Trace(err)
@@ -372,12 +382,13 @@ func (e *Engine) dynamicSubgraphParent(ctx context.Context, db *sequel.DB, flowI
 //
 // Used only by the parked-step wedge sweep - the live failure path is cohort accounting
 // (deliverFlowFailureToParent from failStep / processStep) - and the sweep calls it only for a caller whose
-// latest child is already terminal or gone, so there is no child to terminalize here:
+// owned child is already terminal or gone, so there is no child to terminalize here. childFlowID is the child the
+// sweep found owning the park, whether or not its row still exists:
 //
 //   - a terminal child: it went terminal but the revive was lost, and the re-arm is the whole recovery;
 //   - no child: the child flow is GONE. The caller's park and the child's insert commit in one transaction,
 //     so only a bug or a hand-deleted row leaves this, and failing the caller is the only way out.
-func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, parentStepID int, taskErr error) error {
+func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, parentStepID int, childFlowID int, taskErr error) error {
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)
@@ -387,7 +398,7 @@ func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, parentS
 		// The parent re-arm is the transaction's first statement and is itself a write (the parked caller
 		// step), so it is write-first.
 		var derr error
-		reDispatchParent, derr = e.deliverFlowFailureToParent(ctx, tx, parentStepID, taskErr)
+		reDispatchParent, derr = e.deliverFlowFailureToParent(ctx, tx, parentStepID, childFlowID, taskErr)
 		return errors.Trace(derr)
 	})
 	if err != nil {
@@ -404,7 +415,8 @@ func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, parentS
 // subgraph_error). Called inside the child flow's terminating transaction, after the child flow row has been
 // terminalized. Returns true when the caller step was still parked and got re-armed - the caller then
 // enqueues it after the transaction. Returns false for a top-level flow (parentStepID==0) or a caller step no
-// longer parked (already resolved, terminated, or retried away), in which case there is nothing to re-dispatch.
+// longer parked on childFlowID (already resolved, terminated, or retried away), in which case there is nothing to
+// re-dispatch.
 //
 // The error is stored as its TracedError JSON, stack stripped, not as its message: flow.Subgraph decodes it,
 // so its status code and properties reach the caller - the cancellation marker among them, which is what
@@ -416,7 +428,7 @@ func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, parentS
 // task's own, unbounded and unchecked, so JSON over the payload limit or still holding a NUL keeps only the
 // message and status code - a cancellation marker among the properties is then lost, a smaller cost than a
 // failure write that cannot land, which the classifier reads as the database being down.
-func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Executor, parentStepID int, childErr error) (bool, error) {
+func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Executor, parentStepID int, childFlowID int, childErr error) (bool, error) {
 	if parentStepID == 0 {
 		return false, nil
 	}
@@ -449,8 +461,8 @@ func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Execu
 		return false, errors.Trace(err)
 	}
 	res, err := tx.ExecContext(ctx,
-		"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=1, subgraph_error=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=?",
-		workflow.StatusPending, parkedNone, encoded, parentStepID, parkedSubgraph,
+		"UPDATE dwarf_steps SET status=?, parked=?, parked_child_flow_id=0, subgraph_done=1, subgraph_error=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=?"+parkOwnerGuard,
+		workflow.StatusPending, parkedNone, encoded, parentStepID, parkedSubgraph, childFlowID,
 	)
 	if err != nil {
 		return false, errors.Trace(err)

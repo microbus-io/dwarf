@@ -1923,15 +1923,16 @@ has exactly one fenced write to the dispatched step, and everything after it is 
   abandons instead of advancing the flow twice. (On MySQL the cohort bump's fence is `RowsAffected`, honest there
   because every row it matches changes: arrivals rise, the flag goes 1 -> 0.) Pinned by
   `TestOrphanSweep_ReplaysSlowWorkersStep` and `..._OtherTransitions`, which fail with the fence removed.
-  `completeFlowSequential` carries no fence, **because the re-dispatch is a replay**: it re-derives the slow
-  worker's own decision from the recorded completion rather than re-running the task, so both reach "complete the
-  flow" from the same state, and whichever commits second no-ops on the flow-row guard. Were the re-dispatch to
-  re-run the task instead, a non-deterministic task could route to a successor the slow worker's completion then
-  strands - a flow completed early, its decision from one run and its state from another. One transient remains:
-  if the slow worker completes the flow while the step sits rewound, the step is `pending` on a closed flow until
-  a claim reaps it to the flow's status (seconds). Fencing the flow completion instead would close it at one more
-  statement on every flow completion, for a case that needs a worker stalled past its lease; declined.
-  `completeFlowSequential` in particular makes **no step write at all**: the gate already completed the step.
+  `completeFlow` carries the same fence: the completing step's `advancing` clear, on its lease generation and
+  `advancing=1`, queued after the flow-row lock grab in the same batch, and a zero-row match on a flow still open
+  abandons through `errLeaseFenced`. **A replay does not always re-derive the slow worker's decision**, so the
+  flow-row guard alone is not enough: a Cancel that marks the rewound step makes the replay route the cancellation
+  to `onError`, and an unfenced slow worker then completed the flow while the handler ran, freezing an outcome the
+  handler was still producing. The fence costs no round trip on PostgreSQL (it rides the lock grab's batch) and
+  one statement per flow completion elsewhere. Its verdict is read only for a flow open at the lock, so a retry
+  after a commit that reported an error still re-drives the parent revive. Pinned by
+  `TestCompleteFlow_StaleWorkerIsFenced`.
+  That fence is `completeFlow`'s **only** step write: the gate already completed the step.
   **Do not add a trailing `UPDATE dwarf_steps SET status='completed'` there** - it re-writes the same value, costs
   a transaction on every flow completion, is a post-execution step write with neither a status guard nor a fence,
   and bumps the step's `updated_at` to *after* `completeFlow`'s transaction, inflating the recorded task duration
@@ -2110,6 +2111,19 @@ where a non-subgraph sibling at the same depth is momentarily `running`; (2) par
 parked at `parked=1`. The PK lookup keeps each child flow bound to the step that launched it. **Do not link by the
 caller's step depth**: matching on depth is ambiguous across parallel callers at one depth; `surgraph_step_id` is
 the sole, precise link.
+
+**A park records its owner, and every delivery to it is fenced on that owner** (`dwarf_steps.parked_child_flow_id`,
+`parkOwnerGuard` in `subgraph.go`). `running` + `parkedSubgraph` identify a park, not which child owns it: a Retry
+reaps the child and parks the same `step_id` again on a new one, so a stalled worker's late revive, or a sweep
+acting on what it read before the Retry, would settle the new park with the old child's outcome. The spawn's insert
+batch writes the owner (`insertFlowTx`), a delivery that consumes the park and the Retry rewind clear it, and Fork's
+clone points a re-parked ancestor at its cloned child. The wedge sweep fences on the owner its scan read, also when
+that child's row is gone. **Do not derive the owner from the child flows in the delivery's predicate** (`MAX(flow_id)
+WHERE surgraph_step_id=...`): PostgreSQL rechecks a row it waited to lock against the row's new version, but reads
+every other table from the statement's older snapshot, so a delivery that waited out a Retry and re-park still sees
+the old child as the latest. A new delivery path must pass the child it delivers. Pinned by
+`TestSubgraphRevive_StaleChildDoesNotSettleNewPark` and, on PostgreSQL, `TestSubgraphRevive_StaleDeliveryWaitingOnTheRowLock`
+(which fails with the subquery form).
 
 ### Denormalized root pointer (`root_flow_id`)
 
@@ -4034,7 +4048,7 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
    preempt, and resumes at the completion write. Everything from there is the ordinary path, so the replay commits
    exactly what the dead worker would have. Three consequences hold the design up:
    - **The task's side effects fire once**, and the outcome cannot mix a decision from one run with state from
-     another - which is what lets `completeFlowSequential` stay unfenced (see "Lease fencing").
+     another.
    - **The task's own output is not merged into its input a second time.** A re-run would see its previous
      `changes` as `priorChanges`, so a task computing `x = state.x + 1` would apply twice.
    - **A Cancel that marked the rewound step lands at the completion write**, as for a step that was running when
@@ -4107,7 +4121,7 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
    - **`parkedSubgraph`** (`recoverWedgedSubgraphParks`): a caller step `running`+`parkedSubgraph` with **no
      non-terminal child** (`surgraph_step_id = step_id`, status created/running/interrupted) is wedged - the child
      reached terminal but the revive was lost, or the child was deleted. The sweep re-drives the release on the
-     latest child (`flow_id DESC`): `completeSurgraphFlow` for a completed child, `deliverSubgraphError` for a
+     child the caller's `parked_child_flow_id` names: `completeSurgraphFlow` for a completed child, `deliverSubgraphError` for a
      failed/terminated/cancelled/absent one. `deliverSubgraphError` only re-arms the caller with the error, and
      its one statement is that write, so it is write-first. It is never handed an open child: the sweep skips a
      latest child that is non-terminal again (a spawn that landed after its scan), so there is no child to

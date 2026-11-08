@@ -422,6 +422,15 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 			return 0, nil, errors.Trace(err)
 		}
 	}
+	if newSurgStepID != 0 {
+		// The step clone does not copy parked_child_flow_id, whose origin value names an origin flow. An ancestor
+		// caller the rewind re-parked, already written by its own flow's clone, is owned by this cloned child, or its
+		// re-run child's completion could never revive it. A caller off the rewind path is not parked and keeps 0.
+		_, err = tx.ExecContext(ctx, "UPDATE dwarf_steps SET parked_child_flow_id=? WHERE step_id=? AND parked=?", newFlowID, newSurgStepID, parkedSubgraph)
+		if err != nil {
+			return 0, nil, errors.Trace(err)
+		}
+	}
 	// The clone is a new flow, so its creation hour is its own, from the database clock (the column's default).
 	// Its steps carry it, not the origin's: every step carries its own flow's hour.
 	var newFlowHour int
@@ -915,9 +924,14 @@ func (e *Engine) allDescendantSubgraphFlowsIn(ctx context.Context, db sequel.Exe
 	return collected, nil
 }
 
+// callerChildrenSQL selects every child flow of a caller step. It runs on every flow.Retry rewind, so the literal
+// surgraph_step_id>0 matters: without it SQLite and SQL Server cannot use the partial index for the bound id, and
+// scan dwarf_flows.
+const callerChildrenSQL = "SELECT flow_id FROM dwarf_flows WHERE surgraph_step_id=? AND surgraph_step_id>0"
+
 func (e *Engine) deleteSubgraphFlowsRootedAt(ctx context.Context, tx sequel.Executor, surgraphStepID int) error {
 	var rootChildren []int
-	rows, err := tx.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE surgraph_step_id=?", surgraphStepID)
+	rows, err := tx.QueryContext(ctx, callerChildrenSQL, surgraphStepID)
 	if err != nil {
 		return errors.Trace(err)
 	}

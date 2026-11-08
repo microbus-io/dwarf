@@ -252,7 +252,7 @@ func (e *Engine) failFlowTx(ctx context.Context, tx sequel.Executor, shardNum, f
 		}
 	}
 	if parentStepID != 0 {
-		loss.reDispatchParent, err = e.deliverFlowFailureToParent(ctx, tx, parentStepID, lossErr)
+		loss.reDispatchParent, err = e.deliverFlowFailureToParent(ctx, tx, parentStepID, flowID, lossErr)
 		if err != nil {
 			return flowLoss{}, errors.Trace(err)
 		}
