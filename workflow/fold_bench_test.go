@@ -98,3 +98,31 @@ func BenchmarkFlow_SetPlain(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkFold_UnionFanIn measures a fan-in's union fold: n branches each contributing one distinct element (an
+// id number and a small object), folded in one ApplyAll as the fan-in does. The cost must stay linear in n.
+func BenchmarkFold_UnionFanIn(b *testing.B) {
+	reducers := map[string]Reducer{"ids": ReducerUnion, "seen": ReducerUnion}
+	for _, n := range []int{250, 1000, 4000} {
+		members := make([]Changes, n)
+		for i := range members {
+			c := NewChanges()
+			if err := c.Set("ids", []int{i}, reducers); err != nil {
+				b.Fatal(err)
+			}
+			if err := c.Set("seen", []map[string]any{{"id": i, "tag": "t"}}, reducers); err != nil {
+				b.Fatal(err)
+			}
+			members[i] = c
+		}
+		b.Run(fmt.Sprintf("branches=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				s, _ := NewState()
+				if err := s.ApplyAll(members, reducers); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}

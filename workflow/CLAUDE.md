@@ -276,7 +276,13 @@ explicit; `Parse` into a `map[string]any` is the escape hatch, visible at the ca
    (`SetJSON`'s contract, stated on `ApplyAll`): a malformed base such as `[1] [2]` splices into malformed JSON
    with no error. Do not add `json.Valid` on this path, and do not settle for a first/last-byte check - `[1] [2]`
    passes it; only a full scan catches it. `union` must compare decoded values, so it
-   decodes; `merge` decodes only its top level, into `json.RawMessage` entries.
+   decodes - and `ApplyAll` carries its list and the set of its elements' keys across the whole fold
+   (`unionFold`, keyed by `unionKeyString`, the same equality as `unionKey` under `DeepEqual`), so each element is
+   compared once. **Do not fold a union member by member through `doUnion`**: each call copies the list and
+   compares against every element, quadratic in a fan-in's width inside its transaction (`BenchmarkFold_UnionFanIn`:
+   4,000 one-element branches 8.2s that way, 16ms carried). `doUnion` stays the reducer of record, and
+   `TestUnionFold_MatchesTheReducer` pins the two byte for byte. `merge` decodes only its top level, into
+   `json.RawMessage` entries.
    `Apply` is `ApplyAll` of one member, so there is one fold to keep correct. Pinned by
    `TestState_ApplyAllMatchesPerMember`, which asserts the one-pass and per-member results are
    byte-identical, so the optimization can never quietly change a fan-in outcome. **On a reducer error the

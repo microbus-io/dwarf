@@ -804,3 +804,73 @@ func TestDecodeValue_ScalarFastPathMatchesTheDecoder(t *testing.T) {
 		assert.Error(err, "%q must still fail to decode", in)
 	}
 }
+
+// TestUnionFold_MatchesTheReducer pins ApplyAll's carried union (unionFold) against doUnion folded one contribution
+// at a time, byte for byte, over the inputs where union's equality is subtle: numbers spelled differently, integers
+// past 2^53, numbers against strings, nested objects and lists, nulls, and duplicates already in the base (kept).
+// Apply goes through ApplyAll too, so only a comparison against the reducer itself shows the two agree.
+func TestUnionFold_MatchesTheReducer(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	cases := []struct {
+		name  string
+		base  string // "" for no base
+		parts []string
+	}{
+		{"numbers_by_value", `[1]`, []string{`[1.0, 1e0, 2]`, `[2.0, 3]`, `1`}},
+		{"large_integers_stay_distinct", ``, []string{`[12345678901234567890]`, `[12345678901234567891, 12345678901234567890]`}},
+		{"respelled_exponent", ``, []string{`[1e23]`, `[100000000000000000000000, 1e-7]`, `[0.0000001]`}},
+		{"number_is_not_its_string", ``, []string{`[1, "1"]`, `["1", 1, true, "true"]`}},
+		{"nested_objects", ``, []string{`[{"a":1,"b":[1,2]}]`, `[{"b":[1.0,2],"a":1.0}, {"b":[2,1],"a":1}]`}},
+		{"quoting_is_unambiguous", ``, []string{`[{"a,b":"c"}, {"a":"b,c"}]`, `[{"a":"x\",\"b\":\"y"}, {"a":"x","b":"y"}]`}},
+		{"nulls_and_empties", ``, []string{`[null, "", [], {}]`, `[null, [], {}, ""]`}},
+		{"base_duplicates_kept", `[1, 1, "a", "a"]`, []string{`[1, "a", 2]`, `2`}},
+		{"single_values_and_lists_of_lists", ``, []string{`"x"`, `[["x"]]`, `["x", ["x"]]`, `{"k":1}`}},
+	}
+	reducers := map[string]Reducer{"f": ReducerUnion}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			members := make([]Changes, len(c.parts))
+			for i, p := range c.parts {
+				members[i] = ChangesOf(rawFieldState(t, "f", p))
+			}
+			start := func() State {
+				s, _ := NewState()
+				if c.base != "" {
+					s.SetJSON("f", json.RawMessage(c.base))
+				}
+				return s
+			}
+			got := start()
+			assert.Must(assert.NoError(got.ApplyAll(members, reducers)))
+
+			// The reducer of record, one contribution at a time, as ApplyAll folds them.
+			var acc any = []any{}
+			if c.base != "" {
+				base, err := decodeValue(ReducerUnion, json.RawMessage(c.base))
+				assert.Must(assert.NoError(err))
+				acc = base
+			}
+			for _, p := range c.parts {
+				inc, err := decodeValue(ReducerUnion, json.RawMessage(p))
+				assert.Must(assert.NoError(err))
+				acc, err = doUnion(acc, inc)
+				assert.Must(assert.NoError(err))
+			}
+			want, err := json.Marshal(acc)
+			assert.Must(assert.NoError(err))
+			assert.Equal(string(want), string(got.GetJSON("f")))
+		})
+	}
+}
+
+// rawFieldState is a State holding one field's raw JSON, for building a member's contribution.
+func rawFieldState(t *testing.T, field, raw string) State {
+	t.Helper()
+	s, err := NewState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetJSON(field, json.RawMessage(raw))
+	return s
+}

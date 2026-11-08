@@ -18,9 +18,11 @@ package workflow
 
 import (
 	"encoding/json"
+	"maps"
 	"math"
 	"math/big"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -230,6 +232,122 @@ func unionKey(v any) any {
 		return out
 	}
 	return v
+}
+
+// unionFold is ReducerUnion carried across a whole ApplyAll: one accumulated list and the set of its elements'
+// keys, so each incoming element costs one lookup. Folding member by member through doUnion instead copies the
+// whole list and compares against every element on every member - quadratic in a wide fan-in, inside its
+// transaction (measured: 4,000 one-element branches took 8.2s). doUnion stays the reducer of record; the two
+// agree element for element, and a value unionKeyString cannot key sends the field back to doUnion.
+type unionFold struct {
+	list []any
+	seen map[string]struct{}
+}
+
+// newUnionFold starts a fold onto base, keeping base's own elements as they are, duplicates included, as doUnion
+// does. ok is false when base is not a decoded JSON list.
+func newUnionFold(base any) (u *unionFold, ok bool) {
+	list, isList := base.([]any)
+	if !isList {
+		return nil, false
+	}
+	u = &unionFold{list: slices.Clone(list), seen: make(map[string]struct{}, len(list))}
+	for _, e := range list {
+		k, ok := unionKeyString(e)
+		if !ok {
+			return nil, false
+		}
+		u.seen[k] = struct{}{}
+	}
+	return u, true
+}
+
+// add folds one decoded contribution in as doUnion would onto a []any base: a list spreads, any other value is
+// one element, and an element whose key is already present is skipped. ok is false, with the fold unchanged, when
+// incoming is nil or holds a value unionKeyString cannot key.
+func (u *unionFold) add(incoming any) (ok bool) {
+	if incoming == nil {
+		return false
+	}
+	elems, isList := incoming.([]any)
+	if !isList {
+		elems = []any{incoming}
+	}
+	keys := make([]string, len(elems))
+	for i, e := range elems {
+		k, ok := unionKeyString(e)
+		if !ok {
+			return false
+		}
+		keys[i] = k
+	}
+	for i, e := range elems {
+		if _, dup := u.seen[keys[i]]; dup {
+			continue
+		}
+		u.seen[keys[i]] = struct{}{}
+		u.list = append(u.list, e)
+	}
+	return true
+}
+
+// unionKeyString spells unionKey as a string, so it can key a map: two decoded JSON values have the same spelling
+// exactly when their unionKeys are DeepEqual. Every value is tagged by its kind, so the number 1 and the string "1"
+// differ, and every string and number is quoted, so no spelling is a prefix of another. ok is false for a value a
+// JSON decode does not yield.
+func unionKeyString(v any) (key string, ok bool) {
+	var b strings.Builder
+	ok = writeUnionKey(&b, v)
+	return b.String(), ok
+}
+
+func writeUnionKey(b *strings.Builder, v any) bool {
+	switch v := v.(type) {
+	case nil:
+		b.WriteByte('z')
+	case bool:
+		if v {
+			b.WriteByte('t')
+		} else {
+			b.WriteByte('f')
+		}
+	case json.Number:
+		b.WriteByte('n')
+		b.WriteString(strconv.Quote(numberValueKey(string(v))))
+	case float64:
+		b.WriteByte('n')
+		b.WriteString(strconv.Quote(numberValueKey(strconv.FormatFloat(v, 'g', -1, 64))))
+	case string:
+		b.WriteByte('s')
+		b.WriteString(strconv.Quote(v))
+	case []any:
+		b.WriteByte('[')
+		for i, e := range v {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			if !writeUnionKey(b, e) {
+				return false
+			}
+		}
+		b.WriteByte(']')
+	case map[string]any:
+		b.WriteByte('{')
+		for i, k := range slices.Sorted(maps.Keys(v)) {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(strconv.Quote(k))
+			b.WriteByte(':')
+			if !writeUnionKey(b, v[k]) {
+				return false
+			}
+		}
+		b.WriteByte('}')
+	default:
+		return false
+	}
+	return true
 }
 
 // numberValueKey spells a JSON number by its value: an integer literal as its exact integer, so ids past 2^53 stay

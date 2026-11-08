@@ -509,10 +509,14 @@ func (s State) ApplyAll(cs []Changes, reducers map[string]Reducer) error {
 	// An append or a concat is spliced as bytes rather than decoded: the base and every contribution are collected
 	// and joined once at the end, so the cost is linear in the bytes and allocates no decoded values.
 	spliced := map[string][]json.RawMessage{}
+	// A union is carried as one list and the keys it holds, so each element is compared once (unionFold); a field
+	// it cannot key falls back to acc and the reducer.
+	unions := map[string]*unionFold{}
 	set := func(k string, v json.RawMessage) {
 		delete(decoded, k)
 		delete(acc, k)
 		delete(spliced, k)
+		delete(unions, k)
 		if isCleared(v) {
 			delete(s.d, k)
 		} else {
@@ -535,6 +539,35 @@ func (s State) ApplyAll(cs []Changes, reducers map[string]Reducer) error {
 				}
 				spliced[k] = append(spliced[k], v)
 				continue
+			}
+			if r == ReducerUnion && !decoded[k] {
+				u, ok := unions[k]
+				if !ok {
+					base, err := decodeValue(r, s.d[k])
+					if err != nil {
+						return errors.New("reducer '%s' for field %q: %w", string(r), k, err)
+					}
+					if base == nil {
+						base = []any{} // as below: a list that later members' decoded lists can extend
+					}
+					if u, ok = newUnionFold(base); ok {
+						unions[k] = u
+					} else {
+						acc[k], decoded[k] = base, true
+					}
+				}
+				if ok {
+					inc, err := decodeValue(r, v)
+					if err != nil {
+						return errors.New("reducer '%s' for field %q: %w", string(r), k, err)
+					}
+					if u.add(inc) {
+						continue
+					}
+					// Not keyable: carry on through the reducer from the list as it stands.
+					delete(unions, k)
+					acc[k], decoded[k] = u.list, true
+				}
 			}
 			if !decoded[k] {
 				base, err := decodeValue(r, s.d[k])
@@ -573,6 +606,13 @@ func (s State) ApplyAll(cs []Changes, reducers map[string]Reducer) error {
 	}
 	for k := range decoded {
 		encoded, err := json.Marshal(acc[k])
+		if err != nil {
+			return errors.New("reducer for field %q: %w", k, err)
+		}
+		s.d[k] = encoded
+	}
+	for k, u := range unions {
+		encoded, err := json.Marshal(u.list)
 		if err != nil {
 			return errors.New("reducer for field %q: %w", k, err)
 		}
