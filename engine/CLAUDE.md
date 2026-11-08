@@ -303,7 +303,7 @@ and does nothing else. Each marked step consumes its own mark at one of exactly 
 column off a write they make anyway, so an uncancelled flow pays no extra round trip - **except the completion
 write on MySQL**, which lacks `RETURNING`/`OUTPUT` and reads the mark with a follow-up `SELECT`: +1 round trip per
 completed step (+1 to `k` in the ceiling equation), accepted like the claim's own follow-up read (the site comment
-says why not `LAST_INSERT_ID(expr)`). The successor's mark adds no round trip: each successor row reads the
+says why not `LAST_INSERT_ID(expr)`, which the claim does use). The successor's mark adds no round trip: each successor row reads the
 watermark in its own INSERT, one primary-key lookup on the flow row the transaction already holds.
 
 - **The claim.** The claim CAS returns `cancelling`; a marked step is preempted - `ExecuteTask` is skipped and
@@ -953,7 +953,13 @@ not parallelism:
   `RETURNING`/`OUTPUT` (reads the row *as updated* - a consistent snapshot). MySQL lacks RETURNING, so they are two
   statements run **serially** (claim first, read only on success): running them on separate connections is unsafe -
   an independent read snapshot can observe the pre-transition row and deliver an empty resume payload (the reason is
-  spelled out at the claim site in `dispatch.go`). The lease size comes from the step row's own `time_budget_ms`
+  spelled out at the claim site in `dispatch.go`). **The MySQL read is fenced on the generation the claim took**,
+  which the claim returns in its own OK packet through `LAST_INSERT_ID(lease_seq+1)` (`claim.go`): unfenced, a
+  worker held between the two statements past its lease reads a later claim's generation and row, passes every
+  fence after it, and commits the transition a second time. Pinned on MySQL and MariaDB by
+  `TestMySQLClaim_ReadKeepsItsOwnGeneration` (same-engine and peer re-claims). The dispatch records that generation
+  before the read, so a read error also leaves its recovery reset fenced (`TestMySQLClaim_ReadErrorRecovery`).
+  The lease size comes from the step row's own `time_budget_ms`
   (referenced self-referentially in the claim UPDATE), not a pre-SELECT.
 - **Flow data** - on PostgreSQL it comes back with the claim (below); elsewhere it is read after the claim,
   since it needs the `flow_id`.
@@ -1957,8 +1963,9 @@ has exactly one fenced write to the dispatched step, and everything after it is 
   `dwarf_steps_executed` nor signalled. The check reads the leaf directly rather than a
   same-table subquery, which MySQL rejects on an `UPDATE` target.
 - **recovery defer reset** — fenced with `AND lease_seq=?` so a zombie's `err`-path reset cannot rewind the
-  peer's freshly-claimed step. Skipped when the captured generation is `0` (a claim/read error *before* any
-  execution, where no peer can have stolen the lease yet — keeps prompt pre-execution recovery unfenced).
+  peer's freshly-claimed step. When no generation was captured, the reset itself is skipped: ownership is
+  unknown, and a claim may have been superseded while its response was delayed. Lease expiry supplies the
+  recovery backstop. `TestLeaseFence_RecoveryRequiresKnownGeneration` covers unknown, stale, and current owners.
 
 Writes to *other* rows (a shared cohort spawn step, the flow row, child flows) are not the zombie's ownership
 to prove and are already arbitrated by the transition-tx flow-row lock-grab; the terminal-flow reap at claim

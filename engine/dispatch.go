@@ -231,7 +231,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 // recovery can itself race a contention storm; the reset UPDATE losing that race leaves the step
 // `completed` with advancing=1, which recoverOrphanedFlows rewinds once its lease lapses.
 func (e *Engine) recoverStep(ctx context.Context, d *dispatch, err error) {
-	if err == nil {
+	// Without a captured generation we cannot prove ownership; lease expiry handles an uncertain claim.
+	if err == nil || d.row.leaseSeq <= 0 {
 		return
 	}
 	fromStatus := ""
@@ -248,19 +249,11 @@ func (e *Engine) recoverStep(ctx context.Context, d *dispatch, err error) {
 		// defer runs before this one), and the reset is a database call like any other.
 		ctx, doneTurn := e.dbTurn(ctx, d.shard)
 		defer doneTurn()
-		// Fence the reset on our lease generation so a zombie (lease already re-granted to a peer)
-		// cannot rewind the peer's freshly-claimed step. leaseSeq==0 means we failed before capturing
-		// it (a claim/read error microseconds after claiming, before any ExecuteTask ran) - there a
-		// peer cannot have stolen the lease yet, so the reset stays unfenced to preserve prompt
-		// recovery; every reset that follows an execution has leaseSeq>0 and is fenced.
+		// Fence every reset, including a claim-read failure, on the generation this dispatch acquired.
 		// A parked step is not this worker's to rewind: it is waiting on its child, and a rewind would leave
 		// it pending AND parked, which nothing selects or recovers.
-		resetSQL := "UPDATE dwarf_steps SET status=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='" + fromStatus + "' AND parked=?"
-		resetArgs := []any{workflow.StatusPending, d.stepID, parkedNone}
-		if d.row.leaseSeq > 0 {
-			resetSQL += " AND lease_seq=?"
-			resetArgs = append(resetArgs, d.row.leaseSeq)
-		}
+		resetSQL := "UPDATE dwarf_steps SET status=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='" + fromStatus + "' AND parked=? AND lease_seq=?"
+		resetArgs := []any{workflow.StatusPending, d.stepID, parkedNone, d.row.leaseSeq}
 		// Test checkpoint: a breakpoint here freezes a zombie between capturing its (stale) reset and
 		// running it, so a test can let a peer re-claim+bump the step first and prove the lease_seq fence
 		// makes the zombie's reset a zero-row no-op (never rewinding the peer's freshly-claimed step).
@@ -358,6 +351,8 @@ func (e *Engine) claim(ctx context.Context, d *dispatch) (done bool, err error) 
 		// pending row and succeeds - delivering an empty resume payload to the task. Claiming first, then
 		// reading only on a successful claim, guarantees the read's snapshot is after the claim commit (and
 		// thus after the pending-setter's commit). A lost claim skips the read entirely (n==0 returns below).
+		// The read is fenced on the generation this claim took, so a later claim that slipped in between
+		// leaves it no row and this dispatch abandons (flowID stays 0).
 		res, claimErr := db.ExecContext(ctx,
 			claimSQLMySQL,
 			workflow.StatusRunning, leaseMarginMs, e.engineID, d.stepID, parkedNone,
@@ -368,10 +363,29 @@ func (e *Engine) claim(ctx context.Context, d *dispatch) (done bool, err error) 
 		}
 		n, _ = res.RowsAffected()
 		if n == 1 {
-			readErr := db.QueryRowContext(ctx,
-				claimReadMySQL,
-				d.stepID,
-			).Scan(stepDest...)
+			leaseSeq, seqErr := res.LastInsertId()
+			if seqErr != nil {
+				err = seqErr
+				break
+			}
+			if leaseSeq <= 0 {
+				err = errors.New("claim of step %d returned lease generation %d", d.stepID, leaseSeq)
+				break
+			}
+			// Retain ownership even if the read fails before scanning the generation.
+			d.row.leaseSeq = int(leaseSeq)
+			if e.seams.Enabled() { // Enabled gates the assembled name in production
+				e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointClaimBeforeRead, strconv.Itoa(d.shard), strconv.Itoa(d.stepID), strconv.FormatInt(leaseSeq, 10)))
+			}
+			var readErr error
+			if e.seams.IsFault(engineseams.FaultClaimReadContention) {
+				readErr = errors.New("database is locked (injected fault: " + engineseams.FaultClaimReadContention + ")")
+			} else {
+				readErr = db.QueryRowContext(ctx,
+					claimReadMySQL,
+					d.stepID, leaseSeq,
+				).Scan(stepDest...)
+			}
 			if readErr != nil && readErr != sql.ErrNoRows {
 				err = readErr
 			}
@@ -392,8 +406,9 @@ func (e *Engine) claim(ctx context.Context, d *dispatch) (done bool, err error) 
 		// not round trips spent losing the CAS).
 		//
 		// Gated on n==0 ALONE, not on the flowID==0 arm below: on the MySQL path a successful claim (n==1)
-		// whose follow-up read finds no row leaves flowID at 0, and counting that as a lost claim would
-		// attribute a read miss to contention - in the one instrument whose whole purpose is attribution.
+		// whose follow-up read finds no row at its generation (a later claim took the step in between) leaves
+		// flowID at 0, and counting that as a lost claim would attribute a superseded claim to candidate
+		// contention - in the one instrument whose whole purpose is attribution.
 		// On PostgreSQL the claim joins the flow row, so a step whose flow row is gone matches nothing and
 		// does count here; the reaper and Fork delete a flow's steps before the flow, so such a row should not
 		// exist.
@@ -1055,8 +1070,9 @@ func (e *Engine) complete(ctx context.Context, d *dispatch) (done bool, err erro
 	// The write also reads back the step's Cancel mark - the one post-dispatch cancellation check. It rides a
 	// write every completion makes anyway, via RETURNING/OUTPUT, so on those dialects an uncancelled flow pays
 	// nothing for it. MySQL lacks both and reads the mark with a follow-up SELECT: one extra round trip per
-	// completed step, accepted as it is at the claim, rather than returning it through LAST_INSERT_ID(expr): a
-	// one-off idiom for a dialect that is not the recommended one.
+	// completed step, accepted as it is at the claim, rather than returning it through LAST_INSERT_ID(expr). The
+	// claim uses that idiom because its read would otherwise be racy; here the follow-up read is already race-free
+	// (below), so the idiom would only save a round trip on a dialect that is not the recommended one.
 	// That SELECT is race-free only because the row is already terminal when it runs - Cancel never marks a
 	// terminal row, so the value it reads is the one this UPDATE saw. The status always moves running ->
 	// completed, which keeps RowsAffected an honest fence on MySQL (it counts CHANGED rows): a covered step is

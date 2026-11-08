@@ -182,12 +182,12 @@ func claimEligible(alias string) string {
 		alias + "not_before<=NOW_UTC() AND " + alias + "lease_expires<=NOW_UTC() THEN 1 END=1"
 }
 
-// claimSet is the claim's SET clause: take the lease, bump its generation, and stamp started_at unless the
-// dispatch continues an earlier one (a retry, a resumed park, a replay). alias qualifies the step table's columns
+// claimSet is the claim's SET clause: take the lease, bump its generation to nextSeq, and stamp started_at unless
+// the dispatch continues an earlier one (a retry, a resumed park, a replay). alias qualifies the step table's columns
 // ("s." or ""), since an assignment's right-hand side may need it. Binds: the running status, the lease margin in
 // ms, the engine ID.
-func claimSet(alias string) string {
-	return "status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), " + alias + "time_budget_ms + ?), lease_seq=" + alias + "lease_seq+1, engine_id=?, updated_at=NOW_UTC()," +
+func claimSet(alias, nextSeq string) string {
+	return "status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), " + alias + "time_budget_ms + ?), lease_seq=" + nextSeq + ", engine_id=?, updated_at=NOW_UTC()," +
 		" started_at=CASE WHEN " + alias + "attempt>0 OR " + alias + "subgraph_done=1 OR " + alias + "interrupt_done=1 OR " + alias + "advancing=1 THEN " + alias + "started_at ELSE NOW_UTC() END"
 }
 
@@ -213,13 +213,21 @@ func claimCols(prefix string) string {
 // The claim, per dialect, built once: it runs on every step. Binds: the running status, the lease margin in ms,
 // the engine ID, the step ID, the unparked value. claimSQLPostgres is the CAS on the step row, its read, and the
 // flow row joined in, in one round trip; SQLite and SQL Server read the step back with RETURNING/OUTPUT; MySQL has
-// neither, so it claims and then reads (claimReadMySQL, bound to the step ID).
+// neither, so it claims and then reads (claimReadMySQL, bound to the step ID and the generation the claim took).
+//
+// MySQL's claim wraps the new generation in LAST_INSERT_ID(expr), which hands it back in the UPDATE's own OK
+// packet (sql.Result.LastInsertId, MySQL 8.4 and MariaDB 10.11 alike), so the read can be fenced on it at no extra
+// round trip. Do not read the generation back unfenced: the two statements are separate, so between them the lease
+// can expire, recovery can return the step to pending, and a later claim (this engine's or a peer's) can take it -
+// an unfenced read then adopts THAT claim's generation and row, every lease_seq fence after it passes, and the
+// transition is committed twice. Every claim raises lease_seq and nothing lowers it, so the generation names one
+// claim.
 var (
-	claimSQLSQLite   = "UPDATE dwarf_steps SET " + claimSet("") + " WHERE step_id=? AND " + claimEligible("") + " RETURNING " + claimCols("")
-	claimSQLMSSQL    = "UPDATE dwarf_steps SET " + claimSet("") + " OUTPUT " + claimCols("INSERTED.") + " WHERE step_id=? AND " + claimEligible("")
-	claimSQLMySQL    = "UPDATE dwarf_steps SET " + claimSet("") + " WHERE step_id=? AND " + claimEligible("")
-	claimReadMySQL   = "SELECT " + claimCols("") + " FROM dwarf_steps WHERE step_id=?"
-	claimSQLPostgres = "UPDATE dwarf_steps s SET " + claimSet("s.") +
+	claimSQLSQLite   = "UPDATE dwarf_steps SET " + claimSet("", "lease_seq+1") + " WHERE step_id=? AND " + claimEligible("") + " RETURNING " + claimCols("")
+	claimSQLMSSQL    = "UPDATE dwarf_steps SET " + claimSet("", "lease_seq+1") + " OUTPUT " + claimCols("INSERTED.") + " WHERE step_id=? AND " + claimEligible("")
+	claimSQLMySQL    = "UPDATE dwarf_steps SET " + claimSet("", "LAST_INSERT_ID(lease_seq+1)") + " WHERE step_id=? AND " + claimEligible("")
+	claimReadMySQL   = "SELECT " + claimCols("") + " FROM dwarf_steps WHERE step_id=? AND lease_seq=?"
+	claimSQLPostgres = "UPDATE dwarf_steps s SET " + claimSet("s.", "s.lease_seq+1") +
 		" FROM dwarf_flows f" +
 		" WHERE s.step_id=? AND " + claimEligible("s.") + " AND f.flow_id=s.flow_id" +
 		" RETURNING " + claimCols("s.") + "," +

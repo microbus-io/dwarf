@@ -113,6 +113,7 @@ const (
 	FaultSubgraphReviveLost      = "subgraphReviveLost"      // the subgraph-completion path skips reviving the parked caller
 
 	// Process-wide, consumed per attempt (InjectN sets how many attempts fail):
+	FaultClaimReadContention = "claimReadContention" // the MySQL/MariaDB post-claim read returns lock contention before scanning a row
 	FaultCompleteSurgraphErr = "completeSurgraphErr" // the subgraph-completion write returns a non-contention database error
 	FaultCancelReasonReadErr = "cancelReasonReadErr" // a Cancel-preempted step's re-read of the cancel reason returns a non-contention database error
 	FaultCancelMarkErr       = "cancelMarkErr"       // a chunk of Cancel's step mark errors before it runs, after the watermark committed
@@ -165,6 +166,7 @@ const (
 	CheckpointBeforeReviveWrite         = "beforeReviveWrite"         // the subgraph-completion path, just before its transaction's caller-revive write
 	CheckpointBeforeRecoveryReset       = "beforeRecoveryReset"       // the post-execution recovery path, just before its fenced step-reset transaction
 	CheckpointClaimedDispatchDone       = "claimedDispatchDone"       // step execution returned after winning its claim, recovery reset included; fired bare and targeted by (shard, step id)
+	CheckpointClaimBeforeRead           = "claimBeforeRead"           // the MySQL/MariaDB claim, after its CAS committed and before it reads the row back; fired targeted by (shard, step id, the generation it claimed)
 	CheckpointLeaseRecoverySelected     = "leaseRecoverySelected"     // lease recovery, after it selected expired steps and before its by-id reset; reached only when it found some
 	CheckpointPoolPushHeld              = "poolPushHeld"              // recomputePools, inside poolsLock between reading the roles and pushing the sizes; reached only by the recompute FaultSlowPoolPush picks
 	CheckpointWedgeSweepSelected        = "wedgeSweepSelected"        // the wedged-park sweep, after it selected parked callers with no open child and before it reads each one's latest child; reached only when it found some
