@@ -1478,3 +1478,21 @@ func TestGraph_ValidateRejectsAPaddedTaskName(t *testing.T) {
 	g.AddTransitionChain("Start", "Join Them", End)
 	assert.NoError(g.Validate())
 }
+
+// TestGraph_ValidateRejectsAPaddedGraphName pins that a graph name beginning or ending with whitespace is refused, in a
+// constructed graph and in one decoded from JSON. The name is stored on the flow and matched by the lists.
+func TestGraph_ValidateRejectsAPaddedGraphName(t *testing.T) {
+	assert := testarossa.For(t)
+	for _, name := range []string{" Order", "Order ", "Order\t"} {
+		g := NewGraph(name)
+		g.SetURL("Start", "svc/start")
+		g.AddTransition("Start", End)
+		assert.Error(g.Validate(), "%q", name)
+
+		data, err := json.Marshal(g)
+		assert.Must(assert.NoError(err))
+		var decoded Graph
+		assert.Must(assert.NoError(json.Unmarshal(data, &decoded)))
+		assert.Error(decoded.Validate(), "%q decoded", name)
+	}
+}

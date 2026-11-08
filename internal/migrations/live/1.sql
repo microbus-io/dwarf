@@ -55,6 +55,9 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     INDEX idx_dwarf_flows_delete_after (delete_after_ms)
 );
 
+-- DRIVER: mysql mariadb
+ALTER TABLE dwarf_flows CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
 -- DRIVER: pgx
 CREATE TABLE IF NOT EXISTS dwarf_flows (
     flow_id              BIGSERIAL        NOT NULL,
@@ -116,28 +119,28 @@ ALTER TABLE dwarf_flows SET (autovacuum_vacuum_scale_factor = 0.01, autovacuum_v
 -- DRIVER: mssql
 CREATE TABLE dwarf_flows (
     flow_id              BIGINT        NOT NULL IDENTITY(1,1),
-    flow_token           NVARCHAR(16)  NOT NULL,
-    workflow_url         NVARCHAR(512) NOT NULL,
-    workflow_name        NVARCHAR(512) NOT NULL,
+    flow_token           NVARCHAR(16) COLLATE Latin1_General_100_BIN2  NOT NULL,
+    workflow_url         NVARCHAR(512) COLLATE Latin1_General_100_BIN2 NOT NULL,
+    workflow_name        NVARCHAR(512) COLLATE Latin1_General_100_BIN2 NOT NULL,
     graph                VARBINARY(MAX) NOT NULL,
-    graph_hash           NVARCHAR(64)  NOT NULL,
+    graph_hash           NVARCHAR(64) COLLATE Latin1_General_100_BIN2  NOT NULL,
     payload_ver          INT           NOT NULL DEFAULT 1,
     baggage              VARBINARY(MAX) NOT NULL DEFAULT 0x7B7D,
-    status               NVARCHAR(16)  NOT NULL,
+    status               NVARCHAR(16) COLLATE Latin1_General_100_BIN2  NOT NULL,
     stopped_step_id      BIGINT        NOT NULL DEFAULT 0,
     surgraph_flow_id     BIGINT        NOT NULL DEFAULT 0,
     surgraph_step_id     BIGINT        NOT NULL DEFAULT 0,
     root_flow_id         BIGINT        NOT NULL DEFAULT 0,
     forked_from_step     BIGINT        NOT NULL DEFAULT 0,
-    trace_parent         NVARCHAR(128) NOT NULL DEFAULT '',
+    trace_parent         NVARCHAR(128) COLLATE Latin1_General_100_BIN2 NOT NULL DEFAULT '',
     delete_on_completion TINYINT       NOT NULL DEFAULT 0,
     delete_after_ms      INT           NOT NULL DEFAULT 0,
     final_state          VARBINARY(MAX) NOT NULL DEFAULT 0x7B7D,
-    error                NVARCHAR(MAX) NOT NULL DEFAULT '',
-    cancel_reason        NVARCHAR(MAX) NOT NULL DEFAULT '',
+    error                NVARCHAR(MAX) COLLATE Latin1_General_100_BIN2 NOT NULL DEFAULT '',
+    cancel_reason        NVARCHAR(MAX) COLLATE Latin1_General_100_BIN2 NOT NULL DEFAULT '',
     cancel_watermark     BIGINT        NOT NULL DEFAULT 0,
     priority             INT           NOT NULL DEFAULT 5,
-    fairness_key         NVARCHAR(256) NOT NULL DEFAULT '',
+    fairness_key         NVARCHAR(256) COLLATE Latin1_General_100_BIN2 NOT NULL DEFAULT '',
     fairness_weight      FLOAT         NOT NULL DEFAULT 1,
     time_budget_ms       INT           NOT NULL DEFAULT 0,
     engine_id            BIGINT        NOT NULL DEFAULT 0,

@@ -18,8 +18,10 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,15 +69,20 @@ func TestCreate_RejectsNegativeOptions(t *testing.T) {
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "weight %v", w)
 	}
 
-	// A fairness key that is not valid UTF-8 -> 400: the planner matches keys by their JSON encoding, which rewrites
-	// the invalid bytes, so the key's steps would be tallied and never fetched. A valid multi-byte key is accepted.
 	_, err = e.Create(ctx, "fopt/g", nil, &workflow.FlowOptions{FairnessWeight: maxWeight})
 	assert.NoError(err)
 
-	_, err = e.Create(ctx, "fopt/g", nil, &workflow.FlowOptions{FairnessKey: string([]byte{0xff})})
-	assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
-	_, err = e.Create(ctx, "fopt/g", nil, &workflow.FlowOptions{FairnessKey: "tenant-\u00e9"})
-	assert.NoError(err)
+	// A fairness key is ASCII letters, digits, '-', '_' and '.', at most 256 of them -> anything else is a 400. SQL
+	// groups and matches the key as well as Go, and outside that alphabet a collation can fold two keys into one
+	// (a trailing space, an accent) or the planner's JSON encoding can rewrite one (invalid UTF-8).
+	for _, key := range []string{"tenant 42", "tenant-42 ", "tenant-\u00e9", "org/team", "a@b", "a:b", "'", "\"", string([]byte{0xff}), strings.Repeat("k", 257)} {
+		_, err = e.Create(ctx, "fopt/g", nil, &workflow.FlowOptions{FairnessKey: key})
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "key %q", key)
+	}
+	for _, key := range []string{"", "tenant-42", "Org_7.prod", strings.Repeat("k", 256)} {
+		_, err = e.Create(ctx, "fopt/g", nil, &workflow.FlowOptions{FairnessKey: key})
+		assert.NoError(err, "key %q", key)
+	}
 
 	// Run shares the same create path, so it rejects too.
 	_, _, err = e.Run(ctx, "fopt/g", nil, &workflow.FlowOptions{Priority: -7})
@@ -230,4 +237,73 @@ func TestCreate_RejectsAPaddedTaskName(t *testing.T) {
 	assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "%v", err)
 	assert.False(ran)
 	assert.Zero(enginetest.CountRows(t, e, 1, "SELECT COUNT(*) FROM dwarf_flows"))
+}
+
+// TestCreate_RejectsAPaddedWorkflowURL pins that Create refuses a workflow URL that begins or ends with whitespace,
+// before any flow is stored. The URL is stored on the flow and matched by the lists, and SQL Server and the MySQL
+// family compare it ignoring trailing spaces, so "g" and "g " would be one workflow in SQL and two in Go.
+func TestCreate_RejectsAPaddedWorkflowURL(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("PaddedURL")
+	g.SetURL("Work", "paddedurl/work")
+	g.AddTransition("Work", workflow.End)
+	for _, url := range []string{" paddedurl/g", "paddedurl/g ", "paddedurl/g\t"} {
+		mux.HandleGraph(url, g)
+	}
+	ran := false
+	mux.HandleTask("paddedurl/work", func(ctx context.Context, f *workflow.Flow) error { ran = true; return nil })
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.Must(assert.NoError(e.Startup(t.Context())))
+
+	for _, url := range []string{" paddedurl/g", "paddedurl/g ", "paddedurl/g\t"} {
+		_, _, err := e.Run(ctx, url, nil, nil)
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "%q: %v", url, err)
+	}
+	assert.False(ran)
+	assert.Zero(enginetest.CountRows(t, e, 1, "SELECT COUNT(*) FROM dwarf_flows"))
+}
+
+// TestSubgraph_PaddedURLFromAWireCarrierFailsTheSpawn pins that the engine refuses a padded subgraph URL itself, not
+// only through flow.Subgraph: a carrier decoded from a remote host's reply arms the URL directly. The spawn fails
+// as an unloadable child does - no child flow, the 400 delivered to the caller - though a graph is registered under
+// the padded URL, so without the refusal the child would be created.
+func TestSubgraph_PaddedURLFromAWireCarrierFailsTheSpawn(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	mux := hosts.NewMux()
+	child := workflow.NewGraph("Child")
+	child.SetURL("Leaf", "paddedsub/leaf")
+	child.AddTransition("Leaf", workflow.End)
+	mux.HandleGraph("paddedsub/child ", child)
+	mux.HandleTask("paddedsub/leaf", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	g := workflow.NewGraph("Caller")
+	g.SetURL("Call", "paddedsub/call")
+	g.AddTransition("Call", workflow.End)
+	mux.HandleGraph("paddedsub/g", g)
+	mux.HandleTask("paddedsub/call", func(ctx context.Context, f *workflow.Flow) error {
+		yield, err := f.Subgraph("paddedsub/child", nil, nil)
+		if err != nil || !yield {
+			return err
+		}
+		return overWire(f, func(wire map[string]json.RawMessage) { wire["subgraphURL"] = json.RawMessage(`"paddedsub/child "`) })
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.Must(assert.NoError(e.Startup(t.Context())))
+
+	_, out, err := e.Run(ctx, "paddedsub/g", nil, nil)
+	if assert.NoError(err) {
+		assert.Equal(workflow.StatusFailed, out.Status)
+		assert.Contains(out.Error, "whitespace")
+	}
+	assert.Equal(1, enginetest.CountRows(t, e, 1, "SELECT COUNT(*) FROM dwarf_flows"), "a child was created under the padded URL")
 }

@@ -45,6 +45,9 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 	if workflowURL == "" {
 		return "", errors.New("workflow URL is required", http.StatusBadRequest)
 	}
+	if strings.TrimSpace(workflowURL) != workflowURL {
+		return "", errors.New("workflow URL must not begin or end with whitespace", http.StatusBadRequest)
+	}
 	// Reject a negative priority/weight/budget rather than silently coercing it to the default
 	// (resolveFlowOptions treats <=0 as "unset"): a negative value is a caller bug, and swallowing it hides
 	// it. 0 stays "use the engine default" for all three, so this only rejects genuinely-invalid input.
@@ -64,10 +67,8 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 		if !(opts.FairnessWeight >= 0 && opts.FairnessWeight <= maxWeight) {
 			return "", errors.New("fairness weight must be between 0 and %d", maxWeight, http.StatusBadRequest)
 		}
-		// The planner matches a key by its JSON encoding, which replaces invalid UTF-8 with U+FFFD, so a key that is
-		// not valid UTF-8 never matches its own stored bytes and its steps are tallied but never fetched.
-		if !utf8.ValidString(opts.FairnessKey) {
-			return "", errors.New("fairness key must be valid UTF-8", http.StatusBadRequest)
+		if !validFairnessKey(opts.FairnessKey) {
+			return "", errors.New("fairness key must be at most %d letters, digits, '-', '_' or '.'", maxFairnessKeyLen, http.StatusBadRequest)
 		}
 		// 0 means "use the engine default"; anything else must survive the millisecond persistence, or the
 		// step is stamped with a 0 budget and its task's deadline has already passed when it is dispatched.
@@ -1469,4 +1470,25 @@ func (e *Engine) continueFlow(ctx context.Context, flowKey string, additionalSta
 	// entry step is due now and its priority is in hand, so no lookup is needed.
 	e.enqueueStepDue(ctx, shardNum, int(newStepID), priority)
 	return nextKey, nil
+}
+
+// maxFairnessKeyLen is the width of the fairness_key column.
+const maxFairnessKeyLen = 256
+
+// validFairnessKey reports whether key is a fairness key Create accepts: empty, or up to maxFairnessKeyLen ASCII
+// letters, digits, '-', '_' and '.'. The key is grouped and matched in SQL as well as in Go, and the narrow alphabet
+// keeps the two from disagreeing on what is one key: no whitespace a PAD SPACE comparison drops, no accent or
+// look-alike spelling a collation folds, no byte the planner's JSON encoding rewrites, and a length that is the same
+// count in bytes, characters and UTF-16 units, as each dialect measures the column.
+func validFairnessKey(key string) bool {
+	if len(key) > maxFairnessKeyLen {
+		return false
+	}
+	for i := range len(key) {
+		c := key[i]
+		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '-' || c == '_' || c == '.') {
+			return false
+		}
+	}
+	return true
 }

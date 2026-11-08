@@ -55,6 +55,9 @@ CREATE TABLE IF NOT EXISTS dwarf_flows_archive (
     INDEX idx_dwarf_flows_archive_archived (archived_at)
 );
 
+-- DRIVER: mysql mariadb
+ALTER TABLE dwarf_flows_archive CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
 -- DRIVER: pgx
 CREATE TABLE IF NOT EXISTS dwarf_flows_archive (
     flow_id              BIGINT           NOT NULL,
@@ -116,28 +119,28 @@ ALTER TABLE dwarf_flows_archive SET (autovacuum_freeze_min_age = 0, autovacuum_v
 -- DRIVER: mssql
 IF OBJECT_ID(N'dwarf_flows_archive', N'U') IS NULL CREATE TABLE dwarf_flows_archive (
     flow_id              BIGINT        NOT NULL,
-    flow_token           NVARCHAR(16)  NOT NULL,
-    workflow_url         NVARCHAR(512) NOT NULL,
-    workflow_name        NVARCHAR(512) NOT NULL,
+    flow_token           NVARCHAR(16) COLLATE Latin1_General_100_BIN2  NOT NULL,
+    workflow_url         NVARCHAR(512) COLLATE Latin1_General_100_BIN2 NOT NULL,
+    workflow_name        NVARCHAR(512) COLLATE Latin1_General_100_BIN2 NOT NULL,
     graph                VARBINARY(MAX) NOT NULL,
-    graph_hash           NVARCHAR(64)  NOT NULL,
+    graph_hash           NVARCHAR(64) COLLATE Latin1_General_100_BIN2  NOT NULL,
     payload_ver          INT           NOT NULL DEFAULT 1,
     baggage              VARBINARY(MAX) NOT NULL DEFAULT 0x7B7D,
-    status               NVARCHAR(16)  NOT NULL,
+    status               NVARCHAR(16) COLLATE Latin1_General_100_BIN2  NOT NULL,
     stopped_step_id      BIGINT        NOT NULL DEFAULT 0,
     surgraph_flow_id     BIGINT        NOT NULL DEFAULT 0,
     surgraph_step_id     BIGINT        NOT NULL DEFAULT 0,
     root_flow_id         BIGINT        NOT NULL DEFAULT 0,
     forked_from_step     BIGINT        NOT NULL DEFAULT 0,
-    trace_parent         NVARCHAR(128) NOT NULL DEFAULT '',
+    trace_parent         NVARCHAR(128) COLLATE Latin1_General_100_BIN2 NOT NULL DEFAULT '',
     delete_on_completion TINYINT       NOT NULL DEFAULT 0,
     delete_after_ms      INT           NOT NULL DEFAULT 0,
     final_state          VARBINARY(MAX) NOT NULL DEFAULT 0x7B7D,
-    error                NVARCHAR(MAX) NOT NULL DEFAULT '',
-    cancel_reason        NVARCHAR(MAX) NOT NULL DEFAULT '',
+    error                NVARCHAR(MAX) COLLATE Latin1_General_100_BIN2 NOT NULL DEFAULT '',
+    cancel_reason        NVARCHAR(MAX) COLLATE Latin1_General_100_BIN2 NOT NULL DEFAULT '',
     cancel_watermark     BIGINT        NOT NULL DEFAULT 0,
     priority             INT           NOT NULL DEFAULT 5,
-    fairness_key         NVARCHAR(256) NOT NULL DEFAULT '',
+    fairness_key         NVARCHAR(256) COLLATE Latin1_General_100_BIN2 NOT NULL DEFAULT '',
     fairness_weight      FLOAT         NOT NULL DEFAULT 1,
     time_budget_ms       INT           NOT NULL DEFAULT 0,
     engine_id            BIGINT        NOT NULL DEFAULT 0,

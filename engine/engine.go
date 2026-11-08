@@ -1381,7 +1381,8 @@ func (e *Engine) ensureStarted() error {
 // with Resume (which, unlike a separate start, also delivers a payload).
 //
 // An error from the host's LoadGraph is returned with its own status code, so a 503 (the graph's source
-// unreachable) tells the caller to try again; nothing is created.
+// unreachable) tells the caller to try again; nothing is created. A workflowURL that is empty or begins or
+// ends with whitespace is a 400.
 func (e *Engine) Create(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return "", errors.Trace(err)

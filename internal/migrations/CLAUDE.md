@@ -63,7 +63,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `touch` | Churn-avoidance toggle (`SMALLINT`, `0`/`1`). Carries **no meaning** and is never SELECTed - it exists only so a flow-row write can (a) acquire the row's write lock without moving the `(status, updated_at)` index entry, and (b) guarantee a value change so `RowsAffected()` reflects the `WHERE` match on every driver (MySQL's default "changed rows" count included). A `dwarf_flows` UPDATE whose matched count is read must change a value on every row it matches; the status-transition writes flip it (`touch=1-touch`) *alongside* `updated_at=NOW_UTC()`, and a write that always moves another column (the `delete_after_ms` mark, the creation fix-up of a new root's own-id `root_flow_id`) does not flip it. A self-assign (`SET col=col`) was rejected for (b): MySQL reports 0 rows changed when no value differs, which would silently break the terminal-status `RowsAffected==0` guards. **A lock that writes nothing else is not an UPDATE on PostgreSQL or MySQL** (`lockFlowRowsSQL`): there it is a locking read (`FOR NO KEY UPDATE` / `FOR UPDATE`), because on PostgreSQL every UPDATE writes a new row version even when it changes nothing, so a lock-only UPDATE on the row every step locks would be a row version per step on a row that otherwise changes a few times per flow (see the fillfactor section). SQLite and SQL Server still flip `touch` for it |
 | `archived_at` | When the reaper moved the flow into its archive day (`NOW_UTC()`, clamped to that day's last millisecond); `9999-12-31 23:59:59` on every live row, so a not-yet-archived flow sorts ahead of every archived one. The last column of both flows tables, so the day tables keep the live column order; the move names the columns to stamp it (`archivedFlowColumns`, `engine/reaper.go`). Never set on a live row: a Fork clone of an archived flow takes the default. Indexed only on the day tables (`(status, archived_at)` and `(archived_at)`), so a day is read in archive order; the live table's ended rows are few and all carry the default. On SQLite the default is written `9999-12-31 23:59:59.000`, the text `NOW_UTC()` writes, since there the comparison is of text |
 | `priority` | Scheduling priority, `1..max` (the engine's `SetMaxPriority`, 5 by default), lower runs first. Resolved at `Create` from `FlowOptions` else the midpoint of the range; inherited unchanged by `Continue`/subgraph. Immutable. The refiller counts bands `1..max` one by one and every priority beyond `max` together as an overflow served last, so a row outside the range (written before the range existed, or by a replica with a larger one) still runs |
-| `fairness_key` | Fairness bucket. From `FlowOptions`, else `''`. Immutable. **Deliberately unindexed on `dwarf_flows`** (it *is* indexed on `dwarf_steps` as the hot selection key). The only reader on the flows table is `ListOpen`'s `Query.FairnessKey` filter (`ListClosed` and `Purge` read the day tables) (the documented "list tenant X" path), a cold per-shard scan on a warm operator path - not worth a secondary-index entry per insert against the write-amplification budget. If tenant-scoped listing ever becomes a routine operational path, add `(fairness_key, flow_id)` with the filter then. `ListOpen`'s window needs no index of its own: its branches range over `idx_dwarf_flows_status`, and a standalone `updated_at` index would amplify writes on a churny column - exactly the cost the dropped `created_at` indexes carried. `workflow_name`/`priority` filters are likewise deliberately unindexed |
+| `fairness_key` | Fairness bucket. From `FlowOptions`, else `''`: at most 256 ASCII letters, digits, `-`, `_` and `.` (`validFairnessKey`), so its byte, character and UTF-16 lengths agree with every dialect's column width. Immutable. **Deliberately unindexed on `dwarf_flows`** (it *is* indexed on `dwarf_steps` as the hot selection key). The only reader on the flows table is `ListOpen`'s `Query.FairnessKey` filter (`ListClosed` and `Purge` read the day tables) (the documented "list tenant X" path), a cold per-shard scan on a warm operator path - not worth a secondary-index entry per insert against the write-amplification budget. If tenant-scoped listing ever becomes a routine operational path, add `(fairness_key, flow_id)` with the filter then. `ListOpen`'s window needs no index of its own: its branches range over `idx_dwarf_flows_status`, and a standalone `updated_at` index would amplify writes on a churny column - exactly the cost the dropped `created_at` indexes carried. `workflow_name`/`priority` filters are likewise deliberately unindexed |
 | `fairness_weight` | Relative dispatch share of the `fairness_key`. From `FlowOptions`, else `1` |
 | `error` | Task error string for `failed` flows. Written by `failStep` to the **failing flow only** (`WHERE flow_id=? AND status NOT IN (terminal)`, so first-failure-wins on that flow). Cross-subgraph failure does **not** write the whole chain in one UPDATE - it bubbles up level-by-level: when a subgraph child fails (via cohort accounting, never eagerly - see "Failure back to the parent"), `deliverFlowFailureToParent` surfaces the error to the parked caller step (`subgraph_error`), whose task re-fails on re-dispatch, writing `error` on the parent flow, and so on to the root. (`deliverSubgraphError` does the same re-dispatch from the wedge sweep only.) Surfaced as `FlowOutcome.Error` |
 | `cancel_reason` | Reason passed to `Cancel` or `Terminate` - one column shared by both. `Cancel` writes it to every open flow in the tree when the request is recorded, before any step is marked, so a step claimed in between reads it. **May be empty** (a reason is optional), so it is never the test for "was this flow cancelled" - `cancel_watermark` is. Surfaced as `FlowOutcome.CancelReason` |
@@ -512,6 +512,39 @@ SQL Server payload storage and transfer, which matters on a byte-throughput-boun
 **Cost, accepted knowingly:** `SELECT state FROM dwarf_steps` in SSMS returns hex rather than readable JSON, and
 server-side `JSON_VALUE` on these columns is foreclosed (already deferred - see the `JSON_FIELD` note in
 `internal/staterefs/CLAUDE.md`).
+
+### Text columns compare in binary: `utf8mb4_bin` on MySQL and MariaDB, `Latin1_General_100_BIN2` on SQL Server
+
+**Every text column of `dwarf_flows` and `dwarf_steps`, live and archive, is binary-collated**: each MySQL-family
+table is converted to `utf8mb4_bin` right after its `CREATE TABLE` (which also makes it the table's default, so a
+column added later inherits it), and each SQL Server `NVARCHAR` column carries `COLLATE Latin1_General_100_BIN2`.
+PostgreSQL and SQLite need nothing: PostgreSQL's equality is byte-wise under any deterministic collation, and
+SQLite's default is `BINARY`.
+
+**Why.** The engine treats a fairness key, a workflow URL, a task name and the rest as exact identities in Go,
+and the database must agree, because the same values are grouped and matched in SQL as well: the planner's tally
+groups by `fairness_key` and its fetch matches `(priority, fairness_key)`, and every list filter and `Purge`
+compares with `=`. Each server's default collation is case-insensitive (`utf8mb4_general_ci` on MariaDB 10.11,
+`utf8mb4_0900_ai_ci` on MySQL 8, `SQL_Latin1_General_CP1_CI_AS` on SQL Server), and MariaDB's ignores accents too.
+Under them `Acme` and `acme` are one value in SQL and two in Go, so two tenants shared a fairness bucket, a list
+for one tenant returned the other's flows, and a `Purge` of one tenant deleted the other's. Measured with the
+defaults, all three servers: each list filter returned both flows and the `Purge` removed both. Pinned by
+`engine/collation_test.go`, which fails on all three with the collations removed.
+
+- **A new text column of these tables needs its collation on SQL Server** (`COLLATE Latin1_General_100_BIN2` on
+  the column, there is no table default), in the live migration and its archive twin alike, which must agree: a
+  comparison or `UNION` between two columns of different collations is an error there.
+- **Do not pick a MySQL-only or MariaDB-only collation** (`utf8mb4_0900_bin`, `utf8mb4_nopad_bin`, which would
+  also stop ignoring trailing spaces). sequel names the driver `mariadb` only for a `mariadb://` data source name;
+  a MariaDB server reached with a MySQL-style one runs as `mysql`, so a `-- DRIVER: mysql` block that names a
+  MySQL-only collation fails the migration there (`Unknown collation: 'utf8mb4_0900_bin'`).
+- **Trailing spaces still compare equal**, under `utf8mb4_bin` (a `PAD SPACE` collation) and on SQL Server under
+  every collation. That is why the identities the engine groups or matches on refuse whitespace at the door: a
+  graph name and a task name may not begin or end with it (`Graph.Validate`), nor a workflow URL (`create`,
+  `flow.Subgraph`, and the spawn in `parkSubgraph` for a carrier that bypassed it), and a fairness key is letters,
+  digits, `-`, `_` and `.` only (`validFairnessKey`).
+- **Case-insensitive matching is spelled out where it is wanted**: `Query.Search` lowercases both sides
+  (`LOWER(...) LIKE ?`), so it stays case-insensitive under a binary collation.
 
 ### Timestamps come from the database clock, never from Go
 

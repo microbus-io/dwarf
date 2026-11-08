@@ -114,7 +114,8 @@ type Graph struct {
 // NewGraph creates a new workflow graph with the given display name. The name is a human-friendly
 // label (surfaced in rendering and Validate error messages); it is NOT the resolve key. The value
 // passed to Create/Run and to the host's LoadGraph is a separate opaque workflow URL that the engine
-// keeps with the flow - it is never kept on the graph itself.
+// keeps with the flow - it is never kept on the graph itself. Validate rejects a name that is empty or
+// begins or ends with whitespace.
 func NewGraph(name string) *Graph {
 	return &Graph{
 		name: name,
@@ -427,6 +428,9 @@ func (g *Graph) Reducers() map[string]Reducer {
 func (g *Graph) Validate() error {
 	if g.name == "" {
 		return errors.New("graph name is required")
+	}
+	if strings.TrimSpace(g.name) != g.name {
+		return errors.New("graph name %q has leading or trailing whitespace", g.name)
 	}
 	if len(g.tasks) == 0 {
 		return errors.New("graph '%s' has no tasks", g.name)

@@ -282,6 +282,21 @@ func TestFlow_SubgraphRejectsAnEmptyURL(t *testing.T) {
 	assert.NoError(err)
 }
 
+// TestFlow_SubgraphRejectsAPaddedURL pins that Subgraph refuses a workflow URL that begins or ends with whitespace,
+// as Create does, without arming anything.
+func TestFlow_SubgraphRejectsAPaddedURL(t *testing.T) {
+	assert := testarossa.For(t)
+	for _, url := range []string{" https://x/wf", "https://x/wf ", "https://x/wf\n"} {
+		rf := NewRawFlow()
+		f := &rf.Flow
+		yield, err := f.Subgraph(url, nil, nil)
+		assert.False(yield, "%q", url)
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "%q", url)
+		_, _, requested := rf.SubgraphRequested()
+		assert.False(requested, "%q", url)
+	}
+}
+
 func TestFlow_Retry(t *testing.T) {
 	assert := testarossa.For(t)
 

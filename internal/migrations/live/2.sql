@@ -67,6 +67,9 @@ CREATE TABLE IF NOT EXISTS dwarf_steps (
     INDEX idx_dwarf_steps_due (status, parked, priority, not_before, fairness_key, created_at, step_id, lease_expires, fairness_weight)
 );
 
+-- DRIVER: mysql mariadb
+ALTER TABLE dwarf_steps CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
 -- DRIVER: pgx
 CREATE TABLE IF NOT EXISTS dwarf_steps (
     step_id           BIGSERIAL        NOT NULL,
@@ -136,17 +139,17 @@ CREATE TABLE dwarf_steps (
     step_id           BIGINT        NOT NULL IDENTITY(1,1),
     flow_id           BIGINT        NOT NULL,
     step_depth        INT           NOT NULL,
-    step_token        NVARCHAR(16)  NOT NULL,
-    task_name         NVARCHAR(512) NOT NULL,
-    task_url          NVARCHAR(512) NOT NULL,
+    step_token        NVARCHAR(16) COLLATE Latin1_General_100_BIN2  NOT NULL,
+    task_name         NVARCHAR(512) COLLATE Latin1_General_100_BIN2 NOT NULL,
+    task_url          NVARCHAR(512) COLLATE Latin1_General_100_BIN2 NOT NULL,
     state             VARBINARY(MAX) NOT NULL DEFAULT 0x7B7D,
     changes           VARBINARY(MAX) NOT NULL DEFAULT 0x7B7D,
     interrupt_payload VARBINARY(MAX) NOT NULL DEFAULT 0x7B7D,
     state_refs        VARBINARY(MAX) NOT NULL DEFAULT 0x7B7D,
     state_reduced     VARBINARY(MAX) NOT NULL DEFAULT 0x7B7D,
     payload_deferrals INT           NOT NULL DEFAULT 0,
-    status            NVARCHAR(16)  NOT NULL,
-    error             NVARCHAR(MAX) NOT NULL DEFAULT '',
+    status            NVARCHAR(16) COLLATE Latin1_General_100_BIN2  NOT NULL,
+    error             NVARCHAR(MAX) COLLATE Latin1_General_100_BIN2 NOT NULL DEFAULT '',
     time_budget_ms    INT           NOT NULL,
     attempt           INT           NOT NULL DEFAULT 0,
     lineage_id        BIGINT        NOT NULL DEFAULT 0,
@@ -158,7 +161,7 @@ CREATE TABLE dwarf_steps (
     predecessor_id    BIGINT        NOT NULL DEFAULT 0,
     successor_id      BIGINT        NOT NULL DEFAULT 0,
     priority          INT           NOT NULL DEFAULT 5,
-    fairness_key      NVARCHAR(256) NOT NULL DEFAULT '',
+    fairness_key      NVARCHAR(256) COLLATE Latin1_General_100_BIN2 NOT NULL DEFAULT '',
     fairness_weight   FLOAT         NOT NULL DEFAULT 1,
     interrupt_done    TINYINT       NOT NULL DEFAULT 0,
     resume_data       VARBINARY(MAX) NOT NULL DEFAULT 0x7B7D,
@@ -169,7 +172,7 @@ CREATE TABLE dwarf_steps (
     parked_child_flow_id BIGINT     NOT NULL DEFAULT 0,
     cancelling        TINYINT       NOT NULL DEFAULT 0,
     advancing         TINYINT       NOT NULL DEFAULT 0,
-    advance_goto      NVARCHAR(512) NOT NULL DEFAULT '',
+    advance_goto      NVARCHAR(512) COLLATE Latin1_General_100_BIN2 NOT NULL DEFAULT '',
     advance_sleep_until DATETIME2(3) NOT NULL DEFAULT NOW_UTC(),
     advance_on_error  TINYINT       NOT NULL DEFAULT 0,
     not_before        DATETIME2(3)  NOT NULL DEFAULT NOW_UTC(),

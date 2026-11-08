@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/cancelmarker"
@@ -829,6 +830,11 @@ func (e *Engine) parkSubgraph(ctx context.Context, d *dispatch, subgraphURL stri
 	// delivered to the task as the subgraph's error, like a child that cannot be spawned.
 	if err := checkFieldNames(subgraphInput); err != nil {
 		return errors.Trace(e.resolveFailedSpawn(ctx, d, subgraphURL, err))
+	}
+	// Refused as Create refuses it. flow.Subgraph does already, but a carrier from a host that is not this
+	// package's code arms the URL without it.
+	if strings.TrimSpace(subgraphURL) != subgraphURL {
+		return errors.Trace(e.resolveFailedSpawn(ctx, d, subgraphURL, errors.New("cannot start subgraph: workflow URL must not begin or end with whitespace", http.StatusBadRequest)))
 	}
 	// Bound the subgraph LoadGraph by the caller flow's budget (the create-time LoadGraph uses the caller's ctx).
 	loadCtx, loadCancel := context.WithTimeout(workflow.ContextWithBaggage(ctx, d.baggage), time.Duration(d.row.flowTimeBudgetMs)*time.Millisecond)
