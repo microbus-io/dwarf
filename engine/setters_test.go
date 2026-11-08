@@ -77,6 +77,9 @@ func TestSetShard_RejectsBadSpecs(t *testing.T) {
 	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.SetShard(ShardSpec{Index: 1, MaxConnections: -1})))
 	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.SetShard(ShardSpec{Index: 1, Weight: -1})))
 	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.SetShard(ShardSpec{Index: 1, Weight: math.NaN()})))
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.SetShard(ShardSpec{Index: 1, Weight: math.Inf(1)})))
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.SetShard(ShardSpec{Index: 1, Weight: maxWeight * 1.5})))
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.SetShard(ShardSpec{Index: 1, Weight: 1e308})))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1}))
 	assert.Equal(http.StatusConflict, errors.StatusCode(e.SetShard(ShardSpec{Index: 1})))
 	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.Startup(t.Context()))) // no host
@@ -297,5 +300,27 @@ func TestSetMaxPriority(t *testing.T) {
 	_, outcome, err := e2.Run(t.Context(), "maxprio/g", nil, &workflow.FlowOptions{Priority: 3})
 	if assert.NoError(err) {
 		assert.Equal(workflow.StatusCompleted, outcome.Status, "the worst band is served")
+	}
+}
+
+// TestPickShard_WeightsAtTheBoundKeepTheirRatio pins that placement over shards at the largest accepted weight
+// still follows their ratio. The bound exists because weights that sum past the float range send every draw to
+// whichever shard comes last: two shards of 1e308 split about 12/88 instead of 50/50.
+func TestPickShard_WeightsAtTheBoundKeepTheirRatio(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	e := NewEngine()
+	assert.Must(assert.NoError(e.SetShard(ShardSpec{Index: 1, Weight: maxWeight})))
+	assert.Must(assert.NoError(e.SetShard(ShardSpec{Index: 2, Weight: maxWeight})))
+	const draws = 20000
+	counts := map[int]int{}
+	for range draws {
+		shard, err := e.pickShard()
+		assert.Must(assert.NoError(err))
+		counts[shard]++
+	}
+	for _, shard := range []int{1, 2} {
+		assert.True(counts[shard] > draws*45/100 && counts[shard] < draws*55/100, "shard %d got %d of %d", shard, counts[shard], draws)
 	}
 }

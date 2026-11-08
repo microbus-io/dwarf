@@ -60,14 +60,18 @@ func TestCreate_RejectsNegativeOptions(t *testing.T) {
 	assert.Error(err)
 	assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
 
-	// A non-finite weight passes a `< 0` test, and the planner's draw has no answer for it -> 400.
-	for _, w := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+	// A non-finite weight passes a `< 0` test, and the planner's draw has no answer for it -> 400; nor does a weight
+	// past the bound, whose sum with others can overflow. The bound itself is accepted.
+	for _, w := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), maxWeight * 1.5, 1e308} {
 		_, err = e.Create(ctx, "fopt/g", nil, &workflow.FlowOptions{FairnessWeight: w})
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "weight %v", w)
 	}
 
 	// A fairness key that is not valid UTF-8 -> 400: the planner matches keys by their JSON encoding, which rewrites
 	// the invalid bytes, so the key's steps would be tallied and never fetched. A valid multi-byte key is accepted.
+	_, err = e.Create(ctx, "fopt/g", nil, &workflow.FlowOptions{FairnessWeight: maxWeight})
+	assert.NoError(err)
+
 	_, err = e.Create(ctx, "fopt/g", nil, &workflow.FlowOptions{FairnessKey: string([]byte{0xff})})
 	assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
 	_, err = e.Create(ctx, "fopt/g", nil, &workflow.FlowOptions{FairnessKey: "tenant-\u00e9"})

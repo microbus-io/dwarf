@@ -59,9 +59,10 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 		if opts.Priority > e.maxPriority {
 			return "", errors.New("priority must be at most the maximum priority %d", e.maxPriority, http.StatusBadRequest)
 		}
-		// NaN and the infinities pass a `< 0` test, and the planner's weighted draw has no defined answer for them.
-		if opts.FairnessWeight < 0 || math.IsNaN(opts.FairnessWeight) || math.IsInf(opts.FairnessWeight, 0) {
-			return "", errors.New("fairness weight must be a finite number >= 0", http.StatusBadRequest)
+		// NaN fails both comparisons; the planner's weighted draw has no defined answer for it or for a sum that
+		// overflows.
+		if !(opts.FairnessWeight >= 0 && opts.FairnessWeight <= maxWeight) {
+			return "", errors.New("fairness weight must be between 0 and %d", maxWeight, http.StatusBadRequest)
 		}
 		// The planner matches a key by its JSON encoding, which replaces invalid UTF-8 with U+FFFD, so a key that is
 		// not valid UTF-8 never matches its own stored bytes and its steps are tallied but never fetched.

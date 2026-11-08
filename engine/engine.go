@@ -465,6 +465,7 @@ type ShardSpec struct {
 	// with the shard set itself.
 	MaxConnections int
 	// Weight is the shard's share of new-flow placement, relative to the other shards. Left at 0, it is 1.
+	// SetShard rejects a weight above 1,048,576 (2^20); a fraction expresses a smaller share.
 	//
 	// While every non-cordoned shard's weight is 1, a replica places a new flow on one of the shards it
 	// dispatches (over all non-cordoned shards only when it dispatches none), so flows spread by where the
@@ -479,6 +480,12 @@ type ShardSpec struct {
 	// and forks - all shard-pinned - are still created on it. Use for retiring or overloaded shards.
 	Cordoned bool
 }
+
+// maxWeight bounds a shard's placement weight and a flow's fairness weight. Each feeds a weighted pick over a
+// running sum, and finite weights can still sum to infinity (two at 1e308), which sends every placement draw to
+// whichever shard comes last in map order. A share needs a ratio, not a magnitude, so the bound costs nothing; a
+// fraction expresses a smaller share.
+const maxWeight = 1 << 20
 
 // SetShard registers a database shard. Call once per shard; see ShardSpec for field semantics. When no
 // shard is registered, Startup opens a single default shard 1 (in test mode, an isolated in-memory
@@ -498,8 +505,8 @@ func (e *Engine) SetShard(spec ShardSpec) error {
 	if spec.MaxConnections < 0 {
 		return errors.New("max connections must be >= 0", http.StatusBadRequest)
 	}
-	if spec.Weight < 0 || math.IsNaN(spec.Weight) || math.IsInf(spec.Weight, 0) {
-		return errors.New("weight must be a finite number >= 0", http.StatusBadRequest)
+	if !(spec.Weight >= 0 && spec.Weight <= maxWeight) { // NaN fails both comparisons
+		return errors.New("weight must be between 0 and %d", maxWeight, http.StatusBadRequest)
 	}
 	e.shardsLock.Lock()
 	defer e.shardsLock.Unlock()

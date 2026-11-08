@@ -60,7 +60,8 @@ eng.Create(ctx, "import", state, &workflow.FlowOptions{
 
 The scheduler dispatches in proportion to weight across the distinct keys within each priority band — a weight-4
 key gets ~4x the share of a weight-1 key, independent of how much backlog each has. If flows sharing a key carry
-different weights, the key dispatches at the lowest weight among its due work, so give one key one weight. Within a single key,
+different weights, the key dispatches at the lowest weight among its due work, so give one key one weight. A weight is at
+most 1,048,576 (2^20); use a fraction for a smaller share. Within a single key,
 dispatch is oldest-first (FIFO). Both `FairnessKey` and `FairnessWeight` are immutable for the flow's life
 (changing them mid-run would be a self-promotion vector).
 

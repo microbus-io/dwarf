@@ -32,7 +32,7 @@ up to twice its size, since Go's garbage collector lets the heap reach about twi
 
 A shard needs only its `Index` and `DSN`. The engine sizes its connection pool on its own (see
 [Connection pool](#connection-pool)); `MaxConnections` overrides that size, and `Weight` sets the shard's
-share of new flows relative to the other shards (default 1). `Cordoned: true` excludes a shard from
+share of new flows relative to the other shards (default 1, at most 1,048,576). `Cordoned: true` excludes a shard from
 new-flow placement (resident flows and their subgraph children/continuations/forks proceed) - for retiring
 or overloaded shards. The [cloud benchmarks](benchmark-cloud.md) document the measurements behind the
 defaults.

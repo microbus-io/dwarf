@@ -30,7 +30,8 @@ type FlowOptions struct {
 	// Empty uses the "" bucket. Create rejects a key that is not valid UTF-8.
 	FairnessKey string `json:"fairnessKey,omitzero"`
 	// FairnessWeight is the relative dispatch share of the fairness key.
-	// Zero uses a weight of 1. Create rejects a negative weight, NaN and the infinities.
+	// Zero uses a weight of 1. Create rejects a negative weight, NaN, and a weight above
+	// 1,048,576 (2^20); a fraction expresses a smaller share.
 	FairnessWeight float64 `json:"fairnessWeight,omitzero"`
 	// TimeBudget overrides the engine's default per-task time budget for this flow, bounding every
 	// ExecuteTask call's context deadline. Subgraph descendants inherit it. Zero uses the engine's
