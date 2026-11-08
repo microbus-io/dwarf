@@ -79,7 +79,7 @@ small libraries: [`boolexp`](https://github.com/microbus-io/boolexp) (`when` exp
 go get github.com/microbus-io/dwarf
 ```
 
-Requires Go 1.26+.
+Requires Go 1.27.3+.
 
 ## Packages
 

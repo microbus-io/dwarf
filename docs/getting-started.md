@@ -9,7 +9,7 @@
 go get github.com/microbus-io/dwarf
 ```
 
-Dwarf requires Go 1.26+ and a SQL database for production use (PostgreSQL, MySQL/MariaDB, or SQL Server).
+Dwarf requires Go 1.27.3+ and a SQL database for production use (PostgreSQL, MySQL/MariaDB, or SQL Server).
 For tests and local experiments it uses SQLite in-memory automatically — no database to set up.
 
 ## The three things you provide

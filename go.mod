@@ -1,15 +1,15 @@
 module github.com/microbus-io/dwarf
 
-go 1.26.3
+go 1.27.3
 
 tool github.com/microbus-io/copyrighter
 
 require (
-	github.com/jackc/pgx/v5 v5.11.0
+	github.com/jackc/pgx/v5 v5.12.0
 	github.com/microbus-io/boolexp v1.3.0
 	github.com/microbus-io/errors v1.0.1
 	github.com/microbus-io/seamster v0.4.0
-	github.com/microbus-io/sequel v1.16.0
+	github.com/microbus-io/sequel v1.17.0
 	github.com/microbus-io/testarossa v0.7.4
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/metric v1.47.0
@@ -41,11 +41,11 @@ require (
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/log v1.47.0 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
-	golang.org/x/net v0.61.0 // indirect
+	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
-	modernc.org/libc v1.78.0 // indirect
+	modernc.org/libc v1.80.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
-	modernc.org/sqlite v1.60.1 // indirect
+	modernc.org/sqlite v1.62.0 // indirect
 )
