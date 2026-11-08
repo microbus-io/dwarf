@@ -68,8 +68,10 @@ type artifact struct {
 	Soak        *soakReport    `json:"soak,omitzero"`   // set in -soak mode instead of Results
 	Volume      *volumeReport  `json:"volume,omitzero"` // set in -volume mode instead of Results
 	Real        *realReport    `json:"real,omitzero"`   // set in -real mode instead of Results
-	Valid       bool           `json:"valid"`           // false when recovery/unwedge counters fired
-	Invalidity  string         `json:"invalidity,omitzero"`
+	// ArchivedReads is the -archived-readers load's record, beside whichever mode ran.
+	ArchivedReads *archivedReadReport `json:"archivedReads,omitzero"`
+	Valid         bool                `json:"valid"` // false when recovery/unwedge counters fired
+	Invalidity    string              `json:"invalidity,omitzero"`
 }
 
 func main() {
@@ -104,6 +106,8 @@ func run() error {
 		// per-shard rates the run summary prints, is the operator's lever and the bench's.
 		weightsFlag      = flag.String("weights", "", "ShardSpec.Weight per shard as comma-separated N=w (e.g. '1=1,2=0.8'); unlisted shards weigh 1")
 		refillIntervalMs = flag.Int("refill-interval-ms", 0, "pin each shard's refill cycle period in ms (0 = derived from the pool); the scan-rate sweep knob")
+		archivedReaders  = flag.Int("archived-readers", 0, "goroutines that read the History of archived flows (keys from ListClosed) for the whole run, beside its own load - the read load callers put on the archive; reported as archivedReads in the artifact (0 = none)")
+		archiveRetention = flag.Int("archive-retention", -1, "Engine.SetRetention for every replica: how many archive days to keep (-1 = the engine's default; with a short DWARF_ARCHIVE_DAY, a small value makes day drops happen within the run)")
 		stateCacheMB     = flag.Int64("state-cache-mb", 0, "Engine.SetStateCacheSize in MiB for every replica: the memory each keeps for large state fields (0 = derived: a tenth of GOMEMLIMIT, else of the cgroup limit or physical memory, else 1 GiB)")
 		openLoop         = flag.Bool("open-loop", false, "open-loop load: creators fire flows without awaiting completion, so the backlog grows past the goroutine count (closed-loop caps in-flight flows at -concurrency, keeping a linear backlog inside the cache and never stressing the refiller)")
 		maxOutstanding   = flag.Int("max-outstanding", 100000, "open-loop only: cap on in-flight (created minus ended) flows, the backpressure bound that keeps the backlog from OOMing the DB")
@@ -364,6 +368,9 @@ func run() error {
 		if *stateCacheMB > 0 {
 			setters = append(setters, eng.SetStateCacheSize(*stateCacheMB<<20))
 		}
+		if *archiveRetention >= 0 {
+			setters = append(setters, eng.SetRetention(*archiveRetention))
+		}
 		for _, setter := range setters {
 			if setter != nil {
 				return setter
@@ -402,6 +409,10 @@ func run() error {
 	// counterpart for shards 2+.
 	waits := startWaitSampler(dsns[0].dsn)
 	defer waits.close()
+	var stopArchivedReaders func() *archivedReadReport
+	if *archivedReaders > 0 {
+		stopArchivedReaders = startArchivedReaders(ctx, engines[0], *archivedReaders)
+	}
 
 	art := artifact{
 		Label:     *label,
@@ -423,21 +434,23 @@ func run() error {
 			"taskDelayMeanMs": dist.mean().Milliseconds(),
 			// The workload's own shape knobs. Without them a -fanout-width or -linear-steps sweep produces
 			// artifacts that are byte-identical in configuration and wildly different in what they measured.
-			"fanOutWidth":     *fanOutWidth,
-			"branchDepth":     *branchDepth,
-			"linearSteps":     *linearStepsFlag,
-			"carryRead":       *carryRead,
-			"workers":         *workers,
-			"maxConnections":  *maxConns,
-			"stateCacheMB":    *stateCacheMB,
-			"weights":         weights,
-			"replicas":        *replicas,
-			"replicaWorkers":  *replicaWorkers,
-			"shards":          dsns.redacted(),
-			"windowSec":       window.Seconds(),
-			"warmupSec":       warmup.Seconds(),
-			"drainSec":        drain.Seconds(),
-			"stallTimeoutSec": stallTimeout.Seconds(),
+			"fanOutWidth":      *fanOutWidth,
+			"branchDepth":      *branchDepth,
+			"linearSteps":      *linearStepsFlag,
+			"carryRead":        *carryRead,
+			"workers":          *workers,
+			"maxConnections":   *maxConns,
+			"stateCacheMB":     *stateCacheMB,
+			"archiveRetention": *archiveRetention,
+			"archivedReaders":  *archivedReaders,
+			"weights":          weights,
+			"replicas":         *replicas,
+			"replicaWorkers":   *replicaWorkers,
+			"shards":           dsns.redacted(),
+			"windowSec":        window.Seconds(),
+			"warmupSec":        warmup.Seconds(),
+			"drainSec":         drain.Seconds(),
+			"stallTimeoutSec":  stallTimeout.Seconds(),
 		},
 		Environment: environment(),
 		Valid:       true,
@@ -629,6 +642,18 @@ func run() error {
 	fmt.Printf("rtt: p50 %.2fms p95 %.2fms (%d samples)  valid: %v\n", art.RTT.P50ms, art.RTT.P95ms, art.RTT.Samples, art.Valid)
 	if !art.Valid {
 		fmt.Println("INVALID RUN:", art.Invalidity)
+	}
+
+	if stopArchivedReaders != nil {
+		r := stopArchivedReaders()
+		art.ArchivedReads = r
+		fmt.Printf("archived reads: %d readers, %.0f reads/s, p50 %.1f ms, p99 %.1f ms, max %.0f ms, %d not found, %d errors\n",
+			r.Readers, r.ReadsPerSec, r.P50Ms, r.P99Ms, r.MaxMs, r.NotFound, r.Errors)
+		if r.Errors > 0 && art.Valid {
+			art.Valid = false
+			art.Invalidity = fmt.Sprintf("archived reads: %d errors", r.Errors)
+			fmt.Println("INVALID RUN:", art.Invalidity)
+		}
 	}
 
 	path := *out

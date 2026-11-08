@@ -655,7 +655,9 @@ missing, with a note).
 test seams: `DWARF_ARCHIVE_DAY` shortens the archive's day (whole seconds), so one run sees day rollovers, several
 day tables and retention drops under load; `DWARF_ARCHIVE_GRACE` sets how long a closed flow waits before it is
 archived (a Go duration, `0s` and up), so an archived run's warmup can be short or a run can hold closed flows live
-longer. The engine logs a warning when either is set.
+longer. The engine logs a warning when either is set. `-archive-retention N` sets `SetRetention` on every replica: a
+day of minutes under the default retention of 30 days drops nothing within a run, so pair a short day with a small
+`N` to see drops under load.
 
 **Start every run on a fresh database, and never change `DWARF_ARCHIVE_DAY` against one that holds archive day
 tables** - not to another value, not between set and unset. The day length is not stored: a day table's number is
