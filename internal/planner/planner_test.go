@@ -18,6 +18,7 @@ package planner
 
 import (
 	"math"
+	"math/rand/v2"
 	"sync"
 	"testing"
 
@@ -278,6 +279,24 @@ func TestPlanner_TallyNormalizesWeight(t *testing.T) {
 	plan := p.Plan(1, 8)
 	assert.Equal(1, len(plan.Slots), "a zero-weight key must still be dispatchable")
 	assert.Equal([]string{"zero"}, plan.Fetches[0].Keys)
+
+	// NaN and the infinities are normalized too: either one would poison the draw for every key at its band.
+	// Capacity is below the backlog and the rolls alternate, so the split shows the weights the draw saw.
+	for _, w := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		p := New()
+		n := 0
+		p.randFloat = func() float64 { n++; return []float64{0.25, 0.75}[n%2] }
+		p.Tally(1, []Tally{
+			{Band: 5, Key: "odd", Weight: w, AgeMs: 10, Count: 100},
+			{Band: 5, Key: "plain", Weight: 1, AgeMs: 10, Count: 100},
+		})
+		counts := map[string]int{}
+		for _, s := range p.Plan(1, 50).Slots {
+			counts[s.Key]++
+		}
+		assert.Equal(25, counts["odd"], "weight %v", w)
+		assert.Equal(25, counts["plain"], "weight %v", w)
+	}
 }
 
 // TestPlanner_EmptyAndReset pins the two trivial states: a planner nobody has reported to plans
@@ -457,4 +476,71 @@ func TestPlanner_BetterBandsThatFillTheBatchHoldTheRestBack(t *testing.T) {
 	}
 	assert.Equal(slots(10, "a", 3), p.Plan(1, 8).Slots, "shard 1 serves all of the best band and none of its band 30")
 	assert.Equal(5, len(p.Plan(2, 8).Slots), "shard 2 fills the rest from band 20, none from band 40")
+}
+
+// TestPlanner_PickIsScaleInvariant pins that only the weights' ratios reach the draw. Two equal weights at 1e20
+// with alternating rolls must split the slots evenly; drawn by comparing U^(1/w) per key, every score rounded to 1
+// and the first key took all 100 (and at 1e-6 every score underflowed to 0, the same result). Scaling every weight
+// by one factor, by powers of two so the normalized weights are exact, must not change a single slot.
+func TestPlanner_PickIsScaleInvariant(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	alternating := func() func() float64 {
+		n := 0
+		return func() float64 {
+			n++
+			if n%2 == 1 {
+				return 0.25
+			}
+			return 0.75
+		}
+	}
+	for _, w := range []float64{1e20, 1e-6} {
+		keys := []keyAgg{{key: "a", weight: w, count: 100}, {key: "b", weight: w, count: 100}}
+		counts := map[string]int{}
+		for _, k := range pick(keys, 100, alternating()) {
+			counts[k]++
+		}
+		assert.Equal(50, counts["a"], "weight %g", w)
+		assert.Equal(50, counts["b"], "weight %g", w)
+	}
+
+	seq := func() func() float64 {
+		r := rand.New(rand.NewPCG(1, 2))
+		return r.Float64
+	}
+	base := pick([]keyAgg{{key: "heavy", weight: 4, count: 500}, {key: "light", weight: 1, count: 500}}, 300, seq())
+	for _, exp := range []int{70, -1000} {
+		scaled := []keyAgg{
+			{key: "heavy", weight: math.Ldexp(4, exp), count: 500},
+			{key: "light", weight: math.Ldexp(1, exp), count: 500},
+		}
+		assert.Equal(base, pick(scaled, 300, seq()), "scaled by 2^%d", exp)
+	}
+}
+
+// TestPlanner_PickRebasesWhenTheLargestKeyRunsOut pins that the weights are rescaled against the keys still holding
+// steps. A one-step key at 1e308 leaves two keys at 1e-300 and 2e-300 rounding to zero against it; normalized once,
+// they stayed zero after it ran out, every draw fell through to the last live key, and the alternating rolls gave
+// b all 100 remaining slots and a none.
+func TestPlanner_PickRebasesWhenTheLargestKeyRunsOut(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	p := New()
+	n := 0
+	p.randFloat = func() float64 { n++; return []float64{0.75, 0.25}[n%2] }
+	p.Tally(1, []Tally{
+		{Band: 5, Key: "huge", Weight: 1e308, AgeMs: 10, Count: 1},
+		{Band: 5, Key: "a", Weight: 1e-300, AgeMs: 10, Count: 100},
+		{Band: 5, Key: "b", Weight: 2e-300, AgeMs: 10, Count: 100},
+	})
+	counts := map[string]int{}
+	for _, s := range p.Plan(1, 101).Slots {
+		counts[s.Key]++
+	}
+	assert.Equal(1, counts["huge"])
+	assert.Equal(50, counts["a"], "a's share was lost to the exhausted key's scale")
+	assert.Equal(50, counts["b"])
 }

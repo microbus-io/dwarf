@@ -108,33 +108,61 @@ func reach(bands []bandAgg, capacity int) int {
 // pick runs the weighted fairness lottery over one band's keys and returns the ordered sequence of
 // keys to dispatch - one entry per step, at most capacity.
 //
-// Each slot is an independent Efraimidis-Spirakis draw over the KEYS, re-rolled every slot. Rolling
-// per slot rather than per key is what makes a key's expected share proportional to its weight and
-// INDEPENDENT of how deep its backlog is - a tenant with a million queued steps and a tenant with ten
-// get the same share at the same weight. A key can never be drawn more times than it has steps.
+// Each slot is an independent weighted draw over the KEYS still holding steps, re-rolled every slot: key i
+// with probability w_i / Σw. Rolling per slot rather than per key is what makes a key's expected share
+// proportional to its weight and INDEPENDENT of how deep its backlog is - a tenant with a million queued
+// steps and a tenant with ten get the same share at the same weight. A key can never be drawn more times
+// than it has steps.
+//
+// The live keys' weights are divided by the largest among them, so only their ratios reach the draw: equal
+// weights get equal shares at any common scale.
 func pick(keys []keyAgg, capacity int, randFloat func() float64) []string {
 	remaining := make([]int, len(keys))
 	for i := range keys {
 		remaining[i] = keys[i].count
 	}
+	// rebase divides the live keys' weights by the largest among them and sums them. It runs again whenever a
+	// key exhausts: dividing once by a key that has run out leaves the others at what rounding made of them
+	// against it, which can be zero for every one, and re-summing rounded values cannot restore their ratios.
+	weights := make([]float64, len(keys))
+	total := 0.0
+	rebase := func() {
+		largest := 0.0
+		for i := range keys {
+			if remaining[i] > 0 {
+				largest = max(largest, keys[i].weight)
+			}
+		}
+		total = 0
+		for i := range keys {
+			if remaining[i] > 0 {
+				weights[i] = keys[i].weight / largest
+				total += weights[i]
+			}
+		}
+	}
+	rebase()
 	order := make([]string, 0, capacity)
 	for len(order) < capacity {
-		best, bestScore := -1, -1.0
+		chosen := -1
+		r := randFloat() * total
 		for i := range keys {
 			if remaining[i] <= 0 {
 				continue
 			}
-			score := math.Pow(randFloat(), 1/keys[i].weight)
-			if score > bestScore {
-				bestScore = score
-				best = i
+			// The last live key takes what rounding leaves past the end of the sum.
+			chosen = i
+			if r -= weights[i]; r < 0 {
+				break
 			}
 		}
-		if best < 0 {
+		if chosen < 0 {
 			break // every key exhausted: the whole band fits in the batch
 		}
-		order = append(order, keys[best].key)
-		remaining[best]--
+		order = append(order, keys[chosen].key)
+		if remaining[chosen]--; remaining[chosen] == 0 {
+			rebase()
+		}
 	}
 	return order
 }

@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"testing"
 	"time"
@@ -57,6 +58,19 @@ func TestCreate_RejectsNegativeOptions(t *testing.T) {
 	_, err = e.Create(ctx, "fopt/g", nil, &workflow.FlowOptions{FairnessWeight: -0.5})
 	assert.Error(err)
 	assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
+
+	// A non-finite weight passes a `< 0` test, and the planner's draw has no answer for it -> 400.
+	for _, w := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		_, err = e.Create(ctx, "fopt/g", nil, &workflow.FlowOptions{FairnessWeight: w})
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "weight %v", w)
+	}
+
+	// A fairness key that is not valid UTF-8 -> 400: the planner matches keys by their JSON encoding, which rewrites
+	// the invalid bytes, so the key's steps would be tallied and never fetched. A valid multi-byte key is accepted.
+	_, err = e.Create(ctx, "fopt/g", nil, &workflow.FlowOptions{FairnessKey: string([]byte{0xff})})
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
+	_, err = e.Create(ctx, "fopt/g", nil, &workflow.FlowOptions{FairnessKey: "tenant-\u00e9"})
+	assert.NoError(err)
 
 	// Run shares the same create path, so it rejects too.
 	_, _, err = e.Run(ctx, "fopt/g", nil, &workflow.FlowOptions{Priority: -7})

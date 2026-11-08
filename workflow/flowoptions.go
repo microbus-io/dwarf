@@ -27,10 +27,10 @@ type FlowOptions struct {
 	// midpoint of the range (3 by default). Create rejects a value outside the range.
 	Priority int `json:"priority,omitzero"`
 	// FairnessKey groups flows for fair scheduling, typically a tenant.
-	// Empty uses the "" bucket.
+	// Empty uses the "" bucket. Create rejects a key that is not valid UTF-8.
 	FairnessKey string `json:"fairnessKey,omitzero"`
 	// FairnessWeight is the relative dispatch share of the fairness key.
-	// Zero uses a weight of 1.
+	// Zero uses a weight of 1. Create rejects a negative weight, NaN and the infinities.
 	FairnessWeight float64 `json:"fairnessWeight,omitzero"`
 	// TimeBudget overrides the engine's default per-task time budget for this flow, bounding every
 	// ExecuteTask call's context deadline. Subgraph descendants inherit it. Zero uses the engine's

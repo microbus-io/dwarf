@@ -55,7 +55,7 @@ highest, an average - lets a tenant self-promote by queueing heavier work; the l
 light flow then lowers only its own key. The oldest step's weight would be safe too, but an aggregate cannot
 read it: it takes a lookup per key, and a fan-out puts thousands of a key's steps in one millisecond.
 
-**The lottery re-rolls per SLOT, not per key** (`pick`, Efraimidis-Spirakis over the keys). That is what
+**The lottery re-rolls per SLOT, not per key** (`pick`, a weighted draw over the keys). That is what
 makes a key's expected share proportional to its weight and **independent of backlog depth** — a tenant
 with a million queued steps and one with ten get the same share at the same weight. Rolling once per key
 and handing out runs would reintroduce depth-proportionality through the back door.
@@ -63,18 +63,24 @@ and handing out runs would reintroduce depth-proportionality through the back do
 **Every caller rolls its own plan independently.** The rolls are uncoordinated, which changes nothing in
 expectation and needs no cross-shard agreement.
 
+**Only the weights' ratios may reach the draw.** `pick` divides the weights of the keys still holding steps
+by the largest among them, again whenever a key runs out, and takes one cumulative draw per slot (key *i* with
+probability `w_i / Σw`). Rescaling once is not enough: against a dominating key the others can round to zero,
+and re-summing those rounded values after it runs out cannot restore their ratios. **Do not draw by comparing `U^(1/w)` per
+key** (Efraimidis-Spirakis top-1): it is the same distribution in exact arithmetic, but at a large weight
+every score rounds to 1 and at a small one underflows to 0, and the strict comparison then hands the first
+key every slot - two keys at weight 1e20 split 100/0. `Tally` rewrites a NaN or infinite weight to 1 beside
+a non-positive one, since either poisons the sum for every key at the band. Pinned by
+`TestPlanner_PickIsScaleInvariant`, `TestPlanner_PickRebasesWhenTheLargestKeyRunsOut` and
+`TestPlanner_TallyNormalizesWeight`.
+
 **`pick` is O(capacity x distinct keys), and it is the one cost in the whole design that scales with key
 CARDINALITY.** The three-phase split bounds wire cost and (on Postgres) server scan cost against cardinality;
-this is not covered by either. The inner loop calls `randFloat` and `math.Pow` once per key per slot, so at
-the reference capacity of 768 against a few thousand keys at the band it is millions of `Pow` calls, per
-shard, per cycle.
+this is not covered by either. Each slot walks the live keys' weights once, so at the reference capacity of
+768 against a few thousand keys at the band it is millions of additions, per shard, per cycle. A Fenwick
+tree over the weights would make it O(K + C·log K) with identical semantics.
 
-There is a known faster shape with **identical semantics**: an Efraimidis-Spirakis top-1 draw with exponent
-`1/w` selects key *i* with probability `w_i / Σw`, so each slot is just a weighted draw, and the loop as a
-whole is weighted sampling with replacement plus exhaustion. A Fenwick tree over the weights gives
-O(K + C·log K).
-
-**It is deliberately NOT built, because it cannot honestly be justified until it is measured** - the same
+**The tree is deliberately NOT built, because it cannot honestly be justified until it is measured** - the same
 bar every other refiller tuning change in this codebase was held to, and the one three adaptive designs
 failed. The piston records planning cost directly (`dwarf_refill_query_duration_seconds{phase="planning"}`);
 get a real cardinality profile off that before touching the lottery.

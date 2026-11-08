@@ -672,7 +672,7 @@ number of bands: per-band counts capped at capacity for every band `1..max` (`Se
 (2) **Global merge + weighted fill** (`internal/planner`): the shard's tally is recorded in the planner - a
 shared map holding each shard's LAST report, which is what makes a barrier unnecessary - and the plan is
 computed over all of them, band by band from the best: counts summed per key within a band, the lowest
-weight winning, then repeatedly weighted-random pick a key (Efraimidis-Spirakis over
+weight winning, then repeatedly weighted-random pick a key (a weighted draw over
 the *keys*, not the rows) until the band is exhausted or the plan reaches `capacity`, and spill to the next
 band only while capacity remains. **The plan is global; only the fetch is per-shard**, so fairness semantics are exactly the
 barrier's - never re-derive this as per-shard lotteries, presence-scaled (`1/d`) weights, or capacity

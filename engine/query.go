@@ -386,15 +386,30 @@ const likeEscape = "~"
 
 var likeEscaper = strings.NewReplacer(likeEscape, likeEscape+likeEscape, "%", likeEscape+"%", "_", likeEscape+"_")
 
+// mssqlLikeEscaper also escapes `[`, which opens a character set (`[x]`, a range `[a-c]`, a negated `[^x]`) only in
+// SQL Server's LIKE. Unescaped, a search for "[x]" matches every value holding an x, and Purge, which selects its
+// victims through this clause, deletes them. A `]` or `^` outside a set is already literal there. The other dialects
+// do not get the escape: SQLite defines its escape character only before %, _ and itself.
+var mssqlLikeEscaper = strings.NewReplacer(likeEscape, likeEscape+likeEscape, "%", likeEscape+"%", "_", likeEscape+"_", "[", likeEscape+"[")
+
+// likePattern is the %...% pattern that matches search as a literal substring under ESCAPE likeEscape, lowercased.
+func likePattern(driverName string, search string) string {
+	escaper := likeEscaper
+	if driverName == "mssql" {
+		escaper = mssqlLikeEscaper
+	}
+	return "%" + escaper.Replace(strings.ToLower(search)) + "%"
+}
+
 func searchClause(driverName string, shardIdx int, search string) (string, []any) {
 	if search == "" {
 		return "", nil
 	}
-	// Escape the caller-supplied term's LIKE metacharacters (% and _) and the escape char itself before
-	// wrapping in %...%, so a search for "a_b" or "50%" matches literally instead of being steered into an
-	// unbounded wildcard full scan. Every LIKE below carries the matching ESCAPE clause. No injection risk
-	// either way (the term is a bind parameter); this is purely about scan cost.
-	pattern := "%" + likeEscaper.Replace(strings.ToLower(search)) + "%"
+	// Escape the caller-supplied term's LIKE metacharacters and the escape char itself before wrapping in %...%, so a
+	// search for "a_b", "50%" or "[x]" matches literally. Every LIKE below carries the matching ESCAPE clause. The term
+	// is a bind parameter, so this is not about injection: an unescaped wildcard widens what the search selects, which
+	// for Purge is what it deletes.
+	pattern := likePattern(driverName, search)
 	var flowKeyExpr string
 	switch driverName {
 	case "mysql", "mariadb", "mssql":

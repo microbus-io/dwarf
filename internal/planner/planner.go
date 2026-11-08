@@ -178,10 +178,10 @@ func (p *Planner) Tally(shard int, tallies []Tally) {
 	if len(tallies) > 0 {
 		st.byKey = make(map[Slot]int, len(tallies))
 		for i := range tallies {
-			// A non-positive weight would make the lottery's 1/weight exponent infinite and the key
-			// unpickable forever - silent starvation. Normalize here, where the invariant belongs,
-			// rather than trusting every producer.
-			if tallies[i].Weight <= 0 {
+			// The lottery needs a positive finite weight: a non-positive one would make its key unpickable
+			// forever - silent starvation - and NaN or an infinity poisons the draw for every key at the band.
+			// Normalize here, where the invariant belongs, rather than trusting every producer.
+			if w := tallies[i].Weight; !(w > 0) || math.IsInf(w, 0) {
 				tallies[i].Weight = 1
 			}
 			st.byKey[Slot{Band: tallies[i].Band, Key: tallies[i].Key}] = i

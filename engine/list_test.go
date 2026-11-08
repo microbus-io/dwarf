@@ -492,3 +492,16 @@ func TestSQLTime_AFarFutureBoundMeansNoBound(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal([]int{roots[0]}, idsOf(t, got))
 }
+
+// TestList_SearchPatternIsLiteral pins the LIKE pattern a Search builds per dialect: every metacharacter of that
+// dialect is escaped, so the term matches as a literal substring. SQL Server alone reads `[` as opening a character
+// set, so only its pattern escapes it; unescaped, Search "[x]" matched every value holding an x, and Purge deleted them.
+func TestList_SearchPatternIsLiteral(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	for _, driver := range []string{"sqlite", "pgx", "mysql", "mariadb"} {
+		assert.Equal("%a~_b~%c~~d[x]%", likePattern(driver, "A_B%C~D[X]"), driver)
+	}
+	assert.Equal("%a~_b~%c~~d~[x]%", likePattern("mssql", "A_B%C~D[X]"))
+	assert.Equal("%~[a-c]~[^z]]%", likePattern("mssql", "[a-c][^z]]"))
+}
