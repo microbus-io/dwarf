@@ -1169,6 +1169,57 @@ func TestPiston_FailingFetchesReportNoLiveness(t *testing.T) {
 	assert.True(recovered > stalled, "recovery costs exactly one round trip")
 }
 
+// TestPiston_BankedTurnsDoNotCarryAFailingLoop pins that a turn needs BOTH loops to have turned since the last
+// one, so a surplus one loop banked while healthy cannot keep a piston looking alive once the other stops. The two
+// loops are paced independently, and a minimum over their lifetime counts moved again for every turn of the
+// slower loop while the faster one failed, until its historical lead ran out: 1 -> 11 over ten cycles with every
+// fetch failing, against at most one turn now. Both directions: a supply surplus over failing fetches, a tally
+// surplus over failing scans.
+func TestPiston_BankedTurnsDoNotCarryAFailingLoop(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name  string
+		bank  func(p *Piston, ctx context.Context)
+		fault string
+	}{
+		{"supply_surplus_then_failing_fetches", func(p *Piston, ctx context.Context) { p.SupplyCycle(ctx) }, FaultFetchErr},
+		{"tally_surplus_then_failing_scans", func(p *Piston, ctx context.Context) { p.TallyCycle(ctx) }, FaultScanErr},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			assert := testarossa.For(t)
+			ctx := context.Background()
+			r := newRig(t)
+			sm := seamster.New(true)
+			r.p.SetSeams(sm)
+			r.insertStep(t, 1, 5, "k", 1)
+
+			r.p.Cycle(ctx)
+			for range 20 {
+				c.bank(r.p, ctx) // one loop runs ahead while everything is healthy
+			}
+			healthy, _, _ := r.p.Liveness()
+
+			// The banked loop's last healthy cycle and the other's next one are one genuine pair, so at most one more
+			// turn is reported; past it nothing banked may count.
+			sm.InjectN(c.fault, 1<<20)
+			r.p.Cycle(ctx)
+			first, _, _ := r.p.Liveness()
+			assert.True(first <= healthy+1, "at most the one pair already under way (%d -> %d)", healthy, first)
+			for range 10 {
+				r.p.Cycle(ctx)
+			}
+			stalled, _, _ := r.p.Liveness()
+			assert.Equal(first, stalled, "a loop that fails every cycle must stop the turns, whatever the other banked")
+
+			sm.Withdraw(c.fault)
+			r.p.Cycle(ctx)
+			recovered, _, _ := r.p.Liveness()
+			assert.True(recovered > stalled, "and one healthy round trip resumes them")
+		})
+	}
+}
+
 // TestPiston_StealPredicateIsAlwaysRelaxed pins that there is no gate: the residue class is relaxed on
 // every query, and only the AGE terms decide whether a foreign step is admitted at all.
 //

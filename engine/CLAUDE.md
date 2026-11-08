@@ -1437,8 +1437,8 @@ than over-suppressing.
 
 **The partition divides DISPATCHERS, not the pool divisor** - counted per shard from `dwarf_peers.dispatched_at`
 freshness, which is EVIDENCE that a piston turned rather than a claim of intent (`internal/peers/CLAUDE.md`
-owns the evidence rules: registration does not stamp it, the busy term is duration-qualified, and the count is
-the minimum of the piston's two loops). Over-counting the pool divisor collapses a database, while over-counting
+owns the evidence rules: registration does not stamp it, the busy term is duration-qualified, and the count
+needs both of the piston's loops to have turned). Over-counting the pool divisor collapses a database, while over-counting
 dispatchers strands work, so the pool errs toward keeping a replica and the partition toward dropping one. A
 registered replica that dispatches nothing on a shard must get no residue class there:
 `fixtures/crossreplicaawait_test.go` (an await-only replica that registers) hangs if it does.

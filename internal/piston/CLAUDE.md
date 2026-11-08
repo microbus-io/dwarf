@@ -50,7 +50,7 @@ are all in `internal/pipeline/CLAUDE.md`. What belongs *here* are the three cons
   is a full round trip: a scan to tally it, then a supply cycle to fetch it — the slower loop is what bounds
   how fast a healthy owner gets there, and keying off the faster one under-states the grace, which admits a
   healthy peer's work). Pinned by `TestPiston_CadenceIsPerLoop`, which sets the two loops apart deliberately.
-- **`Liveness`'s turn count is the MINIMUM of the two loops'** — see below.
+- **`Liveness`'s turn count advances only once BOTH loops have turned since its last advance** — see below.
 - **The steal must not acquire a flag one loop writes and the other reads** — see below. Anything shared
   between them is sampled at an arbitrary phase of the other's cadence, and the phases are not independent:
   both loops start together and the tally's interval is derived from the supply's - the owner multiplies it
@@ -72,7 +72,7 @@ Four things the shape has to get right:
 - **A counter, never a flag the reader clears.** A consuming getter would create a contract — call it once
   per publication, from one caller — and any second caller (a metric, a test) would silently swallow the
   evidence. Holding "since I last looked" belongs to the reader.
-- **The count is the MINIMUM of each loop's own count, and EITHER loop alone reports a broken piston as
+- **The count needs BOTH loops to have turned since it last advanced, and EITHER loop alone reports a broken piston as
   fully alive.** A turn has to mean this piston can both LOOK at its shard and SERVE it, and the two failures
   are exactly symmetric:
 
@@ -82,10 +82,17 @@ Four things the shape has to get right:
   | FETCH | tallies honestly, claims its band, takes zero candidates | the TALLY loop's — the scan is perfectly healthy |
 
   Either way the replica holds a residue class nobody else will select, which is the whole stranding this
-  evidence exists to prevent. The minimum stalls when either loop does. Each loop writes only its own
-  counter, so this adds no cross-loop state. Pinned from both sides by
+  evidence exists to prevent. The count stalls when either loop does. Pinned from both sides by
   `TestPiston_FailingCyclesReportNoLiveness` and `TestPiston_FailingFetchesReportNoLiveness`, each of which
   fails against a build that takes the count from the other loop.
+
+  **Do not report the MINIMUM of the two lifetime counts.** It stalls only once the failing loop's lead is spent:
+  the loops are paced independently, so one banks a surplus while both are healthy, and after it starts failing
+  every turn of the other moves the minimum again - a window that grows with uptime and the cadence ratio.
+  Measured: 1 -> 11 over ten cycles with every fetch failing. Each loop still counts only its own successes; after
+  each, `advanceTurn` advances the reported generation when both counts have moved past the pair it last advanced
+  at, under a mutex since either loop can complete the pair. A failure therefore costs at most the one pair already
+  under way. Pinned by `TestPiston_BankedTurnsDoNotCarryAFailingLoop`, both directions.
 
   **The fetch side is the one with no other signal.** A failing scan at least logs and clears the shard; a
   failing fetch leaves an honest tally, a claimed band, and a silent partition — no error counter names it,

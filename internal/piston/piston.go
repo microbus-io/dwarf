@@ -142,7 +142,8 @@ type Piston struct {
 	// maxPriority is the worst band the scan counts - priorities run 1..maxPriority. See SetMaxPriority.
 	maxPriority atomic.Int32
 	// tallyTurns and supplyTurns count each loop's successful cycles, monotonically and independently -
-	// neither loop ever writes the other's. Liveness reports their MINIMUM, because a turn has to mean this
+	// neither loop ever writes the other's. Liveness reports neither: it reports turns, a generation that
+	// advances only once BOTH have moved since its last advance (advanceTurn), because a turn has to mean this
 	// piston can both LOOK at its shard and SERVE it, and the two failures are symmetric:
 	//
 	//   - every SCAN failing clears this shard from planning and selects nothing, while the supply loop
@@ -151,13 +152,22 @@ type Piston struct {
 	//     candidates - the quiet shape the bind-count overflow produces.
 	//
 	// Either alone therefore reads a piston that serves nothing as fully alive, and it then holds a residue
-	// class nobody else will select. The minimum stalls when either loop does, which is the whole point.
+	// class nobody else will select. The generation stalls when either loop does, which is the whole point.
+	//
+	// Not the MINIMUM of the two counts: the loops are paced independently, so one banks a lead over the other
+	// while both are healthy, and once the leader fails every turn of the other moves the minimum again until the
+	// lead runs out - a window that grows with uptime. Measured: 1 -> 11 over ten cycles of failing fetches.
 	//
 	// COUNTERS rather than a flag the reader clears: a consuming getter would make any second caller - a
 	// metric, a test - silently swallow the evidence and leave a healthy piston reading as stalled. Holding
 	// "since I last looked" is the reader's business.
 	tallyTurns  atomic.Uint64
 	supplyTurns atomic.Uint64
+	// turns is the generation Liveness reports, and turnMark the two counts it last advanced at; turnMu makes the
+	// check and the advance one step, since both loops call advanceTurn.
+	turnMu   sync.Mutex
+	turnMark [2]uint64
+	turns    atomic.Uint64
 	// lag is what the last completed band scan read of its oldest due step - see DispatchLag. Nil until a
 	// scan completes, and again once the piston has gone idle.
 	lag atomic.Pointer[lagReading]
@@ -296,9 +306,9 @@ func (p *Piston) MaxPriority() int { return int(p.maxPriority.Load()) }
 // as stalled. Holding the previous count is the reader's business, so this is a pure read that may be
 // called any number of times.
 //
-// The count is the MINIMUM of the two loops' own counts, because a turn has to mean this piston can both
-// LOOK at its shard and SERVE it. Taking it from either loop alone reads a piston that serves nothing as
-// fully alive - see tallyTurns.
+// The count advances only once BOTH loops have completed a cycle since it last advanced, because a turn has to
+// mean this piston can both LOOK at its shard and SERVE it. Taking it from either loop alone, or from the minimum
+// of their lifetime counts, reads a piston that serves nothing as alive - see tallyTurns.
 //
 // A loop inside its QUERIES counts, because a scan can legitimately run for tens of seconds on a deep
 // backlog where the executor cannot early-stop, and a piston in the middle of one is plainly still serving.
@@ -321,8 +331,7 @@ func (p *Piston) Liveness() (turns uint64, busy, idle bool) {
 	// scan reads busy. Period() floors at the DefaultMinGap constant, which is what keeps this a duration
 	// predicate rather than the bool it exists to replace when a caller pins the cadence to zero.
 	busy = p.tallier.WorkingFor() > p.tallier.Period() || p.supplier.WorkingFor() > p.supplier.Period()
-	turns = min(p.tallyTurns.Load(), p.supplyTurns.Load())
-	return turns, busy, p.idle.Load()
+	return p.turns.Load(), busy, p.idle.Load()
 }
 
 // DispatchLag is how long the most overdue step this piston can see, at a band the plan reaches, has been
@@ -625,6 +634,7 @@ func (p *Piston) SupplyCycle(ctx context.Context) pipeline.SupplyResult {
 	// outcomes, and only a FAILED fetch means this piston could not serve what it was asked to.
 	if r.Err == nil {
 		p.supplyTurns.Add(1)
+		p.advanceTurn()
 	}
 	return r
 }
@@ -643,8 +653,21 @@ func (p *Piston) TallyCycle(ctx context.Context) pipeline.TallyResult {
 	// Gating on candidates instead would make a quiet fleet look like it had no dispatchers at all.
 	if r.Err == nil {
 		p.tallyTurns.Add(1)
+		p.advanceTurn()
 	}
 	return r
+}
+
+// advanceTurn advances the generation Liveness reports when both loops have completed a cycle since it last
+// advanced. Called by each loop after its own successful cycle, so whichever loop completes the pair advances it.
+func (p *Piston) advanceTurn() {
+	p.turnMu.Lock()
+	defer p.turnMu.Unlock()
+	tally, supply := p.tallyTurns.Load(), p.supplyTurns.Load()
+	if tally > p.turnMark[0] && supply > p.turnMark[1] {
+		p.turnMark = [2]uint64{tally, supply}
+		p.turns.Add(1)
+	}
 }
 
 // recordTally translates a tally cycle's result into this piston's instruments.
