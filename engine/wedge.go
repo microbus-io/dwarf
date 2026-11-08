@@ -400,80 +400,83 @@ func (e *Engine) terminateOrphanedSubtree(ctx context.Context, shard int, childF
 	return errors.Trace(err)
 }
 
-// recoverOrphanedFlows repairs a `running` flow that is stranded - every step terminal, and a step whose transition
-// never committed and whose lease has lapsed - by rewinding that step.
+// recoverOrphanedFlows repairs a lost transition - a `completed` step of an open flow whose transition never
+// committed and whose lease has lapsed - by rewinding that step, whatever the flow's other steps are doing.
 //
 // That shape is what a worker leaves when it dies between a step's completion write and its transition
 // transaction: the step is `completed`, so lease recovery (which resets `running` rows only) cannot see it, and
-// nothing else will ever advance the flow. The completion write sets advancing=1, and every transition transaction
-// that commits while the flow stays open clears it, so advancing=1 on a completed step of a running flow means
-// exactly "this step's transition never committed". The repair rewinds such a step to `pending` - the same rewind
-// the processStep recovery defer performs for a worker that is still alive - and dispatch REPLAYS it: the claim
-// sees the flag, skips the task, and commits the transition from the output and disposition the completion write
-// recorded. The task does not run again, and the transition is the one the dead worker would have committed. No
-// transition logic is duplicated here, and a flow with no flagged step is never touched, so a false positive cannot
-// double-advance a flow.
+// nothing else will ever advance it. The completion write sets advancing=1, and every transition transaction
+// that commits while the flow stays open clears it, so advancing=1 on a completed step of a running or interrupted
+// flow means exactly "this step's transition never committed". The repair rewinds such a step to `pending` - the
+// same rewind the processStep recovery defer performs for a worker that is still alive - and dispatch REPLAYS it:
+// the claim sees the flag, skips the task, and commits the transition from the output and disposition the
+// completion write recorded. The task does not run again, and the transition is the one the dead worker would have
+// committed. No transition logic is duplicated here, and a flow with no flagged step is never touched, so a false
+// positive cannot double-advance a flow.
+//
+// THE REPAIR IS PER STEP, NOT PER FLOW. Do not gate it on the rest of the flow being terminal: a fan-out branch
+// whose transition was lost would then wait out its live siblings - a 24h retry backoff, a parked subgraph, a human
+// on an interrupt elsewhere in the flow - instead of its own lease. An interrupted flow is repaired too, for the
+// same reason: its other branches run on while it waits (a transition commits into an interrupted flow), and the
+// rewind is a transition's lock order, flow row first.
 //
 // THE LEASE IS THE ONLY WAIT, and the repair runs on every recovery tick, so a dead worker's completed step is
 // recovered within `lease + recoveryInterval` - the bound lease recovery gives a claimed step. Do not add an age
 // guard on step activity to the repair: a step mid-transition holds an unexpired lease, so the scan already skips it,
-// and a worker that keeps its step past its lease without dying is fenced rather than raced - the scan skips a flow
-// whose flagged step still holds an unexpired lease, and the rewind bumps lease_seq, so a worker that outlived its
-// lease rolls its transition back at its fenced step-row write instead of committing successors beside the
-// re-dispatch's. The step is then replayed, not re-run, so a false positive costs one redone transition and never a
-// second run of the task. Reaching one takes a task that overran its budget, a transition stalled past the
-// leaseMargin, or the database clock jumping forward by more than the leaseMargin: the completion write leaves the lease as the claim set it, so a task that returns within its budget
-// reaches its transition with leaseMargin left, and the two waits that can outlast that - persist's retry backoff and
-// the cohort stripe - extend the lease first. The rewind runs behind a write-first lock on the flow row, guarded on
-// `running`, so a Terminate landing between the scan and the rewind wins and the closed flow is left as it is.
+// and a worker that keeps its step past its lease without dying is fenced rather than raced - the rewind bumps
+// lease_seq, so a worker that outlived its lease rolls its transition back at its fenced step-row write instead of
+// committing successors beside the re-dispatch's. The step is then replayed, not re-run, so a false positive costs
+// one redone transition and never a second run of the task. Reaching one takes a task that overran its budget, a
+// transition stalled past the leaseMargin, or the database clock jumping forward by more than the leaseMargin: the
+// completion write leaves the lease as the claim set it, so a task that returns within its budget reaches its
+// transition with leaseMargin left, and the two waits that can outlast that - persist's retry backoff and the cohort
+// stripe - extend the lease first. The rewind runs behind a write-first lock on the flow row, guarded on the flow
+// being open, so a Terminate landing between the scan and the rewind wins and the closed flow is left as it is.
 //
-// A stranded flow with no flagged step is a bug signal - some other path stranded it - logged at error level and
-// counted by dwarf_flows_orphaned, and not repaired. That verdict is re-taken under the flow-row lock, so a flow
-// that went terminal, was repaired by a peer's sweep, or moved on after the unlocked scan is not miscounted. The
-// ALARM keeps an age guard, and only the alarm: it fires only once no step of the flow has been touched for
-// orphanFlowThreshold, so a transient all-terminal state nobody has named is not reported as a bug. It is raised
-// only when alarm is set - the heavy pass, every heavyRepairEvery ticks - so an unrepairable flow is counted at the
-// cadence the alarm always had rather than on every tick. The guard reads
-// dwarf_steps.updated_at, which moves on every step transition; dwarf_flows.updated_at is frozen at the flow's
-// go-`running` time and says nothing about progress.
+// A stranded flow - running, every step terminal, none flagged - is a bug signal: some other path stranded it. It
+// is logged at error level and counted by dwarf_flows_orphaned, and not repaired. That verdict is re-taken under the
+// flow-row lock, so a flow that went terminal, was repaired by a peer's sweep, or moved on after the unlocked scan is
+// not miscounted. The ALARM keeps an age guard, and only the alarm: it fires only once no step of the flow has been
+// touched for orphanFlowThreshold, so a transient all-terminal state nobody has named is not reported as a bug. It is
+// looked for only when alarm is set - the heavy pass, every heavyRepairEvery ticks - so an unrepairable flow is
+// counted at the cadence the alarm always had rather than on every tick. The guard reads dwarf_steps.updated_at,
+// which moves on every step transition; dwarf_flows.updated_at is frozen at the flow's go-`running` time and says
+// nothing about progress. "All steps terminal" excludes every legitimate long-wait from the alarm, because each holds
+// a non-terminal step: a task mid-execution, a sleep/retry backoff, a parked subgraph caller, a human, a live sibling.
 //
-// "All steps terminal" (NOT EXISTS a non-terminal step) excludes every legitimate long-wait, because each holds a
-// non-terminal step: a task mid-execution (`running`, even for 10 minutes with no DB activity), a sleep/retry
-// backoff (`pending`), a parked subgraph caller (`running`+parked), a human (`interrupted`), and a live fan-out
-// sibling.
-//
-// THE SCAN LISTS THE RUNNING FLOWS, THEN CHECKS THEM inListChunk AT A TIME, so it costs running flows x their
-// steps, not the size of dwarf_steps. Do not check every running flow in one statement: once the running flows
-// are a large share of the table, the planner hashes them and reads all of dwarf_steps once per NOT EXISTS.
-// Measured on PostgreSQL 16 at 240,000 running flows over 2.1M step rows: the one statement ran two parallel
-// sequential scans of dwarf_steps (1.5 s), the chunks probe the primary key and idx_dwarf_steps_flow_id per
-// flow (6-7 ms per chunk, ~3 s for the pass); against a 190 GB dwarf_steps the one statement averaged 48 s a
-// pass and peaked at 596 s. A chunk's outer side is at most inListChunk rows, so the per-flow probe wins whatever
-// the table holds, and the pass grows with running flows alone (~13 us each), which delays the next lease
-// recovery by as much. RUNNING INCLUDES THE SLEEPERS: a flow waiting out flow.Sleep or a retry backoff is running
-// (its step pending, not_before ahead), as are a task mid-execution and a parked subgraph caller, so every one is
-// listed and probed on every pass, to find its live step. The cost is O(running + sleeping), and a large sleeping
-// population pays it once a minute on every dispatcher of the shard. A chunk that fails is skipped rather than ending the pass, so one bad chunk cannot hold
-// back every repair on the shard. The flow row cannot shortcut it: stopped_step_id is 0 while a flow runs.
+// THE SCAN LISTS THE OPEN FLOWS, THEN CHECKS THEM inListChunk AT A TIME. The work depends on the retained
+// steps of those flows, not just their count: proving no completed step is still advancing can read the entire
+// history of an open flow. Chunking bounds the candidate flow IDs, not the step rows examined or the query plan;
+// a planner can prefer a sequential scan when those flows account for a large share of the step table. Do not
+// check every open flow in one statement, which makes that the likely plan: measured on PostgreSQL 16 at 240,000
+// running flows over 2.1M step rows, the one statement ran two parallel sequential scans of dwarf_steps (1.5 s)
+// where the chunks probed the primary key and idx_dwarf_steps_flow_id per flow (6-7 ms per chunk, ~3 s for the
+// pass, ~13 us a flow); against a 190 GB dwarf_steps the one statement averaged 48 s a pass and peaked at 596 s.
+// OPEN INCLUDES THE WAITERS: sleeping/retrying and subgraph-parked flows are running, and human waits are
+// interrupted, so all are checked on every pass. This cost is paid once a minute on every dispatcher of the shard
+// and delays the next lease-recovery pass by the sweep's runtime. Advancing remains deliberately unindexed: it is
+// set and cleared on every step, so indexing it adds two index changes per step on the hottest table. A chunk that
+// fails is skipped rather than ending the pass, so one bad chunk cannot hold back every repair on the shard.
+// The flow row cannot shortcut the search: stopped_step_id is 0 while a flow runs.
 func (e *Engine) recoverOrphanedFlows(ctx context.Context, db *sequel.DB, shard int, alarm bool) {
 	var running []int
-	rows, err := db.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE status='"+workflow.StatusRunning+"'")
+	rows, err := db.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')")
 	if err != nil {
-		e.logSweepError(ctx, "Orphan sweep: listing running flows", "shard", shard, "error", err)
+		e.logSweepError(ctx, "Orphan sweep: listing open flows", "shard", shard, "error", err)
 		return
 	}
 	for rows.Next() {
 		var flowID int
 		if err := rows.Scan(&flowID); err != nil {
 			rows.Close()
-			e.logSweepError(ctx, "Orphan sweep: scanning running flow", "shard", shard, "error", err)
+			e.logSweepError(ctx, "Orphan sweep: scanning open flow", "shard", shard, "error", err)
 			return
 		}
 		running = append(running, flowID)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		e.logSweepError(ctx, "Orphan sweep: iterating running flows", "shard", shard, "error", err)
+		e.logSweepError(ctx, "Orphan sweep: iterating open flows", "shard", shard, "error", err)
 		return
 	}
 	// Ascending, so each chunk's primary-key probes stay in one region of the index.
@@ -483,6 +486,16 @@ func (e *Engine) recoverOrphanedFlows(ctx context.Context, db *sequel.DB, shard 
 		flowID      int
 		workflowURL string
 	}
+	// A flow is a hit when one of its steps lost its transition and its lease has lapsed - whatever its other steps
+	// are doing - or, on an alarm pass, when it is running with every step terminal and none flagged.
+	const lostTransition = "EXISTS (SELECT 1 FROM dwarf_steps s WHERE s.flow_id=f.flow_id AND s.status='" + workflow.StatusCompleted + "' AND s.advancing=1 AND s.lease_expires<=NOW_UTC())"
+	const stranded = "(f.status='" + workflow.StatusRunning + "'" +
+		" AND NOT EXISTS (SELECT 1 FROM dwarf_steps s2 WHERE s2.flow_id=f.flow_id AND (s2.status IN ('" + workflow.StatusCreated + "', '" + workflow.StatusPending + "', '" + workflow.StatusRunning + "', '" + workflow.StatusInterrupted + "')" +
+		" OR (s2.status='" + workflow.StatusCompleted + "' AND s2.advancing=1))))"
+	hit := lostTransition
+	if alarm {
+		hit = "(" + lostTransition + " OR " + stranded + ")"
+	}
 	var hits []orphan
 	for chunk := range slices.Chunk(running, inListChunk) {
 		if ctx.Err() != nil {
@@ -491,14 +504,11 @@ func (e *Engine) recoverOrphanedFlows(ctx context.Context, db *sequel.DB, shard 
 		ph, ids := inList(chunk)
 		rows, err := db.QueryContext(ctx,
 			"SELECT f.flow_id, f.workflow_url FROM dwarf_flows f"+
-				" WHERE f.flow_id IN ("+ph+") AND f.status='"+workflow.StatusRunning+"'"+
-				" AND NOT EXISTS (SELECT 1 FROM dwarf_steps s WHERE s.flow_id=f.flow_id AND s.status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"'))"+
-				// A flagged step whose lease is unexpired is still its worker's; the flow is left until it lapses.
-				" AND NOT EXISTS (SELECT 1 FROM dwarf_steps s3 WHERE s3.flow_id=f.flow_id AND s3.status='"+workflow.StatusCompleted+"' AND s3.advancing=1 AND s3.lease_expires > NOW_UTC())",
+				" WHERE f.flow_id IN ("+ph+") AND f.status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"') AND "+hit,
 			ids...,
 		)
 		if err != nil {
-			e.logSweepError(ctx, "Orphan sweep: checking running flows", "shard", shard, "error", err)
+			e.logSweepError(ctx, "Orphan sweep: checking open flows", "shard", shard, "error", err)
 			continue
 		}
 		for rows.Next() {
@@ -520,14 +530,15 @@ func (e *Engine) recoverOrphanedFlows(ctx context.Context, db *sequel.DB, shard 
 			return // abandoned by the drain; the next pass finds what is left
 		}
 		// The scan read without locks, so its verdict is re-taken under the flow-row lock. Since the scan the flow may
-		// have gone terminal, a flagged step may have stopped qualifying (its worker's lease extended), or the flow
-		// may have stopped being stranded at all - a peer's sweep rewound the step, or a slow worker's transition
-		// committed. Only a flow still running with every step terminal and none flagged is an unrepairable orphan.
+		// have gone terminal, a flagged step may have stopped qualifying (its worker's lease extended, or a peer's
+		// sweep rewound it, or a slow worker's transition committed), or a stranded flow may have moved on. Only a
+		// flow still open with every step terminal and none flagged is an unrepairable orphan - and an interrupted
+		// flow never is, since it holds the interrupted step.
 		var rewound, held int64
 		var locked bool
 		err := db.Transact(ctx, func(tx *sequel.Tx) error {
 			rewound, held, locked = 0, 0, false
-			n, err := lockFlowRows(ctx, tx, "flow_id=? AND status='"+workflow.StatusRunning+"'", o.flowID)
+			n, err := lockFlowRows(ctx, tx, "flow_id=? AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')", o.flowID)
 			if err != nil {
 				return err
 			}

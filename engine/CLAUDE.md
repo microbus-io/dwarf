@@ -4031,19 +4031,24 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
 2. **Closed flow check** in `processStep` - after loading flow data, if the flow is `terminated`/`cancelled`/`failed`/
    `completed`, sets the step to that status and returns. Catches races where the flow went terminal before the step
    was updated.
-3. **Orphan flow repair** (`recoverOrphanedFlows`, `wedge.go`) - finds a `running` flow that is stranded:
-   **every step terminal**, and rewinds to `pending` every `completed` step still carrying **`advancing=1`** whose
-   lease has lapsed. That is the shape a worker leaves when
-   it dies between the completion write and the transition transaction (see "processStep - Normal Completion"
-   below) - the only shape lease recovery cannot reach, since the step is `completed`. Dispatch then **replays** it
-   (see *A rewound step is REPLAYED* below): the task does not run again.
+3. **Orphan flow repair** (`recoverOrphanedFlows`, `wedge.go`) - rewinds to `pending` every `completed` step of a
+   `running` or `interrupted` flow still carrying **`advancing=1`** whose lease has lapsed. That is the shape a
+   worker leaves when it dies between the completion write and the transition transaction (see "processStep -
+   Normal Completion" below) - the only shape lease recovery cannot reach, since the step is `completed`. Dispatch
+   then **replays** it (see *A rewound step is REPLAYED* below): the task does not run again.
+
+   **The repair is per step: do not gate it on the rest of the flow being terminal.** A fan-out branch whose
+   transition was lost would then wait out its live siblings (a 24h retry backoff, a parked subgraph, a human on an
+   interrupt elsewhere in the flow) instead of its own lease. Interrupted flows are repaired for the same reason:
+   the other branches of an interrupted flow run on, and their transitions commit into it. Pinned by
+   `TestOrphanSweep_RecoversLostTransitionBesideLiveSibling`.
 
    *The `advancing` flag is what makes this safe, and it costs no round trip.* The completion write sets it in the
    statement it already runs; every transition transaction that commits while the flow stays open clears it in a
    statement that already writes the dispatched row (see "Lease fencing"), and the transaction that terminalizes
-   the flow leaves it - harmless, since the sweep only rewinds a `running` flow and a closed flow never becomes
-   running again. So `advancing=1` on a completed step of a running flow means exactly "this transition never
-   committed", and the sweep re-derives nothing: it never decides which transition should have been taken, and a
+   the flow leaves it - harmless, since the sweep only rewinds an open flow and a closed flow never reopens. So
+   `advancing=1` on a completed step of a running or interrupted flow means exactly "this transition never
+   committed" (the invariant checker's "completed step still advancing on an open flow" holds it), and the sweep re-derives nothing: it never decides which transition should have been taken, and a
    flow with no flagged step is never touched, so a false positive cannot double-advance it. **Do not re-drive a
    stranded flow from the sweep by evaluating its transitions** - that duplicates `processStep`'s transition logic
    and, without the flag, cannot tell a lost transition from a committed one (a counted cohort arrival is also
@@ -4075,11 +4080,11 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
    rather than restarting the sleep; one that has already passed applies none. Routing reads the engine's fold
    of the recorded changes (`successorBase`) on a live run and a replay alike, so both route on the same state.
 
-   *A slow worker is excluded, then fenced.* The scan skips a flow whose flagged step still holds an unexpired
-   lease (it is still its worker's), and the rewind bumps `lease_seq`, so a worker that outlived its lease rolls
-   its transition back at its fenced step-row write. The rewind runs behind a write-first flow-row lock guarded on
-   `running`, so a `Terminate` between the scan and the rewind wins. Rewinds count in `dwarf_steps_recovered` (a
-   dead worker's step, like lease recovery). A stranded flow with **no** flagged step is a bug signal: logged at
+   *A slow worker is excluded, then fenced.* The repair skips each flagged step whose lease has not expired;
+   another expired step in that flow can still be repaired. The rewind bumps `lease_seq`, so a worker that outlived
+   its lease rolls its transition back at its fenced step-row write. The rewind runs behind a write-first flow-row
+   lock guarded on `running` or `interrupted`, so a `Terminate` between the scan and the rewind wins. Rewinds count
+   in `dwarf_steps_recovered` (a dead worker's step, like lease recovery). A stranded flow with **no** flagged step is a bug signal: logged at
    error level and counted by `dwarf_flows_orphaned{workflow}`, the flow-level sibling of `dwarf_steps_unwedged`,
    and not repaired. That verdict is re-taken under the flow-row lock - still running, every step terminal, none
    flagged - so a flow that went terminal, was repaired by a peer's sweep (every dispatcher of a shard sweeps it), or
@@ -4098,10 +4103,12 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
    transition redone, never the task. Reaching that takes a task that overran its budget or a transition stalled
    past `leaseMargin`: the completion write leaves the lease as the claim set it, so a task finishing within its
    budget reaches its transition with the whole margin, and persist's backoff and the cohort stripe extend the
-   lease before waiting. The all-terminal check excludes every legitimate long-wait (a `running` task - even a
-   10-minute one with no DB activity - a `pending` sleep/retry, a `running`+parked subgraph caller, an
-   `interrupted` human wait, a live fan-out sibling).
+   lease before waiting.
 
+   **A stranded flow is an alarm, not a repair:** `running`, every step terminal, and no step flagged - some other
+   path stranded it, and nothing can safely advance it. The all-terminal check excludes every legitimate long-wait
+   from the alarm (a `running` task - even a 10-minute one with no DB activity - a `pending` sleep/retry, a
+   `running`+parked subgraph caller, an `interrupted` human wait, a live fan-out sibling).
    **The alarm keeps an age guard** (`orphanFlowThreshold`, 5m): a stranded flow with no flagged step is counted
    only once no step of it has been touched for that long, so a transient all-terminal state nobody has named is
    not reported as a bug. It is raised only on the heavy pass (every `heavyRepairEvery`-th tick), so an
@@ -4109,13 +4116,17 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
    per-step write moves `dwarf_flows.updated_at`, which stays at go-`running` time, so it tracks no per-step progress and is
    permanently satisfied for any flow running past 5m.
 
-   The scan lists the running flows and checks them `inListChunk` at a time, so every chunk probes
-   `idx_dwarf_steps_flow_id` per flow and the pass costs running flows x their steps, not the size of `dwarf_steps`. A sleeping flow is a running
-   flow, so the sleepers are probed on every pass too: O(running + sleeping).
-   **Do not check every running flow in one statement:** once running flows are a large share of
-   the table, PostgreSQL hashes them and reads all of `dwarf_steps` once per `NOT EXISTS` (the measurements are at
-   `recoverOrphanedFlows`). The flow row offers no shortcut to the flagged step: `stopped_step_id` is 0 while a
-   flow runs.
+   The scan lists the open (`running` and `interrupted`) flows and checks them `inListChunk` at a time. The cost
+   depends on **the retained steps in those flows**, not just the number of flows: proving no completed step is
+   still advancing can read an open flow's whole history. Sleeping/retrying and subgraph-parked flows are running,
+   and a human wait is interrupted, so all are checked on every pass. `inListChunk` bounds candidate flow IDs; it
+   does not cap step rows examined or force indexed probes. If those flows account for much of `dwarf_steps`, the
+   planner may prefer a sequential scan. **Do not check every open flow in one statement**, which makes that the
+   likely plan: PostgreSQL then hashes them and reads all of `dwarf_steps` once per `EXISTS` (the measurements are at
+   `recoverOrphanedFlows`). The sweep's runtime delays the next lease-recovery pass.
+   `advancing` remains deliberately unindexed because it is set and cleared on every step; indexing it trades
+   scan work for two index changes per step. The flow row offers no shortcut to the flagged step:
+   `stopped_step_id` is 0 while a flow runs.
 4. **Parked-step wedge sweep** (`recoverWedgedSubgraphParks` + `recoverOrphanedSubgraphChildren`, `wedge.go`,
    called inline from `runRecoverySweep`) - defense in depth for the `parkedSubgraph` park, whose releasing
    condition could in principle never fire (a parked step is invisible to selection, and `parkedSubgraph` is

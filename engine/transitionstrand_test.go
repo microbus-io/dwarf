@@ -455,3 +455,116 @@ func TestBumpCohortArrivals_Fence(t *testing.T) {
 	}
 	enginetest.AssertInvariants(t, e)
 }
+
+// TestOrphanSweep_RecoversLostTransitionBesideLiveSibling pins that a lost transition is repaired at step
+// granularity: a fan-out branch whose worker died between its completion write and its transition is rewound once
+// its own lease lapses, while a sibling branch is still live - waiting out a 24h Retry backoff, or interrupted for
+// a human, which also leaves the flow `interrupted`. Gated on the whole flow being terminal, the sweep would leave A
+// stranded for the sibling's whole lifetime.
+//
+// A's death is simulated as in TestOrphanSweep_RecoversLostTransition: the test writes the completion the dying
+// worker's completion write would, under a bumped lease generation, already lapsed. Dispatch is driven by hand (no
+// workers) so each step runs exactly where the scenario needs it.
+func TestOrphanSweep_RecoversLostTransitionBesideLiveSibling(t *testing.T) {
+	t.Parallel()
+	for _, sibling := range []string{"retrying", "interrupted"} {
+		t.Run(sibling, func(t *testing.T) {
+			assert := testarossa.For(t)
+			ctx := context.Background()
+
+			mux := hosts.NewMux()
+			g := workflow.NewGraph("LiveSibling")
+			g.SetURL("Start", "livesibling/start")
+			g.SetURL("A", "livesibling/a")
+			g.SetURL("B", "livesibling/b")
+			g.SetURL("Join", "livesibling/join")
+			g.AddTransition("Start", "A")
+			g.AddTransition("Start", "B")
+			g.AddTransition("A", "Join")
+			g.AddTransition("B", "Join")
+			g.SetFanIn("Join")
+			g.AddTransition("Join", workflow.End)
+			assert.NoError(g.Validate())
+			mux.HandleGraph("livesibling/g", g)
+			var runsA atomic.Int32
+			mux.HandleTask("livesibling/start", func(ctx context.Context, f *workflow.Flow) error { return nil })
+			mux.HandleTask("livesibling/a", func(ctx context.Context, f *workflow.Flow) error { runsA.Add(1); return f.Set("a", 1) })
+			mux.HandleTask("livesibling/b", func(ctx context.Context, f *workflow.Flow) error {
+				if sibling == "interrupted" {
+					if yield, err := f.Interrupt(nil, nil); yield || err != nil {
+						return err
+					}
+				} else if f.Attempt() == 0 && f.Retry(24*time.Hour, 1, 24*time.Hour, 0) {
+					return nil
+				}
+				return f.Set("b", 1)
+			})
+			mux.HandleTask("livesibling/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+			e := NewEngineUnderTest(t.Name())
+			defer e.Shutdown(ctx)
+			e.SetHost(mux)
+			assert.NoError(e.SetWorkers(0))
+			assert.Must(assert.NoError(e.Startup(t.Context())))
+			awaitStartupRecoverySweep(t, e)
+
+			fk, err := e.Create(ctx, "livesibling/g", nil, nil)
+			assert.Must(assert.NoError(err))
+			shard, _, flowID, _, err := keys.ParseFlowKey(fk)
+			assert.Must(assert.NoError(err))
+			db, err := e.db.Shard(shard)
+			assert.Must(assert.NoError(err))
+			stepOf := func(task string) int {
+				var id int
+				assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name=?", flowID, task).Scan(&id))
+				return id
+			}
+			noTurn := func() {}
+
+			assert.NoError(e.processStep(ctx, shard, stepOf("Start"), noTurn))
+			aID, bID := stepOf("A"), stepOf("B")
+			_, err = db.ExecContext(ctx,
+				"UPDATE dwarf_steps SET status='"+workflow.StatusCompleted+"', changes=?, advancing=1, lease_seq=lease_seq+1,"+
+					" lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -1000), updated_at=NOW_UTC() WHERE step_id=?",
+				[]byte(`{"a":1}`), aID)
+			assert.NoError(err)
+			var seqBefore int
+			assert.NoError(db.QueryRowContext(ctx, "SELECT lease_seq FROM dwarf_steps WHERE step_id=?", aID).Scan(&seqBefore))
+			assert.NoError(e.processStep(ctx, shard, bID, noTurn))
+			wantFlow := workflow.StatusRunning
+			if sibling == "interrupted" {
+				wantFlow = workflow.StatusInterrupted
+			}
+			var flowStatus string
+			assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&flowStatus))
+			assert.Equal(wantFlow, flowStatus)
+
+			// A LIGHT pass, the one that runs every tick, takes A back under a new generation while B is live.
+			e.recoverOrphanedFlows(ctx, db, shard, false)
+			var aStatus string
+			var seqAfter int
+			assert.NoError(db.QueryRowContext(ctx, "SELECT status, lease_seq FROM dwarf_steps WHERE step_id=?", aID).Scan(&aStatus, &seqAfter))
+			assert.Equal(workflow.StatusPending, aStatus, "the sweep left A stranded beside a live sibling")
+			assert.True(seqAfter > seqBefore, "the sweep did not rewind A under a new generation")
+
+			// A is replayed and arrives at Join; B then finishes and the flow completes with both contributions.
+			assert.NoError(e.processStep(ctx, shard, aID, noTurn))
+			if sibling == "interrupted" {
+				assert.NoError(e.Resume(ctx, fk, nil))
+			} else {
+				_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=NOW_UTC() WHERE step_id=?", bID)
+				assert.NoError(err)
+			}
+			assert.NoError(e.processStep(ctx, shard, bID, noTurn))
+			assert.NoError(e.processStep(ctx, shard, stepOf("Join"), noTurn))
+			out, err := e.Snapshot(ctx, fk)
+			if assert.NoError(err) {
+				assert.Equal(workflow.StatusCompleted, out.Status)
+				assert.Equal(1, out.State.GetInt("a"), "the replay carried A's recorded output forward")
+				assert.Equal(1, out.State.GetInt("b"))
+			}
+			assert.Equal(int32(0), runsA.Load(), "A was replayed, not run")
+			enginetest.AssertInvariants(t, e)
+		})
+	}
+}
