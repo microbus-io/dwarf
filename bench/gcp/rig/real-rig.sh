@@ -4,7 +4,7 @@
 # generate half the load each, and a c4a-standard-2 admin host (psql, s-mon.sh, v-mon.sh).
 #   0  draw check: both replicas, saturated linear 0 B, 1 + 6 min; dbcpu.sh's core-ms per step above $DRAW_MAX is a slow
 #      draw, redrawn at most $REDRAWS times.
-# $DBFLAGS defaults to docs/deployment.md's settings: max_wal_size 20 GB, checkpoint_timeout 15 min, wal_compression
+# $DBFLAGS defaults to https://docs.dwarf.run/operating/deployment/'s settings: max_wal_size 20 GB, checkpoint_timeout 15 min, wal_compression
 # lz4, autovacuum_work_mem 1 GB. Every payload in the calibration and the day is a -payload-json document, which
 # compresses as real JSON does.
 #   1  calibration: the mix, saturated, 2 + 16 min, fresh database. C_mix is the replicas' summed rate over the last 5

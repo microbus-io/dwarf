@@ -71,7 +71,7 @@ Three alternatives were weighed against this rule and lost; do not re-propose th
   undefined for `min`/`max`), and a task reads a reduced field differently inside a branch than outside it.
 - **A re-run starts from the step's original input, and only its last run's writes count.** Safer against a
   `Set` placed before `Interrupt`/`Subgraph`, but it loses the attempt log (one entry per `Retry`) and a task can
-  no longer see what its earlier runs wrote. The ordering rule is documented instead (`docs/tasks.md`).
+  no longer see what its earlier runs wrote. The ordering rule is documented instead ([Writing Tasks](https://docs.dwarf.run/building-workflows/tasks/)).
 
 **The carrier (`flow.go`): every write lands in both `changes` and the view.** A `Set` on a field with no
 reducer folds nothing, so its encoded bytes go into both directly (`Changes.setPlain`, the rule `contribute`

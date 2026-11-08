@@ -1,4 +1,4 @@
-"""Charts for docs/benchmark.md (the local four-dialect comparison). The cloud page's charts are drawn by
+"""Charts for https://docs.dwarf.run/performance/benchmark/ (the local four-dialect comparison). The cloud page's charts are drawn by
 bench/charts_cloud.py.
 
 Run from the repo root with matplotlib available:
@@ -22,7 +22,7 @@ plt.rcParams.update({
     "font.size": 11, "axes.titlesize": 13, "axes.titleweight": "bold",
     "axes.titlelocation": "left",
 })
-OUT = "docs"
+OUT = "../cloudflarepages/docs.dwarf.run/content/performance"
 
 def finish(fig, ax, path):
     fig.tight_layout()
@@ -30,7 +30,7 @@ def finish(fig, ax, path):
     plt.close(fig)
     print("wrote", path)
 
-# ---- 6. Local four-dialect comparison (docs/benchmark.md) ----
+# ---- 6. Local four-dialect comparison (https://docs.dwarf.run/performance/benchmark/) ----
 # Medians of three runs from fixtures/benchmark_test.go; those come from `go test`
 # output rather than a JSON artifact, so they are transcribed here.
 DIALECTS = ["SQLite", "PostgreSQL", "MariaDB", "SQL Server"]
@@ -60,7 +60,7 @@ ax.legend(loc="upper right", frameon=False, fontsize=9.5)
 ax.grid(axis="x", visible=False)
 finish(fig, ax, f"{OUT}/benchmark-dialects.png")
 
-# ---- 7. Local state-payload byte rate (docs/benchmark.md) ----
+# ---- 7. Local state-payload byte rate (https://docs.dwarf.run/performance/benchmark/) ----
 SIZES = [4, 64, 256, 1024]       # KB
 PAYLOAD_MBPS = {                 # dialect -> payloadMB/s, median of 3 runs
     "SQLite":     [5.1, 44.0, 74.1, 83.0],

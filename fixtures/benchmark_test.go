@@ -16,8 +16,8 @@ limitations under the License.
 
 // Throughput / latency benchmarks for the engine, exercised through the public API against whatever dialect
 // SEQUEL_TESTING_DSN points at (unset = in-memory SQLite). They answer the questions no amount of review can:
-// flows/sec and steps/sec per dialect per shard count, and dispatch-latency percentiles. See docs/benchmark.md
-// for captured results and interpretation. Run one dialect at a time, e.g.:
+// flows/sec and steps/sec per dialect per shard count, and dispatch-latency percentiles. See
+// https://docs.dwarf.run/performance/benchmark/ for captured results and interpretation. Run one dialect at a time, e.g.:
 //
 //	go test ./fixtures/ -run=X -bench=BenchmarkFlowThroughput -benchtime=300x   # SQLite (no env)
 //	SEQUEL_TESTING_DSN='postgres://root:secret1234@127.0.0.1:5432/dwarfbench_%d?sslmode=disable' \

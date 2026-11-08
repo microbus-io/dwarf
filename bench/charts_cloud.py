@@ -1,10 +1,10 @@
-"""Charts for docs/benchmark-cloud.md and docs/benchmark-day.md.
+"""Charts for https://docs.dwarf.run/performance/benchmark-cloud/ and https://docs.dwarf.run/performance/benchmark-day/.
 
 Run from the repo root with matplotlib available:
 
     python3 -m venv tmp/viz && tmp/viz/bin/pip install matplotlib && tmp/viz/bin/python bench/charts_cloud.py [out-dir]
 
-PNGs go to out-dir (default docs/). Three charts draw from tables in this file, because their numbers come from
+PNGs go to out-dir (default ../cloudflarepages/docs.dwarf.run/content/performance, the docs site's source). Three charts draw from tables in this file, because their numbers come from
 many runs, from Cloud Monitoring and from CPU profiles rather than from one artifact: database size (tiers), shards,
 and engine host size. The rest read run artifacts under bench/results/, which are kept on the machine that ran
 them: replicas (redo-one-20261009, redo-rs-20261009), minute-by-minute and payload size (redo-ha-20261106), failover
@@ -41,7 +41,7 @@ plt.rcParams.update({
     "font.size": 11, "axes.titlesize": 13, "axes.titleweight": "bold",
     "axes.titlelocation": "left",
 })
-OUT = sys.argv[1] if len(sys.argv) > 1 else "docs"
+OUT = sys.argv[1] if len(sys.argv) > 1 else "../cloudflarepages/docs.dwarf.run/content/performance"
 RESULTS = "bench/results"
 kilo = matplotlib.ticker.FuncFormatter(lambda v, _: f"{v / 1000:.0f}k")
 

@@ -250,7 +250,7 @@ from step origination rather than from the weighted plan.
 
 **Inserting a better band ahead of worse cached candidates is band order, not preemption.** Nothing running is
 interrupted, and within its band the arrival goes last, so it bypasses no fairness decision - the plan's lottery
-is per band. `docs/scheduling-and-reliability.md` states the public contract: *priority is never preemptive*,
+is per band. [Scheduling](https://docs.dwarf.run/building-workflows/scheduling/) states the public contract: *priority is never preemptive*,
 and the delay before a new band is served is *bounded by the snapshot cycle*.
 
 **`Refill` returns the number of candidates it discarded un-popped**, which the engine feeds to

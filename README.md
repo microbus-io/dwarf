@@ -1,22 +1,42 @@
-<img src="dwarf-banner.jpg" width=600>
+<a href="https://www.dwarf.run"><img src="dwarf-banner.jpg" width=600 alt="Dwarf"></a>
 <p></p>
 
 [![License Apache 2](https://img.shields.io/badge/License-Apache2-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![Go](https://img.shields.io/badge/Go-1.27.3+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![Reference](https://pkg.go.dev/badge/github.com/microbus-io/dwarf)](https://pkg.go.dev/github.com/microbus-io/dwarf)
 [![Test](https://github.com/microbus-io/dwarf/actions/workflows/test.yaml/badge.svg?branch=main&event=push)](https://github.com/microbus-io/dwarf/actions/workflows/test.yaml)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/FAJHnGkNqJ)
 
-**Dwarf is a standalone, embeddable workflow-orchestration engine for Go.**
+**Dwarf is an open source durable execution engine, written in pure Go and backed by Postgres: an alternative
+to Temporal and LangGraph that runs as a library, not a platform.** You describe a workflow as a graph of tasks,
+and Dwarf runs it, checkpointing every step to your SQL database. Your tasks can be written in any language: the
+engine reaches them through a small host you write.
 
-You describe a workflow as a graph of tasks; dwarf runs it — dispatching one task at a time per step,
-persisting state between steps in a SQL database, and handling the hard parts of durable orchestration:
-parallel fan-out/fan-in, conditional routing, retries with backoff, timed sleeps, subgraphs,
-and human-in-the-loop pauses.
+See **[www.dwarf.run](https://www.dwarf.run)** for the overview, and how Dwarf
+[compares with Temporal and LangGraph](https://www.dwarf.run/compare/).
 
-Dwarf has **no built-in transport**. It doesn't know how your tasks are reached (a local function call, an
-RPC, a message bus) or where your graphs live. You wire it to your world through one small `Host`
-interface, and it handles scheduling, state, durability, and recovery.
+## Documentation
+
+Full documentation lives at **[docs.dwarf.run](https://docs.dwarf.run)**, including:
+
+- [Getting Started](https://docs.dwarf.run/getting-started/) — install Dwarf, write the two-method host, and run your first flow.
+- [Concepts](https://docs.dwarf.run/concepts/) — graph, task, flow, step, reducer, and the flow lifecycle.
+- [How Dwarf Works](https://docs.dwarf.run/how-dwarf-works/) — what runs where, a step's life, crash recovery and at-least-once execution.
+- [Building Workflows](https://docs.dwarf.run/building-workflows/) — graphs, tasks, driving flows, fan-out, scheduling, testing, and tasks in other languages.
+- [Operating Dwarf](https://docs.dwarf.run/operating/) — deployment, observability, upgrading, resharding, backup and the runbook.
+- [Performance](https://docs.dwarf.run/performance/) — cloud benchmarks against managed PostgreSQL, and how to size a deployment.
+- [Reference](https://docs.dwarf.run/reference/) — glossary, FAQ, and a concept map for people coming from Temporal or LangGraph.
+- [Release Notes](https://docs.dwarf.run/about/release-notes/) — per-release changes.
+
+## Quick Start
+
+You'll need [Go](https://go.dev/) 1.27.3+. Add Dwarf to your module:
+
+```sh
+go get github.com/microbus-io/dwarf
+```
+
+A one-task workflow, run on the in-process test harness (SQLite in memory, no database to set up):
 
 ```go
 // Define the workflow:
@@ -46,149 +66,19 @@ _, out, _ := eng.Run(ctx, "http://example/greet", map[string]any{"name": "ada"},
 fmt.Println(out.State.GetString("greeting")) // hello ada
 ```
 
-## Why dwarf
+In production, point the engine at PostgreSQL with `SetShard` and give it your own host. See
+[Getting Started](https://docs.dwarf.run/getting-started/) for the full walkthrough.
 
-- **Durable by construction.** Every step is checkpointed to SQL. A crashed worker's in-flight step is
-  recovered by lease expiry; a flow can be inspected, resumed, forked, or continued days later.
-- **Parallelism that merges cleanly.** Static and dynamic (`forEach`) fan-out run branches concurrently;
-  per-field reducers (append, add, union, merge, …) fold every write into the field's value, so the
-  branches' results combine at the fan-in instead of overwriting each other.
-- **Human-in-the-loop.** A task can `Interrupt` to park the flow for external input and `Resume` later —
-  approvals, manual review, async callbacks.
-- **Fair and prioritized.** Two-level scheduling: strict priority bands across the cluster, weighted
-  fairness within a band so one tenant can't starve another.
-- **Scales horizontally.** Run many replicas against sharded databases; they coordinate entirely through
-  the databases they already share, with no message bus to run between them.
-- **OTEL-native observability.** Structured logs (`slog`), 49 `dwarf_*` instruments, and distributed tracing,
-  all through standard providers you inject.
-- **Four SQL dialects.** PostgreSQL, MySQL/MariaDB, SQL Server, and SQLite (single-instance, low throughput).
-- **Free, and cheap at scale.** Apache 2.0 — no license tier, no vendor, no per-operation pricing. One
-  32-vCPU PostgreSQL database with two 8-vCPU engine hosts runs [18,900–24,300 steps/s](docs/benchmark-cloud.md),
-  $0.036–0.047 per million steps — **billions of steps a day** — and
-  the whole deployment is your own replicas plus a few ordinary SQL instances. No broker, no control plane,
-  nothing else to run or pay for, so the bill is a handful of cloud instances rather than a metered service.
+## Community
 
-Dwarf depends on [`sequel`](https://github.com/microbus-io/sequel) (SQL), the OpenTelemetry API, and a few
-small libraries: [`boolexp`](https://github.com/microbus-io/boolexp) (`when` expressions),
-[`errors`](https://github.com/microbus-io/errors), [`seamster`](https://github.com/microbus-io/seamster), and
-`golang.org/x/sync`.
-
-## Install
-
-```bash
-go get github.com/microbus-io/dwarf
-```
-
-Requires Go 1.27.3+.
-
-## Packages
-
-| Import | Role | Who imports it |
-|---|---|---|
-| `github.com/microbus-io/dwarf` | Thin convenience: `NewEngine()`, `NewEngineUnderTest()` | The host process, and its tests |
-| `github.com/microbus-io/dwarf/engine` | The engine: lifecycle, operations, config, the `Host` interface | The host process only |
-| `github.com/microbus-io/dwarf/workflow` | Pure types: `Graph`, `Flow`, `FlowOptions`, reducers, error helpers | Any code that defines tasks or graphs |
-| `github.com/microbus-io/dwarf/hosts` | Ready-made `Host` implementations: `Mux`, an in-process router by URL | The host process, and its tests |
-
-The split matters: `dwarf/workflow` is a lightweight type package. Code that *defines* tasks and graphs
-imports only `dwarf/workflow`, never the engine, so the engine's heavy dependencies (SQL drivers, the
-scheduler) stay out of those builds.
-
-## The host model
-
-The engine reaches the outside world through a single `Host` interface, registered once with `SetHost`.
-Two methods, both required — and that is the whole contract, single-replica or not: replicas coordinate
-through the databases they share.
-
-```go
-type Host interface {
-    // Required. Fetch a workflow graph by its workflow URL (called at Create and at subgraph spawn; the
-    // graph is then frozen on the flow).
-    LoadGraph(ctx context.Context, workflowURL string) (graph *workflow.Graph, err error)
-
-    // Required. Execute one task. The Flow carrier arrives with its input state populated; write outputs.
-    ExecuteTask(ctx context.Context, taskURL string, flow *workflow.Flow) error
-}
-```
-
-A standalone host backs `LoadGraph` with an in-memory registry / file / database, and `ExecuteTask`
-with a local function table or an RPC client. `hosts.Mux` is that host ready-made, for graphs and tasks that live in-process. A bus-based host (for example a microservice mesh) bridges
-them to its transport. The engine never learns how tasks are reached.
-
-## Production wiring
-
-Each `Set*` returns an `error`, so misconfiguration fails loudly at wiring time:
-
-```go
-eng := dwarf.NewEngine()
-eng.SetShard(engine.ShardSpec{Index: 1, DSN: "postgres://user:pass@db-a.internal:5432/dwarf"})
-eng.SetShard(engine.ShardSpec{Index: 2, DSN: "postgres://user:pass@db-b.internal:5432/dwarf"})
-eng.SetHost(host)
-eng.SetLogger(slog.Default())
-eng.SetMeterProvider(otel.GetMeterProvider())
-eng.SetTracerProvider(otel.GetTracerProvider())
-
-err := eng.Startup(ctx)
-if err != nil {
-    log.Fatal(err)
-}
-defer eng.Shutdown(ctx)
-
-flowKey, err := eng.Create(ctx, "checkout", initialState, &workflow.FlowOptions{
-    Priority:    2,
-    FairnessKey: tenantID,
-    Baggage:     actorClaims,
-})
-outcome, err := eng.Await(ctx, flowKey) // Create returns a running flow
-```
-
-The live `Set*` method (`SetTimeBudget`) may be called after `Startup` for hot reconfiguration; the rest are
-construction-time only.
-
-## Database support
-
-| Engine | Use | Notes |
-|---|---|---|
-| **PostgreSQL** 13+ | Recommended for production | MVCC, no gap locks; fan-out runs deadlock-free at any concurrency |
-| **SQL Server** | Production | Enable `READ_COMMITTED_SNAPSHOT` for non-blocking reads |
-| **MySQL** 8.0+ / **MariaDB** 10.6+ | Production, expect tuning | Prefer `READ-COMMITTED` isolation to drop gap locks; add `interpolateParams=true` to the DSN |
-| **SQLite** | Single-instance, low-throughput production; testing | One engine process per database file; used automatically by `NewEngineUnderTest` |
-
-See [docs/deployment.md](docs/deployment.md) for tuning, sharding, and connection-pool guidance.
-
-## Documentation
-
-Full guides live in [`docs/`](docs/), split by who they are written for — start at the
-[documentation index](docs/index.md) for the recommended reading order.
-
-**Building workflows:**
-
-- [Getting started](docs/getting-started.md) — install, wiring, your first flow
-- [Concepts](docs/concepts.md) — graph, task, flow, step, reducer, lifecycle
-- [Building graphs](docs/graphs.md) — transitions, conditions, fan-out, error handling, reducers
-- [Writing tasks](docs/tasks.md) — the Flow carrier, state, control signals, baggage, error handling
-- [Driving flows](docs/flows.md) — create, run, inspect, resume, terminate, fork, continue, retain, error codes
-- [Detecting completion](docs/detecting-completion.md) — `Await` vs. orchestration, and how to deliver reliably
-- [Fan-out & subgraphs](docs/fan-out-and-subgraphs.md) — parallelism, dynamic `forEach`, calling sub-workflows
-- [Scheduling & reliability](docs/scheduling-and-reliability.md) — priority, fairness, retries, recovery
-- [Testing](docs/testing.md) — `NewEngineUnderTest` and `hosts.Mux`
-
-**Running it in production:**
-
-- [Operating dwarf](docs/operations.md) — what the engine repairs itself, what needs you, what to watch
-- [Production checklist](docs/production-checklist.md) — the pre-flight list before you go live
-- [Runbook](docs/runbook.md) — symptom-indexed incident response
-- [Deployment](docs/deployment.md) — database choice, sharding, config, multi-replica
-- [Observability](docs/observability.md) — logs, metrics, tracing
-- [Upgrading](docs/upgrading.md) — redeploying your app, upgrading dwarf itself, graph evolution
-- [Resharding](docs/resharding.md) — adding, retiring and moving shards
-- [Backup and restore](docs/backup-and-restore.md) — what to back up, and what a restore does to flows
-- [Data handling](docs/data-handling.md) — what is stored, what is searchable, retention
-- [Benchmarks](docs/benchmark.md) — throughput & latency per dialect and shard count, and how to run them
-- [Cloud benchmarks](docs/benchmark-cloud.md) — how to size a deployment, measured against managed PostgreSQL
-
-API reference: [pkg.go.dev/github.com/microbus-io/dwarf](https://pkg.go.dev/github.com/microbus-io/dwarf).
+| | |
+|---|---|
+| Website | [www.dwarf.run](https://www.dwarf.run) |
+| Docs | [docs.dwarf.run](https://docs.dwarf.run) |
+| GitHub | [github.com/microbus-io/dwarf](https://github.com/microbus-io/dwarf) |
+| Discord | [discord.gg/FAJHnGkNqJ](https://discord.gg/FAJHnGkNqJ) |
+| Email | info@microbus.io |
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE).
+Apache 2.0. See [LICENSE](./LICENSE).

@@ -70,8 +70,8 @@ limitations under the License.
 // budget; Run is Create+Await in one call. Snapshot/History/Step/ListOpen/ListClosed/Fingerprint inspect; Resume continues
 // a paused flow; Cancel requests a graceful stop that tasks can catch, and Terminate a forceful one;
 // Continue starts a new flow from a completed one; Fork clones a closed flow from a chosen step into a new flow
-// for non-destructive recovery; Delete/Purge retain; ShardInfo summarizes each shard. See the repository's
-// docs/ directory for guides.
+// for non-destructive recovery; Delete/Purge retain; ShardInfo summarizes each shard. See
+// https://docs.dwarf.run for guides.
 //
 // # Security model
 //
@@ -111,7 +111,7 @@ limitations under the License.
 // (256,000,000 bytes). That bounds a task's changes in one step, initial state, baggage, resume data, an
 // interrupt payload, and a flow's whole state when it ends (its final state holds every field at once). Mid-flow,
 // a large field is stored once and carried by reference, so a running flow's state may exceed the limit;
-// docs/data-handling.md says which fields still count toward it.
+// https://docs.dwarf.run/operating/data-handling/ says which fields still count toward it.
 // Create, Continue, Resume and Fork return a 413 for an oversized value; a step that produces one fails at once,
 // and its task is not run again.
 //

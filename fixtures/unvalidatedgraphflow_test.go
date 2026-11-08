@@ -16,7 +16,7 @@ limitations under the License.
 
 /*
 Create-time graph validation and fan-in routing. The engine calls graph.Validate() at Create (and at
-subgraph spawn), as docs/graphs.md promises, and derives the fan-out/fan-in routing map from the graph
+subgraph spawn), as the graphs guide (https://docs.dwarf.run/building-workflows/graphs/) promises, and derives the fan-out/fan-in routing map from the graph
 definition at dispatch (internal/faninmap). This pins three consequences:
   - An empty-forEach fan-out still fires its fan-in and runs the downstream tasks, instead of silently
     completing early (data loss). The engine computes the fan-in target from the graph structure at

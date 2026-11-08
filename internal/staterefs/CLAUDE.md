@@ -143,7 +143,7 @@ B/ceiling. The number of round trips a step makes does not enter it. Each input:
   width, so branches on the minting replica are served from it; every other dispatching replica pays one miss,
   shared by its branches through `ResolveShared`.
 - **RTT ~0.5 ms** same-zone; cross-zone and managed databases run 1-2 ms.
-- **ceiling: a fraction of the payload ceiling.** `docs/benchmark-cloud.md`'s 194-284 MB/s is payload at 64KB
+- **ceiling: a fraction of the payload ceiling.** [Cloud Benchmarks](https://docs.dwarf.run/performance/benchmark-cloud/)'s 194-284 MB/s is payload at 64KB
   and up, where values are TOASTed out of line. The fields the fan-out bar decides are small (0.4-2KB at N=64)
   and sit inline in the row, where every non-HOT claim and completion re-logs them, so each byte costs several
   times the WAL a TOASTed one does.
@@ -424,7 +424,7 @@ instead of serving another flow's bytes for up to 5 idle minutes. Keep the shard
 that id. Every caller passes the token of the flow the refs belong to. A Seed and a resolve under different
 tokens never meet, which `TestStateRefs_LinearSuccessorIsServedFromTheSeed` would catch. A flow that keeps
 running across a restore can still re-run a step under the same token and id and be served its own lost
-output; `docs/backup-and-restore.md` has operators restart replicas for that. Pinned by
+output; [Backup and Restore](https://docs.dwarf.run/operating/backup-and-restore/) has operators restart replicas for that. Pinned by
 `TestLinker_ReissuedStepIDIsNotServedAcrossFlows`.
 
 - **Do not split the budget per shard, evenly or by `ShardSpec.Weight`.** The cache fills only where this

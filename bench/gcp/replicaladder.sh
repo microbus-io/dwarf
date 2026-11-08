@@ -5,7 +5,7 @@
 #
 # WHY THIS SCRIPT EXISTS. Every claim about R is currently derived, not measured. The engine splits
 # each shard's connection budget by the replica count it reads from the dwarf_peers registry
-# (M = min(Y-headroom, ~6*V) / R), and docs/benchmark-cloud.md lists that division as the first known
+# (M = min(Y-headroom, ~6*V) / R), and https://docs.dwarf.run/performance/benchmark-cloud/ lists that division as the first known
 # gap. Two questions have never been put to a rig:
 #   - Does the split HOLD? R replicas sharing one shard should sum to about what R=1 delivers - the
 #     database's capacity is fixed, so the ladder should read FLAT. A rising ladder means the fleet is

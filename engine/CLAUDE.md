@@ -204,7 +204,7 @@ edges; under an edited graph a pending step can name a task that no longer exist
 the new graph never spawns, and there is no general rule for where such a flow resumes. Only `Create` and
 subgraph spawn call `LoadGraph`; `Fork` and `Continue` copy the stored graph verbatim. Task implementations may
 change freely behind stable names - that, and cancel-and-recreate via `Snapshot`, is the whole migration story,
-and `docs/upgrading.md` states it as the position.
+and [Upgrading](https://docs.dwarf.run/operating/upgrading/) states it as the position.
 
 **Every flow row holds its own copy of the graph JSON; do not move graphs into a shared table keyed by
 `graph_hash`.** It would save a graph's bytes per flow - a few percent of the WAL at small payloads, less as they
@@ -860,7 +860,7 @@ It is not a test-only trick: the most loaded fixtures gain most from it, because
 faster than the period refills them (the table is in `internal/candidates/CLAUDE.md`).
 
 **Band order in the cache is not preemption.** An offered better band runs before worse candidates that are
-merely cached; nothing already running is interrupted. `docs/scheduling-and-reliability.md` promises the
+merely cached; nothing already running is interrupted. [Scheduling](https://docs.dwarf.run/building-workflows/scheduling/) promises the
 matching contract: priority is never preemptive, and a new band is served within a snapshot cycle or two.
 
 **The cycle period is the supply control, DERIVED per shard (`deriveRefillInterval` /
@@ -906,7 +906,7 @@ the step) and neither reachable on a single shard:
   adjacent bands).
 
 Ordering among work already tallied **and reconciled** is strict, and nothing is preemptive, in the cache
-included. `docs/scheduling-and-reliability.md` states the contract publicly - keep the two in step. Pinned by
+included. [Scheduling](https://docs.dwarf.run/building-workflows/scheduling/) states the contract publicly - keep the two in step. Pinned by
 `fixtures/shardedflow_test.go` and `fixtures/crossshardpriorityflow_test.go`, which asserts urgent-burst
 LATENCY because an ordering-only test passes a starved build (a 5s period ordered correctly, 22x slower). Both
 are interval-relative: if either fails on timing, suspect the derived period (and `share`'s clamp at 1, see
@@ -2521,7 +2521,7 @@ returns the flow row and whose transition is one pipelined batch, 8 on SQLite, 9
 against `fanout` 8.67 on one rig at one pool, a gap inside the fanout arms' own spread. The intuition that a fan-out costs more
 per step is the wrong unit - it costs more per FLOW, while most of its STEPS are branches that insert no
 successor. Constants, their portability, and the normalization formula are in
-`bench/CLAUDE.md`; the operator-facing version is in `docs/benchmark-cloud.md` and `docs/deployment.md`.
+`bench/CLAUDE.md`; the operator-facing version is in [Cloud Benchmarks](https://docs.dwarf.run/performance/benchmark-cloud/) and [Deployment](https://docs.dwarf.run/operating/deployment/).
 
 ### Connection pool sizing - a constant budget, ramped by distance, clamped by the server (`poolsize.go`)
 
@@ -3271,7 +3271,7 @@ reads), and the `Resume`/surgraph-revive *writes* of
 `resume_data`/`subgraph_result` (cold paths where the workflow URL is not in hand - those bytes are
 counted on the claim *read* at the re-dispatch they trigger, so every payload is counted in at least one
 direction). The metric exists to track against the database's byte-throughput ceiling (disk/WAL), which
-binds separately from its steps ceiling (`docs/benchmark-cloud.md`). Transition-tx byte counts are accumulated in the closure
+binds separately from its steps ceiling ([Cloud Benchmarks](https://docs.dwarf.run/performance/benchmark-cloud/)). Transition-tx byte counts are accumulated in the closure
 (`stateByteCount`) and emitted only after commit - a contention retry re-runs the closure, so counting
 inline would double on every rollback. Unit-denominated instrument names end with the unit (`_bytes`),
 per the Prometheus naming convention.
@@ -4364,7 +4364,7 @@ call (the per-shard debug path is `ShardInfo` + `Query.Shard`). `Limit` is requi
   It puts two time axes in one window - `updated_at` for the unarchived, `archived_at` for the rest - and each way of
   placing the unarchived flows breaks a caller: counted as archived after now, a window ending at now misses the last
   minute; windowed by their end, a forward poll sees each flow twice. So a flow closed in the last minute is in
-  neither list; it is read by key meanwhile. The godocs and `docs/flows.md` say so.
+  neither list; it is read by key meanwhile. The godocs and [Driving Flows](https://docs.dwarf.run/building-workflows/flows/) say so.
 - **`ListClosed`'s window is required and clamped, not refused**: both ends are required, since the window decides
   how many tables a statement reads. Its days are cut to the retention's first day and to today (plus one day past
   today when the window reaches it, for a database clock ahead of this process's), and the days a shard's record
@@ -4395,7 +4395,7 @@ call (the per-shard debug path is `ShardInfo` + `Query.Shard`). `Limit` is requi
   long batch stamped earlier can commit after a later one - so the godoc tells a walk to keep its newest bound a few
   seconds behind now. Neither list has a cursor or a promise of a stable walk.
 - **`Purge` takes the exact oldest `Limit` across shards from the archive only**, through the same merge (ascending),
-  so it removes what `ListClosed` lists, and inherits the 31-day cap: a retention purge goes a month at a time, as the godoc and `docs/flows.md` say, rather than `Purge`
+  so it removes what `ListClosed` lists, and inherits the 31-day cap: a retention purge goes a month at a time, as the godoc and [Driving Flows](https://docs.dwarf.run/building-workflows/flows/) say, rather than `Purge`
   walking a longer window itself - the cap bounds what one call touches.
 
 Pinned by `fixtures/listorder_test.go` (`ListOpen`: globally descending, and a smaller `Limit` returns exactly the

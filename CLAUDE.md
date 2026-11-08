@@ -26,7 +26,7 @@ or their types like `sub.TimeBudget` or a "plane"). Use **"host"** for the upstr
 **Audience — every piece of prose is written for exactly one of two readers; know which before you write.**
 
 - **Module users** (people and agents *using* dwarf as a dependency) read the **public-facing** docs:
-  **`docs/`, `README.md`, and godoc comments** on exported types, functions, and packages. Write these about the
+  **the docs site ([docs.dwarf.run](https://docs.dwarf.run), whose source is `../cloudflarepages/docs.dwarf.run`), `README.md`, and godoc comments** on exported types, functions, and packages. Write these about the
   **public API only**: how to use it, what to pass, what comes back. They must **not** name or describe internal
   implementation - unexported functions, internal packages, private struct fields, source-file names (`state.go`),
   or internal mechanics - because that reader cannot see any of it. Godoc especially stays at the how-to-use-it
@@ -78,8 +78,8 @@ Further guidance within each:
 - **No prose refers to anything not checked in.** Working documents ("finding A2", "_PLAN.md"), review
   threads, and **numbered benchmark campaigns** ("campaign 11", "run 14") are all invisible to every future
   reader, so a citation of one is a dead end that also implies the claim cannot be checked. Cite the
-  measurement itself - the number, the configuration, the failure mode - or a checked-in doc such as
-  `docs/benchmark-cloud.md`. "Measured at ~120 steps/s per connection" travels; "campaign 11 measured it"
+  measurement itself - the number, the configuration, the failure mode - or a published doc such as
+  [Cloud Benchmarks](https://docs.dwarf.run/performance/benchmark-cloud/). "Measured at ~120 steps/s per connection" travels; "campaign 11 measured it"
   does not.
 - **Code comments do not refer to `CLAUDE.md`.** The agent reads `CLAUDE.md` implicitly.
 - **IMPORTANT: Do not add Claude as a co-author on git commits.** No `Co-Authored-By: Claude ...` trailer,

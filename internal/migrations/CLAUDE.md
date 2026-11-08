@@ -22,7 +22,7 @@ from that watermark.
 - **Numbers only append.** The watermark is a `MAX`, not a set, so a file numbered at or below an applied number
   (a skipped number filled in later, a `2a.sql` slotted between) is silently never run on an existing database.
 - **A new `N.sql` means a MINOR release at least, never a PATCH** (the published versioning policy in
-  `docs/upgrading.md`). A PATCH must run side by side with the earlier patches of its minor version during a
+  [Upgrading](https://docs.dwarf.run/operating/upgrading/)). A PATCH must run side by side with the earlier patches of its minor version during a
   rolling deploy, so it carries no migration - and no change to what replicas write to or expect from the
   shared tables either, such as a new meaning for an existing column or status. A MINOR may change the
   database and may need a maintenance window; the release notes say whether it does.

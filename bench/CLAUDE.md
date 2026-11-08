@@ -1,7 +1,7 @@
 # Dwarf `bench` — the load harness, and how not to fool yourself with it
 
 > Load when: running a benchmark campaign, adding a workload or a flag, or reading a results artifact.
-> Coupled with: `engine/CLAUDE.md` (the derivations these runs measure) and `docs/benchmark-cloud.md`
+> Coupled with: `engine/CLAUDE.md` (the derivations these runs measure) and [Cloud Benchmarks](https://docs.dwarf.run/performance/benchmark-cloud/)
 > (the cloud campaign's findings).
 
 The harness drives the engine through its **public API** against a real database and writes one
@@ -644,8 +644,8 @@ clean commit;
 `bench/charts_redo.py` charts a tree of cells and `-volume` artifacts. Run `dbcpu.sh` with `WRITE=1` first so
 the artifacts carry database CPU.
 
-`bench/charts_cloud.py` draws the charts of `docs/benchmark-cloud.md` and `docs/benchmark-day.md`, and `bench/charts.py` the local dialect charts in
-`docs/benchmark.md`. A cloud chart drawn from many runs or from CPU profiles keeps its numbers as a table in the
+`bench/charts_cloud.py` draws the charts of [Cloud Benchmarks](https://docs.dwarf.run/performance/benchmark-cloud/) and [A Day of Varied Load](https://docs.dwarf.run/performance/benchmark-day/), and `bench/charts.py` the local dialect charts in
+[Dialect Benchmarks](https://docs.dwarf.run/performance/benchmark/). A cloud chart drawn from many runs or from CPU profiles keeps its numbers as a table in the
 script, because no single artifact holds them; the rest read their artifacts under `bench/results/`.
 **`bench/results/` is gitignored**, so those charts can be redrawn only on the machine that holds the run's
 local results - a clean checkout cannot rebuild them (`charts_cloud.py` skips a chart whose artifacts are

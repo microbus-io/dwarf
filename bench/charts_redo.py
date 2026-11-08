@@ -7,7 +7,7 @@ so each carries its database CPU. Then, from the repo root, with matplotlib avai
     python3 -m venv /tmp/viz && /tmp/viz/bin/pip install matplotlib
     /tmp/viz/bin/python bench/charts_redo.py <results-root> [out-dir]
 
-PNGs go to out-dir (default docs/); the tables print as markdown. A chart whose cells are not there yet
+PNGs go to out-dir (default ../cloudflarepages/docs.dwarf.run/content/performance, the docs site's source); the tables print as markdown. A chart whose cells are not there yet
 is skipped with a note, so a partial campaign charts what it has.
 """
 import glob
@@ -333,7 +333,7 @@ def main():
         print(__doc__)
         sys.exit(1)
     root = sys.argv[1]
-    out = sys.argv[2] if len(sys.argv) > 2 else "docs"
+    out = sys.argv[2] if len(sys.argv) > 2 else "../cloudflarepages/docs.dwarf.run/content/performance"
     os.makedirs(out, exist_ok=True)
     cells = load_cells(root)
     print(f"{len(cells)} cell(s) under {root}")

@@ -3,7 +3,7 @@
 # Shard-scaling ladder: measures throughput at 1, 2 and 3 shards with enough control to support a
 # causal claim. Runs ON the bench VM, next to the deployed dwarf-bench binary.
 #
-# WHY THIS SCRIPT EXISTS. The original ladder (docs/benchmark-cloud.md: x2.04 at two shards, x2.19 at
+# WHY THIS SCRIPT EXISTS. The original ladder (https://docs.dwarf.run/performance/benchmark-cloud/: x2.04 at two shards, x2.19 at
 # three, "the third shard is slow") is the only comparison in bench/results/ with NO replicates - one
 # 60s run per arm. Three things make that thin:
 #   - The sibling n=2 experiment (r-ratio-*) shows run-to-run spread the size of the effect: one
