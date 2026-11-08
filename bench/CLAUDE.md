@@ -657,6 +657,13 @@ day tables and retention drops under load; `DWARF_ARCHIVE_GRACE` sets how long a
 archived (a Go duration, `0s` and up), so an archived run's warmup can be short or a run can hold closed flows live
 longer. The engine logs a warning when either is set.
 
+**Start every run on a fresh database, and never change `DWARF_ARCHIVE_DAY` against one that holds archive day
+tables** - not to another value, not between set and unset. The day length is not stored: a day table's number is
+read in whatever unit the running replica has, so a shorter day makes every existing table look ancient, and
+retention maintenance drops them all, today's included, with every configuration check passing (shown: a normal
+daily archive reopened with one-hour days lost all three of its day tables on the first maintenance pass). Replicas
+of one run must agree on it too. The engine deliberately does not guard this: the setting is for the rig only.
+
 Test-only knobs the bench CANNOT reach: the engine's seams are enabled only under `testing.Testing()`, so
 arming one from `internal/engineseams` in a bench binary does nothing, and fault injection and `sequel`'s
 `SimulateRTT` are available to fixtures but not here. Reaching them from a
