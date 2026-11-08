@@ -537,20 +537,12 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	idMap := make(map[int]int, len(keep))
 	isLeafFlow := originFlowID == cc.leafFlowID
 	for _, s := range keep {
-		var newID int64
+		status, args := "status", []any{newFlowID, keys.RandomIdentifier(16)}
 		if isLeafFlow && s.oldID == cc.leafStepID {
-			newID, err = tx.InsertReturnID(ctx, "step_id",
-				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, state_reduced, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key, fairness_weight, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, engine_id, flow_created_hour)"+
-					" SELECT ?, step_depth, ?, task_name, task_url, state, state_refs, state_reduced, changes, interrupt_payload, ?, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, ?, ? FROM "+cc.src.steps+" WHERE step_id=?",
-				newFlowID, keys.RandomIdentifier(16), workflow.StatusCreated, flowPriority, flowFairnessKey, flowFairnessWeight, e.engineID, newFlowHour, s.oldID,
-			)
-		} else {
-			newID, err = tx.InsertReturnID(ctx, "step_id",
-				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, state_reduced, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key, fairness_weight, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, engine_id, flow_created_hour)"+
-					" SELECT ?, step_depth, ?, task_name, task_url, state, state_refs, state_reduced, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, ?, ? FROM "+cc.src.steps+" WHERE step_id=?",
-				newFlowID, keys.RandomIdentifier(16), flowPriority, flowFairnessKey, flowFairnessWeight, e.engineID, newFlowHour, s.oldID,
-			)
+			status, args = "?", append(args, workflow.StatusCreated)
 		}
+		args = append(args, flowPriority, flowFairnessKey, flowFairnessWeight, e.engineID, newFlowHour, s.oldID)
+		newID, err := tx.InsertReturnID(ctx, "step_id", cloneStepSQL(cc.src.steps, status), args...)
 		if err != nil {
 			return 0, nil, errors.Trace(err)
 		}
@@ -984,4 +976,13 @@ func (e *Engine) deleteSubgraphFlowsRootedAt(ctx context.Context, tx sequel.Exec
 		}
 	}
 	return nil
+}
+
+// cloneStepSQL copies one step row of steps into a cloned flow DB-side, every column but the id: under the new flow
+// id, a fresh token, the root's scheduling, this engine and the clone's creation hour (bound in that order, the
+// status between the token and the scheduling when status is "?"), then the source step id. status is the status
+// column's expression: the source's own ("status"), or a bind for the leaf, which is held created.
+func cloneStepSQL(steps, status string) string {
+	return "INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, state_reduced, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key, fairness_weight, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, engine_id, flow_created_hour)" +
+		" SELECT ?, step_depth, ?, task_name, task_url, state, state_refs, state_reduced, changes, interrupt_payload, " + status + ", error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, ?, ? FROM " + steps + " WHERE step_id=?"
 }

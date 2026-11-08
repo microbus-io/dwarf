@@ -1084,12 +1084,10 @@ func (e *Engine) complete(ctx context.Context, d *dispatch) (done bool, err erro
 	// completed, which keeps RowsAffected an honest fence on MySQL (it counts CHANGED rows): a covered step is
 	// settled by a write of its own below, never by a variant of this one that could leave the row unchanged.
 	//
-	// advancing=1 marks the step as completed-but-not-yet-transitioned, and the advance_* columns record what the
-	// transition needs beyond the step's state and changes: the task's Goto target, its Sleep and whether it was
-	// error-routed. The transition transaction clears the flag in a statement that already writes this row, so
-	// neither side costs a round trip, and a worker that dies between here and that commit leaves a step the orphan
-	// sweep can rewind and dispatch can replay without running the task again - see recoverOrphanedFlows and
-	// row.replaying in claim.
+	// advancing=1 marks the step completed but not yet transitioned, and the advance_* columns record what a replay
+	// of the transition needs (the Goto target, the Sleep, whether it was error-routed), so a worker that dies before
+	// the transition commits leaves a step replayed without re-running the task (row.replaying in claim). The
+	// transition clears the flag in a statement that already writes this row.
 	const advanceSet = "advancing=1, advance_goto=?, advance_sleep_until=DATE_ADD_MILLIS(NOW_UTC(), ?), advance_on_error=?"
 	advanceGoto, advanceSleepMs, advanceOnError := d.result.GotoRequested(), d.sleep.Milliseconds(), 0
 	if d.errorRouted {

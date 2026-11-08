@@ -144,7 +144,7 @@ func timeConditions(driverName, column string, query workflow.Query) (conds []st
 // listFilters returns a list's WHERE conditions on one shard, and their arguments, but for the time bounds: the
 // query's filters, the exclusion of flows marked for deletion, and the search.
 func (e *Engine) listFilters(driverName string, shardIdx int, query workflow.Query) (conds []string, args []any) {
-	_, where, args, _ := e.queryClauses(query, subgraphCondition(query.IncludeSubgraphs))
+	where, args, _ := e.queryClauses(query, subgraphCondition(query.IncludeSubgraphs))
 	conds = []string{where, "f.delete_after_ms=0"}
 	if sc, scArgs := searchClause(driverName, shardIdx, query.Search); sc != "" {
 		conds, args = append(conds, sc), append(args, scArgs...)
@@ -181,7 +181,7 @@ func (e *Engine) listLive(ctx context.Context, query workflow.Query, statuses []
 	if _, err := listWindowOf(query, false); err != nil {
 		return nil, errors.Trace(err)
 	}
-	if _, _, _, err := e.queryClauses(query, "1=1"); err != nil {
+	if _, _, err := e.queryClauses(query, "1=1"); err != nil {
 		return nil, errors.Trace(err)
 	}
 	if query.Status != "" {
@@ -252,7 +252,7 @@ func (e *Engine) listArchived(ctx context.Context, query workflow.Query, limit i
 		return nil, errors.New("ListClosed lists closed flows; status %q is not closed", query.Status,
 			http.StatusBadRequest)
 	}
-	if _, _, _, err := e.queryClauses(query, "1=1"); err != nil {
+	if _, _, err := e.queryClauses(query, "1=1"); err != nil {
 		return nil, errors.Trace(err)
 	}
 	// The window's archive days, clamped to the retention's first day and to today: nothing is archived before the one
@@ -431,23 +431,22 @@ func subgraphCondition(includeSubgraphs bool) string {
 	return "f.surgraph_flow_id=0" // roots only (default)
 }
 
-// queryClauses builds the shared WHERE/JOIN for the lists and purge, but for the time bounds (timeConditions), whose
+// queryClauses builds the shared WHERE for the lists and purge, but for the time bounds (timeConditions), whose
 // column differs. subgraphCond is the surgraph_flow_id predicate the caller chose: the lists honor
-// Query.IncludeSubgraphs, purge always passes roots-only.
-func (e *Engine) queryClauses(query workflow.Query, subgraphCond string) (string, string, []any, error) {
+// Query.IncludeSubgraphs, purge always passes roots-only. A `s.` condition needs the caller's stepsJoin.
+func (e *Engine) queryClauses(query workflow.Query, subgraphCond string) (where string, args []any, err error) {
 	if query.Shard != 0 && !e.db.Has(query.Shard) {
-		return "", "", nil, errors.New("invalid shard", http.StatusBadRequest)
+		return "", nil, errors.New("invalid shard", http.StatusBadRequest)
 	}
 
 	conditions := []string{subgraphCond}
-	var args []any
 	if query.Status != "" {
 		// Inline the status as a literal (like every other status predicate) so SQL Server reads the
 		// histogram and index-seeks a rare status instead of a clustered scan driven by the ORDER BY
 		// flow_id DESC + LIMIT under a parameter's density-average estimate. Validated against the known
 		// set first, so only an engine constant - never caller input - is concatenated (no injection).
 		if !workflow.IsValidStatus(query.Status) {
-			return "", "", nil, errors.New("invalid status filter: %q", query.Status, http.StatusBadRequest)
+			return "", nil, errors.New("invalid status filter: %q", query.Status, http.StatusBadRequest)
 		}
 		conditions = append(conditions, "f.status='"+query.Status+"'")
 	}
@@ -472,9 +471,7 @@ func (e *Engine) queryClauses(query workflow.Query, subgraphCond string) (string
 		args = append(args, query.Priority)
 	}
 
-	joinSQL := stepsJoin("dwarf_steps")
-	whereSQL := strings.Join(conditions, " AND ")
-	return joinSQL, whereSQL, args, nil
+	return strings.Join(conditions, " AND "), args, nil
 }
 
 // intCSV renders ids as a comma-separated list for direct embedding in a SQL IN (...) clause. The ids are

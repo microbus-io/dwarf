@@ -29,37 +29,13 @@ import (
 //	ctx, done := e.dbTurn(ctx, shardNum)
 //	defer done()
 //
-// TAKE IT AT THE OUTERMOST DATABASE OPERATION OF A CALL PATH, NEVER INSIDE A SHARED HELPER - except a helper
-// that has first handed back the turn its caller held, as lockCohortStripe's lease tick does while it waits.
-// A turn taken while one is already held is the nesting the enclosure rule forbids: holders waiting on a second turn
-// deadlock against each other, and the helpers here are shared between paths that hold a turn (a worker
-// mid-step) and paths that do not (a sweep, an operation). The engine's rule is therefore positional -
-// operations take a turn at their entry point, background loops take one per shard per pass, and the
-// worker path takes one per database call between the phases it has already released.
-//
-// The claim's age comes from the first stamp on the context and is never re-stamped, so a caller that
-// visits several shards presents the same age at each - which is what keeps a long cross-shard operation
-// from looking newly arrived at every hop it makes.
-//
-// DO NOT HOLD ONE ACROSS A WAIT FOR SOMETHING THAT IS NOT THE DATABASE - a host call, a park on the latch
-// board, a sleep. The turn is only for the stretch that holds or awaits a connection; everything else must
-// give it back first, or a caller parked on something unbounded bounds every other caller with it.
-//
-// NOTHING THAT TAKES A CONNECTION IS EXEMPT, and the caller that looks like it should be is the reason to
-// say so out loud. The peer Sonars must not be throttled by it: a Sonar that cannot beat reads as BLIND,
-// which makes its replica stop partitioning, so throttling the registry would let load reshape the fleet.
-// (The backlog loop that feeds the gauges is ordered in the common band on purpose: a late gauge is still
-// correct. The gauge callback itself makes no query.)
-//
-// The answer for the Sonars is the REFILLER'S BAND (dbTurnAt with priorityRefill), not an exemption. Exempting a caller
-// does not put it outside the contest, it ranks it ABOVE every band - a bypasser takes a connection
-// without queueing for one - and drops it from the population the turn count is there to bound. Band 0
-// gives the same precedence back while keeping both properties, and costs those callers nothing: strict
-// priority means a band-0 caller waits only for the NEXT turn to free, not for the queue to drain, which
-// at hundreds of turns each held for one round trip is no wait at all.
-//
-// Startup's RTT probe is the one genuine exemption, trivially: it runs before any worker exists, so there
-// is nothing for it to be ordered against.
+// Take it at the OUTERMOST database operation of a call path, never inside a shared helper - except one that has
+// first handed back the turn its caller held, as lockCohortStripe's lease tick does: a turn taken while one is held
+// deadlocks against the other holders. Do not hold it across a wait that is not the database (a host call, the latch
+// board, a sleep); hand it back first. The claim's age is the context's first stamp and is never re-stamped, so a
+// cross-shard caller presents one age at every shard. Nothing that takes a connection is exempt: the peer Sonars
+// take the refiller's band (dbTurnAt with priorityRefill), since an exemption ranks a caller above every band and
+// drops it from the population the turns bound. Startup's RTT probe is the one exemption, as no worker exists yet.
 func (e *Engine) dbTurn(ctx context.Context, shardNum int) (context.Context, func()) {
 	return e.dbTurnAt(ctx, shardNum, priorityCommon)
 }

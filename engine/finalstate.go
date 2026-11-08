@@ -615,16 +615,11 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, ste
 		if e.seams.IsFault(engineseams.FaultCompleteFlowCommit) {
 			return errors.New("injected fault: " + engineseams.FaultCompleteFlowCommit)
 		}
-		// Write-first: take the flow row's write lock before computeFinalState's reads. Without this the
-		// transaction is read-first (SELECT graph + terminal steps, then UPDATE), and on SQLite with
-		// cache=shared two concurrent completions both hold SHARED locks and deadlock on the upgrade to
-		// write - which under load exhausts Transact's retries and errors. Because the terminal step is
-		// already marked completed by processStep, the lease recovery (which only resets running rows)
-		// cannot re-dispatch it, leaving the flow stranded 'running' with all steps terminal (an orphan
-		// flow). Mirrors the transition transaction and fireFanInDirect, which write first for the same reason.
-		// The grab takes the lock the way lockFlowRowsSQL does: a locking read on PostgreSQL and MySQL, a flip of
-		// the non-indexed `touch` elsewhere, never `updated_at`, which moves only on the genuine status transition
-		// below, so idx_dwarf_flows_status is not churned twice per completion.
+		// Write-first: take the flow row's lock before computeFinalState's reads. Read-first, two concurrent
+		// completions deadlock on SQLite's lock upgrade, and with the terminal step already completed nothing
+		// re-dispatches it, so the flow strands running. The grab takes the lock the way lockFlowRowsSQL does: a
+		// locking read on PostgreSQL and MySQL, a flip of the non-indexed `touch` elsewhere, never `updated_at`,
+		// which moves only on the status transition below, so idx_dwarf_flows_status is not churned twice.
 		//
 		// The lock grab also reads back the surgraph linkage, the disposable flag and the priority - needed for
 		// the post-tx surgraph revival, the atomic disposable delete below and the ended counter - and it goes out in one statement batch with
