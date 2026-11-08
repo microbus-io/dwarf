@@ -57,6 +57,9 @@ Further guidance within each:
 - **Private comments** should stay concise: don't restate what the code plainly does; do capture design rationale
   or a pitfall specific to that location.
 - **Cross-cutting design rationale** belongs in the appropriate `CLAUDE.md`, not scattered across code comments.
+- **One explanation per invariant.** When a change touches an invariant whose rationale appears in more than one
+  place, fold the copies into the owning `CLAUDE.md` in the same commit and leave each call site its local rule,
+  hazard and pinning test. Copies drift until they contradict, and a reader cannot follow both.
 - **Describe what IS, never what changed.** Every comment and every `CLAUDE.md` line states the design as it
   stands now. Do not write "X used to be Y", "this replaced Z", "there is no longer a...", or a numbered account
   of what was deleted in what order. Git holds the change history; prose that re-tells it ages into a lie at the

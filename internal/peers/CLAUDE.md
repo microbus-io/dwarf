@@ -351,9 +351,11 @@ differently from the shards where registration landed. A repair that keeps faili
 like the missing-row one. Pinned by `TestPeers_RepairCorrectsAnOrderingRegistrationMissed`.
 
 `register`'s `RowsAffected` test is safe on MySQL (which counts *changed*, not matched, rows) because
-neither caller can hit the one tripping case — an existing row whose `seen_at` already holds this
-millisecond. At startup nothing has beaten yet; the repair path has just *observed* the row absent, and this
-replica is the only writer of its own row, so that observation cannot be raced.
+no caller can hit the one tripping case — an existing row the UPDATE leaves unchanged, its `seen_at` already
+holding this millisecond. At startup nothing has beaten yet. The missing-row repair has just *observed* the row
+absent, and this replica is the only writer of its own row, so that observation cannot be raced. The ordering
+repair fires only on a row holding another `ordering_seq` than the one the UPDATE writes, so the row changes
+whatever `seen_at` holds.
 
 ## Who dispatches: one shared order, a staggered cut per shard
 
