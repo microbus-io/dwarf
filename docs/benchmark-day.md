@@ -49,12 +49,22 @@ Each replica was stopped and restarted in the second cycle, and the database res
 ![A day on one database: CPU and write-ahead log](benchmark-day-database.png)
 
 - **A rolling restart cost nothing.** Each replica stopped within about 25 seconds of being told to, and was back
-  ten seconds later. Flows kept completing at the offered rate, with a little catch-up in each restart's minute.
-- **The fleet rode out a database restart.** At minute 251 the database service restarted the server on its own
-  and it was down for about 30 seconds. `Create` calls made while it was down returned errors, about 3,000 across the
-  two replicas. The engines resumed without intervention: completions fell to 575 flows/s in that minute, caught up
-  at 1,166 the next, and were back at the offered rate two minutes after the restart. When the day ended, no step was
-  left unfinished.
+  ten seconds later. The other replica ran on at its own rate throughout, and flows kept completing at the offered
+  rate.
+- **The fleet rode out a database restart.** At minute 251 the database service restarted the server on its own, and
+  it was down for about 30 seconds. Nothing could be admitted while it was down: about 3,000 `Create` calls returned
+  errors, and the rest were admitted as soon as it was back, at up to 3,100 flows/s for a few seconds. The engines
+  resumed without intervention, completed the backlog at up to 1,700 flows/s, and were back at the offered rate two
+  minutes after the restart. When the day ended, no step was left unfinished.
+
+  This run had one shard. With several, an outage of one shard's database stops only that shard: the others keep
+  admitting and running their own flows, while the down shard's flows wait for it, since a flow stays on its shard
+  for life.
+
+![A rolling restart and a database restart, at 10-second resolution](benchmark-day-restarts.png)
+
+- **The load generator never fell behind.** It dropped no arrival and was never throttled, through the bursts and both
+  restarts. A replica that was restarting created none of its half of the load until it was running again.
 
 *(Measured 2026-11-07.)*
 

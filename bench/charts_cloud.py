@@ -742,6 +742,66 @@ def chart_day_storage():
     finish(fig, "benchmark-day-storage.png")
 
 
+def real_slots():
+    """Per replica and 10 s slot of the day: steps/s and offered, admitted and ended flows/s, a stopping and a
+    restarted process of one replica summed."""
+    keys = ("stepsPerSec", "offeredFlowsPerSec", "admittedFlowsPerSec", "endedFlowsPerSec")
+    per = collections.defaultdict(list)  # (replica, slot, process) -> samples: a stopping process writes a last one
+    for path in glob.glob(os.path.join(REAL, "dwarf-real-e*", "out", "day*.series.jsonl")):
+        proc = os.path.basename(path).split(".")[0]
+        for line in open(path):
+            p = json.loads(line)
+            per[(proc.split("-", 1)[1], int(p["t"] // 10), proc)].append(p)
+    slots = collections.defaultdict(lambda: collections.defaultdict(float))
+    for (replica, slot, _), samples in per.items():
+        for k in keys:
+            slots[(replica, slot)][k] += sum(p.get(k) or 0 for p in samples) / len(samples)
+    return slots
+
+
+def chart_day_restarts():
+    rs = os.path.join(REAL, "restarts.txt")
+    if not os.path.exists(rs):
+        return skip("benchmark-day-restarts.png", f"restarts.txt not in {REAL}")
+    slots, replicas = real_slots(), ["dwarf-real-ea", "dwarf-real-eb"]
+    events = [(real_utc_min(t), vm, what) for t, vm, what in (l.split() for l in open(rs))]
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(12, 4.6))
+    # Left: the rolling restart, each replica's steps/s. A slot a replica has no sample for is a gap.
+    lo, hi = 133, 147
+    for vm, colour, name in zip(replicas, (S1, S2), ("replica A", "replica B")):
+        xs = [s / 6 for s in range(lo * 6, hi * 6)]
+        a1.plot(xs, [slots[(vm, s)]["stepsPerSec"] if (vm, s) in slots else float("nan") for s in range(lo * 6, hi * 6)],
+                color=colour, lw=1.8, label=name)
+    for at, vm, what in events:
+        colour = S1 if vm.endswith("ea") else S2
+        a1.axvline(at, color=colour, lw=1, ls=":" if what == "SIGTERM" else "-")
+    a1.set_xlim(lo, hi)
+    a1.set_ylim(0, None)
+    a1.yaxis.set_major_formatter(kilo)
+    a1.set_xlabel("minute of the day   (dotted: told to stop; solid: started again)")
+    a1.set_ylabel("steps/s executed")
+    a1.set_title("A rolling restart")
+    a1.legend(frameon=False, fontsize=9, loc="lower left")
+    # Right: the database restart, the fleet's flows/s offered, admitted and ended.
+    lo, hi = 248, 256
+    xs = [s / 6 for s in range(lo * 6, hi * 6)]
+    for key, colour, ls, name in (("offeredFlowsPerSec", INK, (0, (4, 2)), "offered"),
+                                  ("admittedFlowsPerSec", S3, "-", "admitted"),
+                                  ("endedFlowsPerSec", S1, "-", "completed")):
+        a2.plot(xs, [sum(slots[(vm, s)][key] for vm in replicas if (vm, s) in slots) for s in range(lo * 6, hi * 6)],
+                color=colour, lw=1.8, ls=ls, label=name)
+    down = real_utc_min(DB_RESTART_UTC)
+    a2.axvspan(down, down + 0.5, color=OUTAGE, alpha=0.15, lw=0)
+    a2.text(down + 0.05, 0.97, "database\ndown", color=OUTAGE, fontsize=9, va="top", transform=a2.get_xaxis_transform())
+    a2.set_xlim(lo, hi)
+    a2.set_ylim(0, None)
+    a2.set_xlabel("minute of the day")
+    a2.set_ylabel("flows/s, both replicas")
+    a2.set_title("The database restarts")
+    a2.legend(frameon=False, fontsize=9, loc="lower left")
+    finish(fig, "benchmark-day-restarts.png")
+
+
 chart_tiers()
 chart_shards()
 chart_engine_hosts()
@@ -756,3 +816,4 @@ chart_day()
 chart_day_backlog()
 chart_day_database()
 chart_day_storage()
+chart_day_restarts()
