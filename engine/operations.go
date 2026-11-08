@@ -1257,15 +1257,16 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 		if e.seams.IsFault(engineseams.FaultResumeCommit) {
 			return errors.New("injected fault: " + engineseams.FaultResumeCommit)
 		}
-		allStepIDs := append([]any{leafStepID}, parkStepIDs...)
-		clearPlaceholders := strings.Repeat("?,", len(allStepIDs)-1) + "?"
-		tx.ExecContext(ctx, "UPDATE dwarf_steps SET interrupt_payload=? WHERE step_id IN ("+clearPlaceholders+")",
-			append([]any{emptyJSON}, allStepIDs...)...)
-
-		if len(parkStepIDs) > 0 {
-			parkPlaceholders := strings.Repeat("?,", len(parkStepIDs)-1) + "?"
-			parkArgs := append([]any{workflow.StatusRunning, parkedSubgraph}, parkStepIDs...)
-			tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE step_id IN ("+parkPlaceholders+") AND status='"+workflow.StatusInterrupted+"'", parkArgs...)
+		// The chain is as deep as the subgraph nesting, so its writes go out inListChunk ids at a time, ascending, as
+		// handleInterrupt's do (see there).
+		for chunk := range slices.Chunk(lockOrder(append([]any{leafStepID}, parkStepIDs...)), inListChunk) {
+			ph, ids := inList(chunk)
+			tx.ExecContext(ctx, "UPDATE dwarf_steps SET interrupt_payload=? WHERE step_id IN ("+ph+")", append([]any{emptyJSON}, ids...)...)
+		}
+		for chunk := range slices.Chunk(lockOrder(parkStepIDs), inListChunk) {
+			ph, ids := inList(chunk)
+			tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE step_id IN ("+ph+") AND status='"+workflow.StatusInterrupted+"'",
+				append([]any{workflow.StatusRunning, parkedSubgraph}, ids...)...)
 		}
 
 		// The leaf flip is this Resume's claim on the interrupt it selected outside the transaction. A zero-row match

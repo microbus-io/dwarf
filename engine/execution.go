@@ -19,6 +19,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 
 	"github.com/microbus-io/dwarf/internal/engineseams"
@@ -102,17 +103,24 @@ func (e *Engine) handleInterrupt(ctx context.Context, d *dispatch, interruptPayl
 		// (the transition transaction, completeFlow) cannot cycle with this path either: the only step rows it
 		// locks besides its own are a cohort's spawn and exit rows, and an interrupting leaf is a member that has
 		// not arrived, so its cohort cannot be resolving while it interrupts.
-		allStepIDs := append([]any{stepID}, chainStepIDs...)
-		stepPlaceholders := strings.Repeat("?,", len(allStepIDs)-1) + "?"
-		stepArgs := []any{stepID, changesJSON, stepID, workflow.StatusInterrupted, parkedNone}
-		stepArgs = append(stepArgs, allStepIDs...)
-		chainSQL := "UPDATE dwarf_steps SET changes=CASE WHEN step_id=? THEN ? ELSE changes END, interrupt_done=CASE WHEN step_id=? THEN 1 ELSE interrupt_done END, status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN (" + stepPlaceholders + ") AND status IN ('" + workflow.StatusRunning + "', '" + workflow.StatusInterrupted + "')"
+		// The chain is as deep as the subgraph nesting, which nothing bounds, so every chain-wide write goes out
+		// inListChunk ids at a time, in one transaction. Ascending, so chunk after chunk takes its row locks in one
+		// order (lockOrder); a single statement over the whole list would instead pass SQL Server's 2,100-parameter
+		// ceiling at a chain of 700 flows.
+		allStepIDs := lockOrder(append([]any{stepID}, chainStepIDs...))
 		// engineseams.FaultInterruptChainWrite reproduces a deadlock victim dialect-independently: the statement errors and
 		// applies NOTHING, so the leaf stays `running` - the shape that must not read back as a genuine fence.
 		if e.seams.IsFault(engineseams.FaultInterruptChainWrite) {
-			chainSQL, stepArgs = "UPDATE dwarf_steps SET no_such_column=1 WHERE step_id=?", []any{stepID}
+			tx.ExecContext(ctx, "UPDATE dwarf_steps SET no_such_column=1 WHERE step_id=?", stepID)
+		} else {
+			for chunk := range slices.Chunk(allStepIDs, inListChunk) {
+				ph, ids := inList(chunk)
+				tx.ExecContext(ctx,
+					"UPDATE dwarf_steps SET changes=CASE WHEN step_id=? THEN ? ELSE changes END, interrupt_done=CASE WHEN step_id=? THEN 1 ELSE interrupt_done END, status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN ("+ph+") AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')",
+					append([]any{stepID, changesJSON, stepID, workflow.StatusInterrupted, parkedNone}, ids...)...,
+				)
+			}
 		}
-		tx.ExecContext(ctx, chainSQL, stepArgs...)
 
 		// Lease fence - on BOTH the generation AND the leaf's own transition. The combined UPDATE above locked
 		// and re-parked the whole chain (in PK order, before any flow row - the ordering the comment guards),
@@ -163,8 +171,6 @@ func (e *Engine) handleInterrupt(ctx context.Context, d *dispatch, interruptPayl
 				return err
 			}
 			payloadLen = len(payloadJSON)
-			payloadArgs := []any{payloadJSON}
-			payloadArgs = append(payloadArgs, allStepIDs...)
 			// Guard: write the payload only to chain steps still at the default empty object, so a
 			// concurrent fan-out interrupt does not clobber a payload already set on a shared ancestor
 			// (first-writer-wins). Three dialect forms, and each is load-bearing:
@@ -183,29 +189,43 @@ func (e *Engine) handleInterrupt(ctx context.Context, d *dispatch, interruptPayl
 			case "mssql":
 				emptyGuard = "interrupt_payload=0x7B7D"
 			}
-			tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET interrupt_payload=? WHERE step_id IN ("+stepPlaceholders+") AND "+emptyGuard,
-				payloadArgs...,
-			)
+			for chunk := range slices.Chunk(allStepIDs, inListChunk) {
+				ph, ids := inList(chunk)
+				tx.ExecContext(ctx,
+					"UPDATE dwarf_steps SET interrupt_payload=? WHERE step_id IN ("+ph+") AND "+emptyGuard,
+					append([]any{payloadJSON}, ids...)...,
+				)
+			}
 		}
 
 		// Each chain flow records the step it stopped at - the leaf in the leaf's flow, the parked caller in each
-		// ancestor (allStepIDs is aligned with chainFlowIDs) - unless it is already interrupted, where the first
+		// ancestor (stoppedAt pairs each chain flow with its step) - unless it is already interrupted, where the first
 		// interrupt keeps its record. stopped_step_id is assigned BEFORE status: MySQL evaluates SET assignments left to
-		// right, so a CASE placed after status=? would read the new status.
-		flowPlaceholders := strings.Repeat("?,", len(chainFlowIDs)-1) + "?"
-		stoppedAt := "CASE flow_id" + strings.Repeat(" WHEN ? THEN ?", len(chainFlowIDs)) + " ELSE stopped_step_id END"
-		var flowArgs []any
+		// right, so a CASE placed after status=? would read the new status. A chunk binds two values per flow for the
+		// CASE and one for the IN list, about 1,500 at inListChunk flows.
+		// chainFlowIDs[0] is the leaf's flow and chainFlowIDs[i] the flow of the caller chainStepIDs[i-1].
+		stoppedAt := make(map[int]any, len(chainFlowIDs))
 		for i, chainFlowID := range chainFlowIDs {
-			flowArgs = append(flowArgs, chainFlowID, allStepIDs[i])
+			if i == 0 {
+				stoppedAt[chainFlowID.(int)] = stepID
+			} else {
+				stoppedAt[chainFlowID.(int)] = chainStepIDs[i-1]
+			}
 		}
-		flowArgs = append(flowArgs, workflow.StatusInterrupted)
-		flowArgs = append(flowArgs, chainFlowIDs...)
-		tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET stopped_step_id=CASE WHEN status='"+workflow.StatusRunning+"' THEN "+stoppedAt+" ELSE stopped_step_id END, status=?, updated_at=NOW_UTC(), touch=1-touch"+
-				" WHERE flow_id IN ("+flowPlaceholders+") AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')",
-			flowArgs...,
-		)
+		for chunk := range slices.Chunk(lockOrder(chainFlowIDs), inListChunk) {
+			ph, ids := inList(chunk)
+			args := make([]any, 0, 2*len(chunk)+1+len(ids))
+			for _, chainFlowID := range chunk {
+				args = append(args, chainFlowID, stoppedAt[chainFlowID.(int)])
+			}
+			args = append(args, workflow.StatusInterrupted)
+			args = append(args, ids...)
+			tx.ExecContext(ctx,
+				"UPDATE dwarf_flows SET stopped_step_id=CASE WHEN status='"+workflow.StatusRunning+"' THEN CASE flow_id"+strings.Repeat(" WHEN ? THEN ?", len(chunk))+" ELSE stopped_step_id END ELSE stopped_step_id END, status=?, updated_at=NOW_UTC(), touch=1-touch"+
+					" WHERE flow_id IN ("+ph+") AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')",
+				args...,
+			)
+		}
 		return nil
 	})
 	if err != nil {
