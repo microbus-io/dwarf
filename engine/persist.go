@@ -41,7 +41,8 @@ import (
 //  1. Retry in place, holding the lease. An ephemeral database error (a failover, a dropped connection, a
 //     momentary connection-limit rejection) clears in seconds to tens of seconds, so an exponential ladder lands
 //     the write with ZERO re-execution - which is the whole point, and what re-dispatching could never give us.
-//  2. If the retries are exhausted, ask the database to classify the failure for us - see failOnPersistError.
+//  2. If the retries are exhausted, show the database is reachable with a payload-free write, retry the real write
+//     at once, and only then ask the database to classify the failure for us - see failOnPersistError.
 //
 // Lock contention is NOT handled here: it is retried before it reaches persist - by `sequel.Transact` for a
 // transaction, by retryContention for a statement run on its own - and re-litigating it with a second loop
@@ -187,8 +188,37 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 			return errors.Trace(err)
 		}
 	}
+
+	// The ladder is spent. Before the failure is classified, demonstrate the database is reachable NOW with a
+	// payload-free write, then retry the real one at once: a failover that ended during the last backoff lands the
+	// write here instead of failing a healthy step. Only a write that fails between two writes the database accepted
+	// - this renewal and failOnPersistError's failStep - is taken as the payload's fault. A renewal that errors means
+	// the database is still away, and nothing is classified; the step stays for lease recovery.
+	held, xerr := e.extendLease(ctx, db, stepID, leaseSeq, e.persistLeaseExtension)
+	if xerr != nil {
+		return &persistUnreachableError{writeErr: err, probeErr: xerr}
+	}
+	if !held {
+		e.logLostLease(ctx, stepID, err)
+		return errPersistFenced
+	}
+	e.metricStepWriteRetried(ctx, shardNum)
+	err = write()
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, errLeaseFenced) {
+		return errPersistFenced
+	}
 	return errors.Trace(err)
 }
+
+// persistUnreachableError is a write persist gave up on while the database refused even a payload-free write, so
+// the failure says nothing about the payload. settlePersist leaves the step to lease recovery; it never fails it.
+type persistUnreachableError struct{ writeErr, probeErr error }
+
+func (p *persistUnreachableError) Error() string { return p.writeErr.Error() }
+func (p *persistUnreachableError) Unwrap() error { return p.writeErr }
 
 // logLostLease reports a step whose outcome write failed for a reason of its own and that was then no longer this
 // worker's. Usually lease recovery has taken it and the task runs again; a write that fails every time makes that a
@@ -264,9 +294,10 @@ func (e *Engine) releaseLease(ctx context.Context, db *sequel.DB, stepID, leaseS
 //     (`dwarf_steps_recovered` counts that). Re-execution here is unavoidable AND correct - from the database's
 //     point of view the step never ran.
 //
-// The two attempts are milliseconds apart and differ only in what they carry, which is what makes the
-// classification sound. Guessing the other way - terminalizing on any unknown error - would kill open flows on
-// every routine failover, and a closed flow is immutable (recovery is a human running Fork).
+// persist's last attempt follows a payload-free lease renewal that landed, so the failed write sits between two
+// writes the database accepted, milliseconds apart, and differs from them only in what it carries - which is what
+// makes the classification sound. Guessing the other way - terminalizing on any unknown error - would kill open
+// flows on every routine failover, and a closed flow is immutable (recovery is a human running Fork).
 func (e *Engine) failOnPersistError(ctx context.Context, d *dispatch, writeErr error, held stepHeld) error {
 	stepID, taskName := d.stepID, d.row.taskName
 	fenced, ferr := e.failStep(ctx, d, writeErr, held)
@@ -363,6 +394,7 @@ func isPermanentError(err error) bool {
 // to exhaustion (by Transact, or by retryContention), so it goes to the recovery defer, which rewinds the step
 // and re-polls.
 func (e *Engine) settlePersist(ctx context.Context, d *dispatch, err error, held stepHeld) (landed bool, _ error) {
+	var unreachable *persistUnreachableError
 	switch {
 	case err == nil:
 		return true, nil
@@ -374,6 +406,10 @@ func (e *Engine) settlePersist(ctx context.Context, d *dispatch, err error, held
 		// Not a storage fault: the step fails with it, without the write alarm.
 		_, ferr := e.failStep(ctx, d, err, held)
 		return false, errors.Trace(ferr)
+	case errors.As(err, &unreachable):
+		e.logger.ErrorContext(ctx, "Persisting step outcome failed and the database refused a payload-free write too; leaving it for lease recovery",
+			"step", d.stepID, "task", d.row.taskName, "writeError", unreachable.writeErr, "probeError", unreachable.probeErr)
+		return false, errors.Trace(unreachable.writeErr)
 	default:
 		return false, errors.Trace(e.failOnPersistError(ctx, d, err, held))
 	}

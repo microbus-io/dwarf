@@ -595,3 +595,66 @@ func TestPersist_LandedWriteReportingAnErrorIsNotFailed(t *testing.T) {
 	assert.Equal("done", stateVal(outcome.State, "out"))
 	assert.Equal(int32(1), runs.Load(), "a landed completion is replayed, never re-run")
 }
+
+// TestPersist_RecoveryAfterTheLadderLandsTheWrite pins that a database which comes back after the last retry of the
+// ladder lands the write rather than failing the step. Every write of the ladder fails, as through a failover, and
+// the database is fine from then on. Classified straight off the ladder, failStep landed a moment later and failed
+// a healthy flow as a payload fault - a successful later write proves only that the database is up now. persist
+// instead renews the lease (payload-free) and retries the write once more before anything is classified.
+func TestPersist_RecoveryAfterTheLadderLandsTheWrite(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	var runs atomic.Int32
+	e, reader := countingEngine(t, "p/afterladder", &runs)
+	defer e.Shutdown(ctx)
+	assert.Must(assert.NoError(e.Startup(t.Context())))
+	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistErr, "A"), 1+len(shortPersistBackoff))
+
+	_, outcome, err := e.Run(ctx, "p/afterladder/wf", nil, nil)
+	if !assert.NoError(err) || !assert.NotNil(outcome) {
+		return
+	}
+	assert.Equal(workflow.StatusCompleted, outcome.Status, outcome.Error)
+	assert.Equal("done", stateVal(outcome.State, "out"))
+	assert.Equal(int32(1), runs.Load(), "the WRITE is retried, never the task")
+	var rm metricdata.ResourceMetrics
+	assert.NoError(reader.Collect(ctx, &rm))
+	failed, _ := sumCounter(rm, "dwarf_steps_write_failed", "", "")
+	assert.Zero(failed, "a write that landed is no payload fault")
+}
+
+// TestPersist_UnreachableAfterTheLadderIsNotClassified pins the other half of the bracket: when the database still
+// refuses the payload-free renewal after the ladder, nothing is classified, even though failStep itself would land.
+// The step stays running under its lease, for lease recovery, and no write is counted as failed.
+func TestPersist_UnreachableAfterTheLadderIsNotClassified(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	var runs atomic.Int32
+	e, reader := countingEngine(t, "p/unreachable", &runs)
+	defer e.Shutdown(ctx)
+	assert.Must(assert.NoError(e.Startup(t.Context())))
+	e.seams.InjectN(engineseams.FaultExtendLeaseErr, 1000)
+	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistErr, "A"), 1000)
+
+	fk, err := e.Create(ctx, "p/unreachable/wf", nil, nil)
+	assert.Must(assert.NoError(err))
+	shard, _, _, _, err := keys.ParseFlowKey(fk)
+	assert.NoError(err)
+	_, _, stepID := flowRows(t, e, fk)
+	enginetest.AwaitVisitCount(t, e.seams, 1, 15*time.Second,
+		engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(stepID)))
+
+	held := enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE step_id=? AND status='"+
+		workflow.StatusRunning+"' AND lease_expires>NOW_UTC()", stepID)
+	assert.Equal(1, held, "a step whose database refused the renewal must stay running for lease recovery")
+	assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE status='"+workflow.StatusRunning+"'"))
+	assert.Equal(int32(1), runs.Load())
+	var rm metricdata.ResourceMetrics
+	assert.NoError(reader.Collect(ctx, &rm))
+	failed, _ := sumCounter(rm, "dwarf_steps_write_failed", "", "")
+	assert.Zero(failed, "an unreachable database says nothing about the payload")
+}

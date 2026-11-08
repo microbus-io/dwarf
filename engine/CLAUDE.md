@@ -1837,8 +1837,15 @@ the completion write.
   watch), releases its lease, and exits. That *does* re-execute the task on the peer that picks it up - it is the
   at-least-once contract, and it is what lease expiry would have done anyway, only sooner.
 
-**The classifier: ask the database, do not read the error code.** When the retries are exhausted, `failOnPersistError`
-attempts the **clean** terminal write (`failStep` - a status and an error message, none of the payload):
+**The classifier: ask the database, do not read the error code.** When the retries are exhausted, `persist` first
+**brackets one more attempt**: it renews the lease (a payload-free write, no backoff) and, if that lands, retries the
+real write at once. A renewal that errors means the database is still away, so nothing is classified
+(`persistUnreachableError`; `settlePersist` leaves the step for lease recovery). **Do not classify straight off the
+ladder:** its last write follows a backoff, so a failover that ends during it leaves `failStep` landing a moment
+later and failing a healthy step - a successful later write proves only that the database is up *now*
+(`TestPersist_RecoveryAfterTheLadderLandsTheWrite`). Only a write that fails between that renewal and the
+**clean** terminal write (`failStep` - a status and an error message, none of the payload) is classified, by
+`failOnPersistError`:
 
 - it **lands** ⇒ the database is reachable, so the database is not the problem: the **payload** is. The failure is
   permanent, re-running the task would only reproduce it, and the step **fails** naming the driver's actual error.
@@ -1854,8 +1861,9 @@ attempts the **clean** terminal write (`failStep` - a status and an error messag
   matches nothing, returns no loss - no failure delivered to a parent, no second `dwarf_flows_closed`. Pinned by
   `TestPersist_LandedWriteReportingAnErrorIsNotFailed` (`FaultPersistLandedErr`) and `TestFailStep_HeldStates`.
 
-The two attempts are milliseconds apart and differ only in what they carry, which is what makes the classification
-sound. It needs **no per-driver error taxonomy** (the part that would rot). Guessing the other way - terminalizing
+The failed write sits milliseconds from a payload-free write on either side and differs from them only in what it
+carries, which is what makes the classification sound. It needs **no per-driver error taxonomy** (the part that
+would rot). Guessing the other way - terminalizing
 on any unknown error - would kill open flows on every routine failover, and a closed flow is **immutable**
 (recovery is a human running `Fork`).
 
