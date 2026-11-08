@@ -9,7 +9,7 @@
 gc compute scp --zone=$ZONE "$R/bench/gcp/burst.sh" "$ADMIN":~/ >/dev/null 2>&1 && vmssh "$ADMIN" 'chmod +x burst.sh' ||
   { log "burst.sh deploy failed"; exit 1; }
 BENV="DSN='$(admdsn "${IPS[0]}")' OUT=out/burst RATE=${RATE:-450} VCPUS=${VCPUS:-16} DELAY=${DELAY:-8s} BURST=${BURST:-3m} QUIET=${QUIET:-9m} WINDOW=${WINDOW:-24m} STATS=${STATS:-15s}"
-log "burst.sh: $BENV"
+log "burst.sh: ${BENV//$pass/PASS}"
 vmssh "$ADMIN" "$BENV setsid nohup bash -c './burst.sh > out/burst.log 2>&1; touch out/burst.done' > /dev/null 2>&1 < /dev/null &"
 until vmssh "$ADMIN" 'test -f out/burst.done'; do
   late; sleep 120

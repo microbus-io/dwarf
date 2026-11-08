@@ -169,7 +169,7 @@ for rep in $(seq 1 "$REPS"); do
   echo "-- rep ${rep} order: ${order[*]}"
   for arm in "${order[@]}"; do
     tag="${arm}-r${rep}"
-    db="dwarf_bu_${RUN_ID}_${arm}_r${rep}"
+    db=$(echo "dwarf_bu_${RUN_ID}_${arm}_r${rep}" | tr "[:upper:]" "[:lower:]") # lower case: PostgreSQL folds an unquoted CREATE DATABASE name
 
     echo "-- ${tag}"
     rtt_gate "$(admin_dsn "$DSN")"
@@ -210,20 +210,34 @@ import glob, json, os, re, statistics, sys
 
 out, rate = sys.argv[1], float(sys.argv[2])
 
-# One readout line: eight numeric fields. The run's own trailing summary line has thirteen and the header
-# has none, so the field count alone separates them - no need to track where the header was printed.
-LINE = re.compile(r"^\s*([\d.]+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*$")
+# The readout is a "t(s)" header followed by one line per -stats-interval; the run's closing summary has the same
+# field count after the "drain:" line, so lines are read by the header in force, not by their shape. A reading the
+# sampler did not have prints "-" and is kept as None.
+COLS = {"t(s)": "t", "delayMs": "delay", "crew": "crew", "gorout": "gor", "heapMB": "heap", "outstand": "pending"}
+
+
+def num(v):
+    try:
+        return float(v)
+    except ValueError:
+        return None
 
 
 def readout(path):
     """The stats lines from one arm's log, as dicts. This is the only record of the crew over time."""
-    rows = []
+    rows, cols = [], None
     for line in open(path, errors="replace"):
-        m = LINE.match(line)
-        if m:
-            t, delay, crew, gor, heap, turns, infl, pending = (float(x) for x in m.groups())
-            rows.append(dict(t=t, delay=delay, crew=crew, gor=gor, heap=heap,
-                             turns=turns, infl=infl, pending=pending))
+        parts = line.split()
+        if not parts:
+            continue
+        if parts[0] == "t(s)":
+            cols = parts
+        elif parts[0] in ("conc", "drain:"):  # the window ended: what follows is the run summary
+            cols = None
+        elif cols and len(parts) == len(cols) and parts[0].isdigit():
+            row = {COLS[c]: num(v) for c, v in zip(cols, parts) if c in COLS}
+            if row.get("crew") is not None:
+                rows.append(row)
     return rows
 
 
@@ -255,9 +269,9 @@ for arm in ("steady0", "steadyN", "burst"):
     sp = statistics.mean(r["stepsPerSec"] for r, _ in reps)
     fl = statistics.mean(r["flowsPerSec"] for r, _ in reps)
     crews = [row["crew"] for _, rows in reps for row in rows]
-    heaps = [row["heap"] for _, rows in reps for row in rows]
+    heaps = [row["heap"] for _, rows in reps for row in rows if row.get("heap") is not None] or [0]
     ends = [rows[-1]["crew"] for _, rows in reps if rows]
-    hends = [rows[-1]["heap"] for _, rows in reps if rows]
+    hends = [rows[-1]["heap"] for _, rows in reps if rows and rows[-1].get("heap") is not None]
     if not crews:
         print(f"{arm:>8} {len(reps):>2} {sp:>9.0f} {fl:>8.1f}  (no readout lines - was -stats-interval set?)")
         continue
@@ -278,7 +292,7 @@ if "burst" in arms:
             continue
         crew = [r["crew"] for r in rows]
         print(f"  {name:<22} n={len(rows):<4} crew {min(crew):>7.0f}-{max(crew):<7.0f} "
-              f"mean {statistics.mean(crew):>7.0f}   pending mean {statistics.mean(r['pending'] for r in rows):>8.0f}")
+              f"mean {statistics.mean(crew):>7.0f}   pending mean {statistics.mean(r['pending'] or 0 for r in rows):>8.0f}")
 
     # Does it come back down WITHIN a quiet stretch? Compare the first reading of each quiet run to its
     # last: a crew that is falling shows it here even when the stretch was too short to finish falling.

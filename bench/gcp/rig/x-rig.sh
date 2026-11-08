@@ -37,6 +37,7 @@ authok
 log "creating $DB (${TIER:-db-custom-32-131072}, ${DISK} GB SSD, Query Insights) + $ADMIN (c4a-16); step $STEP"
 # 1 GB of dead-row memory per autovacuum worker: at Cloud SQL's 64 MB default a vacuum pass rescans every index once
 # per ~11M dead rows. DBFLAGS may set its own value.
+DBFLAGS=${DBFLAGS:-}
 [[ ,$DBFLAGS, == *,autovacuum_work_mem=* ]] || DBFLAGS=${DBFLAGS:+$DBFLAGS,}autovacuum_work_mem=1048576
 gc sql instances create "$DB" --database-version=POSTGRES_16 --tier=${TIER:-db-custom-32-131072} --edition=enterprise \
   --zone=$ZONE --storage-type=SSD --storage-size="$DISK" --insights-config-query-insights-enabled \

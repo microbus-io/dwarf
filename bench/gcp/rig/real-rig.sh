@@ -12,7 +12,9 @@
 #   2  the day: three 90-minute periods (4.5 h) of night 8,000 / ramp / day 12,000 / ramp, bursts to 16,000 at
 #      minutes 10 (2 min), 40 (2 min) and 58 (5 min), +-10% seeded noise per minute, Poisson arrivals; the mix below,
 #      85% 2 ms / 12% 100 ms / 3% 5 s tasks, 200 fairness keys on a Zipf (s 1.1), flows across all five priority
-#      levels (3 / 12 / 55 / 20 / 10% at 1..5), completed flows purged after 30 min. A rolling restart in period
+#      levels (3 / 12 / 55 / 20 / 10% at 1..5), closed flows archived and kept: no -retention, whose row Purge on the
+#      archive left 30M dead rows that held every autovacuum worker and starved the live tables (the archive's own
+#      retention drops whole days). A rolling restart in period
 #      2's day phase: replica A at run minute $RESTART_A (137), replica B at $RESTART_B (141), each by SIGTERM (the
 #      bench stops creating and its engine drains; SIGKILL if it has not stopped in 3 min), restarted 10 s later on
 #      the same epoch. At the end every replica keeps its engines up until no flow is left running.
@@ -173,7 +175,7 @@ PROFILE="25m:$NIGHT,10m:$NIGHT-$DAY,40m:$DAY,15m:$DAY-$NIGHT"
 BURSTS="10m+2m:$BURST,40m+2m:$BURST,58m+5m:$BURST"
 authok; late; RUN_DB=dwarf_real; fresh $RUN_DB
 EPOCH=$(( $(date +%s) + 120 ))
-DAYARGS="-real 270m -arrival-epoch $EPOCH -arrival-share 0.5 -arrival-profile '$PROFILE' -arrival-bursts '$BURSTS' -arrival-noise 0.1 -arrival-seed 1 -mix '$MIX' -payload-json -task-delay-dist '$DIST' -fairness-keys 200 -fairness-skew 1.1 -priority-mix '$PRIO' -retention 30m -concurrency 128 -max-outstanding 150000"
+DAYARGS="-real 270m -arrival-epoch $EPOCH -arrival-share 0.5 -arrival-profile '$PROFILE' -arrival-bursts '$BURSTS' -arrival-noise 0.1 -arrival-seed 1 -mix '$MIX' -payload-json -task-delay-dist '$DIST' -fairness-keys 200 -fairness-skew 1.1 -priority-mix '$PRIO' -concurrency 128 -max-outstanding 150000"
 echo "$DAYARGS" > "$OUT/day-args.txt"
 log "the day: epoch $(date -r $EPOCH '+%H:%M:%S'), profile $PROFILE, bursts $BURSTS"
 vmssh "$ADMIN" "setsid nohup ./s-mon.sh $(( 300 * 60 )) out/mon-day.log '$(dsn $RUN_DB)' > /dev/null 2>&1 < /dev/null &"
