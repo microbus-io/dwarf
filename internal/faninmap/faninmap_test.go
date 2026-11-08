@@ -115,6 +115,27 @@ func TestFanInMap_NonFanOutSourceHasNoMapping(t *testing.T) {
 	assert.Equal("", New(g).For("a"))
 }
 
+// Override and switch edges must not turn a source into a cohort opener when indexing its edges.
+func TestFanInMap_ExclusiveAndOverrideEdgesDoNotFanOut(t *testing.T) {
+	g := workflow.NewGraph("Exclusive")
+	g.AddTransition("Start", "Switch")
+	g.AddTransitionGoto("Start", "Switch")
+	g.AddTransitionOnError("Start", "Switch")
+	g.AddTransitionSwitch("Switch", "Left", "flag")
+	g.AddTransitionSwitch("Switch", "Right", "true")
+	g.AddTransition("Left", workflow.End)
+	g.AddTransition("Right", workflow.End)
+	if err := g.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	fim := New(g)
+	for _, task := range g.Tasks() {
+		if g.IsFanOutSource(task.Name) || fim.For(task.Name) != "" {
+			t.Errorf("%s unexpectedly opens a cohort", task.Name)
+		}
+	}
+}
+
 func TestFanInMap_RecomputesAfterJSONRoundTrip(t *testing.T) {
 	assert := testarossa.For(t)
 

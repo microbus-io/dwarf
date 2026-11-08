@@ -1332,10 +1332,8 @@ func TestGraph_ValidateLineageStripsProto(t *testing.T) {
 	}
 }
 
-// validateLineage memoizes IsFanOutSource rather than re-implementing the fan-out predicate, because the
-// engine ROUTES on IsFanOutSource (internal/faninmap, processStep): a validator that disagreed with the
-// router about what fans out would bless a graph the engine then mis-executes. This pins the agreement
-// across every shape the predicate distinguishes.
+// The validator uses the same fan-out predicate as IsFanOutSource, restricted to each source's adjacency
+// list. This pins the public predicate across every shape it distinguishes.
 func TestGraph_ValidatorAgreesWithIsFanOutSource(t *testing.T) {
 	assert := testarossa.For(t)
 

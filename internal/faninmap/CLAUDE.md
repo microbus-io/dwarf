@@ -24,6 +24,14 @@ fan-in tasks) and storing its result on the graph would make the author's defini
 Two cheap traversals of a small structure, on two paths that run at completely different times, beat one
 shared mutable field.
 
+Each traversal builds local outgoing-edge lists, preserving definition order, so discovering edges costs
+O(V+E). `New` also counts ordinary outgoing edges in that pass: two ordinary edges or any ordinary `forEach`
+edge mark a fan-out source, exactly as `Graph.IsFanOutSource` does. Switch, goto, and error edges never count;
+`when` does not make ordinary edges exclusive. Keep this classification in agreement with the public predicate.
+Lineage-stack copies and comparisons still depend on nesting depth, so the whole traversal is not promised to
+be O(V+E) for arbitrarily nested graphs. `BenchmarkGraphTraversal` measures both validation and mapping with
+construction outside the timer.
+
 ## The traversal assumes a VALIDATED graph, and that assumption is load-bearing
 
 `Validate` runs at `Create` and rejects the malformed shapes — a fan-out whose branches converge on

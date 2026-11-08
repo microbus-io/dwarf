@@ -3,6 +3,18 @@
 > Load when: editing the `workflow.Flow` carrier, state/merge semantics, control signals, or the Mermaid renderer.
 > Coupled with: root `CLAUDE.md` — the engine dispatch side implements much of what these describe.
 
+### Graph traversal indexes
+
+`Graph.Validate` builds an outgoing-edge index local to the call and shares it between reachability and
+`validateLineage`. Each source's edges retain definition order. Fan-out classification uses the same private
+predicate as `IsFanOutSource`, applied to each adjacency list rather than the whole graph. The index is never
+stored on the graph: validation stays pure, and a later call sees any author edits.
+
+Edge discovery and classification cost O(V+E). Lineage stacks still cost time to copy and compare in proportion
+to their depth; do not describe the entire validator as unconditionally O(V+E). The corresponding engine-side
+traversal in `internal/faninmap` follows the same rules. `BenchmarkGraphTraversal` in that package measures both
+traversals on chains, wide fan-outs, and nested cohorts, excluding graph construction.
+
 ### Task self-identity on the carrier
 
 `Flow.FlowKey()` and `Flow.StepKey()` return the task's own flow/step keys (`{shard}-{hour}-{flowID}-{token}` and

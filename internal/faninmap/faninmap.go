@@ -43,7 +43,19 @@ type Map struct {
 // keeps only the resulting map.
 func New(g *workflow.Graph) *Map {
 	fanOutToFanIn := make(map[string]string)
-	transitions := g.Transitions()
+	outgoing := make(map[string][]workflow.Transition)
+	normalCount := make(map[string]int)
+	fanOut := make(map[string]bool)
+	for _, tr := range g.Transitions() {
+		outgoing[tr.From] = append(outgoing[tr.From], tr)
+		// Match Graph.IsFanOutSource: only ordinary edges open cohorts; conditions do not make them exclusive.
+		if tr.Kind == "" {
+			normalCount[tr.From]++
+			if tr.ForEach != "" || normalCount[tr.From] >= 2 {
+				fanOut[tr.From] = true
+			}
+		}
+	}
 	entry := g.EntryPoint()
 
 	// stacks records, per reached task, the fan-out frames still open on the path to it.
@@ -62,12 +74,9 @@ func New(g *workflow.Graph) *Map {
 		from := queue[0]
 		queue = queue[1:]
 		fromStack := stacks[from]
-		fromIsFanOut := g.IsFanOutSource(from)
+		fromIsFanOut := fanOut[from]
 
-		for _, tr := range transitions {
-			if tr.From != from {
-				continue
-			}
+		for _, tr := range outgoing[from] {
 			var nextStack []string
 			switch {
 			// The fan-in arm precedes the override arm, as in Validate: an edge of any kind into a fan-in is a

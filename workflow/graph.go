@@ -390,8 +390,13 @@ func (g *Graph) IsFanIn(name string) bool {
 // transitions, or any forEach outgoing transition. Switch transitions are exclusive
 // (only one branch ever fires) and therefore do not count toward fan-out.
 func (g *Graph) IsFanOutSource(name string) bool {
+	return isFanOutSource(name, g.transitions)
+}
+
+// isFanOutSource accepts either the whole edge list or a source's outgoing edges.
+func isFanOutSource(name string, transitions []Transition) bool {
 	var normalCount int
-	for _, tr := range g.transitions {
+	for _, tr := range transitions {
 		if tr.From != name || tr.Kind != "" {
 			continue
 		}
@@ -526,8 +531,10 @@ func (g *Graph) Validate() error {
 		}
 	}
 
+	outgoing := make(map[string][]Transition, len(g.tasks))
 	hasSwitchFrom := make(map[string]bool, len(g.tasks))
 	for _, tr := range g.transitions {
+		outgoing[tr.From] = append(outgoing[tr.From], tr)
 		if tr.Kind == TransitionSwitch {
 			hasSwitchFrom[tr.From] = true
 		}
@@ -545,8 +552,8 @@ func (g *Graph) Validate() error {
 	for len(queue) > 0 {
 		current := queue[0]
 		queue = queue[1:]
-		for _, tr := range g.transitions {
-			if tr.From == current && tr.To != End && !reachable[tr.To] {
+		for _, tr := range outgoing[current] {
+			if tr.To != End && !reachable[tr.To] {
 				reachable[tr.To] = true
 				queue = append(queue, tr.To)
 			}
@@ -569,27 +576,25 @@ func (g *Graph) Validate() error {
 		return errors.New("graph '%s' has no transition to END", g.name)
 	}
 
-	return g.validateLineage()
+	return g.validateLineage(outgoing)
 }
 
 // validateLineage checks fan-out/fan-in convergence: every fan-out's branches must converge on the same
 // fan-in, every branch must pop its frame before END, and no task may be reached with two different lineage
 // stacks. It builds a local fan-out->fan-in map to run these checks and stores nothing on the graph; the
 // engine derives the same map at dispatch (internal/faninmap) for routing.
-func (g *Graph) validateLineage() error {
+func (g *Graph) validateLineage(outgoing map[string][]Transition) error {
 	fanOutToFanIn := make(map[string]string)
 
-	// Memoized IsFanOutSource, not a second copy of it: the BFS below revisits a task once per incoming
-	// edge, and this predicate must stay in lockstep with the engine's routing (internal/faninmap and
-	// processStep both branch on IsFanOutSource) - a validator that disagreed with the router about what
-	// fans out would bless a graph the engine then mis-executes.
+	// Use IsFanOutSource's predicate on each adjacency list so classification visits each edge once.
+	// Validation and execution must agree about which sources open cohorts.
 	//
 	// It is a SET, not a task->bool table: the "every fan-out source needs a fan-in" check below iterates
 	// its KEYS, so storing an explicit false would enrol every task in the graph as a fan-out source.
-	isFanOutSource := make(map[string]bool, len(g.tasks))
+	fanOutSources := make(map[string]bool, len(g.tasks))
 	for _, t := range g.tasks {
-		if g.IsFanOutSource(t.Name) {
-			isFanOutSource[t.Name] = true
+		if isFanOutSource(t.Name, outgoing[t.Name]) {
+			fanOutSources[t.Name] = true
 		}
 	}
 
@@ -621,12 +626,9 @@ func (g *Graph) validateLineage() error {
 		from := queue[0]
 		queue = queue[1:]
 		fromStack := stacks[from]
-		fromIsFanOut := isFanOutSource[from]
+		fromIsFanOut := fanOutSources[from]
 
-		for _, tr := range g.transitions {
-			if tr.From != from {
-				continue
-			}
+		for _, tr := range outgoing[from] {
 			var nextStack []string
 			switch {
 			// The fan-in arm MUST precede the goto/error/switch arm. The engine treats any transition
@@ -700,7 +702,7 @@ func (g *Graph) validateLineage() error {
 		}
 	}
 
-	for source := range isFanOutSource {
+	for source := range fanOutSources {
 		if _, ok := fanOutToFanIn[source]; !ok {
 			return errors.New(
 				"fan-out source '%s' in graph '%s' has no fan-in task downstream; mark the convergence task with SetFanIn",
