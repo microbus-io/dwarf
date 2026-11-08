@@ -60,9 +60,10 @@ func NewSet() *Set {
 	return &Set{ts: map[int]*Turnstile{}}
 }
 
-// Resize sets a shard's ceiling, creating its turnstile on first use. Size it against the resource being
-// ordered - AT MOST as many passes as there are units of it, or the surplus callers simply queue inside
-// the resource again, where there is no ordering, while this reports itself healthy.
+// Resize sets a shard's ceiling, creating its turnstile on first use. Size it as a small multiple of the
+// resource being ordered, never equal to it: with one pass per unit the resource idles in every gap between
+// a holder releasing it and the next one asking, while unbounded the surplus queues inside the resource
+// again, where there is no ordering.
 //
 // Every path that changes that resource's size must call this, for the same reason the ceiling exists.
 func (s *Set) Resize(shard int, concurrency int) {

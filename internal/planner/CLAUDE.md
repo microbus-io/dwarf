@@ -142,15 +142,19 @@ the best information anyone has. Detection is also immediate on the failing cycl
 later, and recovery costs exactly one cycle with no cooldown.
 
 **Do not add a timeout back as a "backstop."** The residual case it would target — a worker alive but
-wedged forever, so it neither tallies nor clears — belongs upstream: put a deadline on the scan and it
-cannot hang, so it returns rows or an error and both are signals. A planner-side timer would instead hide
-a liveness bug behind a plausible-looking recovery, while reintroducing the slow-versus-dead question in
-full. Note too that a wedged shard is not dispatching either, so the fleet is already degraded; papering
-over the symptom costs the diagnosis.
+wedged forever, so it neither tallies nor clears — is not the planner's to detect, and it cannot be
+removed upstream either: the scan deliberately carries no deadline (`engine/CLAUDE.md`, "Why no deadline
+on background reads"), since any bound is a guess at backlog depth and a scan that can never finish inside
+it clears its shard every cycle. A hung scan therefore shows as a rotting tally, and
+`dwarf_refill_tally_age_seconds` (`TallyAge`) is the signal that names it. A planner-side timer would
+instead hide a liveness bug behind a plausible-looking recovery, while reintroducing the slow-versus-dead
+question in full. Note too that a wedged shard is not dispatching either, so the fleet is already
+degraded; papering over the symptom costs the diagnosis.
 
-**Weight normalization lives in `Tally`.** A non-positive weight makes the lottery's `1/weight` exponent
-infinite and the key **permanently unpickable** — silent starvation, no error anywhere. Normalizing at the
-boundary means no producer can reintroduce it.
+**Weight normalization lives in `Tally`.** The lottery draws in proportion to weight, so a zero or negative
+weight leaves its key **permanently unpickable** — silent starvation, no error anywhere — and NaN or an
+infinity poisons the draw for every key at the band. Normalizing at the boundary means no producer can
+reintroduce it.
 
 **`LastBand` reports the last plan's best band, and a negative one for "nothing to report."** An idle fleet's real value is
 `math.MaxInt`, which reads as a genuine band — wrong in the direction of looking valid — so it is reported

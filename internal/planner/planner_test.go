@@ -268,8 +268,8 @@ func TestPlanner_PickNeverExceedsCount(t *testing.T) {
 	assert.Equal(1, counts["b"])
 }
 
-// TestPlanner_TallyNormalizesWeight pins the guard on a non-positive weight, which would make the
-// lottery's 1/weight exponent infinite and the key unpickable forever - silent starvation.
+// TestPlanner_TallyNormalizesWeight pins the guard on a non-positive weight, which would leave its key
+// unpickable by the weighted draw forever - silent starvation.
 func TestPlanner_TallyNormalizesWeight(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)

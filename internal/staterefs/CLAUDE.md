@@ -76,12 +76,11 @@ input for large elements, `D/(1+D)` for mid-size ones. Task outputs (`changes`) 
   `pick` walks the path level by level, keeping each level's split in the array's cache entry under the
   path to it (`data`, then `data[3]`), so each inner array is split once per cohort. Why the split lives
   in the entry is in "The resolve cache is sized in bytes" below.
-- **Fidelity depends on how the element was stored.** Resolving from the array's stored bytes returns an integer
-  beyond 2^53 exactly; an element stored INLINE (below `minItem`, or from an inline array) was decoded to `any`
-  in transition evaluation and re-encoded by `Set`, so it still rounds. Nothing byte-compares elements, so the
-  difference is only visible to an untyped reader. **Do not make the inline path byte-identical by splitting the
-  array at the spawn:** that is one array scan per branch, O(N²) per cohort - the cost the split cache exists to
-  avoid. `TestLinker_ResolveItemIsExact` pins the exact case.
+- **An element keeps its bytes however it is stored.** Resolving an item ref returns the element's bytes from
+  the array's stored bytes; an element stored INLINE (below `minItem`, or from an inline array) carries the bytes
+  transition evaluation split out of the array, once per cohort, into `json.RawMessage` elements. Neither path
+  decodes an element to a Go value, which would round an integer beyond 2^53 through float64. Pinned by
+  `TestLinker_ResolveItemIsExact` (ref) and `fixtures/foreachexactflow_test.go` (inline).
 - **Pinned by** `TestRef_WireFormat`, `TestLinker_MintItem`, `TestLinker_ResolveItem`,
   `TestLinker_ResolveNestedItem`, `TestSplitArray`, and against a real database `engine/itemref_test.go`
   (storage shape at every branch step, nested and 2D fan-outs, a failed fan-out, `Fork`, the shared-`as` strip).

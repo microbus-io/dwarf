@@ -551,8 +551,7 @@ compared with one, it is converted through the SESSION's `TimeZone`:
 - On a UTC session nothing shows.
 - On any other session every stored instant is off by the zone's offset. Comparisons inside SQL stay
   self-consistent; values read into Go do not.
-- Measured on a server in `America/Los_Angeles`: `CreatedAt` read 7 h in the future, and `flow.Retry`'s give-up
-  horizon, anchored at creation, never expired (`TestRetryHorizonflow` hung).
+- Measured on a server in `America/Los_Angeles`: `CreatedAt` read 7 h in the future.
 
 Pinned by `TestTimestamps_SurviveANonUTCSession`, which fails on a `TIMESTAMPTZ` column. The Docker images run UTC
 and hide it, so a native or managed server in another zone is where it shows.

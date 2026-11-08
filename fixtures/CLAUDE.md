@@ -160,7 +160,7 @@ period is what `crossshardpriorityflow`'s reaction margin, the steal grace and `
 under the parallel suite, every latency a test would bound - create, queue, claim, dispatch, an interrupt write
 that deadlocks and is retried - is unbounded, so a bound short enough to be the thing a test *relies on*
 eventually loses. It fails as a wrong-phase or wrong-count assertion, never as an honest timeout, which is what
-makes it expensive to diagnose. Three shapes, each measured failing against SQL Server:
+makes it expensive to diagnose. Two shapes, each measured failing against SQL Server:
 
 - **A short ctx handed to `Run` bounds create AND await.** A deadline chosen to expire the *await* expires the
   *create* first on a slow server, and the test then measures a create failure - empty flowKey, no flow, every
@@ -172,10 +172,10 @@ makes it expensive to diagnose. Three shapes, each measured failing against SQL 
   step for every flow in the surgraph chain - so counting its `Visits` on the ROOT key counts propagations
   durably (`interruptselectionflow`'s `awaitPropagatedInterrupts`; a 5s poll saw ZERO of two on a run whose
   every other assertion passed).
-- **A wall-clock FEATURE under test competes with dispatch latency for the same budget.** `flow.Retry`'s
-  `giveUpAfter` is anchored at the step's CREATION, so a 250ms horizon with a 20ms initial delay left 230ms of
-  headroom and gave up at attempt 0 - failing "the horizon is not first-try". Size such a horizon to dominate
-  dispatch latency, not to make the test fast (`retryhorizonflow`: 2s, ~6 attempts unloaded).
+
+`flow.Retry`'s `giveUpAfter` is not one of these: it bounds the summed backoff `Retry` asks for, computed from
+the call's own arguments, never the clock, so dispatch latency cannot move the give-up. Assert the exact give-up
+attempt (`retryhorizonflow` gives up at attempt 6).
 
 **A test that FORGES a shape a background sweep also detects must first wait for that sweep.** `recoveryLoop`
 sweeps ON ENTRY (Startup), concurrently with the test body, and it is four scans on one goroutine sharing the

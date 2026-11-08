@@ -12,7 +12,7 @@
 an engine-side lookup computed from that definition, and keeping it out of the graph is what stops it
 from leaking into the public API and into every flow's frozen graph JSON.
 
-**It is never persisted.** The map is a pure, deterministic `O(V+E)` function of the graph structure, so
+**It is never persisted.** The map is a pure, deterministic function of the graph structure, so
 freezing it onto the flow row would store something rederivable, and — worse — would pin a stale copy for
 the life of every flow already running when the traversal changes. The engine computes it once per parsed
 graph per replica (`faninmap.New` beside the parse, in the graph cache's shared layer), so it has the same

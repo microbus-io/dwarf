@@ -94,7 +94,7 @@ parse. `Intern` takes the stored JSON, never a caller's live `*workflow.Graph`, 
 dispatches that share the entry; `Create`'s seed therefore interns the bytes it just wrote.
 
 The fan-in map is a pure function of the graph and is not persisted, so it is computed once per parse and kept
-in the entry, amortizing its O(V+E) analysis across every step.
+in the entry, amortizing its graph walk across every step.
 
 ### A parse failure is a plain error here, a permanent one in the engine
 
