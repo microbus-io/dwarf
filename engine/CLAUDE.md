@@ -468,8 +468,10 @@ surgraph chain is **re-parked** (`running`/`parkedSubgraph`, `subgraph_done=0`, 
 child re-completes, `completeSurgraphFlow` revives the caller and execution bubbles back to the root. **Clear the
 caller's `changes`**: the revived run re-executes the task from the top with `changes` as its prior changes, so
 keeping the origin's would fold every post-`Subgraph` contribution twice. The fork's caller is therefore one run,
-not the origin's runs plus one (pinned by `TestForkflow_InsideSubgraphCallerFoldsOnce`). Chain flows are set `running`;
-off-path prefix subgraphs keep their `completed` status.
+not the origin's runs plus one (pinned by `TestForkflow_InsideSubgraphCallerFoldsOnce`). Chain flows are set `running`
+and start with an empty outcome; off-path prefix subgraphs keep their closed status **and the outcome frozen with
+it** (`final_state`, `error`), since nothing recomputes a closed flow's outcome and `Snapshot` of the cloned child's
+key would otherwise report the defaults (pinned by `TestFork_KeptChildKeepsItsOutcome`).
 
 *Scheduling and identity.* Scheduling (priority/fairness/time-budget) is inherited from the **root's
 frozen values**, resolved once and applied **uniformly to every cloned flow and step**, because the original
@@ -1597,7 +1599,9 @@ format" is decided once, at the claim, and holds for everything the dispatch rea
   bail must commit.
 - **Separate flows are separate formats.** A subgraph child, a `Continue` turn and a Fork clone of a subgraph
   each carry their own. What crosses between flows - `in`, `final_state`, `subgraph_result`, `Continue`'s
-  initial state - is plain JSON, readable in any format, so a v1 parent may run a v2 child.
+  initial state - is plain JSON, readable in any format, so a v1 parent may run a v2 child. **So `Continue` does
+  not check its source's version**: it reads only that `final_state` and the graph, and a check would make an older
+  replica refuse a Continue it can serve (pinned by `TestPayloadVer_ContinueReadsANewerSource`).
 - **Dispatch defers; the other readers refuse.** The claim reads the flow's `payload_ver` (the joined flow row
   on Postgres, the flow read on the other dialects - free on both), and a newer flow sends the step to
   `deferNewerPayload`: back to `pending` with a doubling backoff (1s to 1min), fenced on `lease_seq` and guarded

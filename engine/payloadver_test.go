@@ -219,6 +219,47 @@ func TestPayloadVer_ReadersRefuseNewerFlows(t *testing.T) {
 	}
 }
 
+// TestPayloadVer_ContinueReadsANewerSource pins that Continue does NOT refuse a source in a newer format. It reads
+// only the source's final_state, which crosses flows as plain JSON readable in any format, and its graph, which the
+// version does not cover; refusing would only make an older replica in a rolling upgrade turn away a Continue it
+// can serve. The new flow is created in this build's format, as every new flow is.
+func TestPayloadVer_ContinueReadsANewerSource(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("ContinueNewer")
+	g.SetURL("Only", "continuenewer/only")
+	g.AddTransition("Only", workflow.End)
+	mux.HandleGraph("continuenewer/g", g)
+	mux.HandleTask("continuenewer/only", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.Must(assert.NoError(e.Startup(t.Context())))
+
+	fk, out, err := e.Run(ctx, "continuenewer/g", map[string]any{"kept": 1}, nil)
+	assert.Must(assert.NoError(err))
+	assert.Equal(workflow.StatusCompleted, out.Status)
+	db, flowID, _ := flowRows(t, e, fk)
+	setFlowPayloadVer(t, db, flowID, payloadVer+1)
+
+	next, err := e.Continue(ctx, fk, map[string]any{"added": 2})
+	assert.Must(assert.NoError(err))
+	out, err = e.Await(ctx, next)
+	assert.NoError(err)
+	if assert.NotNil(out) {
+		assert.Equal(workflow.StatusCompleted, out.Status)
+		assert.Equal(1, out.State.GetInt("kept"))
+		assert.Equal(2, out.State.GetInt("added"))
+	}
+	_, nextID, _ := flowRows(t, e, next)
+	var ver int
+	assert.NoError(db.QueryRowContext(ctx, "SELECT payload_ver FROM dwarf_flows WHERE flow_id=?", nextID).Scan(&ver))
+	assert.Equal(payloadVer, ver)
+}
+
 // TestPayloadVer_ForkRefusesANewerFlow pins that Fork refuses a flow it cannot read before it decodes any of it.
 func TestPayloadVer_ForkRefusesANewerFlow(t *testing.T) {
 	t.Parallel()

@@ -1348,7 +1348,9 @@ func (e *Engine) continueFlow(ctx context.Context, flowKey string, additionalSta
 
 	// The source is read with no lock and outside the insert's transaction, from the live tables or the archive: a
 	// completed flow is immutable, and the new flow copies its state, graph and policy rather than referencing it, so
-	// a deletion or a move racing this read leaves the copy valid.
+	// a deletion or a move racing this read leaves the copy valid. Its payload_ver is not checked: it reads no step
+	// payload column, only the final_state that crosses flows as plain JSON, and the graph, which the version does not
+	// cover. A check would make an older replica in a rolling upgrade refuse a Continue it can serve.
 	var flowStatus, workflowURL, fairnessKey, graphHash string
 	var finalStateJSON, graphJSON, baggageJSON []byte
 	var surgraphFlowID, deleteAfterMs, priority, timeBudgetMs int

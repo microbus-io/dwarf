@@ -360,13 +360,13 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		}
 	}
 
-	var status, workflowURL, workflowName, traceParent, cancelReason, graphHash string
-	var graphJSON, baggageJSON []byte
+	var status, workflowURL, workflowName, traceParent, cancelReason, graphHash, flowError string
+	var graphJSON, baggageJSON, finalStateJSON []byte
 	var deleteOnCompletion, originStoppedStepID, originPayloadVer int
 	err := tx.QueryRowContext(ctx,
-		"SELECT status, workflow_url, workflow_name, graph, graph_hash, baggage, trace_parent, delete_on_completion, stopped_step_id, cancel_reason, payload_ver FROM "+cc.src.flows+" WHERE flow_id=?",
+		"SELECT status, workflow_url, workflow_name, graph, graph_hash, baggage, trace_parent, delete_on_completion, stopped_step_id, cancel_reason, payload_ver, final_state, error FROM "+cc.src.flows+" WHERE flow_id=?",
 		originFlowID,
-	).Scan(&status, &workflowURL, &workflowName, &graphJSON, &graphHash, &baggageJSON, &traceParent, &deleteOnCompletion, &originStoppedStepID, &cancelReason, &originPayloadVer)
+	).Scan(&status, &workflowURL, &workflowName, &graphJSON, &graphHash, &baggageJSON, &traceParent, &deleteOnCompletion, &originStoppedStepID, &cancelReason, &originPayloadVer, &finalStateJSON, &flowError)
 	if err == nil {
 		// Each flow of the tree has its own format (a subgraph child is created in its creator's), and the clone
 		// copies its rows, so it keeps the origin's.
@@ -380,7 +380,11 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	if isRoot || rewind != 0 { // on the rewind chain
 		newStatus = workflow.StatusRunning
 		cc.startedURLs = append(cc.startedURLs, workflowURL)
+		// It runs again and writes its own outcome; it is closed in no form yet.
+		finalStateJSON, flowError = emptyJSON, ""
 	}
+	// A flow off the chain keeps its status, so it keeps the outcome frozen with it: nothing recomputes the outcome
+	// of a closed flow, and Snapshot of the clone's child key would report the defaults.
 	// Scheduling (cc.*) is resolved once and applied uniformly to every cloned flow and step - the tree is
 	// uniform and a deep-subgraph fork's re-running leaf must carry the same overridden values.
 	forkedFromStep, newTrace := 0, traceParent
@@ -397,13 +401,13 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	// the clone inherits, and a fork whose only losses are such branches resolves cancelled - so it reports the
 	// reason that explains it, rather than a cancellation nobody gave a reason for. cancel_watermark is
 	// deliberately NOT copied: the fork is not under cancellation, so none of its steps may pass one on.
-	columns := "flow_token, workflow_url, workflow_name, graph, graph_hash, baggage, status, surgraph_flow_id, surgraph_step_id, forked_from_step, trace_parent, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, cancel_reason, payload_ver"
-	values := "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
+	columns := "flow_token, workflow_url, workflow_name, graph, graph_hash, baggage, status, surgraph_flow_id, surgraph_step_id, forked_from_step, trace_parent, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, cancel_reason, payload_ver, final_state, error"
+	values := "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
 	flowToken := cc.rootFlowToken
 	if !isRoot {
 		flowToken = keys.RandomIdentifier(16)
 	}
-	args := []any{flowToken, workflowURL, workflowName, graphJSON, graphHash, baggageJSON, newStatus, newSurgFlowID, newSurgStepID, forkedFromStep, newTrace, deleteOnCompletion, flowPriority, flowFairnessKey, flowFairnessWeight, flowBudget, e.engineID, cancelReason, originPayloadVer}
+	args := []any{flowToken, workflowURL, workflowName, graphJSON, graphHash, baggageJSON, newStatus, newSurgFlowID, newSurgStepID, forkedFromStep, newTrace, deleteOnCompletion, flowPriority, flowFairnessKey, flowFairnessWeight, flowBudget, e.engineID, cancelReason, originPayloadVer, finalStateJSON, flowError}
 	var self []string
 	if isRoot {
 		self = append(self, "root_flow_id")
