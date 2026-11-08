@@ -324,19 +324,14 @@ func (e *Engine) claim(ctx context.Context, d *dispatch) (done bool, err error) 
 		} else if err == nil {
 			n, flowRead = 1, false
 		}
-	case "sqlite":
-		err = db.QueryRowContext(ctx,
-			claimSQLSQLite,
-			workflow.StatusRunning, leaseMarginMs, e.engineID, d.stepID, parkedNone,
-		).Scan(stepDest...)
-		if err == sql.ErrNoRows {
-			n, err = 0, nil
-		} else if err == nil {
-			n = 1
+	case "sqlite", "mssql":
+		// One statement that reads the claimed step back: RETURNING on SQLite, OUTPUT on SQL Server.
+		claimSQL := claimSQLSQLite
+		if db.DriverName() == "mssql" {
+			claimSQL = claimSQLMSSQL
 		}
-	case "mssql":
 		err = db.QueryRowContext(ctx,
-			claimSQLMSSQL,
+			claimSQL,
 			workflow.StatusRunning, leaseMarginMs, e.engineID, d.stepID, parkedNone,
 		).Scan(stepDest...)
 		if err == sql.ErrNoRows {
@@ -1116,22 +1111,16 @@ func (e *Engine) complete(ctx context.Context, d *dispatch) (done bool, err erro
 				return errors.Join(errors.New("injected fault: "+engineseams.FaultPersistConnErr+" "+taskName), driver.ErrBadConn)
 			}
 			const where = " WHERE step_id=? AND status NOT IN ('" + workflow.StatusTerminated + "', '" + workflow.StatusCancelled + "') AND lease_seq=?"
+			const update = "UPDATE dwarf_steps SET status=?, changes=?, " + advanceSet + ", updated_at=NOW_UTC()"
 			switch db.DriverName() {
-			case "pgx", "sqlite":
-				werr := db.QueryRowContext(ctx,
-					"UPDATE dwarf_steps SET status=?, changes=?, "+advanceSet+", updated_at=NOW_UTC()"+where+" RETURNING cancelling",
-					workflow.StatusCompleted, d.changesJSON, advanceGoto, advanceSleepMs, advanceOnError, d.stepID, writeSeq,
-				).Scan(&d.completedCancelling)
-				if werr == sql.ErrNoRows {
-					return nil
+			case "pgx", "sqlite", "mssql":
+				// The mark comes back from the write itself: RETURNING after the WHERE, OUTPUT before it.
+				completeSQL := update + where + " RETURNING cancelling"
+				if db.DriverName() == "mssql" {
+					completeSQL = update + " OUTPUT INSERTED.cancelling" + where
 				}
-				if werr != nil {
-					return errors.Trace(werr)
-				}
-				stepRowsAffected = 1
-			case "mssql":
 				werr := db.QueryRowContext(ctx,
-					"UPDATE dwarf_steps SET status=?, changes=?, "+advanceSet+", updated_at=NOW_UTC() OUTPUT INSERTED.cancelling"+where,
+					completeSQL,
 					workflow.StatusCompleted, d.changesJSON, advanceGoto, advanceSleepMs, advanceOnError, d.stepID, writeSeq,
 				).Scan(&d.completedCancelling)
 				if werr == sql.ErrNoRows {
@@ -1143,7 +1132,7 @@ func (e *Engine) complete(ctx context.Context, d *dispatch) (done bool, err erro
 				stepRowsAffected = 1
 			default:
 				res, werr := db.ExecContext(ctx,
-					"UPDATE dwarf_steps SET status=?, changes=?, "+advanceSet+", updated_at=NOW_UTC()"+where,
+					update+where,
 					workflow.StatusCompleted, d.changesJSON, advanceGoto, advanceSleepMs, advanceOnError, d.stepID, writeSeq,
 				)
 				if werr != nil {
