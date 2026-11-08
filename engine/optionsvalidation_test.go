@@ -152,3 +152,42 @@ func TestCreate_RejectsAnEmptyTaskName(t *testing.T) {
 	assert.False(ran)
 	assert.Zero(enginetest.CountRows(t, e, 1, "SELECT COUNT(*) FROM dwarf_flows"))
 }
+
+// TestSubgraph_EmptyURLFailsTheStep pins the end-to-end shape of an empty Subgraph URL: a task following the
+// documented `if yield || err != nil { return err }` pattern fails its step with the 400, and nothing after it
+// runs. Accepted, Subgraph returned yield=true for a request the engine could not see, so the step completed
+// with no child and the flow ran on to its next task.
+func TestSubgraph_EmptyURLFailsTheStep(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("EmptySubgraph")
+	g.SetURL("Call", "emptysub/call")
+	g.SetURL("After", "emptysub/after")
+	g.AddTransition("Call", "After")
+	g.AddTransition("After", workflow.End)
+	mux.HandleGraph("emptysub/g", g)
+	afterRan := false
+	mux.HandleTask("emptysub/call", func(ctx context.Context, f *workflow.Flow) error {
+		yield, err := f.Subgraph("", nil, nil)
+		if yield || err != nil {
+			return err
+		}
+		f.SetBool("childReturned", true)
+		return nil
+	})
+	mux.HandleTask("emptysub/after", func(ctx context.Context, f *workflow.Flow) error { afterRan = true; return nil })
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.Must(assert.NoError(e.Startup(t.Context())))
+
+	_, out, err := e.Run(ctx, "emptysub/g", nil, nil)
+	if assert.NoError(err) {
+		assert.Equal(workflow.StatusFailed, out.Status)
+		assert.Contains(out.Error, "workflow URL")
+	}
+	assert.False(afterRan, "the task after the Subgraph call ran")
+}

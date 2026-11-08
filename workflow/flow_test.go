@@ -19,10 +19,12 @@ package workflow
 import (
 	"encoding/json"
 	"math"
+	"net/http"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -259,6 +261,25 @@ func TestFlow_SingleParkGuard(t *testing.T) {
 	assert.False(yield)
 	assert.Error(err)
 	assert.Equal("https://x/first", f.subgraphURL)
+}
+
+// TestFlow_SubgraphRejectsAnEmptyURL pins that Subgraph refuses an empty workflow URL without arming anything.
+// The empty URL is also what "no subgraph requested" reads as, so arming one returned yield=true for a request
+// the engine never saw: the task returned, and the engine completed the step and moved on with no child.
+func TestFlow_SubgraphRejectsAnEmptyURL(t *testing.T) {
+	assert := testarossa.For(t)
+	rf := NewRawFlow()
+	f := &rf.Flow
+	yield, err := f.Subgraph("", map[string]any{"x": 1}, nil)
+	assert.False(yield)
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
+	_, _, requested := rf.SubgraphRequested()
+	assert.False(requested)
+
+	// Nothing was armed, so a valid call still can be.
+	yield, err = f.Subgraph("https://x/wf", nil, nil)
+	assert.True(yield)
+	assert.NoError(err)
 }
 
 func TestFlow_Retry(t *testing.T) {

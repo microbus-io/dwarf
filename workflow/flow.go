@@ -19,6 +19,7 @@ package workflow
 import (
 	"encoding/json"
 	"math"
+	"net/http"
 	"slices"
 	"time"
 
@@ -471,7 +472,7 @@ yield=true; the task must return immediately.
 
 On re-entry after the child terminates it unmarshals the child's final state into out, returns yield=false, and sets
 err if the child failed. Does not re-arm on re-entry. Like Interrupt, it returns an error without arming if in cannot
-be marshalled or this step already parked.
+be marshalled or this step already parked, and a 400 if workflowURL is empty.
 
 A child that could not be started comes back the same way, with no child flow created and nothing in out: err
 carries the host's error when the child's graph could not be loaded (a 503 when its source is unreachable), a 404
@@ -504,6 +505,11 @@ func (f *Flow) Subgraph(workflowURL string, in any, out any) (yield bool, err er
 			return false, decodeSubgraphError(f.subgraphError)
 		}
 		return false, nil
+	}
+	// An empty URL is also how "no subgraph requested" reads (SubgraphRequested), so arming one would answer
+	// yield=true for a request the engine never sees: the step would complete with no child.
+	if workflowURL == "" {
+		return false, errors.New("cannot start subgraph: workflow URL is required", http.StatusBadRequest)
 	}
 	// Single-park guard: a step parks at most once - interrupt XOR subgraph, and at most once per kind.
 	// Reject arming a subgraph when this step already parked for an interrupt (resolved interruptDone, or
