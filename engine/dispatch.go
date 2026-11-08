@@ -19,6 +19,7 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -1110,6 +1111,9 @@ func (e *Engine) complete(ctx context.Context, d *dispatch) (done bool, err erro
 			// permanent failure the classifier must terminalize rather than loop on.
 			if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultPersistErr, taskName)) {
 				return errors.New("injected fault: " + engineseams.FaultPersistErr + " " + taskName)
+			}
+			if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultPersistConnErr, taskName)) {
+				return errors.Join(errors.New("injected fault: "+engineseams.FaultPersistConnErr+" "+taskName), driver.ErrBadConn)
 			}
 			const where = " WHERE step_id=? AND status NOT IN ('" + workflow.StatusTerminated + "', '" + workflow.StatusCancelled + "') AND lease_seq=?"
 			switch db.DriverName() {

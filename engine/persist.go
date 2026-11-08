@@ -53,6 +53,9 @@ const (
 	// contentionMaxAttempts matches Transact's retry depth, so a statement run on its own survives the same
 	// contention a transaction does.
 	contentionMaxAttempts = 8
+	// persistConfirmAttempts bounds how many times persist re-runs its bracket (a payload-free renewal, then the
+	// write) for a write that keeps failing on a lost connection while the database answers the renewal.
+	persistConfirmAttempts = 3
 )
 
 var (
@@ -194,23 +197,32 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 	// write here instead of failing a healthy step. Only a write that fails between two writes the database accepted
 	// - this renewal and failOnPersistError's failStep - is taken as the payload's fault. A renewal that errors means
 	// the database is still away, and nothing is classified; the step stays for lease recovery.
-	held, xerr := e.extendLease(ctx, db, stepID, leaseSeq, e.persistLeaseExtension)
-	if xerr != nil {
-		return &persistUnreachableError{writeErr: err, probeErr: xerr}
+	//
+	// A write that fails on a lost connection between two accepted writes met a connection the failover severed,
+	// not a bad payload, so the bracket runs again on the fresh connection the pool hands out next. It is bounded
+	// because a payload can end its own connection (MySQL closes it on a packet over max_allowed_packet): one that
+	// loses the connection every time, with the database answering on either side, is the payload's fault.
+	for confirm := 1; ; confirm++ {
+		held, xerr := e.extendLease(ctx, db, stepID, leaseSeq, e.persistLeaseExtension)
+		if xerr != nil {
+			return &persistUnreachableError{writeErr: err, probeErr: xerr}
+		}
+		if !held {
+			e.logLostLease(ctx, stepID, err)
+			return errPersistFenced
+		}
+		e.metricStepWriteRetried(ctx, shardNum)
+		err = write()
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, errLeaseFenced) {
+			return errPersistFenced
+		}
+		if confirm == persistConfirmAttempts || !sequel.IsConnectionError(err) {
+			return errors.Trace(err)
+		}
 	}
-	if !held {
-		e.logLostLease(ctx, stepID, err)
-		return errPersistFenced
-	}
-	e.metricStepWriteRetried(ctx, shardNum)
-	err = write()
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, errLeaseFenced) {
-		return errPersistFenced
-	}
-	return errors.Trace(err)
 }
 
 // persistUnreachableError is a write persist gave up on while the database refused even a payload-free write, so

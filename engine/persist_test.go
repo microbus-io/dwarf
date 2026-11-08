@@ -658,3 +658,64 @@ func TestPersist_UnreachableAfterTheLadderIsNotClassified(t *testing.T) {
 	failed, _ := sumCounter(rm, "dwarf_steps_write_failed", "", "")
 	assert.Zero(failed, "an unreachable database says nothing about the payload")
 }
+
+// TestPersist_LostConnectionInTheBracketRunsItAgain pins that a write failing on a lost connection between two
+// writes the database accepted is not taken for the payload's fault. Every write of the ladder fails, and so does
+// the first bracketed write, on a severed connection (an error sequel.IsConnectionError recognizes), as when a
+// failover kills the connection that write went out on while the renewal took a fresh one. Classified at once,
+// failStep landed and failed a healthy flow; the bracket runs again instead, and the write lands.
+func TestPersist_LostConnectionInTheBracketRunsItAgain(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	var runs atomic.Int32
+	e, reader := countingEngine(t, "p/lostconn", &runs)
+	defer e.Shutdown(ctx)
+	assert.Must(assert.NoError(e.Startup(t.Context())))
+	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistConnErr, "A"), 1+len(shortPersistBackoff)+1)
+
+	_, outcome, err := e.Run(ctx, "p/lostconn/wf", nil, nil)
+	if !assert.NoError(err) || !assert.NotNil(outcome) {
+		return
+	}
+	assert.Equal(workflow.StatusCompleted, outcome.Status, outcome.Error)
+	assert.Equal(int32(1), runs.Load(), "the WRITE is retried, never the task")
+	var rm metricdata.ResourceMetrics
+	assert.NoError(reader.Collect(ctx, &rm))
+	failed, _ := sumCounter(rm, "dwarf_steps_write_failed", "", "")
+	assert.Zero(failed, "a write that landed is no payload fault")
+}
+
+// TestPersist_ConnectionLostEveryTimeIsClassified pins the bracket's bound. A payload can end its own connection
+// (MySQL closes it on a packet over max_allowed_packet), so a write that loses its connection on every attempt
+// while the database answers the renewals must still fail the step, the task run once, rather than loop.
+func TestPersist_ConnectionLostEveryTimeIsClassified(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	var runs atomic.Int32
+	e, reader := countingEngine(t, "p/alwayslost", &runs)
+	defer e.Shutdown(ctx)
+	assert.Must(assert.NoError(e.Startup(t.Context())))
+	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistConnErr, "A"), 1000)
+
+	fk, outcome, err := e.Run(ctx, "p/alwayslost/wf", nil, nil)
+	if !assert.NoError(err) || !assert.NotNil(outcome) {
+		return
+	}
+	assert.Equal(workflow.StatusFailed, outcome.Status)
+	assert.Contains(outcome.Error, engineseams.FaultPersistConnErr)
+	assert.Equal(int32(1), runs.Load())
+	// The classifier counts the failed write after failStep commits, so wait for the dispatch to return.
+	shard, _, _, _, err := keys.ParseFlowKey(fk)
+	assert.NoError(err)
+	_, _, stepID := flowRows(t, e, fk)
+	enginetest.AwaitVisitCount(t, e.seams, 1, 15*time.Second,
+		engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(stepID)))
+	var rm metricdata.ResourceMetrics
+	assert.NoError(reader.Collect(ctx, &rm))
+	failed, _ := sumCounter(rm, "dwarf_steps_write_failed", "", "")
+	assert.Equal(int64(1), failed)
+}

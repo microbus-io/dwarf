@@ -1843,7 +1843,12 @@ real write at once. A renewal that errors means the database is still away, so n
 (`persistUnreachableError`; `settlePersist` leaves the step for lease recovery). **Do not classify straight off the
 ladder:** its last write follows a backoff, so a failover that ends during it leaves `failStep` landing a moment
 later and failing a healthy step - a successful later write proves only that the database is up *now*
-(`TestPersist_RecoveryAfterTheLadderLandsTheWrite`). Only a write that fails between that renewal and the
+(`TestPersist_RecoveryAfterTheLadderLandsTheWrite`). A bracketed write that fails on a lost connection
+(`sequel.IsConnectionError`) went out on a connection the outage severed while the renewal took a fresh one, so the
+bracket runs again, up to `persistConfirmAttempts` (3) times (`TestPersist_LostConnectionInTheBracketRunsItAgain`).
+**Keep that bounded:** a payload can end its own connection - MySQL closes it on a packet over
+`max_allowed_packet` - and an unbounded re-run would spin on it forever, renewing the lease each pass
+(`TestPersist_ConnectionLostEveryTimeIsClassified`). Only a write that fails between that renewal and the
 **clean** terminal write (`failStep` - a status and an error message, none of the payload) is classified, by
 `failOnPersistError`:
 

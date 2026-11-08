@@ -99,6 +99,7 @@ const (
 	FaultContention             = "contention"             // a dispatch transaction returns a lock-contention error
 	FaultLeaseStaleWrite        = "leaseStaleWrite"        // the completion write carries a stale lease_seq (zombie)
 	FaultPersistErr             = "persistErr"             // the step-completion write returns a non-contention database error (consumed per attempt, so InjectN sets how many attempts fail)
+	FaultPersistConnErr         = "persistConnErr"         // the step-completion write fails on a lost connection, an error sequel.IsConnectionError recognizes (consumed per attempt)
 	FaultPersistLandedErr       = "persistLandedErr"       // the step-completion write lands, then returns a non-contention database error, as when a commit's acknowledgement is lost (consumed per attempt)
 	FaultExtendLeaseErr         = "extendLeaseErr"         // persist's lease renewal returns a database error, as during an outage (consumed per attempt)
 	FaultCompletionContention   = "completionContention"   // the step-completion write returns a lock-contention error (consumed per attempt, so InjectN sets how many attempts fail)
