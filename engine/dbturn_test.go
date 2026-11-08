@@ -124,34 +124,3 @@ func TestRecoveryReset_TakesATurn(t *testing.T) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
 }
-
-// TestLatchResolve_SkipsShardsWithNoParkedKey pins that the latch resolver takes no turn on a shard holding none of
-// the parked keys. With shard 2's turnstile closed off entirely, a pass resolving a key on shard 1 must still
-// return at once; a turn taken on every shard first would hold the whole pass - shard 1's releases with it -
-// until the context gave out.
-func TestLatchResolve_SkipsShardsWithNoParkedKey(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	ctx := context.Background()
-
-	e := NewEngineUnderTest(t.Name())
-	defer e.Shutdown(ctx)
-	assert.NoError(e.SetShard(ShardSpec{Index: 1}))
-	assert.NoError(e.SetShard(ShardSpec{Index: 2}))
-	e.SetHost(hosts.NewMux())
-	assert.Must(assert.NoError(e.Startup(t.Context())))
-
-	size := e.turnstiles.Turnstile(2).Size()
-	e.turnstiles.Resize(2, 0)
-	defer e.turnstiles.Resize(2, size)
-
-	key := keys.NewFlowKey(1, 0, 1<<30, "0123456789abcdef")
-	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	start := time.Now()
-	settled, err := e.resolveStoppedFlows(rctx, []string{key})
-	elapsed := time.Since(start)
-	assert.NoError(err)
-	assert.Equal(flowUnresolved, settled[key])
-	assert.True(elapsed < 2*time.Second, "a shard with no parked key must not hold the pass, took %v", elapsed)
-}

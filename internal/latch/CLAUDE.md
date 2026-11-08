@@ -81,8 +81,9 @@ so `Result.Err` routes the failure to the log line where it belongs.
 
 **A partial answer is applied before the error is examined.** A `StatusResolver` that resolved three of
 four keys must not hold the three back over the fourth; the unreported key is simply asked about again
-next pass. This matters for the engine, where `StatusResolver` fans out over shards and one shard can
-fail alone.
+next pass. This matters for the engine, whose `StatusResolver` chunks its lookup and can fail on one
+chunk alone. (The engine keeps one board per shard rather than one resolver fanned out over shards: a
+fan-out is a barrier, and a stalled shard would hold every other shard's releases.)
 
 ## Two small invariants that are load-bearing
 

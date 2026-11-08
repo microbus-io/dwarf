@@ -595,12 +595,17 @@ func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 	if isStoppedStatus(outcome.Status) {
 		return outcome, nil
 	}
+	board := e.latchBoard(flowKey)
+	if board == nil {
+		// The read above found the flow, so its shard is open: only a drain can have taken the boards since.
+		return nil, errors.New("engine is shutting down", http.StatusServiceUnavailable)
+	}
 
 	for {
 		// Park for the WHOLE remaining budget, in one call. Waiting costs no query of its own - the detector
 		// already asks about every parked key on its own cadence - so waking a caller early to re-read a row
 		// the sweep is polling anyway would add a per-caller query rate for nothing.
-		_, waitErr := e.latches.Latch(ctx, flowKey)
+		_, waitErr := board.Latch(ctx, flowKey)
 		switch {
 		case errors.Is(waitErr, latch.ErrClosed):
 			return nil, errors.New("engine is shutting down", http.StatusServiceUnavailable)
@@ -662,10 +667,9 @@ func (e *Engine) signalStop(ctx context.Context, flowKey string, status string) 
 	if !isStoppedStatus(status) {
 		return
 	}
-	if e.latches == nil {
-		return // not started: nobody can be awaiting
+	if board := e.latchBoard(flowKey); board != nil {
+		board.Release(flowKey, status)
 	}
-	e.latches.Release(flowKey, status)
 }
 
 // The work doorbell is PURELY LOCAL - it reaches this replica's candidate cache and nothing else.

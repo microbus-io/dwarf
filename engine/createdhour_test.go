@@ -337,7 +337,7 @@ func TestCreatedHour_WrongHourIsNotFound(t *testing.T) {
 	_, err = e.Await(actx, wrongParked)
 	notFound("Await", err)
 	assert.True(time.Since(t0) < 5*time.Second, "Await settled after %v", time.Since(t0))
-	resolved, err := e.resolveStoppedFlows(ctx, []string{parkedKey, wrongParked, doneKey, wrongDone})
+	resolved, err := resolveOnEachShard(ctx, e, []string{parkedKey, wrongParked, doneKey, wrongDone})
 	if assert.NoError(err) {
 		assert.Equal(workflow.StatusInterrupted, resolved[parkedKey])
 		assert.Equal(workflow.StatusCompleted, resolved[doneKey])

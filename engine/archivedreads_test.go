@@ -305,7 +305,7 @@ func TestArchivedReads_AwaitParkedAcrossTheMoveGetsTheOutcome(t *testing.T) {
 		out, err := e.Await(ctx, fk)
 		awaited <- result{out, err}
 	}()
-	for deadline := time.Now().Add(10 * time.Second); e.latches.Waiting(fk) == 0; {
+	for deadline := time.Now().Add(10 * time.Second); e.latchBoard(fk).Waiting(fk) == 0; {
 		if time.Now().After(deadline) {
 			t.Fatal("Await never parked")
 		}
@@ -326,7 +326,7 @@ func TestArchivedReads_AwaitParkedAcrossTheMoveGetsTheOutcome(t *testing.T) {
 	default:
 	}
 
-	e.latches.Sweep(ctx)
+	e.latchBoard(fk).Sweep(ctx)
 	r := <-awaited
 	if assert.NoError(r.err) {
 		assert.Equal(workflow.StatusCompleted, r.outcome.Status)

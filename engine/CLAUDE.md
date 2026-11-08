@@ -2308,8 +2308,8 @@ correlation-id→key lookup (see "Tracing"); subgraph-child keys are read-only f
 
 `Await` blocks until a flow stops (no longer `created`/`pending`/`running`); it returns on `completed`/`failed`/
 `terminated`/`cancelled`/`interrupted`. Its shape is **read, then park and read until a read sees a stop**:
-snapshot and return if the flow has already stopped; otherwise park on the **latch board** (`internal/latch`,
-held as `e.latches`) until it settles, then snapshot to build the outcome. **The park repeats only when that
+snapshot and return if the flow has already stopped; otherwise park on its shard's **latch board**
+(`internal/latch`, held in `e.latches` and found by `latchBoard`) until it settles, then snapshot to build the outcome. **The park repeats only when that
 read finds the flow running again** - an interrupted flow Resumed between its release and the read - and the
 caller's ctx is still live. Each iteration follows a release, never a timer, so it is not a poll (a sweep that
 read the row before a Resume can release the re-parked caller once more for the same stop - bounded); returning
@@ -2341,8 +2341,9 @@ park is reported by the next sweep. Registration order is a latency question, no
 **Two things can end a park, and they are not interchangeable:**
 
 - **`signalStop` → `Board.Release`** - instant, in-memory, for a stop THIS replica just committed.
-- **The detector** (`latchLoop` → `Board.Sweep` → `resolveStoppedFlows`, `latchSweepInterval` **50ms**) - one
-  indexed `IN` lookup per shard holding a parked key, and *nothing at all* when nobody is awaiting. This is the
+- **The detector** (`latchLoop` → `Board.Sweep` → `resolveStoppedFlows`, `latchSweepInterval` **50ms**, one
+  loop per shard) - one indexed `IN` lookup on a shard holding a parked key, and *nothing at all* when nobody is
+  awaiting there. This is the
   only path that can see a stop made by a **peer**, so it is the primary wake for the cross-replica case, not a
   backstop. Its `IN` lookup scales with concurrent **awaiters**, which is what lets the cadence stay tight
   without watching how fast the engine is running - but the recent-stop pre-scan beside it scales with the
@@ -2373,10 +2374,20 @@ holding a released status keeps it - the closure travels the same one-slot chann
 displace one - so a flow that stopped microseconds before shutdown still returns its outcome. Pinned by
 `fixtures/awaitshutdownflow_test.go`.
 
-**`resolveStoppedFlows` is the board's status resolver, and five of its shapes are load-bearing** (`latch.go`):
+**One board and one detector per shard, never one board swept across the shards.** A cross-shard pass is a
+barrier: it releases nothing until its slowest shard answers, so a shard waiting on a saturated turnstile or a
+stalled connection holds every other shard's awaiters - and every later pass - for as long as it waits, which a
+background read with no deadline makes unbounded. Releasing each shard's keys as it answers inside one pass is
+not enough either: keys parked after that pass still wait for the next one, which the stalled shard holds. Each
+detector takes its own shard's turn, so a stalled shard holds only its own awaiters. Pinned by
+`TestLatch_StalledShardHoldsOnlyItsOwnAwaiters` (shard 2's turnstile closed, shard 1's Await woken only by the
+detector).
 
-- **One query per SHARD, not per key.** Keys carry their shard, so they are grouped and each shard is asked once;
-  a pass costs O(shards), not O(awaiters).
+**`resolveStoppedFlows` is a shard board's status resolver, and five of its shapes are load-bearing** (`latch.go`):
+
+- **One lookup per pass, not per key.** The board holds only its shard's keys, so the shard is asked once
+  (chunked); the queries a pass costs do not grow with the awaiters. A key naming another shard, or none, settles as
+  `flowUnresolved` - `latchBoard` never parks one there.
 - **A recent-stop PRE-SCAN settles keys without naming them, and it is an optimization ONLY.** It reads the
   flows that stopped within **`2 x latchSweepInterval`** (100ms); every key it matches - by token, the same
   rule as the lookup - is settled and DROPPED from the `IN` list. It never resolves a key as absent (a token
@@ -2406,9 +2417,8 @@ displace one - so a flow that stopped microseconds before shutdown still returns
   out its entire budget for an answer that was already decided. Absence may only be inferred from a chunk whose
   query **fully succeeded**: on a failed chunk every row is missing, and calling those keys unresolved would
   404 existing flows on a transient blip.
-- **A shard error is not a failed pass.** Whatever the other shards resolved is returned *alongside* the error
-  (`OnEach` is all-or-nothing, so its callback never propagates one), and the unresolved keys are simply asked
-  about again next tick.
+- **A chunk error is not a failed pass.** Whatever the other chunks and the pre-scan resolved is returned
+  *alongside* the error, and the unresolved keys are simply asked about again next tick.
 
 Two smaller rules at the same site: the `IN` list is **chunked at 512** (SQL Server's 2,100-parameter ceiling is
 the tightest bound) and **padded up to one of ten bucket arities** by repeating an id, because arity is part of
@@ -2418,7 +2428,7 @@ the filtered-index landmine.
 
 **Cross-replica `Await`.** A flow created on one replica but completed on another is found by the
 **detector**, and only by it: the stop is committed in the shared database, nothing is sent, and the sweep is
-what reads it. `signalStop` reaches this replica's own board and stops there. Non-terminal (`running`)
+what reads it. `signalStop` reaches this replica's own board for the flow's shard and stops there. Non-terminal (`running`)
 transitions take the same local-only path.
 
 **Nothing marks a flow as awaited, and nothing may start.** `Await` is a pure reader: it writes no row, sets
@@ -3875,11 +3885,11 @@ cache.Close(); turnstiles.Close()            // BOTH: a worker parks on one or w
 crew.Drain(); withdrawal.Wait()
 recoveryCancel();    recoveryWorker.Wait() // abandons a sweep statement in flight
 reaperCancel();      reaperWorker.Wait()   // ditto, a reap batch
-latchCancel();       latchWorker.Wait()    // the detector stops before the board closes
+latchCancel();       latchWorker.Wait()    // the detectors stop before the boards close
 pistonCancel();      pistonPool.Wait()   // ctx is the pistons' only stop signal
 sonarCancel();       sonarPool.Wait()    // ditto - and they must outlive the pistons
 leaveFleet()                             // only now is the last possible beat behind us
-latches.Close(); lifetimeCancel()
+latches[*].Close(); lifetimeCancel()
 ```
 
 **The Sonars drain LAST, after the pistons, and that ordering is load-bearing.** This replica must stay

@@ -20,11 +20,16 @@ import (
 	"context"
 	"maps"
 	"slices"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -93,7 +98,7 @@ func TestLatchResolve_ReportsStoppedFlowsOnly(t *testing.T) {
 	// one still holding this would never return.
 	defer close(release)
 	assert.NoError(e.SetHost(mux))
-	// Two shards, so the resolver's per-shard grouping is exercised rather than assumed.
+	// Two shards, so a board resolving only its own shard's keys is exercised rather than assumed.
 	assert.NoError(e.SetShard(ShardSpec{Index: 1}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 2}))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
@@ -113,7 +118,7 @@ func TestLatchResolve_ReportsStoppedFlowsOnly(t *testing.T) {
 	}
 	forgedKey := keys.NewFlowKey(shard, hour, flowID, "0123456789abcdef")
 
-	resolved, err := e.resolveStoppedFlows(ctx, []string{stoppedKey, runningKey, forgedKey, "not-a-key"})
+	resolved, err := resolveOnEachShard(ctx, e, []string{stoppedKey, runningKey, forgedKey, "not-a-key"})
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, resolved[stoppedKey])
 	_, running := resolved[runningKey]
@@ -123,6 +128,33 @@ func TestLatchResolve_ReportsStoppedFlowsOnly(t *testing.T) {
 	// the capability, and answering on flow_id alone would hand the outcome to a caller who never held it.
 	assert.Equal(flowUnresolved, resolved[forgedKey], "a wrong token must not resolve to the real status")
 	assert.Equal(flowUnresolved, resolved["not-a-key"], "an unparseable key names no row")
+
+	// A board asks only its own shard, so a key naming another shard names no row there.
+	otherShard := 3 - shard
+	resolved, err = e.resolveStoppedFlows(ctx, otherShard, []string{stoppedKey})
+	assert.NoError(err)
+	assert.Equal(flowUnresolved, resolved[stoppedKey], "a key is resolved only by its own shard's board")
+}
+
+// resolveOnEachShard asks each key's own shard's resolver, as the per-shard detectors do, and merges the
+// answers. A key that does not parse is asked of shard 1, which settles it as naming no row.
+func resolveOnEachShard(ctx context.Context, e *Engine, flowKeys []string) (map[string]string, error) {
+	byShard := map[int][]string{}
+	for _, flowKey := range flowKeys {
+		shard, _, _, _, err := keys.ParseFlowKey(flowKey)
+		if err != nil {
+			shard = 1
+		}
+		byShard[shard] = append(byShard[shard], flowKey)
+	}
+	merged := map[string]string{}
+	var errs []error
+	for shard, shardKeys := range byShard {
+		resolved, err := e.resolveStoppedFlows(ctx, shard, shardKeys)
+		maps.Copy(merged, resolved)
+		errs = append(errs, err)
+	}
+	return merged, errors.Join(errs...)
 }
 
 // TestLatchResolve_ChunksWithoutDroppingKeys pins that a key set well past latchResolveChunk still
@@ -165,7 +197,7 @@ func TestLatchResolve_ChunksWithoutDroppingKeys(t *testing.T) {
 	}
 	askFor = append(askFor, stoppedKey)
 
-	resolved, err := e.resolveStoppedFlows(ctx, askFor)
+	resolved, err := e.resolveStoppedFlows(ctx, shard, askFor)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, resolved[stoppedKey])
 	// Every key is settled - the real one by its status, the synthetic ones as naming no row - and that
@@ -238,10 +270,110 @@ func TestLatchResolve_RecentStopScanIsOnlyAnOptimization(t *testing.T) {
 	}
 
 	// One pass, both paths: the fresh stop is settled by the scan, the stale one only by the lookup.
-	resolved, err := e.resolveStoppedFlows(ctx, []string{freshKey, staleKey})
+	resolved, err := e.resolveStoppedFlows(ctx, shard, []string{freshKey, staleKey})
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, resolved[freshKey],
 		"a stop inside the scan's window is settled without the lookup naming it")
 	assert.Equal(workflow.StatusCompleted, resolved[staleKey],
 		"a stop older than the scan's window must still be reported by the lookup")
+}
+
+// TestLatch_StalledShardHoldsOnlyItsOwnAwaiters pins that the detector has no barrier across shards. A caller
+// is parked on a running flow on each shard; shard 2's turnstile is then closed off, so any read of shard 2
+// waits until its context ends. Shard 1's flow completes with its local wake dropped, which leaves the
+// detector as its only path - and its Await must return while shard 2 is still stalled. A pass that gathers
+// every shard before releasing anything holds it for as long as shard 2 does.
+func TestLatch_StalledShardHoldsOnlyItsOwnAwaiters(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+
+	release := make(chan struct{})
+	started := make(chan struct{}, 1)
+	unblock := sync.OnceFunc(func() { close(release) })
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("Stall")
+	g.SetURL("Work", "stall/work")
+	g.SetURL("Then", "stall/then")
+	g.AddTransition("Work", "Then")
+	g.AddTransition("Then", workflow.End)
+	mux.HandleGraph("stall/g", g)
+	mux.HandleTask("stall/then", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("stall/work", func(ctx context.Context, f *workflow.Flow) error {
+		shard, _, _, _, _ := keys.ParseFlowKey(f.FlowKey())
+		switch shard {
+		case 1:
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-release
+		case 2:
+			f.Sleep(time.Hour) // delays Then, keeping the flow running and its key parked for the whole test
+		}
+		return nil
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	t.Cleanup(func() { e.Shutdown(context.Background()) })
+	t.Cleanup(unblock) // runs first, so a failed test frees the worker
+	assert.NoError(e.SetShard(ShardSpec{Index: 1}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 2}))
+	e.SetHost(mux)
+	assert.Must(assert.NoError(e.Startup(ctx)))
+
+	// Placement is random, so create until each shard holds a flow. The extras finish at once (shard 2's
+	// sleep, shard 1's gate only for the first).
+	var onShard [3]string
+	for i := 0; i < 200 && (onShard[1] == "" || onShard[2] == ""); i++ {
+		fk, err := e.Create(ctx, "stall/g", nil, nil)
+		assert.Must(assert.NoError(err))
+		shard, _, _, _, _ := keys.ParseFlowKey(fk)
+		if onShard[shard] == "" {
+			onShard[shard] = fk
+		}
+	}
+	assert.Must(assert.True(onShard[1] != "" && onShard[2] != "", "placement never reached both shards"))
+	<-started
+
+	type result struct {
+		outcome *workflow.FlowOutcome
+		err     error
+	}
+	awaited := map[int]chan result{}
+	for _, shard := range []int{1, 2} {
+		parked := e.seams.Waiter(engineseams.Join(engineseams.CheckpointAwaitParked, onShard[shard]))
+		awaited[shard] = make(chan result, 1)
+		go func() {
+			out, err := e.Await(ctx, onShard[shard])
+			awaited[shard] <- result{out, err}
+		}()
+		select {
+		case <-parked:
+		case r := <-awaited[shard]:
+			t.Fatalf("Await on shard %d returned instead of parking: %+v, %v", shard, r.outcome, r.err)
+		case <-time.After(10 * time.Second):
+			t.Fatalf("Await on shard %d never parked", shard)
+		}
+	}
+
+	size := e.turnstiles.Turnstile(2).Size()
+	e.turnstiles.Resize(2, 0)
+	t.Cleanup(func() { e.turnstiles.Resize(2, size) }) // before Shutdown, which runs later
+	e.seams.InjectN(engineseams.FaultDropSignalStop, 1<<20)
+	unblock()
+
+	select {
+	case r := <-awaited[1]:
+		if assert.NoError(r.err) {
+			assert.Equal(workflow.StatusCompleted, r.outcome.Status)
+		}
+	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
+		t.Fatal("a stalled shard 2 held shard 1's Await")
+	}
+	select {
+	case r := <-awaited[2]:
+		t.Fatalf("shard 2's Await returned while its flow sleeps: %v, %v", r.outcome, r.err)
+	default:
+	}
 }

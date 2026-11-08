@@ -306,11 +306,11 @@ type Engine struct {
 	archiveCancel  context.CancelFunc
 	archiveWorker  sync.WaitGroup
 
-	// Await latch: the board callers park on, and the detector goroutine that asks the shards which of
-	// those flows have settled. A stop this replica commits reaches the board instantly through
-	// signalStop; the detector is what makes a PEER's stop observable. latchCancel stops the detector,
-	// abandoning a sweep in flight.
-	latches     *latch.Board
+	// Await latch: one board per shard for callers to park on, each with a detector goroutine that asks its
+	// shard which of those flows have settled. A stop this replica commits reaches its board instantly
+	// through signalStop; the detector is what makes a PEER's stop observable. latchCancel stops the
+	// detectors, abandoning a sweep in flight.
+	latches     map[int]*latch.Board
 	latchCancel context.CancelFunc
 	latchWorker sync.WaitGroup
 
@@ -992,18 +992,24 @@ func (e *Engine) initRuntime() error {
 	archiveCtx, e.archiveCancel = context.WithCancel(e.lifetimeCtx)
 	latchCtx, e.latchCancel = context.WithCancel(e.lifetimeCtx)
 	e.graphs = graphcache.New(graphCacheFlows, graphCacheGraphs)
-	// A fresh board per run: the previous one was closed at drain, and a closed board turns every Await
-	// away. resolveStoppedFlows is non-nil, so New cannot fail.
-	e.latches, _ = latch.New(e.resolveStoppedFlows)
-	// The park rendezvous, wired only under test so a production board holds no hook and Latch pays one
-	// atomic load. Fired unscoped and scoped by flow key, for the same reason signalStop fires both: a
-	// scoped fire does not wake an unscoped waiter, and a test may be waiting for THIS caller to park while
-	// a subgraph child's or a peer's Await parks alongside it.
-	if e.seams.Enabled() {
-		e.latches.SetOnPark(func(flowKey string) {
-			e.seams.Checkpoint(e.lifetimeCtx, engineseams.CheckpointAwaitParked)
-			e.seams.Checkpoint(e.lifetimeCtx, engineseams.Join(engineseams.CheckpointAwaitParked, flowKey))
+	// Fresh boards per run: the previous ones were closed at drain, and a closed board turns every Await
+	// away. The resolver is non-nil, so New cannot fail.
+	e.latches = make(map[int]*latch.Board)
+	for _, idx := range e.db.Indices() {
+		board, _ := latch.New(func(ctx context.Context, flowKeys []string) (map[string]string, error) {
+			return e.resolveStoppedFlows(ctx, idx, flowKeys)
 		})
+		// The park rendezvous, wired only under test so a production board holds no hook and Latch pays one
+		// atomic load. Fired unscoped and scoped by flow key, for the same reason signalStop fires both: a
+		// scoped fire does not wake an unscoped waiter, and a test may be waiting for THIS caller to park
+		// while a subgraph child's or a peer's Await parks alongside it.
+		if e.seams.Enabled() {
+			board.SetOnPark(func(flowKey string) {
+				e.seams.Checkpoint(e.lifetimeCtx, engineseams.CheckpointAwaitParked)
+				e.seams.Checkpoint(e.lifetimeCtx, engineseams.Join(engineseams.CheckpointAwaitParked, flowKey))
+			})
+		}
+		e.latches[idx] = board
 	}
 	e.started.Store(true)
 
@@ -1159,9 +1165,11 @@ func (e *Engine) initRuntime() error {
 	e.archiveWorker.Go(func() {
 		e.archiveLoop(archiveCtx)
 	})
-	e.latchWorker.Go(func() {
-		e.latchLoop(latchCtx)
-	})
+	for shard, board := range e.latches {
+		e.latchWorker.Go(func() {
+			e.latchLoop(latchCtx, shard, board)
+		})
+	}
 	// On a child of the lifetime ctx, so the drain can abandon an aggregate in flight rather than wait out its
 	// timeout: the query is a pure read.
 	backlogCtx, backlogCancel := context.WithCancel(e.lifetimeCtx)
@@ -1303,8 +1311,8 @@ func (e *Engine) drainRuntime() {
 	// Wake every blocked Await so it returns a shutdown error rather than waiting out its own context on a
 	// board nothing will ever release again - every goroutine that could have is drained above. A caller
 	// already holding a stop status keeps it and returns that outcome instead.
-	if e.latches != nil {
-		e.latches.Close()
+	for _, board := range e.latches {
+		board.Close()
 	}
 	if e.lifetimeCancel != nil {
 		e.lifetimeCancel()
