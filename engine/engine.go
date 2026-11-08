@@ -291,7 +291,7 @@ type Engine struct {
 	reaperCancel context.CancelFunc
 	reaperWorker sync.WaitGroup
 
-	// Archive goroutine: keeps each shard's archive day tables - today's and the two days ahead made, expired days
+	// Archive goroutine: keeps each shard's archive day tables - today's and the days ahead made, expired days
 	// dropped. archives is the run's set, published at Startup; testArchiveDay, when set, replaces the day's
 	// length for a test (archiveDayLength). noReapQuiet, set in test mode, lets a reaper pass archive into its day
 	// however late it runs (reapQuietMargin), so a test's pass near midnight, or on a day of seconds, does what it does

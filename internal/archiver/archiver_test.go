@@ -327,6 +327,49 @@ func TestArchiver_TheDaysAheadComeWithToday(t *testing.T) {
 	assert.Equal([]int{9000, 9001, 9002, 9003}, days, "the next day ahead, once the day changes")
 }
 
+// TestArchiver_ShortDaysAreMadeThirtySecondsAhead pins how many days are made ahead of today: two, or as many as cover
+// 30 seconds of days shorter than 15 seconds, so a maintenance pass that falls a few short days behind still finds
+// tomorrow made. MigrateDays accepts the last day made ahead and refuses the one after it.
+func TestArchiver_ShortDaysAreMadeThirtySecondsAhead(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	assert := testarossa.For(t)
+	for _, c := range []struct {
+		dayLength time.Duration
+		ahead     int
+	}{
+		{archiver.DefaultDayLength, 2},
+		{time.Minute, 2},
+		{15 * time.Second, 2},
+		{14 * time.Second, 3},
+		{7 * time.Second, 5},
+		{2 * time.Second, 15},
+		{time.Second, 30},
+	} {
+		assert.Equal(c.ahead, archiver.DaysAhead(archiver.New(nil, c.dayLength, migrations.Archive())), "%v", c.dayLength)
+	}
+
+	db := openShard(t)
+	a := archiver.New(db, 2*time.Second, migrations.Archive())
+	const today = 9000
+	archiver.SetClock(a, func() int64 { return 946684800 + today*2 })
+	assert.NoError(a.EnsureToday(ctx))
+	days, err := archiver.Days(ctx, a)
+	assert.NoError(err)
+	want := []int{}
+	for d := today; d <= today+15; d++ {
+		want = append(want, d)
+	}
+	assert.Equal(want, days)
+	assert.True(a.Whole(today + 15))
+	assert.NoError(a.MigrateDays(ctx, 30), "the last day made ahead")
+	assert.NoError(archiver.Ensure(ctx, a, today+16))
+	err = a.MigrateDays(ctx, 30)
+	if assert.Error(err) {
+		assert.Contains(err.Error(), "another length")
+	}
+}
+
 // TestArchiver_MigrateDaysAppliesALaterMigration pins how a schema change reaches the days already made: a later
 // archive migration is applied to every existing day within the retention, once, and an older day is
 // left for the retention to drop.
@@ -414,7 +457,7 @@ func TestArchiver_AFailedDayMigrationFails(t *testing.T) {
 }
 
 // TestArchiver_MigrateDaysRefusesAnotherDayLength pins the guard against two day lengths on one database: a day past
-// the day after tomorrow is numbered by another length, and Startup refuses rather than let a retention pass treat the
+// the last day made ahead (the day after tomorrow, at a day's length) is numbered by another length, and Startup refuses rather than let a retention pass treat the
 // other length's days as its own. The day after tomorrow itself, made ahead, is not.
 func TestArchiver_MigrateDaysRefusesAnotherDayLength(t *testing.T) {
 	t.Parallel()

@@ -20,8 +20,8 @@ day's tables and nothing else: a live table in it would be changed once per day.
   SQL Server's `SELECT ... INTO` copies the identity property, which an archive id must not have (it keeps its live
   value, which state refs point at).
 - **The SQL is exercised by sequel**, the same runner and splitting rules as the schema.
-- **A later archive migration reaches the existing days**: the engine's Startup runs `EnsureToday` (today and the two days
-  after) and then `MigrateDays` on each shard, before anything reads a day. Not inside the shard's open: the
+- **A later archive migration reaches the existing days**: the engine's Startup runs `EnsureToday` (today and the days
+  ahead) and then `MigrateDays` on each shard, before anything reads a day. Not inside the shard's open: the
   database layer knows connections and the schema, not this package's tables. `MigrateDays` migrates every day before
   today that the catalog lists, back to today minus the retention, one `Migrate` each - an up-to-date day costs sequel's
   one read of its progress, since sequel makes sure of its own table once per process. **A day whose migration fails
@@ -56,13 +56,20 @@ its schema differs by dialect, and a sequel release may change it. Two consequen
   drops and the `OBJECT_ID` guards resolve to. Listed across schemas, as a bare `sys.tables` does on SQL Server, a
   second deployment's tables would be migrated - made, here - and dropped as if they were this one's.
 
-**Today and the two days after it must exist; nothing else is made.** Rows are archived into the day they are
+**Today and the days ahead of it must exist; nothing else is made.** The days ahead are two - tomorrow and the day
+after - at any day length of 15 seconds or more, so in production; below that, as many as cover 30 seconds (`daysAhead`:
+15 at the tests' 2-second days). Rows are archived into the day they are
 archived, so no past day is written - but for the batch a pass has in flight when the day turns, which lands in the day
 that just ended, its `archived_at` clamped to that day's last millisecond (`DayEnds`; the engine's reaper also stops a
 margin before midnight, so this is rare). At a retention of 1 or more that day is kept through the whole of the next;
 at 0 nothing is archived. The reaper makes no table, and archives only while the archive's record holds tomorrow
-whole (`Whole`). `EnsureToday` (Startup) and `Maintain` (every maintenance pass) make the three days, so a day exists a whole day before it begins, and is missing at its start
-only after two days of failed passes. **The day after tomorrow keeps a locate's `created+1` in place**: for a flow
+whole (`Whole`). `EnsureToday` (Startup) and `Maintain` (every maintenance pass) make them, so at a day's length a day
+exists a whole day before it begins, and is missing at its start only after two days of failed passes. **Do not cut
+short days to two ahead.** Two days of 2 seconds leave the maintenance loop 4 seconds of slack, and making a day is a
+`Migrate` of DDL, slowest on MySQL and SQL Server: under several dialect gates run at once on one machine the reaper
+found tomorrow not whole, its one pass archived nothing, and `TestDirectory_ShortDaysNameMovesFarFromTheHour` failed on
+MySQL and SQL Server. The cost of 30 seconds is 16 days made at Startup instead of 3, on short days only.
+**The day after tomorrow keeps a locate's `created+1` in place**: for a flow
 created just after midnight, `created+1` is the new tomorrow, made the day before as the day after tomorrow. Making
 only tomorrow leaves it missing from midnight until the first pass after it, and every locate of such a key would
 first fail on it. Do not make a day only near its start to save the empty
@@ -70,7 +77,7 @@ tables - a window of a pass or two turns a short outage into a missing today. `M
 the expired days, both from one reading of today, and drops even when making them failed: the likeliest cause is a
 full database, which the drops free, and a drop never reaches a day being written.
 
-**A day seen whole is not checked again** (`ensured`, the today of the last `ensureCurrent` that saw all three whole).
+**A day seen whole is not checked again** (`ensured`, the today of the last `ensureCurrent` that saw today and every day ahead whole).
 Nothing drops today or a day after it - `Maintain` drops days before today minus the retention, `DropBefore` refuses a
 day after today - so a maintenance pass reads only the clock until the day changes, rather than a `Migrate` and a
 catalog read per day. The record is per Archive, so each replica, and each Startup, checks once. What it misses is a
@@ -118,8 +125,8 @@ yesterday through the whole of today.
 
 **The day length is a parameter, for tests and the benchmark only.** Production days are `DefaultDayLength`; a test
 passes seconds, and the engine reads `DWARF_ARCHIVE_DAY` for the rig. Day numbers of different lengths are different
-counts, so a database must only ever see one length. `MigrateDays` refuses a day the catalog lists past the day after
-tomorrow - a shorter length's numbering, seen by a longer one - so Startup fails rather than keep both. The other way round is not caught:
+counts, so a database must only ever see one length. `MigrateDays` refuses a day the catalog lists past the last day
+made ahead - a shorter length's numbering, seen by a longer one - so Startup fails rather than keep both. The other way round is not caught:
 a shorter length reads a longer one's days as long expired, and its retention drops them.
 
 **`TodayLeft` rounds down.** The clock reads whole seconds, so up to one has passed by the reading; rounded down, the
@@ -208,8 +215,8 @@ directory's expired rows across batches. The engine's `directory_test.go` pins t
 Pinned by `archiver_test.go` (the substitution itself by `internal/migrations`' tests): a day made with the live tables'
 columns and their flows indexes (all but the deletion one), a written id and PostgreSQL's freeze settings, a whole migration replayed over existing tables, eight racing
 ensures converging, the oldest days dropped and never made again (an `ensure` of one makes nothing, and fails on a later
-migration), retention by days up to the largest int, the two days ahead made with today and not checked again until the day
-changes - unless one could not be made - a later migration
+migration), retention by days up to the largest int, the days ahead made with today (two, or 30 seconds of short days) and not
+checked again until the day changes - unless one could not be made - a later migration
 reaching the retained days once - the day exactly the retention old included - and leaving the one before, the day
-count, a failed day migration failing the call unless the day is missing a table by then, and a day past the day
-after tomorrow refused.
+count, a failed day migration failing the call unless the day is missing a table by then, and a day past the last day
+made ahead refused.

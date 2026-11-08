@@ -61,5 +61,10 @@ func CreationDay(a *Archive, hour int) int {
 	return a.creationDay(hour)
 }
 
+// DaysAhead exposes daysAhead to the tests.
+func DaysAhead(a *Archive) int {
+	return daysAhead(a.dayLength)
+}
+
 // ForgetBatch is how many expired directory rows one statement deletes.
 const ForgetBatch = forgetBatch

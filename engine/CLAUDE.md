@@ -3539,7 +3539,7 @@ drains (`reapDue`):
 - **Closed roots** (terminal, unstamped, `updated_at` older than `archiveGrace`): copied into **today's** day tables
   and deleted, in one transaction; at a retention of 0, deleted only. Every tree goes into the day it is archived,
   whenever it ended, so a day holds exactly the rows archived on it and a later day only later ones: the days are in
-  `archived_at` order. **The reaper makes no table**: today and the two days
+  `archived_at` order. **The reaper makes no table**: today and the days
   ahead are maintenance's (`EnsureToday` at Startup, `Maintain` every archive pass), and today is read from the
   database clock (`refreshReapDay`). **Tomorrow not whole in the archive's record is an archive failure like any
   other** (below), checked before the move: a row goes into a day only once the day after it is whole, which a
@@ -3705,7 +3705,7 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
   interval in, for the archive loop's reason: a replica living shorter than the interval would never expire anything.
   Pinned by `engine/expiration_test.go`.
 - **Startup does not serve before today's tables exist on every shard**, whatever the retention (`startArchives`, right after the shards
-  open and before the fleet join, so a failure has only the shards to close), and those of the two days after. It
+  open and before the fleet join, so a failure has only the shards to close), and those of the days ahead. It
   takes no turn: no worker exists yet. The
   same pass then brings the existing days within the retention up to the archive migrations (`MigrateDays`), so a
   later archive migration reaches them before anything reads them; a day whose migration fails fails Startup. Startup

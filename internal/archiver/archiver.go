@@ -19,13 +19,13 @@ limitations under the License.
 //
 // A day's tables are made by the archive migrations (migrations.Archive) for that day, run as its own sequence, so a
 // later archive migration reaches the existing days within the retention through MigrateDays, run at Startup right
-// after the schema migrations. Today's tables and those of the two days after it are made ahead, so a day exists before
-// it begins.
+// after the schema migrations. Today's tables and those of the days after it are made ahead - two days, or 30 seconds of
+// days shorter than 15 seconds - so a day exists before it begins.
 //
 // One Archive serves one shard:
 //
 //	a := archiver.New(db, archiver.DefaultDayLength, migrations.Archive())
-//	err := a.EnsureToday(ctx)             // at Startup: the tables of today and the two days after must exist
+//	err := a.EnsureToday(ctx)             // at Startup: the tables of today and the days ahead must exist
 //	err = a.MigrateDays(ctx, retention)   // at Startup: the existing days within the retention brought up to date
 //	n, err := a.Maintain(ctx, retention)  // periodically: the days ahead made, expired days dropped
 //	n, err = a.DropBefore(ctx, day)       // an operator's purge of every day before one
@@ -62,6 +62,17 @@ func DayOf(t time.Time, dayLength time.Duration) int {
 	return floorDiv(t.Unix()-epochUnix, dayLengthSeconds(dayLength))
 }
 
+// aheadSpan is the least time the days made ahead of today cover.
+const aheadSpan = 30 * time.Second
+
+// daysAhead returns how many days after today are made ahead of it, for days of dayLength: two, or as many as cover
+// 30 seconds when days are shorter than 15 seconds.
+func daysAhead(dayLength time.Duration) int {
+	secs := dayLengthSeconds(dayLength)
+	span := int64(aheadSpan / time.Second)
+	return int(max((span+secs-1)/secs, 2))
+}
+
 func dayLengthSeconds(dayLength time.Duration) int64 {
 	return max(int64(dayLength/time.Second), 1)
 }
@@ -81,7 +92,7 @@ type Archive struct {
 	fsys      fs.FS
 	// clock overrides the database clock in tests; nil reads the database's.
 	clock func(ctx context.Context) (int64, error)
-	// mu guards ensured, the day whose tables, and those of the two days after it, this Archive last saw whole, and
+	// mu guards ensured, the day whose tables, and those of the days ahead of it, this Archive last saw whole, and
 	// known, the days with both tables at the last catalog read, less the days this Archive dropped since.
 	mu      sync.Mutex
 	ensured int
@@ -168,8 +179,9 @@ func (a *Archive) ensure(ctx context.Context, day int) error {
 	return nil
 }
 
-// EnsureToday makes sure the tables of today and of the two days after it exist. Once it has seen them whole, it reads
-// only the clock until the day changes. It retries a failure a few times before returning it.
+// EnsureToday makes sure the tables of today and of the days ahead of it exist: two, or as many as cover 30 seconds when
+// days are shorter than 15 seconds. Once it has seen them whole, it reads only the clock until the day changes. It
+// retries a failure a few times before returning it.
 func (a *Archive) EnsureToday(ctx context.Context) error {
 	backoff := 200 * time.Millisecond
 	for attempt := 1; ; attempt++ {
@@ -192,7 +204,7 @@ func (a *Archive) EnsureToday(ctx context.Context) error {
 	}
 }
 
-// ensureCurrent makes sure the tables of today, as the caller read it, and of the two days after it exist - each only
+// ensureCurrent makes sure the tables of today, as the caller read it, and of the days ahead of it exist - each only
 // once the day before is whole, so days are always made in order. Days seen whole stay whole - nothing drops today or a
 // day after it - so once they are, it does nothing until the day changes.
 func (a *Archive) ensureCurrent(ctx context.Context, today int) error {
@@ -202,7 +214,8 @@ func (a *Archive) ensureCurrent(ctx context.Context, today int) error {
 	if done {
 		return nil
 	}
-	for day := today; day <= today+2; day++ {
+	last := today + daysAhead(a.dayLength)
+	for day := today; day <= last; day++ {
 		if err := a.ensure(ctx, day); err != nil {
 			return errors.Trace(err)
 		}
@@ -224,7 +237,7 @@ func (a *Archive) MigrateDays(ctx context.Context, retention int) error {
 		return nil
 	}
 	// The days are listed before today is read, so a day a peer made just after midnight, when this read of today
-	// would still have been the day before, cannot read as past the day after tomorrow.
+	// would still have been the day before, cannot read as past the last day ahead.
 	days, _, err := a.catalog(ctx)
 	if err != nil {
 		return errors.Trace(err)
@@ -233,9 +246,9 @@ func (a *Archive) MigrateDays(ctx context.Context, retention int) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	if len(days) > 0 && days[len(days)-1] > today+2 {
-		return errors.New("archive day %d is past the day after tomorrow (%d): the database holds days of another length",
-			days[len(days)-1], today+2)
+	if last := today + daysAhead(a.dayLength); len(days) > 0 && days[len(days)-1] > last {
+		return errors.New("archive day %d is past the last day made ahead (%d): the database holds days of another length",
+			days[len(days)-1], last)
 	}
 	for _, day := range days {
 		// Written as a bound on day so that a retention near the largest int cannot overflow. Today and the days ahead
@@ -273,7 +286,7 @@ func (a *Archive) migrateExisting(ctx context.Context, day int) error {
 	return errors.New("migrating the archive tables of day %d", day, err)
 }
 
-// Maintain makes sure the tables of today and of the two days after it exist, and drops every day that ended at least
+// Maintain makes sure the tables of today and of the days ahead of it exist, and drops every day that ended at least
 // retention days ago. A retention of 0 keeps today's tables and those ahead, which nothing writes, and drops every day
 // before today. It returns how many days it dropped, which a failure does not undo.
 func (a *Archive) Maintain(ctx context.Context, retention int) (dropped int, err error) {
