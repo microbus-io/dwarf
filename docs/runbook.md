@@ -224,8 +224,11 @@ A pass that runs for hours cannot remove anything that died after it began, so d
 - **If elapsed time far exceeds CPU time,** the pass is mostly asleep on autovacuum's cost limit, which is
   shared by every running autovacuum worker. Raising it lets vacuum keep up at the price of more I/O while it
   runs.
-- **Retention adds to the load.** Deleting old flows puts dead rows on old pages, so every pass has the whole
-  table to clean.
+- **A bulk `Purge` or `Delete` adds the most.** Nothing else deletes from the archive, so vacuum has little to do
+  there until a row delete gives it a whole day's table to clean, and its workers then spend their time there
+  instead of on the live tables. A `Purge` run every minute on a busy database left the day's archive with 30 million
+  dead rows to 12 million live and held every autovacuum worker for most of an hour. The retention and `PurgeBefore`
+  drop whole days and leave nothing to vacuum.
 
 ---
 

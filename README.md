@@ -63,8 +63,8 @@ fmt.Println(out.State.GetString("greeting")) // hello ada
   all through standard providers you inject.
 - **Four SQL dialects.** PostgreSQL, MySQL/MariaDB, SQL Server, and SQLite (single-instance, low throughput).
 - **Free, and cheap at scale.** Apache 2.0 — no license tier, no vendor, no per-operation pricing. One
-  32-vCPU PostgreSQL database with two 8-vCPU engine hosts runs [~21,900 steps/s](docs/benchmark-cloud.md),
-  about $0.04 per million steps — **billions of steps a month** — and
+  32-vCPU PostgreSQL database with two 8-vCPU engine hosts runs [18,900–24,300 steps/s](docs/benchmark-cloud.md),
+  $0.036–0.047 per million steps — **billions of steps a day** — and
   the whole deployment is your own replicas plus a few ordinary SQL instances. No broker, no control plane,
   nothing else to run or pay for, so the bill is a handful of cloud instances rather than a metered service.
 

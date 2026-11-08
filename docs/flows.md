@@ -342,6 +342,9 @@ for {
 
 A row delete writes in proportion to the rows and leaves dead rows for the database to vacuum: `Delete` and `Purge`
 are for removing specific records, and bulk removal is the retention's and `PurgeBefore`'s, which drop whole days.
+Run in bulk, a row delete can take vacuum away from the work in flight: on a busy PostgreSQL database, a `Purge` of
+flows older than 30 minutes, run every minute, left the day's archive with 30 million dead rows to 12 million live,
+every autovacuum worker spent most of an hour on it, and the live tables' dead rows piled up meanwhile.
 
 A flow created with `FlowOptions.DeleteOnCompletion` schedules its own deletion when it completes successfully
 (a failed, terminated or cancelled flow is archived like any other). Its outcome stays observable via `Await`/`Snapshot` for a short grace window

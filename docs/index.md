@@ -66,6 +66,8 @@ what genuinely needs a human, and what belongs on a dashboard. Then:
   telemetry carries, and how retention and deletion actually work.
 - **[Cloud benchmarks](benchmark-cloud.md)** — measured against managed cloud PostgreSQL across a real
   network hop: how to size a deployment, and the measurements behind the engine's defaults.
+- **[A day of varied load](benchmark-day.md)** — one database through 4.5 hours of mixed flows, bursts above its
+  capacity, a rolling restart and a database restart.
 
 ## For both
 

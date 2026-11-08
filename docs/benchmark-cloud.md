@@ -24,7 +24,7 @@
   32 vCPU database serve it at about a third of their CPU each, and either can carry it alone.
 - **Shards add throughput linearly.** Four 32 vCPU shards ran 91,800 steps/s, 3.8 times one shard, each shard
   at close to what one shard runs alone.
-- **No flow failed in any run.** In the 242 runs behind this page, across 39 sessions, no flow errored and no
+- **No flow failed in any run.** In the 243 runs behind this page, across 40 sessions, no flow errored and no
   step was left stuck. The engine recovered a crashed worker's step only in the runs that killed engines on
   purpose.
 - **Failover takes about 40 seconds and loses nothing.** With every dispatcher killed at once, dispatch
@@ -36,6 +36,10 @@
   predicts. 10,000 concurrent 60-second tasks ran on under one engine core.
 - **Large state works up to the database column's limit.** 250 MB per step completed cleanly, at ~45 MB/s for
   one flow and ~135 MB/s for four.
+- **A day of varied load ran without falling behind.** 4.5 hours of mixed shapes, payloads, task durations and
+  priorities, with bursts above capacity, a rolling restart and a database restart: flows completed at the rate they
+  arrived, bursts cost only the lowest priorities a wait, and the live tables levelled off at 10 GB
+  ([A day of varied load](benchmark-day.md)).
 - **Stored data costs little.** Filled from empty to 522 GB, four times its memory, a 32 vCPU database ran within
   2.5% of its empty rate at every size. 249 million step rows with nothing deleted cost ~11%, as vacuum fell
   behind.

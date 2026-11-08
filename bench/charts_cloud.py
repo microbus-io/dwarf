@@ -1,4 +1,4 @@
-"""Charts for docs/benchmark-cloud.md.
+"""Charts for docs/benchmark-cloud.md and docs/benchmark-day.md.
 
 Run from the repo root with matplotlib available:
 
@@ -8,9 +8,9 @@ PNGs go to out-dir (default docs/). Three charts draw from tables in this file, 
 many runs, from Cloud Monitoring and from CPU profiles rather than from one artifact: database size (tiers), shards,
 and engine host size. The rest read run artifacts under bench/results/, which are kept on the machine that ran
 them: replicas (redo-one-20261009, redo-rs-20261009), minute-by-minute and payload size (redo-ha-20261106), headroom
-(redo-hr4-20261018), failover (redo-fo-20261011), and stored volume and row count (redo-vbytes2-20261020,
-redo-vrows-20261020). A chart whose artifacts
-are missing is skipped with a note.
+(redo-hr4-20261018), failover (redo-fo-20261011), stored volume and row count (redo-vbytes2-20261020,
+redo-vrows-20261020), and the day of varied load (redo-real-20261107, with its monitors and Cloud Monitoring's
+database metrics in cloudmon.json). A chart whose artifacts are missing is skipped with a note.
 """
 import collections
 import glob
@@ -544,6 +544,204 @@ def chart_failover():
     finish(fig, "benchmark-cloud-failover.png")
 
 
+# ---- A day: REAL, three 90-minute day/night cycles over five priority bands (redo-real-20261107) ----
+# Two engine replicas each generate half the commanded rate. A replica's series t counts from the day's shared epoch,
+# so the restarted process (day2-*) lines up with the first (day1-*). Pending and oldest-pending come from the backlog
+# leader's gauges, refreshed every 30 s, so a minute's reading is the max over the processes. The admin host's
+# monitors (s-mon: WAL every 5 s; v-mon: table sizes every 60 s) and Cloud Monitoring (cloudmon.json, database CPU)
+# are on wall-clock time and are placed on the day's minutes by the epoch in day-args.txt.
+REAL = os.path.join(RESULTS, "redo-real-20261107")
+BANDS = [f"band:{i}" for i in range(1, 6)]
+BAND_COLOURS = [S1, S2, S3, S4, S5]
+DAY_END = 270
+DB_RESTART_UTC = "2026-11-08T04:45:53Z"  # Cloud SQL's own fast shutdown and restart, ~30 s down
+
+
+def real_epoch():
+    m = re.search(r"-arrival-epoch (\d+)", open(os.path.join(REAL, "day-args.txt")).read())
+    return int(m.group(1))
+
+
+def real_minutes():
+    """Per run minute: the fleet's commanded and ended flows/s, ended flows/s by band and engine CPU cores, and pending
+    and oldest pending by band (max over the processes). A replica's samples are pooled by 10 s slot first: in a restart
+    minute its stopping and its restarted process both report, so their completions add and their commanded rate (the
+    replica's share of one schedule) is taken once."""
+    slots = collections.defaultdict(lambda: {"commanded": 0.0, "ended": 0.0, "cpu": 0.0, "endedBy": collections.Counter()})
+    gauges = collections.defaultdict(lambda: {"pending": {}, "oldest": {}})
+    for path in glob.glob(os.path.join(REAL, "dwarf-real-e*", "out", "day*.series.jsonl")):
+        replica = os.path.basename(path).split(".")[0].split("-", 1)[1]
+        for line in open(path):
+            p = json.loads(line)
+            d = slots[(replica, int(p["t"] // 10))]
+            d["commanded"] = max(d["commanded"], p["commandedFlowsPerSec"])
+            d["ended"] += p["endedFlowsPerSec"]
+            d["cpu"] += p.get("cpuCores") or 0
+            for b in BANDS:
+                d["endedBy"][b] += p.get("endedBy", {}).get(b, 0)
+            g = gauges[int(p["t"] // 60)]
+            for key, gauge in (("pending", "pending"), ("oldest", "oldestPendingSec")):
+                for b, v in (p.get(gauge) or {}).items():
+                    g[key][b] = max(g[key].get(b, 0), v)
+    per = collections.defaultdict(lambda: collections.defaultdict(list))
+    for (replica, slot), d in slots.items():
+        per[slot // 6][replica].append(d)
+    rows = []
+    for m in sorted(per):
+        row = {"min": m, "commanded": 0.0, "ended": 0.0, "cpu": 0.0, "endedBy": collections.Counter(), **gauges[m]}
+        for ds in per[m].values():
+            n = len(ds)
+            for k in ("commanded", "ended", "cpu"):
+                row[k] += sum(d[k] for d in ds) / n
+            for b in BANDS:
+                row["endedBy"][b] += sum(d["endedBy"][b] for d in ds) / n
+        rows.append(row)
+    return [r for r in rows if r["min"] < DAY_END]
+
+
+def real_utc_min(iso):
+    return (datetime.strptime(iso[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=__import__("datetime").timezone.utc)
+            .timestamp() - real_epoch()) / 60
+
+
+def shade_day(ax):
+    """The schedule behind each panel: day level shaded, bursts darker, the restarts as dotted lines and the
+    database's own restart in red."""
+    for c in range(0, DAY_END, 90):
+        ax.axvspan(c + 25, c + 90, color=GRID, alpha=0.55, lw=0)  # ramp up, day, ramp down
+        for at, length in ((10, 2), (40, 2), (58, 5)):
+            ax.axvspan(c + at, c + at + length, color=MUTED, alpha=0.18, lw=0)
+    for at in (137, 141):
+        ax.axvline(at, color=INK2, lw=1, ls=":")
+    ax.axvline(real_utc_min(DB_RESTART_UTC), color=OUTAGE, lw=1.2, ls="--")
+    ax.set_xlim(0, DAY_END)
+    ax.set_xticks(range(0, DAY_END + 1, 30))
+
+
+def chart_day():
+    if not glob.glob(os.path.join(REAL, "dwarf-real-e*", "out", "day*.series.jsonl")):
+        return skip("benchmark-day.png", f"artifacts not in {REAL}")
+    rows = real_minutes()
+    xs = [r["min"] for r in rows]
+    fig, ax = plt.subplots(figsize=(11, 4.8))
+    shade_day(ax)
+    ax.stackplot(xs, [[r["endedBy"][b] for r in rows] for b in BANDS], colors=BAND_COLOURS,
+                 labels=[f"priority {b[5:]}" for b in BANDS], edgecolor=SURFACE, lw=0.4)
+    ax.plot(xs, [r["commanded"] for r in rows], color=INK, lw=1.4, ls=(0, (4, 2)), label="offered")
+    top = 1.15 * max(max(r["commanded"], r["ended"]) for r in rows)
+    ax.set_ylim(0, top)
+    ax.text(137.8, top * 0.98, "replica restarts", color=INK2, fontsize=9, va="top")
+    ax.text(real_utc_min(DB_RESTART_UTC) - 0.8, top * 0.98, "database\nrestart", color=OUTAGE, fontsize=9, va="top",
+            ha="right")
+    ax.set_xlabel("minute of the day   (shaded: day level; darker: bursts)")
+    ax.set_ylabel("flows completed/s, by priority")
+    ax.set_title("A day on one database: offered load and completed flows by priority")
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(handles[::-1], labels[::-1], frameon=False, fontsize=9, loc="upper left", bbox_to_anchor=(1.0, 1.0))
+    finish(fig, "benchmark-day.png")
+
+
+def chart_day_backlog():
+    if not glob.glob(os.path.join(REAL, "dwarf-real-e*", "out", "day*.series.jsonl")):
+        return skip("benchmark-day-backlog.png", f"artifacts not in {REAL}")
+    rows = real_minutes()
+    fig, (a1, a2) = plt.subplots(2, 1, figsize=(11, 6.6), sharex=True)
+    for ax, key, label in ((a1, "pending", "steps waiting (log scale)"),
+                           (a2, "oldest", "oldest waiting step, s (log scale)")):
+        shade_day(ax)
+        for b, colour in zip(BANDS, BAND_COLOURS):
+            pts = [(r["min"], r[key].get(b)) for r in rows]
+            ax.plot([m for m, _ in pts], [max(v, 1) if v is not None else float("nan") for _, v in pts], color=colour,
+                    lw=1.8, label=f"priority {b[5:]}")
+        ax.set_yscale("log")
+        ax.set_ylabel(label)
+        ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
+    a1.set_title("A day on one database: the backlog by priority")
+    a1.legend(frameon=False, fontsize=9, loc="upper left", bbox_to_anchor=(1.0, 1.0))
+    a2.set_xlabel("minute of the day")
+    finish(fig, "benchmark-day-backlog.png")
+
+
+def real_wal_minutes():
+    """Per run minute from s-mon: WAL MB/s (the cumulative wal_bytes differenced) and the mean count of backends
+    waiting on LWLock/WALWrite."""
+    path = os.path.join(REAL, "dwarf-real-m", "out", "mon-day.log")
+    epoch, prev, acc = real_epoch(), None, collections.defaultdict(lambda: [0.0, 0.0, 0])
+    for line in open(path):
+        f = line.split()
+        if len(f) < 4 or not f[3].isdigit():
+            continue
+        t, wal = float(f[0]), int(f[3])
+        waiters = sum(int(x.rsplit(":", 1)[1]) for x in f[4:] if "LWLock/WALWrite" in x)
+        if prev:
+            m = int((t - epoch) // 60)
+            a = acc[m]
+            a[0] += wal - prev[1]
+            a[1] += t - prev[0]
+            a[2] += 0
+            a.append(waiters)
+        prev = (t, wal)
+    return {m: (a[0] / a[1] / 1e6, sum(a[3:]) / max(1, len(a) - 3)) for m, a in acc.items() if a[1] > 0}
+
+
+def chart_day_database():
+    mon, cm = os.path.join(REAL, "dwarf-real-m", "out", "mon-day.log"), os.path.join(REAL, "cloudmon.json")
+    if not (os.path.exists(mon) and os.path.exists(cm)):
+        return skip("benchmark-day-database.png", f"monitor files not in {REAL}")
+    rows = real_minutes()
+    cpu = [(real_utc_min(t) - 1, v * 32) for t, v in json.load(open(cm))["database/cpu/utilization"]]
+    wal = real_wal_minutes()
+    fig, (a1, a2) = plt.subplots(2, 1, figsize=(11, 6.2), sharex=True)
+    shade_day(a1)
+    a1.plot([m for m, _ in cpu if 0 <= m < DAY_END], [v for m, v in cpu if 0 <= m < DAY_END], color=S1, lw=1.8,
+            label="database (32 vCPU)")
+    a1.plot([r["min"] for r in rows], [r["cpu"] for r in rows], color=S2, lw=1.8, label="both engine hosts (2 x 8 vCPU)")
+    a1.set_ylim(0, 32)
+    a1.set_ylabel("CPU cores busy")
+    a1.set_title("A day on one database: what it cost the database and the engines")
+    a1.legend(frameon=False, fontsize=9, loc="upper left", bbox_to_anchor=(1.0, 1.0))
+    shade_day(a2)
+    ms = sorted(m for m in wal if 0 <= m < DAY_END)
+    ys = [wal[m][0] for m in ms]
+    a2.plot(ms, ys, color=S3, lw=0.8, alpha=0.45, label="per minute")
+    a2.plot(ms, [sum(ys[max(0, i - 2):i + 3]) / len(ys[max(0, i - 2):i + 3]) for i in range(len(ys))], color=S3, lw=2,
+            label="5-minute mean")
+    a2.legend(frameon=False, fontsize=9, loc="upper left", bbox_to_anchor=(1.0, 1.0))
+    a2.set_ylim(0, None)
+    a2.set_ylabel("write-ahead log, MB/s")
+    a2.set_xlabel("minute of the day")
+    finish(fig, "benchmark-day-database.png")
+
+
+def chart_day_storage():
+    path = os.path.join(REAL, "dwarf-real-m", "out", "vmon-day.log")
+    if not os.path.exists(path):
+        return skip("benchmark-day-storage.png", f"v-mon log not in {REAL}")
+    epoch, pts = real_epoch(), []
+    for line in open(path):
+        f = line.split()
+        if len(f) >= 7 and f[1].isdigit():
+            pts.append(((int(f[0]) - epoch) / 60, int(f[1]) / 1e9, int(f[2]) / 1e9, int(f[4]) / 1e9, int(f[5]),
+                        int(f[6])))
+    pts = [p for p in pts if 0 <= p[0] <= DAY_END]
+    xs = [p[0] for p in pts]
+    fig, (a1, a2) = plt.subplots(2, 1, figsize=(11, 6.2), sharex=True)
+    shade_day(a1)
+    a1.plot(xs, [p[2] for p in pts], color=S1, lw=2, label="live steps table")
+    a1.plot(xs, [p[3] for p in pts], color=S2, lw=2, label="live flows table")
+    a1.set_ylim(0, None)
+    a1.set_ylabel("GB, with indexes and TOAST")
+    a1.set_title("A day on one database: the live tables level off while the archive grows")
+    a1.legend(frameon=False, fontsize=9, loc="upper left", bbox_to_anchor=(1.0, 1.0))
+    shade_day(a2)
+    a2.plot(xs, [p[1] for p in pts], color=S5, lw=2, label="whole database (the archive is most of it)")
+    a2.set_ylim(0, None)
+    a2.set_ylabel("GB")
+    a2.set_xlabel("minute of the day")
+    a2.legend(frameon=False, fontsize=9, loc="upper left", bbox_to_anchor=(1.0, 1.0))
+    finish(fig, "benchmark-day-storage.png")
+
+
 chart_tiers()
 chart_shards()
 chart_engine_hosts()
@@ -554,3 +752,7 @@ chart_headroom()
 chart_volume()
 chart_volume_rows()
 chart_failover()
+chart_day()
+chart_day_backlog()
+chart_day_database()
+chart_day_storage()

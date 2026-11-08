@@ -600,7 +600,10 @@ axis for a bytes fill: two 0 B probes on an empty database wrote ~15M small step
 `-arrival-bursts` repeat every period, with seeded per-minute `-arrival-noise` and Poisson arrivals, plus a
 `-priority-mix` over the engine's five priority levels, Zipf tenants (`-fairness-skew`) and a `-retention` Purge
 (or `-delete-on-completion`, which keeps the step table to the work in flight plus the one-minute deletion grace).
-Four things about it:
+**Leave `-retention` off with the archive on.** Its Purge deletes rows from the archive's day table, which nothing else
+deletes from, so vacuum then has a whole day's heap and TOAST to clean: on a REAL rig the archive ended up with more dead
+rows than live, every autovacuum worker sat on it, and the live `dwarf_steps` went unvacuumed. The archive's own
+retention drops whole days. Four things about it:
 - **The schedule is a function of the time since `-arrival-epoch`.** Give every process of a fleet the same
   epoch and its `-arrival-share`, and a process restarted mid-run rejoins in phase and stops at the shared end.
 - **The record is a JSONL series beside the artifact**, one line per `-stats-interval`, written as it goes, with
@@ -641,7 +644,7 @@ clean commit;
 `bench/charts_redo.py` charts a tree of cells and `-volume` artifacts. Run `dbcpu.sh` with `WRITE=1` first so
 the artifacts carry database CPU.
 
-`bench/charts_cloud.py` draws `docs/benchmark-cloud.md`'s charts and `bench/charts.py` the local dialect charts in
+`bench/charts_cloud.py` draws the charts of `docs/benchmark-cloud.md` and `docs/benchmark-day.md`, and `bench/charts.py` the local dialect charts in
 `docs/benchmark.md`. A cloud chart drawn from many runs or from CPU profiles keeps its numbers as a table in the
 script, because no single artifact holds them; the rest read their artifacts under `bench/results/`.
 **`bench/results/` is gitignored**, so those charts can be redrawn only on the machine that holds the run's
