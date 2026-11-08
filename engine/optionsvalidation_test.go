@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -121,4 +122,33 @@ func TestSetTimeBudget_RejectsNonPositive(t *testing.T) {
 	assert.NoError(e.SetTimeBudget(30 * time.Second))
 	assert.Error(e.SetTimeBudget(-1))
 	assert.Equal(30*time.Second, e.taskTimeBudget())
+}
+
+// TestCreate_RejectsAnEmptyTaskName pins that a graph with a task named "" is refused at Create with a 400,
+// before any flow is stored. Accepted, the transition into it was read as "no successor" and the flow
+// completed without running the task.
+func TestCreate_RejectsAnEmptyTaskName(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("EmptyName")
+	g.SetURL("Start", "emptyname/start")
+	g.SetURL("", "emptyname/empty")
+	g.AddTransition("Start", "")
+	g.AddTransition("", workflow.End)
+	mux.HandleGraph("emptyname/g", g)
+	ran := false
+	mux.HandleTask("emptyname/start", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("emptyname/empty", func(ctx context.Context, f *workflow.Flow) error { ran = true; return nil })
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.Must(assert.NoError(e.Startup(t.Context())))
+
+	_, _, err := e.Run(ctx, "emptyname/g", nil, nil)
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "%v", err)
+	assert.False(ran)
+	assert.Zero(enginetest.CountRows(t, e, 1, "SELECT COUNT(*) FROM dwarf_flows"))
 }

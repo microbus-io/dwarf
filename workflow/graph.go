@@ -149,7 +149,7 @@ func (g *Graph) Transitions() []Transition {
 // (used by transitions, fan-in, goto); the URL is the opaque downstream endpoint the engine
 // hands to the host's ExecuteTask. The first task bound
 // becomes the default entry point unless SetEntryPoint is called explicitly. End is not
-// registered.
+// registered. The name must not be empty; Validate rejects a task with an empty name.
 //
 // The same URL may be bound under multiple names. This is how a workflow author reuses the same task
 // code at distinct positions in the graph with different downstream transitions per position.
@@ -434,6 +434,11 @@ func (g *Graph) Validate() error {
 	taskSet := make(map[string]bool, len(g.tasks)+1)
 	taskSet[End] = true
 	for _, t := range g.tasks {
+		// "" means "no task" throughout the engine (no successor, no Goto, no entry point yet), so a task by that
+		// name would be skipped, not run.
+		if t.Name == "" {
+			return errors.New("task with URL '%s' in graph '%s' has no name", t.URL, g.name)
+		}
 		if taskSet[t.Name] {
 			return errors.New("duplicate task '%s' in graph '%s'", stripProto(t.Name), g.name)
 		}

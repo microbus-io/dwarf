@@ -83,6 +83,13 @@ func TestSubgraphSpawnFailFlow(t *testing.T) {
 	invalid.SetURL("Lonely", spawnFailPrefix+"/lonely")
 	mux.HandleGraph(spawnFailPrefix+"/invalid", invalid)
 
+	// An empty task name must fail before a child can be created and silently skip that task.
+	emptyName := workflow.NewGraph("EmptyName")
+	emptyName.SetURL("Start", spawnFailPrefix+"/work")
+	emptyName.SetURL("", spawnFailPrefix+"/work")
+	emptyName.AddTransitionChain("Start", "", workflow.End)
+	mux.HandleGraph(spawnFailPrefix+"/empty-name", emptyName)
+
 	// A child that works, served by the flaky URL once its 503s run out.
 	child := workflow.NewGraph("Child")
 	child.SetURL("Work", spawnFailPrefix+"/work")
@@ -124,6 +131,7 @@ func TestSubgraphSpawnFailFlow(t *testing.T) {
 			{"unreachable", http.StatusServiceUnavailable, "no worker serves"},
 			{"missing", http.StatusNotFound, "subgraph graph not found"},
 			{"invalid", http.StatusBadRequest, "invalid subgraph graph"},
+			{"empty-name", http.StatusBadRequest, "has no name"},
 			{"panics", http.StatusInternalServerError, "graph loader exploded"},
 		}
 		for _, tc := range cases {
@@ -145,6 +153,7 @@ func TestSubgraphSpawnFailFlow(t *testing.T) {
 				assert.Equal(float64(0), stateVal(out.State, "outFields"))
 
 				// No child flow was created for the caller step.
+				assert.Zero(enginetest.CountRows(t, eng, 1, "SELECT COUNT(*) FROM dwarf_flows WHERE workflow_url=?", spawnFailPrefix+"/"+tc.child))
 				history, err := eng.History(ctx, flowKey)
 				if assert.NoError(err) && assert.Len(history, 1) {
 					assert.False(history[0].Subgraph)

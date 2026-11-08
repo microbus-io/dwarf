@@ -1430,3 +1430,23 @@ func TestTransition_ForEachAliasDefaultsOnDecode(t *testing.T) {
 	assert.NoError(json.Unmarshal([]byte(`{"from":"S","to":"W"}`), &tr))
 	assert.Equal("", tr.As, "a transition with no forEach takes no alias")
 }
+
+// TestGraph_ValidateRejectsAnEmptyTaskName pins that a task named "" is refused. Dispatch reads an empty
+// successor name as "no successor", so a graph that routes to a task named "" would complete the flow without
+// ever running that task's URL. Both a constructed graph and one decoded from JSON go through Validate.
+func TestGraph_ValidateRejectsAnEmptyTaskName(t *testing.T) {
+	assert := testarossa.For(t)
+
+	g := NewGraph("Test")
+	g.SetURL("Start", "svc/start")
+	g.SetURL("", "svc/empty")
+	g.AddTransition("Start", "")
+	g.AddTransition("", End)
+	assert.Error(g.Validate())
+
+	data, err := json.Marshal(g)
+	assert.Must(assert.NoError(err))
+	var decoded Graph
+	assert.Must(assert.NoError(json.Unmarshal(data, &decoded)))
+	assert.Error(decoded.Validate())
+}

@@ -27,7 +27,8 @@ address means (a function key, an HTTP endpoint, a message topic).
 By convention, **graph and task names are PascalCase** (`Reserve`, `Charge`) — they are
 graph-topology identifiers, distinct from the lowercased URLs they dispatch to and from the camelCase
 **state fields** tasks read and write (`lineItems`, `loopsLeft`). Keeping the three namespaces visually
-distinct makes graphs easier to read; the engine itself imposes no casing.
+distinct makes graphs easier to read; the engine itself imposes no casing. A task name must not be empty, and
+`END` is the terminal, not a task.
 
 The **entry point** defaults to the first task bound. Override it with `g.SetEntryPoint("Reserve")`.
 
