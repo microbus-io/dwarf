@@ -33,6 +33,9 @@ import (
 //
 // Each document is also known by its record count and the sum of its records' ids, so a task handed one can check it
 // arrived whole (holds) without comparing bytes, which the database does not keep: PostgreSQL's JSONB reorders keys.
+// The documents are drawn from a generator seeded by the size alone, so every process builds the same ones: a scatter
+// element written by one replica is read by another, or by the same replica after a restart, and a per-process random
+// pool would fail every such read.
 type jsonPayloads struct {
 	docs []json.RawMessage
 	keys map[jsonDocKey]struct{}
@@ -52,8 +55,9 @@ const jsonPayloadPoolBytes = 64 << 20
 func newJSONPayloads(size int) *jsonPayloads {
 	n := min(1024, max(2, jsonPayloadPoolBytes/max(size, 1)))
 	j := &jsonPayloads{docs: make([]json.RawMessage, n), keys: make(map[jsonDocKey]struct{}, n)}
+	r := rand.New(rand.NewPCG(uint64(size), 0x6a736f6e))
 	for i := range j.docs {
-		j.docs[i] = jsonDoc(size)
+		j.docs[i] = jsonDoc(r, size)
 		key, err := keyOfJSONDoc(j.docs[i])
 		if err != nil {
 			panic(err)
@@ -103,11 +107,11 @@ func (j *jsonPayloads) next() json.RawMessage {
 }
 
 // jsonDoc builds an array of records no larger than size bytes, as many as fit, and at least one.
-func jsonDoc(size int) json.RawMessage {
+func jsonDoc(r *rand.Rand, size int) json.RawMessage {
 	b := make([]byte, 0, size)
 	b = append(b, '[')
 	for {
-		rec := jsonRecord()
+		rec := jsonRecord(r)
 		if len(b) > 1 && len(b)+1+len(rec)+1 > size {
 			break
 		}
@@ -130,14 +134,14 @@ var jsonWords = []string{
 }
 
 // jsonRecord returns one record, about 250-300 bytes of JSON.
-func jsonRecord() []byte {
-	w := func() string { return jsonWords[rand.IntN(len(jsonWords))] }
+func jsonRecord(r *rand.Rand) []byte {
+	w := func() string { return jsonWords[r.IntN(len(jsonWords))] }
 	return fmt.Appendf(nil,
 		`{"id":%d,"sku":"%s-%04d-%04d","name":"%s %s %s","category":"%s","status":"%s","qty":%d,"price":%d.%02d,`+
 			`"active":%t,"tags":["%s","%s"],"warehouse":{"region":"%s","bin":"%s-%03d"},`+
 			`"updated":"2026-%02d-%02dT%02d:%02d:%02dZ"}`,
-		rand.IntN(10_000_000), w(), rand.IntN(10_000), rand.IntN(10_000), w(), w(), w(), w(), w(),
-		1+rand.IntN(50), rand.IntN(1000), rand.IntN(100),
-		rand.IntN(2) == 0, w(), w(), w(), w(), rand.IntN(1000),
-		1+rand.IntN(12), 1+rand.IntN(28), rand.IntN(24), rand.IntN(60), rand.IntN(60))
+		r.IntN(10_000_000), w(), r.IntN(10_000), r.IntN(10_000), w(), w(), w(), w(), w(),
+		1+r.IntN(50), r.IntN(1000), r.IntN(100),
+		r.IntN(2) == 0, w(), w(), w(), w(), r.IntN(1000),
+		1+r.IntN(12), 1+r.IntN(28), r.IntN(24), r.IntN(60), r.IntN(60))
 }

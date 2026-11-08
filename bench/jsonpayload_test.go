@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"encoding/json"
+	"math/rand/v2"
 	"testing"
 
 	"github.com/microbus-io/testarossa"
@@ -61,7 +62,7 @@ func TestJSONPayload_SizedValidAndCompressible(t *testing.T) {
 
 	// A size below one record still yields one whole record.
 	var one []map[string]any
-	assert.NoError(json.Unmarshal(jsonDoc(10), &one))
+	assert.NoError(json.Unmarshal(jsonDoc(rand.New(rand.NewPCG(1, 2)), 10), &one))
 	assert.Len(one, 1)
 	// A large size builds only as many documents as the pool bound allows.
 	assert.Len(newJSONPayloads(jsonPayloadPoolBytes/4).docs, 4)
@@ -87,7 +88,12 @@ func TestJSONPayload_HoldsKnowsItsDocumentsWhole(t *testing.T) {
 	short, err := json.Marshal(records[:len(records)-1])
 	assert.NoError(err)
 	assert.False(j.holds(short))
-	assert.False(j.holds(jsonDoc(4 * 1024)))
+	assert.False(j.holds(jsonDoc(rand.New(rand.NewPCG(1, 2)), 4*1024)))
+
+	// Another process builds the same documents, so a document one replica wrote is one the other holds.
+	other := newJSONPayloads(4 * 1024)
+	assert.True(other.holds(j.docs[0]))
+	assert.True(other.holds(j.docs[len(j.docs)-1]))
 	assert.False(j.holds([]byte(`"x"`)))
 	assert.Len(j.nextN(5), 5)
 }
