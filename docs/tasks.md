@@ -111,7 +111,7 @@ var order struct{ ID int64 `json:"orderID"` }
 f.Get("orderID", &order.ID)             // exact — a typed target
 
 var loose any
-f.Get("orderID", &loose)                // ROUNDS to ...800 — untyped lands in a float64
+f.Get("orderID", &loose)                // ROUNDED — untyped lands in a float64: 1234567890123456768
 ```
 
 **Typed integer accessors are exact.** `GetInt` and a `Get` into an integer-typed target decode straight into
