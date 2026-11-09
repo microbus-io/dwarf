@@ -101,6 +101,7 @@ func init() {
 		return e.listLive(ctx, query, slices.Concat(openStatuses, closedStatuses), "list_open")
 	}
 	engineseams.ArchiveNow = func(eng any, ctx context.Context) { eng.(*Engine).reapPass(ctx, 0) }
+	engineseams.FlowsClosed = func(eng any) int64 { return eng.(*Engine).flowsClosedCount.Load() }
 	engineseams.ArchiveDays = func(eng any, ctx context.Context, shard int) ([]int, error) {
 		set := eng.(*Engine).archives.Load()
 		if set == nil || set.byShard[shard] == nil {

@@ -20,24 +20,34 @@ import "time"
 
 // FlowSummary is a flow's metadata, as the lists and Engine.Summary return it.
 type FlowSummary struct {
-	FlowKey      string `json:"flowKey,omitzero"`
-	WorkflowURL  string `json:"workflowURL,omitzero"`
+	// FlowKey is the flow's key, which the operations on one flow take.
+	FlowKey string `json:"flowKey,omitzero"`
+	// WorkflowURL is the URL the flow's graph was loaded from, as Create was given it.
+	WorkflowURL string `json:"workflowURL,omitzero"`
+	// WorkflowName is the graph's name, as workflow.NewGraph was given it.
 	WorkflowName string `json:"workflowName,omitzero"`
-	Status       string `json:"status,omitzero"`
+	// Status is the flow's status: running or interrupted while it is open; completed, failed, terminated or cancelled
+	// once it has closed.
+	Status string `json:"status,omitzero"`
 	// StoppedTaskName is the task the flow stopped at: the step that completed, failed or cancelled it, or the
 	// step it is interrupted at, which a Terminate of an interrupted flow keeps. It is empty while the flow is
 	// running, and for a stop with no single step.
 	StoppedTaskName string `json:"stoppedTaskName,omitzero"`
 	// Error is the task error string when Status is "failed". A message over 16 KB is cut to that size and ends
 	// with " ... [truncated]".
-	Error           string `json:"error,omitzero"`
+	Error string `json:"error,omitzero"`
+	// TerminateReason is the reason passed to Terminate, or the one the engine gives when a flow's expiration
+	// terminates it. Populated when Status is "terminated".
 	TerminateReason string `json:"terminateReason,omitzero"`
 	// CancelReason is the reason string passed to Cancel(flowKey, reason). Populated when Status is "cancelled".
-	CancelReason string    `json:"cancelReason,omitzero"`
-	CreatedAt    time.Time `json:"createdAt,omitzero"`
-	// Use StartedAt for duration metrics; CreatedAt for when the flow first appeared. StartedAt is
-	// when this attempt began dispatching, distinct from CreatedAt, when the flow was first created.
+	CancelReason string `json:"cancelReason,omitzero"`
+	// CreatedAt is when the flow was created, by the database's clock.
+	CreatedAt time.Time `json:"createdAt,omitzero"`
+	// StartedAt is when the flow began running: the same as CreatedAt for a flow Create, Continue or a subgraph made,
+	// and for a Fork's new flow when its copy of the original was complete. Measure a flow's duration from it.
 	StartedAt time.Time `json:"startedAt,omitzero"`
+	// UpdatedAt is when the flow last changed status - for a closed flow, when it closed. ListOpen and
+	// ListRecentlyClosed window and order on it.
 	UpdatedAt time.Time `json:"updatedAt,omitzero"`
 	// ArchivedAt is when the flow moved to the archive, normally about a minute after it closed, by the database's
 	// clock; zero for a flow not archived. ListClosed orders by it.

@@ -18,7 +18,7 @@ limitations under the License.
 // engine: the names of the engine's fault-injection, checkpoint and recorded-variable seams, Join for their
 // targeted forms, DB and Seams, which reach a running engine's shard set and seam registry, ListLive,
 // ArchiveNow and ArchiveDays, which list the live tables in every status, archive what just closed and read the
-// archive's days, SetRefillInterval, the benchmark override of the refill cycle period, and ShardBudget, the pool
+// archive's days, FlowsClosed, the count of flows an engine closed, SetRefillInterval, the benchmark override of the refill cycle period, and ShardBudget, the pool
 // the engine derives for a shard.
 //
 // The engine fires these seams from its own production code and consults one seamster.Seamster per engine,
@@ -61,6 +61,11 @@ var ArchiveNow func(eng any, ctx context.Context)
 // ArchiveDays reads the archive days whose tables exist on a shard, ascending, for a benchmark that counts or sizes
 // the archive.
 var ArchiveDays func(eng any, ctx context.Context, shard int) ([]int, error)
+
+// FlowsClosed counts the flows this engine has closed - completed, failed, terminated or cancelled - with an atomic
+// read that needs no meter, for a benchmark to sum over the engines it runs in process. A flow is closed by whichever
+// replica dispatches its last step, so one engine's count means nothing alone.
+var FlowsClosed func(eng any) int64
 
 // SetRefillInterval pins every shard's refill cycle period to d on a running or configured engine, for a
 // benchmark sweep to hold the period at fixed values, or a fixture whose backlog makes the derived period too

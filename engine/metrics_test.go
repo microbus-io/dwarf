@@ -1022,7 +1022,7 @@ func TestMetrics_StartedAndClosedBalanceAcrossTrees(t *testing.T) {
 	}
 	balanced := func(t *testing.T) {
 		assert := testarossa.For(t)
-		assert.Equal(eng.FlowsStarted(), eng.FlowsClosed(), "started and ended disagree")
+		assert.Equal(eng.flowsStartedCount.Load(), eng.flowsClosedCount.Load(), "started and ended disagree")
 	}
 
 	t.Run("fork_inside_a_subgraph", func(t *testing.T) {

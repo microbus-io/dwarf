@@ -151,11 +151,11 @@ type Engine struct {
 	// which every shard's Linker reads through; 0 derives it from the process's memory limit (stateCacheBudget).
 	stateCacheBytes int64
 
-	// flowsStartedCount / flowsClosedCount are cheap in-memory lifecycle counts, incremented
-	// alongside the dwarf_flows_started / dwarf_flows_closed OTEL counters but WITHOUT needing a
-	// configured meter (the default provider is a no-op). They let an embedder read in-flight work
-	// (started - ended) with an atomic load - no OTEL reader, no query. Used by the open-loop load
-	// generator to bound outstanding flows; generally useful for backpressure.
+	// flowsStartedCount / flowsClosedCount count this replica's flow starts and closes beside the
+	// dwarf_flows_started / dwarf_flows_closed counters, readable with no meter configured. They are per
+	// replica - a flow started on one is closed by whichever dispatches its last step - so only a sum over
+	// every engine in a process means anything: the load generator sums FlowsClosed (engineseams) over its
+	// in-process engines to bound outstanding flows, and a test with one engine compares the two.
 	flowsStartedCount atomic.Int64
 	flowsClosedCount  atomic.Int64
 
@@ -712,15 +712,6 @@ func (e *Engine) setRefillInterval(d time.Duration) error {
 	return nil
 }
 
-// FlowsStarted returns the count of flows this engine has started (Create/Continue/Fork/subgraph),
-// a cheap atomic read that needs no configured meter. FlowsClosed is its counterpart; started - closed
-// approximates the open flows, for backpressure.
-func (e *Engine) FlowsStarted() int64 { return e.flowsStartedCount.Load() }
-
-// FlowsClosed returns the count of flows this engine has closed: completed, failed, terminated or cancelled. See
-// FlowsStarted.
-func (e *Engine) FlowsClosed() int64 { return e.flowsClosedCount.Load() }
-
 // SetHost registers the host the engine reaches the outside world through: it loads graphs and executes
 // tasks. Host has exactly two methods, LoadGraph and ExecuteTask, both required. Construction-time only.
 func (e *Engine) SetHost(h Host) error {
@@ -792,8 +783,9 @@ func (e *Engine) SetDebugLogger() error {
 
 // --- Lifecycle ---
 
-// Startup initializes the engine: opens database connections, runs migrations,
-// and starts worker goroutines.
+// Startup opens the connections to every shard, applies the schema migrations each shard is missing, and starts the
+// engine's workers and background loops; every other operation returns 503 until it has returned nil. On PostgreSQL it
+// fails unless it connects as the role that owns the dwarf tables. Calling it on a started engine is a 409.
 func (e *Engine) Startup(ctx context.Context) error {
 	if e.started.Load() {
 		return errors.New("engine is already started", http.StatusConflict)
@@ -1431,7 +1423,12 @@ func (e *Engine) Create(ctx context.Context, workflowURL string, initialState an
 	return e.create(ctx, workflowURL, initialState, opts)
 }
 
-// Snapshot returns the current state and status of a flow.
+// Snapshot returns a flow's outcome as it stands: its status, and for a closed flow its final state and its error or
+// reason. For an interrupted flow, State is the state at the interrupt and InterruptPayload what flow.Interrupt was
+// passed - of the interrupt the next Resume resolves, when several are pending. A running flow has an empty State:
+// the state of work in progress is not assembled. Any flow key works, a subgraph child's included, and so does an
+// archived flow's, or one marked for deletion until it is removed. Returns 404 for an unknown key, including a
+// deleted flow, and 400 for a malformed one.
 func (e *Engine) Snapshot(ctx context.Context, flowKey string) (outcome *workflow.FlowOutcome, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
@@ -1439,7 +1436,10 @@ func (e *Engine) Snapshot(ctx context.Context, flowKey string) (outcome *workflo
 	return e.snapshot(ctx, flowKey)
 }
 
-// Fingerprint returns a fingerprint and status for change detection.
+// Fingerprint returns a short digest of a flow's progress and its status, for a caller polling for change: the
+// fingerprint differs whenever the flow's status does, or a step of the flow or of any subgraph beneath it is created
+// or changes, and is the same while nothing does, so a caller can poll it and read Snapshot or History only when it
+// moves. Errors as Snapshot.
 func (e *Engine) Fingerprint(ctx context.Context, flowKey string) (fingerprint string, status string, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return "", "", errors.Trace(err)
@@ -1447,7 +1447,12 @@ func (e *Engine) Fingerprint(ctx context.Context, flowKey string) (fingerprint s
 	return e.fingerprint(ctx, flowKey)
 }
 
-// Resume continues a flow paused by flow.Interrupt.
+// Resume continues a flow paused by flow.Interrupt, addressed by its root flow key, whichever subgraph the interrupt
+// is in. resumeData goes to the interrupted task, as what its flow.Interrupt call returns when the task runs again;
+// it is not written to the flow's state, so a task that needs it there sets it. Each call resolves one interrupt -
+// the one Snapshot reports - and the flow runs again once none is left. Returns 404 for an unknown key, 400 for a
+// malformed key or a subgraph child's, or resume data that is not JSON-marshalable, 413 for resume data over the
+// size limit, and 409 for a flow that is not interrupted, including one a Terminate stopped first.
 func (e *Engine) Resume(ctx context.Context, flowKey string, resumeData any) error {
 	if err := e.ensureStarted(); err != nil {
 		return errors.Trace(err)
@@ -1504,7 +1509,11 @@ func (e *Engine) Fork(ctx context.Context, stepKey string, stateOverrides any) (
 	return e.forkFlow(ctx, stepKey, stateOverrides)
 }
 
-// History returns the step-by-step execution history of a flow.
+// History returns a flow's steps, ordered by depth, each with its key, task, status, error, timing and links to
+// the steps before and after it. A step that ran a subgraph carries the child's key and steps in SubgraphKey and
+// SubHistory. The steps carry no State or Changes: Step returns one step's. Any flow key works, a subgraph child's
+// included, and so does an archived flow's. Returns 404 for an unknown key, including a flow deleted or marked for
+// deletion, and 400 for a malformed one.
 func (e *Engine) History(ctx context.Context, flowKey string) (steps []workflow.FlowStep, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
@@ -1523,7 +1532,9 @@ func (e *Engine) Summary(ctx context.Context, flowKey string) (summary *workflow
 	return e.summary(ctx, flowKey)
 }
 
-// Step returns details of a single step.
+// Step returns one step by its key, as History lists it but with its State, the input it ran on, and its Changes,
+// what it wrote. Step keys come from History, from FlowSummary.ParentStepKey, and from a task's own flow.StepKey.
+// Returns 404 for an unknown key and 400 for a malformed one.
 func (e *Engine) Step(ctx context.Context, stepKey string) (step *workflow.FlowStep, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
@@ -1603,7 +1614,7 @@ func (e *Engine) ListRecentlyClosed(ctx context.Context, query workflow.Query) (
 
 // Delete removes a closed flow and its subgraph subtree. An archived flow is deleted at once. One not archived yet -
 // the minute after it closes - is marked for deletion, and a background reaper removes it shortly after, without
-// archiving it: History returns 404 for it immediately, though Snapshot/Await/Run still report its
+// archiving it: History and Summary return 404 for it immediately, though Snapshot and Await still report its
 // outcome until the reaper removes it, and calling Delete on it again is success. Returns 404 for an unknown key,
 // including a flow already deleted from the archive; 400 for a subgraph-child key (address the root instead); and 409
 // for an open flow: Terminate it first.
@@ -1616,7 +1627,8 @@ func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 
 // Purge removes the closed flows ListClosed would list for a query, and their subgraph subtrees, oldest archived
 // first: at most Query.Limit roots in a call, each deleted at once. A flow closed in the last minute is not archived
-// yet, so it is not in ListClosed and Purge leaves it; a later call takes it, and Delete removes one by its key. Open
+// yet, so it is not in ListClosed and Purge leaves it - ListRecentlyClosed lists it; a later call takes it, and Delete
+// removes one by its key. Open
 // flows are never touched, and a Query.Status that is not closed is a 400, as is IncludeSubgraphs (a subgraph child is
 // removed with its root).
 //

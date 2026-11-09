@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/workflow"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
@@ -160,7 +161,7 @@ func watchProgress(ctx context.Context, engines []*engine.Engine, readers []*sdk
 	ended := func() int64 {
 		var n int64
 		for _, e := range engines {
-			n += e.FlowsClosed()
+			n += engineseams.FlowsClosed(e)
 		}
 		return n
 	}
@@ -438,7 +439,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 // nothing to bind on). Open loop is what puts the refiller under the deep backlog it exists for, and it
 // separates two latencies the closed loop conflates: admission (the Create call) and end-to-end.
 //
-// Outstanding is bounded to maxOutstanding (created - Sum(FlowsClosed) across engines, a cheap
+// Outstanding is bounded to maxOutstanding (created - the sum of engineseams.FlowsClosed across engines, a cheap
 // atomic read - no per-flow Await, which under a deep backlog would park tens of thousands of callers and
 // put every one of their flow ids in the latch detector's per-shard lookup). Completion latency is SAMPLED
 // by a small bounded pool of
@@ -457,7 +458,7 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 	ended := func() int64 {
 		var n int64
 		for _, e := range engines {
-			n += e.FlowsClosed()
+			n += engineseams.FlowsClosed(e)
 		}
 		return n
 	}
