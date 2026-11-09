@@ -20,10 +20,10 @@ import "time"
 
 // Query specifies the filters, the time window and the limit for listing or purging flows.
 //
-// The window is FromTime, inclusive, to ToTime, exclusive. ListClosed and Purge need both; for ListOpen each is
-// optional. Times compare to the millisecond.
-// ListOpen's window is on when a flow last changed status (FlowSummary.UpdatedAt); ListClosed's and Purge's on when a
-// flow was archived (FlowSummary.ArchivedAt), and may reach at most 31 days.
+// The window is FromTime, inclusive, to ToTime, exclusive. ListClosed and Purge need both; for ListOpen and
+// ListRecentlyClosed each is optional. Times compare to the millisecond.
+// ListOpen's and ListRecentlyClosed's window is on when a flow last changed status (FlowSummary.UpdatedAt);
+// ListClosed's and Purge's on when a flow was archived (FlowSummary.ArchivedAt), and may reach at most 31 days.
 type Query struct {
 	Status      string `json:"status,omitzero"`
 	WorkflowURL string `json:"workflowURL,omitzero"`
@@ -42,11 +42,11 @@ type Query struct {
 	// Priority filters to flows at this scheduling priority band. Zero disables the filter
 	// (valid priorities are >= 1).
 	Priority int `json:"priority,omitzero"`
-	// FromTime is the window's lower bound, inclusive: ListOpen lists flows last updated at or after it,
-	// ListClosed flows archived at or after it. Zero disables it.
+	// FromTime is the window's lower bound, inclusive: ListOpen and ListRecentlyClosed list flows last updated at or
+	// after it, ListClosed flows archived at or after it. Zero disables it.
 	FromTime time.Time `json:"fromTime,omitzero"`
-	// ToTime is the window's upper bound, exclusive: ListOpen lists flows last updated before it, ListClosed flows
-	// archived before it. Zero disables it.
+	// ToTime is the window's upper bound, exclusive: ListOpen and ListRecentlyClosed list flows last updated before it,
+	// ListClosed flows archived before it. Zero disables it.
 	ToTime time.Time `json:"toTime,omitzero"`
 	// IncludeSubgraphs adds subgraph-child flows to the results alongside roots. They are excluded by default -
 	// a subgraph child is an internal execution detail most callers never want in a list. Pair it with
@@ -63,7 +63,7 @@ type Query struct {
 	// the flow key. Any '%' or '_' in the value is matched literally, not as a wildcard, so "a_b" matches only
 	// "a_b" (not "axb") and "50%" matches only a literal "50%".
 	Search string `json:"search,omitzero"`
-	// Limit is the most flows ListOpen and ListClosed return, and the most roots Purge removes: required, at most
+	// Limit is the most flows a list returns, and the most roots Purge removes: required, at most
 	// 65,536. The result is the first Limit in the call's order across every shard queried. A search over many days
 	// wants a low Limit; a walk through a time range wants short windows.
 	Limit int `json:"limit,omitzero"`

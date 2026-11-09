@@ -63,7 +63,8 @@ func stampArchived(t *testing.T, e *Engine, day, rootID int, at time.Time) {
 // TestList_EachListReadsItsOwnTables pins the split between the two lists over the live tables and three archive days:
 // ListClosed reads the archive alone, newest archived first, windowed on the archive time from inclusive to exclusive,
 // with ArchivedAt on every flow, a Limit that keeps the order's prefix, the subgraph children with IncludeSubgraphs,
-// and Purge's ascending order the same list reversed; a flow closed but not archived yet is in neither list.
+// and Purge's ascending order the same list reversed; a flow closed but not archived yet is in ListRecentlyClosed alone,
+// with its subgraph children by IncludeSubgraphs, by status, and not once it is marked for deletion.
 func TestList_EachListReadsItsOwnTables(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -102,10 +103,31 @@ func TestList_EachListReadsItsOwnTables(t *testing.T) {
 	}
 	open, err := e.ListOpen(ctx, workflow.Query{Limit: 100})
 	assert.NoError(err)
-	assert.Len(open, 0, "the flows closed but not archived yet are in neither list")
+	assert.Len(open, 0, "the flows closed but not archived yet are not open")
 	live, err := engineseams.ListLive(e, ctx, workflow.Query{Limit: 100})
 	assert.NoError(err)
 	assert.Equal([]int{roots[4], roots[3]}, idsOf(t, live), "they are in the live tables")
+	recent, err := e.ListRecentlyClosed(ctx, workflow.Query{Limit: 100})
+	assert.NoError(err)
+	assert.Equal([]int{roots[4], roots[3]}, idsOf(t, recent), "ListRecentlyClosed lists them, and nothing archived")
+	for _, f := range recent {
+		assert.True(f.ArchivedAt.IsZero(), "not archived")
+		assert.False(f.UpdatedAt.IsZero(), "closed at")
+	}
+	recent, err = e.ListRecentlyClosed(ctx, workflow.Query{Limit: 1})
+	assert.NoError(err)
+	assert.Equal([]int{roots[4]}, idsOf(t, recent), "the most recently closed first")
+	recent, err = e.ListRecentlyClosed(ctx, workflow.Query{Limit: 100, IncludeSubgraphs: true})
+	assert.NoError(err)
+	assert.Len(recent, 4, "each live root and its subgraph child")
+	if assert.Len(live, 2) {
+		recent, err = e.ListRecentlyClosed(ctx, workflow.Query{Limit: 100, Status: live[0].Status})
+		assert.NoError(err)
+		assert.Contains(idsOf(t, recent), roots[4], "by its status")
+	}
+	recent, err = e.ListRecentlyClosed(ctx, workflow.Query{Limit: 100, Status: workflow.StatusCancelled})
+	assert.NoError(err)
+	assert.Len(recent, 0, "no flow was cancelled")
 
 	for limit := 1; limit <= 4; limit++ {
 		q := window
@@ -161,6 +183,11 @@ func TestList_EachListReadsItsOwnTables(t *testing.T) {
 	if assert.Len(rows, 1) {
 		assert.Equal(roots[0], rows[0].flowID, "ascending, each day's read keeps its oldest")
 	}
+
+	assert.NoError(e.Delete(ctx, live[1].FlowKey))
+	recent, err = e.ListRecentlyClosed(ctx, workflow.Query{Limit: 100})
+	assert.NoError(err)
+	assert.Equal([]int{roots[4]}, idsOf(t, recent), "a flow marked for deletion is not listed")
 }
 
 // TestList_MergeOrdersAcrossShards pins the cross-shard merge of both lists: by time, then shard ascending, then flow
@@ -275,6 +302,8 @@ func TestList_RequiredInputsAndStatuses(t *testing.T) {
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "ListOpen: %s", name)
 		_, err = e.ListClosed(ctx, q)
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "ListClosed: %s", name)
+		_, err = e.ListRecentlyClosed(ctx, q)
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "ListRecentlyClosed: %s", name)
 	}
 	for name, q := range map[string]workflow.Query{
 		"no lower bound": {ToTime: now.Add(time.Hour), Limit: 10},
@@ -285,12 +314,16 @@ func TestList_RequiredInputsAndStatuses(t *testing.T) {
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "ListClosed: %s", name)
 		_, err = e.ListOpen(ctx, q)
 		assert.NoError(err, "ListOpen: %s", name)
+		_, err = e.ListRecentlyClosed(ctx, q)
+		assert.NoError(err, "ListRecentlyClosed: %s", name)
 	}
 	max := ok
 	max.Limit = maxListLimit
 	_, err := e.ListOpen(ctx, max)
 	assert.NoError(err)
 	_, err = e.ListClosed(ctx, max)
+	assert.NoError(err)
+	_, err = e.ListRecentlyClosed(ctx, max)
 	assert.NoError(err)
 
 	for _, status := range []string{workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusTerminated, workflow.StatusCancelled} {
@@ -300,6 +333,8 @@ func TestList_RequiredInputsAndStatuses(t *testing.T) {
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "ListOpen of %s", status)
 		_, err = e.ListClosed(ctx, q)
 		assert.NoError(err, "ListClosed of %s", status)
+		_, err = e.ListRecentlyClosed(ctx, q)
+		assert.NoError(err, "ListRecentlyClosed of %s", status)
 	}
 	for _, status := range []string{workflow.StatusRunning, workflow.StatusInterrupted} {
 		q := ok
@@ -308,6 +343,8 @@ func TestList_RequiredInputsAndStatuses(t *testing.T) {
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "ListClosed of %s", status)
 		_, err = e.ListOpen(ctx, q)
 		assert.NoError(err, "ListOpen of %s", status)
+		_, err = e.ListRecentlyClosed(ctx, q)
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "ListRecentlyClosed of %s", status)
 	}
 }
 

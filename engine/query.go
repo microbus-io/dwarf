@@ -35,7 +35,7 @@ import (
 	"github.com/microbus-io/sequel"
 )
 
-// maxListLimit is the most flows ListOpen and ListClosed return in a call. It must stay above the reaper's batch
+// maxListLimit is the most flows a list returns in a call. It must stay above the reaper's batch
 // (reapBatch roots, about reapBatchRows flows): a batch's trees share one archived_at, and a caller paging ListClosed
 // by window cannot page across a tie larger than its Limit (TestList_TheLimitIsAboveAReaperBatch). A batch takes at
 // least one tree however large, so with IncludeSubgraphs one tree of more flows than this is a tie no walk pages across.
@@ -156,6 +156,10 @@ func (e *Engine) listFilters(driverName string, shardIdx int, query workflow.Que
 // among them: it is only ever seen inside Fork's uncommitted clone.
 var openStatuses = []string{workflow.StatusRunning, workflow.StatusInterrupted}
 
+// closedStatuses are the statuses of a flow that has closed, each a branch of ListRecentlyClosed's statement.
+var closedStatuses = []string{workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusTerminated,
+	workflow.StatusCancelled}
+
 // listOpen lists the open flows - running or interrupted - in the live tables, newest updated first across shards. Its
 // window is optional: the live tables are one table per shard, however wide the window.
 //
@@ -170,9 +174,19 @@ func (e *Engine) listOpen(ctx context.Context, query workflow.Query) ([]workflow
 	return e.listLive(ctx, query, openStatuses, "list_open")
 }
 
+// listRecentlyClosed lists the closed flows still in the live tables - not archived yet - newest updated first across
+// shards, with listOpen's statement: a closed flow's last write is the one that closed it, so updated_at is when.
+func (e *Engine) listRecentlyClosed(ctx context.Context, query workflow.Query) ([]workflow.FlowSummary, error) {
+	if query.Status != "" && workflow.IsValidStatus(query.Status) && !workflow.IsTerminalStatus(query.Status) {
+		return nil, errors.New("ListRecentlyClosed lists closed flows; status %q is not closed", query.Status,
+			http.StatusBadRequest)
+	}
+	return e.listLive(ctx, query, closedStatuses, "list_recently_closed")
+}
+
 // listLive lists the flows in the live tables whose status is among statuses - or is query.Status, which must be one -
-// newest updated first across shards, with listOpen's statement. op names the operation for its turn's metric. Beside
-// ListOpen it serves the tests (engineseams.ListLive), which list the closed flows not archived yet as well.
+// newest updated first across shards, with listOpen's statement. op names the operation for its turn's metric. It
+// serves ListOpen, ListRecentlyClosed and the tests (engineseams.ListLive), which list every status at once.
 func (e *Engine) listLive(ctx context.Context, query workflow.Query, statuses []string, op string) ([]workflow.FlowSummary, error) {
 	limit, err := listLimit(query)
 	if err != nil {

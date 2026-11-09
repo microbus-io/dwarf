@@ -98,9 +98,7 @@ func init() {
 		if err := e.ensureStarted(); err != nil {
 			return nil, err
 		}
-		all := append(slices.Clone(openStatuses), workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusTerminated,
-			workflow.StatusCancelled)
-		return e.listLive(ctx, query, all, "list_open")
+		return e.listLive(ctx, query, slices.Concat(openStatuses, closedStatuses), "list_open")
 	}
 	engineseams.ArchiveNow = func(eng any, ctx context.Context) { eng.(*Engine).reapPass(ctx, 0) }
 	engineseams.ArchiveDays = func(eng any, ctx context.Context, shard int) ([]int, error) {

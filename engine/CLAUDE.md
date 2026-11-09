@@ -514,11 +514,11 @@ steps have `Subgraph=true` with nested `SubHistory` and the child's `SubgraphKey
 retry, the same one `SubHistory` shows), so a caller can `Snapshot` what the child returned. `Step` returns one step by key **with** its `state`/`changes`
 (refs resolved) - it is the payload-bearing reader; use it when you need a step's actual data.
 
-**ListOpen / ListClosed** - Return at most `Query.Limit` flows matching the `Query` filters within its window:
-`ListOpen` the open flows (`running`, `interrupted`) in the live tables, the most recently updated first; `ListClosed`
-the archived ones, the most recently archived first. A flow closed but not archived yet, about a minute, is in
-neither. No pagination (see "`ListOpen` and `ListClosed` are cross-shard
-top-Ns" under Database Sharding). Each returns a `Subgraph` bool in each `workflow.FlowSummary`. By default it returns **root flows only**;
+**ListOpen / ListRecentlyClosed / ListClosed** - Return at most `Query.Limit` flows matching the `Query` filters
+within its window: `ListOpen` the open flows (`running`, `interrupted`) in the live tables, the most recently updated
+first; `ListRecentlyClosed` the closed flows still in the live tables (not archived yet, about a minute), the most
+recently closed first; `ListClosed` the archived ones, the most recently archived first. No pagination (see "The
+lists are cross-shard top-Ns" under Database Sharding). Each returns a `Subgraph` bool in each `workflow.FlowSummary`. By default it returns **root flows only**;
 `Query.IncludeSubgraphs` adds subgraph children to the results. Combined with `WorkflowURL` (a graph that runs only
 as a subgraph has no root flows under that URL) this locates every run of a graph that executed as a subgraph.
 `Purge` **rejects** the flag with a 400 (`purge cannot include subgraphs`) rather than silently ignoring it, and
@@ -4345,8 +4345,8 @@ operator's to weight down; `dwarf_operation_seconds{op,shard}` is what lets them
 placement entirely (everything resident proceeds - execution, subgraph children, `Continue`, `Fork`); all
 shards cordoned is a loud 503 at `Create`. Pinned by `engine/poolsizing_test.go`.
 
-**`ListOpen` and `ListClosed` are cross-shard top-Ns, named by a flow's state, each reading one side of where flows
-are kept** (`query.go`). Each table they read on each shard returns its own first `Limit` in the list's order, and the engine
+**The lists are cross-shard top-Ns, named by a flow's state, each reading one side of where flows are kept**
+(`query.go`). Each table they read on each shard returns its own first `Limit` in the list's order, and the engine
 merges the shards in Go (`mergeByTime`) and keeps the first `Limit`. Both are strict: any shard error fails the whole
 call (the per-shard debug path is `ShardInfo` + `Query.Shard`). `Limit` is required, at most `maxListLimit` (65,536).
 - **`ListOpen`** reads the live tables only, the open statuses only. Ordered by `updated_at DESC`, ties by shard,
@@ -4354,6 +4354,8 @@ call (the per-shard debug path is `ShardInfo` + `Query.Shard`). `Limit` is requi
   one `UNION ALL` branch per open status (`listLive`), each a range of `(status, updated_at)` that stops at `Limit`:
   one scan over both statuses has no index order and would sort every open flow of the shard on every call. The
   same code with every status serves the tests (`engineseams.ListLive`).
+- **`ListRecentlyClosed`** is the same `listLive` over the closed statuses: the flows that closed and are not archived
+  yet. A closed flow's last write is the one that closed it, so `updated_at` is its close time.
 - **`ListClosed`** reads the archive's day tables only, never the live ones, ordered by `archived_at DESC`, ties
   likewise. Per shard it is one `UNION ALL` over every day the window reaches, each branch a derived table carrying
   its own `ORDER BY` and `LIMIT_OFFSET` (SQLite allows neither on a compound member; SQL Server allows an `ORDER BY`
@@ -4363,8 +4365,9 @@ call (the per-shard debug path is `ShardInfo` + `Query.Shard`). `Limit` is requi
 - **Do not mix the two sides in one list, and do not make `ListClosed` read the live tables for the last minute.**
   It puts two time axes in one window - `updated_at` for the unarchived, `archived_at` for the rest - and each way of
   placing the unarchived flows breaks a caller: counted as archived after now, a window ending at now misses the last
-  minute; windowed by their end, a forward poll sees each flow twice. So a flow closed in the last minute is in
-  neither list; it is read by key meanwhile. The godocs and [Driving Flows](https://docs.dwarf.run/building-workflows/flows/) say so.
+  minute; windowed by their end, a forward poll sees each flow twice. The unarchived closed flows are
+  `ListRecentlyClosed`'s instead, on its own axis. A caller combining the two calls `ListRecentlyClosed` first: a
+  flow archived between the calls then shows in both (deduped by key), where the other order loses it.
 - **`ListClosed`'s window is required and clamped, not refused**: both ends are required, since the window decides
   how many tables a statement reads. Its days are cut to the retention's first day and to today (plus one day past
   today when the window reaches it, for a database clock ahead of this process's), and the days a shard's record

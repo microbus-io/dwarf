@@ -67,7 +67,7 @@ limitations under the License.
 // # Operations
 //
 // Create makes a flow and runs it; Await blocks until it stops, and Poll answers within the caller's
-// budget; Run is Create+Await in one call. Snapshot/History/Step/ListOpen/ListClosed/Fingerprint inspect; Resume continues
+// budget; Run is Create+Await in one call. Snapshot/History/Step/ListOpen/ListRecentlyClosed/ListClosed/Fingerprint inspect; Resume continues
 // a paused flow; Cancel requests a graceful stop that tasks can catch, and Terminate a forceful one;
 // Continue starts a new flow from a completed one; Fork clones a closed flow from a chosen step into a new flow
 // for non-destructive recovery; Delete/Purge retain; ShardInfo summarizes each shard. See
@@ -93,7 +93,7 @@ limitations under the License.
 // a token-free "{shard}-{id}" correlation id), and there is deliberately no operation that resolves a
 // correlation id back to a key, which would be a capability-minting oracle.
 //
-// ListOpen and ListClosed return keys, tokens included — the only key-returning operations. Exposing them to a
+// ListOpen, ListRecentlyClosed and ListClosed return keys, tokens included — the only key-returning operations. Exposing them to a
 // principal is equivalent to granting the
 // write capability for every flow they return, so a host must gate them by ownership and never surface
 // them to less-than-fully-trusted callers. Key exposure is also transitive across an execution tree: Step

@@ -66,5 +66,5 @@ limitations under the License.
 // transition: each branch gets its own Flow.
 //
 // FlowOutcome, FlowStep and FlowSummary are the read-side result types returned by the engine's inspection
-// operations; Query is the filter ListOpen, ListClosed and Purge take.
+// operations; Query is the filter ListOpen, ListRecentlyClosed, ListClosed and Purge take.
 package workflow
