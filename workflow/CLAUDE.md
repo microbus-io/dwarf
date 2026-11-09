@@ -471,6 +471,18 @@ back where in process it backs off to a minute. Decoding saturates at the `Durat
 overflowing. Timestamps stay RFC 3339 strings. Field names are case-sensitive to any other implementation, though
 Go's decoder matches them case-insensitively; the golden files spell them exactly.
 
+**Every duration dwarf writes as JSON is an integer number of milliseconds**, its key ending `Millis` wherever
+dwarf names the key: the carrier's three, `FlowOptions`' `timeBudgetMillis` and `ShardSummary`'s `latencyMillis`
+(each Go field tagged `json:"-"` and written by the type's own `MarshalJSON`), and `SetDuration` in state, where the
+key is the author's. Do not add one in another unit, fractional seconds or a `"1.5s"` string: an integer is what
+`add`/`min`/`max` fold and a `when` expression compares, and it is exact in every language. Rounding follows what a
+zero would mean: a state value and a latency round to the nearest millisecond; a time budget, like a backoff base,
+rounds a positive fraction up, because its zero means the engine's default. **The trap is `Set` with a
+`time.Duration`** (or one in a Create's initial state): Go's encoder writes nanoseconds, which `GetDuration` reads as
+a duration a million times too long. `SetDuration` is the way in, and nothing intercepts `Set`. Pinned by
+`TestState_DurationIsWholeMilliseconds`, `TestFlowOptions_JSONTimeBudgetIsMilliseconds` and `engine`'s
+`TestShardSummary_JSONLatencyIsMilliseconds`.
+
 **The golden files under `testdata/carrier` are the conformance fixtures** (`carriers_test.go`): each direction for
 a task that writes and for each control signal, the bodies every decoder refuses (`refused.json`), and each
 reducer's fold (`reducers.json`). Each body is also decoded with its form's decoder and re-encoded, which must give

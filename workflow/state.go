@@ -172,8 +172,16 @@ func (s State) SetFloat(name string, value float64) { s.mustSet(name, value) }
 // SetBool stores a bool field (normalized through JSON, like Set).
 func (s State) SetBool(name string, value bool) { s.mustSet(name, value) }
 
-// SetDuration stores a time.Duration field, in nanoseconds (normalized through JSON, like Set).
-func (s State) SetDuration(name string, value time.Duration) { s.mustSet(name, value) }
+// SetDuration stores a time.Duration field as an integer number of milliseconds, rounded to the nearest one. Every
+// duration dwarf writes as JSON is in milliseconds, so a task in another language reads the field as a plain integer,
+// and a reducer (add, min, max) or a transition's when expression treats it as a number.
+//
+// Set and a Create's initial state store a time.Duration as Go encodes it, in nanoseconds, which GetDuration does
+// not read: write a duration with SetDuration, or as its Milliseconds.
+func (s State) SetDuration(name string, value time.Duration) { s.mustSet(name, millisRounded(value)) }
+
+// millisRounded is a duration as whole milliseconds, rounded to the nearest one: the stored form of SetDuration.
+func millisRounded(d time.Duration) int64 { return d.Round(time.Millisecond).Milliseconds() }
 
 // mustSet is Set for the typed setters, which have no error to return. The panic is live only for SetFloat's
 // NaN or infinity, the one primitive value that does not marshal.
@@ -420,14 +428,14 @@ func (s State) GetBool(name string) bool {
 	return v
 }
 
-// GetDuration returns the field as a time.Duration. It returns 0 if the field is absent or cleared, and
-// panics if the field holds anything but a duration in nanoseconds.
+// GetDuration returns the field, an integer number of milliseconds as SetDuration stores it, as a time.Duration.
+// It returns 0 if the field is absent or cleared, and panics if the field holds anything but an integer.
 func (s State) GetDuration(name string) time.Duration {
-	var v time.Duration
-	if _, err := s.Get(name, &v); err != nil {
+	var ms int64
+	if _, err := s.Get(name, &ms); err != nil {
 		panic(errors.Trace(err))
 	}
-	return v
+	return durationOfMillis(ms)
 }
 
 // Has reports whether a field is present and holds a value. A DELETED field reads as absent, which is what

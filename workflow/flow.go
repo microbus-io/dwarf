@@ -155,8 +155,8 @@ func (f *Flow) GetFloat(name string) float64 { return f.state.GetFloat(name) }
 // field holds a non-boolean.
 func (f *Flow) GetBool(name string) bool { return f.state.GetBool(name) }
 
-// GetDuration returns a state field as a time.Duration. It returns 0 if the field is absent, and panics
-// if the field holds anything but a duration in nanoseconds.
+// GetDuration returns a state field, an integer number of milliseconds as SetDuration stores it, as a
+// time.Duration. It returns 0 if the field is absent, and panics if the field holds anything but an integer.
 func (f *Flow) GetDuration(name string) time.Duration { return f.state.GetDuration(name) }
 
 // Get unmarshals the state field named name into target, a non-nil pointer, and reports whether the field
@@ -339,8 +339,11 @@ func (f *Flow) SetFloat(name string, value float64) { f.mustSet(name, value) }
 // SetBool writes a state bool field, as Set does.
 func (f *Flow) SetBool(name string, value bool) { f.mustSet(name, value) }
 
-// SetDuration writes a state time.Duration field, in nanoseconds, as Set does.
-func (f *Flow) SetDuration(name string, value time.Duration) { f.mustSet(name, value) }
+// SetDuration writes a state time.Duration field as an integer number of milliseconds, rounded to the nearest
+// one, as Set does. Every duration dwarf writes as JSON is in milliseconds, so a task in another language reads it
+// as a plain integer, and a reducer or a when expression treats it as a number. Set stores a time.Duration as Go
+// encodes it, in nanoseconds, which GetDuration does not read.
+func (f *Flow) SetDuration(name string, value time.Duration) { f.mustSet(name, millisRounded(value)) }
 
 // Overwrite replaces a state field with value, whatever reducer the field has; a nil value deletes it. Later
 // Sets in the same task combine onto the new value. Use it to reset or trim a reduced field, such as a

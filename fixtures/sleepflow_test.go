@@ -61,7 +61,7 @@ func TestSleepflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		sleepFor := 100 * time.Millisecond
-		initialState := map[string]any{"sleepFor": sleepFor}
+		initialState := map[string]any{"sleepFor": sleepFor.Milliseconds()}
 		start := time.Now()
 		_, outcome, err := eng.Run(ctx, "sleepflow.verify:428/delay", initialState, nil)
 		elapsed := time.Since(start)

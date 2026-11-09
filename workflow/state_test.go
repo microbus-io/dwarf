@@ -18,7 +18,9 @@ package workflow
 
 import (
 	"encoding/json"
+	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -687,10 +689,10 @@ func TestState_TypedGettersPreserveTypeAcrossJSONStorage(t *testing.T) {
 
 	s, _ := NewState()
 	s.SetInt("n", 42)
-	s.SetDuration("d", 1500)
+	s.SetDuration("d", 1500*time.Millisecond)
 
 	assert.Equal(42, s.GetInt("n"), "a typed read returns the type asked for")
-	assert.Equal(time.Duration(1500), s.GetDuration("d"))
+	assert.Equal(1500*time.Millisecond, s.GetDuration("d"))
 
 	var untyped any
 	ok, err := s.Get("n", &untyped)
@@ -873,4 +875,37 @@ func rawFieldState(t *testing.T, field, raw string) State {
 	}
 	s.SetJSON(field, json.RawMessage(raw))
 	return s
+}
+
+// TestState_DurationIsWholeMilliseconds pins the stored form of a duration: an integer number of milliseconds,
+// rounded to the nearest one, which GetDuration reads back and refuses as anything else.
+func TestState_DurationIsWholeMilliseconds(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	s, _ := NewState()
+	for d, ms := range map[time.Duration]int64{
+		0:                            0,
+		1500 * time.Millisecond:      1500,
+		1499*time.Microsecond + 999:  1, // 1.499999ms
+		1500 * time.Microsecond:      2, // half rounds away from zero
+		-1500 * time.Microsecond:     -2,
+		400 * time.Microsecond:       0,
+		200 * 24 * time.Hour:         200 * 24 * 3600 * 1000, // past 2^53 in nanoseconds
+		time.Duration(math.MaxInt64): math.MaxInt64 / int64(time.Millisecond),
+	} {
+		s.SetDuration("d", d)
+		raw := s.GetJSON("d")
+		assert.Equal(strconv.FormatInt(ms, 10), string(raw), "%v is stored as %d", d, ms)
+		assert.Equal(time.Duration(ms)*time.Millisecond, s.GetDuration("d"), "%v reads back", d)
+	}
+
+	panics := func() (panicked bool) {
+		defer func() { panicked = recover() != nil }()
+		s.GetDuration("d")
+		return false
+	}
+	s.SetFloat("d", 1.5)
+	assert.True(panics(), "a fraction is not a number of milliseconds")
+	s.SetString("d", "1.5s")
+	assert.True(panics(), "nor is a string")
 }

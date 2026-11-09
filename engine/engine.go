@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"maps"
 	"math"
 	"math/rand/v2"
@@ -57,8 +58,40 @@ type ShardSummary struct {
 	Index int `json:"index,omitzero"`
 	// Error is the failure of a trivial query to the shard, empty when the shard answered.
 	Error string `json:"error,omitzero"`
-	// Latency is the round trip of a trivial query to the shard.
-	Latency time.Duration `json:"latency,omitzero"`
+	// Latency is the round trip of a trivial query to the shard. In JSON it is "latencyMillis", an integer number of
+	// milliseconds rounded to the nearest one.
+	Latency time.Duration `json:"-"`
+}
+
+// shardSummaryJSON is ShardSummary's JSON form: its fields but Latency, which goes as whole milliseconds.
+type shardSummaryJSON struct {
+	*shardSummaryFields
+	LatencyMillis *int64 `json:"latencyMillis,omitempty"`
+}
+
+// shardSummaryFields is ShardSummary without its methods, so the JSON form can embed it without recursing.
+type shardSummaryFields ShardSummary
+
+// MarshalJSON encodes the summary, Latency as "latencyMillis".
+func (s ShardSummary) MarshalJSON() ([]byte, error) {
+	w := shardSummaryJSON{shardSummaryFields: (*shardSummaryFields)(&s)}
+	if ms := s.Latency.Round(time.Millisecond).Milliseconds(); ms != 0 {
+		w.LatencyMillis = &ms
+	}
+	b, err := json.Marshal(w)
+	return b, errors.Trace(err)
+}
+
+// UnmarshalJSON decodes the summary, Latency from "latencyMillis". An absent field leaves the value as it was.
+func (s *ShardSummary) UnmarshalJSON(data []byte) error {
+	w := shardSummaryJSON{shardSummaryFields: (*shardSummaryFields)(s)}
+	if err := json.Unmarshal(data, &w); err != nil {
+		return errors.Trace(err)
+	}
+	if w.LatencyMillis != nil {
+		s.Latency = time.Duration(*w.LatencyMillis) * time.Millisecond
+	}
+	return nil
 }
 
 const (

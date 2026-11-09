@@ -74,9 +74,9 @@ func TestFlow_GetSetStrings(t *testing.T) {
 func TestFlow_GetSetDuration(t *testing.T) {
 	assert := testarossa.For(t)
 	f := NewFlow()
-	err := f.Set("timeout", 5*time.Second)
-	assert.NoError(err)
+	f.SetDuration("timeout", 5*time.Second)
 	assert.Equal(5*time.Second, f.GetDuration("timeout"))
+	assert.Equal(5000, f.GetInt("timeout"), "stored as whole milliseconds")
 }
 
 func TestFlow_GetComplex(t *testing.T) {

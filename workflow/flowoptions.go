@@ -16,7 +16,12 @@ limitations under the License.
 
 package workflow
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+
+	"github.com/microbus-io/errors"
+)
 
 // FlowOptions sets a flow's policy at genesis - Create or Run only. Derived operations (Continue, Fork)
 // do not take FlowOptions; they inherit policy from their source, so the operation is the
@@ -43,7 +48,9 @@ type FlowOptions struct {
 	// milliseconds, so a sub-millisecond value would truncate to zero and dispatch every task with a
 	// deadline that has already passed - and one over just under 24.8 days, the most the stored count of
 	// milliseconds holds. A task that waits for days should Sleep or Interrupt instead.
-	TimeBudget time.Duration `json:"timeBudget,omitzero"`
+	//
+	// In JSON it is "timeBudgetMillis", an integer number of milliseconds, a positive fraction of one rounded up.
+	TimeBudget time.Duration `json:"-"`
 	// DeleteOnCompletion marks the flow (and its subgraph subtree) for deletion once it completes
 	// successfully - for fire-and-forget jobs whose output is not retained. A failed, terminated or
 	// cancelled flow is archived like any other. Deletion is deferred: the flow lingers for a short grace window during
@@ -57,4 +64,36 @@ type FlowOptions struct {
 	// context - read it with BaggageFrom(ctx). Any JSON-marshalable object (a struct or map); the host
 	// receives it back as a workflow.State, exactly like flow state. A non-object value is delivered as an empty State.
 	Baggage any `json:"baggage,omitzero"`
+}
+
+// flowOptionsJSON is FlowOptions' JSON form: its fields but TimeBudget, which goes as whole milliseconds.
+type flowOptionsJSON struct {
+	*flowOptionsFields
+	TimeBudgetMillis *int64 `json:"timeBudgetMillis,omitempty"`
+}
+
+// flowOptionsFields is FlowOptions without its methods, so the JSON form can embed it without recursing.
+type flowOptionsFields FlowOptions
+
+// MarshalJSON encodes the options, TimeBudget as "timeBudgetMillis".
+func (o FlowOptions) MarshalJSON() ([]byte, error) {
+	w := flowOptionsJSON{flowOptionsFields: (*flowOptionsFields)(&o)}
+	if o.TimeBudget != 0 {
+		ms := millisRoundedUp(o.TimeBudget)
+		w.TimeBudgetMillis = &ms
+	}
+	b, err := json.Marshal(w)
+	return b, errors.Trace(err)
+}
+
+// UnmarshalJSON decodes the options, TimeBudget from "timeBudgetMillis". An absent field leaves the value as it was.
+func (o *FlowOptions) UnmarshalJSON(data []byte) error {
+	w := flowOptionsJSON{flowOptionsFields: (*flowOptionsFields)(o)}
+	if err := json.Unmarshal(data, &w); err != nil {
+		return errors.Trace(err)
+	}
+	if w.TimeBudgetMillis != nil {
+		o.TimeBudget = durationOfMillis(*w.TimeBudgetMillis)
+	}
+	return nil
 }

@@ -259,9 +259,10 @@ func decodeCarrier(data []byte) (w flowJSON, v int, err error) {
 	return w, *w.V, nil
 }
 
-// millisRoundedUp converts a backoff delay to whole milliseconds, rounding a positive one up. The engine
-// truncates the delay it computes for an attempt, not the delay's base: truncated on the wire, a base under 1ms
-// would arrive as 0, which no multiplier grows, and the retry would run back to back.
+// millisRoundedUp converts a duration to whole milliseconds, rounding a positive one up, for a value whose zero
+// means something else: a backoff base (the engine truncates the delay it computes for an attempt, not the base, and
+// a base truncated to 0 is grown by no multiplier, so the retry would run back to back) and FlowOptions.TimeBudget
+// (whose zero is the engine's default).
 func millisRoundedUp(d time.Duration) int64 {
 	ms := d.Milliseconds()
 	if d > 0 && d%time.Millisecond != 0 {
