@@ -18,7 +18,7 @@ package workflow
 
 import "time"
 
-// FlowSummary is a summary of a flow for listing purposes.
+// FlowSummary is a flow's metadata, as the lists and Engine.Summary return it.
 type FlowSummary struct {
 	FlowKey      string `json:"flowKey,omitzero"`
 	WorkflowURL  string `json:"workflowURL,omitzero"`
@@ -53,4 +53,10 @@ type FlowSummary struct {
 	// Subgraph is true when this flow is a subgraph child (it has a parent caller step), false for a
 	// top-level/root flow. A list returns roots only unless Query.IncludeSubgraphs opts subgraph children in.
 	Subgraph bool `json:"subgraph,omitzero"`
+	// ParentStepKey is the key of the step that called this flow as its subgraph, in the parent flow, and empty for a
+	// root flow. Pass it to Engine.Step or Engine.Fork.
+	ParentStepKey string `json:"parentStepKey,omitzero"`
+	// RootFlowKey is the key of the root of this flow's tree: its own key for a root flow. Resume, Cancel, Terminate,
+	// Delete and Continue take the root's key and reject a subgraph child's.
+	RootFlowKey string `json:"rootFlowKey,omitzero"`
 }

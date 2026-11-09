@@ -1168,6 +1168,8 @@ func TestMetrics_OperationSeconds(t *testing.T) {
 	assert.NoError(err)
 	_, err = eng.ListRecentlyClosed(ctx, enginetest.Recent(workflow.Query{}))
 	assert.NoError(err)
+	_, err = eng.Summary(ctx, flowKey)
+	assert.NoError(err)
 	_, err = eng.ShardInfo(ctx)
 	assert.NoError(err)
 	assert.NoError(eng.Delete(ctx, flowKey))
@@ -1196,7 +1198,7 @@ func TestMetrics_OperationSeconds(t *testing.T) {
 	if !assert.NoError(reader.Collect(ctx, &rm)) {
 		return
 	}
-	once := []string{"history", "step", "fingerprint", "fork", "continue", "list_open", "list_closed", "list_recently_closed", "shard_info", "delete",
+	once := []string{"history", "step", "fingerprint", "fork", "continue", "list_open", "list_closed", "list_recently_closed", "summary", "shard_info", "delete",
 		"purge_before", "resume", "terminate", "cancel"}
 	for _, op := range once {
 		n, ok := histCount(rm, "dwarf_operation_seconds", map[string]string{"op": op, "shard": "1"})

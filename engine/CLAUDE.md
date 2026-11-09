@@ -507,6 +507,12 @@ callers) are stamped fork-time (`NOW_UTC()`). So a cloned prefix's timings match
 re-run boundary reads as new. Every cloned step still carries the CLONE's creation hour (`flow_created_hour`), so for
 the prefix that hour and `created_at` disagree: the hour is the flow's, never the row's.
 
+**Summary** - One flow's `FlowSummary` by key, open or closed, live or archived (`queryLiveOrArchive`), read with
+the lists' `summaryColumns`, `summaryJoins` and `scanListRow`, so a summary by key and a listed row cannot differ.
+A flow marked for deletion is a 404, as the lists leave it out. It is how a caller holding only a key learns the
+flow's place in its tree: `Subgraph`, `RootFlowKey` (the key the mutations take) and `ParentStepKey` (the caller
+step). Pinned by `TestSummary_ReadsEachFlowOfATreeAsTheListsDo`.
+
 **History / Step** - `History` returns the step-by-step execution as `[]workflow.FlowStep`; each includes key, depth,
 task name, status, error, timestamps, and DAG links - but **not** `state`/`changes` (its two-round-trip tree scan
 deliberately omits the payload columns, so `FlowStep.State`/`.Changes` are nil on a History result). Subgraph-executing
@@ -4350,7 +4356,12 @@ shards cordoned is a loud 503 at `Create`. Pinned by `engine/poolsizing_test.go`
 merges the shards in Go (`mergeByTime`) and keeps the first `Limit`. Both are strict: any shard error fails the whole
 call (the per-shard debug path is `ShardInfo` + `Query.Shard`). `Limit` is required, at most `maxListLimit` (65,536).
 - **`ListOpen`** reads the live tables only, the open statuses only. Ordered by `updated_at DESC`, ties by shard,
-  then `flow_id DESC`. Its window, optional (one table per shard however wide), filters `updated_at`. Per shard it is
+  then `flow_id DESC`. Its window, optional (one table per shard however wide), filters `updated_at`.
+- **Every list's row joins three things beside the flow row** (`summaryJoins`): the step it stopped at, its caller
+  step (`ParentStepKey`) and its root flow (`RootFlowKey`), each a primary-key lookup in the same table set, since a
+  tree is created on one shard and archived in one move. They are left joins, so they never drop a row, and the
+  caller and root joins key on `NULLIF` so a root looks neither up: a list without `IncludeSubgraphs` reads what it
+  read before them (the measurement is at `summaryJoins`). Per shard it is
   one `UNION ALL` branch per open status (`listLive`), each a range of `(status, updated_at)` that stops at `Limit`:
   one scan over both statuses has no index order and would sort every open flow of the shard on every call. The
   same code with every status serves the tests (`engineseams.ListLive`).

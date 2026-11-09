@@ -57,24 +57,41 @@ type listRow struct {
 	day     int       // the archive day the flow was read from; 0 for a live one
 }
 
-// summaryColumns are what a list reads of a flow, f being its flows table and s its steps table. The names are unique,
-// so a union of them can be selected from by name.
+// summaryColumns are what a list reads of a flow, f being its flows table, s its stopped step, ps its caller step
+// and rf its root flow (summaryJoins). The names are unique, so a union of them can be selected from by name.
 const summaryColumns = "f.flow_id, f.flow_token, f.created_hour, f.workflow_url, f.workflow_name, f.status, s.task_name," +
 	" f.error, f.cancel_reason, f.created_at, f.started_at, f.updated_at, f.priority, f.fairness_key, f.surgraph_flow_id," +
-	" f.trace_parent, f.archived_at"
+	" f.trace_parent, f.archived_at, f.surgraph_step_id, ps.flow_created_hour AS parent_step_hour," +
+	" ps.step_token AS parent_step_token, f.root_flow_id, rf.created_hour AS root_flow_hour, rf.flow_token AS root_flow_token"
 
-// scanListRow reads one row of summaryColumns from shardIdx - followed, for an archived flow, by the archive day its
-// branch selected.
-func scanListRow(rows *sequel.Rows, shardIdx int, archived bool) (listRow, error) {
+// summaryJoins joins what summaryColumns reads beside the flow row: the step it stopped at, a child's caller step and
+// a child's root flow. A tree lives in one table set - it is created on one shard and archived in one move - so the
+// caller and the root are in the tables the flow is. Each is a primary-key lookup.
+//
+// The caller and root joins compare with NULLIF, so a root - every row of a list without IncludeSubgraphs - looks
+// neither up: a NULL key matches no row and costs no index probe, where a key of 0 (a root has no caller) or of the
+// flow's own id (a root is its own root) is probed for each row. Measured on PostgreSQL 16, 100 archived roots: 446
+// buffers without the two joins, 1,153 with them keyed plainly.
+func summaryJoins(t flowTables) string {
+	return " LEFT JOIN " + t.steps + " s ON f.stopped_step_id=s.step_id" +
+		" LEFT JOIN " + t.steps + " ps ON ps.step_id=NULLIF(f.surgraph_step_id, 0)" +
+		" LEFT JOIN " + t.flows + " rf ON rf.flow_id=NULLIF(f.root_flow_id, f.flow_id)"
+}
+
+// scanListRow reads one row of summaryColumns from shardIdx - followed, when withDay, by the archive day its branch
+// selected.
+func scanListRow(rows *sequel.Rows, shardIdx int, withDay bool) (listRow, error) {
 	lr := listRow{shard: shardIdx}
 	var flowToken, flowError, cancelReason, traceParent string
-	var flowHour, surgraphFlowID int
-	var taskName sql.NullString
+	var flowHour, surgraphFlowID, surgraphStepID, rootFlowID int
+	var taskName, parentStepToken, rootFlowToken sql.NullString
+	var parentStepHour, rootFlowHour sql.NullInt64
 	var archivedAt time.Time
 	dest := []any{&lr.flowID, &flowToken, &flowHour, &lr.summary.WorkflowURL, &lr.summary.WorkflowName,
 		&lr.summary.Status, &taskName, &flowError, &cancelReason, &lr.summary.CreatedAt, &lr.summary.StartedAt,
-		&lr.summary.UpdatedAt, &lr.summary.Priority, &lr.summary.FairnessKey, &surgraphFlowID, &traceParent, &archivedAt}
-	if archived {
+		&lr.summary.UpdatedAt, &lr.summary.Priority, &lr.summary.FairnessKey, &surgraphFlowID, &traceParent, &archivedAt,
+		&surgraphStepID, &parentStepHour, &parentStepToken, &rootFlowID, &rootFlowHour, &rootFlowToken}
+	if withDay {
 		dest = append(dest, &lr.day)
 	}
 	err := rows.Scan(dest...)
@@ -89,12 +106,62 @@ func scanListRow(rows *sequel.Rows, shardIdx int, archived bool) (listRow, error
 	// cancel_reason is the shared reason column both Terminate and Cancel write into; splitTerminateCancelReason is
 	// the one place that maps it onto the two reason fields, shared with snapshot()'s FlowOutcome.
 	lr.summary.TerminateReason, lr.summary.CancelReason = splitTerminateCancelReason(lr.summary.Status, strings.TrimSpace(cancelReason))
-	lr.at = lr.summary.UpdatedAt
-	if archived {
+	if surgraphStepID != 0 && parentStepToken.Valid {
+		lr.summary.ParentStepKey = keys.NewStepKey(shardIdx, int(parentStepHour.Int64), surgraphFlowID, surgraphStepID,
+			parentStepToken.String)
+	}
+	switch {
+	case rootFlowID == lr.flowID:
+		lr.summary.RootFlowKey = lr.summary.FlowKey
+	case rootFlowToken.Valid:
+		lr.summary.RootFlowKey = keys.NewFlowKey(shardIdx, int(rootFlowHour.Int64), rootFlowID, rootFlowToken.String)
+	}
+	// A live row's archived_at is the far-future sentinel, so the column itself says whether the flow is archived.
+	if archivedAt.Year() < maxSQLTime.Year() {
 		lr.summary.ArchivedAt = archivedAt
+	}
+	lr.at = lr.summary.UpdatedAt
+	if withDay {
 		lr.at = archivedAt
 	}
 	return lr, nil
+}
+
+// summary reads one flow's summary by its key, from the live tables or the archive, with the lists' columns and
+// scanner so the two cannot disagree. A flow marked for deletion is not found, as the lists leave it out.
+func (e *Engine) summary(ctx context.Context, flowKey string) (*workflow.FlowSummary, error) {
+	shardNum, flowHour, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	db, err := e.db.Shard(shardNum)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	ctx, doneTurn := e.opTurn(ctx, shardNum, "summary")
+	defer doneTurn()
+	var lr listRow
+	found, err := e.queryLiveOrArchive(ctx, db, shardNum, flowID, flowHour, true, func(t flowTables) (bool, error) {
+		rows, err := db.QueryContext(ctx, "SELECT "+summaryColumns+" FROM "+t.flows+" f"+summaryJoins(t)+
+			" WHERE f.flow_id=? AND f.flow_token=? AND f.created_hour=? AND f.delete_after_ms=0",
+			flowID, flowToken, flowHour)
+		if err != nil {
+			return false, errors.Trace(err)
+		}
+		defer rows.Close()
+		if !rows.Next() {
+			return false, errors.Trace(rows.Err())
+		}
+		lr, err = scanListRow(rows, shardNum, false)
+		return err == nil, errors.Trace(err)
+	})
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	if !found {
+		return nil, errors.New("flow not found", http.StatusNotFound)
+	}
+	return &lr.summary, nil
 }
 
 // listLimit returns the query's Limit, required and at most maxListLimit.
@@ -224,7 +291,7 @@ func (e *Engine) listLive(ctx context.Context, query workflow.Query, statuses []
 		var args []any
 		for i, status := range statuses {
 			// A derived table, so the branch carries its own ORDER BY and limit on every dialect (see listArchived).
-			branches[i] = "SELECT * FROM (SELECT " + summaryColumns + " FROM dwarf_flows f" + stepsJoin("dwarf_steps") +
+			branches[i] = "SELECT * FROM (SELECT " + summaryColumns + " FROM dwarf_flows f" + summaryJoins(liveTables) +
 				" WHERE " + branchWhere + " AND f.status='" + status + "'" +
 				" ORDER BY f.updated_at DESC, f.flow_id DESC LIMIT_OFFSET(?, 0)) b" + strconv.Itoa(i)
 			args = append(append(args, branchArgs...), limit)
@@ -328,7 +395,8 @@ func (e *Engine) listArchived(ctx context.Context, query workflow.Query, limit i
 				// day back from archived_at as the driver parsed it, which on MySQL follows the DSN's loc.
 				branches[i] = "SELECT * FROM (SELECT " + summaryColumns + ", " + strconv.Itoa(d) + " AS archive_day FROM " +
 					migrations.FlowsTable(d) + " f" +
-					stepsJoin(migrations.StepsTable(d)) + " WHERE " + branchWhere +
+					summaryJoins(flowTables{flows: migrations.FlowsTable(d), steps: migrations.StepsTable(d)}) +
+					" WHERE " + branchWhere +
 					" ORDER BY f.archived_at " + order + ", f.flow_id " + idOrder + " LIMIT_OFFSET(?, 0)) b" + strconv.Itoa(i)
 				args = append(append(args, branchArgs...), limit)
 			}
@@ -388,11 +456,6 @@ func summariesOf(rows []listRow) []workflow.FlowSummary {
 	return flows
 }
 
-// stepsJoin joins a list's flows table to the step each flow stopped at, in steps.
-func stepsJoin(steps string) string {
-	return " LEFT JOIN " + steps + " s ON f.stopped_step_id=s.step_id"
-}
-
 // likeEscape is the LIKE ESCAPE character used by searchClause. It is a printable char that is neither a
 // LIKE metacharacter nor special inside a string literal on any of the four dialects (unlike backslash,
 // which MySQL and Postgres treat differently in literals), so `ESCAPE '~'` is portable as-is.
@@ -447,7 +510,7 @@ func subgraphCondition(includeSubgraphs bool) string {
 
 // queryClauses builds the shared WHERE for the lists and purge, but for the time bounds (timeConditions), whose
 // column differs. subgraphCond is the surgraph_flow_id predicate the caller chose: the lists honor
-// Query.IncludeSubgraphs, purge always passes roots-only. A `s.` condition needs the caller's stepsJoin.
+// Query.IncludeSubgraphs, purge always passes roots-only. A `s.` condition needs the caller's summaryJoins.
 func (e *Engine) queryClauses(query workflow.Query, subgraphCond string) (where string, args []any, err error) {
 	if query.Shard != 0 && !e.db.Has(query.Shard) {
 		return "", nil, errors.New("invalid shard", http.StatusBadRequest)

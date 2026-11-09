@@ -67,7 +67,7 @@ limitations under the License.
 // # Operations
 //
 // Create makes a flow and runs it; Await blocks until it stops, and Poll answers within the caller's
-// budget; Run is Create+Await in one call. Snapshot/History/Step/ListOpen/ListRecentlyClosed/ListClosed/Fingerprint inspect; Resume continues
+// budget; Run is Create+Await in one call. Snapshot/Summary/History/Step/ListOpen/ListRecentlyClosed/ListClosed/Fingerprint inspect; Resume continues
 // a paused flow; Cancel requests a graceful stop that tasks can catch, and Terminate a forceful one;
 // Continue starts a new flow from a completed one; Fork clones a closed flow from a chosen step into a new flow
 // for non-destructive recovery; Delete/Purge retain; ShardInfo summarizes each shard. See

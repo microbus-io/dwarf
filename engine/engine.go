@@ -1479,6 +1479,17 @@ func (e *Engine) History(ctx context.Context, flowKey string) (steps []workflow.
 	return e.history(ctx, flowKey)
 }
 
+// Summary returns one flow's summary by its key, as the lists return it: open or closed, archived or not.
+// FlowSummary.Subgraph tells a subgraph child from a root, RootFlowKey names the root, which the operations that change
+// a flow take, and ParentStepKey the step that called the child. Returns 404 for an unknown key, including a flow
+// deleted or marked for deletion, and 400 for a malformed one.
+func (e *Engine) Summary(ctx context.Context, flowKey string) (summary *workflow.FlowSummary, err error) {
+	if err := e.ensureStarted(); err != nil {
+		return nil, errors.Trace(err)
+	}
+	return e.summary(ctx, flowKey)
+}
+
 // Step returns details of a single step.
 func (e *Engine) Step(ctx context.Context, stepKey string) (step *workflow.FlowStep, err error) {
 	if err := e.ensureStarted(); err != nil {

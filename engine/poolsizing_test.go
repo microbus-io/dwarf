@@ -752,6 +752,8 @@ func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
 	is503("ListClosed", err)
 	_, err = e2.ListRecentlyClosed(ctx, enginetest.Recent(workflow.Query{}))
 	is503("ListRecentlyClosed", err)
+	_, err = e2.Summary(ctx, "1-1-1-abcdef0123456789")
+	is503("Summary", err)
 	_, _, err = e2.Purge(ctx, enginetest.Recent(workflow.Query{})) // unguarded, it returns 0 marked and no error
 	is503("Purge", err)
 	_, err = e2.ShardInfo(ctx)
