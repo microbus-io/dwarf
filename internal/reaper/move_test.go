@@ -108,8 +108,8 @@ func TestMove_BatchesAreCappedByRows(t *testing.T) {
 
 // TestMove_ResidencySplitsTheDueRoots pins the residency clause the scans take on a shard with two dispatchers:
 // each class selects only its own roots while they are fresh, and either takes the other's once they are overdue by
-// the steal grace. A solo test engine never partitions, so the clause is built here as reapResidency builds it, and the
-// roots are trees of one flow so that both classes hold some.
+// the steal grace. The clause is built here as a walk builds it from its Residency, and the roots are trees of one flow
+// so that both classes hold some.
 func TestMove_ResidencySplitsTheDueRoots(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)

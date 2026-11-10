@@ -580,3 +580,34 @@ func TestWalk_AStopIsNotAFailure(t *testing.T) {
 	r.p().archiveFailed(t.Context(), "archiving closed trees", errors.New("failed"))
 	assert.Len(r.reaper.failures.byID, 1)
 }
+
+// TestWalk_TheResidencyCallbackRestrictsAPass pins that a pass reads the shard's Residency: with two dispatchers, a
+// pass takes only its own residue class of the fresh roots, and the other class's once nothing restricts it.
+func TestWalk_TheResidencyCallbackRestrictsAPass(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := newRig(t, 0)
+	roots := seedTrees(t, r.db, 4, soloShape)
+	calls := 0
+	shard := r.shard()
+	shard.Residency = func() (count, ordinal int, ok bool) {
+		calls++
+		return 2, 0, true
+	}
+	r.reaper.Pass(ctx, r.cfg, shard)
+	assert.True(calls > 0, "the walks read the residency")
+	for _, id := range roots {
+		flows, _ := treeCount(t, r, "dwarf_flows", "dwarf_steps", id)
+		if id%2 == 0 {
+			assert.Zero(flows, "root %d is in this dispatcher's class", id)
+		} else {
+			assert.Equal(1, flows, "root %d is the other's, and fresh", id)
+		}
+	}
+	r.pass(ctx)
+	for _, id := range roots {
+		flows, _ := treeCount(t, r, "dwarf_flows", "dwarf_steps", id)
+		assert.Zero(flows, "root %d", id)
+	}
+}

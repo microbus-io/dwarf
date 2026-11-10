@@ -29,7 +29,8 @@ import (
 
 // DeleteArchivedTree deletes, in one transaction on the caller's context, the archived tree rooted at root in day's
 // tables: the directory's rows for its flows, its steps and its flows. It returns 1 when it deleted the tree and 0 when
-// the tree was not there; err is an undefined-table error when the day's tables are gone.
+// the tree was not there; err is an undefined-table error when the day's tables are gone. It locks the root first, FOR
+// UPDATE or by flipping its touch column, so a caller's conflicting lock on the root holds the deletion back.
 func (r *Reaper) DeleteArchivedTree(ctx context.Context, db *sequel.DB, day, root int) (deleted int, err error) {
 	return r.deleteArchived(ctx, db, day, []int{root})
 }
@@ -37,8 +38,10 @@ func (r *Reaper) DeleteArchivedTree(ctx context.Context, db *sequel.DB, day, roo
 // DeleteArchivedRoots deletes the archived trees rooted at roots in day's tables, on the caller's context, in
 // transactions of at most chunk roots whose trees fit in about rows rows, and at least one tree each. It returns how
 // many trees it deleted, those of the transactions that committed before an error included. A day whose tables are
-// gone deletes nothing more and is no error: its trees are gone with it.
+// gone deletes nothing more and is no error: its trees are gone with it. A chunk below 1 is taken as 1. It locks each
+// root as DeleteArchivedTree does.
 func (r *Reaper) DeleteArchivedRoots(ctx context.Context, db *sequel.DB, day int, roots []int, chunk, rows int) (deleted int, err error) {
+	chunk = max(chunk, 1)
 	t := tables{flows: migrations.FlowsTable(day), steps: migrations.StepsTable(day)}
 	ids := slices.Sorted(slices.Values(roots))
 	for len(ids) > 0 {

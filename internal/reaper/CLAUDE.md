@@ -14,8 +14,11 @@ live tables it runs (as `internal/piston` does, borrowing its handle and partiti
 
 - **One Reaper per engine run, built at Startup before the gauge callback registers.** A fresh one is the single reset
   point, so nothing a previous run learned is ever reported, a failed Startup included. Do not add a `Reset`: two
-  reset points let a gauge read between them report the last run's walks. Pinned in the engine by
-  `TestReaperContract_ARestartForgetsTheWalksAndTheLag` and `TestReaperContract_AFailedStartupLeavesNoReadings`.
+  reset points let a gauge read between them report the last run's walks. That window is NOT pinned:
+  `TestReaperContract_ARestartForgetsTheWalksAndTheLag` and `TestReaperContract_AFailedStartupLeavesNoReadings` read the
+  gauges only once Startup has returned, so they pin that no reading outlives a run, and pass with a `Reset` after the
+  callback registers too. The engine holds the Reaper in an atomic pointer, since an operation still running from the
+  previous run may read it while a new Startup stores the next.
 - **`Config` is built by the engine for every pass** from its fields, because tests change them on a running engine.
   Nothing in it is kept.
 - **`Residency` is the only callback into the engine**, re-read on every walk. Everything else comes in by value, and
@@ -109,8 +112,8 @@ other; the engine's `lockRows` names this one, and Fork's pins stay in the engin
 
 `DeleteArchivedTree` (Delete, one tree, no sizing) and `DeleteArchivedRoots` (Purge) run on the caller's context:
 no attempt deadline and none of the pass's faults, since an operator's call has its own deadline
-(`TestReaperContract_RemovalsRunOnTheCallersContext`). Purge's row budget is the engine's `BatchRows`, passed in
-explicitly. `DeleteArchivedRoots` returns the trees its committed transactions deleted even when a later one fails,
+(`TestReaperContract_RemovalsRunOnTheCallersContext`). Purge's row budget is the engine's `reapBatchRows`, the same
+value as a pass's `BatchRows`, passed in explicitly. `DeleteArchivedRoots` returns the trees its committed transactions deleted even when a later one fails,
 and the engine records `dwarf_flows_removed` from that count, once per shard per call. A day whose tables are gone
 deletes nothing and is no error. `FaultArchiveDelete`, targeted at a root, fails the transaction that would delete it.
 Pinned by `TestDelete_ADroppedDayIsNoError` and `TestDelete_APartialRemovalCountsWhatCommitted`.

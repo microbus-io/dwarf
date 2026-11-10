@@ -265,7 +265,7 @@ func (e *Engine) initMetrics() error {
 	m.flowsExpired = ctr("dwarf_flows_expired", "Counts root flows terminated because they were still open after the flow expiration (SetFlowExpiration), by shard. Each is also counted in dwarf_flows_closed{status=\"terminated\"}, with its subgraph flows. Zero while the expiration is off.")
 	m.expireFailed = ctr("dwarf_flows_expire_failed", "Counts attempts to terminate an expired root flow that failed, by shard - attempts, not flows: a root that fails again is counted on every pass, 5 minutes apart, until it is terminated. Expect zero: a database failing the termination, or a tree spawning subgraphs faster than it can be stopped. The error log names the flow and the cause.")
 	// The reaper's own instruments, on the same meter so they keep this engine's instrumentation scope.
-	if err := e.reaper.SetMeter(meter); err != nil {
+	if err := e.reaper.Load().SetMeter(meter); err != nil {
 		errs = append(errs, errors.Trace(err))
 	}
 
@@ -472,7 +472,7 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 		// The reaper's readings only while dispatching, for the same reason as the dispatch lag below: only a
 		// dispatcher reaps, and a replica that stopped must not keep reporting a shard it no longer reaps.
 		if dispatching == 1 {
-			obs := e.reaper.Observe(idx, now)
+			obs := e.reaper.Load().Observe(idx, now)
 			for _, k := range obs.Kinds {
 				opts := metric.WithAttributes(shardAttr(idx), attribute.String("kind", k.Kind))
 				o.ObserveInt64(g.heldRoots, int64(k.Held), opts)

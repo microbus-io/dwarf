@@ -345,7 +345,7 @@ func TestArchiveMetrics_HeldWorkIsVisibleBeforeASweepCompletes(t *testing.T) {
 	age, ok := gaugeAt(rm, "dwarf_archive_oldest_held_seconds", attrs)
 	assert.True(ok)
 	assert.True(age >= 119)
-	assert.True(e.reaper.Observe(1, time.Now()).Kinds[0].Sweep > 0, "sweep is incomplete")
+	assert.True(e.reaper.Load().Observe(1, time.Now()).Kinds[0].Sweep > 0, "sweep is incomplete")
 	assert.True(sumAt(rm, "dwarf_archive_move_failures", map[string]string{"shard": "1"}) >= 2)
 	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonArchiveFailed}))
 	e.seams.Withdraw(engineseams.FaultReapArchiveErr)
@@ -356,7 +356,7 @@ func TestArchiveMetrics_HeldWorkIsVisibleBeforeASweepCompletes(t *testing.T) {
 	n, _ = gaugeAt(rm, "dwarf_archive_held_roots", attrs)
 	assert.Zero(n)
 	e.forgetReaping(1)
-	assert.Equal(reaper.KindObservation{Kind: reaper.KindClosed}, e.reaper.Observe(1, time.Now()).Kinds[0])
+	assert.Equal(reaper.KindObservation{Kind: reaper.KindClosed}, e.reaper.Load().Observe(1, time.Now()).Kinds[0])
 }
 
 func TestArchiveMetrics_UnarchivedRetentionDeletionCountsOnlyOnce(t *testing.T) {

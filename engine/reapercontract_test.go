@@ -64,9 +64,10 @@ func assertNoReaperReadings(t *testing.T, rm metricdata.ResourceMetrics) {
 			assert.Zero(v, "%s{kind=%s}", name, kind)
 		}
 	}
-	failing, _ := gaugeAt(rm, "dwarf_archive_failing_seconds", map[string]string{"shard": "1"})
+	failing, ok := gaugeAt(rm, "dwarf_archive_failing_seconds", map[string]string{"shard": "1"})
+	assert.True(ok, "dwarf_archive_failing_seconds is reported")
 	assert.Zero(failing)
-	_, ok := gaugeAt(rm, "dwarf_archive_lag_seconds", map[string]string{"shard": "1"})
+	_, ok = gaugeAt(rm, "dwarf_archive_lag_seconds", map[string]string{"shard": "1"})
 	assert.False(ok, "no lag until a pass scans")
 }
 
@@ -77,6 +78,8 @@ func assertHeldReadings(t *testing.T, rm metricdata.ResourceMetrics) {
 	assert := testarossa.For(t)
 	held, _ := gaugeAt(rm, "dwarf_archive_held_roots", map[string]string{"shard": "1", "kind": "closed"})
 	assert.Equal(float64(1), held)
+	failing, _ := gaugeAt(rm, "dwarf_archive_failing_seconds", map[string]string{"shard": "1"})
+	assert.True(failing > 0, "archiving is failing")
 	_, ok := gaugeAt(rm, "dwarf_archive_lag_seconds", map[string]string{"shard": "1"})
 	assert.True(ok, "a lag was read")
 }

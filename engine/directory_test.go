@@ -37,7 +37,7 @@ func moveInto(t *testing.T, e *Engine, rootID, day int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	moved, err := e.reaper.MoveTrees(t.Context(), db, e.archives.Load().byShard[1], day, []int{rootID})
+	moved, err := e.reaper.Load().MoveTrees(t.Context(), db, e.archives.Load().byShard[1], day, []int{rootID})
 	if err != nil {
 		t.Fatal(err)
 	}

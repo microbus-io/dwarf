@@ -73,6 +73,7 @@ func (e *Engine) deleteArchivedRoots(ctx context.Context, roots []listRow) (int,
 	if set == nil || len(roots) == 0 {
 		return 0, nil
 	}
+	r := e.reaper.Load()
 	var deleted atomic.Int64
 	err := e.onShardsOf(ctx, roots, func(ctx context.Context, db *sequel.DB, rows []listRow) error {
 		shardDeleted := 0
@@ -86,7 +87,7 @@ func (e *Engine) deleteArchivedRoots(ctx context.Context, roots []listRow) (int,
 			byDay[lr.day] = append(byDay[lr.day], lr.flowID)
 		}
 		for day, dayIDs := range byDay {
-			n, err := e.reaper.DeleteArchivedRoots(ctx, db, day, dayIDs, e.purgeChunk, e.reapBatchRows)
+			n, err := r.DeleteArchivedRoots(ctx, db, day, dayIDs, e.purgeChunk, e.reapBatchRows)
 			shardDeleted += n
 			if err != nil {
 				return errors.Trace(err)

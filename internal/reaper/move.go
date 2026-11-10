@@ -124,7 +124,8 @@ func (p *pass) batchOf(ctx context.Context, rootIDs []int, k kind, d *filingDay)
 // MoveTrees moves the closed trees rooted at roots from the live tables into the archive tables of day d, in one
 // transaction, on the caller's context: what a pass does to one batch of due closed roots, into a day the caller
 // chooses. A root that is not a closed root, or is stamped for deletion, is left where it is. It returns how many
-// flows it moved.
+// flows it moved. The caller provides a non-nil archive, and makes sure the tables of d and of the day after it are
+// whole: MoveTrees checks neither, and a locate relies on the day after being whole. It locks each root as Pass does.
 func (r *Reaper) MoveTrees(ctx context.Context, db *sequel.DB, archive *archiver.Archive, d int, roots []int) (moved int, err error) {
 	return r.move(ctx, db, roots, closedDue(0, 0), &filingDay{day: d, archive: archive})
 }
@@ -241,8 +242,7 @@ func archivedAtSQL(driverName string, dayEnds time.Time) (expr string, args []an
 
 // lockRoots locks the rows of flows that match where and returns their flow ids, ascending. The rows are about to be
 // deleted, so on PostgreSQL and MySQL the lock is FOR UPDATE, the strength a DELETE takes; SQLite and SQL Server take
-// it by flipping touch. It serializes with a caller's lock on the same root that conflicts with FOR UPDATE: the
-// engine's Fork takes FOR NO KEY UPDATE, which does. With skipHeld, a row another transaction holds is left out rather
+// it by flipping touch. With skipHeld, a row another transaction holds is left out rather
 // than waited for (SKIP LOCKED) on PostgreSQL and MySQL. SQL Server and SQLite wait as without it: SQLite has one
 // writer, so nothing there is held. On SQL Server a READPAST here does skip the row, but the move's own statements then
 // wait on it - under locking READ COMMITTED a DELETE that scans waits on every locked row it passes, one it would not

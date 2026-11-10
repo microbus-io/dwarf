@@ -1110,7 +1110,7 @@ func (e *Engine) deleteArchivedFlow(ctx context.Context, db *sequel.DB, shardNum
 	if surgraphFlowID != 0 {
 		return errors.New("cannot delete a subgraph child; use the root flow key", http.StatusBadRequest)
 	}
-	n, err := e.reaper.DeleteArchivedTree(ctx, db, day, flowID)
+	n, err := e.reaper.Load().DeleteArchivedTree(ctx, db, day, flowID)
 	if sequel.IsUndefinedTableError(err) || (err == nil && n == 0) {
 		return errors.New("flow not found", http.StatusNotFound) // dropped, or deleted by a racing Delete or Purge
 	}

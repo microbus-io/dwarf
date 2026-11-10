@@ -243,7 +243,7 @@ func (e *Engine) startArchives(ctx context.Context, dayLength time.Duration) err
 	r := reaper.New()
 	r.SetLogger(e.logger)
 	r.SetSeams(e.seams)
-	e.reaper = r
+	e.reaper.Store(r)
 	return errors.Trace(e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		a := set.byShard[shard]
 		err := a.EnsureToday(ctx)

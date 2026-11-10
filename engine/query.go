@@ -118,7 +118,7 @@ func scanListRow(rows *sequel.Rows, shardIdx int, withDay bool) (listRow, error)
 		lr.summary.RootFlowKey = keys.NewFlowKey(shardIdx, int(rootFlowHour.Int64), rootFlowID, rootFlowToken.String)
 	}
 	// A live row's archived_at is the far-future sentinel, so the column itself says whether the flow is archived.
-	if archivedAt.Year() < database.MaxSQLTime.Year() {
+	if archivedAt.Year() < database.MaxSQLTime().Year() {
 		lr.summary.ArchivedAt = archivedAt
 	}
 	lr.at = lr.summary.UpdatedAt

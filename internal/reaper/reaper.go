@@ -26,7 +26,7 @@ has been failing, and the archive lag. Build one per run with New, before anythi
 	r.SetLogger(logger)
 	r.SetSeams(seams)
 	if err := r.SetMeter(meter); err != nil { ... }
-	// On each tick, for each shard this replica dispatches, under the caller's turn on that shard:
+	// On each tick, for each shard this replica dispatches:
 	r.Pass(ctx, cfg, reaper.Shard{Index: shard, DB: db, Archive: archive, Residency: residency})
 	// On a shard this replica stopped dispatching:
 	r.Forget(shard)
@@ -35,10 +35,7 @@ has been failing, and the archive lag. Build one per run with New, before anythi
 
 Concurrency: Pass on different shards may run at once, and Observe and Forget may overlap a Pass. Two Passes on one
 shard are safe too, though each walk's position is then a hint either may overwrite; a caller runs one per shard.
-
-Every transaction that removes a tree locks its root first with the strength a DELETE takes - FOR UPDATE on
-PostgreSQL, MySQL and MariaDB, a flip of the touch column on SQLite and SQL Server - so a caller that locks a root the
-same way serializes with every removal of its tree, live or archived.
+The Reaper takes no admission of its own on a shard: a caller that meters its connections does so around each call.
 */
 package reaper
 
@@ -183,7 +180,8 @@ func (r *Reaper) SetMeter(meter metric.Meter) error {
 }
 
 // Pass removes what is due on one shard: the trees past their retention, then the stamped trees and the closed ones,
-// batch by batch, until none is due, the budget is spent, or ctx is done. The caller holds its turn on the shard.
+// batch by batch, until none is due, the budget is spent, or ctx is done. Each transaction locks the roots it removes
+// first, FOR UPDATE or by flipping their touch column, so a caller's conflicting lock on a root holds its tree back.
 func (r *Reaper) Pass(ctx context.Context, cfg Config, s Shard) {
 	(&pass{r: r, cfg: cfg, shard: s}).run(ctx)
 }

@@ -96,6 +96,7 @@ func (e *Engine) reaperConfig(ctx context.Context, set *archiveSet, grace time.D
 // dwarf_reap_pass_seconds times the reaper's pass alone.
 func (e *Engine) reapPass(ctx context.Context, grace time.Duration, expire bool) {
 	set := e.archives.Load()
+	r := e.reaper.Load()
 	cfg := e.reaperConfig(ctx, set, grace)
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		if !e.dispatchesOn(shard) {
@@ -112,7 +113,7 @@ func (e *Engine) reapPass(ctx context.Context, grace time.Duration, expire bool)
 		if set != nil {
 			a = set.byShard[shard]
 		}
-		e.reaper.Pass(ctx, cfg, reaper.Shard{Index: shard, DB: db, Archive: a, Residency: func() (int, int, bool) {
+		r.Pass(ctx, cfg, reaper.Shard{Index: shard, DB: db, Archive: a, Residency: func() (int, int, bool) {
 			return e.partitionOn(shard)
 		}})
 		if expire && e.flowExpiration > 0 {
@@ -124,6 +125,6 @@ func (e *Engine) reapPass(ctx context.Context, grace time.Duration, expire bool)
 
 // forgetReaping forgets what the reaper and the expiration walk recorded about shard.
 func (e *Engine) forgetReaping(shard int) {
-	e.reaper.Forget(shard)
+	e.reaper.Load().Forget(shard)
 	e.expirePositions.forget(shard)
 }

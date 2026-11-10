@@ -321,9 +321,10 @@ type Engine struct {
 	recoveryWorker sync.WaitGroup
 
 	// Reaper goroutine: archives closed trees and deletes the stamped ones, on its own 15s ticker (reaperLoop).
-	// reaper is the run's, built at Startup before anything reads it (startArchives); reaperCancel stops the
-	// goroutine, abandoning a pass in flight.
-	reaper       *reaper.Reaper
+	// reaper is the run's, stored at Startup before anything reads it (startArchives); atomic because an operation
+	// still running from the previous run may read it while a new Startup stores the next one. reaperCancel stops
+	// the goroutine, abandoning a pass in flight.
+	reaper       atomic.Pointer[reaper.Reaper]
 	reaperCancel context.CancelFunc
 	reaperWorker sync.WaitGroup
 
