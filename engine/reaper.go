@@ -17,6 +17,7 @@ limitations under the License.
 package engine
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
@@ -49,9 +50,10 @@ import (
 // flight: each batch is one transaction, so an abandoned batch lands whole or not at all, and what is left is reaped
 // by a peer or the next start.
 //
-// The expiration pass (expireFlows) rides the same goroutine, after the reap of the first tick and of any tick at least
-// expireInterval after the last: it has no deadline to keep, and its own time budget bounds how long it holds back the
-// next reap. The first is at once, not an interval in, so that a replica living shorter than the interval still expires.
+// The expiration pass (expireOn) is a stage of the same pass, after the reap, on the first tick and on any tick at
+// least expireInterval after the last that expired: it has no deadline to keep, and its own time budget bounds how long
+// it holds back the next reap. The first is at once, not an interval in, so that a replica living shorter than the
+// interval still expires.
 func (e *Engine) reaperLoop(ctx context.Context) {
 	ticker := time.NewTicker(e.reapInterval)
 	defer ticker.Stop()
@@ -61,29 +63,34 @@ func (e *Engine) reaperLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			e.reapDueFlows(ctx)
-			if time.Since(lastExpire) >= e.expireInterval {
+			expire := time.Since(lastExpire) >= e.expireInterval
+			if expire {
 				lastExpire = time.Now()
-				e.expireFlows(ctx)
 			}
+			e.reapPass(ctx, e.archiveGrace, expire)
 		}
 	}
 }
 
-// reapKind is one population of due roots: how they are found, and what the batch that takes them re-checks.
+// reapKind is one population of due roots: how they are found, in what order, and what the batch that takes them
+// re-checks.
 type reapKind struct {
 	name string
-	// selectDue returns the statement and arguments that select up to limit due roots, oldest first, restricted to
-	// residency (a SQL fragment over flow_id and its arguments; empty for none).
+	// selectDue returns the statement and arguments that select up to limit due roots, restricted to residency (a SQL
+	// fragment over flow_id and its arguments; empty for none), as rows of (flow_id, updated_at, age in milliseconds).
+	// The statement is one or more branches, each in the kind's order and each limited to limit, so the traversal is
+	// the branches merged in that order (scanDue).
 	selectDue func(residency string, residencyArgs []any, limit int) (string, []any)
+	// order is the kind's traversal order over its due roots.
+	order func(a, b dueRoot) int
 	// due re-checks a locked root, with its arguments.
 	due     string
 	dueArgs []any
 	// stealWhere matches a root overdue by the steal grace, which any dispatcher takes whatever its residency.
 	stealWhere string
 	stealArgs  []any
-	// lagged is set when selectDue's second column is each root's age in milliseconds, oldest first per branch, so
-	// a pass's first scan reads the archive lag past grace (archiveLag); otherwise the column is 0.
+	// lagged is set when selectDue's third column is each root's age in milliseconds, so a pass's first scan reads the
+	// archive lag past grace (archiveLag); otherwise the column is 0.
 	lagged bool
 	grace  time.Duration
 }
@@ -97,9 +104,10 @@ func (e *Engine) deletionDue(steal time.Duration) reapKind {
 		selectDue: func(residency string, args []any, limit int) (string, []any) {
 			// ORDER BY flow_id is REQUIRED because LIMIT_OFFSET compiles to OFFSET/FETCH on SQL Server, which
 			// rejects it without a preceding ORDER BY. The scan reads the partial index of stamped roots only.
-			return "SELECT flow_id, 0 FROM dwarf_flows WHERE " + due + residency +
+			return "SELECT flow_id, updated_at, 0 FROM dwarf_flows WHERE " + due + residency +
 				" ORDER BY flow_id LIMIT_OFFSET(?, 0)", append(slices.Clone(args), limit)
 		},
+		order:      byFlowID,
 		due:        due,
 		stealWhere: "DATE_ADD_MILLIS(updated_at, delete_after_ms)<=DATE_ADD_MILLIS(NOW_UTC(), ?)",
 		stealArgs:  []any{-steal.Milliseconds()},
@@ -125,23 +133,27 @@ func (e *Engine) closedDueAfter(steal, grace time.Duration) reapKind {
 			// at the batch: one scan over all four statuses has no index order, so it would read and sort every due
 			// root on every batch, O(backlog) per batch. The status is inlined, never bound: a bound status defeats
 			// the filtered indexes and the estimates. Each root's age comes with it, from the row the scan reads
-			// anyway: the first of each branch is that status's oldest due root, which is the archive lag.
+			// anyway: the first of each branch is that status's oldest due root, which is the archive lag. flow_id
+			// breaks ties of updated_at, so the order is total: the index carries the primary key after updated_at on
+			// MySQL, SQL Server and SQLite, and PostgreSQL sorts only each tie group (an incremental sort).
 			var q string
 			var all []any
 			for i, status := range statuses {
 				if i > 0 {
 					q += " UNION ALL "
 				}
-				q += "SELECT flow_id, age_ms FROM (SELECT flow_id, DATE_DIFF_MILLIS(NOW_UTC(), updated_at) AS age_ms" +
+				q += "SELECT flow_id, updated_at, age_ms FROM (SELECT flow_id, updated_at," +
+					" DATE_DIFF_MILLIS(NOW_UTC(), updated_at) AS age_ms" +
 					" FROM dwarf_flows WHERE status='" + status + "'" +
 					" AND updated_at<=DATE_ADD_MILLIS(NOW_UTC(), ?) AND surgraph_flow_id=0 AND delete_after_ms=0" +
-					residency + " ORDER BY updated_at LIMIT_OFFSET(?, 0)) due_" + status
+					residency + " ORDER BY updated_at, flow_id LIMIT_OFFSET(?, 0)) due_" + status
 				all = append(all, -graceMs)
 				all = append(all, args...)
 				all = append(all, limit)
 			}
 			return q, all
 		},
+		order: byClose,
 		due: "status IN (" + terminalStatusesSQL + ") AND surgraph_flow_id=0 AND delete_after_ms=0" +
 			" AND updated_at<=DATE_ADD_MILLIS(NOW_UTC(), ?)",
 		dueArgs:    []any{-graceMs},
@@ -188,12 +200,13 @@ func reapFetch(count, batch int) int {
 	return 2 * count * batch
 }
 
-// ownFirst returns up to n of ids with this replica's own class (id % count = ordinal) ahead of the others, so a
-// batch takes a peer's roots only for the room its own leave. With no pair every id is its own.
-func ownFirst(ids []int, count, ordinal, n int) []int {
+// ownFirst returns up to n of roots with this replica's own class (flow_id % count = ordinal) ahead of the others,
+// each in the order given, so a batch takes a peer's roots only for the room its own leave. With no pair every root is
+// its own.
+func ownFirst(roots []dueRoot, count, ordinal, n int) []dueRoot {
 	if count >= 2 {
-		slices.SortStableFunc(ids, func(a, b int) int {
-			ownA, ownB := a%count == ordinal, b%count == ordinal
+		slices.SortStableFunc(roots, func(a, b dueRoot) int {
+			ownA, ownB := a.flowID%count == ordinal, b.flowID%count == ordinal
 			switch {
 			case ownA == ownB:
 				return 0
@@ -203,7 +216,35 @@ func ownFirst(ids []int, count, ordinal, n int) []int {
 			return 1
 		})
 	}
-	return ids[:min(n, len(ids))]
+	return roots[:min(n, len(roots))]
+}
+
+// dueRoot is a due root a scan returned, by its key in the traversal order.
+type dueRoot struct {
+	updatedAt time.Time
+	flowID    int
+}
+
+// byClose orders due roots by (updated_at, flow_id), the closed kind's order: the order they became due in.
+func byClose(a, b dueRoot) int {
+	if c := a.updatedAt.Compare(b.updatedAt); c != 0 {
+		return c
+	}
+	return cmp.Compare(a.flowID, b.flowID)
+}
+
+// byFlowID orders due roots by flow_id, the stamped kind's order.
+func byFlowID(a, b dueRoot) int {
+	return cmp.Compare(a.flowID, b.flowID)
+}
+
+// rootIDs returns the flow ids of roots, in their order.
+func rootIDs(roots []dueRoot) []int {
+	ids := make([]int, len(roots))
+	for i, r := range roots {
+		ids[i] = r.flowID
+	}
+	return ids
 }
 
 // reapDay is the archive day a pass writes into, and until when, by this process's clock, it archives into it: a margin
@@ -229,24 +270,16 @@ func reapQuietMargin(dayLength time.Duration) time.Duration {
 	return min(time.Minute, dayLength/8)
 }
 
-// reapDueFlows removes, per shard this replica dispatches, every due tree: first the roots stamped for deletion,
-// then the roots that ended archiveGrace ago, archived into today's day tables (or deleted, at a retention of 0).
-// A tree is a root and every subgraph descendant, found by root_flow_id, and goes in one transaction with its steps.
-// Each kind loops batches until its due set drains, all on one turn.
-//
-// The tree delete is unconditional on descendant status: it removes every flow with root_flow_id IN(ids)
-// regardless of whether a descendant is still non-terminal. A due root is always terminal - but a descendant can
-// still be a live orphan (a running child whose parent already terminalized, which only a bug leaves; see
-// recoverOrphanedSubgraphChildren) or a fan-out straggler still settling. Removing it is safe: a worker
-// mid-dispatch on it no-ops via the lease fence (its claim/write matches zero rows once the row is gone), so the
-// reaper does not reguard on descendant status.
+// reapDueFlows is a reaper pass that does not expire: what a test drives to reap what is due.
 func (e *Engine) reapDueFlows(ctx context.Context) {
-	e.reapPass(ctx, e.archiveGrace)
+	e.reapPass(ctx, e.archiveGrace, false)
 }
 
-// reapPass is reapDueFlows archiving the roots that ended grace ago: the archive grace, or 0 for a test archiving
-// what it just ended (engineseams.ArchiveNow).
-func (e *Engine) reapPass(ctx context.Context, grace time.Duration) {
+// reapPass removes, per shard this replica dispatches, every due tree, archiving the closed roots that ended grace ago
+// - the archive grace, or 0 for a test archiving what it just ended (engineseams.ArchiveNow) - and, with expire, then
+// runs the expiration pass. Each shard's pass is one turn and a sequence of stages (reapShard), one after the other;
+// a stage that fails or has nothing to do ends itself, never the stages after it.
+func (e *Engine) reapPass(ctx context.Context, grace time.Duration, expire bool) {
 	set := e.archives.Load()
 	steal := e.reapStealGrace()
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
@@ -260,38 +293,65 @@ func (e *Engine) reapPass(ctx context.Context, grace time.Duration) {
 		// connections like any other caller instead of taking them from work already under way.
 		ctx, doneTurn := e.dbTurn(ctx, shard)
 		defer doneTurn()
-		passStart := time.Now()
-		defer func() { e.metricReapPass(ctx, shard, time.Since(passStart)) }()
-		// A failure of the stamped kind, logged, does not hold back the closed kind.
-		e.reapDue(ctx, db, shard, e.deletionDue(steal), func() (*reapDay, bool) { return nil, true }, reapReasonDeleted)
-		var day *reapDay
-		unarchived := reapReasonNoRetention
-		if e.retentionDays > 0 {
-			if set == nil || set.byShard[shard] == nil {
-				return nil // nowhere to archive into; never fall back to deleting
-			}
-			day = &reapDay{}
-			if err := e.refreshReapDay(ctx, set.byShard[shard], day); err != nil {
-				if !e.archiveFailed(ctx, shard, "reading today's archive day", err) {
-					return nil
-				}
-				day, unarchived = nil, reapReasonArchiveFailed
-			}
-		}
-		archiving := day != nil
-		endedStart := time.Now()
-		ok := e.reapDue(ctx, db, shard, e.closedDueAfter(steal, grace), func() (*reapDay, bool) {
-			if day != nil && !day.stop.IsZero() && !time.Now().Before(day.stop) {
-				return nil, false // the day's last moments: the trees wait for the next day's first pass
-			}
-			return day, true
-		}, unarchived)
-		if ok && archiving {
-			// Only a pass that met no failure ends one: a pass that deleted after the grace failed too.
-			e.archiveFailures.clearUnlessFailedSince(shard, endedStart)
+		e.reapShard(ctx, db, shard, set, steal, grace)
+		if expire && e.flowExpiration > 0 {
+			e.expireOn(ctx, db, shard)
 		}
 		return nil
 	})
+}
+
+// reapShard is one shard's reap: first the roots stamped for deletion, then the roots that ended grace ago, archived
+// into today's day tables (or deleted, at a retention of 0). A tree is a root and every subgraph descendant, found by
+// root_flow_id, and goes in one transaction with its steps. Each kind loops batches until its due set drains.
+//
+// The tree delete is unconditional on descendant status: it removes every flow with root_flow_id IN(ids)
+// regardless of whether a descendant is still non-terminal. A due root is always terminal - but a descendant can
+// still be a live orphan (a running child whose parent already terminalized, which only a bug leaves; see
+// recoverOrphanedSubgraphChildren) or a fan-out straggler still settling. Removing it is safe: a worker
+// mid-dispatch on it no-ops via the lease fence (its claim/write matches zero rows once the row is gone), so the
+// reaper does not reguard on descendant status.
+func (e *Engine) reapShard(
+	ctx context.Context, db *sequel.DB, shard int, set *archiveSet, steal, grace time.Duration,
+) {
+	passStart := time.Now()
+	defer func() { e.metricReapPass(ctx, shard, time.Since(passStart)) }()
+	// A failure of the stamped kind, logged, does not hold back the closed kind.
+	e.reapDue(ctx, db, shard, e.deletionDue(steal), func() (*reapDay, bool) { return nil, true }, reapReasonDeleted)
+	e.reapClosed(ctx, db, shard, set, steal, grace)
+}
+
+// reapClosed is the closed kind's stage of a shard's reap: the roots that ended grace ago, archived into today's day
+// tables, or deleted at a retention of 0.
+func (e *Engine) reapClosed(
+	ctx context.Context, db *sequel.DB, shard int, set *archiveSet, steal, grace time.Duration,
+) {
+	var day *reapDay
+	unarchived := reapReasonNoRetention
+	if e.retentionDays > 0 {
+		if set == nil || set.byShard[shard] == nil {
+			return // nowhere to archive into; never fall back to deleting
+		}
+		day = &reapDay{}
+		if err := e.refreshReapDay(ctx, set.byShard[shard], day); err != nil {
+			if !e.archiveFailed(ctx, shard, "reading today's archive day", err) {
+				return
+			}
+			day, unarchived = nil, reapReasonArchiveFailed
+		}
+	}
+	archiving := day != nil
+	endedStart := time.Now()
+	ok := e.reapDue(ctx, db, shard, e.closedDueAfter(steal, grace), func() (*reapDay, bool) {
+		if day != nil && !day.stop.IsZero() && !time.Now().Before(day.stop) {
+			return nil, false // the day's last moments: the trees wait for the next day's first pass
+		}
+		return day, true
+	}, unarchived)
+	if ok && archiving {
+		// Only a pass that met no failure ends one: a pass that deleted after the grace failed too.
+		e.archiveFailures.clearUnlessFailedSince(shard, endedStart)
+	}
 }
 
 // refreshReapDay reads today from the database clock into day, and when to stop archiving into it. The reaper makes
@@ -455,8 +515,9 @@ func (l *archiveLag) reset() {
 // why a batch dayOf gives no day is deleted, for dwarf_flows_reaped. It reports false when it stopped on an error, or
 // on an archive failure within its grace.
 //
-// One scan feeds several batches: the candidates it returns, own class first, are consumed a batch at a time, and
-// only an exhausted list is scanned again. A batch whose move fails ends the pass, and is deleted unarchived instead
+// One scan feeds several batches: the candidates it returns, in the kind's order with the own class first, are
+// consumed a batch at a time - each a contiguous prefix of what is left - and only an exhausted list is scanned
+// again. A batch whose move fails ends the pass, and is deleted unarchived instead
 // once archiving has been failing for the grace (archiveFailed). A batch that cannot be deleted either ends the pass,
 // and the next tick tries again.
 func (e *Engine) reapDue(
@@ -491,8 +552,7 @@ func (e *Engine) reapDue(
 			if !ok {
 				return false
 			}
-			batch := slices.Sorted(slices.Values(candidates[:min(e.reapBatch, len(candidates))]))
-			cut, err := e.rootsWithinRows(ctx, db, batch)
+			cut, err := e.rootsWithinRows(ctx, db, rootIDs(candidates[:min(e.reapBatch, len(candidates))]))
 			if err == nil {
 				var moved int
 				moved, err = e.reapBatchOf(ctx, db, cut, kind, day)
@@ -520,11 +580,7 @@ func (e *Engine) reapDue(
 				e.logSweepError(ctx, "Reaper: removing due trees", "shard", shard, "kind", kind.name, "error", err)
 				return false
 			}
-			taken := make(map[int]bool, len(cut))
-			for _, id := range cut {
-				taken[id] = true
-			}
-			candidates = slices.DeleteFunc(candidates, func(id int) bool { return taken[id] })
+			candidates = candidates[len(cut):]
 		}
 		// A scan that came back short saw every due root; one whose batches moved nothing found them all changed
 		// since, and would only see the same ones again.
@@ -534,11 +590,13 @@ func (e *Engine) reapDue(
 	}
 }
 
-// scanDue selects up to fetch due roots of kind (per terminal status, for the closed kind), and the age of the oldest
-// of them for a lagged kind (0 for none).
+// scanDue selects up to fetch due roots of kind in its traversal order (kind.order), and the age of the oldest of them
+// for a lagged kind (0 for none). The statement's branches - one per terminal status, for the closed kind - are merged
+// here; their first fetch are exactly the kind's first fetch due roots, since each branch holds its own first fetch.
+// It reports fewer than fetch only when every branch did, which is when it saw every due root.
 func (e *Engine) scanDue(
 	ctx context.Context, db *sequel.DB, kind reapKind, residency string, residencyArgs []any, fetch int,
-) (ids []int, oldest time.Duration, err error) {
+) (roots []dueRoot, oldest time.Duration, err error) {
 	stmt, args := kind.selectDue(residency, residencyArgs, fetch)
 	rows, err := db.QueryContext(ctx, stmt, args...)
 	// engineseams.FaultReapSelectErr treats this due-root scan as errored (sibling to engineseams.FaultReapMidTree,
@@ -553,19 +611,23 @@ func (e *Engine) scanDue(
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id int
+		var r dueRoot
 		// float64: DATE_DIFF_MILLIS is fractional on SQLite, where an int64 scan fails.
 		var ageMs float64
-		if err := rows.Scan(&id, &ageMs); err != nil {
+		if err := rows.Scan(&r.flowID, &r.updatedAt, &ageMs); err != nil {
 			return nil, 0, errors.Trace(err)
 		}
-		ids = append(ids, id)
+		roots = append(roots, r)
 		oldest = max(oldest, time.Duration(ageMs*float64(time.Millisecond)))
 	}
-	return ids, oldest, errors.Trace(rows.Err())
+	if err := rows.Err(); err != nil {
+		return nil, 0, errors.Trace(err)
+	}
+	slices.SortFunc(roots, kind.order)
+	return roots[:min(fetch, len(roots))], oldest, nil
 }
 
-// reapBatchOf removes the trees of the roots it can lock among rootIDs (ascending) in one transaction: moved into
+// reapBatchOf removes the trees of the roots it can lock among rootIDs, in any order, in one transaction: moved into
 // day's archive tables unless day is nil, deleted otherwise. It returns how many flow rows it removed.
 //
 // The roots are locked first, in flow_id order, and re-checked, so two reapers that meet on a root - a stolen one, or
@@ -574,6 +636,7 @@ func (e *Engine) scanDue(
 func (e *Engine) reapBatchOf(
 	ctx context.Context, db *sequel.DB, rootIDs []int, kind reapKind, day *reapDay,
 ) (int, error) {
+	rootIDs = slices.Sorted(slices.Values(rootIDs))
 	var moved int
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
 		moved = 0
@@ -727,8 +790,8 @@ func lockRootsIn(ctx context.Context, tx *sequel.Tx, flows string, skipHeld bool
 	return locked, nil
 }
 
-// rootsWithinRows returns the leading roots of roots (ascending) whose trees fit in about reapBatchRows rows, and at
-// least the first. A tree's rows are counted as its flows' joined steps, one for a flow with none. It reads outside
+// rootsWithinRows returns the leading roots of roots, in the order given, whose trees fit in about reapBatchRows rows,
+// and at least the first. A tree's rows are counted as its flows' joined steps, one for a flow with none. It reads outside
 // the batch's transaction - a closed tree's size does not move - so the batch locks only the roots it takes, and its
 // transaction still opens with a write, which SQLite needs.
 func (e *Engine) rootsWithinRows(ctx context.Context, db *sequel.DB, roots []int) ([]int, error) {

@@ -3569,10 +3569,11 @@ terminate inside a delete, and nothing either operation does can then race a `Re
   per shard (the read, the deletes), not once per shard: one turn across the stages would hold a shard's turn while
   the call merges the other shards. Pinned by `TestPurge_OldestArchivedFirstAndOnlyTheArchive`.
 
-**The reaper** (`reapDueFlows`, `reaper.go`) runs on its own dedicated goroutine + a 15 s ticker (a single goroutine,
+**The reaper** (`reapPass`, `reaper.go`) runs on its own dedicated goroutine + a 15 s ticker (a single goroutine,
 inherently non-overlapping), stopped by `drainRuntime` cancelling its ctx. On each shard this replica DISPATCHES (a
-reader replica reaps nothing), on one turn, it removes two kinds of due roots, each in batches until its due set
-drains (`reapDue`):
+reader replica reaps nothing), on one turn, it runs its stages in order - each a function that ends itself on a
+failure or on nothing to do, never the stages after it (`reapShard`, then the expiration pass when it is due). The
+reap removes two kinds of due roots, each in batches until its due set drains (`reapDue`):
 - **Stamped roots** (`delete_after_ms>0`, due at `updated_at + delete_after_ms`): deleted, never archived.
 - **Closed roots** (terminal, unstamped, `updated_at` older than `archiveGrace`): copied into **today's** day tables
   and deleted, in one transaction; at a retention of 0, deleted only. Every tree goes into the day it is archived,
@@ -3648,9 +3649,14 @@ MySQL, the strength a `DELETE` takes; a `touch` flip with `RETURNING`/`OUTPUT` e
   statement, elsewhere an `INSERT ... SELECT` before the delete. Which flows is the archiver's rule
   (`DirectoryHours`): those archived two or more days after their creation day, or on a day before it - with days
   shorter than an hour a straggler's creation day can fall after the day its batch writes (`internal/archiver/CLAUDE.md`, "Locating an archived row"). Pinned by `directory_test.go`.
-- **The closed scan is one branch per terminal status**, each `ORDER BY updated_at LIMIT` on
-  `idx_dwarf_flows_status (status, updated_at)`. One scan over all four statuses has no index order, so every scan
-  would read and sort the whole due set. A long-lived root's closed subgraph children still sit oldest-first in the
+- **The closed scan is one branch per terminal status**, each `ORDER BY updated_at, flow_id LIMIT` on
+  `idx_dwarf_flows_status (status, updated_at)`, merged in Go (`scanDue`) into one `(updated_at, flow_id)` order;
+  the first `fetch` of the merge are exactly the first `fetch` due roots, since each branch holds its own first
+  `fetch`. One scan over all four statuses has no index order, so every scan would read and sort the whole due set.
+  The tie-break is free: MySQL, SQL Server and SQLite carry the primary key after `updated_at` in the index, and
+  PostgreSQL sorts only each tie group (an incremental sort; 513 rows read for a `LIMIT 512`, as without it). A batch
+  is a contiguous prefix of that order (`rootsWithinRows` keeps the order it is given), and only the lock takes a
+  sorted copy (`reapBatchOf`). A long-lived root's closed subgraph children still sit oldest-first in the
   `completed` range until the root closes, and each scan steps over them.
 - **A shard's dispatchers split the due roots** (`reapResidency`): `flow_id % count = ordinal` from the piston's
   own pair (`partitionOn`), plus any root overdue by `reapStealGrace` (two ticks), so two reapers take disjoint
@@ -3729,8 +3735,8 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
   Keep it so: a flow insert that copied an older `created_at` would sit past a young row and never expire. **Do not
   add a `(status, created_at)` index for it**: one more index entry, and its WAL, on every flow insert and every
   flow-row update (none is HOT, since nearly every one sets the indexed `updated_at`). The walk passes over closed flows waiting for the reaper and subgraph children (ended with their
-  root), a page (`expirePage`, 256) at a time. It runs in the reaper's goroutine, after the reap of any tick
-  `expireInterval` (5 min) after the last, per shard on its dispatchers, on a turn; **its time budget**
+  root), a page (`expirePage`, 256) at a time. It is a stage of the reaper's pass, after the reap, on any tick
+  `expireInterval` (5 min) after the last that expired, per shard on its dispatchers, on the pass's turn; **its time budget**
   (`expireBudget`, 30 s, checked before every page after the first and every termination after the first, so a pass
   always progresses) is what keeps a first-time backlog - expiration turned on over months of abandoned flows,
   thousands of tree transactions - from holding back archiving: the rest waits for the next pass, which logs once per

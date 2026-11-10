@@ -143,6 +143,11 @@ func age(t *testing.T, e *Engine, fk string, ago time.Duration) {
 	}
 }
 
+// expireNow runs a reaper pass that expires, as the reaper's goroutine does every expireInterval.
+func expireNow(ctx context.Context, e *Engine) {
+	e.reapPass(ctx, e.archiveGrace, true)
+}
+
 // statusOf returns a flow's status, and its terminate reason.
 func statusOf(t *testing.T, e *Engine, fk string) (status, reason string) {
 	t.Helper()
@@ -196,7 +201,7 @@ func TestExpiration_TerminatesTheOldOpenRoots(t *testing.T) {
 	}
 	assert.Equal(want, ids)
 
-	e.expireFlows(ctx)
+	expireNow(ctx, e)
 	for _, fk := range []string{asking, napping, parent, child} {
 		status, reason := statusOf(t, e, fk)
 		assert.Equal(workflow.StatusTerminated, status, "%s", fk)
@@ -207,7 +212,7 @@ func TestExpiration_TerminatesTheOldOpenRoots(t *testing.T) {
 	assert.Equal(int64(3), sumAt(collect(t, reader), "dwarf_flows_expired", map[string]string{"shard": "1"}), "roots, not their children")
 
 	// Nothing more to do: a second pass ends nothing and counts nothing.
-	e.expireFlows(ctx)
+	expireNow(ctx, e)
 	assert.Equal(int64(3), sumAt(collect(t, reader), "dwarf_flows_expired", map[string]string{"shard": "1"}))
 }
 
@@ -224,7 +229,7 @@ func TestExpiration_TheWalkStopsAtTheFirstYoungFlow(t *testing.T) {
 	age(t, e, old, 2*time.Hour)
 	age(t, e, beyond, 2*time.Hour)
 
-	e.expireFlows(ctx)
+	expireNow(ctx, e)
 	status, _ := statusOf(t, e, old)
 	assert.Equal(workflow.StatusTerminated, status)
 	status, _ = statusOf(t, e, young)
@@ -249,7 +254,7 @@ func TestExpiration_PagesPastWhatItDoesNotEnd(t *testing.T) {
 		age(t, e, fk, 2*time.Hour)
 	}
 
-	e.expireFlows(ctx)
+	expireNow(ctx, e)
 	status, _ := statusOf(t, e, parent)
 	assert.Equal(workflow.StatusTerminated, status)
 	status, reason := statusOf(t, e, ended)
@@ -272,14 +277,14 @@ func TestExpiration_ThePassKeepsToItsBudget(t *testing.T) {
 	age(t, e, first, 2*time.Hour)
 	age(t, e, second, 2*time.Hour)
 
-	e.expireFlows(ctx)
+	expireNow(ctx, e)
 	status, _ := statusOf(t, e, first)
 	assert.Equal(workflow.StatusTerminated, status, "a pass always ends one")
 	status, _ = statusOf(t, e, second)
 	assert.Equal(workflow.StatusInterrupted, status, "past the budget, the rest waits")
 	assert.Equal(1, logs.count("Expiring flows: the pass reached its time budget"))
 
-	e.expireFlows(ctx)
+	expireNow(ctx, e)
 	status, _ = statusOf(t, e, second)
 	assert.Equal(workflow.StatusTerminated, status)
 	assert.Equal(int64(2), sumAt(collect(t, reader), "dwarf_flows_expired", map[string]string{"shard": "1"}))
@@ -294,13 +299,13 @@ func TestExpiration_OffByDefault(t *testing.T) {
 	e, _, _ := expiryEngine(t, 0)
 	old := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
 	age(t, e, old, 1000*time.Hour)
-	e.expireFlows(ctx)
+	expireNow(ctx, e)
 	status, _ := statusOf(t, e, old)
 	assert.Equal(workflow.StatusInterrupted, status)
 
 	e.flowExpiration = time.Hour
 	e.dispatchFlag(1).Store(false)
-	e.expireFlows(ctx)
+	expireNow(ctx, e)
 	e.dispatchFlag(1).Store(true)
 	status, _ = statusOf(t, e, old)
 	assert.Equal(workflow.StatusInterrupted, status, "a reader leaves the shard to its dispatchers")
@@ -358,14 +363,14 @@ func TestExpiration_AFailingRootIsPassedOver(t *testing.T) {
 	// Past the budget at once: the failed attempt is the pass's one.
 	e.expireBudget = time.Nanosecond
 	e.seams.InjectN(engineseams.FaultExpireTerminate, 1)
-	e.expireFlows(ctx)
+	expireNow(ctx, e)
 	status, _ := statusOf(t, e, second)
 	assert.Equal(workflow.StatusInterrupted, status, "a failed attempt counts against the budget")
 
 	// The next pass goes on after the failed root and sweeps the rest; the failed root waits for the next sweep.
 	e.expireBudget = time.Minute
 	e.seams.InjectN(engineseams.FaultExpireTerminate, 1)
-	e.expireFlows(ctx)
+	expireNow(ctx, e)
 	status, _ = statusOf(t, e, first)
 	assert.Equal(workflow.StatusInterrupted, status, "its termination failed, and a pass goes on from where the last stopped")
 	status, _ = statusOf(t, e, second)
@@ -376,7 +381,7 @@ func TestExpiration_AFailingRootIsPassedOver(t *testing.T) {
 	assert.Equal(int64(2), sumAt(collect(t, reader), "dwarf_flows_expire_failed", map[string]string{"shard": "1"}),
 		"one failed attempt per pass")
 
-	e.expireFlows(ctx)
+	expireNow(ctx, e)
 	for _, fk := range []string{first, second} {
 		status, _ = statusOf(t, e, fk)
 		assert.Equal(workflow.StatusTerminated, status, "the next sweep retries it")
@@ -405,24 +410,24 @@ func TestExpiration_AClosedPrefixDoesNotHoldBackAnExpiredRoot(t *testing.T) {
 	open := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
 	age(t, e, open, 2*time.Hour)
 
-	e.expireFlows(ctx)
+	expireNow(ctx, e)
 	status, _ := statusOf(t, e, open)
 	assert.Equal(workflow.StatusInterrupted, status, "a pass that terminates nothing keeps to its budget")
 	assert.Equal(1, logs.count("Expiring flows: the pass reached its time budget"))
 
 	for range closed - 1 {
-		e.expireFlows(ctx)
+		expireNow(ctx, e)
 	}
 	status, _ = statusOf(t, e, open)
 	assert.Equal(workflow.StatusInterrupted, status, "one page of closed flows per pass")
-	e.expireFlows(ctx)
+	expireNow(ctx, e)
 	status, reason := statusOf(t, e, open)
 	assert.Equal(workflow.StatusTerminated, status, "reached by going on from where the last pass stopped")
 	assert.Equal(expirationReason(time.Hour), reason)
 
 	// The next pass finds nothing after it, so the one after starts from the oldest again.
 	assert.NotEqual(0, e.expirePositions.of(1))
-	e.expireFlows(ctx)
+	expireNow(ctx, e)
 	assert.Equal(0, e.expirePositions.of(1), "swept")
 }
 

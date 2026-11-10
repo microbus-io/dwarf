@@ -269,20 +269,9 @@ func TestArchiving_ResidencySplitsTheDueRoots(t *testing.T) {
 	assert.Must(assert.NoError(err))
 	selectWith := func(kind reapKind, ordinal int) []int {
 		residency, residencyArgs, count, _ := residencyClause(2, ordinal, true, kind)
-		stmt, args := kind.selectDue(residency, residencyArgs, reapFetch(count, e.reapBatch))
-		rows, err := db.QueryContext(ctx, stmt, args...)
-		if !assert.NoError(err) {
-			return nil
-		}
-		defer rows.Close()
-		var ids []int
-		for rows.Next() {
-			var id int
-			var ageMs float64
-			assert.NoError(rows.Scan(&id, &ageMs))
-			ids = append(ids, id)
-		}
-		return ids
+		roots, _, err := e.scanDue(ctx, db, kind, residency, residencyArgs, reapFetch(count, e.reapBatch))
+		assert.NoError(err)
+		return rootIDs(roots)
 	}
 	var both []int
 	for _, ordinal := range []int{0, 1} {
@@ -311,15 +300,71 @@ func TestArchiving_ResidencySplitsTheDueRoots(t *testing.T) {
 	assert.True(slices.Contains(selectWith(e.deletionDue(time.Hour), roots[0]%2), roots[0]), "its own class's")
 }
 
+// TestArchiving_TheScanMergesTheStatusesInCloseOrder pins the closed kind's traversal: the four per-status branches
+// merged into one (updated_at, flow_id) order, ties broken by flow_id; a fetch shorter than the due set returning
+// exactly the first of that order, however each branch was cut; and a batch trimmed to a prefix in that order, not in
+// flow_id order. Each tree is one flow of one step, one row.
+func TestArchiving_TheScanMergesTheStatusesInCloseOrder(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e := archiveEngine(t, treeMux(), 30)
+	var ids []int
+	for range 4 {
+		fk, err := e.Create(ctx, "arch/solo", nil, nil)
+		assert.NoError(err)
+		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
+		_, _, id, _, _ := keys.ParseFlowKey(fk)
+		ids = append(ids, id)
+	}
+	a, b, c, d := ids[0], ids[1], ids[2], ids[3]
+	db, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	closeAt := func(status string, ago time.Duration, flowID int) {
+		_, err := db.ExecContext(ctx, "UPDATE dwarf_flows SET status=?, updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?)"+
+			" WHERE flow_id=?", status, -ago.Milliseconds(), flowID)
+		assert.NoError(err)
+	}
+	closeAt(workflow.StatusFailed, 4*time.Minute, a)
+	closeAt(workflow.StatusCancelled, 5*time.Minute, c)
+	// A tie: b and d closed in the same millisecond, in different statuses. One statement reads one now.
+	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET status=CASE WHEN flow_id=? THEN '"+workflow.StatusCompleted+
+		"' ELSE '"+workflow.StatusTerminated+"' END, updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE flow_id IN (?, ?)",
+		b, -(3 * time.Minute).Milliseconds(), b, d)
+	assert.NoError(err)
+
+	kind := e.closedDueAfter(0, 0)
+	roots, _, err := e.scanDue(ctx, db, kind, "", nil, 10)
+	assert.NoError(err)
+	assert.Equal([]int{c, a, b, d}, rootIDs(roots), "closed first first, a tie by flow_id")
+	assert.True(len(roots) == 4 && roots[2].updatedAt.Equal(roots[3].updatedAt), "b and d tie")
+	roots, _, err = e.scanDue(ctx, db, kind, "", nil, 2)
+	assert.NoError(err)
+	assert.Equal([]int{c, a}, rootIDs(roots), "a short fetch is the first of the merged order")
+
+	e.reapBatchRows = 2
+	cut, err := e.rootsWithinRows(ctx, db, rootIDs(roots))
+	assert.NoError(err)
+	assert.Equal([]int{c, a}, cut, "the trim keeps the traversal order")
+}
+
 // TestArchiving_ABatchTakesItsOwnClassFirst pins the fill order that keeps two reapers apart once a backlog is older
 // than the steal grace and the scan admits both classes: the own class first, a peer's roots only for the room left,
 // and a fetch large enough that the own class is rarely short.
 func TestArchiving_ABatchTakesItsOwnClassFirst(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	assert.Equal([]int{2, 4, 6, 1}, ownFirst([]int{1, 2, 3, 4, 5, 6}, 2, 0, 4))
-	assert.Equal([]int{1, 3, 5, 2}, ownFirst([]int{1, 2, 3, 4, 5, 6}, 2, 1, 4))
-	assert.Equal([]int{1, 2, 3}, ownFirst([]int{1, 2, 3}, 0, 0, 4), "no pair: every root is its own")
+	roots := func(ids ...int) []dueRoot {
+		var rs []dueRoot
+		for _, id := range ids {
+			rs = append(rs, dueRoot{flowID: id})
+		}
+		return rs
+	}
+	assert.Equal([]int{2, 4, 6, 1}, rootIDs(ownFirst(roots(1, 2, 3, 4, 5, 6), 2, 0, 4)))
+	assert.Equal([]int{1, 3, 5, 2}, rootIDs(ownFirst(roots(1, 2, 3, 4, 5, 6), 2, 1, 4)))
+	assert.Equal([]int{5, 3, 1, 6}, rootIDs(ownFirst(roots(6, 5, 4, 3, 2, 1), 2, 1, 4)), "each in the order given")
+	assert.Equal([]int{1, 2, 3}, rootIDs(ownFirst(roots(1, 2, 3), 0, 0, 4)), "no pair: every root is its own")
 	assert.Equal(512, reapFetch(0, 512))
 	assert.Equal(4*512, reapFetch(2, 512), "twice the classes' share")
 }

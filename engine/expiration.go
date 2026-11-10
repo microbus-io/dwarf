@@ -52,7 +52,7 @@ func expirationReason(d time.Duration) string {
 	return "expired: still running or interrupted after the flow expiration (" + d.String() + ")"
 }
 
-// expireFlows terminates, per shard this replica dispatches, every root that has not closed and was created longer
+// expireOn terminates, on a shard this replica dispatches, every root that has not closed and was created longer
 // than the flow expiration ago. It reads no index of its own: flow_id is assigned in creation order, and every flow
 // row's created_at is the column default (Fork's clones and Continue's flows included), so the oldest flows by id are
 // the oldest by creation, and the walk stops at the first row that has not expired - one row when none has. Ids
@@ -60,30 +60,14 @@ func expirationReason(d time.Duration) string {
 // tree takes, on PostgreSQL, whose NOW() is the transaction's start - which a lifetime of hours or days does not see. An index on (status, created_at)
 // would cost an entry, and its WAL, on every flow insert and status change.
 //
-// A shard's pass reads no page and starts no termination once it has run expireBudget, after its first page and its
-// first termination, so a backlog - expiration turned on over months of abandoned flows, or a long run of closed
-// flows waiting for the reaper - drains over several passes rather than holding back the reaper, whose goroutine
-// this runs on. Each pass resumes where the shard's last one stopped (expirePositions): from the oldest, a prefix
-// larger than one budget would cost every pass its whole budget and never reach an expired root behind it. A walk
-// that reaches a flow that has not expired, or the newest flow, has swept the shard, and the next pass starts again
-// from the oldest. Two dispatchers of a shard may meet on a root; the later finds it ended and does nothing. A root
-// that fails to terminate is logged and passed over, and retried by the next sweep.
-func (e *Engine) expireFlows(ctx context.Context) {
-	if e.flowExpiration <= 0 {
-		return
-	}
-	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
-		if !e.dispatchesOn(shard) {
-			return nil
-		}
-		ctx, doneTurn := e.dbTurn(ctx, shard)
-		defer doneTurn()
-		e.expireOn(ctx, db, shard)
-		return nil
-	})
-}
-
-// expireOn is expireFlows on one shard.
+// A pass reads no page and starts no termination once it has run expireBudget, after its first page and its first
+// termination, so a backlog - expiration turned on over months of abandoned flows, or a long run of closed flows
+// waiting for the reaper - drains over several passes rather than holding back the reaper's pass, of which this is a
+// stage (reapPass). Each pass resumes where the shard's last one stopped (expirePositions): from the oldest, a prefix
+// larger than one budget would cost every pass its whole budget and never reach an expired root behind it. A walk that
+// reaches a flow that has not expired, or the newest flow, has swept the shard, and the next pass starts again from
+// the oldest. Two dispatchers of a shard may meet on a root; the later finds it ended and does nothing. A root that
+// fails to terminate is logged and passed over, and retried by the next sweep.
 func (e *Engine) expireOn(ctx context.Context, db *sequel.DB, shard int) {
 	start := time.Now()
 	reason := expirationReason(e.flowExpiration)
