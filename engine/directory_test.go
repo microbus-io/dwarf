@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -65,19 +66,19 @@ func TestDirectory_NamesOnlyWhatTheLocateCannotFind(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
-	e := archiveEngine(t, treeMux(), 30)
+	e := archiveEngine(t, hosts.NewMux(), 30)
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
 	assert.NoError(makeArchiveDay(t, e, today-1))
 	assert.NoError(makeArchiveDay(t, e, today+2))
-	roots := closedRoots(t, e, 4)
+	db, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	roots := seedTrees(t, db, 4, callShape)
 	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
-		t.Skip("midnight passed while the flows ran")
+		t.Skip("midnight passed while the flows were seeded")
 	}
 	keyOf := map[int]string{}
 	for _, id := range roots {
-		db, err := e.db.Shard(1)
-		assert.Must(assert.NoError(err))
 		var token string
 		var hour int
 		assert.NoError(db.QueryRowContext(ctx, "SELECT flow_token, created_hour FROM dwarf_flows WHERE flow_id=?", id).Scan(&token, &hour))
@@ -94,8 +95,6 @@ func TestDirectory_NamesOnlyWhatTheLocateCannotFind(t *testing.T) {
 		{today - 1, true},  // a day before: a batch still writing the day that ended
 	} {
 		moveInto(t, e, roots[i], c.day)
-		db, err := e.db.Shard(1)
-		assert.Must(assert.NoError(err))
 		var named int
 		assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+archiver.DirectoryTable+" WHERE day=?", c.day).Scan(&named))
 		if c.named {
@@ -174,13 +173,13 @@ func TestDirectory_TheReapersBounds(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
-	e := archiveEngine(t, treeMux(), 30)
+	e := archiveEngine(t, hosts.NewMux(), 30)
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
 	before, from := e.archives.Load().byShard[1].DirectoryHours(today)
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
-	roots := closedRoots(t, e, 4)
+	roots := seedTrees(t, db, 4, callShape)
 	for i, c := range []struct {
 		hour  int
 		named bool

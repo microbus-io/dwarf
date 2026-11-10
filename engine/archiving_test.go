@@ -114,18 +114,14 @@ func TestArchiving_ClosedTreeMovesToTodaysTables(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
-	e := archiveEngine(t, treeMux(), 30)
-	fk, err := e.Create(ctx, "arch/parent", nil, nil)
-	assert.NoError(err)
-	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
-	_, _, rootID, _, err := keys.ParseFlowKey(fk)
-	assert.NoError(err)
+	e := archiveEngine(t, hosts.NewMux(), 30)
+	db, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	rootID := seedTrees(t, db, 1, callShape)[0]
 
 	liveFlows, liveSteps := treeCount(t, e, "dwarf_flows", "dwarf_steps", rootID)
 	assert.Equal(2, liveFlows, "the root and its subgraph child")
 	assert.True(liveSteps >= 2)
-	db, err := e.db.Shard(1)
-	assert.Must(assert.NoError(err))
 	var finalState string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT final_state FROM dwarf_flows WHERE flow_id=?", rootID).Scan(&finalState))
 
@@ -154,12 +150,10 @@ func TestArchiving_RetentionZeroDeletes(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
-	e := archiveEngine(t, treeMux(), 0)
-	fk, err := e.Create(ctx, "arch/parent", nil, nil)
-	assert.NoError(err)
-	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
-	_, _, rootID, _, err := keys.ParseFlowKey(fk)
-	assert.NoError(err)
+	e := archiveEngine(t, hosts.NewMux(), 0)
+	db, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	rootID := seedTrees(t, db, 1, callShape)[0]
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
 
@@ -253,21 +247,10 @@ func TestArchiving_ResidencySplitsTheDueRoots(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
-	e := archiveEngine(t, treeMux(), 30)
-	var roots []int
-	var firstKey string
-	for i := range 4 {
-		fk, err := e.Create(ctx, "arch/solo", nil, nil)
-		assert.NoError(err)
-		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
-		_, _, id, _, _ := keys.ParseFlowKey(fk)
-		roots = append(roots, id)
-		if i == 0 {
-			firstKey = fk
-		}
-	}
+	e := archiveEngine(t, hosts.NewMux(), 30)
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	roots := seedTrees(t, db, 4, soloShape)
 	selectWith := func(kind reapKind, ordinal int) []int {
 		residency, residencyArgs, _, _ := residencyClause(2, ordinal, true, kind)
 		roots, _, err := e.scanDue(ctx, db, kind, residency, residencyArgs, e.reapBatch)
@@ -291,7 +274,8 @@ func TestArchiving_ResidencySplitsTheDueRoots(t *testing.T) {
 	}
 	// The deletion scan takes the same clause: a stamped root is due a millisecond after its stamp, and then
 	// selected by its own class while fresh, by any once overdue.
-	assert.NoError(e.Delete(ctx, firstKey))
+	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1 WHERE flow_id=?", roots[0])
+	assert.NoError(err)
 	deadline := time.Now().Add(5 * time.Second * enginetest.TimeoutScale())
 	for !slices.Contains(selectWith(e.deletionDue(0), 1-roots[0]%2), roots[0]) && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
@@ -309,18 +293,11 @@ func TestArchiving_TheScanMergesTheStatusesInCloseOrder(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
-	e := archiveEngine(t, treeMux(), 30)
-	var ids []int
-	for range 4 {
-		fk, err := e.Create(ctx, "arch/solo", nil, nil)
-		assert.NoError(err)
-		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
-		_, _, id, _, _ := keys.ParseFlowKey(fk)
-		ids = append(ids, id)
-	}
-	a, b, c, d := ids[0], ids[1], ids[2], ids[3]
+	e := archiveEngine(t, hosts.NewMux(), 30)
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	ids := seedTrees(t, db, 4, soloShape)
+	a, b, c, d := ids[0], ids[1], ids[2], ids[3]
 	closeAt := func(status string, ago time.Duration, flowID int) {
 		_, err := db.ExecContext(ctx, "UPDATE dwarf_flows SET status=?, updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?)"+
 			" WHERE flow_id=?", status, -ago.Milliseconds(), flowID)
@@ -356,17 +333,12 @@ func TestArchiving_APassDrainsInSeveralBatches(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
-	e := archiveEngine(t, treeMux(), 30)
+	e := archiveEngine(t, hosts.NewMux(), 30)
 	e.reapBatch = 2
 	e.reapBatchRows = 3
-	var roots []int
-	for range 7 {
-		fk, err := e.Create(ctx, "arch/parent", nil, nil)
-		assert.NoError(err)
-		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
-		_, _, id, _, _ := keys.ParseFlowKey(fk)
-		roots = append(roots, id)
-	}
+	db, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	roots := seedTrees(t, db, 7, callShape)
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
 	e.reapDueFlows(ctx)
@@ -422,15 +394,10 @@ func TestArchiving_ABatchThatMeetsContentionWaitsForTheNextPass(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
-	e := archiveEngine(t, treeMux(), 30)
-	var roots []int
-	for range 3 {
-		fk, err := e.Create(ctx, "arch/parent", nil, nil)
-		assert.NoError(err)
-		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
-		_, _, id, _, _ := keys.ParseFlowKey(fk)
-		roots = append(roots, id)
-	}
+	e := archiveEngine(t, hosts.NewMux(), 30)
+	db, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	roots := seedTrees(t, db, 3, callShape)
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
 
@@ -476,13 +443,13 @@ func TestArchiving_NoClosedTreeMovesWhileTomorrowIsNotWhole(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
-	e := archiveEngine(t, treeMux(), 30)
-	roots := closedRoots(t, e, 3)
-	stamped := closedRoots(t, e, 1)[0]
-	today, err := e.archives.Load().byShard[1].Today(ctx)
-	assert.NoError(err)
+	e := archiveEngine(t, hosts.NewMux(), 30)
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	roots := seedTrees(t, db, 3, callShape)
+	stamped := seedTrees(t, db, 1, callShape)[0]
+	today, err := e.archives.Load().byShard[1].Today(ctx)
+	assert.NoError(err)
 	// Stamped a second ago, so it is due whatever the clock's millisecond.
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1, updated_at=DATE_ADD_MILLIS(NOW_UTC(), -1000)"+
 		" WHERE flow_id=?", stamped)
@@ -522,8 +489,10 @@ func TestArchiving_AFailedDeletionScanDoesNotHoldBackArchiving(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
-	e := archiveEngine(t, treeMux(), 30)
-	roots := closedRoots(t, e, 2)
+	e := archiveEngine(t, hosts.NewMux(), 30)
+	db, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	roots := seedTrees(t, db, 2, callShape)
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
 
@@ -544,14 +513,14 @@ func TestArchiving_APoisonTreeDoesNotLoseItsBatchMates(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
-	e := archiveEngine(t, treeMux(), 30)
+	e := archiveEngine(t, hosts.NewMux(), 30)
 	e.reapBatch = 4
-	roots := closedRoots(t, e, 9)
+	db, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	roots := seedTrees(t, db, 9, callShape)
 	a := e.archives.Load().byShard[1]
 	today, err := a.Today(ctx)
 	assert.NoError(err)
-	db, err := e.db.Shard(1)
-	assert.Must(assert.NoError(err))
 	_, err = db.ExecContext(ctx, "INSERT INTO "+migrations.FlowsTable(today)+" SELECT * FROM dwarf_flows WHERE flow_id=?", roots[1])
 	assert.NoError(err)
 	for range 3 {
@@ -582,8 +551,10 @@ func TestArchiving_APoisonTreeDoesNotLoseItsBatchMates(t *testing.T) {
 func TestArchiving_AFatalArchiveFaultNeverAuthorizesDeletion(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	e := archiveEngine(t, treeMux(), 30)
-	roots := closedRoots(t, e, 3)
+	e := archiveEngine(t, hosts.NewMux(), 30)
+	db, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	roots := seedTrees(t, db, 3, callShape)
 	e.seams.InjectN(engineseams.FaultReapArchiveErr, 10000)
 	for range 3 {
 		e.reapDueFlows(t.Context())
@@ -640,12 +611,14 @@ func TestArchiving_ALastingFaultPreservesAndLogs(t *testing.T) {
 			logs := &logCounter{seen: map[string]int{}}
 			e := NewEngineUnderTest(t.Name())
 			t.Cleanup(func() { e.Shutdown(context.Background()) })
-			e.SetHost(treeMux())
+			e.SetHost(hosts.NewMux())
 			assert.NoError(e.SetLogger(slog.New(logs)))
 			e.archiveGrace = 0
 			e.reapInterval = time.Hour
 			assert.Must(assert.NoError(e.Startup(t.Context())))
-			roots := closedRoots(t, e, 2)
+			db, err := e.db.Shard(1)
+			assert.Must(assert.NoError(err))
+			roots := seedTrees(t, db, 2, callShape)
 			e.seams.InjectN(fault, 100000)
 			for range 3 {
 				e.reapDueFlows(t.Context())
@@ -669,7 +642,7 @@ func TestArchiving_AScanFailureAtRetentionZeroIsNoArchiveFailure(t *testing.T) {
 	for _, retention := range []int{0, 30} {
 		t.Run(strconv.Itoa(retention), func(t *testing.T) {
 			assert := testarossa.For(t)
-			e := archiveEngine(t, treeMux(), retention)
+			e := archiveEngine(t, hosts.NewMux(), retention)
 			e.seams.InjectN(engineseams.FaultReapSelectErr, 100000)
 			e.reapDueFlows(t.Context())
 			e.seams.Withdraw(engineseams.FaultReapSelectErr)
@@ -699,7 +672,8 @@ func TestArchiving_AStopIsNotAFailureAndARestartForgetsThem(t *testing.T) {
 
 // TestArchiving_TheMoveNamesEveryFlowsColumn pins the move's column list against the flows table: every live column
 // but archived_at, in table order, so a column added to dwarf_flows without being added to the list fails here rather
-// than being dropped from the archive. The day's flows table has the live columns.
+// than being dropped from the archive. The day's flows table has the live columns, and its steps table the live
+// steps table's, in the same order.
 func TestArchiving_TheMoveNamesEveryFlowsColumn(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -712,6 +686,9 @@ func TestArchiving_TheMoveNamesEveryFlowsColumn(t *testing.T) {
 	want := append(strings.Split(archivedFlowColumns, ", "), "archived_at")
 	assert.Equal(want, columnNames(t, db, "dwarf_flows"))
 	assert.Equal(want, columnNames(t, db, migrations.FlowsTable(today)))
+	// The steps move by column order (RETURNING * and SELECT *), so the day's steps table has the live columns in the
+	// live order.
+	assert.Equal(columnNames(t, db, "dwarf_steps"), columnNames(t, db, migrations.StepsTable(today)))
 }
 
 // columnNames returns a table's columns in order.
@@ -735,10 +712,10 @@ func TestArchiving_EveryArchivedFlowIsStampedWhenItWasArchived(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
-	e := archiveEngine(t, treeMux(), 30)
-	root := closedRoots(t, e, 1)[0]
+	e := archiveEngine(t, hosts.NewMux(), 30)
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	root := seedTrees(t, db, 1, callShape)[0]
 	// Ended an hour ago, so a stamp copied from when it ended - rather than taken when it moved - is an hour old.
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=DATE_ADD_MILLIS(updated_at, ?) WHERE root_flow_id=?",
 		-time.Hour.Milliseconds(), root)
@@ -779,15 +756,15 @@ func TestArchiving_AMoveAfterItsDayEndedIsStampedWithinTheDay(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
-	e := archiveEngine(t, treeMux(), 30)
+	e := archiveEngine(t, hosts.NewMux(), 30)
 	a := e.archives.Load().byShard[1]
 	today, err := a.Today(ctx)
 	assert.NoError(err)
 	assert.NoError(makeArchiveDay(t, e, today-1))
-	root := closedRoots(t, e, 1)[0]
-	moveInto(t, e, root, today-1)
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	root := seedTrees(t, db, 1, callShape)[0]
+	moveInto(t, e, root, today-1)
 	last, lastArg := sqlTime(db.DriverName(), a.DayEnds(today-1).Add(-time.Millisecond))
 	var stamped int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+migrations.FlowsTable(today-1)+
@@ -804,7 +781,7 @@ func TestArchiving_NoTreeMovesInTheDaysLastMoments(t *testing.T) {
 	ctx := t.Context()
 	e := NewEngineUnderTest(t.Name())
 	t.Cleanup(func() { e.Shutdown(context.Background()) })
-	e.SetHost(treeMux())
+	e.SetHost(hosts.NewMux())
 	e.archiveGrace = 0
 	e.reapInterval = time.Hour
 	e.testArchiveDay = 16 * time.Second
@@ -815,7 +792,9 @@ func TestArchiving_NoTreeMovesInTheDaysLastMoments(t *testing.T) {
 	assert.Equal(2*time.Second, reapQuietMargin(a.DayLength()))
 	assert.Equal(time.Minute, reapQuietMargin(24*time.Hour))
 	assert.Zero(reapQuietMargin(8*time.Second), "a day too short for a margin")
-	root := closedRoots(t, e, 1)[0]
+	db, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	root := seedTrees(t, db, 1, callShape)[0]
 
 	// TodayLeft rounds down, so 1 left means between one and two seconds to go: inside the margin, not past the day.
 	deadline := time.Now().Add(time.Minute)
@@ -863,13 +842,13 @@ func TestArchiving_AHeldRootIsSkippedNotWaitedFor(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
-	e := archiveEngine(t, treeMux(), 30)
+	e := archiveEngine(t, hosts.NewMux(), 30)
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	if d := db.DriverName(); d != "pgx" && d != "mysql" && d != "mariadb" {
 		t.Skip("a held root is waited for on " + d)
 	}
-	roots := closedRoots(t, e, 2)
+	roots := seedTrees(t, db, 2, callShape)
 	held, other := roots[0], roots[1]
 
 	locked := make(chan error, 1)
@@ -906,4 +885,31 @@ func TestArchiving_AHeldRootIsSkippedNotWaitedFor(t *testing.T) {
 		&reapDay{day: today, stop: time.Now().Add(time.Hour), archive: a})
 	assert.NoError(err)
 	assert.Equal(2, moved, "the held tree moved once it was let go")
+}
+
+// TestArchiving_ARemovalOfADroppedDayIsNoError pins the archive-side deletion across days: a day dropped since the list
+// read it removes nothing and is no error, and the roots of a day still there are removed and counted.
+func TestArchiving_ARemovalOfADroppedDayIsNoError(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e := archiveEngine(t, hosts.NewMux(), 30)
+	db, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	today, err := e.archives.Load().byShard[1].Today(ctx)
+	assert.NoError(err)
+	roots := seedTrees(t, db, 2, callShape)
+	moveInto(t, e, roots[0], today)
+	moveInto(t, e, roots[1], today)
+	dropped := today - 5 // never made: its tables are undefined, as a dropped day's are
+	removed, err := e.deleteArchivedRoots(ctx, []listRow{
+		{shard: 1, flowID: roots[0], day: today},
+		{shard: 1, flowID: roots[1], day: dropped},
+	})
+	assert.NoError(err)
+	assert.Equal(1, removed, "the day still there")
+	flows, steps := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), roots[0])
+	assert.Zero(flows + steps)
+	flows, _ = treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), roots[1])
+	assert.Equal(2, flows, "not named in a day it is in")
 }

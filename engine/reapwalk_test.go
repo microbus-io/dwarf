@@ -30,64 +30,18 @@ import (
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
-	"github.com/microbus-io/dwarf/internal/keys"
-	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 )
 
-// chunkMux serves a root of five steps whose last calls a child of two: a tree of two flows and seven step rows.
-func chunkMux() *hosts.Mux {
-	mux := hosts.NewMux()
-	root := workflow.NewGraph("ChunkRoot")
-	for _, task := range []string{"A", "B", "C", "D", "Call"} {
-		root.SetURL(task, "chunk/"+task)
-	}
-	root.AddTransition("A", "B")
-	root.AddTransition("B", "C")
-	root.AddTransition("C", "D")
-	root.AddTransition("D", "Call")
-	root.AddTransition("Call", workflow.End)
-	mux.HandleGraph("chunk/root", root)
-	child := workflow.NewGraph("ChunkChild")
-	child.SetURL("X", "chunk/X")
-	child.SetURL("Y", "chunk/Y")
-	child.AddTransition("X", "Y")
-	child.AddTransition("Y", workflow.End)
-	mux.HandleGraph("chunk/child", child)
-	for _, task := range []string{"A", "B", "C", "D", "X", "Y"} {
-		mux.HandleTask("chunk/"+task, func(ctx context.Context, f *workflow.Flow) error { return nil })
-	}
-	mux.HandleTask("chunk/Call", func(ctx context.Context, f *workflow.Flow) error {
-		yield, err := f.Subgraph("chunk/child", nil, nil)
-		if yield || err != nil {
-			return err
-		}
-		return nil
-	})
-	return mux
-}
-
-// chunkTree runs a chunkMux root to completion, moves its close a minute into the past, and returns its key and flow
-// id. A stamp is due delete_after_ms after the close, and a warm run reaches its next pass within that millisecond.
-func chunkTree(t *testing.T, e *Engine) (string, int) {
+// chunkTree seeds a closed tree of two flows and seven steps on db, closed a minute ago, and returns its root. A stamp
+// is due delete_after_ms after the close, and a warm run reaches its next pass within that millisecond.
+func chunkTree(t *testing.T, db *sequel.DB) int {
 	t.Helper()
-	fk, err := e.Create(t.Context(), "chunk/root", nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
-	_, _, id, _, _ := keys.ParseFlowKey(fk)
-	db, err := e.db.Shard(1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(t.Context(), "UPDATE dwarf_flows SET updated_at=DATE_ADD_MILLIS(updated_at, ?) WHERE root_flow_id=?",
-		-time.Minute.Milliseconds(), id); err != nil {
-		t.Fatal(err)
-	}
-	return fk, id
+	root := seedTrees(t, db, 1, chunkShape)[0]
+	closeTreesAgo(t, db, time.Minute, root)
+	return root
 }
 
 // TestReapWalk_TheArchiveDayLookupKeepsToTheAttempt pins the attempt deadline on the archive-day lookup: with every
@@ -95,7 +49,7 @@ func chunkTree(t *testing.T, e *Engine) (string, int) {
 func TestReapWalk_TheArchiveDayLookupKeepsToTheAttempt(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	e := archiveEngine(t, chunkMux(), 30)
+	e := archiveEngine(t, hosts.NewMux(), 30)
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	db.DB.SetMaxOpenConns(1)
@@ -122,7 +76,7 @@ func TestReapWalk_ABlockedAttemptIsAFailureAndAStopIsNot(t *testing.T) {
 	logs := &logCounter{seen: map[string]int{}}
 	e := NewEngineUnderTest(t.Name())
 	t.Cleanup(func() { e.Shutdown(context.Background()) })
-	e.SetHost(chunkMux())
+	e.SetHost(hosts.NewMux())
 	assert.Must(assert.NoError(e.SetLogger(slog.New(logs))))
 	e.archiveGrace = 0
 	e.reapInterval = time.Hour
@@ -130,7 +84,9 @@ func TestReapWalk_ABlockedAttemptIsAFailureAndAStopIsNot(t *testing.T) {
 	assert.Must(assert.NoError(e.Startup(ctx)))
 	enginetest.AwaitVisitCount(t, e.seams, 1, 10*time.Second, engineseams.CheckpointArchivePassDone)
 	e.reapAttempt = 200 * time.Millisecond
-	_, root := chunkTree(t, e)
+	db, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	root := chunkTree(t, db)
 
 	e.seams.Break(engineseams.CheckpointReapBatchLocked)
 	defer e.seams.Resume(engineseams.CheckpointReapBatchLocked)
@@ -165,10 +121,10 @@ func TestReapWalk_PassesFailedTrees(t *testing.T) {
 	for _, kind := range []string{"closed", "deleted", "retention", "sizing"} {
 		t.Run(kind, func(t *testing.T) {
 			assert := testarossa.For(t)
-			e := archiveEngine(t, treeMux(), 30)
-			roots := closedRoots(t, e, 7)
+			e := archiveEngine(t, hosts.NewMux(), 30)
 			db, err := e.db.Shard(1)
 			assert.Must(assert.NoError(err))
+			roots := seedTrees(t, db, 7, callShape)
 			if kind == "deleted" {
 				_, err = db.ExecContext(t.Context(), "UPDATE dwarf_flows SET delete_after_ms=1, updated_at=DATE_ADD_MILLIS(updated_at,-60000) WHERE flow_id IN ("+intCSV(roots)+")")
 				assert.NoError(err)
@@ -210,15 +166,15 @@ func TestReapWalk_PassesFailedTrees(t *testing.T) {
 func TestReapWalk_RepairWrapsAFrozenEndAndFindsLateRoots(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	e := archiveEngine(t, treeMux(), 0)
-	roots := closedRoots(t, e, 3)
+	e := archiveEngine(t, hosts.NewMux(), 0)
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	roots := seedTrees(t, db, 3, callShape)
 	// Equal timestamps exercise the id tie-break across pages on every dialect.
 	_, err = db.ExecContext(t.Context(), "UPDATE dwarf_flows SET updated_at=DATE_ADD_MILLIS(NOW_UTC(),-60000) WHERE flow_id IN ("+intCSV(roots)+")")
 	assert.NoError(err)
 	// Keep an already-created root out of the first scan, then make its old close visible behind the position.
-	late := closedRoots(t, e, 1)[0]
+	late := seedTrees(t, db, 1, callShape)[0]
 	_, err = db.ExecContext(t.Context(), "UPDATE dwarf_flows SET updated_at=DATE_ADD_MILLIS(NOW_UTC(),3600000) WHERE flow_id=?", late)
 	assert.NoError(err)
 	e.reapSlice = 0
@@ -229,7 +185,7 @@ func TestReapWalk_RepairWrapsAFrozenEndAndFindsLateRoots(t *testing.T) {
 	key := reapWalkKey{1, "closed", true}
 	e.reapWalk(t.Context(), db, 1, kind, day, reapReasonNoRetention, true)
 	frozen := e.reapWalks.get(key).end
-	later := closedRoots(t, e, 1)[0]
+	later := seedTrees(t, db, 1, callShape)[0]
 	// A new id is outside the frozen endpoint, even if the database clock moved backwards.
 	backdate(t, e, later, 2*time.Minute)
 	backdate(t, e, late, 2*time.Minute)
@@ -254,13 +210,13 @@ func TestReapWalk_RetentionBoundaryAndHugeRetention(t *testing.T) {
 	for _, retention := range []int{1, math.MaxInt} {
 		t.Run(strconv.Itoa(retention), func(t *testing.T) {
 			assert := testarossa.For(t)
-			e := archiveEngine(t, treeMux(), retention)
-			roots := closedRoots(t, e, 2)
+			e := archiveEngine(t, hosts.NewMux(), retention)
+			db, err := e.db.Shard(1)
+			assert.Must(assert.NoError(err))
+			roots := seedTrees(t, db, 2, callShape)
 			a := e.archives.Load().byShard[1]
 			today, err := a.Today(t.Context())
 			assert.NoError(err)
-			db, err := e.db.Shard(1)
-			assert.Must(assert.NoError(err))
 			edge := a.DayEnds(today - 2)
 			for i, id := range roots {
 				ts, arg := sqlTime(db.DriverName(), edge.Add(time.Duration(i-1)*time.Millisecond))
@@ -285,11 +241,11 @@ func TestReapWalk_AtomicTreeAboveBatchBudget(t *testing.T) {
 	for _, retention := range []int{0, 30} {
 		t.Run(strconv.Itoa(retention), func(t *testing.T) {
 			assert := testarossa.For(t)
-			e := archiveEngine(t, chunkMux(), retention)
-			_, root := chunkTree(t, e)
-			e.reapBatchRows = 2
+			e := archiveEngine(t, hosts.NewMux(), retention)
 			db, err := e.db.Shard(1)
 			assert.Must(assert.NoError(err))
+			root := chunkTree(t, db)
+			e.reapBatchRows = 2
 			// A tree larger than a batch is still one atomic unit, including every descendant.
 			e.seams.InjectN(engineseams.FaultReapMidTree, 1000)
 			e.reapDueFlows(t.Context())
@@ -320,10 +276,10 @@ func TestReapWalk_TreeEnvelope(t *testing.T) {
 	for _, retention := range []int{0, 30} {
 		t.Run(strconv.Itoa(retention), func(t *testing.T) {
 			assert := testarossa.For(t)
-			e := archiveEngine(t, chunkMux(), retention)
-			_, root := chunkTree(t, e)
+			e := archiveEngine(t, hosts.NewMux(), retention)
 			db, err := e.db.Shard(1)
 			assert.Must(assert.NoError(err))
+			root := chunkTree(t, db)
 			payload := `'{"p":"` + strings.Repeat("x", 1600) + `"}'`
 			if db.DriverName() == "mssql" {
 				payload = "CONVERT(VARBINARY(MAX)," + payload + ")"
@@ -362,10 +318,10 @@ func TestReapWalk_TreeEnvelope(t *testing.T) {
 func TestReapWalk_ArchiveMoveAlsoHasAnAttemptDeadline(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	e := archiveEngine(t, chunkMux(), 30)
-	_, root := chunkTree(t, e)
+	e := archiveEngine(t, hosts.NewMux(), 30)
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	root := chunkTree(t, db)
 	day := &reapDay{}
 	assert.Must(assert.NoError(e.refreshReapDay(t.Context(), e.archives.Load().byShard[1], day)))
 	e.reapAttempt = 50 * time.Millisecond
@@ -398,11 +354,11 @@ func TestReapWalk_FastPassesTheBatchItAttempted(t *testing.T) {
 		t.Run(fault, func(t *testing.T) {
 			assert := testarossa.For(t)
 			ctx := t.Context()
-			e := archiveEngine(t, treeMux(), 0)
-			roots := closedRoots(t, e, 4)
-			ascendingCloses(t, e, roots)
+			e := archiveEngine(t, hosts.NewMux(), 0)
 			db, err := e.db.Shard(1)
 			assert.Must(assert.NoError(err))
+			roots := seedTrees(t, db, 4, callShape)
+			ascendingCloses(t, e, roots)
 			e.reapBatch = 2
 			e.reapSlice = time.Hour
 			targeted := engineseams.Join(fault, strconv.Itoa(roots[0]))
@@ -430,11 +386,11 @@ func TestReapWalk_RepairRetriesAFailedBatchFromItsFirstRoot(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
-	e := archiveEngine(t, treeMux(), 0)
-	roots := closedRoots(t, e, 4)
-	ascendingCloses(t, e, roots)
+	e := archiveEngine(t, hosts.NewMux(), 0)
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	roots := seedTrees(t, db, 4, callShape)
+	ascendingCloses(t, e, roots)
 	e.reapSlice = 0 // one attempt per slice
 	targeted := engineseams.Join(engineseams.FaultReapMidTree, strconv.Itoa(roots[2]))
 	e.seams.InjectN(targeted, 10000)
@@ -474,13 +430,13 @@ func TestReapWalk_RetentionCountsFromTheCloseAndTheGrace(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
-	e := archiveEngine(t, treeMux(), 1)
-	roots := closedRoots(t, e, 2)
+	e := archiveEngine(t, hosts.NewMux(), 1)
+	db, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	roots := seedTrees(t, db, 2, callShape)
 	set := e.archives.Load()
 	a := set.byShard[1]
 	today, err := a.Today(ctx)
-	assert.Must(assert.NoError(err))
-	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	grace := a.DayLength() / 4
 	edge := a.DayEnds(today - 2) // the last day a retention of 1 drops
@@ -512,18 +468,11 @@ func TestReapWalk_TheSweepEndIncludesTheNewestRoot(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
-	e := archiveEngine(t, treeMux(), 0)
-	var roots []int
-	for range 2 {
-		fk, err := e.Create(ctx, "arch/solo", nil, nil)
-		assert.Must(assert.NoError(err))
-		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
-		_, _, id, _, _ := keys.ParseFlowKey(fk)
-		roots = append(roots, id)
-	}
-	ascendingCloses(t, e, roots)
+	e := archiveEngine(t, hosts.NewMux(), 0)
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	roots := seedTrees(t, db, 2, soloShape)
+	ascendingCloses(t, e, roots)
 	var newest int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT MAX(flow_id) FROM dwarf_flows").Scan(&newest))
 	assert.Equal(roots[1], newest, "the newest flow is a root")
@@ -545,7 +494,7 @@ func TestReapWalk_TheStampedScanWalksTheStampedIndex(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
-	e := archiveEngine(t, treeMux(), 30)
+	e := archiveEngine(t, hosts.NewMux(), 30)
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	var explain, priceOutScans string
@@ -608,5 +557,35 @@ func TestReapWalk_TheStampedScanWalksTheStampedIndex(t *testing.T) {
 		// stamped root on each scan, which is what an empty table's plan shows.
 		assert.False(strings.Contains(plan.String(), "Sort") || strings.Contains(plan.String(), "TEMP B-TREE"),
 			"no sort: %s", plan.String())
+	}
+}
+
+// TestReapWalk_AFlowWithNoStepsIsOneRow pins the sizing of a tree holding a flow of no steps: the flow counts as one
+// row, as the join leaves it one, and the move takes it with the rest of its tree.
+func TestReapWalk_AFlowWithNoStepsIsOneRow(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e := archiveEngine(t, hosts.NewMux(), 30)
+	db, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	roots := seedTrees(t, db, 2, treeShape{rootSteps: 2, childSteps: 0})
+	e.reapBatchRows = 5
+	cut, err := e.rootsWithinRows(ctx, db, roots)
+	assert.NoError(err)
+	assert.Equal(roots[:1], cut, "three rows a tree: two steps and the flow of none")
+	e.reapBatchRows = 6
+	cut, err = e.rootsWithinRows(ctx, db, roots)
+	assert.NoError(err)
+	assert.Equal(roots, cut)
+
+	day := &reapDay{}
+	assert.Must(assert.NoError(e.refreshReapDay(ctx, e.archives.Load().byShard[1], day)))
+	moved, err := e.reapBatchOf(ctx, db, cut, e.closedDue(0), day)
+	assert.NoError(err)
+	assert.Equal(4, moved)
+	for _, root := range roots {
+		flows, steps := treeCount(t, e, migrations.FlowsTable(day.day), migrations.StepsTable(day.day), root)
+		assert.Equal([2]int{2, 2}, [2]int{flows, steps})
 	}
 }
