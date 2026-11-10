@@ -46,6 +46,11 @@ func Known(a *Archive) []int {
 	return slices.Clone(a.known)
 }
 
+// OnCatalogRead makes f run after the query of each of a's catalog reads, before the read updates the days a knows.
+func OnCatalogRead(a *Archive, f func()) {
+	a.catalogRead = f
+}
+
 // Catalogs returns how many times a has read the catalog.
 func Catalogs(a *Archive) int {
 	return int(a.catalogs.Load())

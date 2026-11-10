@@ -166,8 +166,12 @@ it for every archived read.
   every maintenance pass, and `Refresh` on a replica that maintains nothing there - less the days this archive dropped
   since), **and any day later than every one it knows.** A day it lacks below its newest was dropped or never made, and
   nothing makes it later, so it is skipped: an expired key costs the directory alone, one statement and no error. A
-  later day may have been made since by a peer, so it is probed. **The record is stale in both directions for up to a
-  pass interval (an hour)**: a day made since is probed as later than every known one, and a known day a peer dropped
+  later day may have been made since by a peer, so it is probed. **A catalog read sets the record only if it began
+  after the read or drop the record holds** (`begun`, `knownAt`): reads run concurrently - a reader's `Refresh`, a
+  pass's `ensure` and drops - and a slower one that began before a day was made or dropped would otherwise finish
+  last and put back a list missing the new day, or holding the dropped one, until the next read. A drop by this
+  archive counts as begun when it is forgotten, since a read begun before it may still list the day. **The record is
+  stale in both directions for up to a pass interval (an hour)**: a day made since is probed as later than every known one, and a known day a peer dropped
   fails the statement, and so costs a server-side error, on every locate that probes it until the next read.
 - **On a missing table** (`sequel.IsUndefinedTableError`) the locate leaves out the oldest day it probed and runs the
   statement again - the day after, then the directory alone, which a drop cannot reach. The statement does not say
@@ -206,7 +210,8 @@ it for every archived read.
 
 Pinned by `locate_test.go`: the creation day, the day after and the directory's day each found with no catalog read, a
 day the archive lacks below its newest not probed and one later than its newest probed, a peer's drop still probed and
-a day made below the newest unseen until the next catalog read, a day dropped by the archive itself forgotten at once, a probed day
+a day made below the newest unseen until the next catalog read, a day dropped by the archive itself forgotten at once, a
+catalog read that began before a later read or before a drop by the archive not kept, a probed day
 preferred to a directory row, a dropped directory day returned as written, the creation day dropped and
 then both (the directory alone finding a later day), a day with either table missing, a failure other than a missing
 table (one only a probe meets) not read as a 404, `DirectoryHours` against the creation day for several day lengths, and retention deleting the

@@ -92,13 +92,19 @@ type Archive struct {
 	fsys      fs.FS
 	// clock overrides the database clock in tests; nil reads the database's.
 	clock func(ctx context.Context) (int64, error)
-	// mu guards ensured, the day whose tables, and those of the days ahead of it, this Archive last saw whole, and
-	// known, the days with both tables at the last catalog read, less the days this Archive dropped since.
+	// mu guards ensured, the day whose tables, and those of the days ahead of it, this Archive last saw whole;
+	// known, the days with both tables at the latest-begun catalog read to finish, less the days this Archive dropped
+	// since; begun, which numbers the catalog reads and this Archive's drops in the order they began; and knownAt,
+	// the number of the read or drop known reflects. A read that began before knownAt's is not kept: it can predate a
+	// day made or dropped since.
 	mu      sync.Mutex
 	ensured int
 	known   []int
-	// catalogs counts the catalog reads, for the tests.
-	catalogs atomic.Int64
+	begun   int64
+	knownAt int64
+	// catalogs counts the catalog reads, and catalogRead, when set, runs after each one's query, for the tests.
+	catalogs    atomic.Int64
+	catalogRead func()
 }
 
 // New returns the Archive of the shard db is open on, for days of dayLength. fsys holds the archive migrations,
@@ -417,6 +423,10 @@ func (a *Archive) Refresh(ctx context.Context) error {
 // of them with both - the others are half made or half dropped.
 func (a *Archive) catalog(ctx context.Context) (days []int, whole []int, err error) {
 	a.catalogs.Add(1)
+	a.mu.Lock()
+	a.begun++
+	read := a.begun
+	a.mu.Unlock()
 	// The pattern narrows what the catalog returns; DayOfTable decides. Its underscores match any character, harmlessly.
 	var stmt string
 	switch a.db.DriverName() {
@@ -458,8 +468,14 @@ func (a *Archive) catalog(ctx context.Context) (days []int, whole []int, err err
 	}
 	slices.Sort(days)
 	slices.Sort(whole)
+	if a.catalogRead != nil {
+		a.catalogRead()
+	}
 	a.mu.Lock()
-	a.known = whole
+	if read > a.knownAt {
+		a.known = whole
+		a.knownAt = read
+	}
 	a.mu.Unlock()
 	return days, whole, nil
 }

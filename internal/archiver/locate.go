@@ -88,10 +88,13 @@ func (a *Archive) worthProbing(days ...int) []int {
 	return probed
 }
 
-// forget takes a day the archive dropped out of the days it knows.
+// forget takes a day the archive dropped out of the days it knows. A catalog read begun before it may list the day,
+// so it counts as begun after every such read.
 func (a *Archive) forget(day int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.begun++
+	a.knownAt = a.begun
 	if i, ok := slices.BinarySearch(a.known, day); ok {
 		a.known = slices.Delete(slices.Clone(a.known), i, i+1)
 	}

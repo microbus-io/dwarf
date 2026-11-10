@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -224,6 +225,80 @@ func TestArchiver_LocateFollowsTheCatalogReads(t *testing.T) {
 	day, err := a.LocateFlow(ctx, 102, hourOfDay(9001, 1))
 	assert.NoError(err)
 	assert.Equal(9001, day)
+}
+
+// TestArchiver_AnOlderCatalogReadIsNotKept pins that a catalog read finishing after a later one does not put back its
+// older list: a day made while it ran stays known.
+func TestArchiver_AnOlderCatalogReadIsNotKept(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	assert := testarossa.For(t)
+	db := openShard(t)
+	a := archiver.New(db, archiver.DefaultDayLength, migrations.Archive())
+	for day := 9003; day <= 9005; day++ {
+		assert.NoError(archiver.Ensure(ctx, a, day))
+	}
+
+	held, release := make(chan struct{}), make(chan struct{})
+	var reads atomic.Int32
+	archiver.OnCatalogRead(a, func() {
+		if reads.Add(1) == 1 {
+			close(held)
+			<-release
+		}
+	})
+	done := make(chan error, 1)
+	go func() { done <- a.Refresh(ctx) }()
+	select {
+	case <-held:
+	case err := <-done:
+		t.Fatalf("the read ended before it was held: %v", err)
+	}
+	assert.NoError(archiver.Ensure(ctx, a, 9006))
+	assert.Equal([]int{9003, 9004, 9005, 9006}, archiver.Known(a))
+	close(release)
+	assert.NoError(<-done)
+	assert.Equal([]int{9003, 9004, 9005, 9006}, archiver.Known(a), "the older read does not take back the day made")
+}
+
+// TestArchiver_ACatalogReadBeforeADropDoesNotRestoreTheDay pins that a catalog read that began before the archive
+// dropped a day, and finishes after, does not put the day back.
+func TestArchiver_ACatalogReadBeforeADropDoesNotRestoreTheDay(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	assert := testarossa.For(t)
+	db := openShard(t)
+	a := archiver.New(db, archiver.DefaultDayLength, migrations.Archive())
+	for day := 9003; day <= 9006; day++ {
+		assert.NoError(archiver.Ensure(ctx, a, day))
+	}
+
+	// The first read is the drop's own listing; while it is held, a second read begins and lists the day not yet
+	// dropped, then waits until the drop is done.
+	held, release := make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	var reads atomic.Int32
+	archiver.OnCatalogRead(a, func() {
+		switch reads.Add(1) {
+		case 1:
+			go func() { done <- a.Refresh(ctx) }()
+			select {
+			case <-held:
+			case err := <-done:
+				done <- err // for the test's own receive, which then reports it
+			}
+		case 2:
+			close(held)
+			<-release
+		}
+	})
+	dropped, err := a.DropBefore(ctx, 9004)
+	assert.NoError(err)
+	assert.Equal(1, dropped)
+	assert.Equal([]int{9004, 9005, 9006}, archiver.Known(a))
+	close(release)
+	assert.NoError(<-done)
+	assert.Equal([]int{9004, 9005, 9006}, archiver.Known(a), "the read begun before the drop does not restore the day")
 }
 
 // TestArchiver_LocateBeforeAnyCatalogRead pins that an archive that has not read the catalog yet probes every day it is
