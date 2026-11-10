@@ -157,3 +157,27 @@ func TestNew_RoundTrips(t *testing.T) {
 		t.Fatalf("ParseStepKey(%q) = %d, %d, %d, %d, %q, %v", key, shard, hour, flowID, stepID, token, err)
 	}
 }
+
+// TestCorrelationID_IsTheKeyWithoutItsToken pins that the correlation id is the flow key with its token omitted, so
+// a search for it followed by "-" within its shard finds exactly that flow, and that it is not itself a key.
+func TestCorrelationID_IsTheKeyWithoutItsToken(t *testing.T) {
+	const tok = "a1b2c3d4e5f60718"
+	corrID := CorrelationID(3, 234567, 42)
+	if corrID != "3-234567-42" {
+		t.Fatalf("CorrelationID spelled %q", corrID)
+	}
+	key := NewFlowKey(3, 234567, 42, tok)
+	if key != corrID+"-"+tok {
+		t.Fatalf("flow key %q is not correlation id %q plus its token", key, corrID)
+	}
+	// The trailing "-" keeps flow 42 from matching flow 421 of the same shard and hour.
+	if strings.HasPrefix(NewFlowKey(3, 234567, 421, tok), corrID+"-") {
+		t.Fatalf("correlation id %q followed by - matches another flow's key", corrID)
+	}
+	if _, _, _, _, err := ParseFlowKey(corrID); err == nil {
+		t.Fatalf("correlation id %q must not parse as a flow key", corrID)
+	}
+	if _, _, _, _, _, err := ParseStepKey(corrID); err == nil {
+		t.Fatalf("correlation id %q must not parse as a step key", corrID)
+	}
+}

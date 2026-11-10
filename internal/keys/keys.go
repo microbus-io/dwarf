@@ -122,14 +122,15 @@ func canonicalInt(s string) (int64, bool) {
 }
 
 // CorrelationID is the non-secret, capability-free flow identifier for telemetry (spans, logs,
-// metrics): the flow key with its creation hour and its random token segment omitted. It uniquely identifies the flow for
-// correlation - {shard} disambiguates the per-shard sequential flow_id - but grants nothing. It is
-// deliberately NOT a valid engine key: no operation accepts it, and the engine offers no
-// correlationID->key lookup, so a trace/log reader cannot escalate it into the flow's write capability.
+// metrics): "{shard}-{hour}-{flowID}", the flow key with its random token segment omitted. It uniquely identifies
+// the flow for correlation - {shard} disambiguates the per-shard sequential flow_id - but grants nothing. It is
+// deliberately NOT a valid engine key: no operation accepts it, so a trace/log reader cannot escalate it into the
+// flow's write capability. It is a prefix of the flow key, so a caller that can already list flows - and so already
+// receives their keys - finds the flow by searching for it followed by "-" within its shard.
 // Every place a flow identifier crosses into an observability sink must use this, never the token-bearing
 // key (which belongs only on the task carrier and in-memory waiter matching).
-func CorrelationID(shardNum, flowID int) string {
-	return strconv.Itoa(shardNum) + "-" + strconv.Itoa(flowID)
+func CorrelationID(shardNum, hour, flowID int) string {
+	return strconv.Itoa(shardNum) + "-" + strconv.Itoa(hour) + "-" + strconv.Itoa(flowID)
 }
 
 // RandomIdentifier generates a random hex string of n characters (4n bits of entropy). It mints the unguessable

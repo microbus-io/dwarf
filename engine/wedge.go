@@ -220,7 +220,7 @@ func (e *Engine) recoverExpiredLeases(ctx context.Context) {
 
 // wedgedParksSQL selects the parked callers no open child can revive. The literal f.surgraph_step_id>0 lets the
 // partial index serve the correlated lookup; without it SQLite scans dwarf_flows once per parked step.
-const wedgedParksSQL = "SELECT s.step_id, s.flow_id, s.parked_child_flow_id FROM dwarf_steps s" +
+const wedgedParksSQL = "SELECT s.step_id, s.flow_id, s.flow_created_hour, s.parked_child_flow_id FROM dwarf_steps s" +
 	" WHERE s.parked=? AND s.status='" + workflow.StatusRunning + "' AND s.updated_at <= DATE_ADD_MILLIS(NOW_UTC(), ?)" +
 	" AND NOT EXISTS (SELECT 1 FROM dwarf_flows f WHERE f.surgraph_step_id=s.step_id AND f.surgraph_step_id>0" +
 	" AND f.status IN ('" + workflow.StatusCreated + "', '" + workflow.StatusRunning + "', '" + workflow.StatusInterrupted + "'))"
@@ -246,11 +246,11 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 		e.logSweepError(ctx, "Wedge sweep: querying parked subgraph steps", "shard", shard, "error", err)
 		return
 	}
-	type wedgedCaller struct{ stepID, flowID, childFlowID int }
+	type wedgedCaller struct{ stepID, flowID, flowHour, childFlowID int }
 	var hits []wedgedCaller
 	for rows.Next() {
 		var w wedgedCaller
-		err := rows.Scan(&w.stepID, &w.flowID, &w.childFlowID)
+		err := rows.Scan(&w.stepID, &w.flowID, &w.flowHour, &w.childFlowID)
 		if err != nil {
 			rows.Close()
 			e.logSweepError(ctx, "Wedge sweep: scanning parked subgraph step", "shard", shard, "error", err)
@@ -275,16 +275,17 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 		// delivery below is fenced on it: a caller re-parked on a newer child since the scan is left alone.
 		childFlowID := w.childFlowID
 		var childStatus, childError, childCancelReason string
+		var childHour int
 		var childFinalState []byte
 		err := db.QueryRowContext(ctx,
-			"SELECT status, final_state, error, cancel_reason FROM dwarf_flows WHERE flow_id=?",
+			"SELECT status, created_hour, final_state, error, cancel_reason FROM dwarf_flows WHERE flow_id=?",
 			childFlowID,
-		).Scan(&childStatus, &childFinalState, &childError, &childCancelReason)
+		).Scan(&childStatus, &childHour, &childFinalState, &childError, &childCancelReason)
 		switch {
 		case err == sql.ErrNoRows:
 			// The child flow is gone (e.g. deleted/purged): fail the caller so the flow can terminate.
 			e.logger.ErrorContext(ctx, "Wedge sweep: parked subgraph caller has no child flow; failing it",
-				"shard", shard, "step", w.stepID, "flow", keys.CorrelationID(shard, w.flowID))
+				"shard", shard, "step", w.stepID, "flow", keys.CorrelationID(shard, w.flowHour, w.flowID))
 			if rerr := e.deliverSubgraphError(ctx, shard, w.stepID, childFlowID, errors.New("subgraph flow not found (wedge recovery)")); rerr != nil {
 				e.logSweepError(ctx, "Wedge sweep: failing orphaned subgraph caller", "shard", shard, "step", w.stepID, "error", rerr)
 				continue
@@ -297,7 +298,7 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 			// revived and parked again. It is not wedged.
 		default:
 			e.logger.ErrorContext(ctx, "Wedge sweep: reviving wedged subgraph caller",
-				"shard", shard, "step", w.stepID, "childFlow", keys.CorrelationID(shard, childFlowID), "childStatus", childStatus)
+				"shard", shard, "step", w.stepID, "childFlow", keys.CorrelationID(shard, childHour, childFlowID), "childStatus", childStatus)
 			var rerr error
 			switch childStatus {
 			case workflow.StatusCompleted:
@@ -381,9 +382,9 @@ func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel
 			return // abandoned by the drain; the next pass finds what is left
 		}
 		e.logger.ErrorContext(ctx, "Wedge sweep: terminating orphaned subgraph child whose parent is terminal",
-			"shard", shard, "childFlow", keys.CorrelationID(shard, o.flowID))
+			"shard", shard, "childFlow", keys.CorrelationID(shard, o.hour, o.flowID))
 		if rerr := e.terminateOrphanedSubtree(ctx, shard, o.flowID, o.hour, o.token); rerr != nil {
-			e.logSweepError(ctx, "Wedge sweep: terminating orphaned subgraph child", "shard", shard, "childFlow", keys.CorrelationID(shard, o.flowID), "error", rerr)
+			e.logSweepError(ctx, "Wedge sweep: terminating orphaned subgraph child", "shard", shard, "childFlow", keys.CorrelationID(shard, o.hour, o.flowID), "error", rerr)
 			continue
 		}
 		e.metricStepUnwedged(ctx, "orphaned_child")
@@ -483,8 +484,8 @@ func (e *Engine) recoverOrphanedFlows(ctx context.Context, db *sequel.DB, shard 
 	slices.Sort(running)
 
 	type orphan struct {
-		flowID      int
-		workflowURL string
+		flowID, hour int
+		workflowURL  string
 	}
 	// A flow is a hit when one of its steps lost its transition and its lease has lapsed - whatever its other steps
 	// are doing - or, on an alarm pass, when it is running with every step terminal and none flagged.
@@ -503,7 +504,7 @@ func (e *Engine) recoverOrphanedFlows(ctx context.Context, db *sequel.DB, shard 
 		}
 		ph, ids := inList(chunk)
 		rows, err := db.QueryContext(ctx,
-			"SELECT f.flow_id, f.workflow_url FROM dwarf_flows f"+
+			"SELECT f.flow_id, f.created_hour, f.workflow_url FROM dwarf_flows f"+
 				" WHERE f.flow_id IN ("+ph+") AND f.status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"') AND "+hit,
 			ids...,
 		)
@@ -513,7 +514,7 @@ func (e *Engine) recoverOrphanedFlows(ctx context.Context, db *sequel.DB, shard 
 		}
 		for rows.Next() {
 			var o orphan
-			if err := rows.Scan(&o.flowID, &o.workflowURL); err != nil {
+			if err := rows.Scan(&o.flowID, &o.hour, &o.workflowURL); err != nil {
 				e.logSweepError(ctx, "Orphan sweep: scanning stranded flow", "shard", shard, "error", err)
 				break
 			}
@@ -570,14 +571,14 @@ func (e *Engine) recoverOrphanedFlows(ctx context.Context, db *sequel.DB, shard 
 		// Token-free correlation id: an operator alarm must not carry the flow key, which is a write capability.
 		switch {
 		case err != nil:
-			e.logSweepError(ctx, "Orphan sweep: rewinding stranded steps", "shard", shard, "flow", keys.CorrelationID(shard, o.flowID), "error", err)
+			e.logSweepError(ctx, "Orphan sweep: rewinding stranded steps", "shard", shard, "flow", keys.CorrelationID(shard, o.hour, o.flowID), "error", err)
 		case rewound > 0:
 			e.logger.WarnContext(ctx, "Orphan sweep: replaying steps whose transition never committed",
-				"flow", keys.CorrelationID(shard, o.flowID), "steps", rewound)
+				"flow", keys.CorrelationID(shard, o.hour, o.flowID), "steps", rewound)
 			e.metricStepsRecovered(ctx, int(rewound))
 		case alarm && locked && held == 0:
 			e.logger.ErrorContext(ctx, "Orphaned flow: running with all steps terminal and no successor",
-				"flow", keys.CorrelationID(shard, o.flowID))
+				"flow", keys.CorrelationID(shard, o.hour, o.flowID))
 			e.metricOrphanedFlow(ctx, o.workflowURL)
 		}
 	}

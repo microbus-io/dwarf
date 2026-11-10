@@ -2311,8 +2311,8 @@ free-text search is a field on `workflow.Query` that the lists consume.)
 `internal/keys/CLAUDE.md`.
 
 **Related engine-side hardening (all verified, none a substitute for host authz):** uniform not-found on
-key mismatch (no existence oracle); telemetry carries only the token-free correlation id and there is no
-correlation-id→key lookup (see "Tracing"); subgraph-child keys are read-only for lifecycle mutations (see
+key mismatch (no existence oracle); telemetry carries only the token-free correlation id and no operation accepts or resolves one -
+only the lists, which already return keys, find its flow (see "Tracing"); subgraph-child keys are read-only for lifecycle mutations (see
 "Subgraph keys are read-only"). The engine cannot go further - it never sees the principal.
 
 ### Await
@@ -3443,8 +3443,8 @@ metrics: spans need cross-replica continuity, metrics don't).
   (`recordSpanError` → `RecordError`+`SetStatus(codes.Error)`) when the executor returns one.
 
 **Telemetry carries the token-free correlation id, never the flowKey.** `workflow.id` is
-`keys.CorrelationID(shard, flowID)` = `"{shard}-{flowID}"`, **not** the flowKey. The flowKey's last
-segment is a random token that is a *bearer write-capability* (`Resume`/`Terminate`/`Fork`/… gate only on
+`keys.CorrelationID(shard, hour, flowID)` = `"{shard}-{hour}-{flowID}"`, the flowKey with its token omitted.
+The flowKey's last segment is a random token that is a *bearer write-capability* (`Resume`/`Terminate`/`Fork`/… gate only on
 `flow_id`+`flow_token`+`created_hour`), and a trace backend is typically readable far more broadly than the workflow
 data - so stamping the key onto every span would hand a write capability for every traced flow to every
 trace reader. The correlation id uniquely identifies the flow ({shard} disambiguates the per-shard
@@ -3457,18 +3457,21 @@ flow key at all. Any new span/log/metric that names a flow must use `keys.Correl
 `trace_parent` column (`traceIDFromParent`), empty when no tracer was configured. It is a **token-free
 correlation value** (like `keys.CorrelationID`, not a capability), safe to surface so an operator can pivot from
 a listed flow to its trace backend - consistent with the trace-read < data-read privilege boundary above. It is
-*not* the OTEL span attribute (`workflow.id` stays the `{shard}-{flowID}` correlation id); it is a distinct,
+*not* the OTEL span attribute (`workflow.id` stays the `{shard}-{hour}-{flowID}` correlation id); it is a distinct,
 read-only observability field on the list projection.
 
-**No correlationID→key lookup, by design.** The correlation id is deliberately *not* a valid engine key
-(no operation accepts it) and the engine offers **no** operation that resolves it back to a key - that
-would be a capability-minting oracle, re-leaking through the back door exactly what dropping the token
-from telemetry closes (a trace reader, or any service that can reach the engine, could turn the id into
-write access). Legitimate "act on the flow I found in a trace" resolves outside the engine: the host's own
-store of the keys it minted at `Create` (under the host's authz), or database break-glass
-(`SELECT flow_token …`, already the top privilege tier - it exposes everything, so it mints no *new*
-capability). The friction of "a trace id is not accepted by any API" is the trace-read < data-read <
-DB-read privilege boundary working, not a gap to fill.
+**No correlationID→key lookup operation, by design.** The correlation id is deliberately *not* a valid engine
+key (no operation accepts it), and the engine offers **no** operation dedicated to resolving it back to a key -
+one reachable by less than list access would be a capability-minting oracle, re-leaking through the back door
+exactly what dropping the token from telemetry closes (a trace reader, or any service that can reach the engine,
+could turn the id into write access). The one route from a correlation id to its key is the lists: the id is a
+prefix of the key, so `Query.Search` finds the flow (the recipe and why it matches no other flow are in
+`internal/keys/CLAUDE.md`). That grants nothing, because the lists already return every key they match to
+whoever may call them - which is why a host gates them as write access - so the trace-read < data-read <
+DB-read privilege boundary holds: a trace reader without list access still gains no key. Outside the engine, the
+host's own store of the keys it minted at `Create`, or database break-glass (`SELECT flow_token …`, already the
+top privilege tier), also resolve it. Do not add an operation that accepts a correlation id: it would be gated on
+less than the lists, or it would be the lists again.
 
 **Subgraphs nest, they don't flatten.** A subgraph gets its **own** "workflow" span parented to the
 **caller step's span**, not the parent flow's root - so the trace reads

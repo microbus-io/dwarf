@@ -179,7 +179,7 @@ func (e *Engine) failStep(ctx context.Context, d *dispatch, taskErr error, held 
 		}
 		if failFlow {
 			var err error
-			loss, err = e.failFlowTx(ctx, tx, shardNum, flowID, flowToken, flowCancelled, taskErr, parentStepID, stepID)
+			loss, err = e.failFlowTx(ctx, tx, shardNum, flowID, flowHour, flowToken, flowCancelled, taskErr, parentStepID, stepID)
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -216,7 +216,7 @@ type flowLoss struct {
 // lost flow looks like. lastLoss is the resolving step's own error, or nil for a completing arrival. stoppedStepID
 // is the step recorded as the one the flow stopped at: the failing step, or 0 for a completing arrival, which is not
 // the loss.
-func (e *Engine) failFlowTx(ctx context.Context, tx sequel.Executor, shardNum, flowID int, flowToken string, cancelled bool, lastLoss error, parentStepID int, stoppedStepID int) (flowLoss, error) {
+func (e *Engine) failFlowTx(ctx context.Context, tx sequel.Executor, shardNum, flowID, flowHour int, flowToken string, cancelled bool, lastLoss error, parentStepID int, stoppedStepID int) (flowLoss, error) {
 	loss := flowLoss{status: workflow.StatusFailed, parentStepID: parentStepID}
 	if cancelled {
 		loss.status = workflow.StatusCancelled
@@ -235,7 +235,7 @@ func (e *Engine) failFlowTx(ctx context.Context, tx sequel.Executor, shardNum, f
 		// it as "the database is down" - leaving the step to re-execute forever. So the flow still terminalizes,
 		// with an empty final_state and the error logged.
 		e.logger.ErrorContext(ctx, "Computing final_state while failing a flow; terminalizing with empty state",
-			"flow", keys.CorrelationID(shardNum, flowID), "error", err)
+			"flow", keys.CorrelationID(shardNum, flowHour, flowID), "error", err)
 		finalStateJSON = []byte("{}")
 	}
 	res, uerr := tx.ExecContext(ctx,
@@ -265,7 +265,7 @@ func (e *Engine) failFlowTx(ctx context.Context, tx sequel.Executor, shardNum, f
 // introspection), whose failure otherwise travels only to its parent's flow.Subgraph call.
 func (e *Engine) endLostFlow(ctx context.Context, shardNum, flowID, flowHour int, flowToken string, label flowLabel, loss flowLoss) {
 	e.metricFlowClosed(ctx, label.workflowURL, loss.status, label.priority, shardNum)
-	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowID), "to", loss.status)
+	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowHour, flowID), "to", loss.status)
 	e.signalStop(ctx, keys.NewFlowKey(shardNum, flowHour, flowID, flowToken), loss.status)
 	if loss.reDispatchParent {
 		e.enqueueStep(ctx, shardNum, loss.parentStepID)

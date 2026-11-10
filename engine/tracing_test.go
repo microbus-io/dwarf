@@ -213,16 +213,17 @@ func TestTracing_SpansEmittedOnRun(t *testing.T) {
 	assert.True(armerFound, "subgraph workflow span should be parented to the runInner dispatch that armed it")
 	assert.Equal(subRoot.SpanContext().SpanID(), taskX.Parent().SpanID(), "subgraph step parented to the subgraph workflow span")
 
-	// SEC2: the per-step span's workflow.id is the token-free correlation id ("{shard}-{flowID}"), never
-	// the flowKey (whose last segment is a bearer write-capability). It is the key's shard and id, with neither
-	// the hour nor the token, and is not the full key.
-	shard, _, flowID, _, err := keys.ParseFlowKey(flowKey)
+	// SEC2: the per-step span's workflow.id is the token-free correlation id ("{shard}-{hour}-{flowID}"), never
+	// the flowKey (whose last segment is a bearer write-capability). It is the key with its token omitted, and is
+	// not the full key.
+	shard, hour, flowID, token, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
-	wantCorrID := strconv.Itoa(shard) + "-" + strconv.Itoa(flowID)
+	wantCorrID := strconv.Itoa(shard) + "-" + strconv.Itoa(hour) + "-" + strconv.Itoa(flowID)
 	gotID := spanAttrString(taskA, "workflow.id")
 	assert.Equal(wantCorrID, gotID, "workflow.id is the token-free correlation id")
-	assert.Equal(1, strings.Count(gotID, "-"), "correlation id has exactly two segments (shard-flowID), no token")
-	assert.NotEqual(flowKey, gotID, "workflow.id must not be the capability-bearing flowKey")
+	assert.Equal(2, strings.Count(gotID, "-"), "correlation id has exactly three segments (shard-hour-flowID), no token")
+	assert.Equal(flowKey, gotID+"-"+token, "correlation id is the flowKey without its token")
+	assert.NotContains(gotID, token, "workflow.id must not carry the token")
 }
 
 func TestTraceIDFromParent(t *testing.T) {

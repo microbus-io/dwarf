@@ -37,10 +37,19 @@ not found, exactly as one with the wrong token is.
 a key by hand, so each constructor and its parser stay inverses by construction rather than by convention (pinned by
 the fuzzers' round-trips). A flow key does not parse as a step key, nor the reverse: their segment counts differ.
 
-`CorrelationID(shard, id)` returns `"{shard}-{id}"` — the key with the hour and token omitted. It is deliberately
-**not** a valid engine key (no operation accepts it) so a trace/log reader cannot escalate it into the flow's write
-capability, and the engine offers no correlation-id→key lookup. It stays unique without the hour, since ids are
-per-shard sequences.
+`CorrelationID(shard, hour, id)` returns `"{shard}-{hour}-{id}"` — the flow key with only its token omitted. The
+token is the key's one secret, so the id grants nothing: it is deliberately **not** a valid engine key (three
+segments where a flow key has four; no operation accepts it), so a trace/log reader cannot escalate it into the
+flow's write capability. It is unique, since ids are per-shard sequences.
+
+It is an **exact prefix of the flow key**, so an operator holding a correlation id from a log finds the flow
+through the lists: `Query.Search` matches substrings of the key, and searching `{correlationID}-` with
+`Query.Shard` set matches that flow's key and no other's (the trailing `-` keeps flow 123 from matching 1234,
+`Query.Shard` keeps shard 1 from matching inside shard 21's keys). That is not a correlation-id→key oracle: the
+lists already return keys wholesale to whoever may call them, so the search reveals nothing that caller could not
+list anyway, and a log reader without list access still holds no key. Keep it a prefix — an id that is not a
+substring of the key (dropping the hour, reordering segments) leaves the operator with no way to find the flow.
+Pinned by `TestCorrelationID_IsTheKeyWithoutItsToken` and the engine's `TestList_SearchFindsTheFlowOfACorrelationID`.
 
 ### Why 64-bit, and why not widen
 

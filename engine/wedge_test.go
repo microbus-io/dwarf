@@ -568,7 +568,7 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 	if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, orphanOut.Status) {
 		return
 	}
-	shard, _, orphanFlowID, _, err := keys.ParseFlowKey(orphanKey)
+	shard, orphanHour, orphanFlowID, _, err := keys.ParseFlowKey(orphanKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -620,7 +620,7 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 	assert.Len(seen, 1, "exactly one flow should be flagged as orphaned")
 	if len(seen) == 1 {
 		// The alarm logs the token-free correlation id (SEC2), never the capability-bearing flowKey.
-		assert.Equal(keys.CorrelationID(shard, orphanFlowID), seen[0], "the flagged flow is the forged orphan, not the healthy blocked flow")
+		assert.Equal(keys.CorrelationID(shard, orphanHour, orphanFlowID), seen[0], "the flagged flow is the forged orphan, not the healthy blocked flow")
 		assert.NotEqual(orphanKey, seen[0], "the logged id carries no token")
 	}
 }
@@ -670,7 +670,7 @@ func TestOrphanDetection_ChecksEveryChunk(t *testing.T) {
 	// Two full chunks and a short third of three ids, padded to four by repeating the last.
 	const n = 2*inListChunk + 3
 	stranded := map[int]bool{0: true, inListChunk - 1: true, inListChunk: true, 2*inListChunk - 1: true, n - 1: true, 300: true}
-	var ids []int
+	var ids, hours []int
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		for range n {
 			_, err := tx.ExecContext(ctx,
@@ -681,18 +681,19 @@ func TestOrphanDetection_ChecksEveryChunk(t *testing.T) {
 				return err
 			}
 		}
-		rows, err := tx.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE flow_id>? ORDER BY flow_id", templateID)
+		rows, err := tx.QueryContext(ctx, "SELECT flow_id, created_hour FROM dwarf_flows WHERE flow_id>? ORDER BY flow_id", templateID)
 		if err != nil {
 			return err
 		}
-		ids = ids[:0]
+		ids, hours = ids[:0], hours[:0]
 		for rows.Next() {
-			var id int
-			if err := rows.Scan(&id); err != nil {
+			var id, hour int
+			if err := rows.Scan(&id, &hour); err != nil {
 				rows.Close()
 				return err
 			}
 			ids = append(ids, id)
+			hours = append(hours, hour)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
@@ -718,7 +719,7 @@ func TestOrphanDetection_ChecksEveryChunk(t *testing.T) {
 	e.recoverOrphanedFlows(ctx, db, shard, true)
 	var want []string
 	for i := range stranded {
-		want = append(want, keys.CorrelationID(shard, ids[i]))
+		want = append(want, keys.CorrelationID(shard, hours[i], ids[i]))
 	}
 	got := capture.seen()
 	slices.Sort(want)

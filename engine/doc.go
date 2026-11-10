@@ -89,9 +89,11 @@ limitations under the License.
 // The token defends only against reference forgery and id enumeration: flow ids are sequential, so without
 // the token a caller cannot fabricate a key for a flow it was never handed. That is defense in depth, not
 // access control — a leaked, logged, or shared key grants its bearer full write access to that one flow,
-// so treat a key like a password. The engine does not emit keys to traces or logs (telemetry carries only
-// a token-free "{shard}-{id}" correlation id), and there is deliberately no operation that resolves a
-// correlation id back to a key, which would be a capability-minting oracle.
+// so treat a key like a password. The engine does not emit keys to traces or logs: telemetry carries only
+// a token-free "{shard}-{hour}-{id}" correlation id, the flow key without its token. No operation accepts a
+// correlation id. A caller with access to the lists finds its flow by searching for it followed by "-" with
+// Query.Shard set, which returns nothing those lists do not already return; a log reader without that access
+// gains no key.
 //
 // ListOpen, ListRecentlyClosed and ListClosed return keys, tokens included — the only key-returning operations. Exposing them to a
 // principal is equivalent to granting the

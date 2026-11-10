@@ -22,8 +22,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/workflow"
@@ -541,4 +543,37 @@ func TestList_SearchPatternIsLiteral(t *testing.T) {
 	}
 	assert.Equal("%a~_b~%c~~d~[x]%", likePattern("mssql", "A_B%C~D[X]"))
 	assert.Equal("%~[a-c]~[^z]]%", likePattern("mssql", "[a-c][^z]]"))
+}
+
+// TestList_SearchFindsTheFlowOfACorrelationID pins that the correlation id telemetry carries finds its flow through
+// the lists: searched for followed by "-", within its shard, it matches that flow's key and no other flow's.
+func TestList_SearchFindsTheFlowOfACorrelationID(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("Corr")
+	g.SetURL("Work", "corrsearch.verify:0/work")
+	g.AddTransition("Work", workflow.End)
+	mux.HandleGraph("corrsearch.verify:0/corr", g)
+	mux.HandleTask("corrsearch.verify:0/work", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(context.Background())
+	e.SetHost(mux)
+	assert.Must(assert.NoError(e.Startup(ctx)))
+
+	var flowKeys []string
+	for range 2 {
+		key, _, err := e.Run(ctx, "corrsearch.verify:0/corr", nil, nil)
+		assert.Must(assert.NoError(err))
+		flowKeys = append(flowKeys, key)
+	}
+	shard, hour, flowID, _, err := keys.ParseFlowKey(flowKeys[0])
+	assert.Must(assert.NoError(err))
+	found, err := enginetest.ListAll(ctx, e, workflow.Query{Shard: shard, Search: keys.CorrelationID(shard, hour, flowID) + "-"})
+	assert.NoError(err)
+	if assert.Len(found, 1) {
+		assert.Equal(flowKeys[0], found[0].FlowKey)
+	}
 }

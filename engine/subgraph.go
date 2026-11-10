@@ -220,11 +220,11 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 
 			finalStates := make([][]byte, len(allFlowIDs))
 			for i, fid := range allFlowIDs {
-				_, _, _, fToken, err := keys.ParseFlowKey(allCompositeIDs[i])
+				_, fHour, _, fToken, err := keys.ParseFlowKey(allCompositeIDs[i])
 				if err != nil {
 					return errors.Trace(err)
 				}
-				fs, err := e.terminalFinalState(ctx, tx, shardNum, fid.(int), fToken)
+				fs, err := e.terminalFinalState(ctx, tx, shardNum, fid.(int), fHour, fToken)
 				if err != nil {
 					return errors.Trace(err)
 				}
@@ -283,7 +283,8 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 			continue
 		}
 		fid := allFlowIDs[i].(int)
-		e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, fid), "to", workflow.StatusTerminated)
+		_, fHour, _, _, _ := keys.ParseFlowKey(cid) // parsed once already, in the transaction
+		e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, fHour, fid), "to", workflow.StatusTerminated)
 		label := labelByFlowID[fid]
 		e.metricFlowClosed(ctx, label.workflowURL, workflow.StatusTerminated, label.priority, shardNum)
 		e.signalStop(ctx, cid, workflow.StatusTerminated)

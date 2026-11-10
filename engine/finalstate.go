@@ -246,16 +246,16 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shar
 // final_state rather than an error: the merge would fail identically on every attempt, so propagating it would
 // leave the flow impossible to stop. A flow whose row is gone - reaped or deleted under a racing Terminate - needs
 // no final state either: the terminalizing UPDATE's guard will match nothing. A database error still propagates.
-func (e *Engine) terminalFinalState(ctx context.Context, db sequel.Executor, shardNum, flowID int, flowToken string) ([]byte, error) {
+func (e *Engine) terminalFinalState(ctx context.Context, db sequel.Executor, shardNum, flowID, flowHour int, flowToken string) ([]byte, error) {
 	fs, _, err := e.computeFinalState(ctx, db, shardNum, flowID, flowToken)
 	if errors.Is(err, sql.ErrNoRows) {
 		e.logger.WarnContext(ctx, "Computing final_state while terminalizing a flow found no row; terminalizing with empty state",
-			"flow", keys.CorrelationID(shardNum, flowID), "error", err)
+			"flow", keys.CorrelationID(shardNum, flowHour, flowID), "error", err)
 		return []byte("{}"), nil
 	}
 	if isPermanentError(err) {
 		e.logger.ErrorContext(ctx, "Computing final_state while terminalizing a flow; terminalizing with empty state",
-			"flow", keys.CorrelationID(shardNum, flowID), "error", err)
+			"flow", keys.CorrelationID(shardNum, flowHour, flowID), "error", err)
 		return []byte("{}"), nil
 	}
 	return fs, errors.Trace(err)
@@ -722,7 +722,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, ste
 		return false, nil
 	}
 
-	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowID), "to", workflow.StatusCompleted)
+	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowHour, flowID), "to", workflow.StatusCompleted)
 	e.metricFlowClosed(ctx, workflowURL, workflow.StatusCompleted, priority, shardNum)
 	compositeID := keys.NewFlowKey(shardNum, flowHour, flowID, flowToken)
 

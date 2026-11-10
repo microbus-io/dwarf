@@ -93,7 +93,7 @@ func (e *Engine) deferNewerPayload(ctx context.Context, d *dispatch) error {
 		level = slog.LevelWarn
 	}
 	e.logger.Log(ctx, level, "Deferring a step of a flow in a newer payload format",
-		"flow", keys.CorrelationID(shardNum, flowID), "task", taskName,
+		"flow", keys.CorrelationID(shardNum, d.row.createdHour, flowID), "task", taskName,
 		"payloadVer", ver, "supportedVer", payloadVer, "deferrals", deferrals+1, "backoff", backoff)
 	pass := turnstile.WaitTurn(ctx)
 	// Fenced and guarded like the retry rewind: a zero-row match means a peer holds the lease or a Terminate

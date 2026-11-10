@@ -614,7 +614,7 @@ func (e *Engine) startTask(ctx context.Context, d *dispatch) {
 	taskCtx, d.taskSpan = e.tracer.Start(taskCtx, d.row.taskName,
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(
-			attribute.String("workflow.id", keys.CorrelationID(d.shard, d.row.flowID)),
+			attribute.String("workflow.id", keys.CorrelationID(d.shard, d.row.createdHour, d.row.flowID)),
 			attribute.String("workflow.name", d.row.workflowURL),
 			attribute.Bool("workflow.replay", d.row.replaying),
 		),
@@ -1681,7 +1681,7 @@ func (e *Engine) transitionTx(ctx context.Context, d *dispatch, tx *sequel.Tx) e
 				return errLeaseFenced
 			}
 			if d.isPushTransition {
-				e.logger.DebugContext(ctx, "Fan-out cohort spawned", "flow", keys.CorrelationID(d.shard, d.row.flowID), "spawnStep", d.stepID, "task", taskName, "cohortSize", d.cohortSize)
+				e.logger.DebugContext(ctx, "Fan-out cohort spawned", "flow", keys.CorrelationID(d.shard, d.row.createdHour, d.row.flowID), "spawnStep", d.stepID, "task", taskName, "cohortSize", d.cohortSize)
 			}
 			return nil
 		}, "UPDATE dwarf_steps SET "+set+"advancing=0 WHERE step_id=? AND lease_seq=? AND advancing=1", args...)
@@ -1817,7 +1817,7 @@ func (e *Engine) arriveAtCohort(ctx context.Context, d *dispatch, tx *sequel.Tx,
 			return errors.Trace(rerr)
 		}
 		var lerr error
-		d.loss, lerr = e.failFlowTx(ctx, tx, d.shard, d.row.flowID, d.row.flowToken, flowCancelled, nil, parentStepID, 0)
+		d.loss, lerr = e.failFlowTx(ctx, tx, d.shard, d.row.flowID, d.row.createdHour, d.row.flowToken, flowCancelled, nil, parentStepID, 0)
 		if lerr != nil {
 			return errors.Trace(lerr)
 		}
