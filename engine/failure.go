@@ -153,7 +153,8 @@ func (e *Engine) failStep(ctx context.Context, d *dispatch, taskErr error, held 
 		// failOnPersistError fails the already-completed step for, to escape the re-execution loop). The lease fence
 		// alone guards the zombie "late error → healthy-flow kill" hazard; the status guard, which every sibling
 		// post-execution write also carries, closes the rest. Without it a step a racing Terminate just
-		// terminated (terminateSubtree does NOT bump lease_seq, so it still matches our generation) is rewritten
+		// terminated (terminateSubtree terminates a running step without bumping lease_seq, so it still matches our
+		// generation; it bumps only a completed step still advancing) is rewritten
 		// terminated→failed, violating step immutability and seeding a phantom branch failure a later Fork re-derives
 		// from step status; and a step recovery reset to `pending` (also lease_seq-preserving) would be terminalized
 		// out from under the peer re-claiming it. This is the first write in the transaction, so a zero-row match means

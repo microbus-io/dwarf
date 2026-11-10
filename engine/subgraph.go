@@ -172,6 +172,18 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 				return errTreeClosed
 			}
 			terminateSteps()
+			// A step whose completion write landed before this transaction stays `completed` with advancing=1, and
+			// its worker still holds the generation its remaining writes are fenced on. A new generation turns each
+			// into a quiet abandon, as the orphan sweep's rewind does. The step keeps its status and flag, the state
+			// a dead worker leaves too. After the flow-row locks, in an ordinary transition's order; the crossing
+			// with the resolving cohort arrival and failStep is retried by Transact.
+			for chunk := range slices.Chunk(lockIDs, inListChunk) {
+				ph, ids := inList(chunk)
+				tx.ExecContext(ctx,
+					"UPDATE dwarf_steps SET lease_seq=lease_seq+1 WHERE flow_id IN ("+ph+") AND status='"+workflow.StatusCompleted+"' AND advancing=1",
+					ids...,
+				)
+			}
 			// The scan before this transaction misses a child spawned since. A spawn parks its caller step in the
 			// transaction that inserts the child, and every live step of these flows is now locked here, so each
 			// spawn from them has either committed or will find its caller terminated: ONE scan settles them. It is

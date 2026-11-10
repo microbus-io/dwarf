@@ -15,14 +15,15 @@ limitations under the License.
 */
 
 // Deterministic race pins for a cohort ARRIVAL against a flow-stopping operation. A non-final arrival takes no
-// flow-row lock (the terminal-status guard is deferred to the arrival that resolves the cohort), so the guard sits
-// at a different statement on each of the two arrival kinds, and each is pinned here: a late non-final arrival
-// writes nothing but its counter, and a late last arrival inserts no fan-in. The graceful-Cancel case pins that a
-// last arrival in the completion-to-transition gap still carries the cancellation into the fan-in step it inserts.
+// flow-row lock (the terminal-status guard is deferred to the arrival that resolves the cohort), and Terminate fences
+// both kinds before that guard, by bumping the arriving step's lease generation: a late arrival, non-final or last,
+// writes nothing, its counter included. The graceful-Cancel case pins that a last arrival in the
+// completion-to-transition gap still carries the cancellation into the fan-in step it inserts.
 package engine
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -147,14 +148,30 @@ func (r *cohortRaceRig) flowRow(t *testing.T) flowRow {
 	return row
 }
 
+// releaseFenced releases the transition held at CheckpointBeforeTransitionTx and waits for the dispatch of task's
+// step to return, then checks the step was left as Terminate found it: completed and still advancing, its
+// arrival never counted.
+func (r *cohortRaceRig) releaseFenced(t *testing.T, task string) {
+	assert := testarossa.For(t)
+	var stepID int
+	assert.NoError(r.db.QueryRowContext(context.Background(),
+		"SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name=?", r.flowID, task).Scan(&stepID))
+	done := engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(r.shard), strconv.Itoa(stepID))
+	base := r.e.seams.Visits(done)
+	r.e.seams.Resume(engineseams.CheckpointBeforeTransitionTx)
+	enginetest.AwaitVisitCount(t, r.e.seams, base+1, 10*time.Second, done)
+	assert.Equal(1, enginetest.CountRows(t, r.e, r.shard, "SELECT COUNT(*) FROM dwarf_steps WHERE step_id=? AND status='"+
+		workflow.StatusCompleted+"' AND advancing=1", stepID), "the fenced arrival changed its step")
+}
+
 func (r *cohortRaceRig) stepCount(t *testing.T) int {
 	return enginetest.CountRows(t, r.e, r.shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=?", r.flowID)
 }
 
 // TestTerminateVsNonFinalCohortArrival_Deterministic pins a non-final arrival landing on a flow that Terminate
-// stopped after the arriving step was marked completed. The arrival takes no flow-row lock, so nothing guards it
-// on the flow's status: its counter bump commits. What must hold is that the bump is ALL it commits - no write to
-// the terminated flow's row, no step inserted - and that the cohort counters stay within cohort_size.
+// stopped after the arriving step was marked completed. The arrival takes no flow-row lock, so the flow's status
+// does not guard it; Terminate's bump of its lease generation does. It must write nothing: not the spawn's counter,
+// not the terminated flow's row, not a step.
 func TestTerminateVsNonFinalCohortArrival_Deterministic(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -170,23 +187,22 @@ func TestTerminateVsNonFinalCohortArrival_Deterministic(t *testing.T) {
 	before, stepsBefore := r.flowRow(t), r.stepCount(t)
 	assert.Equal(workflow.StatusTerminated, before.status)
 
-	// Release X: its arrival bumps the spawn's counter on the terminated flow.
-	r.e.seams.Resume(engineseams.CheckpointBeforeTransitionTx)
-	r.awaitArrivals(t, 1)
+	// Release X: its arrival is fenced at the bump.
+	r.releaseFenced(t, "X")
 
 	arrivals, size := r.arrivals(t)
 	assert.Equal(2, size)
-	assert.Equal(1, arrivals)
+	assert.Equal(0, arrivals)
 	assert.Equal(before, r.flowRow(t))        // no flow-row write: status, final_state, step_id and touch untouched
 	assert.Equal(stepsBefore, r.stepCount(t)) // nothing inserted into the terminated flow
 	assert.Equal(int32(0), r.jRuns.Load())
 	enginetest.AssertInvariants(t, r.e) // cohort_arrivals <= cohort_size among them
 }
 
-// TestTerminateVsLastCohortArrival_Deterministic pins the deferred terminal-status guard on the arrival that
-// resolves the cohort. Terminate stops the flow after the last branch was marked completed but before its
-// transition; the arrival's bump commits, the guard's flow-row lock then matches zero rows, and the transition
-// must end there - no fan-in step, no write to the flow row. Removing the guard inserts J into the terminated flow.
+// TestTerminateVsLastCohortArrival_Deterministic pins the arrival that would resolve the cohort, landing on a flow
+// Terminate stopped after the last branch was marked completed but before its transition. Terminate's bump of its
+// lease generation fences it at the bump, before the deferred terminal-status guard: no counter moves, no fan-in
+// step is inserted, and the flow row is not written.
 func TestTerminateVsLastCohortArrival_Deterministic(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -205,16 +221,15 @@ func TestTerminateVsLastCohortArrival_Deterministic(t *testing.T) {
 	before, stepsBefore := r.flowRow(t), r.stepCount(t)
 	assert.Equal(workflow.StatusTerminated, before.status)
 
-	// Release Y: its bump resolves the cohort, and the guard turns the rest of the transition into a no-op.
-	r.e.seams.Resume(engineseams.CheckpointBeforeTransitionTx)
-	r.awaitArrivals(t, 2)
+	// Release Y: its arrival is fenced at the bump, so the cohort never resolves.
+	r.releaseFenced(t, "Y")
 
 	arrivals, size := r.arrivals(t)
 	assert.Equal(2, size)
-	assert.Equal(2, arrivals)
+	assert.Equal(1, arrivals)
 	assert.Equal(0, enginetest.CountRows(t, r.e, r.shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND task_name='J'", r.flowID))
 	assert.Equal(0, enginetest.CountRows(t, r.e, r.shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND task_name='Y' AND successor_id<>0", r.flowID))
-	assert.Equal(before, r.flowRow(t)) // the guard's lock-grab matched nothing, and nothing after it ran
+	assert.Equal(before, r.flowRow(t)) // nothing reached the flow row
 	assert.Equal(stepsBefore, r.stepCount(t))
 	assert.Equal(int32(0), r.jRuns.Load())
 	enginetest.AssertInvariants(t, r.e)

@@ -158,6 +158,7 @@ const (
 	CheckpointBeforeDeleteStamp         = "beforeDeleteStamp"         // Delete, after it read the root, just before the delete stamp
 	CheckpointArchivePassDone           = "archivePassDone"           // the archive loop, after each pass over the shards
 	CheckpointBeforeTransitionTx        = "beforeTransitionTx"        // step execution, after the step is marked completed, before whichever transaction transitions it
+	CheckpointBeforeCancelRoute         = "beforeCancelRoute"         // step execution, after the completion write of a step Cancel marked while it ran, before it is routed to its handler or failed as cancelled
 	CheckpointCancelBeforeMark          = "cancelBeforeMark"          // Cancel, after its watermark transaction commits, before it marks the steps
 	CheckpointForkBeforeClone           = "forkBeforeClone"           // Fork, before its first clone transaction
 	CheckpointReapBatchLocked           = "reapBatchLocked"           // a reaper batch has locked its due roots, inside its transaction

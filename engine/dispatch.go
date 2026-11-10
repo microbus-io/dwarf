@@ -1166,6 +1166,9 @@ func (e *Engine) complete(ctx context.Context, d *dispatch) (done bool, err erro
 	// above persisted them), but what it asked for next is not honored. An errorRouted step is already on its
 	// way to its handler and needs nothing more.
 	if d.completedCancelling && !d.errorRouted {
+		// Test checkpoint: a breakpoint here freezes the worker with the step completed and still advancing,
+		// before the write that routes it or the failure, so a test can Terminate the flow in between.
+		e.seams.Checkpoint(ctx, engineseams.CheckpointBeforeCancelRoute)
 		// The flow row was read at claim time, which for a step already running when Cancel landed predates
 		// the reason. Cancel writes the reason before the mark, so a step that sees the mark finds the reason
 		// on a fresh read; this path is rare, so the extra round trip is too.
@@ -1555,9 +1558,10 @@ func (e *Engine) transitionTx(ctx context.Context, d *dispatch, tx *sequel.Tx) e
 	//     SHARED->EXCLUSIVE upgrade deadlock stays closed (the same argument that makes handleInterrupt
 	//     legitimately steps-first).
 	//   - The terminal-status guard sits in front of every write that can extend or terminalize the flow.
-	//     A pure arrival on a flow Terminate already stopped is not guarded: its bump commits, and it is
-	//     the arrival's only write. Pinned by TestTerminateVsNonFinalCohortArrival_Deterministic and
-	//     TestTerminateVsLastCohortArrival_Deterministic.
+	//     A non-final arrival is not guarded by it: on a flow Terminate already stopped, the arrival is fenced
+	//     instead, since Terminate bumped its lease generation and the bump's own-row fence matches nothing - so
+	//     it rolls back and abandons, and the closed flow's counters do not move. Pinned by
+	//     TestTerminateVsNonFinalCohortArrival_Deterministic and TestTerminateVsLastCohortArrival_Deterministic.
 	//   - Exactly-one-resolver comes from the spawn row's write lock, held across the bump and the re-read
 	//     below within one transaction - never from the flow row.
 	// isPushTransition is excluded because a fan-out SOURCE writes cohort_size to its own step row and
@@ -1754,8 +1758,9 @@ func (e *Engine) arriveAtCohort(ctx context.Context, d *dispatch, tx *sequel.Tx,
 	}
 	// The cohort resolves here, so this arrival is about to extend (fan-in step) or terminalize
 	// (cohort failure) the flow - exactly the writes the terminal guard protects - so a deferred grab is
-	// taken now, before either. A zero-row match means Terminate/failStep won the race: bail as a clean
-	// no-op, which still commits the bump (arrivals then equals size, never exceeds it). A graceful Cancel
+	// taken now, before either. A zero-row match means the flow closed first: bail as a clean no-op, which still
+	// commits the bump (arrivals then equals size, never exceeds it). Terminate never reaches it, as it fences
+	// the arrival before the bump; the bail covers any other close. A graceful Cancel
 	// that landed while this step sat between its completion write and here marked nothing - every
 	// member is already completed - so it reaches the flow only through the mark the fan-in insert
 	// inherits (inheritCancel). Pinned by TestCancelVsLastCohortArrival_Deterministic.

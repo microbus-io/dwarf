@@ -1029,7 +1029,7 @@ not parallelism:
   - The terminal-status guard is read after the statements batched with the grab ran, so a closed flow bails by
     **rolling back** (`errTransitionFlowTerminal`, mapped to nil after `Transact`), and the bail shows in
     telemetry as a rolled-back transaction, as a lease-fenced one does. The DEFERRED grab of a resolving fan-in
-    arrival is the exception: its bail returns nil, because that transaction's cohort bump must commit (below).
+    arrival is the exception: its bail returns nil and commits the cohort bump (below).
   - Never close batch results with a `defer`: on a driver that does not pipeline, `Close` runs every statement
     not read yet - every successor INSERT of a bailed transition, under the flow-row lock - while the rollback
     after an early return abandons them unrun.
@@ -1048,8 +1048,9 @@ not parallelism:
   [the fan-in INSERT + the cohort-exit `successor_id` write], naming the fan-in step by
   `insertedID`. A pure resolving arrival is BEGIN, bump, two batches, COMMIT: 5 round trips on PostgreSQL. The
   deferred grab's terminal bail **returns nil, committing the bump**, which is sound because everything batched
-  with the grab is a read (`TestTerminateVsLastCohortArrival_Deterministic` pins arrivals == size); those reads
-  still run before the bail, on every driver. The members' changes are decoded as each row is
+  with the grab is a read (arrivals then equals size, never exceeds it); those reads still run before the bail, on
+  every driver. A Terminate never reaches the bail: it bumps the arriving step's lease generation, so the arrival
+  is fenced at the bump itself (see "Lease fencing"). The members' changes are decoded as each row is
   read, and only a completed member's. On PostgreSQL the pipelined batch reads every member's raw row when it is
   sent, and releases each one as the reader moves past it (sequel v1.12.1+), so a wide cohort is held raw and
   decoded only one row at a time - the peak is about the larger of the two, not their sum. A reduced field that arrived as a ref is
@@ -1940,10 +1941,19 @@ changes nothing, reads "fenced", and returns without failing the flow - a perman
 alone, invisible to the SQLite suite. Keep every fenced step write moving a value (in practice: the status), and
 run anything touching these writes against a MySQL-family server (`fixtures/CLAUDE.md`).
 
-**`lease_seq` is bumped where a lease is *granted* — the claim CAS — and where the orphan sweep takes a
-`completed` step back.** The sweep's rewind (`recoverOrphanedFlows`, `completed`→`pending`) must bump it: the
+**`lease_seq` is bumped where a lease is *granted* — the claim CAS — and where a `completed` step still
+`advancing` is taken from its worker: the orphan sweep's rewind and Terminate.** The sweep's rewind (`recoverOrphanedFlows`, `completed`→`pending`) must bump it: the
 worker it takes the step from is already past its completion gate, so without a new generation nothing would
-stop a slow worker's transition committing beside the re-dispatch's. `recoverExpiredLeases`' expired-lease
+stop a slow worker's transition committing beside the re-dispatch's. Terminate's bump (`terminateSubtree`, on the
+tree's `completed` steps still `advancing`) is for the writes such a worker still makes: the Cancel-covered reroute,
+the cohort bump, `extendLease`, and after a failed transition failStep, the recovery reset and `releaseLease`. Each
+matches only `lease_seq` and a status the row still has, so without the bump it rewrites a step of a closed tree -
+`failed` or `cancelled` with an error, `pending` and then reaped as `terminated`, `onErr` added to its changes - or
+counts a late arrival into its cohort. With it each abandons quietly, and the step stays `completed` and
+`advancing`, as a dead worker leaves it. Pinned by `TestTerminate_FencesAFailedTransition`,
+`TestTerminate_FencesAnErroredTransition`, `TestTerminate_FencesACancelRoute` and the two
+`TestTerminateVs*CohortArrival_Deterministic`.
+`recoverExpiredLeases`' expired-lease
 reset (`running`→`pending`) leaves it untouched: the reset does not grant a lease, it only makes the step
 claimable, and the next claim bumps the generation. Consequence: a step reset-but-not-yet-reclaimed still
 carries the prior worker's generation, so that worker's write is *not* fenced — but this is the benign
@@ -4011,12 +4021,21 @@ flow row and waiting on `Terminate`'s gap lock cycles with `Terminate` waiting o
 `TestTerminateVsSubgraphSpawn_Deterministic`, retry-recovered like the rest.
 
 **`Terminate` takes steps, then flows, then steps AGAIN** (why, under the orphaned-child rules in "Background
-Recovery"), **and the second pass is the one exception to steps-first.** It can only reach a step created after the first one - every older step is already locked by it - so it crosses
+Recovery"), **and two writes after the flow rows are the exceptions to steps-first.** The second step pass can only reach a step created after the first one - every older step is already locked by it - so it crosses
 only a transaction that took such a just-created step first and then wants the flow row: a worker that claimed it
 and is already in `failStep` or `handleInterrupt` (both steps, then flows). That needs the step inserted, claimed,
 executed and failed or interrupted inside `Terminate`'s own transaction; the cycle is retry-recovered by
 `db.Transact` like the cross above. Do not drop the second pass to remove it - it is what keeps a step created
 mid-terminate from running on, and spawning, under a terminated flow.
+
+The other is the lease-generation bump on the tree's `completed` steps still `advancing` (see "Lease fencing"),
+which the first pass never touched. It crosses, on every row-locking engine at any isolation, the two steps-first
+writers of such a step: the arrival that resolves a cohort (its bump locks its own row and the spawn's, then its
+deferred grab wants the flow row) and failStep (its own row, then the flow or the spawn row). Tolerated, and
+retried by `db.Transact` either way: a late writer that loses is fenced on its retry, and a `Terminate` that loses
+re-runs after the late writer committed, or finds the tree closed. On PostgreSQL a cycle costs `deadlock_timeout`
+(1s by default) before either side moves. **Do not move the bump before the flow-row locks**: it would then cycle
+with every ordinary transition (flow row, then its own row), the hot path, instead of these two.
 
 **Do not make `handleInterrupt` flow-first.** A flow-first `handleInterrupt` against steps-first `Resume` on a
 shared interrupt chain is the more dangerous cross, because it locks *two* overlapping resources (chain flow rows
