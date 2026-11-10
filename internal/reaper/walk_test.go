@@ -224,34 +224,29 @@ func TestWalk_RetentionBoundaryAndHugeRetention(t *testing.T) {
 	}
 }
 
-func TestWalk_AtomicTreeAboveBatchBudget(t *testing.T) {
+// TestWalk_AnArchiveMoveAboveTheBatchBudgetIsAtomic pins that a tree to archive larger than a batch is still one atomic
+// move, every descendant included: a fault mid-move leaves it whole and unstamped, and the next pass moves it.
+func TestWalk_AnArchiveMoveAboveTheBatchBudgetIsAtomic(t *testing.T) {
 	t.Parallel()
-	for _, retention := range []int{0, 30} {
-		t.Run(strconv.Itoa(retention), func(t *testing.T) {
-			assert := testarossa.For(t)
-			r := newRig(t, retention)
-			db := r.db
-			root := chunkTree(t, db)
-			r.cfg.BatchRows = 2
-			// A tree larger than a batch is still one atomic unit, including every descendant.
-			r.seams.InjectN(FaultMidTree, 1000)
-			r.pass(t.Context())
-			flows, steps := treeCount(t, r, "dwarf_flows", "dwarf_steps", root)
-			assert.Equal([2]int{2, 7}, [2]int{flows, steps})
-			var stamp int
-			assert.NoError(db.QueryRowContext(t.Context(), "SELECT delete_after_ms FROM dwarf_flows WHERE flow_id=?", root).Scan(&stamp))
-			assert.Zero(stamp)
-			r.seams.Withdraw(FaultMidTree)
-			r.pass(t.Context())
-			flows, steps = treeCount(t, r, "dwarf_flows", "dwarf_steps", root)
-			assert.Zero(flows + steps)
-			if retention > 0 {
-				day, _ := r.archive.Today(t.Context())
-				flows, steps = treeCount(t, r, migrations.FlowsTable(day), migrations.StepsTable(day), root)
-				assert.Equal([2]int{2, 7}, [2]int{flows, steps})
-			}
-		})
-	}
+	assert := testarossa.For(t)
+	r := newRig(t, 30)
+	db := r.db
+	root := chunkTree(t, db)
+	r.cfg.BatchRows = 2
+	r.seams.InjectN(FaultMidTree, 1000)
+	r.pass(t.Context())
+	flows, steps := treeCount(t, r, "dwarf_flows", "dwarf_steps", root)
+	assert.Equal([2]int{2, 7}, [2]int{flows, steps})
+	var stamp int
+	assert.NoError(db.QueryRowContext(t.Context(), "SELECT delete_after_ms FROM dwarf_flows WHERE flow_id=?", root).Scan(&stamp))
+	assert.Zero(stamp)
+	r.seams.Withdraw(FaultMidTree)
+	r.pass(t.Context())
+	flows, steps = treeCount(t, r, "dwarf_flows", "dwarf_steps", root)
+	assert.Zero(flows + steps)
+	day, _ := r.archive.Today(t.Context())
+	flows, steps = treeCount(t, r, migrations.FlowsTable(day), migrations.StepsTable(day), root)
+	assert.Equal([2]int{2, 7}, [2]int{flows, steps})
 }
 
 // A representative qualification workload: 10,000 flow+step rows and about 16 MB of JSON, moved/deleted whole.
@@ -284,7 +279,7 @@ func TestWalk_TreeEnvelope(t *testing.T) {
 				assert.Must(assert.NoError(r.p().refreshDay(t.Context(), day)))
 			}
 			start := time.Now()
-			cut, err := r.p().rootsWithinRows(t.Context(), []int{root})
+			cut, _, err := r.p().rootsWithinRows(t.Context(), []int{root})
 			assert.Must(assert.NoError(err))
 			sized := time.Since(start)
 			start = time.Now()
@@ -547,11 +542,11 @@ func TestWalk_AFlowWithNoStepsIsOneRow(t *testing.T) {
 	var err error
 	roots := seedTrees(t, db, 2, treeShape{rootSteps: 2, childSteps: 0})
 	r.cfg.BatchRows = 5
-	cut, err := r.p().rootsWithinRows(ctx, roots)
+	cut, _, err := r.p().rootsWithinRows(ctx, roots)
 	assert.NoError(err)
 	assert.Equal(roots[:1], cut, "three rows a tree: two steps and the flow of none")
 	r.cfg.BatchRows = 6
-	cut, err = r.p().rootsWithinRows(ctx, roots)
+	cut, _, err = r.p().rootsWithinRows(ctx, roots)
 	assert.NoError(err)
 	assert.Equal(roots, cut)
 

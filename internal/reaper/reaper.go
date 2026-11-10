@@ -74,7 +74,9 @@ const (
 	FaultArchiveErr    = "reapArchiveErr"   // an archive move fails with an error that is not lock contention
 	FaultArchiveDelete = "archiveDeleteErr" // an archived tree's deletion fails before it commits; targeted
 
-	CheckpointBatchLocked = "reapBatchLocked" // a batch has locked its due roots, inside its transaction
+	CheckpointBatchLocked      = "reapBatchLocked"      // a batch has locked its due roots, inside its transaction
+	CheckpointBeforeRootDelete = "reapBeforeRootDelete" // a chunked deletion is about to recheck and delete its root
+	CheckpointChunkDone        = "reapChunkDone"        // a chunk of a chunked deletion has committed and been counted
 )
 
 // Config is one pass's settings. Nothing in it is kept between passes.

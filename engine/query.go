@@ -65,6 +65,12 @@ const summaryColumns = "f.flow_id, f.flow_token, f.created_hour, f.workflow_url,
 	" f.trace_parent, f.archived_at, f.surgraph_step_id, ps.flow_created_hour AS parent_step_hour," +
 	" ps.step_token AS parent_step_token, f.root_flow_id, rf.created_hour AS root_flow_hour, rf.flow_token AS root_flow_token"
 
+// treeUnstamped is the condition, over summaryJoins' f and rf, that the flow's tree is not marked for deletion: a root
+// unstamped itself, a child whose root is there and unstamped. It reads the root's stamp, not the flow's: only a root
+// is stamped, and a stamped tree's children are deleted, in chunks, before it. A child whose root is gone is a tree in
+// deletion too.
+const treeUnstamped = "((f.root_flow_id=f.flow_id AND f.delete_after_ms=0) OR rf.delete_after_ms=0)"
+
 // summaryJoins joins what summaryColumns reads beside the flow row: the step it stopped at, a child's caller step and
 // a child's root flow. A tree lives in one table set - it is created on one shard and archived in one move - so the
 // caller and the root are in the tables the flow is. Each is a primary-key lookup.
@@ -142,9 +148,9 @@ func (e *Engine) summary(ctx context.Context, flowKey string) (*workflow.FlowSum
 	ctx, doneTurn := e.opTurn(ctx, shardNum, "summary")
 	defer doneTurn()
 	var lr listRow
-	found, err := e.queryLiveOrArchive(ctx, db, shardNum, flowID, flowHour, true, func(t flowTables) (bool, error) {
+	found, err := e.queryLiveOrArchive(ctx, db, shardNum, flowID, flowHour, closeNone, func(t flowTables) (bool, error) {
 		rows, err := db.QueryContext(ctx, "SELECT "+summaryColumns+" FROM "+t.flows+" f"+summaryJoins(t)+
-			" WHERE f.flow_id=? AND f.flow_token=? AND f.created_hour=? AND f.delete_after_ms=0",
+			" WHERE f.flow_id=? AND f.flow_token=? AND f.created_hour=? AND "+treeUnstamped,
 			flowID, flowToken, flowHour)
 		if err != nil {
 			return false, errors.Trace(err)
@@ -213,7 +219,7 @@ func timeConditions(driverName, column string, query workflow.Query) (conds []st
 // query's filters, the exclusion of flows marked for deletion, and the search.
 func (e *Engine) listFilters(driverName string, shardIdx int, query workflow.Query) (conds []string, args []any) {
 	where, args, _ := e.queryClauses(query, subgraphCondition(query.IncludeSubgraphs))
-	conds = []string{where, "f.delete_after_ms=0"}
+	conds = []string{where, treeUnstamped}
 	if sc, scArgs := searchClause(driverName, shardIdx, query.Search); sc != "" {
 		conds, args = append(conds, sc), append(args, scArgs...)
 	}

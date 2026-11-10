@@ -3538,8 +3538,10 @@ the archive and deletes there (`purge.go`).
 
 **On the live side, deletion is deferred: mark, then reap.** No path deletes live rows inline. `DeleteOnCompletion`
 and `Delete` **stamp `delete_after_ms`** on the target **root** flow (`0`=keep; `>0`=reap at `updated_at + delete_after_ms`);
-a dedicated **reaper** goroutine (`reaperLoop`, 15 s ticker) later removes the whole subtree set-based, keyed on
-`root_flow_id`. Only a closed root is ever stamped, so no rows are deleted where a lifecycle op could interleave
+a dedicated **reaper** goroutine (`reaperLoop`, 15 s ticker) later removes the whole tree, keyed on `root_flow_id`:
+in one transaction with other small trees, or, for a tree larger than a batch, in chunks with the root last
+(`internal/reaper/CLAUDE.md`). A retention of 0 and the retention cleanup stamp such a tree before its first chunk.
+Only a closed root is ever stamped, so no rows are deleted where a lifecycle op could interleave
 (see "Deletion race gate" below), and a disposable flow's **outcome is observable** during its grace window.
 
 - **`FlowOptions.DeleteOnCompletion`** - the author declares a flow fire-and-forget (durable-execution jobs whose
@@ -3728,6 +3730,16 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
     read after the move is unresolvable, which is the move and not a fault. A read of one statement (`Snapshot`,
     `Continue`) needs none. Do not detect the straddle per operation (a step count, a re-read of the step): the one
     closing read is what keeps it out of every read.
+  - **A read that must not return part of a tree closes on its root too** (`closeTree`, `liveFlowStanding`: `History`,
+    `Step`): on the live side the pass is discarded when the root is gone, or stamped and due. A large tree is deleted
+    in chunks, and a chunk starts only once the stamp is due, so a read overlapping one fails the check, misses on the
+    archive, and is a 404 rather than part of a tree. A DeleteOnCompletion root inside its grace is not due, so `Step`
+    serves its steps through the grace. **`Fingerprint` closes on its own row** (`closeFlow`): it tracks change, a
+    deletion is one, and it must answer as `Snapshot` does, which serves the root until it goes. Pinned by
+    `TestChunkedDeletion_APartlyDeletedTreeReadsAsDeleted` and `TestChunkedDeletion_StepServesThroughTheGrace`.
+  - **`Summary` and the lists test the tree's stamp, the root's, not the flow's** (`treeUnstamped`): a child of a
+    stamped tree, or of a root that is gone, is not shown, so a tree under deletion leaves every list in the commit
+    that stamps it.
   - **Neither pass runs in a transaction.** On MySQL a transaction's plain reads share its first read's snapshot,
     which breaks the argument above, and on SQLite's shared cache a read transaction keeps each table's lock until it
     ends, which cycles with the reaper's move. A read must have no side effect and tolerate rows vanishing, since it

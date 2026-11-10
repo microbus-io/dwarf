@@ -54,7 +54,7 @@ func (e *Engine) history(ctx context.Context, flowKey string) ([]workflow.FlowSt
 	// flow is discarding, so it 404s during the grace window (Snapshot/Await still serve the outcome). Only the
 	// root is stamped, so a subgraph child's key is checked against its root's row (a root is its own root).
 	var history []workflow.FlowStep
-	found, err := e.queryLiveOrArchive(ctx, db, shardNum, flowID, flowHour, false, func(t flowTables) (bool, error) {
+	found, err := e.queryLiveOrArchive(ctx, db, shardNum, flowID, flowHour, closeTree, func(t flowTables) (bool, error) {
 		var exists int
 		err := db.QueryRowContext(ctx,
 			"SELECT 1 FROM "+t.flows+" f JOIN "+t.flows+" r ON r.flow_id=f.root_flow_id"+
@@ -221,7 +221,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	ctx, doneTurn := e.opTurn(ctx, shardNum, "step")
 	defer doneTurn()
 	var fs *workflow.FlowStep
-	found, err := e.queryLiveOrArchive(ctx, db, shardNum, stepFlowID, stepHour, false, func(t flowTables) (bool, error) {
+	found, err := e.queryLiveOrArchive(ctx, db, shardNum, stepFlowID, stepHour, closeTree, func(t flowTables) (bool, error) {
 		var err error
 		fs, err = e.stepIn(ctx, db, t, shardNum, stepKey, stepID, stepFlowID, stepToken, stepHour)
 		return fs != nil, errors.Trace(err)
@@ -515,7 +515,7 @@ func (e *Engine) fingerprint(ctx context.Context, flowKey string) (string, strin
 	// The digest is the same on either side: a tree moves as it is, its updated_at with it.
 	var status string
 	var digest []byte
-	found, err := e.queryLiveOrArchive(ctx, db, shardNum, flowID, flowHour, false, func(t flowTables) (bool, error) {
+	found, err := e.queryLiveOrArchive(ctx, db, shardNum, flowID, flowHour, closeFlow, func(t flowTables) (bool, error) {
 		var rootFlowID int
 		err := db.QueryRowContext(ctx, "SELECT status, root_flow_id FROM "+t.flows+" WHERE flow_id=? AND flow_token=? AND created_hour=?", flowID, flowToken, flowHour).Scan(&status, &rootFlowID)
 		if err == sql.ErrNoRows {

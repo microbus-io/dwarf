@@ -1541,7 +1541,8 @@ func (e *Engine) Summary(ctx context.Context, flowKey string) (summary *workflow
 
 // Step returns one step by its key, as History lists it but with its State, the input it ran on, and its Changes,
 // what it wrote. Step keys come from History, from FlowSummary.ParentStepKey, and from a task's own flow.StepKey.
-// Returns 404 for an unknown key and 400 for a malformed one.
+// Returns 404 for an unknown key, for a step of a flow marked for deletion once its deletion is due (at once after
+// Delete, after the grace for DeleteOnCompletion), and 400 for a malformed one.
 func (e *Engine) Step(ctx context.Context, stepKey string) (step *workflow.FlowStep, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
@@ -1621,8 +1622,8 @@ func (e *Engine) ListRecentlyClosed(ctx context.Context, query workflow.Query) (
 
 // Delete removes a closed flow and its subgraph subtree. An archived flow is deleted at once. One not archived yet -
 // the minute after it closes - is marked for deletion, and a background reaper removes it shortly after, without
-// archiving it: History and Summary return 404 for it immediately, though Snapshot and Await still report its
-// outcome until the reaper removes it, and calling Delete on it again is success. Returns 404 for an unknown key,
+// archiving it: History, Summary and Step return 404 for it immediately, though Snapshot, Fingerprint and Await still
+// report its outcome until the reaper removes it, and calling Delete on it again is success. Returns 404 for an unknown key,
 // including a flow already deleted from the archive; 400 for a subgraph-child key (address the root instead); and 409
 // for an open flow: Terminate it first.
 func (e *Engine) Delete(ctx context.Context, flowKey string) error {

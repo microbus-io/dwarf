@@ -439,7 +439,7 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 	var flowCancelReason string
 	var flowPayloadVer int
 	var archived bool
-	found, err := e.queryLiveOrArchive(ctx, db, shardNum, flowID, flowHour, true, func(t flowTables) (bool, error) {
+	found, err := e.queryLiveOrArchive(ctx, db, shardNum, flowID, flowHour, closeNone, func(t flowTables) (bool, error) {
 		err := db.QueryRowContext(ctx,
 			"SELECT status, final_state, error, cancel_reason, payload_ver FROM "+t.flows+" WHERE flow_id=? AND flow_token=? AND created_hour=?",
 			flowID, flowToken, flowHour,
@@ -1369,7 +1369,7 @@ func (e *Engine) continueFlow(ctx context.Context, flowKey string, additionalSta
 	var finalStateJSON, graphJSON, baggageJSON []byte
 	var surgraphFlowID, deleteAfterMs, priority, timeBudgetMs int
 	var fairnessWeight float64
-	found, err := e.queryLiveOrArchive(ctx, db, shardNum, flowID, flowHour, true, func(t flowTables) (bool, error) {
+	found, err := e.queryLiveOrArchive(ctx, db, shardNum, flowID, flowHour, closeNone, func(t flowTables) (bool, error) {
 		err := db.QueryRowContext(ctx,
 			"SELECT status, surgraph_flow_id, delete_after_ms, final_state, graph, graph_hash, workflow_url, baggage, priority, fairness_key, fairness_weight, time_budget_ms FROM "+t.flows+" WHERE flow_id=? AND flow_token=? AND created_hour=?",
 			flowID, flowToken, flowHour,

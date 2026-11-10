@@ -305,3 +305,83 @@ func closeTreesAgo(t *testing.T, db *sequel.DB, ago time.Duration, roots ...int)
 		}
 	}
 }
+
+// seedWideTree inserts a closed tree on db of a root of rootSteps steps with children flows of steps steps each, and
+// returns its root. The steps go in by multi-row inserts, so a tree of tens of thousands of rows seeds quickly.
+func seedWideTree(t *testing.T, db *sequel.DB, rootSteps, children, steps int) int {
+	t.Helper()
+	ctx := t.Context()
+	const token = "0123456789abcdef"
+	var root int
+	err := db.Transact(ctx, func(tx *sequel.Tx) error {
+		insertFlow := func(rootID, surgraph int) (int, int, error) {
+			id, err := tx.InsertReturnID(ctx, "flow_id",
+				"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status,"+
+					" surgraph_flow_id, surgraph_step_id, root_flow_id) VALUES (?,?,?,?,?,'"+workflow.StatusCompleted+"',?,0,?)",
+				token, "seed/wide", "Wide", []byte("{}"), "", surgraph, rootID)
+			if err != nil {
+				return 0, 0, err
+			}
+			var hour int
+			err = tx.QueryRowContext(ctx, "SELECT created_hour FROM dwarf_flows WHERE flow_id=?", id).Scan(&hour)
+			return int(id), hour, err
+		}
+		insertSteps := func(flowID, hour, n int) error {
+			for n > 0 {
+				k := min(n, 200)
+				row := "(" + strconv.Itoa(flowID) + ",1,'" + token + "','T','seed/t','" + workflow.StatusCompleted + "',60000," +
+					strconv.Itoa(hour) + ")"
+				if _, err := tx.ExecContext(ctx, "INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name,"+
+					" task_url, status, time_budget_ms, flow_created_hour) VALUES "+strings.TrimSuffix(strings.Repeat(row+",", k), ",")); err != nil {
+					return err
+				}
+				n -= k
+			}
+			return nil
+		}
+		id, hour, err := insertFlow(0, 0)
+		if err != nil {
+			return err
+		}
+		root = id
+		if _, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET root_flow_id=? WHERE flow_id=?", root, root); err != nil {
+			return err
+		}
+		if err := insertSteps(root, hour, rootSteps); err != nil {
+			return err
+		}
+		for range children {
+			child, childHour, err := insertFlow(root, root)
+			if err != nil {
+				return err
+			}
+			if err := insertSteps(child, childHour, steps); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// stampTree marks the tree rooted at root for deletion, due at once, as Delete does.
+func stampTree(t *testing.T, db *sequel.DB, root int) {
+	t.Helper()
+	if _, err := db.ExecContext(t.Context(), "UPDATE dwarf_flows SET delete_after_ms=1 WHERE flow_id=?", root); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// rowsOf returns how many flows of the tree rooted at root are live, and whether the root is among them.
+func rowsOf(t *testing.T, r *rig, root int) (flows, steps int, rootThere bool) {
+	t.Helper()
+	flows, steps = treeCount(t, r, "dwarf_flows", "dwarf_steps", root)
+	var n int
+	if err := r.db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=?", root).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return flows, steps, n == 1
+}

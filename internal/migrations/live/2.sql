@@ -123,7 +123,7 @@ CREATE TABLE IF NOT EXISTS dwarf_steps (
 );
 
 -- DRIVER: pgx
-CREATE INDEX idx_dwarf_steps_flow_id ON dwarf_steps (flow_id);
+CREATE INDEX idx_dwarf_steps_flow_id ON dwarf_steps (flow_id, step_id);
 
 -- DRIVER: pgx
 CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority, fairness_key, created_at, step_id) INCLUDE (not_before, lease_expires, fairness_weight) WHERE status IN ('pending', 'running');

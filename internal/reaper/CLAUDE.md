@@ -39,9 +39,10 @@ checked between attempts; healthy backlog uses up to `Budget`. Every stage gets 
 attempt overshot the budget, and a failed stage does not suppress the next. `dwarf_reap_pass_seconds` times the pass
 alone; the engine's expiration stage runs after it (`TestReaperContract_ThePassTimeExcludesExpiration`).
 
-**A tree is always one atomic move or delete, descendants included.** A batch considers at most `Batch` roots and
-trims a leading run to about `BatchRows` joined step rows, always admitting the first tree (a flow with no steps counts
-one row). The sizing is a hint outside the transaction, bounded by the attempt deadline; it is not a guard and is not
+**A tree is always one atomic move, descendants included, and a deletion of a tree that fits a batch is one too.** A
+batch considers at most `Batch` roots and trims a leading run to about `BatchRows` joined step rows, always admitting
+the first tree (a flow with no steps counts one row). A tree to DELETE that is larger than a batch alone is deleted in
+chunks instead (below). The sizing is a hint outside the transaction, bounded by the attempt deadline; it is not a guard and is not
 cached. The transaction locks a sorted copy of the roots, rechecks eligibility under the lock, and processes their
 whole `root_flow_id` trees, steps before flows. PostgreSQL and MySQL skip held roots; SQLite and SQL Server wait
 under the deadline. `Transact` retries contention, including a straggler's reverse lock order. A stop records no
@@ -66,6 +67,55 @@ ticks). Traversal stays ordered, without the own class first. Closed and retenti
 flow_id)`, each closed status a branch that seeks by timestamp, merged in Go, with exact stored timestamps bound
 through `database.SQLTime`; stamped roots walk `flow_id`. Roots a fleet change or an idle class misses are covered by
 repair. Residency is a work preference; the transactional locks are the ownership.
+
+## Chunked deletion of a large live tree
+
+A deletion that grows with its tree eventually cannot finish within one attempt, and then never finishes: the delete
+wall. So a tree to delete - stamped, closed at a retention of 0, or past its retention - that is larger than
+`BatchRows` alone is deleted over several transactions (`deleteLarge`, `chunk.go`), each about `BatchRows` rows.
+
+- **Every chunk is authorized by the root's stamp.** The deletion kind's roots are stamped already. A retention of 0
+  and the retention cleanup first stamp the root (`delete_after_ms=1`, due at once) in a transaction of their own,
+  with their own due predicate as the guard. Each chunk then locks the root and rechecks "stamped and due" (the
+  deletion kind's predicate), so a chunk never deletes from an unstamped tree, and a pass that stops part-way leaves
+  a stamped tree the deletion kind finishes, on this replica or another, with nothing in memory.
+- **Descendants first, newest first, each flow's steps then the flow; the root's steps; then the root, last.**
+  Children are read 256 at a time (`treeChunk`), from the chunk's position (`chunkPos`), so a read seeks past the
+  entries earlier chunks deleted, which stay in the indexes until vacuum. The position is in memory, for one
+  `deleteLarge`; a new call starts again from the newest descendant. It also holds the last step deleted of a flow
+  part deleted, a child or the root, so the next chunk seeks past that flow's deleted steps: read from the start, a
+  flow of a million steps - one `forEach` flow is one - would cost each chunk every step deleted before it (measured
+  on PostgreSQL before vacuum, 112 ms against 42 ms for the last chunk of a 100,000-step child).
+- **Every read in a chunk is bounded by its budget, never by the tree.** Which children fit is decided by counting
+  at most the budget's worth of their steps (`stepsUpTo`, a `LIMIT` or `TOP` under a `COUNT`), halving the run of
+  children until it fits (at most eight probes); a child larger than what is left has a budget's worth of its steps
+  deleted. Do not size the children with a full `COUNT ... GROUP BY`: it recounts a large child's remaining steps on
+  every chunk, quadratic over the tree (measured 279 ms a chunk on PostgreSQL at 4,000 steps a child, and past the
+  attempt at about a million). Step ids are read in `step_id` order from `idx_dwarf_steps_flow_id` and deleted by a
+  literal list: a range or an ordered `DELETE` with a limit is not portable, and the read stays bounded by the flow's
+  own steps only with that index keyed on `(flow_id, step_id)` (`internal/migrations/CLAUDE.md`). The walk's first
+  sizing of its candidates (`rootsWithinRows`) still counts each tree whole.
+- **The root goes only after a recheck that the tree holds nothing else:** two probes, the first remaining
+  descendant and the first root step, not an `EXISTS` over the tree, which MariaDB materializes over the whole steps
+  index (275 ms on a 100,000-child tree). The descendant probe seeks above the position's top: the walk has just found
+  none below its position and deleted those between, so only a newer descendant can be left. On MySQL and MariaDB the
+  probes are locking reads, since a plain read there sees the snapshot the chunk's first plain read took. A closed tree gains no flow, so this guards against a bug, not a path
+  (`TestChunk_ALateDescendantKeepsTheRoot`).
+- **Readers never see part of a tree.** The engine's live closing read rejects a tree whose root is stamped and due,
+  and the lists and Summary hide a stamped tree's children (`engine/CLAUDE.md`, "Reading an archived flow").
+- **The walk keeps its position on a tree it did not finish without a failure**, so the next slice resumes it. A
+  chunk that fails is passed like any failed batch: the fast walker goes on, repair counts it held and passes it, and
+  the trees behind it are not held back (`TestChunk_AFailingLargeTreeDoesNotHoldBackTheRest`).
+- **`dwarf_flows_reaped` counts each chunk as it commits**, so a later chunk's failure or a stop loses none of it
+  (`TestChunk_CommittedChunksAreCountedWhenALaterOneFails`), under the reason of the walk that deleted it: a tree
+  retention or a retention of 0 stamped and a later pass finished counts the rest as `deleted`.
+- **Archiving stays atomic.** A tree to archive that is larger than a batch moves in one transaction.
+
+Pinned by `chunk_test.go`: a large tree deleted over several passes for each deleting kind, the root last and no step
+outliving its flow; a faulted chunk rolled back whole, the stamp kept; a restart (a fresh Reaper) resuming; two
+Reapers sharing a tree; a chunk with nothing to do; the late descendant; a failing tree passed; committed chunks
+counted; the step read's plan; and an envelope, a half-drained wide tree and a child of 100,000 steps, each beside
+50,000 unrelated steps.
 
 ## Archive failures never become permission to delete
 

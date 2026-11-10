@@ -193,13 +193,23 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 		if !ok {
 			return false
 		}
-		cut, err := p.rootsWithinRows(ctx, rootIDs(candidates))
+		cut, firstSize, err := p.rootsWithinRows(ctx, rootIDs(candidates))
 		if err != nil {
 			cut = rootIDs(candidates) // a known range, even when its count fails
 		}
 		moved := 0
 		attemptStart := time.Now()
-		if err == nil {
+		// finished is false when a tree deleted in chunks is not gone yet and nothing failed: the walk keeps its
+		// position on it. A failed chunk is passed like any failed batch.
+		finished := true
+		large := err == nil && d == nil && len(cut) == 1 && firstSize > max(p.cfg.BatchRows, 1)
+		switch {
+		case err != nil:
+		case large:
+			// A tree to delete that is larger than a batch is deleted in chunks rather than in one transaction, which
+			// would grow with the tree until it could not finish within its attempt. It counts its own chunks.
+			moved, finished, err = p.deleteLarge(ctx, k, cut[0], reason, start)
+		default:
 			moved, err = p.batchOf(ctx, cut, k, d)
 		}
 		if ctx.Err() != nil {
@@ -231,14 +241,14 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 				if !repair && moved > 0 {
 					p.r.failures.clearUnlessFailedSince(shard, attemptStart)
 				}
-			} else {
+			} else if !large {
 				p.r.metrics.flowsReaped(ctx, shard, reason, moved)
 			}
 			if repair && moved > 0 {
 				w.batch = min(p.cfg.Batch, 2*w.batch)
 			}
 		}
-		if !repair || err == nil || len(cut) == 1 {
+		if (finished || err != nil) && (!repair || err == nil || len(cut) == 1) {
 			w.after = candidates[len(cut)-1]
 		}
 		// Publish running counts even when an outage makes a sweep take many passes.

@@ -282,42 +282,47 @@ func lockRoots(ctx context.Context, tx *sequel.Tx, flows string, skipHeld bool, 
 }
 
 // rootsWithinRows returns the leading roots of roots, in the order given, whose trees fit in about BatchRows rows, and
-// at least the first. A tree's rows are counted as its flows' joined steps, one for a flow with none. Sizing is a
-// batching hint outside the transaction; the batch locks only the roots it takes, and its transaction still opens with
-// a write, which SQLite needs.
-func (p *pass) rootsWithinRows(ctx context.Context, roots []int) ([]int, error) {
+// at least the first, with the first tree's size. A tree's rows are counted as its flows' joined steps, one for a flow
+// with none. Sizing is a batching hint outside the transaction; the batch locks only the roots it takes, and its
+// transaction still opens with a write, which SQLite needs.
+func (p *pass) rootsWithinRows(ctx context.Context, roots []int) (cut []int, firstSize int, err error) {
 	ctx, cancel := p.attemptCtx(ctx)
 	defer cancel()
 	if p.r.seams.Enabled() {
 		for _, root := range roots {
 			if p.r.seams.IsFault(join(FaultSizeErr, strconv.Itoa(root))) {
-				return nil, errors.New("injected fault: " + FaultSizeErr)
+				return nil, 0, errors.New("injected fault: " + FaultSizeErr)
 			}
 		}
 	}
-	return rootsWithinRowsIn(ctx, p.shard.DB, live, roots, p.cfg.BatchRows)
+	cut, size, err := rootsWithinRowsIn(ctx, p.shard.DB, live, roots, p.cfg.BatchRows)
+	if err != nil {
+		return nil, 0, errors.Trace(err)
+	}
+	return cut, size[roots[0]], nil
 }
 
-// rootsWithinRowsIn is rootsWithinRows over the given tables, the live ones or an archive day's, for a budget of rows.
-func rootsWithinRowsIn(ctx context.Context, db *sequel.DB, t tables, roots []int, rows int) ([]int, error) {
+// rootsWithinRowsIn is rootsWithinRows over the given tables, the live ones or an archive day's, for a budget of rows,
+// with every tree's size.
+func rootsWithinRowsIn(ctx context.Context, db *sequel.DB, t tables, roots []int, rows int) (cut []int, size map[int]int, err error) {
 	res, err := db.QueryContext(ctx, "SELECT f.root_flow_id, COUNT(*) FROM "+t.flows+" f"+
 		" LEFT JOIN "+t.steps+" s ON s.flow_id=f.flow_id WHERE f.root_flow_id IN ("+intCSV(roots)+") GROUP BY f.root_flow_id")
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, nil, errors.Trace(err)
 	}
 	defer res.Close()
-	size := make(map[int]int, len(roots))
+	size = make(map[int]int, len(roots))
 	for res.Next() {
 		var root, n int
 		if err := res.Scan(&root, &n); err != nil {
-			return nil, errors.Trace(err)
+			return nil, nil, errors.Trace(err)
 		}
 		size[root] = n
 	}
 	if err := res.Err(); err != nil {
-		return nil, errors.Trace(err)
+		return nil, nil, errors.Trace(err)
 	}
-	return withinRows(roots, size, rows), nil
+	return withinRows(roots, size, rows), size, nil
 }
 
 // withinRows returns the leading roots whose sizes sum to at most limit, and at least the first.

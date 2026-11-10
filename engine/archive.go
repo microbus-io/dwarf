@@ -42,7 +42,7 @@ const defaultRetentionDays = 30
 // An archive failure leaves a closed flow live until it can be archived or its retention expires. For an unarchived
 // flow, retention counts from the day it became eligible for archival, normally a minute after completion. A late
 // successful archival instead receives retention from its actual archive day. Deletion can be delayed by database
-// failures or a tree too large to remove within one maintenance attempt.
+// failures, and a large tree is deleted over several passes.
 //
 // Use the same value on every replica sharing a database: any of them may drop an expired day. Construction-time
 // only.
@@ -99,23 +99,33 @@ var liveTables = flowTables{flows: "dwarf_flows", steps: "dwarf_steps"}
 // is in. read reports whether it found the flow; it must have no side effect and tolerate rows vanishing, since it may
 // run on both sides.
 //
-// A read of more than one statement is closed by a primary-key read of the flow's row. A tree moves in one
+// A read of more than one statement is closed (closing) by a primary-key read of the flow's row. A tree moves in one
 // transaction, and each plain statement sees only what had committed when it began, so the row still there means
 // every statement of the pass saw the tree on that side; the row gone means the pass's result is discarded, an error
 // included, since the error may be the move itself (an anchor read after its tree left). A read of one statement
-// (oneStatement) sees the tree on one side by itself. Neither pass runs in a transaction, which would break that
-// argument on MySQL, whose transactions read one snapshot, and lock tables on SQLite's shared cache.
+// (closeNone) sees the tree on one side by itself. Neither pass runs in a transaction, which would break that argument
+// on MySQL, whose transactions read one snapshot, and lock tables on SQLite's shared cache.
+//
+// A live tree is deleted in chunks once its root's stamp is due, so a read that must not return part of a tree
+// (closeTree) closes on the root too, and a tree stamped and due is discarded as if it had left. A read that only
+// tracks change (closeFlow) closes on its own row, and serves a tree in deletion until its row goes, as Snapshot does.
 //
 // found is false when neither side holds the flow: never archived, archived on a day dropped since, or removed from
 // the archive mid-read. The caller names the 404.
-func (e *Engine) queryLiveOrArchive(ctx context.Context, db *sequel.DB, shard, flowID, hour int, oneStatement bool,
+func (e *Engine) queryLiveOrArchive(ctx context.Context, db *sequel.DB, shard, flowID, hour int, closing readClosing,
 	read func(t flowTables) (found bool, err error)) (found bool, err error) {
 	found, err = read(liveTables)
 	if found || err != nil {
-		if oneStatement {
+		if closing == closeNone {
 			return found, errors.Trace(err)
 		}
-		there, cerr := flowRowThere(ctx, db, liveTables, flowID)
+		var there bool
+		var cerr error
+		if closing == closeTree {
+			there, cerr = liveFlowStanding(ctx, db, flowID)
+		} else {
+			there, cerr = flowRowThere(ctx, db, liveTables, flowID)
+		}
 		if cerr != nil {
 			return false, errors.Trace(cmp.Or(err, cerr))
 		}
@@ -141,7 +151,7 @@ func (e *Engine) queryLiveOrArchive(ctx context.Context, db *sequel.DB, shard, f
 	if sequel.IsUndefinedTableError(err) {
 		return false, nil
 	}
-	if (found || err != nil) && !oneStatement {
+	if (found || err != nil) && closing != closeNone {
 		there, cerr := flowRowThere(ctx, db, t, flowID)
 		if sequel.IsUndefinedTableError(cerr) || (cerr == nil && !there) {
 			return false, nil
@@ -169,7 +179,30 @@ func (e *Engine) locateRetained(ctx context.Context, set *archiveSet, shard, flo
 	return day, nil
 }
 
-// flowRowThere reports whether t's flows table holds the flow with flowID: the closing read of a pass.
+// readClosing is how queryLiveOrArchive closes a read.
+type readClosing int
+
+const (
+	closeNone readClosing = iota // a read of one statement: no closing read
+	closeFlow                    // the flow's row is still there
+	closeTree                    // on the live side, the flow's row and its root are there, the root not stamped and due
+)
+
+// liveFlowStanding reports whether the live flow with flowID is there and its root neither stamped for deletion and due
+// nor gone: the closing read of a pass on the live side. A DeleteOnCompletion root inside its grace is standing.
+func liveFlowStanding(ctx context.Context, db *sequel.DB, flowID int) (bool, error) {
+	var one int
+	err := db.QueryRowContext(ctx, "SELECT 1 FROM dwarf_flows f JOIN dwarf_flows r ON r.flow_id=f.root_flow_id"+
+		" WHERE f.flow_id=? AND NOT (r.delete_after_ms>0 AND DATE_ADD_MILLIS(r.updated_at, r.delete_after_ms)<=NOW_UTC())",
+		flowID).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil, errors.Trace(err)
+}
+
+// flowRowThere reports whether t's flows table holds the flow with flowID: the closing read of a pass on the archive
+// side.
 func flowRowThere(ctx context.Context, db *sequel.DB, t flowTables, flowID int) (bool, error) {
 	var one int
 	err := db.QueryRowContext(ctx, "SELECT 1 FROM "+t.flows+" WHERE flow_id=?", flowID).Scan(&one)

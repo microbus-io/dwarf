@@ -45,7 +45,7 @@ func (r *Reaper) DeleteArchivedRoots(ctx context.Context, db *sequel.DB, day int
 	t := tables{flows: migrations.FlowsTable(day), steps: migrations.StepsTable(day)}
 	ids := slices.Sorted(slices.Values(roots))
 	for len(ids) > 0 {
-		cut, err := rootsWithinRowsIn(ctx, db, t, ids[:min(chunk, len(ids))], rows)
+		cut, _, err := rootsWithinRowsIn(ctx, db, t, ids[:min(chunk, len(ids))], rows)
 		if sequel.IsUndefinedTableError(err) {
 			return deleted, nil
 		}

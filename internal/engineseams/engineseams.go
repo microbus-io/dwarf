@@ -94,13 +94,15 @@ func Join(parts ...string) string {
 
 // The reaper's seams, named by internal/reaper and aliased here so an engine test arms the same strings.
 const (
-	FaultReapMidTree          = reaper.FaultMidTree          // after deleting steps, before flows; optionally targeted at root flow_id
-	FaultReapSizeErr          = reaper.FaultSizeErr          // sizing a selected root fails; targeted at root flow_id
-	FaultReapSelectErr        = reaper.FaultSelectErr        // the reaper's due-root SELECT errors
-	FaultReapContention       = reaper.FaultContention       // the reaper's archive move fails on lock contention (a deadlock victim)
-	FaultReapArchiveErr       = reaper.FaultArchiveErr       // the reaper's archive move fails with an error that is not lock contention
-	FaultArchiveDelete        = reaper.FaultArchiveDelete    // an archived tree's deletion fails before it commits; targeted at root flow_id
-	CheckpointReapBatchLocked = reaper.CheckpointBatchLocked // a reaper batch has locked its due roots, inside its transaction
+	FaultReapMidTree               = reaper.FaultMidTree               // after deleting steps, before flows; optionally targeted at root flow_id
+	FaultReapSizeErr               = reaper.FaultSizeErr               // sizing a selected root fails; targeted at root flow_id
+	FaultReapSelectErr             = reaper.FaultSelectErr             // the reaper's due-root SELECT errors
+	FaultReapContention            = reaper.FaultContention            // the reaper's archive move fails on lock contention (a deadlock victim)
+	FaultReapArchiveErr            = reaper.FaultArchiveErr            // the reaper's archive move fails with an error that is not lock contention
+	FaultArchiveDelete             = reaper.FaultArchiveDelete         // an archived tree's deletion fails before it commits; targeted at root flow_id
+	CheckpointReapBatchLocked      = reaper.CheckpointBatchLocked      // a reaper batch has locked its due roots, inside its transaction
+	CheckpointReapBeforeRootDelete = reaper.CheckpointBeforeRootDelete // a chunked deletion is about to recheck and delete its root
+	CheckpointReapChunkDone        = reaper.CheckpointChunkDone        // a chunk of a chunked deletion has committed and been counted
 )
 const (
 	// Scoped by task name (the task's name in the graph, not the URL ExecuteTask receives):
