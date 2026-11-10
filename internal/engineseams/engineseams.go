@@ -39,6 +39,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/peers"
 	"github.com/microbus-io/dwarf/internal/piston"
+	"github.com/microbus-io/dwarf/internal/reaper"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/seamster"
 )
@@ -90,6 +91,17 @@ func Join(parts ...string) string {
 }
 
 // --- Fault injection ---
+
+// The reaper's seams, named by internal/reaper and aliased here so an engine test arms the same strings.
+const (
+	FaultReapMidTree          = reaper.FaultMidTree          // after deleting steps, before flows; optionally targeted at root flow_id
+	FaultReapSizeErr          = reaper.FaultSizeErr          // sizing a selected root fails; targeted at root flow_id
+	FaultReapSelectErr        = reaper.FaultSelectErr        // the reaper's due-root SELECT errors
+	FaultReapContention       = reaper.FaultContention       // the reaper's archive move fails on lock contention (a deadlock victim)
+	FaultReapArchiveErr       = reaper.FaultArchiveErr       // the reaper's archive move fails with an error that is not lock contention
+	FaultArchiveDelete        = reaper.FaultArchiveDelete    // an archived tree's deletion fails before it commits; targeted at root flow_id
+	CheckpointReapBatchLocked = reaper.CheckpointBatchLocked // a reaper batch has locked its due roots, inside its transaction
+)
 const (
 	// Scoped by task name (the task's name in the graph, not the URL ExecuteTask receives):
 	FaultExecuteTask      = "executeTask"      // ExecuteTask returns a synthetic error (as if the task failed)
@@ -131,11 +143,6 @@ const (
 	FaultDropDoorbell        = "dropDoorbell"        // the local work doorbell is dropped (the step waits for a refiller scan)
 	FaultSkipRefSeed         = "skipRefSeed"         // a transition does not seed the ref cache, so its successors resolve their refs from the database
 	FaultRecoveryResetErr    = "recoveryResetErr"    // the post-execution recovery reset write errors
-	FaultReapMidTree         = "reapMidTree"         // after deleting steps, before flows; optionally targeted at root flow_id
-	FaultReapSizeErr         = "reapSizeErr"         // sizing a selected root fails; targeted at root flow_id
-	FaultReapSelectErr       = "reapSelectErr"       // the reaper's due-root SELECT errors
-	FaultReapContention      = "reapContention"      // the reaper's archive move fails on lock contention (a deadlock victim)
-	FaultReapArchiveErr      = "reapArchiveErr"      // the reaper's archive move fails with an error that is not lock contention
 	FaultArchiveMaintainErr  = "archiveMaintainErr"  // an archive maintenance pass fails after its work
 	FaultExpireTerminate     = "expireTerminate"     // the expiration pass's termination of a root fails, rolled back
 	FaultRefillScanErr       = piston.FaultScanErr   // the piston's priority-band scan errors (its name, so there is one catalogue)
@@ -161,7 +168,6 @@ const (
 	CheckpointBeforeCancelRoute         = "beforeCancelRoute"         // step execution, after the completion write of a step Cancel marked while it ran, before it is routed to its handler or failed as cancelled
 	CheckpointCancelBeforeMark          = "cancelBeforeMark"          // Cancel, after its watermark transaction commits, before it marks the steps
 	CheckpointForkBeforeClone           = "forkBeforeClone"           // Fork, before its first clone transaction
-	CheckpointReapBatchLocked           = "reapBatchLocked"           // a reaper batch has locked its due roots, inside its transaction
 	CheckpointForkRootLocked            = "forkRootLocked"            // Fork, in a clone transaction, after it locked the source root and before it reads the source
 	CheckpointBeforeSubgraphSpawn       = "beforeSubgraphSpawn"       // step execution, before the transaction that parks a subgraph caller and creates its child
 	CheckpointTerminateAfterScan        = "terminateAfterScan"        // Terminate, after its pre-transaction scan of the tree, before its transaction

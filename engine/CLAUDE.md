@@ -3533,8 +3533,8 @@ window in which a disposable flow's outcome stays readable.
 
 Deleting without archiving is either operator-driven (`Delete`, `Purge`) or an explicit author opt-in
 (`DeleteOnCompletion`): a flow whose output and history are not needed. `Delete` reaches both sides: a closed flow
-still live is marked, an archived one deleted at once in its day (`deleteArchivedTrees`); `Purge` reads only the
-archive and deletes there (`purge.go`).
+still live is marked, an archived one deleted at once in its day (`reaper.DeleteArchivedTree`); `Purge` reads only
+the archive and deletes there (`purge.go`).
 
 **On the live side, deletion is deferred: mark, then reap.** No path deletes live rows inline. `DeleteOnCompletion`
 and `Delete` **stamp `delete_after_ms`** on the target **root** flow (`0`=keep; `>0`=reap at `updated_at + delete_after_ms`);
@@ -3565,17 +3565,17 @@ terminate inside a delete, and nothing either operation does can then race a `Re
   terminal-status guard is defense in depth. Already-scheduled (`delete_after_ms > 0`) is idempotent-success. The
   reaper sweeps the subtree. **When the live read misses** - or the stamp finds the row gone, the reaper having
   archived the tree between the read and the stamp - it locates the archive day and deletes the tree there
-  (`deleteArchivedFlow`): the root read with its token (a subgraph child's key a 400), then `deleteArchivedTrees`,
-  one transaction that locks the root first with the strength a `DELETE` takes (`lockRootsIn`: `FOR UPDATE`, or the
-  `touch` flip) - which serializes with Fork's lock on an archived source - then deletes the directory's rows for
-  the tree's flows, their steps, and the flows. Not marked: the reaper reads only the live tables, and an archived
-  tree has no `Resume` to race. A repeat is a 404, the tree gone. Pinned by `TestDelete_AnArchivedFlowIsDeletedInItsDay`
+  (`deleteArchivedFlow`): the root read with its token (a subgraph child's key a 400), then
+  `reaper.DeleteArchivedTree`, one transaction that locks the root first with the strength a `DELETE` takes - which
+  serializes with Fork's lock on an archived source - then deletes the directory's rows for the tree's flows, their
+  steps, and the flows. Not marked: the reaper reads only the live tables, and an archived tree has no `Resume` to
+  race. A repeat is a 404, the tree gone. Pinned by `TestDelete_AnArchivedFlowIsDeletedInItsDay`
   and `TestArchiving_DeleteOfATreeArchivedMeanwhileDeletesItThere`.
 - **`Purge(Query)`** (`purge.go`) needs `Limit` (at most `maxListLimit`) and both window bounds, and removes what
   `ListClosed` lists for the query, oldest archived first, at most `Limit` roots: the internal ascending
   `listArchived` (so its window is on `archived_at`, cut and capped as there), each tree deleted at once in the day
-  its branch read it from, by `deleteArchivedTrees`, in transactions of about `reapBatchRows` rows and at most
-  `purgeChunk` (4,096) roots: a literal `IN` list in the tens of thousands of terms can fail to plan outright on SQL
+  its branch read it from, by `reaper.DeleteArchivedRoots`, in transactions of about `reapBatchRows` rows and at
+  most `purgeChunk` (4,096) roots: a literal `IN` list in the tens of thousands of terms can fail to plan outright on SQL
   Server (errors 8623 / 8632). **It reads only the archive**, as `ListClosed` does: a root closed in the last minute
   is left for a later call, and `Delete` removes one by key. It returns `(removed, done)`: `done` when the archive
   had fewer than `Limit` and every root taken was removed - one a racing `Delete` took first was not. A
@@ -3583,72 +3583,28 @@ terminate inside a delete, and nothing either operation does can then race a `Re
   per shard (the read, the deletes), not once per shard: one turn across the stages would hold a shard's turn while
   the call merges the other shards. Pinned by `TestPurge_OldestArchivedFirstAndOnlyTheArchive`.
 
-**The reaper** (`reapPass`, `reaper.go`, `reapwalk.go`) has one goroutine per engine and a 15-second ticker. Shards
-run concurrently; on one shard the stages share one database turn and run serially: retention cleanup, stamped
-cleanup, closed-tree archiving, then expiration when due. Each walker yields after a 5-second slice, checked between
-attempts. Healthy backlog uses up to a 30-second pass budget before expiration gets its turn. Every stage gets its
-first slice even if a previous attempt overshot the pass budget. A failed stage does not suppress later stages.
+**The reaper** is `internal/reaper`, and its mechanics - the walks, the batch move, the attempt limit, why an
+archive failure never becomes permission to delete - are in `internal/reaper/CLAUDE.md`. The engine holds the wiring
+(`reaper.go`):
 
-A tree is always one atomic move or delete, including descendants. Batches consider at most 512 roots and trim a
-contiguous prefix to about 4096 joined step rows, always admitting the first tree. Exact sizing is a hint outside
-the transaction, bounded by the attempt deadline; it is not a correctness guard or a durable size cache. The
-transaction locks a sorted copy of the roots, rechecks eligibility, and processes their whole `root_flow_id` trees,
-steps before flows. Root locks arbitrate peer overlap and Fork/Delete races. PostgreSQL and MySQL skip held roots;
-SQLite and SQL Server wait under the deadline. Transact retries contention, including a straggler's reverse lock
-order. Shutdown stops attempts without recording failure; an uncertain commit is reconciled by scanning live roots
-again, never by assuming that an error proves rollback.
+- **One goroutine, a 15-second ticker** (`reaperLoop`); each tick is one `reapPass`, which takes a turn per shard this
+  replica dispatches and calls `Reaper.Pass` under it, then the expiration stage when due. Shards run concurrently.
+- **A fresh `Reaper` per run**, built in `startArchives` before `initMetrics` registers the gauge callback, so no
+  reading survives a restart or a failed Startup. Its four instruments are created on the engine's meter
+  (`SetMeter`), so the engine does not register them itself.
+- **`Config` is built for every pass** (`reaperConfig`) from the engine's fields, which tests change on a running
+  engine: the steal grace is two ticks, and the day's length comes from the archive set, resolved through
+  `archiveDayLength` only when there is none.
+- **A shard this replica stops dispatching is forgotten** (`forgetReaping`: `Reaper.Forget` with the expiration
+  walk's position), so a replica that dispatches it again starts afresh.
+- **The gauges stay here**, reading `Reaper.Observe`, because they are gated on dispatching when read.
+- **`dwarf_flows_removed` is the engine's**, recorded once per shard per Purge call from the count
+  `DeleteArchivedRoots` returns, what committed before a failure included
+  (`TestReaperContract_APartialPurgeCountsWhatItRemoved`).
+- **Two invariants cross the boundary.** Fork's `lockRows` must keep conflicting with the reaper's root lock (see
+  `lockRows`), and `maxListLimit` must stay above a reaper batch (`TestList_TheLimitIsAboveAReaperBatch`).
 
-**Two walkers share one traversal implementation.** The fast walker keeps a position and advances past each attempted
-range, including a failed size count or move. The repair walker independently covers **all due roots**, including
-roots behind or ahead of the fast position. Each repair sweep freezes an inclusive end from the database clock
-and maximum flow id, keeps its position across slices, and wraps when exhausted. A root committed late with an old
-timestamp, or one that becomes due behind the position, is found on the next sweep. Fast position is a hint only;
-neither deletion authority nor repair coverage depends on it. Restart and relinquishing a shard clear the hints.
-
-Repair starts with one root, doubles after actual removal up to the normal batch size, and drops to one after any
-failure. A failed multi-root attempt stays at its position; a failed single advances and is logged once in that
-sweep. A zero-lock attempt also advances, without counting a failure or growing the batch. Eight consecutive failed
-attempts yield until a later slice. Scan failure has no known range to skip and ends its slice. No transient-error
-classes, counters for retries at the same position, deletion handover stamps, or chunk boundaries are required.
-
-Both walkers use the existing residency/steal predicate: this dispatcher's residue class plus any root overdue by
-two reaper ticks. Traversal stays ordered, without reordering the own class first. Closed and retention roots use
-`(updated_at, flow_id)`; stamped roots use `flow_id`. Each closed-status branch seeks by timestamp and is merged in
-Go, with exact stored timestamps bound through `sqlTime`. Roots missed by a fleet change or an idle residency class
-are covered by repair, which has no dependency on fast progress. SQL Server replicas can still contend on overdue
-work; residency is a work preference, and transactional locks supply ownership.
-
-**Archive failures preserve retained trees.** A positive retention never turns an archive failure into permission
-to delete. The independent retention walker deletes an unstamped closed tree only when
-`today - retention > day(updated_at + archiveGrace)`, using the database clock and the archive day length. The
-strict cutoff is rechecked under the root lock. Day arithmetic avoids overflowing a duration for an accepted
-large retention. Cleanup needs no archive day tables or successful tomorrow-whole check. Explicit Delete,
-DeleteOnCompletion and retention zero retain their existing deletion authority. Delete remains deferred.
-A late successful move still receives retention from its filing day.
-
-**Every scan, sizing query, day lookup and tree transaction has the same 30-second attempt limit**
-(`reapAttemptCtx`). Slice/pass budgets yield between attempts; they do not interrupt transactions at arbitrary
-points. Atomicity does not make an arbitrarily large tree serviceable: a tree that repeatedly misses its attempt
-limit stays intact and is retried indefinitely, even with DeleteOnCompletion or after retention. The operator must
-repair the bottleneck or arrange controlled maintenance; simply waiting for retention is not a remedy. See the
-checked-in retention runbook for qualification, capacity planning and the operator procedure. Do not add a destructive
-archive-failure fallback to evade this limit. Driver cancellation must also leave pooled connections usable; the
-blocked-attempt regression reads through the pool immediately after cancellation to check that boundary.
-
-The move itself retains these constraints:
-
-- The archive makes tables at Startup and during maintenance; the reaper never creates them. Tomorrow must be whole
-  before moving into today because locate's retry relies on it. Missing day tables hold trees live, while explicit
-  and retention deletion continue. Cold Startup still fails if required archive tables cannot be prepared.
-- `archived_at` is set by the move and clamped to its filing day's last millisecond. The minute before day-end is a
-  quiet margin for archive moves only; stamped and retention-zero deletion continue. Test mode disables the margin.
-- `archivedFlowColumns` names every live flow column except `archived_at`; the column-coverage test pins it. Steps
-  use `SELECT *`. PostgreSQL moves each table with DELETE RETURNING into INSERT, so archived rows are exactly removed
-  rows; other dialects copy then delete, with a straggler recorded as it was at copy time.
-- The directory entry for an unusually late or early filing belongs to the same transaction as the tree move.
-  `DirectoryHours` decides which entries are needed; a backlog can create many entries but cannot omit them.
-- Tree operations are atomic across the directory, flows and steps. A lost response after commit may undercount a
-  metric, but retries find the live root gone. No partial tree is published or handed between cleanup stages.
+The engine's tests drive a pass with `reapDueFlows`; the `TestReaperContract_*` tests pin what the engine relies on.
 
 **The tree delete is unconditional on descendant status, deliberately** - do not 409 on a `running` subgraph
 descendant. The deferred path stamps only the root (whose own status is 409-guarded, so an open root is never
@@ -4388,12 +4344,12 @@ call (the per-shard debug path is `ShardInfo` + `Query.Shard`). `Limit` is requi
   340 - some 5% of the default shared lock table (`max_locks_per_transaction` 64 x `max_connections`). A 30-day
   locate walk touched about 160 relations and exhausted that table only with about 40% of connections running it at
   once.
-- **The time bounds are bound as text** (`sqlTime`, `timeConditions`): `FromTime`/`ToTime` rounded UP to the
+- **The time bounds are bound as text** (`database.SQLTime`, `timeConditions`): `FromTime`/`ToTime` rounded UP to the
   columns' unit, milliseconds on every dialect (`TIMESTAMP(3)` on PostgreSQL), which is exact
   for an inclusive lower and an exclusive upper bound alike (truncating drops the values just below an exclusive
   bound), formatted in UTC and cast to the column's type, never a `time.Time`, so no session time zone is involved; the
-  relative bounds read the database clock. Pinned by `TestSQLTime_ReadsAsTheInstantItNames` (every dialect, and a
-  PostgreSQL session in Tokyo) and `TestSQLTime_RoundsUpToTheColumnsPrecision`.
+  relative bounds read the database clock. Pinned by `internal/database`'s `TestSQLTime_*` (every dialect, and a
+  PostgreSQL session in Tokyo) and by `TestListClosed_TheWindowRoundsUpToTheColumnsPrecision`.
 - **Do not divide `Limit` across shards to read less.** A per-shard share drops a shard's flows that are newer than
   everything another shard returned. The cost is shards x tables x `Limit` rows read on the servers, shards x
   `Limit` on the wire.

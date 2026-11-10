@@ -25,6 +25,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/migrations"
+	"github.com/microbus-io/dwarf/internal/reaper"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 	"go.opentelemetry.io/otel/attribute"
@@ -144,7 +145,7 @@ func TestArchiveMetrics_TheReaperCountsWhatItMoves(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	e.reapDueFlows(ctx)
 	rm = collect(t, reader)
-	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reapReasonArchiveFailed}))
+	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonArchiveFailed}))
 	assert.Equal(int64(4), sumAt(rm, "dwarf_flows_archived", shard1), "nothing more archived")
 	failing, _ = gaugeAt(rm, "dwarf_archive_failing_seconds", shard1)
 	assert.True(failing >= 0.02, "failing since the first pass, got %v", failing)
@@ -167,8 +168,8 @@ func TestArchiveMetrics_DeletionsAreCountedByReason(t *testing.T) {
 
 	rm := collect(t, reader)
 	assert.Equal(int64(1), sumAt(rm, "dwarf_flows_removed", map[string]string{"shard": "1", "side": removedFromLive, "op": "delete"}))
-	assert.Equal(int64(2), sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reapReasonDeleted}))
-	assert.Equal(int64(2), sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reapReasonNoRetention}))
+	assert.Equal(int64(2), sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonDeleted}))
+	assert.Equal(int64(2), sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonNoRetention}))
 	assert.Zero(sumAt(rm, "dwarf_flows_archived", nil))
 }
 
@@ -293,7 +294,7 @@ func TestArchiveMetrics_AReplicaThatStopsReapingForgets(t *testing.T) {
 	// Returning to the shard does not authorize deletion.
 	e.reapDueFlows(ctx)
 	rm = collect(t, reader)
-	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reapReasonArchiveFailed}))
+	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonArchiveFailed}))
 }
 
 // An unavailable archive holds records without incrementing either deletion counter.
@@ -320,8 +321,8 @@ func TestArchiveMetrics_AnUnreadableDayIsAnArchiveFailure(t *testing.T) {
 		t.Skip("midnight passed during the passes")
 	}
 	rm := collect(t, reader)
-	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reapReasonArchiveFailed}))
-	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reapReasonNoRetention}))
+	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonArchiveFailed}))
+	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonNoRetention}))
 }
 
 func TestArchiveMetrics_HeldWorkIsVisibleBeforeASweepCompletes(t *testing.T) {
@@ -344,10 +345,9 @@ func TestArchiveMetrics_HeldWorkIsVisibleBeforeASweepCompletes(t *testing.T) {
 	age, ok := gaugeAt(rm, "dwarf_archive_oldest_held_seconds", attrs)
 	assert.True(ok)
 	assert.True(age >= 119)
-	w := e.reapWalks.get(reapWalkKey{1, "closed", true})
-	assert.False(w.started.IsZero(), "sweep is incomplete")
+	assert.True(e.reaper.Observe(1, time.Now()).Kinds[0].Sweep > 0, "sweep is incomplete")
 	assert.True(sumAt(rm, "dwarf_archive_move_failures", map[string]string{"shard": "1"}) >= 2)
-	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reapReasonArchiveFailed}))
+	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonArchiveFailed}))
 	e.seams.Withdraw(engineseams.FaultReapArchiveErr)
 	for range 4 {
 		e.reapDueFlows(t.Context())
@@ -356,7 +356,7 @@ func TestArchiveMetrics_HeldWorkIsVisibleBeforeASweepCompletes(t *testing.T) {
 	n, _ = gaugeAt(rm, "dwarf_archive_held_roots", attrs)
 	assert.Zero(n)
 	e.forgetReaping(1)
-	assert.Equal(reapWalk{}, e.reapWalks.get(reapWalkKey{1, "closed", true}))
+	assert.Equal(reaper.KindObservation{Kind: reaper.KindClosed}, e.reaper.Observe(1, time.Now()).Kinds[0])
 }
 
 func TestArchiveMetrics_UnarchivedRetentionDeletionCountsOnlyOnce(t *testing.T) {
@@ -369,7 +369,7 @@ func TestArchiveMetrics_UnarchivedRetentionDeletionCountsOnlyOnce(t *testing.T) 
 	e.reapDueFlows(t.Context())
 	e.reapDueFlows(t.Context())
 	rm := collect(t, reader)
-	assert.Equal(int64(2), sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reapReasonArchiveFailed}))
-	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reapReasonDeleted}))
+	assert.Equal(int64(2), sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonArchiveFailed}))
+	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonDeleted}))
 	assert.Zero(sumAt(rm, "dwarf_flows_archived", map[string]string{"shard": "1"}))
 }

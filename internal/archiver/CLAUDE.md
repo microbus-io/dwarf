@@ -215,7 +215,8 @@ catalog read that began before a later read or before a drop by the archive not 
 preferred to a directory row, a dropped directory day returned as written, the creation day dropped and
 then both (the directory alone finding a later day), a day with either table missing, a failure other than a missing
 table (one only a probe meets) not read as a 404, `DirectoryHours` against the creation day for several day lengths, and retention deleting the
-directory's expired rows across batches. The engine's `directory_test.go` pins the reaper's half - which moves it names - and a reader's `Refresh` on every archive pass.
+directory's expired rows across batches. `internal/reaper`'s `TestMove_Directory*` pin the reaper's half - which moves it names - and the engine's
+`directory_test.go` a reader's `Refresh` on every archive pass.
 
 Pinned by `archiver_test.go` (the substitution itself by `internal/migrations`' tests): a day made with the live tables'
 columns and their flows indexes (all but the deletion one), a written id and PostgreSQL's freeze settings, a whole migration replayed over existing tables, eight racing

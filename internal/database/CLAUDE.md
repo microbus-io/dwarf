@@ -107,6 +107,14 @@ main reason. It is not retried: nothing but a different role clears it. MySQL an
 there the one role matters too: their catalogs show a user only the tables it holds a privilege on, which is how the
 archive lists its days. Pinned by `TestCheckOwner_ANonOwnerFails` (PostgreSQL).
 
+## Time bounds are bound as text (`SQLTime`)
+
+Every statement that compares a time column with a Go time binds `SQLTime`'s text, never a `time.Time`: rounded UP to
+the millisecond the columns hold (`internal/migrations/CLAUDE.md`, "Timestamps come from the database clock"), in
+UTC, cast to the dialect's column type, and clamped to the year 9999. The engine's lists and the reaper's walks both
+use it; a second copy would split the rounding that keeps an inclusive and an exclusive bound exact. Pinned by
+`sqltime_test.go`, on every dialect and in a PostgreSQL session whose zone is not UTC.
+
 ## Sharding mechanics
 
 **Shard indices are sparse.** Valid indices are unique integers `>= 1`, not necessarily contiguous (`Index: 1`

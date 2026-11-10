@@ -117,7 +117,9 @@ func lockFlowRows(ctx context.Context, tx *sequel.Tx, where string, args ...any)
 	return lockRows(ctx, tx, liveTables.flows, where, args...)
 }
 
-// lockRows is lockFlowRows over the given flows table: the live one, or an archive day's.
+// lockRows is lockFlowRows over the given flows table: the live one, or an archive day's. Fork locks its source root
+// with it, and that lock must keep conflicting with the reaper's, which takes every root it removes FOR UPDATE (or by
+// the touch flip): it is what serializes a Fork with the archiving or deletion of the tree it clones.
 func lockRows(ctx context.Context, tx *sequel.Tx, flows string, where string, args ...any) (int64, error) {
 	query := lockRowsSQL(tx.DriverName(), flows, where)
 	if !locksByReading(tx.DriverName()) {

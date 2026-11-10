@@ -19,11 +19,8 @@ package engine
 import (
 	"context"
 	"net/http"
-	"slices"
 	"sync/atomic"
 
-	"github.com/microbus-io/dwarf/internal/archiver"
-	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -66,9 +63,11 @@ func purgeDone(limit, took, gone int) bool {
 	return took < limit && gone == took
 }
 
-// deleteArchivedRoots deletes the trees of the archived roots, each in the day the list read it from, a transaction
-// per run of trees that fits in about reapBatchRows rows (at most purgeChunk roots), and returns how many roots it
-// deleted.
+// deleteArchivedRoots deletes the trees of the archived roots, each in the day the list read it from, and returns how
+// many roots it deleted. Each shard's day goes to the reaper in transactions of about reapBatchRows rows and at most
+// purgeChunk roots: 4,096 roots of wide fan-outs would otherwise be millions of rows deleted in one transaction,
+// holding the vacuum horizon and the shard's turn for its length. dwarf_flows_removed counts each shard's total once,
+// what committed before a failure included.
 func (e *Engine) deleteArchivedRoots(ctx context.Context, roots []listRow) (int, error) {
 	set := e.archives.Load()
 	if set == nil || len(roots) == 0 {
@@ -76,35 +75,21 @@ func (e *Engine) deleteArchivedRoots(ctx context.Context, roots []listRow) (int,
 	}
 	var deleted atomic.Int64
 	err := e.onShardsOf(ctx, roots, func(ctx context.Context, db *sequel.DB, rows []listRow) error {
+		shardDeleted := 0
+		defer func() {
+			deleted.Add(int64(shardDeleted))
+			e.metricFlowsRemoved(ctx, rows[0].shard, removedFromArchive, "purge", shardDeleted)
+		}()
 		// Each row carries the day its list branch read it from.
 		byDay := map[int][]int{}
 		for _, lr := range rows {
 			byDay[lr.day] = append(byDay[lr.day], lr.flowID)
 		}
 		for day, dayIDs := range byDay {
-			slices.Sort(dayIDs)
-			t := flowTables{flows: migrations.FlowsTable(day), steps: migrations.StepsTable(day)}
-			// A transaction takes the leading trees that fit in about reapBatchRows rows, and at least one, as the
-			// reaper's does: 4,096 roots of wide fan-outs would otherwise be millions of rows deleted in one
-			// transaction, holding the vacuum horizon and the shard's turn for its length.
-			for len(dayIDs) > 0 {
-				cut, err := e.rootsWithinRowsIn(ctx, db, t, dayIDs[:min(e.purgeChunk, len(dayIDs))])
-				if sequel.IsUndefinedTableError(err) {
-					break // the day was dropped since the list: its trees are gone already
-				}
-				if err != nil {
-					return errors.Trace(err)
-				}
-				n, err := deleteArchivedTrees(ctx, db, day, cut)
-				deleted.Add(int64(n))
-				e.metricFlowsRemoved(ctx, rows[0].shard, removedFromArchive, "purge", n)
-				if sequel.IsUndefinedTableError(err) {
-					break
-				}
-				if err != nil {
-					return errors.Trace(err)
-				}
-				dayIDs = dayIDs[len(cut):]
+			n, err := e.reaper.DeleteArchivedRoots(ctx, db, day, dayIDs, e.purgeChunk, e.reapBatchRows)
+			shardDeleted += n
+			if err != nil {
+				return errors.Trace(err)
 			}
 		}
 		return nil
@@ -130,38 +115,4 @@ func (e *Engine) onShardsOf(ctx context.Context, rows []listRow, fn func(ctx con
 		defer doneTurn()
 		return fn(ctx, db, mine)
 	}))
-}
-
-// deleteArchivedTrees deletes, in one transaction, the trees in day's archive tables whose roots are among roots and
-// still there: the roots locked first - the lock Fork takes on an archived source, so a Fork and a deletion of one tree
-// serialize - then the directory's rows for their flows, their steps and their flows. It returns how many roots it
-// deleted.
-func deleteArchivedTrees(ctx context.Context, db *sequel.DB, day int, roots []int) (int, error) {
-	flows, steps := migrations.FlowsTable(day), migrations.StepsTable(day)
-	var locked []int
-	err := db.Transact(ctx, func(tx *sequel.Tx) error {
-		var err error
-		locked, err = lockRootsIn(ctx, tx, flows, false, "flow_id IN ("+intCSV(roots)+") AND surgraph_flow_id=0")
-		if err != nil || len(locked) == 0 {
-			return errors.Trace(err)
-		}
-		// ids are trusted integers embedded as literals to dodge the per-driver bind-param ceiling.
-		ids := intCSV(locked)
-		trees := "SELECT flow_id FROM " + flows + " WHERE root_flow_id IN (" + ids + ")"
-		// The directory and the steps before the flows: their subqueries read the flow rows.
-		if _, err := tx.ExecContext(ctx, "DELETE FROM "+archiver.DirectoryTable+" WHERE flow_id IN ("+trees+")"); err != nil {
-			return errors.Trace(err)
-		}
-		if _, err := tx.ExecContext(ctx, "DELETE FROM "+steps+" WHERE flow_id IN ("+trees+")"); err != nil {
-			return errors.Trace(err)
-		}
-		if _, err := tx.ExecContext(ctx, "DELETE FROM "+flows+" WHERE root_flow_id IN ("+ids+")"); err != nil {
-			return errors.Trace(err)
-		}
-		return nil
-	})
-	if err != nil {
-		return 0, errors.Trace(err) // rolled back: nothing deleted
-	}
-	return len(locked), nil
 }

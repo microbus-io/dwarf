@@ -21,7 +21,6 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -33,7 +32,6 @@ import (
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
@@ -219,79 +217,29 @@ func (l *queryLog) count(prefix string) int {
 	return n
 }
 
-// cancelOnQuery is a slog.Handler that, once armed, cancels a context when the nth logged query starting with a prefix
-// has run: a fault between two statements that every dialect shares.
-type cancelOnQuery struct {
-	mu     sync.Mutex
-	prefix string
-	left   int
-	cancel context.CancelFunc
-}
-
-func (c *cancelOnQuery) Enabled(context.Context, slog.Level) bool { return true }
-func (c *cancelOnQuery) WithAttrs([]slog.Attr) slog.Handler       { return c }
-func (c *cancelOnQuery) WithGroup(string) slog.Handler            { return c }
-func (c *cancelOnQuery) Handle(_ context.Context, r slog.Record) error {
-	if r.Message != "sequel query" {
-		return nil
-	}
-	r.Attrs(func(a slog.Attr) bool {
-		if a.Key != "query" {
-			return true
-		}
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		if c.cancel != nil && strings.HasPrefix(a.Value.String(), c.prefix) {
-			c.left--
-			if c.left == 0 {
-				c.cancel()
-			}
-		}
-		return false
-	})
-	return nil
-}
-
-// arm cancels with cancel once the nth query starting with prefix has run.
-func (c *cancelOnQuery) arm(prefix string, nth int, cancel context.CancelFunc) {
-	c.mu.Lock()
-	c.prefix, c.left, c.cancel = prefix, nth, cancel
-	c.mu.Unlock()
-}
-
 // TestReaperContract_APartialPurgeCountsWhatItRemoved pins a Purge that fails part-way: it reports the roots its
-// committed transactions removed, and dwarf_flows_removed counts exactly those. The caller's context is cancelled as
-// the second transaction's trees are sized.
+// committed transactions removed, and dwarf_flows_removed counts exactly those. The second transaction's deletion is
+// faulted.
 func TestReaperContract_APartialPurgeCountsWhatItRemoved(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
-	reader := sdkmetric.NewManualReader()
-	faults := &cancelOnQuery{}
-	e := NewEngineUnderTest(t.Name())
-	t.Cleanup(func() { e.Shutdown(context.Background()) })
-	e.SetHost(hosts.NewMux())
-	e.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
-	assert.NoError(e.SetLogger(slog.New(faults)))
-	e.archiveGrace = 0
-	e.reapInterval = time.Hour
-	assert.NoError(e.SetRetention(30))
-	assert.Must(assert.NoError(e.Startup(ctx)))
+	e, reader := meteredArchiveEngine(t, hosts.NewMux(), 30)
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
-	seedTrees(t, db, 4, callShape)
+	roots := seedTrees(t, db, 4, callShape)
 	e.reapDueFlows(ctx)
 	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
 		t.Skip("midnight passed during the pass")
 	}
 
-	e.reapBatchRows = 4 // two trees to a transaction
-	purging, cancel := context.WithCancel(ctx)
-	defer cancel()
-	faults.arm("SELECT f.root_flow_id, COUNT(*) FROM "+migrations.FlowsTable(today), 2, cancel)
-	removed, done, err := e.Purge(purging, enginetest.Recent(workflow.Query{Limit: 10}))
+	e.reapBatchRows = 4 // two trees to a transaction: roots[2] is in the second
+	fault := engineseams.Join(engineseams.FaultArchiveDelete, strconv.Itoa(roots[2]))
+	e.seams.InjectN(fault, 1000)
+	defer e.seams.Withdraw(fault)
+	removed, done, err := e.Purge(ctx, enginetest.Recent(workflow.Query{Limit: 10}))
 	assert.Error(err)
 	assert.False(done)
 	assert.Equal(2, removed, "the first transaction's roots")

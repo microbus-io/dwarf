@@ -42,6 +42,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/peers"
 	"github.com/microbus-io/dwarf/internal/piston"
 	"github.com/microbus-io/dwarf/internal/planner"
+	"github.com/microbus-io/dwarf/internal/reaper"
 	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/internal/turnstile"
 	"github.com/microbus-io/dwarf/internal/workers"
@@ -319,22 +320,19 @@ type Engine struct {
 	recoveryCancel context.CancelFunc
 	recoveryWorker sync.WaitGroup
 
-	// Reaper goroutine: deletes flows whose delete_after_ms window has elapsed, on its own ~1min ticker.
-	// reaperCancel stops it, abandoning a pass in flight.
+	// Reaper goroutine: archives closed trees and deletes the stamped ones, on its own 15s ticker (reaperLoop).
+	// reaper is the run's, built at Startup before anything reads it (startArchives); reaperCancel stops the
+	// goroutine, abandoning a pass in flight.
+	reaper       *reaper.Reaper
 	reaperCancel context.CancelFunc
 	reaperWorker sync.WaitGroup
 
 	// Archive goroutine: keeps each shard's archive day tables - today's and the days ahead made, expired days
 	// dropped. archives is the run's set, published at Startup; testArchiveDay, when set, replaces the day's
 	// length for a test (archiveDayLength). noReapQuiet, set in test mode, lets a reaper pass archive into its day
-	// however late it runs (reapQuietMargin), so a test's pass near midnight, or on a day of seconds, does what it does
-	// at noon. archiveCancel stops the loop between its statements.
-	archives atomic.Pointer[archiveSet]
-	// archiveFailures is, per shard, since when the reaper's archiving has been failing (reaper.go).
-	archiveFailures archiveFailures
-	// archiveLag is the wait past grace at each shard's fast cursor.
-	archiveLag     archiveLag
-	reapWalks      reapWalks
+	// however late it runs (reaper.Config.NoQuietMargin), so a test's pass near midnight, or on a day of seconds, does
+	// what it does at noon. archiveCancel stops the loop between its statements.
+	archives       atomic.Pointer[archiveSet]
 	testArchiveDay time.Duration
 	noReapQuiet    bool
 	archiveCancel  context.CancelFunc
@@ -1192,7 +1190,6 @@ func (e *Engine) initRuntime() error {
 		e.recoveryLoop(recoveryCtx)
 	})
 	e.expirePositions.reset()
-	e.reapWalks.reset()
 	e.reaperWorker.Go(func() {
 		e.reaperLoop(reaperCtx)
 	})

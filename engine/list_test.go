@@ -24,13 +24,13 @@ import (
 
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/archiver"
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
-	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -55,7 +55,7 @@ func stampArchived(t *testing.T, e *Engine, day, rootID int, at time.Time) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expr, arg := sqlTime(db.DriverName(), at)
+	expr, arg := database.SQLTime(db.DriverName(), at)
 	_, err = db.ExecContext(t.Context(), "UPDATE "+migrations.FlowsTable(day)+" SET archived_at="+expr+" WHERE root_flow_id=?", arg, rootID)
 	if err != nil {
 		t.Fatal(err)
@@ -360,41 +360,6 @@ func TestList_TheLimitIsAboveAReaperBatch(t *testing.T) {
 	assert.True(maxListLimit > e.reapBatch, "and its roots (%d)", e.reapBatch)
 }
 
-// TestSQLTime_ReadsAsTheInstantItNames pins the bound a list's FromTime and ToTime are written as: compared to the
-// database's NOW_UTC(), the current instant reads within a second of it on every dialect, and on PostgreSQL in a
-// session whose time zone is not UTC.
-func TestSQLTime_ReadsAsTheInstantItNames(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	ctx := context.Background()
-	e := archiveEngine(t, treeMux(), 30)
-	db, err := e.db.Shard(1)
-	assert.Must(assert.NoError(err))
-	diff := func(x sequel.Executor) float64 {
-		expr, arg := sqlTime(db.DriverName(), time.Now())
-		var ms float64
-		assert.NoError(x.QueryRowContext(ctx, "SELECT DATE_DIFF_MILLIS(NOW_UTC(), "+expr+")", arg).Scan(&ms))
-		return ms
-	}
-	ms := diff(db)
-	assert.True(ms > -1000 && ms < 1000, "%vms off", ms)
-	if db.DriverName() != "pgx" {
-		return
-	}
-	errRollback := errors.New("rollback")
-	err = db.Transact(ctx, func(tx *sequel.Tx) error {
-		if _, err := tx.ExecContext(ctx, "SET LOCAL TIME ZONE 'Asia/Tokyo'"); err != nil {
-			return err
-		}
-		ms = diff(tx)
-		return errRollback
-	})
-	if !errors.Is(err, errRollback) {
-		assert.NoError(err)
-	}
-	assert.True(ms > -1000 && ms < 1000, "%vms off on a session in Tokyo", ms)
-}
-
 // TestListClosed_TheDayAfterTodayIsRead pins the one day past today a window reaching past now reads, for a database
 // clock ahead of this process's across midnight: a tree there is listed.
 func TestListClosed_TheDayAfterTodayIsRead(t *testing.T) {
@@ -414,10 +379,10 @@ func TestListClosed_TheDayAfterTodayIsRead(t *testing.T) {
 	assert.Equal([]int{root}, idsOf(t, got))
 }
 
-// TestSQLTime_RoundsUpToTheColumnsPrecision pins that a bound between two of the column's units - microseconds on
-// PostgreSQL, milliseconds elsewhere - compares as the instant it names: half a unit after a stored value, an
-// exclusive upper bound includes it and an inclusive lower bound excludes it. Truncated, both would do the opposite.
-func TestSQLTime_RoundsUpToTheColumnsPrecision(t *testing.T) {
+// TestListClosed_TheWindowRoundsUpToTheColumnsPrecision pins that a bound between two of the column's units compares
+// as the instant it names: half a unit after a stored value, an exclusive upper bound includes it and an inclusive
+// lower bound excludes it. Truncated, both would do the opposite.
+func TestListClosed_TheWindowRoundsUpToTheColumnsPrecision(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -439,15 +404,6 @@ func TestSQLTime_RoundsUpToTheColumnsPrecision(t *testing.T) {
 	got, err = e.ListClosed(ctx, workflow.Query{FromTime: stored.Add(half), ToTime: stored.Add(time.Hour), Limit: 10})
 	assert.NoError(err)
 	assert.Len(got, 0, "before the lower bound")
-
-	expr, arg := sqlTime("mysql", time.Date(2026, 11, 4, 1, 2, 3, 123400000, time.UTC))
-	assert.Equal("CAST(? AS DATETIME(3))", expr)
-	assert.Equal("2026-11-04 01:02:03.124", arg)
-	_, arg = sqlTime("sqlite", time.Date(2026, 11, 4, 1, 2, 3, 123000000, time.UTC))
-	assert.Equal("2026-11-04 01:02:03.123", arg, "an exact millisecond is kept")
-	expr, arg = sqlTime("pgx", time.Date(2026, 11, 4, 1, 2, 3, 123000100, time.UTC))
-	assert.Equal("CAST(? AS TIMESTAMP(3))", expr)
-	assert.Equal("2026-11-04 01:02:03.124", arg, "milliseconds on PostgreSQL too")
 }
 
 // TestListClosed_RetentionZeroStillReadsToday pins the archived list at a retention of 0: today's tables are still
@@ -513,10 +469,10 @@ func TestListOpen_NewestUpdatedFirstAcrossStatuses(t *testing.T) {
 	assert.Equal([]string{first, last}, keysOf(interrupted))
 }
 
-// TestSQLTime_AFarFutureBoundMeansNoBound pins the clamp at the year 9999: a ToTime past it - a "no upper bound"
+// TestListClosed_AFarFutureBoundMeansNoBound pins the clamp at the year 9999: a ToTime past it - a "no upper bound"
 // sentinel - lists what a ToTime of the last instant would, on every dialect, rather than nothing (SQLite compares a
 // five-digit year as text, MySQL casts it to NULL) or an error (SQL Server).
-func TestSQLTime_AFarFutureBoundMeansNoBound(t *testing.T) {
+func TestListClosed_AFarFutureBoundMeansNoBound(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()

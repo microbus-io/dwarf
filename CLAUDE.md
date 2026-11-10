@@ -115,6 +115,9 @@ matching one before working there:**
 - **`internal/archiver/CLAUDE.md`** - one shard's archive day tables: why a day is made by its own migration
   sequence, why the catalog and not the migration records says which days exist, retention by days, and the
   one-statement locate with its sparse directory.
+- **`internal/reaper/CLAUDE.md`** - removing closed trees from one shard's live tables: why it is a package with one
+  instance per run, the two walkers and their coverage, why an archive failure never becomes permission to delete, the
+  attempt limit, the move's column rules, and the root lock it shares with Fork.
 - **`internal/candidates/CLAUDE.md`** - the bounded hint-cache mechanism; its driving refiller algorithm is in
   `engine/CLAUDE.md`. (`internal/lru` is a textbook LRU+TTL, bounded by count or by weight - godoc only, no
   design doc.)

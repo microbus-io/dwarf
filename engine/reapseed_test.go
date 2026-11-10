@@ -34,10 +34,6 @@ type treeShape struct {
 var (
 	// callShape is a root of one step that called a child of one step: two flows, two steps.
 	callShape = treeShape{rootSteps: 1, childSteps: 1}
-	// chunkShape is a root of five steps whose last called a child of two: two flows, seven steps.
-	chunkShape = treeShape{rootSteps: 5, childSteps: 2}
-	// soloShape is a tree of one flow of one step, so consecutive roots take consecutive ids.
-	soloShape = treeShape{rootSteps: 1, childSteps: -1}
 )
 
 // seedTrees inserts n closed trees of shape on db, one after another, and returns their roots in that order. Every flow

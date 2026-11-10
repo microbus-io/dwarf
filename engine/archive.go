@@ -27,6 +27,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/migrations"
+	"github.com/microbus-io/dwarf/internal/reaper"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
 )
@@ -237,8 +238,12 @@ func (e *Engine) startArchives(ctx context.Context, dayLength time.Duration) err
 		set.byShard[idx] = archiver.New(db, dayLength, migrations.Archive())
 	}
 	e.archives.Store(set)
-	e.archiveFailures.reset()
-	e.archiveLag.reset()
+	// The run's reaper, fresh, so nothing the last run learned survives into this one's readings - built before
+	// initMetrics registers the gauge callback that reads it.
+	r := reaper.New()
+	r.SetLogger(e.logger)
+	r.SetSeams(e.seams)
+	e.reaper = r
 	return errors.Trace(e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		a := set.byShard[shard]
 		err := a.EnsureToday(ctx)

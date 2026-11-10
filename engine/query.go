@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/archiver"
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/workflow"
@@ -117,7 +118,7 @@ func scanListRow(rows *sequel.Rows, shardIdx int, withDay bool) (listRow, error)
 		lr.summary.RootFlowKey = keys.NewFlowKey(shardIdx, int(rootFlowHour.Int64), rootFlowID, rootFlowToken.String)
 	}
 	// A live row's archived_at is the far-future sentinel, so the column itself says whether the flow is archived.
-	if archivedAt.Year() < maxSQLTime.Year() {
+	if archivedAt.Year() < database.MaxSQLTime.Year() {
 		lr.summary.ArchivedAt = archivedAt
 	}
 	lr.at = lr.summary.UpdatedAt
@@ -195,14 +196,14 @@ func listWindowOf(query workflow.Query, required bool) (listWindow, error) {
 }
 
 // timeConditions returns the query's time bounds as conditions on column, and their arguments, bound as text
-// (sqlTime).
+// (database.SQLTime).
 func timeConditions(driverName, column string, query workflow.Query) (conds []string, args []any) {
 	if !query.FromTime.IsZero() {
-		expr, arg := sqlTime(driverName, query.FromTime)
+		expr, arg := database.SQLTime(driverName, query.FromTime)
 		conds, args = append(conds, column+">="+expr), append(args, arg)
 	}
 	if !query.ToTime.IsZero() {
-		expr, arg := sqlTime(driverName, query.ToTime)
+		expr, arg := database.SQLTime(driverName, query.ToTime)
 		conds, args = append(conds, column+"<"+expr), append(args, arg)
 	}
 	return conds, args

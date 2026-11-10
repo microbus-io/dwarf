@@ -14,14 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engine
+package database
 
 import "time"
 
-// maxSQLTime is the latest instant every dialect's time column holds.
-var maxSQLTime = time.Date(9999, 12, 31, 23, 59, 59, 999000000, time.UTC)
+// MaxSQLTime is the latest instant every dialect's time column holds.
+var MaxSQLTime = time.Date(9999, 12, 31, 23, 59, 59, 999000000, time.UTC)
 
-// sqlTime returns the SQL that reads t as a value of a time column, holding one placeholder, and the argument to bind
+// SQLTime returns the SQL that reads t as a value of a time column, holding one placeholder, and the argument to bind
 // to it. The time.Time itself is never bound: SQLite would compare the driver's RFC 3339 text (a T where the column
 // has a space) against the stored text, PostgreSQL would shift a zoned bind by the session's offset against the
 // zone-less column, and SQL Server's driver may send a datetimeoffset. The text, in UTC and cast to the column's type,
@@ -33,12 +33,12 @@ var maxSQLTime = time.Date(9999, 12, 31, 23, 59, 59, 999000000, time.UTC)
 // bound, and admit them to an inclusive lower one. On SQLite the text must also be spelled as NOW_UTC() writes it, to
 // the millisecond: there the comparison is of text, and a longer spelling of the same instant sorts after the stored
 // one.
-func sqlTime(driverName string, t time.Time) (expr string, arg string) {
+func SQLTime(driverName string, t time.Time) (expr string, arg string) {
 	// A bound past the year 9999 is written as its last instant: a five-digit year sorts before every stored time as
 	// text on SQLite, is NULL to MySQL's CAST and an error to SQL Server's, so a far-future sentinel would mean nothing,
 	// or fail, depending on the dialect.
-	if t.After(maxSQLTime) {
-		t = maxSQLTime
+	if t.After(MaxSQLTime) {
+		t = MaxSQLTime
 	}
 	if r := t.Truncate(time.Millisecond); !r.Equal(t) {
 		t = r.Add(time.Millisecond)

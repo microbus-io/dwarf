@@ -1099,7 +1099,7 @@ func (e *Engine) archivedFlowRow(ctx context.Context, db *sequel.DB, shardNum, f
 	return day, status, surgraphFlowID, nil
 }
 
-// deleteArchivedFlow deletes an archived flow's tree at once in its day's tables (deleteArchivedTrees): it is not
+// deleteArchivedFlow deletes an archived flow's tree at once in its day's tables (reaper.DeleteArchivedTree): it is not
 // marked, since the reaper reads only the live tables and an archived tree has nothing left to race. A subgraph
 // child's key is a 400, as on the live side.
 func (e *Engine) deleteArchivedFlow(ctx context.Context, db *sequel.DB, shardNum, flowID int, flowToken string, flowHour int) error {
@@ -1110,7 +1110,7 @@ func (e *Engine) deleteArchivedFlow(ctx context.Context, db *sequel.DB, shardNum
 	if surgraphFlowID != 0 {
 		return errors.New("cannot delete a subgraph child; use the root flow key", http.StatusBadRequest)
 	}
-	n, err := deleteArchivedTrees(ctx, db, day, []int{flowID})
+	n, err := e.reaper.DeleteArchivedTree(ctx, db, day, flowID)
 	if sequel.IsUndefinedTableError(err) || (err == nil && n == 0) {
 		return errors.New("flow not found", http.StatusNotFound) // dropped, or deleted by a racing Delete or Purge
 	}
