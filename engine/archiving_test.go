@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -268,8 +269,8 @@ func TestArchiving_ResidencySplitsTheDueRoots(t *testing.T) {
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	selectWith := func(kind reapKind, ordinal int) []int {
-		residency, residencyArgs, count, _ := residencyClause(2, ordinal, true, kind)
-		roots, _, err := e.scanDue(ctx, db, kind, residency, residencyArgs, reapFetch(count, e.reapBatch))
+		residency, residencyArgs, _, _ := residencyClause(2, ordinal, true, kind)
+		roots, _, err := e.scanDue(ctx, db, kind, residency, residencyArgs, e.reapBatch)
 		assert.NoError(err)
 		return rootIDs(roots)
 	}
@@ -348,27 +349,6 @@ func TestArchiving_TheScanMergesTheStatusesInCloseOrder(t *testing.T) {
 	assert.Equal([]int{c, a}, cut, "the trim keeps the traversal order")
 }
 
-// TestArchiving_ABatchTakesItsOwnClassFirst pins the fill order that keeps two reapers apart once a backlog is older
-// than the steal grace and the scan admits both classes: the own class first, a peer's roots only for the room left,
-// and a fetch large enough that the own class is rarely short.
-func TestArchiving_ABatchTakesItsOwnClassFirst(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	roots := func(ids ...int) []dueRoot {
-		var rs []dueRoot
-		for _, id := range ids {
-			rs = append(rs, dueRoot{flowID: id})
-		}
-		return rs
-	}
-	assert.Equal([]int{2, 4, 6, 1}, rootIDs(ownFirst(roots(1, 2, 3, 4, 5, 6), 2, 0, 4)))
-	assert.Equal([]int{1, 3, 5, 2}, rootIDs(ownFirst(roots(1, 2, 3, 4, 5, 6), 2, 1, 4)))
-	assert.Equal([]int{5, 3, 1, 6}, rootIDs(ownFirst(roots(6, 5, 4, 3, 2, 1), 2, 1, 4)), "each in the order given")
-	assert.Equal([]int{1, 2, 3}, rootIDs(ownFirst(roots(1, 2, 3), 0, 0, 4)), "no pair: every root is its own")
-	assert.Equal(512, reapFetch(0, 512))
-	assert.Equal(4*512, reapFetch(2, 512), "twice the classes' share")
-}
-
 // TestArchiving_APassDrainsInSeveralBatches pins the loop of one pass: with batches far smaller than the due set, and
 // a row budget that cuts them further, one pass still moves every closed tree, consuming one scan's candidates
 // across batches and scanning again when they run out.
@@ -437,8 +417,7 @@ func TestArchiving_DeleteOfATreeArchivedMeanwhileDeletesItThere(t *testing.T) {
 }
 
 // TestArchiving_ABatchThatMeetsContentionWaitsForTheNextPass pins that lock contention past Transact's retries is an
-// archive failure like any other: within the grace the batch stays live, neither archived nor deleted, and the next
-// pass archives it. (TestArchiving_ALastingFaultDeletesAndLogsOnce pins contention that outlasts the grace.)
+// archive failure like any other: the tree stays whole, and repair archives it once contention clears.
 func TestArchiving_ABatchThatMeetsContentionWaitsForTheNextPass(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -492,7 +471,7 @@ func closedRoots(t *testing.T, e *Engine, n int) []int {
 // TestArchiving_NoClosedTreeMovesWhileTomorrowIsNotWhole pins that while tomorrow's tables are missing - so today, whose
 // own tables are there, must not be written, or a locate would leave out a day that holds the flow - the closed trees
 // wait in the live tables, neither archived nor deleted, while the stamped ones are still deleted: they need no
-// archive. Once that has lasted the failure grace, the closed trees are deleted unarchived.
+// archive. Repeated failures never authorize deletion of the retained trees.
 func TestArchiving_NoClosedTreeMovesWhileTomorrowIsNotWhole(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -530,11 +509,10 @@ func TestArchiving_NoClosedTreeMovesWhileTomorrowIsNotWhole(t *testing.T) {
 	flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", stamped)
 	assert.Equal(0, flows, "the stamped tree is deleted")
 
-	e.archiveFailureGrace = 0
 	e.reapDueFlows(ctx)
 	for _, id := range roots {
 		flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", id)
-		assert.Equal(0, flows, "tree %d is deleted once the grace has passed", id)
+		assert.Equal(2, flows, "tree %d remains live while the archive is unavailable", id)
 	}
 }
 
@@ -561,84 +539,67 @@ func TestArchiving_AFailedDeletionScanDoesNotHoldBackArchiving(t *testing.T) {
 	}
 }
 
-// TestArchiving_ABatchThatCannotBeArchivedIsDeletedAfterTheGrace pins the reaper's fallback: a batch whose move fails -
-// here a primary-key collision in the archive, as reissued ids would give - waits in the live tables on the first
-// failure, and is deleted without archiving once archiving has been failing for the grace, so a lasting archive fault
-// cannot fill the live tables. The flows' work is recorded already; what is lost is their archive.
-func TestArchiving_ABatchThatCannotBeArchivedIsDeletedAfterTheGrace(t *testing.T) {
+// A poison tree stays whole while both its batch-mates and later roots make progress.
+func TestArchiving_APoisonTreeDoesNotLoseItsBatchMates(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
-	e.archiveFailureGrace = 0
-	roots := closedRoots(t, e, 6)
-	today, err := e.archives.Load().byShard[1].Today(ctx)
+	e.reapBatch = 4
+	roots := closedRoots(t, e, 9)
+	a := e.archives.Load().byShard[1]
+	today, err := a.Today(ctx)
 	assert.NoError(err)
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
-	_, err = db.ExecContext(ctx, "INSERT INTO "+migrations.FlowsTable(today)+" SELECT * FROM dwarf_flows WHERE flow_id IN ("+
-		intCSV(roots[:3])+")")
+	_, err = db.ExecContext(ctx, "INSERT INTO "+migrations.FlowsTable(today)+" SELECT * FROM dwarf_flows WHERE flow_id=?", roots[1])
 	assert.NoError(err)
-
-	e.reapDueFlows(ctx)
-	for _, id := range roots {
-		flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", id)
-		assert.Equal(2, flows, "tree %d waits on the first failure", id)
+	for range 3 {
+		e.reapDueFlows(ctx)
 	}
-	e.reapDueFlows(ctx)
-	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
-		t.Skip("midnight passed during the pass")
+	if now, _ := a.Today(ctx); now != today {
+		t.Skip("midnight passed")
 	}
 	for i, id := range roots {
 		flows, steps := treeCount(t, e, "dwarf_flows", "dwarf_steps", id)
-		assert.Equal(0, flows+steps, "tree %d left the live tables", id)
-		if i >= 3 {
-			archFlows, _ := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), id)
-			assert.Equal(0, archFlows, "tree %d went with its batch, unarchived", id)
+		if i == 1 {
+			assert.Equal(2, flows)
+			assert.True(steps > 0)
+			continue
 		}
+		assert.Equal(0, flows+steps, "healthy tree leaves live tables")
+		archived, _ := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), id)
+		assert.Equal(2, archived, "healthy tree is retained")
 	}
+	// Nothing new arrives: repairing the collision must still let the held root move.
+	_, err = db.ExecContext(ctx, "DELETE FROM "+migrations.FlowsTable(today)+" WHERE flow_id=?", roots[1])
+	assert.NoError(err)
+	e.reapDueFlows(ctx)
+	flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", roots[1])
+	assert.Zero(flows)
 }
 
-// TestArchiving_AFailureWaitsForTheGraceAndASuccessClearsIt pins the failure grace: a move failing on every pass deletes
-// nothing while the grace lasts, a pass that archives ends the failure, and a failure after that starts a grace of
-// its own rather than deleting at once.
-func TestArchiving_AFailureWaitsForTheGraceAndASuccessClearsIt(t *testing.T) {
+func TestArchiving_AFatalArchiveFaultNeverAuthorizesDeletion(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
-	e.archiveFailureGrace = time.Hour
 	roots := closedRoots(t, e, 3)
-	today, err := e.archives.Load().byShard[1].Today(ctx)
-	assert.NoError(err)
-
-	e.seams.InjectN(engineseams.FaultReapArchiveErr, 1000)
-	e.reapDueFlows(ctx)
-	e.reapDueFlows(ctx)
+	e.seams.InjectN(engineseams.FaultReapArchiveErr, 10000)
+	for range 3 {
+		e.reapDueFlows(t.Context())
+	}
+	for _, id := range roots {
+		flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", id)
+		assert.Equal(2, flows)
+	}
 	e.seams.Withdraw(engineseams.FaultReapArchiveErr)
+	e.reapDueFlows(t.Context())
 	for _, id := range roots {
 		flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", id)
-		assert.Equal(2, flows, "tree %d waits within the grace", id)
+		assert.Zero(flows)
 	}
-
-	e.reapDueFlows(ctx)
-	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
-		t.Skip("midnight passed during the pass")
-	}
-	for _, id := range roots {
-		archFlows, _ := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), id)
-		assert.Equal(2, archFlows, "tree %d archived once the move works", id)
-	}
-
-	// The grace is over, but the success cleared the failure: the next failure waits again.
-	e.archiveFailureGrace = 0
-	more := closedRoots(t, e, 2)
-	e.seams.InjectN(engineseams.FaultReapArchiveErr, 1)
-	e.reapDueFlows(ctx)
-	for _, id := range more {
-		flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", id)
-		assert.Equal(2, flows, "tree %d waits: a new failure is a first failure", id)
-	}
+	e.reapDueFlows(t.Context())
+	assert.Zero(e.archiveFailures.failingFor(1, time.Now()))
 }
 
 // logCounter is a slog.Handler that counts the records carrying each message.
@@ -670,16 +631,12 @@ func (l *logCounter) count(prefix string) int {
 	return n
 }
 
-// TestArchiving_ALastingFaultDeletesAndLogsOnce pins a fault that outlasts the grace, as a plain error and as lock
-// contention: the first failure waits, every failure after the grace deletes, a pass that deleted does not count as
-// one that archived (so the deletions go on rather than starting a new grace), and the failure and the start of the
-// deletions are each logged once, not every pass.
-func TestArchiving_ALastingFaultDeletesAndLogsOnce(t *testing.T) {
+// Both ordinary errors and contention preserve records through repeated passes.
+func TestArchiving_ALastingFaultPreservesAndLogs(t *testing.T) {
 	t.Parallel()
 	for _, fault := range []string{engineseams.FaultReapArchiveErr, engineseams.FaultReapContention} {
 		t.Run(fault, func(t *testing.T) {
 			assert := testarossa.For(t)
-			ctx := t.Context()
 			logs := &logCounter{seen: map[string]int{}}
 			e := NewEngineUnderTest(t.Name())
 			t.Cleanup(func() { e.Shutdown(context.Background()) })
@@ -687,29 +644,37 @@ func TestArchiving_ALastingFaultDeletesAndLogsOnce(t *testing.T) {
 			assert.NoError(e.SetLogger(slog.New(logs)))
 			e.archiveGrace = 0
 			e.reapInterval = time.Hour
-			e.archiveFailureGrace = 0
-			assert.Must(assert.NoError(e.Startup(ctx)))
+			assert.Must(assert.NoError(e.Startup(t.Context())))
+			roots := closedRoots(t, e, 2)
 			e.seams.InjectN(fault, 100000)
-
-			first := closedRoots(t, e, 2)
-			e.reapDueFlows(ctx)
-			for _, id := range first {
-				flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", id)
-				assert.Equal(2, flows, "tree %d waits on the first failure", id)
-			}
-			e.reapDueFlows(ctx)
-			for _, id := range first {
-				flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", id)
-				assert.Equal(0, flows, "tree %d deleted after the grace", id)
-			}
 			for range 3 {
-				more := closedRoots(t, e, 1)
-				e.reapDueFlows(ctx)
-				flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", more[0])
-				assert.Equal(0, flows, "tree %d deleted: the deletions go on", more[0])
+				e.reapDueFlows(t.Context())
 			}
-			assert.Equal(1, logs.count("Reaper: archiving closed trees failed"), "the failure is logged once")
-			assert.Equal(1, logs.count("Reaper: archiving has failed for the grace"), "the deletions' start is logged once")
+			for _, id := range roots {
+				flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", id)
+				assert.Equal(2, flows)
+			}
+			assert.Equal(1, logs.count("Reaper: archiving closed trees failed"))
+			assert.True(logs.count("Reaper: retained tree attempt failed") > 0)
+			assert.Zero(logs.count("Reaper: removing due trees"), "a failed move is logged once per episode, not per attempt")
+		})
+	}
+}
+
+// TestArchiving_AScanFailureAtRetentionZeroIsNoArchiveFailure pins that a failed scan of the closed kind starts the
+// archive failure timer only where there is an archive: at a retention of 0 the kind deletes, and nothing would ever
+// clear a timer started there.
+func TestArchiving_AScanFailureAtRetentionZeroIsNoArchiveFailure(t *testing.T) {
+	t.Parallel()
+	for _, retention := range []int{0, 30} {
+		t.Run(strconv.Itoa(retention), func(t *testing.T) {
+			assert := testarossa.For(t)
+			e := archiveEngine(t, treeMux(), retention)
+			e.seams.InjectN(engineseams.FaultReapSelectErr, 100000)
+			e.reapDueFlows(t.Context())
+			e.seams.Withdraw(engineseams.FaultReapSelectErr)
+			failing := e.archiveFailures.failingFor(1, time.Now().Add(time.Second)) > 0
+			assert.Equal(retention > 0, failing)
 		})
 	}
 }
@@ -722,10 +687,10 @@ func TestArchiving_AStopIsNotAFailureAndARestartForgetsThem(t *testing.T) {
 	e := archiveEngine(t, treeMux(), 30)
 	stopped, cancel := context.WithCancel(t.Context())
 	cancel()
-	assert.False(e.archiveFailed(stopped, 1, "archiving closed trees", errors.New("stopped")))
+	e.archiveFailed(stopped, 1, "archiving closed trees", errors.New("stopped"))
 	assert.Len(e.archiveFailures.byID, 0, "a stop records no failure")
 
-	assert.False(e.archiveFailed(t.Context(), 1, "archiving closed trees", errors.New("failed")))
+	e.archiveFailed(t.Context(), 1, "archiving closed trees", errors.New("failed"))
 	assert.Len(e.archiveFailures.byID, 1)
 	assert.NoError(e.Shutdown(t.Context()))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
@@ -892,10 +857,8 @@ func TestArchiving_NoTreeMovesInTheDaysLastMoments(t *testing.T) {
 	assert.Zero(flows, "not into the day that ended")
 }
 
-// TestArchiving_AHeldRootIsSkippedNotWaitedFor pins that a batch leaves out a root another transaction holds - a long
-// move by another replica's reaper, here a plain lock - and moves the rest at once. Waiting made the holder fail the
-// whole batch on MySQL, whose lock wait gives up, and a batch that keeps failing is deleted unarchived after the
-// failure grace. SQLite has one writer, and SQL Server waits without a timeout, so both keep the wait (lockRootsIn).
+// A held root does not hold back the rest of a batch on dialects supporting SKIP LOCKED.
+// SQL Server and SQLite wait under the attempt deadline and are covered by the blocked-attempt tests.
 func TestArchiving_AHeldRootIsSkippedNotWaitedFor(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)

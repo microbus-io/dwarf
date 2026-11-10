@@ -530,11 +530,12 @@ func TestFaultSite_ReapSelectErr(t *testing.T) {
 	time.Sleep(5 * time.Millisecond) // let the 1ms window elapse
 
 	// The due-root SELECT errors: the pass bails without deleting, so the flow is still present.
-	e.seams.Inject(engineseams.FaultReapSelectErr)
+	e.seams.InjectN(engineseams.FaultReapSelectErr, 1000)
 	e.reapDueFlows(ctx)
 	assert.Equal(1, shardFlowCount(t, e, shard)) // not deleted - the scan bailed
 
-	// The next pass (fault consumed) reaps cleanly.
+	// The next pass after the fault clears reaps cleanly.
+	e.seams.Withdraw(engineseams.FaultReapSelectErr)
 	e.reapDueFlows(ctx)
 	assert.Equal(0, shardFlowCount(t, e, shard))
 }

@@ -38,6 +38,11 @@ const defaultRetentionDays = 30
 // dropped as a whole once it ended at least days days ago. The default is 30. 0 keeps no archive: a closed flow is
 // deleted rather than archived. To keep the archive indefinitely, pass a large number of days.
 //
+// An archive failure leaves a closed flow live until it can be archived or its retention expires. For an unarchived
+// flow, retention counts from the day it became eligible for archival, normally a minute after completion. A late
+// successful archival instead receives retention from its actual archive day. Deletion can be delayed by database
+// failures or a tree too large to remove within one maintenance attempt.
+//
 // Use the same value on every replica sharing a database: any of them may drop an expired day. Construction-time
 // only.
 func (e *Engine) SetRetention(days int) error {
@@ -53,7 +58,7 @@ func (e *Engine) SetRetention(days int) error {
 
 // PurgeBefore drops the archive's records of every UTC day before the one containing before, on every shard, whatever
 // the retention; a before within today keeps only today's. It returns a 400 when before falls after today on the
-// database's clock, since today's records are still being written.
+// database's clock, since today's records are still being written. Closed flows still awaiting archival are unaffected.
 func (e *Engine) PurgeBefore(ctx context.Context, before time.Time) error {
 	if err := e.ensureStarted(); err != nil {
 		return errors.Trace(err)

@@ -131,7 +131,8 @@ const (
 	FaultDropDoorbell        = "dropDoorbell"        // the local work doorbell is dropped (the step waits for a refiller scan)
 	FaultSkipRefSeed         = "skipRefSeed"         // a transition does not seed the ref cache, so its successors resolve their refs from the database
 	FaultRecoveryResetErr    = "recoveryResetErr"    // the post-execution recovery reset write errors
-	FaultReapMidTree         = "reapMidTree"         // the reaper errors after deleting steps, before flows
+	FaultReapMidTree         = "reapMidTree"         // after deleting steps, before flows; optionally targeted at root flow_id
+	FaultReapSizeErr         = "reapSizeErr"         // sizing a selected root fails; targeted at root flow_id
 	FaultReapSelectErr       = "reapSelectErr"       // the reaper's due-root SELECT errors
 	FaultReapContention      = "reapContention"      // the reaper's archive move fails on lock contention (a deadlock victim)
 	FaultReapArchiveErr      = "reapArchiveErr"      // the reaper's archive move fails with an error that is not lock contention

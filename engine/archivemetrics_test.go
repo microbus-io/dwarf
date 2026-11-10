@@ -103,7 +103,7 @@ func backdate(t *testing.T, e *Engine, rootID int, ago time.Duration) {
 
 // TestArchiveMetrics_TheReaperCountsWhatItMoves pins the reaper's instruments: the flows it archives, counted per flow
 // of each tree; the lag of the oldest due root past the grace, read from the pass's first scan and 0 once none is
-// due; the pass's time; and, while archiving fails, the failing time and the trees deleted unarchived after the grace.
+// due; the pass's time; and, while archiving fails, the failing time without premature deletion.
 func TestArchiveMetrics_TheReaperCountsWhatItMoves(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -136,8 +136,7 @@ func TestArchiveMetrics_TheReaperCountsWhatItMoves(t *testing.T) {
 	lag, _ = gaugeAt(rm, "dwarf_archive_lag_seconds", shard1)
 	assert.Zero(lag, "nothing due")
 
-	// Archiving fails: the first pass waits, and the next, past a grace of 0, deletes the tree unarchived.
-	e.archiveFailureGrace = 0
+	// Archiving fails across passes: the tree stays live and no deletion is counted.
 	closedRoots(t, e, 1)
 	e.seams.InjectN(engineseams.FaultReapArchiveErr, 1000)
 	defer e.seams.Withdraw(engineseams.FaultReapArchiveErr)
@@ -145,7 +144,7 @@ func TestArchiveMetrics_TheReaperCountsWhatItMoves(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	e.reapDueFlows(ctx)
 	rm = collect(t, reader)
-	assert.Equal(int64(2), sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reapReasonArchiveFailed}))
+	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reapReasonArchiveFailed}))
 	assert.Equal(int64(4), sumAt(rm, "dwarf_flows_archived", shard1), "nothing more archived")
 	failing, _ = gaugeAt(rm, "dwarf_archive_failing_seconds", shard1)
 	assert.True(failing >= 0.02, "failing since the first pass, got %v", failing)
@@ -266,14 +265,13 @@ func TestArchiveMetrics_TheDays(t *testing.T) {
 
 // TestArchiveMetrics_AReplicaThatStopsReapingForgets pins that a replica forgets a shard's reaper readings once it
 // stops dispatching there: when it dispatches again, it reports no old failure or lag, and its next failure starts a
-// grace of its own rather than deleting unarchived at once.
+// fresh failure interval.
 func TestArchiveMetrics_AReplicaThatStopsReapingForgets(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e, reader := meteredArchiveEngine(t, treeMux(), 30)
 	shard1 := map[string]string{"shard": "1"}
-	e.archiveFailureGrace = time.Hour
 	closedRoots(t, e, 1)
 	e.seams.InjectN(engineseams.FaultReapArchiveErr, 1000)
 	defer e.seams.Withdraw(engineseams.FaultReapArchiveErr)
@@ -292,15 +290,13 @@ func TestArchiveMetrics_AReplicaThatStopsReapingForgets(t *testing.T) {
 	_, ok := gaugeAt(rm, "dwarf_archive_lag_seconds", shard1)
 	assert.False(ok, "no reading until a pass scans again")
 
-	// The grace passed while it was away, but the next failure is a first failure: the tree waits.
-	e.archiveFailureGrace = 10 * time.Millisecond
+	// Returning to the shard does not authorize deletion.
 	e.reapDueFlows(ctx)
 	rm = collect(t, reader)
 	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reapReasonArchiveFailed}))
 }
 
-// TestArchiveMetrics_AnUnreadableDayIsAnArchiveFailure pins that the trees a pass deletes because it could not read
-// today's archive day - tomorrow's tables missing - are counted as archive_failed, not as no_retention.
+// An unavailable archive holds records without incrementing either deletion counter.
 func TestArchiveMetrics_AnUnreadableDayIsAnArchiveFailure(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -318,13 +314,62 @@ func TestArchiveMetrics_AnUnreadableDayIsAnArchiveFailure(t *testing.T) {
 	}
 	assert.NoError(a.Refresh(ctx))
 
-	e.archiveFailureGrace = 0
 	e.reapDueFlows(ctx) // the first failure waits
 	e.reapDueFlows(ctx)
 	if now, _ := a.Today(ctx); now != today {
 		t.Skip("midnight passed during the passes")
 	}
 	rm := collect(t, reader)
-	assert.Equal(int64(2), sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reapReasonArchiveFailed}))
+	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reapReasonArchiveFailed}))
 	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reapReasonNoRetention}))
+}
+
+func TestArchiveMetrics_HeldWorkIsVisibleBeforeASweepCompletes(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	e, reader := meteredArchiveEngine(t, treeMux(), 30)
+	roots := closedRoots(t, e, 3)
+	for _, id := range roots {
+		backdate(t, e, id, 2*time.Minute)
+	}
+	e.reapSlice = 0
+	e.reapBatch = 1
+	e.seams.InjectN(engineseams.FaultReapArchiveErr, 10000)
+	e.reapDueFlows(t.Context())
+	rm := collect(t, reader)
+	attrs := map[string]string{"shard": "1", "kind": "closed"}
+	n, ok := gaugeAt(rm, "dwarf_archive_held_roots", attrs)
+	assert.True(ok)
+	assert.Equal(float64(1), n)
+	age, ok := gaugeAt(rm, "dwarf_archive_oldest_held_seconds", attrs)
+	assert.True(ok)
+	assert.True(age >= 119)
+	w := e.reapWalks.get(reapWalkKey{1, "closed", true})
+	assert.False(w.started.IsZero(), "sweep is incomplete")
+	assert.True(sumAt(rm, "dwarf_archive_move_failures", map[string]string{"shard": "1"}) >= 2)
+	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reapReasonArchiveFailed}))
+	e.seams.Withdraw(engineseams.FaultReapArchiveErr)
+	for range 4 {
+		e.reapDueFlows(t.Context())
+	}
+	rm = collect(t, reader)
+	n, _ = gaugeAt(rm, "dwarf_archive_held_roots", attrs)
+	assert.Zero(n)
+	e.forgetReaping(1)
+	assert.Equal(reapWalk{}, e.reapWalks.get(reapWalkKey{1, "closed", true}))
+}
+
+func TestArchiveMetrics_UnarchivedRetentionDeletionCountsOnlyOnce(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	e, reader := meteredArchiveEngine(t, treeMux(), 1)
+	root := closedRoots(t, e, 1)[0]
+	backdate(t, e, root, 3*24*time.Hour)
+	e.seams.InjectN(engineseams.FaultReapArchiveErr, 10000)
+	e.reapDueFlows(t.Context())
+	e.reapDueFlows(t.Context())
+	rm := collect(t, reader)
+	assert.Equal(int64(2), sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reapReasonArchiveFailed}))
+	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reapReasonDeleted}))
+	assert.Zero(sumAt(rm, "dwarf_flows_archived", map[string]string{"shard": "1"}))
 }

@@ -332,8 +332,9 @@ type Engine struct {
 	archives atomic.Pointer[archiveSet]
 	// archiveFailures is, per shard, since when the reaper's archiving has been failing (reaper.go).
 	archiveFailures archiveFailures
-	// archiveLag is, per shard, how far past the grace the oldest due closed root was at the reaper's last scan.
+	// archiveLag is the wait past grace at each shard's fast cursor.
 	archiveLag     archiveLag
+	reapWalks      reapWalks
 	testArchiveDay time.Duration
 	noReapQuiet    bool
 	archiveCancel  context.CancelFunc
@@ -373,9 +374,11 @@ type Engine struct {
 	orphanFlowThreshold time.Duration // quiet time before a stranded flow with no step to replay is reported orphaned (5m)
 	deletionGrace       time.Duration // DeleteOnCompletion linger window before reap (1m)
 	archiveGrace        time.Duration // how long a closed root stays in the live tables before it is archived (1m)
-	archiveFailureGrace time.Duration // how long archiving may fail before closed trees are deleted unarchived (1m)
 	reapBatch           int           // due roots one reaper batch considers (512)
 	reapBatchRows       int           // about how many rows one reaper batch moves, at least one tree (4096)
+	reapAttempt         time.Duration // one database attempt (30s)
+	reapSlice           time.Duration // one walker before yielding (5s)
+	reapBudget          time.Duration // healthy backlog work per pass (30s)
 	// purgeChunk is how many roots one Purge statement names, a field so a test can drive several chunks. A literal
 	// IN list in the tens of thousands of terms can fail to plan outright on SQL Server (errors 8623 / 8632); 4,096
 	// keeps an order of magnitude under it.
@@ -450,7 +453,9 @@ func NewEngine() *Engine {
 	e.orphanFlowThreshold = 5 * time.Minute
 	e.deletionGrace = 1 * time.Minute
 	e.archiveGrace = 1 * time.Minute
-	e.archiveFailureGrace = 1 * time.Minute
+	e.reapAttempt = 30 * time.Second
+	e.reapSlice = 5 * time.Second
+	e.reapBudget = 30 * time.Second
 	e.reapBatch = 512
 	e.reapBatchRows = 4096
 	e.purgeChunk = 4096
@@ -1187,6 +1192,7 @@ func (e *Engine) initRuntime() error {
 		e.recoveryLoop(recoveryCtx)
 	})
 	e.expirePositions.reset()
+	e.reapWalks.reset()
 	e.reaperWorker.Go(func() {
 		e.reaperLoop(reaperCtx)
 	})
@@ -1629,9 +1635,8 @@ func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 }
 
 // Purge removes the closed flows ListClosed would list for a query, and their subgraph subtrees, oldest archived
-// first: at most Query.Limit roots in a call, each deleted at once. A flow closed in the last minute is not archived
-// yet, so it is not in ListClosed and Purge leaves it - ListRecentlyClosed lists it; a later call takes it, and Delete
-// removes one by its key. Open
+// first: at most Query.Limit roots in a call, each deleted at once. A flow awaiting archival is not in ListClosed
+// and Purge leaves it - ListRecentlyClosed lists it, and Delete schedules its removal by key. Open
 // flows are never touched, and a Query.Status that is not closed is a 400, as is IncludeSubgraphs (a subgraph child is
 // removed with its root).
 //
@@ -1639,8 +1644,8 @@ func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 // was archived, and may reach at most 31 days of the archive, or the call is a 400: purge a longer range a month at a
 // time. Returns how many roots it removed, and whether it is done: call it again until done is true. done covers only
 // what is archived: a flow closed shortly before the call, still on its way to the archive, is not purged until a call
-// after it is archived. For an erasure that must also take those, wait a minute after the last flow closed and call
-// again, or Delete them by key.
+// after it is archived. For an erasure that must also take those, confirm they have reached the archive and call
+// again, or Delete them by key. Archival failures can keep closed flows live beyond the usual minute.
 //
 // Deleting rows writes in proportion to them and leaves dead rows for the database to vacuum; Purge is for removing
 // specific records, and bulk removal is the retention's (SetRetention) and PurgeBefore's, which drop whole days.

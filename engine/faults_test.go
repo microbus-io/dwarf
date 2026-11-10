@@ -509,10 +509,11 @@ func TestFault_ReapMidTree(t *testing.T) {
 	time.Sleep(5 * time.Millisecond) // inherent wall-clock: let the 1ms deletion window elapse
 
 	// Reap aborts mid-tree (after steps, before flows) and rolls back: the tree is left intact, not a
-	// half-deleted flow. The next reap pass (fault consumed) removes it cleanly.
-	e.seams.Inject(engineseams.FaultReapMidTree)
+	// half-deleted flow. The next reap pass after the fault clears removes it cleanly.
+	e.seams.InjectN(engineseams.FaultReapMidTree, 1000)
 	e.reapDueFlows(ctx)
 	assert.Equal(1, shardFlowCount(t, e, shard)) // rolled back - still present
+	e.seams.Withdraw(engineseams.FaultReapMidTree)
 
 	e.reapDueFlows(ctx)
 	assert.Equal(0, shardFlowCount(t, e, shard)) // clean removal
