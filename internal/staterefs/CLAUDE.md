@@ -339,7 +339,7 @@ cohort**, against **1.0 and 0.94** in two runs with it (and ~1.0 closed-loop eit
 runs the first branch ahead of its siblings and warms the cache). It is a cold-cache stampede, not eviction;
 a bigger cache would not have fixed it.
 
-The shape is load-bearing in five ways:
+The shape is load-bearing in six ways:
 - **Only the dispatch resolve waits** (`ResolveShared`, `engine/staterefs.go` `resolveDispatchRefs`). Every
   other resolve - the fan-in, the terminal merge, `Fork` - may run inside a transaction holding a
   connection and the flow row's lock, and must not wait on another goroutine: parked fan-ins could drain the
@@ -353,9 +353,19 @@ The shape is load-bearing in five ways:
   `flight` before closing it. Handing it over through the cache instead fails whenever the cache does not keep
   the field - larger than the whole cache, or evicted before a waiter looks, both routine under a byte
   budget - and every waiter then reads the row itself: N reads of the array per cohort.
+- **`claim` looks in the cache again, under the lock, before claiming a field no flight holds.** `fetch`'s
+  cache check runs unlocked, so a read can store the field and release its flight between a fetch's miss and
+  its claim; claiming then reads the row again. Because a read stores before it releases, a field with no
+  flight is in the cache unless the cache could not keep it. The window is narrow but routine: a cohort
+  claimed together has every branch's cache check racing the first read's completion. Pinned by
+  `TestLinker_LateClaimTakesTheCachedField`.
 - **`release` runs (deferred) whether the read succeeded or not**, and a waiter left without an entry reads the
   row itself, unclaimed. A failed read errors only its own fetch. Pinned, with the read-once property (also
-  for a field too large to cache) and `Resolve` never waiting, by `TestLinker_ConcurrentMissesReadOnce`.
+  for a field too large to cache) and `Resolve` never waiting, by `TestLinker_ConcurrentMissesReadOnce`. That
+  test releases the held read only once every resolve has called the Loader or reached the `waiting` hook,
+  which a resolve calls once it is committed to another's flight. Do not synchronize it with a sleep: a
+  resolve scheduled after the read completes finds no flight and reads again - legitimately, for the field too
+  large to cache - so the count would depend on the machine's load.
 
 ## The resolve cache is sized in bytes
 

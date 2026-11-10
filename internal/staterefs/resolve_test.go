@@ -259,20 +259,25 @@ func TestLinker_ConcurrentMissesReadOnce(t *testing.T) {
 
 	var mu sync.Mutex
 	reads, failFirst := 0, false
-	release := make(chan struct{})
-	slow := func(ctx context.Context, _ []Read) (map[int]Anchor, error) {
-		mu.Lock()
-		reads++
-		fail := failFirst && reads == 1
-		mu.Unlock()
-		<-release // hold the read open until every fetch has missed
-		if fail {
-			return nil, errors.New("read failed")
-		}
-		return map[int]Anchor{7: {Changes: cols(map[string]any{"pages": []any{"a", "b", "c", "d"}})}}, nil
-	}
 
+	// resolveAll starts n resolves of one anchor and holds every read open until each resolve has arrived:
+	// called the Loader, or committed to taking the field from another resolve's read.
 	resolveAll := func(linker *Linker, n int, shared bool) []error {
+		release := make(chan struct{})
+		arrived := make(chan struct{}, 4*n)
+		linker.waiting = func() { arrived <- struct{}{} }
+		slow := func(ctx context.Context, _ []Read) (map[int]Anchor, error) {
+			mu.Lock()
+			reads++
+			fail := failFirst && reads == 1
+			mu.Unlock()
+			arrived <- struct{}{}
+			<-release
+			if fail {
+				return nil, errors.New("read failed")
+			}
+			return map[int]Anchor{7: {Changes: cols(map[string]any{"pages": []any{"a", "b", "c", "d"}})}}, nil
+		}
 		errs := make([]error, n)
 		var wg sync.WaitGroup
 		for i := range n {
@@ -289,8 +294,13 @@ func TestLinker_ConcurrentMissesReadOnce(t *testing.T) {
 				}
 			})
 		}
-		// Let every fetch miss and start reading or waiting before the held-open read completes.
-		time.Sleep(50 * time.Millisecond)
+		for range n {
+			select {
+			case <-arrived:
+			case <-time.After(10 * time.Second):
+				t.Fatal("a resolve neither read nor waited on a read")
+			}
+		}
 		close(release)
 		wg.Wait()
 		return errs
@@ -302,10 +312,7 @@ func TestLinker_ConcurrentMissesReadOnce(t *testing.T) {
 	assert.Equal(1, reads, "eight concurrent misses on one anchor read it once")
 
 	// The read reaches its waiters even when the cache cannot keep the field: they take it from the read itself.
-	mu.Lock()
 	reads = 0
-	mu.Unlock()
-	release = make(chan struct{})
 	tiny := New("sqlite", 1, NewCache(1))
 	for _, err := range resolveAll(tiny, 8, true) {
 		assert.NoError(err)
@@ -314,20 +321,14 @@ func TestLinker_ConcurrentMissesReadOnce(t *testing.T) {
 	assert.Equal(int64(0), tiny.cacheBytes())
 
 	// Resolve reads for itself: a caller inside a transaction must not wait on another goroutine.
-	mu.Lock()
 	reads = 0
-	mu.Unlock()
-	release = make(chan struct{})
 	for _, err := range resolveAll(New("sqlite", 1, NewCache(testCacheBytes)), 8, false) {
 		assert.NoError(err)
 	}
 	assert.Equal(8, reads, "Resolve never waits on a concurrent read")
 
 	// A failed read errors its own fetch only; the waiters read the row themselves.
-	mu.Lock()
 	reads, failFirst = 0, true
-	mu.Unlock()
-	release = make(chan struct{})
 	failed := 0
 	for _, err := range resolveAll(New("sqlite", 1, NewCache(testCacheBytes)), 8, true) {
 		if err != nil {
@@ -335,6 +336,31 @@ func TestLinker_ConcurrentMissesReadOnce(t *testing.T) {
 		}
 	}
 	assert.Equal(1, failed, "only the fetch whose read failed sees the error")
+}
+
+// TestLinker_LateClaimTakesTheCachedField pins the cache look under the claim lock. A fetch checks the cache
+// without the lock, so a read can store the field and release its flight between that check and the claim;
+// claiming then would read the row a second time. The test plays the late fetch's two halves around a
+// completed read.
+func TestLinker_LateClaimTakesTheCachedField(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	anchors := &fakeAnchors{rows: map[int]Anchor{7: {Changes: cols(map[string]any{"pages": []any{"a", "b"}})}}}
+	linker := New("sqlite", 1, NewCache(testCacheBytes))
+	k := linker.key(testFlow, 7, "pages", ColAny)
+	_, hit := linker.cache.Load(k)
+	assert.False(hit)
+
+	_, err := linker.ResolveShared(ctx, testFlow, newState(), Refs{"pages": {Anchor: 7}}, anchors.load)
+	assert.NoError(err)
+	assert.Len(anchors.calls, 1)
+
+	entries := map[cacheKey]*cachedField{}
+	assert.NoError(linker.read(ctx, []cacheKey{k}, entries, anchors.load, true))
+	assert.Len(anchors.calls, 1, "a fetch that claims after the read it missed has released takes the cached field")
+	assert.NotNil(entries[k])
 }
 
 // TestLinker_SeedServesTheMintedAnchor pins the write-side half of the cache: after Seed, a successor resolving

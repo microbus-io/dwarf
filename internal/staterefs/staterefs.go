@@ -485,6 +485,10 @@ type Linker struct {
 	// waits on it rather than reading the row again.
 	mu      sync.Mutex
 	loading map[cacheKey]*flight
+
+	// waiting, when set, is called by a ResolveShared that found a field another one is reading, once it is
+	// committed to taking the field from that read. Only a test sets it, to know every caller has arrived.
+	waiting func()
 }
 
 // flight is one field a ResolveShared is reading. The reader sets entry, when the read succeeded, before
@@ -1114,7 +1118,10 @@ func (l *Linker) read(ctx context.Context, missing []cacheKey, entries map[cache
 	// Read the claimed fields' anchors, which resolves every missing field on those rows - claimed or not - and
 	// only then wait. Reading before waiting is what keeps two fetches that each claimed a field the other
 	// needs from deadlocking.
-	mine, theirs := l.claim(missing)
+	mine, theirs := l.claim(missing, entries)
+	if len(theirs) > 0 && l.waiting != nil {
+		l.waiting()
+	}
 	if len(mine) > 0 {
 		loaded, err := func() (loaded map[cacheKey]*cachedField, err error) {
 			defer func() { l.release(mine, loaded) }()
@@ -1156,14 +1163,22 @@ func (l *Linker) read(ctx context.Context, missing []cacheKey, entries map[cache
 }
 
 // claim splits the fields a fetch is missing into those it will read and those another fetch is already
-// reading, returning the latter's flights.
-func (l *Linker) claim(missing []cacheKey) (mine []cacheKey, theirs map[cacheKey]*flight) {
+// reading, returning the latter's flights. A field a read cached since the fetch missed it goes into entries
+// instead.
+func (l *Linker) claim(missing []cacheKey, entries map[cacheKey]*cachedField) (mine []cacheKey, theirs map[cacheKey]*flight) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	theirs = map[cacheKey]*flight{}
 	for _, k := range missing {
 		if f, busy := l.loading[k]; busy {
 			theirs[k] = f
+			continue
+		}
+		// The fetch's cache check ran without the lock, so the read it missed may have stored and released
+		// since. A read stores before it releases, so with no flight left the cache has the field unless it
+		// could not keep it; claiming without this look reads the row a second time.
+		if f, ok := l.cache.Load(k); ok {
+			entries[k] = f
 			continue
 		}
 		l.loading[k] = &flight{done: make(chan struct{})}
