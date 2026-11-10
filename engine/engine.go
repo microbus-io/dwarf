@@ -1560,7 +1560,7 @@ func (e *Engine) Step(ctx context.Context, stepKey string) (step *workflow.FlowS
 // the window. The order across shards compares the times recorded by each shard's own database, so flows updated
 // within the clock skew between two shard servers may be listed out of order. A flow that closes leaves this list at
 // once for ListRecentlyClosed, and moves on to ListClosed when it is archived, about a minute later, longer while
-// archiving lags. A flow deleted without archiving - DeleteOnCompletion, a retention of 0 - is never in ListClosed.
+// archiving lags or fails. A flow deleted without archiving - DeleteOnCompletion, a retention of 0 - is never in ListClosed.
 func (e *Engine) ListOpen(ctx context.Context, query workflow.Query) (summaries []workflow.FlowSummary, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
@@ -1571,7 +1571,7 @@ func (e *Engine) ListOpen(ctx context.Context, query workflow.Query) (summaries 
 // ListClosed returns the closed flows - completed, failed, terminated or cancelled - matching query's filters within
 // its window on when each was archived (FlowSummary.ArchivedAt): at most Query.Limit of them, the most recently
 // archived first, ties broken by shard and then newest flow. A flow is archived, and so listed here, about a minute
-// after it closes; until then it is in ListRecentlyClosed. Query.Limit and
+// after it closes, longer while archiving lags or fails; until then it is in ListRecentlyClosed. Query.Limit and
 // both of the window's bounds are required, and a Query.Status that is not closed is a 400.
 //
 // A window is cut to what the archive can hold: nothing before the retention's first day (SetRetention), nothing
@@ -1608,8 +1608,8 @@ func (e *Engine) ListClosed(ctx context.Context, query workflow.Query) (summarie
 // them, the most recently closed first, ties broken by shard and then newest flow. Query.Limit is required; the
 // window's bounds are not. A Query.Status that is not closed is a 400.
 //
-// A flow is listed here from when it closes until it is archived, about a minute later, longer while archiving lags,
-// and then in ListClosed. To see every closed flow, call ListRecentlyClosed and then ListClosed, and drop duplicates by
+// A flow is listed here from when it closes until it is archived, about a minute later, longer while archiving lags or
+// fails, and then in ListClosed. To see every closed flow, call ListRecentlyClosed and then ListClosed, and drop duplicates by
 // FlowKey: a flow archived between the two calls is in both, while in the other order it would be in neither. A flow
 // marked for deletion is not listed. At a retention of 0 nothing is archived: a closed flow is listed here until it is
 // deleted, about a minute after it closes. Like ListOpen it has no pagination, and flows closed within the clock skew
