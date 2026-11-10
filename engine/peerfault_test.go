@@ -194,14 +194,18 @@ func TestPeerFault_BeatFailureEvictsFromTheDispatchers(t *testing.T) {
 	// The worker drops it from the WORK divisor once its dispatch evidence ages out, and stops partitioning:
 	// with one dispatcher left there is nothing to divide, so the survivor selects everything. That is the
 	// takeover - no rebalancing, just a divisor that shrank.
+	//
+	// Wait on the COUNT, not on ok: a worker whose readings run late (a loaded machine, two 50ms cadences)
+	// is blind for a moment, which reports ok=false with the count unchanged, and reads again a pass later.
 	deadline := time.Now().Add(30 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
-		if _, _, ok := worker.partitionOn(1); !ok {
+		if d, _, _ := worker.partitionOn(1); d == 1 {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	_, _, ok := worker.partitionOn(1)
+	dispatchers, _, ok := worker.partitionOn(1)
+	assert.Equal(1, dispatchers, "a peer that stopped proving it serves must drop out of the dispatchers")
 	assert.False(ok, "a peer that stopped proving it serves must not keep a residue class")
 
 	// And it is STILL counted for the connections it holds, because that window is far more generous - the
