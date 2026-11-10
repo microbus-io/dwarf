@@ -341,9 +341,8 @@ func TestExpiration_TerminateSubtreeReportsWhatItClosed(t *testing.T) {
 	assert.False(ended)
 }
 
-// TestExpiration_AFailingRootIsPassedOver pins that a root whose termination fails does not stop the pass - every pass
-// walks from the oldest, so it would stop expiration for good - and that the budget counts it as an attempt, so a run
-// of failing roots cannot outlast it.
+// TestExpiration_AFailingRootIsPassedOver pins that a root whose termination fails does not stop the pass, that the
+// next sweep retries it, and that the budget counts a failed attempt, so a run of failing roots cannot outlast it.
 func TestExpiration_AFailingRootIsPassedOver(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -351,8 +350,10 @@ func TestExpiration_AFailingRootIsPassedOver(t *testing.T) {
 	e, reader, _ := expiryEngine(t, time.Hour)
 	first := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
 	second := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
-	age(t, e, first, 2*time.Hour)
-	age(t, e, second, 2*time.Hour)
+	third := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
+	for _, fk := range []string{first, second, third} {
+		age(t, e, fk, 2*time.Hour)
+	}
 
 	// Past the budget at once: the failed attempt is the pass's one.
 	e.expireBudget = time.Nanosecond
@@ -361,21 +362,81 @@ func TestExpiration_AFailingRootIsPassedOver(t *testing.T) {
 	status, _ := statusOf(t, e, second)
 	assert.Equal(workflow.StatusInterrupted, status, "a failed attempt counts against the budget")
 
+	// The next pass goes on after the failed root and sweeps the rest; the failed root waits for the next sweep.
 	e.expireBudget = time.Minute
 	e.seams.InjectN(engineseams.FaultExpireTerminate, 1)
 	e.expireFlows(ctx)
 	status, _ = statusOf(t, e, first)
-	assert.Equal(workflow.StatusInterrupted, status, "its termination failed")
+	assert.Equal(workflow.StatusInterrupted, status, "its termination failed, and a pass goes on from where the last stopped")
 	status, _ = statusOf(t, e, second)
+	assert.Equal(workflow.StatusInterrupted, status, "its termination failed too")
+	status, _ = statusOf(t, e, third)
 	assert.Equal(workflow.StatusTerminated, status, "the next root is reached all the same")
 	assert.Equal(int64(1), sumAt(collect(t, reader), "dwarf_flows_expired", map[string]string{"shard": "1"}))
 	assert.Equal(int64(2), sumAt(collect(t, reader), "dwarf_flows_expire_failed", map[string]string{"shard": "1"}),
 		"one failed attempt per pass")
 
 	e.expireFlows(ctx)
-	status, _ = statusOf(t, e, first)
-	assert.Equal(workflow.StatusTerminated, status, "the next pass retries it")
+	for _, fk := range []string{first, second} {
+		status, _ = statusOf(t, e, fk)
+		assert.Equal(workflow.StatusTerminated, status, "the next sweep retries it")
+	}
+	assert.Equal(int64(3), sumAt(collect(t, reader), "dwarf_flows_expired", map[string]string{"shard": "1"}))
 	assert.Equal(int64(2), sumAt(collect(t, reader), "dwarf_flows_expire_failed", map[string]string{"shard": "1"}))
+}
+
+// TestExpiration_AClosedPrefixDoesNotHoldBackAnExpiredRoot pins the budget on a walk that terminates nothing and the
+// position kept across passes: closed flows waiting for the reaper, more than one pass reads within its budget, stop
+// each pass at the budget, and the passes after it go on from where it stopped until they reach the expired root
+// behind them. Walking from the oldest each time, no pass would ever reach it.
+func TestExpiration_AClosedPrefixDoesNotHoldBackAnExpiredRoot(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e, _, logs := expiryEngine(t, time.Hour)
+	e.expirePage = 1
+	e.expireBudget = time.Nanosecond // one page per pass
+	const closed = 4
+	for range closed {
+		fk := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
+		assert.NoError(e.Terminate(ctx, fk, "ended before the pass"))
+		age(t, e, fk, 2*time.Hour)
+	}
+	open := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
+	age(t, e, open, 2*time.Hour)
+
+	e.expireFlows(ctx)
+	status, _ := statusOf(t, e, open)
+	assert.Equal(workflow.StatusInterrupted, status, "a pass that terminates nothing keeps to its budget")
+	assert.Equal(1, logs.count("Expiring flows: the pass reached its time budget"))
+
+	for range closed - 1 {
+		e.expireFlows(ctx)
+	}
+	status, _ = statusOf(t, e, open)
+	assert.Equal(workflow.StatusInterrupted, status, "one page of closed flows per pass")
+	e.expireFlows(ctx)
+	status, reason := statusOf(t, e, open)
+	assert.Equal(workflow.StatusTerminated, status, "reached by going on from where the last pass stopped")
+	assert.Equal(expirationReason(time.Hour), reason)
+
+	// The next pass finds nothing after it, so the one after starts from the oldest again.
+	assert.NotEqual(0, e.expirePositions.of(1))
+	e.expireFlows(ctx)
+	assert.Equal(0, e.expirePositions.of(1), "swept")
+}
+
+// TestExpiration_AHandoffForgetsThePosition pins that a replica that stops dispatching a shard forgets where its
+// walk there stopped, so it starts from the oldest when it takes the shard up again.
+func TestExpiration_AHandoffForgetsThePosition(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	e, _, _ := expiryEngine(t, time.Hour)
+	e.expirePositions.set(1, 42)
+	e.dispatchFlag(1).Store(false)
+	e.reapDueFlows(t.Context())
+	e.dispatchFlag(1).Store(true)
+	assert.Equal(0, e.expirePositions.of(1))
 }
 
 // TestExpiration_TheReaperRunsThePassAtOnce pins the wiring: the reaper's goroutine runs the pass on its first tick,

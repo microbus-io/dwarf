@@ -435,10 +435,12 @@ func (l *archiveLag) forget(shard int) {
 	l.mu.Unlock()
 }
 
-// forgetReaping forgets what the reaper recorded about shard: its archive failures and its lag.
+// forgetReaping forgets what the reaper recorded about shard: its archive failures, its lag and where its expiration
+// walk resumes.
 func (e *Engine) forgetReaping(shard int) {
 	e.archiveFailures.forget(shard)
 	e.archiveLag.forget(shard)
+	e.expirePositions.forget(shard)
 }
 
 // reset forgets every shard's reading.

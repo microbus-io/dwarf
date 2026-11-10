@@ -19,6 +19,7 @@ package engine
 import (
 	"context"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/engineseams"
@@ -59,11 +60,14 @@ func expirationReason(d time.Duration) string {
 // tree takes, on PostgreSQL, whose NOW() is the transaction's start - which a lifetime of hours or days does not see. An index on (status, created_at)
 // would cost an entry, and its WAL, on every flow insert and status change.
 //
-// A shard's pass starts no termination once it has run expireBudget, after the first, so a backlog - expiration
-// turned on over months of abandoned flows - drains over several passes rather than holding back the reaper, whose
-// goroutine this runs on. Two dispatchers of a shard may meet on a root; the later finds it ended and does nothing.
-// A root that fails to terminate is logged and passed over: every pass walks from the oldest, so one failing every
-// time would otherwise stop expiration on the shard for good.
+// A shard's pass reads no page and starts no termination once it has run expireBudget, after its first page and its
+// first termination, so a backlog - expiration turned on over months of abandoned flows, or a long run of closed
+// flows waiting for the reaper - drains over several passes rather than holding back the reaper, whose goroutine
+// this runs on. Each pass resumes where the shard's last one stopped (expirePositions): from the oldest, a prefix
+// larger than one budget would cost every pass its whole budget and never reach an expired root behind it. A walk
+// that reaches a flow that has not expired, or the newest flow, has swept the shard, and the next pass starts again
+// from the oldest. Two dispatchers of a shard may meet on a root; the later finds it ended and does nothing. A root
+// that fails to terminate is logged and passed over, and retried by the next sweep.
 func (e *Engine) expireFlows(ctx context.Context) {
 	if e.flowExpiration <= 0 {
 		return
@@ -83,41 +87,44 @@ func (e *Engine) expireFlows(ctx context.Context) {
 func (e *Engine) expireOn(ctx context.Context, db *sequel.DB, shard int) {
 	start := time.Now()
 	reason := expirationReason(e.flowExpiration)
-	ended, attempts := 0, 0
+	ended, attempts, pages := 0, 0, 0
 	defer func() { e.metricFlowsExpired(ctx, shard, ended) }()
-	after := 0
+	after := e.expirePositions.of(shard)
+	defer func() { e.expirePositions.set(shard, after) }()
+	overBudget := func() bool {
+		if time.Since(start) < e.expireBudget {
+			return false
+		}
+		e.logger.InfoContext(ctx, "Expiring flows: the pass reached its time budget; the next pass goes on",
+			"shard", shard, "expired", ended, "budget", e.expireBudget)
+		return true
+	}
 	for {
-		// Checked per page as well as per root: a page holding no open root - a large tree's subgraph children - would
-		// otherwise walk on past the budget, and past a stop.
-		if ctx.Err() != nil {
+		// Checked per page as well as per root: a page holding no open root - closed flows waiting for the reaper, a
+		// large tree's subgraph children - would otherwise walk on past the budget, and past a stop.
+		if ctx.Err() != nil || (pages > 0 && overBudget()) {
 			return
 		}
-		if attempts > 0 && time.Since(start) >= e.expireBudget {
-			e.logger.InfoContext(ctx, "Expiring flows: the pass reached its time budget; the next pass goes on",
-				"shard", shard, "expired", ended, "budget", e.expireBudget)
-			return
-		}
-		roots, last, young, err := e.expiredPage(ctx, db, after)
+		roots, last, swept, err := e.expiredPage(ctx, db, after)
 		if err != nil {
 			e.logSweepError(ctx, "Expiring flows; the next pass retries", "shard", shard, "error", err)
 			return
 		}
+		pages++
 		for _, r := range roots {
-			if ctx.Err() != nil {
-				return
-			}
-			if attempts > 0 && time.Since(start) >= e.expireBudget {
-				e.logger.InfoContext(ctx, "Expiring flows: the pass reached its time budget; the next pass goes on",
-					"shard", shard, "expired", ended, "budget", e.expireBudget)
+			// A stop before a root leaves the position just short of it, never past the rest of the page.
+			if ctx.Err() != nil || (attempts > 0 && overBudget()) {
+				after = r.flowID - 1
 				return
 			}
 			attempts++
+			after = r.flowID
 			done, err := e.terminateSubtree(ctx, shard, r.flowID, r.hour, r.token, reason, engineseams.FaultExpireTerminate)
 			if err != nil {
 				if ctx.Err() == nil {
 					e.metricExpireFailed(ctx, shard)
 				}
-				e.logSweepError(ctx, "Expiring flows: terminating an expired flow; the next pass retries", "shard", shard,
+				e.logSweepError(ctx, "Expiring flows: terminating an expired flow; the next sweep retries", "shard", shard,
 					"flow", r.flowID, "error", err)
 				continue
 			}
@@ -125,11 +132,50 @@ func (e *Engine) expireOn(ctx context.Context, db *sequel.DB, shard int) {
 				ended++
 			}
 		}
-		if young || last == 0 {
+		if swept {
+			after = 0
 			return
 		}
 		after = last
 	}
+}
+
+// expirePositions is, per shard, the flow_id after which the shard's next expiration pass reads (0 for the oldest).
+// It is a hint: a position lost to a restart or a handoff costs one walk from the oldest.
+type expirePositions struct {
+	mu   sync.Mutex
+	byID map[int]int
+}
+
+// of returns shard's position.
+func (p *expirePositions) of(shard int) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.byID[shard]
+}
+
+// set records shard's position.
+func (p *expirePositions) set(shard, after int) {
+	p.mu.Lock()
+	if p.byID == nil {
+		p.byID = map[int]int{}
+	}
+	p.byID[shard] = after
+	p.mu.Unlock()
+}
+
+// forget forgets shard's position.
+func (p *expirePositions) forget(shard int) {
+	p.mu.Lock()
+	delete(p.byID, shard)
+	p.mu.Unlock()
+}
+
+// reset forgets every shard's position.
+func (p *expirePositions) reset() {
+	p.mu.Lock()
+	p.byID = nil
+	p.mu.Unlock()
 }
 
 // expiredRoot is a root the expiration pass terminates.
@@ -139,9 +185,10 @@ type expiredRoot struct {
 }
 
 // expiredPage reads the page of flow rows after flowID after, in flow_id order, up to the first that has not expired,
-// and returns the open roots among them, the last id it read (0 for none), and whether it reached a row that has
-// not expired. Closed flows waiting for the reaper, and subgraph children - ended with their roots - are passed over.
-func (e *Engine) expiredPage(ctx context.Context, db *sequel.DB, after int) (roots []expiredRoot, last int, young bool, err error) {
+// and returns the open roots among them, the last id it read (0 for none), and whether the walk has swept the shard:
+// it reached a row that has not expired, or read fewer rows than a page, the newest flow included. Closed flows
+// waiting for the reaper, and subgraph children - ended with their roots - are passed over.
+func (e *Engine) expiredPage(ctx context.Context, db *sequel.DB, after int) (roots []expiredRoot, last int, swept bool, err error) {
 	// ORDER BY flow_id is REQUIRED: LIMIT_OFFSET is OFFSET/FETCH on SQL Server, which needs one. The age is compared
 	// on the database clock, never bound as a Go time.
 	rows, err := db.QueryContext(ctx, "SELECT flow_id, flow_token, created_hour, status, surgraph_flow_id,"+
@@ -152,6 +199,7 @@ func (e *Engine) expiredPage(ctx context.Context, db *sequel.DB, after int) (roo
 		return nil, 0, false, errors.Trace(err)
 	}
 	defer rows.Close()
+	n := 0
 	for rows.Next() {
 		var r expiredRoot
 		var status string
@@ -162,10 +210,14 @@ func (e *Engine) expiredPage(ctx context.Context, db *sequel.DB, after int) (roo
 		if expired == 0 {
 			return roots, last, true, nil
 		}
+		n++
 		last = r.flowID
 		if surgraphFlowID == 0 && (status == workflow.StatusRunning || status == workflow.StatusInterrupted) {
 			roots = append(roots, r)
 		}
 	}
-	return roots, last, false, errors.Trace(rows.Err())
+	if err := rows.Err(); err != nil {
+		return nil, 0, false, errors.Trace(err)
+	}
+	return roots, last, n < e.expirePage, nil
 }

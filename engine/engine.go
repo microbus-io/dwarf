@@ -382,10 +382,12 @@ type Engine struct {
 	purgeChunk   int
 	reapInterval time.Duration // reaper goroutine tick; read once at Startup (15s)
 	// The expiration pass (expiration.go): how often it runs in the reaper's goroutine (5m), how long one shard's pass
-	// may keep starting terminations (30s), and how many rows one page of its walk reads (256).
+	// may keep reading and starting terminations (30s), how many rows one page of its walk reads (256), and where each
+	// shard's walk resumes.
 	expireInterval     time.Duration
 	expireBudget       time.Duration
 	expirePage         int
+	expirePositions    expirePositions
 	leaseRecoveryBatch int // ids per lease-recovery reset, embedded as a literal IN list (1024)
 	maxPayloadBytes    int // largest JSON value written into one payload column (maxPayloadBytes)
 	// persistBackoff is the outcome-write retry schedule (1s doubling to 32s, a minute in all), exponential
@@ -1184,6 +1186,7 @@ func (e *Engine) initRuntime() error {
 	e.recoveryWorker.Go(func() {
 		e.recoveryLoop(recoveryCtx)
 	})
+	e.expirePositions.reset()
 	e.reaperWorker.Go(func() {
 		e.reaperLoop(reaperCtx)
 	})

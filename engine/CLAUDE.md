@@ -3731,15 +3731,21 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
   flow-row update (none is HOT, since nearly every one sets the indexed `updated_at`). The walk passes over closed flows waiting for the reaper and subgraph children (ended with their
   root), a page (`expirePage`, 256) at a time. It runs in the reaper's goroutine, after the reap of any tick
   `expireInterval` (5 min) after the last, per shard on its dispatchers, on a turn; **its time budget**
-  (`expireBudget`, 30 s, checked after the first termination so a pass always progresses) is what keeps a first-time
-  backlog - expiration turned on over months of abandoned flows, thousands of tree transactions - from holding back
-  archiving: the rest waits for the next pass, which logs once per pass that hits it. `dwarf_flows_expired` counts
+  (`expireBudget`, 30 s, checked before every page after the first and every termination after the first, so a pass
+  always progresses) is what keeps a first-time backlog - expiration turned on over months of abandoned flows,
+  thousands of tree transactions - from holding back archiving: the rest waits for the next pass, which logs once per
+  pass that hits it. **The budget binds a pass that terminates nothing**, and **each pass resumes where the shard's
+  last one stopped** (`expirePositions`, in memory, forgotten on a restart or a handoff): a prefix of closed flows held
+  in the live tables (an archive outage) longer than one budget would otherwise either hold back the reaper unbounded
+  or, walked from the oldest every pass, cost each pass its whole budget and never reach an expired root behind it. A
+  stop before a root leaves the position just short of it, never past the rest of its page. A walk that reaches a row
+  that has not expired, or a short page, has swept the shard; the next pass starts from the oldest again. `dwarf_flows_expired` counts
   the roots `terminateSubtree` reports it ended (`ended`), so two dispatchers meeting on a root count it once; every
   dispatcher of a shard walks the same rows, which a duplicate termination makes harmless (the later one is a no-op),
   and the budget counts attempts, so a dispatcher losing every race to a peer is still cut off. **A root that fails to
   terminate is logged, counted (`dwarf_flows_expire_failed`, attempts, not under a cancelled ctx) and passed over**,
-  never ends the pass: every pass walks from the oldest, so a root failing every
-  time would otherwise stop expiration on the shard for good. **The first pass runs on the reaper's first tick**, not an
+  never ends the pass, and is retried by the next sweep: a root failing every time would otherwise stop expiration on
+  the shard for good. **The first pass runs on the reaper's first tick**, not an
   interval in, for the archive loop's reason: a replica living shorter than the interval would never expire anything.
   Pinned by `engine/expiration_test.go`.
 - **Startup does not serve before today's tables exist on every shard**, whatever the retention (`startArchives`, right after the shards
