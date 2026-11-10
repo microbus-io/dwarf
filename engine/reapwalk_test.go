@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"log/slog"
 	"math"
@@ -31,6 +32,8 @@ import (
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/errors"
+	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -531,5 +534,79 @@ func TestReapWalk_TheSweepEndIncludesTheNewestRoot(t *testing.T) {
 	for _, id := range roots {
 		flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", id)
 		assert.Zero(flows)
+	}
+}
+
+// TestReapWalk_TheStampedScanWalksTheStampedIndex pins the stamped scan's plan to idx_dwarf_flows_delete_after - keyed
+// on flow_id over the stamped roots alone on PostgreSQL and SQLite, named with FORCE INDEX on MySQL and MariaDB.
+// Without it the scan walks the primary key past every unstamped root ahead of the first stamped one: an archive
+// outage's whole held backlog, on every sweep from the front.
+func TestReapWalk_TheStampedScanWalksTheStampedIndex(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e := archiveEngine(t, treeMux(), 30)
+	db, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	var explain, priceOutScans string
+	switch db.DriverName() {
+	case "pgx":
+		// An empty table's estimates favour a scan or a bitmap read and sort whatever the index; priced out, the plan
+		// shows whether the index itself is in the scan's order.
+		explain, priceOutScans = "EXPLAIN ", "SET LOCAL enable_seqscan = off; SET LOCAL enable_bitmapscan = off"
+	case "sqlite":
+		explain = "EXPLAIN QUERY PLAN "
+	case "mysql", "mariadb":
+		explain = "EXPLAIN "
+	default:
+		t.Skip("the plan shapes pinned here are PostgreSQL's, SQLite's, MySQL's and MariaDB's")
+	}
+	stmt, args := e.deletionDue(0).selectDue(db.DriverName(), "", nil, 512)
+	var plan strings.Builder
+	errRollback := errors.New("rollback")
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		for _, set := range strings.Split(priceOutScans, "; ") {
+			if set == "" {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, set); err != nil {
+				return err
+			}
+		}
+		rows, err := tx.QueryContext(ctx, explain+stmt, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		cols, _ := rows.Columns()
+		for rows.Next() {
+			vals := make([]any, len(cols))
+			ptrs := make([]any, len(cols))
+			for i := range vals {
+				ptrs[i] = &vals[i]
+			}
+			if err := rows.Scan(ptrs...); err != nil {
+				return err
+			}
+			for _, v := range vals {
+				if b, ok := v.([]byte); ok {
+					v = string(b)
+				}
+				fmt.Fprint(&plan, v, " ")
+			}
+			plan.WriteString("\n")
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		return errRollback
+	})
+	assert.True(errors.Is(err, errRollback), "%v", err)
+	assert.Contains(plan.String(), "idx_dwarf_flows_delete_after", "%s", plan.String())
+	if d := db.DriverName(); d == "pgx" || d == "sqlite" {
+		// Keyed on flow_id the index is already in the scan's order; keyed on anything else it needs a sort of every
+		// stamped root on each scan, which is what an empty table's plan shows.
+		assert.False(strings.Contains(plan.String(), "Sort") || strings.Contains(plan.String(), "TEMP B-TREE"),
+			"no sort: %s", plan.String())
 	}
 }

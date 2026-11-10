@@ -3649,8 +3649,9 @@ an **orphaned child** (an open child whose parent already terminalized, which on
 worker mid-dispatch on the orphan no-ops via the lease fence (claim/write matches zero rows once the tree is gone),
 so no strand and no corruption. Whichever of the reaper and the wedge sweep reaches the orphan first wins. The
 reaper therefore does **not** reguard on descendant status. Backed by a
-partial index `idx_dwarf_flows_delete_after WHERE delete_after_ms > 0` (full on mysql) that narrows the due scan to
-the small in-window subset. (`deletionGrace`/`reapInterval` are Engine fields, not constants, only so a test can
+partial index `idx_dwarf_flows_delete_after (flow_id) WHERE delete_after_ms > 0` (full `(delete_after_ms)` on MySQL and
+MariaDB, which the scan names with `FORCE INDEX`) that walks the stamped roots alone in the scan's `flow_id` order; why
+it is keyed on `flow_id` is in `internal/migrations/CLAUDE.md`. (`deletionGrace`/`reapInterval` are Engine fields, not constants, only so a test can
 shorten them -
 engine-package tests force a reap via `reapDueFlows`; fixtures verify the observable public contract via the lists/
 `History`/`Snapshot`.)

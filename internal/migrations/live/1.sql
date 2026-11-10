@@ -111,7 +111,7 @@ CREATE INDEX idx_dwarf_flows_surgraph_step ON dwarf_flows (surgraph_step_id) WHE
 CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id);
 
 -- DRIVER: pgx
-CREATE INDEX idx_dwarf_flows_delete_after ON dwarf_flows (delete_after_ms) WHERE delete_after_ms > 0;
+CREATE INDEX idx_dwarf_flows_delete_after ON dwarf_flows (flow_id) WHERE delete_after_ms > 0;
 
 -- DRIVER: pgx
 ALTER TABLE dwarf_flows SET (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_insert_scale_factor = 0.01, autovacuum_vacuum_cost_delay = 0, vacuum_truncate = false, toast.autovacuum_vacuum_scale_factor = 0.01, toast.autovacuum_vacuum_insert_scale_factor = 0.01, toast.autovacuum_vacuum_cost_delay = 0, toast.vacuum_truncate = false);
@@ -169,7 +169,7 @@ CREATE INDEX idx_dwarf_flows_surgraph_step ON dwarf_flows (surgraph_step_id) WHE
 CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id);
 
 -- DRIVER: mssql
-CREATE INDEX idx_dwarf_flows_delete_after ON dwarf_flows (delete_after_ms) WHERE delete_after_ms > 0;
+CREATE INDEX idx_dwarf_flows_delete_after ON dwarf_flows (flow_id) WHERE delete_after_ms > 0;
 
 -- DRIVER: sqlite
 CREATE TABLE IF NOT EXISTS dwarf_flows (
@@ -223,4 +223,4 @@ CREATE INDEX idx_dwarf_flows_surgraph_step ON dwarf_flows (surgraph_step_id) WHE
 CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id);
 
 -- DRIVER: sqlite
-CREATE INDEX idx_dwarf_flows_delete_after ON dwarf_flows (delete_after_ms) WHERE delete_after_ms > 0;
+CREATE INDEX idx_dwarf_flows_delete_after ON dwarf_flows (flow_id) WHERE delete_after_ms > 0;

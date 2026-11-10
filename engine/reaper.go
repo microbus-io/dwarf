@@ -76,11 +76,12 @@ func (e *Engine) reaperLoop(ctx context.Context) {
 // re-checks.
 type reapKind struct {
 	name string
-	// selectDue returns the statement and arguments that select up to limit due roots, restricted to residency (a SQL
-	// fragment over flow_id and its arguments; empty for none), as rows of (flow_id, updated_at, age in milliseconds, created_hour).
+	// selectDue returns the statement and arguments that select up to limit due roots on a database of driverName,
+	// restricted to residency (a SQL fragment over flow_id and its arguments; empty for none), as rows of (flow_id,
+	// updated_at, age in milliseconds, created_hour).
 	// The statement is one or more branches, each in the kind's order and each limited to limit, so the traversal is
 	// the branches merged in that order (scanDue).
-	selectDue func(residency string, residencyArgs []any, limit int) (string, []any)
+	selectDue func(driverName, residency string, residencyArgs []any, limit int) (string, []any)
 	// order is the kind's traversal order over its due roots.
 	order func(a, b dueRoot) int
 	// due re-checks a locked root, with its arguments.
@@ -100,11 +101,21 @@ func (e *Engine) deletionDue(steal time.Duration) reapKind {
 	const due = "delete_after_ms>0 AND surgraph_flow_id=0 AND DATE_ADD_MILLIS(updated_at, delete_after_ms)<=NOW_UTC()"
 	return reapKind{
 		name: "deleted",
-		selectDue: func(residency string, args []any, limit int) (string, []any) {
+		selectDue: func(driverName, residency string, args []any, limit int) (string, []any) {
 			// ORDER BY flow_id is REQUIRED because LIMIT_OFFSET compiles to OFFSET/FETCH on SQL Server, which
-			// rejects it without a preceding ORDER BY. The scan reads the partial index of stamped roots only.
-			return "SELECT flow_id, updated_at, DATE_DIFF_MILLIS(NOW_UTC(), updated_at), created_hour FROM dwarf_flows WHERE " + due + residency +
-				" ORDER BY flow_id LIMIT_OFFSET(?, 0)", append(slices.Clone(args), limit)
+			// rejects it without a preceding ORDER BY. It walks idx_dwarf_flows_delete_after, keyed on flow_id over
+			// the stamped roots only, in its own order. Without that index every dialect walks the primary key past
+			// every unstamped root ahead of the first stamped one - an archive outage's whole held backlog, on every
+			// sweep from the front (PostgreSQL: 1.29 s at 1.2M held roots, 0.35 ms with it). MySQL and MariaDB have
+			// no partial index, so their index is the full (delete_after_ms) one and the scan is told to use it: it
+			// then reads every stamped root and sorts them (~250 ms at 220k stamped), bounded by what is stamped
+			// rather than by what is held; left to itself MariaDB walked the primary key (2.05 s).
+			from := "dwarf_flows"
+			if driverName == "mysql" || driverName == "mariadb" {
+				from += " FORCE INDEX (idx_dwarf_flows_delete_after)"
+			}
+			return "SELECT flow_id, updated_at, DATE_DIFF_MILLIS(NOW_UTC(), updated_at), created_hour FROM " + from +
+				" WHERE " + due + residency + " ORDER BY flow_id LIMIT_OFFSET(?, 0)", append(slices.Clone(args), limit)
 		},
 		order:      byFlowID,
 		due:        due,
@@ -127,7 +138,7 @@ func (e *Engine) closedDueAfter(steal, grace time.Duration) reapKind {
 	}
 	return reapKind{
 		name: "closed",
-		selectDue: func(residency string, args []any, limit int) (string, []any) {
+		selectDue: func(_, residency string, args []any, limit int) (string, []any) {
 			// One branch per terminal status, each a range of idx_dwarf_flows_status (status, updated_at) that stops
 			// at the batch: one scan over all four statuses has no index order, so it would read and sort every due
 			// root on every batch, O(backlog) per batch. The status is inlined, never bound: a bound status defeats
@@ -451,7 +462,7 @@ func (e *Engine) scanDue(
 ) (roots []dueRoot, oldest time.Duration, err error) {
 	ctx, cancel := e.reapAttemptCtx(ctx)
 	defer cancel()
-	stmt, args := kind.selectDue(residency, residencyArgs, fetch)
+	stmt, args := kind.selectDue(db.DriverName(), residency, residencyArgs, fetch)
 	rows, err := db.QueryContext(ctx, stmt, args...)
 	// engineseams.FaultReapSelectErr treats this due-root scan as errored (sibling to engineseams.FaultReapMidTree,
 	// which covers the delete half), so the test proves the pass logs and bails without deleting and the NEXT pass

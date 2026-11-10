@@ -294,8 +294,8 @@ func (e *Engine) retentionDue(driver string, cutoff time.Time, steal, grace time
 	kind := e.closedDueAfter(steal, grace)
 	kind.name, kind.lagged = "retention", false
 	selectDue := kind.selectDue
-	kind.selectDue = func(where string, args []any, limit int) (string, []any) {
-		return selectDue(where+" AND updated_at<"+ts, append(slices.Clone(args), arg), limit)
+	kind.selectDue = func(driverName, where string, args []any, limit int) (string, []any) {
+		return selectDue(driverName, where+" AND updated_at<"+ts, append(slices.Clone(args), arg), limit)
 	}
 	kind.due += " AND updated_at<" + ts
 	kind.dueArgs = append(slices.Clone(kind.dueArgs), arg)
