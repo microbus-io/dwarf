@@ -29,6 +29,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 )
@@ -749,4 +750,46 @@ func TestMove_DirectoryTheReapersBounds(t *testing.T) {
 			assert.Equal(0, named, "hour %d (bounds %d, %d) is not named", c.hour, before, from)
 		}
 	}
+}
+
+// TestMove_TheSizingSeeksEachFlowsSteps pins the sizing count's join on PostgreSQL to a nested loop, each flow's steps
+// a seek: with nested loops priced out, a plain join is planned as a hash join over every step in the table. Measured
+// under load on a steps table of 121k live and 835k dead rows: 84 ms to count a tree of 10 rows that way, against 0.6
+// ms by the seek, and a group of such counts past the 30 s attempt.
+func TestMove_TheSizingSeeksEachFlowsSteps(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := newRig(t, 30)
+	if r.db.DriverName() != "pgx" {
+		t.Skip("the plan pinned here is PostgreSQL's")
+	}
+	stmt := treesRowsUpToSQL(r.db.DriverName(), live, []int{1, 2}, []int{1001, 4097})
+	var plan strings.Builder
+	errRollback := errors.New("rollback")
+	err := r.db.Transact(ctx, func(tx *sequel.Tx) error {
+		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_nestloop = off"); err != nil {
+			return err
+		}
+		rows, err := tx.QueryContext(ctx, "EXPLAIN "+stmt)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var line string
+			if err := rows.Scan(&line); err != nil {
+				return err
+			}
+			plan.WriteString(line + "\n")
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		return errRollback
+	})
+	assert.True(errors.Is(err, errRollback), "%v", err)
+	assert.Contains(plan.String(), "Nested Loop")
+	assert.NotContains(plan.String(), "Hash")
+	assert.NotContains(plan.String(), "Merge Join")
 }

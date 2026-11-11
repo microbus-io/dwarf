@@ -318,16 +318,10 @@ func stepsUpTo(ctx context.Context, q sequel.Executor, steps string, flows []int
 }
 
 // treesRowsUpTo counts the rows of each tree rooted at roots in t (a flow with no steps counts one), each up to its own
-// limit, in one statement: a UNION ALL of capped counts, so a group of trees costs one round trip and no tree is read
-// past its limit.
+// limit, in one statement (treesRowsUpToSQL), so a group of trees costs one round trip and no tree is read past its
+// limit.
 func treesRowsUpTo(ctx context.Context, q sequel.Executor, t tables, roots, limits []int) ([]int, error) {
-	branches := make([]string, len(roots))
-	for k, root := range roots {
-		inner := capped(q.DriverName(), "f.flow_id FROM "+t.flows+" f LEFT JOIN "+t.steps+" s ON s.flow_id=f.flow_id"+
-			" WHERE f.root_flow_id="+strconv.Itoa(root), limits[k])
-		branches[k] = "SELECT " + strconv.Itoa(k) + " AS k, COUNT(*) AS n FROM (" + inner + ") c" + strconv.Itoa(k)
-	}
-	rows, err := q.QueryContext(ctx, strings.Join(branches, " UNION ALL "))
+	rows, err := q.QueryContext(ctx, treesRowsUpToSQL(q.DriverName(), t, roots, limits))
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -349,6 +343,28 @@ func countUpTo(ctx context.Context, q sequel.Executor, selectFrom string, limit 
 	var n int
 	err := q.QueryRowContext(ctx, "SELECT COUNT(*) FROM ("+capped(q.DriverName(), selectFrom, limit)+") c").Scan(&n)
 	return n, errors.Trace(err)
+}
+
+// treesRowsUpToSQL is treesRowsUpTo's statement: a UNION ALL of capped counts, one a tree, each joining the tree's
+// flows to their steps. On PostgreSQL the join is LATERAL and on SQL Server an OUTER APPLY, each flow's steps a seek
+// into its own: a plain join there may be planned as a hash join over a scan of every step in the table, which the
+// LIMIT stops early only for a tree larger than it, so a small tree costs the whole table. MySQL, MariaDB and SQLite
+// join an indexed equality by nested loops.
+func treesRowsUpToSQL(driver string, t tables, roots, limits []int) string {
+	branches := make([]string, len(roots))
+	for k, root := range roots {
+		n := strconv.Itoa(limits[k])
+		join := " LEFT JOIN " + t.steps + " s ON s.flow_id=f.flow_id"
+		switch driver {
+		case "pgx":
+			join = " LEFT JOIN LATERAL (SELECT s.step_id FROM " + t.steps + " s WHERE s.flow_id=f.flow_id LIMIT " + n + ") s ON TRUE"
+		case "mssql":
+			join = " OUTER APPLY (SELECT TOP (" + n + ") s.step_id FROM " + t.steps + " s WHERE s.flow_id=f.flow_id) s"
+		}
+		inner := capped(driver, "f.flow_id FROM "+t.flows+" f"+join+" WHERE f.root_flow_id="+strconv.Itoa(root), limits[k])
+		branches[k] = "SELECT " + strconv.Itoa(k) + " AS k, COUNT(*) AS n FROM (" + inner + ") c" + strconv.Itoa(k)
+	}
+	return strings.Join(branches, " UNION ALL ")
 }
 
 // capped is "SELECT "+selectFrom reading at most limit rows: a LIMIT, or a TOP on SQL Server.
