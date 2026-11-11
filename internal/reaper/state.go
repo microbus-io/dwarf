@@ -45,6 +45,22 @@ type walk struct {
 	attemptSeen, lastAttemptSeen time.Time
 }
 
+// observeAttempts compares samples at one instant, so time between reads cannot make a younger attempt win.
+func (w *walk) observeAttempts(ages map[int]time.Duration, now time.Time) {
+	oldest := w.attemptAge
+	if oldest > 0 {
+		oldest += max(now.Sub(w.attemptSeen), 0)
+	}
+	for _, age := range ages {
+		if age > oldest {
+			oldest = age
+		}
+	}
+	if oldest > 0 {
+		w.attemptAge, w.attemptSeen = oldest, now
+	}
+}
+
 // walks holds every walker's position. One walker per shard runs at a time in production; the mutex lets Observe
 // read alongside, and overlapping passes in tests run without data races.
 type walks struct {

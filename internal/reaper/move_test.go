@@ -634,7 +634,7 @@ func TestMove_AHeldRootIsSkippedNotWaitedFor(t *testing.T) {
 	close(release)
 	assert.NoError(<-holderDone)
 	if assert.NoError(err, "the batch did not wait on the held root") {
-		assert.Equal(2, moved, "the other tree moved: its root and its child")
+		assert.Equal(2, moved.flows, "the other tree moved: its root and its child")
 	}
 	flows, _ := treeCount(t, r, "dwarf_flows", "dwarf_steps", held)
 	assert.Equal(2, flows, "the held tree was left in the live tables")
@@ -644,7 +644,7 @@ func TestMove_AHeldRootIsSkippedNotWaitedFor(t *testing.T) {
 	moved, err = r.p().batchOf(ctx, []int{held}, closedDue(0, r.cfg.Grace),
 		&filingDay{day: today, stop: time.Now().Add(time.Hour), archive: a})
 	assert.NoError(err)
-	assert.Equal(2, moved, "the held tree moved once it was let go")
+	assert.Equal(2, moved.flows, "the held tree moved once it was let go")
 }
 
 // TestMove_DirectoryNamesOnlyWhatTheLocateCannotFind pins the directory's rule, through the reaper's own move: a tree

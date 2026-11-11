@@ -1356,19 +1356,18 @@ func (e *Engine) continueFlow(ctx context.Context, flowKey string, additionalSta
 	var surgraphFlowID, deleteAfterMs, priority, timeBudgetMs int
 	var fairnessWeight float64
 	found, err := e.queryLiveOrArchive(ctx, db, shardNum, flowID, flowHour, closeNone, func(t flowTables) (bool, error) {
+		publication, args := publicationColumn(db.DriverName(), t)
+		var published int
 		err := db.QueryRowContext(ctx,
-			"SELECT status, surgraph_flow_id, delete_after_ms, final_state, graph, graph_hash, workflow_url, baggage, priority, fairness_key, fairness_weight, time_budget_ms FROM "+t.flows+" WHERE flow_id=? AND flow_token=? AND created_hour=?",
-			flowID, flowToken, flowHour,
-		).Scan(&flowStatus, &surgraphFlowID, &deleteAfterMs, &finalStateJSON, &graphJSON, &graphHash, &workflowURL, &baggageJSON, &priority, &fairnessKey, &fairnessWeight, &timeBudgetMs)
+			"SELECT "+publication+", status, surgraph_flow_id, delete_after_ms, final_state, graph, graph_hash, workflow_url, baggage, priority, fairness_key, fairness_weight, time_budget_ms FROM "+t.flows+" WHERE flow_id=? AND flow_token=? AND created_hour=?",
+			append(args, flowID, flowToken, flowHour)...,
+		).Scan(&published, &flowStatus, &surgraphFlowID, &deleteAfterMs, &finalStateJSON, &graphJSON, &graphHash, &workflowURL, &baggageJSON, &priority, &fairnessKey, &fairnessWeight, &timeBudgetMs)
 		if err == sql.ErrNoRows {
 			return false, nil
 		}
-		if err == nil && t == liveTables && deleteAfterMs > 0 {
-			// A live root stamped with an archive attempt is published: its copy is read from the archive.
-			published, err := livePublished(ctx, db, flowID)
-			if err != nil || published {
-				return false, errors.Trace(err)
-			}
+		if err == nil && published != 0 {
+			e.seams.Checkpoint(ctx, engineseams.CheckpointContinuePublished)
+			return false, nil
 		}
 		return err == nil, errors.Trace(err)
 	})

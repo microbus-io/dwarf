@@ -40,7 +40,7 @@ var errNotToday = errors.New("the attempt's time is not in today's archive day")
 // stagePos is where a staged copy of one tree stands, in memory, held by the Reaper between slices (stages). at is the
 // attempt it belongs to; seen counts the descendants copied whole, in flow_id order up to after; of flow, part of whose
 // steps are copied (a descendant, or the root at the end), every step up to stepAfter is. A position for another
-// attempt is not used: the copy starts again from the first descendant, rewriting what is there with the same values.
+// attempt is not used: its fresh position is reconstructed from the destination's ordered prefixes.
 type stagePos struct {
 	at              time.Time
 	seen, after     int
@@ -216,6 +216,24 @@ func (p *pass) stageChunk(ctx context.Context, root int, a *archiver.Archive, po
 				" WHERE root_flow_id="+id+" AND flow_id<>"+id).Scan(&at.seen, &at.after); err != nil {
 				return errors.Trace(err)
 			}
+			children, open, err := descendantsAfter(ctx, tx, root, at.after)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			if open {
+				return errors.New("tree %d holds a flow that is not closed", root)
+			}
+			at.flow = root
+			if len(children) > 0 {
+				at.flow = children[0]
+			}
+			if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(step_id), 0) FROM "+c.steps+" WHERE flow_id="+strconv.Itoa(at.flow)).Scan(&at.stepAfter); err != nil {
+				return errors.Trace(err)
+			}
+			// No partial child: keep the ordinary batched descendant path.
+			if at.flow != root && at.stepAfter == 0 {
+				at.flow = 0
+			}
 		}
 		budget := max(p.cfg.BatchRows, 1)
 		for budget > 0 && at.flow != root {
@@ -317,7 +335,7 @@ func (p *pass) stageChunk(ctx context.Context, root int, a *archiver.Archive, po
 		if err := c.flowRows(ctx, tx, []int{root}, groups*stageGroup); err != nil {
 			return errors.Trace(err)
 		}
-		if _, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1 WHERE flow_id="+id); err != nil {
+		if _, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1, archived_at=(SELECT archived_at FROM "+c.flows+" WHERE flow_id="+id+") WHERE flow_id="+id); err != nil {
 			return errors.Trace(err)
 		}
 		published = at.seen + 1

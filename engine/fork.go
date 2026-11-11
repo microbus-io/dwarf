@@ -183,9 +183,10 @@ func (e *Engine) forkSource(ctx context.Context, tx *sequel.Tx, src flowTables, 
 			current = " LOCK IN SHARE MODE"
 		}
 		var rootStatus string
-		var rootDeleteAfterMs int
-		err := tx.QueryRowContext(ctx, "SELECT status, delete_after_ms FROM "+src.flows+" WHERE "+rootOf+current, rootArgs...).
-			Scan(&rootStatus, &rootDeleteAfterMs)
+		var published int
+		publication, args := publicationColumn(tx.DriverName(), src)
+		err := tx.QueryRowContext(ctx, "SELECT "+publication+", status FROM "+src.flows+" WHERE "+rootOf+current, append(args, rootArgs...)...).
+			Scan(&published, &rootStatus)
 		if err == sql.ErrNoRows {
 			return nil, 0, errForkSourceNotHere
 		}
@@ -195,20 +196,11 @@ func (e *Engine) forkSource(ctx context.Context, tx *sequel.Tx, src flowTables, 
 		if !workflow.IsTerminalStatus(rootStatus) {
 			return nil, 0, errors.New("can only fork a closed flow (status: %s)", rootStatus, http.StatusConflict)
 		}
-		if src == liveTables && rootDeleteAfterMs > 0 {
-			// A live root stamped with an archive attempt is published: the archive's copy is the source.
-			var rootID int
-			if err := tx.QueryRowContext(ctx, "SELECT flow_id FROM "+src.flows+" WHERE "+rootOf, rootArgs...).Scan(&rootID); err != nil {
-				return nil, 0, errors.Trace(err)
-			}
-			published, err := livePublished(ctx, tx, rootID)
-			if err != nil {
-				return nil, 0, errors.Trace(err)
-			}
-			if published {
-				return nil, 0, errForkSourceNotHere
-			}
+		if published != 0 {
+			e.seams.Checkpoint(ctx, engineseams.CheckpointForkPublished)
+			return nil, 0, errForkSourceNotHere
 		}
+
 		// A flow scheduled for deletion is on its way out, so naming it is an error, as for Continue.
 		return nil, 0, errors.New("cannot fork a flow scheduled for deletion", http.StatusConflict)
 	}

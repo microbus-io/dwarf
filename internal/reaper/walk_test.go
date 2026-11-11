@@ -285,7 +285,7 @@ func TestWalk_TreeEnvelope(t *testing.T) {
 			start = time.Now()
 			n, err := r.p().batchOf(t.Context(), cut, closedDue(0, 0), day)
 			assert.NoError(err)
-			assert.Equal(2, n)
+			assert.Equal(2, n.flows)
 			t.Logf("%s retention=%d: size=%s atomic transaction=%s, 10000 rows/~16MB JSON", db.DriverName(), retention, sized, time.Since(start))
 			flows, steps := treeCount(t, r, "dwarf_flows", "dwarf_steps", root)
 			assert.Zero(flows + steps)
@@ -554,7 +554,7 @@ func TestWalk_AFlowWithNoStepsIsOneRow(t *testing.T) {
 	assert.Must(assert.NoError(r.p().refreshDay(ctx, day)))
 	moved, err := r.p().batchOf(ctx, cut, closedDue(0, r.cfg.Grace), day)
 	assert.NoError(err)
-	assert.Equal(4, moved)
+	assert.Equal(4, moved.flows)
 	for _, root := range roots {
 		flows, steps := treeCount(t, r, migrations.FlowsTable(day.day), migrations.StepsTable(day.day), root)
 		assert.Equal([2]int{2, 2}, [2]int{flows, steps})

@@ -199,13 +199,13 @@ func TestChunk_StaleWorkIsANoOp(t *testing.T) {
 	n, done, err := r.p().deleteChunk(ctx, root, &chunkPos{})
 	assert.NoError(err)
 	assert.True(done)
-	assert.Zero(n)
+	assert.Zero(n.flows)
 	f, s, _ := rowsOf(t, r, root)
 	assert.Equal([2]int{3, 5}, [2]int{f, s}, "an unstamped tree is left whole")
 	n, done, err = r.p().deleteChunk(ctx, root+1000, &chunkPos{})
 	assert.NoError(err)
 	assert.True(done)
-	assert.Zero(n)
+	assert.Zero(n.flows)
 }
 
 // TestChunk_ALateDescendantKeepsTheRoot pins the membership recheck before a root is deleted: a descendant that appears
@@ -230,7 +230,7 @@ func TestChunk_ALateDescendantKeepsTheRoot(t *testing.T) {
 	got := make(chan result, 1)
 	go func() {
 		n, done, err := r.p().deleteChunk(ctx, root, &chunkPos{})
-		got <- result{n, done, err}
+		got <- result{n.flows, done, err}
 	}()
 	assert.Must(assert.True(r.seams.WaitTimeout(ctx, CheckpointBeforeRootDelete, 10*time.Second*timeoutScale)))
 	late, err := r.db.InsertReturnID(ctx, "flow_id", "INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name,"+
@@ -247,7 +247,7 @@ func TestChunk_ALateDescendantKeepsTheRoot(t *testing.T) {
 	n, done, err := r.p().deleteChunk(ctx, root, &chunkPos{})
 	assert.NoError(err)
 	assert.True(done)
-	assert.Equal(2, n, "the late descendant and the root")
+	assert.Equal(2, n.flows, "the late descendant and the root")
 	var left int
 	assert.NoError(r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id IN (?, ?)", root, late).Scan(&left))
 	assert.Zero(left)

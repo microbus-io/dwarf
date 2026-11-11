@@ -206,15 +206,12 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 		}
 		if repair && d != nil {
 			// The oldest unpublished attempt this sweep has seen, for its gauge.
-			for _, age := range attemptAges {
-				if age > w.attemptAge {
-					w.attemptAge, w.attemptSeen = age, time.Now()
-				}
-			}
+			w.observeAttempts(attemptAges, time.Now())
 		}
 		_, attempted := attemptAges[cut[0]]
 		attempted = attempted || (d != nil && p.r.prefer.has(stageKey{shard, cut[0]}))
 		moved := 0
+		var removed removal
 		attemptStart := time.Now()
 		// finished is false when a tree deleted in chunks is not gone yet and nothing failed: the walk keeps its
 		// position on it. A failed chunk is passed like any failed batch.
@@ -233,7 +230,8 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 			// would grow with the tree until it could not finish within its attempt. It counts its own chunks.
 			moved, finished, err = p.deleteLarge(ctx, k, cut[0], reason, start)
 		default:
-			moved, err = p.batchOf(ctx, cut, k, d)
+			removed, err = p.batchOf(ctx, cut, k, d)
+			moved = removed.flows
 		}
 		if ctx.Err() != nil {
 			return false
@@ -273,7 +271,7 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 					p.r.failures.clearUnlessFailedSince(shard, attemptStart)
 				}
 			} else if !large {
-				p.r.metrics.flowsReaped(ctx, shard, reason, moved)
+				p.r.metrics.flowsReaped(ctx, shard, reason, removed.unarchived)
 			}
 			if !staged {
 				for _, root := range cut {
@@ -352,6 +350,7 @@ func (p *pass) resumeStarted(ctx context.Context, k kind, w *walk, d *filingDay,
 			p.logError(ctx, "Reaper: reading archive attempts", "shard", shard, "error", err)
 			return
 		}
+		w.observeAttempts(started, time.Now())
 		i := slices.IndexFunc(candidates, func(c dueRoot) bool { _, ok := started[c.flowID]; return ok })
 		if i < 0 {
 			w.startedAfter = candidates[len(candidates)-1]

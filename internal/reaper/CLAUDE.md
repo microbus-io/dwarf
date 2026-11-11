@@ -40,15 +40,20 @@ checked between attempts; healthy backlog uses up to `Budget`. Every stage gets 
 attempt overshot the budget, and a failed stage does not suppress the next. `dwarf_reap_pass_seconds` times the pass
 alone; the engine's expiration stage runs after it (`TestReaperContract_ThePassTimeExcludesExpiration`).
 
-**A tree is always one atomic move, descendants included, and a deletion of a tree that fits a batch is one too.** A
-batch considers at most `Batch` roots and trims a leading run to about `BatchRows` joined step rows, always admitting
-the first tree (a flow with no steps counts one row). A tree to DELETE that is larger than a batch alone is deleted in
-chunks instead (below). The sizing is a hint outside the transaction, bounded by the attempt deadline; it is not a guard and is not
-cached. The transaction locks a sorted copy of the roots, rechecks eligibility under the lock, and processes their
-whole `root_flow_id` trees, steps before flows. PostgreSQL and MySQL skip held roots; SQLite and SQL Server wait
-under the deadline. `Transact` retries contention, including a straggler's reverse lock order. A stop records no
-failure; an uncertain commit is reconciled by scanning the live roots again, never by assuming an error proves a
-rollback.
+The root's disposition selects the operation; every mutation rechecks it under the root lock:
+
+| Root disposition | Operation | Recovery authority |
+|---|---|---|
+| Closed, unstamped, no attempt | Atomic archive, or start staging when oversized/preferred | Locked eligibility and the atomic attempt fence |
+| Closed, unstamped, attempt present | Resume staged copy without sizing | Attempt identity and the ordered rows already copied |
+| Stamped and due | Delete the live copy, atomically or in chunks | Root stamp; root removed last |
+| Archived and marked | Delete archive rows in chunks | Archive root mark; root removed last |
+
+A batch considers at most `Batch` roots. Capped counts trim a leading run to about `BatchRows` joined step rows,
+always admitting the first tree; a flow with no steps counts one. Sizing is a hint, not authority. Each transaction
+locks its roots in sorted order and rechecks eligibility. PostgreSQL and MySQL skip held roots; SQLite and SQL Server
+wait under the attempt deadline. `Transact` retries contention. A stop records no failure; an uncertain commit is
+reconciled from durable rows rather than treating an error as proof of rollback.
 
 **Two walkers share one traversal.** The fast walker keeps a position and advances past each attempted range,
 including a failed sizing or move. The repair walker independently covers **all due roots**, behind or ahead of the
@@ -94,8 +99,7 @@ wall. So a tree to delete - stamped, closed at a retention of 0, or past its ret
   every chunk, quadratic over the tree (measured 279 ms a chunk on PostgreSQL at 4,000 steps a child, and past the
   attempt at about a million). Step ids are read in `step_id` order from `idx_dwarf_steps_flow_id` and deleted by a
   literal list: a range or an ordered `DELETE` with a limit is not portable, and the read stays bounded by the flow's
-  own steps only with that index keyed on `(flow_id, step_id)` (`internal/migrations/CLAUDE.md`). The walk's first
-  sizing of its candidates (`rootsWithinRows`) still counts each tree whole.
+  own steps only with that index keyed on `(flow_id, step_id)` (`internal/migrations/CLAUDE.md`). Candidate sizing also uses capped counts (`rootsWithinRows`).
 - **The root goes only after a recheck that the tree holds nothing else:** two probes, the first remaining
   descendant and the first root step, not an `EXISTS` over the tree, which MariaDB materializes over the whole steps
   index (275 ms on a 100,000-child tree). The descendant probe seeks above the position's top: the walk has just found
@@ -110,7 +114,6 @@ wall. So a tree to delete - stamped, closed at a retention of 0, or past its ret
 - **`dwarf_flows_reaped` counts each chunk as it commits**, so a later chunk's failure or a stop loses none of it
   (`TestChunk_CommittedChunksAreCountedWhenALaterOneFails`), under the reason of the walk that deleted it: a tree
   retention or a retention of 0 stamped and a later pass finished counts the rest as `deleted`.
-- **Archiving stays atomic.** A tree to archive that is larger than a batch moves in one transaction.
 
 Pinned by `chunk_test.go`: a large tree deleted over several passes for each deleting kind, the root last and no step
 outliving its flow; a faulted chunk rolled back whole, the stamp kept; a restart (a fresh Reaper) resuming; two
@@ -141,7 +144,8 @@ transactions, invisible there, then published in one small one. **It is off in p
   show a staged tree under its attempt's time, not its publication's: a window that moves while archival runs is not
   a lossless feed of what was archived.
 - **Publication is the last chunk:** the root's last steps, its flow row, its directory row, and the live root
-  stamped `delete_after_ms=1` with T kept, in one transaction, no whole-tree statement. Stamped with T means
+  stamped `delete_after_ms=1` with T kept and its `archived_at` copied from the archive root, in one transaction,
+  no whole-tree statement. Stamped with T means
   published, so a lost response is retried as nothing to stage (`TestStage_APublishedTreeIsNotCopiedAgain`). The
   deletion kind then removes the live tree, **in the same pass**: a walk that published reports more work, so the pass
   runs its walks again rather than leave the live copy to the next tick (`TestStage_ALargeTreeIsPublishedWhole`).
@@ -149,21 +153,16 @@ transactions, invisible there, then published in one small one. **It is off in p
   one, still under the root lock and only while T is unchanged, starts a new attempt in today; the old rows went with
   their day (`TestStage_ADroppedDayIsReplaced`, `TestStage_AHalfDroppedDayIsReplaced`, the latter the reason the
   archiver drops a day's flows table first).
-- **The position is in memory** (`stagePos`, in `stages`, per shard and root, so the fast and repair walkers share
-  it). **A fresh one - a restart, another replica - resumes from the day itself**: descendants are copied in
-  `flow_id` order and each flow row after its steps, so every descendant up to the largest the day holds is whole, and
-  their count numbers the next one's stamp group. Do not start a fresh position at the first descendant: a restart
-  then re-reads the whole prefix at a chunk's budget, and a copier restarted every few chunks never gets past the first
-  descendants (`TestStage_ARestartAtEveryStep`). It
-  is still kept whenever the copy may go on, since the resume costs a count of what is there: **a root another transaction holds - another copier, a Fork - locks nothing, as
-  a stamped one does, and only a read of the root tells them apart** (`treeGone`). Do not forget the position when a
-  lock takes nothing: a large copy would restart at every collision, and two replicas would keep throwing away each
-  other's progress (`TestStage_AHeldRootKeepsItsCopysPosition`). A position is forgotten when the copy publishes or its tree
-  is stamped or gone; past `maxStages` per shard the least recently used goes, never the rest
-  (`TestStage_APublishedCopyIsForgotten`).
+- **The position is in memory** (`stagePos`), shared by the fast and repair walkers. A fresh position reads the
+  count and largest id of completed archived descendants, then the largest archived step id of the first incomplete
+  flow (or the root). Both are ordered prefixes written under the same attempt's root lock, so recovery skips work
+  already committed even when an individual flow spans many chunks. The descendant count costs a reread on recovery;
+  keep positions across ordinary lock collisions. `treeGone` distinguishes a held root from a stamped or absent one.
+  At `maxStages` the least recently used position is evicted, not the whole cache. Pinned by
+  `TestStage_RestartInsideLargeFlow`, `TestStage_AHeldRootKeepsItsCopysPosition` and `TestStage_APublishedCopyIsForgotten`.
 - **The atomic path is fenced**: `move` locks only roots with no attempt, so a selection made before a staging claim
   cannot move the tree atomically into a day that holds staged rows, and the walk sends a root with an attempt to the
-  staged path whatever its size, once its sizing succeeds (`rootsWithinRows` reads the attempt with the sizing;
+  staged path whatever its size, without sizing (`rootsWithinRows` reads attempts first;
   `TestStage_AnAttemptedRootIsStagedWhateverItsSize`).
 - **The day's gate stops new archives only** (`filingDay.startable`: before the quiet margin, tomorrow whole). A walk
   that may not start one spends its slice on the trees whose attempt has started (`resumeStarted`), each going on into
@@ -198,9 +197,10 @@ transactions, invisible there, then published in one small one. **It is off in p
   handoff or no room forgets a preference, and the tree times out once more before it is remembered: it is not a
   durable guarantee, the attempt is (`TestStage_ARestartForgetsOnlyThePreference`). A lock wait that ran out stages a
   tree that did not need it, which costs only transactions; do not add failure counters or timeout classes to avoid it.
-- **The oldest unpublished attempt the repair sweep sees is a gauge** (`dwarf_archive_oldest_attempt_seconds`), read
-  from the attempts the sizing reads anyway, the larger of the current sweep's and the last complete one's, aging
-  since: an incomplete sweep never reads as nothing outstanding. A replaced attempt starts its age again, so it is
+- **The oldest unpublished attempt is observed in both traversals**, including the scan used while new starts are
+  disabled. `walk.observeAttempts` compares samples at the same instant; a fresh age must not replace an older sample
+  merely because time passed between reads. `dwarf_archive_oldest_attempt_seconds` takes the larger of the current and
+  last complete sweep's ages, so an incomplete sweep does not erase the previous observation. A replaced attempt starts its age again, so it is
   read beside the archive lag (`TestStage_TheOldestUnpublishedAttemptIsObserved`).
 - **Copy progress is a counter apart from failures** (`dwarf_archive_staged_rows`): the rows each staging chunk
   inserted, counted as it commits, so a rerun over rows already there adds nothing. A growing attempt age with this
@@ -216,6 +216,16 @@ more than one row staged); run them so after a change to this protocol.
 Pinned by `stage_test.go` and the engine's `TestStaged_ATreeArchivedInStagesReadsAsOne` (reads mid-copy, after
 publication, and after the live copy goes).
 
+## Publication cleanup accounting
+
+`dwarf_flows_archived` counts publication. `dwarf_flows_reaped` counts live removals without publication, so their sum
+does not count a staged tree twice. Both atomic and chunked deletions return physical removals separately from
+unarchived removals, classified under the root lock. The live root retains its actual `archived_at` until cleanup;
+Delete clears the attempt to revoke routing authority but preserves this accounting provenance. A stamp with an
+attempt also establishes publication. An unstarted/partly copied tree keeps the far-future archive-time sentinel.
+`TestStage_PublishedCleanupNotUnarchived` covers atomic and chunked cleanup, mixed batches, and Delete before or during
+cleanup. This provenance is not a visibility or authorization guard.
+
 ## Archive failures never become permission to delete
 
 At a positive retention an archive failure keeps the tree live. The retention walker deletes an unstamped closed tree
@@ -225,9 +235,9 @@ retention. The retention walk needs no archive tables and no whole tomorrow. Sta
 their own authority. A late successful move still takes its retention from its filing day.
 
 **Every scan, sizing, day lookup and tree transaction has the same `Attempt` limit.** The slice and budget yield
-between attempts and never interrupt a transaction. Atomicity does not make an arbitrarily large tree serviceable: one
-that keeps missing its attempt limit stays whole and is retried indefinitely, DeleteOnCompletion and retention
-included. Do not add a destructive fallback to get past it; the operator repairs the bottleneck. Driver cancellation
+between attempts and never interrupt a transaction. Large deletions use chunks; when staging is enabled, a singleton
+atomic archive timeout records a preference for staging. A chunk that cannot complete still needs the bottleneck
+repaired. An archive failure never authorizes deletion before retention. Driver cancellation
 must leave pooled connections usable: `TestWalk_ABlockedAttemptIsAFailureAndAStopIsNot` reads through the pool right
 after a cancelled attempt.
 
@@ -286,7 +296,9 @@ value as a pass's `BatchRows`, passed in explicitly.
     not probe every day before deleting, nor start from the first tree each time: one slow day's probe, or one tree
     whose chunk waits out the budget, then takes every pass (`TestDelete_AStuckMarkedTreeDoesNotStarveTheOthers`,
     `TestDelete_EachCallGetsPastWhereTheLastStopped`).
-  - **The first tree a pass finds gets at least one chunk** however the budget went, so a pass always makes progress.
+  - **Discovery checks the budget after its first probe**, even if probes fail or find no marked root. Its next-day
+    position advances independently of deletion work. The first root found within those probes gets at least one chunk
+    even if its probe spent the budget (`TestDelete_MarkedDiscoveryRespectsBudget`).
   - **On MySQL and MariaDB the probe names the index, and falls back to a probe without it**: a day made before the
     index has none, and a hint naming a missing index is an error there
     (`TestDelete_ADayWithoutTheDeletionIndexIsSwept`).

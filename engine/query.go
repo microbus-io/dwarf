@@ -123,7 +123,7 @@ func scanListRow(rows *sequel.Rows, shardIdx int, withDay bool) (listRow, error)
 	case rootFlowToken.Valid:
 		lr.summary.RootFlowKey = keys.NewFlowKey(shardIdx, int(rootFlowHour.Int64), rootFlowID, rootFlowToken.String)
 	}
-	// A live row's archived_at is the far-future sentinel, so the column itself says whether the flow is archived.
+	// Visible live rows keep the far-future sentinel; a published live root is hidden by its stamp.
 	if archivedAt.Year() < database.MaxSQLTime().Year() {
 		lr.summary.ArchivedAt = archivedAt
 	}

@@ -124,7 +124,7 @@ func (p *pass) scanDue(ctx context.Context, k kind, residency string, residencyA
 }
 
 // batchOf is move under the attempt deadline, on the pass's shard.
-func (p *pass) batchOf(ctx context.Context, rootIDs []int, k kind, d *filingDay) (int, error) {
+func (p *pass) batchOf(ctx context.Context, rootIDs []int, k kind, d *filingDay) (removal, error) {
 	ctx, cancel := p.attemptCtx(ctx)
 	defer cancel()
 	return p.r.move(ctx, p.shard.DB, rootIDs, k, d)
@@ -136,7 +136,8 @@ func (p *pass) batchOf(ctx context.Context, rootIDs []int, k kind, d *filingDay)
 // flows it moved. The caller provides a non-nil archive, and makes sure the tables of d and of the day after it are
 // whole: MoveTrees checks neither, and a locate relies on the day after being whole. It locks each root as Pass does.
 func (r *Reaper) MoveTrees(ctx context.Context, db *sequel.DB, archive *archiver.Archive, d int, roots []int) (moved int, err error) {
-	return r.move(ctx, db, roots, closedDue(0, 0), &filingDay{day: d, archive: archive})
+	n, err := r.move(ctx, db, roots, closedDue(0, 0), &filingDay{day: d, archive: archive})
+	return n.flows, err
 }
 
 // move removes the trees of the roots it can lock among rootIDs, in any order, in one transaction: moved into d's
@@ -144,7 +145,7 @@ func (r *Reaper) MoveTrees(ctx context.Context, db *sequel.DB, archive *archiver
 //
 // Root locks and eligibility rechecks arbitrate overlapping replicas. PostgreSQL and MySQL skip held roots; elsewhere
 // the attempt waits under its deadline. Transact retries contention, including straggler lock inversions.
-func (r *Reaper) move(ctx context.Context, db *sequel.DB, rootIDs []int, k kind, d *filingDay) (int, error) {
+func (r *Reaper) move(ctx context.Context, db *sequel.DB, rootIDs []int, k kind, d *filingDay) (removal, error) {
 	rootIDs = slices.Sorted(slices.Values(rootIDs))
 	due, dueArgs := k.due, k.dueArgs
 	if d != nil {
@@ -152,9 +153,9 @@ func (r *Reaper) move(ctx context.Context, db *sequel.DB, rootIDs []int, k kind,
 		none, noneArg := NoAttemptSQL(db.DriverName())
 		due, dueArgs = due+" AND archive_attempt_at<="+none, append(slices.Clone(dueArgs), noneArg)
 	}
-	var moved int
+	var moved removal
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
-		moved = 0
+		moved = removal{}
 		locked, err := lockRoots(ctx, tx, live.flows, true, "flow_id IN ("+intCSV(rootIDs)+") AND "+due, dueArgs...)
 		if err != nil || len(locked) == 0 {
 			return errors.Trace(err)
@@ -163,6 +164,14 @@ func (r *Reaper) move(ctx context.Context, db *sequel.DB, rootIDs []int, k kind,
 		// ids are trusted integers embedded as literals to dodge the per-driver bind-param ceiling.
 		ids := intCSV(locked)
 		trees := "SELECT flow_id FROM dwarf_flows WHERE root_flow_id IN (" + ids + ")"
+		published := 0
+		if d == nil {
+			cond, args := publishedSQL(tx.DriverName())
+			// Only an atomic batch is counted here, under its root locks; large trees use chunks.
+			if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE root_flow_id IN (SELECT flow_id FROM dwarf_flows WHERE flow_id IN ("+ids+") AND "+cond+")", args...).Scan(&published); err != nil {
+				return errors.Trace(err)
+			}
+		}
 		steps := "DELETE FROM dwarf_steps WHERE flow_id IN (" + trees + ")"
 		flows := "DELETE FROM dwarf_flows WHERE root_flow_id IN (" + ids + ")"
 		// FaultContention fails every attempt of an archive move on lock contention.
@@ -232,10 +241,16 @@ func (r *Reaper) move(ctx context.Context, db *sequel.DB, rootIDs []int, k kind,
 			return errors.Trace(err)
 		}
 		n, _ := res.RowsAffected()
-		moved = int(n)
+		moved.flows = int(n)
+		if d == nil {
+			moved.unarchived = moved.flows - published
+		}
 		return nil
 	})
-	return moved, errors.Trace(err)
+	if err != nil {
+		return removal{}, errors.Trace(err)
+	}
+	return moved, nil
 }
 
 // liveOnlyColumn is the one column of dwarf_flows the day tables do not have: a live root's archive attempt, which

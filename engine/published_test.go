@@ -53,7 +53,7 @@ func publish(t *testing.T, e *Engine, rootKey string, at time.Time) (day int) {
 		{"INSERT INTO " + migrations.StepsTable(day) + " SELECT * FROM dwarf_steps WHERE flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id=?)", []any{rootID}},
 		{"INSERT INTO " + migrations.FlowsTable(day) + " (" + cols + ") SELECT " + cols + " FROM dwarf_flows WHERE root_flow_id=?", []any{rootID}},
 		{"UPDATE " + migrations.FlowsTable(day) + " SET archived_at=" + stamp + " WHERE root_flow_id=?", []any{arg, rootID}},
-		{"UPDATE dwarf_flows SET delete_after_ms=1, archive_attempt_at=" + stamp + " WHERE flow_id=?", []any{arg, rootID}},
+		{"UPDATE dwarf_flows SET delete_after_ms=1, archive_attempt_at=" + stamp + ", archived_at=" + stamp + " WHERE flow_id=?", []any{arg, arg, rootID}},
 	} {
 		if _, err := db.ExecContext(ctx, stmt.sql, stmt.args...); err != nil {
 			t.Fatal(err)
@@ -70,11 +70,13 @@ func attemptCleared(t *testing.T, e *Engine, rootKey string) bool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	published, err := livePublished(t.Context(), db, rootID)
+	column, args := publicationColumn(db.DriverName(), liveTables)
+	var published int
+	err = db.QueryRowContext(t.Context(), "SELECT "+column+" FROM dwarf_flows WHERE flow_id=?", append(args, rootID)...).Scan(&published)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return !published
+	return published == 0
 }
 
 // archiveMark returns the archive root's delete_after_ms in day, and -1 when the row is not there.

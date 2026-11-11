@@ -112,3 +112,11 @@ func (r *Reaper) DeleteLive(ctx context.Context, db *sequel.DB, dayLength time.D
 	}
 	return result, nil
 }
+
+// publishedSQL identifies published roots for cleanup accounting. The archive time survives Delete clearing
+// the attempt; a stamped root with its attempt still set also establishes publication.
+func publishedSQL(driver string) (string, []any) {
+	cond, args := AttemptedSQL(driver)
+	sentinel, arg := database.SQLTime(driver, database.MaxSQLTime().Truncate(time.Second))
+	return "((delete_after_ms>0 AND " + cond + ") OR archived_at<" + sentinel + ")", append(args, arg)
+}

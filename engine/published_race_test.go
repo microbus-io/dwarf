@@ -1,0 +1,74 @@
+/*
+Copyright (c) 2026 Microbus LLC and various contributors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package engine
+
+import (
+	"testing"
+	"time"
+
+	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/keys"
+	"github.com/microbus-io/errors"
+)
+
+func TestPublished_ContinueRacingLiveCleanup(t *testing.T) {
+	ctx := t.Context()
+	e := archiveEngine(t, treeMux(), 30)
+	root, _, _, _ := treeKeys(t, e)
+	publish(t, e, root, time.Now())
+	e.seams.Break(engineseams.CheckpointContinuePublished)
+	defer e.seams.Resume(engineseams.CheckpointContinuePublished)
+	done := make(chan error, 1)
+	go func() { _, err := e.Continue(ctx, root, nil); done <- err }()
+	if !e.seams.WaitTimeout(ctx, engineseams.CheckpointContinuePublished, 10*time.Second) {
+		t.Fatal("checkpoint not reached")
+	}
+	e.reapDueFlows(ctx)
+	_, _, id, _, _ := keys.ParseFlowKey(root)
+	n, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", id)
+	if n != 0 {
+		t.Fatalf("live cleanup incomplete: %d", n)
+	}
+	e.seams.Resume(engineseams.CheckpointContinuePublished)
+	err := <-done
+	if err != nil {
+		t.Fatalf("Continue rejected published source after live cleanup: status=%d err=%v", errors.StatusCode(err), err)
+	}
+}
+
+func TestPublished_ForkRacingLiveCleanup(t *testing.T) {
+	ctx := t.Context()
+	e := archiveEngine(t, treeMux(), 30)
+	db, _ := e.db.Shard(1)
+	if db.DriverName() != "pgx" {
+		t.Skip("requires PostgreSQL nonlocking refusal read")
+	}
+	root, _, step, _ := treeKeys(t, e)
+	publish(t, e, root, time.Now())
+	e.seams.Break(engineseams.CheckpointForkPublished)
+	defer e.seams.Resume(engineseams.CheckpointForkPublished)
+	done := make(chan error, 1)
+	go func() { _, err := e.Fork(ctx, step, nil); done <- err }()
+	if !e.seams.WaitTimeout(ctx, engineseams.CheckpointForkPublished, 10*time.Second) {
+		t.Fatal("checkpoint not reached")
+	}
+	e.reapDueFlows(ctx)
+	e.seams.Resume(engineseams.CheckpointForkPublished)
+	if err := <-done; err != nil {
+		t.Fatalf("Fork failed during published source cleanup: status=%d err=%v", errors.StatusCode(err), err)
+	}
+}

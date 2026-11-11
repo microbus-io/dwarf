@@ -3760,10 +3760,12 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
     there (`sequel.IsUndefinedTableError`: a day dropped since the locate, or a directory row outliving its day, which
     the locate returns unchecked) is a 404. Any other error is returned. Fork of a marked tree is a 404 too: it is
     deleted. Pinned by `TestArchiveVisibility_*`.
-  - **A live root stamped with an archive attempt is published** (`livePublished`): every stamp but a publication
+  - **A live root stamped with an archive attempt is published** (`publicationColumn`): every stamp but a publication
     clears the attempt (`internal/reaper/CLAUDE.md`). Its live copy is being deleted, so Step, Summary, History and the
     lists read the archive's copy, Snapshot serves the live root until it goes, and Fork and Continue take the
-    archive's copy as their source. `Delete` uses the locked mutation described above. Pinned by `TestPublished_*`.
+    archive's copy as their source. Continue and Fork read this disposition with the status/stamp in one statement;
+    a follow-up lookup can lose the live row to cleanup and misclassify a published source as deleted. `Delete` uses
+    the locked mutation described above. Pinned by `TestPublished_*`.
   - **An archived flow that has not closed is a 500 from `Snapshot`**: only a bug leaves one, and reported as running
     it would hold an `Await` until its deadline. An interrupted flow is never archived, so `Snapshot`'s interrupted
     branch reads the live tables only.

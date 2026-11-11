@@ -27,6 +27,9 @@ import (
 	"github.com/microbus-io/sequel"
 )
 
+// removal separates physical live cleanup from removal without an archive copy.
+type removal struct{ flows, unarchived int }
+
 // treeChunk is how many descendant flows one statement of a chunked deletion names: a literal IN list of a size every
 // dialect plans.
 const treeChunk = 256
@@ -47,8 +50,8 @@ func (p *pass) deleteLarge(ctx context.Context, k kind, root int, reason string,
 	var pos chunkPos
 	for {
 		n, done, err := p.deleteChunk(ctx, root, &pos)
-		removed += n
-		p.r.metrics.flowsReaped(ctx, p.shard.Index, reason, n)
+		removed += n.flows
+		p.r.metrics.flowsReaped(ctx, p.shard.Index, reason, n.unarchived)
 		if err != nil {
 			return removed, false, errors.Trace(err)
 		}
@@ -118,7 +121,7 @@ func archiveTarget(day int) chunkTarget {
 }
 
 // deleteChunk is chunk on the live tables, under the attempt deadline, with the pass's batch as its budget.
-func (p *pass) deleteChunk(ctx context.Context, root int, pos *chunkPos) (deleted int, done bool, err error) {
+func (p *pass) deleteChunk(ctx context.Context, root int, pos *chunkPos) (deleted removal, done bool, err error) {
 	ctx, cancel := p.attemptCtx(ctx)
 	defer cancel()
 	return p.r.chunk(ctx, p.shard.DB, liveTarget, root, p.cfg.BatchRows, pos)
@@ -128,12 +131,12 @@ func (p *pass) deleteChunk(ctx context.Context, root int, pos *chunkPos) (delete
 // steps, then the root itself after a recheck that the tree holds nothing else. It returns how many flows it deleted,
 // and done when the tree is gone or is not this call's: the root no longer meets tgt.due, or is held by another
 // transaction. On an archive day the directory's rows for the deleted flows go with them.
-// pos advances only when the chunk commits.
+// pos advances only when the chunk commits. Its result separates physical removals from unarchived live removals.
 //
 // Every read is bounded by the budget, not by the tree: which descendants fit is decided by counting at most the
 // budget's worth of their steps, halving the run of descendants until it fits, so a flow of a million steps costs a
 // chunk no more than one of a thousand.
-func (r *Reaper) chunk(ctx context.Context, db *sequel.DB, tgt chunkTarget, root, budget int, pos *chunkPos) (deleted int, done bool, err error) {
+func (r *Reaper) chunk(ctx context.Context, db *sequel.DB, tgt chunkTarget, root, budget int, pos *chunkPos) (deleted removal, done bool, err error) {
 	id := strconv.Itoa(root)
 	flowsTable, stepsTable := tgt.t.flows, tgt.t.steps
 	// dropFlows deletes the flows in list, and the directory's rows for them on an archive day.
@@ -151,8 +154,10 @@ func (r *Reaper) chunk(ctx context.Context, db *sequel.DB, tgt chunkTarget, root
 		return int(n), nil
 	}
 	var at chunkPos
+	var published int
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
-		deleted, done, at = 0, false, *pos
+		deleted, done, at = removal{}, false, *pos
+		published = 0
 		locked, err := lockRoots(ctx, tx, flowsTable, true, "flow_id="+id+" AND "+tgt.due)
 		if err != nil {
 			return errors.Trace(err)
@@ -160,6 +165,12 @@ func (r *Reaper) chunk(ctx context.Context, db *sequel.DB, tgt chunkTarget, root
 		if len(locked) == 0 {
 			done = true
 			return nil
+		}
+		if !tgt.directory {
+			cond, args := publishedSQL(tx.DriverName())
+			if err := tx.QueryRowContext(ctx, "SELECT CASE WHEN "+cond+" THEN 1 ELSE 0 END FROM dwarf_flows WHERE flow_id="+id, args...).Scan(&published); err != nil {
+				return errors.Trace(err)
+			}
 		}
 		budget := max(budget, 1)
 		for budget > 0 {
@@ -193,7 +204,7 @@ func (r *Reaper) chunk(ctx context.Context, db *sequel.DB, tgt chunkTarget, root
 				if err != nil {
 					return errors.Trace(err)
 				}
-				deleted += flows
+				deleted.flows += flows
 				budget -= n + 1
 				at.below, at.stepFlow, at.stepAfter = children[0], 0, 0
 				continue
@@ -235,7 +246,7 @@ func (r *Reaper) chunk(ctx context.Context, db *sequel.DB, tgt chunkTarget, root
 			if err != nil {
 				return errors.Trace(err)
 			}
-			deleted += flows
+			deleted.flows += flows
 			budget -= int(steps) + run
 			at.below = children[run-1]
 		}
@@ -281,12 +292,15 @@ func (r *Reaper) chunk(ctx context.Context, db *sequel.DB, tgt chunkTarget, root
 		if err != nil {
 			return errors.Trace(err)
 		}
-		deleted += rows
+		deleted.flows += rows
 		done = true
 		return nil
 	})
 	if err != nil {
-		return 0, false, errors.Trace(err)
+		return removal{}, false, errors.Trace(err)
+	}
+	if !tgt.directory && published == 0 {
+		deleted.unarchived = deleted.flows
 	}
 	*pos = at
 	return deleted, done, nil

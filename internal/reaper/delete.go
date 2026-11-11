@@ -175,7 +175,7 @@ func (r *Reaper) DeleteMarked(ctx context.Context, cfg Config, s Shard) {
 	var wrap []int
 	for n := range days {
 		day := days[(first+n)%len(days)]
-		if ctx.Err() != nil || (worked && spent()) {
+		if ctx.Err() != nil || (n > 0 && spent()) {
 			unknown++ // not reached
 			continue
 		}
@@ -190,16 +190,25 @@ func (r *Reaper) DeleteMarked(ctx context.Context, cfg Config, s Shard) {
 			unknown++
 			continue
 		}
-		for _, root := range roots {
+		for i, root := range roots {
 			if n == 0 && day == from.day && root <= from.root {
 				wrapDay, wrap = day, append(wrap, root)
 				continue
 			}
 			try(day, root)
+			if i == len(roots)-1 && state.from == (markedTree{day: day, root: root}) {
+				state.from = markedTree{day: day + 1}
+			}
 		}
 	}
-	for _, root := range wrap {
-		try(wrapDay, root)
+	// Do not revisit the starting prefix before reaching the other days. With a spent discovery budget that
+	// would put the position back on the same held tree every pass.
+	if unknown > 0 {
+		left += len(wrap)
+	} else {
+		for _, root := range wrap {
+			try(wrapDay, root)
+		}
 	}
 	if ctx.Err() == nil {
 		state.pending, state.unknown, state.observed = left, unknown, true

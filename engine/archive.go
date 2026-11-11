@@ -204,18 +204,14 @@ func liveFlowStanding(ctx context.Context, db *sequel.DB, flowID int) (bool, err
 	return err == nil, errors.Trace(err)
 }
 
-// livePublished reports whether the live root with flowID is published to the archive: stamped for deletion with an
-// archive attempt, which only a publication leaves, since every other stamp clears the attempt. Its live copy is being
-// deleted, and a read that needs the whole tree takes the archive's.
-func livePublished(ctx context.Context, x sequel.Executor, flowID int) (bool, error) {
-	cond, args := reaper.AttemptedSQL(x.DriverName())
-	var one int
-	err := x.QueryRowContext(ctx, "SELECT 1 FROM dwarf_flows WHERE flow_id=? AND delete_after_ms>0 AND "+cond,
-		append([]any{flowID}, args...)...).Scan(&one)
-	if err == sql.ErrNoRows {
-		return false, nil
+// publicationColumn reads a live root's publication disposition with its status and stamp. Archive tables have no
+// attempt column; their visibility is checked separately.
+func publicationColumn(driver string, t flowTables) (string, []any) {
+	if t != liveTables {
+		return "0", nil
 	}
-	return err == nil, errors.Trace(err)
+	cond, args := reaper.AttemptedSQL(driver)
+	return "CASE WHEN delete_after_ms>0 AND " + cond + " THEN 1 ELSE 0 END", args
 }
 
 // archiveFlowVisible reports whether t's flows table holds the flow with flowID, visible: its root in the same table and
