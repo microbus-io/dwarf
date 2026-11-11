@@ -22,7 +22,6 @@ import (
 	"math"
 	"os"
 	"slices"
-	"strconv"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/database"
@@ -61,9 +60,6 @@ import (
 // or "debug" for the flow-status play-by-play; "silent" or "off" for the discard logger). A benchmark or
 // fuzz target silences the engine itself with SetLogger, since per-iteration logging would dominate the
 // measurement / flood the fuzz output; SetLogger before Startup takes over entirely either way.
-//
-// DWARF_TEST_STAGE_ROWS, a positive number of rows, archives every tree larger than that in stages rather than in one
-// transaction, so a suite can be run with staged archival on.
 func NewEngineUnderTest(testName string) *Engine {
 	e := NewEngine()
 	level := slog.LevelError
@@ -90,13 +86,6 @@ func NewEngineUnderTest(testName string) *Engine {
 	// A pass in a day's last moments archives as at any other time: the quiet margin is pinned by its own test, and
 	// left on it would hold back every archiving test that runs then.
 	e.noReapQuiet = true
-	// DWARF_TEST_STAGE_ROWS archives every tree over that many rows in stages, so a suite can run with staging on:
-	// 1 stages every tree of more than one row.
-	if s := os.Getenv("DWARF_TEST_STAGE_ROWS"); s != "" {
-		if n, err := strconv.Atoi(s); err == nil && n > 0 {
-			e.reapStageRows = n
-		}
-	}
 	return e
 }
 

@@ -238,3 +238,23 @@ func TestRetention_TheGraceFromTheEnvironment(t *testing.T) {
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 	assert.Equal(5*time.Second, e.archiveGrace)
 }
+
+// TestRetention_TheStagingThresholdFromTheEnvironment pins the benchmark's staging override: a value that is not a
+// whole number of rows of at least 0 fails Startup with a 400 before any shard opens, and a good one is the threshold
+// the reaper stages above. Not parallel: it sets an environment variable.
+func TestRetention_TheStagingThresholdFromTheEnvironment(t *testing.T) {
+	assert := testarossa.For(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(context.Background())
+	e.SetHost(hosts.NewMux())
+	for _, bad := range []string{"-1", "lots", "1.5"} {
+		t.Setenv(stageRowsEnv, bad)
+		err := e.Startup(t.Context())
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "%q", bad)
+		assert.Len(e.db.Indices(), 0, "%q left shards open", bad)
+	}
+	t.Setenv(stageRowsEnv, "131072")
+	assert.Must(assert.NoError(e.Startup(t.Context())))
+	assert.Equal(131072, e.reapStageRows)
+	assert.Equal(131072, e.reaperConfig(t.Context(), e.archives.Load(), 0).StageRows)
+}

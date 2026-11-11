@@ -22,6 +22,7 @@ import (
 	"database/sql"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/archiver"
@@ -262,6 +263,28 @@ func (e *Engine) applyArchiveGraceEnv(ctx context.Context) error {
 	// Loud, because a grace other than the minute changes when every closed flow leaves the live tables.
 	e.logger.WarnContext(ctx, "The archive's grace is set by "+archiveGraceEnv+"; it is for benchmarks only", "grace", d)
 	e.archiveGrace = d
+	return nil
+}
+
+// stageRowsEnv names the environment variable that sets the size, in rows, above which a closed tree is archived in
+// stages rather than in one transaction, for the benchmark rig and the staging-on test runs, as a whole number of rows
+// of at least 0 (0, off). A rig cannot reach a test-only override, and staged archival is off until its threshold is
+// qualified. Production leaves it unset.
+const stageRowsEnv = "DWARF_STAGE_ROWS"
+
+// applyStageRowsEnv sets this run's staging threshold from stageRowsEnv, when it is set.
+func (e *Engine) applyStageRowsEnv(ctx context.Context) error {
+	v := os.Getenv(stageRowsEnv)
+	if v == "" {
+		return nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return errors.New("%s must be a whole number of rows, at least 0, not %q", stageRowsEnv, v, http.StatusBadRequest)
+	}
+	// Loud, because it changes how every large tree leaves the live tables.
+	e.logger.WarnContext(ctx, "Staged archival is set by "+stageRowsEnv+"; it is for benchmarks only", "rows", n)
+	e.reapStageRows = n
 	return nil
 }
 

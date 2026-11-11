@@ -31,9 +31,9 @@ and calls `Startup` itself.
   a name, so it cannot tell a benchmark from a test: **a benchmark or fuzz target silences the engine** with
   `SetLogger(slog.New(slog.DiscardHandler))` (`fixtures/benchmark_test.go`) - per-iteration logging otherwise
   dominates the measurement / floods the fuzz output. `SetLogger` before `Startup` takes over entirely.
-- **`DWARF_TEST_STAGE_ROWS=<n>` runs the suite with staged archival on**: the constructor sets the engine's
+- **`DWARF_STAGE_ROWS=<n>` runs the suite with staged archival on**: every engine's Startup reads it into
   `reapStageRows`, so every tree over `n` rows is archived in stages (`internal/reaper/CLAUDE.md`). `1` stages every
-  tree of more than one row. Off by default, as in production.
+  tree of more than one row. Off when unset, as in production; the engine logs a warning when it is set.
 
 The `testHashedID` switches the open path into test mode: `resolveShardDSN` (`internal/database`)
 resolves the base DSN in three tiers - an explicitly-set DSN wins; else `SEQUEL_TESTING_DSN` (the same variable

@@ -210,7 +210,7 @@ transactions, invisible there, then published in one small one. **It is off in p
   it copied stay in the day, invisible, until the day drops (`TestStage_ADeleteAbandonsTheCopy`).
 
 `FaultArchiveErr` fails a staging chunk as it fails a move, so a test that makes archiving fail makes it fail on
-either path. **The engine and fixtures suites run with staging on** under `DWARF_TEST_STAGE_ROWS=1` (every tree of
+either path. **The engine and fixtures suites run with staging on** under `DWARF_STAGE_ROWS=1` (every tree of
 more than one row staged); run them so after a change to this protocol.
 
 Pinned by `stage_test.go` and the engine's `TestStaged_ATreeArchivedInStagesReadsAsOne` (reads mid-copy, after

@@ -840,6 +840,9 @@ func (e *Engine) Startup(ctx context.Context) error {
 	if err := e.applyArchiveGraceEnv(ctx); err != nil {
 		return errors.Trace(err)
 	}
+	if err := e.applyStageRowsEnv(ctx); err != nil {
+		return errors.Trace(err)
+	}
 	// Resolved before the shards open, so the migrations trace through the same provider as everything after.
 	tp := e.initTracer()
 	err = e.db.Open(ctx, database.Config{
