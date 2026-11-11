@@ -367,10 +367,11 @@ func seedWideTree(t *testing.T, db *sequel.DB, rootSteps, children, steps int) i
 	return root
 }
 
-// stampTree marks the tree rooted at root for deletion, due at once, as Delete does.
+// stampTree marks the tree rooted at root for deletion, as Delete does, and backdates it a second: a stamp in the
+// millisecond the tree was seeded is not due yet on the database clock.
 func stampTree(t *testing.T, db *sequel.DB, root int) {
 	t.Helper()
-	if _, err := db.ExecContext(t.Context(), "UPDATE dwarf_flows SET delete_after_ms=1 WHERE flow_id=?", root); err != nil {
+	if _, err := db.ExecContext(t.Context(), "UPDATE dwarf_flows SET delete_after_ms=1, updated_at=DATE_ADD_MILLIS(NOW_UTC(), -1000) WHERE flow_id=?", root); err != nil {
 		t.Fatal(err)
 	}
 }
