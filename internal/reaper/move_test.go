@@ -158,7 +158,7 @@ func TestMove_ResidencySplitsTheDueRoots(t *testing.T) {
 	var err error
 	roots := seedTrees(t, db, 4, soloShape)
 	selectWith := func(kind kind, ordinal int) []int {
-		residency, residencyArgs, _, _ := residencyClause(2, ordinal, true, kind)
+		residency, residencyArgs := residencyClause(2, ordinal, true, kind)
 		roots, _, err := r.p().scanDue(ctx, kind, residency, residencyArgs, r.cfg.Batch)
 		assert.NoError(err)
 		return rootIDs(roots)

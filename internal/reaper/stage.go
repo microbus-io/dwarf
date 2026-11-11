@@ -203,8 +203,8 @@ func (p *pass) stageChunk(ctx context.Context, root int, a *archiver.Archive, po
 			done = true
 			return nil
 		}
-		if p.r.seams.Enabled() && p.r.seams.IsFault(join(FaultStageChunk, id)) {
-			return errors.New("injected fault: " + FaultStageChunk)
+		if err := p.r.faultOn(FaultStageChunk, root); err != nil {
+			return err
 		}
 		// FaultArchiveErr fails every archive write, a staging chunk as a move.
 		if p.r.seams.IsFault(FaultArchiveErr) {
@@ -267,22 +267,10 @@ func (p *pass) stageChunk(ctx context.Context, root int, a *archiver.Archive, po
 				at.flow, at.stepAfter = root, 0
 				break
 			}
-			// The longest leading run whose steps and flow rows fit what is left of the budget. The budget is charged
-			// what the run reads, whether or not a row is there already.
-			run, steps := len(children), 0
-			for run > 0 {
-				room := budget - run
-				if room >= 0 {
-					n, err := stepsUpTo(ctx, tx, live.steps, children[:run], room+1)
-					if err != nil {
-						return errors.Trace(err)
-					}
-					if n <= room {
-						steps = n
-						break
-					}
-				}
-				run /= 2
+			// The budget is charged what the run reads, whether or not a row is there already.
+			run, steps, err := fitRun(ctx, tx, live.steps, children, budget)
+			if err != nil {
+				return errors.Trace(err)
 			}
 			if run == 0 {
 				// The next descendant alone is over what is left: part of its steps now, the rest in the next chunk.
@@ -395,8 +383,7 @@ func (c *stageCopy) inserted(res sql.Result) {
 // stepsFrom copies up to limit steps of flow after the step after, in step_id order, and returns how many it read and
 // the last one's id. The ids are read first and copied by a literal list, as a chunked deletion reads them.
 func (c *stageCopy) stepsFrom(ctx context.Context, tx *sequel.Tx, flow, after, limit int) (n, last int, err error) {
-	ids, err := ints(ctx, tx, "SELECT step_id FROM dwarf_steps WHERE flow_id="+strconv.Itoa(flow)+" AND step_id>"+
-		strconv.Itoa(after)+" ORDER BY step_id LIMIT_OFFSET(?, 0)", limit)
+	ids, err := stepIDsAfter(ctx, tx, "dwarf_steps", flow, after, limit)
 	if err != nil || len(ids) == 0 {
 		return 0, after, errors.Trace(err)
 	}

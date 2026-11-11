@@ -3533,7 +3533,7 @@ window in which a disposable flow's outcome stays readable.
 
 Deleting without archiving is either operator-driven (`Delete`, `Purge`) or an explicit author opt-in
 (`DeleteOnCompletion`): a flow whose output and history are not needed. `Delete` reaches both sides: a closed flow
-still live is marked, an archived one deleted at once in its day (`reaper.DeleteArchivedTree`); `Purge` reads only
+still live is marked, an archived one deleted at once in its day (`reaper.DeleteArchivedRoots` with the one root); `Purge` reads only
 the archive and deletes there (`purge.go`). On the archive side a tree larger than a batch is marked - gone from every
 read at once, and counted removed - deleted in chunks for up to `archiveDeleteInCall` (5 s) inside the call, and
 finished by the reaper's five-minute stage (`DeleteMarked`). `dwarf_archive_deletions_pending` counts discovered
@@ -3570,7 +3570,7 @@ terminate inside a delete, and nothing either operation does can then race a `Re
   `reaper.DeleteLive`, which decides under the live root lock whether to stamp the root, accept an existing deletion,
   or mark a published archive copy. The returned counts feed `dwarf_flows_removed` for the appropriate side.
   A missing live root goes to archive lookup (`deleteArchivedFlow`), which authenticates the archived row and rejects
-  a child's key before `reaper.DeleteArchivedTree`. Small archived trees are deleted atomically; larger ones are
+  a child's key before `reaper.DeleteArchivedRoots`. Small archived trees are deleted atomically; larger ones are
   marked and drained within the call's allowance, then finished by the background pass. A missing or hidden archived
   tree is a 404. Root locking serializes these operations with Fork. The lock and publication protocol belongs to
   `internal/reaper/CLAUDE.md`; the API race tests are `TestArchiving_DeleteOfATreeArchivedMeanwhileDeletesItThere`

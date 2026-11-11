@@ -17,7 +17,7 @@ limitations under the License.
 /*
 Package reaper removes closed trees from one shard's live tables: it archives each closed root's tree into the
 archive day it is filed in, deletes the trees stamped for deletion, and deletes an unarchived tree once its retention
-has passed. It also deletes archived trees for a caller that removes them (DeleteArchivedTree, DeleteArchivedRoots).
+has passed. It also deletes archived trees for a caller that removes them (DeleteArchivedRoots).
 
 A Reaper holds what its passes learned, per shard: where each walk over the due roots stands, since when archiving
 has been failing, and the archive lag. Build one per run with New, before anything reads it, and drive it:

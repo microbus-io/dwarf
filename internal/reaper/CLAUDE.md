@@ -27,9 +27,8 @@ live tables it runs (as `internal/piston` does, borrowing its handle and partiti
 - **The engine keeps** the ticker, the per-shard turn, the `dispatchesOn` gate (and `Forget` when it fails),
   expiration after the pass, the gauges, `dwarf_flows_removed`, and Delete's key and status validation. The gauges
   stay there because they are gated on dispatching when read, while `Forget` runs only at the next pass.
-- **Operation-level exports only.** `MoveTrees`, `DeleteLive`, `DeleteArchivedTree`, `DeleteArchivedRoots` and
-  `DeleteMarked` are operations;
-  nothing exports a transaction or a lock. A later protocol step that needs the root lock is added here as an
+- **Operation-level exports only.** `MoveTrees`, `DeleteLive`, `DeleteArchivedRoots` and `DeleteMarked` are
+  operations; nothing exports a transaction or a lock. A later protocol step that needs the root lock is added here as an
   operation too, so the lock order stays in one package.
 
 ## A pass
@@ -279,8 +278,8 @@ other; the engine's `lockRows` names this one, and Fork's pins stay in the engin
 
 ## Archive-side deletion
 
-`DeleteArchivedTree` (Delete) and `DeleteArchivedRoots` (Purge) run on the caller's context: no attempt deadline and
-none of the pass's faults, since an operator's call has its own deadline
+`DeleteArchivedRoots` (Delete, with one root; Purge) runs on the caller's context: no attempt deadline and none of
+the pass's faults, since an operator's call has its own deadline
 (`TestReaperContract_RemovalsRunOnTheCallersContext`). Purge's row budget is the engine's `reapBatchRows`, the same
 value as a pass's `BatchRows`, passed in explicitly.
 
@@ -290,9 +289,8 @@ value as a pass's `BatchRows`, passed in explicitly.
 - **A larger tree is marked, then deleted in chunks.** The mark is `delete_after_ms=1` on the archive root, written by
   the one UPDATE that also takes the root's lock; it hides the whole tree from every read at once (the visibility
   rule), so the call counts the tree removed. Whether a tree fits is counted only as far as the batch
-  (`treeRowsUpTo`), so sizing a tree of millions of rows does not spend the call before its allowance begins. The
-  call then deletes chunks (`chunk` on `archiveTarget`, which also
-  deletes the directory's rows) until its deadline - the engine's `archiveDeleteInCall`, 5 s, since an API call must
+  (`cutWithinRows`'s capped counts), so sizing a tree of millions of rows does not spend the call before its
+  allowance begins. The call then deletes chunks (`chunk` on `archiveTarget`, which also deletes the directory's rows) until its deadline - the engine's `archiveDeleteInCall`, 5 s, since an API call must
   not run for tens of seconds - and the rest is left. **The chunks run under that deadline**, not only between them:
   checked between chunks alone, a chunk waiting on a lock held the call for as long as the lock was held
   (`TestDelete_TheInCallChunksKeepToTheirDeadline`). A chunk that fails after the mark is no failure of the call.

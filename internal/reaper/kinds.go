@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/database"
-	"github.com/microbus-io/dwarf/workflow"
 )
 
 // kind is one population of due roots: how they are found, in what order, and what the batch that takes them
@@ -81,9 +80,6 @@ func deletionDue(steal time.Duration) kind {
 // retention of 0.
 func closedDue(steal, grace time.Duration) kind {
 	graceMs := grace.Milliseconds()
-	statuses := []string{
-		workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusTerminated, workflow.StatusCancelled,
-	}
 	return kind{
 		name: KindClosed,
 		selectDue: func(_, residency string, args []any, limit int) (string, []any) {
@@ -96,7 +92,7 @@ func closedDue(steal, grace time.Duration) kind {
 			// MySQL, SQL Server and SQLite, and PostgreSQL sorts only each tie group (an incremental sort).
 			var q string
 			var all []any
-			for i, status := range statuses {
+			for i, status := range terminalStatuses {
 				if i > 0 {
 					q += " UNION ALL "
 				}
@@ -141,12 +137,11 @@ func retentionDue(driver string, cutoff time.Time, steal, grace time.Duration) k
 // ordinal, plus every root overdue by the steal grace, and returns the pair (count 0 when it restricts nothing). Two
 // reapers then take disjoint roots while both keep up, and a slow or departed one's roots are taken after the grace.
 // It fails open, as the piston's partition does: an unknown or invalid pair, or a solo dispatcher, restricts nothing.
-func residencyClause(count, ordinal int, ok bool, k kind) (clause string, args []any, c, o int) {
+func residencyClause(count, ordinal int, ok bool, k kind) (clause string, args []any) {
 	if !ok || count < 2 || ordinal < 0 || ordinal >= count {
-		return "", nil, 0, 0
+		return "", nil
 	}
-	return " AND (flow_id % ? = ? OR " + k.stealWhere + ")", append([]any{count, ordinal}, k.stealArgs...),
-		count, ordinal
+	return " AND (flow_id % ? = ? OR " + k.stealWhere + ")", append([]any{count, ordinal}, k.stealArgs...)
 }
 
 // dueRoot is a due root a scan returned, by its key in the traversal order.

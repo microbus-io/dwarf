@@ -129,7 +129,7 @@ func (p *pass) residency(k kind) (clause string, args []any) {
 		return "", nil
 	}
 	count, ordinal, ok := p.shard.Residency()
-	clause, args, _, _ = residencyClause(count, ordinal, ok, k)
+	clause, args = residencyClause(count, ordinal, ok, k)
 	return clause, args
 }
 
@@ -199,7 +199,7 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 			}
 			return false
 		}
-		cut, firstSize, attemptAges, err := p.rootsWithinRows(ctx, rootIDs(candidates), d != nil)
+		cut, via, attemptAges, err := p.rootsWithinRows(ctx, rootIDs(candidates), d != nil)
 		if err != nil {
 			cut = rootIDs(candidates) // a known range, even when its count fails
 		}
@@ -207,23 +207,18 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 			// The oldest unpublished attempt this sweep has seen, for its gauge.
 			w.observeAttempts(attemptAges, time.Now())
 		}
-		_, attempted := attemptAges[cut[0]]
-		attempted = attempted || (d != nil && p.r.prefer.has(stageKey{shard, cut[0]}))
 		moved := 0
 		var removed removal
 		attemptStart := time.Now()
 		// finished is false when a tree deleted in chunks is not gone yet and nothing failed: the walk keeps its
 		// position on it. A failed chunk is passed like any failed batch.
 		finished := true
-		large := err == nil && d == nil && len(cut) == 1 && firstSize > max(p.cfg.BatchRows, 1)
-		staged := err == nil && d != nil && len(cut) == 1 &&
-			(attempted || (p.cfg.StageRows > 0 && firstSize > p.cfg.StageRows))
 		switch {
 		case err != nil:
-		case staged:
+		case via == inStages:
 			// A tree too large to archive in one transaction is copied over several, and published in the last.
 			moved, finished, err = p.stage(ctx, k, cut[0], d, start)
-		case large:
+		case via == inChunks:
 			// A tree to delete that is larger than a batch is deleted in chunks rather than in one transaction, which
 			// would grow with the tree until it could not finish within its attempt. It counts its own chunks.
 			moved, finished, err = p.deleteLarge(ctx, k, cut[0], reason, start)
@@ -243,7 +238,7 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 					p.archiveFailed(ctx, "archiving closed trees", err)
 				}
 			}
-			if d != nil && !staged && len(cut) == 1 && p.cfg.StageRows > 0 && ctx.Err() == nil &&
+			if d != nil && via == inBatch && len(cut) == 1 && p.cfg.StageRows > 0 && ctx.Err() == nil &&
 				time.Since(attemptStart) >= p.cfg.Attempt {
 				// A tree that ran into its deadline in one transaction takes the staged path from its next visit,
 				// whatever its size: the claim waits for the next visit, since a timed-out statement can hold the
@@ -268,10 +263,10 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 				if !repair && moved > 0 {
 					p.r.failures.clearUnlessFailedSince(shard, attemptStart)
 				}
-			} else if !large {
+			} else if via != inChunks {
 				p.r.metrics.flowsReaped(ctx, shard, reason, removed.unarchived)
 			}
-			if !staged {
+			if via != inStages {
 				for _, root := range cut {
 					p.r.prefer.drop(stageKey{shard, root}) // removed by the batch, or not this walk's
 				}

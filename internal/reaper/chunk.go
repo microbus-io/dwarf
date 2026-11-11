@@ -210,20 +210,9 @@ func (r *Reaper) chunk(ctx context.Context, db *sequel.DB, tgt chunkTarget, root
 				at.below, at.stepFlow, at.stepAfter = children[0], 0, 0
 				continue
 			}
-			// The longest leading run whose steps and flow rows fit what is left of the budget.
-			run := len(children)
-			for run > 0 {
-				room := budget - run
-				if room >= 0 {
-					n, err := stepsUpTo(ctx, tx, stepsTable, children[:run], room+1)
-					if err != nil {
-						return errors.Trace(err)
-					}
-					if n <= room {
-						break
-					}
-				}
-				run /= 2
+			run, _, err := fitRun(ctx, tx, stepsTable, children, budget)
+			if err != nil {
+				return errors.Trace(err)
 			}
 			if run == 0 {
 				// The newest descendant alone is over what is left: part of its steps now, the rest in the next chunk.
@@ -307,31 +296,35 @@ func (r *Reaper) chunk(ctx context.Context, db *sequel.DB, tgt chunkTarget, root
 	return deleted, done, nil
 }
 
+// fitRun returns the longest leading run of flows, halving from all of them, whose steps and flow rows fit budget, and
+// its steps; run 0 when the first flow alone is over it. Each probe counts at most the budget's worth of steps.
+func fitRun(ctx context.Context, tx *sequel.Tx, steps string, flows []int, budget int) (run, n int, err error) {
+	for run = len(flows); run > 0; run /= 2 {
+		room := budget - run
+		if room < 0 {
+			continue
+		}
+		if n, err = stepsUpTo(ctx, tx, steps, flows[:run], room+1); err != nil || n <= room {
+			return run, n, errors.Trace(err)
+		}
+	}
+	return 0, 0, nil
+}
+
 // stepsUpTo counts the steps of flows, reading at most limit of them: enough to tell whether they fit a budget,
 // whatever their number.
 func stepsUpTo(ctx context.Context, q sequel.Executor, steps string, flows []int, limit int) (int, error) {
 	return countUpTo(ctx, q, "step_id FROM "+steps+" WHERE flow_id IN ("+intCSV(flows)+")", limit)
 }
 
-// treeRowsUpTo counts the rows of the tree of root in t, as rootsWithinRowsIn sizes a tree (a flow with no steps counts
-// one), up to limit.
-func treeRowsUpTo(ctx context.Context, q sequel.Executor, t tables, root, limit int) (int, error) {
-	return countUpTo(ctx, q, "f.flow_id FROM "+t.flows+" f LEFT JOIN "+t.steps+" s ON s.flow_id=f.flow_id WHERE f.root_flow_id="+
-		strconv.Itoa(root), limit)
-}
-
-// treesRowsUpTo counts the rows of each tree rooted at roots in t, as treeRowsUpTo does, each up to its own limit, in
-// one statement: a UNION ALL of capped counts, so a group of trees costs one round trip and no tree is read past its
-// limit.
+// treesRowsUpTo counts the rows of each tree rooted at roots in t (a flow with no steps counts one), each up to its own
+// limit, in one statement: a UNION ALL of capped counts, so a group of trees costs one round trip and no tree is read
+// past its limit.
 func treesRowsUpTo(ctx context.Context, q sequel.Executor, t tables, roots, limits []int) ([]int, error) {
 	branches := make([]string, len(roots))
 	for k, root := range roots {
-		inner := "SELECT f.flow_id FROM " + t.flows + " f LEFT JOIN " + t.steps + " s ON s.flow_id=f.flow_id WHERE f.root_flow_id=" +
-			strconv.Itoa(root) + " LIMIT " + strconv.Itoa(limits[k])
-		if q.DriverName() == "mssql" {
-			inner = "SELECT TOP (" + strconv.Itoa(limits[k]) + ") f.flow_id FROM " + t.flows + " f LEFT JOIN " + t.steps +
-				" s ON s.flow_id=f.flow_id WHERE f.root_flow_id=" + strconv.Itoa(root)
-		}
+		inner := capped(q.DriverName(), "f.flow_id FROM "+t.flows+" f LEFT JOIN "+t.steps+" s ON s.flow_id=f.flow_id"+
+			" WHERE f.root_flow_id="+strconv.Itoa(root), limits[k])
 		branches[k] = "SELECT " + strconv.Itoa(k) + " AS k, COUNT(*) AS n FROM (" + inner + ") c" + strconv.Itoa(k)
 	}
 	rows, err := q.QueryContext(ctx, strings.Join(branches, " UNION ALL "))
@@ -353,13 +346,17 @@ func treesRowsUpTo(ctx context.Context, q sequel.Executor, t tables, roots, limi
 // countUpTo counts the rows of "SELECT "+selectFrom, up to limit: a COUNT over a LIMIT or TOP, so it reads at most limit
 // rows however many match.
 func countUpTo(ctx context.Context, q sequel.Executor, selectFrom string, limit int) (int, error) {
-	inner := "SELECT " + selectFrom + " LIMIT " + strconv.Itoa(limit)
-	if q.DriverName() == "mssql" {
-		inner = "SELECT TOP (" + strconv.Itoa(limit) + ") " + selectFrom
-	}
 	var n int
-	err := q.QueryRowContext(ctx, "SELECT COUNT(*) FROM ("+inner+") c").Scan(&n)
+	err := q.QueryRowContext(ctx, "SELECT COUNT(*) FROM ("+capped(q.DriverName(), selectFrom, limit)+") c").Scan(&n)
 	return n, errors.Trace(err)
+}
+
+// capped is "SELECT "+selectFrom reading at most limit rows: a LIMIT, or a TOP on SQL Server.
+func capped(driver, selectFrom string, limit int) string {
+	if driver == "mssql" {
+		return "SELECT TOP (" + strconv.Itoa(limit) + ") " + selectFrom
+	}
+	return "SELECT " + selectFrom + " LIMIT " + strconv.Itoa(limit)
 }
 
 // deleteStepsFrom deletes up to limit steps of flow after the step after, in step_id order, and returns how many it
@@ -367,8 +364,7 @@ func countUpTo(ctx context.Context, q sequel.Executor, selectFrom string, limit 
 // BY with a limit on the DELETE is not portable, and the read is a seek into (flow_id, step_id) whatever else the table
 // holds.
 func deleteStepsFrom(ctx context.Context, tx *sequel.Tx, steps string, flow, after, limit int) (n, last int, err error) {
-	ids, err := ints(ctx, tx, "SELECT step_id FROM "+steps+" WHERE flow_id="+strconv.Itoa(flow)+" AND step_id>"+
-		strconv.Itoa(after)+" ORDER BY step_id LIMIT_OFFSET(?, 0)", limit)
+	ids, err := stepIDsAfter(ctx, tx, steps, flow, after, limit)
 	if err != nil || len(ids) == 0 {
 		return 0, after, errors.Trace(err)
 	}
@@ -376,6 +372,13 @@ func deleteStepsFrom(ctx context.Context, tx *sequel.Tx, steps string, flow, aft
 		return 0, after, errors.Trace(err)
 	}
 	return len(ids), ids[len(ids)-1], nil
+}
+
+// stepIDsAfter reads the ids of up to limit steps of flow in steps after the step after, in step_id order: a seek into
+// (flow_id, step_id) whatever else the table holds.
+func stepIDsAfter(ctx context.Context, tx *sequel.Tx, steps string, flow, after, limit int) ([]int, error) {
+	return ints(ctx, tx, "SELECT step_id FROM "+steps+" WHERE flow_id="+strconv.Itoa(flow)+" AND step_id>"+
+		strconv.Itoa(after)+" ORDER BY step_id LIMIT_OFFSET(?, 0)", limit)
 }
 
 // ints runs a query of one integer column and returns its values.
@@ -396,10 +399,23 @@ func ints(ctx context.Context, tx *sequel.Tx, query string, args ...any) ([]int,
 	return out, errors.Trace(rows.Err())
 }
 
-// midTree is FaultMidTree's consult in a chunk: after its steps, before its flows, plain or targeted at root.
-func (r *Reaper) midTree(root int) error {
-	if r.seams.Enabled() && (r.seams.IsFault(FaultMidTree) || r.seams.IsFault(join(FaultMidTree, strconv.Itoa(root)))) {
+// midTree is FaultMidTree's consult: after a tree's steps, before its flows, plain or targeted at one of roots.
+func (r *Reaper) midTree(roots ...int) error {
+	if r.seams.IsFault(FaultMidTree) {
 		return errors.New("injected fault: " + FaultMidTree)
+	}
+	return r.faultOn(FaultMidTree, roots...)
+}
+
+// faultOn fails when fault is injected targeted at any of roots.
+func (r *Reaper) faultOn(fault string, roots ...int) error {
+	if !r.seams.Enabled() {
+		return nil
+	}
+	for _, root := range roots {
+		if r.seams.IsFault(join(fault, strconv.Itoa(root))) {
+			return errors.New("injected fault: " + fault)
+		}
 	}
 	return nil
 }

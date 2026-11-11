@@ -226,15 +226,8 @@ func (r *Reaper) move(ctx context.Context, db *sequel.DB, rootIDs []int, k kind,
 		}
 		// FaultMidTree aborts after the steps go but before the flows do, so the whole batch rolls back atomically: a
 		// mid-tree failure leaves the tree intact, never a flow with no steps, and the next pass removes it cleanly.
-		if r.seams.Enabled() {
-			for _, root := range locked {
-				if r.seams.IsFault(join(FaultMidTree, strconv.Itoa(root))) {
-					return errors.New("injected fault: " + FaultMidTree)
-				}
-			}
-		}
-		if r.seams.IsFault(FaultMidTree) {
-			return errors.New("injected fault: " + FaultMidTree)
+		if err := r.midTree(locked...); err != nil {
+			return err
 		}
 		res, err := tx.ExecContext(ctx, flowsStmt, flowsArgs...)
 		if err != nil {
@@ -315,15 +308,15 @@ func lockRoots(ctx context.Context, tx *sequel.Tx, flows string, skipHeld bool, 
 	return locked, nil
 }
 
-// rootsWithinRows returns the leading roots of roots, in the order given, that one batch takes, with the first tree's
-// size and, when archiving, the archive attempts among roots by their age. A root with an attempt, or one whose atomic
+// rootsWithinRows returns the leading roots of roots, in the order given, that one batch takes, the route it takes and,
+// when archiving, the archive attempts among roots by their age. A root with an attempt, or one whose atomic
 // archive ran into its deadline, is archived in stages, so when archiving it takes a batch of its own and is not
 // sized: first, it is the cut alone; later, the cut ends before it.
 // The others are sized by capped counts in their order (cutWithinRows): the first up to what decides its path - over
 // the batch, and over StageRows when staging - and each later one up to what is left of the batch. Sizing is a
 // batching hint outside the transaction; the batch locks only the roots it takes, and its transaction still opens with
 // a write, which SQLite needs.
-func (p *pass) rootsWithinRows(ctx context.Context, roots []int, archiving bool) (cut []int, firstSize int, attempts map[int]time.Duration, err error) {
+func (p *pass) rootsWithinRows(ctx context.Context, roots []int, archiving bool) (cut []int, via route, attempts map[int]time.Duration, err error) {
 	// staged is whether a root takes the staged path whatever its size: it has an attempt, or its atomic archive ran
 	// into its deadline (preferences).
 	staged := func(root int) bool {
@@ -332,10 +325,10 @@ func (p *pass) rootsWithinRows(ctx context.Context, roots []int, archiving bool)
 	}
 	if archiving {
 		if attempts, err = p.attemptsAmong(ctx, roots); err != nil {
-			return nil, 0, nil, errors.Trace(err)
+			return nil, inBatch, nil, errors.Trace(err)
 		}
 		if staged(roots[0]) {
-			return roots[:1], 0, attempts, nil
+			return roots[:1], inStages, attempts, nil
 		}
 	}
 	ctx, cancel := p.attemptCtx(ctx)
@@ -354,19 +347,35 @@ func (p *pass) rootsWithinRows(ctx context.Context, roots []int, archiving bool)
 	if archiving {
 		stop = staged
 	}
-	cut, firstSize, err = cutWithinRows(roots, rows, firstLimit, stop,
+	cut, firstSize, err := cutWithinRows(roots, rows, firstLimit, stop,
 		func(group, limits []int) ([]int, error) {
-			if p.r.seams.Enabled() {
-				for _, root := range group {
-					if p.r.seams.IsFault(join(FaultSizeErr, strconv.Itoa(root))) {
-						return nil, errors.New("injected fault: " + FaultSizeErr)
-					}
-				}
+			if err := p.r.faultOn(FaultSizeErr, group...); err != nil {
+				return nil, err
 			}
 			return treesRowsUpTo(ctx, p.shard.DB, live, group, limits)
 		})
-	return cut, firstSize, attempts, errors.Trace(err)
+	if err != nil {
+		return nil, inBatch, attempts, errors.Trace(err)
+	}
+	switch {
+	case len(cut) > 1:
+	case archiving && p.cfg.StageRows > 0 && firstSize > p.cfg.StageRows:
+		via = inStages
+	case !archiving && firstSize > max(p.cfg.BatchRows, 1):
+		via = inChunks
+	}
+	return cut, via, attempts, nil
 }
+
+// route is the path a batch's cut takes: one transaction (inBatch), a staged archive of its one tree (inStages), or a
+// chunked deletion of it (inChunks).
+type route int
+
+const (
+	inBatch route = iota
+	inStages
+	inChunks
+)
 
 // cutWithinRows returns the leading roots whose trees fit in about rows rows, and at least the first, with the first's
 // size. It sizes the roots in groups - the first of firstGroup, then of sizeGroup - each by one call of sizes, which

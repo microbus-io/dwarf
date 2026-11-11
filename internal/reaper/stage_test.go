@@ -931,8 +931,9 @@ func TestStage_ADroppedDayDuringTheLiveCleanup(t *testing.T) {
 	assert.Equal(errorsBefore, r.logs.count("Reaper:"), "and logged nothing")
 }
 
-// TestStage_SizingCountsOnlyWhatItDecides pins the capped sizing on a real tree: the first tree is counted up to one
-// past the staging threshold, not whole, and a root with an attempt is not counted at all.
+// TestStage_SizingCountsOnlyWhatItDecides pins the sizing's route on real trees: a tree over the staging threshold is
+// alone and staged, a root with an attempt is staged without being counted at all, and a batch's cut ends before one.
+// The caps the counts take are TestMove_BatchesAreCappedByRows'.
 func TestStage_SizingCountsOnlyWhatItDecides(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -940,22 +941,24 @@ func TestStage_SizingCountsOnlyWhatItDecides(t *testing.T) {
 	r := stageRig(t)
 	big := seedWideTree(t, r.db, 3, 30, 3) // 124 rows
 	small := seedTrees(t, r.db, 1, callShape)[0]
-	cut, first, ages, err := r.p().rootsWithinRows(ctx, []int{big, small}, true)
+	cut, via, ages, err := r.p().rootsWithinRows(ctx, []int{big, small}, true)
 	assert.NoError(err)
-	assert.Equal([]int{big}, cut, "over the batch: alone")
-	assert.Equal(r.cfg.StageRows+1, first, "counted to one past the threshold")
+	assert.Equal([]int{big}, cut, "over the threshold: alone")
+	assert.Equal(inStages, via)
 	assert.Zero(len(ages))
 
 	setAttempt(t, r, big, time.Now())
 	r.seams.Inject(join(FaultSizeErr, strconv.Itoa(big)))
 	defer r.seams.Withdraw(join(FaultSizeErr, strconv.Itoa(big)))
-	cut, _, ages, err = r.p().rootsWithinRows(ctx, []int{big, small}, true)
+	cut, via, ages, err = r.p().rootsWithinRows(ctx, []int{big, small}, true)
 	assert.NoError(err, "a root with an attempt is not sized")
 	assert.Equal([]int{big}, cut)
+	assert.Equal(inStages, via)
 	assert.Equal(1, len(ages))
-	cut, _, _, err = r.p().rootsWithinRows(ctx, []int{small, big}, true)
+	cut, via, _, err = r.p().rootsWithinRows(ctx, []int{small, big}, true)
 	assert.NoError(err)
 	assert.Equal([]int{small}, cut, "the cut ends before a root with an attempt")
+	assert.Equal(inBatch, via)
 }
 
 // TestStage_TheOldestUnpublishedAttemptIsObserved pins the observation behind dwarf_archive_oldest_attempt_seconds: a

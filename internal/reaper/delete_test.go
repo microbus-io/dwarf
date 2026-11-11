@@ -96,11 +96,11 @@ func TestDelete_APartialRemovalCountsWhatCommitted(t *testing.T) {
 		}
 	}
 
-	n, err = r.reaper.DeleteArchivedTree(ctx, r.db, today, roots[2], 4096, time.Now().Add(time.Minute))
+	n, err = r.reaper.DeleteArchivedRoots(ctx, r.db, today, []int{roots[2]}, 1, 4096, time.Now().Add(time.Minute))
 	assert.Error(err, "the fault applies to one tree too")
 	assert.Zero(n)
 	r.seams.Withdraw(fault)
-	n, err = r.reaper.DeleteArchivedTree(ctx, r.db, today, roots[2], 4096, time.Now().Add(time.Minute))
+	n, err = r.reaper.DeleteArchivedRoots(ctx, r.db, today, []int{roots[2]}, 1, 4096, time.Now().Add(time.Minute))
 	assert.NoError(err)
 	assert.Equal(1, n)
 }
@@ -153,7 +153,7 @@ func TestDelete_ALargeArchivedTreeIsMarkedThenDeleted(t *testing.T) {
 	_, err := r.db.ExecContext(ctx, "INSERT INTO "+archiver.DirectoryTable+" (flow_id, day) VALUES (?, ?)", flows[3], today)
 	assert.Must(assert.NoError(err))
 
-	n, err := r.reaper.DeleteArchivedTree(ctx, r.db, today, root, 4, time.Now()) // no time to chunk in the call
+	n, err := r.reaper.DeleteArchivedRoots(ctx, r.db, today, []int{root}, 1, 4, time.Now()) // no time to chunk in the call
 	assert.NoError(err)
 	assert.Equal(1, n, "marked: removed as far as every reader is concerned")
 	var mark int
@@ -161,7 +161,7 @@ func TestDelete_ALargeArchivedTreeIsMarkedThenDeleted(t *testing.T) {
 	assert.True(mark > 0)
 	f, s, _ := archivedRows(t, r, today, flows)
 	assert.Equal([2]int{7, 20}, [2]int{f, s}, "its rows are deleted later")
-	n, err = r.reaper.DeleteArchivedTree(ctx, r.db, today, root, 4, time.Now())
+	n, err = r.reaper.DeleteArchivedRoots(ctx, r.db, today, []int{root}, 1, 4, time.Now())
 	assert.NoError(err)
 	assert.Zero(n, "a marked tree is not marked or counted again")
 
@@ -271,7 +271,7 @@ func TestDelete_TheInCallChunksKeepToTheirDeadline(t *testing.T) {
 	release := holdArchivedStep(t, r, today, flows[len(flows)-1])
 	defer release()
 	start := time.Now()
-	n, err := r.reaper.DeleteArchivedTree(ctx, r.db, today, root, 4, time.Now().Add(200*time.Millisecond))
+	n, err := r.reaper.DeleteArchivedRoots(ctx, r.db, today, []int{root}, 1, 4, time.Now().Add(200*time.Millisecond))
 	assert.NoError(err)
 	assert.Equal(1, n, "marked")
 	assert.True(time.Since(start) < 5*time.Second*timeoutScale, "returned at its deadline: %v", time.Since(start))

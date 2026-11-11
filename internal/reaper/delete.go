@@ -21,7 +21,6 @@ import (
 	"database/sql"
 	"slices"
 	"sort"
-	"strconv"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/archiver"
@@ -30,33 +29,14 @@ import (
 	"github.com/microbus-io/sequel"
 )
 
-// DeleteArchivedTree deletes the archived tree rooted at root in day's tables, on the caller's context. A tree that fits
-// about rows rows goes in one transaction: the directory's rows for its flows, its steps and its flows. A larger one is
-// marked for deletion, which hides it from every read at once, and deleted in chunks of about rows rows until until;
-// what is left is deleted in the background (DeleteMarked). It returns 1 when it deleted or marked the tree, and 0 when
-// the tree was not there or was marked already; err is an undefined-table error when the day's tables are gone. Every
-// transaction locks the root first, FOR UPDATE or by flipping its touch column, so a caller's conflicting lock on the
-// root holds it back.
-func (r *Reaper) DeleteArchivedTree(ctx context.Context, db *sequel.DB, day, root, rows int, until time.Time) (deleted int, err error) {
-	t := tables{flows: migrations.FlowsTable(day), steps: migrations.StepsTable(day)}
-	// Counted only as far as the batch: a tree of millions of rows would otherwise take seconds to size before its
-	// in-call allowance began.
-	size, err := treeRowsUpTo(ctx, db, t, root, max(rows, 1)+1)
-	if err != nil {
-		return 0, errors.Trace(err)
-	}
-	if size > max(rows, 1) {
-		return r.deleteMarked(ctx, db, day, root, rows, until)
-	}
-	return r.deleteArchived(ctx, db, day, []int{root})
-}
-
 // DeleteArchivedRoots deletes the archived trees rooted at roots in day's tables, on the caller's context, in
-// transactions of at most chunk roots whose trees fit in about rows rows. A tree larger than that alone is marked and
-// deleted in chunks as DeleteArchivedTree does, all of them sharing until. It returns how many trees it deleted or
-// marked, those of the transactions that committed before an error included. A day whose tables are gone deletes
-// nothing more and is no error: its trees are gone with it. A chunk below 1 is taken as 1. It locks each root as
-// DeleteArchivedTree does.
+// transactions of at most chunk roots whose trees fit in about rows rows. A tree larger than that alone is marked,
+// which hides it from every read at once, and deleted in chunks until until; what is left is deleted in the background
+// (DeleteMarked). It returns how many trees it deleted or marked, those of the transactions that committed before an
+// error included, and 0 for a tree that was not there or was marked already. A day whose tables are gone deletes
+// nothing more and is no error: its trees are gone with it. A chunk below 1 is taken as 1. Every transaction locks
+// the root first, FOR UPDATE or by flipping its touch column, so a caller's conflicting lock on the root holds it
+// back.
 func (r *Reaper) DeleteArchivedRoots(ctx context.Context, db *sequel.DB, day int, roots []int, chunk, rows int, until time.Time) (deleted int, err error) {
 	chunk = max(chunk, 1)
 	t := tables{flows: migrations.FlowsTable(day), steps: migrations.StepsTable(day)}
@@ -73,7 +53,7 @@ func (r *Reaper) DeleteArchivedRoots(ctx context.Context, db *sequel.DB, day int
 		}
 		var n int
 		if len(cut) == 1 && size > max(rows, 1) {
-			n, err = r.deleteMarked(ctx, db, day, cut[0], rows, until)
+			n, err = r.markThenDelete(ctx, db, day, cut[0], rows, until)
 		} else {
 			n, err = r.deleteArchived(ctx, db, day, cut)
 		}
@@ -89,10 +69,10 @@ func (r *Reaper) DeleteArchivedRoots(ctx context.Context, db *sequel.DB, day int
 	return deleted, nil
 }
 
-// deleteMarked marks the archived root for deletion in day, if it is a root not marked yet, and deletes its tree in
+// markThenDelete marks the archived root for deletion in day, if it is a root not marked yet, and deletes its tree in
 // chunks of about rows rows until until. It returns 1 when it marked the tree. A chunk that fails after the mark is no
 // failure of the call: the tree is deleted already as far as every reader is concerned, and DeleteMarked finishes it.
-func (r *Reaper) deleteMarked(ctx context.Context, db *sequel.DB, day, root, rows int, until time.Time) (int, error) {
+func (r *Reaper) markThenDelete(ctx context.Context, db *sequel.DB, day, root, rows int, until time.Time) (int, error) {
 	res, err := db.ExecContext(ctx, "UPDATE "+migrations.FlowsTable(day)+" SET delete_after_ms=1 WHERE flow_id=? AND"+
 		" surgraph_flow_id=0 AND delete_after_ms=0", root)
 	if err != nil {
@@ -169,7 +149,7 @@ func (r *Reaper) DeleteMarked(ctx context.Context, cfg Config, s Shard) {
 				break
 			}
 		}
-		if !done || r.stillThere(ctx, p, day, root) {
+		if !done || p.stillThere(ctx, day, root) {
 			left++ // a chunk is done too when another transaction holds the root
 		}
 	}
@@ -219,7 +199,7 @@ func (r *Reaper) DeleteMarked(ctx context.Context, cfg Config, s Shard) {
 }
 
 // stillThere reports whether day's flows table still holds root, or might: a read that fails is taken for yes.
-func (r *Reaper) stillThere(ctx context.Context, p *pass, day, root int) bool {
+func (p *pass) stillThere(ctx context.Context, day, root int) bool {
 	ctx, cancel := p.attemptCtx(ctx)
 	defer cancel()
 	var one int
@@ -292,14 +272,7 @@ func (r *Reaper) deleteArchived(ctx context.Context, db *sequel.DB, day int, roo
 			return errors.Trace(err)
 		}
 		// FaultArchiveDelete, targeted at a root, fails the transaction that would delete it, after its statements ran.
-		if r.seams.Enabled() {
-			for _, root := range locked {
-				if r.seams.IsFault(join(FaultArchiveDelete, strconv.Itoa(root))) {
-					return errors.New("injected fault: " + FaultArchiveDelete)
-				}
-			}
-		}
-		return nil
+		return r.faultOn(FaultArchiveDelete, locked...)
 	})
 	if err != nil {
 		return 0, errors.Trace(err) // rolled back: nothing deleted
