@@ -77,7 +77,8 @@ func (p *pass) stage(ctx context.Context, k kind, root int, d *filingDay, sliceS
 		pos = stagePos{at: at}
 	}
 	for {
-		n, done, err := p.stageChunk(ctx, root, d.archive, &pos)
+		n, copied, done, err := p.stageChunk(ctx, root, d.archive, &pos)
+		p.r.metrics.rowsStaged(ctx, p.shard.Index, copied)
 		if sequel.IsUndefinedTableError(err) {
 			// The attempt's day was dropped, and its rows with it: a fresh attempt into today, in a transaction of its
 			// own, since the statement that found the day missing ended this one.
@@ -174,14 +175,14 @@ func attemptOf(ctx context.Context, tx *sequel.Tx, root int) (time.Time, error) 
 // there, so a chunk run again writes the same rows. It returns the flows archived when it published, and done when the
 // tree cannot be copied now: stamped, its attempt changed, held, or every row copied while the day after the attempt's
 // is not whole - a root published there could not be located. pos advances only when the chunk commits.
-func (p *pass) stageChunk(ctx context.Context, root int, a *archiver.Archive, pos *stagePos) (published int, done bool, err error) {
+func (p *pass) stageChunk(ctx context.Context, root int, a *archiver.Archive, pos *stagePos) (published, copied int, done bool, err error) {
 	ctx, cancel := p.attemptCtx(ctx)
 	defer cancel()
 	db := p.shard.DB
 	driver := db.DriverName()
 	id := strconv.Itoa(root)
 	day := archiver.DayOf(pos.at, a.DayLength())
-	c := stageCopy{
+	c := &stageCopy{
 		driver: driver, at: pos.at, dayEnds: a.DayEnds(day), day: day,
 		flows: migrations.FlowsTable(day), steps: migrations.StepsTable(day),
 	}
@@ -190,6 +191,7 @@ func (p *pass) stageChunk(ctx context.Context, root int, a *archiver.Archive, po
 	var at stagePos
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		published, done, at = 0, false, *pos
+		c.copied = 0
 		locked, err := lockRoots(ctx, tx, live.flows, true, "flow_id="+id+" AND status IN ("+terminalStatusesSQL+")"+
 			" AND surgraph_flow_id=0 AND delete_after_ms=0 AND archive_attempt_at="+atExpr, atArg)
 		if err != nil {
@@ -201,6 +203,10 @@ func (p *pass) stageChunk(ctx context.Context, root int, a *archiver.Archive, po
 		}
 		if p.r.seams.Enabled() && p.r.seams.IsFault(join(FaultStageChunk, id)) {
 			return errors.New("injected fault: " + FaultStageChunk)
+		}
+		// FaultArchiveErr fails every archive write, a staging chunk as a move.
+		if p.r.seams.IsFault(FaultArchiveErr) {
+			return errors.New("injected fault: " + FaultArchiveErr)
 		}
 		if at == (stagePos{at: pos.at}) {
 			// A fresh position - a restart, another replica - resumes after what the day already holds of this
@@ -268,10 +274,12 @@ func (p *pass) stageChunk(ctx context.Context, root int, a *archiver.Archive, po
 				return nil
 			}
 			list := intCSV(children[:run])
-			if _, err := tx.ExecContext(ctx, "INSERT INTO "+c.steps+" SELECT * FROM dwarf_steps s WHERE s.flow_id IN ("+list+")"+
-				" AND NOT EXISTS (SELECT 1 FROM "+c.steps+" a WHERE a.step_id=s.step_id)"); err != nil {
+			res, err := tx.ExecContext(ctx, "INSERT INTO "+c.steps+" SELECT * FROM dwarf_steps s WHERE s.flow_id IN ("+list+")"+
+				" AND NOT EXISTS (SELECT 1 FROM "+c.steps+" a WHERE a.step_id=s.step_id)")
+			if err != nil {
 				return errors.Trace(err)
 			}
+			c.inserted(res)
 			if err := c.flowRows(ctx, tx, children[:run], at.seen); err != nil {
 				return errors.Trace(err)
 			}
@@ -316,13 +324,13 @@ func (p *pass) stageChunk(ctx context.Context, root int, a *archiver.Archive, po
 		return nil
 	})
 	if err != nil {
-		return 0, false, errors.Trace(err)
+		return 0, 0, false, errors.Trace(err)
 	}
 	*pos = at
 	if p.r.seams.Enabled() && p.r.seams.IsFault(join(FaultStageLost, id)) {
-		return 0, false, errors.New("injected fault: " + FaultStageLost)
+		return 0, c.copied, false, errors.New("injected fault: " + FaultStageLost)
 	}
-	return published, done, nil
+	return published, c.copied, done, nil
 }
 
 // descendantsAfter returns up to treeChunk of root's descendants after the flow after, in flow_id order, and whether
@@ -353,20 +361,31 @@ type stageCopy struct {
 	day                int
 	flows, steps       string
 	dirBefore, dirFrom int
+	// copied counts the rows the chunk inserted, for dwarf_archive_staged_rows.
+	copied int
+}
+
+// inserted adds the rows an insert wrote to the chunk's count.
+func (c *stageCopy) inserted(res sql.Result) {
+	if n, err := res.RowsAffected(); err == nil {
+		c.copied += int(n)
+	}
 }
 
 // stepsFrom copies up to limit steps of flow after the step after, in step_id order, and returns how many it read and
 // the last one's id. The ids are read first and copied by a literal list, as a chunked deletion reads them.
-func (c stageCopy) stepsFrom(ctx context.Context, tx *sequel.Tx, flow, after, limit int) (n, last int, err error) {
+func (c *stageCopy) stepsFrom(ctx context.Context, tx *sequel.Tx, flow, after, limit int) (n, last int, err error) {
 	ids, err := ints(ctx, tx, "SELECT step_id FROM dwarf_steps WHERE flow_id="+strconv.Itoa(flow)+" AND step_id>"+
 		strconv.Itoa(after)+" ORDER BY step_id LIMIT_OFFSET(?, 0)", limit)
 	if err != nil || len(ids) == 0 {
 		return 0, after, errors.Trace(err)
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO "+c.steps+" SELECT * FROM dwarf_steps s WHERE s.step_id IN ("+intCSV(ids)+")"+
-		" AND NOT EXISTS (SELECT 1 FROM "+c.steps+" a WHERE a.step_id=s.step_id)"); err != nil {
+	res, err := tx.ExecContext(ctx, "INSERT INTO "+c.steps+" SELECT * FROM dwarf_steps s WHERE s.step_id IN ("+intCSV(ids)+")"+
+		" AND NOT EXISTS (SELECT 1 FROM "+c.steps+" a WHERE a.step_id=s.step_id)")
+	if err != nil {
 		return 0, after, errors.Trace(err)
 	}
+	c.inserted(res)
 	return len(ids), ids[len(ids)-1], nil
 }
 
@@ -374,7 +393,7 @@ func (c stageCopy) stepsFrom(ctx context.Context, tx *sequel.Tx, flow, after, li
 // being numbered past every descendant group), each stamped with its stamp group's archive time, at + its group in
 // milliseconds; and writes the directory's rows for those a locate would not find by their creation hour. A stamp past
 // the day's end is an error: nothing is clamped, since a clamp would put a large tree's flows on one archive time.
-func (c stageCopy) flowRows(ctx context.Context, tx *sequel.Tx, flows []int, first int) error {
+func (c *stageCopy) flowRows(ctx context.Context, tx *sequel.Tx, flows []int, first int) error {
 	for i := 0; i < len(flows); {
 		g := (first + i) / stageGroup
 		j := min(len(flows), (g+1)*stageGroup-first) // the next group's first flow
@@ -384,11 +403,13 @@ func (c stageCopy) flowRows(ctx context.Context, tx *sequel.Tx, flows []int, fir
 		}
 		expr, arg := database.SQLTime(c.driver, stamp)
 		list := intCSV(flows[i:j])
-		if _, err := tx.ExecContext(ctx, "INSERT INTO "+c.flows+" ("+archivedFlowColumns+", archived_at)"+
+		res, err := tx.ExecContext(ctx, "INSERT INTO "+c.flows+" ("+archivedFlowColumns+", archived_at)"+
 			" SELECT "+archivedFlowColumns+", "+expr+" FROM dwarf_flows f WHERE f.flow_id IN ("+list+")"+
-			" AND NOT EXISTS (SELECT 1 FROM "+c.flows+" a WHERE a.flow_id=f.flow_id)", arg); err != nil {
+			" AND NOT EXISTS (SELECT 1 FROM "+c.flows+" a WHERE a.flow_id=f.flow_id)", arg)
+		if err != nil {
 			return errors.Trace(err)
 		}
+		c.inserted(res)
 		// A replaced attempt moves a flow's directory row from the dropped day to this one.
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+archiver.DirectoryTable+" WHERE flow_id IN ("+list+")"+
 			" AND day<>"+strconv.Itoa(c.day)); err != nil {

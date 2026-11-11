@@ -26,6 +26,8 @@ import (
 	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/testarossa"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 // stageRig is a rig that archives a tree of more than 8 rows in stages, 4 rows a chunk.
@@ -597,7 +599,7 @@ func TestStage_ACopierWithAReplacedAttemptWritesNothing(t *testing.T) {
 	old := database.StoredTime(now)
 	setAttempt(t, r, root, old.Add(time.Second)) // the attempt the copier does not hold
 	pos := stagePos{at: old}
-	n, done, err := r.p().stageChunk(ctx, root, r.archive, &pos)
+	n, _, done, err := r.p().stageChunk(ctx, root, r.archive, &pos)
 	assert.NoError(err)
 	assert.True(done)
 	assert.Zero(n)
@@ -825,7 +827,9 @@ func TestStage_ADroppedDayIsReplacedWhileWaitingToPublish(t *testing.T) {
 
 	_, err = r.archive.DropBefore(ctx, dest+1)
 	assert.Must(assert.NoError(err))
-	r.pass(ctx) // the wait finds the day gone, and the attempt is replaced
+	r.cfg.Budget = time.Nanosecond // one round of walks, so the live root is still there to read
+	r.pass(ctx)                    // the wait finds the day gone, and the attempt is replaced
+	r.cfg.Budget = 30 * time.Second
 	assert.False(attemptAt(t, r, root).Equal(stale), "replaced")
 	r.pass(ctx)
 	if now, _ := r.archive.Today(ctx); now != today {
@@ -913,7 +917,9 @@ func TestStage_ADroppedDayDuringTheLiveCleanup(t *testing.T) {
 	assert.Must(assert.NoError(r.archive.Refresh(ctx)))
 	root := seedWideTree(t, r.db, 3, 10, 3)
 	setAttempt(t, r, root, r.archive.DayEnds(yesterday).Add(-2*time.Minute))
-	r.pass(ctx) // published into yesterday; the deletion kind ran before it, so the live copy is still there
+	r.cfg.Budget = time.Nanosecond // one round of walks: published, its live copy not yet removed
+	r.pass(ctx)
+	r.cfg.Budget = 30 * time.Second
 	assert.Must(assert.Equal(11, visibleInDay(t, r, yesterday, root)))
 	_, _, there := rowsOf(t, r, root)
 	assert.Must(assert.True(there, "the live copy still there"))
@@ -1128,4 +1134,45 @@ func TestStage_ARestartForgetsOnlyThePreference(t *testing.T) {
 	}
 	assert.Equal(11, visibleInDay(t, r, today, root))
 	assert.True(archivedByStages(t, r, today, root))
+}
+
+// stagedRows sums dwarf_archive_staged_rows on reader.
+func stagedRows(t *testing.T, reader *sdkmetric.ManualReader) int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(t.Context(), &rm); err != nil {
+		t.Fatal(err)
+	}
+	var n int64
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if sum, ok := m.Data.(metricdata.Sum[int64]); ok && m.Name == "dwarf_archive_staged_rows" {
+				for _, dp := range sum.DataPoints {
+					n += dp.Value
+				}
+			}
+		}
+	}
+	return n
+}
+
+// TestStage_TheCopiedRowsAreCounted pins dwarf_archive_staged_rows: every flow and step a staged copy writes is counted
+// as its chunk commits, and each once - the tree's whole size by its publication.
+func TestStage_TheCopiedRowsAreCounted(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := stageRig(t)
+	reader := sdkmetric.NewManualReader()
+	assert.Must(assert.NoError(r.reaper.SetMeter(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"))))
+	oneChunk(r)
+	seedWideTree(t, r.db, 3, 10, 3) // 11 flows, 33 steps
+	for range 3 {
+		r.pass(ctx)
+	}
+	partial := stagedRows(t, reader)
+	assert.True(partial > 0 && partial < 44, "part copied: %d", partial)
+	fullPasses(r)
+	r.pass(ctx)
+	assert.Equal(int64(44), stagedRows(t, reader), "the whole tree, once")
 }

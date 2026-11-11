@@ -30,6 +30,7 @@ import (
 type instruments struct {
 	moveFailures metric.Int64Counter
 	archived     metric.Int64Counter
+	staged       metric.Int64Counter
 	reaped       metric.Int64Counter
 	passSeconds  metric.Float64Histogram
 }
@@ -48,6 +49,7 @@ func newInstruments(meter metric.Meter) (*instruments, error) {
 	m := &instruments{}
 	m.moveFailures = ctr("dwarf_archive_move_failures", "Failed archive attempts, including sizing, contention and deadlines; counts attempts, not distinct trees.")
 	m.archived = ctr("dwarf_flows_archived", "Counts flows the reaper moved from the live tables into the archive, by shard: each root and every subgraph flow of its tree. Its rate plus dwarf_flows_reaped's, against dwarf_flows_closed, is the reaper keeping up - a closed root waits the archive grace (a minute) in the live tables, so the two track each other a minute apart.")
+	m.staged = ctr("dwarf_archive_staged_rows", "Counts rows a staged archive copied into the archive, by shard: the flows and steps of a tree too large to archive in one transaction, written chunk by chunk before it is published. A chunk run again counts only what was not there. Read beside dwarf_archive_oldest_attempt_seconds: an age that grows while this moves is a large tree copying; one that grows while this is flat is a copy that is stuck, and the logs say why.")
 	m.reaped = ctr("dwarf_flows_reaped", "Counts flows the reaper deleted from the live tables WITHOUT archiving them, by shard and by reason: deleted (a tree Delete or DeleteOnCompletion scheduled for deletion), no_retention (a retention of 0 keeps no archive), and archive_failed (an unarchived tree reached its retention cutoff). archive_failed is records LOST from the archive and must stay zero; dwarf_archive_failing_seconds says since when it has been failing, and the logs say why.")
 	passSeconds, err := meter.Float64Histogram("dwarf_reap_pass_seconds",
 		metric.WithUnit("s"),
@@ -70,6 +72,14 @@ func (m *instruments) flowsArchived(ctx context.Context, shard, n int) {
 		return
 	}
 	m.archived.Add(ctx, int64(n), metric.WithAttributes(shardAttr(shard)))
+}
+
+// rowsStaged counts the rows one staging chunk copied.
+func (m *instruments) rowsStaged(ctx context.Context, shard, n int) {
+	if m == nil || m.staged == nil || n <= 0 {
+		return
+	}
+	m.staged.Add(ctx, int64(n), metric.WithAttributes(shardAttr(shard)))
 }
 
 // flowsReaped counts the flows one batch deleted without archiving, for reason.

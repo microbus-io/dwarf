@@ -71,7 +71,7 @@ const (
 	FaultSizeErr       = "reapSizeErr"      // sizing a batch fails; targeted
 	FaultSelectErr     = "reapSelectErr"    // a due-root scan fails
 	FaultContention    = "reapContention"   // an archive move fails on lock contention
-	FaultArchiveErr    = "reapArchiveErr"   // an archive move fails with an error that is not lock contention
+	FaultArchiveErr    = "reapArchiveErr"   // an archive move or staging chunk fails with an error that is not lock contention
 	FaultArchiveDelete = "archiveDeleteErr" // an archived tree's deletion fails before it commits; targeted
 	FaultStageChunk    = "reapStageChunk"   // a staging chunk fails under its root's lock, before it writes; targeted
 	FaultStageLost     = "reapStageLost"    // a staging chunk commits, then reports an error, as a lost response; targeted

@@ -152,6 +152,9 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 	}
 	residency, residencyArgs := p.residency(k)
 	failures, attempts := 0, 0
+	// published is whether this walk published a staged tree: its live copy is then the deletion walk's, which the
+	// pass runs again before it ends, so a published tree is not left live until the next pass.
+	published := false
 	for ctx.Err() == nil {
 		if attempts > 0 && time.Since(start) >= p.cfg.Slice {
 			return failures == 0
@@ -187,7 +190,7 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 				w.lastFailed, w.failed, w.started = w.failed, 0, time.Time{}
 				w.lastAttemptAge, w.lastAttemptSeen, w.attemptAge, w.attemptSeen = w.attemptAge, w.attemptSeen, 0, time.Time{}
 			}
-			return false
+			return published
 		}
 		d, startable := dayOf()
 		if !startable {
@@ -224,6 +227,7 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 		case staged:
 			// A tree too large to archive in one transaction is copied over several, and published in the last.
 			moved, finished, err = p.stage(ctx, k, cut[0], d, start)
+			published = published || (err == nil && moved > 0)
 		case large:
 			// A tree to delete that is larger than a batch is deleted in chunks rather than in one transaction, which
 			// would grow with the tree until it could not finish within its attempt. It counts its own chunks.

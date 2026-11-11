@@ -142,8 +142,9 @@ transactions, invisible there, then published in one small one. **It is off in p
   a lossless feed of what was archived.
 - **Publication is the last chunk:** the root's last steps, its flow row, its directory row, and the live root
   stamped `delete_after_ms=1` with T kept, in one transaction, no whole-tree statement. Stamped with T means
-  published, so a lost response is retried as nothing to stage (`TestStage_APublishedTreeIsNotCopiedAgain`); the
-  deletion kind then removes the live tree on a later walk (`TestStage_ALargeTreeIsPublishedWhole`).
+  published, so a lost response is retried as nothing to stage (`TestStage_APublishedTreeIsNotCopiedAgain`). The
+  deletion kind then removes the live tree, **in the same pass**: a walk that published reports more work, so the pass
+  runs its walks again rather than leave the live copy to the next tick (`TestStage_ALargeTreeIsPublishedWhole`).
 - **A dropped day replaces the attempt.** A chunk's statement on a dropped `DayOf(T)` ends its transaction, so a fresh
   one, still under the root lock and only while T is unchanged, starts a new attempt in today; the old rows went with
   their day (`TestStage_ADroppedDayIsReplaced`, `TestStage_AHalfDroppedDayIsReplaced`, the latter the reason the
@@ -201,9 +202,16 @@ transactions, invisible there, then published in one small one. **It is off in p
   from the attempts the sizing reads anyway, the larger of the current sweep's and the last complete one's, aging
   since: an incomplete sweep never reads as nothing outstanding. A replaced attempt starts its age again, so it is
   read beside the archive lag (`TestStage_TheOldestUnpublishedAttemptIsObserved`).
+- **Copy progress is a counter apart from failures** (`dwarf_archive_staged_rows`): the rows each staging chunk
+  inserted, counted as it commits, so a rerun over rows already there adds nothing. A growing attempt age with this
+  moving is a large tree copying; with it flat, a stuck copy (`TestStage_TheCopiedRowsAreCounted`).
 - **A tree holding a flow that is not closed is refused**: only a bug leaves one, and its copy would not be settled.
 - **Delete during staging** stamps the root and clears T (`DeleteLive`). The copier's next lock fails, and the rows
   it copied stay in the day, invisible, until the day drops (`TestStage_ADeleteAbandonsTheCopy`).
+
+`FaultArchiveErr` fails a staging chunk as it fails a move, so a test that makes archiving fail makes it fail on
+either path. **The engine and fixtures suites run with staging on** under `DWARF_TEST_STAGE_ROWS=1` (every tree of
+more than one row staged); run them so after a change to this protocol.
 
 Pinned by `stage_test.go` and the engine's `TestStaged_ATreeArchivedInStagesReadsAsOne` (reads mid-copy, after
 publication, and after the live copy goes).

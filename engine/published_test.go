@@ -428,7 +428,9 @@ func TestStaged_APurgeDuringTheLiveCleanup(t *testing.T) {
 		assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE root_flow_id=?", rootID).Scan(&n))
 		return n
 	}
-	e.reapDueFlows(ctx) // published; the deletion walk ran before it, so the live copy is still there
+	e.reapBudget = time.Nanosecond // one round of walks: published, its live copy not yet removed
+	e.reapDueFlows(ctx)
+	e.reapBudget = 30 * time.Second
 	assert.Must(assert.True(liveFlows() > 0, "the live copy still there"))
 
 	removed, _, err := e.Purge(ctx, enginetest.Recent(workflow.Query{}))

@@ -1588,10 +1588,11 @@ func (e *Engine) ListOpen(ctx context.Context, query workflow.Query) (summaries 
 // It has no pagination and no cursor. An archived flow never changes, so a caller can walk a time range in windows,
 // each ending just after the oldest ArchivedAt it holds, dropping the flows already held: flows archived together
 // share one ArchivedAt. A caller polling forward from its last check up to now sees each flow once, provided its newest
-// bound stays behind now by more than an archiving batch takes - seconds, longer for a very large tree: flows archived
-// together are stamped with their batch's start, so they can appear after a later stamp has. Archive times come from
-// each shard's database and the window is cut by this process's clock, so flows within the skew between them may be
-// listed out of order, or, at a window's edge, missed.
+// bound stays behind now by more than archiving a tree takes: flows archived together are stamped with their batch's
+// start, so they can appear after a later stamp has. That is seconds, but a tree too large for one batch is copied
+// over many and listed once the copy is done, stamped with the time it began - minutes, or hours for the very largest.
+// Archive times come from each shard's database and the window is cut by this process's clock, so flows within the
+// skew between them may be listed out of order, or, at a window's edge, missed.
 func (e *Engine) ListClosed(ctx context.Context, query workflow.Query) (summaries []workflow.FlowSummary, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
