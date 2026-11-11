@@ -74,6 +74,7 @@ const (
 	FaultArchiveErr    = "reapArchiveErr"   // an archive move fails with an error that is not lock contention
 	FaultArchiveDelete = "archiveDeleteErr" // an archived tree's deletion fails before it commits; targeted
 	FaultStageChunk    = "reapStageChunk"   // a staging chunk fails under its root's lock, before it writes; targeted
+	FaultStageLost     = "reapStageLost"    // a staging chunk commits, then reports an error, as a lost response; targeted
 
 	CheckpointBatchLocked      = "reapBatchLocked"      // a batch has locked its due roots, inside its transaction
 	CheckpointBeforeRootDelete = "reapBeforeRootDelete" // a chunked deletion is about to recheck and delete its root
@@ -150,6 +151,9 @@ type KindObservation struct {
 	OldestHeld time.Duration
 	// Sweep is how long the current repair sweep has run, or 0 between sweeps.
 	Sweep time.Duration
+	// OldestAttempt is the age of the oldest unpublished archive attempt the repair sweep has seen, the larger of the
+	// current sweep's and the last complete one's, aging since it was read; 0 for none. The closed kind's only.
+	OldestAttempt time.Duration
 }
 
 // Reaper removes closed trees, one shard per Pass.
@@ -162,6 +166,7 @@ type Reaper struct {
 	lag      lag
 	cleanup  archiveCleanups
 	stages   stages
+	prefer   preferences
 }
 
 // New returns a Reaper that knows nothing yet, logs nowhere and records no metric.
@@ -208,6 +213,7 @@ func (r *Reaper) Forget(shard int) {
 	r.walks.forget(shard)
 	r.cleanup.forget(shard)
 	r.stages.forget(shard)
+	r.prefer.forget(shard)
 }
 
 // Observe returns what the Reaper knows of shard at now.
@@ -225,6 +231,14 @@ func (r *Reaper) Observe(shard int, now time.Time) Observation {
 		}
 		if !w.started.IsZero() {
 			k.Sweep = max(now.Sub(w.started), 0)
+		}
+		for _, a := range []struct {
+			age  time.Duration
+			seen time.Time
+		}{{w.attemptAge, w.attemptSeen}, {w.lastAttemptAge, w.lastAttemptSeen}} {
+			if a.age > 0 {
+				k.OldestAttempt = max(k.OldestAttempt, a.age+max(now.Sub(a.seen), 0))
+			}
 		}
 		o.Kinds[i] = k
 	}

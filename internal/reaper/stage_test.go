@@ -833,3 +833,299 @@ func TestStage_ADroppedDayIsReplacedWhileWaitingToPublish(t *testing.T) {
 	}
 	assert.Equal(11, visibleInDay(t, r, today, root), "published into today")
 }
+
+// TestStage_ALostPublicationResponse pins chunks, the publication's included, whose commits succeed but whose
+// responses are lost: each is a failure of the walk, the copy's position is kept from the commit, and a visit to a
+// published tree finds it stamped and copies nothing again; the archive holds the tree once, and the live tree goes.
+func TestStage_ALostPublicationResponse(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := stageRig(t)
+	today, err := r.archive.Today(ctx)
+	assert.NoError(err)
+	root := seedWideTree(t, r.db, 3, 10, 3)
+	wantFlows, wantSteps := treeRows(t, r, "dwarf_flows", "dwarf_steps", root)
+	fault := join(FaultStageLost, strconv.Itoa(root))
+	r.seams.InjectN(fault, 1000)
+	defer r.seams.Withdraw(fault)
+	for range 50 {
+		if _, _, there := rowsOf(t, r, root); !there {
+			break
+		}
+		r.pass(ctx)
+	}
+	if now, _ := r.archive.Today(ctx); now != today {
+		t.Skip("midnight passed during the test")
+	}
+	assert.True(r.logs.count("Reaper:") > 0, "the lost responses were failures")
+	gotFlows, gotSteps := treeRows(t, r, migrations.FlowsTable(today), migrations.StepsTable(today), root)
+	assert.Equal(wantFlows, gotFlows)
+	assert.Equal(wantSteps, gotSteps)
+	_, _, there := rowsOf(t, r, root)
+	assert.False(there, "the live tree is removed")
+}
+
+// TestStage_ARestartAtEveryStep pins a restart between any two steps of the protocol - before the attempt, mid-copy,
+// with the copy done, after publication, mid-cleanup: a fresh Reaper after every pass of one chunk each still archives
+// the tree whole, once, and removes it from the live tables.
+func TestStage_ARestartAtEveryStep(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := stageRig(t)
+	oneChunk(r)
+	today, err := r.archive.Today(ctx)
+	assert.NoError(err)
+	root := seedWideTree(t, r.db, 3, 10, 3)
+	wantFlows, wantSteps := treeRows(t, r, "dwarf_flows", "dwarf_steps", root)
+	for range 100 {
+		if _, _, there := rowsOf(t, r, root); !there {
+			break
+		}
+		r.reaper = New()
+		r.reaper.SetSeams(r.seams)
+		r.pass(ctx)
+	}
+	if now, _ := r.archive.Today(ctx); now != today {
+		t.Skip("midnight passed during the test")
+	}
+	gotFlows, gotSteps := treeRows(t, r, migrations.FlowsTable(today), migrations.StepsTable(today), root)
+	assert.Equal(wantFlows, gotFlows)
+	assert.Equal(wantSteps, gotSteps)
+	assert.Equal(len(wantFlows), visibleInDay(t, r, today, root))
+	_, _, there := rowsOf(t, r, root)
+	assert.False(there, "the live tree is removed")
+}
+
+// TestStage_ADroppedDayDuringTheLiveCleanup pins PurgeBefore - a drop of the day - after a tree is published there,
+// while its live copy is still to be removed: the live cleanup goes on and removes it, and the published copy went
+// with its day.
+func TestStage_ADroppedDayDuringTheLiveCleanup(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := stageRig(t)
+	today, err := r.archive.Today(ctx)
+	assert.NoError(err)
+	yesterday := today - 1
+	assert.Must(assert.NoError(makeArchiveDay(t, r, yesterday)))
+	assert.Must(assert.NoError(r.archive.Refresh(ctx)))
+	root := seedWideTree(t, r.db, 3, 10, 3)
+	setAttempt(t, r, root, r.archive.DayEnds(yesterday).Add(-2*time.Minute))
+	r.pass(ctx) // published into yesterday; the deletion kind ran before it, so the live copy is still there
+	assert.Must(assert.Equal(11, visibleInDay(t, r, yesterday, root)))
+	_, _, there := rowsOf(t, r, root)
+	assert.Must(assert.True(there, "the live copy still there"))
+
+	_, err = r.archive.DropBefore(ctx, today)
+	assert.Must(assert.NoError(err))
+	errorsBefore := r.logs.count("Reaper:")
+	r.pass(ctx)
+	_, _, there = rowsOf(t, r, root)
+	assert.False(there, "the live cleanup finished")
+	assert.Equal(errorsBefore, r.logs.count("Reaper:"), "and logged nothing")
+}
+
+// TestStage_SizingCountsOnlyWhatItDecides pins the capped sizing on a real tree: the first tree is counted up to one
+// past the staging threshold, not whole, and a root with an attempt is not counted at all.
+func TestStage_SizingCountsOnlyWhatItDecides(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := stageRig(t)
+	big := seedWideTree(t, r.db, 3, 30, 3) // 124 rows
+	small := seedTrees(t, r.db, 1, callShape)[0]
+	cut, first, ages, err := r.p().rootsWithinRows(ctx, []int{big, small}, true)
+	assert.NoError(err)
+	assert.Equal([]int{big}, cut, "over the batch: alone")
+	assert.Equal(r.cfg.StageRows+1, first, "counted to one past the threshold")
+	assert.Zero(len(ages))
+
+	setAttempt(t, r, big, time.Now())
+	r.seams.Inject(join(FaultSizeErr, strconv.Itoa(big)))
+	defer r.seams.Withdraw(join(FaultSizeErr, strconv.Itoa(big)))
+	cut, _, ages, err = r.p().rootsWithinRows(ctx, []int{big, small}, true)
+	assert.NoError(err, "a root with an attempt is not sized")
+	assert.Equal([]int{big}, cut)
+	assert.Equal(1, len(ages))
+	cut, _, _, err = r.p().rootsWithinRows(ctx, []int{small, big}, true)
+	assert.NoError(err)
+	assert.Equal([]int{small}, cut, "the cut ends before a root with an attempt")
+}
+
+// TestStage_TheOldestUnpublishedAttemptIsObserved pins the observation behind dwarf_archive_oldest_attempt_seconds: a
+// repair sweep that sees an attempt not yet published reports its age, aging since; once the tree is published and a
+// later sweep completes without one, it reads zero.
+func TestStage_TheOldestUnpublishedAttemptIsObserved(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := stageRig(t)
+	root := seedWideTree(t, r.db, 3, 10, 3)
+	var now time.Time
+	assert.Must(assert.NoError(r.db.QueryRowContext(ctx, "SELECT updated_at FROM dwarf_flows WHERE flow_id=?", root).Scan(&now)))
+	setAttempt(t, r, root, database.StoredTime(now).Add(-time.Minute))
+	fault := join(FaultStageChunk, strconv.Itoa(root))
+	r.seams.InjectN(fault, 1000) // the copy fails, so the attempt stays unpublished
+	r.pass(ctx)
+	r.pass(ctx)
+	obs := r.reaper.Observe(1, time.Now())
+	assert.True(obs.Kinds[0].OldestAttempt >= time.Minute, "observed: %v", obs.Kinds[0].OldestAttempt)
+	r.seams.Withdraw(fault)
+	for range 4 {
+		r.pass(ctx)
+	}
+	_, _, there := rowsOf(t, r, root)
+	assert.Must(assert.False(there, "published and cleaned up"))
+	assert.Zero(r.reaper.Observe(1, time.Now()).Kinds[0].OldestAttempt, "a sweep with no attempt reads zero")
+}
+
+// archivedByStages reports whether root's tree was archived into day by stages rather than in one move: a staged
+// tree's root is stamped a millisecond or more after its descendants, a moved tree's flows all at one time.
+func archivedByStages(t *testing.T, r *rig, day, root int) bool {
+	t.Helper()
+	var rootAt, childAt time.Time
+	flows := migrations.FlowsTable(day)
+	if err := r.db.QueryRowContext(t.Context(), "SELECT archived_at FROM "+flows+" WHERE flow_id=?", root).Scan(&rootAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.db.QueryRowContext(t.Context(), "SELECT archived_at FROM "+flows+" WHERE root_flow_id=? AND flow_id<>?"+
+		" ORDER BY flow_id LIMIT_OFFSET(1, 0)", root, root).Scan(&childAt); err != nil {
+		t.Fatal(err)
+	}
+	return database.StoredTime(rootAt).Sub(database.StoredTime(childAt)) >= time.Millisecond
+}
+
+// TestStage_ATreeThatMissesItsDeadlineIsStaged pins the fallback: a tree under the staging threshold whose atomic move
+// runs into its deadline is remembered, and its next visit takes the staged path - never another atomic move - once
+// its root can be claimed. On MySQL the timed-out statement runs on, holding the root, so the visits in between find
+// it held, keep the preference and yield.
+func TestStage_ATreeThatMissesItsDeadlineIsStaged(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := stageRig(t)
+	r.cfg.StageRows = 1 << 20 // far over the tree: size alone would never stage it
+	r.cfg.BatchRows = 4096
+	r.cfg.Attempt = 500 * time.Millisecond
+	today, err := r.archive.Today(ctx)
+	assert.NoError(err)
+	root := seedWideTree(t, r.db, 3, 10, 3)
+	var child int
+	assert.Must(assert.NoError(r.db.QueryRowContext(ctx, "SELECT MAX(flow_id) FROM dwarf_flows WHERE root_flow_id=?", root).Scan(&child)))
+	release := holdRows(t, r, "dwarf_steps", child) // the move waits on it past its deadline
+	r.pass(ctx)
+	if _, _, there := rowsOf(t, r, root); there && !attemptAt(t, r, root).After(noAttempt) {
+		assert.True(r.reaper.prefer.has(stageKey{1, root}), "remembered")
+		r.pass(ctx) // a visit that cannot claim the root keeps the preference
+		if !attemptAt(t, r, root).After(noAttempt) {
+			assert.True(r.reaper.prefer.has(stageKey{1, root}), "still remembered while the root is held")
+		}
+	}
+	release()
+	r.cfg.Attempt = 30 * time.Second
+	for range 20 {
+		if _, _, there := rowsOf(t, r, root); !there {
+			break
+		}
+		time.Sleep(100 * time.Millisecond) // MySQL's timed-out statement ends once the row is released
+		r.pass(ctx)
+	}
+	if now, _ := r.archive.Today(ctx); now != today {
+		t.Skip("midnight passed during the test")
+	}
+	assert.Equal(11, visibleInDay(t, r, today, root))
+	assert.True(archivedByStages(t, r, today, root), "archived in stages, not by another move")
+	assert.False(r.reaper.prefer.has(stageKey{1, root}), "forgotten once its attempt held it")
+}
+
+// TestStage_APreferenceWaitsForItsRoot pins a remembered tree whose root stays held: every visit yields and keeps the
+// preference, never moving it atomically, and the trees beside it are archived meanwhile.
+func TestStage_APreferenceWaitsForItsRoot(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := stageRig(t)
+	r.cfg.StageRows = 1 << 20
+	today, err := r.archive.Today(ctx)
+	assert.NoError(err)
+	root := seedTrees(t, r.db, 1, callShape)[0]
+	other := seedTrees(t, r.db, 1, callShape)[0]
+	r.reaper.prefer.add(stageKey{1, root})
+	release := holdRows(t, r, "dwarf_flows", root)
+	for range 3 {
+		r.pass(ctx)
+	}
+	release()
+	if now, _ := r.archive.Today(ctx); now != today {
+		t.Skip("midnight passed during the test")
+	}
+	assert.True(r.reaper.prefer.has(stageKey{1, root}), "kept")
+	_, _, there := rowsOf(t, r, root)
+	assert.True(there, "not moved")
+	assert.Equal(2, visibleInDay(t, r, today, other), "the tree beside it archived")
+}
+
+// TestStage_APreferenceIsHarmlessOnceItsTreeIsGone pins a preference whose tree went another way: deleted, or moved
+// by a commit whose response was lost. The deletion forgets it, and a full set of preferences makes room by dropping
+// those whose trees are gone - never one still pending.
+func TestStage_APreferenceIsHarmlessOnceItsTreeIsGone(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := stageRig(t)
+	today, err := r.archive.Today(ctx)
+	assert.NoError(err)
+	deleted := seedTrees(t, r.db, 1, callShape)[0]
+	r.reaper.prefer.add(stageKey{1, deleted})
+	_, err = r.reaper.DeleteLive(ctx, r.db, r.archive.DayLength(), deleted)
+	assert.NoError(err)
+	r.pass(ctx)
+	_, _, there := rowsOf(t, r, deleted)
+	assert.False(there)
+	assert.False(r.reaper.prefer.has(stageKey{1, deleted}), "the deletion forgot it")
+
+	moved := seedTrees(t, r.db, 1, callShape)[0]
+	pending := seedTrees(t, r.db, 1, callShape)[0]
+	_, err = r.reaper.MoveTrees(ctx, r.db, r.archive, today, []int{moved}) // as if its response was lost
+	assert.NoError(err)
+	r.reaper.prefer.add(stageKey{1, moved})
+	r.reaper.prefer.add(stageKey{1, pending})
+	for i := range maxPreferred - 2 {
+		r.reaper.prefer.add(stageKey{1, 1_000_000 + i}) // full of trees that are gone
+	}
+	fresh := seedTrees(t, r.db, 1, callShape)[0]
+	r.p().preferStaging(ctx, fresh)
+	assert.True(r.reaper.prefer.has(stageKey{1, fresh}), "room made")
+	assert.True(r.reaper.prefer.has(stageKey{1, pending}), "a pending preference kept")
+	assert.False(r.reaper.prefer.has(stageKey{1, moved}), "a gone tree's dropped")
+}
+
+// TestStage_ARestartForgetsOnlyThePreference pins a restart after a preference started its tree's attempt: the fresh
+// Reaper knows no preference, but the attempt, being in the database, is resumed and the tree published.
+func TestStage_ARestartForgetsOnlyThePreference(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := stageRig(t)
+	r.cfg.StageRows = 1 << 20
+	oneChunk(r)
+	today, err := r.archive.Today(ctx)
+	assert.NoError(err)
+	root := seedWideTree(t, r.db, 3, 10, 3)
+	r.reaper.prefer.add(stageKey{1, root})
+	r.pass(ctx)
+	assert.Must(assert.True(attemptAt(t, r, root).After(noAttempt), "the preference started an attempt"))
+	r.reaper = New()
+	r.reaper.SetSeams(r.seams)
+	fullPasses(r)
+	for range 3 {
+		r.pass(ctx)
+	}
+	if now, _ := r.archive.Today(ctx); now != today {
+		t.Skip("midnight passed during the test")
+	}
+	assert.Equal(11, visibleInDay(t, r, today, root))
+	assert.True(archivedByStages(t, r, today, root))
+}

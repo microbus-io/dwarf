@@ -104,6 +104,7 @@ const (
 	CheckpointReapBeforeRootDelete = reaper.CheckpointBeforeRootDelete // a chunked deletion is about to recheck and delete its root
 	CheckpointReapChunkDone        = reaper.CheckpointChunkDone        // a chunk of a chunked deletion has committed and been counted
 	FaultReapStageChunk            = reaper.FaultStageChunk            // a staging chunk fails under its root's lock, before it writes; targeted at root flow_id
+	FaultReapStageLost             = reaper.FaultStageLost             // a staging chunk commits, then reports an error, as a lost response; targeted at root flow_id
 	CheckpointReapStageChunkDone   = reaper.CheckpointStageChunkDone   // a staging chunk, or the publication, has committed
 )
 const (

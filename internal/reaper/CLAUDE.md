@@ -149,8 +149,12 @@ transactions, invisible there, then published in one small one. **It is off in p
   their day (`TestStage_ADroppedDayIsReplaced`, `TestStage_AHalfDroppedDayIsReplaced`, the latter the reason the
   archiver drops a day's flows table first).
 - **The position is in memory** (`stagePos`, in `stages`, per shard and root, so the fast and repair walkers share
-  it), never durable. A lost one starts the copy again from the first descendant, rewriting the same rows, so it is
-  kept whenever the copy may go on: **a root another transaction holds - another copier, a Fork - locks nothing, as
+  it). **A fresh one - a restart, another replica - resumes from the day itself**: descendants are copied in
+  `flow_id` order and each flow row after its steps, so every descendant up to the largest the day holds is whole, and
+  their count numbers the next one's stamp group. Do not start a fresh position at the first descendant: a restart
+  then re-reads the whole prefix at a chunk's budget, and a copier restarted every few chunks never gets past the first
+  descendants (`TestStage_ARestartAtEveryStep`). It
+  is still kept whenever the copy may go on, since the resume costs a count of what is there: **a root another transaction holds - another copier, a Fork - locks nothing, as
   a stamped one does, and only a read of the root tells them apart** (`treeGone`). Do not forget the position when a
   lock takes nothing: a large copy would restart at every collision, and two replicas would keep throwing away each
   other's progress (`TestStage_AHeldRootKeepsItsCopysPosition`). A position is forgotten when the copy publishes or its tree
@@ -173,6 +177,30 @@ transactions, invisible there, then published in one small one. **It is off in p
   statement, and the copy would wait forever for a next day that is never made
   (`TestStage_ADroppedDayIsReplacedWhileWaitingToPublish`). The archive's record of the days may be stale, so only the
   statement is proof.
+- **Which path a tree takes is decided by capped counts, never a whole-tree count** (`rootsWithinRows`,
+  `cutWithinRows`). The attempts are read first, by primary key: a root with one goes to the staged path unsized. The
+  rest are counted one by one with `treeRowsUpTo`, the first up to one past what decides its path (the batch, and
+  `StageRows` when staging), each later one up to one past what is left of the batch. Do not size a batch with one
+  `GROUP BY` over its trees: a huge tree anywhere in it makes that count miss its deadline, the batch gets no sizes,
+  and the tree never gets the attempt that would stop it being counted. The cost is a round trip per tree in the
+  batch; Purge's sizing uses the same rule.
+- **A tree whose atomic move runs into its deadline takes the staged path from its next visit**, whatever its size,
+  when staging is on: the walk remembers it (`preferences`, in memory, per shard and root), and its next visit treats
+  it as one with an attempt - unsized, a batch of its own, the staged path - whose locked claim starts the attempt.
+  **The claim waits for the next visit**: a claim right after the timeout finds the root still held on MySQL, whose
+  driver abandons a timed-out statement by closing its connection while the server runs it on, holding the root until
+  it ends. A visit that cannot claim the root, or may not start an attempt, yields and keeps the preference, and
+  **never tries another atomic move** (`TestStage_ATreeThatMissesItsDeadlineIsStaged`,
+  `TestStage_APreferenceWaitsForItsRoot`). A preference is dropped once its tree has an attempt, is stamped or gone,
+  or a batch removed it. A full set makes room only by dropping preferences whose trees are no longer live, never a
+  pending one; one that finds no room is not kept (`TestStage_APreferenceIsHarmlessOnceItsTreeIsGone`). A restart, a
+  handoff or no room forgets a preference, and the tree times out once more before it is remembered: it is not a
+  durable guarantee, the attempt is (`TestStage_ARestartForgetsOnlyThePreference`). A lock wait that ran out stages a
+  tree that did not need it, which costs only transactions; do not add failure counters or timeout classes to avoid it.
+- **The oldest unpublished attempt the repair sweep sees is a gauge** (`dwarf_archive_oldest_attempt_seconds`), read
+  from the attempts the sizing reads anyway, the larger of the current sweep's and the last complete one's, aging
+  since: an incomplete sweep never reads as nothing outstanding. A replaced attempt starts its age again, so it is
+  read beside the archive lag (`TestStage_TheOldestUnpublishedAttemptIsObserved`).
 - **A tree holding a flow that is not closed is refused**: only a bug leaves one, and its copy would not be settled.
 - **Delete during staging** stamps the root and clears T (`DeleteLive`). The copier's next lock fails, and the rows
   it copied stay in the day, invisible, until the day drops (`TestStage_ADeleteAbandonsTheCopy`).

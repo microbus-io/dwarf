@@ -185,6 +185,7 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 					p.r.failures.clearUnlessFailedSince(shard, w.started)
 				}
 				w.lastFailed, w.failed, w.started = w.failed, 0, time.Time{}
+				w.lastAttemptAge, w.lastAttemptSeen, w.attemptAge, w.attemptSeen = w.attemptAge, w.attemptSeen, 0, time.Time{}
 			}
 			return false
 		}
@@ -196,19 +197,20 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 			}
 			return false
 		}
-		cut, firstSize, attempted, err := p.rootsWithinRows(ctx, rootIDs(candidates))
+		cut, firstSize, attemptAges, err := p.rootsWithinRows(ctx, rootIDs(candidates), d != nil)
 		if err != nil {
 			cut = rootIDs(candidates) // a known range, even when its count fails
 		}
-		if d != nil {
-			// A root whose staged archive has started is archived in stages, so it takes a batch of its own.
-			for i, root := range cut {
-				if attempted[root] {
-					cut = cut[:max(i, 1)]
-					break
+		if repair && d != nil {
+			// The oldest unpublished attempt this sweep has seen, for its gauge.
+			for _, age := range attemptAges {
+				if age > w.attemptAge {
+					w.attemptAge, w.attemptSeen = age, time.Now()
 				}
 			}
 		}
+		_, attempted := attemptAges[cut[0]]
+		attempted = attempted || (d != nil && p.r.prefer.has(stageKey{shard, cut[0]}))
 		moved := 0
 		attemptStart := time.Now()
 		// finished is false when a tree deleted in chunks is not gone yet and nothing failed: the walk keeps its
@@ -216,7 +218,7 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 		finished := true
 		large := err == nil && d == nil && len(cut) == 1 && firstSize > max(p.cfg.BatchRows, 1)
 		staged := err == nil && d != nil && len(cut) == 1 &&
-			(attempted[cut[0]] || (p.cfg.StageRows > 0 && firstSize > p.cfg.StageRows))
+			(attempted || (p.cfg.StageRows > 0 && firstSize > p.cfg.StageRows))
 		switch {
 		case err != nil:
 		case staged:
@@ -241,6 +243,14 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 					p.archiveFailed(ctx, "archiving closed trees", err)
 				}
 			}
+			if d != nil && !staged && len(cut) == 1 && p.cfg.StageRows > 0 && ctx.Err() == nil &&
+				time.Since(attemptStart) >= p.cfg.Attempt {
+				// A tree that ran into its deadline in one transaction takes the staged path from its next visit,
+				// whatever its size: the claim waits for the next visit, since a timed-out statement can hold the
+				// root a while yet (MySQL runs it on after the driver gives up). A lock wait that ran out stages a
+				// tree that did not need it, which costs only the transactions.
+				p.preferStaging(ctx, cut[0])
+			}
 			if repair {
 				w.batch = 1
 				if len(cut) == 1 {
@@ -260,6 +270,11 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 				}
 			} else if !large {
 				p.r.metrics.flowsReaped(ctx, shard, reason, moved)
+			}
+			if !staged {
+				for _, root := range cut {
+					p.r.prefer.drop(stageKey{shard, root}) // removed by the batch, or not this walk's
+				}
 			}
 			if repair && moved > 0 {
 				w.batch = min(p.cfg.Batch, 2*w.batch)
@@ -328,12 +343,12 @@ func (p *pass) resumeStarted(ctx context.Context, k kind, w *walk, d *filingDay,
 			w.startedAfter = dueRoot{}
 			return
 		}
-		started, err := p.attemptedAmong(ctx, rootIDs(candidates))
+		started, err := p.attemptsAmong(ctx, rootIDs(candidates))
 		if err != nil {
 			p.logError(ctx, "Reaper: reading archive attempts", "shard", shard, "error", err)
 			return
 		}
-		i := slices.IndexFunc(candidates, func(c dueRoot) bool { return started[c.flowID] })
+		i := slices.IndexFunc(candidates, func(c dueRoot) bool { _, ok := started[c.flowID]; return ok })
 		if i < 0 {
 			w.startedAfter = candidates[len(candidates)-1]
 			continue
@@ -350,23 +365,58 @@ func (p *pass) resumeStarted(ctx context.Context, k kind, w *walk, d *filingDay,
 	}
 }
 
-// attemptedAmong returns which of roots have an archive attempt.
-func (p *pass) attemptedAmong(ctx context.Context, roots []int) (map[int]bool, error) {
+// attemptsAmong returns the roots among roots that have an archive attempt, each with the attempt's age on the
+// database clock: one primary-key read of the roots, before anything sizes or copies them.
+func (p *pass) attemptsAmong(ctx context.Context, roots []int) (map[int]time.Duration, error) {
 	ctx, cancel := p.attemptCtx(ctx)
 	defer cancel()
 	cond, args := AttemptedSQL(p.shard.DB.DriverName())
-	rows, err := p.shard.DB.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE flow_id IN ("+intCSV(roots)+") AND "+cond, args...)
+	rows, err := p.shard.DB.QueryContext(ctx, "SELECT flow_id, DATE_DIFF_MILLIS(NOW_UTC(), archive_attempt_at) FROM dwarf_flows"+
+		" WHERE flow_id IN ("+intCSV(roots)+") AND "+cond, args...)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	defer rows.Close()
-	out := map[int]bool{}
+	out := map[int]time.Duration{}
 	for rows.Next() {
 		var id int
-		if err := rows.Scan(&id); err != nil {
+		var ageMs float64 // fractional on SQLite
+		if err := rows.Scan(&id, &ageMs); err != nil {
 			return nil, errors.Trace(err)
 		}
-		out[id] = true
+		out[id] = max(time.Duration(ageMs*float64(time.Millisecond)), time.Nanosecond)
 	}
 	return out, errors.Trace(rows.Err())
+}
+
+// preferStaging remembers root as preferring the staged path (preferences), making room first by dropping the
+// remembered roots that are no longer live, unstamped roots - which one read of them tells - and no other: a pending
+// preference is never evicted for a new one. A preference that finds no room is not kept, and the tree times out once
+// more before it is remembered.
+func (p *pass) preferStaging(ctx context.Context, root int) {
+	key := stageKey{p.shard.Index, root}
+	if p.r.prefer.add(key) {
+		return
+	}
+	held := p.r.prefer.roots(p.shard.Index)
+	ctx, cancel := p.attemptCtx(ctx)
+	defer cancel()
+	live := map[int]bool{}
+	rows, err := p.shard.DB.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE flow_id IN ("+intCSV(held)+") AND delete_after_ms=0")
+	if err != nil {
+		return
+	}
+	for rows.Next() {
+		var id int
+		if rows.Scan(&id) == nil {
+			live[id] = true
+		}
+	}
+	rows.Close()
+	for _, r := range held {
+		if !live[r] {
+			p.r.prefer.drop(stageKey{p.shard.Index, r})
+		}
+	}
+	p.r.prefer.add(key)
 }

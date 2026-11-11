@@ -60,6 +60,7 @@ func (p *pass) stage(ctx context.Context, k kind, root int, d *filingDay, sliceS
 	yield := func() (int, bool, error) {
 		if p.treeGone(ctx, root) {
 			p.r.stages.drop(key)
+			p.r.prefer.drop(key)
 		}
 		return 0, true, nil
 	}
@@ -70,6 +71,7 @@ func (p *pass) stage(ctx context.Context, k kind, root int, d *filingDay, sliceS
 	if !ok {
 		return yield()
 	}
+	p.r.prefer.drop(key) // the attempt records it now
 	pos := p.r.stages.get(key)
 	if !pos.at.Equal(at) {
 		pos = stagePos{at: at}
@@ -200,6 +202,15 @@ func (p *pass) stageChunk(ctx context.Context, root int, a *archiver.Archive, po
 		if p.r.seams.Enabled() && p.r.seams.IsFault(join(FaultStageChunk, id)) {
 			return errors.New("injected fault: " + FaultStageChunk)
 		}
+		if at == (stagePos{at: pos.at}) {
+			// A fresh position - a restart, another replica - resumes after what the day already holds of this
+			// attempt: descendants are copied in flow_id order and each flow row after its steps, so every descendant
+			// up to the largest there is whole, and their count numbers the next one's stamp group.
+			if err := tx.QueryRowContext(ctx, "SELECT COUNT(*), COALESCE(MAX(flow_id), 0) FROM "+c.flows+
+				" WHERE root_flow_id="+id+" AND flow_id<>"+id).Scan(&at.seen, &at.after); err != nil {
+				return errors.Trace(err)
+			}
+		}
 		budget := max(p.cfg.BatchRows, 1)
 		for budget > 0 && at.flow != root {
 			if at.flow != 0 {
@@ -308,6 +319,9 @@ func (p *pass) stageChunk(ctx context.Context, root int, a *archiver.Archive, po
 		return 0, false, errors.Trace(err)
 	}
 	*pos = at
+	if p.r.seams.Enabled() && p.r.seams.IsFault(join(FaultStageLost, id)) {
+		return 0, false, errors.New("injected fault: " + FaultStageLost)
+	}
 	return published, done, nil
 }
 

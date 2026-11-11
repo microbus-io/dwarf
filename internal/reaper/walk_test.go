@@ -279,7 +279,7 @@ func TestWalk_TreeEnvelope(t *testing.T) {
 				assert.Must(assert.NoError(r.p().refreshDay(t.Context(), day)))
 			}
 			start := time.Now()
-			cut, _, _, err := r.p().rootsWithinRows(t.Context(), []int{root})
+			cut, _, _, err := r.p().rootsWithinRows(t.Context(), []int{root}, false)
 			assert.Must(assert.NoError(err))
 			sized := time.Since(start)
 			start = time.Now()
@@ -542,11 +542,11 @@ func TestWalk_AFlowWithNoStepsIsOneRow(t *testing.T) {
 	var err error
 	roots := seedTrees(t, db, 2, treeShape{rootSteps: 2, childSteps: 0})
 	r.cfg.BatchRows = 5
-	cut, _, _, err := r.p().rootsWithinRows(ctx, roots)
+	cut, _, _, err := r.p().rootsWithinRows(ctx, roots, false)
 	assert.NoError(err)
 	assert.Equal(roots[:1], cut, "three rows a tree: two steps and the flow of none")
 	r.cfg.BatchRows = 6
-	cut, _, _, err = r.p().rootsWithinRows(ctx, roots)
+	cut, _, _, err = r.p().rootsWithinRows(ctx, roots, false)
 	assert.NoError(err)
 	assert.Equal(roots, cut)
 

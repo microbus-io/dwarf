@@ -409,3 +409,41 @@ func TestStaged_ATreeArchivedInStagesReadsAsOne(t *testing.T) {
 	assert.Zero(n, "the live copy is deleted")
 	reads("published, the live copy deleted")
 }
+
+// TestStaged_APurgeDuringTheLiveCleanup pins Purge of a staged tree published while its live copy is still to be
+// removed: the archive's copy is purged, the outcome is still served from the live root until the cleanup removes it,
+// and the cleanup then finishes, leaving the tree nowhere.
+func TestStaged_APurgeDuringTheLiveCleanup(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e := archiveEngine(t, treeMux(), 30)
+	e.reapStageRows, e.reapBatchRows = 1, 2
+	rootKey, childKey, _, _ := treeKeys(t, e)
+	_, _, rootID, _, _ := keys.ParseFlowKey(rootKey)
+	db, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	liveFlows := func() int {
+		var n int
+		assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE root_flow_id=?", rootID).Scan(&n))
+		return n
+	}
+	e.reapDueFlows(ctx) // published; the deletion walk ran before it, so the live copy is still there
+	assert.Must(assert.True(liveFlows() > 0, "the live copy still there"))
+
+	removed, _, err := e.Purge(ctx, enginetest.Recent(workflow.Query{}))
+	assert.NoError(err)
+	assert.Equal(1, removed)
+	assert.Zero(closedListed(t, e))
+	_, err = e.Summary(ctx, childKey)
+	assert.Equal(http.StatusNotFound, errors.StatusCode(err), "the purged child is not read from the live copy")
+	outcome, err := e.Snapshot(ctx, rootKey)
+	if assert.NoError(err, "the live root still serves its outcome") {
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
+	}
+
+	e.reapDueFlows(ctx)
+	assert.Zero(liveFlows(), "the live cleanup finished")
+	_, err = e.Snapshot(ctx, rootKey)
+	assert.Equal(http.StatusNotFound, errors.StatusCode(err))
+}

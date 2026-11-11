@@ -300,78 +300,78 @@ func lockRoots(ctx context.Context, tx *sequel.Tx, flows string, skipHeld bool, 
 	return locked, nil
 }
 
-// rootsWithinRows returns the leading roots of roots, in the order given, whose trees fit in about BatchRows rows, and
-// at least the first, with the first tree's size. A tree's rows are counted as its flows' joined steps, one for a flow
-// with none. Sizing is a batching hint outside the transaction; the batch locks only the roots it takes, and its
-// transaction still opens with a write, which SQLite needs.
-func (p *pass) rootsWithinRows(ctx context.Context, roots []int) (cut []int, firstSize int, attempted map[int]bool, err error) {
-	ctx, cancel := p.attemptCtx(ctx)
-	defer cancel()
-	if p.r.seams.Enabled() {
-		for _, root := range roots {
-			if p.r.seams.IsFault(join(FaultSizeErr, strconv.Itoa(root))) {
-				return nil, 0, nil, errors.New("injected fault: " + FaultSizeErr)
-			}
-		}
+// rootsWithinRows returns the leading roots of roots, in the order given, that one batch takes, with the first tree's
+// size and, when archiving, the archive attempts among roots by their age. A root with an attempt, or one whose atomic
+// archive ran into its deadline, is archived in stages, so when archiving it takes a batch of its own and is not
+// sized: first, it is the cut alone; later, the cut ends before it.
+// The others are sized by capped counts in their order (cutWithinRows): the first up to what decides its path - over
+// the batch, and over StageRows when staging - and each later one up to what is left of the batch. Sizing is a
+// batching hint outside the transaction; the batch locks only the roots it takes, and its transaction still opens with
+// a write, which SQLite needs.
+func (p *pass) rootsWithinRows(ctx context.Context, roots []int, archiving bool) (cut []int, firstSize int, attempts map[int]time.Duration, err error) {
+	// staged is whether a root takes the staged path whatever its size: it has an attempt, or its atomic archive ran
+	// into its deadline (preferences).
+	staged := func(root int) bool {
+		_, ok := attempts[root]
+		return ok || p.r.prefer.has(stageKey{p.shard.Index, root})
 	}
-	// The same statement says which roots have an archive attempt, read from the root's own row of the tree.
-	cond, condArgs := AttemptedSQL(p.shard.DB.DriverName())
-	res, err := p.shard.DB.QueryContext(ctx, "SELECT f.root_flow_id, COUNT(*), MAX(CASE WHEN f.flow_id=f.root_flow_id AND f."+
-		cond+" THEN 1 ELSE 0 END) FROM dwarf_flows f LEFT JOIN dwarf_steps s ON s.flow_id=f.flow_id"+
-		" WHERE f.root_flow_id IN ("+intCSV(roots)+") GROUP BY f.root_flow_id", condArgs...)
-	if err != nil {
-		return nil, 0, nil, errors.Trace(err)
-	}
-	defer res.Close()
-	size := make(map[int]int, len(roots))
-	attempted = map[int]bool{}
-	for res.Next() {
-		var root, n, a int
-		if err := res.Scan(&root, &n, &a); err != nil {
+	if archiving {
+		if attempts, err = p.attemptsAmong(ctx, roots); err != nil {
 			return nil, 0, nil, errors.Trace(err)
 		}
-		size[root] = n
-		if a == 1 {
-			attempted[root] = true
+		if staged(roots[0]) {
+			return roots[:1], 0, attempts, nil
 		}
 	}
-	if err := res.Err(); err != nil {
-		return nil, 0, nil, errors.Trace(err)
+	ctx, cancel := p.attemptCtx(ctx)
+	defer cancel()
+	firstLimit := max(p.cfg.BatchRows, 1) + 1
+	if archiving && p.cfg.StageRows > 0 {
+		firstLimit = max(firstLimit, p.cfg.StageRows+1)
 	}
-	return withinRows(roots, size, p.cfg.BatchRows), size[roots[0]], attempted, nil
+	var stop func(int) bool
+	if archiving {
+		stop = staged
+	}
+	cut, firstSize, err = cutWithinRows(roots, p.cfg.BatchRows, firstLimit, stop,
+		func(root, limit int) (int, error) {
+			if p.r.seams.Enabled() && p.r.seams.IsFault(join(FaultSizeErr, strconv.Itoa(root))) {
+				return 0, errors.New("injected fault: " + FaultSizeErr)
+			}
+			return treeRowsUpTo(ctx, p.shard.DB, live, root, limit)
+		})
+	return cut, firstSize, attempts, errors.Trace(err)
 }
 
-// rootsWithinRowsIn is rootsWithinRows over the given tables, the live ones or an archive day's, for a budget of rows,
-// with every tree's size.
-func rootsWithinRowsIn(ctx context.Context, db *sequel.DB, t tables, roots []int, rows int) (cut []int, size map[int]int, err error) {
-	res, err := db.QueryContext(ctx, "SELECT f.root_flow_id, COUNT(*) FROM "+t.flows+" f"+
-		" LEFT JOIN "+t.steps+" s ON s.flow_id=f.flow_id WHERE f.root_flow_id IN ("+intCSV(roots)+") GROUP BY f.root_flow_id")
-	if err != nil {
-		return nil, nil, errors.Trace(err)
-	}
-	defer res.Close()
-	size = make(map[int]int, len(roots))
-	for res.Next() {
-		var root, n int
-		if err := res.Scan(&root, &n); err != nil {
-			return nil, nil, errors.Trace(err)
-		}
-		size[root] = n
-	}
-	if err := res.Err(); err != nil {
-		return nil, nil, errors.Trace(err)
-	}
-	return withinRows(roots, size, rows), size, nil
-}
-
-// withinRows returns the leading roots whose sizes sum to at most limit, and at least the first.
-func withinRows(roots []int, size map[int]int, limit int) []int {
+// cutWithinRows returns the leading roots whose trees fit in about rows rows, and at least the first, with the first's
+// size: each sized by size, counting up to a limit - the first up to firstLimit, each later one up to one past what
+// is left of rows, which is all it takes to tell whether it fits - so no count reads a large tree whole. The cut ends
+// before a root for which stop is true.
+func cutWithinRows(roots []int, rows, firstLimit int, stop func(root int) bool, size func(root, limit int) (int, error)) (cut []int, firstSize int, err error) {
+	rows = max(rows, 1)
 	total := 0
 	for i, root := range roots {
-		total += size[root]
-		if total > limit && i > 0 {
-			return roots[:i]
+		if i > 0 && stop != nil && stop(root) {
+			return roots[:i], firstSize, nil
+		}
+		limit := firstLimit
+		if i > 0 {
+			limit = rows - total + 1
+		}
+		n, err := size(root, limit)
+		if err != nil {
+			return nil, 0, errors.Trace(err)
+		}
+		if i == 0 {
+			firstSize = n
+		}
+		total += n
+		if total > rows {
+			if i == 0 {
+				return roots[:1], firstSize, nil
+			}
+			return roots[:i], firstSize, nil
 		}
 	}
-	return roots
+	return roots, firstSize, nil
 }

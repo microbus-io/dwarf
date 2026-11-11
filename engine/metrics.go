@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/reaper"
 	"github.com/microbus-io/errors"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -337,6 +338,7 @@ func (e *Engine) initMetrics() error {
 	archiveLagG := gaugeF("dwarf_archive_lag_seconds", "Wait past grace at the fast cursor's last scan. Held roots behind it are reported separately. Aggregate with max.", "s")
 	heldRoots := gauge("dwarf_archive_held_roots", "Failed singles observed by repair: max of the current and last complete sweep. Per replica, shard and kind; aggregate with max, not sum. Resets at restart or handoff.", "{root}")
 	heldOldest := gaugeF("dwarf_archive_oldest_held_seconds", "Age of the oldest due root at the last repair sweep's front, increasing until resampled. Includes roots not yet attempted. Per shard and kind; aggregate with max.", "s")
+	attemptOldest := gaugeF("dwarf_archive_oldest_attempt_seconds", "Per shard: age of the oldest unpublished staged archive attempt the repair sweep has seen, the larger of the current sweep's and the last complete one's, increasing until resampled; zero for none. A tree too large to archive in one transaction is copied in stages and then published; a value that keeps growing means one is not publishing, and the logs say why. Read beside dwarf_archive_sweep_seconds for freshness, and beside dwarf_archive_lag_seconds, since a replaced attempt starts its age again. Aggregate with max.", "s")
 	sweepAge := gaugeF("dwarf_archive_sweep_seconds", "Age of the current repair sweep, or zero between sweeps. Per shard and kind; aggregate with max.", "s")
 	archiveDays := gauge("dwarf_archive_days", "Per-shard: the archive days whose tables exist on that shard, by each replica's last reading of them (every archive pass, 24 times a day): the retained days, today, and the two days ahead made early - the retention plus 3 once the shard has kept a full retention. More means expired days are not being dropped (dwarf_archive_maintain_failed). Aggregate with max.", "")
 	archiveOldest := gaugeF("dwarf_archive_oldest_day_age_seconds", "Per-shard: how long ago the oldest archive day on that shard began, by each replica's last reading of the days. About the retention plus a day once maintenance keeps up, and up to two hours more, since days drop on hourly passes; beyond that, expired days are not being dropped. Aggregate with max.", "s")
@@ -362,7 +364,7 @@ func (e *Engine) initMetrics() error {
 				inFlightSteps:    inFlightSteps,
 				stateCacheBytes:  stateCacheBytes,
 				archiveFailing:   archiveFailing,
-				heldRoots:        heldRoots, heldOldest: heldOldest, sweepAge: sweepAge,
+				heldRoots:        heldRoots, heldOldest: heldOldest, sweepAge: sweepAge, attemptOldest: attemptOldest,
 				archiveLag:     archiveLagG,
 				deletesPending: deletesPending,
 				deletesUnknown: deletesUnknown,
@@ -372,7 +374,7 @@ func (e *Engine) initMetrics() error {
 		},
 		queueDepth, stepsPending, oldestAge, dispatchLag, peerReplicas, shardDispatching, peerBlind, tallyAge,
 		turnstileAvail, turnstileWaiting, workersResident, inFlightBytes, inFlightSteps, stateCacheBytes,
-		dbPhaseWorkers, archiveFailing, archiveLagG, archiveDays, archiveOldest, heldRoots, heldOldest, sweepAge,
+		dbPhaseWorkers, archiveFailing, archiveLagG, archiveDays, archiveOldest, heldRoots, heldOldest, sweepAge, attemptOldest,
 		deletesPending, deletesUnknown,
 	)
 	if err != nil {
@@ -416,6 +418,7 @@ type observableGauges struct {
 	heldRoots       metric.Int64ObservableGauge
 	heldOldest      metric.Float64ObservableGauge
 	sweepAge        metric.Float64ObservableGauge
+	attemptOldest   metric.Float64ObservableGauge
 	archiveFailing  metric.Float64ObservableGauge
 	archiveLag      metric.Float64ObservableGauge
 	deletesPending  metric.Int64ObservableGauge
@@ -485,6 +488,9 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 				o.ObserveInt64(g.heldRoots, int64(k.Held), opts)
 				o.ObserveFloat64(g.heldOldest, k.OldestHeld.Seconds(), opts)
 				o.ObserveFloat64(g.sweepAge, k.Sweep.Seconds(), opts)
+				if k.Kind == reaper.KindClosed {
+					o.ObserveFloat64(g.attemptOldest, k.OldestAttempt.Seconds(), shard)
+				}
 			}
 			o.ObserveFloat64(g.archiveFailing, obs.Failing.Seconds(), shard)
 			if obs.LagOK {

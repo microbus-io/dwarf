@@ -39,6 +39,10 @@ type walk struct {
 	// startedAfter is where the scan for trees whose staged archive has started stands, while no new archive may
 	// start (resumeStarted); apart from after, which stays on the trees the walk archives once the day opens.
 	startedAfter dueRoot
+	// attemptAge is the age of the oldest unpublished archive attempt the current repair sweep has seen, when it was
+	// read; lastAttemptAge the last complete sweep's.
+	attemptAge, lastAttemptAge   time.Duration
+	attemptSeen, lastAttemptSeen time.Time
 }
 
 // walks holds every walker's position. One walker per shard runs at a time in production; the mutex lets Observe
@@ -252,6 +256,77 @@ func (s *stages) forget(shard int) {
 	for k := range s.byKey {
 		if k.shard == shard {
 			delete(s.byKey, k)
+		}
+	}
+}
+
+// maxPreferred bounds the trees a Reaper remembers per shard as preferring the staged path.
+const maxPreferred = 1024
+
+// preferences is, per shard, the roots whose atomic archive ran into its deadline: their next visit takes the staged
+// path, unsized, whatever their size, and its locked claim starts their attempt. In memory only: a restart forgets a
+// preference, and the tree then times out once more before it is remembered again. A preference is dropped once its
+// tree has an attempt, is stamped or gone, or a batch removed it.
+type preferences struct {
+	mu    sync.Mutex
+	byKey map[stageKey]struct{}
+}
+
+// add remembers k, unless its shard holds maxPreferred already; it reports whether k is remembered.
+func (p *preferences) add(k stageKey) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.byKey == nil {
+		p.byKey = map[stageKey]struct{}{}
+	}
+	if _, ok := p.byKey[k]; ok {
+		return true
+	}
+	n := 0
+	for other := range p.byKey {
+		if other.shard == k.shard {
+			n++
+		}
+	}
+	if n >= maxPreferred {
+		return false
+	}
+	p.byKey[k] = struct{}{}
+	return true
+}
+
+func (p *preferences) has(k stageKey) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, ok := p.byKey[k]
+	return ok
+}
+
+func (p *preferences) drop(k stageKey) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.byKey, k)
+}
+
+// roots returns shard's remembered roots.
+func (p *preferences) roots(shard int) []int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []int
+	for k := range p.byKey {
+		if k.shard == shard {
+			out = append(out, k.root)
+		}
+	}
+	return out
+}
+
+func (p *preferences) forget(shard int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for k := range p.byKey {
+		if k.shard == shard {
+			delete(p.byKey, k)
 		}
 	}
 }

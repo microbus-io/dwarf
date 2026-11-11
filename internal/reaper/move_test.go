@@ -94,16 +94,36 @@ func TestMove_RetentionZeroDeletes(t *testing.T) {
 	assert.Equal(0, archFlows, "a retention of 0 archives nothing")
 }
 
-// TestMove_BatchesAreCappedByRows pins how a batch is cut: the leading trees whose rows fit the budget, and
-// always the first however large.
+// TestMove_BatchesAreCappedByRows pins how a batch is cut: the leading trees whose rows fit the budget, and always the
+// first however large - each counted only up to what the decision needs, the first up to its own limit and each later
+// one up to one past what is left, and the cut ending before a root that stops it.
 func TestMove_BatchesAreCappedByRows(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	size := map[int]int{1: 3, 2: 4, 3: 5, 4: 100}
-	assert.Equal([]int{1, 2}, withinRows([]int{1, 2, 3, 4}, size, 8))
-	assert.Equal([]int{1, 2, 3}, withinRows([]int{1, 2, 3, 4}, size, 12))
-	assert.Equal([]int{4}, withinRows([]int{4, 1}, size, 8), "a tree over the budget goes alone")
-	assert.Equal([]int{1, 2, 3, 4}, withinRows([]int{1, 2, 3, 4}, size, 1000))
+	cut := func(roots []int, rows, firstLimit int, stop func(int) bool) ([]int, int, []int) {
+		var limits []int
+		c, first, err := cutWithinRows(roots, rows, firstLimit, stop, func(root, limit int) (int, error) {
+			limits = append(limits, limit)
+			return min(size[root], limit), nil
+		})
+		assert.NoError(err)
+		return c, first, limits
+	}
+	got, first, limits := cut([]int{1, 2, 3, 4}, 8, 9, nil)
+	assert.Equal([]int{1, 2}, got)
+	assert.Equal(3, first)
+	assert.Equal([]int{9, 6, 2}, limits, "each later tree counted only to one past what is left")
+	got, _, _ = cut([]int{1, 2, 3, 4}, 12, 13, nil)
+	assert.Equal([]int{1, 2, 3}, got)
+	got, first, limits = cut([]int{4, 1}, 8, 50, nil)
+	assert.Equal([]int{4}, got, "a tree over the budget goes alone")
+	assert.Equal(50, first, "counted to its limit, not whole")
+	assert.Equal([]int{50}, limits)
+	got, _, _ = cut([]int{1, 2, 3, 4}, 1000, 1001, nil)
+	assert.Equal([]int{1, 2, 3, 4}, got)
+	got, _, _ = cut([]int{1, 2, 3}, 1000, 1001, func(root int) bool { return root == 3 })
+	assert.Equal([]int{1, 2}, got, "the cut ends before a root that stops it")
 }
 
 // TestMove_ResidencySplitsTheDueRoots pins the residency clause the scans take on a shard with two dispatchers:
@@ -188,7 +208,7 @@ func TestMove_TheScanMergesTheStatusesInCloseOrder(t *testing.T) {
 	assert.Equal([]int{c, a}, rootIDs(roots), "a short fetch is the first of the merged order")
 
 	r.cfg.BatchRows = 2
-	cut, _, _, err := r.p().rootsWithinRows(ctx, rootIDs(roots))
+	cut, _, _, err := r.p().rootsWithinRows(ctx, rootIDs(roots), true)
 	assert.NoError(err)
 	assert.Equal([]int{c, a}, cut, "the trim keeps the traversal order")
 }
