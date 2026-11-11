@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/janitor"
 	"github.com/microbus-io/dwarf/internal/reaper"
 	"github.com/microbus-io/errors"
 	"go.opentelemetry.io/otel"
@@ -65,6 +66,8 @@ type engineMetrics struct {
 	maintainFailed      metric.Int64Counter
 	flowsExpired        metric.Int64Counter
 	expireFailed        metric.Int64Counter
+	// janitor is the janitors' instruments, one set every janitor of the run records into.
+	janitor *janitor.Instruments
 
 	reg metric.Registration // the observable-gauge callback registration, unregistered at Shutdown
 
@@ -269,6 +272,13 @@ func (e *Engine) initMetrics() error {
 	if err := e.reaper.Load().SetMeter(meter); err != nil {
 		errs = append(errs, errors.Trace(err))
 	}
+	// The janitors', created once a run and shared, since an instrument made per janitor would be made again at every
+	// handoff.
+	janitorInstruments, err := janitor.NewInstruments(meter)
+	if err != nil {
+		errs = append(errs, errors.Trace(err))
+	}
+	m.janitor = janitorInstruments
 
 	gauge := func(name, desc, unit string) metric.Int64ObservableGauge {
 		g, err := meter.Int64ObservableGauge(name, metric.WithDescription(desc), metric.WithUnit(unit))
@@ -341,6 +351,7 @@ func (e *Engine) initMetrics() error {
 	attemptOldest := gaugeF("dwarf_archive_oldest_attempt_seconds", "Per shard: age of the oldest unpublished staged archive attempt the repair sweep has seen, the larger of the current sweep's and the last complete one's, increasing until resampled; zero for none. A tree too large to archive in one transaction is copied in stages and then published; a value that keeps growing means one is not publishing, and the logs say why. Read beside dwarf_archive_sweep_seconds for freshness, and beside dwarf_archive_lag_seconds, since a replaced attempt starts its age again. Aggregate with max.", "s")
 	sweepAge := gaugeF("dwarf_archive_sweep_seconds", "Age of the current repair sweep, or zero between sweeps. Per shard and kind; aggregate with max.", "s")
 	archiveDays := gauge("dwarf_archive_days", "Per-shard: the archive days whose tables exist on that shard, by each replica's last reading of them (every archive pass, 24 times a day): the retained days, today, and the two days ahead made early - the retention plus 3 once the shard has kept a full retention. More means expired days are not being dropped (dwarf_archive_maintain_failed). Aggregate with max.", "")
+	janitorProgress := gaugeF("dwarf_janitor_progress_age_seconds", "Per shard and job: how long since the job last made progress - work done that moved it forward - or since its janitor started, on each replica dispatching the shard. A job with work makes progress batch after batch, so this stays near zero while there is work and grows while there is none; growing while the job's work waits means the job is blocked or failing, and the logs say why. Aggregate with max.", "s")
 	archiveOldest := gaugeF("dwarf_archive_oldest_day_age_seconds", "Per-shard: how long ago the oldest archive day on that shard began, by each replica's last reading of the days. About the retention plus a day once maintenance keeps up, and up to two hours more, since days drop on hourly passes; beyond that, expired days are not being dropped. Aggregate with max.", "s")
 
 	stateCacheBytes := gauge("dwarf_state_cache_bytes", "Per-replica: memory the state cache is charged for right now - the large state fields this replica keeps for the steps that read them next, each counted at its size plus a per-entry overhead of a few hundred bytes. It is bounded by SetStateCacheSize (a tenth of the memory limit by default) and by 1,048,576 fields, so the cache is full - evicting its least recently used fields - when this is pinned at that size, OR below it once 1,048,576 small fields are held. A field unread for 5 minutes expires, but it is counted until a later store or a lookup of it removes it, so on a replica that has gone quiet the reading holds at its last level rather than falling with the working set. Sum across replicas.", "By")
@@ -365,17 +376,18 @@ func (e *Engine) initMetrics() error {
 				stateCacheBytes:  stateCacheBytes,
 				archiveFailing:   archiveFailing,
 				heldRoots:        heldRoots, heldOldest: heldOldest, sweepAge: sweepAge, attemptOldest: attemptOldest,
-				archiveLag:     archiveLagG,
-				deletesPending: deletesPending,
-				deletesUnknown: deletesUnknown,
-				archiveDays:    archiveDays,
-				archiveOldest:  archiveOldest,
+				archiveLag:      archiveLagG,
+				deletesPending:  deletesPending,
+				deletesUnknown:  deletesUnknown,
+				archiveDays:     archiveDays,
+				archiveOldest:   archiveOldest,
+				janitorProgress: janitorProgress,
 			})
 		},
 		queueDepth, stepsPending, oldestAge, dispatchLag, peerReplicas, shardDispatching, peerBlind, tallyAge,
 		turnstileAvail, turnstileWaiting, workersResident, inFlightBytes, inFlightSteps, stateCacheBytes,
 		dbPhaseWorkers, archiveFailing, archiveLagG, archiveDays, archiveOldest, heldRoots, heldOldest, sweepAge, attemptOldest,
-		deletesPending, deletesUnknown,
+		deletesPending, deletesUnknown, janitorProgress,
 	)
 	if err != nil {
 		errs = append(errs, errors.Trace(err))
@@ -425,6 +437,7 @@ type observableGauges struct {
 	deletesUnknown  metric.Int64ObservableGauge
 	archiveDays     metric.Int64ObservableGauge
 	archiveOldest   metric.Float64ObservableGauge
+	janitorProgress metric.Float64ObservableGauge
 }
 
 // observeGauges is the observable-gauge callback. Every reading is from memory: it makes no query, so a
@@ -499,6 +512,12 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 			if obs.PendingOK {
 				o.ObserveInt64(g.deletesPending, int64(obs.Pending), shard)
 				o.ObserveInt64(g.deletesUnknown, int64(obs.PendingUnknown), shard)
+			}
+			if j := e.janitorOn(idx); j != nil {
+				for _, r := range j.Observe(now) {
+					o.ObserveFloat64(g.janitorProgress, r.SinceProgress.Seconds(),
+						metric.WithAttributes(shardAttr(idx), attribute.String("job", r.Job)))
+				}
 			}
 		}
 		if archives != nil && archives.byShard[idx] != nil {

@@ -3613,6 +3613,21 @@ archive failure never becomes permission to delete - are in `internal/reaper/CLA
 
 The engine's tests drive a pass with `reapDueFlows`; the `TestReaperContract_*` tests pin what the engine relies on.
 
+**The janitors** are `internal/janitor`, one per shard this replica dispatches, each running its jobs on goroutines
+of their own; their mechanics are in `internal/janitor/CLAUDE.md`. The engine holds the wiring (`janitor.go`):
+
+- **A supervisor goroutine** (`janitorLoop`) reads `dispatchesOn` for every shard each second, starts a janitor on a
+  shard this replica started dispatching and stops the janitor of one it stopped. Every janitor's context is a child
+  of the supervisor's, which the drain cancels before the workers (see "Shutdown ordering").
+- **A batch's turn is `dbTurn`**, at dispatch's band, taken fresh for each batch.
+- **One set of instruments a run** (`engineMetrics.janitor`), shared by every janitor, since instruments made per
+  janitor would be made again at every handoff. The gauge (`dwarf_janitor_progress_age_seconds`) reads
+  `Janitor.Observe`, gated on dispatching like the reaper's.
+- **Tests:** `reapDueFlows` runs the janitors' jobs until they make no progress (`drainJanitors`, which first brings
+  the janitors in line with the roles), then the reaper's pass. `janitorManual` starts no job goroutine, so a test
+  decides when the jobs run; `janitorIdle` shortens their idle wait; `janitorTestJobs` gives every janitor a test's
+  jobs.
+
 **The tree delete is unconditional on descendant status, deliberately** - do not 409 on a `running` subgraph
 descendant. The deferred path stamps only the root (whose own status is 409-guarded, so an open root is never
 stamped) and the reaper deletes the whole
@@ -3829,7 +3844,7 @@ only at the worker loop):
 The crew's worker-loop `CatchPanic` stays as **defense-in-depth** for panics in *engine* code on the worker
 path (transition evaluation, fan-in, etc.) outside any host call. **Nothing else contains a panic**: the
 piston and its pipeline loops, the planner, the peer Sonars, and the engine's background loops (reconcile,
-reaper, recovery sweeps, backlog gauge, latch poll) run without a recover, so a panic in any of them takes down the
+reaper, janitors, recovery sweeps, backlog gauge, latch poll) run without a recover, so a panic in any of them takes down the
 replica. **That is deliberate; do not add a catch there.** Those loops call no `Host` method - the only `Host` code
 the engine runs is the three wrapped call sites above - so a panic in them is an engine bug, and a crash is what
 gets it found and fixed; a caught-and-logged panic in a loop that retries every cycle would hide it. The one
@@ -3844,8 +3859,8 @@ outcomes (no `onError` → flow `failed`; with `onError` → routed to the handl
 
 The engine's lifetime context (`e.lifetimeCtx`) is created at Startup and cancelled only after `Shutdown` has
 drained everything. The workers run on a non-cancelable copy of it, so a step's writes are never interrupted by
-ctx cancellation. The backlog refresh, the recovery loop, the reaper, the latch detector, the pistons and the
-Sonars each run on a child of it that the drain cancels when it stops that goroutine (see "Shutdown ordering"). The only *cancellable*, time-bounded ctx on a
+ctx cancellation. The backlog refresh, the recovery loop, the reaper, the janitors, the latch detector, the
+pistons and the Sonars each run on a child of it that the drain cancels when it stops that goroutine (see "Shutdown ordering"). The only *cancellable*, time-bounded ctx on a
 worker is the `ExecuteTask` call: `executeTask` derives it from the worker's ctx with the step's `time_budget_ms`.
 
 **The crew runs on `context.WithoutCancel(e.lifetimeCtx)`, and it must stay non-cancelable.** Since no worker
@@ -3861,7 +3876,7 @@ against a ~1.5M/s ceiling - inside the connection hold, since pgx watches during
 crew a cancelable ctx (per-worker children included) to "let shutdown reach the workers"**: the drain's stop
 signals are the cache, the gate and `drainStop`, and a per-step deadline belongs on a per-step ctx.
 
-### Shutdown ordering: workers, then recovery/reaper/latch, then the pistons, then the Sonars
+### Shutdown ordering: janitors, then workers, then recovery/reaper/latch, then the pistons, then the Sonars
 
 There is no timer goroutine and no wake channel to close (see "A cycle is UNCONDITIONAL"), so no send can
 race a close and panic a worker mid-`processStep`. `drainRuntime`:
@@ -3873,6 +3888,7 @@ SetIdle(true) on every piston                // stops the dispatch evidence, so 
 arm withdrawal timer                         // gives up dispatcher slots if the drain outlasts a read cadence
 closeMetrics()                               // no collection may run against a closing engine
 backlogCancel(); backlogWorker.Wait()        // nor the backlog refresh against a closing database
+janitorCancel(); janitorWorker.Wait()        // a job's batch would hold the connections a worker needs to finish
 cache.Close(); turnstiles.Close()            // BOTH: a worker parks on one or waits on the other
 crew.Drain(); withdrawal.Wait()
 recoveryCancel();    recoveryWorker.Wait() // abandons a sweep statement in flight
@@ -3883,6 +3899,12 @@ sonarCancel();       sonarPool.Wait()    // ditto - and they must outlive the pi
 leaveFleet()                             // only now is the last possible beat behind us
 latches[*].Close(); lifetimeCancel()
 ```
+
+**The janitors stop BEFORE the workers drain, and that ordering is load-bearing.** A janitor's batch has no
+deadline and holds connections while it runs, so a worker in flight that needs one to record its step could wait on
+it, and the drain on the worker, for as long as the batch takes - forever, for a job blocked on a held lock. The
+recovery loop and the reaper can stop after the crew only because every attempt of theirs is bounded. Pinned by
+`TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain`, which hangs with the cancellation after `crew.Drain`.
 
 **The Sonars drain LAST, after the pistons, and that ordering is load-bearing.** This replica must stay
 registered while its workers are still executing steps, because every one of them drains against pools each
