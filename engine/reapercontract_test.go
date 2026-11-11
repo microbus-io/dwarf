@@ -278,7 +278,8 @@ func TestReaperContract_ANonDispatcherTakesNoTurn(t *testing.T) {
 }
 
 // TestReaperContract_ThePassTimeExcludesExpiration pins dwarf_reap_pass_seconds to the reap alone: an expiration stage
-// held for half a second after it is not counted in it.
+// held for half a second after it is not counted in it. The bound is the whole call's time less the hold, not the hold
+// itself: a pass on a loaded SQL Server took 0.6 s alone, which a bound of the hold read as the hold counted.
 func TestReaperContract_ThePassTimeExcludesExpiration(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -289,6 +290,7 @@ func TestReaperContract_ThePassTimeExcludesExpiration(t *testing.T) {
 
 	e.seams.Break(engineseams.CheckpointTerminateAfterScan)
 	done := make(chan struct{})
+	start := time.Now()
 	go func() {
 		defer close(done)
 		expireNow(ctx, e)
@@ -298,6 +300,7 @@ func TestReaperContract_ThePassTimeExcludesExpiration(t *testing.T) {
 	time.Sleep(held)
 	e.seams.Resume(engineseams.CheckpointTerminateAfterScan)
 	<-done
+	whole := time.Since(start)
 	status, _ := statusOf(t, e, expiring)
 	assert.Equal(workflow.StatusTerminated, status, "the expiration ran in the pass")
 
@@ -306,5 +309,5 @@ func TestReaperContract_ThePassTimeExcludesExpiration(t *testing.T) {
 	n, ok := histCount(rm, "dwarf_reap_pass_seconds", shard1)
 	assert.True(ok && n == 1, "one pass: %d", n)
 	sum, _ := histSum(rm, "dwarf_reap_pass_seconds", shard1)
-	assert.True(sum < held.Seconds(), "the pass took %vs, the expiration was held %v", sum, held)
+	assert.True(sum <= (whole - held).Seconds(), "the pass took %vs of a %v call, the expiration was held %v", sum, whole, held)
 }
