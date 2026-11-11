@@ -3534,7 +3534,9 @@ window in which a disposable flow's outcome stays readable.
 Deleting without archiving is either operator-driven (`Delete`, `Purge`) or an explicit author opt-in
 (`DeleteOnCompletion`): a flow whose output and history are not needed. `Delete` reaches both sides: a closed flow
 still live is marked, an archived one deleted at once in its day (`reaper.DeleteArchivedTree`); `Purge` reads only
-the archive and deletes there (`purge.go`).
+the archive and deletes there (`purge.go`). On the archive side a tree larger than a batch is marked - gone from every
+read at once, and counted removed - deleted in chunks for up to `archiveDeleteInCall` (5 s) inside the call, and
+finished by the reaper's five-minute stage (`DeleteMarked`); `dwarf_archive_deletions_pending` counts such trees left.
 
 **On the live side, deletion is deferred: mark, then reap.** No path deletes live rows inline. `DeleteOnCompletion`
 and `Delete` **stamp `delete_after_ms`** on the target **root** flow (`0`=keep; `>0`=reap at `updated_at + delete_after_ms`);
@@ -3590,7 +3592,8 @@ archive failure never becomes permission to delete - are in `internal/reaper/CLA
 (`reaper.go`):
 
 - **One goroutine, a 15-second ticker** (`reaperLoop`); each tick is one `reapPass`, which takes a turn per shard this
-  replica dispatches and calls `Reaper.Pass` under it, then the expiration stage when due. Shards run concurrently.
+  replica dispatches and calls `Reaper.Pass` under it, then, every `expireInterval` (5 min), the periodic stages:
+  `Reaper.DeleteMarked` and expiration. Shards run concurrently.
 - **A fresh `Reaper` per run**, built in `startArchives` before `initMetrics` registers the gauge callback, so no
   reading survives a restart or a failed Startup. Its four instruments are created on the engine's meter
   (`SetMeter`), so the engine does not register them itself.
@@ -3744,10 +3747,26 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
     which breaks the argument above, and on SQLite's shared cache a read transaction keeps each table's lock until it
     ends, which cycles with the reaper's move. A read must have no side effect and tolerate rows vanishing, since it
     may run on both sides.
-  - **The archive pass closes the same way**, so a tree removed from its day mid-read is a 404 rather than what the
-    read gathered by then: `Delete` and `Purge` remove single trees from a day, and retention drops whole days. A
-    missing table there (`sequel.IsUndefinedTableError`: a day dropped since the locate, or a directory row outliving
-    its day, which the locate returns unchecked) is a 404. Any other error is returned.
+  - **Every read of the archive closes on the visibility rule** (`archiveFlowVisible`, `archiver.VisibleSQL`), one of
+    one statement included: an archived flow is there only if its root is in the same day and unmarked. A staged copy
+    not published, or one a Delete abandoned, has children in a day without their root; a tree marked for deletion is
+    hidden from the mark on. So a tree removed from its day mid-read is a 404 rather than what the read gathered by
+    then: `Delete` and `Purge` remove or mark single trees in a day, and retention drops whole days. A missing table
+    there (`sequel.IsUndefinedTableError`: a day dropped since the locate, or a directory row outliving its day, which
+    the locate returns unchecked) is a 404. Any other error is returned. Fork of a marked tree is a 404 too: it is
+    deleted. Pinned by `TestArchiveVisibility_*`.
+  - **A live root stamped with an archive attempt is published** (`livePublished`): every stamp but a publication
+    clears the attempt (`internal/reaper/CLAUDE.md`). Its live copy is being deleted, so Step, Summary, History and the
+    lists read the archive's copy, Snapshot serves the live root until it goes, and Fork and Continue take the
+    archive's copy as their source. `Delete` of it marks the archive's copy and clears the attempt in one transaction
+    (`reaper.DeletePublished`). **What Delete read may be stale by the time it acts**: a publication can stamp the
+    root between its read and its stamp, and the live cleanup can delete the root before the mark locks it. So a stamp
+    that matches nothing, or a mark that finds no root to lock, reads the root again and acts on what it is now
+    (`deleteMoved`, `deletePublished`): published, the archive's copy is marked; gone, the tree is deleted from the
+    archive; stamped without an attempt, another call got there. **Do not take a stamp that matched nothing, or a
+    mark that found no root, for success**: either can mean the archive's copy is still standing
+    (`TestPublished_ADeleteRacingAPublication`, `TestPublished_ADeleteRacingTheLiveCleanup`). Pinned by
+    `TestPublished_*`.
   - **An archived flow that has not closed is a 500 from `Snapshot`**: only a bug leaves one, and reported as running
     it would hold an `Await` until its deadline. An interrupted flow is never archived, so `Snapshot`'s interrupted
     branch reads the live tables only.

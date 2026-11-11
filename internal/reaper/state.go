@@ -149,3 +149,60 @@ func (l *lag) forget(shard int) {
 	defer l.mu.Unlock()
 	delete(l.byID, shard)
 }
+
+// pending is, per shard, how many archived trees marked for deletion the last DeleteMarked left.
+type pending struct {
+	mu   sync.Mutex
+	byID map[int]int
+}
+
+func (c *pending) set(shard, n int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.byID == nil {
+		c.byID = map[int]int{}
+	}
+	c.byID[shard] = n
+}
+
+// of returns shard's last reading, and false before its first.
+func (c *pending) of(shard int) (int, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n, ok := c.byID[shard]
+	return n, ok
+}
+
+func (c *pending) forget(shard int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.byID, shard)
+}
+
+// markedFrom is, per shard, where the next DeleteMarked starts: at its day, after its root.
+type markedFrom struct {
+	mu   sync.Mutex
+	byID map[int]markedTree
+}
+
+func (m *markedFrom) set(shard int, t markedTree) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.byID == nil {
+		m.byID = map[int]markedTree{}
+	}
+	m.byID[shard] = t
+}
+
+// get returns where shard's next call starts; the zero place, before every day, at first.
+func (m *markedFrom) get(shard int) markedTree {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.byID[shard]
+}
+
+func (m *markedFrom) forget(shard int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.byID, shard)
+}

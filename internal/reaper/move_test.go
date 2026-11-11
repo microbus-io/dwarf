@@ -338,7 +338,8 @@ func TestMove_APoisonTreeDoesNotLoseItsBatchMates(t *testing.T) {
 	a := r.archive
 	today, err := a.Today(ctx)
 	assert.NoError(err)
-	_, err = db.ExecContext(ctx, "INSERT INTO "+migrations.FlowsTable(today)+" SELECT * FROM dwarf_flows WHERE flow_id=?", roots[1])
+	_, err = db.ExecContext(ctx, "INSERT INTO "+migrations.FlowsTable(today)+" ("+archivedFlowColumns+") SELECT "+
+		archivedFlowColumns+" FROM dwarf_flows WHERE flow_id=?", roots[1])
 	assert.NoError(err)
 	for range 3 {
 		r.pass(ctx)
@@ -432,9 +433,9 @@ func TestMove_AScanFailureAtRetentionZeroIsNoArchiveFailure(t *testing.T) {
 }
 
 // TestMove_NamesEveryFlowsColumn pins the move's column list against the flows table: every live column
-// but archived_at, in table order, so a column added to dwarf_flows without being added to the list fails here rather
-// than being dropped from the archive. The day's flows table has the live columns, and its steps table the live
-// steps table's, in the same order.
+// but archived_at and the live-only archive_attempt_at, in table order, so a column added to dwarf_flows without being
+// added to the list fails here rather than being dropped from the archive. The day's flows table has the same columns,
+// and its steps table the live steps table's, in the same order.
 func TestMove_NamesEveryFlowsColumn(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -444,7 +445,7 @@ func TestMove_NamesEveryFlowsColumn(t *testing.T) {
 	today, err := r.archive.Today(ctx)
 	assert.NoError(err)
 	want := append(strings.Split(archivedFlowColumns, ", "), "archived_at")
-	assert.Equal(want, columnNames(t, db, "dwarf_flows"))
+	assert.Equal(want, slices.DeleteFunc(columnNames(t, db, "dwarf_flows"), func(c string) bool { return c == liveOnlyColumn }))
 	assert.Equal(want, columnNames(t, db, migrations.FlowsTable(today)))
 	// The steps move by column order (RETURNING * and SELECT *), so the day's steps table has the live columns in the
 	// live order.

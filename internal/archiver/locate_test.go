@@ -45,12 +45,12 @@ func name(t *testing.T, db *sequel.DB, flowID, day int) {
 	}
 }
 
-// archive writes a flow row into a day's flows table, as the reaper would.
+// archive writes a root flow row - its own root, so visible - into a day's flows table, as the reaper would.
 func archive(t *testing.T, db *sequel.DB, flowID, day int) {
 	t.Helper()
 	_, err := db.ExecContext(t.Context(), "INSERT INTO "+migrations.FlowsTable(day)+
-		" (flow_id, flow_token, workflow_url, workflow_name, graph, graph_hash, status) VALUES (?, 'tok', 'u', 'W', ?, 'h', 'completed')",
-		flowID, []byte("{}")) // bound: graph is binary on SQL Server
+		" (flow_id, flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id) VALUES (?, 'tok', 'u', 'W', ?, 'h', 'completed', ?)",
+		flowID, []byte("{}"), flowID) // bound: graph is binary on SQL Server
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,6 +407,33 @@ func TestArchiver_RetentionForgetsTheDirectorysExpiredDays(t *testing.T) {
 	_, err = a.DropBefore(ctx, 9009)
 	assert.NoError(err)
 	assert.Equal(map[int]int{104: 9010}, directoryDays(t, db))
+}
+
+// TestArchiver_RetentionKeepsARowThatMovedToALaterDay pins the day bound on the directory's retention delete: a flow's
+// row that moves from an expired day to a kept one between the cleanup's select and its delete - an archive attempt
+// replaced after its day dropped - survives, where a delete by flow_id alone would take it.
+func TestArchiver_RetentionKeepsARowThatMovedToALaterDay(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	assert := testarossa.For(t)
+	db := openShard(t)
+	a := archiver.New(db, archiver.DefaultDayLength, migrations.Archive())
+	archiver.SetClock(a, atHour(9010, 12))
+	name(t, db, 101, 9001)
+	name(t, db, 102, 9002)
+	moved := false
+	archiver.OnForgetSelected(a, func() {
+		if moved {
+			return
+		}
+		moved = true
+		_, err := db.ExecContext(ctx, "UPDATE "+archiver.DirectoryTable+" SET day=9010 WHERE flow_id=101")
+		assert.NoError(err)
+	})
+	_, err := a.Maintain(ctx, 5)
+	assert.NoError(err)
+	assert.True(moved)
+	assert.Equal(map[int]int{101: 9010}, directoryDays(t, db), "the row moved to a kept day survives")
 }
 
 // TestArchiver_RetentionForgetsManyRowsInBatches pins that a day naming more flows than one batch deletes loses all

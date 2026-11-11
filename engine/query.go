@@ -65,11 +65,11 @@ const summaryColumns = "f.flow_id, f.flow_token, f.created_hour, f.workflow_url,
 	" f.trace_parent, f.archived_at, f.surgraph_step_id, ps.flow_created_hour AS parent_step_hour," +
 	" ps.step_token AS parent_step_token, f.root_flow_id, rf.created_hour AS root_flow_hour, rf.flow_token AS root_flow_token"
 
-// treeUnstamped is the condition, over summaryJoins' f and rf, that the flow's tree is not marked for deletion: a root
-// unstamped itself, a child whose root is there and unstamped. It reads the root's stamp, not the flow's: only a root
-// is stamped, and a stamped tree's children are deleted, in chunks, before it. A child whose root is gone is a tree in
-// deletion too.
-const treeUnstamped = "((f.root_flow_id=f.flow_id AND f.delete_after_ms=0) OR rf.delete_after_ms=0)"
+// treeUnstamped is archiver.VisibleSQL over summaryJoins' f and rf: the flow's tree is not marked for deletion, and a
+// child's root is there. It reads the root's stamp, not the flow's: only a root is stamped, and a stamped tree's
+// children are deleted, in chunks, before it. On the archive side a child whose root is not in its day is a copy not
+// published.
+var treeUnstamped = archiver.VisibleSQL("f", "rf")
 
 // summaryJoins joins what summaryColumns reads beside the flow row: the step it stopped at, a child's caller step and
 // a child's root flow. A tree lives in one table set - it is created on one shard and archived in one move - so the
@@ -384,6 +384,14 @@ func (e *Engine) listArchived(ctx context.Context, query workflow.Query, limit i
 		// Every archived flow is closed, so no status condition is added when the query names none: one would only
 		// steer the planner to the status index rather than the archive-time one the order wants.
 		conds, condArgs := e.listFilters(db.DriverName(), shardIdx, query)
+		if db.DriverName() == "sqlite" && !query.IncludeSubgraphs && query.Status != "" {
+			// SQLite takes the (status, archived_at) index whenever the status is compared plainly, and walks every
+			// child of that status before the first root: 139 ms for a page of completed roots on a day of one tree of
+			// 300,000 children. The unary plus hides the column from the index choice, so it walks the roots index
+			// and filters on the status: 0.4 ms for a common status, about 5 ms for a rare one (0.4 ms otherwise),
+			// bounded by the day's roots. Only roots-only: a listing with children cannot use the roots index.
+			conds[0] = strings.Replace(conds[0], "f.status='", "+f.status='", 1)
+		}
 		timeConds, timeArgs := timeConditions(db.DriverName(), "f.archived_at", query)
 		branchWhere := strings.Join(append(conds, timeConds...), " AND ")
 		branchArgs := append(condArgs, timeArgs...)

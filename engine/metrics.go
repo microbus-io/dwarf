@@ -332,6 +332,7 @@ func (e *Engine) initMetrics() error {
 	// The archive gauges. The two reaper readings are reported by each replica dispatching the shard, the two day
 	// readings by every replica, from the days its archive last read; all four are per-shard facts, aggregated with max.
 	archiveFailing := gaugeF("dwarf_archive_failing_seconds", "Per-shard: time since an archive failure, cleared by a successful fast move or a clean repair sweep. Retained trees remain live. Aggregate with max.", "s")
+	deletesPending := gauge("dwarf_archive_deletions_pending", "Archived trees marked for deletion - by Delete or Purge, each too large to delete within its call - that the reaper's last five-minute sweep left still being deleted, by shard. They are hidden from every read from the mark on; this counts the storage not released yet. A count that stays above zero means their deletion keeps failing, and the logs say why. Zero once every marked tree is gone.", "{tree}")
 	archiveLagG := gaugeF("dwarf_archive_lag_seconds", "Wait past grace at the fast cursor's last scan. Held roots behind it are reported separately. Aggregate with max.", "s")
 	heldRoots := gauge("dwarf_archive_held_roots", "Failed singles observed by repair: max of the current and last complete sweep. Per replica, shard and kind; aggregate with max, not sum. Resets at restart or handoff.", "{root}")
 	heldOldest := gaugeF("dwarf_archive_oldest_held_seconds", "Age of the oldest due root at the last repair sweep's front, increasing until resampled. Includes roots not yet attempted. Per shard and kind; aggregate with max.", "s")
@@ -361,14 +362,16 @@ func (e *Engine) initMetrics() error {
 				stateCacheBytes:  stateCacheBytes,
 				archiveFailing:   archiveFailing,
 				heldRoots:        heldRoots, heldOldest: heldOldest, sweepAge: sweepAge,
-				archiveLag:    archiveLagG,
-				archiveDays:   archiveDays,
-				archiveOldest: archiveOldest,
+				archiveLag:     archiveLagG,
+				deletesPending: deletesPending,
+				archiveDays:    archiveDays,
+				archiveOldest:  archiveOldest,
 			})
 		},
 		queueDepth, stepsPending, oldestAge, dispatchLag, peerReplicas, shardDispatching, peerBlind, tallyAge,
 		turnstileAvail, turnstileWaiting, workersResident, inFlightBytes, inFlightSteps, stateCacheBytes,
 		dbPhaseWorkers, archiveFailing, archiveLagG, archiveDays, archiveOldest, heldRoots, heldOldest, sweepAge,
+		deletesPending,
 	)
 	if err != nil {
 		errs = append(errs, errors.Trace(err))
@@ -413,6 +416,7 @@ type observableGauges struct {
 	sweepAge        metric.Float64ObservableGauge
 	archiveFailing  metric.Float64ObservableGauge
 	archiveLag      metric.Float64ObservableGauge
+	deletesPending  metric.Int64ObservableGauge
 	archiveDays     metric.Int64ObservableGauge
 	archiveOldest   metric.Float64ObservableGauge
 }
@@ -482,6 +486,9 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 			o.ObserveFloat64(g.archiveFailing, obs.Failing.Seconds(), shard)
 			if obs.LagOK {
 				o.ObserveFloat64(g.archiveLag, obs.Lag.Seconds(), shard)
+			}
+			if obs.PendingOK {
+				o.ObserveInt64(g.deletesPending, int64(obs.Pending), shard)
 			}
 		}
 		if archives != nil && archives.byShard[idx] != nil {

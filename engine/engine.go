@@ -381,8 +381,11 @@ type Engine struct {
 	// purgeChunk is how many roots one Purge statement names, a field so a test can drive several chunks. A literal
 	// IN list in the tens of thousands of terms can fail to plan outright on SQL Server (errors 8623 / 8632); 4,096
 	// keeps an order of magnitude under it.
-	purgeChunk   int
-	reapInterval time.Duration // reaper goroutine tick; read once at Startup (15s)
+	purgeChunk int
+	// archiveDeleteInCall is how long a Delete or Purge spends deleting an archived tree it marked before it returns,
+	// the rest left to the reaper's periodic stage (5s): an API call must not run for tens of seconds.
+	archiveDeleteInCall time.Duration
+	reapInterval        time.Duration // reaper goroutine tick; read once at Startup (15s)
 	// The expiration pass (expiration.go): how often it runs in the reaper's goroutine (5m), how long one shard's pass
 	// may keep reading and starting terminations (30s), how many rows one page of its walk reads (256), and where each
 	// shard's walk resumes.
@@ -458,6 +461,7 @@ func NewEngine() *Engine {
 	e.reapBatch = 512
 	e.reapBatchRows = 4096
 	e.purgeChunk = 4096
+	e.archiveDeleteInCall = 5 * time.Second
 	e.reapInterval = 15 * time.Second
 	e.expireInterval = 5 * time.Minute
 	e.expireBudget = 30 * time.Second
@@ -1620,7 +1624,9 @@ func (e *Engine) ListRecentlyClosed(ctx context.Context, query workflow.Query) (
 	return e.listRecentlyClosed(ctx, query)
 }
 
-// Delete removes a closed flow and its subgraph subtree. An archived flow is deleted at once. One not archived yet -
+// Delete removes a closed flow and its subgraph subtree. An archived flow is gone from every read when Delete returns:
+// a small tree is deleted at once, a large one marked and its rows deleted in the background, as Purge does. One not
+// archived yet -
 // the minute after it closes - is marked for deletion, and a background reaper removes it shortly after, without
 // archiving it: History, Summary and Step return 404 for it immediately, though Snapshot, Fingerprint and Await still
 // report its outcome until the reaper removes it, and calling Delete on it again is success. Returns 404 for an unknown key,
@@ -1634,15 +1640,20 @@ func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 }
 
 // Purge removes the closed flows ListClosed would list for a query, and their subgraph subtrees, oldest archived
-// first: at most Query.Limit roots in a call, each deleted at once. A flow awaiting archival is not in ListClosed
+// first: at most Query.Limit roots in a call. A removed root is gone from every read and every list when the call
+// returns. A small tree is deleted at once; a large one is marked, and its rows are deleted in the background, so its
+// storage is released later, or when its day drops. dwarf_archive_deletions_pending counts such trees still being
+// deleted as of the reaper's last sweep, which runs every five minutes: a reading of zero taken five minutes after the
+// call means their storage is released. A flow awaiting archival is not in ListClosed
 // and Purge leaves it - ListRecentlyClosed lists it, and Delete schedules its removal by key. Open
 // flows are never touched, and a Query.Status that is not closed is a 400, as is IncludeSubgraphs (a subgraph child is
 // removed with its root).
 //
 // Query.Limit (at most 65,536) and both bounds of the window are required; the window is ListClosed's, on when a flow
 // was archived, and may reach at most 31 days of the archive, or the call is a 400: purge a longer range a month at a
-// time. Returns how many roots it removed, and whether it is done: call it again until done is true. done covers only
-// what is archived: a flow closed shortly before the call, still on its way to the archive, is not purged until a call
+// time. Returns how many roots it removed, and whether it is done: call it again until done is true. done is true when
+// the call found fewer matching roots than its limit and removed every one; it describes what the call found, and
+// covers only what is archived: a flow closed shortly before the call, still on its way to the archive, is not purged until a call
 // after it is archived. For an erasure that must also take those, confirm they have reached the archive and call
 // again, or Delete them by key. Archival failures can keep closed flows live beyond the usual minute.
 //

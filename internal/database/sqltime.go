@@ -61,3 +61,10 @@ func SQLTime(driverName string, t time.Time) (expr string, arg string) {
 		return "?", text
 	}
 }
+
+// StoredTime returns the instant a time column holds, from the time.Time it scanned into: its wall clock, read as UTC.
+// Every time column holds a UTC wall clock with no zone, and a driver may place that wall clock in a location of its
+// own - MySQL's, the DSN's loc - where converting with UTC() would shift it.
+func StoredTime(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.UTC)
+}

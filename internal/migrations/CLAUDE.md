@@ -62,6 +62,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `updated_at` | UTC time of the last **status transition** (`created`→`running`→terminal, `running`↔`interrupted`). Surfaced to tasks via `Flow.UpdatedAt()`. It is **not** bumped on intra-flow step progress: a running flow advancing through N steps leaves `updated_at` fixed at its go-`running` time - no step writes the flow row, and the per-step lock grabs (the transition, `completeFlow`, the fan-in) are locking reads on PostgreSQL and MySQL and flip the non-indexed `touch` column on SQLite and SQL Server, so the running band of `idx_dwarf_flows_status` does not churn once per step (it moves only when the flow's own status changes). Consequence: for a **running** flow `updated_at ≈ started_at` (so `FlowSummary.Duration()` reads ~0 until it stops); for a **closed** flow it is the finish time (Duration = total runtime, and `Purge`'s `ToTime` = "finished before" - both correct, since only closed flows are retention targets) |
 | `touch` | Churn-avoidance toggle (`SMALLINT`, `0`/`1`). Carries **no meaning** and is never SELECTed - it exists only so a flow-row write can (a) acquire the row's write lock without moving the `(status, updated_at)` index entry, and (b) guarantee a value change so `RowsAffected()` reflects the `WHERE` match on every driver (MySQL's default "changed rows" count included). A `dwarf_flows` UPDATE whose matched count is read must change a value on every row it matches; the status-transition writes flip it (`touch=1-touch`) *alongside* `updated_at=NOW_UTC()`, and a write that always moves another column (the `delete_after_ms` mark, the creation fix-up of a new root's own-id `root_flow_id`) does not flip it. A self-assign (`SET col=col`) was rejected for (b): MySQL reports 0 rows changed when no value differs, which would silently break the terminal-status `RowsAffected==0` guards. **A lock that writes nothing else is not an UPDATE on PostgreSQL or MySQL** (`lockFlowRowsSQL`): there it is a locking read (`FOR NO KEY UPDATE` / `FOR UPDATE`), because on PostgreSQL every UPDATE writes a new row version even when it changes nothing, so a lock-only UPDATE on the row every step locks would be a row version per step on a row that otherwise changes a few times per flow (see the fillfactor section). SQLite and SQL Server still flip `touch` for it |
 | `archived_at` | When the reaper moved the flow into its archive day (`NOW_UTC()`, clamped to that day's last millisecond); `9999-12-31 23:59:59` on every live row, so a not-yet-archived flow sorts ahead of every archived one. The last column of both flows tables, so the day tables keep the live column order; the move names the columns to stamp it (`archivedFlowColumns`, `internal/reaper/move.go`). Never set on a live row: a Fork clone of an archived flow takes the default. Indexed only on the day tables (`(status, archived_at)` and `(archived_at)`), so a day is read in archive order; the live table's ended rows are few and all carry the default. On SQLite the default is written `9999-12-31 23:59:59.000`, the text `NOW_UTC()` writes, since there the comparison is of text |
+| `archive_attempt_at` | When a live root's archive attempt began (`NOW_UTC()`): its staged copy's day and identity. `2000-01-01 00:00:00` (`.000` on SQLite), "no attempt", by default; MySQL allows no function default. **Every stamp of `delete_after_ms` but a publication writes "no attempt" in the same UPDATE** (Delete, the reaper's stamp before a chunked deletion), so a root stamped with an attempt is one published to the archive whose live copy is being deleted (`reaper.AttemptedSQL`). **Live only:** the day tables do not have it, so the move names its columns without it and the column-parity tests skip it |
 | `priority` | Scheduling priority, `1..max` (the engine's `SetMaxPriority`, 5 by default), lower runs first. Resolved at `Create` from `FlowOptions` else the midpoint of the range; inherited unchanged by `Continue`/subgraph. Immutable. The refiller counts bands `1..max` one by one and every priority beyond `max` together as an overflow served last, so a row outside the range (written before the range existed, or by a replica with a larger one) still runs |
 | `fairness_key` | Fairness bucket. From `FlowOptions`, else `''`: at most 256 ASCII letters, digits, `-`, `_` and `.` (`validFairnessKey`), so its byte, character and UTF-16 lengths agree with every dialect's column width. Immutable. **Deliberately unindexed on `dwarf_flows`** (it *is* indexed on `dwarf_steps` as the hot selection key). The only reader on the flows table is `ListOpen`'s `Query.FairnessKey` filter (`ListClosed` and `Purge` read the day tables) (the documented "list tenant X" path), a cold per-shard scan on a warm operator path - not worth a secondary-index entry per insert against the write-amplification budget. If tenant-scoped listing ever becomes a routine operational path, add `(fairness_key, flow_id)` with the filter then. `ListOpen`'s window needs no index of its own: its branches range over `idx_dwarf_flows_status`, and a standalone `updated_at` index would amplify writes on a churny column - exactly the cost the dropped `created_at` indexes carried. `workflow_name`/`priority` filters are likewise deliberately unindexed |
 | `fairness_weight` | Relative dispatch share of the `fairness_key`. From `FlowOptions`, else `1` |
@@ -230,7 +231,8 @@ Each day's archive tables (`dwarf_flows_archive_<n>`, `dwarf_steps_archive_<n>`)
 `ArchiveDay` (`internal/archiver/CLAUDE.md`). The files write the tables as `dwarf_flows_archive` and
 `dwarf_steps_archive`, stand-ins no table carries: `live/` makes no empty template tables, so nothing but a day
 ever exists under those names. So:
-- **The columns are the live tables', in the same order**, with the queue-only ones kept at their defaults; an
+- **The columns are the live tables', in the same order** - but `archive_attempt_at`, a live root's archive attempt,
+  which means nothing archived and is added to the live table alone - with the queue-only ones kept at their defaults; an
   archived row is copied whole. **The order is load-bearing for the steps**: the reaper's move copies them by
   position (`RETURNING *` into `SELECT *`), so a steps column added out of order lands in another column of the
   archive, or fails the move. The flows are named (`archivedFlowColumns`). Both are pinned by `internal/reaper`'s
@@ -247,14 +249,29 @@ ever exists under those names. So:
   a live table: the whole file runs once per day, so a live table in it would be changed once per day. The engine's
   Startup applies a new one to every existing day within the retention right after the shards open. A live-table
   change and its archive counterpart are therefore two files, one in each folder.
-- **The flows table carries every live flows index but the deletion one**, so a flow lookup runs with the same
+- **The flows table carries every live flows index**, so a flow lookup runs with the same
   plan on either side - `workflow_url`, the two surgraph links (partial where the dialect has partial indexes), and
   `root_flow_id` - except that the status index is on `(status, archived_at)` rather than `(status, updated_at)`, plus
   an `(archived_at)` range: a day is read in archive order.
-  `delete_after_ms` is always 0 there - a stamped root is deleted, never archived. They cost two to four index
+  - **`delete_after_ms` on an archive root is the archive's deletion mark** (a stamped live root is deleted, never
+    archived): a tree too large for one transaction is marked, hidden at once, and deleted in the background. Its
+    deletion index, `(flow_id) WHERE delete_after_ms > 0` (partial; filtered on SQL Server; the full
+    `(delete_after_ms)` on MySQL and MariaDB, named with `FORCE INDEX`), is what the reaper's five-minute probe of
+    every retained day reads: empty but for a mark on the partial dialects, about 5% on the archive insert on MySQL.
+    Without it the probe reads each day's flows table in full (24-82 ms per 415,000-flow day).
+  - **The roots index, `(archived_at, flow_id) WHERE surgraph_flow_id = 0`** (partial; filtered on SQL Server;
+    `(surgraph_flow_id, archived_at, flow_id)`, full, on MySQL and MariaDB), serves the roots-only lists and Purge in
+    their order: without it they walk `(archived_at)` past every child archived in the window, 79-837 ms for a page
+    beside one tree of 300,000 children against 0.24-3.1 ms with it; 0-7% on the archive insert. SQL Server also
+    carries a roots-only `(status, archived_at, flow_id)`, without which a rare status regresses (2.1 to 15.6 ms).
+    SQLite's planner takes the status index whenever the status is compared plainly, so its roots-only archive
+    listings write `+f.status` (`listArchived`). Pinned by `TestArchiveVisibility_RootsListingsWalkTheRootsIndex`.
+  - **Both are in `archive/1.sql`**, so a day made before them has neither, and keeps the plans above until it drops.
+  They cost two to four index
   inserts per archived FLOW beyond the root and archive-time ones (the surgraph ones only for a subgraph child),
   about a tenth of the rows, mostly at the right end of their index. **The steps table
-  carries `flow_id` only - never the dispatch indexes** (`selection`, `due`): an archived step is terminal, so on
+  carries `flow_id` only - `(flow_id, step_id)` on PostgreSQL, MySQL and SQLite, so a chunked deletion reads a flow's
+  steps in order and bounded, as on the live table - never the dispatch indexes** (`selection`, `due`): an archived step is terminal, so on
   the dialects with partial indexes they would stay empty, and on MySQL, which has none, they would be full indexes
   on the largest table, on a path bound by WAL bytes.
 - **PostgreSQL freezes a day early** (`autovacuum_freeze_min_age = 0`, an insert-triggered vacuum at 1%, on the table

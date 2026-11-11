@@ -28,12 +28,14 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/candidates"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/graphcache"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/latch"
 	"github.com/microbus-io/dwarf/internal/migrations"
+	"github.com/microbus-io/dwarf/internal/reaper"
 	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -1012,11 +1014,13 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	defer doneTurn()
 
 	var flowStatus string
-	var surgraphFlowID, deleteAfterMs int
+	var surgraphFlowID, deleteAfterMs, attempted int
+	attemptedCond, attemptedArgs := reaper.AttemptedSQL(db.DriverName())
 	err = db.QueryRowContext(ctx,
-		"SELECT status, surgraph_flow_id, delete_after_ms FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?",
-		flowID, flowToken, flowHour,
-	).Scan(&flowStatus, &surgraphFlowID, &deleteAfterMs)
+		"SELECT status, surgraph_flow_id, delete_after_ms, CASE WHEN "+attemptedCond+" THEN 1 ELSE 0 END FROM dwarf_flows"+
+			" WHERE flow_id=? AND flow_token=? AND created_hour=?",
+		append(attemptedArgs, flowID, flowToken, flowHour)...,
+	).Scan(&flowStatus, &surgraphFlowID, &deleteAfterMs, &attempted)
 	if err == sql.ErrNoRows {
 		return e.deleteArchivedFlow(ctx, db, shardNum, flowID, flowToken, flowHour)
 	}
@@ -1036,14 +1040,21 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	if !workflow.IsTerminalStatus(flowStatus) {
 		return errors.New("flow is open (status: %s); terminate it first", flowStatus, http.StatusConflict)
 	}
+	// Test checkpoint: between the read and what Delete does with it, the reaper can archive the tree, publish it, or
+	// delete its live copy.
+	e.seams.Checkpoint(ctx, engineseams.CheckpointBeforeDeleteStamp)
+	if deleteAfterMs > 0 && attempted == 1 {
+		return e.deletePublished(ctx, db, shardNum, flowID, flowToken, flowHour)
+	}
 	if deleteAfterMs > 0 {
 		return nil // already scheduled - idempotent
 	}
-	// Test checkpoint: the reaper can archive the tree between the read and the stamp.
-	e.seams.Checkpoint(ctx, engineseams.CheckpointBeforeDeleteStamp)
+	// The stamp clears any archive attempt, as every stamp but a publication does: a copy being staged is abandoned,
+	// and its next chunk finds the root stamped.
+	none, noneArg := reaper.NoAttemptSQL(db.DriverName())
 	res, err := db.ExecContext(ctx,
-		"UPDATE dwarf_flows SET delete_after_ms=1 WHERE flow_id=? AND flow_token=? AND created_hour=? AND status IN ("+terminalStatusesSQL+") AND delete_after_ms=0",
-		flowID, flowToken, flowHour,
+		"UPDATE dwarf_flows SET delete_after_ms=1, archive_attempt_at="+none+" WHERE flow_id=? AND flow_token=? AND created_hour=? AND status IN ("+terminalStatusesSQL+") AND delete_after_ms=0",
+		noneArg, flowID, flowToken, flowHour,
 	)
 	if err != nil {
 		return errors.Trace(err)
@@ -1053,16 +1064,29 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 		return nil
 	}
 	// The stamp matched nothing, so the row moved since the read: the reaper archived the tree (deleted from the
-	// archive instead), or a racing Delete stamped it first (success).
-	err = db.QueryRowContext(ctx,
-		"SELECT delete_after_ms FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?",
-		flowID, flowToken, flowHour,
-	).Scan(&deleteAfterMs)
+	// archive instead), published it (its archive copy marked), or a racing Delete stamped it first (success).
+	return e.deleteMoved(ctx, db, shardNum, flowID, flowToken, flowHour)
+}
+
+// deleteMoved finishes a Delete whose live root changed after it was read: it reads the root again and does what its
+// state now asks. Gone from the live tables, the tree is in the archive, or nowhere. Stamped with an archive attempt,
+// it is published, and its archive copy is marked. Stamped without one, a racing Delete or the reaper got there:
+// success.
+func (e *Engine) deleteMoved(ctx context.Context, db *sequel.DB, shardNum, flowID int, flowToken string, flowHour int) error {
+	var deleteAfterMs, attempted int
+	attemptedCond, attemptedArgs := reaper.AttemptedSQL(db.DriverName())
+	err := db.QueryRowContext(ctx,
+		"SELECT delete_after_ms, CASE WHEN "+attemptedCond+" THEN 1 ELSE 0 END FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?",
+		append(attemptedArgs, flowID, flowToken, flowHour)...,
+	).Scan(&deleteAfterMs, &attempted)
 	if err == sql.ErrNoRows {
 		return e.deleteArchivedFlow(ctx, db, shardNum, flowID, flowToken, flowHour)
 	}
 	if err != nil {
 		return errors.Trace(err)
+	}
+	if deleteAfterMs > 0 && attempted == 1 {
+		return e.deletePublished(ctx, db, shardNum, flowID, flowToken, flowHour)
 	}
 	if deleteAfterMs > 0 {
 		return nil
@@ -1070,9 +1094,47 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	return errors.New("the flow changed while it was being deleted; try again", http.StatusConflict)
 }
 
+// deletePublished deletes a tree published to the archive while its live copy is being deleted: the archive's copy is
+// marked and the attempt cleared in one transaction (reaper.DeletePublished), and counted removed only when this call
+// marked it, since a Purge that removed it counted it already. When that finds the root no longer
+// stamped with an attempt - its live copy deleted meanwhile, or a racing Delete cleared it - the root is read again,
+// so a tree whose live copy went is deleted from the archive rather than reported deleted while it stays there.
+func (e *Engine) deletePublished(ctx context.Context, db *sequel.DB, shardNum, flowID int, flowToken string, flowHour int) error {
+	set := e.archives.Load()
+	if set == nil {
+		return errors.New("the archive is not open", http.StatusServiceUnavailable)
+	}
+	done, marked, err := e.reaper.Load().DeletePublished(ctx, db, set.dayLength, flowID)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if marked {
+		e.metricFlowsRemoved(ctx, shardNum, removedFromArchive, "delete", 1)
+	}
+	if done {
+		return nil
+	}
+	var one int
+	err = db.QueryRowContext(ctx, "SELECT 1 FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND created_hour=?",
+		flowID, flowToken, flowHour).Scan(&one)
+	if err == sql.ErrNoRows {
+		return e.deleteArchivedFlow(ctx, db, shardNum, flowID, flowToken, flowHour)
+	}
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if published, err := livePublished(ctx, db, flowID); err != nil || published {
+		if err == nil {
+			err = errors.New("the flow changed while it was being deleted; try again", http.StatusConflict)
+		}
+		return errors.Trace(err)
+	}
+	return nil // a racing Delete cleared the attempt, marking the archive's copy
+}
+
 // archivedFlowRow reads an archived flow's status and surgraph link from the day the archive's locate finds it in,
 // with its token, for an operation whose live read missed: the day, or a 404 when neither side holds the flow - never
-// archived, deleted, or on a day dropped since.
+// archived, deleted, marked for deletion, a child the visibility rule hides, or on a day dropped since.
 func (e *Engine) archivedFlowRow(ctx context.Context, db *sequel.DB, shardNum, flowID int, flowToken string, flowHour int) (
 	day int, status string, surgraphFlowID int, err error) {
 	notFound := errors.New("flow not found", http.StatusNotFound)
@@ -1087,8 +1149,10 @@ func (e *Engine) archivedFlowRow(ctx context.Context, db *sequel.DB, shardNum, f
 	if err != nil {
 		return 0, "", 0, errors.Trace(err)
 	}
-	err = db.QueryRowContext(ctx, "SELECT status, surgraph_flow_id FROM "+migrations.FlowsTable(day)+
-		" WHERE flow_id=? AND flow_token=? AND created_hour=?", flowID, flowToken, flowHour).Scan(&status, &surgraphFlowID)
+	flows := migrations.FlowsTable(day)
+	err = db.QueryRowContext(ctx, "SELECT f.status, f.surgraph_flow_id FROM "+flows+" f LEFT JOIN "+flows+
+		" r ON r.flow_id=NULLIF(f.root_flow_id, f.flow_id) WHERE f.flow_id=? AND f.flow_token=? AND f.created_hour=? AND "+
+		archiver.VisibleSQL("f", "r"), flowID, flowToken, flowHour).Scan(&status, &surgraphFlowID)
 	// A day dropped since the locate, or a directory row outliving its day, is a missing table: the flow is gone.
 	if err == sql.ErrNoRows || sequel.IsUndefinedTableError(err) {
 		return 0, "", 0, notFound
@@ -1099,8 +1163,8 @@ func (e *Engine) archivedFlowRow(ctx context.Context, db *sequel.DB, shardNum, f
 	return day, status, surgraphFlowID, nil
 }
 
-// deleteArchivedFlow deletes an archived flow's tree at once in its day's tables (reaper.DeleteArchivedTree): it is not
-// marked, since the reaper reads only the live tables and an archived tree has nothing left to race. A subgraph
+// deleteArchivedFlow deletes an archived flow's tree in its day's tables (reaper.DeleteArchivedTree): at once when it
+// fits a batch, otherwise marked, which hides it at once, and deleted in chunks in the call and after it. A subgraph
 // child's key is a 400, as on the live side.
 func (e *Engine) deleteArchivedFlow(ctx context.Context, db *sequel.DB, shardNum, flowID int, flowToken string, flowHour int) error {
 	day, _, surgraphFlowID, err := e.archivedFlowRow(ctx, db, shardNum, flowID, flowToken, flowHour)
@@ -1110,7 +1174,7 @@ func (e *Engine) deleteArchivedFlow(ctx context.Context, db *sequel.DB, shardNum
 	if surgraphFlowID != 0 {
 		return errors.New("cannot delete a subgraph child; use the root flow key", http.StatusBadRequest)
 	}
-	n, err := e.reaper.Load().DeleteArchivedTree(ctx, db, day, flowID)
+	n, err := e.reaper.Load().DeleteArchivedTree(ctx, db, day, flowID, e.reapBatchRows, time.Now().Add(e.archiveDeleteInCall))
 	if sequel.IsUndefinedTableError(err) || (err == nil && n == 0) {
 		return errors.New("flow not found", http.StatusNotFound) // dropped, or deleted by a racing Delete or Purge
 	}
@@ -1376,6 +1440,13 @@ func (e *Engine) continueFlow(ctx context.Context, flowKey string, additionalSta
 		).Scan(&flowStatus, &surgraphFlowID, &deleteAfterMs, &finalStateJSON, &graphJSON, &graphHash, &workflowURL, &baggageJSON, &priority, &fairnessKey, &fairnessWeight, &timeBudgetMs)
 		if err == sql.ErrNoRows {
 			return false, nil
+		}
+		if err == nil && t == liveTables && deleteAfterMs > 0 {
+			// A live root stamped with an archive attempt is published: its copy is read from the archive.
+			published, err := livePublished(ctx, db, flowID)
+			if err != nil || published {
+				return false, errors.Trace(err)
+			}
 		}
 		return err == nil, errors.Trace(err)
 	})

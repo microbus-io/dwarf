@@ -164,7 +164,7 @@ const (
 const (
 	CheckpointResumeLeafSelected        = "resumeLeafSelected"        // Resume, after it selected the leaf interrupt and before it reads the leaf's park record
 	CheckpointResumeBeforeFlowWrite     = "resumeBeforeFlowWrite"     // Resume, just before its transaction's flow-status gate write
-	CheckpointBeforeDeleteStamp         = "beforeDeleteStamp"         // Delete, after it read the root, just before the delete stamp
+	CheckpointBeforeDeleteStamp         = "beforeDeleteStamp"         // Delete, after it read the root, before it acts on what it read
 	CheckpointArchivePassDone           = "archivePassDone"           // the archive loop, after each pass over the shards
 	CheckpointBeforeTransitionTx        = "beforeTransitionTx"        // step execution, after the step is marked completed, before whichever transaction transitions it
 	CheckpointBeforeCancelRoute         = "beforeCancelRoute"         // step execution, after the completion write of a step Cancel marked while it ran, before it is routed to its handler or failed as cancelled

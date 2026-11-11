@@ -151,8 +151,11 @@ func (e *Engine) queryLiveOrArchive(ctx context.Context, db *sequel.DB, shard, f
 	if sequel.IsUndefinedTableError(err) {
 		return false, nil
 	}
-	if (found || err != nil) && closing != closeNone {
-		there, cerr := flowRowThere(ctx, db, t, flowID)
+	// Every read of the archive closes on the visibility rule, one of one statement included: an archived flow is there
+	// only if its root is in the same day and unmarked. A copy not published, or abandoned, has children in a day
+	// without their root; a tree marked for deletion is hidden from the mark on.
+	if found || err != nil {
+		there, cerr := archiveFlowVisible(ctx, db, t, flowID)
 		if sequel.IsUndefinedTableError(cerr) || (cerr == nil && !there) {
 			return false, nil
 		}
@@ -201,8 +204,34 @@ func liveFlowStanding(ctx context.Context, db *sequel.DB, flowID int) (bool, err
 	return err == nil, errors.Trace(err)
 }
 
-// flowRowThere reports whether t's flows table holds the flow with flowID: the closing read of a pass on the archive
-// side.
+// livePublished reports whether the live root with flowID is published to the archive: stamped for deletion with an
+// archive attempt, which only a publication leaves, since every other stamp clears the attempt. Its live copy is being
+// deleted, and a read that needs the whole tree takes the archive's.
+func livePublished(ctx context.Context, x sequel.Executor, flowID int) (bool, error) {
+	cond, args := reaper.AttemptedSQL(x.DriverName())
+	var one int
+	err := x.QueryRowContext(ctx, "SELECT 1 FROM dwarf_flows WHERE flow_id=? AND delete_after_ms>0 AND "+cond,
+		append([]any{flowID}, args...)...).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil, errors.Trace(err)
+}
+
+// archiveFlowVisible reports whether t's flows table holds the flow with flowID, visible: its root in the same table and
+// not marked for deletion (archiver.VisibleSQL). It is the closing read of every read of the archive.
+func archiveFlowVisible(ctx context.Context, db *sequel.DB, t flowTables, flowID int) (bool, error) {
+	var one int
+	err := db.QueryRowContext(ctx, "SELECT 1 FROM "+t.flows+" f LEFT JOIN "+t.flows+
+		" r ON r.flow_id=NULLIF(f.root_flow_id, f.flow_id) WHERE f.flow_id=? AND "+archiver.VisibleSQL("f", "r"), flowID).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil, errors.Trace(err)
+}
+
+// flowRowThere reports whether t's flows table holds the flow with flowID: the closing read of a live read that tracks
+// change (closeFlow).
 func flowRowThere(ctx context.Context, db *sequel.DB, t flowTables, flowID int) (bool, error) {
 	var one int
 	err := db.QueryRowContext(ctx, "SELECT 1 FROM "+t.flows+" WHERE flow_id=?", flowID).Scan(&one)

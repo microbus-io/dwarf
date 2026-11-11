@@ -35,10 +35,11 @@ import (
 // flight: each batch is one transaction, so an abandoned batch lands whole or not at all, and what is left is reaped
 // by a peer or the next start.
 //
-// The expiration pass (expireOn) is a stage of the same pass, after the reap, on the first tick and on any tick at
-// least expireInterval after the last that expired: it has no deadline to keep, and its own time budget bounds how long
-// it holds back the next reap. The first is at once, not an interval in, so that a replica living shorter than the
-// interval still expires.
+// Two stages of the same pass run on the first tick and on any tick at least expireInterval after the last that ran
+// them: the deletion of archived trees marked for deletion that the call marking them did not finish (DeleteMarked),
+// and the expiration pass (expireOn). Neither has a deadline to keep, and their own time budgets bound how long they
+// hold back the next reap. The first is at once, not an interval in, so that a replica living shorter than the
+// interval still runs them.
 func (e *Engine) reaperLoop(ctx context.Context) {
 	ticker := time.NewTicker(e.reapInterval)
 	defer ticker.Stop()
@@ -48,11 +49,11 @@ func (e *Engine) reaperLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			expire := time.Since(lastExpire) >= e.expireInterval
-			if expire {
+			periodic := time.Since(lastExpire) >= e.expireInterval
+			if periodic {
 				lastExpire = time.Now()
 			}
-			e.reapPass(ctx, e.archiveGrace, expire)
+			e.reapPass(ctx, e.archiveGrace, periodic)
 		}
 	}
 }
@@ -91,10 +92,10 @@ func (e *Engine) reaperConfig(ctx context.Context, set *archiveSet, grace time.D
 }
 
 // reapPass removes, per shard this replica dispatches, every due tree, archiving the closed roots that ended grace ago
-// - the archive grace, or 0 for a test archiving what it just ended (engineseams.ArchiveNow) - and, with expire, then
-// runs the expiration pass. Each shard's pass is one turn: the reaper's pass, then expiration, one after the other.
-// dwarf_reap_pass_seconds times the reaper's pass alone.
-func (e *Engine) reapPass(ctx context.Context, grace time.Duration, expire bool) {
+// - the archive grace, or 0 for a test archiving what it just ended (engineseams.ArchiveNow) - and, with periodic,
+// then deletes the marked archive trees left and runs the expiration pass. Each shard's pass is one turn: the
+// reaper's pass, then the periodic stages, one after the other. dwarf_reap_pass_seconds times the reaper's pass alone.
+func (e *Engine) reapPass(ctx context.Context, grace time.Duration, periodic bool) {
 	set := e.archives.Load()
 	r := e.reaper.Load()
 	cfg := e.reaperConfig(ctx, set, grace)
@@ -116,8 +117,11 @@ func (e *Engine) reapPass(ctx context.Context, grace time.Duration, expire bool)
 		r.Pass(ctx, cfg, reaper.Shard{Index: shard, DB: db, Archive: a, Residency: func() (int, int, bool) {
 			return e.partitionOn(shard)
 		}})
-		if expire && e.flowExpiration > 0 {
-			e.expireOn(ctx, db, shard)
+		if periodic {
+			r.DeleteMarked(ctx, cfg, reaper.Shard{Index: shard, DB: db, Archive: a})
+			if e.flowExpiration > 0 {
+				e.expireOn(ctx, db, shard)
+			}
 		}
 		return nil
 	})

@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     started_at           DATETIME(3)  NOT NULL DEFAULT NOW_UTC(),
     updated_at           DATETIME(3)  NOT NULL DEFAULT NOW_UTC(),
     touch                TINYINT      NOT NULL DEFAULT 0,
+    archive_attempt_at   DATETIME(3)  NOT NULL DEFAULT '2000-01-01 00:00:00',
     archived_at          DATETIME(3)  NOT NULL DEFAULT '9999-12-31 23:59:59',
     PRIMARY KEY (flow_id),
     INDEX idx_dwarf_flows_status (status, updated_at),
@@ -91,6 +92,7 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     started_at           TIMESTAMP(3)     NOT NULL DEFAULT NOW_UTC(),
     updated_at           TIMESTAMP(3)     NOT NULL DEFAULT NOW_UTC(),
     touch                SMALLINT         NOT NULL DEFAULT 0,
+    archive_attempt_at   TIMESTAMP(3)     NOT NULL DEFAULT '2000-01-01 00:00:00',
     archived_at          TIMESTAMP(3)     NOT NULL DEFAULT '9999-12-31 23:59:59',
     PRIMARY KEY (flow_id)
 );
@@ -149,6 +151,7 @@ CREATE TABLE dwarf_flows (
     started_at           DATETIME2(3)  NOT NULL DEFAULT NOW_UTC(),
     updated_at           DATETIME2(3)  NOT NULL DEFAULT NOW_UTC(),
     touch                TINYINT       NOT NULL DEFAULT 0,
+    archive_attempt_at   DATETIME2(3)  NOT NULL DEFAULT '2000-01-01 00:00:00',
     archived_at          DATETIME2(3)  NOT NULL DEFAULT '9999-12-31 23:59:59',
     PRIMARY KEY (flow_id)
 );
@@ -204,6 +207,7 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     started_at           DATETIME NOT NULL DEFAULT NOW_UTC(),
     updated_at           DATETIME NOT NULL DEFAULT NOW_UTC(),
     touch                INTEGER  NOT NULL DEFAULT 0,
+    archive_attempt_at   DATETIME NOT NULL DEFAULT '2000-01-01 00:00:00.000',
     archived_at          DATETIME NOT NULL DEFAULT '9999-12-31 23:59:59.000'
 );
 

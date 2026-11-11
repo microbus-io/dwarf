@@ -223,8 +223,12 @@ func (r *Reaper) move(ctx context.Context, db *sequel.DB, rootIDs []int, k kind,
 	return moved, errors.Trace(err)
 }
 
-// archivedFlowColumns are the columns of dwarf_flows but archived_at, in table order. A move names them, so the
-// archive's row takes its archive time in place of the live row's "not archived" value. A column added to dwarf_flows
+// liveOnlyColumn is the one column of dwarf_flows the day tables do not have: a live root's archive attempt, which
+// means nothing once the tree is archived.
+const liveOnlyColumn = "archive_attempt_at"
+
+// archivedFlowColumns are the columns of dwarf_flows but archived_at and liveOnlyColumn, in table order. A move names
+// them, so the archive's row takes its archive time in place of the live row's "not archived" value. A column added to dwarf_flows
 // must be added here too, or the archive drops it: TestMove_NamesEveryFlowsColumn compares the list with the table.
 const archivedFlowColumns = "flow_id, flow_token, workflow_url, workflow_name, graph, graph_hash, payload_ver, baggage," +
 	" status, stopped_step_id, surgraph_flow_id, surgraph_step_id, root_flow_id, forked_from_step, trace_parent," +

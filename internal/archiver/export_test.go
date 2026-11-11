@@ -51,6 +51,11 @@ func OnCatalogRead(a *Archive, f func()) {
 	a.catalogRead = f
 }
 
+// OnForgetSelected makes f run in each batch of the directory's retention cleanup, between its select and its delete.
+func OnForgetSelected(a *Archive, f func()) {
+	a.forgetSelected = f
+}
+
 // Catalogs returns how many times a has read the catalog.
 func Catalogs(a *Archive) int {
 	return int(a.catalogs.Load())

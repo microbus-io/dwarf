@@ -134,6 +134,13 @@ reaper never takes a day to last past its end.
 
 ### Locating an archived row
 
+**A probe finds a flow only where it is visible** (`VisibleSQL`, the one rule every reader applies, live and
+archived): its root in the same day and not marked for deletion. The probe joins the root by
+`NULLIF(f.root_flow_id, f.flow_id)`, so a root costs nothing more and a child one primary-key probe of its root. A
+child whose root is not in its day - a staged copy not published, or one a Delete abandoned - and every flow of a
+marked tree are not found. The directory's branch cannot join a day chosen at runtime, so the day it names is checked
+by the reader's own closing read of that day (the engine's `archiveFlowVisible`).
+
 **A locate is one statement, and reads no catalog of its own** (`LocateFlow`): a `UNION ALL` of the directory's row for the flow
 and primary-key probes of the flows tables of its creation day and the day after, each branch selecting its day. It
 does not check the token - the caller's read of the day, with the flow's token and hour, says whether the flow is the
@@ -206,7 +213,9 @@ it for every archived read.
 - **Retention deletes a day's directory rows** (`forgetDaysBefore`, every `Maintain` pass and `DropBefore`), by a bound
   rather than per day dropped, so rows a failed pass left behind go with the next, `forgetBatch` (4,096) rows at a time -
   a select of their ids by the day index, then a delete by those ids - so a day of long-running flows is not one long
-  delete.
+  delete. **The delete repeats the day bound** (`AND day<?`): an archive attempt replaced after its day dropped moves a
+  flow's row to a later day, and a delete by `flow_id` alone between the select and it would take the new row, leaving
+  a flow only the directory finds unreachable by key (`TestArchiver_RetentionKeepsARowThatMovedToALaterDay`).
 
 Pinned by `locate_test.go`: the creation day, the day after and the directory's day each found with no catalog read, a
 day the archive lacks below its newest not probed and one later than its newest probed, a peer's drop still probed and

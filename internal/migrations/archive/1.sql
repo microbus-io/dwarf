@@ -52,7 +52,9 @@ CREATE TABLE IF NOT EXISTS dwarf_flows_archive (
     INDEX idx_dwarf_flows_archive_surgraph (surgraph_flow_id),
     INDEX idx_dwarf_flows_archive_surgraph_step (surgraph_step_id),
     INDEX idx_dwarf_flows_archive_root (root_flow_id),
-    INDEX idx_dwarf_flows_archive_archived (archived_at)
+    INDEX idx_dwarf_flows_archive_archived (archived_at),
+    INDEX idx_dwarf_flows_archive_roots (surgraph_flow_id, archived_at, flow_id),
+    INDEX idx_dwarf_flows_archive_delete_after (delete_after_ms)
 );
 
 -- DRIVER: mysql mariadb
@@ -114,6 +116,12 @@ CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_root ON dwarf_flows_archive (
 CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_archived ON dwarf_flows_archive (archived_at);
 
 -- DRIVER: pgx
+CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_roots ON dwarf_flows_archive (archived_at, flow_id) WHERE surgraph_flow_id = 0;
+
+-- DRIVER: pgx
+CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_delete_after ON dwarf_flows_archive (flow_id) WHERE delete_after_ms > 0;
+
+-- DRIVER: pgx
 ALTER TABLE dwarf_flows_archive SET (autovacuum_freeze_min_age = 0, autovacuum_vacuum_insert_scale_factor = 0.01, toast.autovacuum_freeze_min_age = 0, toast.autovacuum_vacuum_insert_scale_factor = 0.01);
 
 -- DRIVER: mssql
@@ -171,6 +179,15 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_dwarf_flows_archive_
 -- DRIVER: mssql
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_dwarf_flows_archive_archived' AND object_id = OBJECT_ID(N'dwarf_flows_archive')) CREATE INDEX idx_dwarf_flows_archive_archived ON dwarf_flows_archive (archived_at);
 
+-- DRIVER: mssql
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_dwarf_flows_archive_roots' AND object_id = OBJECT_ID(N'dwarf_flows_archive')) CREATE INDEX idx_dwarf_flows_archive_roots ON dwarf_flows_archive (archived_at, flow_id) WHERE surgraph_flow_id = 0;
+
+-- DRIVER: mssql
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_dwarf_flows_archive_roots_status' AND object_id = OBJECT_ID(N'dwarf_flows_archive')) CREATE INDEX idx_dwarf_flows_archive_roots_status ON dwarf_flows_archive (status, archived_at, flow_id) WHERE surgraph_flow_id = 0;
+
+-- DRIVER: mssql
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_dwarf_flows_archive_delete_after' AND object_id = OBJECT_ID(N'dwarf_flows_archive')) CREATE INDEX idx_dwarf_flows_archive_delete_after ON dwarf_flows_archive (flow_id) WHERE delete_after_ms > 0;
+
 -- DRIVER: sqlite
 CREATE TABLE IF NOT EXISTS dwarf_flows_archive (
     flow_id              INTEGER  NOT NULL PRIMARY KEY,
@@ -224,3 +241,9 @@ CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_root ON dwarf_flows_archive (
 
 -- DRIVER: sqlite
 CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_archived ON dwarf_flows_archive (archived_at);
+
+-- DRIVER: sqlite
+CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_roots ON dwarf_flows_archive (archived_at, flow_id) WHERE surgraph_flow_id = 0;
+
+-- DRIVER: sqlite
+CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_delete_after ON dwarf_flows_archive (flow_id) WHERE delete_after_ms > 0;

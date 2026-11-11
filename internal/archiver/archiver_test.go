@@ -125,8 +125,8 @@ func atHour(day, hour int) func() int64 {
 }
 
 // TestArchiver_EnsureMakesTheDayLikeTheLiveTables pins what a day is made of: both tables, with the live tables'
-// columns in the same order, and an id that is written rather than drawn - an archived row keeps its live id,
-// which state refs point at.
+// columns in the same order - but archive_attempt_at, a live root's archive attempt, which means nothing archived -
+// and an id that is written rather than drawn - an archived row keeps its live id, which state refs point at.
 func TestArchiver_EnsureMakesTheDayLikeTheLiveTables(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -139,7 +139,8 @@ func TestArchiver_EnsureMakesTheDayLikeTheLiveTables(t *testing.T) {
 	days, err := archiver.Days(ctx, a)
 	assert.NoError(err)
 	assert.Equal([]int{today}, days)
-	assert.Equal(columnsOf(t, db, "dwarf_flows"), columnsOf(t, db, migrations.FlowsTable(today)))
+	assert.Equal(slices.DeleteFunc(columnsOf(t, db, "dwarf_flows"), func(c string) bool { return c == "archive_attempt_at" }),
+		columnsOf(t, db, migrations.FlowsTable(today)))
 	assert.Equal(columnsOf(t, db, "dwarf_steps"), columnsOf(t, db, migrations.StepsTable(today)))
 
 	_, err = db.ExecContext(ctx, "INSERT INTO "+migrations.StepsTable(today)+
@@ -150,14 +151,10 @@ func TestArchiver_EnsureMakesTheDayLikeTheLiveTables(t *testing.T) {
 	assert.NoError(db.QueryRowContext(ctx, "SELECT flow_id FROM "+migrations.StepsTable(today)+" WHERE step_id=4242").Scan(&flowID))
 	assert.Equal(17, flowID)
 
-	// Every live flows index but the deletion one has its archive counterpart, so a flow lookup is planned alike on
-	// either side.
+	// Every live flows index has its archive counterpart, so a flow lookup is planned alike on either side.
 	if indexes := indexesOf(t, db, "dwarf_flows"); indexes != nil {
 		archived := indexesOf(t, db, migrations.FlowsTable(today))
 		for _, name := range indexes {
-			if name == "idx_dwarf_flows_delete_after" {
-				continue
-			}
 			want := strings.Replace(name, "idx_dwarf_flows_", "idx_"+migrations.FlowsTable(today)+"_", 1)
 			assert.True(slices.Contains(archived, want), "archive index for %s", name)
 		}

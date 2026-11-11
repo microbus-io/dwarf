@@ -140,9 +140,9 @@ after a cancelled attempt.
 - **`archived_at` is the move's time, clamped to its filing day's last millisecond** (`archivedAtSQL`), so a day holds
   only rows archived on it. A quiet margin before the day's end (a minute, or an eighth of a short day) stops archive
   moves only; `NoQuietMargin` turns it off for tests.
-- **The flows move by name, the steps by column order.** `archivedFlowColumns` names every live flow column but
-  `archived_at`; the steps move with `RETURNING *` / `SELECT *`, so the day's steps table must keep the live column
-  order (a rule in `internal/migrations/CLAUDE.md`). Both pinned by `TestMove_NamesEveryFlowsColumn`. On PostgreSQL
+- **The flows move by name, the steps by column order.** `archivedFlowColumns` names every flow column the day tables
+  have, `archived_at` apart, so not the live-only `archive_attempt_at`; the steps move with `RETURNING *` /
+  `SELECT *`, so the day's steps table must keep the live column order (a rule in `internal/migrations/CLAUDE.md`). Both pinned by `TestMove_NamesEveryFlowsColumn`. On PostgreSQL
   each table moves in one `DELETE ... RETURNING` into an `INSERT`, so what is archived is exactly what is deleted;
   elsewhere it is copied, then deleted, and a straggler is archived as it was at the copy.
 - **The directory rows for a late or early filing are written in the move's transaction**, from the same rows;
@@ -160,13 +160,65 @@ other; the engine's `lockRows` names this one, and Fork's pins stay in the engin
 
 ## Archive-side deletion
 
-`DeleteArchivedTree` (Delete, one tree, no sizing) and `DeleteArchivedRoots` (Purge) run on the caller's context:
-no attempt deadline and none of the pass's faults, since an operator's call has its own deadline
+`DeleteArchivedTree` (Delete) and `DeleteArchivedRoots` (Purge) run on the caller's context: no attempt deadline and
+none of the pass's faults, since an operator's call has its own deadline
 (`TestReaperContract_RemovalsRunOnTheCallersContext`). Purge's row budget is the engine's `reapBatchRows`, the same
-value as a pass's `BatchRows`, passed in explicitly. `DeleteArchivedRoots` returns the trees its committed transactions deleted even when a later one fails,
-and the engine records `dwarf_flows_removed` from that count, once per shard per call. A day whose tables are gone
-deletes nothing and is no error. `FaultArchiveDelete`, targeted at a root, fails the transaction that would delete it.
-Pinned by `TestDelete_ADroppedDayIsNoError` and `TestDelete_APartialRemovalCountsWhatCommitted`.
+value as a pass's `BatchRows`, passed in explicitly.
+
+- **A tree that fits a batch is deleted in one transaction**, the directory's rows with it. A day whose
+  tables are gone deletes nothing and is no error. `FaultArchiveDelete`, targeted at a root, fails the transaction that
+  would delete it.
+- **A larger tree is marked, then deleted in chunks.** The mark is `delete_after_ms=1` on the archive root, written by
+  the one UPDATE that also takes the root's lock; it hides the whole tree from every read at once (the visibility
+  rule), so the call counts the tree removed. Whether a tree fits is counted only as far as the batch
+  (`treeRowsUpTo`), so sizing a tree of millions of rows does not spend the call before its allowance begins. The
+  call then deletes chunks (`chunk` on `archiveTarget`, which also
+  deletes the directory's rows) until its deadline - the engine's `archiveDeleteInCall`, 5 s, since an API call must
+  not run for tens of seconds - and the rest is left. **The chunks run under that deadline**, not only between them:
+  checked between chunks alone, a chunk waiting on a lock held the call for as long as the lock was held
+  (`TestDelete_TheInCallChunksKeepToTheirDeadline`). A chunk that fails after the mark is no failure of the call.
+- **A marked tree is never counted twice:** a mark already there matches nothing, Purge's list skips marked roots
+  (`TestDelete_APurgeOfALargeTreeCountsItOnce`), and the atomic deletion's lock skips them too: a selection made
+  before another call marked a tree, the tree shrunk below a batch since, would otherwise delete it and count it
+  again (`TestDelete_AMarkedRootIsNotDeletedAtomically`).
+- **`DeleteMarked` finishes them**, on the reaper's five-minute stage, day by day: a probe of the day's deletion index
+  (`markedIn`), then that day's trees in chunks, each under the attempt deadline, until the pass's budget is spent.
+  - **It starts where the last pass stopped, in (day, root) order, and wraps around** (`markedFrom`). Do not probe
+    every day before deleting, nor start from the first tree each time: one slow day's probe, or one tree whose chunk
+    waits out the budget, then takes every pass (`TestDelete_AStuckMarkedTreeDoesNotStarveTheOthers`,
+    `TestDelete_EachCallGetsPastWhereTheLastStopped`).
+  - **The first tree a pass finds gets at least one chunk** however the budget went, so a pass always makes progress.
+  - **On MySQL and MariaDB the probe names the index, and falls back to a probe without it**: a day made before the
+    index has none, and a hint naming a missing index is an error there (`TestDelete_ADayWithoutTheDeletionIndexIsSwept`).
+  - **It records how many it left**, which `Observe` reports and the engine's `dwarf_archive_deletions_pending` gauge
+    shows. A day it did not reach or could not probe counts as pending, and so does a tree whose chunk reported done
+    while it is still there - a chunk skips a root another transaction holds (`TestDelete_AHeldMarkedTreeIsPending`)
+    - so the reading never says none while marked trees may remain. A day dropped since is skipped. The reading is
+    as old as the last pass: a tree a call marks after it is not counted until the next.
+- `DeleteArchivedRoots` returns the trees its committed transactions deleted or marked even when a later one fails, and
+  the engine records `dwarf_flows_removed` from that count, once per shard per call. Pinned by
+  `TestDelete_ADroppedDayIsNoError`, `TestDelete_APartialRemovalCountsWhatCommitted` and
+  `TestDelete_ALargeArchivedTreeIsMarkedThenDeleted`.
+
+## The archive attempt (`archive_attempt_at`)
+
+A live root's `archive_attempt_at` holds when its staged copy began: the copy's day (`DayOf`) and its identity. The rule
+that gives it meaning:
+
+- **Every stamp of a live root but a publication clears the attempt in the same UPDATE** (`NoAttemptSQL`): the
+  reaper's stamp before a chunked deletion (`stamp`), and the engine's Delete. So a root stamped with an attempt is one
+  published to the archive whose live copy is being deleted (`AttemptedSQL`), and the engine routes reads and Fork and
+  Continue of it to the archive's copy.
+- **`DeletePublished` deletes such a tree**: in one transaction it locks the live root, marks the
+  archive root in the attempt's day (the UPDATE locks it: the live root, then the archive root, the one order across
+  the two), and clears the attempt, so the live copy goes on as an ordinary stamped deletion and the archive's copy is
+  deleted by `DeleteMarked`. A crash cannot leave the archive's copy standing after an accepted Delete. The attempt's
+  day comes from the scanned column through `database.StoredTime`, never `UTC()`: on MySQL the driver puts the wall
+  clock in the DSN's location, and a shifted instant names the wrong day, or never matches the attempt it read.
+- **The archive's copy already gone is the deletion done.** No root row (Purge removed it): the attempt is cleared in
+  the same transaction. The day dropped: the statement on it ends the transaction, so a fresh one clears the attempt
+  it read, rechecked under the stamp; the first error is the proof, since a dropped day is never made again. Pinned by
+  the engine's `TestPublished_*`.
 
 ## Tests
 

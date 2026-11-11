@@ -21,6 +21,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/archiver"
+	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
 )
@@ -65,8 +67,11 @@ func (p *pass) deleteLarge(ctx context.Context, k kind, root int, reason string,
 func (p *pass) stamp(ctx context.Context, k kind, root int) (bool, error) {
 	ctx, cancel := p.attemptCtx(ctx)
 	defer cancel()
-	res, err := p.shard.DB.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1 WHERE flow_id=? AND "+k.due,
-		append([]any{root}, k.dueArgs...)...)
+	// The stamp clears any archive attempt, as every stamp but a publication does: a tree stamped with an attempt is a
+	// published one.
+	none, noneArg := NoAttemptSQL(p.shard.DB.DriverName())
+	res, err := p.shard.DB.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1, archive_attempt_at="+none+
+		" WHERE flow_id=? AND "+k.due, append([]any{noneArg, root}, k.dueArgs...)...)
 	if err != nil {
 		return false, errors.Trace(err)
 	}
@@ -92,23 +97,63 @@ func (c chunkPos) stepsFrom(flow int) int {
 	return 0
 }
 
-// deleteChunk deletes, in one transaction under the root's lock, up to about BatchRows rows of the stamped tree of
-// root: its descendant flows newest first, each flow's steps and then the flow, and once none is left the root's
+// chunkTarget is what a chunked deletion deletes from: the tables, the condition the root must still meet under its
+// lock, and whether the directory names the tables' flows (an archive day's).
+type chunkTarget struct {
+	t         tables
+	due       string
+	directory bool
+}
+
+// liveTarget is the live tables, their roots stamped for deletion and due.
+var liveTarget = chunkTarget{t: live, due: deletionDue(0).due}
+
+// archiveTarget is day's archive tables, their roots marked for deletion.
+func archiveTarget(day int) chunkTarget {
+	return chunkTarget{
+		t:         tables{flows: migrations.FlowsTable(day), steps: migrations.StepsTable(day)},
+		due:       "delete_after_ms>0 AND surgraph_flow_id=0",
+		directory: true,
+	}
+}
+
+// deleteChunk is chunk on the live tables, under the attempt deadline, with the pass's batch as its budget.
+func (p *pass) deleteChunk(ctx context.Context, root int, pos *chunkPos) (deleted int, done bool, err error) {
+	ctx, cancel := p.attemptCtx(ctx)
+	defer cancel()
+	return p.r.chunk(ctx, p.shard.DB, liveTarget, root, p.cfg.BatchRows, pos)
+}
+
+// chunk deletes, in one transaction under the root's lock, up to about budget rows of the tree of root in tgt: its descendant flows newest first, each flow's steps and then the flow, and once none is left the root's
 // steps, then the root itself after a recheck that the tree holds nothing else. It returns how many flows it deleted,
-// and done when the tree is gone or is not this walk's: the root not stamped and due, or held by another transaction.
+// and done when the tree is gone or is not this call's: the root no longer meets tgt.due, or is held by another
+// transaction. On an archive day the directory's rows for the deleted flows go with them.
 // pos advances only when the chunk commits.
 //
 // Every read is bounded by the budget, not by the tree: which descendants fit is decided by counting at most the
 // budget's worth of their steps, halving the run of descendants until it fits, so a flow of a million steps costs a
 // chunk no more than one of a thousand.
-func (p *pass) deleteChunk(ctx context.Context, root int, pos *chunkPos) (deleted int, done bool, err error) {
-	ctx, cancel := p.attemptCtx(ctx)
-	defer cancel()
+func (r *Reaper) chunk(ctx context.Context, db *sequel.DB, tgt chunkTarget, root, budget int, pos *chunkPos) (deleted int, done bool, err error) {
 	id := strconv.Itoa(root)
+	flowsTable, stepsTable := tgt.t.flows, tgt.t.steps
+	// dropFlows deletes the flows in list, and the directory's rows for them on an archive day.
+	dropFlows := func(tx *sequel.Tx, list string) (int, error) {
+		if tgt.directory {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM "+archiver.DirectoryTable+" WHERE flow_id IN ("+list+")"); err != nil {
+				return 0, errors.Trace(err)
+			}
+		}
+		res, err := tx.ExecContext(ctx, "DELETE FROM "+flowsTable+" WHERE flow_id IN ("+list+")")
+		if err != nil {
+			return 0, errors.Trace(err)
+		}
+		n, _ := res.RowsAffected()
+		return int(n), nil
+	}
 	var at chunkPos
-	err = p.shard.DB.Transact(ctx, func(tx *sequel.Tx) error {
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		deleted, done, at = 0, false, *pos
-		locked, err := lockRoots(ctx, tx, live.flows, true, "flow_id="+id+" AND "+deletionDue(0).due)
+		locked, err := lockRoots(ctx, tx, flowsTable, true, "flow_id="+id+" AND "+tgt.due)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -116,13 +161,13 @@ func (p *pass) deleteChunk(ctx context.Context, root int, pos *chunkPos) (delete
 			done = true
 			return nil
 		}
-		budget := max(p.cfg.BatchRows, 1)
+		budget := max(budget, 1)
 		for budget > 0 {
 			below := ""
 			if at.below > 0 {
 				below = " AND flow_id<" + strconv.Itoa(at.below)
 			}
-			children, err := ints(ctx, tx, "SELECT flow_id FROM dwarf_flows WHERE root_flow_id="+id+" AND flow_id<>"+id+
+			children, err := ints(ctx, tx, "SELECT flow_id FROM "+flowsTable+" WHERE root_flow_id="+id+" AND flow_id<>"+id+
 				below+" ORDER BY flow_id DESC LIMIT_OFFSET(?, 0)", treeChunk)
 			if err != nil {
 				return errors.Trace(err)
@@ -133,23 +178,22 @@ func (p *pass) deleteChunk(ctx context.Context, root int, pos *chunkPos) (delete
 			at.top = max(at.top, children[0])
 			if at.stepFlow == children[0] {
 				// A child part deleted by an earlier chunk: go on from its position, without sizing it again.
-				n, last, err := deleteStepsFrom(ctx, tx, children[0], at.stepAfter, budget)
+				n, last, err := deleteStepsFrom(ctx, tx, stepsTable, children[0], at.stepAfter, budget)
 				if err != nil {
 					return errors.Trace(err)
 				}
 				if n == budget {
 					at.stepAfter = last
-					return errors.Trace(p.r.midTree(root))
+					return errors.Trace(r.midTree(root))
 				}
-				if err := p.r.midTree(root); err != nil {
+				if err := r.midTree(root); err != nil {
 					return errors.Trace(err)
 				}
-				res, err := tx.ExecContext(ctx, "DELETE FROM dwarf_flows WHERE flow_id="+strconv.Itoa(children[0]))
+				flows, err := dropFlows(tx, strconv.Itoa(children[0]))
 				if err != nil {
 					return errors.Trace(err)
 				}
-				flows, _ := res.RowsAffected()
-				deleted += int(flows)
+				deleted += flows
 				budget -= n + 1
 				at.below, at.stepFlow, at.stepAfter = children[0], 0, 0
 				continue
@@ -159,7 +203,7 @@ func (p *pass) deleteChunk(ctx context.Context, root int, pos *chunkPos) (delete
 			for run > 0 {
 				room := budget - run
 				if room >= 0 {
-					n, err := stepsUpTo(ctx, tx, children[:run], room+1)
+					n, err := stepsUpTo(ctx, tx, stepsTable, children[:run], room+1)
 					if err != nil {
 						return errors.Trace(err)
 					}
@@ -171,28 +215,27 @@ func (p *pass) deleteChunk(ctx context.Context, root int, pos *chunkPos) (delete
 			}
 			if run == 0 {
 				// The newest descendant alone is over what is left: part of its steps now, the rest in the next chunk.
-				_, last, err := deleteStepsFrom(ctx, tx, children[0], 0, budget)
+				_, last, err := deleteStepsFrom(ctx, tx, stepsTable, children[0], 0, budget)
 				if err != nil {
 					return errors.Trace(err)
 				}
 				at.stepFlow, at.stepAfter = children[0], last
-				return errors.Trace(p.r.midTree(root))
+				return errors.Trace(r.midTree(root))
 			}
 			list := intCSV(children[:run])
-			res, err := tx.ExecContext(ctx, "DELETE FROM dwarf_steps WHERE flow_id IN ("+list+")")
+			res, err := tx.ExecContext(ctx, "DELETE FROM "+stepsTable+" WHERE flow_id IN ("+list+")")
 			if err != nil {
 				return errors.Trace(err)
 			}
 			steps, _ := res.RowsAffected()
-			if err := p.r.midTree(root); err != nil {
+			if err := r.midTree(root); err != nil {
 				return errors.Trace(err)
 			}
-			res, err = tx.ExecContext(ctx, "DELETE FROM dwarf_flows WHERE flow_id IN ("+list+")")
+			flows, err := dropFlows(tx, list)
 			if err != nil {
 				return errors.Trace(err)
 			}
-			flows, _ := res.RowsAffected()
-			deleted += int(flows)
+			deleted += flows
 			budget -= int(steps) + run
 			at.below = children[run-1]
 		}
@@ -200,7 +243,7 @@ func (p *pass) deleteChunk(ctx context.Context, root int, pos *chunkPos) (delete
 			return nil
 		}
 		from := at.stepsFrom(root)
-		n, last, err := deleteStepsFrom(ctx, tx, root, from, budget)
+		n, last, err := deleteStepsFrom(ctx, tx, stepsTable, root, from, budget)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -211,10 +254,10 @@ func (p *pass) deleteChunk(ctx context.Context, root int, pos *chunkPos) (delete
 		if n > 0 {
 			from = last
 		}
-		if err := p.r.midTree(root); err != nil {
+		if err := r.midTree(root); err != nil {
 			return errors.Trace(err)
 		}
-		p.r.seams.Checkpoint(ctx, CheckpointBeforeRootDelete)
+		r.seams.Checkpoint(ctx, CheckpointBeforeRootDelete)
 		// The root goes last, and only once the tree holds nothing else: two probes, not an EXISTS over the tree,
 		// which MariaDB materializes over the whole steps index. The walk just found no descendant below its position,
 		// and deleted those between it and top, so a descendant left can only be one newer than top: the probe seeks
@@ -224,22 +267,21 @@ func (p *pass) deleteChunk(ctx context.Context, root int, pos *chunkPos) (delete
 		if d := tx.DriverName(); d == "mysql" || d == "mariadb" {
 			locking = " FOR UPDATE"
 		}
-		rest, err := ints(ctx, tx, "SELECT flow_id FROM dwarf_flows WHERE root_flow_id="+id+" AND flow_id>"+
+		rest, err := ints(ctx, tx, "SELECT flow_id FROM "+flowsTable+" WHERE root_flow_id="+id+" AND flow_id>"+
 			strconv.Itoa(max(at.top, root))+" ORDER BY flow_id LIMIT_OFFSET(?, 0)"+locking, 1)
 		if err != nil || len(rest) > 0 {
 			return errors.Trace(err)
 		}
-		rest, err = ints(ctx, tx, "SELECT step_id FROM dwarf_steps WHERE flow_id="+id+" AND step_id>"+strconv.Itoa(from)+
+		rest, err = ints(ctx, tx, "SELECT step_id FROM "+stepsTable+" WHERE flow_id="+id+" AND step_id>"+strconv.Itoa(from)+
 			" ORDER BY step_id LIMIT_OFFSET(?, 0)"+locking, 1)
 		if err != nil || len(rest) > 0 {
 			return errors.Trace(err)
 		}
-		res, err := tx.ExecContext(ctx, "DELETE FROM dwarf_flows WHERE flow_id="+id)
+		rows, err := dropFlows(tx, id)
 		if err != nil {
 			return errors.Trace(err)
 		}
-		rows, _ := res.RowsAffected()
-		deleted += int(rows)
+		deleted += rows
 		done = true
 		return nil
 	})
@@ -252,13 +294,26 @@ func (p *pass) deleteChunk(ctx context.Context, root int, pos *chunkPos) (delete
 
 // stepsUpTo counts the steps of flows, reading at most limit of them: enough to tell whether they fit a budget,
 // whatever their number.
-func stepsUpTo(ctx context.Context, tx *sequel.Tx, flows []int, limit int) (int, error) {
-	inner := "SELECT step_id FROM dwarf_steps WHERE flow_id IN (" + intCSV(flows) + ") LIMIT " + strconv.Itoa(limit)
-	if tx.DriverName() == "mssql" {
-		inner = "SELECT TOP (" + strconv.Itoa(limit) + ") step_id FROM dwarf_steps WHERE flow_id IN (" + intCSV(flows) + ")"
+func stepsUpTo(ctx context.Context, q sequel.Executor, steps string, flows []int, limit int) (int, error) {
+	return countUpTo(ctx, q, "step_id FROM "+steps+" WHERE flow_id IN ("+intCSV(flows)+")", limit)
+}
+
+// treeRowsUpTo counts the rows of the tree of root in t, as rootsWithinRowsIn sizes a tree (a flow with no steps counts
+// one), up to limit.
+func treeRowsUpTo(ctx context.Context, q sequel.Executor, t tables, root, limit int) (int, error) {
+	return countUpTo(ctx, q, "f.flow_id FROM "+t.flows+" f LEFT JOIN "+t.steps+" s ON s.flow_id=f.flow_id WHERE f.root_flow_id="+
+		strconv.Itoa(root), limit)
+}
+
+// countUpTo counts the rows of "SELECT "+selectFrom, up to limit: a COUNT over a LIMIT or TOP, so it reads at most limit
+// rows however many match.
+func countUpTo(ctx context.Context, q sequel.Executor, selectFrom string, limit int) (int, error) {
+	inner := "SELECT " + selectFrom + " LIMIT " + strconv.Itoa(limit)
+	if q.DriverName() == "mssql" {
+		inner = "SELECT TOP (" + strconv.Itoa(limit) + ") " + selectFrom
 	}
 	var n int
-	err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM ("+inner+") c").Scan(&n)
+	err := q.QueryRowContext(ctx, "SELECT COUNT(*) FROM ("+inner+") c").Scan(&n)
 	return n, errors.Trace(err)
 }
 
@@ -266,13 +321,13 @@ func stepsUpTo(ctx context.Context, tx *sequel.Tx, flows []int, limit int) (int,
 // read and deleted, and the last one's id. The ids are read first and deleted by a literal list: a range or an ORDER
 // BY with a limit on the DELETE is not portable, and the read is a seek into (flow_id, step_id) whatever else the table
 // holds.
-func deleteStepsFrom(ctx context.Context, tx *sequel.Tx, flow, after, limit int) (n, last int, err error) {
-	ids, err := ints(ctx, tx, "SELECT step_id FROM dwarf_steps WHERE flow_id="+strconv.Itoa(flow)+" AND step_id>"+
+func deleteStepsFrom(ctx context.Context, tx *sequel.Tx, steps string, flow, after, limit int) (n, last int, err error) {
+	ids, err := ints(ctx, tx, "SELECT step_id FROM "+steps+" WHERE flow_id="+strconv.Itoa(flow)+" AND step_id>"+
 		strconv.Itoa(after)+" ORDER BY step_id LIMIT_OFFSET(?, 0)", limit)
 	if err != nil || len(ids) == 0 {
 		return 0, after, errors.Trace(err)
 	}
-	if _, err := tx.ExecContext(ctx, "DELETE FROM dwarf_steps WHERE step_id IN ("+intCSV(ids)+")"); err != nil {
+	if _, err := tx.ExecContext(ctx, "DELETE FROM "+steps+" WHERE step_id IN ("+intCSV(ids)+")"); err != nil {
 		return 0, after, errors.Trace(err)
 	}
 	return len(ids), ids[len(ids)-1], nil

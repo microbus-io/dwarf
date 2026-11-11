@@ -128,7 +128,7 @@ func TestDirectory_AReaderRefreshesTheDaysItLocates(t *testing.T) {
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	_, err = db.ExecContext(ctx, "INSERT INTO "+migrations.FlowsTable(today-3)+
-		" (flow_id, flow_token, workflow_url, workflow_name, graph, graph_hash, status) VALUES (999999, 'tok', 'u', 'W', ?, 'h', 'completed')",
+		" (flow_id, flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id) VALUES (999999, 'tok', 'u', 'W', ?, 'h', 'completed', 999999)",
 		[]byte("{}")) // bound: graph is binary on SQL Server
 	assert.NoError(err)
 	hour := (today - 3) * 24

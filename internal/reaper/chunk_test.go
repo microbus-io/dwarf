@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
@@ -252,8 +253,8 @@ func TestChunk_ALateDescendantKeepsTheRoot(t *testing.T) {
 	assert.Zero(left)
 }
 
-// TestChunk_TheStepBoundaryWalksTheFlowsIndex pins the plan of a chunk's step read to idx_dwarf_steps_flow_id in step_id
-// order, with no sort: keyed on (flow_id, step_id) it is bounded by the flow's own steps, however few of the table's
+// TestChunk_TheStepBoundaryWalksTheFlowsIndex pins the plan of a chunk's step read, on the live steps table and on an
+// archive day's, to the flow_id index in step_id order, with no sort: keyed on (flow_id, step_id) it is bounded by the flow's own steps, however few of the table's
 // they are. Keyed on (flow_id) alone, PostgreSQL walks the primary key instead, past every other flow's
 // steps (3.6k-6.9k buffers a chunk at 4% density, against about 20 with the pair). Do not key it on flow_id alone.
 func TestChunk_TheStepBoundaryWalksTheFlowsIndex(t *testing.T) {
@@ -272,46 +273,53 @@ func TestChunk_TheStepBoundaryWalksTheFlowsIndex(t *testing.T) {
 	default:
 		t.Skip("the plan shapes pinned here are PostgreSQL's, SQLite's, MySQL's and MariaDB's")
 	}
-	var plan string
-	errRollback := errors.New("rollback")
-	err := r.db.Transact(ctx, func(tx *sequel.Tx) error {
-		if priceOut != "" {
-			if _, err := tx.ExecContext(ctx, priceOut); err != nil {
-				return err
-			}
-		}
-		rows, err := tx.QueryContext(ctx, explain+"SELECT step_id FROM dwarf_steps WHERE flow_id=7 ORDER BY step_id LIMIT_OFFSET(?, 0)", 4096)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		cols, _ := rows.Columns()
-		for rows.Next() {
-			vals := make([]any, len(cols))
-			ptrs := make([]any, len(cols))
-			for i := range vals {
-				ptrs[i] = &vals[i]
-			}
-			if err := rows.Scan(ptrs...); err != nil {
-				return err
-			}
-			for _, v := range vals {
-				if b, ok := v.([]byte); ok {
-					v = string(b)
+	today, err := r.archive.Today(ctx)
+	assert.Must(assert.NoError(err))
+	for steps, index := range map[string]string{
+		"dwarf_steps":                "idx_dwarf_steps_flow_id",
+		migrations.StepsTable(today): "idx_" + migrations.StepsTable(today) + "_flow_id",
+	} {
+		var plan string
+		errRollback := errors.New("rollback")
+		err := r.db.Transact(ctx, func(tx *sequel.Tx) error {
+			if priceOut != "" {
+				if _, err := tx.ExecContext(ctx, priceOut); err != nil {
+					return err
 				}
-				plan += " " + toString(v)
 			}
-			plan += "\n"
+			rows, err := tx.QueryContext(ctx, explain+"SELECT step_id FROM "+steps+" WHERE flow_id=7 ORDER BY step_id LIMIT_OFFSET(?, 0)", 4096)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			cols, _ := rows.Columns()
+			for rows.Next() {
+				vals := make([]any, len(cols))
+				ptrs := make([]any, len(cols))
+				for i := range vals {
+					ptrs[i] = &vals[i]
+				}
+				if err := rows.Scan(ptrs...); err != nil {
+					return err
+				}
+				for _, v := range vals {
+					if b, ok := v.([]byte); ok {
+						v = string(b)
+					}
+					plan += " " + toString(v)
+				}
+				plan += "\n"
+			}
+			if err := rows.Err(); err != nil {
+				return err
+			}
+			return errRollback
+		})
+		assert.True(errors.Is(err, errRollback), "%v", err)
+		assert.Contains(plan, index, "%s: %s", steps, plan)
+		if r.db.DriverName() != "mysql" && r.db.DriverName() != "mariadb" {
+			assert.False(strings.Contains(plan, "Sort") || strings.Contains(plan, "TEMP B-TREE"), "no sort on %s: %s", steps, plan)
 		}
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		return errRollback
-	})
-	assert.True(errors.Is(err, errRollback), "%v", err)
-	assert.Contains(plan, "idx_dwarf_steps_flow_id", "%s", plan)
-	if r.db.DriverName() != "mysql" && r.db.DriverName() != "mariadb" {
-		assert.False(strings.Contains(plan, "Sort") || strings.Contains(plan, "TEMP B-TREE"), "no sort: %s", plan)
 	}
 }
 

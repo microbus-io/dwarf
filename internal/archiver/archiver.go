@@ -105,6 +105,8 @@ type Archive struct {
 	// catalogs counts the catalog reads, and catalogRead, when set, runs after each one's query, for the tests.
 	catalogs    atomic.Int64
 	catalogRead func()
+	// forgetSelected, when set, runs in forgetDaysBefore between the select of a batch and its delete: a test seam.
+	forgetSelected func()
 }
 
 // New returns the Archive of the shard db is open on, for days of dayLength. fsys holds the archive migrations,

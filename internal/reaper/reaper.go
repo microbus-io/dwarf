@@ -129,6 +129,10 @@ type Observation struct {
 	LagOK bool
 	// Kinds holds every kind, in the order closed, deleted, retention, zero for a kind not walked yet.
 	Kinds [3]KindObservation
+	// Pending is how many archived trees marked for deletion the last DeleteMarked left; PendingOK is false before
+	// the first.
+	Pending   int
+	PendingOK bool
 }
 
 // KindObservation is what the repair walk of one kind knows.
@@ -144,12 +148,14 @@ type KindObservation struct {
 
 // Reaper removes closed trees, one shard per Pass.
 type Reaper struct {
-	logger   *slog.Logger
-	seams    *seamster.Seamster
-	metrics  *instruments
-	walks    walks
-	failures failures
-	lag      lag
+	logger     *slog.Logger
+	seams      *seamster.Seamster
+	metrics    *instruments
+	walks      walks
+	failures   failures
+	lag        lag
+	pending    pending
+	markedFrom markedFrom
 }
 
 // New returns a Reaper that knows nothing yet, logs nowhere and records no metric.
@@ -194,6 +200,8 @@ func (r *Reaper) Forget(shard int) {
 	r.failures.forget(shard)
 	r.lag.forget(shard)
 	r.walks.forget(shard)
+	r.pending.forget(shard)
+	r.markedFrom.forget(shard)
 }
 
 // Observe returns what the Reaper knows of shard at now.
@@ -201,6 +209,7 @@ func (r *Reaper) Observe(shard int, now time.Time) Observation {
 	var o Observation
 	o.Failing = r.failures.failingFor(shard, now)
 	o.Lag, o.LagOK = r.lag.of(shard)
+	o.Pending, o.PendingOK = r.pending.of(shard)
 	for i, kind := range []string{KindClosed, KindDeleted, KindRetention} {
 		w := r.walks.get(walkKey{shard, kind, true})
 		k := KindObservation{Kind: kind, Held: max(w.failed, w.lastFailed)}

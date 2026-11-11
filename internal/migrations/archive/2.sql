@@ -121,7 +121,7 @@ CREATE TABLE IF NOT EXISTS dwarf_steps_archive (
 );
 
 -- DRIVER: pgx
-CREATE INDEX IF NOT EXISTS idx_dwarf_steps_archive_flow_id ON dwarf_steps_archive (flow_id);
+CREATE INDEX IF NOT EXISTS idx_dwarf_steps_archive_flow_id ON dwarf_steps_archive (flow_id, step_id);
 
 -- DRIVER: pgx
 ALTER TABLE dwarf_steps_archive SET (autovacuum_freeze_min_age = 0, autovacuum_vacuum_insert_scale_factor = 0.01, toast.autovacuum_freeze_min_age = 0, toast.autovacuum_vacuum_insert_scale_factor = 0.01);

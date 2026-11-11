@@ -33,6 +33,15 @@ import (
 // than their creation day and the day after it - with the day each was archived on: (flow_id, day).
 const DirectoryTable = "dwarf_flow_days"
 
+// VisibleSQL is the condition that the flow aliased f is visible, given its root aliased r, joined on
+// r.flow_id=NULLIF(f.root_flow_id, f.flow_id): a root unmarked itself, or a child whose root is in the same tables and
+// unmarked. It is the one rule every reader of the flows tables applies, live and archived: a root is marked for
+// deletion by delete_after_ms>0, and its whole tree is hidden with it; an archived child whose root is not in its day
+// is a copy not published, and hidden too. The NULLIF keeps a root from probing itself.
+func VisibleSQL(f, r string) string {
+	return "((" + f + ".root_flow_id=" + f + ".flow_id AND " + f + ".delete_after_ms=0) OR " + r + ".delete_after_ms=0)"
+}
+
 // forgetBatch is how many of the directory's expired rows one statement deletes.
 const forgetBatch = 4096
 
@@ -102,12 +111,19 @@ func (a *Archive) forget(day int) {
 
 // locateIn runs the locate's statement: the directory's row for the flow, and a primary-key probe of the flows table of
 // each probed day. It returns the day it found the flow in, if any.
+//
+// A probe finds a flow only where it is visible: its root in the same day and not marked for deletion. A root is its
+// own root, and the NULLIF keeps it from probing itself; a child costs one primary-key probe of its root. A child whose
+// root is not in the day - a copy not published yet, or abandoned - is not found there. The directory's branch cannot
+// join a day chosen at runtime, so the day it names is checked by the reader's own read of that day.
 func (a *Archive) locateIn(ctx context.Context, flowID int, probed []int) (found *int, err error) {
 	var stmt strings.Builder
 	args := []any{flowID}
 	stmt.WriteString("SELECT day FROM " + DirectoryTable + " WHERE flow_id=?")
 	for _, d := range probed {
-		stmt.WriteString(" UNION ALL SELECT " + strconv.Itoa(d) + " FROM " + migrations.FlowsTable(d) + " WHERE flow_id=?")
+		flows := migrations.FlowsTable(d)
+		stmt.WriteString(" UNION ALL SELECT " + strconv.Itoa(d) + " FROM " + flows + " f LEFT JOIN " + flows +
+			" r ON r.flow_id=NULLIF(f.root_flow_id, f.flow_id) WHERE f.flow_id=? AND " + VisibleSQL("f", "r"))
 		args = append(args, flowID)
 	}
 	rows, err := a.db.QueryContext(ctx, stmt.String(), args...)
@@ -180,8 +196,13 @@ func (a *Archive) forgetDaysBefore(ctx context.Context, day int) error {
 		if len(ids) == 0 {
 			return nil
 		}
+		if a.forgetSelected != nil {
+			a.forgetSelected()
+		}
 		// The ids are integers read back from the table, embedded as literals to stay under every driver's bind limit.
-		_, err = a.db.ExecContext(ctx, "DELETE FROM "+DirectoryTable+" WHERE flow_id IN ("+strings.Join(ids, ",")+")")
+		// The day bound is repeated: a flow's row can move to a later day between the select and the delete (an
+		// archive attempt replaced after its day dropped), and deleting by flow_id alone would take the new row.
+		_, err = a.db.ExecContext(ctx, "DELETE FROM "+DirectoryTable+" WHERE flow_id IN ("+strings.Join(ids, ",")+") AND day<?", day)
 		if err != nil {
 			return errors.Trace(err)
 		}
