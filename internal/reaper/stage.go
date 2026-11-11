@@ -83,8 +83,10 @@ func (p *pass) stage(ctx context.Context, k kind, root int, d *filingDay, sliceS
 			// The attempt's day was dropped, and its rows with it: a fresh attempt into today, in a transaction of its
 			// own, since the statement that found the day missing ended this one.
 			p.r.stages.drop(key)
-			_, _, err := p.claimAttempt(ctx, k, root, d, at)
-			return 0, false, errors.Trace(err)
+			_, replaced, err := p.claimAttempt(ctx, k, root, d, at)
+			// Replaced, the next visit copies into today; not - no room left today, or past midnight - the walk moves
+			// on rather than find the day missing again until its slice ends.
+			return 0, err == nil && !replaced, errors.Trace(err)
 		}
 		if err != nil {
 			p.r.stages.put(key, pos)

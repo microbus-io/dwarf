@@ -18,6 +18,7 @@ package engine
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -430,9 +431,11 @@ func TestStaged_APurgeDuringTheLiveCleanup(t *testing.T) {
 		assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE root_flow_id=?", rootID).Scan(&n))
 		return n
 	}
-	e.reapBudget = time.Nanosecond // one round of walks: published, its live copy not yet removed
+	// The live cleanup's chunks fail, so the published tree's live copy is still there.
+	cleanup := engineseams.FaultReapMidTree + ":" + strconv.Itoa(rootID)
+	e.seams.InjectN(cleanup, 1000)
 	e.reapDueFlows(ctx)
-	e.reapBudget = 30 * time.Second
+	e.seams.Withdraw(cleanup)
 	assert.Must(assert.True(liveFlows() > 0, "the live copy still there"))
 
 	removed, _, err := e.Purge(ctx, enginetest.Recent(workflow.Query{}))
@@ -450,4 +453,34 @@ func TestStaged_APurgeDuringTheLiveCleanup(t *testing.T) {
 	assert.Zero(liveFlows(), "the live cleanup finished")
 	_, err = e.Snapshot(ctx, rootKey)
 	assert.Equal(http.StatusNotFound, errors.StatusCode(err))
+}
+
+// TestStaged_TheFingerprintHoldsThroughTheLiveCleanup pins Fingerprint of a staged tree while its published live copy
+// is deleted in chunks: it reads the archive's copy, whole from publication on, so the digest stays what it was
+// rather than following the live steps as they go and changing back once they are gone.
+func TestStaged_TheFingerprintHoldsThroughTheLiveCleanup(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e := archiveEngine(t, treeMux(), 30)
+	e.reapStageRows, e.reapBatchRows = 1, 1 // a tree of two rows: its live cleanup takes chunks
+	rootKey, _, _, _ := treeKeys(t, e)
+	before, _, err := e.Fingerprint(ctx, rootKey)
+	assert.Must(assert.NoError(err))
+
+	e.seams.Break(engineseams.CheckpointReapChunkDone) // the live cleanup stops after its first chunk
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.reapDueFlows(ctx)
+	}()
+	assert.Must(assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointReapChunkDone, 10*time.Second*enginetest.TimeoutScale())))
+	during, _, err := e.Fingerprint(ctx, rootKey)
+	assert.NoError(err)
+	assert.Equal(before, during, "part of the live copy deleted")
+	e.seams.Resume(engineseams.CheckpointReapChunkDone)
+	<-done
+	after, _, err := e.Fingerprint(ctx, rootKey)
+	assert.NoError(err)
+	assert.Equal(before, after, "the live copy gone")
 }

@@ -77,3 +77,27 @@ func TestDeleteLive_WaitsForTheRoot(t *testing.T) {
 	assert.Error(err, "a held row waits until cancellation; it does not report absent")
 	assert.Error(ctx.Err())
 }
+
+// TestDeleteLive_TakesPrecedenceOverTheGrace pins Delete of a root in DeleteOnCompletion's grace: it is made due at once
+// and counted, rather than left readable until the grace ends.
+func TestDeleteLive_TakesPrecedenceOverTheGrace(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := newRig(t, 30)
+	root := seedTrees(t, r.db, 1, callShape)[0]
+	_, err := r.db.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=60000, updated_at=NOW_UTC() WHERE flow_id=?", root)
+	assert.Must(assert.NoError(err))
+	result, err := r.reaper.DeleteLive(ctx, r.db, archiver.DefaultDayLength, root)
+	assert.NoError(err)
+	assert.Equal(1, result.Live)
+	var stamp int
+	assert.NoError(r.db.QueryRowContext(ctx, "SELECT delete_after_ms FROM dwarf_flows WHERE flow_id=?", root).Scan(&stamp))
+	assert.Equal(1, stamp, "due at once")
+	r.pass(ctx)
+	_, _, there := rowsOf(t, r, root)
+	assert.False(there, "deleted on the next pass")
+	result, err = r.reaper.DeleteLive(ctx, r.db, archiver.DefaultDayLength, root)
+	assert.NoError(err)
+	assert.False(result.Found, "gone")
+}

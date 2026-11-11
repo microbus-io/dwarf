@@ -340,7 +340,13 @@ func (p *pass) rootsWithinRows(ctx context.Context, roots []int, archiving bool)
 	}
 	ctx, cancel := p.attemptCtx(ctx)
 	defer cancel()
-	firstLimit := max(p.cfg.BatchRows, 1) + 1
+	// When staging, a batch holds no more than the threshold, so a tree over it is alone in its batch and staged
+	// whatever the batch's own size; below the batch, a tree over the threshold would otherwise be moved in it.
+	rows := p.cfg.BatchRows
+	if archiving && p.cfg.StageRows > 0 {
+		rows = min(max(rows, 1), p.cfg.StageRows)
+	}
+	firstLimit := max(rows, 1) + 1
 	if archiving && p.cfg.StageRows > 0 {
 		firstLimit = max(firstLimit, p.cfg.StageRows+1)
 	}
@@ -348,7 +354,7 @@ func (p *pass) rootsWithinRows(ctx context.Context, roots []int, archiving bool)
 	if archiving {
 		stop = staged
 	}
-	cut, firstSize, err = cutWithinRows(roots, p.cfg.BatchRows, firstLimit, stop,
+	cut, firstSize, err = cutWithinRows(roots, rows, firstLimit, stop,
 		func(group, limits []int) ([]int, error) {
 			if p.r.seams.Enabled() {
 				for _, root := range group {

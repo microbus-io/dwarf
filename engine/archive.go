@@ -109,7 +109,8 @@ var liveTables = flowTables{flows: "dwarf_flows", steps: "dwarf_steps"}
 //
 // A live tree is deleted in chunks once its root's stamp is due, so a read that must not return part of a tree
 // (closeTree) closes on the root too, and a tree stamped and due is discarded as if it had left. A read that only
-// tracks change (closeFlow) closes on its own row, and serves a tree in deletion until its row goes, as Snapshot does.
+// tracks change (closeFlow) closes on its own row, and serves a tree in deletion until its row goes, as Snapshot does
+// - but a tree published to the archive is read there, since its live copy is being deleted in chunks.
 //
 // found is false when neither side holds the flow: never archived, archived on a day dropped since, or removed from
 // the archive mid-read. The caller names the 404.
@@ -125,7 +126,7 @@ func (e *Engine) queryLiveOrArchive(ctx context.Context, db *sequel.DB, shard, f
 		if closing == closeTree {
 			there, cerr = liveFlowStanding(ctx, db, flowID)
 		} else {
-			there, cerr = flowRowThere(ctx, db, liveTables, flowID)
+			there, cerr = liveFlowUnpublished(ctx, db, flowID)
 		}
 		if cerr != nil {
 			return false, errors.Trace(cmp.Or(err, cerr))
@@ -205,6 +206,21 @@ func liveFlowStanding(ctx context.Context, db *sequel.DB, flowID int) (bool, err
 	return err == nil, errors.Trace(err)
 }
 
+// liveFlowUnpublished reports whether the live flows table holds the flow with flowID, its root not published to the
+// archive: the closing read of a live read that tracks change (closeFlow). A published tree's live copy is deleted in
+// chunks, so a read of its steps would change as they go and change back once the archive's copy answers; the
+// archive's copy, whole from publication on, answers instead.
+func liveFlowUnpublished(ctx context.Context, db *sequel.DB, flowID int) (bool, error) {
+	cond, args := reaper.AttemptedSQL(db.DriverName())
+	var one int
+	err := db.QueryRowContext(ctx, "SELECT 1 FROM dwarf_flows f JOIN dwarf_flows r ON r.flow_id=f.root_flow_id"+
+		" WHERE f.flow_id=? AND NOT (r.delete_after_ms>0 AND r."+cond+")", append([]any{flowID}, args...)...).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil, errors.Trace(err)
+}
+
 // publicationColumn reads a live root's publication disposition with its status and stamp. Archive tables have no
 // attempt column; their visibility is checked separately.
 func publicationColumn(driver string, t flowTables) (string, []any) {
@@ -221,17 +237,6 @@ func archiveFlowVisible(ctx context.Context, db *sequel.DB, t flowTables, flowID
 	var one int
 	err := db.QueryRowContext(ctx, "SELECT 1 FROM "+t.flows+" f LEFT JOIN "+t.flows+
 		" r ON r.flow_id=NULLIF(f.root_flow_id, f.flow_id) WHERE f.flow_id=? AND "+archiver.VisibleSQL("f", "r"), flowID).Scan(&one)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
-	return err == nil, errors.Trace(err)
-}
-
-// flowRowThere reports whether t's flows table holds the flow with flowID: the closing read of a live read that tracks
-// change (closeFlow).
-func flowRowThere(ctx context.Context, db *sequel.DB, t flowTables, flowID int) (bool, error) {
-	var one int
-	err := db.QueryRowContext(ctx, "SELECT 1 FROM "+t.flows+" WHERE flow_id=?", flowID).Scan(&one)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}

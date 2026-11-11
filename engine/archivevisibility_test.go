@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/migrations"
@@ -126,7 +127,8 @@ func TestArchiveVisibility_AChildWithoutItsRootIsHidden(t *testing.T) {
 }
 
 // TestArchiveVisibility_AMarkedTreeIsHidden pins the archive's deletion mark: a root marked for deletion hides its
-// whole tree at once, from every read by key, Fork's included, and from the lists: a marked tree reads as deleted.
+// whole tree at once, from every read by key, Fork's included - whether the locate finds its day by a probe or through
+// the directory - and from the lists: a marked tree reads as deleted.
 func TestArchiveVisibility_AMarkedTreeIsHidden(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -153,6 +155,15 @@ func TestArchiveVisibility_AMarkedTreeIsHidden(t *testing.T) {
 	assertHidden(t, e, childKey, childStep, "a child of a marked root")
 	_, err = e.Fork(ctx, rootStep, nil)
 	assert.Equal(http.StatusNotFound, errors.StatusCode(err), "a tree marked for deletion is deleted, so not forked")
+
+	// Found through the directory - a tree archived two or more days after its creation - the answer is the same.
+	_, err = db.ExecContext(ctx, "INSERT INTO "+archiver.DirectoryTable+" (flow_id, day) SELECT flow_id, ? FROM "+
+		migrations.FlowsTable(today), today)
+	assert.Must(assert.NoError(err))
+	for _, step := range []string{rootStep, childStep} {
+		_, err = e.Fork(ctx, step, nil)
+		assert.Equal(http.StatusNotFound, errors.StatusCode(err), "through the directory, too")
+	}
 }
 
 // TestArchiveVisibility_RootsListingsWalkTheRootsIndex pins the plan of a roots-only archive listing to the day's roots

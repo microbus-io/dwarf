@@ -34,8 +34,8 @@ live tables it runs (as `internal/piston` does, borrowing its handle and partiti
 
 ## A pass
 
-On one shard the stages share the caller's turn and run serially: retention cleanup, then stamped and closed trees
-alternately until neither has more, the budget is spent, or the pass is stopped. Each walker yields after `Slice`,
+On one shard the stages share the caller's turn and run serially: retention cleanup, then closed and stamped trees
+alternately - closed first - until neither has more, the budget is spent, or the pass is stopped. Each walker yields after `Slice`,
 checked between attempts; healthy backlog uses up to `Budget`. Every stage gets its first slice even if an earlier
 attempt overshot the budget, and a failed stage does not suppress the next. `dwarf_reap_pass_seconds` times the pass
 alone; the engine's expiration stage runs after it (`TestReaperContract_ThePassTimeExcludesExpiration`).
@@ -147,8 +147,9 @@ transactions, invisible there, then published in one small one. **It is off in p
   stamped `delete_after_ms=1` with T kept and its `archived_at` copied from the archive root, in one transaction,
   no whole-tree statement. Stamped with T means
   published, so a lost response is retried as nothing to stage (`TestStage_APublishedTreeIsNotCopiedAgain`). The
-  deletion kind then removes the live tree, **in the same pass**: a walk that published reports more work, so the pass
-  runs its walks again rather than leave the live copy to the next tick (`TestStage_ALargeTreeIsPublishedWhole`).
+  deletion kind then removes the live tree, **in the same round of the pass**: the pass walks closed trees before
+  stamped ones, so a tree published in a round - by the walk or by `resumeStarted` - is the deletion walk's right
+  after, rather than left live to the next tick (`TestStage_ALargeTreeIsPublishedWhole`).
 - **A dropped day replaces the attempt.** A chunk's statement on a dropped `DayOf(T)` ends its transaction, so a fresh
   one, still under the root lock and only while T is unchanged, starts a new attempt in today; the old rows went with
   their day (`TestStage_ADroppedDayIsReplaced`, `TestStage_AHalfDroppedDayIsReplaced`, the latter the reason the
@@ -157,7 +158,9 @@ transactions, invisible there, then published in one small one. **It is off in p
   count and largest id of completed archived descendants, then the largest archived step id of the first incomplete
   flow (or the root). Both are ordered prefixes written under the same attempt's root lock, so recovery skips work
   already committed even when an individual flow spans many chunks. The descendant count costs a reread on recovery;
-  keep positions across ordinary lock collisions. `treeGone` distinguishes a held root from a stamped or absent one.
+  keep positions across ordinary lock collisions. That count grows with the copy, under the root lock and the attempt
+  deadline: a tree of tens of millions of descendants may not resume within it, which the rig's tree ladder is to
+  measure. `treeGone` distinguishes a held root from a stamped or absent one.
   At `maxStages` the least recently used position is evicted, not the whole cache. Pinned by
   `TestStage_RestartInsideLargeFlow`, `TestStage_AHeldRootKeepsItsCopysPosition` and `TestStage_APublishedCopyIsForgotten`.
 - **The atomic path is fenced**: `move` locks only roots with no attempt, so a selection made before a staging claim
@@ -169,8 +172,12 @@ transactions, invisible there, then published in one small one. **It is off in p
   its own day: an attempt into yesterday is not held back by today's tomorrow
   (`TestStage_AnAttemptGoesOnWhenNoneMayStart`). That scan has a position of its own (`startedAfter`), wrapping at the
   end, and reads only which roots have an attempt, so an attempt behind any number of roots without one is reached
-  (`TestStage_AStartedAttemptBehindABatchIsReached`). The walk's own position stays on those roots: moved past them, the
-  fast walker would leave a whole outage's backlog to the repair walker's slower batches once the day opens.
+  (`TestStage_AStartedAttemptBehindABatchIsReached`). It gets one scan whatever the walk's slice left, it stays on a
+  tree whose copy is not done so the next slice comes back to it, and its wrap is a complete reading of the started
+  attempts for the gauge, as a repair sweep's is - the repair sweep does not finish while the day is closed, and a
+  published attempt would otherwise go on aging in the gauge (`TestStage_TheAttemptGaugeFallsOnceItPublishes`). The
+  walk's own position stays on those roots: moved past them, the fast walker would leave a whole outage's backlog to
+  the repair walker's slower batches once the day opens.
 - **Publication waits for the day after the attempt's to be whole**, since a locate finds a flow only where the day
   after its own is: the copy finishes, and the root goes in once it is. **A waiting copy first runs a statement on its
   own day**: a copy whose every row is in writes nothing else there, so without it a dropped day would never fail a
@@ -179,11 +186,14 @@ transactions, invisible there, then published in one small one. **It is off in p
   statement is proof.
 - **Which path a tree takes is decided by capped counts, never a whole-tree count** (`rootsWithinRows`,
   `cutWithinRows`). The attempts are read first, by primary key: a root with one goes to the staged path unsized. The
-  rest are counted one by one with `treeRowsUpTo`, the first up to one past what decides its path (the batch, and
-  `StageRows` when staging), each later one up to one past what is left of the batch. Do not size a batch with one
-  `GROUP BY` over its trees: a huge tree anywhere in it makes that count miss its deadline, the batch gets no sizes,
-  and the tree never gets the attempt that would stop it being counted. The cost is a round trip per tree in the
-  batch; Purge's sizing uses the same rule.
+  rest are counted in groups - 16, then 64 at a time - each group one statement, a `UNION ALL` of capped counts
+  (`treesRowsUpTo`): the first tree up to one past what decides its path, every other up to one past what was left of
+  the batch when its group was sent. Do not size a batch with one `GROUP BY` over its trees: a huge tree anywhere in
+  it makes that count miss its deadline, the batch gets no sizes, and the tree never gets the attempt that would stop
+  it being counted. Nor one count a tree: a round trip each, a batch of 512 small trees took 525 ms at a 0.5 ms round
+  trip on PostgreSQL against 15 ms grouped. **When staging, a batch holds no more than `StageRows`**, so a tree over
+  the threshold is alone in its batch and staged even below the batch's own size
+  (`TestStage_EveryTreeOverTheThresholdIsStaged`). Purge's sizing uses the same rule.
 - **A tree whose atomic move runs into its deadline takes the staged path from its next visit**, whatever its size,
   when staging is on: the walk remembers it (`preferences`, in memory, per shard and root), and its next visit treats
   it as one with an attempt - unsized, a batch of its own, the staged path - whose locked claim starts the attempt.
@@ -324,7 +334,8 @@ that gives it meaning:
   Fork and Continue of it to the archive's copy.
 - **`DeleteLive` chooses the mutation under the live root lock.** The engine authenticates the key and rejects
   children and open flows before calling it; a closed root cannot reopen. The lock waits rather than skipping a
-  held root. An unstamped root is stamped with its attempt cleared; a stamped root without an attempt is already
+  held root. An unstamped root is stamped with its attempt cleared; a root in DeleteOnCompletion's grace is made due at
+  once (a Delete takes precedence); a stamped root without an attempt is otherwise already
   deleted; a published root has its archive copy marked and its attempt cleared in the same transaction. A missing
   live root sends the engine to archive lookup. The lock order is live root, then archive root. `Deletion` reports
   which side was newly marked so repeats count nothing. A rolled-back transaction returns no removal count.

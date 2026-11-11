@@ -45,14 +45,15 @@ func AttemptedSQL(driver string) (cond string, args []any) {
 }
 
 // Deletion reports whether the live root was found, and how many roots this call newly marked on each side.
-// A found root already scheduled for deletion has both counts zero.
+// A found root already due for deletion has both counts zero; one in DeleteOnCompletion's grace is made due at once,
+// and counted as a live removal.
 type Deletion struct {
 	Found         bool
 	Live, Archive int
 }
 
-// DeleteLive schedules a closed live root for deletion, or marks its published archive copy and clears the live
-// attempt. The caller must authenticate the key and check that it names a closed root; closed roots cannot reopen.
+// DeleteLive schedules a closed live root for deletion - at once, cutting DeleteOnCompletion's grace short - or marks
+// its published archive copy and clears the live attempt. The caller must authenticate the key and check that it names a closed root; closed roots cannot reopen.
 // A result with Found false asks the caller to locate the tree in the archive. dayLength is the archive's day length.
 func (r *Reaper) DeleteLive(ctx context.Context, db *sequel.DB, dayLength time.Duration, root int) (result Deletion, err error) {
 	driver := db.DriverName()
@@ -79,7 +80,13 @@ func (r *Reaper) DeleteLive(ctx context.Context, db *sequel.DB, dayLength time.D
 			return errors.Trace(err)
 		}
 		if !at.After(noAttempt) {
-			return nil
+			if stamp > 1 {
+				// Stamped by DeleteOnCompletion, due when its grace ends: a Delete takes precedence, due at once.
+				_, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1 WHERE flow_id="+id)
+				result.Live = 1
+				return errors.Trace(err)
+			}
+			return nil // being deleted already
 		}
 		// Publication and Delete share this order: live root, then archive root.
 		res, err := tx.ExecContext(ctx, "UPDATE "+migrations.FlowsTable(archiver.DayOf(at, dayLength))+

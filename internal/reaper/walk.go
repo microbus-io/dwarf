@@ -47,8 +47,10 @@ func (p *pass) run(ctx context.Context) {
 	// Retention cleanup is independent of archive table health and runs once per pass.
 	p.retained(ctx)
 	for {
-		moreDeleted := p.due(ctx, deletionDue(p.cfg.StealGrace), func() (*filingDay, bool) { return nil, true }, ReasonDeleted)
+		// Closed trees first, then the stamped: a tree published in a round - by a staged copy's last chunk - is a
+		// stamped tree, and the deletion walk after it removes its live copy in the same round.
 		moreClosed := p.closed(ctx)
+		moreDeleted := p.due(ctx, deletionDue(p.cfg.StealGrace), func() (*filingDay, bool) { return nil, true }, ReasonDeleted)
 		if ctx.Err() != nil || time.Since(start) >= p.cfg.Budget || (!moreDeleted && !moreClosed) {
 			return
 		}
@@ -152,9 +154,6 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 	}
 	residency, residencyArgs := p.residency(k)
 	failures, attempts := 0, 0
-	// published is whether this walk published a staged tree: its live copy is then the deletion walk's, which the
-	// pass runs again before it ends, so a published tree is not left live until the next pass.
-	published := false
 	for ctx.Err() == nil {
 		if attempts > 0 && time.Since(start) >= p.cfg.Slice {
 			return failures == 0
@@ -190,7 +189,7 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 				w.lastFailed, w.failed, w.started = w.failed, 0, time.Time{}
 				w.lastAttemptAge, w.lastAttemptSeen, w.attemptAge, w.attemptSeen = w.attemptAge, w.attemptSeen, 0, time.Time{}
 			}
-			return published
+			return false
 		}
 		d, startable := dayOf()
 		if !startable {
@@ -224,7 +223,6 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 		case staged:
 			// A tree too large to archive in one transaction is copied over several, and published in the last.
 			moved, finished, err = p.stage(ctx, k, cut[0], d, start)
-			published = published || (err == nil && moved > 0)
 		case large:
 			// A tree to delete that is larger than a batch is deleted in chunks rather than in one transaction, which
 			// would grow with the tree until it could not finish within its attempt. It counts its own chunks.
@@ -334,7 +332,8 @@ func (p *pass) retained(ctx context.Context) {
 // is left where it is, on the trees it archives once the day opens.
 func (p *pass) resumeStarted(ctx context.Context, k kind, w *walk, d *filingDay, residency string, residencyArgs []any, start time.Time) {
 	shard := p.shard.Index
-	for ctx.Err() == nil && time.Since(start) < p.cfg.Slice {
+	// At least one scan, however the walk's slice went before it, as a walk gives its first batch a try.
+	for first := true; ctx.Err() == nil && (first || time.Since(start) < p.cfg.Slice); first = false {
 		span, spanArgs := walkRange(p.shard.DB.DriverName(), k, w.startedAfter, dueRoot{})
 		candidates, _, err := p.scanDue(ctx, k, residency+span, append(slices.Clone(residencyArgs), spanArgs...), p.cfg.Batch)
 		if err != nil {
@@ -342,9 +341,13 @@ func (p *pass) resumeStarted(ctx context.Context, k kind, w *walk, d *filingDay,
 			return
 		}
 		if len(candidates) == 0 {
+			// The scan wrapped: what it saw is a complete reading of the started attempts, as a repair sweep's is,
+			// which this walk does not finish while no new archive may start.
 			w.startedAfter = dueRoot{}
+			w.lastAttemptAge, w.lastAttemptSeen, w.attemptAge, w.attemptSeen = w.attemptAge, w.attemptSeen, 0, time.Time{}
 			return
 		}
+		before := w.startedAfter
 		started, err := p.attemptsAmong(ctx, rootIDs(candidates))
 		if err != nil {
 			p.logError(ctx, "Reaper: reading archive attempts", "shard", shard, "error", err)
@@ -356,8 +359,16 @@ func (p *pass) resumeStarted(ctx context.Context, k kind, w *walk, d *filingDay,
 			w.startedAfter = candidates[len(candidates)-1]
 			continue
 		}
+		moved, finished, err := p.stage(ctx, k, candidates[i].flowID, d, start)
+		// Past the tree once it is done with or failed; on it still while its copy goes on, so the next slice comes
+		// back to it rather than wrapping past it first.
 		w.startedAfter = candidates[i]
-		moved, _, err := p.stage(ctx, k, candidates[i].flowID, d, start)
+		if err == nil && !finished {
+			w.startedAfter = before
+			if i > 0 {
+				w.startedAfter = candidates[i-1]
+			}
+		}
 		if err != nil {
 			p.r.metrics.archiveMoveFailure(ctx, shard)
 			p.logError(ctx, "Reaper: staging an archive", "shard", shard, "error", err)
@@ -411,11 +422,15 @@ func (p *pass) preferStaging(ctx context.Context, root int) {
 	}
 	for rows.Next() {
 		var id int
-		if rows.Scan(&id) == nil {
-			live[id] = true
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return // a partial read would make a pending preference look gone
 		}
+		live[id] = true
 	}
-	rows.Close()
+	if err := rows.Close(); err != nil || rows.Err() != nil {
+		return
+	}
 	for _, r := range held {
 		if !live[r] {
 			p.r.prefer.drop(stageKey{p.shard.Index, r})

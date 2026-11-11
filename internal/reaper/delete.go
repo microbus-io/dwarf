@@ -158,6 +158,9 @@ func (r *Reaper) DeleteMarked(ctx context.Context, cfg Config, s Shard) {
 			var err error
 			_, done, err = r.chunk(chunkCtx, s.DB, archiveTarget(day), root, cfg.BatchRows, &pos)
 			cancel()
+			if sequel.IsUndefinedTableError(err) {
+				break // the day dropped since its probe: its trees with it
+			}
 			if err != nil {
 				p.logError(ctx, "Reaper: deleting a marked archive tree", "shard", s.Index, "day", day, "root", root, "error", err)
 				break

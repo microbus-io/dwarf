@@ -827,9 +827,9 @@ func TestStage_ADroppedDayIsReplacedWhileWaitingToPublish(t *testing.T) {
 
 	_, err = r.archive.DropBefore(ctx, dest+1)
 	assert.Must(assert.NoError(err))
-	r.cfg.Budget = time.Nanosecond // one round of walks, so the live root is still there to read
-	r.pass(ctx)                    // the wait finds the day gone, and the attempt is replaced
-	r.cfg.Budget = 30 * time.Second
+	oneChunk(r)
+	r.p().closed(ctx) // the wait finds the day gone, and the attempt is replaced; the live root is still there to read
+	fullPasses(r)
 	assert.False(attemptAt(t, r, root).Equal(stale), "replaced")
 	r.pass(ctx)
 	if now, _ := r.archive.Today(ctx); now != today {
@@ -917,9 +917,7 @@ func TestStage_ADroppedDayDuringTheLiveCleanup(t *testing.T) {
 	assert.Must(assert.NoError(r.archive.Refresh(ctx)))
 	root := seedWideTree(t, r.db, 3, 10, 3)
 	setAttempt(t, r, root, r.archive.DayEnds(yesterday).Add(-2*time.Minute))
-	r.cfg.Budget = time.Nanosecond // one round of walks: published, its live copy not yet removed
-	r.pass(ctx)
-	r.cfg.Budget = 30 * time.Second
+	r.p().closed(ctx) // the archive walk alone: published, its live copy not yet removed
 	assert.Must(assert.Equal(11, visibleInDay(t, r, yesterday, root)))
 	_, _, there := rowsOf(t, r, root)
 	assert.Must(assert.True(there, "the live copy still there"))
@@ -1175,4 +1173,66 @@ func TestStage_TheCopiedRowsAreCounted(t *testing.T) {
 	fullPasses(r)
 	r.pass(ctx)
 	assert.Equal(int64(44), stagedRows(t, reader), "the whole tree, once")
+}
+
+// TestStage_EveryTreeOverTheThresholdIsStaged pins the batch's cap at the staging threshold: trees over it are each
+// alone in their batch and staged, even below the batch's own size, rather than moved together in one.
+func TestStage_EveryTreeOverTheThresholdIsStaged(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := newRig(t, 30)
+	r.cfg.StageRows = 1 // every tree of more than one row
+	today, err := r.archive.Today(ctx)
+	assert.NoError(err)
+	roots := seedTrees(t, r.db, 3, chunkShape) // seven rows each, all due together
+	for range 3 {
+		r.pass(ctx)
+	}
+	if now, _ := r.archive.Today(ctx); now != today {
+		t.Skip("midnight passed during the test")
+	}
+	for _, root := range roots {
+		assert.Equal(2, visibleInDay(t, r, today, root))
+		assert.True(archivedByStages(t, r, today, root), "tree %d staged", root)
+	}
+}
+
+// TestStage_TheAttemptGaugeFallsOnceItPublishes pins dwarf_archive_oldest_attempt_seconds while no new archive may
+// start: the scan that goes on with started attempts makes progress every pass, and once the attempt has published,
+// its wrap is a complete reading without it, so the gauge reads zero rather than aging on.
+func TestStage_TheAttemptGaugeFallsOnceItPublishes(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := stageRig(t)
+	oneChunk(r)
+	today, err := r.archive.Today(ctx)
+	assert.NoError(err)
+	yesterday := today - 1
+	assert.Must(assert.NoError(makeArchiveDay(t, r, yesterday)))
+	root := seedWideTree(t, r.db, 3, 10, 3)
+	seedTrees(t, r.db, 2, callShape) // due roots with no attempt, so the repair sweep cannot finish while blocked
+	setAttempt(t, r, root, r.archive.DayEnds(yesterday).Add(-2*time.Minute))
+	_, err = r.db.ExecContext(ctx, "DROP TABLE "+migrations.FlowsTable(today+1))
+	assert.Must(assert.NoError(err))
+	assert.Must(assert.NoError(r.archive.Refresh(ctx)))
+
+	key := stageKey{1, root}
+	last := -1
+	for range 40 {
+		if _, _, there := rowsOf(t, r, root); !there {
+			break
+		}
+		r.pass(ctx)
+		if pos := r.reaper.stages.get(key); pos.seen > 0 {
+			assert.True(pos.seen >= last, "progress kept: %d after %d", pos.seen, last)
+			last = pos.seen
+		}
+	}
+	assert.Equal(11, visibleInDay(t, r, yesterday, root), "published into its day while blocked")
+	for range 3 {
+		r.pass(ctx)
+	}
+	assert.Zero(r.reaper.Observe(1, time.Now()).Kinds[0].OldestAttempt, "no attempt left: the gauge falls")
 }

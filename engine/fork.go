@@ -200,6 +200,11 @@ func (e *Engine) forkSource(ctx context.Context, tx *sequel.Tx, src flowTables, 
 			e.seams.Checkpoint(ctx, engineseams.CheckpointForkPublished)
 			return nil, 0, errForkSourceNotHere
 		}
+		if src != liveTables {
+			// An archived root marked for deletion hides its tree: it reads as deleted, as every other reader has it,
+			// whichever way the locate found the day.
+			return nil, 0, errForkSourceNotHere
+		}
 
 		// A flow scheduled for deletion is on its way out, so naming it is an error, as for Continue.
 		return nil, 0, errors.New("cannot fork a flow scheduled for deletion", http.StatusConflict)
