@@ -878,8 +878,8 @@ func (e *Engine) parkSubgraph(ctx context.Context, d *dispatch, subgraphURL stri
 	// spawn back too, and this worker returns quietly.
 	parkCaller := func(tx *sequel.Tx) error {
 		res, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET changes=?, parked=?, updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=? AND lease_seq=?",
-			d.changesJSON, parkedSubgraph, d.stepID, parkedNone, d.row.leaseSeq,
+			"UPDATE dwarf_steps SET changes=?, changes_bytes=?, parked=?, updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=? AND lease_seq=?",
+			d.changesJSON, len(d.changesJSON), parkedSubgraph, d.stepID, parkedNone, d.row.leaseSeq,
 		)
 		if err != nil {
 			return errors.Trace(err)
@@ -949,8 +949,8 @@ func (e *Engine) resolveFailedSpawn(ctx context.Context, d *dispatch, subgraphUR
 				return errors.New("database is locked (injected fault: " + engineseams.FaultSpawnResolveContention + " " + taskName + ")")
 			}
 			res, err := d.db.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, changes=?, subgraph_done=1, subgraph_result=?, subgraph_error=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=? AND lease_seq=?",
-				workflow.StatusPending, d.changesJSON, emptyJSON, encoded, d.stepID, parkedNone, d.row.leaseSeq,
+				"UPDATE dwarf_steps SET status=?, changes=?, changes_bytes=?, subgraph_done=1, subgraph_result=?, subgraph_result_bytes=?, subgraph_error=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=? AND lease_seq=?",
+				workflow.StatusPending, d.changesJSON, len(d.changesJSON), emptyJSON, len(emptyJSON), encoded, d.stepID, parkedNone, d.row.leaseSeq,
 			)
 			if err != nil {
 				return errors.Trace(err)
@@ -1012,8 +1012,8 @@ func (e *Engine) retry(ctx context.Context, d *dispatch) error {
 		return d.db.Transact(ctx, func(tx *sequel.Tx) error {
 			rewound = false
 			res, execErr := tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, changes=?, attempt=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), lease_expires=NOW_UTC(), updated_at=NOW_UTC(), interrupt_done=0, resume_data=?, subgraph_done=0, subgraph_result=?, subgraph_error=?, parked_child_flow_id=0 WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND lease_seq=?",
-				workflow.StatusPending, d.changesJSON, d.row.attempt+1, retrySleepMs, emptyJSON, emptyJSON, emptyJSON, d.stepID, d.row.leaseSeq,
+				"UPDATE dwarf_steps SET status=?, changes=?, changes_bytes=?, attempt=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), lease_expires=NOW_UTC(), updated_at=NOW_UTC(), interrupt_done=0, resume_data=?, resume_data_bytes=?, subgraph_done=0, subgraph_result=?, subgraph_result_bytes=?, subgraph_error=?, parked_child_flow_id=0 WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND lease_seq=?",
+				workflow.StatusPending, d.changesJSON, len(d.changesJSON), d.row.attempt+1, retrySleepMs, emptyJSON, len(emptyJSON), emptyJSON, len(emptyJSON), emptyJSON, d.stepID, d.row.leaseSeq,
 			)
 			if execErr != nil {
 				return errors.Trace(execErr)
@@ -1111,7 +1111,7 @@ func (e *Engine) complete(ctx context.Context, d *dispatch) (done bool, err erro
 				return errors.Join(errors.New("injected fault: "+engineseams.FaultPersistConnErr+" "+taskName), driver.ErrBadConn)
 			}
 			const where = " WHERE step_id=? AND status NOT IN ('" + workflow.StatusTerminated + "', '" + workflow.StatusCancelled + "') AND lease_seq=?"
-			const update = "UPDATE dwarf_steps SET status=?, changes=?, " + advanceSet + ", updated_at=NOW_UTC()"
+			const update = "UPDATE dwarf_steps SET status=?, changes=?, changes_bytes=?, " + advanceSet + ", updated_at=NOW_UTC()"
 			switch db.DriverName() {
 			case "pgx", "sqlite", "mssql":
 				// The mark comes back from the write itself: RETURNING after the WHERE, OUTPUT before it.
@@ -1121,7 +1121,7 @@ func (e *Engine) complete(ctx context.Context, d *dispatch) (done bool, err erro
 				}
 				werr := db.QueryRowContext(ctx,
 					completeSQL,
-					workflow.StatusCompleted, d.changesJSON, advanceGoto, advanceSleepMs, advanceOnError, d.stepID, writeSeq,
+					workflow.StatusCompleted, d.changesJSON, len(d.changesJSON), advanceGoto, advanceSleepMs, advanceOnError, d.stepID, writeSeq,
 				).Scan(&d.completedCancelling)
 				if werr == sql.ErrNoRows {
 					return nil
@@ -1133,7 +1133,7 @@ func (e *Engine) complete(ctx context.Context, d *dispatch) (done bool, err erro
 			default:
 				res, werr := db.ExecContext(ctx,
 					update+where,
-					workflow.StatusCompleted, d.changesJSON, advanceGoto, advanceSleepMs, advanceOnError, d.stepID, writeSeq,
+					workflow.StatusCompleted, d.changesJSON, len(d.changesJSON), advanceGoto, advanceSleepMs, advanceOnError, d.stepID, writeSeq,
 				)
 				if werr != nil {
 					return errors.Trace(werr)
@@ -1216,8 +1216,8 @@ func (e *Engine) complete(ctx context.Context, d *dispatch) (done bool, err erro
 					writeSeq = d.row.leaseSeq - 1
 				}
 				res, uerr := db.ExecContext(ctx,
-					"UPDATE dwarf_steps SET changes=?, advance_sleep_until=NOW_UTC(), advance_on_error=1 WHERE step_id=? AND lease_seq=?",
-					d.changesJSON, d.stepID, writeSeq,
+					"UPDATE dwarf_steps SET changes=?, changes_bytes=?, advance_sleep_until=NOW_UTC(), advance_on_error=1 WHERE step_id=? AND lease_seq=?",
+					d.changesJSON, len(d.changesJSON), d.stepID, writeSeq,
 				)
 				if uerr != nil {
 					return errors.Trace(uerr)

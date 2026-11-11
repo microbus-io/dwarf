@@ -253,10 +253,11 @@ const liveOnlyColumn = "archive_attempt_at"
 // archivedFlowColumns are the columns of dwarf_flows but archived_at and liveOnlyColumn, in table order. A move names
 // them, so the archive's row takes its archive time in place of the live row's "not archived" value. A column added to dwarf_flows
 // must be added here too, or the archive drops it: TestMove_NamesEveryFlowsColumn compares the list with the table.
-const archivedFlowColumns = "flow_id, flow_token, workflow_url, workflow_name, graph, graph_hash, payload_ver, baggage," +
-	" status, stopped_step_id, surgraph_flow_id, surgraph_step_id, root_flow_id, forked_from_step, trace_parent," +
-	" delete_on_completion, delete_after_ms, final_state, error, cancel_reason, cancel_watermark, priority, fairness_key," +
-	" fairness_weight, time_budget_ms, engine_id, created_hour, created_at, started_at, updated_at, touch"
+const archivedFlowColumns = "flow_id, flow_token, workflow_url, workflow_name, graph, graph_bytes, graph_hash, payload_ver," +
+	" baggage, baggage_bytes, status, stopped_step_id, surgraph_flow_id, surgraph_step_id, root_flow_id, forked_from_step," +
+	" trace_parent, delete_on_completion, delete_after_ms, final_state, final_state_bytes, error, cancel_reason," +
+	" cancel_watermark, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, created_hour, created_at," +
+	" started_at, updated_at, touch"
 
 // archivedAtSQL returns the archive time a move into the day that ends at dayEnds stamps, and its arguments: the
 // database's now, or the day's last millisecond if the move commits after midnight - so a day holds only rows archived

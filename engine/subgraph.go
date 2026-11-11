@@ -261,8 +261,8 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 					terminalized[i] = n > 0
 					return nil
 				},
-					"UPDATE dwarf_flows SET final_state=?, status=?, cancel_reason=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
-					finalStates[i], workflow.StatusTerminated, reason, fid,
+					"UPDATE dwarf_flows SET final_state=?, final_state_bytes=?, status=?, cancel_reason=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
+					finalStates[i], len(finalStates[i]), workflow.StatusTerminated, reason, fid,
 				)
 			}
 			if err := batch.flush(); err != nil {
@@ -349,8 +349,8 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 		// longer running/parked matches no row — and the rows-affected gate keeps Enqueue off a no-op.
 		// parkOwnerGuard confines it to the park this child owns.
 		res, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, parked=?, parked_child_flow_id=0, subgraph_done=1, subgraph_result=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=?"+parkOwnerGuard,
-			workflow.StatusPending, parkedNone, resultJSON, surgraphStepID, parkedSubgraph, childFlowID,
+			"UPDATE dwarf_steps SET status=?, parked=?, parked_child_flow_id=0, subgraph_done=1, subgraph_result=?, subgraph_result_bytes=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=?"+parkOwnerGuard,
+			workflow.StatusPending, parkedNone, resultJSON, len(resultJSON), surgraphStepID, parkedSubgraph, childFlowID,
 		)
 		if err != nil {
 			return errors.Trace(err)

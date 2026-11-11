@@ -178,9 +178,9 @@ func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, ne
 	// `WHERE root_flow_id=?` without a recursive surgraph walk. A known root is bound; a new root's is a "self"
 	// column, taking the new row's own id (selfFlowInsertSQL), so a retry, with a new flow_id, recomputes it
 	// rather than reusing the prior attempt's.
-	columns := "flow_token, workflow_url, workflow_name, graph, graph_hash, baggage, trace_parent, status, surgraph_flow_id, surgraph_step_id, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, payload_ver, started_at"
-	values := "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC()"
-	args := []any{s.flowToken, s.workflowURL, s.workflowName, s.graphJSON, s.graphHash, s.baggageJSON, s.traceParent, workflow.StatusRunning, s.surgraphFlowID, s.surgraphStepID, s.deleteOnCompletion, s.priority, s.fairnessKey, s.fairnessWeight, s.timeBudgetMs, s.engineID, payloadVer}
+	columns := "flow_token, workflow_url, workflow_name, graph, graph_bytes, graph_hash, baggage, baggage_bytes, trace_parent, status, surgraph_flow_id, surgraph_step_id, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, payload_ver, started_at"
+	values := "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC()"
+	args := []any{s.flowToken, s.workflowURL, s.workflowName, s.graphJSON, len(s.graphJSON), s.graphHash, s.baggageJSON, len(s.baggageJSON), s.traceParent, workflow.StatusRunning, s.surgraphFlowID, s.surgraphStepID, s.deleteOnCompletion, s.priority, s.fairnessKey, s.fairnessWeight, s.timeBudgetMs, s.engineID, payloadVer}
 	var self []string
 	if s.rootFlowID == 0 {
 		self = append(self, "root_flow_id")
@@ -209,9 +209,9 @@ func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, ne
 	// A flow that should wait before running uses an entry gate task with flow.Sleep, not a creation-time
 	// delay.
 	queueInsertID(batch, "step_id", func(id int64) { newStepID = id },
-		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, time_budget_ms, not_before, lease_expires, priority, fairness_key, fairness_weight, engine_id, flow_created_hour)"+
-			" VALUES ("+flowID+", ?, ?, ?, ?, ?, ?, ?, NOW_UTC(), NOW_UTC(), ?, ?, ?, ?, "+flowHour+")",
-		append(append(append([]any{}, flowArgs...), s.callerStepDepth+1, s.stepToken, s.entryPoint, s.entryURL, s.stateJSON, workflow.StatusPending, s.timeBudgetMs, s.priority, s.fairnessKey, s.fairnessWeight, s.engineID), flowHourArgs...)...,
+		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_bytes, status, time_budget_ms, not_before, lease_expires, priority, fairness_key, fairness_weight, engine_id, flow_created_hour)"+
+			" VALUES ("+flowID+", ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC(), NOW_UTC(), ?, ?, ?, ?, "+flowHour+")",
+		append(append(append([]any{}, flowArgs...), s.callerStepDepth+1, s.stepToken, s.entryPoint, s.entryURL, s.stateJSON, len(s.stateJSON), workflow.StatusPending, s.timeBudgetMs, s.priority, s.fairnessKey, s.fairnessWeight, s.engineID), flowHourArgs...)...,
 	)
 	if fixup != "" {
 		// Only where the INSERT could not name its own id, which insertedID has therefore already read.
@@ -1251,7 +1251,7 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 		// handleInterrupt's do (see there).
 		for chunk := range slices.Chunk(lockOrder(append([]any{leafStepID}, parkStepIDs...)), inListChunk) {
 			ph, ids := inList(chunk)
-			tx.ExecContext(ctx, "UPDATE dwarf_steps SET interrupt_payload=? WHERE step_id IN ("+ph+")", append([]any{emptyJSON}, ids...)...)
+			tx.ExecContext(ctx, "UPDATE dwarf_steps SET interrupt_payload=?, interrupt_payload_bytes=? WHERE step_id IN ("+ph+")", append([]any{emptyJSON, len(emptyJSON)}, ids...)...)
 		}
 		for chunk := range slices.Chunk(lockOrder(parkStepIDs), inListChunk) {
 			ph, ids := inList(chunk)
@@ -1265,8 +1265,8 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 		// root interrupted, and both Resumes would pass it. The status alone does not name the interrupt: after
 		// another Resume, a flow.Retry re-runs the same row and can interrupt it again, and an unfenced flip would
 		// hand this Resume's payload to that later prompt. So the flip is fenced on the generation it selected.
-		leafRes, err := tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, resume_data=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusInterrupted+"' AND lease_seq=?",
-			workflow.StatusPending, resumeDataJSON, leafStepID, leafLeaseSeq)
+		leafRes, err := tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, resume_data=?, resume_data_bytes=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusInterrupted+"' AND lease_seq=?",
+			workflow.StatusPending, resumeDataJSON, len(resumeDataJSON), leafStepID, leafLeaseSeq)
 		if err != nil {
 			return errors.Trace(err)
 		}

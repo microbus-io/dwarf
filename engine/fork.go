@@ -412,13 +412,13 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	// the clone inherits, and a fork whose only losses are such branches resolves cancelled - so it reports the
 	// reason that explains it, rather than a cancellation nobody gave a reason for. cancel_watermark is
 	// deliberately NOT copied: the fork is not under cancellation, so none of its steps may pass one on.
-	columns := "flow_token, workflow_url, workflow_name, graph, graph_hash, baggage, status, surgraph_flow_id, surgraph_step_id, forked_from_step, trace_parent, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, cancel_reason, payload_ver, final_state, error"
-	values := "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
+	columns := "flow_token, workflow_url, workflow_name, graph, graph_bytes, graph_hash, baggage, baggage_bytes, status, surgraph_flow_id, surgraph_step_id, forked_from_step, trace_parent, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, cancel_reason, payload_ver, final_state, final_state_bytes, error"
+	values := "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
 	flowToken := cc.rootFlowToken
 	if !isRoot {
 		flowToken = keys.RandomIdentifier(16)
 	}
-	args := []any{flowToken, workflowURL, workflowName, graphJSON, graphHash, baggageJSON, newStatus, newSurgFlowID, newSurgStepID, forkedFromStep, newTrace, deleteOnCompletion, flowPriority, flowFairnessKey, flowFairnessWeight, flowBudget, e.engineID, cancelReason, originPayloadVer, finalStateJSON, flowError}
+	args := []any{flowToken, workflowURL, workflowName, graphJSON, len(graphJSON), graphHash, baggageJSON, len(baggageJSON), newStatus, newSurgFlowID, newSurgStepID, forkedFromStep, newTrace, deleteOnCompletion, flowPriority, flowFairnessKey, flowFairnessWeight, flowBudget, e.engineID, cancelReason, originPayloadVer, finalStateJSON, len(finalStateJSON), flowError}
 	var self []string
 	if isRoot {
 		self = append(self, "root_flow_id")
@@ -750,8 +750,8 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		if isLeafFlow && rewind == cc.leafStepID {
 			// Leaf fork step: merged input, cleared output/park/cohort, gated `created`.
 			_, err = tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, parked=?, state=?, state_refs=?, state_reduced=?, changes=?, error='', attempt=0, interrupt_done=0, resume_data=?, subgraph_done=0, subgraph_result=?, subgraph_error=?, successor_id=0, cohort_size=0, cohort_arrivals=0, cohort_failures=0, cohort_cancellations=0, not_before=NOW_UTC(), lease_expires=NOW_UTC(), created_at=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
-				workflow.StatusCreated, parkedNone, cc.mergedLeafState, emptyJSON, cc.leafReduced, emptyJSON, emptyJSON, emptyJSON, emptyJSON, newRewindID,
+				"UPDATE dwarf_steps SET status=?, parked=?, state=?, state_bytes=?, state_refs=?, state_reduced=?, changes=?, changes_bytes=?, error='', attempt=0, interrupt_done=0, resume_data=?, resume_data_bytes=?, subgraph_done=0, subgraph_result=?, subgraph_result_bytes=?, subgraph_error=?, successor_id=0, cohort_size=0, cohort_arrivals=0, cohort_failures=0, cohort_cancellations=0, not_before=NOW_UTC(), lease_expires=NOW_UTC(), created_at=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
+				workflow.StatusCreated, parkedNone, cc.mergedLeafState, len(cc.mergedLeafState), emptyJSON, cc.leafReduced, emptyJSON, len(emptyJSON), emptyJSON, len(emptyJSON), emptyJSON, len(emptyJSON), emptyJSON, newRewindID,
 			)
 			cc.newLeafStepID = newRewindID
 		} else {
@@ -759,8 +759,8 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 			// Its changes are cleared: the revived run re-executes the task from the top, so keeping the
 			// origin's changes as prior changes would fold every post-Subgraph contribution twice.
 			_, err = tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, parked=?, changes=?, subgraph_done=0, subgraph_result=?, subgraph_error=?, successor_id=0, error='', not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
-				workflow.StatusRunning, parkedSubgraph, emptyJSON, emptyJSON, emptyJSON, newRewindID,
+				"UPDATE dwarf_steps SET status=?, parked=?, changes=?, changes_bytes=?, subgraph_done=0, subgraph_result=?, subgraph_result_bytes=?, subgraph_error=?, successor_id=0, error='', not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
+				workflow.StatusRunning, parkedSubgraph, emptyJSON, len(emptyJSON), emptyJSON, len(emptyJSON), emptyJSON, newRewindID,
 			)
 		}
 		if err != nil {
@@ -994,6 +994,6 @@ func (e *Engine) deleteSubgraphFlowsRootedAt(ctx context.Context, tx sequel.Exec
 // status between the token and the scheduling when status is "?"), then the source step id. status is the status
 // column's expression: the source's own ("status"), or a bind for the leaf, which is held created.
 func cloneStepSQL(steps, status string) string {
-	return "INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, state_reduced, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key, fairness_weight, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, engine_id, flow_created_hour)" +
-		" SELECT ?, step_depth, ?, task_name, task_url, state, state_refs, state_reduced, changes, interrupt_payload, " + status + ", error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, ?, ? FROM " + steps + " WHERE step_id=?"
+	return "INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_bytes, state_refs, state_reduced, changes, changes_bytes, interrupt_payload, interrupt_payload_bytes, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key, fairness_weight, interrupt_done, resume_data, resume_data_bytes, subgraph_done, subgraph_result, subgraph_result_bytes, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, engine_id, flow_created_hour)" +
+		" SELECT ?, step_depth, ?, task_name, task_url, state, state_bytes, state_refs, state_reduced, changes, changes_bytes, interrupt_payload, interrupt_payload_bytes, " + status + ", error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, resume_data_bytes, subgraph_done, subgraph_result, subgraph_result_bytes, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, ?, ? FROM " + steps + " WHERE step_id=?"
 }

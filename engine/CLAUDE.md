@@ -118,7 +118,9 @@ refs keep carried fields out of `state`, so mid-flow the binding column is a ste
 boundary flattens (`final_state`, `Continue`, subgraph in/out, Fork's leaf), so the whole state must fit when the
 flow ends. A fold under a reducer other than `append` is stored inline, so it can still
 grow a `state` past the limit mid-flow; the anchor cap inlines only anchors below the bar for opening one
-(`internal/staterefs`). Pinned by `engine/payloadsize_test.go`. A new payload column write must call `checkPayloadSize`.
+(`internal/staterefs`). Pinned by `engine/payloadsize_test.go`. A new payload column write must call `checkPayloadSize`. It must also
+set the column's byte count (`<column>_bytes`) in the same statement, or every sum of the counts reads that payload
+as empty (`TestPayloadBytes_EveryWriterCountsWhatItWrites`).
 
 Subgraph nesting depth is the one axis that is *also* a crash vector if handled carelessly: `Fork` clones the
 tree with an **explicit LIFO worklist** (`cloneTree` drives `cloneOneFlow` per flow), not recursion, so
@@ -984,7 +986,7 @@ not parallelism:
   `graph_hash` is carried verbatim by `Continue` and `Fork`, never recomputed: they copy the graph, and on
   Postgres and MySQL the copied bytes are re-spelled, so their hash would differ.
 - **A transition's successors go in as multi-row INSERTs** (`successorBatch`), in power-of-two chunks of at
-  most 64 rows (23 binds each, under SQL Server's 2,100-parameter ceiling). The ids come back by `RETURNING`/`OUTPUT`
+  most 64 rows (24 binds each, under SQL Server's 2,100-parameter ceiling). The ids come back by `RETURNING`/`OUTPUT`
   and are matched to rows by `step_token`, since neither promises VALUES order. MySQL inserts row by row: it has no
   `RETURNING`, and under the default `innodb_autoinc_lock_mode=2` a multi-row insert's ids are not guaranteed
   contiguous.

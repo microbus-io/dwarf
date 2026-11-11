@@ -179,7 +179,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, d *dispatch, fanInTarget s
 		sleepMs := sleepDur.Milliseconds()
 		var err error
 		fanInStepID, err = tx.InsertReturnID(ctx, "step_id", successorInsertSQL,
-			flowID, nextStepDepth, keys.RandomIdentifier(16), fanInTarget, fanInURL, mergedJSON, refsJSON, emptyJSON, workflow.StatusPending, parkedNone, timeBudgetMs, lineageID, fanOutOrdinal, stepID, sleepMs, priority, fairnessKey, fairnessWeight, e.engineID, flowHour,
+			flowID, nextStepDepth, keys.RandomIdentifier(16), fanInTarget, fanInURL, mergedJSON, len(mergedJSON), refsJSON, emptyJSON, workflow.StatusPending, parkedNone, timeBudgetMs, lineageID, fanOutOrdinal, stepID, sleepMs, priority, fairnessKey, fairnessWeight, e.engineID, flowHour,
 			inheritCancel, stepID, flowID,
 		)
 		if err != nil {

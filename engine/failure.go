@@ -240,8 +240,8 @@ func (e *Engine) failFlowTx(ctx context.Context, tx sequel.Executor, shardNum, f
 		finalStateJSON = []byte("{}")
 	}
 	res, uerr := tx.ExecContext(ctx,
-		"UPDATE dwarf_flows SET final_state=?, status=?, error=?, stopped_step_id=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
-		finalStateJSON, loss.status, flowErrorText(cancelled, lossErr), stoppedStepID, flowID,
+		"UPDATE dwarf_flows SET final_state=?, final_state_bytes=?, status=?, error=?, stopped_step_id=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
+		finalStateJSON, len(finalStateJSON), loss.status, flowErrorText(cancelled, lossErr), stoppedStepID, flowID,
 	)
 	if uerr == nil {
 		if n, _ := res.RowsAffected(); n == 0 {

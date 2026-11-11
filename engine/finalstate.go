@@ -688,8 +688,8 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, ste
 			deleteAfterMs = int(e.deletionGrace.Milliseconds())
 		}
 		res, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET status=?, final_state=?, delete_after_ms=?, stopped_step_id=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
-			workflow.StatusCompleted, finalStateJSON, deleteAfterMs, stepID, flowID,
+			"UPDATE dwarf_flows SET status=?, final_state=?, final_state_bytes=?, delete_after_ms=?, stopped_step_id=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
+			workflow.StatusCompleted, finalStateJSON, len(finalStateJSON), deleteAfterMs, stepID, flowID,
 		)
 		if err != nil {
 			return errors.Trace(err)
