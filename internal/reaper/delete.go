@@ -117,9 +117,9 @@ func (r *Reaper) deleteMarked(ctx context.Context, db *sequel.DB, day, root, row
 // that marked them. It goes day by day through the retained days, finding each day's marked trees by a probe and
 // deleting them in chunks of about BatchRows rows, until the pass's budget is spent. It starts where the last call
 // left off and wraps around, so neither a day whose probe is slow nor a tree whose deletion keeps failing holds back
-// the rest, and it gives the work it finds at least one chunk however the budget went. It records how many marked
-// trees it left, counting a day it did not reach or could not probe as one, which Observe reports. It needs the
-// shard's Archive, and does nothing without one. The caller holds its turn on the shard.
+// the rest, and it gives the work it finds at least one chunk however the budget went. Observe reports marked trees
+// left and days not examined separately. It needs the shard's Archive, and does nothing without one. The caller holds
+// its turn on the shard.
 func (r *Reaper) DeleteMarked(ctx context.Context, cfg Config, s Shard) {
 	if s.Archive == nil {
 		return
@@ -135,9 +135,11 @@ func (r *Reaper) DeleteMarked(ctx context.Context, cfg Config, s Shard) {
 		return
 	}
 	days := s.Archive.DaysIn(today-max(cfg.RetentionDays, 0), today+1)
-	from := r.markedFrom.get(s.Index)
+	state := r.cleanup.get(s.Index)
+	defer func() { r.cleanup.put(s.Index, state) }()
+	from := state.from
 	first := sort.SearchInts(days, from.day)
-	left, worked := 0, false
+	left, unknown, worked := 0, 0, false
 	// try deletes the marked tree of root in day for what is left of the budget, and at least a chunk when it is the
 	// first work of the call.
 	try := func(day, root int) {
@@ -145,7 +147,7 @@ func (r *Reaper) DeleteMarked(ctx context.Context, cfg Config, s Shard) {
 			left++
 			return
 		}
-		r.markedFrom.set(s.Index, markedTree{day: day, root: root})
+		state.from = markedTree{day: day, root: root}
 		worked = true
 		done := false
 		var pos chunkPos
@@ -172,18 +174,18 @@ func (r *Reaper) DeleteMarked(ctx context.Context, cfg Config, s Shard) {
 	for n := range days {
 		day := days[(first+n)%len(days)]
 		if ctx.Err() != nil || (worked && spent()) {
-			left++ // not reached: unknown, counted as pending, so the reading never says none while it could not look
+			unknown++ // not reached
 			continue
 		}
 		// The next call starts at the day after this one, unless it stops inside this day's trees.
-		r.markedFrom.set(s.Index, markedTree{day: day + 1})
+		state.from = markedTree{day: day + 1}
 		roots, err := p.markedIn(ctx, day)
 		if sequel.IsUndefinedTableError(err) {
 			continue // dropped since the archive's record: its trees with it
 		}
 		if err != nil {
 			p.logError(ctx, "Reaper: finding marked archive trees", "shard", s.Index, "day", day, "error", err)
-			left++
+			unknown++
 			continue
 		}
 		for _, root := range roots {
@@ -198,7 +200,7 @@ func (r *Reaper) DeleteMarked(ctx context.Context, cfg Config, s Shard) {
 		try(wrapDay, root)
 	}
 	if ctx.Err() == nil {
-		r.pending.set(s.Index, left)
+		state.pending, state.unknown, state.observed = left, unknown, true
 	}
 }
 

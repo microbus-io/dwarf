@@ -25,9 +25,10 @@ live tables it runs (as `internal/piston` does, borrowing its handle and partiti
   the engine reads the state only through `Observe`. The package imports neither `engine` nor `engineseams`;
   `engineseams` aliases the fault names, so an engine test arms the same strings.
 - **The engine keeps** the ticker, the per-shard turn, the `dispatchesOn` gate (and `Forget` when it fails),
-  expiration after the pass, the gauges, `dwarf_flows_removed`, and Delete's stamp. The gauges stay there because
-  they are gated on dispatching when read, while `Forget` runs only at the next pass.
-- **Operation-level exports only.** `MoveTrees`, `DeleteArchivedTree` and `DeleteArchivedRoots` are operations;
+  expiration after the pass, the gauges, `dwarf_flows_removed`, and Delete's key and status validation. The gauges
+  stay there because they are gated on dispatching when read, while `Forget` runs only at the next pass.
+- **Operation-level exports only.** `MoveTrees`, `DeleteLive`, `DeleteArchivedTree`, `DeleteArchivedRoots` and
+  `DeleteMarked` are operations;
   nothing exports a transaction or a lock. A later protocol step that needs the root lock is added here as an
   operation too, so the lock order stays in one package.
 
@@ -183,18 +184,20 @@ value as a pass's `BatchRows`, passed in explicitly.
   again (`TestDelete_AMarkedRootIsNotDeletedAtomically`).
 - **`DeleteMarked` finishes them**, on the reaper's five-minute stage, day by day: a probe of the day's deletion index
   (`markedIn`), then that day's trees in chunks, each under the attempt deadline, until the pass's budget is spent.
-  - **It starts where the last pass stopped, in (day, root) order, and wraps around** (`markedFrom`). Do not probe
-    every day before deleting, nor start from the first tree each time: one slow day's probe, or one tree whose chunk
-    waits out the budget, then takes every pass (`TestDelete_AStuckMarkedTreeDoesNotStarveTheOthers`,
+  - **It starts where the last pass stopped, in (day, root) order, and wraps around** (`archiveCleanup.from`). Do
+    not probe every day before deleting, nor start from the first tree each time: one slow day's probe, or one tree
+    whose chunk waits out the budget, then takes every pass (`TestDelete_AStuckMarkedTreeDoesNotStarveTheOthers`,
     `TestDelete_EachCallGetsPastWhereTheLastStopped`).
   - **The first tree a pass finds gets at least one chunk** however the budget went, so a pass always makes progress.
   - **On MySQL and MariaDB the probe names the index, and falls back to a probe without it**: a day made before the
-    index has none, and a hint naming a missing index is an error there (`TestDelete_ADayWithoutTheDeletionIndexIsSwept`).
-  - **It records how many it left**, which `Observe` reports and the engine's `dwarf_archive_deletions_pending` gauge
-    shows. A day it did not reach or could not probe counts as pending, and so does a tree whose chunk reported done
-    while it is still there - a chunk skips a root another transaction holds (`TestDelete_AHeldMarkedTreeIsPending`)
-    - so the reading never says none while marked trees may remain. A day dropped since is skipped. The reading is
-    as old as the last pass: a tree a call marks after it is not counted until the next.
+    index has none, and a hint naming a missing index is an error there
+    (`TestDelete_ADayWithoutTheDeletionIndexIsSwept`).
+  - **The position and observations are one per-shard record** (`archiveCleanup`), published together after the
+    pass. `pending` counts discovered roots left; `unknown` counts retained days not examined, separately. Observe
+    reads both without SQL; a zero pending count means completion only when unknown is also zero. A held root still
+    counts as pending: `chunk` also reports done when another transaction holds the root, so `stillThere` checks it
+    (`TestDelete_AHeldMarkedTreeIsPending`). Cancellation keeps the previous observations and advances only the
+    position. `Forget` removes the whole record.
 - `DeleteArchivedRoots` returns the trees its committed transactions deleted or marked even when a later one fails, and
   the engine records `dwarf_flows_removed` from that count, once per shard per call. Pinned by
   `TestDelete_ADroppedDayIsNoError`, `TestDelete_APartialRemovalCountsWhatCommitted` and
@@ -206,15 +209,18 @@ A live root's `archive_attempt_at` holds when its staged copy began: the copy's 
 that gives it meaning:
 
 - **Every stamp of a live root but a publication clears the attempt in the same UPDATE** (`NoAttemptSQL`): the
-  reaper's stamp before a chunked deletion (`stamp`), and the engine's Delete. So a root stamped with an attempt is one
-  published to the archive whose live copy is being deleted (`AttemptedSQL`), and the engine routes reads and Fork and
-  Continue of it to the archive's copy.
-- **`DeletePublished` deletes such a tree**: in one transaction it locks the live root, marks the
-  archive root in the attempt's day (the UPDATE locks it: the live root, then the archive root, the one order across
-  the two), and clears the attempt, so the live copy goes on as an ordinary stamped deletion and the archive's copy is
-  deleted by `DeleteMarked`. A crash cannot leave the archive's copy standing after an accepted Delete. The attempt's
-  day comes from the scanned column through `database.StoredTime`, never `UTC()`: on MySQL the driver puts the wall
-  clock in the DSN's location, and a shifted instant names the wrong day, or never matches the attempt it read.
+  reaper's stamp before a chunked deletion (`stamp`), and Delete's (`DeleteLive`). So a root stamped with an attempt
+  is one published to the archive whose live copy is being deleted (`AttemptedSQL`), and the engine routes reads and
+  Fork and Continue of it to the archive's copy.
+- **`DeleteLive` chooses the mutation under the live root lock.** The engine authenticates the key and rejects
+  children and open flows before calling it; a closed root cannot reopen. The lock waits rather than skipping a
+  held root. An unstamped root is stamped with its attempt cleared; a stamped root without an attempt is already
+  deleted; a published root has its archive copy marked and its attempt cleared in the same transaction. A missing
+  live root sends the engine to archive lookup. The lock order is live root, then archive root. `Deletion` reports
+  which side was newly marked so repeats count nothing. A rolled-back transaction returns no removal count.
+  Publication and live cleanup can run between the engine's validation and this lock, which is why its decision
+  must use the locked row (`TestPublished_ADeleteRacingAPublication`, `TestPublished_ADeleteRacingTheLiveCleanup`).
+  The attempt's day comes from `database.StoredTime`: the MySQL driver's location must not shift the stored wall time.
 - **The archive's copy already gone is the deletion done.** No root row (Purge removed it): the attempt is cleared in
   the same transaction. The day dropped: the statement on it ends the transaction, so a fresh one clears the attempt
   it read, rechecked under the stamp; the first error is the proof, since a dropped day is never made again. Pinned by

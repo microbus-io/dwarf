@@ -170,7 +170,7 @@ func TestDelete_ALargeArchivedTreeIsMarkedThenDeleted(t *testing.T) {
 	r.reaper.DeleteMarked(ctx, r.cfg, r.shard())
 	obs := r.reaper.Observe(1, time.Now())
 	assert.True(obs.PendingOK)
-	assert.True(obs.Pending >= 1, "the tree, and the days not reached: %d", obs.Pending)
+	assert.Equal(1, obs.Pending, "the partially drained tree")
 
 	r.cfg.Budget = time.Minute
 	r.reaper.DeleteMarked(ctx, r.cfg, r.shard())
@@ -357,9 +357,19 @@ func TestDelete_EachCallGetsPastWhereTheLastStopped(t *testing.T) {
 	assert.Zero(f, "the first call deletes the first tree it finds")
 	f, _ = treeCount(t, r, migrations.FlowsTable(today), migrations.StepsTable(today), roots[1])
 	assert.Equal(2, f, "and nothing past its budget")
+	obs := r.reaper.Observe(1, time.Now())
+	assert.Zero(obs.Pending, "the discovered tree is gone")
+	assert.Equal(2, obs.PendingUnknown, "today and the prepared tomorrow were not examined")
 	r.reaper.DeleteMarked(ctx, r.cfg, r.shard())
 	f, _ = treeCount(t, r, migrations.FlowsTable(today), migrations.StepsTable(today), roots[1])
 	assert.Zero(f, "the next call starts at the next day")
+	r.cfg.Budget = time.Minute
+	r.reaper.DeleteMarked(ctx, r.cfg, r.shard())
+	obs = r.reaper.Observe(1, time.Now())
+	assert.True(obs.PendingOK)
+	assert.Zero(obs.Pending+obs.PendingUnknown, "a complete scan finds no work")
+	r.reaper.Forget(1)
+	assert.False(r.reaper.Observe(1, time.Now()).PendingOK, "forget clears the combined observation")
 }
 
 // TestDelete_AHeldMarkedTreeIsPending pins DeleteMarked's count of a tree whose root another transaction holds: a

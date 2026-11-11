@@ -329,10 +329,11 @@ func (e *Engine) initMetrics() error {
 	inFlightBytes := gauge("dwarf_state_in_flight_bytes", "Per-replica: state payload this replica is holding across host calls right now - the JSON each in-flight task's carrier was built from, summed over the tasks currently inside ExecuteTask. Divide by dwarf_state_in_flight_steps for the mean state a task carries: a large mean says state SIZE is what loads this replica, a small mean against a large count says fan-out WIDTH is. It measures the wire form, not the decoded maps that occupy the heap - read against Go heap to get the decode expansion factor, which is the number that says whether holding state in decoded form is worth what it costs. This is the one instrument for a cost the engine otherwise cannot see at all: workers hold no connection during a host call, so the crew grows freely for long tasks, and held state times crew size is the memory ceiling nothing else reports. Sum across replicas.", "By")
 	inFlightSteps := gauge("dwarf_state_in_flight_steps", "Per-replica: tasks currently inside a host call - the denominator for dwarf_state_in_flight_bytes. It is NOT dwarf_workers_resident (workers that EXIST, most of which are idle or in a database phase) and NOT dwarf_db_phase_workers (workers in a database phase, which is the opposite population - a task inside a host call holds no connection); neither can serve as this denominator. Sum across replicas.", "")
 
-	// The archive gauges. The two reaper readings are reported by each replica dispatching the shard, the two day
-	// readings by every replica, from the days its archive last read; all four are per-shard facts, aggregated with max.
+	// Archive gauges are per-shard facts, aggregated with max. Reaper readings come from dispatching replicas;
+	// archive-day readings come from every replica, using its latest catalog observation.
 	archiveFailing := gaugeF("dwarf_archive_failing_seconds", "Per-shard: time since an archive failure, cleared by a successful fast move or a clean repair sweep. Retained trees remain live. Aggregate with max.", "s")
-	deletesPending := gauge("dwarf_archive_deletions_pending", "Archived trees marked for deletion - by Delete or Purge, each too large to delete within its call - that the reaper's last five-minute sweep left still being deleted, by shard. They are hidden from every read from the mark on; this counts the storage not released yet. A count that stays above zero means their deletion keeps failing, and the logs say why. Zero once every marked tree is gone.", "{tree}")
+	deletesPending := gauge("dwarf_archive_deletions_pending", "Discovered archived trees marked for deletion whose storage the last cleanup pass did not release, by shard. Hidden from reads. Check dwarf_archive_deletion_days_unknown too: a zero pending count does not imply completion while some days were not examined.", "{tree}")
+	deletesUnknown := gauge("dwarf_archive_deletion_days_unknown", "Retained archive days the last cleanup pass could not examine, by shard. Zero means all retained days were examined; nonzero means the pending tree count is incomplete.", "{day}")
 	archiveLagG := gaugeF("dwarf_archive_lag_seconds", "Wait past grace at the fast cursor's last scan. Held roots behind it are reported separately. Aggregate with max.", "s")
 	heldRoots := gauge("dwarf_archive_held_roots", "Failed singles observed by repair: max of the current and last complete sweep. Per replica, shard and kind; aggregate with max, not sum. Resets at restart or handoff.", "{root}")
 	heldOldest := gaugeF("dwarf_archive_oldest_held_seconds", "Age of the oldest due root at the last repair sweep's front, increasing until resampled. Includes roots not yet attempted. Per shard and kind; aggregate with max.", "s")
@@ -364,6 +365,7 @@ func (e *Engine) initMetrics() error {
 				heldRoots:        heldRoots, heldOldest: heldOldest, sweepAge: sweepAge,
 				archiveLag:     archiveLagG,
 				deletesPending: deletesPending,
+				deletesUnknown: deletesUnknown,
 				archiveDays:    archiveDays,
 				archiveOldest:  archiveOldest,
 			})
@@ -371,7 +373,7 @@ func (e *Engine) initMetrics() error {
 		queueDepth, stepsPending, oldestAge, dispatchLag, peerReplicas, shardDispatching, peerBlind, tallyAge,
 		turnstileAvail, turnstileWaiting, workersResident, inFlightBytes, inFlightSteps, stateCacheBytes,
 		dbPhaseWorkers, archiveFailing, archiveLagG, archiveDays, archiveOldest, heldRoots, heldOldest, sweepAge,
-		deletesPending,
+		deletesPending, deletesUnknown,
 	)
 	if err != nil {
 		errs = append(errs, errors.Trace(err))
@@ -417,6 +419,7 @@ type observableGauges struct {
 	archiveFailing  metric.Float64ObservableGauge
 	archiveLag      metric.Float64ObservableGauge
 	deletesPending  metric.Int64ObservableGauge
+	deletesUnknown  metric.Int64ObservableGauge
 	archiveDays     metric.Int64ObservableGauge
 	archiveOldest   metric.Float64ObservableGauge
 }
@@ -489,6 +492,7 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 			}
 			if obs.PendingOK {
 				o.ObserveInt64(g.deletesPending, int64(obs.Pending), shard)
+				o.ObserveInt64(g.deletesUnknown, int64(obs.PendingUnknown), shard)
 			}
 		}
 		if archives != nil && archives.byShard[idx] != nil {
@@ -718,8 +722,7 @@ const (
 	removedFromArchive = "archive"
 )
 
-// metricFlowsRemoved counts the roots a Delete or Purge (op) removed from side: the archive, deleted at once, or the
-// live tables, scheduled for the reaper.
+// metricFlowsRemoved counts roots newly removed or marked by Delete or Purge, by storage side.
 func (e *Engine) metricFlowsRemoved(ctx context.Context, shardNum int, side, op string, n int) {
 	if e.metrics == nil || n <= 0 {
 		return
