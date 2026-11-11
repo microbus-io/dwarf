@@ -50,8 +50,8 @@ its schema differs by dialect, and a sequel release may change it. Two consequen
 - **A drop can be half done when a day is migrated.** A peer's drop lands between the listing and the migration, or
   a drop off PostgreSQL (two statements there, one transaction on PostgreSQL) stops between the day's two tables.
   It matters only when a migration is pending: its `ALTER` then fails on a missing table. `migrateExisting`
-  reads the catalog again after a failure and skips a day missing either one - it is past, so never written, and the
-  next drop finishes it. Without that a half-dropped day inside the retention would fail every replica's Startup.
+  reads the catalog again after a failure and skips a day missing either one - a past day is written only by a staged
+  archive attempt, which the drop ends, and the next drop finishes it. Without that a half-dropped day inside the retention would fail every replica's Startup.
 - **The catalog read is of the connection's own schema** (`current_schema()`, `DATABASE()`, `SCHEMA_ID()`), the one the
   drops and the `OBJECT_ID` guards resolve to. Listed across schemas, as a bare `sys.tables` does on SQL Server, a
   second deployment's tables would be migrated - made, here - and dropped as if they were this one's.
@@ -59,9 +59,12 @@ its schema differs by dialect, and a sequel release may change it. Two consequen
 **Today and the days ahead of it must exist; nothing else is made.** The days ahead are two - tomorrow and the day
 after - at any day length of 15 seconds or more, so in production; below that, as many as cover 30 seconds (`daysAhead`:
 15 at the tests' 2-second days). Rows are archived into the day they are
-archived, so no past day is written - but for the batch a pass has in flight when the day turns, which lands in the day
+archived - but for two writers into a past day. The batch a pass has in flight when the day turns lands in the day
 that just ended, its `archived_at` clamped to that day's last millisecond (`DayEnds`; the engine's reaper also stops a
-margin before midnight, so this is rare). At a retention of 1 or more that day is kept through the whole of the next;
+margin before midnight, so this is rare). A staged archive attempt keeps the day it started in, across midnight, and
+publishes into it (`internal/reaper/CLAUDE.md`). **A drop takes the flows table first** (`dropDay`): a drop that
+stops between the two leaves no flows table, so such a publication fails on the missing table and is replaced, rather
+than inserting a root whose steps are gone. At a retention of 1 or more that day is kept through the whole of the next;
 at 0 nothing is archived. The reaper makes no table, and archives only while the archive's record holds tomorrow
 whole (`Whole`). `EnsureToday` (Startup) and `Maintain` (every maintenance pass) make them, so at a day's length a day
 exists a whole day before it begins, and is missing at its start only after two days of failed passes. **Do not cut

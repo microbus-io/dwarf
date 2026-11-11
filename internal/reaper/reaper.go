@@ -73,10 +73,12 @@ const (
 	FaultContention    = "reapContention"   // an archive move fails on lock contention
 	FaultArchiveErr    = "reapArchiveErr"   // an archive move fails with an error that is not lock contention
 	FaultArchiveDelete = "archiveDeleteErr" // an archived tree's deletion fails before it commits; targeted
+	FaultStageChunk    = "reapStageChunk"   // a staging chunk fails under its root's lock, before it writes; targeted
 
 	CheckpointBatchLocked      = "reapBatchLocked"      // a batch has locked its due roots, inside its transaction
 	CheckpointBeforeRootDelete = "reapBeforeRootDelete" // a chunked deletion is about to recheck and delete its root
 	CheckpointChunkDone        = "reapChunkDone"        // a chunk of a chunked deletion has committed and been counted
+	CheckpointStageChunkDone   = "reapStageChunkDone"   // a staging chunk, or the publication, has committed
 )
 
 // Config is one pass's settings. Nothing in it is kept between passes.
@@ -101,6 +103,9 @@ type Config struct {
 	DayLength time.Duration
 	// NoQuietMargin lets a pass archive into its day however near the day's end.
 	NoQuietMargin bool
+	// StageRows is the size, in rows, above which a closed tree is archived in stages rather than in one transaction;
+	// 0 never starts a staged archive. A tree whose staged archive has started is archived in stages whatever its size.
+	StageRows int
 }
 
 // ResidencyFunc returns this replica's residue class among a shard's dispatchers: the count of dispatchers and this
@@ -156,6 +161,7 @@ type Reaper struct {
 	failures failures
 	lag      lag
 	cleanup  archiveCleanups
+	stages   stages
 }
 
 // New returns a Reaper that knows nothing yet, logs nowhere and records no metric.
@@ -201,6 +207,7 @@ func (r *Reaper) Forget(shard int) {
 	r.lag.forget(shard)
 	r.walks.forget(shard)
 	r.cleanup.forget(shard)
+	r.stages.forget(shard)
 }
 
 // Observe returns what the Reaper knows of shard at now.

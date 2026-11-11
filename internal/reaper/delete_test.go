@@ -293,11 +293,13 @@ func TestDelete_AStuckMarkedTreeDoesNotStarveTheOthers(t *testing.T) {
 	release := holdArchivedStep(t, r, today, flows[len(flows)-1])
 	defer release()
 	r.cfg.BatchRows = 4
-	r.cfg.Attempt = 300 * time.Millisecond // a chunk waiting on the lock gives up here
-	r.cfg.Budget = 100 * time.Millisecond  // which is past the pass's budget: one tree a pass
-	for range 2 {
-		r.reaper.DeleteMarked(ctx, r.cfg, r.shard())
-	}
+	r.cfg.Attempt = 2 * time.Second       // a chunk waiting on the lock gives up here
+	r.cfg.Budget = 100 * time.Millisecond // which is past the pass's budget: one tree a pass
+	r.reaper.DeleteMarked(ctx, r.cfg, r.shard())
+	// The next pass starts after the stuck tree, on the other, with a budget a slow server deletes it in but still
+	// short of the stuck chunk's wait: without the rotation the pass would spend it on the stuck tree again.
+	r.cfg.Budget = time.Second
+	r.reaper.DeleteMarked(ctx, r.cfg, r.shard())
 	f, s, _ := archivedRows(t, r, today, otherFlows)
 	assert.Zero(f+s, "the tree behind the stuck one is deleted")
 	f, _, _ = archivedRows(t, r, today, flows)

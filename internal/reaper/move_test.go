@@ -188,7 +188,7 @@ func TestMove_TheScanMergesTheStatusesInCloseOrder(t *testing.T) {
 	assert.Equal([]int{c, a}, rootIDs(roots), "a short fetch is the first of the merged order")
 
 	r.cfg.BatchRows = 2
-	cut, _, err := r.p().rootsWithinRows(ctx, rootIDs(roots))
+	cut, _, _, err := r.p().rootsWithinRows(ctx, rootIDs(roots))
 	assert.NoError(err)
 	assert.Equal([]int{c, a}, cut, "the trim keeps the traversal order")
 }

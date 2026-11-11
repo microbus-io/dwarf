@@ -65,14 +65,13 @@ func (p *pass) closed(ctx context.Context) bool {
 		d = &filingDay{}
 		if err := p.refreshDay(ctx, d); err != nil {
 			p.archiveFailed(ctx, "reading today's archive day", err)
-			return false
+			if d.archive == nil {
+				return false
+			}
 		}
 	}
 	return p.due(ctx, closedDue(p.cfg.StealGrace, p.cfg.Grace), func() (*filingDay, bool) {
-		if d != nil && !d.stop.IsZero() && !time.Now().Before(d.stop) {
-			return nil, false
-		}
-		return d, true
+		return d, d == nil || d.startable()
 	}, ReasonNoRetention)
 }
 
@@ -189,13 +188,26 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 			}
 			return false
 		}
-		d, ok := dayOf()
-		if !ok {
+		d, startable := dayOf()
+		if !startable {
+			// The scan above still reports the lag; the slice goes to the trees whose staged archive has started.
+			if d != nil {
+				p.resumeStarted(ctx, k, &w, d, residency, residencyArgs, start)
+			}
 			return false
 		}
-		cut, firstSize, err := p.rootsWithinRows(ctx, rootIDs(candidates))
+		cut, firstSize, attempted, err := p.rootsWithinRows(ctx, rootIDs(candidates))
 		if err != nil {
 			cut = rootIDs(candidates) // a known range, even when its count fails
+		}
+		if d != nil {
+			// A root whose staged archive has started is archived in stages, so it takes a batch of its own.
+			for i, root := range cut {
+				if attempted[root] {
+					cut = cut[:max(i, 1)]
+					break
+				}
+			}
 		}
 		moved := 0
 		attemptStart := time.Now()
@@ -203,8 +215,13 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 		// position on it. A failed chunk is passed like any failed batch.
 		finished := true
 		large := err == nil && d == nil && len(cut) == 1 && firstSize > max(p.cfg.BatchRows, 1)
+		staged := err == nil && d != nil && len(cut) == 1 &&
+			(attempted[cut[0]] || (p.cfg.StageRows > 0 && firstSize > p.cfg.StageRows))
 		switch {
 		case err != nil:
+		case staged:
+			// A tree too large to archive in one transaction is copied over several, and published in the last.
+			moved, finished, err = p.stage(ctx, k, cut[0], d, start)
 		case large:
 			// A tree to delete that is larger than a batch is deleted in chunks rather than in one transaction, which
 			// would grow with the tree until it could not finish within its attempt. It counts its own chunks.
@@ -292,4 +309,64 @@ func (p *pass) retained(ctx context.Context) {
 	cutoff := a.DayEnds(today - p.cfg.RetentionDays - 1).Add(-p.cfg.Grace)
 	k := retentionDue(p.shard.DB.DriverName(), cutoff, p.cfg.StealGrace, p.cfg.Grace)
 	p.walk(ctx, k, func() (*filingDay, bool) { return nil, true }, ReasonArchiveFailed, true)
+}
+
+// resumeStarted spends a slice, while no new archive may start into the day, on the trees whose staged archive has
+// started: each goes on into its own day. It scans the due roots from where its last scan stopped (startedAfter, which
+// wraps at the end), reading only which have an attempt, and goes on with the first it finds. The walk's own position
+// is left where it is, on the trees it archives once the day opens.
+func (p *pass) resumeStarted(ctx context.Context, k kind, w *walk, d *filingDay, residency string, residencyArgs []any, start time.Time) {
+	shard := p.shard.Index
+	for ctx.Err() == nil && time.Since(start) < p.cfg.Slice {
+		span, spanArgs := walkRange(p.shard.DB.DriverName(), k, w.startedAfter, dueRoot{})
+		candidates, _, err := p.scanDue(ctx, k, residency+span, append(slices.Clone(residencyArgs), spanArgs...), p.cfg.Batch)
+		if err != nil {
+			p.logError(ctx, "Reaper: selecting due flows", "shard", shard, "kind", k.name, "error", err)
+			return
+		}
+		if len(candidates) == 0 {
+			w.startedAfter = dueRoot{}
+			return
+		}
+		started, err := p.attemptedAmong(ctx, rootIDs(candidates))
+		if err != nil {
+			p.logError(ctx, "Reaper: reading archive attempts", "shard", shard, "error", err)
+			return
+		}
+		i := slices.IndexFunc(candidates, func(c dueRoot) bool { return started[c.flowID] })
+		if i < 0 {
+			w.startedAfter = candidates[len(candidates)-1]
+			continue
+		}
+		w.startedAfter = candidates[i]
+		moved, _, err := p.stage(ctx, k, candidates[i].flowID, d, start)
+		if err != nil {
+			p.r.metrics.archiveMoveFailure(ctx, shard)
+			p.logError(ctx, "Reaper: staging an archive", "shard", shard, "error", err)
+			return
+		}
+		p.r.metrics.flowsArchived(ctx, shard, moved)
+		return
+	}
+}
+
+// attemptedAmong returns which of roots have an archive attempt.
+func (p *pass) attemptedAmong(ctx context.Context, roots []int) (map[int]bool, error) {
+	ctx, cancel := p.attemptCtx(ctx)
+	defer cancel()
+	cond, args := AttemptedSQL(p.shard.DB.DriverName())
+	rows, err := p.shard.DB.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE flow_id IN ("+intCSV(roots)+") AND "+cond, args...)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	defer rows.Close()
+	out := map[int]bool{}
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			return nil, errors.Trace(err)
+		}
+		out[id] = true
+	}
+	return out, errors.Trace(rows.Err())
 }

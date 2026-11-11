@@ -103,6 +103,8 @@ const (
 	CheckpointReapBatchLocked      = reaper.CheckpointBatchLocked      // a reaper batch has locked its due roots, inside its transaction
 	CheckpointReapBeforeRootDelete = reaper.CheckpointBeforeRootDelete // a chunked deletion is about to recheck and delete its root
 	CheckpointReapChunkDone        = reaper.CheckpointChunkDone        // a chunk of a chunked deletion has committed and been counted
+	FaultReapStageChunk            = reaper.FaultStageChunk            // a staging chunk fails under its root's lock, before it writes; targeted at root flow_id
+	CheckpointReapStageChunkDone   = reaper.CheckpointStageChunkDone   // a staging chunk, or the publication, has committed
 )
 const (
 	// Scoped by task name (the task's name in the graph, not the URL ExecuteTask receives):

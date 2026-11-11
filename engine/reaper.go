@@ -71,6 +71,7 @@ func (e *Engine) reaperConfig(ctx context.Context, set *archiveSet, grace time.D
 	cfg := reaper.Config{
 		Batch:         e.reapBatch,
 		BatchRows:     e.reapBatchRows,
+		StageRows:     e.reapStageRows,
 		Attempt:       e.reapAttempt,
 		Slice:         e.reapSlice,
 		Budget:        e.reapBudget,

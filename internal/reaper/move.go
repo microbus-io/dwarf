@@ -34,12 +34,19 @@ import (
 // filingDay is the archive day a pass writes into, and until when, by this process's clock, it archives into it: a margin
 // before the day ends (quietMargin), so a pass near midnight leaves its trees to the first pass of the next day. A zero
 // stop never stops - a day too short for a margin, or NoQuietMargin - where a move after midnight is stamped within its
-// day all the same.
+// day all the same. notWhole is true when tomorrow's tables are not whole, which also stops every new archive. Neither
+// stops a staged archive already started, which goes on into its own day.
 type filingDay struct {
-	day  int
-	stop time.Time
+	day      int
+	stop     time.Time
+	notWhole bool
 	// archive is the shard's, whose directory hours say which moved flows the directory must name.
 	archive *archiver.Archive
+}
+
+// startable reports whether a new archive - an atomic move, or a staged attempt - may start into the day now.
+func (d *filingDay) startable() bool {
+	return !d.notWhole && (d.stop.IsZero() || time.Now().Before(d.stop))
 }
 
 // quietMargin is how long before a day ends the reaper stops archiving into it, for days of dayLength: a minute, or an
@@ -56,8 +63,9 @@ func quietMargin(dayLength time.Duration) time.Duration {
 
 // refreshDay reads today from the database clock into d, and when to stop archiving into it. The reaper makes no
 // table: today and the days ahead are the archive's maintenance's to make. Tomorrow not whole is an error, an archive
-// failure like a failed move: a row goes into a day only once the day after it is whole, which a locate relies on.
-// Today missing fails the move itself.
+// failure like a failed move: a row goes into a day only once the day after it is whole, which a locate relies on. d
+// is filled even then, with notWhole set, so a staged archive already started goes on into its own day. Today missing
+// fails the move itself.
 func (p *pass) refreshDay(ctx context.Context, d *filingDay) error {
 	a := p.shard.Archive
 	attemptCtx, cancel := p.attemptCtx(ctx)
@@ -66,13 +74,14 @@ func (p *pass) refreshDay(ctx context.Context, d *filingDay) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	if !a.Whole(today + 1) {
-		return errors.New("tomorrow's archive tables (day %d) are not whole", today+1)
-	}
 	d.day, d.archive = today, a
 	d.stop = time.Time{}
 	if quiet := quietMargin(a.DayLength()); quiet > 0 && !p.cfg.NoQuietMargin {
 		d.stop = time.Now().Add(left - quiet)
+	}
+	d.notWhole = !a.Whole(today + 1)
+	if d.notWhole {
+		return errors.New("tomorrow's archive tables (day %d) are not whole", today+1)
 	}
 	return nil
 }
@@ -137,10 +146,16 @@ func (r *Reaper) MoveTrees(ctx context.Context, db *sequel.DB, archive *archiver
 // the attempt waits under its deadline. Transact retries contention, including straggler lock inversions.
 func (r *Reaper) move(ctx context.Context, db *sequel.DB, rootIDs []int, k kind, d *filingDay) (int, error) {
 	rootIDs = slices.Sorted(slices.Values(rootIDs))
+	due, dueArgs := k.due, k.dueArgs
+	if d != nil {
+		// A root whose staged archive has started is the staged path's, whatever this batch's selection saw.
+		none, noneArg := NoAttemptSQL(db.DriverName())
+		due, dueArgs = due+" AND archive_attempt_at<="+none, append(slices.Clone(dueArgs), noneArg)
+	}
 	var moved int
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
 		moved = 0
-		locked, err := lockRoots(ctx, tx, live.flows, true, "flow_id IN ("+intCSV(rootIDs)+") AND "+k.due, k.dueArgs...)
+		locked, err := lockRoots(ctx, tx, live.flows, true, "flow_id IN ("+intCSV(rootIDs)+") AND "+due, dueArgs...)
 		if err != nil || len(locked) == 0 {
 			return errors.Trace(err)
 		}
@@ -289,21 +304,41 @@ func lockRoots(ctx context.Context, tx *sequel.Tx, flows string, skipHeld bool, 
 // at least the first, with the first tree's size. A tree's rows are counted as its flows' joined steps, one for a flow
 // with none. Sizing is a batching hint outside the transaction; the batch locks only the roots it takes, and its
 // transaction still opens with a write, which SQLite needs.
-func (p *pass) rootsWithinRows(ctx context.Context, roots []int) (cut []int, firstSize int, err error) {
+func (p *pass) rootsWithinRows(ctx context.Context, roots []int) (cut []int, firstSize int, attempted map[int]bool, err error) {
 	ctx, cancel := p.attemptCtx(ctx)
 	defer cancel()
 	if p.r.seams.Enabled() {
 		for _, root := range roots {
 			if p.r.seams.IsFault(join(FaultSizeErr, strconv.Itoa(root))) {
-				return nil, 0, errors.New("injected fault: " + FaultSizeErr)
+				return nil, 0, nil, errors.New("injected fault: " + FaultSizeErr)
 			}
 		}
 	}
-	cut, size, err := rootsWithinRowsIn(ctx, p.shard.DB, live, roots, p.cfg.BatchRows)
+	// The same statement says which roots have an archive attempt, read from the root's own row of the tree.
+	cond, condArgs := AttemptedSQL(p.shard.DB.DriverName())
+	res, err := p.shard.DB.QueryContext(ctx, "SELECT f.root_flow_id, COUNT(*), MAX(CASE WHEN f.flow_id=f.root_flow_id AND f."+
+		cond+" THEN 1 ELSE 0 END) FROM dwarf_flows f LEFT JOIN dwarf_steps s ON s.flow_id=f.flow_id"+
+		" WHERE f.root_flow_id IN ("+intCSV(roots)+") GROUP BY f.root_flow_id", condArgs...)
 	if err != nil {
-		return nil, 0, errors.Trace(err)
+		return nil, 0, nil, errors.Trace(err)
 	}
-	return cut, size[roots[0]], nil
+	defer res.Close()
+	size := make(map[int]int, len(roots))
+	attempted = map[int]bool{}
+	for res.Next() {
+		var root, n, a int
+		if err := res.Scan(&root, &n, &a); err != nil {
+			return nil, 0, nil, errors.Trace(err)
+		}
+		size[root] = n
+		if a == 1 {
+			attempted[root] = true
+		}
+	}
+	if err := res.Err(); err != nil {
+		return nil, 0, nil, errors.Trace(err)
+	}
+	return withinRows(roots, size, p.cfg.BatchRows), size[roots[0]], attempted, nil
 }
 
 // rootsWithinRowsIn is rootsWithinRows over the given tables, the live ones or an archive day's, for a budget of rows,

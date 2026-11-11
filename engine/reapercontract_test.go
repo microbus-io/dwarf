@@ -309,5 +309,5 @@ func TestReaperContract_ThePassTimeExcludesExpiration(t *testing.T) {
 	n, ok := histCount(rm, "dwarf_reap_pass_seconds", shard1)
 	assert.True(ok && n == 1, "one pass: %d", n)
 	sum, _ := histSum(rm, "dwarf_reap_pass_seconds", shard1)
-	assert.True(sum <= (whole - held).Seconds(), "the pass took %vs of a %v call, the expiration was held %v", sum, whole, held)
+	assert.True(sum <= (whole-held).Seconds(), "the pass took %vs of a %v call, the expiration was held %v", sum, whole, held)
 }

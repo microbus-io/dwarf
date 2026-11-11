@@ -277,7 +277,8 @@ func (a *Archive) MigrateDays(ctx context.Context, retention int) error {
 
 // migrateExisting migrates a day the catalog listed, before today. A failure on a day missing either table is a drop
 // in progress - a peer's landing between the listing and the migration, or one that stopped between its two tables -
-// and not an error: a past day is never written, and the next drop finishes it.
+// and not an error: a past day is written only by a staged archive attempt, which the drop ends, and the next drop
+// finishes it.
 func (a *Archive) migrateExisting(ctx context.Context, day int) error {
 	dayFS, err := migrations.ArchiveDay(a.fsys, day)
 	if err != nil {
@@ -356,8 +357,9 @@ func (a *Archive) dropDays(ctx context.Context, drop func(day int) bool) (int, e
 	return dropped, errs
 }
 
-// dropDay drops a day's two tables. Its migration records stay: they are sequel's, and a day dropped is never made
-// again.
+// dropDay drops a day's two tables, the flows table first. Its migration records stay: they are sequel's, and a day
+// dropped is never made again. The order is load-bearing: a drop that stops between the two leaves no flows table, so a
+// staged archive's publication into the day fails rather than inserting a root whose steps are gone.
 func (a *Archive) dropDay(ctx context.Context, day int) error {
 	flows, steps := migrations.FlowsTable(day), migrations.StepsTable(day)
 	var err error

@@ -118,6 +118,68 @@ Reapers sharing a tree; a chunk with nothing to do; the late descendant; a faili
 counted; the step read's plan; and an envelope, a half-drained wide tree and a child of 100,000 steps, each beside
 50,000 unrelated steps.
 
+## Staged archival of a large tree (`stage.go`)
+
+A tree too large to move in one transaction is archived in stages: copied into the archive over several
+transactions, invisible there, then published in one small one. **It is off in production**: `Config.StageRows` is 0
+(the engine's `reapStageRows`), and tests set it. Off, a tree is still staged when its root already has an attempt.
+
+- **The attempt.** `claimAttempt`, under the live root's lock while the root is still due, joins the attempt T in
+  `archive_attempt_at`, or starts one at `NOW_UTC()`. It starts one only before the quiet margin and only when T falls
+  in the filing day, so the stamp groups have room. Every visit joins: another walker, another replica, a restart, a
+  visit after midnight. **T is the attempt's identity and its day** (`DayOf(T)`), so two copiers on one T write the
+  same rows, and a copier holding a replaced T fails its next lock.
+- **Every chunk re-locks the root and rechecks it: closed, unstamped, its attempt still T** (`stageChunk`). It copies
+  descendants in `flow_id` order, each flow's steps and then its flow row and directory row, sized and bounded by the
+  budget as a chunked deletion is (a flow larger than the budget is copied a budget at a time). Each write inserts
+  only what is not there (`NOT EXISTS` by the stable id), so a rerun - a restart, a second copier - writes the same rows.
+  The budget is charged the rows a chunk reads, whether there already or not.
+- **Archive times are stamp groups, never the commit's time:** descendant i (in `flow_id` order) is stamped
+  `T + i/4096` ms, the root `T + G` with `G = ceil(N/4096)`. The group size is a constant, so a flow's time is a
+  function of the tree alone, and no staged tree puts more than 4,096 flows on one time. Nothing is clamped: a stamp
+  past the day's end is an error that holds the tree, since a clamp would put its flows on one time. Lists therefore
+  show a staged tree under its attempt's time, not its publication's: a window that moves while archival runs is not
+  a lossless feed of what was archived.
+- **Publication is the last chunk:** the root's last steps, its flow row, its directory row, and the live root
+  stamped `delete_after_ms=1` with T kept, in one transaction, no whole-tree statement. Stamped with T means
+  published, so a lost response is retried as nothing to stage (`TestStage_APublishedTreeIsNotCopiedAgain`); the
+  deletion kind then removes the live tree on a later walk (`TestStage_ALargeTreeIsPublishedWhole`).
+- **A dropped day replaces the attempt.** A chunk's statement on a dropped `DayOf(T)` ends its transaction, so a fresh
+  one, still under the root lock and only while T is unchanged, starts a new attempt in today; the old rows went with
+  their day (`TestStage_ADroppedDayIsReplaced`, `TestStage_AHalfDroppedDayIsReplaced`, the latter the reason the
+  archiver drops a day's flows table first).
+- **The position is in memory** (`stagePos`, in `stages`, per shard and root, so the fast and repair walkers share
+  it), never durable. A lost one starts the copy again from the first descendant, rewriting the same rows, so it is
+  kept whenever the copy may go on: **a root another transaction holds - another copier, a Fork - locks nothing, as
+  a stamped one does, and only a read of the root tells them apart** (`treeGone`). Do not forget the position when a
+  lock takes nothing: a large copy would restart at every collision, and two replicas would keep throwing away each
+  other's progress (`TestStage_AHeldRootKeepsItsCopysPosition`). A position is forgotten when the copy publishes or its tree
+  is stamped or gone; past `maxStages` per shard the least recently used goes, never the rest
+  (`TestStage_APublishedCopyIsForgotten`).
+- **The atomic path is fenced**: `move` locks only roots with no attempt, so a selection made before a staging claim
+  cannot move the tree atomically into a day that holds staged rows, and the walk sends a root with an attempt to the
+  staged path whatever its size, once its sizing succeeds (`rootsWithinRows` reads the attempt with the sizing;
+  `TestStage_AnAttemptedRootIsStagedWhateverItsSize`).
+- **The day's gate stops new archives only** (`filingDay.startable`: before the quiet margin, tomorrow whole). A walk
+  that may not start one spends its slice on the trees whose attempt has started (`resumeStarted`), each going on into
+  its own day: an attempt into yesterday is not held back by today's tomorrow
+  (`TestStage_AnAttemptGoesOnWhenNoneMayStart`). That scan has a position of its own (`startedAfter`), wrapping at the
+  end, and reads only which roots have an attempt, so an attempt behind any number of roots without one is reached
+  (`TestStage_AStartedAttemptBehindABatchIsReached`). The walk's own position stays on those roots: moved past them, the
+  fast walker would leave a whole outage's backlog to the repair walker's slower batches once the day opens.
+- **Publication waits for the day after the attempt's to be whole**, since a locate finds a flow only where the day
+  after its own is: the copy finishes, and the root goes in once it is. **A waiting copy first runs a statement on its
+  own day**: a copy whose every row is in writes nothing else there, so without it a dropped day would never fail a
+  statement, and the copy would wait forever for a next day that is never made
+  (`TestStage_ADroppedDayIsReplacedWhileWaitingToPublish`). The archive's record of the days may be stale, so only the
+  statement is proof.
+- **A tree holding a flow that is not closed is refused**: only a bug leaves one, and its copy would not be settled.
+- **Delete during staging** stamps the root and clears T (`DeleteLive`). The copier's next lock fails, and the rows
+  it copied stay in the day, invisible, until the day drops (`TestStage_ADeleteAbandonsTheCopy`).
+
+Pinned by `stage_test.go` and the engine's `TestStaged_ATreeArchivedInStagesReadsAsOne` (reads mid-copy, after
+publication, and after the live copy goes).
+
 ## Archive failures never become permission to delete
 
 At a positive retention an archive failure keeps the tree live. The retention walker deletes an unstamped closed tree
@@ -143,8 +205,8 @@ after a cancelled attempt.
   moves only; `NoQuietMargin` turns it off for tests.
 - **The flows move by name, the steps by column order.** `archivedFlowColumns` names every flow column the day tables
   have, `archived_at` apart, so not the live-only `archive_attempt_at`; the steps move with `RETURNING *` /
-  `SELECT *`, so the day's steps table must keep the live column order (a rule in `internal/migrations/CLAUDE.md`). Both pinned by `TestMove_NamesEveryFlowsColumn`. On PostgreSQL
-  each table moves in one `DELETE ... RETURNING` into an `INSERT`, so what is archived is exactly what is deleted;
+  `SELECT *`, so the day's steps table must keep the live column order (a rule in `internal/migrations/CLAUDE.md`).
+  Both pinned by `TestMove_NamesEveryFlowsColumn`. On PostgreSQL each table moves in one `DELETE ... RETURNING` into an `INSERT`, so what is archived is exactly what is deleted;
   elsewhere it is copied, then deleted, and a straggler is archived as it was at the copy.
 - **The directory rows for a late or early filing are written in the move's transaction**, from the same rows;
   `DirectoryHours` decides which. Pinned by `TestMove_DirectoryNamesOnlyWhatTheLocateCannotFind` and

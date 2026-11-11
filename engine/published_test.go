@@ -332,3 +332,80 @@ func TestPublished_ADeleteRacingTheLiveCleanup(t *testing.T) {
 	_, err = e.Summary(ctx, childKey)
 	assert.Equal(http.StatusNotFound, errors.StatusCode(err))
 }
+
+// TestStaged_ATreeArchivedInStagesReadsAsOne pins the engine's reads around a staged archive. While the copy is under
+// way the tree reads from the live tables and nothing of it is listed as archived; once it is published the archive's
+// copy serves every read and list, Fork included, before and after the live copy is deleted.
+func TestStaged_ATreeArchivedInStagesReadsAsOne(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e := archiveEngine(t, treeMux(), 30)
+	e.reapStageRows, e.reapBatchRows = 1, 2
+	rootKey, childKey, rootStep, childStep := treeKeys(t, e)
+
+	// listed counts the archived flows of this tree; a fork's tree is archived too, once it ends.
+	listed := func() int {
+		got, err := e.ListClosed(ctx, enginetest.Recent(workflow.Query{IncludeSubgraphs: true}))
+		assert.NoError(err)
+		n := 0
+		for _, s := range got {
+			if s.RootFlowKey == rootKey {
+				n++
+			}
+		}
+		return n
+	}
+	e.seams.Break(engineseams.CheckpointReapStageChunkDone)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.reapDueFlows(ctx)
+	}()
+	assert.Must(assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointReapStageChunkDone, 10*time.Second*enginetest.TimeoutScale())))
+	assert.Zero(listed(), "nothing listed as archived mid-copy")
+	_, err := e.History(ctx, rootKey)
+	assert.NoError(err, "the live tree reads mid-copy")
+	_, err = e.Step(ctx, childStep)
+	assert.NoError(err)
+	_, err = e.Summary(ctx, childKey)
+	assert.NoError(err)
+	forkKey, err := e.Fork(ctx, rootStep, nil)
+	assert.NoError(err, "Fork of a tree mid-copy")
+	if err == nil {
+		_, err = e.Await(ctx, forkKey)
+		assert.NoError(err)
+	}
+	e.seams.Resume(engineseams.CheckpointReapStageChunkDone)
+	<-done
+
+	reads := func(when string) {
+		t.Helper()
+		assert.Equal(2, listed(), "listed: %s", when)
+		_, err := e.History(ctx, rootKey)
+		assert.NoError(err, "History: %s", when)
+		_, err = e.Step(ctx, childStep)
+		assert.NoError(err, "Step: %s", when)
+		_, err = e.Summary(ctx, childKey)
+		assert.NoError(err, "Summary: %s", when)
+		outcome, err := e.Snapshot(ctx, rootKey)
+		if assert.NoError(err, "Snapshot: %s", when) {
+			assert.Equal(workflow.StatusCompleted, outcome.Status)
+		}
+		forkKey, err := e.Fork(ctx, rootStep, nil)
+		assert.NoError(err, "Fork: %s", when)
+		if err == nil {
+			_, err = e.Await(ctx, forkKey)
+			assert.NoError(err)
+		}
+	}
+	reads("published, the live copy still there")
+	e.reapDueFlows(ctx)
+	_, _, rootID, _, _ := keys.ParseFlowKey(rootKey)
+	db, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	var n int
+	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE root_flow_id=?", rootID).Scan(&n))
+	assert.Zero(n, "the live copy is deleted")
+	reads("published, the live copy deleted")
+}

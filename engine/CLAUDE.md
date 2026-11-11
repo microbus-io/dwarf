@@ -3663,6 +3663,11 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
   no archive**: closed roots are deleted rather than archived, and every day before today is dropped, but the tables of
   today and the days ahead are still made - nothing writes them - so the shape of a shard does not depend on the setting. Keeping it indefinitely is a large number of days,
   never a sentinel. Any replica's pass may drop a day, so the smallest retention in the fleet wins.
+- **Staged archival is off** (`reapStageRows` 0, no setter): a tree too large to move in one transaction stays live
+  until its retention deletes it, in chunks. Tests set the field to archive such a tree in stages (the protocol
+  is `internal/reaper/CLAUDE.md`'s); turning it on for production waits on the threshold's qualification. The reads
+  around it need nothing of their own: a copy is invisible until published, and a published tree is read from the
+  archive (`TestStaged_ATreeArchivedInStagesReadsAsOne`).
 - **`SetFlowExpiration(d)`, construction-time, default off** (`expiration.go`): a root still `running` or `interrupted`
   `d` after its creation is terminated by `terminateSubtree` with a fixed reason (`expirationReason`), then archives
   as any terminated tree. **The pass reads no index of its own: it walks the primary key oldest first** and stops at

@@ -36,6 +36,9 @@ type walk struct {
 	failed, lastFailed int
 	oldest             time.Duration
 	observed           time.Time
+	// startedAfter is where the scan for trees whose staged archive has started stands, while no new archive may
+	// start (resumeStarted); apart from after, which stays on the trees the walk archives once the day opens.
+	startedAfter dueRoot
 }
 
 // walks holds every walker's position. One walker per shard runs at a time in production; the mutex lets Observe
@@ -183,4 +186,72 @@ func (a *archiveCleanups) forget(shard int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.byID, shard)
+}
+
+// stageKey names a staged copy: a shard and the tree's root.
+type stageKey struct{ shard, root int }
+
+// maxStages bounds the staged copies a Reaper remembers per shard. A copy is forgotten when it publishes, its tree is
+// stamped or gone, or its attempt's day drops; past the bound the least recently used one goes. Losing a position
+// costs a copy a reread of what it copied, never a row.
+const maxStages = 64
+
+// stages is where each staged copy stands, shared by a shard's walkers so the fast and the repair walk on one tree
+// carry one position.
+type stages struct {
+	mu    sync.Mutex
+	byKey map[stageKey]stageEntry
+	clock int64
+}
+
+type stageEntry struct {
+	pos  stagePos
+	used int64
+}
+
+func (s *stages) get(k stageKey) stagePos {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.byKey[k].pos
+}
+
+func (s *stages) put(k stageKey, pos stagePos) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.byKey == nil {
+		s.byKey = map[stageKey]stageEntry{}
+	}
+	if _, ok := s.byKey[k]; !ok {
+		n, oldest, oldestKey := 0, int64(0), stageKey{}
+		for other, e := range s.byKey {
+			if other.shard != k.shard {
+				continue
+			}
+			if n == 0 || e.used < oldest {
+				oldest, oldestKey = e.used, other
+			}
+			n++
+		}
+		if n >= maxStages {
+			delete(s.byKey, oldestKey)
+		}
+	}
+	s.clock++
+	s.byKey[k] = stageEntry{pos: pos, used: s.clock}
+}
+
+func (s *stages) drop(k stageKey) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.byKey, k)
+}
+
+func (s *stages) forget(shard int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k := range s.byKey {
+		if k.shard == shard {
+			delete(s.byKey, k)
+		}
+	}
 }

@@ -375,6 +375,7 @@ type Engine struct {
 	archiveGrace        time.Duration // how long a closed root stays in the live tables before it is archived (1m)
 	reapBatch           int           // due roots one reaper batch considers (512)
 	reapBatchRows       int           // about how many rows one reaper batch moves, at least one tree (4096)
+	reapStageRows       int           // the tree size above which archival is staged; 0, never, until it is qualified
 	reapAttempt         time.Duration // one database attempt (30s)
 	reapSlice           time.Duration // one walker before yielding (5s)
 	reapBudget          time.Duration // healthy backlog work per pass (30s)
@@ -1626,10 +1627,10 @@ func (e *Engine) ListRecentlyClosed(ctx context.Context, query workflow.Query) (
 
 // Delete removes a closed flow and its subgraph subtree. An archived flow is gone from every read when Delete returns:
 // a small tree is deleted at once, a large one marked and its rows deleted in the background, as Purge does. One not
-// archived yet -
-// the minute after it closes - is marked for deletion, and a background reaper removes it shortly after, without
-// archiving it: History, Summary and Step return 404 for it immediately, though Snapshot, Fingerprint and Await still
-// report its outcome until the reaper removes it, and calling Delete on it again is success. Returns 404 for an unknown key,
+// archived yet - the minute after it closes - is marked for deletion, and a background reaper removes it shortly after,
+// without archiving it: History, Summary and Step return 404 for it immediately, though Snapshot, Fingerprint and Await
+// still report its outcome until the reaper removes it, and calling Delete on it again is success. The same holds for
+// a flow archived so recently that its copy in the live tables is still being removed. Returns 404 for an unknown key,
 // including a flow already deleted from the archive; 400 for a subgraph-child key (address the root instead); and 409
 // for an open flow: Terminate it first.
 func (e *Engine) Delete(ctx context.Context, flowKey string) error {
@@ -1640,8 +1641,9 @@ func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 }
 
 // Purge removes the closed flows ListClosed would list for a query, and their subgraph subtrees, oldest archived
-// first: at most Query.Limit roots in a call. A removed root is gone from every read and every list when the call
-// returns. A small tree is deleted at once; a large one is marked, and its rows are deleted in the background, so its
+// first: at most Query.Limit roots in a call. A removed root is gone from the archive's reads and from every list when
+// the call returns; Snapshot, Fingerprint and Await of one archived so recently that its copy in the live tables is
+// still being removed keep reporting its outcome until that copy is gone. A small tree is deleted at once; a large one is marked, and its rows are deleted in the background, so its
 // storage is released later, or when its day drops. As of the reaper's last sweep, which runs every five minutes,
 // dwarf_archive_deletions_pending counts such trees still being deleted and dwarf_archive_deletion_days_unknown the
 // archive days the sweep could not examine: both reading zero five minutes after the call means their storage is
