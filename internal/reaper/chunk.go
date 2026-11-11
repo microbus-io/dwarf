@@ -35,7 +35,7 @@ type removal struct{ flows, unarchived int }
 // dialect plans.
 const treeChunk = 256
 
-// deleteLarge deletes the live tree of root in transactions of about BatchRows rows each, until it is gone, the walk's
+// deleteLarge deletes the live tree of root in transactions of about a batch each, until it is gone, the walk's
 // slice (begun at sliceStart) ends, or ctx is done, and counts each committed chunk's flows under reason. A root that
 // is not stamped yet - the closed kind at a retention of 0, the retention kind - is stamped first, in a transaction of
 // its own, so every chunk after it is authorized by the stamp, and a pass that stops part-way leaves a stamped tree the
@@ -125,19 +125,21 @@ func archiveTarget(day int) chunkTarget {
 func (p *pass) deleteChunk(ctx context.Context, root int, pos *chunkPos) (deleted removal, done bool, err error) {
 	ctx, cancel := p.attemptCtx(ctx)
 	defer cancel()
-	return p.r.chunk(ctx, p.shard.DB, liveTarget, root, p.cfg.BatchRows, pos)
+	return p.r.chunk(ctx, p.shard.DB, liveTarget, root, p.batchLimit(), pos)
 }
 
-// chunk deletes, in one transaction under the root's lock, up to about budget rows of the tree of root in tgt: its descendant flows newest first, each flow's steps and then the flow, and once none is left the root's
+// chunk deletes, in one transaction under the root's lock, up to about budget's rows and bytes of the tree of root in
+// tgt: its descendant flows newest first, each flow's steps and then the flow, and once none is left the root's
 // steps, then the root itself after a recheck that the tree holds nothing else. It returns how many flows it deleted,
 // and done when the tree is gone or is not this call's: the root no longer meets tgt.due, or is held by another
 // transaction. On an archive day the directory's rows for the deleted flows go with them.
 // pos advances only when the chunk commits. Its result separates physical removals from unarchived live removals.
 //
-// Every read is bounded by the budget, not by the tree: which descendants fit is decided by counting at most the
+// Every read is bounded by the budget, not by the tree: which descendants fit is decided by sizing at most the
 // budget's worth of their steps, halving the run of descendants until it fits, so a flow of a million steps costs a
-// chunk no more than one of a thousand.
-func (r *Reaper) chunk(ctx context.Context, db *sequel.DB, tgt chunkTarget, root, budget int, pos *chunkPos) (deleted removal, done bool, err error) {
+// chunk no more than one of a thousand. A chunk always takes at least one row, so one row over the byte budget still
+// goes, alone.
+func (r *Reaper) chunk(ctx context.Context, db *sequel.DB, tgt chunkTarget, root int, budget limit, pos *chunkPos) (deleted removal, done bool, err error) {
 	id := strconv.Itoa(root)
 	flowsTable, stepsTable := tgt.t.flows, tgt.t.steps
 	// dropFlows deletes the flows in list, and the directory's rows for them on an archive day.
@@ -173,14 +175,14 @@ func (r *Reaper) chunk(ctx context.Context, db *sequel.DB, tgt chunkTarget, root
 				return errors.Trace(err)
 			}
 		}
-		budget := max(budget, 1)
-		for budget > 0 {
+		left := budget
+		for !left.spent() {
 			below := ""
 			if at.below > 0 {
 				below = " AND flow_id<" + strconv.Itoa(at.below)
 			}
-			children, err := ints(ctx, tx, "SELECT flow_id FROM "+flowsTable+" WHERE root_flow_id="+id+" AND flow_id<>"+id+
-				below+" ORDER BY flow_id DESC LIMIT_OFFSET(?, 0)", treeChunk)
+			children, childBytes, err := intPairs(ctx, tx, "SELECT flow_id, "+flowBytesSQL("")+" FROM "+flowsTable+
+				" WHERE root_flow_id="+id+" AND flow_id<>"+id+below+" ORDER BY flow_id DESC LIMIT_OFFSET(?, 0)", treeChunk)
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -190,11 +192,12 @@ func (r *Reaper) chunk(ctx context.Context, db *sequel.DB, tgt chunkTarget, root
 			at.top = max(at.top, children[0])
 			if at.stepFlow == children[0] {
 				// A child part deleted by an earlier chunk: go on from its position, without sizing it again.
-				n, last, err := deleteStepsFrom(ctx, tx, stepsTable, children[0], at.stepAfter, budget)
+				fresh := left == budget
+				sz, last, more, err := deleteStepsFrom(ctx, tx, stepsTable, children[0], at.stepAfter, left, fresh)
 				if err != nil {
 					return errors.Trace(err)
 				}
-				if n == budget {
+				if more || !rowFits(left, fresh, sz, childBytes[0]) {
 					at.stepAfter = last
 					return errors.Trace(r.midTree(root))
 				}
@@ -206,17 +209,18 @@ func (r *Reaper) chunk(ctx context.Context, db *sequel.DB, tgt chunkTarget, root
 					return errors.Trace(err)
 				}
 				deleted.flows += flows
-				budget -= n + 1
+				left = left.minus(sz.plus(size{1, childBytes[0]}))
 				at.below, at.stepFlow, at.stepAfter = children[0], 0, 0
 				continue
 			}
-			run, _, err := fitRun(ctx, tx, stepsTable, children, budget)
+			run, sz, err := fitRun(ctx, tx, stepsTable, children, childBytes, left)
 			if err != nil {
 				return errors.Trace(err)
 			}
 			if run == 0 {
-				// The newest descendant alone is over what is left: part of its steps now, the rest in the next chunk.
-				_, last, err := deleteStepsFrom(ctx, tx, stepsTable, children[0], 0, budget)
+				// The newest descendant alone is over what is left: part of its steps now, the rest - and its flow row -
+				// in the next chunk.
+				_, last, _, err := deleteStepsFrom(ctx, tx, stepsTable, children[0], 0, left, left == budget)
 				if err != nil {
 					return errors.Trace(err)
 				}
@@ -224,11 +228,9 @@ func (r *Reaper) chunk(ctx context.Context, db *sequel.DB, tgt chunkTarget, root
 				return errors.Trace(r.midTree(root))
 			}
 			list := intCSV(children[:run])
-			res, err := tx.ExecContext(ctx, "DELETE FROM "+stepsTable+" WHERE flow_id IN ("+list+")")
-			if err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM "+stepsTable+" WHERE flow_id IN ("+list+")"); err != nil {
 				return errors.Trace(err)
 			}
-			steps, _ := res.RowsAffected()
 			if err := r.midTree(root); err != nil {
 				return errors.Trace(err)
 			}
@@ -237,23 +239,32 @@ func (r *Reaper) chunk(ctx context.Context, db *sequel.DB, tgt chunkTarget, root
 				return errors.Trace(err)
 			}
 			deleted.flows += flows
-			budget -= int(steps) + run
+			left = left.minus(sz)
 			at.below = children[run-1]
 		}
-		if budget <= 0 {
+		if left.spent() {
 			return nil
 		}
 		from := at.stepsFrom(root)
-		n, last, err := deleteStepsFrom(ctx, tx, stepsTable, root, from, budget)
+		fresh := left == budget
+		sz, last, more, err := deleteStepsFrom(ctx, tx, stepsTable, root, from, left, fresh)
 		if err != nil {
 			return errors.Trace(err)
 		}
-		if n == budget {
+		if more {
 			at.stepFlow, at.stepAfter = root, last // the root may hold more steps than the budget left
 			return nil
 		}
-		if n > 0 {
+		if sz.rows > 0 {
 			from = last
+		}
+		rootBytes, err := flowBytes(ctx, tx, flowsTable, root)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if !rowFits(left, fresh, sz, rootBytes) {
+			at.stepFlow, at.stepAfter = root, from
+			return nil
 		}
 		if err := r.midTree(root); err != nil {
 			return errors.Trace(err)
@@ -297,72 +308,82 @@ func (r *Reaper) chunk(ctx context.Context, db *sequel.DB, tgt chunkTarget, root
 }
 
 // fitRun returns the longest leading run of flows, halving from all of them, whose steps and flow rows fit budget, and
-// its steps; run 0 when the first flow alone is over it. Each probe counts at most the budget's worth of steps.
-func fitRun(ctx context.Context, tx *sequel.Tx, steps string, flows []int, budget int) (run, n int, err error) {
+// their size; run 0 when the first flow alone is over it. flowBytes are the flows' own payload bytes. Each probe reads
+// at most the budget's worth of steps.
+func fitRun(ctx context.Context, tx *sequel.Tx, steps string, flows, flowBytes []int, budget limit) (run int, sz size, err error) {
 	for run = len(flows); run > 0; run /= 2 {
-		room := budget - run
-		if room < 0 {
+		own := size{rows: run}
+		for _, b := range flowBytes[:run] {
+			own.bytes += b
+		}
+		room := budget.minus(own)
+		if room.rows < 0 || room.bytes < 0 {
 			continue
 		}
-		if n, err = stepsUpTo(ctx, tx, steps, flows[:run], room+1); err != nil || n <= room {
-			return run, n, errors.Trace(err)
+		st, err := stepsSizeUpTo(ctx, tx, steps, flows[:run], room.rows+1)
+		if err != nil {
+			return 0, size{}, errors.Trace(err)
+		}
+		if !room.over(st) {
+			return run, st.plus(own), nil
 		}
 	}
-	return 0, 0, nil
+	return 0, size{}, nil
 }
 
-// stepsUpTo counts the steps of flows, reading at most limit of them: enough to tell whether they fit a budget,
+// stepsSizeUpTo sizes the steps of flows, reading at most limit of them: enough to tell whether they fit a budget,
 // whatever their number.
-func stepsUpTo(ctx context.Context, q sequel.Executor, steps string, flows []int, limit int) (int, error) {
-	return countUpTo(ctx, q, "step_id FROM "+steps+" WHERE flow_id IN ("+intCSV(flows)+")", limit)
+func stepsSizeUpTo(ctx context.Context, q sequel.Executor, steps string, flows []int, limit int) (sz size, err error) {
+	driver := q.DriverName()
+	inner := capped(driver, stepBytesSQL("")+" AS b FROM "+steps+" WHERE flow_id IN ("+intCSV(flows)+")", limit)
+	err = q.QueryRowContext(ctx, "SELECT COUNT(*), "+sumSQL(driver, "b")+" FROM ("+inner+") c").Scan(&sz.rows, &sz.bytes)
+	return sz, errors.Trace(err)
 }
 
-// treesRowsUpTo counts the rows of each tree rooted at roots in t (a flow with no steps counts one), each up to its own
-// limit, in one statement (treesRowsUpToSQL), so a group of trees costs one round trip and no tree is read past its
-// limit.
-func treesRowsUpTo(ctx context.Context, q sequel.Executor, t tables, roots, limits []int) ([]int, error) {
-	rows, err := q.QueryContext(ctx, treesRowsUpToSQL(q.DriverName(), t, roots, limits))
+// treesSizesUpTo sizes each tree rooted at roots in t - its flow rows and its step rows, and their payload bytes - each
+// read up to its own limit of rows, in one statement (treesSizesUpToSQL), so a group of trees costs one round trip and
+// no tree is read past its limit. A tree read up to its limit reports at least that many rows.
+func treesSizesUpTo(ctx context.Context, q sequel.Executor, t tables, roots, limits []int) ([]size, error) {
+	rows, err := q.QueryContext(ctx, treesSizesUpToSQL(q.DriverName(), t, roots, limits))
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	defer rows.Close()
-	counts := make([]int, len(roots))
+	sizes := make([]size, len(roots))
 	for rows.Next() {
-		var k, n int
-		if err := rows.Scan(&k, &n); err != nil {
+		var k int
+		var sz size
+		if err := rows.Scan(&k, &sz.rows, &sz.bytes); err != nil {
 			return nil, errors.Trace(err)
 		}
-		counts[k] = n
+		sizes[k] = sizes[k].plus(sz)
 	}
-	return counts, errors.Trace(rows.Err())
+	return sizes, errors.Trace(rows.Err())
 }
 
-// countUpTo counts the rows of "SELECT "+selectFrom, up to limit: a COUNT over a LIMIT or TOP, so it reads at most limit
-// rows however many match.
-func countUpTo(ctx context.Context, q sequel.Executor, selectFrom string, limit int) (int, error) {
-	var n int
-	err := q.QueryRowContext(ctx, "SELECT COUNT(*) FROM ("+capped(q.DriverName(), selectFrom, limit)+") c").Scan(&n)
-	return n, errors.Trace(err)
-}
-
-// treesRowsUpToSQL is treesRowsUpTo's statement: a UNION ALL of capped counts, one a tree, each joining the tree's
-// flows to their steps. On PostgreSQL the join is LATERAL and on SQL Server an OUTER APPLY, each flow's steps a seek
-// into its own: a plain join there may be planned as a hash join over a scan of every step in the table, which the
-// LIMIT stops early only for a tree larger than it, so a small tree costs the whole table. MySQL, MariaDB and SQLite
-// join an indexed equality by nested loops.
-func treesRowsUpToSQL(driver string, t tables, roots, limits []int) string {
-	branches := make([]string, len(roots))
+// treesSizesUpToSQL is treesSizesUpTo's statement: a UNION ALL of two capped reads a tree, its flows by root and their
+// steps by flow. On PostgreSQL the steps are read through a LATERAL join and on SQL Server a CROSS APPLY, each flow's
+// steps a seek into its own: a plain join there may be planned as a hash join over a scan of every step in the table,
+// which the LIMIT stops early only for a tree larger than it, so a small tree costs the whole table. MySQL, MariaDB and
+// SQLite join an indexed equality by nested loops. Each read is capped on its own, since a LIMIT over a UNION ALL is
+// applied after MySQL materializes it whole.
+func treesSizesUpToSQL(driver string, t tables, roots, limits []int) string {
+	branches := make([]string, 0, 2*len(roots))
 	for k, root := range roots {
-		n := strconv.Itoa(limits[k])
-		join := " LEFT JOIN " + t.steps + " s ON s.flow_id=f.flow_id"
+		n, key, id := strconv.Itoa(limits[k]), strconv.Itoa(k), strconv.Itoa(root)
+		steps := stepBytesSQL("s.") + " AS b FROM " + t.flows + " f JOIN " + t.steps + " s ON s.flow_id=f.flow_id"
 		switch driver {
 		case "pgx":
-			join = " LEFT JOIN LATERAL (SELECT s.step_id FROM " + t.steps + " s WHERE s.flow_id=f.flow_id LIMIT " + n + ") s ON TRUE"
+			steps = "s.b FROM " + t.flows + " f CROSS JOIN LATERAL (SELECT " + stepBytesSQL("s.") + " AS b FROM " + t.steps +
+				" s WHERE s.flow_id=f.flow_id LIMIT " + n + ") s"
 		case "mssql":
-			join = " OUTER APPLY (SELECT TOP (" + n + ") s.step_id FROM " + t.steps + " s WHERE s.flow_id=f.flow_id) s"
+			steps = "s.b FROM " + t.flows + " f CROSS APPLY (SELECT TOP (" + n + ") " + stepBytesSQL("s.") + " AS b FROM " +
+				t.steps + " s WHERE s.flow_id=f.flow_id) s"
 		}
-		inner := capped(driver, "f.flow_id FROM "+t.flows+" f"+join+" WHERE f.root_flow_id="+strconv.Itoa(root), limits[k])
-		branches[k] = "SELECT " + strconv.Itoa(k) + " AS k, COUNT(*) AS n FROM (" + inner + ") c" + strconv.Itoa(k)
+		flows := capped(driver, flowBytesSQL("")+" AS b FROM "+t.flows+" WHERE root_flow_id="+id, limits[k])
+		stepRows := capped(driver, steps+" WHERE f.root_flow_id="+id, limits[k])
+		agg := "SELECT " + key + " AS k, COUNT(*) AS n, " + sumSQL(driver, "b") + " AS b FROM ("
+		branches = append(branches, agg+flows+") cf"+key, agg+stepRows+") cs"+key)
 	}
 	return strings.Join(branches, " UNION ALL ")
 }
@@ -375,26 +396,55 @@ func capped(driver, selectFrom string, limit int) string {
 	return "SELECT " + selectFrom + " LIMIT " + strconv.Itoa(limit)
 }
 
-// deleteStepsFrom deletes up to limit steps of flow after the step after, in step_id order, and returns how many it
-// read and deleted, and the last one's id. The ids are read first and deleted by a literal list: a range or an ORDER
-// BY with a limit on the DELETE is not portable, and the read is a seek into (flow_id, step_id) whatever else the table
-// holds.
-func deleteStepsFrom(ctx context.Context, tx *sequel.Tx, steps string, flow, after, limit int) (n, last int, err error) {
-	ids, err := stepIDsAfter(ctx, tx, steps, flow, after, limit)
+// deleteStepsFrom deletes steps of flow after the step after, in step_id order, up to budget - at least one, whatever
+// its bytes, when fresh - and returns their size, the last one's id, and more when the budget, not the flow, ended
+// them. The ids are read first and deleted by a literal list: a range or an ORDER BY with a limit on the DELETE is not
+// portable, and the read is a seek into (flow_id, step_id) whatever else the table holds.
+func deleteStepsFrom(ctx context.Context, tx *sequel.Tx, steps string, flow, after int, budget limit, fresh bool) (sz size, last int, more bool, err error) {
+	ids, sz, more, err := stepsWithin(ctx, tx, steps, flow, after, budget, fresh)
 	if err != nil || len(ids) == 0 {
-		return 0, after, errors.Trace(err)
+		return size{}, after, more, errors.Trace(err)
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM "+steps+" WHERE step_id IN ("+intCSV(ids)+")"); err != nil {
-		return 0, after, errors.Trace(err)
+		return size{}, after, false, errors.Trace(err)
 	}
-	return len(ids), ids[len(ids)-1], nil
+	return sz, ids[len(ids)-1], more, nil
 }
 
-// stepIDsAfter reads the ids of up to limit steps of flow in steps after the step after, in step_id order: a seek into
-// (flow_id, step_id) whatever else the table holds.
-func stepIDsAfter(ctx context.Context, tx *sequel.Tx, steps string, flow, after, limit int) ([]int, error) {
-	return ints(ctx, tx, "SELECT step_id FROM "+steps+" WHERE flow_id="+strconv.Itoa(flow)+" AND step_id>"+
-		strconv.Itoa(after)+" ORDER BY step_id LIMIT_OFFSET(?, 0)", limit)
+// stepsWithin returns the leading steps of flow in steps after the step after, in step_id order, that fit budget; their
+// size; and more when the budget, not the flow, ended them. When fresh - nothing else in the chunk yet - it takes at
+// least one, so a step over the whole budget goes alone; otherwise it may take none, and the chunk ends there. It reads
+// up to budget's rows, a seek into (flow_id, step_id) whatever else the table holds.
+func stepsWithin(ctx context.Context, tx *sequel.Tx, steps string, flow, after int, budget limit, fresh bool) (ids []int, sz size, more bool, err error) {
+	read, bytes, err := intPairs(ctx, tx, "SELECT step_id, "+stepBytesSQL("")+" FROM "+steps+" WHERE flow_id="+strconv.Itoa(flow)+
+		" AND step_id>"+strconv.Itoa(after)+" ORDER BY step_id LIMIT_OFFSET(?, 0)", max(budget.rows, 1))
+	if err != nil {
+		return nil, size{}, false, errors.Trace(err)
+	}
+	for k := range read {
+		if (k > 0 || !fresh) && sz.bytes+bytes[k] > budget.bytes {
+			return read[:k], sz, true, nil
+		}
+		sz = sz.plus(size{1, bytes[k]})
+	}
+	return read, sz, len(read) >= max(budget.rows, 1), nil
+}
+
+// intPairs runs a query of two integer columns and returns their values.
+func intPairs(ctx context.Context, tx *sequel.Tx, query string, args ...any) (a, b []int, err error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, nil, errors.Trace(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var x, y int
+		if err := rows.Scan(&x, &y); err != nil {
+			return nil, nil, errors.Trace(err)
+		}
+		a, b = append(a, x), append(b, y)
+	}
+	return a, b, errors.Trace(rows.Err())
 }
 
 // ints runs a query of one integer column and returns its values.

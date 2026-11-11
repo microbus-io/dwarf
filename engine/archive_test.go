@@ -239,22 +239,27 @@ func TestRetention_TheGraceFromTheEnvironment(t *testing.T) {
 	assert.Equal(5*time.Second, e.archiveGrace)
 }
 
-// TestRetention_TheStagingThresholdFromTheEnvironment pins the benchmark's staging override: a value that is not a
-// whole number of rows of at least 0 fails Startup with a 400 before any shard opens, and a good one is the threshold
-// the reaper stages above. Not parallel: it sets an environment variable.
+// TestRetention_TheStagingThresholdFromTheEnvironment pins the benchmark's staging overrides, in rows and in bytes: a
+// value that is not a whole number of at least 0 fails Startup with a 400 before any shard opens, and good ones are
+// the thresholds the reaper stages above. Not parallel: it sets an environment variable.
 func TestRetention_TheStagingThresholdFromTheEnvironment(t *testing.T) {
 	assert := testarossa.For(t)
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(context.Background())
 	e.SetHost(hosts.NewMux())
-	for _, bad := range []string{"-1", "lots", "1.5"} {
-		t.Setenv(stageRowsEnv, bad)
-		err := e.Startup(t.Context())
-		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "%q", bad)
-		assert.Len(e.db.Indices(), 0, "%q left shards open", bad)
+	for _, env := range []string{stageRowsEnv, stageBytesEnv} {
+		for _, bad := range []string{"-1", "lots", "1.5"} {
+			t.Setenv(env, bad)
+			err := e.Startup(t.Context())
+			assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "%s=%q", env, bad)
+			assert.Len(e.db.Indices(), 0, "%s=%q left shards open", env, bad)
+		}
+		t.Setenv(env, "")
 	}
 	t.Setenv(stageRowsEnv, "131072")
+	t.Setenv(stageBytesEnv, "67108864")
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	assert.Equal(131072, e.reapStageRows)
-	assert.Equal(131072, e.reaperConfig(t.Context(), e.archives.Load(), 0).StageRows)
+	cfg := e.reaperConfig(t.Context(), e.archives.Load(), 0)
+	assert.Equal(131072, cfg.StageRows)
+	assert.Equal(67108864, cfg.StageBytes)
 }

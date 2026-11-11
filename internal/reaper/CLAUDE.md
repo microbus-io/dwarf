@@ -48,8 +48,9 @@ The root's disposition selects the operation; every mutation rechecks it under t
 | Stamped and due | Delete the live copy, atomically or in chunks | Root stamp; root removed last |
 | Archived and marked | Delete archive rows in chunks | Archive root mark; root removed last |
 
-A batch considers at most `Batch` roots. Capped counts trim a leading run to about `BatchRows` joined step rows,
-always admitting the first tree; a flow with no steps counts one. Sizing is a hint, not authority. Each transaction
+A batch considers at most `Batch` roots. Capped reads trim a leading run to about a batch - `BatchRows` rows, flows and
+steps alike, and `BatchBytes` payload bytes, whichever comes first - always admitting the first tree. Sizing is a hint,
+not authority. Each transaction
 locks its roots in sorted order and rechecks eligibility. PostgreSQL and MySQL skip held roots; SQLite and SQL Server
 wait under the attempt deadline. `Transact` retries contention. A stop records no failure; an uncertain commit is
 reconciled from durable rows rather than treating an error as proof of rollback.
@@ -77,7 +78,8 @@ repair. Residency is a work preference; the transactional locks are the ownershi
 
 A deletion that grows with its tree eventually cannot finish within one attempt, and then never finishes: the delete
 wall. So a tree to delete - stamped, closed at a retention of 0, or past its retention - that is larger than
-`BatchRows` alone is deleted over several transactions (`deleteLarge`, `chunk.go`), each about `BatchRows` rows.
+a batch - in rows or in bytes - alone is deleted over several transactions (`deleteLarge`, `chunk.go`), each about a
+batch.
 
 - **Every chunk is authorized by the root's stamp.** The deletion kind's roots are stamped already. A retention of 0
   and the retention cleanup first stamp the root (`delete_after_ms=1`, due at once) in a transaction of their own,
@@ -91,14 +93,26 @@ wall. So a tree to delete - stamped, closed at a retention of 0, or past its ret
   part deleted, a child or the root, so the next chunk seeks past that flow's deleted steps: read from the start, a
   flow of a million steps - one `forEach` flow is one - would cost each chunk every step deleted before it (measured
   on PostgreSQL before vacuum, 112 ms against 42 ms for the last chunk of a 100,000-step child).
-- **Every read in a chunk is bounded by its budget, never by the tree.** Which children fit is decided by counting
-  at most the budget's worth of their steps (`stepsUpTo`, a `LIMIT` or `TOP` under a `COUNT`), halving the run of
-  children until it fits (at most eight probes); a child larger than what is left has a budget's worth of its steps
-  deleted. Do not size the children with a full `COUNT ... GROUP BY`: it recounts a large child's remaining steps on
+- **Every read in a chunk is bounded by its budget, never by the tree.** Which children fit is decided by sizing
+  at most the budget's worth of their steps (`stepsSizeUpTo`, a `LIMIT` or `TOP` under a `COUNT` and a sum of their
+  byte counts) with the children's own bytes, read with their ids, halving the run of children until it fits (at most
+  eight probes); a child larger than what is left has a budget's worth of its steps deleted.
+- **A budget is rows and bytes, and a chunk stops at whichever it reaches first** (`limit`, `size.go`). The byte
+  counts are the `*_bytes` columns (`internal/migrations/CLAUDE.md`), so no payload is read to size it. **A chunk
+  takes at least one step only while it has taken nothing** (`stepsWithin`'s `fresh`): a step over the whole budget
+  then goes alone, and a chunk that already took rows ends rather than overshoot its bytes with one more
+  (`TestSize_AStagingChunkKeepsToItsBytes`, `TestSize_AChunkKeepsToItsBytes`). A read that takes no step reports
+  `more`, so the caller keeps the flow row: taken for a finished flow, its row went with its steps still there.
+- **A flow row is charged its own bytes before it is taken**, a resumed child's and the root's alike, in a deletion
+  and a staged copy (`rowFits`, `flowBytes`): it goes with its last steps only when both fit what is left, and
+  otherwise first in the next chunk, the position kept; alone it may pass the budget. Charged as a row alone, a
+  flow's last steps and a heavy row (a large `final_state`, a large graph) went into one chunk at twice its bytes
+  (`TestSize_AFlowRowIsChargedItsBytes`, which gives every flow row bytes: the other budget tests leave them 0). Do not size the children with a full `COUNT ... GROUP BY`: it recounts a large child's remaining steps on
   every chunk, quadratic over the tree (measured 279 ms a chunk on PostgreSQL at 4,000 steps a child, and past the
   attempt at about a million). Step ids are read in `step_id` order from `idx_dwarf_steps_flow_id` and deleted by a
   literal list: a range or an ordered `DELETE` with a limit is not portable, and the read stays bounded by the flow's
-  own steps only with that index keyed on `(flow_id, step_id)` (`internal/migrations/CLAUDE.md`). Candidate sizing also uses capped counts (`rootsWithinRows`).
+  own steps only with that index keyed on `(flow_id, step_id)` (`internal/migrations/CLAUDE.md`). Candidate sizing
+  also uses capped reads (`rootsWithin`).
 - **The root goes only after a recheck that the tree holds nothing else:** two probes, the first remaining
   descendant and the first root step, not an `EXISTS` over the tree, which MariaDB materializes over the whole steps
   index (275 ms on a 100,000-child tree). The descendant probe seeks above the position's top: the walk has just found
@@ -125,6 +139,8 @@ counted; the step read's plan; and an envelope, a half-drained wide tree and a c
 A tree too large to move in one transaction is archived in stages: copied into the archive over several
 transactions, invisible there, then published in one small one. **It is off in production**: `Config.StageRows` is 0
 (the engine's `reapStageRows`), and tests set it. Off, a tree is still staged when its root already has an attempt.
+On, a tree is staged when it is over `StageRows` rows or `StageBytes` payload bytes (`stageLimit`; `StageBytes` 0 sets
+no byte threshold), so a tree of few rows but heavy payloads is staged too (`TestSize_AFewHeavyRowsAreSizedByTheirBytes`).
 
 - **The attempt.** `claimAttempt`, under the live root's lock while the root is still due, joins the attempt T in
   `archive_attempt_at`, or starts one at `NOW_UTC()`. It starts one only before the quiet margin and only when T falls
@@ -164,7 +180,7 @@ transactions, invisible there, then published in one small one. **It is off in p
   `TestStage_RestartInsideLargeFlow`, `TestStage_AHeldRootKeepsItsCopysPosition` and `TestStage_APublishedCopyIsForgotten`.
 - **The atomic path is fenced**: `move` locks only roots with no attempt, so a selection made before a staging claim
   cannot move the tree atomically into a day that holds staged rows, and the walk sends a root with an attempt to the
-  staged path whatever its size, without sizing (`rootsWithinRows` reads attempts first;
+  staged path whatever its size, without sizing (`rootsWithin` reads attempts first;
   `TestStage_AnAttemptedRootIsStagedWhateverItsSize`).
 - **The day's gate stops new archives only** (`filingDay.startable`: before the quiet margin, tomorrow whole). A walk
   that may not start one spends its slice on the trees whose attempt has started (`resumeStarted`), each going on into
@@ -183,15 +199,18 @@ transactions, invisible there, then published in one small one. **It is off in p
   statement, and the copy would wait forever for a next day that is never made
   (`TestStage_ADroppedDayIsReplacedWhileWaitingToPublish`). The archive's record of the days may be stale, so only the
   statement is proof.
-- **Which path a tree takes is decided by capped counts, never a whole-tree count** (`rootsWithinRows`,
-  `cutWithinRows`). The attempts are read first, by primary key: a root with one goes to the staged path unsized. The
-  rest are counted in groups - 16, then 64 at a time - each group one statement, a `UNION ALL` of capped counts
-  (`treesRowsUpTo`): the first tree up to one past what decides its path, every other up to one past what was left of
-  the batch when its group was sent. Do not size a batch with one `GROUP BY` over its trees: a huge tree anywhere in
+- **Which path a tree takes is decided by capped reads, never a whole-tree read** (`rootsWithin`, `cutWithin`). The
+  attempts are read first, by primary key: a root with one goes to the staged path unsized. The rest are sized in
+  groups - 16, then 64 at a time - each group one statement (`treesSizesUpTo`), a `UNION ALL` of two capped reads a
+  tree, its flow rows by root and their step rows by flow, each counting rows and summing their byte counts: the first
+  tree up to one past what decides its path, every other up to one past what was left of the batch's rows when its
+  group was sent. Each read is capped on its own: a `LIMIT` over a `UNION ALL` applies after MySQL materializes the
+  union whole. The rows are capped, the bytes are not, so a tree read to its cap is over the batch by its rows, and one
+  under it has its bytes summed exactly. Do not size a batch with one `GROUP BY` over its trees: a huge tree anywhere in
   it makes that count miss its deadline, the batch gets no sizes, and the tree never gets the attempt that would stop
   it being counted. Nor one count a tree: a round trip each, a batch of 512 small trees took 525 ms at a 0.5 ms round
-  trip on PostgreSQL against 15 ms grouped. **When staging, a batch holds no more than `StageRows`**, so a tree over
-  the threshold is alone in its batch and staged even below the batch's own size
+  trip on PostgreSQL against 15 ms grouped. **When staging, a batch holds no more than the staging threshold**, rows
+  and bytes, so a tree over it is alone in its batch and staged even below the batch's own size
   (`TestStage_EveryTreeOverTheThresholdIsStaged`). Purge's sizing uses the same rule.
 - **A tree whose atomic move runs into its deadline takes the staged path from its next visit**, whatever its size,
   when staging is on: the walk remembers it (`preferences`, in memory, per shard and root), and its next visit treats
@@ -280,17 +299,17 @@ other; the engine's `lockRows` names this one, and Fork's pins stay in the engin
 
 `DeleteArchivedRoots` (Delete, with one root; Purge) runs on the caller's context: no attempt deadline and none of
 the pass's faults, since an operator's call has its own deadline
-(`TestReaperContract_RemovalsRunOnTheCallersContext`). Purge's row budget is the engine's `reapBatchRows`, the same
-value as a pass's `BatchRows`, passed in explicitly.
+(`TestReaperContract_RemovalsRunOnTheCallersContext`). Its budget is the engine's `reapBatchRows` and
+`reapBatchBytes`, the same values as a pass's `BatchRows` and `BatchBytes`, passed in explicitly.
 
 - **A tree that fits a batch is deleted in one transaction**, the directory's rows with it. A day whose
   tables are gone deletes nothing and is no error. `FaultArchiveDelete`, targeted at a root, fails the transaction that
   would delete it.
 - **A larger tree is marked, then deleted in chunks.** The mark is `delete_after_ms=1` on the archive root, written by
   the one UPDATE that also takes the root's lock; it hides the whole tree from every read at once (the visibility
-  rule), so the call counts the tree removed. Whether a tree fits is counted only as far as the batch
-  (`cutWithinRows`'s capped counts), so sizing a tree of millions of rows does not spend the call before its
-  allowance begins. The call then deletes chunks (`chunk` on `archiveTarget`, which also deletes the directory's rows) until its deadline - the engine's `archiveDeleteInCall`, 5 s, since an API call must
+  rule), so the call counts the tree removed. Whether a tree fits is read only as far as the batch (`cutWithin`'s
+  capped reads), so sizing a tree of millions of rows does not spend the call before its allowance begins. The call
+  then deletes chunks (`chunk` on `archiveTarget`, which also deletes the directory's rows) until its deadline - the engine's `archiveDeleteInCall`, 5 s, since an API call must
   not run for tens of seconds - and the rest is left. **The chunks run under that deadline**, not only between them:
   checked between chunks alone, a chunk waiting on a lock held the call for as long as the lock was held
   (`TestDelete_TheInCallChunksKeepToTheirDeadline`). A chunk that fails after the mark is no failure of the call.

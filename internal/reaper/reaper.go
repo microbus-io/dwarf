@@ -86,8 +86,12 @@ const (
 type Config struct {
 	// Batch is how many due roots one batch considers.
 	Batch int
-	// BatchRows is about how many rows one transaction moves or deletes, and at least one tree.
+	// BatchRows is about how many rows, flows and steps alike, one transaction moves or deletes, and at least one
+	// tree.
 	BatchRows int
+	// BatchBytes is about how many payload bytes one transaction moves or deletes, and at least one tree or step; 0
+	// sets no byte limit. A transaction stops at whichever of BatchRows and BatchBytes it reaches first.
+	BatchBytes int
 	// Attempt bounds each database attempt: a scan, a sizing, a day lookup, a tree transaction.
 	Attempt time.Duration
 	// Slice is how long one walker runs before it yields to the next.
@@ -107,6 +111,9 @@ type Config struct {
 	// StageRows is the size, in rows, above which a closed tree is archived in stages rather than in one transaction;
 	// 0 never starts a staged archive. A tree whose staged archive has started is archived in stages whatever its size.
 	StageRows int
+	// StageBytes is the size, in payload bytes, above which a closed tree is archived in stages, when StageRows starts
+	// staged archives at all; 0 sets no byte threshold.
+	StageBytes int
 }
 
 // ResidencyFunc returns this replica's residue class among a shard's dispatchers: the count of dispatchers and this

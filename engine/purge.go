@@ -65,8 +65,8 @@ func purgeDone(limit, took, gone int) bool {
 }
 
 // deleteArchivedRoots deletes the trees of the archived roots, each in the day the list read it from, and returns how
-// many roots it deleted. Each shard's day goes to the reaper in transactions of about reapBatchRows rows and at most
-// purgeChunk roots: 4,096 roots of wide fan-outs would otherwise be millions of rows deleted in one transaction,
+// many roots it deleted. Each shard's day goes to the reaper in transactions of about a reaper batch (reapBatchRows and
+// reapBatchBytes) and at most purgeChunk roots: 4,096 roots of wide fan-outs would otherwise be millions of rows deleted in one transaction,
 // holding the vacuum horizon and the shard's turn for its length. dwarf_flows_removed counts each shard's total once,
 // what committed before a failure included.
 func (e *Engine) deleteArchivedRoots(ctx context.Context, roots []listRow) (int, error) {
@@ -89,7 +89,7 @@ func (e *Engine) deleteArchivedRoots(ctx context.Context, roots []listRow) (int,
 			byDay[lr.day] = append(byDay[lr.day], lr.flowID)
 		}
 		for day, dayIDs := range byDay {
-			n, err := r.DeleteArchivedRoots(ctx, db, day, dayIDs, e.purgeChunk, e.reapBatchRows, until)
+			n, err := r.DeleteArchivedRoots(ctx, db, day, dayIDs, e.purgeChunk, e.reapBatchRows, e.reapBatchBytes, until)
 			shardDeleted += n
 			if err != nil {
 				return errors.Trace(err)

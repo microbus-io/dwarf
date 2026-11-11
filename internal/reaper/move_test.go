@@ -95,51 +95,60 @@ func TestMove_RetentionZeroDeletes(t *testing.T) {
 	assert.Equal(0, archFlows, "a retention of 0 archives nothing")
 }
 
-// TestMove_BatchesAreCappedByRows pins how a batch is cut: the leading trees whose rows fit the budget, and always the
-// first however large - sized in groups, one call each, the first tree counted up to its own limit and every other up
-// to one past what was left when its group was sent, and the cut ending before a root that stops it.
-func TestMove_BatchesAreCappedByRows(t *testing.T) {
+// TestMove_BatchesAreCappedByRowsAndBytes pins how a batch is cut: the leading trees whose rows and bytes both fit
+// the batch, and always the first however large - sized in groups, one call each, the first tree read up to its own
+// limit of rows and every other up to one past what was left of the batch's rows when its group was sent, and the cut
+// ending before a root that stops it.
+func TestMove_BatchesAreCappedByRowsAndBytes(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	size := map[int]int{1: 3, 2: 4, 3: 5, 4: 100}
+	rowsOf := map[int]int{1: 3, 2: 4, 3: 5, 4: 100}
+	bytesOf := map[int]int{1: 300, 2: 400, 3: 500, 4: 10000, 5: 9000}
 	type call struct{ group, limits []int }
-	cut := func(roots []int, rows, firstLimit int, stop func(int) bool) ([]int, int, []call) {
+	cut := func(roots []int, batch limit, firstRows int, stop func(int) bool) ([]int, size, []call) {
 		var calls []call
-		c, first, err := cutWithinRows(roots, rows, firstLimit, stop, func(group, limits []int) ([]int, error) {
+		c, first, err := cutWithin(roots, batch, firstRows, stop, func(group, limits []int) ([]size, error) {
 			calls = append(calls, call{append([]int(nil), group...), append([]int(nil), limits...)})
-			counts := make([]int, len(group))
+			sizes := make([]size, len(group))
 			for k, root := range group {
-				n := size[root]
+				n := rowsOf[root]
 				if n == 0 {
 					n = 1
 				}
-				counts[k] = min(n, limits[k])
+				sizes[k] = size{min(n, limits[k]), bytesOf[root]}
 			}
-			return counts, nil
+			return sizes, nil
 		})
 		assert.NoError(err)
 		return c, first, calls
 	}
-	got, first, calls := cut([]int{1, 2, 3, 4}, 8, 9, nil)
+	got, first, calls := cut([]int{1, 2, 3, 4}, capOf(8, 0), 9, nil)
 	assert.Equal([]int{1, 2}, got)
-	assert.Equal(3, first)
+	assert.Equal(size{3, 300}, first)
 	assert.Equal([]call{{[]int{1, 2, 3, 4}, []int{9, 9, 9, 9}}}, calls, "one call; each capped to one past the batch")
-	got, _, _ = cut([]int{1, 2, 3, 4}, 12, 13, nil)
+	got, _, _ = cut([]int{1, 2, 3, 4}, capOf(12, 0), 13, nil)
 	assert.Equal([]int{1, 2, 3}, got)
-	got, first, calls = cut([]int{4, 1}, 8, 50, nil)
+	got, first, calls = cut([]int{4, 1}, capOf(8, 0), 50, nil)
 	assert.Equal([]int{4}, got, "a tree over the budget goes alone")
-	assert.Equal(50, first, "counted to its limit, not whole")
+	assert.Equal(50, first.rows, "read to its limit, not whole")
 	assert.Equal(50, calls[0].limits[0])
-	got, _, _ = cut([]int{1, 2, 3, 4}, 1000, 1001, nil)
+	got, _, _ = cut([]int{1, 2, 3, 4}, capOf(1000, 0), 1001, nil)
 	assert.Equal([]int{1, 2, 3, 4}, got)
-	got, _, _ = cut([]int{1, 2, 3}, 1000, 1001, func(root int) bool { return root == 3 })
+	got, _, _ = cut([]int{1, 2, 3}, capOf(1000, 0), 1001, func(root int) bool { return root == 3 })
 	assert.Equal([]int{1, 2}, got, "the cut ends before a root that stops it")
+
+	// Bytes cut a batch the rows would let through, and a tree of few rows but many bytes goes alone.
+	got, _, _ = cut([]int{1, 2, 3}, capOf(1000, 800), 1001, nil)
+	assert.Equal([]int{1, 2}, got, "300 + 400 bytes fit 800, 500 more do not")
+	got, first, _ = cut([]int{5, 1}, capOf(1000, 800), 1001, nil)
+	assert.Equal([]int{5}, got, "one row of 9,000 bytes goes alone")
+	assert.Equal(size{1, 9000}, first)
 
 	many := make([]int, 20)
 	for i := range many {
 		many[i] = 100 + i // trees of one row
 	}
-	got, _, calls = cut(many, 100, 101, nil)
+	got, _, calls = cut(many, capOf(100, 0), 101, nil)
 	assert.Equal(many, got)
 	assert.Equal(2, len(calls), "a first group, then the rest")
 	assert.Equal(firstGroup, len(calls[0].group))
@@ -227,8 +236,8 @@ func TestMove_TheScanMergesTheStatusesInCloseOrder(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal([]int{c, a}, rootIDs(roots), "a short fetch is the first of the merged order")
 
-	r.cfg.BatchRows = 2
-	cut, _, _, err := r.p().rootsWithinRows(ctx, rootIDs(roots), true)
+	r.cfg.BatchRows = 4 // two trees of a flow and a step each
+	cut, _, _, err := r.p().rootsWithin(ctx, rootIDs(roots), true)
 	assert.NoError(err)
 	assert.Equal([]int{c, a}, cut, "the trim keeps the traversal order")
 }
@@ -764,7 +773,7 @@ func TestMove_TheSizingSeeksEachFlowsSteps(t *testing.T) {
 	if r.db.DriverName() != "pgx" {
 		t.Skip("the plan pinned here is PostgreSQL's")
 	}
-	stmt := treesRowsUpToSQL(r.db.DriverName(), live, []int{1, 2}, []int{1001, 4097})
+	stmt := treesSizesUpToSQL(r.db.DriverName(), live, []int{1, 2}, []int{1001, 4097})
 	var plan strings.Builder
 	errRollback := errors.New("rollback")
 	err := r.db.Transact(ctx, func(tx *sequel.Tx) error {

@@ -199,7 +199,7 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 			}
 			return false
 		}
-		cut, via, attemptAges, err := p.rootsWithinRows(ctx, rootIDs(candidates), d != nil)
+		cut, via, attemptAges, err := p.rootsWithin(ctx, rootIDs(candidates), d != nil)
 		if err != nil {
 			cut = rootIDs(candidates) // a known range, even when its count fails
 		}

@@ -309,15 +309,15 @@ func lockRoots(ctx context.Context, tx *sequel.Tx, flows string, skipHeld bool, 
 	return locked, nil
 }
 
-// rootsWithinRows returns the leading roots of roots, in the order given, that one batch takes, the route it takes and,
-// when archiving, the archive attempts among roots by their age. A root with an attempt, or one whose atomic
-// archive ran into its deadline, is archived in stages, so when archiving it takes a batch of its own and is not
-// sized: first, it is the cut alone; later, the cut ends before it.
-// The others are sized by capped counts in their order (cutWithinRows): the first up to what decides its path - over
-// the batch, and over StageRows when staging - and each later one up to what is left of the batch. Sizing is a
-// batching hint outside the transaction; the batch locks only the roots it takes, and its transaction still opens with
-// a write, which SQLite needs.
-func (p *pass) rootsWithinRows(ctx context.Context, roots []int, archiving bool) (cut []int, via route, attempts map[int]time.Duration, err error) {
+// rootsWithin returns the leading roots of roots, in the order given, that one batch takes, the route it takes and,
+// when archiving, the archive attempts among roots by their age. A root with an attempt, or one whose atomic archive
+// ran into its deadline, is archived in stages, so when archiving it takes a batch of its own and is not sized: first,
+// it is the cut alone; later, the cut ends before it.
+// The others are sized by capped reads in their order (cutWithin): the first up to what decides its path - over the
+// batch, and over the staging threshold when staging - and each later one up to what is left of the batch. Sizing is
+// a batching hint outside the transaction; the batch locks only the roots it takes, and its transaction still opens
+// with a write, which SQLite needs.
+func (p *pass) rootsWithin(ctx context.Context, roots []int, archiving bool) (cut []int, via route, attempts map[int]time.Duration, err error) {
 	// staged is whether a root takes the staged path whatever its size: it has an attempt, or its atomic archive ran
 	// into its deadline (preferences).
 	staged := func(root int) bool {
@@ -336,36 +336,48 @@ func (p *pass) rootsWithinRows(ctx context.Context, roots []int, archiving bool)
 	defer cancel()
 	// When staging, a batch holds no more than the threshold, so a tree over it is alone in its batch and staged
 	// whatever the batch's own size; below the batch, a tree over the threshold would otherwise be moved in it.
-	rows := p.cfg.BatchRows
-	if archiving && p.cfg.StageRows > 0 {
-		rows = min(max(rows, 1), p.cfg.StageRows)
-	}
-	firstLimit := max(rows, 1) + 1
-	if archiving && p.cfg.StageRows > 0 {
-		firstLimit = max(firstLimit, p.cfg.StageRows+1)
+	batch := p.batchLimit()
+	stage, staging := p.stageLimit()
+	staging = staging && archiving
+	firstRows := batch.rows + 1
+	if staging {
+		batch = batch.tighter(stage)
+		firstRows = max(firstRows, stage.rows+1)
 	}
 	var stop func(int) bool
 	if archiving {
 		stop = staged
 	}
-	cut, firstSize, err := cutWithinRows(roots, rows, firstLimit, stop,
-		func(group, limits []int) ([]int, error) {
+	cut, first, err := cutWithin(roots, batch, firstRows, stop,
+		func(group, limits []int) ([]size, error) {
 			if err := p.r.faultOn(FaultSizeErr, group...); err != nil {
 				return nil, err
 			}
-			return treesRowsUpTo(ctx, p.shard.DB, live, group, limits)
+			return treesSizesUpTo(ctx, p.shard.DB, live, group, limits)
 		})
 	if err != nil {
 		return nil, inBatch, attempts, errors.Trace(err)
 	}
 	switch {
 	case len(cut) > 1:
-	case archiving && p.cfg.StageRows > 0 && firstSize > p.cfg.StageRows:
+	case staging && stage.over(first):
 		via = inStages
-	case !archiving && firstSize > max(p.cfg.BatchRows, 1):
+	case !archiving && p.batchLimit().over(first):
 		via = inChunks
 	}
 	return cut, via, attempts, nil
+}
+
+// batchLimit is one transaction's rows and bytes.
+func (p *pass) batchLimit() limit { return capOf(p.cfg.BatchRows, p.cfg.BatchBytes) }
+
+// stageLimit is the size over which a closed tree is archived in stages, and whether any is: StageRows starts staged
+// archives, and StageBytes adds a byte threshold to it.
+func (p *pass) stageLimit() (stage limit, staging bool) {
+	if p.cfg.StageRows <= 0 {
+		return limit{}, false
+	}
+	return capOf(p.cfg.StageRows, p.cfg.StageBytes), true
 }
 
 // route is the path a batch's cut takes: one transaction (inBatch), a staged archive of its one tree (inStages), or a
@@ -378,14 +390,14 @@ const (
 	inChunks
 )
 
-// cutWithinRows returns the leading roots whose trees fit in about rows rows, and at least the first, with the first's
-// size. It sizes the roots in groups - the first of firstGroup, then of sizeGroup - each by one call of sizes, which
-// counts each tree up to its limit: the first root up to firstLimit, every other up to one past what was left of rows
-// when its group was sent, which is all it takes to tell whether it fits. So no count reads a large tree whole, and a
+// cutWithin returns the leading roots whose trees fit in batch, and at least the first, with the first's size. It sizes
+// the roots in groups - the first of firstGroup, then of sizeGroup - each by one call of sizes, which reads each tree up
+// to its limit of rows: the first root up to firstRows, every other up to one past what was left of the batch's rows
+// when its group was sent, which is all it takes to tell whether it fits. So no read takes a large tree whole, and a
 // batch of small trees takes a few calls, not one a tree. The cut ends before a root for which stop is true.
-func cutWithinRows(roots []int, rows, firstLimit int, stop func(root int) bool, sizes func(group, limits []int) ([]int, error)) (cut []int, firstSize int, err error) {
-	rows = max(rows, 1)
-	total, i := 0, 0
+func cutWithin(roots []int, batch limit, firstRows int, stop func(root int) bool, sizes func(group, limits []int) ([]size, error)) (cut []int, first size, err error) {
+	var total size
+	i := 0
 	for i < len(roots) {
 		n := sizeGroup
 		if i == 0 {
@@ -399,37 +411,37 @@ func cutWithinRows(roots []int, rows, firstLimit int, stop func(root int) bool, 
 			}
 		}
 		if len(group) == 0 {
-			return roots[:i], firstSize, nil
+			return roots[:i], first, nil
 		}
 		limits := make([]int, len(group))
 		for k := range group {
-			limits[k] = rows - total + 1
+			limits[k] = batch.rows - total.rows + 1
 		}
 		if i == 0 {
-			limits[0] = firstLimit
+			limits[0] = firstRows
 		}
-		counts, err := sizes(group, limits)
+		got, err := sizes(group, limits)
 		if err != nil {
-			return nil, 0, errors.Trace(err)
+			return nil, size{}, errors.Trace(err)
 		}
-		for k, c := range counts {
+		for k, sz := range got {
 			if i+k == 0 {
-				firstSize = c
+				first = sz
 			}
-			total += c
-			if total > rows {
-				return roots[:max(i+k, 1)], firstSize, nil
+			total = total.plus(sz)
+			if batch.over(total) {
+				return roots[:max(i+k, 1)], first, nil
 			}
 		}
 		i += len(group)
 		if i < len(roots) && stop != nil && stop(roots[i]) {
-			return roots[:i], firstSize, nil
+			return roots[:i], first, nil
 		}
 	}
-	return roots, firstSize, nil
+	return roots, first, nil
 }
 
-// The groups cutWithinRows sizes in one call: a small first one, since its first tree may be large and the batch then
+// The groups cutWithin sizes in one call: a small first one, since its first tree may be large and the batch then
 // takes it alone, then larger ones.
 const (
 	firstGroup = 16

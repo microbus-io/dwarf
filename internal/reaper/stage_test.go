@@ -941,7 +941,7 @@ func TestStage_SizingCountsOnlyWhatItDecides(t *testing.T) {
 	r := stageRig(t)
 	big := seedWideTree(t, r.db, 3, 30, 3) // 124 rows
 	small := seedTrees(t, r.db, 1, callShape)[0]
-	cut, via, ages, err := r.p().rootsWithinRows(ctx, []int{big, small}, true)
+	cut, via, ages, err := r.p().rootsWithin(ctx, []int{big, small}, true)
 	assert.NoError(err)
 	assert.Equal([]int{big}, cut, "over the threshold: alone")
 	assert.Equal(inStages, via)
@@ -950,12 +950,12 @@ func TestStage_SizingCountsOnlyWhatItDecides(t *testing.T) {
 	setAttempt(t, r, big, time.Now())
 	r.seams.Inject(join(FaultSizeErr, strconv.Itoa(big)))
 	defer r.seams.Withdraw(join(FaultSizeErr, strconv.Itoa(big)))
-	cut, via, ages, err = r.p().rootsWithinRows(ctx, []int{big, small}, true)
+	cut, via, ages, err = r.p().rootsWithin(ctx, []int{big, small}, true)
 	assert.NoError(err, "a root with an attempt is not sized")
 	assert.Equal([]int{big}, cut)
 	assert.Equal(inStages, via)
 	assert.Equal(1, len(ages))
-	cut, via, _, err = r.p().rootsWithinRows(ctx, []int{small, big}, true)
+	cut, via, _, err = r.p().rootsWithin(ctx, []int{small, big}, true)
 	assert.NoError(err)
 	assert.Equal([]int{small}, cut, "the cut ends before a root with an attempt")
 	assert.Equal(inBatch, via)

@@ -169,11 +169,11 @@ func TestReaperContract_RemovalsRunOnTheCallersContext(t *testing.T) {
 	}
 }
 
-// TestReaperContract_PurgeTakesTheReapersRowBudget pins Purge's transactions to the reaper's row budget: trees of two
-// rows each, at a budget of four, go two to a transaction, and at a budget of two, one.
+// TestReaperContract_PurgeTakesTheReapersRowBudget pins Purge's transactions to the reaper's row budget: trees of four
+// rows each (two flows of a step each), at a budget of eight, go two to a transaction, and at a budget of four, one.
 func TestReaperContract_PurgeTakesTheReapersRowBudget(t *testing.T) {
 	t.Parallel()
-	for _, c := range []struct{ rows, transactions int }{{4, 2}, {2, 4}} {
+	for _, c := range []struct{ rows, transactions int }{{8, 2}, {4, 4}} {
 		t.Run(strconv.Itoa(c.rows), func(t *testing.T) {
 			assert := testarossa.For(t)
 			ctx := t.Context()

@@ -17,8 +17,9 @@ limitations under the License.
 package reaper
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"os"
-	"strings"
 	"testing"
 	"time"
 )
@@ -50,7 +51,7 @@ func TestMeasure_Sizing(t *testing.T) {
 	}
 	capped := func(roots []int) (time.Duration, int) {
 		start := time.Now()
-		cut, _, _, err := r.p().rootsWithinRows(ctx, roots, true)
+		cut, _, _, err := r.p().rootsWithin(ctx, roots, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -78,8 +79,8 @@ func TestMeasure_Sizing(t *testing.T) {
 }
 
 // TestMeasure_Staging times archiving one large tree both ways on the rig's shard: the atomic move in one transaction,
-// and the staged copy chunk by chunk at the default batch of 4,096 rows - its chunk count, slowest chunk and total -
-// for a narrow tree, a wide one, and one with large states. Opt-in (DWARF_MEASURE_STAGING=1); run it against the
+// and the staged copy chunk by chunk at the default batch of 4,096 rows and 16 MiB - its chunk count, slowest chunk and total -
+// for a narrow tree, a wide one, and one with large incompressible states. Opt-in (DWARF_MEASURE_STAGING=1); run it against the
 // database wanted (SEQUEL_TESTING_DSN).
 func TestMeasure_Staging(t *testing.T) {
 	if os.Getenv("DWARF_MEASURE_STAGING") == "" {
@@ -120,16 +121,22 @@ func measureStaging(t *testing.T, children, steps, rootSteps, stateBytes, unrela
 				t.Fatal(err)
 			}
 		}
-		r.cfg.BatchRows = 4096
+		r.cfg.BatchRows, r.cfg.BatchBytes = 4096, 16<<20 // the engine's defaults
 		r.cfg.StageRows = 1
 		today, err := r.archive.Today(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		state := `{"pad":"` + strings.Repeat("x", shape.stateBytes) + `"}`
+		// Random bytes, base64-encoded: a repeated character compresses to almost nothing out of line, which measures
+		// nothing of a heavy payload.
+		pad := make([]byte, shape.stateBytes*3/4)
+		if _, err := rand.Read(pad); err != nil {
+			t.Fatal(err)
+		}
+		state := `{"pad":"` + base64.StdEncoding.EncodeToString(pad) + `"}`
 		seed := func() int {
 			root := seedWideTree(t, r.db, shape.rootSt, shape.children, shape.steps)
-			if _, err := r.db.ExecContext(ctx, "UPDATE dwarf_steps SET state=? WHERE flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id=?)", []byte(state), root); err != nil {
+			if _, err := r.db.ExecContext(ctx, "UPDATE dwarf_steps SET state=?, state_bytes=? WHERE flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id=?)", []byte(state), len(state), root); err != nil {
 				t.Fatal(err)
 			}
 			return root

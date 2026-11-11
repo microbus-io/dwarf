@@ -279,7 +279,7 @@ func TestWalk_TreeEnvelope(t *testing.T) {
 				assert.Must(assert.NoError(r.p().refreshDay(t.Context(), day)))
 			}
 			start := time.Now()
-			cut, _, _, err := r.p().rootsWithinRows(t.Context(), []int{root}, false)
+			cut, _, _, err := r.p().rootsWithin(t.Context(), []int{root}, false)
 			assert.Must(assert.NoError(err))
 			sized := time.Since(start)
 			start = time.Now()
@@ -531,9 +531,9 @@ func TestWalk_TheStampedScanWalksTheStampedIndex(t *testing.T) {
 	}
 }
 
-// TestWalk_AFlowWithNoStepsIsOneRow pins the sizing of a tree holding a flow of no steps: the flow counts as one
-// row, as the join leaves it one, and the move takes it with the rest of its tree.
-func TestWalk_AFlowWithNoStepsIsOneRow(t *testing.T) {
+// TestWalk_EveryFlowAndStepIsARow pins the sizing of a tree: every flow row and every step row counts as one, a flow of
+// no steps included, and the move takes the tree whole.
+func TestWalk_EveryFlowAndStepIsARow(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -541,12 +541,12 @@ func TestWalk_AFlowWithNoStepsIsOneRow(t *testing.T) {
 	db := r.db
 	var err error
 	roots := seedTrees(t, db, 2, treeShape{rootSteps: 2, childSteps: 0})
-	r.cfg.BatchRows = 5
-	cut, _, _, err := r.p().rootsWithinRows(ctx, roots, false)
+	r.cfg.BatchRows = 7
+	cut, _, _, err := r.p().rootsWithin(ctx, roots, false)
 	assert.NoError(err)
-	assert.Equal(roots[:1], cut, "three rows a tree: two steps and the flow of none")
-	r.cfg.BatchRows = 6
-	cut, _, _, err = r.p().rootsWithinRows(ctx, roots, false)
+	assert.Equal(roots[:1], cut, "four rows a tree: the root, its two steps and the child of none")
+	r.cfg.BatchRows = 8
+	cut, _, _, err = r.p().rootsWithin(ctx, roots, false)
 	assert.NoError(err)
 	assert.Equal(roots, cut)
 

@@ -3580,8 +3580,8 @@ terminate inside a delete, and nothing either operation does can then race a `Re
 - **`Purge(Query)`** (`purge.go`) needs `Limit` (at most `maxListLimit`) and both window bounds, and removes what
   `ListClosed` lists for the query, oldest archived first, at most `Limit` roots: the internal ascending
   `listArchived` (so its window is on `archived_at`, cut and capped as there), each tree deleted at once in the day
-  its branch read it from, by `reaper.DeleteArchivedRoots`, in transactions of about `reapBatchRows` rows and at
-  most `purgeChunk` (4,096) roots: a literal `IN` list in the tens of thousands of terms can fail to plan outright on SQL
+  its branch read it from, by `reaper.DeleteArchivedRoots`, in transactions of about a batch (`reapBatchRows`
+  rows, `reapBatchBytes` payload bytes) and at most `purgeChunk` (4,096) roots: a literal `IN` list in the tens of thousands of terms can fail to plan outright on SQL
   Server (errors 8623 / 8632). **It reads only the archive**, as `ListClosed` does: a root closed in the last minute
   is left for a later call, and `Delete` removes one by key. It returns `(removed, done)`: `done` when the archive
   had fewer than `Limit` and every root taken was removed - one a racing `Delete` took first was not. A
@@ -3725,9 +3725,10 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
   a rig cannot reach a test-only override, and a day of minutes is the only way to see rollover and retention under
   load in one run. Engine tests set `testArchiveDay`. **`DWARF_ARCHIVE_GRACE`** sets the archive grace the same way
   (a Go duration of at least 0, logged), for a run that must archive within its window, or hold closed flows live
-  longer; engine tests set `archiveGrace`. **`DWARF_STAGE_ROWS`** sets the staging threshold the same way (whole rows,
-  at least 0, logged), for a rig run that stages large trees and for the suites run with staging on; engine tests set
-  `reapStageRows`.
+  longer; engine tests set `archiveGrace`. **`DWARF_STAGE_ROWS`** and **`DWARF_STAGE_BYTES`** set the staging
+  thresholds the same way (whole rows and whole payload bytes, at least 0, logged; rows start staging, bytes add a
+  threshold beside them), for a rig run that stages large trees and for the suites run with staging on; engine tests
+  set `reapStageRows` and `reapStageBytes`.
 - **Reading an archived flow** (`queryLiveOrArchive`, `archive.go`). Only the read API reads the archive - `Snapshot`,
   `Fingerprint` (and so `Await`/`Poll`/`Run`, which build their outcome with `Snapshot`), `History`, `Step` and
   `Continue`'s source; dispatch and every write path never do, a moved tree being answered there by the zero-row

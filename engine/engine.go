@@ -375,7 +375,9 @@ type Engine struct {
 	archiveGrace        time.Duration // how long a closed root stays in the live tables before it is archived (1m)
 	reapBatch           int           // due roots one reaper batch considers (512)
 	reapBatchRows       int           // about how many rows one reaper batch moves, at least one tree (4096)
+	reapBatchBytes      int           // about how many payload bytes one reaper batch moves, at least one tree (16 MiB)
 	reapStageRows       int           // the tree size above which archival is staged; 0, never, until it is qualified
+	reapStageBytes      int           // the tree payload above which archival is staged, when it is; 0, no byte threshold
 	reapAttempt         time.Duration // one database attempt (30s)
 	reapSlice           time.Duration // one walker before yielding (5s)
 	reapBudget          time.Duration // healthy backlog work per pass (30s)
@@ -461,6 +463,7 @@ func NewEngine() *Engine {
 	e.reapBudget = 30 * time.Second
 	e.reapBatch = 512
 	e.reapBatchRows = 4096
+	e.reapBatchBytes = 16 << 20
 	e.purgeChunk = 4096
 	e.archiveDeleteInCall = 5 * time.Second
 	e.reapInterval = 15 * time.Second
@@ -840,7 +843,7 @@ func (e *Engine) Startup(ctx context.Context) error {
 	if err := e.applyArchiveGraceEnv(ctx); err != nil {
 		return errors.Trace(err)
 	}
-	if err := e.applyStageRowsEnv(ctx); err != nil {
+	if err := e.applyStageEnv(ctx); err != nil {
 		return errors.Trace(err)
 	}
 	// Resolved before the shards open, so the migrations trace through the same provider as everything after.

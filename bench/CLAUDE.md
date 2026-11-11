@@ -656,7 +656,8 @@ test seams: `DWARF_ARCHIVE_DAY` shortens the archive's day (whole seconds), so o
 day tables and retention drops under load; `DWARF_ARCHIVE_GRACE` sets how long a closed flow waits before it is
 archived (a Go duration, `0s` and up), so an archived run's warmup can be short or a run can hold closed flows live
 longer. `DWARF_STAGE_ROWS` sets the size, in rows, above which a closed tree is archived in stages (whole rows, `0`
-off), since staged archival is off until its threshold is qualified. The engine logs a warning when any is set. `-archive-retention N` sets `SetRetention` on every replica: a
+off), and `DWARF_STAGE_BYTES` a size in payload bytes beside it (whole bytes, `0` none), since staged archival is off
+until its thresholds are qualified. The engine logs a warning when any is set. `-archive-retention N` sets `SetRetention` on every replica: a
 day of minutes under the default retention of 30 days drops nothing within a run, so pair a short day with a small
 `N` to see drops under load.
 

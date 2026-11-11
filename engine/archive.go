@@ -271,25 +271,37 @@ func (e *Engine) applyArchiveGraceEnv(ctx context.Context) error {
 	return nil
 }
 
-// stageRowsEnv names the environment variable that sets the size, in rows, above which a closed tree is archived in
-// stages rather than in one transaction, for the benchmark rig and the staging-on test runs, as a whole number of rows
-// of at least 0 (0, off). A rig cannot reach a test-only override, and staged archival is off until its threshold is
-// qualified. Production leaves it unset.
-const stageRowsEnv = "DWARF_STAGE_ROWS"
+// stageRowsEnv and stageBytesEnv name the environment variables that set the size above which a closed tree is
+// archived in stages rather than in one transaction, for the benchmark rig and the staging-on test runs: in rows, which
+// starts staged archives (0, off), and in payload bytes, a threshold beside it (0, none), each a whole number of at
+// least 0. A rig cannot reach a test-only override, and staged archival is off until its thresholds are qualified.
+// Production leaves them unset.
+const (
+	stageRowsEnv  = "DWARF_STAGE_ROWS"
+	stageBytesEnv = "DWARF_STAGE_BYTES"
+)
 
-// applyStageRowsEnv sets this run's staging threshold from stageRowsEnv, when it is set.
-func (e *Engine) applyStageRowsEnv(ctx context.Context) error {
-	v := os.Getenv(stageRowsEnv)
-	if v == "" {
-		return nil
+// applyStageEnv sets this run's staging thresholds from stageRowsEnv and stageBytesEnv, each when it is set.
+func (e *Engine) applyStageEnv(ctx context.Context) error {
+	for _, v := range []struct {
+		name, unit string
+		field      *int
+	}{
+		{stageRowsEnv, "rows", &e.reapStageRows},
+		{stageBytesEnv, "bytes", &e.reapStageBytes},
+	} {
+		s := os.Getenv(v.name)
+		if s == "" {
+			continue
+		}
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 0 {
+			return errors.New("%s must be a whole number of %s, at least 0, not %q", v.name, v.unit, s, http.StatusBadRequest)
+		}
+		// Loud, because it changes how every large tree leaves the live tables.
+		e.logger.WarnContext(ctx, "Staged archival is set by "+v.name+"; it is for benchmarks only", v.unit, n)
+		*v.field = n
 	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n < 0 {
-		return errors.New("%s must be a whole number of rows, at least 0, not %q", stageRowsEnv, v, http.StatusBadRequest)
-	}
-	// Loud, because it changes how every large tree leaves the live tables.
-	e.logger.WarnContext(ctx, "Staged archival is set by "+stageRowsEnv+"; it is for benchmarks only", "rows", n)
-	e.reapStageRows = n
 	return nil
 }
 

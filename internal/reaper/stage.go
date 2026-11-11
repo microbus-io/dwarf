@@ -48,7 +48,7 @@ type stagePos struct {
 }
 
 // stage archives the live tree of root in stages into the day of its archive attempt: it starts the attempt or joins
-// the one there, copies the tree in transactions of about BatchRows rows until the walk's slice (begun at sliceStart)
+// the one there, copies the tree in transactions of about a batch until the walk's slice (begun at sliceStart)
 // ends, and publishes it - the archive root inserted and the live root stamped for deletion, attempt kept - in the last
 // one. The live tree is then the deletion kind's. published is the flows archived when this call published the tree;
 // finished is true when it did, or when the tree is not this walk's to stage now: stamped, no longer due, held by
@@ -171,7 +171,7 @@ func attemptOf(ctx context.Context, tx *sequel.Tx, root int) (time.Time, error) 
 	return database.StoredTime(at), errors.Trace(err)
 }
 
-// stageChunk copies, in one transaction under the live root's lock, up to about BatchRows rows of root's tree into the
+// stageChunk copies, in one transaction under the live root's lock, up to about a batch of root's tree into the
 // day of the attempt pos holds, from pos on: descendants in flow_id order, each flow's steps then its flow row and its
 // directory row; then the root's steps; then, when nothing is left, it publishes. Every write inserts only what is not
 // there, so a chunk run again writes the same rows. It returns the flows archived when it published, and done when the
@@ -218,7 +218,7 @@ func (p *pass) stageChunk(ctx context.Context, root int, a *archiver.Archive, po
 				" WHERE root_flow_id="+id+" AND flow_id<>"+id).Scan(&at.seen, &at.after); err != nil {
 				return errors.Trace(err)
 			}
-			children, open, err := descendantsAfter(ctx, tx, root, at.after)
+			children, _, open, err := descendantsAfter(ctx, tx, root, at.after)
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -237,26 +237,33 @@ func (p *pass) stageChunk(ctx context.Context, root int, a *archiver.Archive, po
 				at.flow = 0
 			}
 		}
-		budget := max(p.cfg.BatchRows, 1)
-		for budget > 0 && at.flow != root {
+		budget := p.batchLimit()
+		left := budget
+		for !left.spent() && at.flow != root {
 			if at.flow != 0 {
-				// A descendant part copied by an earlier chunk: go on from its position.
-				n, last, err := c.stepsFrom(ctx, tx, at.flow, at.stepAfter, budget)
+				// A descendant part copied by an earlier chunk: go on from its position. Its flow row goes with its
+				// last steps when it fits beside them, or first in the next chunk.
+				fresh := left == budget
+				sz, last, more, err := c.stepsFrom(ctx, tx, at.flow, at.stepAfter, left, fresh)
 				if err != nil {
 					return errors.Trace(err)
 				}
-				if n == budget {
+				own, err := flowBytes(ctx, tx, "dwarf_flows", at.flow)
+				if err != nil {
+					return errors.Trace(err)
+				}
+				if more || !rowFits(left, fresh, sz, own) {
 					at.stepAfter = last
 					return nil
 				}
 				if err := c.flowRows(ctx, tx, []int{at.flow}, at.seen); err != nil {
 					return errors.Trace(err)
 				}
-				budget -= n + 1
+				left = left.minus(sz.plus(size{1, own}))
 				at.seen, at.after, at.flow, at.stepAfter = at.seen+1, at.flow, 0, 0
 				continue
 			}
-			children, open, err := descendantsAfter(ctx, tx, root, at.after)
+			children, childBytes, open, err := descendantsAfter(ctx, tx, root, at.after)
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -268,13 +275,14 @@ func (p *pass) stageChunk(ctx context.Context, root int, a *archiver.Archive, po
 				break
 			}
 			// The budget is charged what the run reads, whether or not a row is there already.
-			run, steps, err := fitRun(ctx, tx, live.steps, children, budget)
+			run, sz, err := fitRun(ctx, tx, live.steps, children, childBytes, left)
 			if err != nil {
 				return errors.Trace(err)
 			}
 			if run == 0 {
-				// The next descendant alone is over what is left: part of its steps now, the rest in the next chunk.
-				_, last, err := c.stepsFrom(ctx, tx, children[0], 0, budget)
+				// The next descendant alone is over what is left: part of its steps now, the rest - and its flow row -
+				// in the next chunk.
+				_, last, _, err := c.stepsFrom(ctx, tx, children[0], 0, left, left == budget)
 				if err != nil {
 					return errors.Trace(err)
 				}
@@ -291,23 +299,32 @@ func (p *pass) stageChunk(ctx context.Context, root int, a *archiver.Archive, po
 			if err := c.flowRows(ctx, tx, children[:run], at.seen); err != nil {
 				return errors.Trace(err)
 			}
-			budget -= steps + run
+			left = left.minus(sz)
 			at.seen, at.after = at.seen+run, children[run-1]
 		}
-		if budget <= 0 {
+		if left.spent() {
 			return nil
 		}
-		// The root's steps, then the root itself: the publication.
-		n, last, err := c.stepsFrom(ctx, tx, root, at.stepAfter, budget)
+		// The root's steps, then the root itself: the publication, when the root's row fits beside them, or first in
+		// the next chunk.
+		fresh := left == budget
+		sz, last, more, err := c.stepsFrom(ctx, tx, root, at.stepAfter, left, fresh)
 		if err != nil {
 			return errors.Trace(err)
 		}
-		if n == budget {
+		if more {
 			at.stepAfter = last
 			return nil
 		}
-		if n > 0 {
+		if sz.rows > 0 {
 			at.stepAfter = last
+		}
+		rootBytes, err := flowBytes(ctx, tx, "dwarf_flows", root)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if !rowFits(left, fresh, sz, rootBytes) {
+			return nil
 		}
 		if !a.Whole(day + 1) {
 			// A locate finds a flow only where the day after its own is whole: publish once it is. Unless the
@@ -341,25 +358,25 @@ func (p *pass) stageChunk(ctx context.Context, root int, a *archiver.Archive, po
 	return published, c.copied, done, nil
 }
 
-// descendantsAfter returns up to treeChunk of root's descendants after the flow after, in flow_id order, and whether
-// any of them is not closed.
-func descendantsAfter(ctx context.Context, tx *sequel.Tx, root, after int) (children []int, open bool, err error) {
-	rows, err := tx.QueryContext(ctx, "SELECT flow_id, CASE WHEN status IN ("+terminalStatusesSQL+") THEN 0 ELSE 1 END"+
+// descendantsAfter returns up to treeChunk of root's descendants after the flow after, in flow_id order, with their
+// payload bytes, and whether any of them is not closed.
+func descendantsAfter(ctx context.Context, tx *sequel.Tx, root, after int) (children, bytes []int, open bool, err error) {
+	rows, err := tx.QueryContext(ctx, "SELECT flow_id, "+flowBytesSQL("")+", CASE WHEN status IN ("+terminalStatusesSQL+") THEN 0 ELSE 1 END"+
 		" FROM dwarf_flows WHERE root_flow_id="+strconv.Itoa(root)+" AND flow_id<>"+strconv.Itoa(root)+
 		" AND flow_id>"+strconv.Itoa(after)+" ORDER BY flow_id LIMIT_OFFSET(?, 0)", treeChunk)
 	if err != nil {
-		return nil, false, errors.Trace(err)
+		return nil, nil, false, errors.Trace(err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id, notClosed int
-		if err := rows.Scan(&id, &notClosed); err != nil {
-			return nil, false, errors.Trace(err)
+		var id, b, notClosed int
+		if err := rows.Scan(&id, &b, &notClosed); err != nil {
+			return nil, nil, false, errors.Trace(err)
 		}
-		children = append(children, id)
+		children, bytes = append(children, id), append(bytes, b)
 		open = open || notClosed == 1
 	}
-	return children, open, errors.Trace(rows.Err())
+	return children, bytes, open, errors.Trace(rows.Err())
 }
 
 // stageCopy is what a staging chunk writes into: the attempt's day, its tables, and when it ends.
@@ -380,20 +397,21 @@ func (c *stageCopy) inserted(res sql.Result) {
 	}
 }
 
-// stepsFrom copies up to limit steps of flow after the step after, in step_id order, and returns how many it read and
-// the last one's id. The ids are read first and copied by a literal list, as a chunked deletion reads them.
-func (c *stageCopy) stepsFrom(ctx context.Context, tx *sequel.Tx, flow, after, limit int) (n, last int, err error) {
-	ids, err := stepIDsAfter(ctx, tx, "dwarf_steps", flow, after, limit)
+// stepsFrom copies steps of flow after the step after, in step_id order, up to budget - at least one, whatever its
+// bytes, when fresh - and returns their size, the last one's id, and more when the budget, not the flow, ended them.
+// The ids are read first and copied by a literal list, as a chunked deletion reads them.
+func (c *stageCopy) stepsFrom(ctx context.Context, tx *sequel.Tx, flow, after int, budget limit, fresh bool) (sz size, last int, more bool, err error) {
+	ids, sz, more, err := stepsWithin(ctx, tx, "dwarf_steps", flow, after, budget, fresh)
 	if err != nil || len(ids) == 0 {
-		return 0, after, errors.Trace(err)
+		return size{}, after, more, errors.Trace(err)
 	}
 	res, err := tx.ExecContext(ctx, "INSERT INTO "+c.steps+" SELECT * FROM dwarf_steps s WHERE s.step_id IN ("+intCSV(ids)+")"+
 		" AND NOT EXISTS (SELECT 1 FROM "+c.steps+" a WHERE a.step_id=s.step_id)")
 	if err != nil {
-		return 0, after, errors.Trace(err)
+		return size{}, after, false, errors.Trace(err)
 	}
 	c.inserted(res)
-	return len(ids), ids[len(ids)-1], nil
+	return sz, ids[len(ids)-1], more, nil
 }
 
 // flowRows copies the flow rows of flows, the first of which is the tree's flow number first in flow_id order (the root
