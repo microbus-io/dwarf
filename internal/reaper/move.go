@@ -349,44 +349,73 @@ func (p *pass) rootsWithinRows(ctx context.Context, roots []int, archiving bool)
 		stop = staged
 	}
 	cut, firstSize, err = cutWithinRows(roots, p.cfg.BatchRows, firstLimit, stop,
-		func(root, limit int) (int, error) {
-			if p.r.seams.Enabled() && p.r.seams.IsFault(join(FaultSizeErr, strconv.Itoa(root))) {
-				return 0, errors.New("injected fault: " + FaultSizeErr)
+		func(group, limits []int) ([]int, error) {
+			if p.r.seams.Enabled() {
+				for _, root := range group {
+					if p.r.seams.IsFault(join(FaultSizeErr, strconv.Itoa(root))) {
+						return nil, errors.New("injected fault: " + FaultSizeErr)
+					}
+				}
 			}
-			return treeRowsUpTo(ctx, p.shard.DB, live, root, limit)
+			return treesRowsUpTo(ctx, p.shard.DB, live, group, limits)
 		})
 	return cut, firstSize, attempts, errors.Trace(err)
 }
 
 // cutWithinRows returns the leading roots whose trees fit in about rows rows, and at least the first, with the first's
-// size: each sized by size, counting up to a limit - the first up to firstLimit, each later one up to one past what
-// is left of rows, which is all it takes to tell whether it fits - so no count reads a large tree whole. The cut ends
-// before a root for which stop is true.
-func cutWithinRows(roots []int, rows, firstLimit int, stop func(root int) bool, size func(root, limit int) (int, error)) (cut []int, firstSize int, err error) {
+// size. It sizes the roots in groups - the first of firstGroup, then of sizeGroup - each by one call of sizes, which
+// counts each tree up to its limit: the first root up to firstLimit, every other up to one past what was left of rows
+// when its group was sent, which is all it takes to tell whether it fits. So no count reads a large tree whole, and a
+// batch of small trees takes a few calls, not one a tree. The cut ends before a root for which stop is true.
+func cutWithinRows(roots []int, rows, firstLimit int, stop func(root int) bool, sizes func(group, limits []int) ([]int, error)) (cut []int, firstSize int, err error) {
 	rows = max(rows, 1)
-	total := 0
-	for i, root := range roots {
-		if i > 0 && stop != nil && stop(root) {
+	total, i := 0, 0
+	for i < len(roots) {
+		n := sizeGroup
+		if i == 0 {
+			n = firstGroup
+		}
+		group := roots[i:min(i+n, len(roots))]
+		for k, root := range group {
+			if (i+k > 0) && stop != nil && stop(root) {
+				group = group[:k]
+				break
+			}
+		}
+		if len(group) == 0 {
 			return roots[:i], firstSize, nil
 		}
-		limit := firstLimit
-		if i > 0 {
-			limit = rows - total + 1
+		limits := make([]int, len(group))
+		for k := range group {
+			limits[k] = rows - total + 1
 		}
-		n, err := size(root, limit)
+		if i == 0 {
+			limits[0] = firstLimit
+		}
+		counts, err := sizes(group, limits)
 		if err != nil {
 			return nil, 0, errors.Trace(err)
 		}
-		if i == 0 {
-			firstSize = n
-		}
-		total += n
-		if total > rows {
-			if i == 0 {
-				return roots[:1], firstSize, nil
+		for k, c := range counts {
+			if i+k == 0 {
+				firstSize = c
 			}
+			total += c
+			if total > rows {
+				return roots[:max(i+k, 1)], firstSize, nil
+			}
+		}
+		i += len(group)
+		if i < len(roots) && stop != nil && stop(roots[i]) {
 			return roots[:i], firstSize, nil
 		}
 	}
 	return roots, firstSize, nil
 }
+
+// The groups cutWithinRows sizes in one call: a small first one, since its first tree may be large and the batch then
+// takes it alone, then larger ones.
+const (
+	firstGroup = 16
+	sizeGroup  = 64
+)

@@ -19,6 +19,7 @@ package reaper
 import (
 	"context"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/archiver"
@@ -317,6 +318,36 @@ func stepsUpTo(ctx context.Context, q sequel.Executor, steps string, flows []int
 func treeRowsUpTo(ctx context.Context, q sequel.Executor, t tables, root, limit int) (int, error) {
 	return countUpTo(ctx, q, "f.flow_id FROM "+t.flows+" f LEFT JOIN "+t.steps+" s ON s.flow_id=f.flow_id WHERE f.root_flow_id="+
 		strconv.Itoa(root), limit)
+}
+
+// treesRowsUpTo counts the rows of each tree rooted at roots in t, as treeRowsUpTo does, each up to its own limit, in
+// one statement: a UNION ALL of capped counts, so a group of trees costs one round trip and no tree is read past its
+// limit.
+func treesRowsUpTo(ctx context.Context, q sequel.Executor, t tables, roots, limits []int) ([]int, error) {
+	branches := make([]string, len(roots))
+	for k, root := range roots {
+		inner := "SELECT f.flow_id FROM " + t.flows + " f LEFT JOIN " + t.steps + " s ON s.flow_id=f.flow_id WHERE f.root_flow_id=" +
+			strconv.Itoa(root) + " LIMIT " + strconv.Itoa(limits[k])
+		if q.DriverName() == "mssql" {
+			inner = "SELECT TOP (" + strconv.Itoa(limits[k]) + ") f.flow_id FROM " + t.flows + " f LEFT JOIN " + t.steps +
+				" s ON s.flow_id=f.flow_id WHERE f.root_flow_id=" + strconv.Itoa(root)
+		}
+		branches[k] = "SELECT " + strconv.Itoa(k) + " AS k, COUNT(*) AS n FROM (" + inner + ") c" + strconv.Itoa(k)
+	}
+	rows, err := q.QueryContext(ctx, strings.Join(branches, " UNION ALL "))
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	defer rows.Close()
+	counts := make([]int, len(roots))
+	for rows.Next() {
+		var k, n int
+		if err := rows.Scan(&k, &n); err != nil {
+			return nil, errors.Trace(err)
+		}
+		counts[k] = n
+	}
+	return counts, errors.Trace(rows.Err())
 }
 
 // countUpTo counts the rows of "SELECT "+selectFrom, up to limit: a COUNT over a LIMIT or TOP, so it reads at most limit

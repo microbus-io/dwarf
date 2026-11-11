@@ -95,35 +95,54 @@ func TestMove_RetentionZeroDeletes(t *testing.T) {
 }
 
 // TestMove_BatchesAreCappedByRows pins how a batch is cut: the leading trees whose rows fit the budget, and always the
-// first however large - each counted only up to what the decision needs, the first up to its own limit and each later
-// one up to one past what is left, and the cut ending before a root that stops it.
+// first however large - sized in groups, one call each, the first tree counted up to its own limit and every other up
+// to one past what was left when its group was sent, and the cut ending before a root that stops it.
 func TestMove_BatchesAreCappedByRows(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	size := map[int]int{1: 3, 2: 4, 3: 5, 4: 100}
-	cut := func(roots []int, rows, firstLimit int, stop func(int) bool) ([]int, int, []int) {
-		var limits []int
-		c, first, err := cutWithinRows(roots, rows, firstLimit, stop, func(root, limit int) (int, error) {
-			limits = append(limits, limit)
-			return min(size[root], limit), nil
+	type call struct{ group, limits []int }
+	cut := func(roots []int, rows, firstLimit int, stop func(int) bool) ([]int, int, []call) {
+		var calls []call
+		c, first, err := cutWithinRows(roots, rows, firstLimit, stop, func(group, limits []int) ([]int, error) {
+			calls = append(calls, call{append([]int(nil), group...), append([]int(nil), limits...)})
+			counts := make([]int, len(group))
+			for k, root := range group {
+				n := size[root]
+				if n == 0 {
+					n = 1
+				}
+				counts[k] = min(n, limits[k])
+			}
+			return counts, nil
 		})
 		assert.NoError(err)
-		return c, first, limits
+		return c, first, calls
 	}
-	got, first, limits := cut([]int{1, 2, 3, 4}, 8, 9, nil)
+	got, first, calls := cut([]int{1, 2, 3, 4}, 8, 9, nil)
 	assert.Equal([]int{1, 2}, got)
 	assert.Equal(3, first)
-	assert.Equal([]int{9, 6, 2}, limits, "each later tree counted only to one past what is left")
+	assert.Equal([]call{{[]int{1, 2, 3, 4}, []int{9, 9, 9, 9}}}, calls, "one call; each capped to one past the batch")
 	got, _, _ = cut([]int{1, 2, 3, 4}, 12, 13, nil)
 	assert.Equal([]int{1, 2, 3}, got)
-	got, first, limits = cut([]int{4, 1}, 8, 50, nil)
+	got, first, calls = cut([]int{4, 1}, 8, 50, nil)
 	assert.Equal([]int{4}, got, "a tree over the budget goes alone")
 	assert.Equal(50, first, "counted to its limit, not whole")
-	assert.Equal([]int{50}, limits)
+	assert.Equal(50, calls[0].limits[0])
 	got, _, _ = cut([]int{1, 2, 3, 4}, 1000, 1001, nil)
 	assert.Equal([]int{1, 2, 3, 4}, got)
 	got, _, _ = cut([]int{1, 2, 3}, 1000, 1001, func(root int) bool { return root == 3 })
 	assert.Equal([]int{1, 2}, got, "the cut ends before a root that stops it")
+
+	many := make([]int, 20)
+	for i := range many {
+		many[i] = 100 + i // trees of one row
+	}
+	got, _, calls = cut(many, 100, 101, nil)
+	assert.Equal(many, got)
+	assert.Equal(2, len(calls), "a first group, then the rest")
+	assert.Equal(firstGroup, len(calls[0].group))
+	assert.Equal(85, calls[1].limits[0], "the later group capped to what was left: 100 - 16 + 1")
 }
 
 // TestMove_ResidencySplitsTheDueRoots pins the residency clause the scans take on a shard with two dispatchers:
