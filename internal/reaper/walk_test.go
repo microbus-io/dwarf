@@ -67,6 +67,7 @@ func TestWalk_TheArchiveDayLookupKeepsToTheAttempt(t *testing.T) {
 // Server or SQLite holds it - it is abandoned at the deadline as a failure, and the tree stays whole; the same delete
 // stopped by its caller's ctx is no failure.
 func TestWalk_ABlockedAttemptIsAFailureAndAStopIsNot(t *testing.T) {
+	t.Skip("janitor step 2: the fast walk of closed trees runs in the janitor; see internal/janitor TestWalk_AStopIsNotAFailure; the janitor has no attempt deadline")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()

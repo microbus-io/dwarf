@@ -1226,6 +1226,9 @@ func (e *Engine) initRuntime() error {
 	e.reaperWorker.Go(func() {
 		e.reaperLoop(reaperCtx)
 	})
+	// The first supervision runs here, so a shard this replica dispatches has its janitor - and its gauges their
+	// readings - by the time Startup returns.
+	e.superviseJanitors()
 	e.janitorWorker.Go(func() {
 		e.janitorLoop(janitorCtx)
 	})

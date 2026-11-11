@@ -17,9 +17,13 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"testing"
 
 	"github.com/microbus-io/testarossa"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
 func TestDBStats_WindowDeltaCountsTheArchive(t *testing.T) {
@@ -50,4 +54,24 @@ func TestDBStats_WindowDeltaCountsTheArchive(t *testing.T) {
 	// A failed reading on either side yields no delta.
 	before.ok = false
 	assert.Nil(s.windowDelta(before, after))
+}
+
+// TestGaugePoints_CarryTheFloatSums pins that the gauge snapshot carries a float64 sum's points - sequel's cumulative
+// pool-wait seconds, which the counter snapshot (int64 sums only) leaves out - so a window's pool wait is gaugesAfter
+// less gaugesBefore.
+func TestGaugePoints_CarryTheFloatSums(t *testing.T) {
+	t.Parallel()
+	reader := sdkmetric.NewManualReader()
+	meter := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test")
+	_, err := meter.Float64ObservableCounter("sequel_pool_wait_duration_seconds", metric.WithFloat64Callback(
+		func(_ context.Context, o metric.Float64Observer) error {
+			o.Observe(1.5, metric.WithAttributes(attribute.String("database", "d")))
+			return nil
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := collectGauges(reader)["sequel_pool_wait_duration_seconds|database=d"]; got != 1.5 {
+		t.Fatalf("pool wait %v, want 1.5", got)
+	}
 }

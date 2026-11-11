@@ -263,7 +263,7 @@ func (e *Engine) initMetrics() error {
 	// The archive's instruments count work the reaper, the archive's maintenance and the removals do anyway: none costs
 	// a statement. Exact counts of the live or archive tables by status (a GROUP BY linear in the tables) and the
 	// database's own statistics (a privileged read in four dialect shapes) are left to the server's exporter.
-	m.flowsRemoved = ctr("dwarf_flows_removed", "Counts root flows Delete and Purge removed, by shard, by operation (op: delete, purge) and by side: archive for a tree deleted from the archive at once, live for a closed tree not archived yet that Delete scheduled for deletion, which the reaper then deletes within a tick and counts as dwarf_flows_reaped{reason=\"deleted\"}. Purge reads only the archive, so it counts on the archive side only.")
+	m.flowsRemoved = ctr("dwarf_flows_removed", "Counts root flows Delete and Purge removed, by shard, by operation (op: delete, purge) and by side: archive for a tree deleted from the archive at once, live for a closed tree not archived yet that Delete scheduled for deletion, which is then deleted within seconds and counted as dwarf_flows_reaped{reason=\"deleted\"}. Purge reads only the archive, so it counts on the archive side only.")
 	m.daysDropped = ctr("dwarf_archive_days_dropped", "Counts archive days dropped, by shard: by retention, or by PurgeBefore. At a steady retention it rises by one per shard a day; two dispatchers dropping the same day at once can each count it.")
 	m.maintainFailed = ctr("dwarf_archive_maintain_failed", "Counts archive maintenance passes that failed, by shard: the pass that makes the days ahead and drops the expired days, run 24 times a day by a dispatcher of the shard. One failure is retried by the next pass; a run of them leaves the days ahead unmade, and one to two days of them stop archiving (dwarf_archive_failing_seconds). A pass cut short by Shutdown is not counted.")
 	m.flowsExpired = ctr("dwarf_flows_expired", "Counts root flows terminated because they were still open after the flow expiration (SetFlowExpiration), by shard. Each is also counted in dwarf_flows_closed{status=\"terminated\"}, with its subgraph flows. Zero while the expiration is off.")
@@ -505,18 +505,19 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 					o.ObserveFloat64(g.attemptOldest, k.OldestAttempt.Seconds(), shard)
 				}
 			}
-			o.ObserveFloat64(g.archiveFailing, obs.Failing.Seconds(), shard)
-			if obs.LagOK {
-				o.ObserveFloat64(g.archiveLag, obs.Lag.Seconds(), shard)
-			}
 			if obs.PendingOK {
 				o.ObserveInt64(g.deletesPending, int64(obs.Pending), shard)
 				o.ObserveInt64(g.deletesUnknown, int64(obs.PendingUnknown), shard)
 			}
 			if j := e.janitorOn(idx); j != nil {
-				for _, r := range j.Observe(now) {
+				jobs := j.Observe(now)
+				for _, r := range jobs.Jobs {
 					o.ObserveFloat64(g.janitorProgress, r.SinceProgress.Seconds(),
 						metric.WithAttributes(shardAttr(idx), attribute.String("job", r.Job)))
+				}
+				o.ObserveFloat64(g.archiveFailing, jobs.Failing.Seconds(), shard)
+				if jobs.LagOK {
+					o.ObserveFloat64(g.archiveLag, jobs.Lag.Seconds(), shard)
 				}
 			}
 		}

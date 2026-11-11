@@ -25,6 +25,7 @@ import (
 
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/janitor"
+	"github.com/microbus-io/dwarf/internal/reaper"
 	"github.com/microbus-io/dwarf/internal/turnstile"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/sequel"
@@ -73,8 +74,11 @@ func TestJanitor_FollowsTheDispatchRole(t *testing.T) {
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
 	var stopped atomic.Int64
+	entered := make(chan struct{}, 2)
+	e.janitorManual = false // the jobs run in the background, as in production
 	e.janitorTestJobs = func(shard int, db *sequel.DB) []janitor.Job {
 		return []janitor.Job{{Name: "test", Round: func(ctx context.Context, _ janitor.Batch) bool {
+			entered <- struct{}{}
 			<-ctx.Done()
 			stopped.Add(1)
 			return false
@@ -82,13 +86,20 @@ func TestJanitor_FollowsTheDispatchRole(t *testing.T) {
 	}
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
+	// Each janitor's job is waited into its round before it is stopped: one stopped before its first round never runs.
 	first := awaitJanitor(t, e, 1, true)
+	<-entered
 	e.dispatchFlag(1).Store(false)
 	awaitJanitor(t, e, 1, false)
+	deadline := time.Now().Add(10 * time.Second)
+	for stopped.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	assert.Equal(int64(1), stopped.Load(), "the janitor of a shard no longer dispatched is stopped and joined")
 	e.dispatchFlag(1).Store(true)
 	second := awaitJanitor(t, e, 1, true)
 	assert.True(first != second, "a shard dispatched again gets a new janitor")
+	<-entered
 
 	assert.NoError(e.Shutdown(t.Context()))
 	assert.Equal(int64(2), stopped.Load(), "Shutdown stops and joins the janitors")
@@ -107,6 +118,7 @@ func TestJanitor_AJobBlockedInAStatementIsCancelled(t *testing.T) {
 	in := make(chan struct{}, 1)
 	out := make(chan error, 1)
 	e.janitorIdle = 10 * time.Millisecond
+	e.janitorManual = false // the jobs run in the background, as in production
 	e.janitorTestJobs = func(shard int, db *sequel.DB) []janitor.Job {
 		return []janitor.Job{{Name: "test", Round: func(ctx context.Context, batch janitor.Batch) bool {
 			err := batch(ctx, func(ctx context.Context, h janitor.Handle) error {
@@ -185,6 +197,7 @@ func TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain(t *testing.T) {
 	held := make(chan int, 1)
 	giveUp := make(chan struct{})
 	e.janitorIdle = 10 * time.Millisecond
+	e.janitorManual = false // the jobs run in the background, as in production
 	e.janitorTestJobs = func(shard int, db *sequel.DB) []janitor.Job {
 		return []janitor.Job{{Name: "test", Round: func(ctx context.Context, _ janitor.Batch) bool {
 			if !grab.CompareAndSwap(true, false) {
@@ -235,8 +248,8 @@ func TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain(t *testing.T) {
 	}
 }
 
-// TestJanitor_ReapDueFlowsDrainsTheJobs pins the deterministic test mode: a Manual janitor runs no goroutine, and
-// reapDueFlows runs its jobs until a round makes no progress. Each batch takes a turn at dispatch's band, on a claim
+// TestJanitor_ReapDueFlowsDrainsTheJobs pins the deterministic test mode, test-mode engines' default: a Manual janitor
+// runs no goroutine, and reapDueFlows runs its jobs until a round makes no progress. Each batch takes a turn at dispatch's band, on a claim
 // of its own.
 func TestJanitor_ReapDueFlowsDrainsTheJobs(t *testing.T) {
 	t.Parallel()
@@ -246,7 +259,6 @@ func TestJanitor_ReapDueFlowsDrainsTheJobs(t *testing.T) {
 	assert.NoError(e.SetHost(noopHost{}))
 	var rounds atomic.Int64
 	var claims []turnstile.Claim
-	e.janitorManual = true
 	e.janitorTestJobs = func(shard int, db *sequel.DB) []janitor.Job {
 		return []janitor.Job{{Name: "test", Round: func(ctx context.Context, batch janitor.Batch) bool {
 			n := rounds.Add(1)
@@ -285,7 +297,6 @@ func TestJanitor_TheProgressGauge(t *testing.T) {
 	assert.NoError(e.SetHost(noopHost{}))
 	reader := sdkmetric.NewManualReader()
 	assert.NoError(e.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
-	e.janitorManual = true
 	e.janitorTestJobs = func(shard int, db *sequel.DB) []janitor.Job {
 		return []janitor.Job{{Name: "test", Round: func(context.Context, janitor.Batch) bool { return false }}}
 	}
@@ -319,4 +330,40 @@ func TestJanitor_TheProgressGauge(t *testing.T) {
 	awaitJanitor(t, e, 1, false)
 	_, ok = age()
 	assert.False(ok, "a shard no longer dispatched is not reported")
+}
+
+// TestJanitor_SharesTheReapersFaultNames pins that the janitor consults the reaper's fault and checkpoint names, so a
+// test arming one through engineseams arms both while both run.
+func TestJanitor_SharesTheReapersFaultNames(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	assert.Equal(reaper.FaultMidTree, janitor.FaultMidTree)
+	assert.Equal(reaper.FaultSizeErr, janitor.FaultSizeErr)
+	assert.Equal(reaper.FaultSelectErr, janitor.FaultSelectErr)
+	assert.Equal(reaper.FaultContention, janitor.FaultContention)
+	assert.Equal(reaper.FaultArchiveErr, janitor.FaultArchiveErr)
+	assert.Equal(reaper.CheckpointBatchLocked, janitor.CheckpointBatchLocked)
+	assert.Equal(reaper.ReasonNoRetention, janitor.ReasonNoRetention)
+}
+
+// TestJanitor_TheGraceOverrideReachesTheJobs pins the grace a test's ArchiveNow passes: the janitors' rounds under it
+// archive a root closed just now, which the archive grace keeps them from otherwise.
+func TestJanitor_TheGraceOverrideReachesTheJobs(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e := archiveEngine(t, treeMux(), 30)
+	e.archiveGrace = time.Hour
+	root := closedRoots(t, e, 1)[0]
+	db, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	live := func() int {
+		var n int
+		assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=?", root).Scan(&n))
+		return n
+	}
+	e.drainJanitors(ctx)
+	assert.Equal(1, live(), "within the archive grace")
+	e.drainJanitors(context.WithValue(ctx, janitorGraceKey{}, time.Duration(0)))
+	assert.Zero(live(), "archived by the janitor under a grace of 0")
 }

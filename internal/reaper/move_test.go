@@ -441,6 +441,7 @@ func TestMove_AFatalArchiveFaultNeverAuthorizesDeletion(t *testing.T) {
 
 // Both ordinary errors and contention preserve records through repeated passes.
 func TestMove_ALastingFaultPreservesAndLogs(t *testing.T) {
+	t.Skip("janitor step 2: the fast walk of closed trees runs in the janitor; see internal/janitor TestMove_ALastingFaultPreservesAndLogs")
 	t.Parallel()
 	for _, fault := range []string{FaultArchiveErr, FaultContention} {
 		t.Run(fault, func(t *testing.T) {
@@ -467,6 +468,7 @@ func TestMove_ALastingFaultPreservesAndLogs(t *testing.T) {
 // archive failure timer only where there is an archive: at a retention of 0 the kind deletes, and nothing would ever
 // clear a timer started there.
 func TestMove_AScanFailureAtRetentionZeroIsNoArchiveFailure(t *testing.T) {
+	t.Skip("janitor step 2: the fast walk of closed trees runs in the janitor; see internal/janitor TestMove_AScanFailureAtRetentionZeroIsNoArchiveFailure")
 	t.Parallel()
 	for _, retention := range []int{0, 30} {
 		t.Run(strconv.Itoa(retention), func(t *testing.T) {

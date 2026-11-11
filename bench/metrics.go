@@ -284,8 +284,9 @@ type gaugeKV struct {
 	value float64
 }
 
-// gaugePoints flattens a gauge metric's data points (int64 or float64) to keyed values; non-gauge
-// metrics yield nothing.
+// gaugePoints flattens a gauge metric's data points (int64 or float64) to keyed values, and a float64 sum's:
+// collectCounters takes int64 sums only, and the float64 ones are cumulative totals - sequel's
+// sequel_pool_wait_duration_seconds - whose window is gaugesAfter less gaugesBefore. Other metrics yield nothing.
 func gaugePoints(m metricdata.Metrics) []gaugeKV {
 	var out []gaugeKV
 	add := func(attrs attribute.Set, v float64) {
@@ -303,6 +304,10 @@ func gaugePoints(m metricdata.Metrics) []gaugeKV {
 			add(dp.Attributes, float64(dp.Value))
 		}
 	case metricdata.Gauge[float64]:
+		for _, dp := range data.DataPoints {
+			add(dp.Attributes, dp.Value)
+		}
+	case metricdata.Sum[float64]:
 		for _, dp := range data.DataPoints {
 			add(dp.Attributes, dp.Value)
 		}

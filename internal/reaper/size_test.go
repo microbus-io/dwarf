@@ -99,8 +99,7 @@ func TestSize_AChunkKeepsToItsBytes(t *testing.T) {
 	r := newRig(t, 30)
 	root := seedWideTree(t, r.db, 6, 0, 0) // one flow of 6 steps
 	setStepBytes(t, r, root, 3000, 0)
-	_, err := r.db.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1 WHERE flow_id=?", root)
-	assert.Must(assert.NoError(err))
+	stampTree(t, r.db, root) // backdated: a stamp in the seed's millisecond is not due, and its root is not deleted
 
 	steps := func() int {
 		_, n, _ := rowsOf(t, r, root)
@@ -166,6 +165,7 @@ func TestSize_AStagingChunkKeepsToItsBytes(t *testing.T) {
 // thresholds: a pass moves them all in one transaction - one archive time for every flow of every tree - with no
 // attempt started and nothing counted as staged.
 func TestSize_SmallTreesMoveTogether(t *testing.T) {
+	t.Skip("janitor step 2: the fast walk of closed trees runs in the janitor; see internal/janitor TestSize_SmallTreesMoveTogether")
 	t.Parallel()
 	for _, staging := range []bool{false, true} {
 		t.Run(map[bool]string{false: "staging_off", true: "staging_on"}[staging], func(t *testing.T) {
@@ -278,8 +278,7 @@ func TestSize_AFlowRowIsChargedItsBytes(t *testing.T) {
 			r := newRig(t, 30)
 			root := seedWideTree(t, r.db, shape.rootSteps, shape.kids, shape.kidSts)
 			setStepBytes(t, r, root, 3000, 6000)
-			_, err := r.db.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1 WHERE flow_id=?", root)
-			assert.Must(assert.NoError(err))
+			stampTree(t, r.db, root) // backdated: a stamp in the seed's millisecond is not due, and its root is not deleted
 			ids := treeIDs(t, r, root)
 			whole := treeSize(t, r, "dwarf_flows", "dwarf_steps", ids)
 			var pos chunkPos

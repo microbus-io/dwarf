@@ -1,9 +1,10 @@
 # Dwarf `internal/janitor` — one shard's background jobs, a goroutine each
 
 > Load when: changing how a janitor's jobs are scheduled, started, stopped or drained, how a batch takes its turn
-> and its connection, or the janitors' metrics.
-> Coupled with: `engine/CLAUDE.md` §"The janitors" (the supervisor, the drain order, the test seams) and
-> `internal/turnstile/CLAUDE.md` (what a claim's age means).
+> and its connection, fast archiving or fast deletion, or the janitors' metrics.
+> Coupled with: `engine/CLAUDE.md` §"The janitors" (the supervisor, the drain order, the test seams),
+> `internal/turnstile/CLAUDE.md` (what a claim's age means), `internal/reaper/CLAUDE.md` (the work the janitor has not
+> taken over: the sweeps, staging, deletion, retention) and `internal/archiver/CLAUDE.md` (the day tables).
 
 ## What a Janitor is
 
@@ -39,11 +40,23 @@ A round does its work in batches through the `Batch` it is handed.
 - **The turn is at dispatch's band** (the engine's `priorityCommon`). A lower band could starve the jobs at peak
   load and let the live tables grow; equal standing does not guarantee them any share, which the batch timings are
   there to show.
-- **The batch runs on the shard's pool**, so each statement takes a connection of its own and queues for it behind
-  dispatch; on a full pool those waits, one per statement, can be most of a batch's time. `Handle` is the seam where
-  a batch's one connection goes: anything with sequel's query methods and `Transact`.
-- **Timings** (`dwarf_janitor_batch_seconds`, by shard, job and part): `turn` is the wait for the turn, `work` the
-  batch's statements, the pool's waits included. They attribute a job's shortfall to its own waits, which the
+- **Each batch takes one connection from the pool, once, and runs every statement on it** (a `sequel.Conn`, closed
+  when the batch ends). Under a full pool every acquisition queues behind dispatch, and a batch that took one per
+  statement - its scan, its attempt read, its sizing, its transaction - spent most of its time in those queues rather
+  than in SQL. Pinned by
+  `TestJanitor_ABatchRunsOnOneConnection`. Its reads run on the connection before its transaction begins: SQLite
+  needs a transaction to open with a write, and on MySQL a read inside it would pin its snapshot for the batch.
+- **A batch never takes a second connection while it holds its own** - no statement on the shard's `DB`, nor on
+  anything holding it, the archive included (`archiver.TodayLeftOn` reads the day on the batch's connection). A
+  batch holding one connection and waiting for another is hold-and-wait: enough of them at once take every
+  connection of the pool and wait forever. Read each query's rows to the end before the next statement, too: the
+  connection runs one statement at a time. Pinned by `TestJanitor_NoBatchTakesASecondConnection`, which runs every job
+  on a pool of one connection.
+- **A batch that cannot take its connection fails** without running its work, and its job reports it: an archive
+  failure for fast archiving, a logged error otherwise (`TestJanitor_ABatchThatCannotTakeItsConnectionFails`,
+  `TestFast_ABatchThatCannotTakeItsConnectionIsAFailure`).
+- **Timings** (`dwarf_janitor_batch_seconds`, by shard, job and part): `turn` is the wait for the turn, `acquire`
+  for the connection, `work` the batch's statements - none for a batch that could not take its connection. They attribute a job's shortfall to its own waits, which the
   pool-wide counters cannot.
 
 ## Stopping
@@ -61,3 +74,81 @@ until a pass over every job makes none. It returns where a running job would wai
 failing cannot hang on it, and jobs that feed each other are run until both are done. A round holds its job's mutex,
 so a `Drain` beside the goroutines never overlaps a round (`TestJanitor_ADrainBesideTheGoroutineNeverOverlapsARound`).
 Pinned by `TestJanitor_DrainReturnsWhereAJobWouldWait`.
+
+## Fast archiving (`fast.go`)
+
+The janitor's first job (`JobFastArchiving`): the closed roots as they come due, by close time, one batch a round,
+moved into today's archive in one transaction - or deleted, at a retention of 0. The move, its root locks and the
+rechecks under them, the directory rows and the archive time are the reaper's, carried over (`move.go`;
+`internal/reaper/CLAUDE.md` holds their rationale while the reaper stands).
+
+- **A position, and nothing behind it.** The job scans from its position, the last root a round was done with, and
+  moves the position past every root the round considered, whatever became of it: moved, held, failed, or not its own.
+  A root behind the position - one it failed on, one held, one that committed late with an older close - is left to a
+  sweep (the reaper's repair walk). A job that held its position on a failure would retry it every round and reach
+  nothing behind it (`TestWalk_FastPassesTheBatchItAttempted`). A round that removed nothing - held or failed - makes no
+  progress and the job waits; the batches after it are reached on the next round.
+- **Not its own, and passed:** a root with an archive attempt (the staged path's, whoever copies it); with staging on,
+  a tree over the staging threshold, alone in its batch, which the reaper's repair walk stages; at a retention of 0, a
+  tree too large for a batch, which the job stamps for deletion - due at once - and the deletion of stamped trees
+  removes in chunks. Passing them counts as progress. The stamp locks the root as a move does, so a root a Fork holds
+  is skipped on PostgreSQL and MySQL rather than waited for (`TestFast_AHeldRootIsNotWaitedForWhenStamped`).
+- **The residue class is read every round, and a change starts the walk over.** When a peer leaves, the roots of its
+  class are already behind the survivors' positions, which were not theirs then; started over, the job takes them at
+  once rather than leaving them to a sweep (`TestFast_AResidencyChangeStartsOver`). The scan also takes another class's
+  roots overdue by the steal grace, a fixed 30 s past the archive grace - but only those ahead of the position, which
+  happens when this job is behind. By the time a slow peer's roots are overdue, a job keeping up has passed them: they
+  are a sweep's (the reaper's repair walk).
+- **An atomic batch holds at most `MaxBatchFlows` (4,096) flows**, whatever its rows and bytes allow: every flow of a
+  batch gets one archive time, and `ListClosed` cannot page across a tie larger than its `Limit`, so the lists'
+  maximum must stay above it. A tree of more goes alone (`TestMove_ABatchHoldsAtMostMaxBatchFlows`).
+- **The lag is read at every scan** (`dwarf_archive_lag_seconds`): how long past the grace the oldest due root after the
+  position had waited, 0 when none is.
+- **The failure episode** (`dwarf_archive_failing_seconds`) begins at an archive failure - a day not readable or not
+  whole, a batch that cannot take its connection, a failed scan, attempt read, sizing or move - and ends at a later
+  move that archives something, or at a sweep of every due closed root, begun after the last failure, that failed on
+  none (`SweptClean`; the engine passes on the reaper's repair sweep until the janitor sweeps itself). **Do not end it
+  at an empty round:** the scan is after the position, and a root a failure left behind is not in it, so a failing root
+  on a quiet shard would read as recovered. Ending it only at a move fails the other way: one transient error on a
+  quiet shard reads as failing for as long as nothing closes; the clean sweep ends that. Pinned by
+  `TestFast_TheFailureEndsAtAMoveOrACleanSweep` and the engine's `TestArchiveMetrics_ATransientFailureEndsAtACleanSweep`
+  and `TestArchiveMetrics_TheReaperCountsWhatItMoves`. A stop records nothing. Only the episode's first failure is
+  logged (`TestMove_ALastingFaultPreservesAndLogs`). At a retention of 0 nothing is archived, so nothing starts an
+  episode (`TestMove_AScanFailureAtRetentionZeroIsNoArchiveFailure`).
+- **The counters it shares with the reaper** - `dwarf_flows_archived`, `dwarf_archive_move_failures`,
+  `dwarf_flows_reaped` - are created on the same meter by both packages, from one description each
+  (`ArchivedDescription` and the rest): two instruments of one name with different descriptions are exported as two
+  streams of that name.
+- **The recheck under the root lock is the authority, not the scan:** a root selected and sized is moved only if it is
+  still a closed root due, unstamped, and with no archive attempt when locked (`TestMove_TheLockRechecksEveryRoot`); a
+  stamped one only if still stamped and due (`TestDelete_TheLockRechecksTheStamp`).
+- **The position's close time is normalized** (`database.StoredTime`) before it is bound back: a MySQL driver with a
+  DSN `loc` other than UTC places the stored wall clock in that location. The fault and checkpoint names are the reaper's strings, so a test
+  arming one through `engineseams` arms both.
+
+## Fast deletion (`delete.go`)
+
+The second job (`JobFastDeletion`): the trees stamped for deletion - a Delete's, a DeleteOnCompletion's once its
+grace has run, a published tree's live copy - deleted whole as their stamps come due, one batch a round, by the same
+transaction as an archive move with no day (`move`, the stamp rechecked under the root lock). It walks the stamped
+roots by `flow_id` through `idx_dwarf_flows_delete_after`, from a position it moves past every root a round
+considered, and starts over when its residue class changes, as fast archiving does.
+
+- **A stamped tree too large for a batch is passed**, stamped and whole, to the deletion in chunks (the reaper's repair
+  walk of stamped trees), which yields between its chunks; one transaction deleting a tree grows with the tree until it
+  cannot finish (`TestDelete_ALargeStampedTreeIsPassed`).
+- **By `flow_id`, any stamp that comes due behind the position waits for a sweep**, and more do than the old-flow case
+  suggests: a Delete of an old flow; a DeleteOnCompletion flow still in its grace when a newer flow's stamp comes due
+  (an operator Delete of a fresh flow passes every such flow below it); with mixed durations, every
+  DeleteOnCompletion flow outlived by one created after it. Every read hides a stamped tree the moment it is stamped,
+  so the wait costs storage, not correctness. Ordering by due time instead would need an index on it.
+- **`dwarf_flows_reaped{reason="deleted"}` counts only trees never archived**: a published tree's live copy, stamped
+  with its attempt or carrying the archive time its publication copied, is counted at the move's root locks and left
+  out (`publishedSQL`, `TestDelete_APublishedLiveCopyIsNotCountedReaped`).
+
+Until large-tree archiving moves (step 5 of the plan), a staged archive is copied only by the reaper's repair walk,
+which never ends or begins an archive failure episode: a stuck staged copy shows in
+`dwarf_archive_oldest_attempt_seconds`, not in `dwarf_archive_failing_seconds`. Staging is off in production.
+
+Its tests run on a rig (`rig_test.go`): an isolated shard database, an archive with today's tables made, and a Manual
+janitor whose settings a test changes between passes.

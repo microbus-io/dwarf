@@ -50,7 +50,10 @@ func (p *pass) run(ctx context.Context) {
 		// Closed trees first, then the stamped: a tree published in a round - by a staged copy's last chunk - is a
 		// stamped tree, and the deletion walk after it removes its live copy in the same round.
 		moreClosed := p.closed(ctx)
-		moreDeleted := p.due(ctx, deletionDue(p.cfg.StealGrace), func() (*filingDay, bool) { return nil, true }, ReasonDeleted)
+		// Janitor step 3: the fast walk of stamped trees is the janitor's fast deletion job (internal/janitor), so only
+		// the repair walk runs here. The fast walk is kept, commented out, as the reference.
+		// moreDeleted := p.due(ctx, deletionDue(p.cfg.StealGrace), func() (*filingDay, bool) { return nil, true }, ReasonDeleted)
+		moreDeleted := p.walk(ctx, deletionDue(p.cfg.StealGrace), func() (*filingDay, bool) { return nil, true }, ReasonDeleted, true)
 		if ctx.Err() != nil || time.Since(start) >= p.cfg.Budget || (!moreDeleted && !moreClosed) {
 			return
 		}
@@ -72,9 +75,14 @@ func (p *pass) closed(ctx context.Context) bool {
 			}
 		}
 	}
-	return p.due(ctx, closedDue(p.cfg.StealGrace, p.cfg.Grace), func() (*filingDay, bool) {
+	// Janitor step 2: the fast walk of closed trees is the janitor's fast archiving job (internal/janitor), so only the
+	// repair walk runs here. The fast walk is kept, commented out, as the reference.
+	// return p.due(ctx, closedDue(p.cfg.StealGrace, p.cfg.Grace), func() (*filingDay, bool) {
+	// 	return d, d == nil || d.startable()
+	// }, ReasonNoRetention)
+	return p.walk(ctx, closedDue(p.cfg.StealGrace, p.cfg.Grace), func() (*filingDay, bool) {
 		return d, d == nil || d.startable()
-	}, ReasonNoRetention)
+	}, ReasonNoRetention, true)
 }
 
 // archiveFailed records an archive failure. Only the first of an episode is logged; repair logs individual held roots.
@@ -185,6 +193,10 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 			if repair {
 				if k.lagged && w.failed == 0 {
 					p.r.failures.clearUnlessFailedSince(shard, w.started)
+					// A sweep over a day closed to archiving - tomorrow not whole - says nothing about archiving.
+					if _, startable := dayOf(); startable {
+						w.cleanSweep = w.started
+					}
 				}
 				w.lastFailed, w.failed, w.started = w.failed, 0, time.Time{}
 				w.lastAttemptAge, w.lastAttemptSeen, w.attemptAge, w.attemptSeen = w.attemptAge, w.attemptSeen, 0, time.Time{}

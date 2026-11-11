@@ -27,6 +27,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
+	"github.com/microbus-io/dwarf/internal/janitor"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/workflow"
@@ -358,6 +359,7 @@ func TestList_TheLimitIsAboveAReaperBatch(t *testing.T) {
 	e := NewEngine()
 	assert.True(maxListLimit > e.reapBatchRows, "the most a list returns (%d) must exceed a reaper batch (%d rows)", maxListLimit, e.reapBatchRows)
 	assert.True(maxListLimit > e.reapBatch, "and its roots (%d)", e.reapBatch)
+	assert.True(maxListLimit > janitor.MaxBatchFlows, "and an archiving batch's flows (%d)", janitor.MaxBatchFlows)
 }
 
 // TestListClosed_TheDayAfterTodayIsRead pins the one day past today a window reaching past now reads, for a database

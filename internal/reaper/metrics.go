@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/janitor"
 	"github.com/microbus-io/errors"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -47,10 +48,11 @@ func newInstruments(meter metric.Meter) (*instruments, error) {
 		return c
 	}
 	m := &instruments{}
-	m.moveFailures = ctr("dwarf_archive_move_failures", "Failed archive attempts, including sizing, contention and deadlines; counts attempts, not distinct trees.")
-	m.archived = ctr("dwarf_flows_archived", "Counts flows the reaper moved from the live tables into the archive, by shard: each root and every subgraph flow of its tree. Its rate plus dwarf_flows_reaped's, against dwarf_flows_closed, is the reaper keeping up - a closed root waits the archive grace (a minute) in the live tables, so the two track each other a minute apart.")
+	// Janitor steps 2-3: the janitor creates these three counters on the same meter, so both take one description.
+	m.moveFailures = ctr("dwarf_archive_move_failures", janitor.MoveFailuresDescription)
+	m.archived = ctr("dwarf_flows_archived", janitor.ArchivedDescription)
 	m.staged = ctr("dwarf_archive_staged_rows", "Counts rows a staged archive copied into the archive, by shard: the flows and steps of a tree too large to archive in one transaction, written chunk by chunk before it is published. A chunk run again counts only what was not there. Read beside dwarf_archive_oldest_attempt_seconds: an age that grows while this moves is a large tree copying; one that grows while this is flat is a copy that is stuck, and the logs say why.")
-	m.reaped = ctr("dwarf_flows_reaped", "Counts flows the reaper deleted from the live tables WITHOUT archiving them, by shard and by reason: deleted (a tree Delete or DeleteOnCompletion scheduled for deletion), no_retention (a retention of 0 keeps no archive), and archive_failed (an unarchived tree reached its retention cutoff). archive_failed is records LOST from the archive and must stay zero; dwarf_archive_failing_seconds says since when it has been failing, and the logs say why.")
+	m.reaped = ctr("dwarf_flows_reaped", janitor.ReapedDescription)
 	passSeconds, err := meter.Float64Histogram("dwarf_reap_pass_seconds",
 		metric.WithUnit("s"),
 		metric.WithDescription("Time one reaper pass spent on a shard, by shard: from its turn at the shard to the end of its work - the trees scheduled for deletion removed, then the closed trees archived, each batch by batch until none is due. A pass runs every 15 seconds on each dispatcher of the shard. Passes that grow toward that interval mean the reaper is falling behind the rate flows close; read dwarf_archive_lag_seconds for how far."),

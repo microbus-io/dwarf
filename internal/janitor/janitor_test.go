@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/turnstile"
+	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/testarossa"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -155,7 +156,7 @@ func TestJanitor_StopCancelsABlockedJob(t *testing.T) {
 	assert := testarossa.For(t)
 	in := make(chan struct{})
 	var ended atomic.Bool
-	j := New(Config{Turn: noTurn, Jobs: []Job{
+	j := New(Config{DB: newRig(t, 30).db, Turn: noTurn, Jobs: []Job{
 		{Name: "blocked", Round: func(ctx context.Context, batch Batch) bool {
 			_ = batch(ctx, func(ctx context.Context, _ Handle) error {
 				close(in)
@@ -193,7 +194,7 @@ func TestJanitor_EachBatchTakesAFreshClaim(t *testing.T) {
 	}
 	var claims []turnstile.Claim
 	var nested error
-	j := New(Config{Turn: turn, Manual: true, Jobs: []Job{
+	j := New(Config{DB: newRig(t, 30).db, Turn: turn, Manual: true, Jobs: []Job{
 		{Name: "two", Round: func(ctx context.Context, batch Batch) bool {
 			for range 2 {
 				err := batch(ctx, func(batchCtx context.Context, _ Handle) error {
@@ -227,20 +228,20 @@ func TestJanitor_ObserveReportsTimeSinceProgress(t *testing.T) {
 	j := New(Config{Turn: noTurn, Manual: true, Jobs: []Job{
 		{Name: "job", Round: func(ctx context.Context, _ Batch) bool { return progress.Swap(false) }},
 	}})
-	assert.Len(j.Observe(time.Now()), 0, "nothing to report before Start")
+	assert.Len(j.Observe(time.Now()).Jobs, 0, "nothing to report before Start")
 	j.Start(t.Context())
 	defer j.Stop()
-	r := j.Observe(time.Now())
+	r := j.Observe(time.Now()).Jobs
 	assert.Must(assert.Len(r, 1))
 	assert.Equal("job", r[0].Job)
 	assert.True(r[0].SinceProgress < time.Second)
 
 	time.Sleep(100 * time.Millisecond)
 	j.Drain(t.Context())
-	assert.True(j.Observe(time.Now())[0].SinceProgress >= 100*time.Millisecond, "a round without progress resets nothing")
+	assert.True(j.Observe(time.Now()).Jobs[0].SinceProgress >= 100*time.Millisecond, "a round without progress resets nothing")
 	progress.Store(true)
 	j.Drain(t.Context())
-	assert.True(j.Observe(time.Now())[0].SinceProgress < 50*time.Millisecond, "a round with progress resets it")
+	assert.True(j.Observe(time.Now()).Jobs[0].SinceProgress < 50*time.Millisecond, "a round with progress resets it")
 }
 
 // TestJanitor_ADrainBesideTheGoroutineNeverOverlapsARound pins that one job's rounds never overlap, so a test's Drain
@@ -267,6 +268,45 @@ func TestJanitor_ADrainBesideTheGoroutineNeverOverlapsARound(t *testing.T) {
 	assert.Equal(int64(0), overlaps.Load())
 }
 
+// TestJanitor_ABatchRunsOnOneConnection pins the batch's connection: every statement of a batch runs on the one
+// connection the batch took, so it waits for the pool once rather than once a statement.
+func TestJanitor_ABatchRunsOnOneConnection(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	db := newRig(t, 30).db
+	var idSQL string
+	switch db.DriverName() {
+	case "pgx":
+		idSQL = "SELECT pg_backend_pid()"
+	case "mysql", "mariadb":
+		idSQL = "SELECT CONNECTION_ID()"
+	case "mssql":
+		idSQL = "SELECT @@SPID"
+	default:
+		t.Skip("SQLite names no connection")
+	}
+	j := New(Config{DB: db, Turn: noTurn, Manual: true, Jobs: []Job{
+		{Name: "job", Round: func(ctx context.Context, batch Batch) bool {
+			assert.NoError(batch(ctx, func(ctx context.Context, h Handle) error {
+				ids := map[int64]bool{}
+				for range 8 {
+					var id int64
+					if err := h.QueryRowContext(ctx, idSQL).Scan(&id); err != nil {
+						return err
+					}
+					ids[id] = true
+				}
+				assert.Len(ids, 1, "every statement on one connection")
+				return nil
+			}))
+			return false
+		}},
+	}})
+	j.Start(t.Context())
+	defer j.Stop()
+	j.Drain(t.Context())
+}
+
 // TestJanitor_BatchTimings pins dwarf_janitor_batch_seconds: one sample per batch for each part, by shard and job.
 func TestJanitor_BatchTimings(t *testing.T) {
 	t.Parallel()
@@ -274,7 +314,7 @@ func TestJanitor_BatchTimings(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	inst, err := NewInstruments(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"))
 	assert.Must(assert.NoError(err))
-	j := New(Config{Shard: 3, Turn: noTurn, Manual: true, Instruments: inst, Jobs: []Job{
+	j := New(Config{Shard: 3, DB: newRig(t, 30).db, Turn: noTurn, Manual: true, Instruments: inst, Jobs: []Job{
 		{Name: "job", Round: func(ctx context.Context, batch Batch) bool {
 			for range 2 {
 				_ = batch(ctx, func(context.Context, Handle) error { time.Sleep(10 * time.Millisecond); return nil })
@@ -309,6 +349,45 @@ func TestJanitor_BatchTimings(t *testing.T) {
 			}
 		}
 	}
-	assert.Equal(map[string]uint64{partTurn: 2, partWork: 2}, counts)
+	assert.Equal(map[string]uint64{partTurn: 2, partAcquire: 2, partWork: 2}, counts)
 	assert.True(work >= 0.02, "work %v", work)
+}
+
+// TestJanitor_ABatchThatCannotTakeItsConnectionFails pins the batch's failure to take its connection: the batch
+// returns the error without running its work, and records its turn and acquisition but no work.
+func TestJanitor_ABatchThatCannotTakeItsConnectionFails(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	reader := sdkmetric.NewManualReader()
+	inst, err := NewInstruments(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"))
+	assert.Must(assert.NoError(err))
+	seams := seamster.New(true)
+	seams.InjectN(FaultConnErr, 1)
+	ran := false
+	var batchErr error
+	j := New(Config{DB: newRig(t, 30).db, Turn: noTurn, Manual: true, Instruments: inst, Seams: seams, Jobs: []Job{
+		{Name: "job", Round: func(ctx context.Context, batch Batch) bool {
+			batchErr = batch(ctx, func(context.Context, Handle) error { ran = true; return nil })
+			return false
+		}},
+	}})
+	j.Start(t.Context())
+	defer j.Stop()
+	j.Drain(t.Context())
+	assert.Error(batchErr)
+	assert.False(ran, "the work did not run")
+	var rm metricdata.ResourceMetrics
+	assert.Must(assert.NoError(reader.Collect(t.Context(), &rm)))
+	parts := map[string]uint64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if h, ok := m.Data.(metricdata.Histogram[float64]); ok && m.Name == "dwarf_janitor_batch_seconds" {
+				for _, dp := range h.DataPoints {
+					part, _ := dp.Attributes.Value("part")
+					parts[part.AsString()] += dp.Count
+				}
+			}
+		}
+	}
+	assert.Equal(map[string]uint64{partTurn: 1, partAcquire: 1}, parts)
 }

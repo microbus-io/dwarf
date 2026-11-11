@@ -86,6 +86,10 @@ func NewEngineUnderTest(testName string) *Engine {
 	// A pass in a day's last moments archives as at any other time: the quiet margin is pinned by its own test, and
 	// left on it would hold back every archiving test that runs then.
 	e.noReapQuiet = true
+	// The janitors run their jobs only when a test drives them (reapDueFlows, engineseams.ArchiveNow): polling every
+	// second from Startup, they would race every test that holds a due tree in the live tables for a moment - a Delete
+	// then a Fork expecting 409, a root backdated past the grace. A test of the background running sets it false.
+	e.janitorManual = true
 	return e
 }
 
@@ -100,7 +104,11 @@ func init() {
 		}
 		return e.listLive(ctx, query, slices.Concat(openStatuses, closedStatuses), "list_open")
 	}
-	engineseams.ArchiveNow = func(eng any, ctx context.Context) { eng.(*Engine).reapPass(ctx, 0, false) }
+	engineseams.ArchiveNow = func(eng any, ctx context.Context) {
+		e := eng.(*Engine)
+		e.drainJanitors(context.WithValue(ctx, janitorGraceKey{}, time.Duration(0)))
+		e.reapPass(ctx, 0, false)
+	}
 	engineseams.FlowsClosed = func(eng any) int64 { return eng.(*Engine).flowsClosedCount.Load() }
 	engineseams.ArchiveDays = func(eng any, ctx context.Context, shard int) ([]int, error) {
 		set := eng.(*Engine).archives.Load()

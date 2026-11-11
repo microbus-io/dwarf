@@ -43,6 +43,9 @@ type walk struct {
 	// read; lastAttemptAge the last complete sweep's.
 	attemptAge, lastAttemptAge   time.Duration
 	attemptSeen, lastAttemptSeen time.Time
+	// cleanSweep is when the last sweep that completed with no failure began. Janitor steps 2-5: the engine passes it
+	// to the janitor, whose fast archiving ends its failure episode at it.
+	cleanSweep time.Time
 }
 
 // observeAttempts compares samples at one instant, so time between reads cannot make a younger attempt win.

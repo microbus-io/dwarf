@@ -3620,13 +3620,27 @@ of their own; their mechanics are in `internal/janitor/CLAUDE.md`. The engine ho
   shard this replica started dispatching and stops the janitor of one it stopped. Every janitor's context is a child
   of the supervisor's, which the drain cancels before the workers (see "Shutdown ordering").
 - **A batch's turn is `dbTurn`**, at dispatch's band, taken fresh for each batch.
+- **The first supervision runs in `initRuntime`**, before Startup returns, so a dispatched shard's janitor - and the
+  archive gauges it feeds - exists from the start; the loop takes over from there.
+- **Settings are read at every round** (`janitorSettings`) from the engine's fields, since tests change them on a
+  running engine; such a test runs its janitors Manual, or the background round races the write. A round on a context
+  carrying `janitorGraceKey` archives with that grace: `engineseams.ArchiveNow` drains the janitors with 0, then runs
+  the reaper's pass with 0.
+- **The archive gauges come from the janitor** (`dwarf_archive_lag_seconds`, `dwarf_archive_failing_seconds`), the
+  held-root, sweep, attempt and deletion gauges still from the reaper. After each reaper pass on a shard, `reapPass`
+  hands the reaper's last clean repair sweep of closed roots to the janitor (`Janitor.SweptClean`), which ends a
+  failure episode the sweep has shown is over. Its jobs are fast archiving and fast
+  deletion; the reaper's pass runs the repair walks, staging, chunked deletion, retention and the periodic stages.
 - **One set of instruments a run** (`engineMetrics.janitor`), shared by every janitor, since instruments made per
   janitor would be made again at every handoff. The gauge (`dwarf_janitor_progress_age_seconds`) reads
   `Janitor.Observe`, gated on dispatching like the reaper's.
 - **Tests:** `reapDueFlows` runs the janitors' jobs until they make no progress (`drainJanitors`, which first brings
   the janitors in line with the roles), then the reaper's pass. `janitorManual` starts no job goroutine, so a test
-  decides when the jobs run; `janitorIdle` shortens their idle wait; `janitorTestJobs` gives every janitor a test's
-  jobs.
+  decides when the jobs run: **test mode's default** (`NewEngineUnderTest`), since jobs polling every second from
+  Startup race any test that holds a due tree in the live tables for a moment (a Delete then a Fork expecting 409, a
+  root backdated past the grace); the suite was written against a reaper whose first tick came 15 s in. A test of the
+  background running sets it false (`shortenDeletion` with a short interval, the `TestJanitor_*` lifecycle tests).
+  `janitorIdle` shortens the idle wait; `janitorTestJobs` gives every janitor a test's jobs.
 
 **The tree delete is unconditional on descendant status, deliberately** - do not 409 on a `running` subgraph
 descendant. The deferred path stamps only the root (whose own status is 409-guarded, so an open root is never

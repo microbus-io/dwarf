@@ -142,6 +142,9 @@ type Observation struct {
 	LagOK bool
 	// Kinds holds every kind, in the order closed, deleted, retention, zero for a kind not walked yet.
 	Kinds [3]KindObservation
+	// CleanSweep is when the last repair sweep of closed roots that completed with no failure began; zero before the
+	// first.
+	CleanSweep time.Time
 	// Pending is the number of discovered marked trees left by the last DeleteMarked. PendingUnknown counts
 	// retained days it could not examine. PendingOK is false before the first completed pass.
 	Pending        int
@@ -228,6 +231,7 @@ func (r *Reaper) Observe(shard int, now time.Time) Observation {
 	var o Observation
 	o.Failing = r.failures.failingFor(shard, now)
 	o.Lag, o.LagOK = r.lag.of(shard)
+	o.CleanSweep = r.walks.get(walkKey{shard, KindClosed, true}).cleanSweep
 	cleanup := r.cleanup.get(shard)
 	o.Pending, o.PendingUnknown, o.PendingOK = cleanup.pending, cleanup.unknown, cleanup.observed
 	for i, kind := range []string{KindClosed, KindDeleted, KindRetention} {

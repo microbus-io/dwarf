@@ -39,10 +39,12 @@ func (e *Engine) janitorLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			e.janitorMu.Lock()
-			defer e.janitorMu.Unlock()
-			for shard, j := range e.janitors {
+			stopping := e.janitors
+			e.janitors = map[int]*janitor.Janitor{}
+			e.janitorMu.Unlock()
+			// Every janitor's context is a child of ctx, so they are all cancelled: this joins them.
+			for _, j := range stopping {
 				j.Stop()
-				delete(e.janitors, shard)
 			}
 			return
 		case <-ticker.C:
@@ -51,8 +53,15 @@ func (e *Engine) janitorLoop(ctx context.Context) {
 }
 
 // superviseJanitors starts a janitor on each shard this replica dispatches that has none, and stops the janitor of
-// each shard it no longer dispatches. It starts none once the supervisor's context has ended.
+// each shard it no longer dispatches. It starts none once the supervisor's context has ended. A janitor leaves the map
+// under the lock and is stopped after it, so the gauges and a test's drain never wait out a batch's rollback.
 func (e *Engine) superviseJanitors() {
+	var stopping []*janitor.Janitor
+	defer func() {
+		for _, j := range stopping {
+			j.Stop()
+		}
+	}()
 	e.janitorMu.Lock()
 	defer e.janitorMu.Unlock()
 	if e.janitorCtx == nil || e.janitorCtx.Err() != nil {
@@ -73,13 +82,14 @@ func (e *Engine) superviseJanitors() {
 			e.janitors[shard] = j
 		case !dispatching && running:
 			delete(e.janitors, shard)
-			j.Stop()
+			stopping = append(stopping, j)
 		}
 	}
 }
 
 // janitorConfig is the configuration of a new janitor on shard. A batch's turn is on the shard at dispatch's band,
-// priorityCommon: a lower one could starve the jobs at peak load and let the live tables grow.
+// priorityCommon: a lower one could starve the jobs at peak load and let the live tables grow. The settings are read
+// from the engine's fields at every round, since tests change them on a running engine.
 func (e *Engine) janitorConfig(shard int, db *sequel.DB) janitor.Config {
 	cfg := janitor.Config{
 		Shard: shard,
@@ -87,9 +97,17 @@ func (e *Engine) janitorConfig(shard int, db *sequel.DB) janitor.Config {
 		Turn: func(ctx context.Context) (context.Context, func()) {
 			return e.dbTurn(ctx, shard)
 		},
-		Logger: e.logger,
-		Idle:   e.janitorIdle,
-		Manual: e.janitorManual,
+		Logger:   e.logger,
+		Idle:     e.janitorIdle,
+		Manual:   e.janitorManual,
+		Settings: e.janitorSettings,
+		Residency: func() (int, int, bool) {
+			return e.partitionOn(shard)
+		},
+		Seams: e.seams,
+	}
+	if set := e.archives.Load(); set != nil {
+		cfg.Archive = set.byShard[shard]
 	}
 	if e.metrics != nil {
 		cfg.Instruments = e.metrics.janitor
@@ -99,6 +117,29 @@ func (e *Engine) janitorConfig(shard int, db *sequel.DB) janitor.Config {
 	}
 	return cfg
 }
+
+// janitorSettings is the janitors' settings at a round, from the engine's fields. A round on a context carrying
+// janitorGraceKey archives closed roots with that grace instead of the archive grace.
+func (e *Engine) janitorSettings(ctx context.Context) janitor.Settings {
+	grace := e.archiveGrace
+	if g, ok := ctx.Value(janitorGraceKey{}).(time.Duration); ok {
+		grace = g
+	}
+	return janitor.Settings{
+		Grace:         grace,
+		RetentionDays: e.retentionDays,
+		BatchRoots:    e.reapBatch,
+		BatchRows:     e.reapBatchRows,
+		BatchBytes:    e.reapBatchBytes,
+		StageRows:     e.reapStageRows,
+		StageBytes:    e.reapStageBytes,
+		NoQuietMargin: e.noReapQuiet,
+	}
+}
+
+// janitorGraceKey carries a grace that replaces the archive grace for the janitors' rounds under a context: a test
+// archiving what it just ended (engineseams.ArchiveNow) drains the janitors with 0.
+type janitorGraceKey struct{}
 
 // janitorOn is the janitor of shard, or nil when it has none.
 func (e *Engine) janitorOn(shard int) *janitor.Janitor {

@@ -73,10 +73,16 @@ func waitFlowDeleted(t *testing.T, e *Engine, flowKey string, timeout time.Durat
 
 // shortenDeletion overrides the engine's deletion grace / reaper cadence. Must be called after
 // NewEngineUnderTest and before Startup (the reaper reads reapInterval at Startup; completeFlow reads deletionGrace at
-// completion). Per-engine fields, so there is nothing to restore.
+// completion). Per-engine fields, so there is nothing to restore. An interval under a minute means the test wants
+// removal in the background: the janitors then run their jobs (not janitorManual, test mode's default), waiting that
+// long after a round without progress. A longer one means the test drives the removals itself.
 func shortenDeletion(e *Engine, grace, interval time.Duration) {
 	e.deletionGrace = grace
 	e.reapInterval = interval
+	if interval < time.Minute {
+		e.janitorManual = false
+		e.janitorIdle = interval
+	}
 }
 
 // TestDeleteOnCompletion_ReaperDeletesOnSuccess asserts a flow created with DeleteOnCompletion is removed (row
