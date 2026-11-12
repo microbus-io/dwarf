@@ -332,7 +332,7 @@ func targetedFault(seams *seamster.Seamster, fault string, roots ...int) error {
 		return nil
 	}
 	for _, root := range roots {
-		if seams.IsFault(join(fault, strconv.Itoa(root))) {
+		if seams.IsFault(diagnostics.Join(fault, strconv.Itoa(root))) {
 			return errors.New("injected fault: " + fault)
 		}
 	}

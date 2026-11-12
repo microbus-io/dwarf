@@ -159,7 +159,7 @@ func TestWalk_FastPassesTheBatchItAttempted(t *testing.T) {
 			roots := seedTrees(t, db, 4, callShape)
 			ascendingCloses(t, r, roots)
 			r.settings.batchRoots = 2
-			targeted := join(fault, strconv.Itoa(roots[0]))
+			targeted := diagnostics.Join(fault, strconv.Itoa(roots[0]))
 			r.seams.InjectN(targeted, 10000)
 			defer r.seams.Withdraw(targeted)
 

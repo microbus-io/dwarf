@@ -52,8 +52,3 @@ func intCSV(ids []int) string {
 	}
 	return b.String()
 }
-
-// join names a targeted fault or checkpoint: its parts joined by colons.
-func join(parts ...string) string {
-	return strings.Join(parts, ":")
-}

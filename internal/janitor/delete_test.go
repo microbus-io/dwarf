@@ -127,7 +127,7 @@ func TestDelete_FastPassesTheBatchItAttempted(t *testing.T) {
 	for _, root := range roots {
 		stampTree(t, r.db, root)
 	}
-	targeted := join(diagnostics.FaultReapMidTree, strconv.Itoa(roots[0]))
+	targeted := diagnostics.Join(diagnostics.FaultReapMidTree, strconv.Itoa(roots[0]))
 	r.seams.InjectN(targeted, 10000)
 	defer r.seams.Withdraw(targeted)
 	r.pass(ctx) // the failed batch: a round without progress
