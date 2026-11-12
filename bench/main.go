@@ -50,7 +50,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
 	"github.com/microbus-io/dwarf/workflow"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
@@ -172,7 +172,7 @@ func run() error {
 		}
 	}
 	if *printPool > 0 {
-		fmt.Println(engineseams.ShardBudget(*printPool, *serverMaxConns))
+		fmt.Println(accessors.ShardBudget(*printPool, *serverMaxConns))
 		return nil
 	}
 
@@ -363,7 +363,7 @@ func run() error {
 			setters = append(setters, eng.SetWorkers(replicaWorkerCount))
 		}
 		if *refillIntervalMs > 0 {
-			setters = append(setters, engineseams.SetRefillInterval(eng, time.Duration(*refillIntervalMs)*time.Millisecond))
+			setters = append(setters, accessors.SetRefillInterval(eng, time.Duration(*refillIntervalMs)*time.Millisecond))
 		}
 		if *stateCacheMB > 0 {
 			setters = append(setters, eng.SetStateCacheSize(*stateCacheMB<<20))

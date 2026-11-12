@@ -19,12 +19,10 @@ package engine
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
-	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/graphcache"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -185,24 +183,6 @@ func TestGraphCache_DispatchMissInterns(t *testing.T) {
 	}
 }
 
-// graphReadCounter counts the dispatch path's graph-column reads in sequel's per-query Debug log.
-type graphReadCounter struct {
-	n atomic.Int32
-}
-
-func (c *graphReadCounter) Enabled(context.Context, slog.Level) bool { return true }
-func (c *graphReadCounter) WithAttrs([]slog.Attr) slog.Handler       { return c }
-func (c *graphReadCounter) WithGroup(string) slog.Handler            { return c }
-func (c *graphReadCounter) Handle(_ context.Context, r slog.Record) error {
-	r.Attrs(func(a slog.Attr) bool {
-		if a.Key == "query" && strings.HasPrefix(a.Value.String(), "SELECT graph FROM dwarf_flows") {
-			c.n.Add(1)
-		}
-		return true
-	})
-	return nil
-}
-
 // TestGraphCache_HashHitReadsNoGraph pins what graph_hash is for: a replica that did not create a flow finds
 // the flow's parse by the hash its flow row carries, so of several flows of one graph created elsewhere -
 // the shape of an HA deployment whose frontends do not dispatch - only the first reads the graph column.
@@ -218,12 +198,11 @@ func TestGraphCache_HashHitReadsNoGraph(t *testing.T) {
 	creator.SetHost(mux)
 	assert.NoError(creator.SetWorkers(0))
 	assert.Must(assert.NoError(creator.Startup(t.Context())))
-	reads := &graphReadCounter{}
 	runner := NewEngineUnderTest(t.Name()) // same name, same database
 	defer runner.Shutdown(ctx)
 	runner.SetHost(mux)
-	assert.NoError(runner.SetLogger(slog.New(reads)))
 	assert.Must(assert.NoError(runner.Startup(t.Context())))
+	reads := runner.diags.Seams().Visits(diagnostics.CheckpointGraphRead)
 
 	// One at a time, so no two first dispatches race to parse the graph.
 	for range 3 {
@@ -234,5 +213,6 @@ func TestGraphCache_HashHitReadsNoGraph(t *testing.T) {
 			assert.Equal(workflow.StatusInterrupted, out.Status, "the runner dispatched the gate")
 		}
 	}
-	assert.Equal(int32(1), reads.n.Load(), "only the first flow of the graph reads the graph column")
+	assert.Equal(1, runner.diags.Seams().Visits(diagnostics.CheckpointGraphRead)-reads,
+		"only the first flow of the graph reads the graph column")
 }

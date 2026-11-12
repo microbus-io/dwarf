@@ -23,7 +23,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -238,7 +238,7 @@ func (p *persistUnreachableError) Unwrap() error { return p.writeErr }
 // with its acknowledgement lost, or a racing Terminate or Cancel, also moves the step out of this worker's hands, and
 // then nothing runs again. A zombie whose write the fence rejected never gets here: persist returns before it.
 func (e *Engine) logLostLease(ctx context.Context, stepID int, writeErr error) {
-	e.logger.WarnContext(ctx, "Step is no longer this worker's after its outcome write failed; it may run again",
+	e.diags.Logger().WarnContext(ctx, "Step is no longer this worker's after its outcome write failed; it may run again",
 		"step", stepID, "error", writeErr)
 }
 
@@ -253,8 +253,8 @@ func (e *Engine) logLostLease(ctx context.Context, stepID int, writeErr error) {
 // RowsAffected is honest on MySQL. A zero-row match is therefore ambiguous - taken back, or already long enough -
 // and only then a read settles which.
 func (e *Engine) extendLease(ctx context.Context, db *sequel.DB, stepID, leaseSeq int, d time.Duration) (bool, error) {
-	if e.seams.Enabled() && e.seams.IsFault(engineseams.FaultExtendLeaseErr) {
-		return false, errors.New("injected fault: " + engineseams.FaultExtendLeaseErr)
+	if e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.FaultExtendLeaseErr) {
+		return false, errors.New("injected fault: " + diagnostics.FaultExtendLeaseErr)
 	}
 	const owned = " WHERE step_id=? AND lease_seq=? AND parked=? AND status IN ('" + workflow.StatusRunning + "', '" + workflow.StatusCompleted + "')"
 	res, err := db.ExecContext(ctx,
@@ -288,7 +288,7 @@ func (e *Engine) releaseLease(ctx context.Context, db *sequel.DB, stepID, leaseS
 	if err != nil {
 		// Best-effort: if we cannot even release it, the lease will lapse and recovery takes it. No worse than
 		// not trying.
-		e.logger.DebugContext(ctx, "Releasing step lease on drain", "step", stepID, "error", err)
+		e.diags.Logger().DebugContext(ctx, "Releasing step lease on drain", "step", stepID, "error", err)
 	}
 }
 
@@ -316,7 +316,7 @@ func (e *Engine) failOnPersistError(ctx context.Context, d *dispatch, writeErr e
 	if ferr != nil {
 		// Cannot write even a payload-free failure: the DATABASE is down, not the payload. Surface the original
 		// error and leave the step to lease recovery.
-		e.logger.ErrorContext(ctx, "Persisting step outcome failed and the step could not be failed either; leaving it for lease recovery",
+		e.diags.Logger().ErrorContext(ctx, "Persisting step outcome failed and the step could not be failed either; leaving it for lease recovery",
 			"step", stepID, "task", taskName, "writeError", writeErr, "failError", ferr)
 		return errors.Trace(writeErr)
 	}
@@ -328,7 +328,7 @@ func (e *Engine) failOnPersistError(ctx context.Context, d *dispatch, writeErr e
 	// (an unstorable payload, a column/packet limit, a constraint violation), not a transient blip. It is an
 	// alarm, like dwarf_steps_unwedged.
 	e.metricStepWriteFailed(ctx, taskName)
-	e.logger.ErrorContext(ctx, "Step failed: its outcome could not be persisted and the database is reachable, so the failure is permanent",
+	e.diags.Logger().ErrorContext(ctx, "Step failed: its outcome could not be persisted and the database is reachable, so the failure is permanent",
 		"step", stepID, "task", taskName, "error", writeErr)
 	return nil
 }
@@ -419,7 +419,7 @@ func (e *Engine) settlePersist(ctx context.Context, d *dispatch, err error, held
 		_, ferr := e.failStep(ctx, d, err, held)
 		return false, errors.Trace(ferr)
 	case errors.As(err, &unreachable):
-		e.logger.ErrorContext(ctx, "Persisting step outcome failed and the database refused a payload-free write too; leaving it for lease recovery",
+		e.diags.Logger().ErrorContext(ctx, "Persisting step outcome failed and the database refused a payload-free write too; leaving it for lease recovery",
 			"step", d.stepID, "task", d.row.taskName, "writeError", unreachable.writeErr, "probeError", unreachable.probeErr)
 		return false, errors.Trace(unreachable.writeErr)
 	default:

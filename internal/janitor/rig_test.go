@@ -27,6 +27,7 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/database"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/workflow"
@@ -98,15 +99,12 @@ func newRig(t *testing.T, retention int, dayLength ...time.Duration) *rig {
 // class set on it.
 func (r *rig) janitor() *Janitor {
 	if r.j == nil {
-		r.j = New(database.NewShard(1, r.db), r.archive, r.retention)
-		r.j.SetLogger(slog.New(r.logs))
-		r.j.SetSeams(r.seams)
+		d := diagnostics.New()
+		d.SetLogger(slog.New(r.logs))
+		d.SetSeams(r.seams)
+		d.SetMeter(r.meter)
+		r.j = New(database.NewShard(1, r.db), d, r.archive, r.retention)
 		r.j.SetManual(true)
-		if r.meter != nil {
-			if err := r.j.SetMeter(r.meter); err != nil {
-				r.t.Fatal(err)
-			}
-		}
 		r.j.Start(r.t.Context())
 		r.j.Resume()
 		r.t.Cleanup(r.j.Stop)

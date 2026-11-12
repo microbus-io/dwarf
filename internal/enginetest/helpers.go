@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -60,7 +60,7 @@ func FlowStatus(t *testing.T, e Engine, flowKey string) string {
 	assert := testarossa.For(t)
 	shard, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
-	sh, err := engineseams.DB(e).Shard(shard)
+	sh, err := accessors.DB(e).Shard(shard)
 	assert.NoError(err)
 	db := sh.DB()
 	var status string
@@ -72,7 +72,7 @@ func FlowStatus(t *testing.T, e Engine, flowKey string) string {
 func CountRows(t *testing.T, e Engine, shard int, query string, args ...any) int {
 	t.Helper()
 	assert := testarossa.For(t)
-	sh, err := engineseams.DB(e).Shard(shard)
+	sh, err := accessors.DB(e).Shard(shard)
 	if !assert.NoError(err) {
 		return -1
 	}
@@ -103,12 +103,12 @@ func Recent(query workflow.Query) workflow.Query {
 	return query
 }
 
-// ListAll returns the flows Recent(query) matches in every status: the live tables' (engineseams.ListLive), then
+// ListAll returns the flows Recent(query) matches in every status: the live tables' (accessors.ListLive), then
 // ListClosed's, a flow archived between the two calls listed once. ListClosed is asked only for a status that may be
 // archived, or none. A test sees in it a flow it just closed, which is in neither public list until it is archived.
 func ListAll(ctx context.Context, e Lister, query workflow.Query) ([]workflow.FlowSummary, error) {
 	query = Recent(query)
-	all, err := engineseams.ListLive(e, ctx, query)
+	all, err := accessors.ListLive(e, ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -134,5 +134,5 @@ func ListAll(ctx context.Context, e Lister, query workflow.Query) ([]workflow.Fl
 // ArchiveNow archives every flow the engine has closed, however recently, and removes the flows scheduled for deletion
 // whose time has come, for a test that purges what it just closed: Purge reads only the archive.
 func ArchiveNow(ctx context.Context, e Lister) {
-	engineseams.ArchiveNow(e, ctx)
+	accessors.ArchiveNow(e, ctx)
 }

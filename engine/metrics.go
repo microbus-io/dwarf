@@ -27,7 +27,6 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/reaper"
 	"github.com/microbus-io/errors"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -168,14 +167,10 @@ func (m *engineMetrics) shardAttrOpts(shard int) *attrOpts {
 // in unit tests (and unconfigured standalone use) the instruments are no-ops and the callback is never
 // invoked, which also keeps the background backlog refresh from ever querying (see backlogLoop).
 func (e *Engine) initMetrics() error {
-	mp := e.meterProvider
-	if mp == nil {
-		mp = otel.GetMeterProvider()
-	}
-	meter := mp.Meter(metricScope)
-	// Held so the pistons resolve their own instruments from the SAME meter, keeping one instrumentation
+	meter := e.diags.MeterProvider().Meter(metricScope)
+	// Held so the components resolve their own instruments from the SAME meter, keeping one instrumentation
 	// scope per engine however many modules record into it.
-	e.meter = meter
+	e.diags.SetMeter(meter)
 	m := &engineMetrics{}
 
 	var errs []error
@@ -650,7 +645,7 @@ func (e *Engine) metricOperation(ctx context.Context, op string, shardNum int, d
 // slots moved, and a replica-count change need not move them (a reader or await-only replica joining, say)
 // - and a churn counter that reads zero because nobody looked is worse than none at all.
 func (e *Engine) metricPeerCountChanged(ctx context.Context, shardNum, from, to int) {
-	e.logger.InfoContext(ctx, "Fleet size changed", "shard", shardNum, "from", from, "to", to)
+	e.diags.Logger().InfoContext(ctx, "Fleet size changed", "shard", shardNum, "from", from, "to", to)
 	if e.metrics == nil {
 		return
 	}

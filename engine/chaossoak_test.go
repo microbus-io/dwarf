@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -427,17 +427,17 @@ func TestChaosSoak_Faults(t *testing.T) {
 		scoped bool // append a random task node name as the scope
 	}
 	faultSpecs := []faultSpec{
-		{engineseams.FaultTransitionCommit, true},
-		{engineseams.FaultContention, true},
-		{engineseams.FaultLeaseStaleWrite, true},
-		{engineseams.FaultCompleteFlowCommit, false},
-		{engineseams.FaultDropSignalStop, false},
-		{engineseams.FaultDropDoorbell, false},
-		{engineseams.FaultSubgraphReviveLost, false},
-		{engineseams.FaultRefillScanErr, false},
+		{diagnostics.FaultTransitionCommit, true},
+		{diagnostics.FaultContention, true},
+		{diagnostics.FaultLeaseStaleWrite, true},
+		{diagnostics.FaultCompleteFlowCommit, false},
+		{diagnostics.FaultDropSignalStop, false},
+		{diagnostics.FaultDropDoorbell, false},
+		{diagnostics.FaultSubgraphReviveLost, false},
+		{diagnostics.FaultRefillScanErr, false},
 	}
 	if longsoak {
-		faultSpecs = append(faultSpecs, faultSpec{engineseams.FaultReapMidTree, false})
+		faultSpecs = append(faultSpecs, faultSpec{diagnostics.FaultReapMidTree, false})
 	}
 	// The graph-node names across the three chaos shapes (the scope for task-scoped faults).
 	taskNodes := []string{"A", "B", "C", "D", "S", "P", "Q", "R", "J", "P0", "CA", "CB", "CC"}
@@ -448,10 +448,10 @@ func TestChaosSoak_Faults(t *testing.T) {
 		fs := faultSpecs[rng.intn(len(faultSpecs))]
 		armedMu.Lock()
 		if fs.scoped {
-			eng.seams.Inject(engineseams.Join(fs.name, taskNodes[rng.intn(len(taskNodes))]))
+			eng.diags.Seams().Inject(diagnostics.Join(fs.name, taskNodes[rng.intn(len(taskNodes))]))
 			armed[fs.name] = taskNodes[rng.intn(len(taskNodes))]
 		} else {
-			eng.seams.Inject(fs.name)
+			eng.diags.Seams().Inject(fs.name)
 			armed[fs.name] = ""
 		}
 		armedMu.Unlock()
@@ -525,9 +525,9 @@ func TestChaosSoak_Faults(t *testing.T) {
 	armedMu.Lock()
 	for name, scope := range armed {
 		if scope != "" {
-			eng.seams.Withdraw(engineseams.Join(name, scope))
+			eng.diags.Seams().Withdraw(diagnostics.Join(name, scope))
 		} else {
-			eng.seams.Withdraw(name)
+			eng.diags.Seams().Withdraw(name)
 		}
 	}
 	armedMu.Unlock()

@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/archiver"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/internal/reaper"
 	"github.com/microbus-io/errors"
@@ -266,7 +266,7 @@ func (e *Engine) applyArchiveGraceEnv(ctx context.Context) error {
 		return errors.New("%s must be a duration of at least 0, not %q", archiveGraceEnv, v, http.StatusBadRequest)
 	}
 	// Loud, because a grace other than the minute changes when every closed flow leaves the live tables.
-	e.logger.WarnContext(ctx, "The archive's grace is set by "+archiveGraceEnv+"; it is for benchmarks only", "grace", d)
+	e.diags.Logger().WarnContext(ctx, "The archive's grace is set by "+archiveGraceEnv+"; it is for benchmarks only", "grace", d)
 	e.archiveGrace = d
 	return nil
 }
@@ -299,7 +299,7 @@ func (e *Engine) applyStageEnv(ctx context.Context) error {
 			return errors.New("%s must be a whole number of %s, at least 0, not %q", v.name, v.unit, s, http.StatusBadRequest)
 		}
 		// Loud, because it changes how every large tree leaves the live tables.
-		e.logger.WarnContext(ctx, "Staged archival is set by "+v.name+"; it is for benchmarks only", v.unit, n)
+		e.diags.Logger().WarnContext(ctx, "Staged archival is set by "+v.name+"; it is for benchmarks only", v.unit, n)
 		*v.field = n
 	}
 	return nil
@@ -317,7 +317,7 @@ func (e *Engine) archiveDayLength(ctx context.Context) (time.Duration, error) {
 			return 0, errors.New("%s must be a whole number of seconds, at least 1s, not %q", archiveDayEnv, v, http.StatusBadRequest)
 		}
 		// Loud, because a short day under the default retention drops a day's records within hours.
-		e.logger.WarnContext(ctx, "The archive's day is shortened by "+archiveDayEnv+"; it is for benchmarks only", "day", d)
+		e.diags.Logger().WarnContext(ctx, "The archive's day is shortened by "+archiveDayEnv+"; it is for benchmarks only", "day", d)
 		dayLength = d
 	}
 	return dayLength, nil
@@ -340,8 +340,8 @@ func (e *Engine) startArchives(ctx context.Context, dayLength time.Duration) err
 	// The run's reaper, fresh, so nothing the last run learned survives into this one's readings - built before
 	// initMetrics registers the gauge callback that reads it.
 	r := reaper.New()
-	r.SetLogger(e.logger)
-	r.SetSeams(e.seams)
+	r.SetLogger(e.diags.Logger())
+	r.SetSeams(e.diags.Seams())
 	e.reaper.Store(r)
 	return errors.Trace(e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		a := set.byShard[shard]
@@ -395,9 +395,9 @@ func (e *Engine) maintainArchives(ctx context.Context, set *archiveSet) {
 			return nil
 		}
 		dropped, err := set.byShard[shard].Maintain(ctx, e.retentionDays)
-		// engineseams.FaultArchiveMaintainErr fails the pass after its work, as a failed drop or make does.
-		if err == nil && e.seams.IsFault(engineseams.FaultArchiveMaintainErr) {
-			err = errors.New("injected fault: " + engineseams.FaultArchiveMaintainErr)
+		// diagnostics.FaultArchiveMaintainErr fails the pass after its work, as a failed drop or make does.
+		if err == nil && e.diags.Seams().IsFault(diagnostics.FaultArchiveMaintainErr) {
+			err = errors.New("injected fault: " + diagnostics.FaultArchiveMaintainErr)
 		}
 		e.metricArchiveDaysDropped(ctx, shard, dropped)
 		// A pass cut short by Shutdown is not a failure: logSweepError does not log it either.
@@ -409,5 +409,5 @@ func (e *Engine) maintainArchives(ctx context.Context, set *archiveSet) {
 		}
 		return nil
 	})
-	e.seams.Checkpoint(ctx, engineseams.CheckpointArchivePassDone)
+	e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointArchivePassDone)
 }

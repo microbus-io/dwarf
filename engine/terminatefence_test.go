@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -56,10 +56,10 @@ func terminateBeforeTransition(t *testing.T, task func(ctx context.Context, f *w
 	e.SetHost(mux)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
-	e.seams.Break(engineseams.CheckpointBeforeTransitionTx)
+	e.diags.Seams().Break(diagnostics.CheckpointBeforeTransitionTx)
 	fk, err := e.Create(ctx, "tfence/g", nil, nil)
 	assert.NoError(err)
-	assert.Must(assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeTransitionTx, 10*time.Second), "A never reached its transition"))
+	assert.Must(assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeTransitionTx, 10*time.Second), "A never reached its transition"))
 	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	sh, err := e.db.Shard(shard)
@@ -68,13 +68,13 @@ func terminateBeforeTransition(t *testing.T, task func(ctx context.Context, f *w
 	var aStepID int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='A' AND status='"+
 		workflow.StatusCompleted+"' AND advancing=1", flowID).Scan(&aStepID), "A's completion write did not land")
-	aDone := engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(aStepID))
-	aDoneBase := e.seams.Visits(aDone)
+	aDone := diagnostics.Join(diagnostics.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(aStepID))
+	aDoneBase := e.diags.Seams().Visits(aDone)
 
 	assert.NoError(e.Terminate(ctx, fk, "test"))
 	arm(e)
-	e.seams.Resume(engineseams.CheckpointBeforeTransitionTx)
-	enginetest.AwaitVisitCount(t, e.seams, aDoneBase+1, 15*time.Second, aDone)
+	e.diags.Seams().Resume(diagnostics.CheckpointBeforeTransitionTx)
+	enginetest.AwaitVisitCount(t, e.diags.Seams(), aDoneBase+1, 15*time.Second, aDone)
 
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status, COALESCE(error, '') FROM dwarf_steps WHERE step_id=?", aStepID).Scan(&aStatus, &aError))
 	bSteps = enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND task_name='B'", flowID)
@@ -111,7 +111,7 @@ func TestTerminate_FencesAnErroredTransition(t *testing.T) {
 	assert := testarossa.For(t)
 	status, errText, bSteps := terminateBeforeTransition(t,
 		func(ctx context.Context, f *workflow.Flow) error { return nil },
-		func(e *Engine) { e.seams.InjectN(engineseams.Join(engineseams.FaultContention, "A"), 1000) },
+		func(e *Engine) { e.diags.Seams().InjectN(diagnostics.Join(diagnostics.FaultContention, "A"), 1000) },
 	)
 	assert.Equal(workflow.StatusCompleted, status, "the terminated flow's completed step was reset")
 	assert.Equal("", errText)
@@ -174,9 +174,9 @@ func TestTerminate_FencesACancelRoute(t *testing.T) {
 			}
 			// Cancel marks A while it runs; A's completion write then finds the mark.
 			assert.NoError(e.Cancel(ctx, fk, "withdrawn"))
-			e.seams.Break(engineseams.CheckpointBeforeCancelRoute)
+			e.diags.Seams().Break(diagnostics.CheckpointBeforeCancelRoute)
 			releaseA()
-			assert.Must(assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeCancelRoute, 10*time.Second), "A never reached its cancel route"))
+			assert.Must(assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeCancelRoute, 10*time.Second), "A never reached its cancel route"))
 
 			shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 			assert.NoError(err)
@@ -186,12 +186,12 @@ func TestTerminate_FencesACancelRoute(t *testing.T) {
 			var aStepID int
 			assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='A' AND status='"+
 				workflow.StatusCompleted+"' AND advancing=1", flowID).Scan(&aStepID), "A's completion write did not land")
-			aDone := engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(aStepID))
-			aDoneBase := e.seams.Visits(aDone)
+			aDone := diagnostics.Join(diagnostics.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(aStepID))
+			aDoneBase := e.diags.Seams().Visits(aDone)
 
 			assert.NoError(e.Terminate(ctx, fk, "test"))
-			e.seams.Resume(engineseams.CheckpointBeforeCancelRoute)
-			enginetest.AwaitVisitCount(t, e.seams, aDoneBase+1, 15*time.Second, aDone)
+			e.diags.Seams().Resume(diagnostics.CheckpointBeforeCancelRoute)
+			enginetest.AwaitVisitCount(t, e.diags.Seams(), aDoneBase+1, 15*time.Second, aDone)
 
 			var status, changes string
 			assert.NoError(db.QueryRowContext(ctx, "SELECT status, changes FROM dwarf_steps WHERE step_id=?", aStepID).Scan(&status, &changes))

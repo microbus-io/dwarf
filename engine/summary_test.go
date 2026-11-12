@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -129,7 +129,7 @@ func TestSummary_ReadsEachFlowOfATreeAsTheListsDo(t *testing.T) {
 		assert.True(f.ArchivedAt.IsZero(), "not archived yet")
 	}
 
-	engineseams.ArchiveNow(e, ctx)
+	accessors.ArchiveNow(e, ctx)
 	window := workflow.Query{FromTime: time.Now().Add(-time.Hour), ToTime: time.Now().Add(time.Hour)}
 	archived := byURL("archived", func(q workflow.Query) ([]workflow.FlowSummary, error) { return e.ListClosed(ctx, q) }, window)
 	for _, f := range archived {

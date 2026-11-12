@@ -27,7 +27,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -82,11 +82,11 @@ func TestResumeLosesToTerminate_Deterministic(t *testing.T) {
 
 	// Freeze resume at the checkpoint before its transaction, then launch it. The wait returns once resume is
 	// frozen there, whether it arrives before or after the wait is armed.
-	e.seams.Break(engineseams.CheckpointResumeBeforeFlowWrite)
+	e.diags.Seams().Break(diagnostics.CheckpointResumeBeforeFlowWrite)
 	resumeDone := make(chan error, 1)
 	go func() { resumeDone <- e.Resume(ctx, fk, nil) }()
 
-	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointResumeBeforeFlowWrite, 10*time.Second), "Resume never reached the checkpoint")
+	assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointResumeBeforeFlowWrite, 10*time.Second), "Resume never reached the checkpoint")
 
 	// Resume is frozen before its flow-status gate write. Drive a Terminate to completion: it flips the flow
 	// interrupted->terminated under the flow-row lock.
@@ -94,7 +94,7 @@ func TestResumeLosesToTerminate_Deterministic(t *testing.T) {
 
 	// Release Resume: its transaction now runs, the gate write finds the flow no longer interrupted, and the
 	// whole transaction rolls back.
-	e.seams.Resume(engineseams.CheckpointResumeBeforeFlowWrite)
+	e.diags.Seams().Resume(diagnostics.CheckpointResumeBeforeFlowWrite)
 	select {
 	case resumeErr := <-resumeDone:
 		assert.Error(resumeErr)
@@ -216,16 +216,16 @@ func TestTerminateVsTransition_Deterministic(t *testing.T) {
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Freeze A after it is marked completed, before it inserts B.
-	e.seams.Break(engineseams.CheckpointBeforeTransitionTx)
+	e.diags.Seams().Break(diagnostics.CheckpointBeforeTransitionTx)
 	fk, err := e.Create(ctx, "cvt/g", nil, nil)
 	assert.NoError(err)
-	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeTransitionTx, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeTransitionTx")
+	assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeTransitionTx, 10*time.Second), "engine never reached checkpoint diagnostics.CheckpointBeforeTransitionTx")
 
 	// Terminate wins while A's transition is held: the flow goes terminated under the flow-row lock.
 	assert.NoError(e.Terminate(ctx, fk, "test"))
 
 	// Release A: its transition tx's guard (status NOT IN terminal) matches zero rows and inserts nothing.
-	e.seams.Resume(engineseams.CheckpointBeforeTransitionTx)
+	e.diags.Seams().Resume(diagnostics.CheckpointBeforeTransitionTx)
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusTerminated, 10*time.Second)
 
 	shardNum, _, flowID, _, err := keys.ParseFlowKey(fk)
@@ -360,13 +360,13 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		parentGraph(t, r)
 		assert.Must(assert.NoError(r.e.Startup(ctx)))
 
-		r.e.seams.Break(engineseams.CheckpointBeforeSubgraphSpawn)
+		r.e.diags.Seams().Break(diagnostics.CheckpointBeforeSubgraphSpawn)
 		fk, err := r.e.Create(ctx, "cvs/parent", nil, nil)
 		assert.NoError(err)
-		assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeSubgraphSpawn, 10*time.Second), "engine never reached the spawn")
+		assert.True(r.e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeSubgraphSpawn, 10*time.Second), "engine never reached the spawn")
 		assert.NoError(r.e.Terminate(ctx, fk, "test"))
-		abandoned := r.e.seams.Waiter(engineseams.CheckpointSubgraphSpawnAbandoned)
-		r.e.seams.Resume(engineseams.CheckpointBeforeSubgraphSpawn)
+		abandoned := r.e.diags.Seams().Waiter(diagnostics.CheckpointSubgraphSpawnAbandoned)
+		r.e.diags.Seams().Resume(diagnostics.CheckpointBeforeSubgraphSpawn)
 		select {
 		case <-abandoned:
 		case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
@@ -385,10 +385,10 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		assert.Must(assert.NoError(r.e.Startup(ctx)))
 
 		// The spawn's transaction parks the caller and freezes before inserting the child.
-		r.e.seams.Break(engineseams.CheckpointSubgraphSpawnParked)
+		r.e.diags.Seams().Break(diagnostics.CheckpointSubgraphSpawnParked)
 		fk, err := r.e.Create(ctx, "cvs/parent", nil, nil)
 		assert.NoError(err)
-		assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointSubgraphSpawnParked, 10*time.Second), "the spawn never parked its caller")
+		assert.True(r.e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointSubgraphSpawnParked, 10*time.Second), "the spawn never parked its caller")
 
 		// Terminate must wait for the spawn: the parked caller is locked by the spawn's open transaction. Had the
 		// park committed on its own, Terminate would finish here and the child would be inserted after it.
@@ -400,7 +400,7 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 			terminated <- err
 		case <-time.After(300 * time.Millisecond):
 		}
-		r.e.seams.Resume(engineseams.CheckpointSubgraphSpawnParked)
+		r.e.diags.Seams().Resume(diagnostics.CheckpointSubgraphSpawnParked)
 		assert.NoError(<-terminated)
 		assert.Equal(1, countFlows(t, r.e, fk, "cvs/child"), "the spawn committed first, so its child exists")
 		assertAllTerminated(t, r.e, fk)
@@ -414,21 +414,21 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		parentGraph(t, r)
 		assert.Must(assert.NoError(r.e.Startup(ctx)))
 
-		r.e.seams.Break(engineseams.CheckpointBeforeSubgraphSpawn)
+		r.e.diags.Seams().Break(diagnostics.CheckpointBeforeSubgraphSpawn)
 		fk, err := r.e.Create(ctx, "cvs/parent", nil, nil)
 		assert.NoError(err)
-		assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeSubgraphSpawn, 10*time.Second), "engine never reached the spawn")
+		assert.True(r.e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeSubgraphSpawn, 10*time.Second), "engine never reached the spawn")
 
 		// Terminate scans the tree (no child yet) and freezes before its transaction.
-		r.e.seams.Break(engineseams.CheckpointTerminateAfterScan)
+		r.e.diags.Seams().Break(diagnostics.CheckpointTerminateAfterScan)
 		terminated := make(chan error, 1)
 		go func() { terminated <- r.e.Terminate(ctx, fk, "test") }()
-		assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointTerminateAfterScan, 10*time.Second), "Terminate never finished its scan")
+		assert.True(r.e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointTerminateAfterScan, 10*time.Second), "Terminate never finished its scan")
 
 		// The spawn commits its child under a tree Terminate scanned without it.
-		r.e.seams.Resume(engineseams.CheckpointBeforeSubgraphSpawn)
+		r.e.diags.Seams().Resume(diagnostics.CheckpointBeforeSubgraphSpawn)
 		ok := awaitFlow(t, r.e, fk, "cvs/child")
-		r.e.seams.Resume(engineseams.CheckpointTerminateAfterScan)
+		r.e.diags.Seams().Resume(diagnostics.CheckpointTerminateAfterScan)
 		assert.NoError(<-terminated)
 		if assert.True(ok, "the spawn never committed its child") {
 			assertAllTerminated(t, r.e, fk)
@@ -458,18 +458,18 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		}))
 		assert.Must(assert.NoError(r.e.Startup(ctx)))
 
-		r.e.seams.Break(engineseams.CheckpointBeforeSubgraphSpawn)
+		r.e.diags.Seams().Break(diagnostics.CheckpointBeforeSubgraphSpawn)
 		fk, err := r.e.Create(ctx, "cvs/parent", nil, nil)
 		assert.NoError(err)
-		assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeSubgraphSpawn, 10*time.Second), "engine never reached the spawn")
+		assert.True(r.e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeSubgraphSpawn, 10*time.Second), "engine never reached the spawn")
 
 		// Terminate scans before the middle flow exists, then the middle flow commits and its task starts.
-		r.e.seams.Break(engineseams.CheckpointTerminateAfterScan)
-		r.e.seams.Break(engineseams.CheckpointTerminateAfterRescan)
+		r.e.diags.Seams().Break(diagnostics.CheckpointTerminateAfterScan)
+		r.e.diags.Seams().Break(diagnostics.CheckpointTerminateAfterRescan)
 		terminated := make(chan error, 1)
 		go func() { terminated <- r.e.Terminate(ctx, fk, "test") }()
-		assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointTerminateAfterScan, 10*time.Second), "Terminate never finished its scan")
-		r.e.seams.Resume(engineseams.CheckpointBeforeSubgraphSpawn)
+		assert.True(r.e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointTerminateAfterScan, 10*time.Second), "Terminate never finished its scan")
+		r.e.diags.Seams().Resume(diagnostics.CheckpointBeforeSubgraphSpawn)
 		select {
 		case <-entered:
 		case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
@@ -480,14 +480,14 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		// task spawns the grandchild, committing after that scan's snapshot. The grandchild is observed through its
 		// task starting, not by reading the database: Terminate holds its transaction open here, and on SQLite
 		// that write lock blocks a read - and the spawn - until it is released.
-		r.e.seams.Resume(engineseams.CheckpointTerminateAfterScan)
-		assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointTerminateAfterRescan, 10*time.Second), "Terminate never scanned inside its transaction")
+		r.e.diags.Seams().Resume(diagnostics.CheckpointTerminateAfterScan)
+		assert.True(r.e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointTerminateAfterRescan, 10*time.Second), "Terminate never scanned inside its transaction")
 		close(gate)
 		select {
 		case <-r.xEntered:
 		case <-time.After(time.Second): // the spawn waits behind Terminate's locks (SQLite; MySQL at REPEATABLE READ)
 		}
-		r.e.seams.Resume(engineseams.CheckpointTerminateAfterRescan)
+		r.e.diags.Seams().Resume(diagnostics.CheckpointTerminateAfterRescan)
 		assert.NoError(<-terminated)
 		assertAllTerminated(t, r.e, fk)
 	})
@@ -511,10 +511,10 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 
 		// Terminate scans the tree, child included, and freezes; the child's rows then disappear, as a flow.Retry
 		// on its caller would remove them. Terminate must drop the vanished flow, not fail looking for it.
-		r.e.seams.Break(engineseams.CheckpointTerminateAfterScan)
+		r.e.diags.Seams().Break(diagnostics.CheckpointTerminateAfterScan)
 		terminated := make(chan error, 1)
 		go func() { terminated <- r.e.Terminate(ctx, fk, "test") }()
-		assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointTerminateAfterScan, 10*time.Second), "Terminate never finished its scan")
+		assert.True(r.e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointTerminateAfterScan, 10*time.Second), "Terminate never finished its scan")
 		shardNum, _, parentFlowID, _, _ := keys.ParseFlowKey(fk)
 		sh, err := r.e.db.Shard(shardNum)
 		assert.Must(assert.NoError(err))
@@ -523,7 +523,7 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		assert.NoError(err)
 		_, err = db.ExecContext(ctx, "DELETE FROM dwarf_flows WHERE surgraph_flow_id=?", parentFlowID)
 		assert.NoError(err)
-		r.e.seams.Resume(engineseams.CheckpointTerminateAfterScan)
+		r.e.diags.Seams().Resume(diagnostics.CheckpointTerminateAfterScan)
 		assert.NoError(<-terminated)
 		assert.Equal(workflow.StatusTerminated, enginetest.FlowStatus(t, r.e, fk))
 	})
@@ -552,30 +552,30 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		assert.Must(assert.NoError(r.e.Startup(ctx)))
 
 		// A completes and freezes before the transition that creates Call.
-		r.e.seams.Break(engineseams.CheckpointBeforeTransitionTx)
+		r.e.diags.Seams().Break(diagnostics.CheckpointBeforeTransitionTx)
 		fk, err := r.e.Create(ctx, "cvs/parent", nil, nil)
 		assert.NoError(err)
-		assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeTransitionTx, 10*time.Second), "A never reached its transition")
+		assert.True(r.e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeTransitionTx, 10*time.Second), "A never reached its transition")
 
 		// Terminate terminates the steps that exist, and freezes before it locks the flow rows.
-		r.e.seams.Break(engineseams.CheckpointTerminateAfterStepsLocked)
+		r.e.diags.Seams().Break(diagnostics.CheckpointTerminateAfterStepsLocked)
 		terminated := make(chan error, 1)
 		go func() { terminated <- r.e.Terminate(ctx, fk, "test") }()
-		assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointTerminateAfterStepsLocked, 10*time.Second), "Terminate never locked the steps")
+		assert.True(r.e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointTerminateAfterStepsLocked, 10*time.Second), "Terminate never locked the steps")
 
 		// The transition creates Call, which Terminate's step UPDATE never saw, and Call is claimed. (Where
 		// Terminate's write lock holds the transition off - SQLite - Call is never created at all.)
-		r.e.seams.Resume(engineseams.CheckpointBeforeTransitionTx)
+		r.e.diags.Seams().Resume(diagnostics.CheckpointBeforeTransitionTx)
 		claimed := false
 		select {
 		case <-entered:
 			claimed = true
 		case <-time.After(2 * time.Second):
 		}
-		r.e.seams.Resume(engineseams.CheckpointTerminateAfterStepsLocked)
+		r.e.diags.Seams().Resume(diagnostics.CheckpointTerminateAfterStepsLocked)
 		assert.NoError(<-terminated)
 		// Call was terminated by Terminate's second step UPDATE, so its spawn must roll back.
-		abandoned := r.e.seams.Waiter(engineseams.CheckpointSubgraphSpawnAbandoned)
+		abandoned := r.e.diags.Seams().Waiter(diagnostics.CheckpointSubgraphSpawnAbandoned)
 		close(gate)
 		if claimed {
 			select {
@@ -627,16 +627,16 @@ func TestRetryRewindVsTerminate_Deterministic(t *testing.T) {
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Freeze A before its retry rewind.
-	e.seams.Break(engineseams.CheckpointBeforeRetryRewind)
+	e.diags.Seams().Break(diagnostics.CheckpointBeforeRetryRewind)
 	fk, err := e.Create(ctx, "rrc/g", nil, nil)
 	assert.NoError(err)
-	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeRetryRewind, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeRetryRewind")
+	assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeRetryRewind, 10*time.Second), "engine never reached checkpoint diagnostics.CheckpointBeforeRetryRewind")
 
 	// Terminate wins: A's running step is flipped terminated under the terminate transaction.
 	assert.NoError(e.Terminate(ctx, fk, "test"))
 
 	// Release A: the rewind's status='running' guard matches zero rows, so the terminated step is not revived.
-	e.seams.Resume(engineseams.CheckpointBeforeRetryRewind)
+	e.diags.Seams().Resume(diagnostics.CheckpointBeforeRetryRewind)
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusTerminated, 10*time.Second)
 
 	shardNum, _, flowID, _, err := keys.ParseFlowKey(fk)

@@ -25,7 +25,8 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -132,10 +133,10 @@ func stealFleet(t *testing.T, name string, crippledWorkers int, crippledDelay ti
 // controls.
 func awaitSteal(t *testing.T, e *engine.Engine, work func()) bool {
 	t.Helper()
-	ch := engineseams.Seams(e).Waiter(engineseams.CheckpointRefillStole)
-	before := engineseams.Seams(e).Visits(engineseams.CheckpointRefillStole)
+	ch := accessors.Seams(e).Waiter(diagnostics.CheckpointRefillStole)
+	before := accessors.Seams(e).Visits(diagnostics.CheckpointRefillStole)
 	work()
-	if engineseams.Seams(e).Visits(engineseams.CheckpointRefillStole) != before {
+	if accessors.Seams(e).Visits(diagnostics.CheckpointRefillStole) != before {
 		return true
 	}
 	select {
@@ -186,8 +187,8 @@ func TestStealLatencyPoisonflow(t *testing.T) {
 	drainFlows(t, 30*time.Second, creator, name, 4)
 
 	// Slow every operation this replica makes, from here on.
-	for _, idx := range engineseams.DB(crippled).Indices() {
-		sh, err := engineseams.DB(crippled).Shard(idx)
+	for _, idx := range accessors.DB(crippled).Indices() {
+		sh, err := accessors.DB(crippled).Shard(idx)
 		if !assert.NoError(err) {
 			return
 		}
@@ -256,17 +257,17 @@ func TestStealHoldsOffAHealthyFleetflow(t *testing.T) {
 	enginetest.AwaitShardCycles(t, healthy, 2)
 	enginetest.AwaitShardCycles(t, crippled, 2)
 	visits := func(checkpoint string) int {
-		return engineseams.Seams(healthy).Visits(checkpoint) + engineseams.Seams(crippled).Visits(checkpoint)
+		return accessors.Seams(healthy).Visits(checkpoint) + accessors.Seams(crippled).Visits(checkpoint)
 	}
-	stoleBefore := visits(engineseams.CheckpointRefillStole)
-	cyclesBefore := visits(engineseams.CheckpointRefillCycleDone)
+	stoleBefore := visits(diagnostics.CheckpointRefillStole)
+	cyclesBefore := visits(diagnostics.CheckpointRefillCycleDone)
 	release()
 
 	// Each dispatcher runs its own class's A steps and the B each one chains into its own cache, so a
 	// replica that has run `flows/2` tasks is half-way through a class of ~flows/2 A steps.
 	deadline := time.After(60 * time.Second * enginetest.TimeoutScale())
 	for {
-		cycled := engineseams.Seams(healthy).Waiter(engineseams.CheckpointRefillCycleDone)
+		cycled := accessors.Seams(healthy).Waiter(diagnostics.CheckpointRefillCycleDone)
 		if max(ran["healthy"].Load(), ran["crippled"].Load()) >= flows/2 {
 			break
 		}
@@ -276,8 +277,8 @@ func TestStealHoldsOffAHealthyFleetflow(t *testing.T) {
 			t.Fatalf("the held backlog never drained half a class (ran %d and %d)", ran["healthy"].Load(), ran["crippled"].Load())
 		}
 	}
-	stole := visits(engineseams.CheckpointRefillStole) - stoleBefore
-	cycles := visits(engineseams.CheckpointRefillCycleDone) - cyclesBefore
+	stole := visits(diagnostics.CheckpointRefillStole) - stoleBefore
+	cycles := visits(diagnostics.CheckpointRefillCycleDone) - cyclesBefore
 	assert.True(2*stole < cycles,
 		"a fleet whose every class can fill its own batch must mostly not steal (stole on %d of %d cycles)",
 		stole, cycles)

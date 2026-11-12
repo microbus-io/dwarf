@@ -151,8 +151,12 @@ matching one before working there:**
   delete wait).
 - **`internal/claimstracker/CLAUDE.md`** - the intra-replica in-flight claim set: why the window is bounded
   (1-2s) rather than tied to a step, and the two-generation roll that costs no per-entry work.
-- **`internal/engineseams/CLAUDE.md`** - the engine's test-only fault and checkpoint seams: why they are inert in
-  production, why consults are inline, the arm-then-receive rendezvous, and the `Enabled()` guard on every join.
+- **`internal/diagnostics/CLAUDE.md`** - what the engine's components report through (`Diags`: logger, meter and
+  tracer and their providers, seams): one per engine, and nil-safe getters; and the seam catalogue - why seams are
+  inert in production, why consults are inline, the arm-then-receive rendezvous, and the `Enabled()` guard on every
+  join.
+- **`internal/accessors/CLAUDE.md`** - how a test or benchmark outside package engine reaches a running engine's
+  internals, and why the accessors are function variables over `any`.
 - **`internal/faninmap/CLAUDE.md`** - the per-flow fan-out-to-fan-in routing map: why it is derived at dispatch
   rather than persisted or stored on the graph, and why an unreachable fan-out routes nowhere.
 - **`internal/latch/CLAUDE.md`** - parking callers on a key until it settles: why polling makes registration

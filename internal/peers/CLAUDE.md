@@ -38,8 +38,8 @@ registration repair exists (below) and why it cannot be left to the beat.
 way out — its context is cancelled by then, so the DELETE would fail — and `Run` having returned is itself
 the guarantee that no beat follows.
 
-**The API is twenty calls, and keeping it that small is a standing constraint.** Six inputs (`New`,
-`SetProfile`, `SetCut`, `SetEvidence`, `SetLogger`, `SetSeams`), five lifecycle calls (`Join`,
+**The API is eighteen calls, and keeping it that small is a standing constraint.** Four inputs (`New`, which
+takes the shard and the owner's `diagnostics.Diags`, `SetProfile`, `SetCut`, `SetEvidence`), five lifecycle calls (`Join`,
 `Run`, `Withdraw`, `Leave`, `SetDraining`), seven published facts (`Replicas`, `Rank`, `Standing`, `InCut`,
 `Draining`, `Partition`, `BlindFor`), one knob (`SetCadence`), and one read for the owner (`StoredOrderingSeq`).
 `SetCut` earns its place because the cut needs the
@@ -564,18 +564,18 @@ is about the decision, not the socket count.
   Everything reachable from *inside* the package needs none: `observe` takes an error directly, and every
   time-dependent decision takes the injected clock. A seam over pure logic would be a signal that a
   dependency should have been injected instead — and here it already is. What the two reach is what
-  injection cannot: `FaultReadErr` is the only way an owner's assembled engine can be made blind, and
-  `FaultBeatErr` the only way a test can occupy a *peer's* view of a replica that has stopped proving
+  injection cannot: `FaultPeerReadErr` is the only way an owner's assembled engine can be made blind, and
+  `FaultPeerBeatErr` the only way a test can occupy a *peer's* view of a replica that has stopped proving
   itself. Both consult unscoped OR shard-scoped, because per-shard blindness is the property this package
   exists to provide and would otherwise be untestable.
 
-  `FaultBeatErr` gates **both** writes that prove liveness — the beat and the registration repair. Gating
+  `FaultPeerBeatErr` gates **both** writes that prove liveness — the beat and the registration repair. Gating
   only the beat leaves the hole its own premise forbids: a peer eventually prunes the row this replica
   stopped refreshing, the repair then re-creates it with a *fresh* timestamp, and a replica that cannot
   prove its liveness proves it anyway through the other write. Pinned inside
   `TestPeers_BeatFaultStopsProvingLiveness`, including that lifting the fault restores the repair — so the
   gate is the fault and not a broken repair path.
-- **One checkpoint, `CheckpointPass`**, fired scoped by shard as a pass begins. It is how an owner's test waits
+- **One checkpoint, `CheckpointPeerPass`**, fired scoped by shard as a pass begins. It is how an owner's test waits
   for a reading that was ATTEMPTED: `BlindFor` grows with the clock whether or not anything read, so a negative
   assertion about a blind replica needs a pass to have run and failed, and passes run one at a time, so two
   visits counted from a moment mean a whole read ran after it.

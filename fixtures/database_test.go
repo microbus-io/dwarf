@@ -22,7 +22,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/sequel"
@@ -51,7 +51,7 @@ func TestDatabase_TestModeCreatesSchema(t *testing.T) {
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Verify the schema was created by querying the flows table.
-	sh, err := engineseams.DB(e).Shard(1)
+	sh, err := accessors.DB(e).Shard(1)
 	assert.Must(assert.NoError(err))
 	db := sh.DB()
 	var count int
@@ -78,7 +78,7 @@ func TestSetShard(t *testing.T) {
 	pre := engine.NewEngine()
 	pre.SetHost(enginetest.NoopHost{})
 	assert.NoError(pre.SetShard(engine.ShardSpec{Index: 1}))
-	assert.Equal(0, engineseams.DB(pre).NumShards())
+	assert.Equal(0, accessors.DB(pre).NumShards())
 	assert.Error(pre.SetShard(engine.ShardSpec{Index: 1}))  // duplicate index
 	assert.Error(pre.SetShard(engine.ShardSpec{Index: 0}))  // index 0 is the "no shard / all shards" sentinel
 	assert.Error(pre.SetShard(engine.ShardSpec{Index: -1})) // negative index
@@ -90,12 +90,12 @@ func TestSetShard(t *testing.T) {
 	assert.NoError(e.SetShard(engine.ShardSpec{Index: 2}))
 	assert.NoError(e.SetShard(engine.ShardSpec{Index: 99}))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	assert.Equal(2, engineseams.DB(e).NumShards())
-	assert.Equal([]int{2, 99}, engineseams.DB(e).Indices())
+	assert.Equal(2, accessors.DB(e).NumShards())
+	assert.Equal([]int{2, 99}, accessors.DB(e).Indices())
 
 	// Both shards are migrated and usable in isolation; unregistered indices route nowhere.
 	for _, n := range []int{2, 99} {
-		sh, err := engineseams.DB(e).Shard(n)
+		sh, err := accessors.DB(e).Shard(n)
 		assert.Must(assert.NoError(err))
 		db := sh.DB()
 		var count int
@@ -103,7 +103,7 @@ func TestSetShard(t *testing.T) {
 		assert.NoError(err, "shard %d has no schema", n)
 		assert.Equal(0, count)
 	}
-	_, err := engineseams.DB(e).Shard(1)
+	_, err := accessors.DB(e).Shard(1)
 	assert.Error(err, "index 1 is not registered")
 
 	// Flows are created on the sparse shards and their keys route back to them.
@@ -115,7 +115,7 @@ func TestSetShard(t *testing.T) {
 
 	// On a running engine, SetShard is rejected and the set is unchanged.
 	assert.Error(e.SetShard(engine.ShardSpec{Index: 3}))
-	assert.Equal(2, engineseams.DB(e).NumShards())
+	assert.Equal(2, accessors.DB(e).NumShards())
 }
 
 func TestDatabase_ShardOutOfRange(t *testing.T) {
@@ -127,11 +127,11 @@ func TestDatabase_ShardOutOfRange(t *testing.T) {
 	e.SetHost(enginetest.NoopHost{})
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
-	_, err := engineseams.DB(e).Shard(0)
+	_, err := accessors.DB(e).Shard(0)
 	assert.Error(err)
-	_, err = engineseams.DB(e).Shard(2)
+	_, err = accessors.DB(e).Shard(2)
 	assert.Error(err)
-	_, err = engineseams.DB(e).Shard(1)
+	_, err = accessors.DB(e).Shard(1)
 	assert.Must(assert.NoError(err))
 }
 
@@ -145,7 +145,7 @@ func TestDatabase_EachShardSingleShard(t *testing.T) {
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	var visited []int
-	err := engineseams.DB(e).OnEach(context.Background(), func(ctx context.Context, db *sequel.DB, shard int) error {
+	err := accessors.DB(e).OnEach(context.Background(), func(ctx context.Context, db *sequel.DB, shard int) error {
 		visited = append(visited, shard)
 		return nil
 	})

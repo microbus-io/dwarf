@@ -24,7 +24,7 @@ import (
 
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/archiver"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/errors"
@@ -189,7 +189,7 @@ func TestRetention_ReadersKeepNoArchive(t *testing.T) {
 	assert.NoError(e.SetRetention(1))
 	assert.Must(assert.NoError(e.Startup(ctx)))
 	// The loop passes once at its start, then an hour later; the day is made once that first pass is done.
-	enginetest.AwaitVisitCount(t, e.seams, 1, 10*time.Second, engineseams.CheckpointArchivePassDone)
+	enginetest.AwaitVisitCount(t, e.diags.Seams(), 1, 10*time.Second, diagnostics.CheckpointArchivePassDone)
 	set := e.archives.Load()
 	today, err := set.byShard[1].Today(ctx)
 	assert.NoError(err)

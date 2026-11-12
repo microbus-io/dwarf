@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -99,10 +99,10 @@ func TestMySQLClaim_ReadKeepsItsOwnGeneration(t *testing.T) {
 			}
 
 			// Hold the first worker between its CAS and its read, at the generation it is about to take.
-			held := engineseams.Join(engineseams.CheckpointClaimBeforeRead, strconv.Itoa(shard), strconv.Itoa(stepID), strconv.Itoa(seq+1))
-			e.seams.Break(held)
-			defer e.seams.Resume(held)
-			reached := e.seams.Waiter(held)
+			held := diagnostics.Join(diagnostics.CheckpointClaimBeforeRead, strconv.Itoa(shard), strconv.Itoa(stepID), strconv.Itoa(seq+1))
+			e.diags.Seams().Break(held)
+			defer e.diags.Seams().Resume(held)
+			reached := e.diags.Seams().Waiter(held)
 			done := make(chan error, 1)
 			go func() { done <- e.processStep(ctx, shard, stepID, func() {}) }()
 			select {
@@ -123,7 +123,7 @@ func TestMySQLClaim_ReadKeepsItsOwnGeneration(t *testing.T) {
 				t.Fatalf("the second claim ran the task %d times, want 1", runs.Load())
 			}
 
-			e.seams.Resume(held)
+			e.diags.Seams().Resume(held)
 			select {
 			case err := <-done:
 				if err != nil {

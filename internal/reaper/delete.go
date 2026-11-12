@@ -279,5 +279,6 @@ func (r *Reaper) deleteArchived(ctx context.Context, db *sequel.DB, day int, roo
 	if err != nil {
 		return 0, errors.Trace(err) // rolled back: nothing deleted
 	}
+	r.seams.Checkpoint(ctx, CheckpointArchiveDeleted)
 	return len(locked), nil
 }

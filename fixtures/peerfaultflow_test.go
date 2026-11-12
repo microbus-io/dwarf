@@ -24,7 +24,8 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -154,7 +155,7 @@ func TestPeerRegistryBlindflow(t *testing.T) {
 	// stopped existing.
 	drainFlows(t, 30*time.Second, creator, name, 4)
 	for _, e := range []*engine.Engine{creator, eng1, eng2} {
-		engineseams.Seams(e).InjectN(engineseams.FaultPeerReadErr, 1<<20)
+		accessors.Seams(e).InjectN(diagnostics.FaultPeerReadErr, 1<<20)
 	}
 
 	before := ran["1"].Load() + ran["2"].Load()
@@ -205,18 +206,18 @@ func TestPeerStalledDispatcherflow(t *testing.T) {
 	//     empty: the first may be the in-flight one, the second planned from the empty tally.
 	//
 	// Shard 1 is the fleet's only shard.
-	tallied := engineseams.Join(engineseams.CheckpointRefillTallyDone, "1")
-	engineseams.Seams(eng2).Break(tallied)
-	<-engineseams.Seams(eng2).Waiter(tallied)
-	enginetest.AwaitVisits(t, engineseams.Seams(eng2), 2, 30*time.Second, engineseams.Join(engineseams.CheckpointRefillCycleDone, "1"))
-	engineseams.Seams(eng2).InjectN(engineseams.FaultRefillScanErr, 1<<20)
-	engineseams.Seams(eng2).Resume(tallied)
+	tallied := diagnostics.Join(diagnostics.CheckpointRefillTallyDone, "1")
+	accessors.Seams(eng2).Break(tallied)
+	<-accessors.Seams(eng2).Waiter(tallied)
+	enginetest.AwaitVisits(t, accessors.Seams(eng2), 2, 30*time.Second, diagnostics.Join(diagnostics.CheckpointRefillCycleDone, "1"))
+	accessors.Seams(eng2).InjectN(diagnostics.FaultRefillScanErr, 1<<20)
+	accessors.Seams(eng2).Resume(tallied)
 
 	// Arm BEFORE the work exists, then check Visits after: a steal landing between the two lines is caught by
 	// the channel, one before them by the count. The reverse order reintroduces the race the split-arm Waiter
 	// exists to remove.
-	stole := engineseams.Seams(eng1).Waiter(engineseams.CheckpointRefillStole)
-	visitsBefore := engineseams.Seams(eng1).Visits(engineseams.CheckpointRefillStole)
+	stole := accessors.Seams(eng1).Waiter(diagnostics.CheckpointRefillStole)
+	visitsBefore := accessors.Seams(eng1).Visits(diagnostics.CheckpointRefillStole)
 
 	before := ran["1"].Load()
 	keys := createFlows(t, creator, name, 20)
@@ -235,7 +236,7 @@ func TestPeerStalledDispatcherflow(t *testing.T) {
 	// 4.3s, 6.7s and 31.2s on runs where this steal assertion passed, so the clock was reporting the suite's
 	// load and not the mechanism. The takeover itself is one grace (4 cycle periods, ~100ms here) behind the
 	// first Create. Measured ~150ms.
-	stolen := visitsBefore != engineseams.Seams(eng1).Visits(engineseams.CheckpointRefillStole)
+	stolen := visitsBefore != accessors.Seams(eng1).Visits(diagnostics.CheckpointRefillStole)
 	if !stolen {
 		select {
 		case <-stole:

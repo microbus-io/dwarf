@@ -28,7 +28,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -103,7 +103,7 @@ func TestFaultComposition_FanOutBranch(t *testing.T) {
 	// X's transition transaction fails once after X was marked completed with a non-contention error: persist
 	// retries the transaction in place, so X's task runs only ONCE and the cohort arrival is still bumped
 	// exactly once by the successful commit.
-	e.seams.Inject(engineseams.Join(engineseams.FaultTransitionCommit, "X"))
+	e.diags.Seams().Inject(diagnostics.Join(diagnostics.FaultTransitionCommit, "X"))
 	fk, out := batteryRun(t, e, "fcfan/g")
 	assert.Equal(workflow.StatusCompleted, out.Status)
 
@@ -163,7 +163,7 @@ func TestFaultComposition_SubgraphChild(t *testing.T) {
 	// X's transition (X->Y) inside the child fails once after X was marked completed: persist retries the
 	// transaction in place, so the child proceeds to Y->END and completes without re-running X, and the parent
 	// revives.
-	e.seams.Inject(engineseams.Join(engineseams.FaultTransitionCommit, "X"))
+	e.diags.Seams().Inject(diagnostics.Join(diagnostics.FaultTransitionCommit, "X"))
 	_, out := batteryRun(t, e, "fcsub/parent")
 	assert.Equal(workflow.StatusCompleted, out.Status)
 
@@ -196,7 +196,7 @@ func TestFaultComposition_RepeatedFault(t *testing.T) {
 	// IN PLACE and the fourth attempt commits - A's task runs exactly ONCE and the flow still completes with an
 	// identical final_state.
 	*calls["a"], *calls["b"] = 0, 0
-	e.seams.InjectN(engineseams.Join(engineseams.FaultTransitionCommit, "A"), 3)
+	e.diags.Seams().InjectN(diagnostics.Join(diagnostics.FaultTransitionCommit, "A"), 3)
 	fk, out := batteryRun(t, e, "fcrep/g")
 	assert.Equal(workflow.StatusCompleted, out.Status)
 	assert.Equal(baseFS, readFinalState(t, e, fk), "final_state diverged from the no-fault baseline")
@@ -226,8 +226,8 @@ func TestFaultComposition_CompoundWakeLoss(t *testing.T) {
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Drop the create-time doorbell AND the terminal signalStop: neither wake reaches its consumer.
-	e.seams.Inject(engineseams.FaultDropDoorbell)
-	e.seams.Inject(engineseams.FaultDropSignalStop)
+	e.diags.Seams().Inject(diagnostics.FaultDropDoorbell)
+	e.diags.Seams().Inject(diagnostics.FaultDropSignalStop)
 	fk, err := e.Create(ctx, "fcwake/g", nil, nil)
 	assert.NoError(err)
 
@@ -297,9 +297,9 @@ func TestFaultComposition_DeepSubgraphReviveLoss(t *testing.T) {
 
 	// The first completeSurgraphFlow to run is the deepest (l3 reviving l2's caller): drop that one revive so
 	// l2's caller wedges running+parkedSubgraph with a terminal child.
-	e.seams.Inject(engineseams.FaultSubgraphReviveLost)
+	e.diags.Seams().Inject(diagnostics.FaultSubgraphReviveLost)
 	// The leaf is the first flow of the tree to stop: every level above it waits on the revive that is lost.
-	stopped := e.seams.Waiter(engineseams.CheckpointFlowStopped)
+	stopped := e.diags.Seams().Waiter(diagnostics.CheckpointFlowStopped)
 	fk, err := e.Create(ctx, "fcdeep/root", nil, nil)
 	assert.NoError(err)
 	shard, _, _, _, err := keys.ParseFlowKey(fk)

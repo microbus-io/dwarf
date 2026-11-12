@@ -23,7 +23,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -87,7 +87,7 @@ func TestFanIn_GotoLoopBranchKeepsInteriorDAGEdges(t *testing.T) {
 	assert.Equal([]string{"a", "b"}, done)
 
 	shard, _ := parseFlowShard(flowKey)
-	sh, err := engineseams.DB(eng).Shard(shard)
+	sh, err := accessors.DB(eng).Shard(shard)
 	assert.Must(assert.NoError(err))
 	db := sh.DB()
 	var joinStepID int

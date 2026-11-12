@@ -26,7 +26,7 @@ import (
 
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/candidates"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -71,7 +71,7 @@ func linear2(mux *hosts.Mux, prefix string, calls map[string]*int) {
 func awaitNextStop(t *testing.T, e *Engine) func() {
 	t.Helper()
 	assert := testarossa.For(t)
-	reached := e.seams.Waiter(engineseams.CheckpointFlowStopped)
+	reached := e.diags.Seams().Waiter(diagnostics.CheckpointFlowStopped)
 	return func() {
 		t.Helper()
 		select {
@@ -188,12 +188,12 @@ func TestFault_ExecuteTask(t *testing.T) {
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// No onError -> the injected failure fails the flow.
-	e.seams.Inject(engineseams.Join(engineseams.FaultExecuteTask, "Work"))
+	e.diags.Seams().Inject(diagnostics.Join(diagnostics.FaultExecuteTask, "Work"))
 	if out := enginetest.BoundedRun(t, e, "fexec/bare"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusFailed, out.Status)
 	}
 	// With onError -> routed to the handler and the flow completes. Fault consumed, so re-arm.
-	e.seams.Inject(engineseams.Join(engineseams.FaultExecuteTask, "Work"))
+	e.diags.Seams().Inject(diagnostics.Join(diagnostics.FaultExecuteTask, "Work"))
 	if out := enginetest.BoundedRun(t, e, "fexec/handled"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 		assert.Equal("yes", stateVal(out.State, "rescued"))
@@ -220,7 +220,7 @@ func TestFault_PanicExecuteTask(t *testing.T) {
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// A panic in the host call is caught at the boundary and fails the step (no wedge/crash-loop).
-	e.seams.Inject(engineseams.Join(engineseams.FaultPanicExecuteTask, "Boom"))
+	e.diags.Seams().Inject(diagnostics.Join(diagnostics.FaultPanicExecuteTask, "Boom"))
 	if out := enginetest.BoundedRun(t, e, "fpanic/g"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusFailed, out.Status)
 	}
@@ -246,7 +246,7 @@ func TestFault_LoadGraph(t *testing.T) {
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Armed: Create fails (the graph "cannot be loaded"). Disarmed: it creates and completes.
-	e.seams.Inject(engineseams.Join(engineseams.FaultLoadGraph, "floadg/g"))
+	e.diags.Seams().Inject(diagnostics.Join(diagnostics.FaultLoadGraph, "floadg/g"))
 	_, err := e.Create(ctx, "floadg/g", nil, nil)
 	assert.Error(err)
 	assert.Equal(500, errors.StatusCode(err))
@@ -275,7 +275,7 @@ func TestFault_TransitionCommit(t *testing.T) {
 	//
 	// Retrying the write instead of the task is the whole point - a task's side effects must not re-fire
 	// because a transaction lost a connection.
-	e.seams.Inject(engineseams.Join(engineseams.FaultTransitionCommit, "A"))
+	e.diags.Seams().Inject(diagnostics.Join(diagnostics.FaultTransitionCommit, "A"))
 	if out := enginetest.BoundedRun(t, e, "ftrans/g"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
@@ -297,7 +297,7 @@ func TestFault_Contention(t *testing.T) {
 
 	// A's transition transaction returns a lock-contention error once: Transact retries the closure to a
 	// clean commit, transparently - the flow completes and A ran only once (retry is inside the tx).
-	e.seams.Inject(engineseams.Join(engineseams.FaultContention, "A"))
+	e.diags.Seams().Inject(diagnostics.Join(diagnostics.FaultContention, "A"))
 	if out := enginetest.BoundedRun(t, e, "fcont/g"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
@@ -324,7 +324,7 @@ func TestFault_CompleteFlowCommit(t *testing.T) {
 	// The flow-completion transaction fails once after the terminal step was marked completed with a
 	// non-contention error: persist retries the transaction in place, so the flow still completes (no `running`
 	// orphan with all steps terminal) and the task runs ONCE.
-	e.seams.Inject(engineseams.FaultCompleteFlowCommit)
+	e.diags.Seams().Inject(diagnostics.FaultCompleteFlowCommit)
 	if out := enginetest.BoundedRun(t, e, "fcfc/g"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
@@ -353,10 +353,10 @@ func TestFault_LeaseStaleWrite(t *testing.T) {
 	// step stays claimable and lease recovery re-runs it cleanly - a stale write never corrupts or
 	// terminalizes the flow. The first dispatch's write is fenced out; once its lease lapses, lease recovery
 	// resets the step and it re-runs (fault consumed) to a clean completion, so A ran exactly twice.
-	e.seams.Inject(engineseams.Join(engineseams.FaultLeaseStaleWrite, "A"))
+	e.diags.Seams().Inject(diagnostics.Join(diagnostics.FaultLeaseStaleWrite, "A"))
 	// Both armed before Create. The fenced first dispatch returns without stopping the flow, so the first - and
 	// only - stop is the recovered completion.
-	firstDone := e.seams.Waiter(engineseams.CheckpointClaimedDispatchDone)
+	firstDone := e.diags.Seams().Waiter(diagnostics.CheckpointClaimedDispatchDone)
 	waitDone := awaitNextStop(t, e)
 	fk, err := e.Create(ctx, "flease/g", nil, nil)
 	assert.NoError(err)
@@ -393,7 +393,7 @@ func TestFault_DropSignalStop(t *testing.T) {
 
 	// The terminal wake is dropped, so Await cannot rely on the signal; it must return via the latch
 	// detector reading the DB-committed stop.
-	e.seams.Inject(engineseams.FaultDropSignalStop)
+	e.diags.Seams().Inject(diagnostics.FaultDropSignalStop)
 	if out := enginetest.BoundedRun(t, e, "fsig/g"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
@@ -419,7 +419,7 @@ func TestFault_DropDoorbell(t *testing.T) {
 	// `pending` and due, so the shard's next piston cycle selects it on its own - which is the whole
 	// backstop, and needs no help from this test. Lease recovery is NOT what covers this (it only resets
 	// `running` rows), so the flow simply has to complete within a few cycles.
-	e.seams.Inject(engineseams.FaultDropDoorbell)
+	e.diags.Seams().Inject(diagnostics.FaultDropDoorbell)
 	fk, err := e.Create(ctx, "fdoor/g", nil, nil)
 	assert.NoError(err)
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
@@ -464,7 +464,7 @@ func TestFault_SubgraphReviveLost(t *testing.T) {
 	// consulted the fault - and a single fire would then be consumed by whichever of the worker and the
 	// sweep got there first. If the sweep won, ITS revive would be the one dropped, the worker would
 	// perform the real one, and this test would pass while proving nothing about the sweep.
-	e.seams.InjectN(engineseams.FaultSubgraphReviveLost, 1<<20)
+	e.diags.Seams().InjectN(diagnostics.FaultSubgraphReviveLost, 1<<20)
 	waitChild := awaitNextStop(t, e) // rendezvous on the child's completion (the first stop; parent is parked)
 	fk, err := e.Create(ctx, "fsub/parent", nil, nil)
 	assert.NoError(err)
@@ -477,7 +477,7 @@ func TestFault_SubgraphReviveLost(t *testing.T) {
 	// The child has now gone terminal; its revive is (faultily) lost, so the caller is wedged.
 	waitChild()
 	// Disarm before the sweep, so the re-drive below is the one revive that is allowed to land.
-	e.seams.Withdraw(engineseams.FaultSubgraphReviveLost)
+	e.diags.Seams().Withdraw(diagnostics.FaultSubgraphReviveLost)
 	// Rendezvous on the parent's completion after the sweep re-drives the release (armed before the sweep).
 	waitParent := awaitNextStop(t, e)
 	e.recoverWedgedSubgraphParks(ctx, db, shard, 0) // the sweep, no age guard
@@ -512,10 +512,10 @@ func TestFault_ReapMidTree(t *testing.T) {
 
 	// Reap aborts mid-tree (after steps, before flows) and rolls back: the tree is left intact, not a
 	// half-deleted flow. The next reap pass after the fault clears removes it cleanly.
-	e.seams.InjectN(engineseams.FaultReapMidTree, 1000)
+	e.diags.Seams().InjectN(diagnostics.FaultReapMidTree, 1000)
 	e.reapDueFlows(ctx)
 	assert.Equal(1, shardFlowCount(t, e, shard)) // rolled back - still present
-	e.seams.Withdraw(engineseams.FaultReapMidTree)
+	e.diags.Seams().Withdraw(diagnostics.FaultReapMidTree)
 
 	e.reapDueFlows(ctx)
 	assert.Equal(0, shardFlowCount(t, e, shard)) // clean removal
@@ -540,7 +540,7 @@ func TestFault_RefillScanErr(t *testing.T) {
 
 	// The refiller's band scan errors once. Instead of refilling empty and idling every worker forever, it
 	// logs and shortens the next poll, so the flow is still dispatched and completes (just after a re-scan).
-	e.seams.Inject(engineseams.FaultRefillScanErr)
+	e.diags.Seams().Inject(diagnostics.FaultRefillScanErr)
 	if out := enginetest.BoundedRun(t, e, "frefill/g"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
@@ -567,7 +567,7 @@ func TestFault_RefillScanErrPreservesCache(t *testing.T) {
 	// cycle cannot slip a legitimate empty refill in and wipe the cache on its own).
 	e.cache.Refill(1, []candidates.Job{{StepID: 101, Shard: 1}, {StepID: 102, Shard: 1}}, 5)
 	assert.Equal(2, e.cache.Len())
-	e.seams.InjectN(engineseams.FaultRefillScanErr, 1<<20)
+	e.diags.Seams().InjectN(diagnostics.FaultRefillScanErr, 1<<20)
 
 	_, _, err := e.pistons[1].ScanBand(ctx, 1)
 	assert.Error(err, "the engine's seams must reach its pistons")

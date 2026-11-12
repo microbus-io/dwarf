@@ -32,7 +32,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
 	"github.com/microbus-io/dwarf/workflow"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
@@ -307,7 +307,7 @@ func runReal(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 	ended := func() int64 {
 		var n int64
 		for _, e := range engines {
-			n += engineseams.FlowsClosed(e)
+			n += accessors.FlowsClosed(e)
 		}
 		return n
 	}
@@ -653,7 +653,7 @@ func drainFleet(ctx context.Context, engines []*engine.Engine, quiet time.Durati
 	ended := func() int64 {
 		var n int64
 		for _, e := range engines {
-			n += engineseams.FlowsClosed(e)
+			n += accessors.FlowsClosed(e)
 		}
 		return n
 	}

@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -93,8 +93,8 @@ func TestLongDuration_SleepAndRetryBackoff(t *testing.T) {
 			var entryStepID int
 			assert.NoError(db.QueryRowContext(ctx,
 				"SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&entryStepID))
-			enginetest.AwaitVisitCount(t, e.seams, 1, 30*time.Second,
-				engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(entryStepID)))
+			enginetest.AwaitVisitCount(t, e.diags.Seams(), 1, 30*time.Second,
+				diagnostics.Join(diagnostics.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(entryStepID)))
 
 			var flowStatus string
 			assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&flowStatus))

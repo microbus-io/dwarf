@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/cancelmarker"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -75,7 +75,7 @@ func (e *Engine) logSweepError(ctx context.Context, msg string, args ...any) {
 	if ctx.Err() != nil {
 		return
 	}
-	e.logger.ErrorContext(ctx, msg, args...)
+	e.diags.Logger().ErrorContext(ctx, msg, args...)
 }
 
 // heavyRepairEvery is how many recovery ticks pass between runs of the park detectors - every 5 minutes at the
@@ -111,8 +111,8 @@ func (e *Engine) runRecoverySweep(ctx context.Context, heavy bool) {
 	})
 	// Test rendezvous: this pass is over, so every detector below has already read the database. A test that
 	// FORGES a wedge/orphan shape and then drives one detector itself must wait for this, or the background
-	// pass races its forge and the shape is counted twice (see engineseams.CheckpointRecoverySweepDone).
-	e.seams.Checkpoint(ctx, engineseams.CheckpointRecoverySweepDone)
+	// pass races its forge and the shape is counted twice (see diagnostics.CheckpointRecoverySweepDone).
+	e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointRecoverySweepDone)
 }
 
 // recoverExpiredLeases resets every running step whose lease has expired, on every shard. It is the ONLY
@@ -195,7 +195,7 @@ func (e *Engine) recoverExpiredLeases(ctx context.Context) {
 			return nil
 		}
 		if len(stepIDs) > 0 {
-			e.seams.Checkpoint(ctx, engineseams.CheckpointLeaseRecoverySelected)
+			e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointLeaseRecoverySelected)
 		}
 		// e.leaseRecoveryBatch caps each UPDATE's literal `IN (...)` list. One batch covers any realistic pass.
 		for len(stepIDs) > 0 {
@@ -264,7 +264,7 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 		return
 	}
 	if len(hits) > 0 {
-		e.seams.Checkpoint(ctx, engineseams.CheckpointWedgeSweepSelected)
+		e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointWedgeSweepSelected)
 	}
 
 	for _, w := range hits {
@@ -284,7 +284,7 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 		switch {
 		case err == sql.ErrNoRows:
 			// The child flow is gone (e.g. deleted/purged): fail the caller so the flow can terminate.
-			e.logger.ErrorContext(ctx, "Wedge sweep: parked subgraph caller has no child flow; failing it",
+			e.diags.Logger().ErrorContext(ctx, "Wedge sweep: parked subgraph caller has no child flow; failing it",
 				"shard", shard, "step", w.stepID, "flow", keys.CorrelationID(shard, w.flowHour, w.flowID))
 			if rerr := e.deliverSubgraphError(ctx, shard, w.stepID, childFlowID, errors.New("subgraph flow not found (wedge recovery)")); rerr != nil {
 				e.logSweepError(ctx, "Wedge sweep: failing orphaned subgraph caller", "shard", shard, "step", w.stepID, "error", rerr)
@@ -297,7 +297,7 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 			// The scan found no open child, so an open one now is a spawn that landed since - the caller was
 			// revived and parked again. It is not wedged.
 		default:
-			e.logger.ErrorContext(ctx, "Wedge sweep: reviving wedged subgraph caller",
+			e.diags.Logger().ErrorContext(ctx, "Wedge sweep: reviving wedged subgraph caller",
 				"shard", shard, "step", w.stepID, "childFlow", keys.CorrelationID(shard, childHour, childFlowID), "childStatus", childStatus)
 			var rerr error
 			switch childStatus {
@@ -381,7 +381,7 @@ func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel
 		if ctx.Err() != nil {
 			return // abandoned by the drain; the next pass finds what is left
 		}
-		e.logger.ErrorContext(ctx, "Wedge sweep: terminating orphaned subgraph child whose parent is terminal",
+		e.diags.Logger().ErrorContext(ctx, "Wedge sweep: terminating orphaned subgraph child whose parent is terminal",
 			"shard", shard, "childFlow", keys.CorrelationID(shard, o.hour, o.flowID))
 		if rerr := e.terminateOrphanedSubtree(ctx, shard, o.flowID, o.hour, o.token); rerr != nil {
 			e.logSweepError(ctx, "Wedge sweep: terminating orphaned subgraph child", "shard", shard, "childFlow", keys.CorrelationID(shard, o.hour, o.flowID), "error", rerr)
@@ -573,11 +573,11 @@ func (e *Engine) recoverOrphanedFlows(ctx context.Context, db *sequel.DB, shard 
 		case err != nil:
 			e.logSweepError(ctx, "Orphan sweep: rewinding stranded steps", "shard", shard, "flow", keys.CorrelationID(shard, o.hour, o.flowID), "error", err)
 		case rewound > 0:
-			e.logger.WarnContext(ctx, "Orphan sweep: replaying steps whose transition never committed",
+			e.diags.Logger().WarnContext(ctx, "Orphan sweep: replaying steps whose transition never committed",
 				"flow", keys.CorrelationID(shard, o.hour, o.flowID), "steps", rewound)
 			e.metricStepsRecovered(ctx, int(rewound))
 		case alarm && locked && held == 0:
-			e.logger.ErrorContext(ctx, "Orphaned flow: running with all steps terminal and no successor",
+			e.diags.Logger().ErrorContext(ctx, "Orphaned flow: running with all steps terminal and no successor",
 				"flow", keys.CorrelationID(shard, o.hour, o.flowID))
 			e.metricOrphanedFlow(ctx, o.workflowURL)
 		}

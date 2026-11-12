@@ -23,9 +23,9 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/accessors"
 	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/database"
-	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/janitor"
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -108,7 +108,7 @@ func TestList_EachListReadsItsOwnTables(t *testing.T) {
 	open, err := e.ListOpen(ctx, workflow.Query{Limit: 100})
 	assert.NoError(err)
 	assert.Len(open, 0, "the flows closed but not archived yet are not open")
-	live, err := engineseams.ListLive(e, ctx, workflow.Query{Limit: 100})
+	live, err := accessors.ListLive(e, ctx, workflow.Query{Limit: 100})
 	assert.NoError(err)
 	assert.Equal([]int{roots[4], roots[3]}, idsOf(t, live), "they are in the live tables")
 	recent, err := e.ListRecentlyClosed(ctx, workflow.Query{Limit: 100})

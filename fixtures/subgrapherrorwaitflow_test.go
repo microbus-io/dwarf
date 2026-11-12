@@ -25,7 +25,8 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -120,14 +121,14 @@ func TestSubgraphErrorWaitflow(t *testing.T) {
 	// Delivery from signalStop to a parked caller is internal/latch's TestRelease_WakesWithoutASweep, and the
 	// detector-only case is TestSubgraphChildStopSignal_DroppedThenBackstopped. Every wait below is a hang
 	// ceiling and nothing else. Armed before anything can fail the child.
-	stopped := engineseams.Seams(eng).Waiter(engineseams.Join(engineseams.CheckpointFlowStopped, child, workflow.StatusFailed))
+	stopped := accessors.Seams(eng).Waiter(diagnostics.Join(diagnostics.CheckpointFlowStopped, child, workflow.StatusFailed))
 
 	// Register an Await on the child key while the child is still running: it must block until the child fails.
 	// The ctx outlasts the hang ceilings below, so it is never what returns the Await.
 	awaitCtx, cancelAwait := context.WithTimeout(ctx, 60*time.Second*enginetest.TimeoutScale())
 	defer cancelAwait()
 	awaitCh := make(chan outcome, 1)
-	parked := engineseams.Seams(eng).Waiter(engineseams.Join(engineseams.CheckpointAwaitParked, child)) // armed before the goroutine that trips it
+	parked := accessors.Seams(eng).Waiter(diagnostics.Join(diagnostics.CheckpointAwaitParked, child)) // armed before the goroutine that trips it
 	go func() {
 		o, e := eng.Await(awaitCtx, child)
 		awaitCh <- outcome{o, e}

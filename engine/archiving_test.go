@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/migrations"
@@ -72,7 +72,7 @@ func archiveEngine(t *testing.T, mux *hosts.Mux, retention int) *Engine {
 	}
 	// The archive loop passes once as it starts, on its own goroutine; waited out here, it cannot land in the middle of
 	// a test and read the catalog - learning a day the test made - at a moment the test does not choose.
-	enginetest.AwaitVisitCount(t, e.seams, 1, 10*time.Second, engineseams.CheckpointArchivePassDone)
+	enginetest.AwaitVisitCount(t, e.diags.Seams(), 1, 10*time.Second, diagnostics.CheckpointArchivePassDone)
 	return e
 }
 
@@ -175,10 +175,10 @@ func TestArchiving_DeleteOfATreeArchivedMeanwhileDeletesItThere(t *testing.T) {
 	assert.NoError(err)
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
 
-	e.seams.Break(engineseams.CheckpointBeforeDeleteStamp)
+	e.diags.Seams().Break(diagnostics.CheckpointBeforeDeleteStamp)
 	deleted := make(chan error, 1)
 	go func() { deleted <- e.Delete(ctx, fk) }()
-	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeDeleteStamp, 10*time.Second))
+	assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeDeleteStamp, 10*time.Second))
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
 	e.reapDueFlows(ctx)
@@ -186,11 +186,11 @@ func TestArchiving_DeleteOfATreeArchivedMeanwhileDeletesItThere(t *testing.T) {
 	assert.NoError(err)
 	flows, _ := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), rootID)
 	if now, _ := e.archives.Load().byShard[1].Today(ctx); flows == 0 && now != today {
-		e.seams.Resume(engineseams.CheckpointBeforeDeleteStamp)
+		e.diags.Seams().Resume(diagnostics.CheckpointBeforeDeleteStamp)
 		t.Skip("midnight passed during the pass")
 	}
 	assert.Equal(2, flows, "the reaper archived the tree while the Delete was held")
-	e.seams.Resume(engineseams.CheckpointBeforeDeleteStamp)
+	e.diags.Seams().Resume(diagnostics.CheckpointBeforeDeleteStamp)
 	assert.NoError(<-deleted)
 	flows, steps := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), rootID)
 	assert.Zero(flows, "deleted from the archive")

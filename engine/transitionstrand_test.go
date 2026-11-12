@@ -27,7 +27,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -103,8 +103,8 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 	assert.NoError(err)
 	var aStepID int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStepID))
-	aDone := engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(aStepID))
-	aDoneBase := e.seams.Visits(aDone)
+	aDone := diagnostics.Join(diagnostics.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(aStepID))
+	aDoneBase := e.diags.Seams().Visits(aDone)
 	releaseA()
 
 	stranded := func(e *Engine) bool {
@@ -116,7 +116,7 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 	}
 	// The fenced worker's own writes are the only thing that could advance the flow; once its dispatch has
 	// returned, they have been attempted.
-	enginetest.AwaitVisitCount(t, e.seams, aDoneBase+1, 15*time.Second, aDone)
+	enginetest.AwaitVisitCount(t, e.diags.Seams(), aDoneBase+1, 15*time.Second, aDone)
 	assert.True(stranded(e), "expected A completed with no successor on a running flow")
 
 	e2 := NewEngineUnderTest(t.Name())
@@ -172,10 +172,10 @@ func slowWorkerReplay(t *testing.T, e *Engine, mux *hosts.Mux, flowURL string, i
 	}
 	awaitStartupRecoverySweep(t, e)
 
-	e.seams.Break(engineseams.CheckpointBeforeTransitionTx)
+	e.diags.Seams().Break(diagnostics.CheckpointBeforeTransitionTx)
 	fk, err := e.Create(ctx, flowURL, initial, nil)
 	assert.NoError(err)
-	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeTransitionTx, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeTransitionTx")
+	assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeTransitionTx, 10*time.Second), "engine never reached checkpoint diagnostics.CheckpointBeforeTransitionTx")
 	shard, _, flowID, _, err = keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	sh, err := e.db.Shard(shard)
@@ -201,10 +201,10 @@ func slowWorkerReplay(t *testing.T, e *Engine, mux *hosts.Mux, flowURL string, i
 	// first, and the replay cannot get past the same checkpoint before the release.
 	var aStepID int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStepID))
-	aDone := engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(aStepID))
-	aDoneBase := e.seams.Visits(aDone)
+	aDone := diagnostics.Join(diagnostics.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(aStepID))
+	aDoneBase := e.diags.Seams().Visits(aDone)
 
-	e.seams.Resume(engineseams.CheckpointBeforeTransitionTx)
+	e.diags.Seams().Resume(diagnostics.CheckpointBeforeTransitionTx)
 	awaitCtx, cancel := context.WithTimeout(ctx, 15*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	out, err := e.Await(awaitCtx, fk)
@@ -212,7 +212,7 @@ func slowWorkerReplay(t *testing.T, e *Engine, mux *hosts.Mux, flowURL string, i
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
 	// The flow can complete before the stalled worker returns; a double advance would land by the time it does.
-	enginetest.AwaitVisitCount(t, e.seams, aDoneBase+2, 15*time.Second, aDone)
+	enginetest.AwaitVisitCount(t, e.diags.Seams(), aDoneBase+2, 15*time.Second, aDone)
 	return shard, flowID, swept
 }
 

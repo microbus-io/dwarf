@@ -247,7 +247,7 @@ func TestPiston_SpillCrossesShards(t *testing.T) {
 			t.Fatal(err)
 		}
 		db := sh.DB()
-		p, err := New(sh, pl, cache)
+		p, err := New(sh, nil, pl, cache)
 		if err != nil {
 			t.Fatal(err)
 		}

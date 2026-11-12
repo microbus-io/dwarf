@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -114,13 +114,13 @@ func TestShutdown_AbandonsASweepInFlight(t *testing.T) {
 
 		// Forge the shape lease recovery resets - a running step whose lease has lapsed - under a breakpoint, so
 		// the next background pass stops between its SELECT and its reset.
-		e.seams.Break(engineseams.CheckpointLeaseRecoverySelected)
+		e.diags.Seams().Break(diagnostics.CheckpointLeaseRecoverySelected)
 		_, err = db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, parked=0, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -60000) WHERE step_id=?",
 			workflow.StatusRunning, stepID)
 		assert.NoError(err)
-		if !assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointLeaseRecoverySelected, ceiling), "the sweep never selected the forged step") {
-			e.seams.Resume(engineseams.CheckpointLeaseRecoverySelected)
+		if !assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointLeaseRecoverySelected, ceiling), "the sweep never selected the forged step") {
+			e.diags.Seams().Resume(diagnostics.CheckpointLeaseRecoverySelected)
 			return
 		}
 		release := hold(t, e, db, stepID)
@@ -157,7 +157,7 @@ func TestShutdown_AbandonsASweepInFlight(t *testing.T) {
 		// The breakpoint stays armed: the sweep is frozen at it for as long as the hold lasts, as it would be in a
 		// slow statement, and returns only when its ctx is cancelled or the breakpoint is resumed.
 		run(t, false, func(t *testing.T, e *Engine, _ *sequel.DB, _ int) func() {
-			return func() { e.seams.Resume(engineseams.CheckpointLeaseRecoverySelected) }
+			return func() { e.diags.Seams().Resume(diagnostics.CheckpointLeaseRecoverySelected) }
 		})
 	})
 
@@ -168,14 +168,14 @@ func TestShutdown_AbandonsASweepInFlight(t *testing.T) {
 			assert := testarossa.For(t)
 			tx, err := db.BeginTx(context.Background(), nil)
 			if !assert.NoError(err) {
-				e.seams.Resume(engineseams.CheckpointLeaseRecoverySelected)
+				e.diags.Seams().Resume(diagnostics.CheckpointLeaseRecoverySelected)
 				return func() {}
 			}
 			// The value moves, so every dialect counts the row as written and holds its lock.
 			_, err = tx.ExecContext(context.Background(), "UPDATE dwarf_steps SET lease_seq=lease_seq+1 WHERE step_id=?", stepID)
 			assert.NoError(err)
 			// Let the sweep go on into its reset, which now waits on the lock.
-			e.seams.Resume(engineseams.CheckpointLeaseRecoverySelected)
+			e.diags.Seams().Resume(diagnostics.CheckpointLeaseRecoverySelected)
 			return func() { tx.Rollback() }
 		})
 	})

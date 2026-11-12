@@ -18,14 +18,12 @@ package engine
 
 import (
 	"context"
-	"log/slog"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/migrations"
@@ -46,8 +44,8 @@ func holdARoot(t *testing.T, e *Engine, db *sequel.DB) {
 	closeTreesAgo(t, db, 2*time.Minute, root)
 	e.reapSlice = 0
 	e.reapBatch = 1
-	e.seams.InjectN(engineseams.FaultReapArchiveErr, 10000)
-	defer e.seams.Withdraw(engineseams.FaultReapArchiveErr)
+	e.diags.Seams().InjectN(diagnostics.FaultReapArchiveErr, 10000)
+	defer e.diags.Seams().Withdraw(diagnostics.FaultReapArchiveErr)
 	e.reapDueFlows(t.Context())
 }
 
@@ -116,7 +114,7 @@ func TestReaperContract_AFailedStartupLeavesNoReadings(t *testing.T) {
 	assertHeldReadings(t, collect(t, reader))
 
 	assert.NoError(e.Shutdown(ctx))
-	e.seams.InjectN(engineseams.FaultInitRuntime, 1)
+	e.diags.Seams().InjectN(diagnostics.FaultInitRuntime, 1)
 	assert.Error(e.Startup(ctx))
 	assert.Must(assert.NoError(e.Startup(ctx)))
 	assertNoReaperReadings(t, collect(t, reader))
@@ -155,12 +153,12 @@ func TestReaperContract_RemovalsRunOnTheCallersContext(t *testing.T) {
 
 	e.reapAttempt = time.Nanosecond
 	e.purgeChunk = 2
-	e.seams.InjectN(engineseams.FaultReapSizeErr, 10000)
-	defer e.seams.Withdraw(engineseams.FaultReapSizeErr)
+	e.diags.Seams().InjectN(diagnostics.FaultReapSizeErr, 10000)
+	defer e.diags.Seams().Withdraw(diagnostics.FaultReapSizeErr)
 	for _, root := range roots {
-		fault := engineseams.Join(engineseams.FaultReapSizeErr, strconv.Itoa(root))
-		e.seams.InjectN(fault, 10000)
-		defer e.seams.Withdraw(fault)
+		fault := diagnostics.Join(diagnostics.FaultReapSizeErr, strconv.Itoa(root))
+		e.diags.Seams().InjectN(fault, 10000)
+		defer e.diags.Seams().Withdraw(fault)
 	}
 	assert.NoError(e.Delete(ctx, keys.NewFlowKey(1, hour, roots[3], token)))
 	removed, _, err := e.Purge(ctx, enginetest.Recent(workflow.Query{Limit: 10}))
@@ -180,11 +178,9 @@ func TestReaperContract_PurgeTakesTheReapersRowBudget(t *testing.T) {
 		t.Run(strconv.Itoa(c.rows), func(t *testing.T) {
 			assert := testarossa.For(t)
 			ctx := t.Context()
-			log := &queryLog{}
 			e := NewEngineUnderTest(t.Name())
 			t.Cleanup(func() { e.Shutdown(context.Background()) })
 			e.SetHost(hosts.NewMux())
-			assert.NoError(e.SetLogger(slog.New(log)))
 			e.archiveGrace = 0
 			e.reapInterval = time.Hour
 			assert.NoError(e.SetRetention(30))
@@ -201,27 +197,14 @@ func TestReaperContract_PurgeTakesTheReapersRowBudget(t *testing.T) {
 			}
 
 			e.reapBatchRows = c.rows
-			stmt := "DELETE FROM " + migrations.FlowsTable(today) + " "
-			before := log.count(stmt)
+			before := e.diags.Seams().Visits(diagnostics.CheckpointReapArchiveDeleted)
 			removed, _, err := e.Purge(ctx, enginetest.Recent(workflow.Query{Limit: 10}))
 			assert.NoError(err)
 			assert.Equal(4, removed)
-			assert.Equal(c.transactions, log.count(stmt)-before, "one flows delete per transaction")
+			assert.Equal(c.transactions, e.diags.Seams().Visits(diagnostics.CheckpointReapArchiveDeleted)-before,
+				"transactions deleting archived trees")
 		})
 	}
-}
-
-// count returns how many logged statements start with prefix.
-func (l *queryLog) count(prefix string) int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	n := 0
-	for _, q := range l.queries {
-		if strings.HasPrefix(q, prefix) {
-			n++
-		}
-	}
-	return n
 }
 
 // TestReaperContract_APartialPurgeCountsWhatItRemoved pins a Purge that fails part-way: it reports the roots its
@@ -244,9 +227,9 @@ func TestReaperContract_APartialPurgeCountsWhatItRemoved(t *testing.T) {
 	}
 
 	e.reapBatchRows = 4 // two trees to a transaction: roots[2] is in the second
-	fault := engineseams.Join(engineseams.FaultArchiveDelete, strconv.Itoa(roots[2]))
-	e.seams.InjectN(fault, 1000)
-	defer e.seams.Withdraw(fault)
+	fault := diagnostics.Join(diagnostics.FaultArchiveDelete, strconv.Itoa(roots[2]))
+	e.diags.Seams().InjectN(fault, 1000)
+	defer e.diags.Seams().Withdraw(fault)
 	removed, done, err := e.Purge(ctx, enginetest.Recent(workflow.Query{Limit: 10}))
 	assert.Error(err)
 	assert.False(done)
@@ -294,17 +277,17 @@ func TestReaperContract_ThePassTimeExcludesExpiration(t *testing.T) {
 	expiring := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
 	age(t, e, expiring, 2*time.Hour)
 
-	e.seams.Break(engineseams.CheckpointTerminateAfterScan)
+	e.diags.Seams().Break(diagnostics.CheckpointTerminateAfterScan)
 	done := make(chan struct{})
 	start := time.Now()
 	go func() {
 		defer close(done)
 		expireNow(ctx, e)
 	}()
-	assert.Must(assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointTerminateAfterScan, 10*time.Second*enginetest.TimeoutScale())))
+	assert.Must(assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointTerminateAfterScan, 10*time.Second*enginetest.TimeoutScale())))
 	const held = 500 * time.Millisecond
 	time.Sleep(held)
-	e.seams.Resume(engineseams.CheckpointTerminateAfterScan)
+	e.diags.Seams().Resume(diagnostics.CheckpointTerminateAfterScan)
 	<-done
 	whole := time.Since(start)
 	status, _ := statusOf(t, e, expiring)

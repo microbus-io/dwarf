@@ -17,7 +17,7 @@ limitations under the License.
 // Package enginetest holds the engine test helpers that are shared across package boundaries - by the
 // white-box tests that stay in package engine AND by the black-box tests in the fixtures package. A helper
 // lands here only when it is (a) used from more than one package and (b) expressible through the engine's
-// public operations and the internal/engineseams accessors alone. A helper that needs an
+// public operations and the internal/accessors alone. A helper that needs an
 // unexported internal (driveLeaseRecovery calling recoverExpiredLeases, startSolo touching testConnCap, the
 // peer-row writers) cannot live here and stays in package engine with the white-box tests that use it.
 //
@@ -34,15 +34,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/engineseams"
-	"github.com/microbus-io/dwarf/internal/piston"
+	"github.com/microbus-io/dwarf/internal/accessors"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/testarossa"
 )
 
 // Engine is the slice of *engine.Engine's exported surface these helpers use; the shard set and the seams
-// are reached through internal/engineseams. Defining it here (rather than importing engine) is what keeps
+// are reached through internal/accessors. Defining it here (rather than importing engine) is what keeps
 // this package free of the import cycle described in the package doc; *engine.Engine satisfies it
 // structurally.
 type Engine interface {
@@ -63,8 +63,8 @@ func AssertInvariants(t *testing.T, e Engine) {
 	terminal := "('" + workflow.StatusCompleted + "', '" + workflow.StatusFailed + "', '" + workflow.StatusTerminated + "', '" + workflow.StatusCancelled + "')"
 	nonTerminal := "('" + workflow.StatusCreated + "', '" + workflow.StatusPending + "', '" + workflow.StatusRunning + "', '" + workflow.StatusInterrupted + "')"
 
-	for _, shard := range engineseams.DB(e).Indices() {
-		sh, err := engineseams.DB(e).Shard(shard)
+	for _, shard := range accessors.DB(e).Indices() {
+		sh, err := accessors.DB(e).Shard(shard)
 		if !assert.NoError(err) {
 			continue
 		}
@@ -145,9 +145,9 @@ func AssertInvariants(t *testing.T, e Engine) {
 // the earlier occurrence (wait on such a status with a Waiter armed around the specific trigger instead).
 func AwaitFlowStatus(t *testing.T, e Engine, flowKey, want string, timeout time.Duration) {
 	t.Helper()
-	stopped := engineseams.Join(engineseams.CheckpointFlowStopped, flowKey, want)
-	reached := engineseams.Seams(e).Waiter(stopped) // arm first...
-	if engineseams.Seams(e).Visits(stopped) > 0 {
+	stopped := diagnostics.Join(diagnostics.CheckpointFlowStopped, flowKey, want)
+	reached := accessors.Seams(e).Waiter(stopped) // arm first...
+	if accessors.Seams(e).Visits(stopped) > 0 {
 		return // ...then catch a stop that beat us to it
 	}
 	select {
@@ -263,13 +263,13 @@ func AwaitVisitCount(t *testing.T, seams *seamster.Seamster, want int, timeout t
 // pushes that follow are what put the plan into the partition.
 func AwaitShardCycles(t *testing.T, e Engine, extra int) {
 	t.Helper()
-	shards := engineseams.DB(e).Indices()
+	shards := accessors.DB(e).Indices()
 	// Every shard scans before any shard's pushes are awaited, so no shard can satisfy its push count
 	// against a plan built before a peer had reported.
 	for _, shard := range shards {
-		AwaitVisits(t, engineseams.Seams(e), extra, time.Minute, engineseams.Join(piston.CheckpointTallyDone, strconv.Itoa(shard)))
+		AwaitVisits(t, accessors.Seams(e), extra, time.Minute, diagnostics.Join(diagnostics.CheckpointRefillTallyDone, strconv.Itoa(shard)))
 	}
 	for _, shard := range shards {
-		AwaitVisits(t, engineseams.Seams(e), extra, time.Minute, engineseams.Join(piston.CheckpointCycleDone, strconv.Itoa(shard)))
+		AwaitVisits(t, accessors.Seams(e), extra, time.Minute, diagnostics.Join(diagnostics.CheckpointRefillCycleDone, strconv.Itoa(shard)))
 	}
 }

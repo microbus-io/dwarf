@@ -26,7 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/errors"
 )
 
@@ -434,11 +434,11 @@ func (e *Engine) checkFleetFits(shard int, sz shardSizing) {
 	}
 	e.fleetOverLimit[shard] = over
 	if over {
-		e.logger.Warn("Fleet may exceed the database's connection limit; consider an external pooler",
+		e.diags.Logger().Warn("Fleet may exceed the database's connection limit; consider an external pooler",
 			"shard", shard, "replicas", replicas, "connections", held, "maxConnections", maxConns)
 		return
 	}
-	e.logger.Info("Fleet back within the database's connection limit",
+	e.diags.Logger().Info("Fleet back within the database's connection limit",
 		"shard", shard, "replicas", replicas, "connections", held, "maxConnections", maxConns)
 }
 
@@ -505,8 +505,8 @@ func (e *Engine) recomputePools() {
 	// recompute here on a stale reading while a fresher one tries to run (see TestPoolSizing_-
 	// ConcurrentRecomputeAppliesLatestR). The fault picks which recompute reaches the checkpoint, so a Break
 	// there holds that one alone and the racing recompute is free to run into the lock.
-	if e.seams.IsFault(engineseams.FaultSlowPoolPush) {
-		e.seams.Checkpoint(e.lifetimeCtx, engineseams.CheckpointPoolPushHeld)
+	if e.diags.Seams().IsFault(diagnostics.FaultSlowPoolPush) {
+		e.diags.Seams().Checkpoint(e.lifetimeCtx, diagnostics.CheckpointPoolPushHeld)
 	}
 	postSplitConns := 0
 	for _, idx := range e.db.Indices() {
@@ -526,20 +526,20 @@ func (e *Engine) recomputePools() {
 		if held {
 			divisor = roles[idx].held
 			if _, ok := e.heldDivisors[idx]; !ok {
-				e.logger.Info("Shard pool held for in-flight steps", "shard", idx)
+				e.diags.Logger().Info("Shard pool held for in-flight steps", "shard", idx)
 			}
 			e.heldDivisors[idx] = divisor
 		} else if _, ok := e.heldDivisors[idx]; ok {
 			delete(e.heldDivisors, idx)
-			e.logger.Info("Shard pool hold released", "shard", idx)
+			e.diags.Logger().Info("Shard pool hold released", "shard", idx)
 		}
 		idle, open := shardPool(sizing[idx].budget, divisor)
 		// Through the shard set, which applies the test-mode cap - a push onto the shard's own handle would
 		// not - and resizes the shard's turns with the pool, for the same reason the cache and the worker
 		// ceiling follow it: they order access to the connections this replica actually holds.
 		e.db.SetShardPool(idx, idle, open)
-		if e.seams.Enabled() { // Enabled gates the assembled name and the boxed value in production
-			e.seams.Variable(engineseams.Join(engineseams.VariablePoolIdle, strconv.Itoa(idx)), idle)
+		if e.diags.Seams().Enabled() { // Enabled gates the assembled name and the boxed value in production
+			e.diags.Seams().Variable(diagnostics.Join(diagnostics.VariablePoolIdle, strconv.Itoa(idx)), idle)
 		}
 		if slots > 0 {
 			postSplitConns += open
@@ -579,14 +579,14 @@ func (e *Engine) recomputePools() {
 	e.cache.Resize(min(dispatch, int(e.workers.Load())))
 	// The refill scan floor is measured against the cache's capacity, so it follows the cache.
 	e.recomputeRefillIntervalsWith(sizing, roles)
-	e.logger.Info("Derived pools recomputed", "slots", observed, "dispatch", dispatch)
+	e.diags.Logger().Info("Derived pools recomputed", "slots", observed, "dispatch", dispatch)
 }
 
 // applyRole starts or stops this replica dispatching one shard: the doorbell's gate, the piston's idle mode and the
 // janitor's activity move together. Called under poolsLock, in the order recomputePools gives it.
 func (e *Engine) applyRole(shard int, dispatches bool) {
 	if b := e.dispatchFlag(shard); b != nil && b.Swap(dispatches) != dispatches {
-		e.logger.Info("Shard dispatch role changed", "shard", shard, "dispatching", dispatches)
+		e.diags.Logger().Info("Shard dispatch role changed", "shard", shard, "dispatching", dispatches)
 	}
 	if p := e.pistons[shard]; p != nil {
 		p.SetIdle(!dispatches || e.zeroWorkers())
@@ -660,7 +660,7 @@ func (e *Engine) recomputeWorkerCeilingWith(ctx context.Context, sizing map[int]
 		return
 	}
 	if n := int(e.workers.Load()); n > ceiling {
-		e.logger.WarnContext(ctx, "Worker count exceeds the lease-margin ceiling: a synchronized completion storm may re-execute tasks",
+		e.diags.Logger().WarnContext(ctx, "Worker count exceeds the lease-margin ceiling: a synchronized completion storm may re-execute tasks",
 			"workers", n, "ceiling", ceiling)
 	}
 }

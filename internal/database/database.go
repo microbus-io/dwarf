@@ -23,6 +23,7 @@ package database
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"os"
 	"slices"
@@ -31,14 +32,10 @@ import (
 	"sync"
 	"time"
 
-	"log/slog"
-
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/metric"
-	"go.opentelemetry.io/otel/trace"
 
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/internal/turnstile"
 )
@@ -76,9 +73,9 @@ type Config struct {
 	// Until SetShardPool sizes a shard, its turns let every caller through unordered.
 	TurnsPerConn int
 
-	Logger         *slog.Logger
-	TracerProvider trace.TracerProvider // nil → otel.GetTracerProvider()
-	MeterProvider  metric.MeterProvider // nil → otel.GetMeterProvider()
+	// Diags is what the shards' sequel layer reports through: its logger, limited to what is above debug level,
+	// and the tracer and meter providers it instruments itself with. Nil reports nowhere.
+	Diags *diagnostics.Diags
 }
 
 // ShardSet is the engine's set of open, migrated database shards. The zero value is a usable, empty set. The
@@ -276,20 +273,13 @@ func checkOwner(ctx context.Context, db *sequel.DB) error {
 	return nil
 }
 
-// applyTelemetry points a shard's sequel DB at the configured logger, tracer, and meter providers, defaulting
-// a nil tracer/meter provider to the global otel one.
+// applyTelemetry points a shard's sequel DB at the configured logger, tracer provider and meter provider. The logger
+// passes nothing at debug level: sequel logs every statement there, and a step runs several, which would bury
+// everything else at that level. Its migrations, logged at info, pass.
 func applyTelemetry(cfg Config, db *sequel.DB) {
-	db.SetLogger(cfg.Logger)
-	tp := cfg.TracerProvider
-	if tp == nil {
-		tp = otel.GetTracerProvider()
-	}
-	db.SetTracerProvider(tp)
-	mp := cfg.MeterProvider
-	if mp == nil {
-		mp = otel.GetMeterProvider()
-	}
-	db.SetMeterProvider(mp)
+	db.SetLogger(slog.New(aboveDebug{cfg.Diags.Logger().Handler()}))
+	db.SetTracerProvider(cfg.Diags.TracerProvider())
+	db.SetMeterProvider(cfg.Diags.MeterProvider())
 }
 
 // Shard returns the shard of the given index. An unknown index returns a uniform not-found error: a flow key
@@ -440,4 +430,24 @@ func (s *ShardSet) Close() {
 	if release != nil {
 		release()
 	}
+}
+
+// aboveDebug passes on what its handler would, except debug records.
+type aboveDebug struct {
+	slog.Handler
+}
+
+// Enabled is the handler's answer for a level above debug, and false at debug and below.
+func (h aboveDebug) Enabled(ctx context.Context, level slog.Level) bool {
+	return level > slog.LevelDebug && h.Handler.Enabled(ctx, level)
+}
+
+// WithAttrs keeps the limit on the derived handler.
+func (h aboveDebug) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return aboveDebug{h.Handler.WithAttrs(attrs)}
+}
+
+// WithGroup keeps the limit on the derived handler.
+func (h aboveDebug) WithGroup(name string) slog.Handler {
+	return aboveDebug{h.Handler.WithGroup(name)}
 }

@@ -14,70 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package engineseams is the engine's test and benchmark surface for code in this module outside package
-// engine: the names of the engine's fault-injection, checkpoint and recorded-variable seams, Join for their
-// targeted forms, DB and Seams, which reach a running engine's shard set and seam registry, ListLive,
-// ArchiveNow and ArchiveDays, which list the live tables in every status, archive what just closed and read the
-// archive's days, FlowsClosed, the count of flows an engine closed, SetRefillInterval, the benchmark override of the refill cycle period, and ShardBudget, the pool
-// the engine derives for a shard.
-//
-// The engine fires these seams from its own production code and consults one seamster.Seamster per engine,
-// enabled only under testing.Testing(); the mechanism (arming, scoping, Wait/Break/Resume) is the seamster
-// package's. A test arms a name from here on the registry Seams returns:
-//
-//	engineseams.Seams(eng).Inject(engineseams.Join(engineseams.FaultExecuteTask, "Charge"))
-//
-// The accessors take the engine as an any because this package cannot import package engine, which imports
-// it; they panic when given anything but an *engine.Engine, and are nil until package engine is linked in.
-package engineseams
+package diagnostics
 
-import (
-	"context"
-	"strings"
-	"time"
-
-	"github.com/microbus-io/dwarf/internal/database"
-	"github.com/microbus-io/dwarf/internal/peers"
-	"github.com/microbus-io/dwarf/internal/piston"
-	"github.com/microbus-io/dwarf/internal/reaper"
-	"github.com/microbus-io/dwarf/workflow"
-	"github.com/microbus-io/seamster"
-)
-
-// DB returns the engine's shard set, for a test to inspect flow and step rows directly.
-var DB func(eng any) *database.ShardSet
-
-// Seams returns the engine's seam registry, for a test to arm faults and checkpoints and wait on them.
-var Seams func(eng any) *seamster.Seamster
-
-// ListLive lists the flows in the engine's live tables in every status, open and closed - what ListOpen lists plus the
-// closed flows not archived yet - with ListOpen's rules otherwise, for a test that must see a flow it just closed.
-var ListLive func(eng any, ctx context.Context, query workflow.Query) ([]workflow.FlowSummary, error)
-
-// ArchiveNow runs one reaper pass that archives every closed root, however recently it closed, and removes the roots
-// scheduled for deletion whose time has come (not a DeleteOnCompletion root inside its grace), for a test that lists
-// or purges what it just closed.
-var ArchiveNow func(eng any, ctx context.Context)
-
-// ArchiveDays reads the archive days whose tables exist on a shard, ascending, for a benchmark that counts or sizes
-// the archive.
-var ArchiveDays func(eng any, ctx context.Context, shard int) ([]int, error)
-
-// FlowsClosed counts the flows this engine has closed - completed, failed, terminated or cancelled - with an atomic
-// read that needs no meter, for a benchmark to sum over the engines it runs in process. A flow is closed by whichever
-// replica dispatches its last step, so one engine's count means nothing alone.
-var FlowsClosed func(eng any) int64
-
-// SetRefillInterval pins every shard's refill cycle period to d on a running or configured engine, for a
-// benchmark sweep to hold the period at fixed values, or a fixture whose backlog makes the derived period too
-// short under -race; d <= 0 restores the derived period.
-var SetRefillInterval func(eng any, d time.Duration) error
-
-// ShardBudget is the connection budget the engine derives for one PostgreSQL shard with no MaxConnections
-// declared, at rttMs of round-trip time against a server whose max_connections is serverMax (0 = unknown) -
-// the pool a lone replica opens. A benchmark computes it ahead of a run to pin exactly the pool that ships,
-// since the engine's own Startup probe varies run to run.
-var ShardBudget func(rttMs float64, serverMax int) int
+import "strings"
 
 // Join builds the targeted form of a seam name: the base name, then the entity it targets, joined with ":".
 // A consult site and the test that arms it both call it, so neither can spell the join the other does not -
@@ -95,8 +34,9 @@ func Join(parts ...string) string {
 // consults or fires both, as separate seams; a comment that says neither is a bare name. "Task" is the task's name
 // in the graph, not the URL ExecuteTask receives.
 //
-// A name owned by a package below the engine (internal/reaper, internal/piston, internal/peers) is aliased from
-// that package, so there is one catalogue and a test arms the very string the package consults.
+// Every component's seams are named here - the engine's, the pistons', the Sonars', the janitors' - so there is one
+// catalogue, and a test arms the very string a component consults. internal/reaper keeps its own copies of its
+// names, which the engine's tests pin equal to these.
 
 // --- Fault injection ---
 //
@@ -160,23 +100,26 @@ const (
 	FaultForkCommit      = "forkCommit"      // the Fork clone transaction errors
 
 	// The refiller:
-	FaultRefillScanErr  = piston.FaultScanErr  // a shard's piston's priority-band scan errors
-	FaultRefillFetchErr = piston.FaultFetchErr // a shard's piston's FetchSteps fails without touching the database
+	FaultRefillScanErr  = "refillScanErr"  // a shard's piston's priority-band scan errors
+	FaultRefillFetchErr = "refillFetchErr" // a shard's piston's FetchSteps fails without touching the database
 
 	// The peer registry:
-	FaultPeerReadErr = peers.FaultReadErr // bare and by shard: a shard's registry reading fails, so this replica goes BLIND on that shard
-	FaultPeerBeatErr = peers.FaultBeatErr // bare and by shard: a shard's registry beat writes nothing, so this replica stops proving its liveness THERE, while running on
+	FaultPeerReadErr = "peerReadErr" // bare and by shard: a shard's registry reading fails, so this replica goes BLIND on that shard
+	FaultPeerBeatErr = "peerBeatErr" // bare and by shard: a shard's registry beat writes nothing, so this replica stops proving its liveness THERE, while running on
 
 	// Reaping and archiving:
-	FaultReapSelectErr      = reaper.FaultSelectErr     // the reaper's due-root SELECT errors
-	FaultReapSizeErr        = reaper.FaultSizeErr       // by root flow_id: sizing a selected root fails
-	FaultReapMidTree        = reaper.FaultMidTree       // bare and by root flow_id: a move or delete fails after its steps, before its flows
-	FaultReapContention     = reaper.FaultContention    // the archive move fails on lock contention (a deadlock victim)
-	FaultReapArchiveErr     = reaper.FaultArchiveErr    // an archive move or staging chunk fails with an error that is not lock contention
-	FaultReapStageChunk     = reaper.FaultStageChunk    // by root flow_id: a staging chunk fails under its root's lock, before it writes
-	FaultReapStageLost      = reaper.FaultStageLost     // by root flow_id: a staging chunk commits, then reports an error, as a lost response
-	FaultArchiveDelete      = reaper.FaultArchiveDelete // by root flow_id: an archived tree's deletion fails before it commits
-	FaultArchiveMaintainErr = "archiveMaintainErr"      // an archive maintenance pass fails after its work
+	FaultReapSelectErr      = "reapSelectErr"      // the reaper's due-root SELECT errors
+	FaultReapSizeErr        = "reapSizeErr"        // by root flow_id: sizing a selected root fails
+	FaultReapMidTree        = "reapMidTree"        // bare and by root flow_id: a move or delete fails after its steps, before its flows
+	FaultReapContention     = "reapContention"     // the archive move fails on lock contention (a deadlock victim)
+	FaultReapArchiveErr     = "reapArchiveErr"     // an archive move or staging chunk fails with an error that is not lock contention
+	FaultReapStageChunk     = "reapStageChunk"     // by root flow_id: a staging chunk fails under its root's lock, before it writes
+	FaultReapStageLost      = "reapStageLost"      // by root flow_id: a staging chunk commits, then reports an error, as a lost response
+	FaultArchiveDelete      = "archiveDeleteErr"   // by root flow_id: an archived tree's deletion fails before it commits
+	FaultArchiveMaintainErr = "archiveMaintainErr" // an archive maintenance pass fails after its work
+
+	// The janitors, beside the reaper's names above, which their jobs consult too:
+	FaultJanitorConnErr = "janitorConnErr" // a janitor's batch cannot take its connection
 )
 
 // --- Execution checkpoints ---
@@ -238,6 +181,10 @@ const (
 	// asserting an exact count must be single-worker and contention-free.
 	CheckpointFlowRowWrite = "flowRowWrite"
 
+	// Counted with Visits, like CheckpointFlowRowWrite, for the statements a performance property is about:
+	CheckpointGraphRead     = "graphRead"     // a dispatch read its flow's graph column, neither cache holding the parse
+	CheckpointFlowSelfFixup = "flowSelfFixup" // a new flow's own-id columns were written by an UPDATE after its INSERT (off PostgreSQL)
+
 	// Subgraphs:
 	CheckpointBeforeSubgraphSpawn    = "beforeSubgraphSpawn"    // before the transaction that parks a subgraph caller and creates its child
 	CheckpointSubgraphSpawnParked    = "subgraphSpawnParked"    // inside the spawn's transaction, after the caller is parked and before the child is inserted
@@ -290,10 +237,12 @@ const (
 	// cadence, so a test that needs the fleet's partitions to agree with the plan before it asserts dispatch ORDER
 	// must wait for a cycle per shard; no amount of elapsed time substitutes, because one starved piston is
 	// exactly the case that breaks it.
-	CheckpointRefillCycleDone = piston.CheckpointCycleDone
+	CheckpointRefillCycleDone = "refillCycleDone"
 
-	CheckpointRefillTallyDone = piston.CheckpointTallyDone // a shard's piston published a tally from a real scan
-	CheckpointRefillStole     = piston.CheckpointStole     // a shard's piston selected steps from OUTSIDE its residue class
+	CheckpointRefillTallyDone   = "refillTallyDone"   // a shard's piston published a tally from a real scan
+	CheckpointRefillStole       = "refillStole"       // a shard's piston selected steps from OUTSIDE its residue class
+	CheckpointRefillTallyBegin  = "refillTallyBegin"  // a shard's piston began a tally cycle, past its idle check and before its first query
+	CheckpointRefillSupplyBegin = "refillSupplyBegin" // a shard's piston began a supply cycle, past its idle check and before its first query
 
 	// The peer registry:
 
@@ -301,14 +250,16 @@ const (
 	// Passes run one at a time, so a visit also says the previous pass is over: two visits counted from a moment
 	// mean a whole read ran after it. That is how a test waits for a reading that was attempted, where the Sonar's
 	// own BlindFor grows with the clock whether or not anything read.
-	CheckpointPeerPass = peers.CheckpointPass
+	CheckpointPeerPass = "peerPass"
 
 	// Reaping and archiving:
-	CheckpointReapBatchLocked      = reaper.CheckpointBatchLocked      // a reaper batch has locked its due roots, inside its transaction
-	CheckpointReapBeforeRootDelete = reaper.CheckpointBeforeRootDelete // a chunked deletion is about to recheck and delete its root
-	CheckpointReapChunkDone        = reaper.CheckpointChunkDone        // a chunk of a chunked deletion has committed and been counted
-	CheckpointReapStageChunkDone   = reaper.CheckpointStageChunkDone   // a staging chunk, or the publication, has committed
-	CheckpointArchivePassDone      = "archivePassDone"                 // the archive loop, after each pass over the shards
+	CheckpointReapBatchLocked      = "reapBatchLocked"      // a reaper batch has locked its due roots, inside its transaction
+	CheckpointReapBeforeRootDelete = "reapBeforeRootDelete" // a chunked deletion is about to recheck and delete its root
+	CheckpointReapChunkDone        = "reapChunkDone"        // a chunk of a chunked deletion has committed and been counted
+	CheckpointReapStageChunkDone   = "reapStageChunkDone"   // a staging chunk, or the publication, has committed
+	CheckpointReapArchiveDeleted   = "reapArchiveDeleted"   // a transaction deleting archived trees (Delete, Purge, the archive deletion sweep) has committed
+	CheckpointArchivePassDone      = "archivePassDone"      // the archive loop, after each pass over the shards
+	CheckpointJanitorBatchConn     = "janitorBatchConn"     // a janitor's batch has taken its connection, before its first statement
 )
 
 // --- Recorded variables ---

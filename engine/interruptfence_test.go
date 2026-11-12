@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -39,7 +39,7 @@ import (
 // caller out of parkedSubgraph and strand the parent revive — so the fence must undo the re-park, which only a
 // full rollback can do.
 //
-// engineseams.FaultInterruptStaleWrite forces the in-tx leaf lease_seq to look re-granted on the FIRST interrupt attempt
+// diagnostics.FaultInterruptStaleWrite forces the in-tx leaf lease_seq to look re-granted on the FIRST interrupt attempt
 // (exactly as a real peer re-claim would). The transaction rolls back, the worker abandons, and the child step
 // stays running-and-leased; once its short lease lapses the background poll re-dispatches it and the SECOND
 // attempt (fault consumed) drives the real interrupt up the whole chain with no strand. A root Resume then
@@ -85,7 +85,7 @@ func TestFault_InterruptStaleWriteRollback(t *testing.T) {
 	e.leaseMargin = 100 * time.Millisecond // lease = budget+margin = 300ms, so lease recovery re-dispatches fast
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
-	e.seams.Inject(engineseams.FaultInterruptStaleWrite)
+	e.diags.Seams().Inject(diagnostics.FaultInterruptStaleWrite)
 	fk, err := e.Create(ctx, "fisw/parent", nil, nil)
 	assert.NoError(err)
 
@@ -224,8 +224,8 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 		assert := testarossa.For(t)
 		e, db := setup(t, workflow.StatusRunning)
 		defer e.Shutdown(ctx)
-		e.seams.Inject(engineseams.FaultInterruptChainWrite)
-		defer e.seams.Withdraw(engineseams.FaultInterruptChainWrite)
+		e.diags.Seams().Inject(diagnostics.FaultInterruptChainWrite)
+		defer e.diags.Seams().Withdraw(diagnostics.FaultInterruptChainWrite)
 
 		err := e.handleInterrupt(ctx, &dispatch{shard: 1, db: db, stepID: 2, changesJSON: []byte(`{"answer":"x"}`), row: claimRow{leaseSeq: 7, flowID: 2, createdHour: createdHourOf(t, e, 2), flowToken: "ctok", workflowURL: "u"}}, mustState(map[string]any{"ask": "approve?"}))
 		assert.Error(err, "a failed chain UPDATE must surface as an error so Transact retries it, NOT be swallowed as a fence")

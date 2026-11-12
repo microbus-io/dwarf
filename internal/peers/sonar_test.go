@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/database"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/sequel"
@@ -82,6 +83,12 @@ type rig struct {
 // ones assigns them here rather than through an API no owner would call.
 func newRig(t *testing.T) *rig {
 	t.Helper()
+	return newRigWith(t, nil)
+}
+
+// newRigWith is newRig with the Sonar reporting through d.
+func newRigWith(t *testing.T, d *diagnostics.Diags) *rig {
+	t.Helper()
 	var set database.ShardSet
 	assert := testarossa.For(t)
 	assert.NoError(set.Open(context.Background(), database.Config{
@@ -93,7 +100,7 @@ func newRig(t *testing.T) *rig {
 	sh, err := set.Shard(1)
 	assert.Must(assert.NoError(err))
 	db := sh.DB()
-	s, err := New(selfID, sh)
+	s, err := New(selfID, sh, d)
 	assert.NoError(err)
 	clk := newFakeClock()
 	// Both, together: New seeded lastGood from the real clock, which against the fake one would read as
@@ -850,16 +857,15 @@ func TestPeers_FailedBeatIsDueOnTheNextPass(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	r := newRig(t)
 	sm := seamster.New(true)
-	r.s.SetSeams(sm)
+	r := newRigWith(t, seamsDiags(sm))
 	assert.NoError(r.s.register(ctx))
 	r.s.pass(ctx)
 
 	// The outage: the row ages past the fresh window, and the beat that comes due fails.
 	_, err := r.db.ExecContext(ctx, "UPDATE dwarf_peers SET seen_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE engine_id=?", -60000, selfID)
 	assert.NoError(err)
-	sm.Inject(FaultBeatErr)
+	sm.Inject(diagnostics.FaultPeerBeatErr)
 	r.clk.advance(r.s.beat)
 	due := r.s.nextBeat
 	r.s.pass(ctx)
@@ -1037,16 +1043,15 @@ func TestPeers_RepairCorrectsAnOrderingRegistrationMissed(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	r := newRig(t)
 	sm := seamster.New(true)
-	r.s.SetSeams(sm)
+	r := newRigWith(t, seamsDiags(sm))
 	_, err := r.db.ExecContext(ctx,
 		"INSERT INTO dwarf_peers (engine_id, seen_at, ordering_seq) VALUES (?, NOW_UTC(), ?)", selfID, 300)
 	assert.Must(assert.NoError(err))
 
 	// This run chose 100; its registration writes nothing (the fault stands in for a failed statement).
 	r.s.SetProfile(Profile{Working: true, OrderingSeq: 100})
-	sm.InjectN(FaultBeatErr, 1)
+	sm.InjectN(diagnostics.FaultPeerBeatErr, 1)
 	assert.NoError(r.s.register(ctx))
 	assert.Equal(int64(300), r.row(t, selfID).orderingSeq, "the registration was missed")
 
@@ -1234,15 +1239,15 @@ func TestPeers_NewRejectsAnUnusableIdentity(t *testing.T) {
 	assert := testarossa.For(t)
 	r := newRig(t)
 
-	_, err := New(0, database.NewShard(1, r.db))
+	_, err := New(0, database.NewShard(1, r.db), nil)
 	assert.Error(err)
-	_, err = New(-1, database.NewShard(1, r.db))
+	_, err = New(-1, database.NewShard(1, r.db), nil)
 	assert.Error(err)
-	_, err = New(selfID, nil)
+	_, err = New(selfID, nil, nil)
 	assert.Error(err)
-	_, err = New(selfID, database.NewShard(0, r.db))
+	_, err = New(selfID, database.NewShard(0, r.db), nil)
 	assert.Error(err)
-	_, err = New(selfID, database.NewShard(1, nil))
+	_, err = New(selfID, database.NewShard(1, nil), nil)
 	assert.Error(err)
 }
 
@@ -1266,18 +1271,16 @@ func TestPeers_ConstantsHoldTheirRelationships(t *testing.T) {
 	assert.True(scanInterval < beatInterval)
 }
 
-// TestPeers_SeamsDefaultInert pins that a Sonar built and never told otherwise consults nothing, so a
-// production one pays a bool read per site and neither fault can fire.
+// TestPeers_SeamsDefaultInert pins that a Sonar built with no Diags consults nothing, so neither fault can fire
+// and its consult sites need no nil check.
 func TestPeers_SeamsDefaultInert(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	r := newRig(t)
 
-	assert.False(r.s.faulted(FaultReadErr))
-	assert.False(r.s.faulted(FaultBeatErr))
-	r.s.SetSeams(nil) // nil restores the inert default rather than nil-panicking
-	assert.False(r.s.faulted(FaultReadErr))
+	assert.False(r.s.faulted(diagnostics.FaultPeerReadErr))
+	assert.False(r.s.faulted(diagnostics.FaultPeerBeatErr))
 
 	r.s.pass(ctx)
 	assert.NoError(r.s.lastErr)
@@ -1292,9 +1295,8 @@ func TestPeers_ReadFaultDrivesTheBlindPolicy(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	r := newRig(t)
 	sm := seamster.New(true)
-	r.s.SetSeams(sm)
+	r := newRigWith(t, seamsDiags(sm))
 
 	// A healthy fleet of three, two of them dispatching alongside us.
 	r.addPeer(t, 10, time.Second, time.Second)
@@ -1311,7 +1313,7 @@ func TestPeers_ReadFaultDrivesTheBlindPolicy(t *testing.T) {
 
 	// Now the readings fail. Nothing is published, so the fleet is held rather than collapsing - which is
 	// the direction that matters, since under-counting over-sizes every pool derived from it.
-	sm.InjectN(FaultReadErr, 1000)
+	sm.InjectN(diagnostics.FaultPeerReadErr, 1000)
 	for range 5 {
 		r.clk.advance(r.s.scan)
 		r.s.pass(ctx)
@@ -1324,7 +1326,7 @@ func TestPeers_ReadFaultDrivesTheBlindPolicy(t *testing.T) {
 	// Reading resumes while the fleet has genuinely shrunk. The first reading back must NOT be believed:
 	// this is the correlated stall, where every row looks stale at once and every replica would otherwise
 	// size for a fleet of one against a database that is already sick.
-	sm.Withdraw(FaultReadErr)
+	sm.Withdraw(diagnostics.FaultPeerReadErr)
 	assert.NoError(r.s.register(ctx))
 	_, err := r.db.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id IN (10, 20)")
 	assert.NoError(err)
@@ -1347,9 +1349,8 @@ func TestPeers_BeatFaultStopsProvingLiveness(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	r := newRig(t)
 	sm := seamster.New(true)
-	r.s.SetSeams(sm)
+	r := newRigWith(t, seamsDiags(sm))
 	assert.NoError(r.s.register(ctx))
 
 	var turns atomic.Uint64
@@ -1360,7 +1361,7 @@ func TestPeers_BeatFaultStopsProvingLiveness(t *testing.T) {
 	assert.True(r.row(t, selfID).dispatchAgeMs < staleAge, "a healthy beat proves both facts")
 
 	// Age the row, then beat with the fault armed: the row must stay exactly as stale as we left it.
-	sm.InjectN(FaultBeatErr, 1000)
+	sm.InjectN(diagnostics.FaultPeerBeatErr, 1000)
 	_, err := r.db.ExecContext(ctx,
 		"UPDATE dwarf_peers SET seen_at=DATE_ADD_MILLIS(NOW_UTC(), ?), dispatched_at=DATE_ADD_MILLIS(NOW_UTC(), ?)"+
 			" WHERE engine_id=?", -60000, -60000, selfID)
@@ -1389,7 +1390,7 @@ func TestPeers_BeatFaultStopsProvingLiveness(t *testing.T) {
 
 	// Lift the fault and the repair works again, which is what proves the gate was the fault and not a
 	// broken repair path.
-	sm.Withdraw(FaultBeatErr)
+	sm.Withdraw(diagnostics.FaultPeerBeatErr)
 	r.clk.advance(r.s.scan)
 	r.s.pass(ctx)
 	assert.Equal([]int64{selfID}, r.ids(t), "and repairs itself the moment it can write again")
@@ -1401,20 +1402,19 @@ func TestPeers_BeatFaultStopsProvingLiveness(t *testing.T) {
 func TestPeers_FaultsScopeByShard(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	r := newRig(t) // shard 1
 	sm := seamster.New(true)
-	r.s.SetSeams(sm)
+	r := newRigWith(t, seamsDiags(sm)) // shard 1
 
-	sm.InjectN(seamsJoin(FaultReadErr, "2"), 1000)
-	assert.False(r.s.faulted(FaultReadErr), "a fault scoped to another shard leaves this one reading")
+	sm.InjectN(diagnostics.Join(diagnostics.FaultPeerReadErr, "2"), 1000)
+	assert.False(r.s.faulted(diagnostics.FaultPeerReadErr), "a fault scoped to another shard leaves this one reading")
 
-	sm.Withdraw(seamsJoin(FaultReadErr, "2"))
-	sm.InjectN(seamsJoin(FaultReadErr, "1"), 1000)
-	assert.True(r.s.faulted(FaultReadErr), "scoped to this shard, it fires")
+	sm.Withdraw(diagnostics.Join(diagnostics.FaultPeerReadErr, "2"))
+	sm.InjectN(diagnostics.Join(diagnostics.FaultPeerReadErr, "1"), 1000)
+	assert.True(r.s.faulted(diagnostics.FaultPeerReadErr), "scoped to this shard, it fires")
 
-	sm.Withdraw(seamsJoin(FaultReadErr, "1"))
-	sm.InjectN(FaultReadErr, 1000)
-	assert.True(r.s.faulted(FaultReadErr), "and unscoped means every shard")
+	sm.Withdraw(diagnostics.Join(diagnostics.FaultPeerReadErr, "1"))
+	sm.InjectN(diagnostics.FaultPeerReadErr, 1000)
+	assert.True(r.s.faulted(diagnostics.FaultPeerReadErr), "and unscoped means every shard")
 }
 
 // TestPeers_LongTurnKeepsProvingService pins the case the busy term exists for, and it is the mirror of
@@ -1775,9 +1775,10 @@ func TestPeers_FailingBeatLogsOnItsEdges(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	r := newRig(t)
 	logs := &beatLogCapture{}
-	r.s.SetLogger(slog.New(logs))
+	d := diagnostics.New()
+	d.SetLogger(slog.New(logs))
+	r := newRigWith(t, d)
 	assert.NoError(r.s.register(ctx))
 
 	// A missing table fails the UPDATE with a real database error, as a revoked grant would.
@@ -1800,4 +1801,11 @@ func TestPeers_FailingBeatLogsOnItsEdges(t *testing.T) {
 	logs.mu.Lock()
 	defer logs.mu.Unlock()
 	assert.Equal([]string{"Peer heartbeat", "Peer heartbeat writing again"}, logs.msgs)
+}
+
+// seamsDiags returns a Diags that carries sm, for a rig whose Sonar consults it.
+func seamsDiags(sm *seamster.Seamster) *diagnostics.Diags {
+	d := diagnostics.New()
+	d.SetSeams(sm)
+	return d
 }

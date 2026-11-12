@@ -39,8 +39,9 @@ The observability providers, injected separately (none is a `Host` method):
   its sequel DB layer stay silent until a logger is injected, rather than writing to the application-owned
   `slog.Default()` - the library convention). A nil logger resets to that silent default. The engine logs through
   the `…Context` variants so a context-aware handler (e.g. the `otelslog` bridge) can correlate records with the
-  active step span. The injected logger is also handed to sequel (only when explicitly set), so the SQL layer's
-  migration logs flow through the same sink.
+  active step span. The engine's logger is also the SQL layer's, so sequel's migration logs flow through the
+  same sink. Its per-statement debug lines never do (`internal/database`'s `applyTelemetry`): a step runs several
+  statements, and they would bury the engine's own debug lines.
 - **`metric.MeterProvider`** - OTEL meter provider (`SetMeterProvider`); defaults to the global
   `otel.GetMeterProvider()` (no-op unless the host configures the SDK). The engine builds its `dwarf_*`
   instruments under the `github.com/microbus-io/dwarf` scope (see "Metrics" below).
@@ -137,7 +138,7 @@ every setter can surface an error). They split into two groups by whether the kn
 engine:
 
 - **Live** (take effect immediately, callable any time): `SetTimeBudget` and the bench override
-  `setRefillInterval`, reached through `internal/engineseams`. The pool lever is
+  `setRefillInterval`, reached through `internal/accessors`. The pool lever is
   construction-time, not live: `ShardSpec.MaxConnections` declares a shard's fleet-wide budget (see "Connection
   pool sizing"). There is deliberately no seam that pins a per-replica pool: such a pool is never divided and
   makes every replica dispatch every shard, so a test or bench using one exercises a fleet shape no deployment
@@ -3604,7 +3605,8 @@ archive failure never becomes permission to delete - are in `internal/reaper/CLA
   `Reaper.DeleteMarked` and expiration. Shards run concurrently.
 - **A fresh `Reaper` per run**, built in `startArchives` before `initMetrics` registers the gauge callback, so no
   reading survives a restart or a failed Startup. Its four instruments are created on the engine's meter
-  (`SetMeter`), so the engine does not register them itself.
+  (`SetMeter`, fed from the engine's `diagnostics.Diags`), so the engine does not register them itself. The reaper
+  keeps its setters, unlike the components built since, until it is deleted.
 - **`Config` is built for every pass** (`reaperConfig`) from the engine's fields, which tests change on a running
   engine: the steal grace is two ticks, and the day's length comes from the archive set, resolved through
   `archiveDayLength` only when there is none.
@@ -3631,7 +3633,7 @@ wiring (`janitor.go`):
 - **A batch's turn is a common turn** (`WaitTurn`), dispatch's band, taken fresh on its shard for each batch.
 - **Settings are set from the engine's fields** (`configureJanitor`): at Startup, and around a test's drain, since
   tests change them on a running engine. `drainJanitors` takes the archive grace to drain with:
-  `engineseams.ArchiveNow` drains with 0, then runs the reaper's pass with 0.
+  `accessors.ArchiveNow` drains with 0, then runs the reaper's pass with 0.
 - **The gauges read the janitor's getters**: `dwarf_janitor_progress_age_seconds` (`JobAges`) and
   `dwarf_archive_lag_seconds` and `dwarf_archive_failing_seconds` (`ArchiveLag`, `ArchiveFailing`), gated on
   dispatching like the reaper's; the held-root, sweep, attempt and deletion gauges still come from the reaper. After
@@ -4394,7 +4396,7 @@ call (the per-shard debug path is `ShardInfo` + `Query.Shard`). `Limit` is requi
   read before them (the measurement is at `summaryJoins`). Per shard it is
   one `UNION ALL` branch per open status (`listLive`), each a range of `(status, updated_at)` that stops at `Limit`:
   one scan over both statuses has no index order and would sort every open flow of the shard on every call. The
-  same code with every status serves the tests (`engineseams.ListLive`).
+  same code with every status serves the tests (`accessors.ListLive`).
 - **`ListRecentlyClosed`** is the same `listLive` over the closed statuses: the flows that closed and are not archived
   yet. A closed flow's last write is the one that closed it, so `updated_at` is its close time.
 - **`ListClosed`** reads the archive's day tables only, never the live ones, ordered by `archived_at DESC`, ties
@@ -4460,4 +4462,5 @@ designed but deliberately deferred; until then the set is fixed per process.
 ## Test-only instrumentation seams (`engine/engineundertest.go`)
 
 Fault injection and execution checkpoints, inert in production: the rules for consulting, naming and waiting on
-them live in `internal/engineseams/CLAUDE.md`.
+them live in `internal/diagnostics/CLAUDE.md`, and the accessors a test reaches the engine through in
+`internal/accessors`.

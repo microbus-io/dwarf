@@ -35,7 +35,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/candidates"
 	"github.com/microbus-io/dwarf/internal/claimstracker"
 	"github.com/microbus-io/dwarf/internal/database"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/graphcache"
 	"github.com/microbus-io/dwarf/internal/janitor"
 	"github.com/microbus-io/dwarf/internal/latch"
@@ -117,15 +117,16 @@ var terminalStatusesSQL = "'" + strings.Join([]string{
 // Engine is the standalone workflow orchestration engine.
 type Engine struct {
 	// Dependencies (set before Startup)
-	host          Host
-	logger        *slog.Logger
-	meterProvider metric.MeterProvider
-	metrics       *engineMetrics
-	// meter is the resolved instrumentation scope, held so every module this engine assembles (the
-	// pistons) records into one scope rather than deriving its own from the provider.
-	meter          metric.Meter
+	host Host
+	// meterProvider and tracerProvider are the configured providers, nil for the global ones; Startup resolves
+	// them into diags.
+	meterProvider  metric.MeterProvider
 	tracerProvider trace.TracerProvider
-	tracer         trace.Tracer
+	metrics        *engineMetrics
+	// diags is what this engine and every component it builds report through: the logger, the seams, and the
+	// providers, meter and tracer Startup resolves - the meter held so every component records into one
+	// instrumentation scope rather than deriving its own from the provider.
+	diags *diagnostics.Diags
 
 	// Shard registry (construction-time only): shard index -> spec. Sparse - indices must be unique and
 	// >= 1 but need not be contiguous. Guarded by shardsLock; empty means one default shard at Startup.
@@ -154,7 +155,7 @@ type Engine struct {
 	// flowsStartedCount / flowsClosedCount count this replica's flow starts and closes beside the
 	// dwarf_flows_started / dwarf_flows_closed counters, readable with no meter configured. They are per
 	// replica - a flow started on one is closed by whichever dispatches its last step - so only a sum over
-	// every engine in a process means anything: the load generator sums FlowsClosed (engineseams) over its
+	// every engine in a process means anything: the load generator sums FlowsClosed (accessors) over its
 	// in-process engines to bound outstanding flows, and a test with one engine compares the two.
 	flowsStartedCount atomic.Int64
 	flowsClosedCount  atomic.Int64
@@ -408,12 +409,6 @@ type Engine struct {
 	// remained of its original lease, if that was longer, since a renewal never shortens a lease - before lease
 	// recovery can take it.
 	persistLeaseExtension time.Duration
-
-	// Test-only instrumentation seams (see engineundertest.go), delegated to a seamster.Seamster constructed enabled
-	// under testing.Testing() in NewEngine. Every consult is a lock-free bool read in production. The
-	// per-flow flow-row-write counter is a counting checkpoint on this same seams (Visits); it holds no
-	// engine-side state.
-	seams *seamster.Seamster
 }
 
 // defaultTestConnCap seeds every engine's test-mode per-shard connection cap (see the testConnCap field).
@@ -424,7 +419,6 @@ const defaultTestConnCap = 4
 // NewEngine creates a new workflow engine.
 func NewEngine() *Engine {
 	e := &Engine{
-		logger:      slog.New(slog.DiscardHandler),
 		claims:      claimstracker.New(),
 		testConnCap: defaultTestConnCap,
 	}
@@ -469,7 +463,11 @@ func NewEngine() *Engine {
 	e.retentionDays = defaultRetentionDays
 	e.leaseRecoveryBatch = 1024
 	e.maxPayloadBytes = maxPayloadBytes
-	e.seams = seamster.New(testing.Testing())
+	// Test-only instrumentation seams (see engineundertest.go), enabled under testing.Testing(). Every consult is a
+	// lock-free bool read in production. The per-flow flow-row-write counter is a counting checkpoint on these same
+	// seams (Visits); it holds no engine-side state.
+	e.diags = diagnostics.New()
+	e.diags.SetSeams(seamster.New(testing.Testing()))
 	return e
 }
 
@@ -701,7 +699,7 @@ func (e *Engine) defaultPriority() int {
 
 // setRefillInterval is the benchmark override that PINS every piston's cycle period to d, replacing the
 // value the engine derives from the cache capacity and the pool (deriveRefillInterval); d <= 0 restores derivation. Reached
-// from the bench through internal/engineseams, never by a host.
+// from the bench through internal/accessors, never by a host.
 //
 // The override exists for scan-rate sweeps: the period is measured, not tuned, so finding its optimum needs
 // to hold it at a series of fixed values - INCLUDING values below the 20ms minimum gap, since the
@@ -773,19 +771,16 @@ func (e *Engine) SetLogger(l *slog.Logger) error {
 	if e.started.Load() {
 		return errSetAfterStartup("logger")
 	}
-	if l == nil {
-		l = slog.New(slog.DiscardHandler)
-	}
-	e.logger = l
+	e.diags.SetLogger(l)
 	return nil
 }
 
 // SetDebugLogger is a convenience that wires a human-readable text logger to stderr at debug level -
 // shorthand for SetLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level:
-// slog.LevelDebug}))). It is meant for development and test runs where you want to see the engine's (and
-// its sequel DB layer's) internal logging without standing up an OTEL pipeline. Output goes to stderr, not
-// stdout, so it never mixes with a program's data stream - the standard convention for diagnostic logs.
-// Because it routes through SetLogger, sequel's logs appear too, its migration logs included.
+// slog.LevelDebug}))). It is meant for development and test runs where you want to see the engine's internal
+// logging without standing up an OTEL pipeline. Output goes to stderr, not stdout, so it never mixes with a
+// program's data stream - the standard convention for diagnostic logs. Because it routes through SetLogger, the
+// database layer's migration logs appear too.
 // Construction-time only.
 func (e *Engine) SetDebugLogger() error {
 	return e.SetLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -843,17 +838,15 @@ func (e *Engine) Startup(ctx context.Context) error {
 		return errors.Trace(err)
 	}
 	// Resolved before the shards open, so the migrations trace through the same provider as everything after.
-	tp := e.initTracer()
+	e.initProviders()
 	err = e.db.Open(ctx, database.Config{
 		Shards:      shards,
 		TestID:      e.testHashedID,
 		TestConnCap: testConnCap,
 		// Turns order access to each shard's connections by band and then by how long the job asking has been
 		// at the database, so that work already under way finishes ahead of work arriving after it.
-		TurnsPerConn:   turnstilePassesPerConn,
-		Logger:         e.logger,
-		TracerProvider: tp,
-		MeterProvider:  e.meterProvider,
+		TurnsPerConn: turnstilePassesPerConn,
+		Diags:        e.diags,
 	})
 	if err != nil {
 		return errors.Trace(err)
@@ -875,10 +868,10 @@ func (e *Engine) Startup(ctx context.Context) error {
 		}
 		if sh.MaxConnections() == 0 && sh.DB().DriverName() != "sqlite" {
 			// Fails open to the unclamped budget, which on a server configured small over-connects it.
-			e.logger.WarnContext(ctx, "Reading the server's connection limit failed; the shard's connection budget is not clamped to it",
+			e.diags.Logger().WarnContext(ctx, "Reading the server's connection limit failed; the shard's connection budget is not clamped to it",
 				"shard", idx)
 		}
-		e.logger.DebugContext(ctx, "Shard sized", "shard", idx, "rttMs", rtts[idx], "maxConnections", sh.MaxConnections(),
+		e.diags.Logger().DebugContext(ctx, "Shard sized", "shard", idx, "rttMs", rtts[idx], "maxConnections", sh.MaxConnections(),
 			"budget", sizing[idx].budget)
 	}
 	// Forget the last run's verdicts, so a fleet still over the limit after a restart is warned about again
@@ -920,8 +913,8 @@ func (e *Engine) Startup(ctx context.Context) error {
 		// not - and sizes the shard's turns with the pool. Here rather than later because the workers
 		// initRuntime starts must never see an unsized shard, whose turns would let them through unordered.
 		e.db.SetShardPool(idx, idle, open)
-		if e.seams.Enabled() { // Enabled gates the assembled name and the boxed value in production
-			e.seams.Variable(engineseams.Join(engineseams.VariablePoolIdle, strconv.Itoa(idx)), idle)
+		if e.diags.Seams().Enabled() { // Enabled gates the assembled name and the boxed value in production
+			e.diags.Seams().Variable(diagnostics.Join(diagnostics.VariablePoolIdle, strconv.Itoa(idx)), idle)
 		}
 		e.lastAppliedSlots[idx] = slots
 		if slots > 0 {
@@ -1020,10 +1013,10 @@ func (e *Engine) initRuntime() error {
 		// atomic load. Fired unscoped and scoped by flow key, for the same reason signalStop fires both: a
 		// scoped fire does not wake an unscoped waiter, and a test may be waiting for THIS caller to park
 		// while a subgraph child's or a peer's Await parks alongside it.
-		if e.seams.Enabled() {
+		if e.diags.Seams().Enabled() {
 			board.SetOnPark(func(flowKey string) {
-				e.seams.Checkpoint(e.lifetimeCtx, engineseams.CheckpointAwaitParked)
-				e.seams.Checkpoint(e.lifetimeCtx, engineseams.Join(engineseams.CheckpointAwaitParked, flowKey))
+				e.diags.Seams().Checkpoint(e.lifetimeCtx, diagnostics.CheckpointAwaitParked)
+				e.diags.Seams().Checkpoint(e.lifetimeCtx, diagnostics.Join(diagnostics.CheckpointAwaitParked, flowKey))
 			})
 		}
 		e.latches[idx] = board
@@ -1033,13 +1026,13 @@ func (e *Engine) initRuntime() error {
 	// The state cache exists before the gauge callback that reads it is registered.
 	cacheBudget, cacheSource := e.stateCacheBudget()
 	e.stateCache = staterefs.NewCache(cacheBudget)
-	e.logger.InfoContext(e.lifetimeCtx, "State cache sized", "bytes", cacheBudget, "source", cacheSource)
+	e.diags.Logger().InfoContext(e.lifetimeCtx, "State cache sized", "bytes", cacheBudget, "source", cacheSource)
 
 	// Create the dwarf_* instruments and register the observable-gauge callback before workers start
 	// emitting. Falls back to the global (no-op) provider when none was injected.
 	err := e.initMetrics()
 	if err != nil {
-		e.logger.ErrorContext(e.lifetimeCtx, "Initializing metrics", "error", err)
+		e.diags.Logger().ErrorContext(e.lifetimeCtx, "Initializing metrics", "error", err)
 	}
 
 	// Build the pistons now that the cache is sized: each takes its own shard's handle, the shared planner
@@ -1047,9 +1040,9 @@ func (e *Engine) initRuntime() error {
 	// shard of an await-only replica (SetWorkers(0)): it claims no work, and its idling reports as much,
 	// which is what keeps the replica out of that shard's candidate partition.
 	idle := int(e.workers.Load()) == 0
-	if e.seams.IsFault(engineseams.FaultInitRuntime) {
+	if e.diags.Seams().IsFault(diagnostics.FaultInitRuntime) {
 		e.unwindRuntime()
-		return errors.New("injected fault: " + engineseams.FaultInitRuntime)
+		return errors.New("injected fault: " + diagnostics.FaultInitRuntime)
 	}
 	for _, idx := range e.db.Indices() {
 		// A shard without a piston has no supply cycle, so nothing on it is ever dispatched while the replica
@@ -1067,13 +1060,11 @@ func (e *Engine) initRuntime() error {
 		// only dialect-dependent term in the size policy) and it caches resolved payload bytes under step
 		// ids, which are unique only within a shard.
 		e.linkers[idx] = staterefs.New(db.DriverName(), idx, e.stateCache)
-		p, perr := piston.New(sh, e.planner, &e.cache)
+		p, perr := piston.New(sh, e.diags, e.planner, &e.cache)
 		if perr != nil {
 			e.unwindRuntime()
 			return errors.New("building piston for shard %d: %w", idx, perr)
 		}
-		p.SetLogger(e.logger)
-		p.SetSeams(e.seams)
 		p.SetMaxPriority(e.maxPriority)
 		// The two halves of this shard's peer accounting meet through the shard and here, rather than through
 		// either package knowing the other: the piston selects within the residue class the shard's Sonar
@@ -1081,9 +1072,6 @@ func (e *Engine) initRuntime() error {
 		// says it is turning. Both are reads of live state, so neither captures anything that could go stale.
 		if s := e.sonarFor(idx); s != nil {
 			s.SetEvidence(p.Liveness)
-		}
-		if merr := p.SetMeter(e.meter); merr != nil {
-			e.logger.ErrorContext(e.lifetimeCtx, "Building piston instruments", "shard", idx, "error", merr)
 		}
 		p.SetIdle(idle || !e.dispatchesOn(idx))
 		e.pistons[idx] = p
@@ -1127,7 +1115,7 @@ func (e *Engine) initRuntime() error {
 	e.crew.SetGateWaitObserver(func(shard int, waited time.Duration) {
 		e.metrics.gateWait.Record(e.lifetimeCtx, waited.Seconds(), e.metrics.shardAttrOpts(shard).rec...)
 	})
-	e.crew.SetLogger(e.logger)
+	e.crew.SetLogger(e.diags.Logger())
 	e.crew.SetMax(maxWorkers)
 	// Start the resident set; the rest of the ceiling is spawned on demand whenever a worker's take of a
 	// candidate leaves nobody idle - the long-task case, where the resident set alone would cap throughput
@@ -1162,7 +1150,7 @@ func (e *Engine) initRuntime() error {
 	// Before Startup returns, so a shard this replica dispatches has its janitor active - and its gauges their
 	// readings - from the start.
 	if err := e.startJanitors(janitorCtx); err != nil {
-		e.logger.ErrorContext(janitorCtx, "Starting the janitors", "error", err)
+		e.diags.Logger().ErrorContext(janitorCtx, "Starting the janitors", "error", err)
 	}
 	e.archiveWorker.Go(func() {
 		e.archiveLoop(archiveCtx)

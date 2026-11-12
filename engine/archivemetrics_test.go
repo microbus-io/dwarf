@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/internal/reaper"
@@ -49,7 +49,7 @@ func meteredArchiveEngine(t *testing.T, mux *hosts.Mux, retention int) (*Engine,
 	if err := e.Startup(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	enginetest.AwaitVisitCount(t, e.seams, 1, 10*time.Second, engineseams.CheckpointArchivePassDone)
+	enginetest.AwaitVisitCount(t, e.diags.Seams(), 1, 10*time.Second, diagnostics.CheckpointArchivePassDone)
 	return e, reader
 }
 
@@ -140,8 +140,8 @@ func TestArchiveMetrics_TheReaperCountsWhatItMoves(t *testing.T) {
 	// Archiving fails across passes: the tree stays live and no deletion is counted. Fast archiving passes it after its
 	// first failure, so the second pass's fast round finds nothing - which ends nothing: the sweep fails on it too.
 	closedRoots(t, e, 1)
-	e.seams.InjectN(engineseams.FaultReapArchiveErr, 1000)
-	defer e.seams.Withdraw(engineseams.FaultReapArchiveErr)
+	e.diags.Seams().InjectN(diagnostics.FaultReapArchiveErr, 1000)
+	defer e.diags.Seams().Withdraw(diagnostics.FaultReapArchiveErr)
 	e.reapDueFlows(ctx)
 	time.Sleep(20 * time.Millisecond)
 	e.reapDueFlows(ctx)
@@ -252,7 +252,7 @@ func TestArchiveMetrics_TheDays(t *testing.T) {
 	assert.Equal(float64(3), days)
 	assert.Zero(sumAt(rm, "dwarf_archive_maintain_failed", shard1))
 
-	e.seams.InjectN(engineseams.FaultArchiveMaintainErr, 1)
+	e.diags.Seams().InjectN(diagnostics.FaultArchiveMaintainErr, 1)
 	e.maintainArchives(ctx, set)
 	rm = collect(t, reader)
 	assert.Equal(int64(1), sumAt(rm, "dwarf_archive_maintain_failed", shard1))
@@ -275,8 +275,8 @@ func TestArchiveMetrics_AReplicaThatStopsReapingForgets(t *testing.T) {
 	e, reader := meteredArchiveEngine(t, treeMux(), 30)
 	shard1 := map[string]string{"shard": "1"}
 	closedRoots(t, e, 1)
-	e.seams.InjectN(engineseams.FaultReapArchiveErr, 1000)
-	defer e.seams.Withdraw(engineseams.FaultReapArchiveErr)
+	e.diags.Seams().InjectN(diagnostics.FaultReapArchiveErr, 1000)
+	defer e.diags.Seams().Withdraw(diagnostics.FaultReapArchiveErr)
 	e.reapDueFlows(ctx)
 	time.Sleep(20 * time.Millisecond)
 	rm := collect(t, reader)
@@ -337,7 +337,7 @@ func TestArchiveMetrics_HeldWorkIsVisibleBeforeASweepCompletes(t *testing.T) {
 	}
 	e.reapSlice = 0
 	e.reapBatch = 1
-	e.seams.InjectN(engineseams.FaultReapArchiveErr, 10000)
+	e.diags.Seams().InjectN(diagnostics.FaultReapArchiveErr, 10000)
 	e.reapDueFlows(t.Context())
 	rm := collect(t, reader)
 	attrs := map[string]string{"shard": "1", "kind": "closed"}
@@ -350,7 +350,7 @@ func TestArchiveMetrics_HeldWorkIsVisibleBeforeASweepCompletes(t *testing.T) {
 	assert.True(e.reaper.Load().Observe(1, time.Now()).Kinds[0].Sweep > 0, "sweep is incomplete")
 	assert.True(sumAt(rm, "dwarf_archive_move_failures", map[string]string{"shard": "1"}) >= 2)
 	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonArchiveFailed}))
-	e.seams.Withdraw(engineseams.FaultReapArchiveErr)
+	e.diags.Seams().Withdraw(diagnostics.FaultReapArchiveErr)
 	for range 4 {
 		e.reapDueFlows(t.Context())
 	}
@@ -367,7 +367,7 @@ func TestArchiveMetrics_UnarchivedRetentionDeletionCountsOnlyOnce(t *testing.T) 
 	e, reader := meteredArchiveEngine(t, treeMux(), 1)
 	root := closedRoots(t, e, 1)[0]
 	backdate(t, e, root, 3*24*time.Hour)
-	e.seams.InjectN(engineseams.FaultReapArchiveErr, 10000)
+	e.diags.Seams().InjectN(diagnostics.FaultReapArchiveErr, 10000)
 	e.reapDueFlows(t.Context())
 	e.reapDueFlows(t.Context())
 	rm := collect(t, reader)
@@ -385,7 +385,7 @@ func TestArchiveMetrics_ATransientFailureEndsAtACleanSweep(t *testing.T) {
 	ctx := t.Context()
 	e, reader := meteredArchiveEngine(t, treeMux(), 30)
 	shard1 := map[string]string{"shard": "1"}
-	e.seams.InjectN(engineseams.FaultReapSelectErr, 1) // the janitor's scan, which runs first
+	e.diags.Seams().InjectN(diagnostics.FaultReapSelectErr, 1) // the janitor's scan, which runs first
 	e.drainJanitors(ctx, e.archiveGrace)
 	time.Sleep(20 * time.Millisecond)
 	failing, _ := gaugeAt(collect(t, reader), "dwarf_archive_failing_seconds", shard1)

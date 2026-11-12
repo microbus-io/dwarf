@@ -18,12 +18,11 @@ package engine
 
 import (
 	"context"
-	"log/slog"
-	"strings"
 	"sync"
 	"testing"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -104,11 +103,9 @@ func TestInsertFlowTx_SelfColumnsInTheInsert(t *testing.T) {
 	mux.HandleTask("selfcols/tail", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	mux.HandleTask("selfcols/leaf", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	log := &queryLog{}
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	assert.NoError(e.SetLogger(slog.New(log)))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
@@ -146,14 +143,13 @@ func TestInsertFlowTx_SelfColumnsInTheInsert(t *testing.T) {
 	}
 
 	// Six flows: the root and its child, the Continue turn and its child, the fork and the clone of the root's
-	// child. Only off PostgreSQL does an UPDATE write a root id, and only for the three roots. The counts are lower
-	// bounds, since a transaction retry logs its rolled-back attempt's statements too.
-	inserts, fixups := log.flowWrites()
-	assert.True(inserts >= 6, "%d INSERTs into dwarf_flows logged, want at least 6", inserts)
+	// child. Only off PostgreSQL does an UPDATE write a root id, and only for the three roots. The count is a lower
+	// bound, since a transaction retry fixes up again.
+	fixups := e.diags.Seams().Visits(diagnostics.CheckpointFlowSelfFixup)
 	if db.DriverName() == "pgx" {
 		assert.Zero(fixups, "UPDATEs of a flow's root id")
 	} else {
-		assert.True(fixups >= 3, "%d UPDATEs of a flow's root id logged, want at least 3", fixups)
+		assert.True(fixups >= 3, "%d UPDATEs of a flow's root id, want at least 3", fixups)
 	}
 
 	_, _, forkID, forkToken, err := keys.ParseFlowKey(forkKey)
@@ -185,48 +181,4 @@ func TestInsertFlowTx_SelfColumnsInTheInsert(t *testing.T) {
 	}
 	assert.NoError(rows.Err())
 	assert.Equal(6, flows)
-}
-
-// queryLog is a slog.Handler that keeps the statements sequel logs at debug level.
-type queryLog struct {
-	mu      sync.Mutex
-	queries []string
-}
-
-func (l *queryLog) Enabled(context.Context, slog.Level) bool { return true }
-func (l *queryLog) WithAttrs([]slog.Attr) slog.Handler       { return l }
-func (l *queryLog) WithGroup(string) slog.Handler            { return l }
-
-func (l *queryLog) Handle(_ context.Context, r slog.Record) error {
-	if r.Message != "sequel query" && r.Message != "sequel batched query" {
-		return nil
-	}
-	r.Attrs(func(a slog.Attr) bool {
-		if a.Key == "query" {
-			l.mu.Lock()
-			l.queries = append(l.queries, a.Value.String())
-			l.mu.Unlock()
-		}
-		return true
-	})
-	return nil
-}
-
-// flowWrites counts the logged INSERTs into dwarf_flows, and the UPDATEs of dwarf_flows that set a root id,
-// whatever their spelling.
-func (l *queryLog) flowWrites() (inserts, fixups int) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	for _, q := range l.queries {
-		switch {
-		case strings.HasPrefix(q, "INSERT INTO dwarf_flows "):
-			inserts++
-		case strings.HasPrefix(q, "UPDATE dwarf_flows "):
-			set, _, _ := strings.Cut(strings.ReplaceAll(q, " ", ""), "WHERE")
-			if strings.Contains(set, "root_flow_id=") {
-				fixups++
-			}
-		}
-	}
-	return inserts, fixups
 }

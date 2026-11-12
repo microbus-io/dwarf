@@ -22,8 +22,7 @@ and fast deletion - the trees stamped for deletion deleted as they come due.
 A Janitor serves one shard on one replica for the replica's run. It works only while it is active - while the replica
 dispatches the shard - and a paused one holds no goroutine and no connection:
 
-	j := janitor.New(shard, archive, retentionDays)
-	j.SetLogger(logger)
+	j := janitor.New(shard, diags, archive, retentionDays)
 	if err := j.SetMeter(meter); err != nil { ... }
 	j.Start(ctx)
 	j.Resume() // this replica dispatches the shard
@@ -45,17 +44,15 @@ package janitor
 
 import (
 	"context"
-	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/database"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/errors"
-	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/sequel"
-	"go.opentelemetry.io/otel/metric"
 )
 
 // The reason a closed tree is deleted without archiving, the reason attribute of dwarf_flows_reaped.
@@ -66,8 +63,7 @@ type Janitor struct {
 	shard         *database.Shard
 	archive       *archiver.Archive
 	retentionDays int
-	logger        *slog.Logger
-	seams         *seamster.Seamster
+	diags         *diagnostics.Diags
 	metrics       *instruments
 	manual        bool
 	idle          time.Duration // replaces every job's idle wait when not 0
@@ -139,16 +135,17 @@ const (
 	defaultBatchBytes = 16 << 20
 )
 
-// New returns a paused Janitor of shard, whose archive is archive - nil when the shard has none, and closed roots
-// then stay live at a positive retention - keeping retentionDays of archive: 0 keeps none, and closed trees are
-// deleted. It logs nowhere and records no metric until set to.
-func New(shard *database.Shard, archive *archiver.Archive, retentionDays int) *Janitor {
+// New returns a paused Janitor of shard, reporting through d - its logger, its seams, and its meter, on which it
+// creates dwarf_janitor_batch_seconds, dwarf_flows_archived, dwarf_archive_move_failures and dwarf_flows_reaped;
+// an instrument it cannot create is logged and records nothing. Its archive is archive - nil when the shard has
+// none, and closed roots then stay live at a positive retention - keeping retentionDays of archive: 0 keeps none,
+// and closed trees are deleted.
+func New(shard *database.Shard, d *diagnostics.Diags, archive *archiver.Archive, retentionDays int) *Janitor {
 	j := &Janitor{
 		shard:         shard,
 		archive:       archive,
 		retentionDays: retentionDays,
-		logger:        slog.New(slog.DiscardHandler),
-		seams:         seamster.New(false),
+		diags:         d,
 		settings: settings{
 			grace:      defaultGrace,
 			batchRoots: defaultBatchRoots,
@@ -156,6 +153,11 @@ func New(shard *database.Shard, archive *archiver.Archive, retentionDays int) *J
 			batchBytes: defaultBatchBytes,
 		},
 	}
+	m, err := newInstruments(d.Meter())
+	if err != nil {
+		j.diags.Logger().Error("Creating the janitor's instruments", "shard", shard.Index(), "error", err)
+	}
+	j.metrics = m
 	j.fast = &fastArchiving{j: j}
 	j.del = &fastDeletion{j: j}
 	j.jobs = []*job{
@@ -163,31 +165,6 @@ func New(shard *database.Shard, archive *archiver.Archive, retentionDays int) *J
 		{name: JobFastDeletion, idle: time.Second, round: j.del.round, reset: j.del.reset},
 	}
 	return j
-}
-
-// SetLogger sets where the jobs log; nil logs nowhere. Call it before Start.
-func (j *Janitor) SetLogger(l *slog.Logger) {
-	if l == nil {
-		l = slog.New(slog.DiscardHandler)
-	}
-	j.logger = l
-}
-
-// SetSeams sets the faults and checkpoints the jobs consult; nil consults none. Call it before Start.
-func (j *Janitor) SetSeams(s *seamster.Seamster) {
-	if s == nil {
-		s = seamster.New(false)
-	}
-	j.seams = s
-}
-
-// SetMeter creates the janitor's instruments on meter: dwarf_janitor_batch_seconds, dwarf_flows_archived,
-// dwarf_archive_move_failures and dwarf_flows_reaped. It keeps every instrument it could create, and returns the
-// errors of those it could not. Call it before Start.
-func (j *Janitor) SetMeter(meter metric.Meter) error {
-	m, err := newInstruments(meter)
-	j.metrics = m
-	return errors.Trace(err)
 }
 
 // SetGrace sets how long after its close a closed root is archived (a minute).
@@ -410,9 +387,9 @@ func (j *Janitor) batch(jb *job) batchFunc {
 		defer pass.Return()
 		turned := time.Now()
 		conn, err := j.shard.DB().Conn(ctx)
-		if err == nil && j.seams.IsFault(FaultConnErr) {
+		if err == nil && j.diags.Seams().IsFault(diagnostics.FaultJanitorConnErr) {
 			conn.Close()
-			conn, err = nil, errors.New("injected fault: "+FaultConnErr)
+			conn, err = nil, errors.New("injected fault: "+diagnostics.FaultJanitorConnErr)
 		}
 		acquired := time.Now()
 		if err != nil {
@@ -420,7 +397,7 @@ func (j *Janitor) batch(jb *job) batchFunc {
 			return errors.Trace(err)
 		}
 		defer conn.Close()
-		j.seams.Checkpoint(ctx, CheckpointBatchConn)
+		j.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointJanitorBatchConn)
 		err = fn(ctx, conn)
 		j.metrics.batch(ctx, j.shard.Index(), jb.name, turned.Sub(start), acquired.Sub(turned), time.Since(acquired))
 		return err

@@ -23,7 +23,7 @@ import (
 
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/database"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/turnstile"
@@ -95,13 +95,13 @@ func TestRecoveryReset_TakesATurn(t *testing.T) {
 
 	// Contention through one full round of the transition's Transact retries sends the completed step to the
 	// defer's reset.
-	eng.seams.InjectN(engineseams.Join(engineseams.FaultContention, "A"), 8)
-	eng.seams.Break(engineseams.CheckpointBeforeRecoveryReset)
+	eng.diags.Seams().InjectN(diagnostics.Join(diagnostics.FaultContention, "A"), 8)
+	eng.diags.Seams().Break(diagnostics.CheckpointBeforeRecoveryReset)
 	flowKey, err := eng.Create(ctx, "resetturn/g", nil, nil)
 	if !assert.NoError(err) {
 		return
 	}
-	if !assert.True(eng.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeRecoveryReset, 15*time.Second), "engine never reached the recovery reset") {
+	if !assert.True(eng.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeRecoveryReset, 15*time.Second), "engine never reached the recovery reset") {
 		return
 	}
 	shard, _, _, _, _ := keys.ParseFlowKey(flowKey)
@@ -117,7 +117,7 @@ func TestRecoveryReset_TakesATurn(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	assert.Equal(0, freeSamples, "the reset must hold a turn while it waits to run")
-	eng.seams.Resume(engineseams.CheckpointBeforeRecoveryReset)
+	eng.diags.Seams().Resume(diagnostics.CheckpointBeforeRecoveryReset)
 
 	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 	defer cancel()

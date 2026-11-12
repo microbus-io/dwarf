@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -327,21 +327,21 @@ func TestWedgeSweep_ChildLiveAgainIsLeftAlone(t *testing.T) {
 	// The scan must see no open child, so the child reads terminal while the sweep selects.
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET status=? WHERE flow_id=?", workflow.StatusCompleted, childFlowID)
 	assert.NoError(err)
-	e.seams.Break(engineseams.CheckpointWedgeSweepSelected)
+	e.diags.Seams().Break(diagnostics.CheckpointWedgeSweepSelected)
 	swept := make(chan struct{})
 	go func() {
 		defer close(swept)
 		e.recoverWedgedSubgraphParks(ctx, db, shard, 0)
 	}()
-	if !assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointWedgeSweepSelected, 30*time.Second*enginetest.TimeoutScale()),
+	if !assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointWedgeSweepSelected, 30*time.Second*enginetest.TimeoutScale()),
 		"the sweep never selected the caller") {
-		e.seams.Resume(engineseams.CheckpointWedgeSweepSelected)
+		e.diags.Seams().Resume(diagnostics.CheckpointWedgeSweepSelected)
 		return
 	}
 	// Between the scan and the read, the latest child is live again, as a spawn landing in the window leaves it.
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET status=? WHERE flow_id=?", workflow.StatusRunning, childFlowID)
 	assert.NoError(err)
-	e.seams.Resume(engineseams.CheckpointWedgeSweepSelected)
+	e.diags.Seams().Resume(diagnostics.CheckpointWedgeSweepSelected)
 	select {
 	case <-swept:
 	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):

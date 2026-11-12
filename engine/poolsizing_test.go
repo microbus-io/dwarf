@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -340,7 +340,7 @@ func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
 // TestPoolSizing_IdleCoreTracksTheDerivedPool pins the half of shardPool nothing else witnesses. database/sql
 // reports the configured max OPEN size through DBStats.MaxOpenConnections, but never the configured max idle
 // (DBStats.Idle counts connections currently idle - traffic, not configuration), so the derived idle core is
-// read back through the engineseams.VariablePoolIdle recording the sizing sites make.
+// read back through the diagnostics.VariablePoolIdle recording the sizing sites make.
 //
 // It equals the open size, and it must follow the open size down as the fleet grows: an idle set left at the
 // R=1 width would hold connections a departing replica's share no longer entitles it to.
@@ -357,7 +357,7 @@ func TestPoolSizing_IdleCoreTracksTheDerivedPool(t *testing.T) {
 
 	idle := func() int {
 		t.Helper()
-		v, ok := e.seams.Capture(engineseams.Join(engineseams.VariablePoolIdle, "1"))
+		v, ok := e.diags.Seams().Capture(diagnostics.Join(diagnostics.VariablePoolIdle, "1"))
 		if !ok {
 			t.Fatal("the sizing path never recorded a derived idle size for shard 1")
 		}
@@ -645,21 +645,21 @@ func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
 	assert.Equal(shareOf(2), awaitPoolSize(t, db, shareOf(2)), "half share with a peer")
 
 	// Hold the first recompute that reads the peer gone (one-shot), before it pushes the full budget.
-	e.seams.Break(engineseams.CheckpointPoolPushHeld)
+	e.diags.Seams().Break(diagnostics.CheckpointPoolPushHeld)
 	resumed := false
 	resume := func() {
 		if !resumed {
 			resumed = true
-			e.seams.Resume(engineseams.CheckpointPoolPushHeld)
+			e.diags.Seams().Resume(diagnostics.CheckpointPoolPushHeld)
 		}
 	}
 	defer resume()
-	e.seams.InjectN(engineseams.FaultSlowPoolPush, 1)
+	e.diags.Seams().InjectN(diagnostics.FaultSlowPoolPush, 1)
 	assert.NoError(e.db.OnEach(t.Context(), func(ctx context.Context, sdb *sequel.DB, shard int) error {
 		_, derr := sdb.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id=1001")
 		return derr
 	}))
-	if !assert.True(e.seams.WaitTimeout(t.Context(), engineseams.CheckpointPoolPushHeld, 30*time.Second*enginetest.TimeoutScale()),
+	if !assert.True(e.diags.Seams().WaitTimeout(t.Context(), diagnostics.CheckpointPoolPushHeld, 30*time.Second*enginetest.TimeoutScale()),
 		"no recompute reached the window with the stale fleet of 1") {
 		return
 	}

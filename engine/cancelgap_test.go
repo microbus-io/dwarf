@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -59,14 +59,14 @@ func TestCancelInTransitionGap(t *testing.T) {
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Freeze A after its completion write, before the transition inserts B.
-	e.seams.Break(engineseams.CheckpointBeforeTransitionTx)
+	e.diags.Seams().Break(diagnostics.CheckpointBeforeTransitionTx)
 	fk, err := e.Create(ctx, "cgap/g", nil, nil)
 	assert.NoError(err)
-	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeTransitionTx, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeTransitionTx")
+	assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeTransitionTx, 10*time.Second), "engine never reached checkpoint diagnostics.CheckpointBeforeTransitionTx")
 
 	// Cancel lands in the gap: A is completed and B does not exist, so the per-step mark finds nothing.
 	assert.NoError(e.Cancel(ctx, fk, "gap reason"))
-	e.seams.Resume(engineseams.CheckpointBeforeTransitionTx)
+	e.diags.Seams().Resume(diagnostics.CheckpointBeforeTransitionTx)
 
 	outcome, err := e.Await(ctx, fk)
 	if !assert.NoError(err) {
@@ -106,13 +106,13 @@ func TestCancelInTransitionGap_WideFanOut(t *testing.T) {
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	items := make([]int, 150)
-	e.seams.Break(engineseams.CheckpointBeforeTransitionTx)
+	e.diags.Seams().Break(diagnostics.CheckpointBeforeTransitionTx)
 	fk, err := e.Create(ctx, "cgapw/g", map[string]any{"items": items}, nil)
 	assert.NoError(err)
-	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeTransitionTx, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeTransitionTx")
+	assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeTransitionTx, 10*time.Second), "engine never reached checkpoint diagnostics.CheckpointBeforeTransitionTx")
 
 	assert.NoError(e.Cancel(ctx, fk, "wide gap"))
-	e.seams.Resume(engineseams.CheckpointBeforeTransitionTx)
+	e.diags.Seams().Resume(diagnostics.CheckpointBeforeTransitionTx)
 
 	outcome, err := e.Await(ctx, fk)
 	if !assert.NoError(err) {
@@ -169,10 +169,10 @@ func TestCancelMarkSparesAHandlerInsertedAfterTheWatermark(t *testing.T) {
 	<-aStarted
 
 	// Cancel commits its watermark while A is running, and is held before it marks anything.
-	e.seams.Break(engineseams.CheckpointCancelBeforeMark)
+	e.diags.Seams().Break(diagnostics.CheckpointCancelBeforeMark)
 	cancelled := make(chan error, 1)
 	go func() { cancelled <- e.Cancel(ctx, fk, "window") }()
-	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointCancelBeforeMark, 10*time.Second), "Cancel never reached its mark")
+	assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointCancelBeforeMark, 10*time.Second), "Cancel never reached its mark")
 
 	// A finishes unmarked; B inherits the cancellation (A is at or below the watermark and was not covered),
 	// is preempted, and routes to H - inserted above the watermark, unmarked.
@@ -184,7 +184,7 @@ func TestCancelMarkSparesAHandlerInsertedAfterTheWatermark(t *testing.T) {
 	}
 
 	// Now the mark runs, with H in flight.
-	e.seams.Resume(engineseams.CheckpointCancelBeforeMark)
+	e.diags.Seams().Resume(diagnostics.CheckpointCancelBeforeMark)
 	assert.NoError(<-cancelled)
 	close(hGo)
 
@@ -296,7 +296,7 @@ func TestCancel_RetryFinishesAFailedMark(t *testing.T) {
 		t.Fatal("A never started")
 	}
 
-	e.seams.Inject(engineseams.FaultCancelMarkErr)
+	e.diags.Seams().Inject(diagnostics.FaultCancelMarkErr)
 	assert.Error(e.Cancel(ctx, fk, "stop"), "the mark failed after the watermark committed")
 	assert.NoError(e.Cancel(ctx, fk, "again"), "the retry finishes the mark")
 	release()
@@ -338,9 +338,9 @@ func TestCancelPreempt_ReasonReadErrorReleasesTheInFlightGauges(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	e.seams.InjectN(engineseams.FaultCancelReasonReadErr, 1)
+	e.diags.Seams().InjectN(diagnostics.FaultCancelReasonReadErr, 1)
 
-	aDone := e.seams.Waiter(engineseams.CheckpointClaimedDispatchDone)
+	aDone := e.diags.Seams().Waiter(diagnostics.CheckpointClaimedDispatchDone)
 	fk, err := e.Create(ctx, "creason/g", map[string]any{"doc": "held"}, nil)
 	if !assert.NoError(err) {
 		return
@@ -358,7 +358,7 @@ func TestCancelPreempt_ReasonReadErrorReleasesTheInFlightGauges(t *testing.T) {
 	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	db := sh.DB()
-	bDone := e.seams.Waiter(engineseams.Join(engineseams.CheckpointClaimedDispatchDone, "1", strconv.Itoa(bIDs[0])))
+	bDone := e.diags.Seams().Waiter(diagnostics.Join(diagnostics.CheckpointClaimedDispatchDone, "1", strconv.Itoa(bIDs[0])))
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=NOW_UTC() WHERE step_id=?", bIDs[0])
 	assert.NoError(err)
 	select {
@@ -418,13 +418,13 @@ func TestCancelWatermark_TakesNoStepLocks(t *testing.T) {
 	assert.NoError(err)
 	<-started
 
-	e.seams.Break(engineseams.CheckpointTerminateAfterStepsLocked)
+	e.diags.Seams().Break(diagnostics.CheckpointTerminateAfterStepsLocked)
 	terminated := make(chan error, 1)
 	go func() { terminated <- e.Terminate(ctx, fk, "test") }()
-	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointTerminateAfterStepsLocked, 10*time.Second*enginetest.TimeoutScale()),
+	assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointTerminateAfterStepsLocked, 10*time.Second*enginetest.TimeoutScale()),
 		"Terminate never locked the steps")
 
-	marking := e.seams.Waiter(engineseams.CheckpointCancelBeforeMark)
+	marking := e.diags.Seams().Waiter(diagnostics.CheckpointCancelBeforeMark)
 	cancelled := make(chan error, 1)
 	go func() { cancelled <- e.Cancel(ctx, fk, "test") }()
 	select {
@@ -432,7 +432,7 @@ func TestCancelWatermark_TakesNoStepLocks(t *testing.T) {
 	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 		assert.True(false, "Cancel's watermark transaction waited on Terminate's step locks")
 	}
-	e.seams.Resume(engineseams.CheckpointTerminateAfterStepsLocked)
+	e.diags.Seams().Resume(diagnostics.CheckpointTerminateAfterStepsLocked)
 	assert.NoError(<-terminated)
 	assert.NoError(<-cancelled)
 }

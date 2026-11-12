@@ -261,7 +261,7 @@ func (e *Engine) listRecentlyClosed(ctx context.Context, query workflow.Query) (
 
 // listLive lists the flows in the live tables whose status is among statuses - or is query.Status, which must be one -
 // newest updated first across shards, with listOpen's statement. op names the operation for its turn's metric. It
-// serves ListOpen, ListRecentlyClosed and the tests (engineseams.ListLive), which list every status at once.
+// serves ListOpen, ListRecentlyClosed and the tests (accessors.ListLive), which list every status at once.
 func (e *Engine) listLive(ctx context.Context, query workflow.Query, statuses []string, op string) ([]workflow.FlowSummary, error) {
 	limit, err := listLimit(query)
 	if err != nil {

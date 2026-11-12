@@ -21,6 +21,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/sequel"
@@ -64,7 +65,7 @@ func (f *fastDeletion) round(ctx context.Context, batch batchFunc) (progress boo
 // batch scans, sizes and deletes one batch of stamped trees on h, and reports whether it made progress: deleted a
 // tree, or passed one too large for a batch.
 func (f *fastDeletion) batch(ctx context.Context, h handle, s settings, res residency) bool {
-	shard, seams := f.j.shard.Index(), f.j.seams
+	shard, seams := f.j.shard.Index(), f.j.diags.Seams()
 	where, whereArgs := f.restriction(res)
 	candidates, err := scanStamped(ctx, h, seams, where, whereArgs, max(s.batchRoots, 1))
 	if err != nil {
@@ -76,7 +77,7 @@ func (f *fastDeletion) batch(ctx context.Context, h handle, s settings, res resi
 	}
 	batchLimit := capOf(s.batchRows, s.batchBytes)
 	cut, first, err := cutWithin(candidates, batchLimit, batchLimit.rows+1, func(group, limits []int) ([]size, error) {
-		if err := targetedFault(seams, FaultSizeErr, group...); err != nil {
+		if err := targetedFault(seams, diagnostics.FaultReapSizeErr, group...); err != nil {
 			return nil, err
 		}
 		return treesSizesUpTo(ctx, h, live, group, limits)
@@ -124,7 +125,7 @@ func (f *fastDeletion) logError(ctx context.Context, msg string, args ...any) {
 	if ctx.Err() != nil {
 		return
 	}
-	f.j.logger.ErrorContext(ctx, msg, append([]any{"shard", f.j.shard.Index()}, args...)...)
+	f.j.diags.Logger().ErrorContext(ctx, msg, append([]any{"shard", f.j.shard.Index()}, args...)...)
 }
 
 // reset forgets where the job stood.
@@ -154,9 +155,9 @@ func stampedResidency(count, ordinal int, ok bool, steal time.Duration) (clause 
 func scanStamped(ctx context.Context, q sequel.Executor, seams *seamster.Seamster, where string, whereArgs []any, limit int) ([]int, error) {
 	stmt, args := stampedScanSQL(q.DriverName(), where, whereArgs, limit)
 	rows, err := q.QueryContext(ctx, stmt, args...)
-	if err == nil && seams.IsFault(FaultSelectErr) {
+	if err == nil && seams.IsFault(diagnostics.FaultReapSelectErr) {
 		rows.Close()
-		err = errors.New("injected fault: " + FaultSelectErr)
+		err = errors.New("injected fault: " + diagnostics.FaultReapSelectErr)
 	}
 	if err != nil {
 		return nil, errors.Trace(err)

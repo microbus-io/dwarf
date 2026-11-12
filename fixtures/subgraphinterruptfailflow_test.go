@@ -16,7 +16,8 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -88,16 +89,16 @@ func TestSubgraphInterruptFailflow(t *testing.T) {
 	// deadline read `running` under a loaded parallel -race run - the tree was still on its way, so the
 	// clock was reporting the suite rather than the engine. Arm all three FIRST, then read Visits: a stop
 	// before the call is caught by the count, a later one by the channel.
-	seams := engineseams.Seams(eng)
-	interrupted := seams.Waiter(engineseams.Join(engineseams.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted))
-	failed := seams.Waiter(engineseams.Join(engineseams.CheckpointFlowStopped, flowKey, workflow.StatusFailed))
-	completed := seams.Waiter(engineseams.Join(engineseams.CheckpointFlowStopped, flowKey, workflow.StatusCompleted))
+	seams := accessors.Seams(eng)
+	interrupted := seams.Waiter(diagnostics.Join(diagnostics.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted))
+	failed := seams.Waiter(diagnostics.Join(diagnostics.CheckpointFlowStopped, flowKey, workflow.StatusFailed))
+	completed := seams.Waiter(diagnostics.Join(diagnostics.CheckpointFlowStopped, flowKey, workflow.StatusCompleted))
 	const early = "tree terminalized as %s before resume; must rest interrupted while a branch is parked"
 	switch {
-	case seams.Visits(engineseams.Join(engineseams.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted)) > 0:
-	case seams.Visits(engineseams.Join(engineseams.CheckpointFlowStopped, flowKey, workflow.StatusFailed)) > 0:
+	case seams.Visits(diagnostics.Join(diagnostics.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted)) > 0:
+	case seams.Visits(diagnostics.Join(diagnostics.CheckpointFlowStopped, flowKey, workflow.StatusFailed)) > 0:
 		t.Fatalf(early, workflow.StatusFailed)
-	case seams.Visits(engineseams.Join(engineseams.CheckpointFlowStopped, flowKey, workflow.StatusCompleted)) > 0:
+	case seams.Visits(diagnostics.Join(diagnostics.CheckpointFlowStopped, flowKey, workflow.StatusCompleted)) > 0:
 		t.Fatalf(early, workflow.StatusCompleted)
 	default:
 		select {

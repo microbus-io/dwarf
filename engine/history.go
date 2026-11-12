@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
@@ -66,7 +66,7 @@ func (e *Engine) history(ctx context.Context, flowKey string) ([]workflow.FlowSt
 		if err != nil {
 			return false, errors.Trace(err)
 		}
-		e.seams.Checkpoint(ctx, engineseams.CheckpointHistoryFlowRead)
+		e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointHistoryFlowRead)
 		// Load the whole subgraph tree in a fixed two queries via root_flow_id (single-shard by parent-shard
 		// affinity), then assemble the nested history in memory - instead of a per-step surgraph_step_id lookup,
 		// an N+1 over every step in the tree. This mirrors the root_flow_id membership walks in subgraph.go.
@@ -259,7 +259,7 @@ func (e *Engine) stepIn(ctx context.Context, db *sequel.DB, t flowTables, shardN
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	e.seams.Checkpoint(ctx, engineseams.CheckpointStepRead)
+	e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointStepRead)
 	fs := &workflow.FlowStep{
 		StepKey:   stepKey,
 		StepDepth: stepDepth,
@@ -527,7 +527,7 @@ func (e *Engine) fingerprint(ctx context.Context, flowKey string) (string, strin
 		if err != nil {
 			return false, errors.Trace(err)
 		}
-		e.seams.Checkpoint(ctx, engineseams.CheckpointFingerprintFlowRead)
+		e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointFingerprintFlowRead)
 
 		// The digest covers the steps of the flow and every subgraph flow beneath it. A root's subtree is its whole
 		// tree, named by root_flow_id. A subgraph child's is found by the descendant walk, and its flow ids go out in

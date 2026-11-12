@@ -22,7 +22,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -108,9 +108,9 @@ func (e *Engine) handleInterrupt(ctx context.Context, d *dispatch, interruptPayl
 		// order (lockOrder); a single statement over the whole list would instead pass SQL Server's 2,100-parameter
 		// ceiling at a chain of 700 flows.
 		allStepIDs := lockOrder(append([]any{stepID}, chainStepIDs...))
-		// engineseams.FaultInterruptChainWrite reproduces a deadlock victim dialect-independently: the statement errors and
+		// diagnostics.FaultInterruptChainWrite reproduces a deadlock victim dialect-independently: the statement errors and
 		// applies NOTHING, so the leaf stays `running` - the shape that must not read back as a genuine fence.
-		if e.seams.IsFault(engineseams.FaultInterruptChainWrite) {
+		if e.diags.Seams().IsFault(diagnostics.FaultInterruptChainWrite) {
 			tx.ExecContext(ctx, "UPDATE dwarf_steps SET no_such_column=1 WHERE step_id=?", stepID)
 		} else {
 			for chunk := range slices.Chunk(allStepIDs, inListChunk) {
@@ -155,10 +155,10 @@ func (e *Engine) handleInterrupt(ctx context.Context, d *dispatch, interruptPayl
 		if serr := tx.QueryRowContext(ctx, "SELECT lease_seq, status FROM dwarf_steps WHERE step_id=?", stepID).Scan(&curLeaseSeq, &curStatus); serr != nil {
 			return errors.Trace(serr)
 		}
-		// engineseams.FaultInterruptStaleWrite forces the generation to look re-granted (as a real zombie would, after a peer
+		// diagnostics.FaultInterruptStaleWrite forces the generation to look re-granted (as a real zombie would, after a peer
 		// re-claimed the leaf), so the fence trips and the WHOLE transaction rolls back - undoing the ancestor
 		// re-park - and the worker abandons. The only fence in the engine that rolls back rather than no-ops.
-		if e.seams.IsFault(engineseams.FaultInterruptStaleWrite) {
+		if e.diags.Seams().IsFault(diagnostics.FaultInterruptStaleWrite) {
 			curLeaseSeq = leaseSeq + 1
 		}
 		if curLeaseSeq != leaseSeq || curStatus != workflow.StatusInterrupted {

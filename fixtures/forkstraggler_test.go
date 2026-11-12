@@ -22,7 +22,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -60,7 +60,7 @@ func TestForkStraggler_NormalizedToTerminated(t *testing.T) {
 	}
 	shardNum, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	sh, err := engineseams.DB(e).Shard(shardNum)
+	sh, err := accessors.DB(e).Shard(shardNum)
 	assert.Must(assert.NoError(err))
 	db := sh.DB()
 

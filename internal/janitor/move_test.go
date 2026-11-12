@@ -26,6 +26,7 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/database"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/workflow"
@@ -301,9 +302,9 @@ func TestMove_ABatchThatMeetsContentionIsPassed(t *testing.T) {
 	today, err := r.archive.Today(ctx)
 	assert.NoError(err)
 
-	r.seams.InjectN(FaultContention, 1000)
+	r.seams.InjectN(diagnostics.FaultReapContention, 1000)
 	r.pass(ctx)
-	r.seams.Withdraw(FaultContention)
+	r.seams.Withdraw(diagnostics.FaultReapContention)
 	for _, id := range roots {
 		flows, _ := treeCount(t, r, "dwarf_flows", "dwarf_steps", id)
 		assert.Equal(2, flows, "tree %d stays live", id)
@@ -376,7 +377,7 @@ func TestMove_AFatalArchiveFaultNeverAuthorizesDeletion(t *testing.T) {
 	r.settings.batchRoots = 1
 	db := r.db
 	roots := seedTrees(t, db, 3, callShape)
-	r.seams.InjectN(FaultArchiveErr, 10000)
+	r.seams.InjectN(diagnostics.FaultReapArchiveErr, 10000)
 	for range 3 {
 		r.pass(t.Context())
 	}
@@ -385,7 +386,7 @@ func TestMove_AFatalArchiveFaultNeverAuthorizesDeletion(t *testing.T) {
 		assert.Equal(2, flows)
 	}
 	assert.True(r.failing(time.Now().Add(time.Second)) > 0)
-	r.seams.Withdraw(FaultArchiveErr)
+	r.seams.Withdraw(diagnostics.FaultReapArchiveErr)
 	later := seedTrees(t, db, 1, callShape)[0]
 	r.pass(t.Context())
 	flows, _ := treeCount(t, r, "dwarf_flows", "dwarf_steps", later)
@@ -397,7 +398,7 @@ func TestMove_AFatalArchiveFaultNeverAuthorizesDeletion(t *testing.T) {
 // repeated failures, and that a failed move is logged once per failure episode, not once per attempt.
 func TestMove_ALastingFaultPreservesAndLogs(t *testing.T) {
 	t.Parallel()
-	for _, fault := range []string{FaultArchiveErr, FaultContention} {
+	for _, fault := range []string{diagnostics.FaultReapArchiveErr, diagnostics.FaultReapContention} {
 		t.Run(fault, func(t *testing.T) {
 			assert := testarossa.For(t)
 			r := newRig(t, 30)
@@ -427,9 +428,9 @@ func TestMove_AScanFailureAtRetentionZeroIsNoArchiveFailure(t *testing.T) {
 		t.Run(strconv.Itoa(retention), func(t *testing.T) {
 			assert := testarossa.For(t)
 			r := newRig(t, retention)
-			r.seams.InjectN(FaultSelectErr, 100000)
+			r.seams.InjectN(diagnostics.FaultReapSelectErr, 100000)
 			r.pass(t.Context())
-			r.seams.Withdraw(FaultSelectErr)
+			r.seams.Withdraw(diagnostics.FaultReapSelectErr)
 			failing := r.failing(time.Now().Add(time.Second)) > 0
 			assert.Equal(retention > 0, failing)
 		})

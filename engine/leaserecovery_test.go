@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -100,19 +100,19 @@ func TestLeaseRecovery_StepCompletedBetweenSelectAndResetIsLeftAlone(t *testing.
 	assert.NoError(err)
 
 	// Hold the sweep after it has selected A, then let A complete and the flow finish in the gap.
-	e.seams.Break(engineseams.CheckpointLeaseRecoverySelected)
+	e.diags.Seams().Break(diagnostics.CheckpointLeaseRecoverySelected)
 	swept := make(chan struct{})
 	go func() {
 		defer close(swept)
 		e.recoverExpiredLeases(ctx)
 	}()
-	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointLeaseRecoverySelected, 15*time.Second), "the sweep never selected A")
+	assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointLeaseRecoverySelected, 15*time.Second), "the sweep never selected A")
 	unblock()
 	out, err := enginetest.BoundedAwait(t, e, fk)
 	if assert.NoError(err) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
-	e.seams.Resume(engineseams.CheckpointLeaseRecoverySelected)
+	e.diags.Seams().Resume(diagnostics.CheckpointLeaseRecoverySelected)
 	<-swept
 
 	var aStatus string
@@ -148,8 +148,8 @@ func TestLeaseRecovery_RecoversAStepNeitherWriteCouldRecord(t *testing.T) {
 	assert.NoError(e.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 	awaitStartupRecoverySweep(t, e)
-	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistErr, "A"), math.MaxInt)
-	e.seams.Inject(engineseams.Join(engineseams.FaultFailStepErr, "A"))
+	e.diags.Seams().InjectN(diagnostics.Join(diagnostics.FaultPersistErr, "A"), math.MaxInt)
+	e.diags.Seams().Inject(diagnostics.Join(diagnostics.FaultFailStepErr, "A"))
 
 	fk, err := e.Create(ctx, "leaseunwritable/g", nil, nil)
 	assert.NoError(err)
@@ -160,8 +160,8 @@ func TestLeaseRecovery_RecoversAStepNeitherWriteCouldRecord(t *testing.T) {
 	db := sh.DB()
 	var aStepID int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStepID))
-	enginetest.AwaitVisitCount(t, e.seams, 1, 15*time.Second,
-		engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(aStepID)))
+	enginetest.AwaitVisitCount(t, e.diags.Seams(), 1, 15*time.Second,
+		diagnostics.Join(diagnostics.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(aStepID)))
 
 	held := enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE step_id=? AND status='"+
 		workflow.StatusRunning+"' AND lease_expires>NOW_UTC()", aStepID)
@@ -169,7 +169,7 @@ func TestLeaseRecovery_RecoversAStepNeitherWriteCouldRecord(t *testing.T) {
 	assert.Equal(int32(1), aCalls.Load())
 
 	// The database is back: let the lease lapse and sweep.
-	e.seams.Withdraw(engineseams.Join(engineseams.FaultPersistErr, "A"))
+	e.diags.Seams().Withdraw(diagnostics.Join(diagnostics.FaultPersistErr, "A"))
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -60000) WHERE step_id=?", aStepID)
 	assert.NoError(err)
 	e.recoverExpiredLeases(ctx)

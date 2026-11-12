@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -37,7 +37,7 @@ import (
 // must be re-driven from the !completed branch rather than silently skipped - otherwise the parent's caller
 // step strands running+parkedSubgraph until the ~10m parked-step wedge sweep (with a false wedge alarm).
 //
-// engineseams.FaultCompleteSurgraphErr fails the FIRST revive with a non-contention error; the retry (fault consumed) must
+// diagnostics.FaultCompleteSurgraphErr fails the FIRST revive with a non-contention error; the retry (fault consumed) must
 // re-drive it and the whole parent+child tree must complete promptly - not wait out the wedge sweep.
 func TestCompleteFlow_TransientReviveErrorIsRetriedNotLost(t *testing.T) {
 	t.Parallel()
@@ -77,7 +77,7 @@ func TestCompleteFlow_TransientReviveErrorIsRetriedNotLost(t *testing.T) {
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// The first completeSurgraphFlow (driven by the child's completion) errors; persist must re-drive it.
-	e.seams.InjectN(engineseams.FaultCompleteSurgraphErr, 1)
+	e.diags.Seams().InjectN(diagnostics.FaultCompleteSurgraphErr, 1)
 
 	fk, err := e.Create(ctx, "csr/parent", nil, nil)
 	if !assert.NoError(err) {

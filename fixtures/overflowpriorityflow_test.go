@@ -24,7 +24,8 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -86,8 +87,8 @@ func TestOverflowPriorityflow(t *testing.T) {
 	assert.Must(assert.NoError(eng.Startup(ctx)))
 	assert.Must(assert.NoError(creator.Startup(ctx)))
 
-	seams := engineseams.Seams(eng)
-	loops := []string{engineseams.CheckpointRefillTallyDone, engineseams.CheckpointRefillCycleDone}
+	seams := accessors.Seams(eng)
+	loops := []string{diagnostics.CheckpointRefillTallyDone, diagnostics.CheckpointRefillCycleDone}
 	hold := func(cp string) {
 		seams.Break(cp)
 		assert.True(seams.WaitTimeout(ctx, cp, 10*time.Second*enginetest.TimeoutScale()), "the loop never came round to %s", cp)

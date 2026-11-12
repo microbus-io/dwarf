@@ -147,17 +147,17 @@ func (e *Engine) buildSonars(ctx context.Context) {
 	for place, idx := range indices {
 		sh, err := e.db.Shard(idx)
 		if err != nil {
-			e.logger.Error("Resolving shard for its peer sonar", "shard", idx, "error", err)
+			e.diags.Logger().Error("Resolving shard for its peer sonar", "shard", idx, "error", err)
 			continue
 		}
-		s, err := peers.New(e.engineID, sh)
+		s, err := peers.New(e.engineID, sh, e.diags)
 		if err != nil {
-			e.logger.Error("Building peer sonar", "shard", idx, "error", err)
+			e.diags.Logger().Error("Building peer sonar", "shard", idx, "error", err)
 			continue
 		}
 		// A failed read only loses this shard's vote on the place; registration still writes the chosen value.
 		if stored, found, err := s.StoredOrderingSeq(ctx); err != nil {
-			e.logger.Warn("Reading this replica's stored peer ordering", "shard", idx, "error", err)
+			e.diags.Logger().Warn("Reading this replica's stored peer ordering", "shard", idx, "error", err)
 		} else if found && stored > 0 && (seq == 0 || stored < seq) {
 			seq = stored
 		}
@@ -177,8 +177,6 @@ func (e *Engine) buildSonars(ctx context.Context) {
 		s.SetCut(func(rank, candidates int) bool {
 			return inWindow(rank, candidates, place, dispatcherSlots(candidates))
 		})
-		s.SetLogger(e.logger)
-		s.SetSeams(e.seams)
 		if testing.Testing() {
 			// A test fleet is ephemeral: every engine pays Join's two cadences on the way up, and a suite that
 			// stands one up per test would spend most of its time there. Shortening the cadence shortens Join
@@ -204,7 +202,7 @@ func (e *Engine) joinFleet(ctx context.Context) {
 			if err := s.Join(ctx); err != nil {
 				// Not fatal: the pools simply size for whatever this shard's reading found, and the Sonar's own
 				// loop repairs a missing row and re-reads within a cadence.
-				e.logger.ErrorContext(ctx, "Joining the fleet", "shard", idx, "error", err)
+				e.diags.Logger().ErrorContext(ctx, "Joining the fleet", "shard", idx, "error", err)
 			}
 		})
 	}
@@ -255,7 +253,7 @@ func (e *Engine) sleepPeerGrace(ctx context.Context, d time.Duration) {
 func (e *Engine) withdrawFromFleet(ctx context.Context) {
 	for idx, s := range e.sonars {
 		if err := s.Withdraw(ctx, e.dispatchesOn(idx)); err != nil {
-			e.logger.ErrorContext(ctx, "Withdrawing from the fleet", "shard", idx, "error", err)
+			e.diags.Logger().ErrorContext(ctx, "Withdrawing from the fleet", "shard", idx, "error", err)
 		}
 	}
 }
@@ -269,7 +267,7 @@ func (e *Engine) withdrawFromFleet(ctx context.Context) {
 func (e *Engine) leaveFleet(ctx context.Context) {
 	for idx, s := range e.sonars {
 		if err := s.Leave(ctx); err != nil {
-			e.logger.ErrorContext(ctx, "Leaving the fleet", "shard", idx, "error", err)
+			e.diags.Logger().ErrorContext(ctx, "Leaving the fleet", "shard", idx, "error", err)
 		}
 	}
 }

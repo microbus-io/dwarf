@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/pipeline"
 	"github.com/microbus-io/dwarf/internal/planner"
@@ -98,8 +98,8 @@ func TestRefillInterval_OneCyclePerPistonNoTrigger(t *testing.T) {
 	assert.NoError(e.SetHost(mux))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
-	// engineseams.FaultDropDoorbell removes the local Offer entirely, so nothing but a cycle can discover this step.
-	e.seams.InjectN(engineseams.FaultDropDoorbell, 1<<20)
+	// diagnostics.FaultDropDoorbell removes the local Offer entirely, so nothing but a cycle can discover this step.
+	e.diags.Seams().InjectN(diagnostics.FaultDropDoorbell, 1<<20)
 	k, err := e.Create(ctx, "notrigger/g", nil, nil)
 	if !assert.NoError(err) {
 		return

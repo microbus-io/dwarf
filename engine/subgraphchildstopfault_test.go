@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -33,7 +33,7 @@ import (
 
 // TestSubgraphChildStopSignal_DroppedThenBackstopped is the dropped-wake variant of
 // TestSubgraphErrorWaitflow. That fixture proves a failing subgraph child raises signalStop for its (read-only)
-// child key, with an Await blocked on that key. Here we arm engineseams.FaultDropSignalStop so the child's terminal wake is LOST
+// child key, with an Await blocked on that key. Here we arm diagnostics.FaultDropSignalStop so the child's terminal wake is LOST
 // (the first signalStop consult is the child's failure; the fault fires once and is consumed there, so the
 // root's later wake is delivered normally). The child-key Await must STILL return - via the latch detector,
 // which reads the child's committed stop out of the flow row - rather than hanging to the caller's ctx
@@ -118,7 +118,7 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 		err error
 	}
 	awaitCh := make(chan outcome, 1)
-	parked := e.seams.Waiter(engineseams.Join(engineseams.CheckpointAwaitParked, child)) // armed before the goroutine that trips it
+	parked := e.diags.Seams().Waiter(diagnostics.Join(diagnostics.CheckpointAwaitParked, child)) // armed before the goroutine that trips it
 	go func() {
 		o, err := e.Await(awaitCtx, child)
 		awaitCh <- outcome{o, err}
@@ -133,10 +133,10 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 		return
 	}
 
-	// Drop the child's terminal wake: with engineseams.FaultDropSignalStop armed, the child's failStep signalStop delivers
+	// Drop the child's terminal wake: with diagnostics.FaultDropSignalStop armed, the child's failStep signalStop delivers
 	// nothing. The fault fires once and is consumed on the child's (first) stop, so the root's later wake is
 	// unaffected.
-	e.seams.Inject(engineseams.FaultDropSignalStop)
+	e.diags.Seams().Inject(diagnostics.FaultDropSignalStop)
 	releaseBoom() // the child now fails via failStep's subgraph-child path, whose signalStop is dropped
 
 	// Despite the lost signal, Await(childKey) must still return - the only remaining wake path is the latch

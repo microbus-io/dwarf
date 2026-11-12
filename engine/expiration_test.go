@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -364,14 +364,14 @@ func TestExpiration_AFailingRootIsPassedOver(t *testing.T) {
 
 	// Past the budget at once: the failed attempt is the pass's one.
 	e.expireBudget = time.Nanosecond
-	e.seams.InjectN(engineseams.FaultExpireTerminate, 1)
+	e.diags.Seams().InjectN(diagnostics.FaultExpireTerminate, 1)
 	expireNow(ctx, e)
 	status, _ := statusOf(t, e, second)
 	assert.Equal(workflow.StatusInterrupted, status, "a failed attempt counts against the budget")
 
 	// The next pass goes on after the failed root and sweeps the rest; the failed root waits for the next sweep.
 	e.expireBudget = time.Minute
-	e.seams.InjectN(engineseams.FaultExpireTerminate, 1)
+	e.diags.Seams().InjectN(diagnostics.FaultExpireTerminate, 1)
 	expireNow(ctx, e)
 	status, _ = statusOf(t, e, first)
 	assert.Equal(workflow.StatusInterrupted, status, "its termination failed, and a pass goes on from where the last stopped")

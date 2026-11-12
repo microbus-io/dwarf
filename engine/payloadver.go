@@ -92,7 +92,7 @@ func (e *Engine) deferNewerPayload(ctx context.Context, d *dispatch) error {
 	if deferrals == 0 {
 		level = slog.LevelWarn
 	}
-	e.logger.Log(ctx, level, "Deferring a step of a flow in a newer payload format",
+	e.diags.Logger().Log(ctx, level, "Deferring a step of a flow in a newer payload format",
 		"flow", keys.CorrelationID(shardNum, d.row.createdHour, flowID), "task", taskName,
 		"payloadVer", ver, "supportedVer", payloadVer, "deferrals", deferrals+1, "backoff", backoff)
 	pass := database.WaitTurn(ctx)

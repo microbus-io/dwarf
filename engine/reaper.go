@@ -97,7 +97,7 @@ func (e *Engine) reaperConfig(ctx context.Context, set *archiveSet, grace time.D
 }
 
 // reapPass removes, per shard this replica dispatches, every due tree, archiving the closed roots that ended grace ago
-// - the archive grace, or 0 for a test archiving what it just ended (engineseams.ArchiveNow) - and, with periodic,
+// - the archive grace, or 0 for a test archiving what it just ended (accessors.ArchiveNow) - and, with periodic,
 // then deletes the marked archive trees left and runs the expiration pass. Each shard's pass is one turn: the
 // reaper's pass, then the periodic stages, one after the other. dwarf_reap_pass_seconds times the reaper's pass alone.
 func (e *Engine) reapPass(ctx context.Context, grace time.Duration, periodic bool) {

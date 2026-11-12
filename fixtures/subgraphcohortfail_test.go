@@ -26,7 +26,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -128,7 +128,7 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	sh, err := engineseams.DB(e).Shard(shard)
+	sh, err := accessors.DB(e).Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}

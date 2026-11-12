@@ -27,7 +27,7 @@ import (
 
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/archiver"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/migrations"
@@ -183,7 +183,7 @@ func readAcrossTheMove(t *testing.T, e *Engine, flowKey, cp string, read func() 
 	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	db := sh.DB()
-	e.seams.Break(cp)
+	e.diags.Seams().Break(cp)
 	type result struct {
 		v   any
 		err error
@@ -193,14 +193,14 @@ func readAcrossTheMove(t *testing.T, e *Engine, flowKey, cp string, read func() 
 		v, err := read()
 		done <- result{v, err}
 	}()
-	assert.True(e.seams.WaitTimeout(ctx, cp, 10*time.Second))
+	assert.True(e.diags.Seams().WaitTimeout(ctx, cp, 10*time.Second))
 	reaped := make(chan struct{})
 	go func() {
 		e.reapDueFlows(ctx)
 		close(reaped)
 	}()
 	<-reaped
-	e.seams.Resume(cp)
+	e.diags.Seams().Resume(cp)
 	r := <-done
 	_, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
@@ -228,7 +228,7 @@ func TestArchivedReads_FingerprintStraddlingTheMoveReadsOneSide(t *testing.T) {
 		want, _, err := e.Fingerprint(ctx, fk)
 		assert.NoError(err)
 
-		got, err := readAcrossTheMove(t, e, fk, engineseams.CheckpointFingerprintFlowRead, func() (any, error) {
+		got, err := readAcrossTheMove(t, e, fk, diagnostics.CheckpointFingerprintFlowRead, func() (any, error) {
 			fp, _, err := e.Fingerprint(ctx, fk)
 			return fp, err
 		})
@@ -314,7 +314,7 @@ func TestArchivedReads_AwaitParkedAcrossTheMoveGetsTheOutcome(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	e.seams.InjectN(engineseams.FaultDropSignalStop, 1<<20)
+	e.diags.Seams().InjectN(diagnostics.FaultDropSignalStop, 1<<20)
 	unblock()
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
 	e.reapDueFlows(ctx)
@@ -485,7 +485,7 @@ func TestArchivedReads_HistoryAndStepStraddlingTheMoveReadOneSide(t *testing.T) 
 	}
 
 	fk, history := newTree()
-	got, err := readAcrossTheMove(t, e, fk, engineseams.CheckpointHistoryFlowRead, func() (any, error) { return e.History(ctx, fk) })
+	got, err := readAcrossTheMove(t, e, fk, diagnostics.CheckpointHistoryFlowRead, func() (any, error) { return e.History(ctx, fk) })
 	assert.NoError(err)
 	assert.Equal(history, got)
 
@@ -494,7 +494,7 @@ func TestArchivedReads_HistoryAndStepStraddlingTheMoveReadOneSide(t *testing.T) 
 		k := history[i].StepKey
 		want, err := e.Step(ctx, k)
 		assert.NoError(err)
-		got, err := readAcrossTheMove(t, e, fk, engineseams.CheckpointStepRead, func() (any, error) { return e.Step(ctx, k) })
+		got, err := readAcrossTheMove(t, e, fk, diagnostics.CheckpointStepRead, func() (any, error) { return e.Step(ctx, k) })
 		assert.NoError(err, history[i].TaskName)
 		assert.Equal(want, got, history[i].TaskName)
 	}
@@ -558,9 +558,9 @@ func TestArchivedReads_ADayDroppedMidReadIsNotFound(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	reads := map[string]func(e *Engine, flowKey, stepKey string) error{
-		engineseams.CheckpointFingerprintFlowRead: func(e *Engine, fk, _ string) error { _, _, err := e.Fingerprint(ctx, fk); return err },
-		engineseams.CheckpointHistoryFlowRead:     func(e *Engine, fk, _ string) error { _, err := e.History(ctx, fk); return err },
-		engineseams.CheckpointStepRead:            func(e *Engine, _, sk string) error { _, err := e.Step(ctx, sk); return err },
+		diagnostics.CheckpointFingerprintFlowRead: func(e *Engine, fk, _ string) error { _, _, err := e.Fingerprint(ctx, fk); return err },
+		diagnostics.CheckpointHistoryFlowRead:     func(e *Engine, fk, _ string) error { _, err := e.History(ctx, fk); return err },
+		diagnostics.CheckpointStepRead:            func(e *Engine, _, sk string) error { _, err := e.Step(ctx, sk); return err },
 	}
 	for cp, read := range reads {
 		t.Run(cp, func(t *testing.T) {
@@ -580,14 +580,14 @@ func TestArchivedReads_ADayDroppedMidReadIsNotFound(t *testing.T) {
 
 			// Fingerprint and History meet their checkpoint only on the side that holds the flow row, and Step only
 			// where the step is: here the archive.
-			e.seams.Break(cp)
+			e.diags.Seams().Break(cp)
 			done := make(chan error, 1)
 			go func() { done <- read(e, fk, history[0].StepKey) }()
-			assert.True(e.seams.WaitTimeout(ctx, cp, 10*time.Second), cp)
+			assert.True(e.diags.Seams().WaitTimeout(ctx, cp, 10*time.Second), cp)
 			for _, table := range []string{tables.flows, tables.steps} {
 				assert.NoError(renameTable(ctx, db, table, table+"_away"))
 			}
-			e.seams.Resume(cp)
+			e.diags.Seams().Resume(cp)
 			err = <-done
 			assert.Equal(http.StatusNotFound, merrors.StatusCode(err), "%s: %v", cp, err)
 		})
@@ -675,18 +675,18 @@ func TestArchivedReads_AnArchivedTreeRemovedMidReadIsNotFound(t *testing.T) {
 	assert.Must(assert.NoError(err))
 	db := sh.DB()
 
-	e.seams.Break(engineseams.CheckpointHistoryFlowRead)
+	e.diags.Seams().Break(diagnostics.CheckpointHistoryFlowRead)
 	done := make(chan error, 1)
 	go func() {
 		_, err := e.History(ctx, fk)
 		done <- err
 	}()
-	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointHistoryFlowRead, 10*time.Second))
+	assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointHistoryFlowRead, 10*time.Second))
 	_, err = db.ExecContext(ctx, "DELETE FROM "+tables.steps+" WHERE flow_id IN (SELECT flow_id FROM "+tables.flows+" WHERE root_flow_id=?)", rootID)
 	assert.NoError(err)
 	_, err = db.ExecContext(ctx, "DELETE FROM "+tables.flows+" WHERE root_flow_id=?", rootID)
 	assert.NoError(err)
-	e.seams.Resume(engineseams.CheckpointHistoryFlowRead)
+	e.diags.Seams().Resume(diagnostics.CheckpointHistoryFlowRead)
 	err = <-done
 	assert.Equal(http.StatusNotFound, merrors.StatusCode(err), err)
 }
@@ -944,7 +944,7 @@ func TestArchivedReads_ForkWhoseSourceIsArchivedMeanwhile(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	held := func(t *testing.T, e *Engine, during func(), fork func() (string, error)) (string, error) {
-		e.seams.Break(engineseams.CheckpointForkBeforeClone)
+		e.diags.Seams().Break(diagnostics.CheckpointForkBeforeClone)
 		type result struct {
 			fk  string
 			err error
@@ -955,9 +955,9 @@ func TestArchivedReads_ForkWhoseSourceIsArchivedMeanwhile(t *testing.T) {
 			done <- result{fk, err}
 		}()
 		assert := testarossa.For(t)
-		assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointForkBeforeClone, 10*time.Second))
+		assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointForkBeforeClone, 10*time.Second))
 		during()
-		e.seams.Resume(engineseams.CheckpointForkBeforeClone)
+		e.diags.Seams().Resume(diagnostics.CheckpointForkBeforeClone)
 		r := <-done
 		return r.fk, r.err
 	}
@@ -1137,7 +1137,7 @@ func TestArchivedReads_ForkHoldsTheReaperOffItsSource(t *testing.T) {
 	use := history[2].SubHistory[0].StepKey // the child's Work
 	want, wantNames := forkOutcome(t, e, use, nil)
 
-	e.seams.Break(engineseams.CheckpointForkRootLocked)
+	e.diags.Seams().Break(diagnostics.CheckpointForkRootLocked)
 	type result struct {
 		fk  string
 		err error
@@ -1147,7 +1147,7 @@ func TestArchivedReads_ForkHoldsTheReaperOffItsSource(t *testing.T) {
 		fk, err := e.Fork(ctx, use, nil)
 		forked <- result{fk, err}
 	}()
-	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointForkRootLocked, 10*time.Second))
+	assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointForkRootLocked, 10*time.Second))
 	reaped := make(chan struct{})
 	go func() {
 		e.reapDueFlows(ctx)
@@ -1173,7 +1173,7 @@ func TestArchivedReads_ForkHoldsTheReaperOffItsSource(t *testing.T) {
 		case <-time.After(500 * time.Millisecond * enginetest.TimeoutScale()):
 		}
 	}
-	e.seams.Resume(engineseams.CheckpointForkRootLocked)
+	e.diags.Seams().Resume(diagnostics.CheckpointForkRootLocked)
 	r := <-forked
 	<-reaped
 	if skips {
@@ -1223,13 +1223,13 @@ func TestArchivedReads_ForkWaitingOnTheMoveForksFromTheArchive(t *testing.T) {
 	history, err := e.History(ctx, fk)
 	assert.NoError(err)
 
-	e.seams.Break(engineseams.CheckpointReapBatchLocked)
+	e.diags.Seams().Break(diagnostics.CheckpointReapBatchLocked)
 	reaped := make(chan struct{})
 	go func() {
 		e.reapDueFlows(ctx)
 		close(reaped)
 	}()
-	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointReapBatchLocked, 10*time.Second), "the batch locked the root")
+	assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointReapBatchLocked, 10*time.Second), "the batch locked the root")
 	type result struct {
 		fk  string
 		err error
@@ -1240,7 +1240,7 @@ func TestArchivedReads_ForkWaitingOnTheMoveForksFromTheArchive(t *testing.T) {
 		forked <- result{fk, err}
 	}()
 	time.Sleep(200 * time.Millisecond) // the Fork's lock waits on the batch's
-	e.seams.Resume(engineseams.CheckpointReapBatchLocked)
+	e.diags.Seams().Resume(diagnostics.CheckpointReapBatchLocked)
 	<-reaped
 	r := <-forked
 	if assert.NoError(r.err, "forked from the archive") {

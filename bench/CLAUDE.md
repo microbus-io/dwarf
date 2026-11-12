@@ -669,6 +669,6 @@ daily archive reopened with one-hour days lost all three of its day tables on th
 of one run must agree on it too. The engine deliberately does not guard this: the setting is for the rig only.
 
 Test-only knobs the bench CANNOT reach: the engine's seams are enabled only under `testing.Testing()`, so
-arming one from `internal/engineseams` in a bench binary does nothing, and fault injection and `sequel`'s
+arming one named in `internal/diagnostics` in a bench binary does nothing, and fault injection and `sequel`'s
 `SimulateRTT` are available to fixtures but not here. Reaching them from a
 benchmark needs real API, not a back door.

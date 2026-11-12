@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
@@ -51,10 +51,10 @@ func awaitPoolSize(t *testing.T, db *sequel.DB, want int) int {
 // whose BlindFor merely grew with the clock while its loop was starved. Every wait is on a pass.
 func awaitBlind(t *testing.T, e *Engine, shard int, d time.Duration) {
 	t.Helper()
-	pass := engineseams.Join(engineseams.CheckpointPeerPass, strconv.Itoa(shard))
-	enginetest.AwaitVisits(t, e.seams, 2, 30*time.Second, pass)
+	pass := diagnostics.Join(diagnostics.CheckpointPeerPass, strconv.Itoa(shard))
+	enginetest.AwaitVisits(t, e.diags.Seams(), 2, 30*time.Second, pass)
 	for e.sonarFor(shard).BlindFor() < d {
-		enginetest.AwaitVisits(t, e.seams, 1, 30*time.Second, pass)
+		enginetest.AwaitVisits(t, e.diags.Seams(), 1, 30*time.Second, pass)
 	}
 }
 
@@ -90,7 +90,7 @@ func TestPeerFault_BlindHoldsThePoolsAndFailsOpen(t *testing.T) {
 	awaitPartition(t, e, 1, 2, -1)
 
 	// The registry stops answering on this shard.
-	e.seams.InjectN(engineseams.FaultPeerReadErr, 1<<20)
+	e.diags.Seams().InjectN(diagnostics.FaultPeerReadErr, 1<<20)
 
 	// The fleet is HELD. Even after the peers' rows are deleted outright, this replica cannot see it, so it
 	// must go on sizing for two - the safe direction, and the one a blip must not undo.
@@ -109,7 +109,7 @@ func TestPeerFault_BlindHoldsThePoolsAndFailsOpen(t *testing.T) {
 	// Reading resumes. The first reading back must not shrink the fleet - this is the correlated stall,
 	// where a database hiccup makes every row look stale at once and every replica would otherwise size for
 	// a fleet of one simultaneously. It settles on the reading after that.
-	e.seams.Withdraw(engineseams.FaultPeerReadErr)
+	e.diags.Seams().Withdraw(diagnostics.FaultPeerReadErr)
 	assert.Equal(declaredBudget, awaitPoolSize(t, db, declaredBudget), "the fleet really did shrink, so the budget comes back")
 	assert.Equal(1, e.replicasOn(1))
 }
@@ -145,7 +145,7 @@ func TestPeerFault_BlindnessIsPerShard(t *testing.T) {
 
 	// Blind shard 1 only, then take the peer away everywhere. Shard 1 must be blind before the peer goes: a reading
 	// begun before the fault can still succeed, and one landing after the delete would see the fleet shrink.
-	e.seams.InjectN(engineseams.Join(engineseams.FaultPeerReadErr, "1"), 1<<20)
+	e.diags.Seams().InjectN(diagnostics.Join(diagnostics.FaultPeerReadErr, "1"), 1<<20)
 	awaitBlind(t, e, 1, 10*testPeerCadence)
 	assert.NoError(e.db.OnEach(context.Background(), func(ctx context.Context, sdb *sequel.DB, shard int) error {
 		_, derr := sdb.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id=6001")
@@ -192,7 +192,7 @@ func TestPeerFault_BeatFailureEvictsFromTheDispatchers(t *testing.T) {
 
 	// The peer loses the ability to prove it is alive. It keeps running - it just goes silent in the
 	// registry - so nothing about it changes except what its own row says.
-	peer.seams.InjectN(engineseams.FaultPeerBeatErr, 1<<20)
+	peer.diags.Seams().InjectN(diagnostics.FaultPeerBeatErr, 1<<20)
 
 	// The worker drops it from the WORK divisor once its dispatch evidence ages out, and stops partitioning:
 	// with one dispatcher left there is nothing to divide, so the survivor selects everything. That is the

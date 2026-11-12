@@ -21,7 +21,7 @@ import (
 	"strings"
 
 	"github.com/microbus-io/dwarf/internal/cancelmarker"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -77,8 +77,8 @@ const (
 func (e *Engine) failStep(ctx context.Context, d *dispatch, taskErr error, held stepHeld) (fenced bool, err error) {
 	shardNum, stepID, leaseSeq, taskName := d.shard, d.stepID, d.row.leaseSeq, d.row.taskName
 	flowID, flowHour, flowToken := d.row.flowID, d.row.createdHour, d.row.flowToken
-	if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultFailStepErr, taskName)) {
-		return false, errors.New("injected fault: " + engineseams.FaultFailStepErr)
+	if e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultFailStepErr, taskName)) {
+		return false, errors.New("injected fault: " + diagnostics.FaultFailStepErr)
 	}
 	sh, err := e.db.Shard(shardNum)
 	if err != nil {
@@ -225,8 +225,8 @@ func (e *Engine) failFlowTx(ctx context.Context, tx sequel.Executor, shardNum, f
 	}
 	lossErr := e.flowLossError(ctx, tx, flowID, cancelled, lastLoss)
 	finalStateJSON, _, err := e.computeFinalState(ctx, tx, shardNum, flowID, flowToken)
-	if err == nil && e.seams.IsFault(engineseams.FaultFailFlowFinalState) {
-		err = errors.New("injected fault: " + engineseams.FaultFailFlowFinalState)
+	if err == nil && e.diags.Seams().IsFault(diagnostics.FaultFailFlowFinalState) {
+		err = errors.New("injected fault: " + diagnostics.FaultFailFlowFinalState)
 	}
 	if err != nil {
 		// A fuse that can itself be poisoned is not a fuse. failStep is the ONLY way out of a step whose outcome
@@ -236,7 +236,7 @@ func (e *Engine) failFlowTx(ctx context.Context, tx sequel.Executor, shardNum, f
 		// the same way as the write being failed, failStep would report an error, and the classifier would misread
 		// it as "the database is down" - leaving the step to re-execute forever. So the flow still terminalizes,
 		// with an empty final_state and the error logged.
-		e.logger.ErrorContext(ctx, "Computing final_state while failing a flow; terminalizing with empty state",
+		e.diags.Logger().ErrorContext(ctx, "Computing final_state while failing a flow; terminalizing with empty state",
 			"flow", keys.CorrelationID(shardNum, flowHour, flowID), "error", err)
 		finalStateJSON = []byte("{}")
 	}
@@ -267,7 +267,7 @@ func (e *Engine) failFlowTx(ctx context.Context, tx sequel.Executor, shardNum, f
 // introspection), whose failure otherwise travels only to its parent's flow.Subgraph call.
 func (e *Engine) endLostFlow(ctx context.Context, shardNum, flowID, flowHour int, flowToken string, label flowLabel, loss flowLoss) {
 	e.metricFlowClosed(ctx, label.workflowURL, loss.status, label.priority, shardNum)
-	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowHour, flowID), "to", loss.status)
+	e.diags.Logger().InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowHour, flowID), "to", loss.status)
 	e.signalStop(ctx, keys.NewFlowKey(shardNum, flowHour, flowID, flowToken), loss.status)
 	if loss.reDispatchParent {
 		e.enqueueStep(ctx, shardNum, loss.parentStepID)

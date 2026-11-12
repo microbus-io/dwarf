@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -962,10 +962,10 @@ func TestMetrics_TerminateCountsOnlyTheFlowsItClosed(t *testing.T) {
 		return
 	}
 
-	eng.seams.Break(engineseams.CheckpointTerminateAfterScan)
+	eng.diags.Seams().Break(diagnostics.CheckpointTerminateAfterScan)
 	terminated := make(chan error, 1)
 	go func() { terminated <- eng.Terminate(ctx, fk, "test") }()
-	if !assert.True(eng.seams.WaitTimeout(ctx, engineseams.CheckpointTerminateAfterScan, 10*time.Second), "Terminate never finished its scan") {
+	if !assert.True(eng.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointTerminateAfterScan, 10*time.Second), "Terminate never finished its scan") {
 		return
 	}
 	shardNum, _, rootID, _, _ := keys.ParseFlowKey(fk)
@@ -974,7 +974,7 @@ func TestMetrics_TerminateCountsOnlyTheFlowsItClosed(t *testing.T) {
 	db := sh.DB()
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET status=? WHERE flow_id=?", workflow.StatusCompleted, rootID)
 	assert.NoError(err)
-	eng.seams.Resume(engineseams.CheckpointTerminateAfterScan)
+	eng.diags.Seams().Resume(diagnostics.CheckpointTerminateAfterScan)
 	assert.NoError(<-terminated)
 
 	var rm metricdata.ResourceMetrics

@@ -24,6 +24,7 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/candidates"
 	"github.com/microbus-io/dwarf/internal/database"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/pipeline"
 	"github.com/microbus-io/dwarf/internal/planner"
 	"github.com/microbus-io/dwarf/workflow"
@@ -48,6 +49,12 @@ type rig struct {
 // the piston itself never opens or closes a handle.
 func newRig(t *testing.T) *rig {
 	t.Helper()
+	return newRigWith(t, nil)
+}
+
+// newRigWith is newRig with the piston reporting through d.
+func newRigWith(t *testing.T, d *diagnostics.Diags) *rig {
+	t.Helper()
 	var set database.ShardSet
 	err := set.Open(context.Background(), database.Config{
 		Shards:      map[int]database.ShardConfig{1: {MaxIdleConns: 2, MaxOpenConns: 4}},
@@ -67,7 +74,7 @@ func newRig(t *testing.T) *rig {
 	cache.Init(4) // capacity 8
 	t.Cleanup(cache.Close)
 	pl := planner.New()
-	p, err := New(sh, pl, cache)
+	p, err := New(sh, d, pl, cache)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -527,7 +534,8 @@ func TestPiston_PartitionNarrowsTheBands(t *testing.T) {
 func TestPiston_RunDispatchesAndReportsItsTurns(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	r := newRig(t)
+	sm := seamster.New(true)
+	r := newRigWith(t, seamsDiags(sm))
 	r.p.SetTallyCadence(5*time.Millisecond, 0)
 	r.p.SetSupplyCadence(5*time.Millisecond, 0)
 
@@ -535,9 +543,6 @@ func TestPiston_RunDispatchesAndReportsItsTurns(t *testing.T) {
 	assert.Equal(uint64(0), turns, "nothing has turned yet")
 	assert.False(busy)
 	assert.False(idle)
-
-	sm := seamster.New(true)
-	r.p.SetSeams(sm)
 
 	want := []int{
 		r.insertStep(t, 1, 5, "k", 1),
@@ -547,7 +552,7 @@ func TestPiston_RunDispatchesAndReportsItsTurns(t *testing.T) {
 	done := make(chan struct{})
 	stop := sync.OnceFunc(func() { cancel(); <-done })
 	defer stop()
-	tallied := sm.Waiter(CheckpointTallyDone)
+	tallied := sm.Waiter(diagnostics.CheckpointRefillTallyDone)
 	go func() { defer close(done); r.p.Run(ctx) }()
 
 	// A scan, then a push planned from it, rendezvoused rather than polled for. The first cycle of each loop
@@ -560,7 +565,7 @@ func TestPiston_RunDispatchesAndReportsItsTurns(t *testing.T) {
 	case <-hang:
 		t.Fatal("the tally loop never completed a scan")
 	}
-	pushed := sm.Waiter(CheckpointCycleDone)
+	pushed := sm.Waiter(diagnostics.CheckpointRefillCycleDone)
 	select {
 	case <-pushed:
 	case <-hang:
@@ -592,7 +597,8 @@ func TestPiston_RunDispatchesAndReportsItsTurns(t *testing.T) {
 func TestPiston_RunSuppliesWhileTheScanIsStalled(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	r := newRig(t)
+	sm := seamster.New(true)
+	r := newRigWith(t, seamsDiags(sm))
 
 	want := []int{
 		r.insertStep(t, 1, 5, "k", 1),
@@ -605,12 +611,10 @@ func TestPiston_RunSuppliesWhileTheScanIsStalled(t *testing.T) {
 	// Now stall the tally loop and let Run drive both. Only the supply loop can make progress.
 	r.p.SetTallyCadence(time.Hour, 0)
 	r.p.SetSupplyCadence(time.Millisecond, time.Millisecond)
-	sm := seamster.New(true)
-	r.p.SetSeams(sm)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	pushed := sm.Waiter(CheckpointCycleDone)
+	pushed := sm.Waiter(diagnostics.CheckpointRefillCycleDone)
 	go func() { defer close(done); r.p.Run(ctx) }()
 
 	// The first push is planned from the hand tally, so it carries both steps. The bound is a hang guard only:
@@ -637,27 +641,26 @@ func TestPiston_RunSuppliesWhileTheScanIsStalled(t *testing.T) {
 //
 // Both halves are staged rather than raced, in the one order that leaves each loop something to undo. Each loop's
 // cycle-begin checkpoint is past its idle check, so breaking it holds the loop inside a cycle, and the two are
-// separate checkpoints, released one at a time. The test starts the two loops itself, exactly as Run does. The tally loop goes first and is frozen at CheckpointTallyDone, after its scan
+// separate checkpoints, released one at a time. The test starts the two loops itself, exactly as Run does. The tally loop goes first and is frozen at diagnostics.CheckpointRefillTallyDone, after its scan
 // re-entered the shard and before its own idle check; only then does the supply loop run, so it plans from
 // that stale tally and re-pushes. Released together, the supply loop usually plans from the tally SetIdle had
 // already cleared, pushes nothing, and its withdrawal goes untested.
 func TestPiston_IdleWithdrawsAgainstARunningLoop(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	r := newRig(t)
+	sm := seamster.New(true)
+	r := newRigWith(t, seamsDiags(sm))
 	r.p.SetTallyCadence(time.Millisecond, 0)
 	r.p.SetSupplyCadence(time.Millisecond, 0)
-	sm := seamster.New(true)
-	r.p.SetSeams(sm)
 	r.insertStep(t, 1, 5, "alpha", 1)
 
 	// Each loop is held at its cycle's begin checkpoint, past its idle check.
-	sm.Break(CheckpointTallyBegin)
-	sm.Break(CheckpointSupplyBegin)
-	defer sm.Resume(CheckpointTallyBegin)
-	defer sm.Resume(CheckpointSupplyBegin)
-	tallyIn := sm.Waiter(CheckpointTallyBegin)
-	supplyIn := sm.Waiter(CheckpointSupplyBegin)
+	sm.Break(diagnostics.CheckpointRefillTallyBegin)
+	sm.Break(diagnostics.CheckpointRefillSupplyBegin)
+	defer sm.Resume(diagnostics.CheckpointRefillTallyBegin)
+	defer sm.Resume(diagnostics.CheckpointRefillSupplyBegin)
+	tallyIn := sm.Waiter(diagnostics.CheckpointRefillTallyBegin)
+	supplyIn := sm.Waiter(diagnostics.CheckpointRefillSupplyBegin)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var loops sync.WaitGroup
@@ -679,15 +682,15 @@ func TestPiston_IdleWithdrawsAgainstARunningLoop(t *testing.T) {
 	await(supplyIn, "the supply loop never entered a cycle")
 	r.p.SetIdle(true) // both loops are inside a cycle, past their idle checks
 
-	sm.Break(CheckpointTallyDone)
-	defer sm.Resume(CheckpointTallyDone)
-	frozen := sm.Waiter(CheckpointTallyDone)
-	sm.Resume(CheckpointTallyBegin)
+	sm.Break(diagnostics.CheckpointRefillTallyDone)
+	defer sm.Resume(diagnostics.CheckpointRefillTallyDone)
+	frozen := sm.Waiter(diagnostics.CheckpointRefillTallyDone)
+	sm.Resume(diagnostics.CheckpointRefillTallyBegin)
 	await(frozen, "the held tally cycle never completed")
 	assert.True(r.planner.Plan(1, 8).Tallied, "the held scan re-entered the shard after SetIdle")
 
-	pushed := sm.Waiter(CheckpointCycleDone)
-	sm.Resume(CheckpointSupplyBegin)
+	pushed := sm.Waiter(diagnostics.CheckpointRefillCycleDone)
+	sm.Resume(diagnostics.CheckpointRefillSupplyBegin)
 	await(pushed, "the held supply cycle never pushed from the stale tally")
 
 	// Each withdrawal must take, and must STAY taken: an idle loop starts no further cycle, so once it has
@@ -697,7 +700,7 @@ func TestPiston_IdleWithdrawsAgainstARunningLoop(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	assert.Equal(0, r.cache.Len(), "the supply loop empties the partition it re-pushed")
-	sm.Resume(CheckpointTallyDone)
+	sm.Resume(diagnostics.CheckpointRefillTallyDone)
 	for r.planner.Plan(1, 8).Tallied && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
@@ -773,7 +776,8 @@ func TestPiston_ScanErrSeamDrivesThePipelineErrorPolicy(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	r := newRig(t)
+	seams := seamster.New(true)
+	r := newRigWith(t, seamsDiags(seams))
 	r.insertStep(t, 1, 5, "alpha", 1)
 
 	// A healthy round trip first, so there is a tally to clear and a partition to preserve.
@@ -785,9 +789,7 @@ func TestPiston_ScanErrSeamDrivesThePipelineErrorPolicy(t *testing.T) {
 	assert.True(r.cache.Len() > 0, "the healthy cycle populated the partition")
 	held := r.cache.Len()
 
-	seams := seamster.New(true)
-	r.p.SetSeams(seams)
-	seams.Inject(FaultScanErr)
+	seams.Inject(diagnostics.FaultRefillScanErr)
 
 	// The scan fails without reaching the database at all.
 	_, _, err := r.p.ScanBand(ctx, 1)
@@ -795,7 +797,7 @@ func TestPiston_ScanErrSeamDrivesThePipelineErrorPolicy(t *testing.T) {
 
 	// And through the loops: the Tallier clears itself from planning, and every Supplier cycle after it
 	// leaves the candidates alone, because a cleared shard means UNKNOWN rather than "nothing is due".
-	seams.InjectN(FaultScanErr, 4)
+	seams.InjectN(diagnostics.FaultRefillScanErr, 4)
 	tal := r.p.TallyCycle(ctx)
 	assert.Error(tal.Err, "the cycle reports the failure rather than returning it")
 	for range 3 {
@@ -807,8 +809,8 @@ func TestPiston_ScanErrSeamDrivesThePipelineErrorPolicy(t *testing.T) {
 	}
 }
 
-// TestPiston_SeamsDefaultInert pins that a piston nobody handed seams to consults nothing - the
-// production shape, and the reason SetSeams can be left unwired without a nil check at the consult site.
+// TestPiston_SeamsDefaultInert pins that a piston built with no Diags consults nothing - the reason its consult
+// sites need no nil check.
 func TestPiston_SeamsDefaultInert(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -817,14 +819,6 @@ func TestPiston_SeamsDefaultInert(t *testing.T) {
 
 	_, _, err := r.p.ScanBand(context.Background(), 1)
 	assert.NoError(err, "the default seams are inert")
-
-	// Nil restores that default after a live one was set.
-	live := seamster.New(true)
-	r.p.SetSeams(live)
-	r.p.SetSeams(nil)
-	live.Inject(FaultScanErr)
-	_, _, err = r.p.ScanBand(context.Background(), 1)
-	assert.NoError(err, "nil restores the inert default")
 }
 
 // TestPiston_IdleWithdrawsTheShard pins that going idle makes the same positive statement an empty plan
@@ -865,8 +859,7 @@ func TestPiston_PartitionPairIsValidated(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	r := newRig(t)
-	r.p.SetSeams(seamster.New(true)) // so CheckpointStole visits are countable
+	r := newRigWith(t, seamsDiags(seamster.New(true))) // so diagnostics.CheckpointRefillStole visits are countable
 	for i := 1; i <= 6; i++ {
 		r.insertStep(t, i, 5, "k", 1)
 	}
@@ -894,11 +887,11 @@ func TestPiston_PartitionPairIsValidated(t *testing.T) {
 		// must also RANK as if unpartitioned. An out-of-range ordinal disables the SQL predicate correctly
 		// while leaving a ranking built from that bad pair with nothing in tier 0, so every kept step counts
 		// as taken from a peer. That shows up as stolen candidates the fetch never stole.
-		before := r.p.seams.Load().Visits(CheckpointStole)
+		before := r.p.diags.Seams().Visits(diagnostics.CheckpointRefillStole)
 		got, err := r.fetch(ctx, 5, []string{"k"}, 6)
 		assert.NoError(err, "%s must not error the fetch", tc.name)
 		assert.Equal(6, len(got["k"]), "%s: the fetch must select everything too", tc.name)
-		assert.Equal(before, r.p.seams.Load().Visits(CheckpointStole),
+		assert.Equal(before, r.p.diags.Seams().Visits(diagnostics.CheckpointRefillStole),
 			"%s: a fail-open pair must rank as unpartitioned, so nothing is reported stolen", tc.name)
 	}
 }
@@ -911,20 +904,20 @@ func TestPiston_NewValidates(t *testing.T) {
 
 	assert.Equal(1, r.p.Shard())
 	assert.Equal(pipeline.DefaultInterval, func() time.Duration {
-		p, _ := New(r.sh, r.planner, r.cache)
+		p, _ := New(r.sh, nil, r.planner, r.cache)
 		i, _ := p.TallyCadence()
 		return i
 	}(), "a fresh piston inherits the pipeline's paced default")
 
-	_, err := New(nil, r.planner, r.cache)
+	_, err := New(nil, nil, r.planner, r.cache)
 	assert.Error(err, "shard is required")
-	_, err = New(database.NewShard(0, r.db), r.planner, r.cache)
+	_, err = New(database.NewShard(0, r.db), nil, r.planner, r.cache)
 	assert.Error(err, "shard must be positive")
-	_, err = New(database.NewShard(1, nil), r.planner, r.cache)
+	_, err = New(database.NewShard(1, nil), nil, r.planner, r.cache)
 	assert.Error(err, "db is required")
-	_, err = New(r.sh, nil, r.cache)
+	_, err = New(r.sh, nil, nil, r.cache)
 	assert.Error(err, "planner is required")
-	_, err = New(r.sh, r.planner, nil)
+	_, err = New(r.sh, nil, r.planner, nil)
 	assert.Error(err, "cache is required")
 }
 
@@ -934,10 +927,10 @@ func TestPiston_RecordsItsInstruments(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	r := newRig(t)
-
 	reader := sdkmetric.NewManualReader()
-	assert.NoError(r.p.SetMeter(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test")))
+	d := diagnostics.New()
+	d.SetMeter(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"))
+	r := newRigWith(t, d)
 
 	// Seed the cache so the cycle's push has something to discard, exercising that counter too.
 	r.cache.Refill(1, []candidates.Job{{StepID: 9999, Shard: 1}}, 100)
@@ -966,7 +959,7 @@ func TestPiston_RecordsItsInstruments(t *testing.T) {
 	}
 }
 
-// TestPiston_SettersAreLive pins that the knobs apply without a restart, including the nil-logger reset.
+// TestPiston_SettersAreLive pins that the knobs apply without a restart.
 func TestPiston_SettersAreLive(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -981,9 +974,6 @@ func TestPiston_SettersAreLive(t *testing.T) {
 	si, sg := r.p.SupplyCadence()
 	assert.Equal(31*time.Millisecond, si, "the supply loop keeps its own interval")
 	assert.Equal(7*time.Millisecond, sg, "and its own gap")
-	r.p.SetLogger(nil)
-	assert.NotNil(r.p.logger.Load(), "a nil logger restores the discarding default, never nil")
-	assert.NoError(r.p.SetMeter(nil), "a nil meter restores no-op instruments")
 }
 
 // TestPiston_CadenceIsPerLoop pins that nothing derived from "the cycle period" keys off ONE loop while
@@ -1035,9 +1025,8 @@ func TestPiston_FailingCyclesReportNoLiveness(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	r := newRig(t)
 	sm := seamster.New(true)
-	r.p.SetSeams(sm)
+	r := newRigWith(t, seamsDiags(sm))
 	r.insertStep(t, 1, 5, "k", 1) // rig default interval is 0 - the degenerate case the floor covers
 
 	// A healthy ROUND TRIP first - both loops, since the turn count is their minimum and a tally alone would
@@ -1050,7 +1039,7 @@ func TestPiston_FailingCyclesReportNoLiveness(t *testing.T) {
 
 	// From here every scan fails. Sample hard while the loop runs: the turn count must not move and busy
 	// must never once read true.
-	sm.InjectN(FaultScanErr, 1<<20)
+	sm.InjectN(diagnostics.FaultRefillScanErr, 1<<20)
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() { defer close(done); r.p.Run(runCtx) }()
@@ -1126,9 +1115,8 @@ func TestPiston_FailingFetchesReportNoLiveness(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	r := newRig(t)
 	sm := seamster.New(true)
-	r.p.SetSeams(sm)
+	r := newRigWith(t, seamsDiags(sm))
 	r.insertStep(t, 1, 5, "k", 1)
 
 	// A healthy round trip first: both loops turn, so the minimum moves.
@@ -1138,7 +1126,7 @@ func TestPiston_FailingFetchesReportNoLiveness(t *testing.T) {
 	assert.Equal(before+1, after, "a completed round trip is a turn")
 
 	// From here every fetch fails while every scan keeps succeeding.
-	sm.InjectN(FaultFetchErr, 1<<20)
+	sm.InjectN(diagnostics.FaultRefillFetchErr, 1<<20)
 	for range 20 {
 		tal, sup := r.p.Cycle(ctx)
 		assert.NoError(tal.Err, "the scan is healthy throughout - that is the point")
@@ -1158,7 +1146,7 @@ func TestPiston_FailingFetchesReportNoLiveness(t *testing.T) {
 		r.p.tallyTurns.Load(), r.p.supplyTurns.Load())
 
 	// And it recovers on the first cycle that can fetch again, with no cooldown.
-	sm.Withdraw(FaultFetchErr)
+	sm.Withdraw(diagnostics.FaultRefillFetchErr)
 	r.p.Cycle(ctx)
 	recovered, _, _ := r.p.Liveness()
 	assert.True(recovered > stalled, "recovery costs exactly one round trip")
@@ -1177,16 +1165,15 @@ func TestPiston_BankedTurnsDoNotCarryAFailingLoop(t *testing.T) {
 		bank  func(p *Piston, ctx context.Context)
 		fault string
 	}{
-		{"supply_surplus_then_failing_fetches", func(p *Piston, ctx context.Context) { p.SupplyCycle(ctx) }, FaultFetchErr},
-		{"tally_surplus_then_failing_scans", func(p *Piston, ctx context.Context) { p.TallyCycle(ctx) }, FaultScanErr},
+		{"supply_surplus_then_failing_fetches", func(p *Piston, ctx context.Context) { p.SupplyCycle(ctx) }, diagnostics.FaultRefillFetchErr},
+		{"tally_surplus_then_failing_scans", func(p *Piston, ctx context.Context) { p.TallyCycle(ctx) }, diagnostics.FaultRefillScanErr},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			assert := testarossa.For(t)
 			ctx := context.Background()
-			r := newRig(t)
 			sm := seamster.New(true)
-			r.p.SetSeams(sm)
+			r := newRigWith(t, seamsDiags(sm))
 			r.insertStep(t, 1, 5, "k", 1)
 
 			r.p.Cycle(ctx)
@@ -1490,4 +1477,11 @@ func TestPiston_DispatchLag(t *testing.T) {
 // setResidency sets the shard's residue class for the rest of the test.
 func (r *rig) setResidency(replicas, ordinal int, ok bool) {
 	r.sh.SetResidency(replicas, ordinal, ok, time.Now().Add(time.Hour))
+}
+
+// seamsDiags returns a Diags that carries sm, for a rig whose piston consults it.
+func seamsDiags(sm *seamster.Seamster) *diagnostics.Diags {
+	d := diagnostics.New()
+	d.SetSeams(sm)
+	return d
 }

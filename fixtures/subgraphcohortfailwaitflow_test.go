@@ -26,7 +26,8 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -91,7 +92,7 @@ func TestSubgraphCohortFailWaitflow(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		done := engineseams.Seams(eng).Waiter(engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(stepID)))
+		done := accessors.Seams(eng).Waiter(diagnostics.Join(diagnostics.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(stepID)))
 		select {
 		case boomCh <- boomed{child: f.FlowKey(), done: done}: // a subgraph child sees its own (child) flow key
 		default:
@@ -167,14 +168,14 @@ func TestSubgraphCohortFailWaitflow(t *testing.T) {
 	// TestRelease_WakesWithoutASweep, and the detector-only case is
 	// TestSubgraphChildStopSignal_DroppedThenBackstopped. Every wait below is a hang ceiling and nothing else.
 	// Armed before anything can fail the child.
-	stopped := engineseams.Seams(eng).Waiter(engineseams.Join(engineseams.CheckpointFlowStopped, child, workflow.StatusFailed))
+	stopped := accessors.Seams(eng).Waiter(diagnostics.Join(diagnostics.CheckpointFlowStopped, child, workflow.StatusFailed))
 
 	// Register an Await on the child key while the child is still running (Slow is blocked). The ctx outlasts
 	// the hang ceilings below, so it is never what returns the Await.
 	awaitCtx, cancelAwait := context.WithTimeout(ctx, 60*time.Second*enginetest.TimeoutScale())
 	defer cancelAwait()
 	awaitCh := make(chan outcome, 1)
-	parked := engineseams.Seams(eng).Waiter(engineseams.Join(engineseams.CheckpointAwaitParked, child)) // armed before the goroutine that trips it
+	parked := accessors.Seams(eng).Waiter(diagnostics.Join(diagnostics.CheckpointAwaitParked, child)) // armed before the goroutine that trips it
 	go func() {
 		o, e := eng.Await(awaitCtx, child)
 		awaitCh <- outcome{o, e}

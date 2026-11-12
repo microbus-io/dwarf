@@ -23,7 +23,8 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -100,7 +101,7 @@ func TestFanInFlowLock_NonFinalArrivalTakesNoFlowRowWrite(t *testing.T) {
 
 		_, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 		assert.NoError(err)
-		return engineseams.Seams(e).Visits(engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
+		return accessors.Seams(e).Visits(diagnostics.Join(diagnostics.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
 	}
 
 	var narrow, wide int

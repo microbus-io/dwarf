@@ -21,7 +21,7 @@ import (
 	"database/sql"
 	"encoding/json"
 
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/graphcache"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/staterefs"
@@ -40,7 +40,7 @@ import (
 // (History and the FlowRenderer read updated_at - started_at) by the cost of completing the flow. It would also
 // be a post-execution step write with neither a status guard nor a lease_seq fence.
 func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, flowID int, stepID int, leaseSeq int, flowHour int, flowToken string, workflowURL string) error {
-	e.logger.DebugContext(ctx, "Flow completed", "workflow", workflowURL)
+	e.diags.Logger().DebugContext(ctx, "Flow completed", "workflow", workflowURL)
 	_, err := e.completeFlow(ctx, shardNum, flowID, stepID, leaseSeq, flowHour, flowToken)
 	return errors.Trace(err)
 }
@@ -249,12 +249,12 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shar
 func (e *Engine) terminalFinalState(ctx context.Context, db sequel.Executor, shardNum, flowID, flowHour int, flowToken string) ([]byte, error) {
 	fs, _, err := e.computeFinalState(ctx, db, shardNum, flowID, flowToken)
 	if errors.Is(err, sql.ErrNoRows) {
-		e.logger.WarnContext(ctx, "Computing final_state while terminalizing a flow found no row; terminalizing with empty state",
+		e.diags.Logger().WarnContext(ctx, "Computing final_state while terminalizing a flow found no row; terminalizing with empty state",
 			"flow", keys.CorrelationID(shardNum, flowHour, flowID), "error", err)
 		return []byte("{}"), nil
 	}
 	if isPermanentError(err) {
-		e.logger.ErrorContext(ctx, "Computing final_state while terminalizing a flow; terminalizing with empty state",
+		e.diags.Logger().ErrorContext(ctx, "Computing final_state while terminalizing a flow; terminalizing with empty state",
 			"flow", keys.CorrelationID(shardNum, flowHour, flowID), "error", err)
 		return []byte("{}"), nil
 	}
@@ -606,15 +606,15 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, ste
 	// Test checkpoint: a breakpoint here freezes completion just before its transaction (holding no lock, so a
 	// racing Terminate can commit), letting a test drive the completeFlow-vs-Terminate race in either order.
 	// Placed before the transaction, not inside, for the same SQLite-deadlock reason as
-	// engineseams.CheckpointResumeBeforeFlowWrite.
-	e.seams.Checkpoint(ctx, engineseams.CheckpointBeforeCompleteFlowWrite)
+	// diagnostics.CheckpointResumeBeforeFlowWrite.
+	e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointBeforeCompleteFlowWrite)
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		completed = false
-		// engineseams.FaultCompleteFlowCommit fails the flow-completion transaction after processStep has already
+		// diagnostics.FaultCompleteFlowCommit fails the flow-completion transaction after processStep has already
 		// marked the terminal step completed, so the test proves the write-first ordering + recovery defer
 		// keep the flow from stranding `running` with every step terminal. Non-retryable (a plain error).
-		if e.seams.IsFault(engineseams.FaultCompleteFlowCommit) {
-			return errors.New("injected fault: " + engineseams.FaultCompleteFlowCommit)
+		if e.diags.Seams().IsFault(diagnostics.FaultCompleteFlowCommit) {
+			return errors.New("injected fault: " + diagnostics.FaultCompleteFlowCommit)
 		}
 		// Write-first: take the flow row's lock before computeFinalState's reads. Read-first, two concurrent
 		// completions deadlock on SQLite's lock upgrade, and with the terminal step already completed nothing
@@ -723,7 +723,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, ste
 		return false, nil
 	}
 
-	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowHour, flowID), "to", workflow.StatusCompleted)
+	e.diags.Logger().InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowHour, flowID), "to", workflow.StatusCompleted)
 	e.metricFlowClosed(ctx, workflowURL, workflow.StatusCompleted, priority, shardNum)
 	compositeID := keys.NewFlowKey(shardNum, flowHour, flowID, flowToken)
 

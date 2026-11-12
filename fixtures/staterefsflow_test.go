@@ -23,7 +23,8 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -34,7 +35,7 @@ import (
 // takes.
 func unseededEngine(name string) *engine.Engine {
 	eng := engine.NewEngineUnderTest(name)
-	engineseams.Seams(eng).InjectN(engineseams.FaultSkipRefSeed, 1<<20)
+	accessors.Seams(eng).InjectN(diagnostics.FaultSkipRefSeed, 1<<20)
 	return eng
 }
 

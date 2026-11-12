@@ -24,7 +24,8 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -86,7 +87,7 @@ func TestFanInDirectTerminate_NoExtendTerminatedFlow(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	sh, err := engineseams.DB(e).Shard(shardNum)
+	sh, err := accessors.DB(e).Shard(shardNum)
 	if !assert.NoError(err) {
 		return
 	}
@@ -117,8 +118,8 @@ func TestFanInDirectTerminate_NoExtendTerminatedFlow(t *testing.T) {
 
 	// fireFanInDirect runs inside the spawn step's dispatch, so once that dispatch returns, a broken guard has
 	// already inserted the fan-in step.
-	spawnDone := engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shardNum), strconv.Itoa(spawnStepID))
-	enginetest.AwaitVisitCount(t, engineseams.Seams(e), 1, 15*time.Second, spawnDone)
+	spawnDone := diagnostics.Join(diagnostics.CheckpointClaimedDispatchDone, strconv.Itoa(shardNum), strconv.Itoa(spawnStepID))
+	enginetest.AwaitVisitCount(t, accessors.Seams(e), 1, 15*time.Second, spawnDone)
 	var spawnStatus string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE step_id=?", spawnStepID).Scan(&spawnStatus))
 	assert.Equal(workflow.StatusCompleted, spawnStatus) // the worker got past the completion write to fireFanInDirect

@@ -25,7 +25,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -61,7 +61,7 @@ func TestRestartSurvival(t *testing.T) {
 	waitFor := func(t *testing.T, e *engine.Engine, query string, args ...any) bool {
 		t.Helper()
 		assert := testarossa.For(t)
-		sh, err := engineseams.DB(e).Shard(1)
+		sh, err := accessors.DB(e).Shard(1)
 		if !assert.NoError(err) {
 			return false
 		}

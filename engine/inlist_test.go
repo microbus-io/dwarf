@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -113,8 +113,8 @@ func TestLockOrder_TreeOperationsLockAscending(t *testing.T) {
 	assert.NoError(err)
 	// Both leaves interrupted, so all four flows exist and rest non-terminal. handleInterrupt fires the root's
 	// interrupted stop once per interrupting step.
-	enginetest.AwaitVisitCount(t, e.seams, 2, 10*time.Second,
-		engineseams.Join(engineseams.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted))
+	enginetest.AwaitVisitCount(t, e.diags.Seams(), 2, 10*time.Second,
+		diagnostics.Join(diagnostics.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted))
 
 	shard, _, rootID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
@@ -130,7 +130,7 @@ func TestLockOrder_TreeOperationsLockAscending(t *testing.T) {
 	assert.NotEqual(lockOrder(walked), walked, "the tree walk must list the ids out of order, or the test pins nothing")
 
 	captured := func(op string) []any {
-		v, ok := e.seams.Capture(engineseams.Join(engineseams.VariableLockOrder, op))
+		v, ok := e.diags.Seams().Capture(diagnostics.Join(diagnostics.VariableLockOrder, op))
 		if !ok {
 			t.Fatalf("%s never recorded its lock order", op)
 		}

@@ -24,7 +24,8 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -49,10 +50,10 @@ import (
 // so nothing is traded away by leaving generous room for a loaded server and for -race.
 func awaitPropagatedInterrupts(t *testing.T, eng *engine.Engine, flowKey string, want int) {
 	t.Helper()
-	seams := engineseams.Seams(eng)
+	seams := accessors.Seams(eng)
 	for {
-		reached := seams.Waiter(engineseams.Join(engineseams.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted))
-		got := seams.Visits(engineseams.Join(engineseams.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted))
+		reached := seams.Waiter(diagnostics.Join(diagnostics.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted))
+		got := seams.Visits(diagnostics.Join(diagnostics.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted))
 		if got >= want {
 			return
 		}
@@ -237,7 +238,7 @@ func TestInterruptSnapshotFollowsTheRecordedInterrupt(t *testing.T) {
 
 	shard, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
-	sh, err := engineseams.DB(eng).Shard(shard)
+	sh, err := accessors.DB(eng).Shard(shard)
 	assert.Must(assert.NoError(err))
 	db := sh.DB()
 	_, err = db.ExecContext(ctx,

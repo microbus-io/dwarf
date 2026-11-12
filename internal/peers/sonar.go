@@ -27,7 +27,7 @@ limitations under the License.
 //
 // # Driving one
 //
-//	s, err := peers.New(engineID, shard) // shard is a *database.Shard
+//	s, err := peers.New(engineID, shard, diags) // a *database.Shard, a *diagnostics.Diags
 //	s.SetProfile(peers.Profile{RTT: rtt, Working: true, OrderingSeq: seq}) // optional; what this replica states in its row
 //	s.SetEvidence(dispatcher.Liveness) // optional; without it this replica never claims to dispatch
 //	s.Join(ctx)                        // announce, wait for peers to notice, then read
@@ -66,7 +66,6 @@ package peers
 import (
 	"context"
 	"database/sql"
-	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -74,33 +73,10 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/database"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/errors"
-	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/sequel"
 )
-
-// The two faults an owner may arm - see SetSeams. Exported so the owning application's catalogue aliases
-// them rather than re-spelling the strings.
-const (
-	// FaultReadErr makes the registry read fail without touching the database. It is how a test reaches
-	// every consequence of being BLIND: the counts hold, a fall is withheld across the gap that follows,
-	// the partition switches off, and the prune's healthy run starts over.
-	FaultReadErr = "peerReadErr"
-	// FaultBeatErr makes every write that would PROVE this replica's liveness fail without touching the
-	// database - the beat, and the registration repair that would otherwise re-create a row a peer has
-	// pruned. Its row therefore stops being refreshed while the process goes on running, which is what a
-	// replica that has lost the ability to prove itself looks like to its PEERS, and the only way to reach
-	// that view without killing a process.
-	//
-	// It deliberately does NOT gate Leave: a test still has to be able to tear its fleet down.
-	FaultBeatErr = "peerBeatErr"
-)
-
-// CheckpointPass is fired, scoped by shard, as a registry pass - a beat and a read - begins, before it takes its
-// turn. Passes run one at a time, so a visit also says the previous pass is over: two visits counted from a moment
-// mean a whole read ran after it. That is how an owner's test waits for a reading that was attempted, where
-// BlindFor grows with the clock whether or not anything read.
-const CheckpointPass = "peerPass"
 
 // The cadences and windows. Only the read cadence is settable (SetCadence), because only it prices
 // something the owner can see; the rest are this package's policy, derived from the asymmetry below rather
@@ -229,9 +205,9 @@ type Sonar struct {
 
 	evidence atomic.Pointer[EvidenceFunc]
 	// cut is the owner's rule for which ranks dispatch - see SetCut.
-	cut    atomic.Pointer[CutFunc]
-	logger atomic.Pointer[slog.Logger]
-	seams  atomic.Pointer[seamster.Seamster]
+	cut atomic.Pointer[CutFunc]
+	// diags is what the Sonar reports through: its logger, and the seams it consults.
+	diags *diagnostics.Diags
 
 	// Published state: written only by the driving goroutine, read by the owner from anywhere.
 	replicas atomic.Int32
@@ -298,12 +274,12 @@ type Sonar struct {
 	sleep func(ctx context.Context, d time.Duration) bool
 }
 
-// New returns a Sonar for one already-open shard.
+// New returns a Sonar for one already-open shard, reporting through d: its logger and its seams.
 //
 // engineID leads because it is required rather than optional: it is the registry's PRIMARY KEY, so an unset
 // one is not a harmless default - every unconfigured replica in the fleet would collide on id 0 and fight
 // over a single row. A setter would make that state reachable; a constructor argument does not.
-func New(engineID int64, sh *database.Shard) (*Sonar, error) {
+func New(engineID int64, sh *database.Shard, d *diagnostics.Diags) (*Sonar, error) {
 	if engineID <= 0 {
 		return nil, errors.New("engine id must be positive, got %d", engineID)
 	}
@@ -322,8 +298,7 @@ func New(engineID int64, sh *database.Shard) (*Sonar, error) {
 		scan: scanInterval, beat: beatInterval, fresh: freshWindow,
 		dispatch: dispatchWindow, straggler: stragglerAge, pruneAfter: pruneHealthyFor,
 	}
-	s.SetLogger(nil)
-	s.SetSeams(nil)
+	s.diags = d
 	s.lastGood.Store(s.now().UnixNano())
 	s.replicas.Store(1)
 	s.standing.Store(&standing{rank: 0, candidates: 1, replicas: 1, inCut: true})
@@ -376,53 +351,13 @@ func (s *Sonar) SetCadence(d time.Duration) {
 	s.scan = d
 }
 
-// SetSeams supplies the OWNER's fault-injection seams, so a test driving a whole engine can break this
-// Sonar's database calls without breaking its database. Nil restores an inert one, which is also the
-// default - a Sonar built and never told otherwise consults nothing, and a Seamster built disabled makes
-// every consult a bool read.
-//
-// The seams are the owner's, not this package's, for the same reason the logger is: one catalogue of fault
-// names per application, armed in one place, however many modules consult it.
-//
-// EXACTLY TWO FAULTS, both at an I/O boundary, and that is the whole rule for adding a third. A seam inside
-// pure logic here would be a signal that a dependency should have been injected instead - and every
-// time-dependent decision already has one, the clock - so it would buy nothing. These two reach what
-// injection cannot: a database that answers, but wrongly for this replica. FaultReadErr makes the reading
-// fail (blindness, and everything downstream of it); FaultBeatErr stops this replica proving its own
-// liveness while it goes on running, which is the only way for a test to occupy a PEER's point of view of a
-// replica that has effectively died.
-//
-// Both are consulted unscoped OR scoped by shard, so a test can blind one shard and leave the rest reading
-// - which is the per-shard property this package exists to provide, and it would be untestable otherwise.
-func (s *Sonar) SetSeams(sm *seamster.Seamster) {
-	if sm == nil {
-		sm = seamster.New(false)
-	}
-	s.seams.Store(sm)
-}
-
-// seamsJoin builds a targeted seam name: a base name, then the entity it targets, joined with ":". A consult
-// site and the test that arms it both call it, so neither can spell the join the other does not. A targeted
-// name and the bare one are DIFFERENT seams, so a site wanting both fires both.
-func seamsJoin(parts ...string) string {
-	return strings.Join(parts, ":")
-}
-
 // faulted reports whether a fault is armed for this Sonar, either fleet-wide or for this shard alone.
 func (s *Sonar) faulted(name string) bool {
-	sm := s.seams.Load()
+	sm := s.diags.Seams()
 	if !sm.Enabled() { // gates the assembled per-shard name in production
 		return false
 	}
-	return sm.IsFault(name) || sm.IsFault(seamsJoin(name, strconv.Itoa(s.shard)))
-}
-
-// SetLogger sets the logger. Nil restores the discarding default.
-func (s *Sonar) SetLogger(l *slog.Logger) {
-	if l == nil {
-		l = slog.New(slog.DiscardHandler)
-	}
-	s.logger.Store(l)
+	return sm.IsFault(name) || sm.IsFault(diagnostics.Join(name, strconv.Itoa(s.shard)))
 }
 
 // Replicas is how many replicas hold connections to this shard, self included, never below one. It
@@ -565,7 +500,7 @@ func (s *Sonar) BlindFor() time.Duration {
 func (s *Sonar) Join(ctx context.Context) error {
 	err := s.register(ctx)
 	if err != nil {
-		s.logger.Load().ErrorContext(ctx, "Registering peer", "shard", s.shard, "error", err)
+		s.diags.Logger().ErrorContext(ctx, "Registering peer", "shard", s.shard, "error", err)
 	}
 	s.sleep(ctx, 2*s.scan)
 	s.pass(ctx)
@@ -677,11 +612,11 @@ func (s *Sonar) Leave(ctx context.Context) error {
 // This replica is the only writer of its own row, and rowMu orders this against its other writes (the beat
 // and Withdraw), so that observation cannot be raced.
 func (s *Sonar) register(ctx context.Context) error {
-	// FaultBeatErr covers this as well as the beat, and the reason is the repair below: a Sonar that observes
+	// diagnostics.FaultPeerBeatErr covers this as well as the beat, and the reason is the repair below: a Sonar that observes
 	// itself absent re-registers, so gating only the beat would let a replica which cannot prove its liveness
 	// resurrect its own row - with a FRESH seen_at - the moment a peer pruned it. The fault's premise is that
 	// no write of this replica's proves anything, and there are two such writes.
-	if s.faulted(FaultBeatErr) {
+	if s.faulted(diagnostics.FaultPeerBeatErr) {
 		return nil
 	}
 	s.rowMu.Lock()
@@ -748,8 +683,8 @@ func (s *Sonar) register(ctx context.Context) error {
 // first turn lands milliseconds after Run starts, long before the next beat would. The same early publish
 // applies when a replica STOPS serving, which is the direction that strands work.
 func (s *Sonar) pass(ctx context.Context) {
-	if sm := s.seams.Load(); sm.Enabled() { // Enabled gates the assembled name in production
-		sm.Checkpoint(ctx, seamsJoin(CheckpointPass, strconv.Itoa(s.shard)))
+	if sm := s.diags.Seams(); sm.Enabled() { // Enabled gates the assembled name in production
+		sm.Checkpoint(ctx, diagnostics.Join(diagnostics.CheckpointPeerPass, strconv.Itoa(s.shard)))
 	}
 	// One priority turn, held for the whole pass: the beat and the read that follows it are one unit of work, and
 	// the read hands back rows that keep a connection until they are scanned. A pass must not queue behind
@@ -809,10 +744,10 @@ func (s *Sonar) dispatchEvidence() (turns uint64, dispatched bool) {
 // so a write that keeps failing is attempted once per read, never in a loop. An immediate retry would turn a
 // database blip into a write storm.
 func (s *Sonar) publishBeat(ctx context.Context, dispatched, draining bool) bool {
-	// FaultBeatErr drops the write, so this replica stops refreshing its own row while everything else about
+	// diagnostics.FaultPeerBeatErr drops the write, so this replica stops refreshing its own row while everything else about
 	// it goes on working. That is what a replica which can no longer prove its liveness looks like from a
 	// PEER's side, and a test can occupy that side no other way short of killing a process.
-	if s.faulted(FaultBeatErr) {
+	if s.faulted(diagnostics.FaultPeerBeatErr) {
 		return false
 	}
 	// The dispatch assignment is composed into the statement rather than bound through a CASE: a conditional
@@ -834,13 +769,13 @@ func (s *Sonar) publishBeat(ctx context.Context, dispatched, draining bool) bool
 	if err != nil {
 		if ctx.Err() == nil && !s.beatFailing {
 			s.beatFailing = true
-			s.logger.Load().ErrorContext(ctx, "Peer heartbeat", "shard", s.shard, "error", err)
+			s.diags.Logger().ErrorContext(ctx, "Peer heartbeat", "shard", s.shard, "error", err)
 		}
 		return false
 	}
 	if s.beatFailing {
 		s.beatFailing = false
-		s.logger.Load().InfoContext(ctx, "Peer heartbeat writing again", "shard", s.shard)
+		s.diags.Logger().InfoContext(ctx, "Peer heartbeat writing again", "shard", s.shard)
 	}
 	return true
 }
@@ -861,12 +796,12 @@ func (s *Sonar) publishBeat(ctx context.Context, dispatched, draining bool) bool
 // The ages are float64 because DATE_DIFF_MILLIS is fractional on SQLite, where scanning it into an int64
 // fails outright.
 func (s *Sonar) read(ctx context.Context) ([]peer, error) {
-	// FaultReadErr fails the reading without touching the database, which is the only way to reach what
+	// diagnostics.FaultPeerReadErr fails the reading without touching the database, which is the only way to reach what
 	// being blind implies - the counts held, a fall withheld across the gap, the partition switched off,
 	// the prune's patience restarted. All four are policy this package owns and none is reachable from
 	// outside without a reading that fails.
-	if s.faulted(FaultReadErr) {
-		return nil, errors.New("injected fault: " + FaultReadErr)
+	if s.faulted(diagnostics.FaultPeerReadErr) {
+		return nil, errors.New("injected fault: " + diagnostics.FaultPeerReadErr)
 	}
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT engine_id, DATE_DIFF_MILLIS(NOW_UTC(), seen_at) AS seen_age_ms,"+
@@ -906,7 +841,7 @@ func (s *Sonar) observe(ctx context.Context, rows []peer, err error) {
 	if err != nil {
 		if !s.blindLogged && s.blind(now) {
 			s.blindLogged = true
-			s.logger.Load().ErrorContext(ctx, "Peer registry unreadable; holding last known fleet",
+			s.diags.Logger().ErrorContext(ctx, "Peer registry unreadable; holding last known fleet",
 				"shard", s.shard, "blindFor", s.BlindFor().String(), "error", err)
 		}
 		return
@@ -915,7 +850,7 @@ func (s *Sonar) observe(ctx context.Context, rows []peer, err error) {
 	gapped := s.blind(now)
 	if s.blindLogged {
 		s.blindLogged = false
-		s.logger.Load().InfoContext(ctx, "Peer registry readable again", "shard", s.shard)
+		s.diags.Logger().InfoContext(ctx, "Peer registry readable again", "shard", s.shard)
 	}
 	s.lastGood.Store(now.UnixNano())
 
@@ -974,9 +909,9 @@ func (s *Sonar) observe(ctx context.Context, rows []peer, err error) {
 	if stale := !v.selfFresh; stale != s.staleLogged {
 		s.staleLogged = stale
 		if stale {
-			s.logger.Load().WarnContext(ctx, "Own peer row stale; not dispatching until its beats land", "shard", s.shard)
+			s.diags.Logger().WarnContext(ctx, "Own peer row stale; not dispatching until its beats land", "shard", s.shard)
 		} else {
-			s.logger.Load().InfoContext(ctx, "Own peer row fresh again", "shard", s.shard)
+			s.diags.Logger().InfoContext(ctx, "Own peer row fresh again", "shard", s.shard)
 		}
 	}
 	next := raw
@@ -1019,18 +954,18 @@ func (s *Sonar) observe(ctx context.Context, rows []peer, err error) {
 		//
 		// An EMPTY registry lands here too, and must: it is always wrong, since this process is in it by
 		// definition, so reading it as "no peers" and stopping there would leave a whole fleet unregistered.
-		s.logger.Load().WarnContext(ctx, "Peer registry row missing; re-registering", "shard", s.shard)
+		s.diags.Logger().WarnContext(ctx, "Peer registry row missing; re-registering", "shard", s.shard)
 		if err := s.register(ctx); err != nil && ctx.Err() == nil {
-			s.logger.Load().ErrorContext(ctx, "Re-registering peer", "shard", s.shard, "error", err)
+			s.diags.Logger().ErrorContext(ctx, "Re-registering peer", "shard", s.shard, "error", err)
 		}
 	} else if seq := s.profile.Load().OrderingSeq; seq != 0 && v.selfSeq != seq {
 		// The row is there but holds another run's place in the order: a registration that failed on a row the
 		// last run left behind. The beat never writes the profile, so nothing else would correct it, and this
 		// shard would rank the replica differently from the shards where registration landed.
-		s.logger.Load().WarnContext(ctx, "Peer registry row holds another ordering; re-registering", "shard", s.shard,
+		s.diags.Logger().WarnContext(ctx, "Peer registry row holds another ordering; re-registering", "shard", s.shard,
 			"held", v.selfSeq, "want", seq)
 		if err := s.register(ctx); err != nil && ctx.Err() == nil {
-			s.logger.Load().ErrorContext(ctx, "Re-registering peer", "shard", s.shard, "error", err)
+			s.diags.Logger().ErrorContext(ctx, "Re-registering peer", "shard", s.shard, "error", err)
 		}
 	}
 	s.prune(ctx, v.dead)
@@ -1067,7 +1002,7 @@ func (s *Sonar) prune(ctx context.Context, dead []int64) {
 	_, err := s.db.ExecContext(ctx,
 		"DELETE FROM dwarf_peers WHERE engine_id IN ("+strings.Repeat("?,", len(dead)-1)+"?)", args...)
 	if err != nil && ctx.Err() == nil {
-		s.logger.Load().ErrorContext(ctx, "Pruning peer registry", "shard", s.shard, "error", err)
+		s.diags.Logger().ErrorContext(ctx, "Pruning peer registry", "shard", s.shard, "error", err)
 	}
 }
 

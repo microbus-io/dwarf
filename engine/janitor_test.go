@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/janitor"
 	"github.com/microbus-io/dwarf/internal/reaper"
@@ -50,7 +50,7 @@ func runningJanitorEngine(t *testing.T, mux *hosts.Mux) *Engine {
 	if err := e.Startup(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	enginetest.AwaitVisitCount(t, e.seams, 1, 10*time.Second, engineseams.CheckpointArchivePassDone)
+	enginetest.AwaitVisitCount(t, e.diags.Seams(), 1, 10*time.Second, diagnostics.CheckpointArchivePassDone)
 	return e
 }
 
@@ -120,21 +120,21 @@ func TestJanitor_APauseOrShutdownCancelsABatchInFlight(t *testing.T) {
 	assert.NoError(e.SetHost(noopHost{}))
 	e.janitorManual = false
 	e.janitorIdle = 10 * time.Millisecond
-	e.seams.Break(janitor.CheckpointBatchConn)
-	defer e.seams.Resume(janitor.CheckpointBatchConn)
+	e.diags.Seams().Break(diagnostics.CheckpointJanitorBatchConn)
+	defer e.diags.Seams().Resume(diagnostics.CheckpointJanitorBatchConn)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	assert.True(e.seams.WaitTimeout(t.Context(), janitor.CheckpointBatchConn, 10*time.Second*enginetest.TimeoutScale()))
+	assert.True(e.diags.Seams().WaitTimeout(t.Context(), diagnostics.CheckpointJanitorBatchConn, 10*time.Second*enginetest.TimeoutScale()))
 
 	setRole(e, 1, false)
-	held := e.seams.Visits(janitor.CheckpointBatchConn)
+	held := e.diags.Seams().Visits(diagnostics.CheckpointJanitorBatchConn)
 	start := time.Now()
 	setRole(e, 1, true) // waits for the paused jobs to be gone
 	assert.True(time.Since(start) < 10*time.Second*enginetest.TimeoutScale(), "resumed after %v", time.Since(start))
 	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
-	for e.seams.Visits(janitor.CheckpointBatchConn) <= held && time.Now().Before(deadline) {
+	for e.diags.Seams().Visits(diagnostics.CheckpointJanitorBatchConn) <= held && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	assert.True(e.seams.Visits(janitor.CheckpointBatchConn) > held, "the resumed jobs run again")
+	assert.True(e.diags.Seams().Visits(diagnostics.CheckpointJanitorBatchConn) > held, "the resumed jobs run again")
 
 	start = time.Now()
 	assert.NoError(e.Shutdown(context.Background()))
@@ -166,7 +166,7 @@ func TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain(t *testing.T) {
 	})
 	assert.NoError(e.SetHost(mux))
 	e.janitorManual = false
-	e.seams.Break(janitor.CheckpointBatchConn)
+	e.diags.Seams().Break(diagnostics.CheckpointJanitorBatchConn)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
@@ -177,10 +177,10 @@ func TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain(t *testing.T) {
 	<-entered
 	// Both jobs hold their batch's connection at the breakpoint; the test takes the rest of the pool.
 	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
-	for e.seams.Visits(janitor.CheckpointBatchConn) < 2 && time.Now().Before(deadline) {
+	for e.diags.Seams().Visits(diagnostics.CheckpointJanitorBatchConn) < 2 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	assert.Must(assert.True(e.seams.Visits(janitor.CheckpointBatchConn) >= 2, "both jobs hold a connection"))
+	assert.Must(assert.True(e.diags.Seams().Visits(diagnostics.CheckpointJanitorBatchConn) >= 2, "both jobs hold a connection"))
 	var conns []*sql.Conn
 	defer func() {
 		for _, c := range conns {
@@ -203,7 +203,7 @@ func TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(30 * time.Second):
-		e.seams.Resume(janitor.CheckpointBatchConn)
+		e.diags.Seams().Resume(diagnostics.CheckpointJanitorBatchConn)
 		for _, c := range conns {
 			c.Close()
 		}
@@ -270,17 +270,25 @@ func TestJanitor_TheProgressGauge(t *testing.T) {
 	assert.Len(ages(), 0, "a shard no longer dispatched is not reported")
 }
 
-// TestJanitor_SharesTheReapersFaultNames pins that the janitor consults the reaper's fault and checkpoint names, so a
-// test arming one through engineseams arms both while both run.
+// TestJanitor_SharesTheReapersFaultNames pins the reaper's own copies of its seam names to the catalogue's, which the
+// janitor consults: a test arming a name through internal/diagnostics then arms the reaper's site as well, and the
+// janitor's beside it while both run.
 func TestJanitor_SharesTheReapersFaultNames(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	assert.Equal(reaper.FaultMidTree, janitor.FaultMidTree)
-	assert.Equal(reaper.FaultSizeErr, janitor.FaultSizeErr)
-	assert.Equal(reaper.FaultSelectErr, janitor.FaultSelectErr)
-	assert.Equal(reaper.FaultContention, janitor.FaultContention)
-	assert.Equal(reaper.FaultArchiveErr, janitor.FaultArchiveErr)
-	assert.Equal(reaper.CheckpointBatchLocked, janitor.CheckpointBatchLocked)
+	assert.Equal(reaper.FaultMidTree, diagnostics.FaultReapMidTree)
+	assert.Equal(reaper.FaultSizeErr, diagnostics.FaultReapSizeErr)
+	assert.Equal(reaper.FaultSelectErr, diagnostics.FaultReapSelectErr)
+	assert.Equal(reaper.FaultContention, diagnostics.FaultReapContention)
+	assert.Equal(reaper.FaultArchiveErr, diagnostics.FaultReapArchiveErr)
+	assert.Equal(reaper.FaultArchiveDelete, diagnostics.FaultArchiveDelete)
+	assert.Equal(reaper.FaultStageChunk, diagnostics.FaultReapStageChunk)
+	assert.Equal(reaper.FaultStageLost, diagnostics.FaultReapStageLost)
+	assert.Equal(reaper.CheckpointBatchLocked, diagnostics.CheckpointReapBatchLocked)
+	assert.Equal(reaper.CheckpointBeforeRootDelete, diagnostics.CheckpointReapBeforeRootDelete)
+	assert.Equal(reaper.CheckpointChunkDone, diagnostics.CheckpointReapChunkDone)
+	assert.Equal(reaper.CheckpointStageChunkDone, diagnostics.CheckpointReapStageChunkDone)
+	assert.Equal(reaper.CheckpointArchiveDeleted, diagnostics.CheckpointReapArchiveDeleted)
 	assert.Equal(reaper.ReasonNoRetention, janitor.ReasonNoRetention)
 }
 

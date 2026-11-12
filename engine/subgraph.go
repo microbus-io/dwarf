@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -38,11 +38,11 @@ import (
 // continuation of the caller (callerStepDepth+1). parkCaller runs first in the child's insert transaction, so
 // the caller is parked and its child created atomically; see processStep for why.
 func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, callerStepDepth int, surgraphStepID int, subgraphWorkflowURL string, subgraphGraph *workflow.Graph, childState workflow.State, baggageJSON []byte, callerTraceParent string, parkCaller func(tx *sequel.Tx) error) (string, error) {
-	// engineseams.FaultSubgraphSpawnErr simulates the spawn failing before its transaction: the caller is not
+	// diagnostics.FaultSubgraphSpawnErr simulates the spawn failing before its transaction: the caller is not
 	// parked and no child is inserted, so the caller must be failed cleanly (failAndReturn). Scoped by the
 	// child workflow URL.
-	if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultSubgraphSpawnErr, subgraphWorkflowURL)) {
-		return "", errors.New("injected fault: "+engineseams.FaultSubgraphSpawnErr+" "+subgraphWorkflowURL, http.StatusInternalServerError)
+	if e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultSubgraphSpawnErr, subgraphWorkflowURL)) {
+		return "", errors.New("injected fault: "+diagnostics.FaultSubgraphSpawnErr+" "+subgraphWorkflowURL, http.StatusInternalServerError)
 	}
 	sh, err := e.db.Shard(shardNum)
 	if err != nil {
@@ -70,10 +70,10 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 	// parent's revive). The child's "workflow" span is parented to the caller step's span (callerTraceParent),
 	// nesting the subtree under the launching task.
 	childKey, err := e.createWithGraph(ctx, shardNum, subgraphWorkflowURL, subgraphGraph, childState, callerTraceParent, &inherited, surgraphFlowID, callerStepDepth, surgraphStepID, rootFlowID, parkCaller)
-	// engineseams.FaultSubgraphSpawnCommitLost reports an error for a spawn whose transaction COMMITTED - a commit
+	// diagnostics.FaultSubgraphSpawnCommitLost reports an error for a spawn whose transaction COMMITTED - a commit
 	// whose acknowledgement was lost - so a test can prove a retried spawn does not create a second child.
-	if err == nil && e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultSubgraphSpawnCommitLost, subgraphWorkflowURL)) {
-		return "", errors.New("injected fault: "+engineseams.FaultSubgraphSpawnCommitLost+" "+subgraphWorkflowURL, http.StatusInternalServerError)
+	if err == nil && e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultSubgraphSpawnCommitLost, subgraphWorkflowURL)) {
+		return "", errors.New("injected fault: "+diagnostics.FaultSubgraphSpawnCommitLost+" "+subgraphWorkflowURL, http.StatusInternalServerError)
 	}
 	return childKey, errors.Trace(err)
 }
@@ -115,7 +115,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 	if err != nil {
 		return false, errors.Trace(err)
 	}
-	e.seams.Checkpoint(ctx, engineseams.CheckpointTerminateAfterScan)
+	e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointTerminateAfterScan)
 	allFlowIDs := append([]any{flowID}, descendantFlowIDs...)
 	allCompositeIDs := append(
 		[]string{keys.NewFlowKey(shardNum, flowHour, flowID, flowToken)},
@@ -132,14 +132,14 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 		grew := false
 		err = db.Transact(ctx, func(tx *sequel.Tx) error {
 			settled, grew = false, false
-			if commitFault != "" && e.seams.IsFault(commitFault) {
+			if commitFault != "" && e.diags.Seams().IsFault(commitFault) {
 				return errors.New("injected fault: " + commitFault)
 			}
 			// The flow-id lists are chunked: a tree can hold more flows than a statement can bind. The lock passes
 			// run in ascending id order (lockOrder), recomputed per run because a re-run covers a larger set.
 			lockIDs := lockOrder(allFlowIDs)
-			if e.seams.Enabled() {
-				e.seams.Variable(engineseams.Join(engineseams.VariableLockOrder, "terminate"), slices.Clone(lockIDs))
+			if e.diags.Seams().Enabled() {
+				e.diags.Seams().Variable(diagnostics.Join(diagnostics.VariableLockOrder, "terminate"), slices.Clone(lockIDs))
 			}
 			terminateSteps := func() {
 				for chunk := range slices.Chunk(lockIDs, inListChunk) {
@@ -155,7 +155,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 			// steps AFTER flows; it reaches only steps created in between, so it can cross only a transaction that
 			// took such a just-created step first.
 			terminateSteps()
-			e.seams.Checkpoint(ctx, engineseams.CheckpointTerminateAfterStepsLocked)
+			e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointTerminateAfterStepsLocked)
 			// Lock the flow rows, then terminate the steps again. A transition locks its flow row before it inserts
 			// a step, so once these rows are held no step can be added to these flows - but one that committed
 			// between the UPDATE above and this lock exists now and was not covered by it. The second UPDATE
@@ -197,7 +197,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 			if err != nil {
 				return errors.Trace(err)
 			}
-			e.seams.Checkpoint(ctx, engineseams.CheckpointTerminateAfterRescan)
+			e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointTerminateAfterRescan)
 			// The scan returns the tree's open flows. A flow of the set that is missing from it ended or was
 			// removed after the first scan - a flow.Retry on a subgraph caller deletes its old child - and is
 			// dropped, so the final-state reads below do not look for a row that is gone. The root stays: its own
@@ -298,7 +298,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 		}
 		fid := allFlowIDs[i].(int)
 		_, fHour, _, _, _ := keys.ParseFlowKey(cid) // parsed once already, in the transaction
-		e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, fHour, fid), "to", workflow.StatusTerminated)
+		e.diags.Logger().InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, fHour, fid), "to", workflow.StatusTerminated)
 		label := labelByFlowID[fid]
 		e.metricFlowClosed(ctx, label.workflowURL, workflow.StatusTerminated, label.priority, shardNum)
 		e.signalStop(ctx, cid, workflow.StatusTerminated)
@@ -317,17 +317,17 @@ const parkOwnerGuard = " AND parked_child_flow_id=?"
 
 // completeSurgraphFlow re-dispatches a parked surgraph step after its child, childFlowID, completes.
 func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, surgraphStepID int, childFlowID int, subgraphFinalStateJSON []byte) error {
-	// engineseams.FaultSubgraphReviveLost simulates the revive being lost after the child went terminal (the wedge the
+	// diagnostics.FaultSubgraphReviveLost simulates the revive being lost after the child went terminal (the wedge the
 	// parked-step sweep exists to catch): the caller step stays running+parkedSubgraph with no open child,
 	// so the test proves recoverWedgedSubgraphParks re-drives the release. Returns nil so the caller path
 	// believes it succeeded, exactly as a lost revive would look.
-	if e.seams.IsFault(engineseams.FaultSubgraphReviveLost) {
+	if e.diags.Seams().IsFault(diagnostics.FaultSubgraphReviveLost) {
 		return nil
 	}
-	// engineseams.FaultCompleteSurgraphErr makes the revive fail with a synthetic non-contention error (consumed per attempt),
+	// diagnostics.FaultCompleteSurgraphErr makes the revive fail with a synthetic non-contention error (consumed per attempt),
 	// so a test can prove persist re-drives it on retry rather than losing it - the whole point of the re-drive.
-	if e.seams.IsFault(engineseams.FaultCompleteSurgraphErr) {
-		return errors.New("injected fault: " + engineseams.FaultCompleteSurgraphErr)
+	if e.diags.Seams().IsFault(diagnostics.FaultCompleteSurgraphErr) {
+		return errors.New("injected fault: " + diagnostics.FaultCompleteSurgraphErr)
 	}
 	sh, err := e.db.Shard(shardNum)
 	if err != nil {
@@ -341,7 +341,7 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 	// Test checkpoint: a breakpoint here freezes the worker after the child completed but before the caller
 	// revive, so a test can Terminate the caller in exactly the window the revive's running+parkedSubgraph guard
 	// exists to survive (the revive must not resurrect the just-terminated caller).
-	e.seams.Checkpoint(ctx, engineseams.CheckpointBeforeReviveWrite)
+	e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointBeforeReviveWrite)
 	reDispatch := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		reDispatch = false
@@ -367,7 +367,7 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 		return errors.Trace(err)
 	}
 	if reDispatch {
-		e.logger.DebugContext(ctx, "Resuming surgraph task after subgraph flow completion",
+		e.diags.Logger().DebugContext(ctx, "Resuming surgraph task after subgraph flow completion",
 			"surgraphFlow", surgraphFlowID, "surgraphStep", surgraphStepID)
 		e.enqueueStep(ctx, shardNum, surgraphStepID)
 	}
@@ -449,7 +449,7 @@ func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Execu
 	if parentStepID == 0 {
 		return false, nil
 	}
-	// engineseams.FaultDeliverFailureErr simulates this re-dispatch being lost: the child still commits terminal (this
+	// diagnostics.FaultDeliverFailureErr simulates this re-dispatch being lost: the child still commits terminal (this
 	// runs inside its terminating tx, after the flow row was marked failed), but the parked caller is never
 	// re-armed - the wedge shape (caller running+parkedSubgraph with a terminal child) that
 	// recoverWedgedSubgraphParks must backstop. Returning (false, nil), not an error, so the child's
@@ -461,12 +461,12 @@ func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Execu
 	// depth-N tree wedge (and unwedge) at every level. This is the one fault consult needing a DB read to
 	// build its scope, so the Enabled gate short-circuits ahead of the SELECT: a live binary runs neither the
 	// query nor any consult.
-	if e.seams.Enabled() {
-		lost := e.seams.IsFault(engineseams.FaultDeliverFailureErr)
+	if e.diags.Seams().Enabled() {
+		lost := e.diags.Seams().IsFault(diagnostics.FaultDeliverFailureErr)
 		if !lost {
 			var taskName string
 			if err := tx.QueryRowContext(ctx, "SELECT task_name FROM dwarf_steps WHERE step_id=?", parentStepID).Scan(&taskName); err == nil {
-				lost = e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultDeliverFailureErr, taskName))
+				lost = e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultDeliverFailureErr, taskName))
 			}
 		}
 		if lost {

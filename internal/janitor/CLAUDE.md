@@ -131,8 +131,8 @@ rechecks under them, the directory rows and the archive time are the reaper's, c
   still a closed root due, unstamped, and with no archive attempt when locked (`TestMove_TheLockRechecksEveryRoot`); a
   stamped one only if still stamped and due (`TestDelete_TheLockRechecksTheStamp`).
 - **The position's close time is normalized** (`database.StoredTime`) before it is bound back: a MySQL driver with a
-  DSN `loc` other than UTC places the stored wall clock in that location. The fault and checkpoint names are the reaper's strings, so a test
-  arming one through `engineseams` arms both.
+  DSN `loc` other than UTC places the stored wall clock in that location. The fault and checkpoint names are the reaper's strings, named in
+  `internal/diagnostics`, so a test arming one arms both.
 
 ## Fast deletion (`delete.go`)
 

@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -72,7 +72,7 @@ func TestPersist_TransientWriteErrorIsAbsorbedWithoutReExecution(t *testing.T) {
 	e.SetHost(mux)
 	e.persistBackoff = shortPersistBackoff
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistErr, "A"), 1) // ONE failing attempt, then the database is fine again
+	e.diags.Seams().InjectN(diagnostics.Join(diagnostics.FaultPersistErr, "A"), 1) // ONE failing attempt, then the database is fine again
 
 	_, outcome, err := e.Run(ctx, "p/transient/wf", nil, nil)
 	assert.NoError(err)
@@ -108,7 +108,7 @@ func TestPersist_CompletionWriteContentionIsAbsorbedWithoutReExecution(t *testin
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	e.seams.InjectN(engineseams.Join(engineseams.FaultCompletionContention, "A"), 3) // three lost deadlocks, then the write lands
+	e.diags.Seams().InjectN(diagnostics.Join(diagnostics.FaultCompletionContention, "A"), 3) // three lost deadlocks, then the write lands
 
 	runCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 	defer cancel()
@@ -153,12 +153,12 @@ func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testi
 	e.SetHost(mux)
 	e.persistBackoff = shortPersistBackoff
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistErr, "A"), 1000) // every attempt fails: the payload, not the database
+	e.diags.Seams().InjectN(diagnostics.Join(diagnostics.FaultPersistErr, "A"), 1000) // every attempt fails: the payload, not the database
 
 	_, outcome, err := e.Run(ctx, "p/permanent/wf", nil, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusFailed, outcome.Status, "a write that will never land must terminalize the flow, not loop")
-	assert.Contains(outcome.Error, engineseams.FaultPersistErr, "the flow's error must name the driver's actual failure")
+	assert.Contains(outcome.Error, diagnostics.FaultPersistErr, "the flow's error must name the driver's actual failure")
 
 	// The whole point: ONE execution. Every extra run here is a side effect fired again.
 	assert.Equal(int32(1), runs.Load(), "the task must execute exactly once, not once per lease expiry forever")
@@ -377,14 +377,14 @@ func TestPersist_FencedRerouteWriteAbandons(t *testing.T) {
 	e.SetHost(mux)
 	reader := withManualReader(e)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	e.seams.Inject(engineseams.Join(engineseams.FaultRerouteStaleWrite, "Work"))
+	e.diags.Seams().Inject(diagnostics.Join(diagnostics.FaultRerouteStaleWrite, "Work"))
 
 	fk, err := e.Create(ctx, "p/fencedreroute/wf", nil, nil)
 	if !assert.NoError(err) {
 		return
 	}
 	<-started
-	dispatched := e.seams.Waiter(engineseams.CheckpointClaimedDispatchDone) // Work's is the dispatch in flight
+	dispatched := e.diags.Seams().Waiter(diagnostics.CheckpointClaimedDispatchDone) // Work's is the dispatch in flight
 	assert.NoError(e.Cancel(ctx, fk, "stop"))
 	close(release)
 	select {
@@ -441,7 +441,7 @@ func TestPersist_CancelRerouteWriteIsPersisted(t *testing.T) {
 		e.persistBackoff = shortPersistBackoff
 		reader := withManualReader(e)
 		assert.Must(assert.NoError(e.Startup(t.Context())))
-		e.seams.InjectN(engineseams.Join(engineseams.FaultRerouteWriteErr, "Work"), faults)
+		e.diags.Seams().InjectN(diagnostics.Join(diagnostics.FaultRerouteWriteErr, "Work"), faults)
 
 		fk, err := e.Create(ctx, "p/reroute/wf", nil, nil)
 		if !assert.NoError(err) {
@@ -453,7 +453,7 @@ func TestPersist_CancelRerouteWriteIsPersisted(t *testing.T) {
 		shard, _, _, _, err := keys.ParseFlowKey(fk)
 		assert.NoError(err)
 		_, _, workStepID := flowRows(t, e, fk)
-		dispatched := e.seams.Waiter(engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(workStepID)))
+		dispatched := e.diags.Seams().Waiter(diagnostics.Join(diagnostics.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(workStepID)))
 		assert.NoError(e.Cancel(ctx, fk, "stop"))
 		close(release)
 		awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
@@ -486,7 +486,7 @@ func TestPersist_CancelRerouteWriteIsPersisted(t *testing.T) {
 		assert := testarossa.For(t)
 		out, workRuns, handlerRuns, rm := run(t, 1000)
 		assert.Equal(workflow.StatusFailed, out.Status, "the classifier fails the step rather than replaying it")
-		assert.Contains(out.Error, engineseams.FaultRerouteWriteErr)
+		assert.Contains(out.Error, diagnostics.FaultRerouteWriteErr)
 		assert.Equal(int32(1), workRuns)
 		assert.Equal(int32(0), handlerRuns)
 		failed, _ := sumCounter(rm, "dwarf_steps_write_failed", "", "")
@@ -525,7 +525,7 @@ func TestPersist_DrainReleasesTheLeaseInsteadOfSleepingItOut(t *testing.T) {
 	// select on drainStop, Shutdown would block for this long.
 	e.persistBackoff = []time.Duration{30 * time.Second}
 	assert.Must(assert.NoError(e.Startup(ctx)))
-	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistErr, "A"), 1000)
+	e.diags.Seams().InjectN(diagnostics.Join(diagnostics.FaultPersistErr, "A"), 1000)
 
 	_, err := e.Create(ctx, "p/drain/wf", nil, nil)
 	assert.NoError(err)
@@ -555,8 +555,8 @@ func TestPersist_FailedRenewalStillRetries(t *testing.T) {
 	e, reader := countingEngine(t, "p/renewout", &runs)
 	defer e.Shutdown(ctx)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	e.seams.InjectN(engineseams.FaultExtendLeaseErr, 1000)
-	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistErr, "A"), 1)
+	e.diags.Seams().InjectN(diagnostics.FaultExtendLeaseErr, 1000)
+	e.diags.Seams().InjectN(diagnostics.Join(diagnostics.FaultPersistErr, "A"), 1)
 
 	_, outcome, err := e.Run(ctx, "p/renewout/wf", nil, nil)
 	if !assert.NoError(err) || !assert.NotNil(outcome) {
@@ -588,7 +588,7 @@ func TestPersist_LandedWriteReportingAnErrorIsNotFailed(t *testing.T) {
 	e.leaseMargin = 200 * time.Millisecond
 	e.recoveryInterval = 200 * time.Millisecond
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistLandedErr, "A"), 1+len(shortPersistBackoff))
+	e.diags.Seams().InjectN(diagnostics.Join(diagnostics.FaultPersistLandedErr, "A"), 1+len(shortPersistBackoff))
 
 	_, outcome, err := e.Run(ctx, "p/landed/wf", nil, &workflow.FlowOptions{TimeBudget: 500 * time.Millisecond})
 	if !assert.NoError(err) || !assert.NotNil(outcome) {
@@ -613,7 +613,7 @@ func TestPersist_RecoveryAfterTheLadderLandsTheWrite(t *testing.T) {
 	e, reader := countingEngine(t, "p/afterladder", &runs)
 	defer e.Shutdown(ctx)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistErr, "A"), 1+len(shortPersistBackoff))
+	e.diags.Seams().InjectN(diagnostics.Join(diagnostics.FaultPersistErr, "A"), 1+len(shortPersistBackoff))
 
 	_, outcome, err := e.Run(ctx, "p/afterladder/wf", nil, nil)
 	if !assert.NoError(err) || !assert.NotNil(outcome) {
@@ -640,16 +640,16 @@ func TestPersist_UnreachableAfterTheLadderIsNotClassified(t *testing.T) {
 	e, reader := countingEngine(t, "p/unreachable", &runs)
 	defer e.Shutdown(ctx)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	e.seams.InjectN(engineseams.FaultExtendLeaseErr, 1000)
-	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistErr, "A"), 1000)
+	e.diags.Seams().InjectN(diagnostics.FaultExtendLeaseErr, 1000)
+	e.diags.Seams().InjectN(diagnostics.Join(diagnostics.FaultPersistErr, "A"), 1000)
 
 	fk, err := e.Create(ctx, "p/unreachable/wf", nil, nil)
 	assert.Must(assert.NoError(err))
 	shard, _, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	_, _, stepID := flowRows(t, e, fk)
-	enginetest.AwaitVisitCount(t, e.seams, 1, 15*time.Second,
-		engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(stepID)))
+	enginetest.AwaitVisitCount(t, e.diags.Seams(), 1, 15*time.Second,
+		diagnostics.Join(diagnostics.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(stepID)))
 
 	held := enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE step_id=? AND status='"+
 		workflow.StatusRunning+"' AND lease_expires>NOW_UTC()", stepID)
@@ -676,7 +676,7 @@ func TestPersist_LostConnectionInTheBracketRunsItAgain(t *testing.T) {
 	e, reader := countingEngine(t, "p/lostconn", &runs)
 	defer e.Shutdown(ctx)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistConnErr, "A"), 1+len(shortPersistBackoff)+1)
+	e.diags.Seams().InjectN(diagnostics.Join(diagnostics.FaultPersistConnErr, "A"), 1+len(shortPersistBackoff)+1)
 
 	_, outcome, err := e.Run(ctx, "p/lostconn/wf", nil, nil)
 	if !assert.NoError(err) || !assert.NotNil(outcome) {
@@ -702,21 +702,21 @@ func TestPersist_ConnectionLostEveryTimeIsClassified(t *testing.T) {
 	e, reader := countingEngine(t, "p/alwayslost", &runs)
 	defer e.Shutdown(ctx)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistConnErr, "A"), 1000)
+	e.diags.Seams().InjectN(diagnostics.Join(diagnostics.FaultPersistConnErr, "A"), 1000)
 
 	fk, outcome, err := e.Run(ctx, "p/alwayslost/wf", nil, nil)
 	if !assert.NoError(err) || !assert.NotNil(outcome) {
 		return
 	}
 	assert.Equal(workflow.StatusFailed, outcome.Status)
-	assert.Contains(outcome.Error, engineseams.FaultPersistConnErr)
+	assert.Contains(outcome.Error, diagnostics.FaultPersistConnErr)
 	assert.Equal(int32(1), runs.Load())
 	// The classifier counts the failed write after failStep commits, so wait for the dispatch to return.
 	shard, _, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	_, _, stepID := flowRows(t, e, fk)
-	enginetest.AwaitVisitCount(t, e.seams, 1, 15*time.Second,
-		engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(stepID)))
+	enginetest.AwaitVisitCount(t, e.diags.Seams(), 1, 15*time.Second,
+		diagnostics.Join(diagnostics.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(stepID)))
 	var rm metricdata.ResourceMetrics
 	assert.NoError(reader.Collect(ctx, &rm))
 	failed, _ := sumCounter(rm, "dwarf_steps_write_failed", "", "")

@@ -30,7 +30,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -157,10 +157,10 @@ func (r *cohortRaceRig) releaseFenced(t *testing.T, task string) {
 	var stepID int
 	assert.NoError(r.db.QueryRowContext(context.Background(),
 		"SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name=?", r.flowID, task).Scan(&stepID))
-	done := engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(r.shard), strconv.Itoa(stepID))
-	base := r.e.seams.Visits(done)
-	r.e.seams.Resume(engineseams.CheckpointBeforeTransitionTx)
-	enginetest.AwaitVisitCount(t, r.e.seams, base+1, 10*time.Second, done)
+	done := diagnostics.Join(diagnostics.CheckpointClaimedDispatchDone, strconv.Itoa(r.shard), strconv.Itoa(stepID))
+	base := r.e.diags.Seams().Visits(done)
+	r.e.diags.Seams().Resume(diagnostics.CheckpointBeforeTransitionTx)
+	enginetest.AwaitVisitCount(t, r.e.diags.Seams(), base+1, 10*time.Second, done)
 	assert.Equal(1, enginetest.CountRows(t, r.e, r.shard, "SELECT COUNT(*) FROM dwarf_steps WHERE step_id=? AND status='"+
 		workflow.StatusCompleted+"' AND advancing=1", stepID), "the fenced arrival changed its step")
 }
@@ -180,9 +180,9 @@ func TestTerminateVsNonFinalCohortArrival_Deterministic(t *testing.T) {
 	r := newCohortRaceRig(t, "tnfa")
 
 	// X completes first, so its arrival is the non-final one. Freeze it before its transition.
-	r.e.seams.Break(engineseams.CheckpointBeforeTransitionTx)
+	r.e.diags.Seams().Break(diagnostics.CheckpointBeforeTransitionTx)
 	r.releaseX()
-	assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeTransitionTx, 10*time.Second), "X never reached checkpoint engineseams.CheckpointBeforeTransitionTx")
+	assert.True(r.e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeTransitionTx, 10*time.Second), "X never reached checkpoint diagnostics.CheckpointBeforeTransitionTx")
 
 	assert.NoError(r.e.Terminate(ctx, r.fk, "test"))
 	before, stepsBefore := r.flowRow(t), r.stepCount(t)
@@ -214,9 +214,9 @@ func TestTerminateVsLastCohortArrival_Deterministic(t *testing.T) {
 	r.releaseX()
 	r.awaitArrivals(t, 1)
 
-	r.e.seams.Break(engineseams.CheckpointBeforeTransitionTx)
+	r.e.diags.Seams().Break(diagnostics.CheckpointBeforeTransitionTx)
 	r.releaseY()
-	assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeTransitionTx, 10*time.Second), "Y never reached checkpoint engineseams.CheckpointBeforeTransitionTx")
+	assert.True(r.e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeTransitionTx, 10*time.Second), "Y never reached checkpoint diagnostics.CheckpointBeforeTransitionTx")
 
 	assert.NoError(r.e.Terminate(ctx, r.fk, "test"))
 	before, stepsBefore := r.flowRow(t), r.stepCount(t)
@@ -249,14 +249,14 @@ func TestCancelVsLastCohortArrival_Deterministic(t *testing.T) {
 	r.releaseX()
 	r.awaitArrivals(t, 1)
 
-	r.e.seams.Break(engineseams.CheckpointBeforeTransitionTx)
+	r.e.diags.Seams().Break(diagnostics.CheckpointBeforeTransitionTx)
 	r.releaseY()
-	assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeTransitionTx, 10*time.Second), "Y never reached checkpoint engineseams.CheckpointBeforeTransitionTx")
+	assert.True(r.e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeTransitionTx, 10*time.Second), "Y never reached checkpoint diagnostics.CheckpointBeforeTransitionTx")
 
 	assert.NoError(r.e.Cancel(ctx, r.fk, "withdrawn"))
 	assert.Equal(workflow.StatusRunning, r.flowRow(t).status) // Cancel does not stop the flow; the mark does
 
-	r.e.seams.Resume(engineseams.CheckpointBeforeTransitionTx)
+	r.e.diags.Seams().Resume(diagnostics.CheckpointBeforeTransitionTx)
 	enginetest.AwaitFlowStatus(t, r.e, r.fk, workflow.StatusCancelled, 10*time.Second)
 
 	arrivals, size := r.arrivals(t)

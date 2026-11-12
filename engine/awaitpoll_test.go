@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -89,7 +89,7 @@ func TestAwait_WakesWhenNoSignalIsDelivered(t *testing.T) {
 		err error
 	}
 	done := make(chan result, 1)
-	parked := e.seams.Waiter(engineseams.Join(engineseams.CheckpointAwaitParked, flowKey)) // armed before the goroutine that trips it
+	parked := e.diags.Seams().Waiter(diagnostics.Join(diagnostics.CheckpointAwaitParked, flowKey)) // armed before the goroutine that trips it
 	go func() {
 		out, aerr := e.await(ctx, flowKey)
 		done <- result{out, aerr}
@@ -277,7 +277,7 @@ func TestAwait_IgnoresANonSettledWake(t *testing.T) {
 	done := make(chan result, 1)
 	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 	defer cancel()
-	parked := e.seams.Waiter(engineseams.Join(engineseams.CheckpointAwaitParked, flowKey)) // armed before the goroutine that trips it
+	parked := e.diags.Seams().Waiter(diagnostics.Join(diagnostics.CheckpointAwaitParked, flowKey)) // armed before the goroutine that trips it
 	go func() {
 		out, aerr := e.await(awaitCtx, flowKey)
 		done <- result{out, aerr}
@@ -362,8 +362,8 @@ func TestAwait_StaleStopReparks(t *testing.T) {
 	done := make(chan result, 1)
 	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 	defer cancel()
-	parkedName := engineseams.Join(engineseams.CheckpointAwaitParked, flowKey)
-	parked := e.seams.Waiter(parkedName) // armed before the goroutine that trips it
+	parkedName := diagnostics.Join(diagnostics.CheckpointAwaitParked, flowKey)
+	parked := e.diags.Seams().Waiter(parkedName) // armed before the goroutine that trips it
 	go func() {
 		out, aerr := e.awaitStopped(awaitCtx, flowKey)
 		done <- result{out, aerr}
@@ -377,7 +377,7 @@ func TestAwait_StaleStopReparks(t *testing.T) {
 
 	// A real stop status, as a flow that interrupted and was then resumed would have signalled. Parking again
 	// is the proof Await read the flow running and did not return on the stale stop.
-	reparked := e.seams.Waiter(parkedName)
+	reparked := e.diags.Seams().Waiter(parkedName)
 	e.signalStop(ctx, flowKey, workflow.StatusInterrupted)
 	select {
 	case <-reparked:
@@ -446,9 +446,9 @@ func TestAwait_ReadAfterReleasePastTheDeadline(t *testing.T) {
 		}
 		done := make(chan result, 1)
 		awaitCtx, cancel := context.WithCancel(ctx)
-		released := engineseams.Join(engineseams.CheckpointAwaitReleased, flowKey)
-		e.seams.Break(released)
-		parked := e.seams.Waiter(engineseams.Join(engineseams.CheckpointAwaitParked, flowKey))
+		released := diagnostics.Join(diagnostics.CheckpointAwaitReleased, flowKey)
+		e.diags.Seams().Break(released)
+		parked := e.diags.Seams().Waiter(diagnostics.Join(diagnostics.CheckpointAwaitParked, flowKey))
 		go func() {
 			var out *workflow.FlowOutcome
 			var aerr error
@@ -469,9 +469,9 @@ func TestAwait_ReadAfterReleasePastTheDeadline(t *testing.T) {
 
 		// A real stop status while the flow runs: the caller is released, then held before its read.
 		e.signalStop(ctx, flowKey, workflow.StatusInterrupted)
-		assert.True(e.seams.WaitTimeout(ctx, released, 10*time.Second*enginetest.TimeoutScale()), "Await was never released")
+		assert.True(e.diags.Seams().WaitTimeout(ctx, released, 10*time.Second*enginetest.TimeoutScale()), "Await was never released")
 		cancel() // the caller's deadline ends inside the window; the held checkpoint returns on it
-		e.seams.Resume(released)
+		e.diags.Seams().Resume(released)
 
 		select {
 		case r := <-done:

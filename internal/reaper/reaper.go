@@ -80,6 +80,7 @@ const (
 	CheckpointBeforeRootDelete = "reapBeforeRootDelete" // a chunked deletion is about to recheck and delete its root
 	CheckpointChunkDone        = "reapChunkDone"        // a chunk of a chunked deletion has committed and been counted
 	CheckpointStageChunkDone   = "reapStageChunkDone"   // a staging chunk, or the publication, has committed
+	CheckpointArchiveDeleted   = "reapArchiveDeleted"   // a transaction deleting archived trees has committed
 )
 
 // Config is one pass's settings. Nothing in it is kept between passes.

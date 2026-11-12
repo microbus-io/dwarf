@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -83,10 +83,10 @@ func TestMySQLClaim_ReadErrorRecovery(t *testing.T) {
 			if err := db.QueryRowContext(ctx, "SELECT step_id, lease_seq FROM dwarf_steps WHERE flow_id=?", flowID).Scan(&stepID, &seq); err != nil {
 				t.Fatal(err)
 			}
-			held := engineseams.Join(engineseams.CheckpointClaimBeforeRead, strconv.Itoa(shard), strconv.Itoa(stepID), strconv.Itoa(seq+1))
-			e.seams.Break(held)
-			defer e.seams.Resume(held)
-			reached := e.seams.Waiter(held)
+			held := diagnostics.Join(diagnostics.CheckpointClaimBeforeRead, strconv.Itoa(shard), strconv.Itoa(stepID), strconv.Itoa(seq+1))
+			e.diags.Seams().Break(held)
+			defer e.diags.Seams().Resume(held)
+			reached := e.diags.Seams().Waiter(held)
 			done := make(chan error, 1)
 			go func() { done <- e.processStep(ctx, shard, stepID, func() {}) }()
 			select {
@@ -108,8 +108,8 @@ func TestMySQLClaim_ReadErrorRecovery(t *testing.T) {
 				wantStatus, wantSeq = workflow.StatusRunning, seq+2
 			}
 			// Fail before Scan can populate any field, including leaseSeq. Arm after the replacement read.
-			e.seams.InjectN(engineseams.FaultClaimReadContention, 1)
-			e.seams.Resume(held)
+			e.diags.Seams().InjectN(diagnostics.FaultClaimReadContention, 1)
+			e.diags.Seams().Resume(held)
 			select {
 			case err := <-done:
 				if !sequel.IsLockContentionError(err) {

@@ -22,7 +22,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -79,7 +79,7 @@ func (e *Engine) expireOn(ctx context.Context, db *sequel.DB, shard int) {
 		if time.Since(start) < e.expireBudget {
 			return false
 		}
-		e.logger.InfoContext(ctx, "Expiring flows: the pass reached its time budget; the next pass goes on",
+		e.diags.Logger().InfoContext(ctx, "Expiring flows: the pass reached its time budget; the next pass goes on",
 			"shard", shard, "expired", ended, "budget", e.expireBudget)
 		return true
 	}
@@ -103,7 +103,7 @@ func (e *Engine) expireOn(ctx context.Context, db *sequel.DB, shard int) {
 			}
 			attempts++
 			after = r.flowID
-			done, err := e.terminateSubtree(ctx, shard, r.flowID, r.hour, r.token, reason, engineseams.FaultExpireTerminate)
+			done, err := e.terminateSubtree(ctx, shard, r.flowID, r.hour, r.token, reason, diagnostics.FaultExpireTerminate)
 			if err != nil {
 				if ctx.Err() == nil {
 					e.metricExpireFailed(ctx, shard)

@@ -85,7 +85,7 @@ func (e *Engine) refreshBacklog(ctx context.Context) {
 		reading, err := e.queryBacklog(ctx, db, shard)
 		if err != nil {
 			if ctx.Err() == nil {
-				e.logger.WarnContext(ctx, "Refreshing backlog gauges", "shard", shard, "error", err)
+				e.diags.Logger().WarnContext(ctx, "Refreshing backlog gauges", "shard", shard, "error", err)
 			}
 			return nil // keep the previous reading
 		}

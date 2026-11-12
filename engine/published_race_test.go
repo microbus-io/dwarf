@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/errors"
 )
@@ -30,11 +30,11 @@ func TestPublished_ContinueRacingLiveCleanup(t *testing.T) {
 	e := archiveEngine(t, treeMux(), 30)
 	root, _, _, _ := treeKeys(t, e)
 	publish(t, e, root, time.Now())
-	e.seams.Break(engineseams.CheckpointContinuePublished)
-	defer e.seams.Resume(engineseams.CheckpointContinuePublished)
+	e.diags.Seams().Break(diagnostics.CheckpointContinuePublished)
+	defer e.diags.Seams().Resume(diagnostics.CheckpointContinuePublished)
 	done := make(chan error, 1)
 	go func() { _, err := e.Continue(ctx, root, nil); done <- err }()
-	if !e.seams.WaitTimeout(ctx, engineseams.CheckpointContinuePublished, 10*time.Second) {
+	if !e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointContinuePublished, 10*time.Second) {
 		t.Fatal("checkpoint not reached")
 	}
 	e.reapDueFlows(ctx)
@@ -43,7 +43,7 @@ func TestPublished_ContinueRacingLiveCleanup(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("live cleanup incomplete: %d", n)
 	}
-	e.seams.Resume(engineseams.CheckpointContinuePublished)
+	e.diags.Seams().Resume(diagnostics.CheckpointContinuePublished)
 	err := <-done
 	if err != nil {
 		t.Fatalf("Continue rejected published source after live cleanup: status=%d err=%v", errors.StatusCode(err), err)
@@ -60,15 +60,15 @@ func TestPublished_ForkRacingLiveCleanup(t *testing.T) {
 	}
 	root, _, step, _ := treeKeys(t, e)
 	publish(t, e, root, time.Now())
-	e.seams.Break(engineseams.CheckpointForkPublished)
-	defer e.seams.Resume(engineseams.CheckpointForkPublished)
+	e.diags.Seams().Break(diagnostics.CheckpointForkPublished)
+	defer e.diags.Seams().Resume(diagnostics.CheckpointForkPublished)
 	done := make(chan error, 1)
 	go func() { _, err := e.Fork(ctx, step, nil); done <- err }()
-	if !e.seams.WaitTimeout(ctx, engineseams.CheckpointForkPublished, 10*time.Second) {
+	if !e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointForkPublished, 10*time.Second) {
 		t.Fatal("checkpoint not reached")
 	}
 	e.reapDueFlows(ctx)
-	e.seams.Resume(engineseams.CheckpointForkPublished)
+	e.diags.Seams().Resume(diagnostics.CheckpointForkPublished)
 	if err := <-done; err != nil {
 		t.Fatalf("Fork failed during published source cleanup: status=%d err=%v", errors.StatusCode(err), err)
 	}

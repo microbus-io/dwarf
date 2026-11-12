@@ -74,7 +74,7 @@ func (e *Engine) latchLoop(ctx context.Context, shard int, board *latch.Board) {
 		// The pass has already dealt with whatever failed - a chunk that could not answer is simply asked
 		// again next tick - so the error is a log line, never a reason to stop sweeping.
 		if r := board.Sweep(ctx); r.Err != nil && ctx.Err() == nil {
-			e.logger.ErrorContext(ctx, "Await latch sweep", "shard", shard, "keys", r.Latched, "error", r.Err)
+			e.diags.Logger().ErrorContext(ctx, "Await latch sweep", "shard", shard, "keys", r.Latched, "error", r.Err)
 		}
 	}
 }

@@ -40,14 +40,7 @@ func (e *Engine) startJanitors(ctx context.Context) error {
 		if set != nil {
 			archive = set.byShard[shard]
 		}
-		j := janitor.New(sh, archive, e.retentionDays)
-		j.SetLogger(e.logger)
-		j.SetSeams(e.seams)
-		if e.meter != nil {
-			if err := j.SetMeter(e.meter); err != nil {
-				e.logger.ErrorContext(ctx, "Creating the janitor's instruments", "shard", shard, "error", err)
-			}
-		}
+		j := janitor.New(sh, e.diags, archive, e.retentionDays)
 		j.SetManual(e.janitorManual)
 		j.SetIdle(e.janitorIdle)
 		e.configureJanitor(j, e.archiveGrace)

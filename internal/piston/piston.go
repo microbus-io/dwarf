@@ -41,7 +41,6 @@ package piston
 
 import (
 	"context"
-	"log/slog"
 	"math"
 	"sort"
 	"strconv"
@@ -52,14 +51,13 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/candidates"
 	"github.com/microbus-io/dwarf/internal/database"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/pipeline"
 	"github.com/microbus-io/dwarf/internal/planner"
 	"github.com/microbus-io/errors"
-	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/sequel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
-	"go.opentelemetry.io/otel/metric/noop"
 )
 
 // refillBuckets are the explicit bucket boundaries for the refill-duration histogram, in SECONDS. The OTEL defaults are
@@ -122,10 +120,10 @@ type Piston struct {
 
 	// Live configuration, each independently atomic. There is no grouped snapshot because nothing here is
 	// coupled - reading idle and the partition a microsecond apart cannot produce an inconsistent pair.
-	idle   atomic.Bool
-	logger atomic.Pointer[slog.Logger]
-	inst   atomic.Pointer[instruments]
-	seams  atomic.Pointer[seamster.Seamster]
+	idle atomic.Bool
+	// diags is what the piston reports through, and inst the instruments it made on diags' meter.
+	diags *diagnostics.Diags
+	inst  *instruments
 
 	// stealAfter is how many cycle periods a foreign step must have been due before this replica takes it.
 	// Zero disables stealing outright, which is what an owner sets when it wants the residue class enforced
@@ -182,9 +180,10 @@ type bandLag struct {
 // priority turns, and keep to the residue class the shard reports. Each loop stamps its turns once per CYCLE rather
 // than once per query, which for the supply loop means the plan and the fetch share one stamp: re-stamping between
 // them would make the fetch look like a newer arrival than the plan it is resolving. The two LOOPS are stamped
-// separately, and that is correct - they are separate units of work on separate clocks. The planner and cache are shared with this replica's
-// other pistons and are not owned here.
-func New(sh *database.Shard, plan *planner.Planner, cache *candidates.Cache) (*Piston, error) {
+// separately, and that is correct - they are separate units of work on separate clocks. It reports through d: its
+// logger, its seams, and its meter, on which it creates its instruments (one it cannot create is logged and
+// records nothing). The planner and cache are shared with this replica's other pistons and are not owned here.
+func New(sh *database.Shard, d *diagnostics.Diags, plan *planner.Planner, cache *candidates.Cache) (*Piston, error) {
 	if sh == nil {
 		return nil, errors.New("shard is required")
 	}
@@ -214,9 +213,12 @@ func New(sh *database.Shard, plan *planner.Planner, cache *candidates.Cache) (*P
 		return nil, errors.Trace(err)
 	}
 	p.tallier, p.supplier = tallier, supplier
-	p.SetLogger(nil)
-	p.SetMeter(nil)
-	p.SetSeams(nil)
+	p.diags = d
+	inst, err := newInstruments(d.Meter())
+	if err != nil {
+		d.Logger().Error("Building piston instruments", "shard", shard, "error", err)
+	}
+	p.inst = inst
 	return p, nil
 }
 
@@ -389,35 +391,8 @@ func (p *Piston) SupplyCadence() (interval, minGap time.Duration) {
 	return p.supplier.Interval(), p.supplier.MinGap()
 }
 
-// SetLogger sets the logger. Nil restores the discarding default.
-func (p *Piston) SetLogger(l *slog.Logger) {
-	if l == nil {
-		l = slog.New(slog.DiscardHandler)
-	}
-	p.logger.Store(l)
-}
-
-// SetSeams supplies the owner's fault-injection seams, so a test that drives a whole engine can make this
-// piston's scan fail (FaultScanErr) without reaching for the database. Nil restores an inert one, which is
-// also the default - a piston built and never told otherwise consults nothing.
-//
-// The seams are the OWNER's, not this package's, for the same reason the meter is: one catalogue of fault
-// names per application, armed in one place, however many modules consult it. A Seamster built disabled
-// makes every consult a bool read, so a production piston pays nothing for the call site.
-//
-// This package deliberately has no seam of its OWN, and the distinction matters. A seam inside pure logic
-// would be a signal that a dependency should have been injected instead; this one perturbs the DATABASE
-// query, which is exactly the boundary a test cannot otherwise reach - the pipeline's error policy (clear
-// the shard from planning, leave the cache alone) is only reachable by making a real scan fail. The
-// pipeline itself gets none: its faults are all reachable through the Source, which is this type.
-func (p *Piston) SetSeams(s *seamster.Seamster) {
-	if s == nil {
-		s = seamster.New(false)
-	}
-	p.seams.Store(s)
-}
-
-// SetMeter resolves this piston's instruments from an already-created meter. Nil restores no-ops.
+// newInstruments creates the piston's instruments on an already-created meter, keeping every one it could create
+// and returning the error of the first it could not.
 //
 // A Meter rather than a MeterProvider so the OWNER picks the instrumentation scope once, for every
 // module it assembles. Each package deriving its own scope from a provider would split one engine's
@@ -425,10 +400,7 @@ func (p *Piston) SetSeams(s *seamster.Seamster) {
 // provider-level capability anyway.
 //
 // Instrument names are a public surface that dashboards bind to - do not rename them.
-func (p *Piston) SetMeter(m metric.Meter) error {
-	if m == nil {
-		m = noop.NewMeterProvider().Meter("")
-	}
+func newInstruments(m metric.Meter) (*instruments, error) {
 	var errs []error
 	hist := func(name, desc string) metric.Float64Histogram {
 		h, err := m.Float64Histogram(name, metric.WithDescription(desc), metric.WithUnit("s"),
@@ -445,7 +417,7 @@ func (p *Piston) SetMeter(m metric.Meter) error {
 		}
 		return c
 	}
-	p.inst.Store(&instruments{
+	inst := &instruments{
 		queryDuration: hist("dwarf_refill_query_duration_seconds",
 			"Duration of one phase of one shard's refill cycle, labelled by shard and by phase: the two queries "+
 				"(band_keys, fetch_steps) and the two in-memory phases (planning, pushing)."),
@@ -455,11 +427,11 @@ func (p *Piston) SetMeter(m metric.Meter) error {
 			"Counts cached step candidates thrown away un-popped by a wholesale refill - the refiller's waste signal. The steps stay pending and are re-selected, so this is cost, not loss."),
 		stolen: ctr("dwarf_steps_stolen",
 			"Counts candidates this replica selected from OUTSIDE its own residue class, because its own class could not fill the batch and the step had been due for several cycle periods - i.e. its owner was not taking it. Zero in a healthy fleet by construction: a replica holding its own work never steals. A sustained nonzero rate names a peer that is alive in the registry but not serving its share, which nothing else reports - and it is the quantity to read dwarf_steps_claim_lost against, since stealing trades exclusivity for coverage."),
-	})
-	if len(errs) > 0 {
-		return errors.Trace(errs[0])
 	}
-	return nil
+	if len(errs) > 0 {
+		return inst, errors.Trace(errs[0])
+	}
+	return inst, nil
 }
 
 // Run drives both of the piston's loops until ctx is cancelled - one goroutine each, on independent
@@ -521,11 +493,11 @@ func (p *Piston) runTallier(ctx context.Context) {
 		withdrawn = false
 		r := p.TallyCycle(ctx)
 		if r.Err != nil && ctx.Err() == nil {
-			p.logger.Load().ErrorContext(ctx, "Refill tally", "shard", p.shard, "error", r.Err)
+			p.diags.Logger().ErrorContext(ctx, "Refill tally", "shard", p.shard, "error", r.Err)
 		}
 		if r.Err == nil {
-			// A scan completed and its tally is in the planner - see CheckpointTallyDone.
-			p.fireCheckpoint(ctx, CheckpointTallyDone)
+			// A scan completed and its tally is in the planner - see diagnostics.CheckpointRefillTallyDone.
+			p.fireCheckpoint(ctx, diagnostics.CheckpointRefillTallyDone)
 		}
 	}
 }
@@ -556,13 +528,13 @@ func (p *Piston) runSupplier(ctx context.Context) {
 		withdrawn = false
 		r := p.SupplyCycle(ctx)
 		if r.Err != nil && ctx.Err() == nil {
-			p.logger.Load().ErrorContext(ctx, "Refill supply", "shard", p.shard, "error", r.Err)
+			p.diags.Logger().ErrorContext(ctx, "Refill supply", "shard", p.shard, "error", r.Err)
 		}
 		if r.Reconciled {
-			// This shard's partition now reflects the plan - see CheckpointCycleDone. Gated on the push
+			// This shard's partition now reflects the plan - see diagnostics.CheckpointRefillCycleDone. Gated on the push
 			// rather than on the error, so a visit cannot mean "looked and gave up": both hold-everything
 			// paths leave the partition alone and only one of them is an error.
-			p.fireCheckpoint(ctx, CheckpointCycleDone)
+			p.fireCheckpoint(ctx, diagnostics.CheckpointRefillCycleDone)
 		}
 	}
 }
@@ -571,9 +543,9 @@ func (p *Piston) runSupplier(ctx context.Context) {
 // package fires uses, so a caller can wait on either "any shard" or this shard specifically. A no-op when
 // seams are disabled, which the caller need not check itself.
 func (p *Piston) fireCheckpoint(ctx context.Context, name string) {
-	if seams := p.seams.Load(); seams.Enabled() { // Enabled gates the assembled name in production
+	if seams := p.diags.Seams(); seams.Enabled() { // Enabled gates the assembled name in production
 		seams.Checkpoint(ctx, name)
-		seams.Checkpoint(ctx, seamsJoin(name, strconv.Itoa(p.shard)))
+		seams.Checkpoint(ctx, diagnostics.Join(name, strconv.Itoa(p.shard)))
 	}
 }
 
@@ -594,7 +566,7 @@ func (p *Piston) Cycle(ctx context.Context) (pipeline.TallyResult, pipeline.Supp
 //
 // NOT safe to call concurrently with Run or with itself; see Cycle.
 func (p *Piston) SupplyCycle(ctx context.Context) pipeline.SupplyResult {
-	p.fireCheckpoint(ctx, CheckpointSupplyBegin)
+	p.fireCheckpoint(ctx, diagnostics.CheckpointRefillSupplyBegin)
 	ctx = p.sh.ContextWithPriority(ctx)
 	r := p.supplier.Cycle(ctx)
 	p.recordSupply(ctx, r)
@@ -612,7 +584,7 @@ func (p *Piston) SupplyCycle(ctx context.Context) pipeline.SupplyResult {
 //
 // NOT safe to call concurrently with Run or with itself; see Cycle.
 func (p *Piston) TallyCycle(ctx context.Context) pipeline.TallyResult {
-	p.fireCheckpoint(ctx, CheckpointTallyBegin)
+	p.fireCheckpoint(ctx, diagnostics.CheckpointRefillTallyBegin)
 	ctx = p.sh.ContextWithPriority(ctx)
 	r := p.tallier.Cycle(ctx)
 	p.recordTally(ctx, r)
@@ -646,14 +618,14 @@ func (p *Piston) advanceTurn() {
 // without a question it answers that the phase split does not.
 func (p *Piston) recordTally(ctx context.Context, r pipeline.TallyResult) {
 	if r.Tallying > 0 {
-		p.inst.Load().queryDuration.Record(ctx, r.Tallying.Seconds(),
+		p.inst.queryDuration.Record(ctx, r.Tallying.Seconds(),
 			metric.WithAttributes(p.shardAttr, attribute.String("phase", "band_keys")))
 	}
 }
 
 // recordSupply translates a supply cycle's result into this piston's instruments.
 func (p *Piston) recordSupply(ctx context.Context, r pipeline.SupplyResult) {
-	in := p.inst.Load()
+	in := p.inst
 	if r.Fetching > 0 {
 		in.queryDuration.Record(ctx, r.Fetching.Seconds(),
 			metric.WithAttributes(p.shardAttr, attribute.String("phase", "fetch_steps")))
@@ -753,7 +725,7 @@ func (p *Piston) partitionPredicate(replicas, ordinal int, grace time.Duration) 
 // A HALF-VALIDATED read is worse than no validation, which is why there is exactly one of these. An
 // out-of-range ordinal correctly disables the SQL predicate, so the query selects everything - but a ranking
 // built from that same bad pair puts nothing in tier 0 and counts every kept step as taken from a peer,
-// flooding dwarf_steps_stolen and firing CheckpointStole for steals that never happened.
+// flooding dwarf_steps_stolen and firing diagnostics.CheckpointRefillStole for steals that never happened.
 func (p *Piston) resolvePartition() (replicas, ordinal int) {
 	r, o, ok := p.sh.Residency()
 	if !ok || r < 2 || o < 0 || o >= r {
@@ -853,11 +825,11 @@ func (s *residueSort) Less(i, j int) bool { return s.tiers[i] < s.tiers[j] }
 // The shard argument is the pipeline's own and equals Shard(); it is accepted for symmetry with the
 // planner and cache calls, which are keyed the same way.
 func (p *Piston) ScanBand(ctx context.Context, shard int) (band int, tallies []planner.Tally, err error) {
-	// FaultScanErr fails the scan without touching the database, so a test can drive the pipeline's
+	// diagnostics.FaultRefillScanErr fails the scan without touching the database, so a test can drive the pipeline's
 	// scan-error policy - clear this shard from planning, leave its cache partition intact - which is
 	// otherwise reachable only by breaking a real database mid-run.
-	if p.seams.Load().IsFault(FaultScanErr) {
-		return pipeline.NoBand, nil, errors.New("injected fault: " + FaultScanErr)
+	if p.diags.Seams().IsFault(diagnostics.FaultRefillScanErr) {
+		return pipeline.NoBand, nil, errors.New("injected fault: " + diagnostics.FaultRefillScanErr)
 	}
 	replicas, ordinal := p.resolvePartition()
 	part, partArgs := p.partitionPredicate(replicas, ordinal, p.stealGrace())
@@ -1084,10 +1056,10 @@ func (p *Piston) FetchSteps(ctx context.Context, shard int, fetches []planner.Fe
 	if len(pairs) == 0 {
 		return nil, nil
 	}
-	// FaultFetchErr fails the fetch without touching the database, so a test can drive the one failure that
-	// is invisible from outside: a piston that tallies honestly and serves nothing - see FaultFetchErr.
-	if p.seams.Load().IsFault(FaultFetchErr) {
-		return nil, errors.New("injected fault: " + FaultFetchErr)
+	// diagnostics.FaultRefillFetchErr fails the fetch without touching the database, so a test can drive the one failure that
+	// is invisible from outside: a piston that tallies honestly and serves nothing - see diagnostics.FaultRefillFetchErr.
+	if p.diags.Seams().IsFault(diagnostics.FaultRefillFetchErr) {
+		return nil, errors.New("injected fault: " + diagnostics.FaultRefillFetchErr)
 	}
 	// ONE reading of the pair and ONE of the grace, feeding the predicate that selects, the multiple that
 	// over-fetches, and the ranking that orders - so none of the three can work from a different fleet than
@@ -1134,8 +1106,8 @@ func (p *Piston) FetchSteps(ctx context.Context, shard int, fetches []planner.Fe
 	}
 	stolen := p.rankByResidue(out, capOf, replicas, ordinal)
 	if stolen > 0 {
-		p.inst.Load().stolen.Add(ctx, int64(stolen), metric.WithAttributes(p.shardAttr))
-		p.fireCheckpoint(ctx, CheckpointStole)
+		p.inst.stolen.Add(ctx, int64(stolen), metric.WithAttributes(p.shardAttr))
+		p.fireCheckpoint(ctx, diagnostics.CheckpointRefillStole)
 	}
 	return out, nil
 }

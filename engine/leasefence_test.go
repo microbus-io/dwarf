@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -133,8 +133,8 @@ func awaitDispatchesReturned(t *testing.T, eng *Engine, flowKey, taskName string
 	if err != nil {
 		t.Fatal(err)
 	}
-	done := engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(stepID))
-	enginetest.AwaitVisitCount(t, eng.seams, n, 15*time.Second, done)
+	done := diagnostics.Join(diagnostics.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(stepID))
+	enginetest.AwaitVisitCount(t, eng.diags.Seams(), n, 15*time.Second, done)
 }
 
 // zombieDispatch drives the real dispatch path into the late-error healthy-flow-kill lease-loss race and returns once a peer
@@ -330,7 +330,7 @@ func TestLeaseFence_CohortNoDoubleArrival(t *testing.T) {
 
 // TestLeaseFence_RecoveryResetFenced pins the fence on the processStep recovery defer's own reset - the one
 // guarding the recovery machinery itself (the leaseSeq>0 gate). Distinct from
-// engineseams.FaultRecoveryResetErr (which tests the reset *failing*): this proves a zombie's reset (completed->pending)
+// diagnostics.FaultRecoveryResetErr (which tests the reset *failing*): this proves a zombie's reset (completed->pending)
 // carrying a stale lease generation matches zero rows, so it cannot rewind a peer's freshly-claimed step.
 //
 // The completed->pending reset fires when a step is marked `completed` but its follow-up transition
@@ -373,14 +373,14 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	// database was busy would be exactly backwards - so it is what drives the completed->pending reset.
 	// InjectN(8) is one full round of Transact's retries (transactMaxAttempts), so the transaction gives up and
 	// hands a contention error to the defer; the fault is spent, and the peer's re-dispatch runs clean.
-	eng.seams.InjectN(engineseams.Join(engineseams.FaultContention, "A"), 8)
-	eng.seams.Break(engineseams.CheckpointBeforeRecoveryReset)
+	eng.diags.Seams().InjectN(diagnostics.Join(diagnostics.FaultContention, "A"), 8)
+	eng.diags.Seams().Break(diagnostics.CheckpointBeforeRecoveryReset)
 
 	flowKey, err := eng.Create(ctx, "lfrr/g", nil, nil)
 	if !assert.NoError(err) {
 		return
 	}
-	assert.True(eng.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeRecoveryReset, 15*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeRecoveryReset")
+	assert.True(eng.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeRecoveryReset, 15*time.Second), "engine never reached checkpoint diagnostics.CheckpointBeforeRecoveryReset")
 
 	shardNum, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
@@ -421,7 +421,7 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	assert.Equal(workflow.StatusCompleted, beforeStatus)
 
 	// Release the zombie: its reset carries the stale generation N and must match zero rows.
-	eng.seams.Resume(engineseams.CheckpointBeforeRecoveryReset)
+	eng.diags.Seams().Resume(diagnostics.CheckpointBeforeRecoveryReset)
 
 	// A broken fence would rewind A completed->pending inside the zombie's dispatch.
 	awaitDispatchesReturned(t, eng, flowKey, "A", 2) // the peer's replay and the released zombie's

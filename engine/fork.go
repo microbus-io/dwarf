@@ -23,7 +23,7 @@ import (
 	"net/http"
 	"slices"
 
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/internal/staterefs"
@@ -68,7 +68,7 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	// tree the live pass locked stays live for the whole clone, and a live pass that locks nothing finds the tree
 	// archived or never there. Nothing moves back out of the archive. The fork's root span is minted once, by
 	// whichever pass first gets that far.
-	e.seams.Checkpoint(ctx, engineseams.CheckpointForkBeforeClone)
+	e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointForkBeforeClone)
 	var traceParent string
 	flowKey, err := e.forkFrom(ctx, db, liveTables, shardNum, forkFlowID, forkStepID, forkStepToken, forkStepHour, overrides, &traceParent)
 	if !errors.Is(err, errForkSourceNotHere) {
@@ -106,11 +106,11 @@ func (e *Engine) forkFrom(ctx context.Context, db *sequel.DB, src flowTables, sh
 	var cc *forkClone
 	var rootFlowID, newRootFlowID int
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
-		// engineseams.FaultForkCommit fails this transaction once, before the clone runs, so the test proves the whole
+		// diagnostics.FaultForkCommit fails this transaction once, before the clone runs, so the test proves the whole
 		// clone rolls back atomically (origin byte-identical, zero partial clone rows) and a retry then
 		// forks cleanly - pinning Fork's "crash mid-clone rolls back, origin never mutated" claim.
-		if e.seams.IsFault(engineseams.FaultForkCommit) {
-			return errors.New("injected fault: " + engineseams.FaultForkCommit)
+		if e.diags.Seams().IsFault(diagnostics.FaultForkCommit) {
+			return errors.New("injected fault: " + diagnostics.FaultForkCommit)
 		}
 		// Write-first, on the source root named by the fork step's flow. The clone reads the source before its first
 		// write, and on SQLite a transaction that reads first holds a SHARED lock it must upgrade at that write:
@@ -145,7 +145,7 @@ func (e *Engine) forkFrom(ctx context.Context, db *sequel.DB, src flowTables, sh
 	}
 
 	newFlowKey := keys.NewFlowKey(shardNum, cc.newRootFlowHour, newRootFlowID, cc.rootFlowToken)
-	e.logger.InfoContext(ctx, "Flow forked", "fromRoot", rootFlowID, "forkStep", forkStepID, "to", newRootFlowID)
+	e.diags.Logger().InfoContext(ctx, "Flow forked", "fromRoot", rootFlowID, "forkStep", forkStepID, "to", newRootFlowID)
 	// Every flow on the rewind chain - the new root and each subgraph flow between it and the fork step - is
 	// cloned running and ends through completeFlow, which counts it in dwarf_flows_closed. Each must be
 	// counted as started too, or the in-flight panel (started - ended) drifts by one per flow.
@@ -198,7 +198,7 @@ func (e *Engine) forkSource(ctx context.Context, tx *sequel.Tx, src flowTables, 
 			return nil, 0, errors.New("can only fork a closed flow (status: %s)", rootStatus, http.StatusConflict)
 		}
 		if published != 0 {
-			e.seams.Checkpoint(ctx, engineseams.CheckpointForkPublished)
+			e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointForkPublished)
 			return nil, 0, errForkSourceNotHere
 		}
 		if src != liveTables {
@@ -210,7 +210,7 @@ func (e *Engine) forkSource(ctx context.Context, tx *sequel.Tx, src flowTables, 
 		// A flow scheduled for deletion is on its way out, so naming it is an error, as for Continue.
 		return nil, 0, errors.New("cannot fork a flow scheduled for deletion", http.StatusConflict)
 	}
-	e.seams.Checkpoint(ctx, engineseams.CheckpointForkRootLocked)
+	e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointForkRootLocked)
 
 	// Resolve the fork step, its owning flow, and that flow's token (needed to walk the surgraph chain).
 	var leafFlowID, leafFlowPayloadVer int
@@ -437,6 +437,7 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		if err != nil {
 			return 0, nil, errors.Trace(err)
 		}
+		e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointFlowSelfFixup)
 	}
 	if newSurgStepID != 0 {
 		// The step clone does not copy parked_child_flow_id, whose origin value names an origin flow. An ancestor

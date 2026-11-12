@@ -26,6 +26,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/database"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/seamster"
@@ -173,7 +174,7 @@ func move(ctx context.Context, h handle, seams *seamster.Seamster, roots []int, 
 		if err != nil || len(locked) == 0 {
 			return errors.Trace(err)
 		}
-		seams.Checkpoint(ctx, CheckpointBatchLocked)
+		seams.Checkpoint(ctx, diagnostics.CheckpointReapBatchLocked)
 		// ids are trusted integers embedded as literals to dodge the per-driver bind-param ceiling.
 		ids := intCSV(locked)
 		trees := "SELECT flow_id FROM dwarf_flows WHERE root_flow_id IN (" + ids + ")"
@@ -190,13 +191,13 @@ func move(ctx context.Context, h handle, seams *seamster.Seamster, roots []int, 
 		flows := "DELETE FROM dwarf_flows WHERE root_flow_id IN (" + ids + ")"
 		var flowsArgs []any
 		if d != nil {
-			// FaultContention fails every attempt of an archive move on lock contention.
-			if seams.IsFault(FaultContention) {
-				return errors.Trace(&pgconn.PgError{Code: "40P01", Message: "injected fault: " + FaultContention})
+			// diagnostics.FaultReapContention fails every attempt of an archive move on lock contention.
+			if seams.IsFault(diagnostics.FaultReapContention) {
+				return errors.Trace(&pgconn.PgError{Code: "40P01", Message: "injected fault: " + diagnostics.FaultReapContention})
 			}
-			// FaultArchiveErr fails an archive move with an error that is not lock contention.
-			if seams.IsFault(FaultArchiveErr) {
-				return errors.New("injected fault: " + FaultArchiveErr)
+			// diagnostics.FaultReapArchiveErr fails an archive move with an error that is not lock contention.
+			if seams.IsFault(diagnostics.FaultReapArchiveErr) {
+				return errors.New("injected fault: " + diagnostics.FaultReapArchiveErr)
 			}
 			steps, flows, flowsArgs = archiveStatements(ctx, tx, d, ids, trees, steps, flows)
 		}
@@ -204,12 +205,12 @@ func move(ctx context.Context, h handle, seams *seamster.Seamster, roots []int, 
 		if _, err := tx.ExecContext(ctx, steps); err != nil {
 			return errors.Trace(err)
 		}
-		// FaultMidTree aborts after the steps go but before the flows do, so the whole batch rolls back: a failure mid
+		// diagnostics.FaultReapMidTree aborts after the steps go but before the flows do, so the whole batch rolls back: a failure mid
 		// tree leaves the tree whole, never a flow with no steps.
-		if seams.IsFault(FaultMidTree) {
-			return errors.New("injected fault: " + FaultMidTree)
+		if seams.IsFault(diagnostics.FaultReapMidTree) {
+			return errors.New("injected fault: " + diagnostics.FaultReapMidTree)
 		}
-		if err := targetedFault(seams, FaultMidTree, locked...); err != nil {
+		if err := targetedFault(seams, diagnostics.FaultReapMidTree, locked...); err != nil {
 			return err
 		}
 		res, err := tx.ExecContext(ctx, flows, flowsArgs...)

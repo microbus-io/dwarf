@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -92,20 +92,20 @@ func TestFork_DeletedBeforeItsLock(t *testing.T) {
 				steps = steps[0].SubHistory
 			}
 
-			e.seams.Break(engineseams.CheckpointForkBeforeClone)
+			e.diags.Seams().Break(diagnostics.CheckpointForkBeforeClone)
 			forked := make(chan error, 1)
 			go func() {
 				_, err := e.Fork(ctx, steps[0].StepKey, nil)
 				forked <- err
 			}()
-			assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointForkBeforeClone, 10*time.Second*enginetest.TimeoutScale()),
+			assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointForkBeforeClone, 10*time.Second*enginetest.TimeoutScale()),
 				"Fork never reached its clone")
 			assert.NoError(e.Delete(ctx, fk))
 			if tc.reaped {
 				time.Sleep(5 * time.Millisecond) // let the 1ms delete_after_ms elapse on the database clock
 				e.reapDueFlows(ctx)
 			}
-			e.seams.Resume(engineseams.CheckpointForkBeforeClone)
+			e.diags.Seams().Resume(diagnostics.CheckpointForkBeforeClone)
 			err = <-forked
 			assert.Error(err)
 			assert.Equal(tc.status, errors.StatusCode(err))

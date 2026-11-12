@@ -24,7 +24,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -115,7 +115,7 @@ func TestForkCohort_MultiStepBranchCountsBranchesNotMembers(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	sh, err := engineseams.DB(eng).Shard(1)
+	sh, err := accessors.DB(eng).Shard(1)
 	if !assert.NoError(err) {
 		return
 	}
@@ -202,7 +202,7 @@ func TestForkCohort_RewindMidBranchExcludesWholeBranch(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	sh, err := engineseams.DB(eng).Shard(1)
+	sh, err := accessors.DB(eng).Shard(1)
 	if !assert.NoError(err) {
 		return
 	}

@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -96,7 +96,7 @@ func TestPayloadVer_NewerFlowIsDeferredUnrun(t *testing.T) {
 	db, flowID, stepID := flowRows(t, e, fk)
 	setFlowPayloadVer(t, db, flowID, payloadVer+1)
 
-	dispatched := e.seams.Waiter(engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(stepID)))
+	dispatched := e.diags.Seams().Waiter(diagnostics.Join(diagnostics.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(stepID)))
 	assert.NoError(e.Resume(ctx, fk, nil))
 	select {
 	case <-dispatched:

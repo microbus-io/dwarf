@@ -31,7 +31,7 @@ and calls `Startup` itself.
   a name, so it cannot tell a benchmark from a test: **a benchmark or fuzz target silences the engine** with
   `SetLogger(slog.New(slog.DiscardHandler))` (`fixtures/benchmark_test.go`) - per-iteration logging otherwise
   dominates the measurement / floods the fuzz output. `SetLogger` before `Startup` takes over entirely.
-- **The janitors run their jobs only when a test drives them** - `engineseams.ArchiveNow`, or an engine test's
+- **The janitors run their jobs only when a test drives them** - `accessors.ArchiveNow`, or an engine test's
   `reapDueFlows` - never in the background, so a fixture that holds a closed or stamped tree in the live tables
   (a Delete, then a Fork expecting 409) is not raced by them. The reaper still ticks every 15 s.
 - **`DWARF_STAGE_ROWS=<n>` runs the suite with staged archival on**: every engine's Startup reads it into
@@ -157,7 +157,7 @@ way. Left unscaled on purpose: a negative wait ("nothing happens within
 and `go test`'s 10-minute default would kill a healthy but slow run instead of letting it fail cleanly.
 
 **A fixture holding thousands of due steps pins a 1s refill period under `-race`** (`enginetest.Race()` +
-`engineseams.SetRefillInterval`, as `TestWideflow` does). The race detector slows the pure-Go SQLite far more
+`accessors.SetRefillInterval`, as `TestWideflow` does). The race detector slows the pure-Go SQLite far more
 than Go code, so the band scan and fetch - O(due rows) each - outrun the derived ~67ms period and run back to
 back on the lock and core the workers need. Scope it to the fixture, never to every test-mode engine: the
 period is what `crossshardpriorityflow`'s reaction margin, the steal grace and `TestRefillInterval_*` pin.
@@ -233,7 +233,7 @@ what they stand in for is what decides whether one is a bug waiting to happen or
 For the last two, name the event instead:
 
 - **`enginetest.AwaitVisits(t, seams, n, timeout, checkpoint)`** - wait for N further arrivals at a
-  checkpoint (a targeted name comes from `engineseams.Join`). seamster's `Waiter` is one-shot
+  checkpoint (a targeted name comes from `diagnostics.Join`). seamster's `Waiter` is one-shot
   and `Visits` is monotonic, so N occurrences means re-arming per occurrence, arming BEFORE reading the
   count each time. Call it from the test goroutine: `t.Fatalf`
   inside a task handler kills the engine goroutine that would have driven the checkpoint, so the suite

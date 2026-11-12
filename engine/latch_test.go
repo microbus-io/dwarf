@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -343,7 +343,7 @@ func TestLatch_StalledShardHoldsOnlyItsOwnAwaiters(t *testing.T) {
 	}
 	awaited := map[int]chan result{}
 	for _, shard := range []int{1, 2} {
-		parked := e.seams.Waiter(engineseams.Join(engineseams.CheckpointAwaitParked, onShard[shard]))
+		parked := e.diags.Seams().Waiter(diagnostics.Join(diagnostics.CheckpointAwaitParked, onShard[shard]))
 		awaited[shard] = make(chan result, 1)
 		go func() {
 			out, err := e.Await(ctx, onShard[shard])
@@ -363,7 +363,7 @@ func TestLatch_StalledShardHoldsOnlyItsOwnAwaiters(t *testing.T) {
 	size := sh2.TurnLimit()
 	sh2.SetTurnLimit(0)
 	t.Cleanup(func() { sh2.SetTurnLimit(size) }) // before Shutdown, which runs later
-	e.seams.InjectN(engineseams.FaultDropSignalStop, 1<<20)
+	e.diags.Seams().InjectN(diagnostics.FaultDropSignalStop, 1<<20)
 	unblock()
 
 	select {

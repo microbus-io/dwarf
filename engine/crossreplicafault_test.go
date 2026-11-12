@@ -30,14 +30,14 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
 // TestCrossReplica_LostTerminalWake_AwaiterPolls pins that when the replica running a flow's final step
-// has its terminal wake dropped entirely (engineseams.FaultDropSignalStop), an Await on a *different* replica still
+// has its terminal wake dropped entirely (diagnostics.FaultDropSignalStop), an Await on a *different* replica still
 // returns. Nothing crosses between the two replicas here, so the awaiter can only learn of the stop by
 // reading the committed flow row. The cross-replica analog of TestFault_DropSignalStop.
 func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
@@ -81,7 +81,7 @@ func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
 	// Break the worker's terminal wake for the rest of the test: every signalStop on the worker delivers
 	// nothing, so the awaiter can learn the outcome only by reading the flow row. Nothing crosses between the
 	// two replicas in any case - they share a database and nothing else.
-	worker.seams.InjectN(engineseams.FaultDropSignalStop, 1<<20)
+	worker.diags.Seams().InjectN(diagnostics.FaultDropSignalStop, 1<<20)
 
 	fk, err := awaiter.Create(ctx, "xrwake/g", nil, nil)
 	if !assert.NoError(err) {
@@ -97,7 +97,7 @@ func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
 }
 
 // TestCrossReplica_ClaimedStepRecoveredByPeer pins cross-replica lease recovery: replica A claims and runs a
-// step but its completion write is fenced out (engineseams.FaultLeaseStaleWrite - a zombie/late write), leaving the step
+// step but its completion write is fenced out (diagnostics.FaultLeaseStaleWrite - a zombie/late write), leaving the step
 // `running` under A's lease; A then "crashes" (Shutdown). Replica B's lease recovery resets the expired lease
 // and re-dispatches the step to a clean completion. The task body runs on both replicas (execution is
 // at-least-once), but the persisted outcome is state-correct and the invariant sweep is clean - the property
@@ -137,7 +137,7 @@ func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
 	repA.leaseMargin = 100 * time.Millisecond // lease = budget+margin = 400ms
 	assert.Must(assert.NoError(repA.Startup(ctx)))
 
-	repA.seams.Inject(engineseams.Join(engineseams.FaultLeaseStaleWrite, "A"))
+	repA.diags.Seams().Inject(diagnostics.Join(diagnostics.FaultLeaseStaleWrite, "A"))
 	fk, err := repA.Create(ctx, "xrrec/g", nil, nil)
 	if !assert.NoError(err) {
 		return

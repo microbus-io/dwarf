@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -70,7 +70,7 @@ func TestSpawnResolve_ContentionIsAbsorbedWithoutReExecution(t *testing.T) {
 	var firstRuns atomic.Int32
 	e := spawnFailEngine(t, "srcont", &firstRuns)
 	defer e.Shutdown(ctx)
-	e.seams.InjectN(engineseams.Join(engineseams.FaultSpawnResolveContention, "Call"), 3)
+	e.diags.Seams().InjectN(diagnostics.Join(diagnostics.FaultSpawnResolveContention, "Call"), 3)
 
 	if out := enginetest.BoundedRun(t, e, "srcont/g"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
@@ -90,13 +90,13 @@ func TestSpawnResolveVsTerminate_Deterministic(t *testing.T) {
 	e := spawnFailEngine(t, "srterm", &firstRuns)
 	defer e.Shutdown(ctx)
 
-	e.seams.Break(engineseams.CheckpointBeforeSpawnResolve)
+	e.diags.Seams().Break(diagnostics.CheckpointBeforeSpawnResolve)
 	fk, err := e.Create(ctx, "srterm/g", nil, nil)
 	assert.Must(assert.NoError(err))
-	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeSpawnResolve, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeSpawnResolve")
+	assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeSpawnResolve, 10*time.Second), "engine never reached checkpoint diagnostics.CheckpointBeforeSpawnResolve")
 
 	assert.NoError(e.Terminate(ctx, fk, "test"))
-	e.seams.Resume(engineseams.CheckpointBeforeSpawnResolve)
+	e.diags.Seams().Resume(diagnostics.CheckpointBeforeSpawnResolve)
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusTerminated, 10*time.Second)
 
 	shardNum, _, flowID, _, err := keys.ParseFlowKey(fk)

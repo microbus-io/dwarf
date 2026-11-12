@@ -22,8 +22,8 @@ live tables it runs (as `internal/piston` does, borrowing its handle and partiti
 - **`Config` is built by the engine for every pass** from its fields, because tests change them on a running engine.
   Nothing in it is kept.
 - **`Residency` is the only callback into the engine**, re-read on every walk. Everything else comes in by value, and
-  the engine reads the state only through `Observe`. The package imports neither `engine` nor `engineseams`;
-  `engineseams` aliases the fault names, so an engine test arms the same strings.
+  the engine reads the state only through `Observe`. The package imports neither `engine` nor `diagnostics`;
+  `internal/diagnostics` names the same strings (an engine test pins them equal), so an engine test arms both.
 - **The engine keeps** the ticker, the per-shard turn, the `dispatchesOn` gate (and `Forget` when it fails),
   expiration after the pass, the gauges, `dwarf_flows_removed`, and Delete's key and status validation. The gauges
   stay there because they are gated on dispatching when read, while `Forget` runs only at the next pass.
@@ -375,4 +375,4 @@ Package tests run on a rig (`rig_test.go`): an isolated shard database through `
 today's tables made, enabled seams and a log counter. Trees are seeded by direct `INSERT` (`seedTrees`), as valid
 closed trees. The engine keeps the behaviour oracle - archived reads, Purge, Delete, DeleteOnCompletion, expiration,
 the archive metrics - and its own copy of the seeder, since this package's tests cannot import `internal/enginetest`
-(it reaches this package through `engineseams`).
+(it reaches this package through `internal/accessors`).

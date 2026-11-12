@@ -29,14 +29,15 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
-// The checkpoint rendezvous is engineseams.Seams(e).WaitTimeout; awaitFlowStatus (checkpointhelpers_test.go) is the
+// The checkpoint rendezvous is accessors.Seams(e).WaitTimeout; awaitFlowStatus (checkpointhelpers_test.go) is the
 // flow-status wait shared by every checkpoint-driven test.
 
 // TestCompleteFlowVsTerminate_BothOrders pins the completeFlow-vs-Terminate race in both directions. The window:
@@ -67,17 +68,17 @@ func TestCompleteFlowVsTerminate_BothOrders(t *testing.T) {
 		defer e.Shutdown(ctx)
 
 		// Freeze the worker just before completeFlow's transaction (A is already marked completed).
-		engineseams.Seams(e).Break(engineseams.CheckpointBeforeCompleteFlowWrite)
+		accessors.Seams(e).Break(diagnostics.CheckpointBeforeCompleteFlowWrite)
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)
-		assert.True(engineseams.Seams(e).WaitTimeout(ctx, engineseams.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeCompleteFlowWrite")
+		assert.True(accessors.Seams(e).WaitTimeout(ctx, diagnostics.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "engine never reached checkpoint diagnostics.CheckpointBeforeCompleteFlowWrite")
 
 		// Terminate wins while completion is held: the flow goes terminated under the flow-row lock.
 		assert.NoError(e.Terminate(ctx, fk, "test"))
 
 		// Release completion: its status-gate write (status NOT IN terminal) matches zero rows - a clean no-op,
 		// the flow stays terminated.
-		engineseams.Seams(e).Resume(engineseams.CheckpointBeforeCompleteFlowWrite)
+		accessors.Seams(e).Resume(diagnostics.CheckpointBeforeCompleteFlowWrite)
 		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusTerminated, 10*time.Second)
 		assert.Equal(workflow.StatusTerminated, enginetest.FlowStatus(t, e, fk))
 		enginetest.AssertInvariants(t, e)
@@ -90,11 +91,11 @@ func TestCompleteFlowVsTerminate_BothOrders(t *testing.T) {
 		defer e.Shutdown(ctx)
 
 		// Freeze at the same window, then release completion FIRST so the flow completes.
-		engineseams.Seams(e).Break(engineseams.CheckpointBeforeCompleteFlowWrite)
+		accessors.Seams(e).Break(diagnostics.CheckpointBeforeCompleteFlowWrite)
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)
-		assert.True(engineseams.Seams(e).WaitTimeout(ctx, engineseams.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeCompleteFlowWrite")
-		engineseams.Seams(e).Resume(engineseams.CheckpointBeforeCompleteFlowWrite)
+		assert.True(accessors.Seams(e).WaitTimeout(ctx, diagnostics.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "engine never reached checkpoint diagnostics.CheckpointBeforeCompleteFlowWrite")
+		accessors.Seams(e).Resume(diagnostics.CheckpointBeforeCompleteFlowWrite)
 		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
 
 		// Terminate now arrives on a closed flow: a no-op, and the flow stays completed.
@@ -179,7 +180,7 @@ func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 	assert.NoError(err)
 	shard, _, parentFlowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	sh, err := engineseams.DB(e).Shard(shard)
+	sh, err := accessors.DB(e).Shard(shard)
 	assert.Must(assert.NoError(err))
 	db := sh.DB()
 

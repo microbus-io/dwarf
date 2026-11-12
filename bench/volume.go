@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -484,10 +484,10 @@ func rowCounts(ctx context.Context, eng *engine.Engine, archive bool) (steps, fl
 	sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	var mu sync.Mutex
-	err = engineseams.DB(eng).OnEach(sctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+	err = accessors.DB(eng).OnEach(sctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		tables := [][2]string{{"dwarf_steps", "dwarf_flows"}}
 		if archive {
-			days, err := engineseams.ArchiveDays(eng, ctx, shard)
+			days, err := accessors.ArchiveDays(eng, ctx, shard)
 			if err != nil {
 				return err
 			}

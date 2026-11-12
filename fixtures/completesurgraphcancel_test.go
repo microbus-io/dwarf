@@ -23,7 +23,8 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -32,7 +33,7 @@ import (
 
 // TestCompleteSurgraph_vs_TerminateRoot_BothOrders is the subgraph-child variant of
 // TestCompleteFlowVsTerminate_BothOrders (which raced a top-level completeFlow against Terminate). Here the flow
-// completing at engineseams.CheckpointBeforeCompleteFlowWrite is a subgraph CHILD, so its completion additionally drives
+// completing at diagnostics.CheckpointBeforeCompleteFlowWrite is a subgraph CHILD, so its completion additionally drives
 // completeSurgraphFlow's revive of the parked caller - and the racing Terminate is a whole-tree teardown from the
 // root. The window: the child's terminal step is already marked completed and completeFlow is about to flip the
 // child flow to completed (which would then revive the caller) when a Terminate(root) arrives.
@@ -96,7 +97,7 @@ func TestCompleteSurgraph_vs_TerminateRoot_BothOrders(t *testing.T) {
 		assert := testarossa.For(t)
 		shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 		assert.NoError(err)
-		sh, err := engineseams.DB(e).Shard(shard)
+		sh, err := accessors.DB(e).Shard(shard)
 		assert.Must(assert.NoError(err))
 		db := sh.DB()
 		var s string
@@ -115,14 +116,14 @@ func TestCompleteSurgraph_vs_TerminateRoot_BothOrders(t *testing.T) {
 
 		// Freeze the child's worker just before its completeFlow transaction (X is already marked completed, the
 		// caller is running+parkedSubgraph).
-		engineseams.Seams(e).Break(engineseams.CheckpointBeforeCompleteFlowWrite)
+		accessors.Seams(e).Break(diagnostics.CheckpointBeforeCompleteFlowWrite)
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)
-		assert.True(engineseams.Seams(e).WaitTimeout(ctx, engineseams.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeCompleteFlowWrite")
+		assert.True(accessors.Seams(e).WaitTimeout(ctx, diagnostics.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "engine never reached checkpoint diagnostics.CheckpointBeforeCompleteFlowWrite")
 
 		// Release completion FIRST: the child completes and completeSurgraphFlow revives the caller, which
 		// re-dispatches and blocks (running).
-		engineseams.Seams(e).Resume(engineseams.CheckpointBeforeCompleteFlowWrite)
+		accessors.Seams(e).Resume(diagnostics.CheckpointBeforeCompleteFlowWrite)
 		select {
 		case <-callResumed:
 		case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
@@ -149,10 +150,10 @@ func TestCompleteSurgraph_vs_TerminateRoot_BothOrders(t *testing.T) {
 		defer close(callBlock)
 
 		// Freeze the child at the same window.
-		engineseams.Seams(e).Break(engineseams.CheckpointBeforeCompleteFlowWrite)
+		accessors.Seams(e).Break(diagnostics.CheckpointBeforeCompleteFlowWrite)
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)
-		assert.True(engineseams.Seams(e).WaitTimeout(ctx, engineseams.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeCompleteFlowWrite")
+		assert.True(accessors.Seams(e).WaitTimeout(ctx, diagnostics.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "engine never reached checkpoint diagnostics.CheckpointBeforeCompleteFlowWrite")
 
 		// Terminate wins while the child's completion is held: the whole tree (root, its parked Call caller, and the
 		// still-running child) is terminalized under the terminate transaction.
@@ -162,7 +163,7 @@ func TestCompleteSurgraph_vs_TerminateRoot_BothOrders(t *testing.T) {
 		// Release completion: the child's status-gate (status NOT IN terminal) matches zero rows - a clean no-op.
 		// completeFlow returns completed=false, so completeSurgraphFlow never runs and the terminated caller is not
 		// resurrected to pending.
-		engineseams.Seams(e).Resume(engineseams.CheckpointBeforeCompleteFlowWrite)
+		accessors.Seams(e).Resume(diagnostics.CheckpointBeforeCompleteFlowWrite)
 
 		// Confirm nothing revived the caller: the flow stays terminated, the caller stays terminated, and no
 		// orphan/wedge shape was created. Two pushing cycles close the window rather than a duration - a

@@ -25,7 +25,7 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/database"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/migrations"
@@ -300,12 +300,12 @@ func TestPublished_ADeleteRacingAPublication(t *testing.T) {
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
 	rootKey, _, _, _ := treeKeys(t, e)
-	e.seams.Break(engineseams.CheckpointBeforeDeleteStamp)
+	e.diags.Seams().Break(diagnostics.CheckpointBeforeDeleteStamp)
 	deleted := make(chan error, 1)
 	go func() { deleted <- e.Delete(ctx, rootKey) }()
-	assert.Must(assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeDeleteStamp, 10*time.Second*enginetest.TimeoutScale())))
+	assert.Must(assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeDeleteStamp, 10*time.Second*enginetest.TimeoutScale())))
 	day := publish(t, e, rootKey, time.Now())
-	e.seams.Resume(engineseams.CheckpointBeforeDeleteStamp)
+	e.diags.Seams().Resume(diagnostics.CheckpointBeforeDeleteStamp)
 	assert.NoError(<-deleted)
 	assert.True(archiveMark(t, e, rootKey, day) > 0, "the archive's copy is marked")
 	assert.True(attemptCleared(t, e, rootKey))
@@ -323,10 +323,10 @@ func TestPublished_ADeleteRacingTheLiveCleanup(t *testing.T) {
 	rootKey, childKey, _, _ := treeKeys(t, e)
 	_, _, rootID, _, _ := keys.ParseFlowKey(rootKey)
 	publish(t, e, rootKey, time.Now())
-	e.seams.Break(engineseams.CheckpointBeforeDeleteStamp)
+	e.diags.Seams().Break(diagnostics.CheckpointBeforeDeleteStamp)
 	deleted := make(chan error, 1)
 	go func() { deleted <- e.Delete(ctx, rootKey) }()
-	assert.Must(assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeDeleteStamp, 10*time.Second*enginetest.TimeoutScale())))
+	assert.Must(assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeDeleteStamp, 10*time.Second*enginetest.TimeoutScale())))
 	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	db := sh.DB()
@@ -337,7 +337,7 @@ func TestPublished_ADeleteRacingTheLiveCleanup(t *testing.T) {
 		_, err := db.ExecContext(ctx, stmt, rootID)
 		assert.Must(assert.NoError(err))
 	}
-	e.seams.Resume(engineseams.CheckpointBeforeDeleteStamp)
+	e.diags.Seams().Resume(diagnostics.CheckpointBeforeDeleteStamp)
 	assert.NoError(<-deleted)
 	assert.Zero(closedListed(t, e), "the archive's copy is gone")
 	_, err = e.Summary(ctx, childKey)
@@ -367,13 +367,13 @@ func TestStaged_ATreeArchivedInStagesReadsAsOne(t *testing.T) {
 		}
 		return n
 	}
-	e.seams.Break(engineseams.CheckpointReapStageChunkDone)
+	e.diags.Seams().Break(diagnostics.CheckpointReapStageChunkDone)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		e.reapDueFlows(ctx)
 	}()
-	assert.Must(assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointReapStageChunkDone, 10*time.Second*enginetest.TimeoutScale())))
+	assert.Must(assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointReapStageChunkDone, 10*time.Second*enginetest.TimeoutScale())))
 	assert.Zero(listed(), "nothing listed as archived mid-copy")
 	_, err := e.History(ctx, rootKey)
 	assert.NoError(err, "the live tree reads mid-copy")
@@ -387,7 +387,7 @@ func TestStaged_ATreeArchivedInStagesReadsAsOne(t *testing.T) {
 		_, err = e.Await(ctx, forkKey)
 		assert.NoError(err)
 	}
-	e.seams.Resume(engineseams.CheckpointReapStageChunkDone)
+	e.diags.Seams().Resume(diagnostics.CheckpointReapStageChunkDone)
 	<-done
 
 	reads := func(when string) {
@@ -442,10 +442,10 @@ func TestStaged_APurgeDuringTheLiveCleanup(t *testing.T) {
 		return n
 	}
 	// The live cleanup's chunks fail, so the published tree's live copy is still there.
-	cleanup := engineseams.FaultReapMidTree + ":" + strconv.Itoa(rootID)
-	e.seams.InjectN(cleanup, 1000)
+	cleanup := diagnostics.FaultReapMidTree + ":" + strconv.Itoa(rootID)
+	e.diags.Seams().InjectN(cleanup, 1000)
 	e.reapDueFlows(ctx)
-	e.seams.Withdraw(cleanup)
+	e.diags.Seams().Withdraw(cleanup)
 	assert.Must(assert.True(liveFlows() > 0, "the live copy still there"))
 
 	removed, _, err := e.Purge(ctx, enginetest.Recent(workflow.Query{}))
@@ -478,17 +478,17 @@ func TestStaged_TheFingerprintHoldsThroughTheLiveCleanup(t *testing.T) {
 	before, _, err := e.Fingerprint(ctx, rootKey)
 	assert.Must(assert.NoError(err))
 
-	e.seams.Break(engineseams.CheckpointReapChunkDone) // the live cleanup stops after its first chunk
+	e.diags.Seams().Break(diagnostics.CheckpointReapChunkDone) // the live cleanup stops after its first chunk
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		e.reapDueFlows(ctx)
 	}()
-	assert.Must(assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointReapChunkDone, 10*time.Second*enginetest.TimeoutScale())))
+	assert.Must(assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointReapChunkDone, 10*time.Second*enginetest.TimeoutScale())))
 	during, _, err := e.Fingerprint(ctx, rootKey)
 	assert.NoError(err)
 	assert.Equal(before, during, "part of the live copy deleted")
-	e.seams.Resume(engineseams.CheckpointReapChunkDone)
+	e.diags.Seams().Resume(diagnostics.CheckpointReapChunkDone)
 	<-done
 	after, _, err := e.Fingerprint(ctx, rootKey)
 	assert.NoError(err)

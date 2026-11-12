@@ -23,7 +23,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -260,7 +260,7 @@ func startWideflow(t *testing.T, eng *engine.Engine) {
 	// derived ~67ms period both loops run back to back on the lock and core the workers need: a subtest spent 57%
 	// of its CPU there against 5.5% executing steps. A 1s period leaves the workers the database.
 	if enginetest.Race() {
-		assert.NoError(engineseams.SetRefillInterval(eng, time.Second))
+		assert.NoError(accessors.SetRefillInterval(eng, time.Second))
 	}
 	if !assert.NoError(eng.Startup(t.Context())) {
 		t.FailNow()

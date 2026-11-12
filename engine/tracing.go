@@ -37,12 +37,18 @@ const traceScope = metricScope
 // Stateless, so a package-level value is safe to share.
 var traceProp = propagation.TraceContext{}
 
-// initTracer resolves the provider for this run, sets the engine's tracer from it, and returns it for the
-// shards' sequel layer. Called from Startup before the shards open.
-func (e *Engine) initTracer() trace.TracerProvider {
+// initProviders resolves the tracer and meter providers for this run into diags - the configured ones, else the
+// global ones - and sets the engine's tracer from the tracer provider. Called from Startup before the shards open,
+// whose sequel layer instruments itself with both.
+func (e *Engine) initProviders() {
 	tp := resolveTracerProvider(e.tracerProvider, otel.GetTracerProvider())
-	e.tracer = tp.Tracer(traceScope)
-	return tp
+	e.diags.SetTracerProvider(tp)
+	e.diags.SetTracer(tp.Tracer(traceScope))
+	mp := e.meterProvider
+	if mp == nil {
+		mp = otel.GetMeterProvider()
+	}
+	e.diags.SetMeterProvider(mp)
 }
 
 // otelStandInPkg and otelStandInType name OTel's global stand-in provider: what otel.GetTracerProvider()
@@ -98,7 +104,7 @@ func (e *Engine) mintWorkflowSpan(ctx context.Context, workflowURL, parentTraceP
 	} else {
 		ctx = injectTraceParent(ctx, parentTraceParent)
 	}
-	flowCtx, span := e.tracer.Start(ctx, "workflow",
+	flowCtx, span := e.diags.Tracer().Start(ctx, "workflow",
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(attribute.String("workflow.name", workflowURL)),
 	)

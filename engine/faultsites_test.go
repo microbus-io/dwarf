@@ -29,7 +29,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -50,7 +50,7 @@ func orphanShapeCount(t *testing.T, e *Engine, shard int) int {
 // TestFaultSite_RecoveryResetErr pins the one fault outcome the recovery defer cannot heal, and its repair. The
 // transition transaction exhausts its lock-contention retries - contention is the one failure persist hands to the
 // defer rather than retrying in place - and the defer's own completed->pending reset then fails too
-// (engineseams.FaultRecoveryResetErr). A is left `completed` with advancing=1 on a `running` flow and no worker holds it: the
+// (diagnostics.FaultRecoveryResetErr). A is left `completed` with advancing=1 on a `running` flow and no worker holds it: the
 // shape a worker that died in that window leaves. Once A's lease lapses, the orphan sweep rewinds
 // it, dispatch replays it, and the flow completes - with A's task having run exactly once.
 func TestFaultSite_RecoveryResetErr(t *testing.T) {
@@ -76,8 +76,8 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 
 	// InjectN(8) is one full round of Transact's retries (transactMaxAttempts), so the transition gives up with a
 	// contention error; the reset fault fires once on the defer that follows.
-	e.seams.InjectN(engineseams.Join(engineseams.FaultContention, "A"), 8)
-	e.seams.Inject(engineseams.FaultRecoveryResetErr)
+	e.diags.Seams().InjectN(diagnostics.Join(diagnostics.FaultContention, "A"), 8)
+	e.diags.Seams().Inject(diagnostics.FaultRecoveryResetErr)
 	fk, err := e.Create(ctx, "ftbreset/g", nil, nil)
 	assert.NoError(err)
 	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
@@ -96,8 +96,8 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 	// and push twice: nothing else may move the step, since lease recovery never touches a completed one.
 	var aStepID int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStepID))
-	enginetest.AwaitVisitCount(t, e.seams, 1, 15*time.Second,
-		engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(aStepID)))
+	enginetest.AwaitVisitCount(t, e.diags.Seams(), 1, 15*time.Second,
+		diagnostics.Join(diagnostics.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(aStepID)))
 	enginetest.AwaitShardCycles(t, e, 2)
 	assert.True(stranded(), "expected A completed and flagged, alone on a running flow, until the sweep runs")
 	assert.Equal(int32(1), runsA.Load())
@@ -159,12 +159,12 @@ func TestFaultSite_SubgraphSpawnErr(t *testing.T) {
 	if !assert.NoError(e.Startup(t.Context())) {
 		return
 	}
-	spawnFault := engineseams.Join(engineseams.FaultSubgraphSpawnErr, "ftbspawn/child")
+	spawnFault := diagnostics.Join(diagnostics.FaultSubgraphSpawnErr, "ftbspawn/child")
 
 	t.Run("transient", func(t *testing.T) {
 		assert := testarossa.For(t)
 		calls.Store(0)
-		e.seams.Inject(spawnFault)
+		e.diags.Seams().Inject(spawnFault)
 		_, out := batteryRun(t, e, "ftbspawn/parent")
 		assert.Equal(workflow.StatusCompleted, out.Status)
 		// Once to spawn, once on the child's return. A third run is the task re-executed for a failed spawn.
@@ -182,18 +182,18 @@ func TestFaultSite_SubgraphSpawnErr(t *testing.T) {
 		gate := make(chan struct{})
 		childGate.Store(&gate)
 		defer childGate.Store(nil)
-		base := e.seams.Visits(engineseams.CheckpointClaimedDispatchDone)
+		base := e.diags.Seams().Visits(diagnostics.CheckpointClaimedDispatchDone)
 		go func() {
 			for {
-				reached := e.seams.Waiter(engineseams.CheckpointClaimedDispatchDone)
-				if e.seams.Visits(engineseams.CheckpointClaimedDispatchDone) > base {
+				reached := e.diags.Seams().Waiter(diagnostics.CheckpointClaimedDispatchDone)
+				if e.diags.Seams().Visits(diagnostics.CheckpointClaimedDispatchDone) > base {
 					close(gate)
 					return
 				}
 				<-reached
 			}
 		}()
-		e.seams.Inject(engineseams.Join(engineseams.FaultSubgraphSpawnCommitLost, "ftbspawn/child"))
+		e.diags.Seams().Inject(diagnostics.Join(diagnostics.FaultSubgraphSpawnCommitLost, "ftbspawn/child"))
 		fk, out := batteryRun(t, e, "ftbspawn/parent")
 		assert.Equal(workflow.StatusCompleted, out.Status)
 		assert.Equal(int32(2), calls.Load(), "the caller's task ran again instead of its spawn being recognized as landed")
@@ -206,8 +206,8 @@ func TestFaultSite_SubgraphSpawnErr(t *testing.T) {
 
 	t.Run("persistent", func(t *testing.T) {
 		assert := testarossa.For(t)
-		e.seams.InjectN(spawnFault, math.MaxInt)
-		defer e.seams.Withdraw(spawnFault)
+		e.diags.Seams().InjectN(spawnFault, math.MaxInt)
+		defer e.diags.Seams().Withdraw(spawnFault)
 		fk, out := batteryRun(t, e, "ftbspawn/parent")
 		assert.Equal(workflow.StatusFailed, out.Status)
 		shard, _, flowID, _, err := keys.ParseFlowKey(fk)
@@ -270,7 +270,7 @@ func TestFaultSite_TerminateCommit(t *testing.T) {
 	assert.NoError(err)
 
 	// The Terminate transaction fails once: Terminate errors and nothing changed (still interrupted).
-	e.seams.Inject(engineseams.FaultTerminateCommit)
+	e.diags.Seams().Inject(diagnostics.FaultTerminateCommit)
 	err = e.Terminate(ctx, fk, "boom")
 	assert.Error(err)
 	assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'", flowID))
@@ -301,7 +301,7 @@ func TestFaultSite_ResumeCommit(t *testing.T) {
 	assert.NoError(err)
 
 	// The Resume transaction fails once: Resume errors and the flow is still interrupted (leaf still parked).
-	e.seams.Inject(engineseams.FaultResumeCommit)
+	e.diags.Seams().Inject(diagnostics.FaultResumeCommit)
 	err = e.Resume(ctx, fk, nil)
 	assert.Error(err)
 	assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'", flowID))
@@ -341,7 +341,7 @@ func TestFaultSite_ForkCommit(t *testing.T) {
 	forkStepKey := keys.NewStepKey(shard, aStepHour, flowID, aStepID, aStepToken)
 
 	// The clone transaction fails once: Fork errors, the origin is byte-identical, and no clone rows exist.
-	e.seams.Inject(engineseams.FaultForkCommit)
+	e.diags.Seams().Inject(diagnostics.FaultForkCommit)
 	_, err = e.Fork(ctx, forkStepKey, nil)
 	assert.Error(err)
 	assert.Equal(originFS, readFinalState(t, e, originKey), "origin final_state mutated by a rolled-back Fork")
@@ -389,7 +389,7 @@ func TestFaultSite_DeliverFailureErr(t *testing.T) {
 
 	// The child fails, but its re-dispatch of the parked caller is lost: the caller wedges running+parkedSubgraph
 	// with a terminal (failed) child.
-	e.seams.Inject(engineseams.FaultDeliverFailureErr)
+	e.diags.Seams().Inject(diagnostics.FaultDeliverFailureErr)
 	fk, err := e.Create(ctx, "ftbdeliver/parent", nil, nil)
 	assert.NoError(err)
 	shard, _, _, _, err := keys.ParseFlowKey(fk)
@@ -468,8 +468,8 @@ func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
 
 	// Drop each level's FIRST failure-delivery independently (scoped by the parked caller's task name). Each
 	// caller's sweep-driven re-delivery (the second consult of its scope) succeeds, so the sweep can recover it.
-	e.seams.Inject(engineseams.Join(engineseams.FaultDeliverFailureErr, "Call2"))
-	e.seams.Inject(engineseams.Join(engineseams.FaultDeliverFailureErr, "Call1"))
+	e.diags.Seams().Inject(diagnostics.Join(diagnostics.FaultDeliverFailureErr, "Call2"))
+	e.diags.Seams().Inject(diagnostics.Join(diagnostics.FaultDeliverFailureErr, "Call1"))
 	fk, err := e.Create(ctx, "ftbdeep/root", nil, nil)
 	assert.NoError(err)
 	shard, _, rootFlowID, _, err := keys.ParseFlowKey(fk)
@@ -507,7 +507,7 @@ func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
 }
 
 // TestFaultSite_ReapSelectErr pins the reaper's resilience to a transient due-root SELECT failure (sibling to
-// engineseams.FaultReapMidTree, which covers the delete half): the pass logs and bails without deleting, and the NEXT
+// diagnostics.FaultReapMidTree, which covers the delete half): the pass logs and bails without deleting, and the NEXT
 // pass reaps cleanly.
 func TestFaultSite_ReapSelectErr(t *testing.T) {
 	t.Parallel()
@@ -534,12 +534,12 @@ func TestFaultSite_ReapSelectErr(t *testing.T) {
 	time.Sleep(5 * time.Millisecond) // let the 1ms window elapse
 
 	// The due-root SELECT errors: the pass bails without deleting, so the flow is still present.
-	e.seams.InjectN(engineseams.FaultReapSelectErr, 1000)
+	e.diags.Seams().InjectN(diagnostics.FaultReapSelectErr, 1000)
 	e.reapDueFlows(ctx)
 	assert.Equal(1, shardFlowCount(t, e, shard)) // not deleted - the scan bailed
 
 	// The next pass after the fault clears reaps cleanly.
-	e.seams.Withdraw(engineseams.FaultReapSelectErr)
+	e.diags.Seams().Withdraw(diagnostics.FaultReapSelectErr)
 	e.reapDueFlows(ctx)
 	assert.Equal(0, shardFlowCount(t, e, shard))
 }
@@ -569,7 +569,7 @@ func TestFaultSite_RetryRewindErr(t *testing.T) {
 	reader := withManualReader(e)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
-	e.seams.Inject(engineseams.Join(engineseams.FaultRetryRewindErr, "Work"))
+	e.diags.Seams().Inject(diagnostics.Join(diagnostics.FaultRetryRewindErr, "Work"))
 	_, out := batteryRun(t, e, "ftbretry/g")
 	assert.Equal(workflow.StatusCompleted, out.Status)
 	assert.Equal(int32(2), calls.Load(), "one attempt that retried, one that completed")
@@ -600,8 +600,8 @@ func TestFaultSite_InterruptWriteRetried(t *testing.T) {
 	e.persistBackoff = []time.Duration{time.Millisecond}
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
-	e.seams.Inject(engineseams.FaultInterruptChainWrite)
-	defer e.seams.Withdraw(engineseams.FaultInterruptChainWrite)
+	e.diags.Seams().Inject(diagnostics.FaultInterruptChainWrite)
+	defer e.diags.Seams().Withdraw(diagnostics.FaultInterruptChainWrite)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	fk, err := e.Create(ctx, "ftbintr/g", nil, nil)
@@ -625,7 +625,7 @@ func TestFaultSite_InitRuntimeFailureLeavesTheFleet(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	assert.NoError(e.SetHost(noopHost{}))
-	e.seams.Inject(engineseams.FaultInitRuntime)
+	e.diags.Seams().Inject(diagnostics.FaultInitRuntime)
 	assert.Error(e.Startup(ctx))
 	assert.False(e.started.Load())
 	assert.Equal(0, e.db.NumShards(), "the shards were left open")
@@ -691,18 +691,18 @@ func TestFaultSite_FailFlowFinalStateErr(t *testing.T) {
 	for _, tc := range []struct{ name, url string }{{"trunk", "ftbfinal/trunk"}, {"cohort", "ftbfinal/fan"}} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert := testarossa.For(t)
-			e.seams.Inject(engineseams.FaultFailFlowFinalState)
-			defer e.seams.Withdraw(engineseams.FaultFailFlowFinalState)
+			e.diags.Seams().Inject(diagnostics.FaultFailFlowFinalState)
+			defer e.diags.Seams().Withdraw(diagnostics.FaultFailFlowFinalState)
 			if tc.name == "cohort" {
 				// Release "good" once two claimed dispatches have returned: Split's, then the failed "bad" branch's.
 				gate := make(chan struct{})
 				goodGate.Store(&gate)
 				defer goodGate.Store(nil)
-				base := e.seams.Visits(engineseams.CheckpointClaimedDispatchDone)
+				base := e.diags.Seams().Visits(diagnostics.CheckpointClaimedDispatchDone)
 				go func() {
 					for {
-						reached := e.seams.Waiter(engineseams.CheckpointClaimedDispatchDone)
-						if e.seams.Visits(engineseams.CheckpointClaimedDispatchDone) >= base+2 {
+						reached := e.diags.Seams().Waiter(diagnostics.CheckpointClaimedDispatchDone)
+						if e.diags.Seams().Visits(diagnostics.CheckpointClaimedDispatchDone) >= base+2 {
 							close(gate)
 							return
 						}

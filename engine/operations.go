@@ -30,7 +30,7 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/candidates"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/graphcache"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/latch"
@@ -100,8 +100,8 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 		graph, lerr = e.host.LoadGraph(loaderCtx, workflowURL)
 		return lerr
 	})
-	if err == nil && e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultLoadGraph, workflowURL)) {
-		err = errors.New("injected fault: "+engineseams.FaultLoadGraph+" "+workflowURL, http.StatusInternalServerError)
+	if err == nil && e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultLoadGraph, workflowURL)) {
+		err = errors.New("injected fault: "+diagnostics.FaultLoadGraph+" "+workflowURL, http.StatusInternalServerError)
 	}
 	if err != nil {
 		return "", errors.Trace(err)
@@ -172,7 +172,7 @@ type flowSeed struct {
 // claimable) - the shared write-half of every creation path, run inside the caller's transaction. Returns the
 // new flow and step ids. createWithGraph and continueFlow each wrap it in a bare transaction, so they share
 // exactly one copy of the insert SQL.
-func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, newStepID int64, newFlowHour int, err error) {
+func (e *Engine) insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, newStepID int64, newFlowHour int, err error) {
 	// root_flow_id is the denormalized tree-membership index: a top-level flow is its own root; a subgraph child
 	// inherits the parent's. Written once here, immutable thereafter, so a whole tree is reachable by
 	// `WHERE root_flow_id=?` without a recursive surgraph walk. A known root is bound; a new root's is a "self"
@@ -216,6 +216,7 @@ func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, ne
 	if fixup != "" {
 		// Only where the INSERT could not name its own id, which insertedID has therefore already read.
 		batch.queue(execOnly, fixup, selfFlowFixupArgs(newFlowID, len(self))...)
+		e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointFlowSelfFixup)
 	}
 	if s.surgraphStepID != 0 {
 		// A subgraph child names itself as the owner of its caller's park, which the spawn's park hook wrote earlier
@@ -371,10 +372,10 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 			if err := beforeInsert(tx); err != nil {
 				return err
 			}
-			e.seams.Checkpoint(ctx, engineseams.CheckpointSubgraphSpawnParked)
+			e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointSubgraphSpawnParked)
 		}
 		var err error
-		newFlowID, newStepID, newFlowHour, err = insertFlowTx(ctx, tx, seed)
+		newFlowID, newStepID, newFlowHour, err = e.insertFlowTx(ctx, tx, seed)
 		return err
 	})
 	if err != nil {
@@ -390,7 +391,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 			e.graphs.Point(graphcache.Key{Shard: shardNum, FlowID: int(newFlowID), Token: flowToken}, cg)
 		}
 	}
-	e.logger.DebugContext(ctx, "Flow created and started", "workflow", workflowURL, "task", entryPoint)
+	e.diags.Logger().DebugContext(ctx, "Flow created and started", "workflow", workflowURL, "task", entryPoint)
 	e.metricFlowStarted(ctx, workflowURL, opts.Priority, shardNum)
 	// The entry step's initial-state snapshot, written by insertFlowTx above.
 	e.metricStateWriteBytes(ctx, workflowURL, "state", len(seed.stateJSON))
@@ -620,8 +621,8 @@ func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 		}
 		// Test rendezvous: released, about to read. Holding a caller here is how a test makes the read straddle
 		// its deadline.
-		if e.seams.Enabled() { // Enabled gates the assembled name in production
-			e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointAwaitReleased, flowKey))
+		if e.diags.Seams().Enabled() { // Enabled gates the assembled name in production
+			e.diags.Seams().Checkpoint(ctx, diagnostics.Join(diagnostics.CheckpointAwaitReleased, flowKey))
 		}
 		next, err := e.snapshot(ctx, flowKey)
 		if err != nil {
@@ -654,14 +655,14 @@ func (e *Engine) signalStop(ctx context.Context, flowKey string, status string) 
 	// specific status. Placed before the drop-fault below so both fire even when the wake itself is dropped - a
 	// test waiting on "the flow stopped" should observe the DB-committed stop regardless of wake delivery.
 	// Inert in production: the Enabled gate short-circuits before the scoped name is built.
-	if e.seams.Enabled() { // Enabled gates the assembled name in production
-		e.seams.Checkpoint(ctx, engineseams.CheckpointFlowStopped)
-		e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowStopped, flowKey, status))
+	if e.diags.Seams().Enabled() { // Enabled gates the assembled name in production
+		e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointFlowStopped)
+		e.diags.Seams().Checkpoint(ctx, diagnostics.Join(diagnostics.CheckpointFlowStopped, flowKey, status))
 	}
-	// engineseams.FaultDropSignalStop simulates a lost terminal wake - a worker crash between the commit and the
+	// diagnostics.FaultDropSignalStop simulates a lost terminal wake - a worker crash between the commit and the
 	// signal - so a test can prove Await still returns without one, via the latch detector reading the
 	// committed row.
-	if e.seams.IsFault(engineseams.FaultDropSignalStop) {
+	if e.diags.Seams().IsFault(diagnostics.FaultDropSignalStop) {
 		return
 	}
 	// Guarded, not merely documented: a release is a promise that the flow reached a stop. A non-stopped status
@@ -699,9 +700,9 @@ func (e *Engine) signalStop(ctx context.Context, flowKey string, status string) 
 // revive, resume, fork's leaf, the wedge sweep - where that value is not in hand; the hot paths use
 // enqueueStepDue instead and skip the lookup.
 func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
-	// engineseams.FaultDropDoorbell simulates a lost work doorbell so a test can prove the pending step is still picked
+	// diagnostics.FaultDropDoorbell simulates a lost work doorbell so a test can prove the pending step is still picked
 	// up by a later refiller scan rather than stranding.
-	if e.seams.IsFault(engineseams.FaultDropDoorbell) {
+	if e.diags.Seams().IsFault(diagnostics.FaultDropDoorbell) {
 		return
 	}
 	// Every caller of this cold path is RE-offering a step this replica already dispatched once - a revived
@@ -729,14 +730,14 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 		// Not due yet: nothing to preempt, so leave the cache untouched. Nothing is scheduled either - the
 		// step's own not_before makes it invisible to selection until it comes due, and visible to the
 		// next cycle after that.
-		e.logger.DebugContext(ctx, "Doorbell deferred", "stepID", stepID, "delayMs", notBeforeDelayMs.Float64)
+		e.diags.Logger().DebugContext(ctx, "Doorbell deferred", "stepID", stepID, "delayMs", notBeforeDelayMs.Float64)
 		return
 	}
 	admitted := e.cache.Offer(candidates.Job{StepID: stepID, Shard: shard}, priority)
 	if admitted {
 		e.metricStepOffered(ctx)
 	}
-	e.logger.DebugContext(ctx, "Doorbell", "stepID", stepID, "priority", priority, "admitted", admitted)
+	e.diags.Logger().DebugContext(ctx, "Doorbell", "stepID", stepID, "priority", priority, "admitted", admitted)
 }
 
 // enqueueStepDue is the fast-path doorbell for a step the caller just created or reset for immediate
@@ -745,8 +746,8 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 // replica just wrote. Use it only where due-ness is certain (the caller's own sleep/not_before branch
 // already diverged) and the priority is the value just bound into the INSERT/reset.
 func (e *Engine) enqueueStepDue(ctx context.Context, shard, stepID, priority int) {
-	// engineseams.FaultDropDoorbell: see enqueueStep.
-	if e.seams.IsFault(engineseams.FaultDropDoorbell) {
+	// diagnostics.FaultDropDoorbell: see enqueueStep.
+	if e.diags.Seams().IsFault(diagnostics.FaultDropDoorbell) {
 		return
 	}
 	// ONLY A DISPATCHER MAY RING ITS OWN BELL. The cache admits a step for any shard, and whoever pops it
@@ -760,7 +761,7 @@ func (e *Engine) enqueueStepDue(ctx context.Context, shard, stepID, priority int
 	if admitted {
 		e.metricStepOffered(ctx)
 	}
-	e.logger.DebugContext(ctx, "Doorbell (due)", "stepID", stepID, "priority", priority, "admitted", admitted)
+	e.diags.Logger().DebugContext(ctx, "Doorbell (due)", "stepID", stepID, "priority", priority, "admitted", admitted)
 }
 
 // maxReasonBytes bounds a Terminate or Cancel reason. A reason is copied into every step a Cancel covers, as that
@@ -825,7 +826,7 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 
 	// The root has no ancestors by construction, so this walks DOWN only - see terminateSubtree, which the orphan
 	// sweep shares.
-	_, err = e.terminateSubtree(ctx, shardNum, flowID, flowHour, flowToken, reason, engineseams.FaultTerminateCommit)
+	_, err = e.terminateSubtree(ctx, shardNum, flowID, flowHour, flowToken, reason, diagnostics.FaultTerminateCommit)
 	return errors.Trace(err)
 }
 
@@ -906,8 +907,8 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	}
 	// Ascending, so the chunked lock passes below take their rows in the order Terminate's do (lockOrder).
 	allFlowIDs := lockOrder(append([]any{flowID}, descendantFlowIDs...))
-	if e.seams.Enabled() {
-		e.seams.Variable(engineseams.Join(engineseams.VariableLockOrder, "cancel"), slices.Clone(allFlowIDs))
+	if e.diags.Seams().Enabled() {
+		e.diags.Seams().Variable(diagnostics.Join(diagnostics.VariableLockOrder, "cancel"), slices.Clone(allFlowIDs))
 	}
 
 	reason = strings.TrimSpace(reason)
@@ -971,7 +972,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 			return errors.Trace(err)
 		}
 	}
-	e.seams.Checkpoint(ctx, engineseams.CheckpointCancelBeforeMark)
+	e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointCancelBeforeMark)
 	// The mark reaches only steps at or below their flow's watermark. A step above it was inserted after the
 	// watermark committed, and its insert already decided its mark - inherited if its source was reached by
 	// this Cancel, not if its source was covered. Unbounded, the mark would catch the onError handler of a
@@ -979,8 +980,8 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	// second time to the handler written to catch it. A chunk holds whole flows, so each flow is marked by one
 	// statement.
 	for chunk := range slices.Chunk(allFlowIDs, inListChunk) {
-		if e.seams.IsFault(engineseams.FaultCancelMarkErr) {
-			return errors.New("injected fault: " + engineseams.FaultCancelMarkErr)
+		if e.diags.Seams().IsFault(diagnostics.FaultCancelMarkErr) {
+			return errors.New("injected fault: " + diagnostics.FaultCancelMarkErr)
 		}
 		ph, ids := inList(chunk)
 		_, err = db.ExecContext(ctx,
@@ -1043,7 +1044,7 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 		return errors.New("flow is open (status: %s); terminate it first", flowStatus, http.StatusConflict)
 	}
 	// The root can move or publish after validation. The mutation chooses its action under the root lock.
-	e.seams.Checkpoint(ctx, engineseams.CheckpointBeforeDeleteStamp)
+	e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointBeforeDeleteStamp)
 	set := e.archives.Load()
 	if set == nil {
 		return errors.New("the archive is not open", http.StatusServiceUnavailable)
@@ -1222,7 +1223,7 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	// leafLeaseSeq, read by the query that selected the leaf, names the interrupt this Resume selected: the step row
 	// is reused by flow.Retry, and every re-interrupt follows a fresh claim, which raises it. This read and the leaf
 	// flip below are fenced on it, never on a generation read again.
-	e.seams.Checkpoint(ctx, engineseams.CheckpointResumeLeafSelected)
+	e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointResumeLeafSelected)
 	var leafInterruptDone bool
 	err = db.QueryRowContext(ctx, "SELECT interrupt_done FROM dwarf_steps WHERE step_id=? AND lease_seq=?", leafStepID, leafLeaseSeq).Scan(&leafInterruptDone)
 	// ErrNoRows means the leaf step is gone or has been claimed since it was selected (a concurrent Resume, then a
@@ -1243,15 +1244,15 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	// write below rolls this transaction back (409) instead of falsely succeeding. Placed *before* the
 	// transaction, not mid-tx: on SQLite the racing Terminate would deadlock against this transaction's write
 	// lock if frozen inside it. No-op in production.
-	e.seams.Checkpoint(ctx, engineseams.CheckpointResumeBeforeFlowWrite)
+	e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointResumeBeforeFlowWrite)
 
 	lost := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		lost = false
-		// engineseams.FaultResumeCommit fails this transaction once, before any write, so the test proves it rolls back
+		// diagnostics.FaultResumeCommit fails this transaction once, before any write, so the test proves it rolls back
 		// atomically (the flow stays interrupted, its steps untouched) and a retry then resumes cleanly.
-		if e.seams.IsFault(engineseams.FaultResumeCommit) {
-			return errors.New("injected fault: " + engineseams.FaultResumeCommit)
+		if e.diags.Seams().IsFault(diagnostics.FaultResumeCommit) {
+			return errors.New("injected fault: " + diagnostics.FaultResumeCommit)
 		}
 		// The chain is as deep as the subgraph nesting, so its writes go out inListChunk ids at a time, ascending, as
 		// handleInterrupt's do (see there).
@@ -1373,7 +1374,7 @@ func (e *Engine) continueFlow(ctx context.Context, flowKey string, additionalSta
 			return false, nil
 		}
 		if err == nil && published != 0 {
-			e.seams.Checkpoint(ctx, engineseams.CheckpointContinuePublished)
+			e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointContinuePublished)
 			return false, nil
 		}
 		return err == nil, errors.Trace(err)
@@ -1460,7 +1461,7 @@ func (e *Engine) continueFlow(ctx context.Context, flowKey string, additionalSta
 	var newFlowHour int
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		var err error
-		newFlowID, newStepID, newFlowHour, err = insertFlowTx(ctx, tx, seed)
+		newFlowID, newStepID, newFlowHour, err = e.insertFlowTx(ctx, tx, seed)
 		return err
 	})
 	if err != nil {
@@ -1468,7 +1469,7 @@ func (e *Engine) continueFlow(ctx context.Context, flowKey string, additionalSta
 	}
 
 	nextKey = keys.NewFlowKey(shardNum, newFlowHour, int(newFlowID), newFlowToken)
-	e.logger.DebugContext(ctx, "Flow continued and started", "workflow", workflowURL)
+	e.diags.Logger().DebugContext(ctx, "Flow continued and started", "workflow", workflowURL)
 	e.metricFlowStarted(ctx, workflowURL, priority, shardNum)
 	// Ring the local doorbell so this replica claims the entry step without waiting for a refiller scan. The
 	// entry step is due now and its priority is in hand, so no lookup is needed.

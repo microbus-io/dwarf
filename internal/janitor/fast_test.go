@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/database"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -43,15 +44,15 @@ func TestWalk_AStopIsNotAFailure(t *testing.T) {
 	logs := r.logs
 	root := chunkTree(t, r.db)
 
-	r.seams.Break(CheckpointBatchLocked)
-	defer r.seams.Resume(CheckpointBatchLocked)
+	r.seams.Break(diagnostics.CheckpointReapBatchLocked)
+	defer r.seams.Resume(diagnostics.CheckpointReapBatchLocked)
 	stop, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		r.pass(stop)
 	}()
-	assert.True(r.seams.WaitTimeout(ctx, CheckpointBatchLocked, 10*time.Second*timeoutScale))
+	assert.True(r.seams.WaitTimeout(ctx, diagnostics.CheckpointReapBatchLocked, 10*time.Second*timeoutScale))
 	cancel()
 	<-done
 	assert.Zero(logs.count("Janitor: removing closed trees"), "a stop is not a failure")
@@ -77,14 +78,14 @@ func TestWalk_AnArchiveMoveAboveTheBatchBudgetIsAtomic(t *testing.T) {
 	db := r.db
 	root := chunkTree(t, db)
 	r.settings.batchRows = 2
-	r.seams.InjectN(FaultMidTree, 1000)
+	r.seams.InjectN(diagnostics.FaultReapMidTree, 1000)
 	r.pass(t.Context())
 	flows, steps := treeCount(t, r, "dwarf_flows", "dwarf_steps", root)
 	assert.Equal([2]int{2, 7}, [2]int{flows, steps})
 	var stamp int
 	assert.NoError(db.QueryRowContext(t.Context(), "SELECT delete_after_ms FROM dwarf_flows WHERE flow_id=?", root).Scan(&stamp))
 	assert.Zero(stamp)
-	r.seams.Withdraw(FaultMidTree)
+	r.seams.Withdraw(diagnostics.FaultReapMidTree)
 	r.restart()
 	r.pass(t.Context())
 	flows, steps = treeCount(t, r, "dwarf_flows", "dwarf_steps", root)
@@ -149,7 +150,7 @@ func TestWalk_TreeEnvelope(t *testing.T) {
 // held its position would retry the failed batch round after round, and reach nothing behind it.
 func TestWalk_FastPassesTheBatchItAttempted(t *testing.T) {
 	t.Parallel()
-	for _, fault := range []string{FaultMidTree, FaultSizeErr} {
+	for _, fault := range []string{diagnostics.FaultReapMidTree, diagnostics.FaultReapSizeErr} {
 		t.Run(fault, func(t *testing.T) {
 			assert := testarossa.For(t)
 			ctx := t.Context()
@@ -463,7 +464,7 @@ func TestFast_TheFailureEndsAtAMoveOrACleanSweep(t *testing.T) {
 	assert := testarossa.For(t)
 	r := newRig(t, 30)
 	before := time.Now()
-	r.seams.InjectN(FaultSelectErr, 1)
+	r.seams.InjectN(diagnostics.FaultReapSelectErr, 1)
 	r.pass(t.Context())
 	assert.True(r.failing(time.Now().Add(time.Second)) > 0, "a failed scan begins an episode")
 	r.pass(t.Context())
@@ -473,7 +474,7 @@ func TestFast_TheFailureEndsAtAMoveOrACleanSweep(t *testing.T) {
 	r.janitor().SweptClean(time.Now())
 	assert.Zero(r.failing(time.Now().Add(time.Second)), "a clean sweep begun after it ends it")
 
-	r.seams.InjectN(FaultSelectErr, 1)
+	r.seams.InjectN(diagnostics.FaultReapSelectErr, 1)
 	r.pass(t.Context())
 	assert.True(r.failing(time.Now().Add(time.Second)) > 0)
 	seedTrees(t, r.db, 1, callShape)
@@ -488,7 +489,7 @@ func TestFast_ABatchThatCannotTakeItsConnectionIsAFailure(t *testing.T) {
 	assert := testarossa.For(t)
 	r := newRig(t, 30)
 	seedTrees(t, r.db, 1, callShape)
-	r.seams.InjectN(FaultConnErr, 1)
+	r.seams.InjectN(diagnostics.FaultJanitorConnErr, 1)
 	r.pass(t.Context())
 	assert.True(r.failing(time.Now().Add(time.Second)) > 0)
 	assert.Equal(1, r.logs.count("Janitor: taking a connection failed"))

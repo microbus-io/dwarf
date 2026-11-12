@@ -97,7 +97,7 @@ Four things the shape has to get right:
   **The fetch side is the one with no other signal.** A failing scan at least logs and clears the shard; a
   failing fetch leaves an honest tally, a claimed band, and a silent partition — no error counter names it,
   and the metric signature is a normal `fetch_steps` duration with `selected` at zero on one shard. That is
-  also the shape a bind-count overflow produces, which is why `FaultFetchErr` exists at all.
+  also the shape a bind-count overflow produces, which is why `FaultRefillFetchErr` exists at all.
 
   **A residual blind spot: a HUNG loop reads busy forever.** `busy` covers a scan that is merely slow (it
   reads either loop's work window), but one that never returns is indistinguishable from a legitimately long
@@ -151,7 +151,7 @@ re-inserted, and a loop that has not run one has nothing to undo. Starting it fa
 already-idle piston wipe state on its first iteration, racing whatever its owner set up between `Startup`
 and then — caught by `TestFault_RefillScanErrPreservesCache`, which seeds an await-only engine's partition
 by hand. Pinned by `TestPiston_IdleWithdrawsAgainstARunningLoop`, which blocks both loops inside a cycle
-at its cycle-begin checkpoints (`CheckpointTallyBegin`, `CheckpointSupplyBegin`) and only then goes idle; without the loop-side withdrawal the idle shard's band
+at its cycle-begin checkpoints (`CheckpointRefillTallyBegin`, `CheckpointRefillSupplyBegin`) and only then goes idle; without the loop-side withdrawal the idle shard's band
 claim outranks a live peer's forever (measured: peer sees band 5, not the 9 it holds).
 
 The default is *not* idle, deliberately: a fresh piston dispatches, which is the common case, and a zero
@@ -258,7 +258,7 @@ gets two hazards for the price of one. It can see a *different* pair, if the fle
 loads, and then filter by one and rank by the other. And if it validates more weakly — `ok && r > 1`, say,
 without the ordinal range — an out-of-range ordinal correctly disables the SQL predicate while the ranking
 built from that same bad pair puts **nothing** in tier 0 and counts **every kept step** as taken from a
-peer: `dwarf_steps_stolen` floods and `CheckpointStole` fires for steals that never happened, which is
+peer: `dwarf_steps_stolen` floods and `CheckpointRefillStole` fires for steals that never happened, which is
 exactly the dishonesty counting-after-the-trim exists to prevent. Pinned for both queries by
 `TestPiston_PartitionPairIsValidated`.
 
@@ -666,7 +666,8 @@ binds), because a hand-ordered arg slice is exactly the thing review does not ca
 
 ## Metrics take a `Meter`, not a `MeterProvider`
 
-So the **owner** picks the instrumentation scope once for every module it assembles. Each package deriving
+The piston creates its instruments on the `Diags`' meter, so the **owner** picks the instrumentation scope once
+for every module it assembles. Each package deriving
 its own scope from a provider would split one engine's metrics across several scopes in the export the
 moment a name drifted, and nothing here needs provider-level capability. Instrument names are a public
 surface that dashboards bind to — `TestPiston_RecordsItsInstruments` asserts them by name so a rename
@@ -688,39 +689,39 @@ under a dashboard is a silent regression, so treat them as fixed rather than as 
 
 ## Two faults and five checkpoints, and why each is the exception
 
-`SetSeams` takes the **owner's** `*seamster.Seamster` — one catalogue of fault names per application,
-armed in one place, however many modules consult it — for the same reason `SetMeter` takes a `Meter`. Nil
-restores an inert one, which is the default, so an unwired piston consults nothing and a disabled Seamster
-makes every consult a bool read.
+The seams are the **owner's** `*seamster.Seamster`, from the `diagnostics.Diags` `New` takes — one catalogue of
+fault names per application, armed in one place, however many modules consult it — for the same reason the
+meter is the owner's. A nil `Diags` gives inert ones, so an unwired piston consults nothing and a disabled
+Seamster makes every consult a bool read.
 
-Two faults are consulted, **`FaultScanErr`** in `ScanBand` and **`FaultFetchErr`** in `FetchSteps`.
-`FaultScanErr` earns its place because it perturbs
+Two faults are consulted, **`FaultRefillScanErr`** in `ScanBand` and **`FaultRefillFetchErr`** in `FetchSteps`.
+`FaultRefillScanErr` earns its place because it perturbs
 the **database query**, which is the boundary a test cannot otherwise reach — the pipeline's scan-error
 policy (clear this shard from planning, leave its cache partition *alone*) is only reachable by making a
-real scan fail, and the two halves are asymmetric, so neither can be inferred from the other. The name is
-exported so the owner's catalogue aliases it rather than re-spelling the string. Pinned by
+real scan fail, and the two halves are asymmetric, so neither can be inferred from the other. Its name, like
+every seam's, is in `internal/diagnostics`' catalogue. Pinned by
 `TestPiston_ScanErrSeamDrivesThePipelineErrorPolicy` and `TestPiston_SeamsDefaultInert`.
 
-`FaultFetchErr` earns its place on a sharper version of the same rule: a piston whose every fetch fails is
+`FaultRefillFetchErr` earns its place on a sharper version of the same rule: a piston whose every fetch fails is
 **invisible from every angle a test can otherwise reach** — it scans honestly, publishes a real tally,
 claims its band, logs nothing, and simply supplies no candidates. Without the seam there is no way to drive
 `TestPiston_FailingFetchesReportNoLiveness`, and therefore no way to pin that the turn count demotes it.
 
 Five checkpoints are fired: three report a cycle's effect, and two hold a loop as its cycle begins (below).
-**`CheckpointStole`** reports a fetch that took steps from outside this
+**`CheckpointRefillStole`** reports a fetch that took steps from outside this
 replica's residue class, and it earns its place on the same boundary rule: a test proving a slow peer's work
 is picked up cannot wait out a duration, because the steal fires on the first cycle where the grace has
 elapsed and this replica's own class has run short — a function of the cadence, the peer's degradation and the backlog, none of which a test
 controls. Without it the only available assertion is "the flows eventually finished", which passes equally
 against a build where stealing does nothing and the dispatch-window eviction did the work seconds later.
 
-**`CheckpointTallyDone`** is there because **a push does not imply a scan**. The supply loop plans from
+**`CheckpointRefillTallyDone`** is there because **a push does not imply a scan**. The supply loop plans from
 whatever tally the planner already holds and touches the database only to fetch, so any number of pushes can
 resolve a tally that predates the work under test. A caller needing "a scan has SEEN what I just committed"
-waits on this first and only then on `CheckpointCycleDone` — which is what `enginetest.AwaitShardCycles`
+waits on this first and only then on `CheckpointRefillCycleDone` — which is what `enginetest.AwaitShardCycles`
 does. Gated on the scan succeeding, since a failed one clears the shard rather than reporting it.
 
-The third is **`CheckpointCycleDone`**, in `Run`, once per cycle that PUSHED. It earns
+The third is **`CheckpointRefillCycleDone`**, in `Run`, once per cycle that PUSHED. It earns
 its place on the same boundary rule read from the other side — it publishes the one fact about a cycle that
 is invisible from outside the process and cannot be waited out on a clock. **Each piston turns on its own
 cadence, so "every shard has reconciled its partition against the plan" is not a function of elapsed time**:
@@ -740,7 +741,7 @@ would be a signal to inject a dependency instead; this one reports a **cycle's e
 package borrows (the cache partition), which no injection into `pipeline` would surface, since the effect is
 the point rather than the call.
 
-**`CheckpointTallyBegin` and `CheckpointSupplyBegin`** fire as each loop's cycle begins, past its idle check
+**`CheckpointRefillTallyBegin` and `CheckpointRefillSupplyBegin`** fire as each loop's cycle begins, past its idle check
 and before its first query. They are the only way to hold a loop INSIDE a cycle: a loop already past its idle
 check when `SetIdle` runs finishes afterwards and re-enters the shard it withdrew - the wedge each loop's own
 withdrawal undoes - and no clock puts a loop at that point on demand. Pinned through them by

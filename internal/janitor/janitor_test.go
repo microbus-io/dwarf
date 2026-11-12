@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/database"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/turnstile"
 	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/sequel"
@@ -31,11 +32,11 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-// testJanitor returns a started, active janitor of shard 1 on db that runs jobs in place of its own, set up by set
-// before it starts.
-func testJanitor(t *testing.T, db *sequel.DB, set func(j *Janitor), jobs ...*job) *Janitor {
+// testJanitor returns a started, active janitor of shard 1 on db, reporting through d, that runs jobs in place of
+// its own, set up by set before it starts.
+func testJanitor(t *testing.T, db *sequel.DB, d *diagnostics.Diags, set func(j *Janitor), jobs ...*job) *Janitor {
 	t.Helper()
-	j := New(database.NewShard(1, db), nil, 30)
+	j := New(database.NewShard(1, db), d, nil, 30)
 	j.jobs = jobs
 	if set != nil {
 		set(j)
@@ -82,7 +83,7 @@ func TestJanitor_EachJobRunsOnItsOwnGoroutine(t *testing.T) {
 	t.Parallel()
 	var other atomic.Int64
 	blocked := make(chan struct{}, 1)
-	testJanitor(t, nil, func(j *Janitor) { j.SetIdle(time.Millisecond) },
+	testJanitor(t, nil, nil, func(j *Janitor) { j.SetIdle(time.Millisecond) },
 		testJob("blocked", func(ctx context.Context, _ batchFunc) bool {
 			select {
 			case blocked <- struct{}{}:
@@ -107,7 +108,7 @@ func TestJanitor_ARoundWithoutProgressWaits(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	var idle, busy atomic.Int64
-	j := testJanitor(t, nil, func(j *Janitor) { j.SetIdle(100 * time.Millisecond) },
+	j := testJanitor(t, nil, nil, func(j *Janitor) { j.SetIdle(100 * time.Millisecond) },
 		testJob("idle", func(ctx context.Context, _ batchFunc) bool {
 			idle.Add(1)
 			return false
@@ -133,7 +134,7 @@ func TestJanitor_EachJobKeepsItsOwnIdle(t *testing.T) {
 	shortJob.idle = 50 * time.Millisecond
 	longJob := testJob("long", func(context.Context, batchFunc) bool { long.Add(1); return false })
 	longJob.idle = 400 * time.Millisecond
-	j := testJanitor(t, nil, nil, shortJob, longJob)
+	j := testJanitor(t, nil, nil, nil, shortJob, longJob)
 	time.Sleep(time.Second)
 	j.Stop()
 	assert.True(short.Load() >= 10, "%d rounds at 50ms", short.Load())
@@ -149,7 +150,7 @@ func TestJanitor_DrainReturnsWhereAJobWouldWait(t *testing.T) {
 
 	// A job with three rounds of work, and one that always fails.
 	var work, failing atomic.Int64
-	j := testJanitor(t, nil, func(j *Janitor) { j.SetManual(true) },
+	j := testJanitor(t, nil, nil, func(j *Janitor) { j.SetManual(true) },
 		testJob("work", func(ctx context.Context, _ batchFunc) bool { return work.Add(1) <= 3 }),
 		testJob("failing", func(ctx context.Context, _ batchFunc) bool { failing.Add(1); return false }),
 	)
@@ -163,7 +164,7 @@ func TestJanitor_DrainReturnsWhereAJobWouldWait(t *testing.T) {
 	var a, b atomic.Int64
 	var forB, forA atomic.Int64
 	forA.Store(1)
-	j = testJanitor(t, nil, func(j *Janitor) { j.SetManual(true) },
+	j = testJanitor(t, nil, nil, func(j *Janitor) { j.SetManual(true) },
 		testJob("a", func(ctx context.Context, _ batchFunc) bool {
 			if forA.Load() == 0 {
 				return false
@@ -207,7 +208,7 @@ func TestJanitor_PauseAndResume(t *testing.T) {
 		return false
 	})
 	jb.reset = func() { resets.Add(1) }
-	j := testJanitor(t, nil, nil, jb)
+	j := testJanitor(t, nil, nil, nil, jb)
 	<-in
 	assert.Equal(int64(1), resets.Load(), "the first resume starts the job over too")
 
@@ -233,7 +234,7 @@ func TestJanitor_ABlockedStatementIsCancelled(t *testing.T) {
 	db := newRig(t, 30).db
 	in := make(chan struct{}, 1)
 	out := make(chan error, 1)
-	j := testJanitor(t, db, func(j *Janitor) { j.SetIdle(10 * time.Millisecond) },
+	j := testJanitor(t, db, nil, func(j *Janitor) { j.SetIdle(10 * time.Millisecond) },
 		testJob("job", func(ctx context.Context, batch batchFunc) bool {
 			err := batch(ctx, func(ctx context.Context, h handle) error {
 				in <- struct{}{}
@@ -269,7 +270,7 @@ func TestJanitor_StopCancelsABlockedJob(t *testing.T) {
 	assert := testarossa.For(t)
 	in := make(chan struct{})
 	var ended atomic.Bool
-	j := testJanitor(t, newRig(t, 30).db, nil, testJob("blocked", func(ctx context.Context, batch batchFunc) bool {
+	j := testJanitor(t, newRig(t, 30).db, nil, nil, testJob("blocked", func(ctx context.Context, batch batchFunc) bool {
 		_ = batch(ctx, func(ctx context.Context, _ handle) error {
 			close(in)
 			select {
@@ -297,7 +298,7 @@ func TestJanitor_EachBatchTakesAFreshClaim(t *testing.T) {
 	assert := testarossa.For(t)
 	var claims []turnstile.Claim
 	var nested error
-	j := testJanitor(t, newRig(t, 30).db, func(j *Janitor) { j.SetManual(true); j.shard.SetTurnLimit(4) },
+	j := testJanitor(t, newRig(t, 30).db, nil, func(j *Janitor) { j.SetManual(true); j.shard.SetTurnLimit(4) },
 		testJob("two", func(ctx context.Context, batch batchFunc) bool {
 			for range 2 {
 				err := batch(ctx, func(batchCtx context.Context, _ handle) error {
@@ -330,7 +331,7 @@ func TestJanitor_JobAgesReportTimeSinceProgress(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	var progress atomic.Bool
-	j := New(database.NewShard(1, nil), nil, 30)
+	j := New(database.NewShard(1, nil), nil, nil, 30)
 	j.jobs = []*job{testJob("job", func(ctx context.Context, _ batchFunc) bool { return progress.Swap(false) })}
 	j.SetManual(true)
 	assert.Len(j.JobAges(time.Now()), 0, "nothing to report before the first resume")
@@ -353,7 +354,7 @@ func TestJanitor_ADrainBesideTheGoroutineNeverOverlapsARound(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	var inside, overlaps, rounds atomic.Int64
-	j := testJanitor(t, nil, func(j *Janitor) { j.SetIdle(time.Millisecond) },
+	j := testJanitor(t, nil, nil, func(j *Janitor) { j.SetIdle(time.Millisecond) },
 		testJob("job", func(ctx context.Context, _ batchFunc) bool {
 			if inside.Add(1) > 1 {
 				overlaps.Add(1)
@@ -387,7 +388,7 @@ func TestJanitor_ABatchRunsOnOneConnection(t *testing.T) {
 	default:
 		t.Skip("SQLite names no connection")
 	}
-	j := testJanitor(t, db, func(j *Janitor) { j.SetManual(true) },
+	j := testJanitor(t, db, nil, func(j *Janitor) { j.SetManual(true) },
 		testJob("job", func(ctx context.Context, batch batchFunc) bool {
 			assert.NoError(batch(ctx, func(ctx context.Context, h handle) error {
 				ids := map[int64]bool{}
@@ -441,10 +442,9 @@ func TestJanitor_BatchTimings(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	reader := sdkmetric.NewManualReader()
-	j := testJanitor(t, newRig(t, 30).db, func(j *Janitor) {
-		j.SetManual(true)
-		assert.NoError(j.SetMeter(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test")))
-	}, testJob("job", func(ctx context.Context, batch batchFunc) bool {
+	d := diagnostics.New()
+	d.SetMeter(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"))
+	j := testJanitor(t, newRig(t, 30).db, d, func(j *Janitor) { j.SetManual(true) }, testJob("job", func(ctx context.Context, batch batchFunc) bool {
 		for range 2 {
 			_ = batch(ctx, func(context.Context, handle) error { time.Sleep(10 * time.Millisecond); return nil })
 		}
@@ -463,14 +463,13 @@ func TestJanitor_ABatchThatCannotTakeItsConnectionFails(t *testing.T) {
 	assert := testarossa.For(t)
 	reader := sdkmetric.NewManualReader()
 	seams := seamster.New(true)
-	seams.InjectN(FaultConnErr, 1)
+	seams.InjectN(diagnostics.FaultJanitorConnErr, 1)
 	ran := false
 	var batchErr error
-	j := testJanitor(t, newRig(t, 30).db, func(j *Janitor) {
-		j.SetManual(true)
-		j.SetSeams(seams)
-		assert.NoError(j.SetMeter(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test")))
-	}, testJob("job", func(ctx context.Context, batch batchFunc) bool {
+	d := diagnostics.New()
+	d.SetSeams(seams)
+	d.SetMeter(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"))
+	j := testJanitor(t, newRig(t, 30).db, d, func(j *Janitor) { j.SetManual(true) }, testJob("job", func(ctx context.Context, batch batchFunc) bool {
 		batchErr = batch(ctx, func(context.Context, handle) error { ran = true; return nil })
 		return false
 	}))

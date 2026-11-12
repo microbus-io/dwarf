@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/archiver"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/migrations"
@@ -280,7 +280,7 @@ func TestDelete_AnArchivedTreeWaitsForAForkOfIt(t *testing.T) {
 		return
 	}
 
-	e.seams.Break(engineseams.CheckpointForkRootLocked)
+	e.diags.Seams().Break(diagnostics.CheckpointForkRootLocked)
 	type result struct {
 		fk  string
 		err error
@@ -290,7 +290,7 @@ func TestDelete_AnArchivedTreeWaitsForAForkOfIt(t *testing.T) {
 		fk, err := e.Fork(ctx, history[0].StepKey, nil)
 		forked <- result{fk, err}
 	}()
-	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointForkRootLocked, 10*time.Second))
+	assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointForkRootLocked, 10*time.Second))
 	deleted := make(chan error, 1)
 	go func() { deleted <- e.Delete(ctx, rootKey) }()
 	// Long enough for a Delete that is not held off to delete the tree.
@@ -300,7 +300,7 @@ func TestDelete_AnArchivedTreeWaitsForAForkOfIt(t *testing.T) {
 		t.Errorf("the Delete finished (%v) while Fork held the archived root", err)
 	default:
 	}
-	e.seams.Resume(engineseams.CheckpointForkRootLocked)
+	e.diags.Seams().Resume(diagnostics.CheckpointForkRootLocked)
 	r := <-forked
 	assert.NoError(r.err)
 	assert.NoError(<-deleted)

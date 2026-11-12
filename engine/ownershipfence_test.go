@@ -29,7 +29,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -89,10 +89,10 @@ func TestCompleteFlow_StaleWorkerIsFenced(t *testing.T) {
 	aID := stepOf("A")
 
 	// The original dispatch of A records its completion and freezes before completing the flow.
-	e.seams.Break(engineseams.CheckpointBeforeCompleteFlowWrite)
+	e.diags.Seams().Break(diagnostics.CheckpointBeforeCompleteFlowWrite)
 	original := make(chan error, 1)
 	go func() { original <- e.processStep(ctx, shard, aID, noTurn) }()
-	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "A never reached flow completion")
+	assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "A never reached flow completion")
 
 	// Its lease lapses and the orphan sweep rewinds it under a new generation.
 	var seqBefore int
@@ -119,7 +119,7 @@ func TestCompleteFlow_StaleWorkerIsFenced(t *testing.T) {
 	}
 
 	// The stalled worker resumes. Its completion is fenced, and the flow stays open under the running handler.
-	e.seams.Resume(engineseams.CheckpointBeforeCompleteFlowWrite)
+	e.diags.Seams().Resume(diagnostics.CheckpointBeforeCompleteFlowWrite)
 	select {
 	case err := <-original:
 		assert.NoError(err)
@@ -200,7 +200,7 @@ func TestSubgraphRevive_StaleChildDoesNotSettleNewPark(t *testing.T) {
 	awaitStartupRecoverySweep(t, e)
 
 	// The first child's revive is lost, wedging the caller on a completed child.
-	e.seams.Inject(engineseams.FaultSubgraphReviveLost)
+	e.diags.Seams().Inject(diagnostics.FaultSubgraphReviveLost)
 	fk, err := e.Create(ctx, "stalechild/root", nil, nil)
 	assert.Must(assert.NoError(err))
 	shard, _, rootFlowID, _, err := keys.ParseFlowKey(fk)
@@ -306,15 +306,15 @@ func TestResume_ConcurrentResumesOfOneLeaf(t *testing.T) {
 		"both branches never interrupted")
 
 	// Both Resumes select the same leaf, then freeze before their transactions.
-	base := e.seams.Visits(engineseams.CheckpointResumeBeforeFlowWrite)
-	e.seams.Break(engineseams.CheckpointResumeBeforeFlowWrite)
+	base := e.diags.Seams().Visits(diagnostics.CheckpointResumeBeforeFlowWrite)
+	e.diags.Seams().Break(diagnostics.CheckpointResumeBeforeFlowWrite)
 	results := make(chan error, 2)
 	go func() { results <- e.Resume(ctx, fk, map[string]any{"v": 1}) }()
 	go func() { results <- e.Resume(ctx, fk, map[string]any{"v": 2}) }()
 	assert.True(enginetest.WaitUntil(t, 10*time.Second, func() bool {
-		return e.seams.Visits(engineseams.CheckpointResumeBeforeFlowWrite) >= base+2
+		return e.diags.Seams().Visits(diagnostics.CheckpointResumeBeforeFlowWrite) >= base+2
 	}), "both Resumes never reached the checkpoint")
-	e.seams.Resume(engineseams.CheckpointResumeBeforeFlowWrite)
+	e.diags.Seams().Resume(diagnostics.CheckpointResumeBeforeFlowWrite)
 
 	var succeeded, conflicted int
 	for range 2 {
@@ -486,7 +486,7 @@ func TestSubgraphRevive_StaleDeliveryWaitingOnTheRowLock(t *testing.T) {
 // sibling as the next prompt, so a stale A answering Gate's second interrupt also skips the recorded one.
 func TestResume_StaleResumeOfAReinterruptedLeaf(t *testing.T) {
 	t.Parallel()
-	for _, freeze := range []string{engineseams.CheckpointResumeLeafSelected, engineseams.CheckpointResumeBeforeFlowWrite} {
+	for _, freeze := range []string{diagnostics.CheckpointResumeLeafSelected, diagnostics.CheckpointResumeBeforeFlowWrite} {
 		for _, sibling := range []bool{false, true} {
 			name := freeze + "/lone_gate"
 			if sibling {
@@ -580,9 +580,9 @@ func staleResumeOfAReinterruptedLeaf(t *testing.T, freeze string, sibling bool) 
 		assert.Must(assert.True(enginetest.WaitUntil(t, 10*time.Second, func() bool { return interrupted("Sibling", 0) }), "Sibling never interrupted"))
 	}
 
-	e.seams.Break(freeze)
-	defer e.seams.Resume(freeze)
-	reached := e.seams.Waiter(freeze)
+	e.diags.Seams().Break(freeze)
+	defer e.diags.Seams().Resume(freeze)
+	reached := e.diags.Seams().Waiter(freeze)
 	stale := make(chan error, 1)
 	go func() { stale <- e.Resume(ctx, fk, map[string]any{"answer": "stale"}) }()
 	select {
@@ -593,7 +593,7 @@ func staleResumeOfAReinterruptedLeaf(t *testing.T, freeze string, sibling bool) 
 	assert.Must(assert.NoError(p.Resume(ctx, fk, map[string]any{"answer": "first"}))) // answers Gate's first interrupt
 	assert.Must(assert.True(enginetest.WaitUntil(t, 10*time.Second, func() bool { return interrupted("Gate", 1) }), "Gate never interrupted again"))
 
-	e.seams.Resume(freeze)
+	e.diags.Seams().Resume(freeze)
 	select {
 	case err := <-stale:
 		assert.Equal(409, errors.StatusCode(err), "the stale Resume answered a later prompt: %v", err)

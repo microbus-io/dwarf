@@ -219,7 +219,7 @@ test drives it by handing over one that misbehaves. The clock and the coin are t
 ambient, so they are fields set in `New`. **That is deliberately injection rather than a fault seam.** This
 package has no I/O, so there is nothing at a boundary for a seam to perturb; a seam inside pure logic is a
 sign a dependency should have been injected instead — which is the same rule `internal/piston` and
-`internal/peers` state at their own `SetSeams`, both of which earn theirs at a database call.
+`internal/peers` state for their seams, both of which earn theirs at a database call.
 
 Neither is exported. Callers have nothing to tune them against, and the tests are same-package, so they are
 plain fields on the same lifetime rule as the policy above: written before any goroutine exists, read

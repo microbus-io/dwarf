@@ -25,7 +25,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -94,7 +94,7 @@ func TestFanInNoCohort_FailsInsteadOfHotLooping(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	sh, err := engineseams.DB(e).Shard(shardNum)
+	sh, err := accessors.DB(e).Shard(shardNum)
 	if !assert.NoError(err) {
 		return
 	}

@@ -27,7 +27,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/staterefs"
@@ -39,7 +39,7 @@ import (
 // unseeded makes an engine resolve every ref from the database. The minting replica seeds its resolve cache, so
 // a single-engine test would otherwise never exercise the read path a successor on another replica takes.
 func unseeded(e *Engine) *Engine {
-	e.seams.InjectN(engineseams.FaultSkipRefSeed, 1<<20)
+	e.diags.Seams().InjectN(diagnostics.FaultSkipRefSeed, 1<<20)
 	return e
 }
 

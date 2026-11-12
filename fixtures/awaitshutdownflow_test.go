@@ -23,7 +23,8 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/accessors"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -81,7 +82,7 @@ func TestAwaitShutdownflow(t *testing.T) {
 	defer cancelAwait()
 	// Armed BEFORE the goroutine that triggers it, which is the only ordering that works here: the waiter
 	// has to be registered before the statement that drives the engine to the checkpoint.
-	parked := engineseams.Seams(eng).Waiter(engineseams.Join(engineseams.CheckpointAwaitParked, flowKey))
+	parked := accessors.Seams(eng).Waiter(diagnostics.Join(diagnostics.CheckpointAwaitParked, flowKey))
 	go func() {
 		out, aerr := eng.Await(awaitCtx, flowKey)
 		done <- awaitResult{out, aerr}

@@ -30,7 +30,7 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/cancelmarker"
 	"github.com/microbus-io/dwarf/internal/database"
-	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/faninmap"
 	"github.com/microbus-io/dwarf/internal/graphcache"
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -136,11 +136,11 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	d := &dispatch{shard: shardNum, stepID: stepID, returnGateTurn: returnGateTurn, closeEntryPhase: closeEntryPhase}
 	// d.claimed is set once this dispatch wins its claim. The checkpoint's defer is registered before the
 	// recovery defer so it runs after it: a test waiting for a dispatch to return sees its recovery reset too.
-	if e.seams.Enabled() { // Enabled gates the assembled name in production
+	if e.diags.Seams().Enabled() { // Enabled gates the assembled name in production
 		defer func() {
 			if d.claimed {
-				e.seams.Checkpoint(ctx, engineseams.CheckpointClaimedDispatchDone)
-				e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointClaimedDispatchDone, strconv.Itoa(shardNum), strconv.Itoa(stepID)))
+				e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointClaimedDispatchDone)
+				e.diags.Seams().Checkpoint(ctx, diagnostics.Join(diagnostics.CheckpointClaimedDispatchDone, strconv.Itoa(shardNum), strconv.Itoa(stepID)))
 			}
 		}()
 	}
@@ -195,8 +195,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// instantaneous, can miss a reservation that was saturated all window without being sampled empty.
 	e.metrics.turnWait.Record(ctx, time.Since(turnWaitStart).Seconds(), e.metrics.shardAttrOpts(shardNum).rec...)
 
-	if execErr == nil && !d.row.replaying && e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultExecuteTask, d.row.taskName)) {
-		execErr = errors.New("injected fault: "+engineseams.FaultExecuteTask+" "+d.row.taskName, http.StatusInternalServerError)
+	if execErr == nil && !d.row.replaying && e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultExecuteTask, d.row.taskName)) {
+		execErr = errors.New("injected fault: "+diagnostics.FaultExecuteTask+" "+d.row.taskName, http.StatusInternalServerError)
 	}
 	recordSpanError(d.taskSpan, execErr)
 
@@ -260,14 +260,14 @@ func (e *Engine) recoverStep(ctx context.Context, d *dispatch, err error) {
 		// Test checkpoint: a breakpoint here freezes a zombie between capturing its (stale) reset and
 		// running it, so a test can let a peer re-claim+bump the step first and prove the lease_seq fence
 		// makes the zombie's reset a zero-row no-op (never rewinding the peer's freshly-claimed step).
-		e.seams.Checkpoint(ctx, engineseams.CheckpointBeforeRecoveryReset)
+		e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointBeforeRecoveryReset)
 		db.Transact(ctx, func(tx *sequel.Tx) error {
-			// engineseams.FaultRecoveryResetErr makes this last-resort reset itself fail (a non-retryable error, as if
+			// diagnostics.FaultRecoveryResetErr makes this last-resort reset itself fail (a non-retryable error, as if
 			// it lost to a contention storm), so the step stays `completed` and the flow strands `running`
 			// with every step terminal until recoverOrphanedFlows rewinds the step.
 			// Process-wide (no scope): the reset may run before the claim read the task's name.
-			if e.seams.IsFault(engineseams.FaultRecoveryResetErr) {
-				return errors.New("injected fault: " + engineseams.FaultRecoveryResetErr)
+			if e.diags.Seams().IsFault(diagnostics.FaultRecoveryResetErr) {
+				return errors.New("injected fault: " + diagnostics.FaultRecoveryResetErr)
 			}
 			_, terr := tx.ExecContext(ctx, resetSQL, resetArgs...)
 			return terr
@@ -373,12 +373,12 @@ func (e *Engine) claim(ctx context.Context, d *dispatch) (done bool, err error) 
 			}
 			// Retain ownership even if the read fails before scanning the generation.
 			d.row.leaseSeq = int(leaseSeq)
-			if e.seams.Enabled() { // Enabled gates the assembled name in production
-				e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointClaimBeforeRead, strconv.Itoa(d.shard), strconv.Itoa(d.stepID), strconv.FormatInt(leaseSeq, 10)))
+			if e.diags.Seams().Enabled() { // Enabled gates the assembled name in production
+				e.diags.Seams().Checkpoint(ctx, diagnostics.Join(diagnostics.CheckpointClaimBeforeRead, strconv.Itoa(d.shard), strconv.Itoa(d.stepID), strconv.FormatInt(leaseSeq, 10)))
 			}
 			var readErr error
-			if e.seams.IsFault(engineseams.FaultClaimReadContention) {
-				readErr = errors.New("database is locked (injected fault: " + engineseams.FaultClaimReadContention + ")")
+			if e.diags.Seams().IsFault(diagnostics.FaultClaimReadContention) {
+				readErr = errors.New("database is locked (injected fault: " + diagnostics.FaultClaimReadContention + ")")
 			} else {
 				readErr = db.QueryRowContext(ctx,
 					claimReadMySQL,
@@ -489,6 +489,7 @@ func (e *Engine) load(ctx context.Context, d *dispatch) (done bool, err error) {
 		if err != nil {
 			return true, errors.Trace(err)
 		}
+		e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointGraphRead)
 		cg, err = e.internGraph(graphJSON, d.row.workflowURL, d.row.graphHash)
 		if err != nil {
 			return true, e.failEntry(ctx, d, err)
@@ -602,8 +603,8 @@ func (e *Engine) load(ctx context.Context, d *dispatch) (done bool, err error) {
 func (e *Engine) startTask(ctx context.Context, d *dispatch) {
 	// The Debug lines on the per-step path are guarded because their arguments are boxed into interfaces, and
 	// so allocated, before the logger can decline them.
-	if !d.row.replaying && e.logger.Enabled(ctx, slog.LevelDebug) {
-		e.logger.DebugContext(ctx, "Executing task", "task", d.row.taskName, "workflow", d.row.workflowURL)
+	if !d.row.replaying && e.diags.Logger().Enabled(ctx, slog.LevelDebug) {
+		e.diags.Logger().DebugContext(ctx, "Executing task", "task", d.row.taskName, "workflow", d.row.workflowURL)
 	}
 	taskCtx := workflow.ContextWithBaggage(ctx, d.baggage)
 
@@ -613,7 +614,7 @@ func (e *Engine) startTask(ctx context.Context, d *dispatch) {
 	// token-free correlation id, never the flowKey: a trace backend is typically readable far more broadly
 	// than the workflow data, and the key is a bearer write-capability.
 	taskCtx = injectTraceParent(taskCtx, d.row.traceParent)
-	taskCtx, d.taskSpan = e.tracer.Start(taskCtx, d.row.taskName,
+	taskCtx, d.taskSpan = e.diags.Tracer().Start(taskCtx, d.row.taskName,
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(
 			attribute.String("workflow.id", keys.CorrelationID(d.shard, d.row.createdHour, d.row.flowID)),
@@ -673,8 +674,8 @@ func (e *Engine) execute(ctx context.Context, d *dispatch) (execErr error, hostC
 		reasonPass := database.WaitTurn(ctx)
 		var rerr error
 		d.row.flowCancelReason, rerr = readCancelReason(ctx, d.db, d.row.flowID)
-		if e.seams.IsFault(engineseams.FaultCancelReasonReadErr) {
-			rerr = errors.New("injected fault: " + engineseams.FaultCancelReasonReadErr)
+		if e.diags.Seams().IsFault(diagnostics.FaultCancelReasonReadErr) {
+			rerr = errors.New("injected fault: " + diagnostics.FaultCancelReasonReadErr)
 		}
 		reasonPass.Return()
 		if rerr != nil {
@@ -687,10 +688,10 @@ func (e *Engine) execute(ctx context.Context, d *dispatch) (execErr error, hostC
 		// A panic in the in-process host is caught here so it flows through the normal error disposition
 		// rather than wedging this leased step until lease expiry.
 		execErr = errors.CatchPanic(func() error {
-			// engineseams.FaultPanicExecuteTask panics inside the wrapper so it exercises the host-call panic isolation
+			// diagnostics.FaultPanicExecuteTask panics inside the wrapper so it exercises the host-call panic isolation
 			// (caught here, routed as a normal task error), scoped to this task name.
-			if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultPanicExecuteTask, d.row.taskName)) {
-				panic("injected fault: " + engineseams.FaultPanicExecuteTask + " " + d.row.taskName)
+			if e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultPanicExecuteTask, d.row.taskName)) {
+				panic("injected fault: " + diagnostics.FaultPanicExecuteTask + " " + d.row.taskName)
 			}
 			return e.host.ExecuteTask(d.taskCtx, dispatchURL, &d.flow.Flow)
 		})
@@ -712,7 +713,7 @@ func (e *Engine) outcome(ctx context.Context, d *dispatch, execErr error) (done 
 		// terminal for this attempt - routed via the graph's onError transition if one exists, else it fails
 		// the step.
 		if tr, ok := d.graph.ErrorTransition(taskName); ok {
-			e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "workflow", d.row.workflowURL, "error", execErr)
+			e.diags.Logger().DebugContext(ctx, "Task error routed", "task", taskName, "workflow", d.row.workflowURL, "error", execErr)
 			// A FRESH flow, deliberately: an error voids the task's changes. Whatever it wrote before
 			// returning the error is dropped rather than carried to the handler - execution is at-least-once,
 			// so a lease-lost re-run recomputes those changes and a half-written attempt is not a fact
@@ -810,7 +811,7 @@ func (e *Engine) outcome(ctx context.Context, d *dispatch, execErr error) (done 
 
 // parkInterrupt records the step's interrupt and parks the flow for external input.
 func (e *Engine) parkInterrupt(ctx context.Context, d *dispatch, interruptPayload workflow.State) error {
-	e.logger.DebugContext(ctx, "Task interrupted", "task", d.row.taskName, "workflow", d.row.workflowURL)
+	e.diags.Logger().DebugContext(ctx, "Task interrupted", "task", d.row.taskName, "workflow", d.row.workflowURL)
 	landed, err := e.settlePersist(ctx, d, e.persistYielding(ctx, d, func() error {
 		return e.handleInterrupt(ctx, d, interruptPayload)
 	}), heldRunning)
@@ -823,7 +824,7 @@ func (e *Engine) parkInterrupt(ctx context.Context, d *dispatch, interruptPayloa
 // parkSubgraph spawns the subgraph the step requested and parks the step on it.
 func (e *Engine) parkSubgraph(ctx context.Context, d *dispatch, subgraphURL string, subgraphInput workflow.State) error {
 	taskName := d.row.taskName
-	e.logger.DebugContext(ctx, "Task requested subgraph", "task", taskName, "workflow", d.row.workflowURL, "subgraph", subgraphURL)
+	e.diags.Logger().DebugContext(ctx, "Task requested subgraph", "task", taskName, "workflow", d.row.workflowURL, "subgraph", subgraphURL)
 	// The child's input is the caller's state handed across, checked as Create checks its caller's. A bad name is
 	// delivered to the task as the subgraph's error, like a child that cannot be spawned.
 	if err := checkFieldNames(subgraphInput); err != nil {
@@ -847,8 +848,8 @@ func (e *Engine) parkSubgraph(ctx context.Context, d *dispatch, subgraphURL stri
 		})
 		return e2
 	})
-	if lerr == nil && e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultLoadGraph, subgraphURL)) {
-		lerr = errors.New("injected fault: "+engineseams.FaultLoadGraph+" "+subgraphURL, http.StatusInternalServerError)
+	if lerr == nil && e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultLoadGraph, subgraphURL)) {
+		lerr = errors.New("injected fault: "+diagnostics.FaultLoadGraph+" "+subgraphURL, http.StatusInternalServerError)
 	}
 	loadCancel()
 	// A child that cannot be spawned is delivered to the caller as its subgraph's result, the way a failed child
@@ -898,7 +899,7 @@ func (e *Engine) parkSubgraph(ctx context.Context, d *dispatch, subgraphURL stri
 	// The caller step's span is still live on taskCtx; parent the subgraph's "workflow" span under it
 	// so the subgraph subtree nests beneath this task in the trace.
 	callerTraceParent := extractTraceParent(d.taskCtx)
-	e.seams.Checkpoint(ctx, engineseams.CheckpointBeforeSubgraphSpawn)
+	e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointBeforeSubgraphSpawn)
 	// createSubgraphFlow inserts the child already surgraph-linked and running, so no separate start. The
 	// spawn is one transaction, so persist may re-run it whole.
 	callerGone := false
@@ -914,7 +915,7 @@ func (e *Engine) parkSubgraph(ctx context.Context, d *dispatch, subgraphURL stri
 		return err
 	}
 	if callerGone {
-		e.seams.Checkpoint(ctx, engineseams.CheckpointSubgraphSpawnAbandoned)
+		e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointSubgraphSpawnAbandoned)
 		return nil
 	}
 	e.metricStateWriteBytes(ctx, d.row.workflowURL, "changes", len(d.changesJSON))
@@ -933,22 +934,22 @@ func (e *Engine) parkSubgraph(ctx context.Context, d *dispatch, subgraphURL stri
 // RowsAffected stays honest on MySQL.
 func (e *Engine) resolveFailedSpawn(ctx context.Context, d *dispatch, subgraphURL string, spawnErr error) error {
 	taskName := d.row.taskName
-	e.logger.DebugContext(ctx, "Subgraph spawn failed", "task", taskName, "workflow", d.row.workflowURL, "subgraph", subgraphURL, "error", spawnErr)
+	e.diags.Logger().DebugContext(ctx, "Subgraph spawn failed", "task", taskName, "workflow", d.row.workflowURL, "subgraph", subgraphURL, "error", spawnErr)
 	encoded, err := e.encodeSubgraphError(spawnErr)
 	if err != nil {
 		return errors.Trace(e.failAndReturn(ctx, d, err))
 	}
 	// Test checkpoint: freezes the worker before the write, so a test can Terminate the flow in the window the
 	// status='running' guard protects.
-	e.seams.Checkpoint(ctx, engineseams.CheckpointBeforeSpawnResolve)
+	e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointBeforeSpawnResolve)
 	var resolved bool
 	landed, err := e.settlePersist(ctx, d, e.persistYielding(ctx, d, func() error {
 		// Not a transaction, so it retries its own contention: one escaping deadlock would rewind the still-running
 		// step and run the task again.
 		return retryContention(ctx, func() error {
 			resolved = false
-			if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultSpawnResolveContention, taskName)) {
-				return errors.New("database is locked (injected fault: " + engineseams.FaultSpawnResolveContention + " " + taskName + ")")
+			if e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultSpawnResolveContention, taskName)) {
+				return errors.New("database is locked (injected fault: " + diagnostics.FaultSpawnResolveContention + " " + taskName + ")")
 			}
 			res, err := d.db.ExecContext(ctx,
 				"UPDATE dwarf_steps SET status=?, changes=?, changes_bytes=?, subgraph_done=1, subgraph_result=?, subgraph_result_bytes=?, subgraph_error=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=? AND lease_seq=?",
@@ -988,7 +989,7 @@ func (e *Engine) retry(ctx context.Context, d *dispatch) error {
 		err := errors.New("task '%s' requested a retry with a negative delay", stripProto(taskName))
 		return errors.Trace(e.failAndReturn(ctx, d, err))
 	}
-	e.logger.DebugContext(ctx, "Task retried", "task", taskName, "workflow", d.row.workflowURL, "step", d.stepID, "attempt", d.row.attempt)
+	e.diags.Logger().DebugContext(ctx, "Task retried", "task", taskName, "workflow", d.row.workflowURL, "step", d.stepID, "attempt", d.row.attempt)
 	// A retry rewinds this step in place and clears its subgraph park slot, so on
 	// re-dispatch flow.Subgraph re-arms and spawns a *fresh* child. The prior attempt's
 	// child (always terminal by now - the park only resolves on a terminal child) must be
@@ -1004,12 +1005,12 @@ func (e *Engine) retry(ctx context.Context, d *dispatch) error {
 	// terminal - Terminate already terminated its children - and returns without reaping or re-dispatching.
 	// Test checkpoint: a breakpoint here freezes the worker before the rewind, so a test can Terminate the
 	// flow (terminalizing this running step) in exactly the window the status='running' rewind guard protects.
-	e.seams.Checkpoint(ctx, engineseams.CheckpointBeforeRetryRewind)
+	e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointBeforeRetryRewind)
 	var rewound bool
 	landed, err := e.settlePersist(ctx, d, e.persistYielding(ctx, d, func() error {
 		rewound = false
-		if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultRetryRewindErr, taskName)) {
-			return errors.New("injected fault: " + engineseams.FaultRetryRewindErr + " " + taskName)
+		if e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultRetryRewindErr, taskName)) {
+			return errors.New("injected fault: " + diagnostics.FaultRetryRewindErr + " " + taskName)
 		}
 		return d.db.Transact(ctx, func(tx *sequel.Tx) error {
 			rewound = false
@@ -1058,12 +1059,12 @@ func (e *Engine) complete(ctx context.Context, d *dispatch) (done bool, err erro
 
 	// Complete the step.
 	//
-	// engineseams.FaultLeaseStaleWrite makes this completion write carry a stale lease generation, exactly as a zombie
+	// diagnostics.FaultLeaseStaleWrite makes this completion write carry a stale lease generation, exactly as a zombie
 	// worker (whose lease was re-granted to a peer) would. The fence must reject it (zero rows -> benign
 	// no-op below), so the step stays claimable and lease recovery re-runs it cleanly - the test proves a
 	// late/slow worker's write can never corrupt or terminalize a flow a peer is healthily re-executing.
 	writeSeq := d.row.leaseSeq
-	if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultLeaseStaleWrite, taskName)) {
+	if e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultLeaseStaleWrite, taskName)) {
 		writeSeq = d.row.leaseSeq - 1
 	}
 	// THE task has already run - its side effects have fired - so this write is the only record that it did.
@@ -1098,19 +1099,19 @@ func (e *Engine) complete(ctx context.Context, d *dispatch) (done bool, err erro
 		// follow-up SELECT lost re-runs a landed UPDATE: the row still matches and is rewritten with the same values.
 		return retryContention(ctx, func() error {
 			stepRowsAffected, d.completedCancelling = 0, false
-			// engineseams.FaultCompletionContention makes this write lose a lock-contention race, consumed per
+			// diagnostics.FaultCompletionContention makes this write lose a lock-contention race, consumed per
 			// attempt - so InjectN(1) is a deadlock the retry must absorb without re-running the task.
-			if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultCompletionContention, taskName)) {
-				return errors.New("database is locked (injected fault: " + engineseams.FaultCompletionContention + " " + taskName + ")")
+			if e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultCompletionContention, taskName)) {
+				return errors.New("database is locked (injected fault: " + diagnostics.FaultCompletionContention + " " + taskName + ")")
 			}
-			// engineseams.FaultPersistErr makes this write fail with a synthetic NON-contention error, consumed per attempt -
+			// diagnostics.FaultPersistErr makes this write fail with a synthetic NON-contention error, consumed per attempt -
 			// so InjectN(1) is a transient blip the retry must absorb with NO re-execution, and InjectN(large) is a
 			// permanent failure the classifier must terminalize rather than loop on.
-			if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultPersistErr, taskName)) {
-				return errors.New("injected fault: " + engineseams.FaultPersistErr + " " + taskName)
+			if e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultPersistErr, taskName)) {
+				return errors.New("injected fault: " + diagnostics.FaultPersistErr + " " + taskName)
 			}
-			if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultPersistConnErr, taskName)) {
-				return errors.Join(errors.New("injected fault: "+engineseams.FaultPersistConnErr+" "+taskName), driver.ErrBadConn)
+			if e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultPersistConnErr, taskName)) {
+				return errors.Join(errors.New("injected fault: "+diagnostics.FaultPersistConnErr+" "+taskName), driver.ErrBadConn)
 			}
 			const where = " WHERE step_id=? AND status NOT IN ('" + workflow.StatusTerminated + "', '" + workflow.StatusCancelled + "') AND lease_seq=?"
 			const update = "UPDATE dwarf_steps SET status=?, changes=?, changes_bytes=?, " + advanceSet + ", updated_at=NOW_UTC()"
@@ -1147,10 +1148,10 @@ func (e *Engine) complete(ctx context.Context, d *dispatch) (done bool, err erro
 					}
 				}
 			}
-			// engineseams.FaultPersistLandedErr reports an error for a write that landed, as a lost acknowledgement
+			// diagnostics.FaultPersistLandedErr reports an error for a write that landed, as a lost acknowledgement
 			// of a commit does, consumed per attempt.
-			if stepRowsAffected > 0 && e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultPersistLandedErr, taskName)) {
-				return errors.New("injected fault: " + engineseams.FaultPersistLandedErr + " " + taskName)
+			if stepRowsAffected > 0 && e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultPersistLandedErr, taskName)) {
+				return errors.New("injected fault: " + diagnostics.FaultPersistLandedErr + " " + taskName)
 			}
 			return nil
 		})
@@ -1170,7 +1171,7 @@ func (e *Engine) complete(ctx context.Context, d *dispatch) (done bool, err erro
 	if d.completedCancelling && !d.errorRouted {
 		// Test checkpoint: a breakpoint here freezes the worker with the step completed and still advancing,
 		// before the write that routes it or the failure, so a test can Terminate the flow in between.
-		e.seams.Checkpoint(ctx, engineseams.CheckpointBeforeCancelRoute)
+		e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointBeforeCancelRoute)
 		// The flow row was read at claim time, which for a step already running when Cancel landed predates
 		// the reason. Cancel writes the reason before the mark, so a step that sees the mark finds the reason
 		// on a fresh read; this path is rare, so the extra round trip is too.
@@ -1207,14 +1208,14 @@ func (e *Engine) complete(ctx context.Context, d *dispatch) (done bool, err erro
 		// of the step's recorded outcome, so it goes through persist like the completion write above.
 		err = e.persistYielding(ctx, d, func() error {
 			return retryContention(ctx, func() error {
-				// engineseams.FaultRerouteWriteErr makes this write fail with a NON-contention error, consumed per
+				// diagnostics.FaultRerouteWriteErr makes this write fail with a NON-contention error, consumed per
 				// attempt: InjectN(1) is a blip persist absorbs in place, InjectN(large) a failure it classifies.
-				if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultRerouteWriteErr, taskName)) {
-					return errors.New("injected fault: " + engineseams.FaultRerouteWriteErr + " " + taskName)
+				if e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultRerouteWriteErr, taskName)) {
+					return errors.New("injected fault: " + diagnostics.FaultRerouteWriteErr + " " + taskName)
 				}
-				// engineseams.FaultRerouteStaleWrite makes it carry a stale lease generation, as a zombie's would.
+				// diagnostics.FaultRerouteStaleWrite makes it carry a stale lease generation, as a zombie's would.
 				writeSeq := d.row.leaseSeq
-				if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultRerouteStaleWrite, taskName)) {
+				if e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultRerouteStaleWrite, taskName)) {
 					writeSeq = d.row.leaseSeq - 1
 				}
 				res, uerr := db.ExecContext(ctx,
@@ -1239,20 +1240,20 @@ func (e *Engine) complete(ctx context.Context, d *dispatch) (done bool, err erro
 		d.errorTarget = tr.To
 		d.sleep = 0
 	}
-	debugLog := e.logger.Enabled(ctx, slog.LevelDebug)
+	debugLog := e.diags.Logger().Enabled(ctx, slog.LevelDebug)
 	if d.row.replaying {
 		// The task ran once, on the worker that recorded this completion, and dwarf_steps_executed counted it there.
 		if debugLog {
-			e.logger.DebugContext(ctx, "Task replayed", "task", taskName, "workflow", d.row.workflowURL)
+			e.diags.Logger().DebugContext(ctx, "Task replayed", "task", taskName, "workflow", d.row.workflowURL)
 		}
 	} else if d.errorRouted {
 		if debugLog {
-			e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "workflow", d.row.workflowURL)
+			e.diags.Logger().DebugContext(ctx, "Task error routed", "task", taskName, "workflow", d.row.workflowURL)
 		}
 		e.metricStepExecuted(ctx, taskName, "error_routed", d.shard)
 	} else {
 		if debugLog {
-			e.logger.DebugContext(ctx, "Task completed", "task", taskName, "workflow", d.row.workflowURL)
+			e.diags.Logger().DebugContext(ctx, "Task completed", "task", taskName, "workflow", d.row.workflowURL)
 		}
 		e.metricStepExecuted(ctx, taskName, workflow.StatusCompleted, d.shard)
 	}
@@ -1275,7 +1276,7 @@ func (e *Engine) transition(ctx context.Context, d *dispatch) error {
 	// completion - so a test can Terminate the flow in exactly the window the write-first terminal-status guard
 	// exists to survive (the transition must become a no-op, inserting no successors into the terminated flow), or
 	// take the step back from under a worker that has stalled there.
-	e.seams.Checkpoint(ctx, engineseams.CheckpointBeforeTransitionTx)
+	e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointBeforeTransitionTx)
 
 	// Evaluate transitions
 	var nextTasks []nextStep
@@ -1511,7 +1512,7 @@ func (e *Engine) advance(ctx context.Context, d *dispatch) error {
 	// from the cache on its dispatch rather than read back. Seeding from the linear mint usually covers a forEach
 	// branch's array ref too (both mint at the same width); where a branch anchors what the linear mint inlined,
 	// the branch's resolve simply misses.
-	if len(d.normalNexts) > 0 && len(d.newStepIDs) > 0 && !e.seams.IsFault(engineseams.FaultSkipRefSeed) {
+	if len(d.normalNexts) > 0 && len(d.newStepIDs) > 0 && !e.diags.Seams().IsFault(diagnostics.FaultSkipRefSeed) {
 		e.linkerFor(d.shard).Seed(d.row.flowToken, d.stepID, d.successorBase, d.changes, d.linearRefsJSON)
 	}
 
@@ -1534,16 +1535,16 @@ func (e *Engine) transitionTx(ctx context.Context, d *dispatch, tx *sequel.Tx) e
 	d.flowRowLocked = false
 	taskName, graph := d.row.taskName, d.graph
 
-	// engineseams.FaultContention returns a retryable lock-contention error (consumed on the first attempt), so the
-	// test proves Transact rolls back and re-runs the closure to a clean commit. engineseams.FaultTransitionCommit
+	// diagnostics.FaultContention returns a retryable lock-contention error (consumed on the first attempt), so the
+	// test proves Transact rolls back and re-runs the closure to a clean commit. diagnostics.FaultTransitionCommit
 	// returns a non-retryable error, so the tx fails after the step was already marked completed and the
 	// processStep recovery defer must reset it (completed->pending) and re-dispatch. Both are scoped to
 	// the completing task and checked before the flow-row write, so a fired fault rolls back nothing.
-	if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultContention, taskName)) {
-		return errors.New("database is locked (injected fault: " + engineseams.FaultContention + " " + taskName + ")")
+	if e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultContention, taskName)) {
+		return errors.New("database is locked (injected fault: " + diagnostics.FaultContention + " " + taskName + ")")
 	}
-	if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultTransitionCommit, taskName)) {
-		return errors.New("injected fault: " + engineseams.FaultTransitionCommit + " " + taskName)
+	if e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultTransitionCommit, taskName)) {
+		return errors.New("injected fault: " + diagnostics.FaultTransitionCommit + " " + taskName)
 	}
 
 	// A NON-FINAL cohort arrival is the one disposition that neither extends nor terminalizes the flow:
@@ -1687,7 +1688,7 @@ func (e *Engine) transitionTx(ctx context.Context, d *dispatch, tx *sequel.Tx) e
 				return errLeaseFenced
 			}
 			if d.isPushTransition {
-				e.logger.DebugContext(ctx, "Fan-out cohort spawned", "flow", keys.CorrelationID(d.shard, d.row.createdHour, d.row.flowID), "spawnStep", d.stepID, "task", taskName, "cohortSize", d.cohortSize)
+				e.diags.Logger().DebugContext(ctx, "Fan-out cohort spawned", "flow", keys.CorrelationID(d.shard, d.row.createdHour, d.row.flowID), "spawnStep", d.stepID, "task", taskName, "cohortSize", d.cohortSize)
 			}
 			return nil
 		}, "UPDATE dwarf_steps SET "+set+"advancing=0 WHERE step_id=? AND lease_seq=? AND advancing=1", args...)
@@ -1708,8 +1709,8 @@ func (e *Engine) transitionTx(ctx context.Context, d *dispatch, tx *sequel.Tx) e
 // failStep inserts nothing into a closed flow. It is batched with what follows it, so its guard is read only after
 // those statements ran: a closed flow matches no row, and its reader returns bail and leaves d.flowRowLocked false.
 func (e *Engine) queueFlowGrab(ctx context.Context, d *dispatch, batch *txBatch, bail error) {
-	if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
-		e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(d.row.flowID)))
+	if e.diags.Seams().Enabled() { // counting checkpoint; Enabled gates the assembled name in production
+		e.diags.Seams().Checkpoint(ctx, diagnostics.Join(diagnostics.CheckpointFlowRowWrite, strconv.Itoa(d.row.flowID)))
 	}
 	driver := batch.tx.DriverName() // the reader captures the name, not the batch, which then stays on the stack
 	batch.queue(func(res *sequel.BatchResults) error {

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/database"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/sequel"
@@ -121,10 +122,10 @@ func afterClose(driver string, root dueRoot) (clause string, args []any) {
 func scanClosed(ctx context.Context, q sequel.Executor, seams *seamster.Seamster, grace time.Duration, where string, whereArgs []any, limit int) (roots []dueRoot, oldest time.Duration, err error) {
 	stmt, args := closedScanSQL(grace, where, whereArgs, limit)
 	rows, err := q.QueryContext(ctx, stmt, args...)
-	// FaultSelectErr fails the scan, so a test proves a round logs and goes on without removing anything.
-	if err == nil && seams.IsFault(FaultSelectErr) {
+	// diagnostics.FaultReapSelectErr fails the scan, so a test proves a round logs and goes on without removing anything.
+	if err == nil && seams.IsFault(diagnostics.FaultReapSelectErr) {
 		rows.Close()
-		err = errors.New("injected fault: " + FaultSelectErr)
+		err = errors.New("injected fault: " + diagnostics.FaultReapSelectErr)
 	}
 	if err != nil {
 		return nil, 0, errors.Trace(err)
