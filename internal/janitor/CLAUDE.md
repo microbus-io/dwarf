@@ -2,16 +2,19 @@
 
 > Load when: changing how a janitor's jobs are scheduled, started, stopped or drained, how a batch takes its turn
 > and its connection, fast archiving or fast deletion, or the janitors' metrics.
-> Coupled with: `engine/CLAUDE.md` §"The janitors" (the supervisor, the drain order, the test seams),
+> Coupled with: `engine/CLAUDE.md` §"The janitors" (their activity, the residue class, the drain order, the test seams),
 > `internal/turnstile/CLAUDE.md` (what a claim's age means), `internal/reaper/CLAUDE.md` (the work the janitor has not
 > taken over: the sweeps, staging, deletion, retention) and `internal/archiver/CLAUDE.md` (the day tables).
 
 ## What a Janitor is
 
-One `Janitor` per shard, on each replica that dispatches the shard; a replica that does not dispatch a shard runs
-none there. It owns its jobs' goroutines and everything they learn - positions, failures, observations - and the
-gauges read it through `Observe`. A new janitor starts with nothing learned: everything it keeps is a hint, so a
-handoff or a restart loses no tree, only where a job had got to.
+One `Janitor` per shard on every replica, for the replica's run. It is **active only while the replica dispatches
+the shard** (`Resume`, `Pause`): paused, it holds no goroutine and no connection. It owns its jobs' goroutines and
+everything they learn - positions, failures, observations - which the gauges read through its getters. A resume
+starts every job over, its position and observations forgotten: a replica that dispatches the shard again saw
+nothing of what happened meanwhile, so everything it kept is a stale hint, and losing it loses no tree. The engine
+hands it what it needs as it changes rather than the janitor asking: its activity from the dispatch role, its residue
+class (`SetResidency`) from the fleet, its settings by setters.
 
 **One goroutine per job, never one goroutine for all of them.** Each job is a loop of rounds on its own goroutine,
 so a job that is slow, blocked on a held root or working through a large tree does not slow the others. A single
@@ -21,25 +24,26 @@ backlog growing all run. Do not reintroduce slices, a pass budget or a shared ti
 ## The round and the idle wait
 
 A round reports whether it made progress: work done that moved the job forward. A round with progress is followed
-at once by the next; a round without - nothing found, or every candidate held or failing - by `Idle` (1 s). **The
-wait follows a round without progress, not only an empty scan:** a job whose candidates all fail would otherwise
-spin on them. No failure counters, backoff or retry classes beyond that.
+at once by the next; a round without - nothing found, or every candidate held or failing - by the job's own idle wait
+(1 s for the jobs on the live tables; `SetIdle` replaces every job's for a test). **The wait follows a round without
+progress, not only an empty scan:** a job whose candidates all fail would otherwise spin on them. No failure
+counters, backoff or retry classes beyond that.
 
-The janitor records the time of each round with progress, and `Observe` reports how long since, per job
+The janitor records the time of each round with progress, and `JobAges` reports how long since, per job
 (`dwarf_janitor_progress_age_seconds`). A blocked job shows there: SQL Server waits on a held lock without bound, and
 nothing else bounds a job's statement.
 
 ## The batch: a fresh turn, its timings
 
-A round does its work in batches through the `Batch` it is handed.
+A round does its work in batches through the `batchFunc` it is handed.
 
 - **Each batch takes a turn of its own, from a context with no claim.** The turnstile keeps the age of a context
   stamped before, so a job that reused a batch's context would rank as old as its first batch and outrank every
   dispatch that arrived since. A batch whose context carries a claim fails rather than run - the same check catches
   a batch inside a batch, a turn taken while one is held. Pinned by `TestJanitor_EachBatchTakesAFreshClaim`.
-- **The turn is at dispatch's band** (the engine's `priorityCommon`). A lower band could starve the jobs at peak
-  load and let the live tables grow; equal standing does not guarantee them any share, which the batch timings are
-  there to show.
+- **The turn is at dispatch's band** (`SetTurnstile` with the engine's `priorityCommon`). A lower band could starve
+  the jobs at peak load and let the live tables grow; equal standing does not guarantee them any share, which the
+  batch timings are there to show.
 - **Each batch takes one connection from the pool, once, and runs every statement on it** (a `sequel.Conn`, closed
   when the batch ends). Under a full pool every acquisition queues behind dispatch, and a batch that took one per
   statement - its scan, its attempt read, its sizing, its transaction - spent most of its time in those queues rather
@@ -59,17 +63,20 @@ A round does its work in batches through the `Batch` it is handed.
   for the connection, `work` the batch's statements - none for a batch that could not take its connection. They attribute a job's shortfall to its own waits, which the
   pool-wide counters cannot.
 
-## Stopping
+## Pausing and stopping
 
-`Stop` cancels the jobs' context and joins their goroutines. A batch in flight is abandoned - its statement
-cancelled, its transaction rolled back - which strands nothing: every write is one statement or one transaction.
-Jobs have no deadline, so cancellation is the only thing that ends a blocked one; the engine stops the janitors
-before it drains its workers for that reason (`engine/CLAUDE.md`). Pinned by `TestJanitor_StopCancelsABlockedJob`
-and the engine's `TestJanitor_AJobBlockedInAStatementIsCancelled`.
+`Pause` cancels the active period's context and returns; `Resume` waits for that period's goroutines to be gone
+before the jobs start over, so two never run one job. `Stop` ends the run: it cancels and joins, and a stopped
+janitor never resumes. A batch in flight is abandoned - its statement cancelled, its transaction rolled back - which
+strands nothing: every write is one statement or one transaction. Jobs have no deadline, so cancellation is the only
+thing that ends a blocked one; the engine stops the janitors before it drains its workers for that reason
+(`engine/CLAUDE.md`). Pinned by `TestJanitor_PauseAndResume`, `TestJanitor_ABlockedStatementIsCancelled` (a pause and
+a stop, inside a statement that never ends by itself), `TestJanitor_StopCancelsABlockedJob` and the engine's
+`TestJanitor_APauseOrShutdownCancelsABatchInFlight`.
 
 ## The deterministic test mode
 
-`Manual` starts no goroutine, and `Drain` runs the jobs: each job's rounds until one makes no progress, over and over
+`SetManual` starts no goroutine, and `Drain` runs the jobs of an active janitor: each job's rounds until one makes no progress, over and over
 until a pass over every job makes none. It returns where a running job would wait, so a test whose roots are held or
 failing cannot hang on it, and jobs that feed each other are run until both are done. A round holds its job's mutex,
 so a `Drain` beside the goroutines never overlaps a round (`TestJanitor_ADrainBesideTheGoroutineNeverOverlapsARound`).
@@ -116,9 +123,9 @@ rechecks under them, the directory rows and the archive time are the reaper's, c
   logged (`TestMove_ALastingFaultPreservesAndLogs`). At a retention of 0 nothing is archived, so nothing starts an
   episode (`TestMove_AScanFailureAtRetentionZeroIsNoArchiveFailure`).
 - **The counters it shares with the reaper** - `dwarf_flows_archived`, `dwarf_archive_move_failures`,
-  `dwarf_flows_reaped` - are created on the same meter by both packages, from one description each
-  (`ArchivedDescription` and the rest): two instruments of one name with different descriptions are exported as two
-  streams of that name.
+  `dwarf_flows_reaped` - are created on the same meter by both packages, each with its description written word for
+  word the same in both: two instruments of one name with different descriptions are exported as two streams of that
+  name. The reaper does not import the janitor; the text is duplicated until the reaper is deleted.
 - **The recheck under the root lock is the authority, not the scan:** a root selected and sized is moved only if it is
   still a closed root due, unstamped, and with no archive attempt when locked (`TestMove_TheLockRechecksEveryRoot`); a
   stamped one only if still stamped and due (`TestDelete_TheLockRechecksTheStamp`).

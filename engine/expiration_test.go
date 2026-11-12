@@ -438,9 +438,9 @@ func TestExpiration_AHandoffForgetsThePosition(t *testing.T) {
 	assert := testarossa.For(t)
 	e, _, _ := expiryEngine(t, time.Hour)
 	e.expirePositions.set(1, 42)
-	e.dispatchFlag(1).Store(false)
+	setRole(e, 1, false)
 	e.reapDueFlows(t.Context())
-	e.dispatchFlag(1).Store(true)
+	setRole(e, 1, true)
 	assert.Equal(0, e.expirePositions.of(1))
 }
 

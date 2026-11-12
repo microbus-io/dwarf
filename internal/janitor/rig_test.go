@@ -32,20 +32,22 @@ import (
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/sequel"
+	"go.opentelemetry.io/otel/metric"
 )
 
-// rig is a Manual Janitor over one shard's own isolated, migrated database and its archive. Its janitor is made at
-// its first pass, so a test sets what it needs before; settings are read at every round, so a test changes them
-// between passes.
+// rig is a Manual, active Janitor over one shard's own isolated, migrated database and its archive. Its janitor is
+// made at its first use, so a test sets what it needs before; settings and the residue class are set on it before
+// every pass, so a test changes them between passes.
 type rig struct {
 	t         *testing.T
 	db        *sequel.DB
 	archive   *archiver.Archive
 	seams     *seamster.Seamster
 	logs      *logCounter
-	settings  Settings
-	residency func() (count, ordinal int, ok bool)
-	inst      *Instruments
+	retention int
+	settings  settings
+	residency residency
+	meter     metric.Meter
 	j         *Janitor
 }
 
@@ -77,38 +79,40 @@ func newRig(t *testing.T, retention int, dayLength ...time.Duration) *rig {
 		t.Fatal(err)
 	}
 	return &rig{
-		t:       t,
-		db:      db,
-		archive: a,
-		seams:   seamster.New(true),
-		logs:    &logCounter{seen: map[string]int{}},
-		settings: Settings{
-			BatchRoots:    512,
-			BatchRows:     4096,
-			RetentionDays: retention,
-			NoQuietMargin: true,
+		t:         t,
+		db:        db,
+		archive:   a,
+		seams:     seamster.New(true),
+		logs:      &logCounter{seen: map[string]int{}},
+		retention: retention,
+		settings: settings{
+			batchRoots:    512,
+			batchRows:     4096,
+			noQuietMargin: true,
 		},
 	}
 }
 
-// janitor is the rig's janitor, made and started at its first call.
+// janitor is the rig's janitor, made, started and resumed at its first call, with the rig's settings and residue
+// class set on it.
 func (r *rig) janitor() *Janitor {
 	if r.j == nil {
-		r.j = New(Config{
-			Shard:       1,
-			DB:          r.db,
-			Turn:        func(ctx context.Context) (context.Context, func()) { return ctx, func() {} },
-			Logger:      slog.New(r.logs),
-			Instruments: r.inst,
-			Manual:      true,
-			Settings:    func(context.Context) Settings { return r.settings },
-			Archive:     r.archive,
-			Residency:   r.residency,
-			Seams:       r.seams,
-		})
+		r.j = New(1, r.db, r.archive, r.retention)
+		r.j.SetLogger(slog.New(r.logs))
+		r.j.SetSeams(r.seams)
+		r.j.SetManual(true)
+		if r.meter != nil {
+			if err := r.j.SetMeter(r.meter); err != nil {
+				r.t.Fatal(err)
+			}
+		}
 		r.j.Start(r.t.Context())
+		r.j.Resume()
 		r.t.Cleanup(r.j.Stop)
 	}
+	r.j.mu.Lock()
+	r.j.settings, r.j.residency = r.settings, r.residency
+	r.j.mu.Unlock()
 	return r.j
 }
 
@@ -132,7 +136,7 @@ func (r *rig) pass(ctx context.Context) {
 
 // failing is how long archiving has been failing, as the janitor reports it at now.
 func (r *rig) failing(now time.Time) time.Duration {
-	return r.janitor().Observe(now).Failing
+	return r.janitor().ArchiveFailing(now)
 }
 
 // moveInto archives the tree rooted at rootID into day.

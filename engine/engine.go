@@ -50,7 +50,6 @@ import (
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/seamster"
-	"github.com/microbus-io/sequel"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -330,19 +329,15 @@ type Engine struct {
 	reaperCancel context.CancelFunc
 	reaperWorker sync.WaitGroup
 
-	// Janitors: one per shard this replica dispatches, kept so by a supervisor goroutine (janitorLoop). janitorCtx is
-	// the supervisor's and the parent of every janitor's; janitorCancel stops them all. The map and the context are
-	// read and written under janitorMu. janitorIdle replaces each job's idle wait for a test; janitorManual starts no
-	// job goroutine, for a test that runs the jobs through reapDueFlows; janitorTestJobs gives every janitor a test's
-	// jobs.
-	janitorMu       sync.Mutex
-	janitors        map[int]*janitor.Janitor
-	janitorCtx      context.Context
-	janitorCancel   context.CancelFunc
-	janitorWorker   sync.WaitGroup
-	janitorIdle     time.Duration
-	janitorManual   bool
-	janitorTestJobs func(shard int, db *sequel.DB) []janitor.Job
+	// Janitors: one per shard for the run (startJanitors), active where this replica dispatches the shard - applyRole
+	// resumes and pauses them - and handed their residue class by the reconcile loop. The map is replaced at Startup and
+	// read under janitorMu. janitorCancel ends their run. janitorIdle replaces every job's idle wait for a test;
+	// janitorManual starts no job goroutine, for a test that runs the jobs through reapDueFlows.
+	janitorMu     sync.Mutex
+	janitors      map[int]*janitor.Janitor
+	janitorCancel context.CancelFunc
+	janitorIdle   time.Duration
+	janitorManual bool
 
 	// Archive goroutine: keeps each shard's archive day tables - today's and the days ahead made, expired days
 	// dropped. archives is the run's set, published at Startup; testArchiveDay, when set, replaces the day's
@@ -1049,11 +1044,8 @@ func (e *Engine) initRuntime() error {
 	reaperCtx, e.reaperCancel = context.WithCancel(e.lifetimeCtx)
 	archiveCtx, e.archiveCancel = context.WithCancel(e.lifetimeCtx)
 	latchCtx, e.latchCancel = context.WithCancel(e.lifetimeCtx)
-	e.janitorMu.Lock()
-	e.janitors = map[int]*janitor.Janitor{}
-	e.janitorCtx, e.janitorCancel = context.WithCancel(e.lifetimeCtx)
-	janitorCtx := e.janitorCtx
-	e.janitorMu.Unlock()
+	var janitorCtx context.Context
+	janitorCtx, e.janitorCancel = context.WithCancel(e.lifetimeCtx)
 	e.graphs = graphcache.New(graphCacheFlows, graphCacheGraphs)
 	// Fresh boards per run: the previous ones were closed at drain, and a closed board turns every Await
 	// away. The resolver is non-nil, so New cannot fail.
@@ -1226,12 +1218,11 @@ func (e *Engine) initRuntime() error {
 	e.reaperWorker.Go(func() {
 		e.reaperLoop(reaperCtx)
 	})
-	// The first supervision runs here, so a shard this replica dispatches has its janitor - and its gauges their
-	// readings - by the time Startup returns.
-	e.superviseJanitors()
-	e.janitorWorker.Go(func() {
-		e.janitorLoop(janitorCtx)
-	})
+	// Before Startup returns, so a shard this replica dispatches has its janitor active - and its gauges their
+	// readings - from the start.
+	if err := e.startJanitors(janitorCtx); err != nil {
+		e.logger.ErrorContext(janitorCtx, "Starting the janitors", "error", err)
+	}
 	e.archiveWorker.Go(func() {
 		e.archiveLoop(archiveCtx)
 	})
@@ -1338,7 +1329,7 @@ func (e *Engine) drainRuntime() {
 	if e.janitorCancel != nil {
 		e.janitorCancel()
 	}
-	e.janitorWorker.Wait()
+	e.stopJanitors()
 	// Closing the cache releases workers parked waiting for work, and closing the turnstiles releases
 	// those waiting for a turn; Drain then closes the crew to new goroutines and waits. All three halves
 	// are the crew's contract - see internal/workers. BOTH closes are required: a worker waiting for a

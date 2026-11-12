@@ -42,14 +42,12 @@ func TestDelete_AStampedTreeIsDeletedWhenItsStampIsDue(t *testing.T) {
 	ctx := t.Context()
 	r := newRig(t, 30)
 	reader := sdkmetric.NewManualReader()
-	inst, err := NewInstruments(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"))
-	assert.Must(assert.NoError(err))
-	r.inst = inst
-	r.settings.Grace = time.Hour // the closed trees are not archiving's yet
+	r.meter = sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test")
+	r.settings.grace = time.Hour // the closed trees are not archiving's yet
 	roots := seedTrees(t, r.db, 3, callShape)
 	stampTree(t, r.db, roots[0])
 	stampTree(t, r.db, roots[1])
-	_, err = r.db.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=? WHERE flow_id=?", time.Hour.Milliseconds(), roots[2])
+	_, err := r.db.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=? WHERE flow_id=?", time.Hour.Milliseconds(), roots[2])
 	assert.NoError(err)
 	r.pass(ctx)
 	for i, id := range roots {
@@ -76,15 +74,13 @@ func TestDelete_APublishedLiveCopyIsNotCountedReaped(t *testing.T) {
 	ctx := t.Context()
 	r := newRig(t, 30)
 	reader := sdkmetric.NewManualReader()
-	inst, err := NewInstruments(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"))
-	assert.Must(assert.NoError(err))
-	r.inst = inst
-	r.settings.Grace = time.Hour
+	r.meter = sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test")
+	r.settings.grace = time.Hour
 	roots := seedTrees(t, r.db, 2, callShape)
 	stampTree(t, r.db, roots[0])
 	stampTree(t, r.db, roots[1])
 	at, arg := database.SQLTime(r.db.DriverName(), time.Now().Add(-time.Minute))
-	_, err = r.db.ExecContext(ctx, "UPDATE dwarf_flows SET archive_attempt_at="+at+" WHERE flow_id=?", arg, roots[0])
+	_, err := r.db.ExecContext(ctx, "UPDATE dwarf_flows SET archive_attempt_at="+at+" WHERE flow_id=?", arg, roots[0])
 	assert.NoError(err)
 	r.pass(ctx)
 	for _, id := range roots {
@@ -103,8 +99,8 @@ func TestDelete_ALargeStampedTreeIsPassed(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	r := newRig(t, 30)
-	r.settings.Grace = time.Hour
-	r.settings.BatchRows = 5
+	r.settings.grace = time.Hour
+	r.settings.batchRows = 5
 	large := seedTrees(t, r.db, 1, chunkShape)[0] // 9 rows
 	small := seedTrees(t, r.db, 1, callShape)[0]  // 4 rows
 	stampTree(t, r.db, large)
@@ -124,8 +120,8 @@ func TestDelete_FastPassesTheBatchItAttempted(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	r := newRig(t, 30)
-	r.settings.Grace = time.Hour
-	r.settings.BatchRoots = 2
+	r.settings.grace = time.Hour
+	r.settings.batchRoots = 2
 	roots := seedTrees(t, r.db, 4, callShape)
 	for _, root := range roots {
 		stampTree(t, r.db, root)

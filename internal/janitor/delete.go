@@ -41,7 +41,7 @@ type fastDeletion struct {
 	// after is the position: the flow id of the last root a round was done with. residency is the residue class the
 	// position was walked in; a round in another starts over.
 	after     int
-	residency [3]int
+	residency residency
 }
 
 // stampedDueSQL is the condition, on a live flows row, that it is a root stamped for deletion whose stamp is due. Only
@@ -49,10 +49,10 @@ type fastDeletion struct {
 const stampedDueSQL = "delete_after_ms>0 AND surgraph_flow_id=0 AND DATE_ADD_MILLIS(updated_at, delete_after_ms)<=NOW_UTC()"
 
 // round runs one batch.
-func (f *fastDeletion) round(ctx context.Context, batch Batch) (progress bool) {
-	s := f.j.cfg.Settings(ctx)
-	err := batch(ctx, func(ctx context.Context, h Handle) error {
-		progress = f.batch(ctx, h, s)
+func (f *fastDeletion) round(ctx context.Context, batch batchFunc) (progress bool) {
+	s, res := f.j.current()
+	err := batch(ctx, func(ctx context.Context, h handle) error {
+		progress = f.batch(ctx, h, s, res)
 		return nil
 	})
 	if err != nil {
@@ -63,10 +63,10 @@ func (f *fastDeletion) round(ctx context.Context, batch Batch) (progress bool) {
 
 // batch scans, sizes and deletes one batch of stamped trees on h, and reports whether it made progress: deleted a
 // tree, or passed one too large for a batch.
-func (f *fastDeletion) batch(ctx context.Context, h Handle, s Settings) bool {
-	shard, seams := f.j.cfg.Shard, f.j.cfg.Seams
-	where, whereArgs := f.restriction()
-	candidates, err := scanStamped(ctx, h, seams, where, whereArgs, max(s.BatchRoots, 1))
+func (f *fastDeletion) batch(ctx context.Context, h handle, s settings, res residency) bool {
+	shard, seams := f.j.shard, f.j.seams
+	where, whereArgs := f.restriction(res)
+	candidates, err := scanStamped(ctx, h, seams, where, whereArgs, max(s.batchRoots, 1))
 	if err != nil {
 		f.logError(ctx, "Janitor: selecting stamped trees", "error", err)
 		return false
@@ -74,7 +74,7 @@ func (f *fastDeletion) batch(ctx context.Context, h Handle, s Settings) bool {
 	if len(candidates) == 0 {
 		return false
 	}
-	batchLimit := capOf(s.BatchRows, s.BatchBytes)
+	batchLimit := capOf(s.batchRows, s.batchBytes)
 	cut, first, err := cutWithin(candidates, batchLimit, batchLimit.rows+1, func(group, limits []int) ([]size, error) {
 		if err := targetedFault(seams, FaultSizeErr, group...); err != nil {
 			return nil, err
@@ -88,7 +88,7 @@ func (f *fastDeletion) batch(ctx context.Context, h Handle, s Settings) bool {
 	}
 	if err == nil {
 		// Counted before the stop check: a batch that committed as the job was stopped still counts.
-		f.j.cfg.Instruments.flowsReaped(ctx, shard, ReasonDeleted, removed.unarchived)
+		f.j.metrics.flowsReaped(ctx, shard, ReasonDeleted, removed.unarchived)
 	}
 	if ctx.Err() != nil {
 		return false // stopped: no failure, and the position stays
@@ -107,20 +107,11 @@ func (f *fastDeletion) batch(ctx context.Context, h Handle, s Settings) bool {
 // restriction is a round's restriction of its scan: this replica's residue class of the roots, and every root overdue
 // by the steal grace; and the range after the position. A residue class other than the last round's starts the walk
 // over from the beginning.
-func (f *fastDeletion) restriction() (where string, args []any) {
-	var count, ordinal int
-	ok := false
-	if f.j.cfg.Residency != nil {
-		count, ordinal, ok = f.j.cfg.Residency()
+func (f *fastDeletion) restriction(res residency) (where string, args []any) {
+	if res != f.residency {
+		f.residency, f.after = res, 0
 	}
-	okInt := 0
-	if ok {
-		okInt = 1
-	}
-	if pair := [3]int{count, ordinal, okInt}; pair != f.residency {
-		f.residency, f.after = pair, 0
-	}
-	where, args = stampedResidency(count, ordinal, ok, stealGrace)
+	where, args = stampedResidency(res.count, res.ordinal, res.ok, stealGrace)
 	if f.after != 0 {
 		where += " AND flow_id>?"
 		args = append(args, f.after)
@@ -133,7 +124,12 @@ func (f *fastDeletion) logError(ctx context.Context, msg string, args ...any) {
 	if ctx.Err() != nil {
 		return
 	}
-	f.j.cfg.Logger.ErrorContext(ctx, msg, append([]any{"shard", f.j.cfg.Shard}, args...)...)
+	f.j.logger.ErrorContext(ctx, msg, append([]any{"shard", f.j.shard}, args...)...)
+}
+
+// reset forgets where the job stood.
+func (f *fastDeletion) reset() {
+	f.after, f.residency = 0, residency{}
 }
 
 // stampedResidency restricts a stamped scan to this replica's share of the shard's dispatchers, as closedResidency

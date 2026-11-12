@@ -19,160 +19,131 @@ package engine
 import (
 	"context"
 	"database/sql"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/engineseams"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/janitor"
 	"github.com/microbus-io/dwarf/internal/reaper"
-	"github.com/microbus-io/dwarf/internal/turnstile"
 	"github.com/microbus-io/dwarf/workflow"
-	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-// awaitJanitor waits until shard has a janitor, or has none, and returns it.
-func awaitJanitor(t *testing.T, e *Engine, shard int, want bool) *janitor.Janitor {
+// runningJanitorEngine starts an engine whose janitors run their jobs in the background, waiting idle a short while,
+// archiving closed roots at once, with the reaper kept out of the way.
+func runningJanitorEngine(t *testing.T, mux *hosts.Mux) *Engine {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		j := e.janitorOn(shard)
-		if (j != nil) == want {
-			return j
-		}
+	e := NewEngineUnderTest(t.Name())
+	t.Cleanup(func() { e.Shutdown(context.Background()) })
+	e.SetHost(mux)
+	e.archiveGrace = 0
+	e.reapInterval = time.Hour
+	e.janitorManual = false
+	e.janitorIdle = 10 * time.Millisecond
+	if err := e.SetRetention(30); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	enginetest.AwaitVisitCount(t, e.seams, 1, 10*time.Second, engineseams.CheckpointArchivePassDone)
+	return e
+}
+
+// setRole makes this replica dispatch shard, or stop, as the reconcile loop does.
+func setRole(e *Engine, shard int, dispatches bool) {
+	e.poolsLock.Lock()
+	defer e.poolsLock.Unlock()
+	e.applyRole(shard, dispatches)
+}
+
+// live reports whether flow is in the live tables.
+func live(t *testing.T, e *Engine, flow int) bool {
+	t.Helper()
+	db, err := e.db.Shard(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=?", flow).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n == 1
+}
+
+// awaitGone waits until flow has left the live tables.
+func awaitGone(t *testing.T, e *Engine, flow int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
+	for live(t, e, flow) {
 		if time.Now().After(deadline) {
-			t.Fatalf("shard %d: janitor %v, want %v", shard, j != nil, want)
+			t.Fatalf("flow %d is still live", flow)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 }
 
-// blockingSQL is a statement that runs until it is cancelled.
-func blockingSQL(driver string) string {
-	switch driver {
-	case "pgx":
-		return "SELECT pg_sleep(600)"
-	case "mysql":
-		return "SELECT SLEEP(600)"
-	case "mssql":
-		return "WAITFOR DELAY '00:10:00'"
-	default:
-		return "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<1000000000000) SELECT MAX(x) FROM c"
-	}
-}
-
-// TestJanitor_FollowsTheDispatchRole pins the supervision: a shard this replica dispatches has a janitor, one it stops
-// dispatching has none - its jobs cancelled and joined - and one it dispatches again has a new janitor. Shutdown
-// stops the rest.
+// TestJanitor_FollowsTheDispatchRole pins the janitor's activity: it archives on a shard this replica dispatches,
+// nothing once it stops dispatching it, and again once it dispatches it again.
 func TestJanitor_FollowsTheDispatchRole(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	e := NewEngineUnderTest(t.Name())
-	defer e.Shutdown(t.Context())
-	assert.NoError(e.SetHost(noopHost{}))
-	var stopped atomic.Int64
-	entered := make(chan struct{}, 2)
-	e.janitorManual = false // the jobs run in the background, as in production
-	e.janitorTestJobs = func(shard int, db *sequel.DB) []janitor.Job {
-		return []janitor.Job{{Name: "test", Round: func(ctx context.Context, _ janitor.Batch) bool {
-			entered <- struct{}{}
-			<-ctx.Done()
-			stopped.Add(1)
-			return false
-		}}}
-	}
-	assert.Must(assert.NoError(e.Startup(t.Context())))
+	e := runningJanitorEngine(t, treeMux())
+	awaitGone(t, e, closedRoots(t, e, 1)[0])
 
-	// Each janitor's job is waited into its round before it is stopped: one stopped before its first round never runs.
-	first := awaitJanitor(t, e, 1, true)
-	<-entered
-	e.dispatchFlag(1).Store(false)
-	awaitJanitor(t, e, 1, false)
-	deadline := time.Now().Add(10 * time.Second)
-	for stopped.Load() < 1 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	assert.Equal(int64(1), stopped.Load(), "the janitor of a shard no longer dispatched is stopped and joined")
-	e.dispatchFlag(1).Store(true)
-	second := awaitJanitor(t, e, 1, true)
-	assert.True(first != second, "a shard dispatched again gets a new janitor")
-	<-entered
+	setRole(e, 1, false)
+	time.Sleep(100 * time.Millisecond) // a round already under way finishes
+	db, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	root := seedTrees(t, db, 1, callShape)[0] // seeded closed: this replica no longer runs flows on the shard
+	time.Sleep(500 * time.Millisecond)
+	assert.True(live(t, e, root), "a paused janitor archives nothing")
 
-	assert.NoError(e.Shutdown(t.Context()))
-	assert.Equal(int64(2), stopped.Load(), "Shutdown stops and joins the janitors")
-	assert.Nil(e.janitorOn(1))
+	setRole(e, 1, true)
+	awaitGone(t, e, root)
 }
 
-// TestJanitor_AJobBlockedInAStatementIsCancelled pins cancellation of a job inside a statement that would not end on
-// its own - SQL Server's unbounded lock wait is the production case - on a handoff and on Shutdown, and that the pool
-// is usable after it.
-func TestJanitor_AJobBlockedInAStatementIsCancelled(t *testing.T) {
+// TestJanitor_APauseOrShutdownCancelsABatchInFlight pins cancellation of a batch held inside its work - as SQL
+// Server's unbounded lock wait would hold it - on a pause, after which a resume runs the jobs again, and on Shutdown,
+// which does not wait it out.
+func TestJanitor_APauseOrShutdownCancelsABatchInFlight(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
-	in := make(chan struct{}, 1)
-	out := make(chan error, 1)
+	e.janitorManual = false
 	e.janitorIdle = 10 * time.Millisecond
-	e.janitorManual = false // the jobs run in the background, as in production
-	e.janitorTestJobs = func(shard int, db *sequel.DB) []janitor.Job {
-		return []janitor.Job{{Name: "test", Round: func(ctx context.Context, batch janitor.Batch) bool {
-			err := batch(ctx, func(ctx context.Context, h janitor.Handle) error {
-				in <- struct{}{}
-				_, err := h.ExecContext(ctx, blockingSQL(h.DriverName()))
-				return err
-			})
-			out <- err
-			<-ctx.Done()
-			return false
-		}}}
-	}
+	e.seams.Break(janitor.CheckpointBatchConn)
+	defer e.seams.Resume(janitor.CheckpointBatchConn)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	db, err := e.db.Shard(1)
-	assert.Must(assert.NoError(err))
+	assert.True(e.seams.WaitTimeout(t.Context(), janitor.CheckpointBatchConn, 10*time.Second*enginetest.TimeoutScale()))
 
-	// The handoff.
-	<-in
-	time.Sleep(200 * time.Millisecond) // into the statement
+	setRole(e, 1, false)
+	held := e.seams.Visits(janitor.CheckpointBatchConn)
 	start := time.Now()
-	e.dispatchFlag(1).Store(false)
-	select {
-	case err := <-out:
-		assert.Error(err, "the statement was cancelled")
-		assert.True(time.Since(start) < 5*time.Second, "cancelled after %v", time.Since(start))
-	case <-time.After(30 * time.Second):
-		t.Fatal("a handoff did not cancel the job's statement")
+	setRole(e, 1, true) // waits for the paused jobs to be gone
+	assert.True(time.Since(start) < 10*time.Second*enginetest.TimeoutScale(), "resumed after %v", time.Since(start))
+	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
+	for e.seams.Visits(janitor.CheckpointBatchConn) <= held && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
 	}
-	var one int
-	assert.NoError(db.QueryRowContext(t.Context(), "SELECT 1").Scan(&one), "the pool is usable after a cancellation")
+	assert.True(e.seams.Visits(janitor.CheckpointBatchConn) > held, "the resumed jobs run again")
 
-	// Shutdown.
-	e.dispatchFlag(1).Store(true)
-	<-in
-	time.Sleep(200 * time.Millisecond)
 	start = time.Now()
-	done := make(chan struct{})
-	go func() {
-		_ = e.Shutdown(context.Background())
-		close(done)
-	}()
-	select {
-	case <-done:
-		assert.Error(<-out, "the statement was cancelled")
-		assert.True(time.Since(start) < 10*time.Second, "Shutdown took %v", time.Since(start))
-	case <-time.After(60 * time.Second):
-		t.Fatal("Shutdown did not cancel the job's statement")
-	}
+	assert.NoError(e.Shutdown(context.Background()))
+	assert.True(time.Since(start) < 10*time.Second*enginetest.TimeoutScale(), "Shutdown took %v", time.Since(start))
 }
 
-// TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain pins the drain order: a job holding every connection of the
-// pool - as a batch with no deadline may - is cancelled before Shutdown waits on the workers, so a worker in flight
-// that needs a connection to record its step gets one and the drain ends. Cancelled after the workers' drain, the job
-// would hold the connections for as long as the drain waited on the worker, which is forever.
+// TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain pins the drain order: batches holding connections - as a
+// batch with no deadline may, here held at a breakpoint while the test holds the rest of the pool - are cancelled
+// before Shutdown waits on the workers, so a worker in flight that needs a connection to record its step gets one and
+// the drain ends. Cancelled after the workers' drain, the batches would hold the connections for as long as the drain
+// waited on the worker, which is forever.
 func TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -192,36 +163,8 @@ func TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain(t *testing.T) {
 		return f.Set("held", true)
 	})
 	assert.NoError(e.SetHost(mux))
-
-	var grab atomic.Bool
-	held := make(chan int, 1)
-	giveUp := make(chan struct{})
-	e.janitorIdle = 10 * time.Millisecond
-	e.janitorManual = false // the jobs run in the background, as in production
-	e.janitorTestJobs = func(shard int, db *sequel.DB) []janitor.Job {
-		return []janitor.Job{{Name: "test", Round: func(ctx context.Context, _ janitor.Batch) bool {
-			if !grab.CompareAndSwap(true, false) {
-				return false
-			}
-			var conns []*sql.Conn
-			for range db.Stats().MaxOpenConnections {
-				c, err := db.DB.Conn(ctx)
-				if err != nil {
-					break
-				}
-				conns = append(conns, c)
-			}
-			held <- len(conns)
-			select {
-			case <-ctx.Done():
-			case <-giveUp:
-			}
-			for _, c := range conns {
-				_ = c.Close()
-			}
-			return false
-		}}}
-	}
+	e.janitorManual = false
+	e.seams.Break(janitor.CheckpointBatchConn)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 	db, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
@@ -229,8 +172,23 @@ func TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain(t *testing.T) {
 	_, err = e.Create(t.Context(), "janitor/graph", nil, nil)
 	assert.Must(assert.NoError(err))
 	<-entered
-	grab.Store(true)
-	assert.Equal(db.Stats().MaxOpenConnections, <-held, "the job holds every connection")
+	// Both jobs hold their batch's connection at the breakpoint; the test takes the rest of the pool.
+	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
+	for e.seams.Visits(janitor.CheckpointBatchConn) < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	assert.Must(assert.True(e.seams.Visits(janitor.CheckpointBatchConn) >= 2, "both jobs hold a connection"))
+	var conns []*sql.Conn
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+	}()
+	for len(conns) < db.Stats().MaxOpenConnections-2 {
+		c, err := db.DB.Conn(t.Context())
+		assert.Must(assert.NoError(err))
+		conns = append(conns, c)
+	}
 	close(release)
 	time.Sleep(200 * time.Millisecond) // the worker is waiting for a connection
 
@@ -242,49 +200,31 @@ func TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(30 * time.Second):
-		close(giveUp)
+		e.seams.Resume(janitor.CheckpointBatchConn)
+		for _, c := range conns {
+			c.Close()
+		}
+		conns = nil
 		<-done
 		t.Fatal("Shutdown waited on a worker the jobs held a connection from")
 	}
 }
 
 // TestJanitor_ReapDueFlowsDrainsTheJobs pins the deterministic test mode, test-mode engines' default: a Manual janitor
-// runs no goroutine, and reapDueFlows runs its jobs until a round makes no progress. Each batch takes a turn at dispatch's band, on a claim
-// of its own.
+// runs no job by itself, and reapDueFlows runs its jobs until a round makes no progress.
 func TestJanitor_ReapDueFlowsDrainsTheJobs(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	e := NewEngineUnderTest(t.Name())
-	defer e.Shutdown(t.Context())
-	assert.NoError(e.SetHost(noopHost{}))
-	var rounds atomic.Int64
-	var claims []turnstile.Claim
-	e.janitorTestJobs = func(shard int, db *sequel.DB) []janitor.Job {
-		return []janitor.Job{{Name: "test", Round: func(ctx context.Context, batch janitor.Batch) bool {
-			n := rounds.Add(1)
-			if n == 1 {
-				for range 2 {
-					assert.NoError(batch(ctx, func(ctx context.Context, h janitor.Handle) error {
-						c, _ := turnstile.ClaimFrom(ctx)
-						claims = append(claims, c)
-						_, err := h.ExecContext(ctx, "SELECT 1")
-						return err
-					}))
-				}
-			}
-			return n <= 3
-		}}}
-	}
-	assert.Must(assert.NoError(e.Startup(t.Context())))
-	awaitJanitor(t, e, 1, true)
+	e := archiveEngine(t, treeMux(), 30)
+	root := closedRoots(t, e, 1)[0]
 	time.Sleep(100 * time.Millisecond)
-	assert.Equal(int64(0), rounds.Load(), "a Manual janitor runs no job by itself")
-
-	e.reapDueFlows(t.Context())
-	assert.Equal(int64(5), rounds.Load(), "three rounds of progress, then one without, then a pass without")
-	assert.Must(assert.Len(claims, 2))
-	assert.Equal(priorityCommon, claims[0].Priority)
-	assert.NotEqual(claims[0].Seq, claims[1].Seq, "each batch is a job of its own at the turnstile")
+	assert.True(live(t, e, root), "a Manual janitor runs no job by itself")
+	_, scanned := e.janitorOn(1).ArchiveLag()
+	assert.False(scanned)
+	e.drainJanitors(t.Context(), e.archiveGrace)
+	assert.False(live(t, e, root), "drained, the janitor archives it")
+	_, scanned = e.janitorOn(1).ArchiveLag()
+	assert.True(scanned)
 }
 
 // TestJanitor_TheProgressGauge pins dwarf_janitor_progress_age_seconds: one reading per shard and job while the
@@ -297,13 +237,10 @@ func TestJanitor_TheProgressGauge(t *testing.T) {
 	assert.NoError(e.SetHost(noopHost{}))
 	reader := sdkmetric.NewManualReader()
 	assert.NoError(e.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
-	e.janitorTestJobs = func(shard int, db *sequel.DB) []janitor.Job {
-		return []janitor.Job{{Name: "test", Round: func(context.Context, janitor.Batch) bool { return false }}}
-	}
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	awaitJanitor(t, e, 1, true)
 
-	age := func() (float64, bool) {
+	ages := func() map[string]float64 {
+		out := map[string]float64{}
 		for _, sm := range collect(t, reader).ScopeMetrics {
 			for _, m := range sm.Metrics {
 				g, ok := m.Data.(metricdata.Gauge[float64])
@@ -313,23 +250,21 @@ func TestJanitor_TheProgressGauge(t *testing.T) {
 				for _, dp := range g.DataPoints {
 					shard, _ := dp.Attributes.Value("shard")
 					job, _ := dp.Attributes.Value("job")
-					if shard.AsString() == "1" && job.AsString() == "test" {
-						return dp.Value, true
+					if shard.AsString() == "1" {
+						out[job.AsString()] = dp.Value
 					}
 				}
 			}
 		}
-		return 0, false
+		return out
 	}
 	time.Sleep(100 * time.Millisecond)
-	v, ok := age()
-	assert.True(ok, "a dispatched shard's job is reported")
-	assert.True(v >= 0.1 && v < 10, "age %v", v)
+	got := ages()
+	assert.Len(got, 2, "fast archiving and fast deletion are reported")
+	assert.True(got[janitor.JobFastArchiving] >= 0.1 && got[janitor.JobFastArchiving] < 10, "age %v", got)
 
-	e.dispatchFlag(1).Store(false)
-	awaitJanitor(t, e, 1, false)
-	_, ok = age()
-	assert.False(ok, "a shard no longer dispatched is not reported")
+	setRole(e, 1, false)
+	assert.Len(ages(), 0, "a shard no longer dispatched is not reported")
 }
 
 // TestJanitor_SharesTheReapersFaultNames pins that the janitor consults the reaper's fault and checkpoint names, so a
@@ -347,23 +282,44 @@ func TestJanitor_SharesTheReapersFaultNames(t *testing.T) {
 }
 
 // TestJanitor_TheGraceOverrideReachesTheJobs pins the grace a test's ArchiveNow passes: the janitors' rounds under it
-// archive a root closed just now, which the archive grace keeps them from otherwise.
+// archive a root closed just now, which the archive grace keeps them from otherwise; and the archive grace is theirs
+// again after it.
 func TestJanitor_TheGraceOverrideReachesTheJobs(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
 	e.archiveGrace = time.Hour
-	root := closedRoots(t, e, 1)[0]
+	roots := closedRoots(t, e, 2)
+	e.drainJanitors(ctx, e.archiveGrace)
+	assert.True(live(t, e, roots[0]), "within the archive grace")
+	e.drainJanitors(ctx, 0)
+	assert.False(live(t, e, roots[0]), "archived by the janitor under a grace of 0")
+	closedRoots(t, e, 1)
+	e.janitorOn(1).Drain(ctx)
+	assert.Len(closedLive(t, e), 1, "the archive grace is the janitor's again")
+}
+
+// closedLive returns the closed roots in the live tables.
+func closedLive(t *testing.T, e *Engine) []int {
+	t.Helper()
 	db, err := e.db.Shard(1)
-	assert.Must(assert.NoError(err))
-	live := func() int {
-		var n int
-		assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=?", root).Scan(&n))
-		return n
+	if err != nil {
+		t.Fatal(err)
 	}
-	e.drainJanitors(ctx)
-	assert.Equal(1, live(), "within the archive grace")
-	e.drainJanitors(context.WithValue(ctx, janitorGraceKey{}, time.Duration(0)))
-	assert.Zero(live(), "archived by the janitor under a grace of 0")
+	rows, err := db.QueryContext(t.Context(), "SELECT flow_id FROM dwarf_flows WHERE surgraph_flow_id=0 AND status IN ('"+
+		workflow.StatusCompleted+"','"+workflow.StatusFailed+"','"+workflow.StatusTerminated+"','"+workflow.StatusCancelled+"')")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var ids []int
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	return ids
 }

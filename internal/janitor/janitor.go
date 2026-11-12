@@ -19,37 +19,35 @@ Package janitor runs one shard's background jobs on the live and archive tables,
 Its jobs are fast archiving - closed trees moved into the archive, or deleted at a retention of 0, as they come due -
 and fast deletion - the trees stamped for deletion deleted as they come due.
 
-A Janitor serves one shard on one replica. Build one when the replica starts dispatching the shard, and stop it when
-the replica stops, or shuts down:
+A Janitor serves one shard on one replica for the replica's run. It works only while it is active - while the replica
+dispatches the shard - and a paused one holds no goroutine and no connection:
 
-	j := janitor.New(janitor.Config{
-		Shard:     shard,
-		DB:        db,
-		Turn:      turn,     // a turn on the shard's connections, for one batch
-		Settings:  settings, // read at every round
-		Archive:   archive,
-		Residency: residency,
-	})
+	j := janitor.New(shard, db, archive, retentionDays)
+	j.SetLogger(logger)
+	j.SetTurnstile(turnstiles, band)
+	if err := j.SetMeter(meter); err != nil { ... }
 	j.Start(ctx)
+	j.Resume()                         // this replica dispatches the shard
+	j.SetResidency(count, ordinal, ok) // its residue class among the shard's dispatchers, when it changes
+	j.Pause()                          // it stopped dispatching the shard
 	...
 	j.Stop()
 
-A job is a loop of rounds. A round that reports progress is followed at once by the next; one that does not is
-followed by an idle wait (Config.Idle). A round does its work in batches, each through the Batch it is handed: a turn
-taken fresh for the batch and one connection, taken from the pool once, for all of its statements.
+Each job is a loop of rounds: one that makes progress is followed at once by the next, one that does not by the job's
+idle wait. A round works in batches, each under a turn on the shard taken fresh for it, and on one connection, taken
+from the pool once, for all of its statements.
 
-For a test that drives the jobs itself, Config.Manual starts no goroutine, and Drain runs the jobs' rounds until they
-stop making progress. For the gauges, Observe reports how long since each job last made progress.
+For a test that drives the jobs itself, SetManual starts no goroutine, and Drain runs the jobs' rounds until they
+stop making progress.
 
-Concurrency: Observe may be called at any time, and Drain beside the goroutines Start runs: one job's rounds never
-overlap.
+Concurrency: every method may be called from any goroutine, a Drain beside the job goroutines included: one job's
+rounds never overlap.
 */
 package janitor
 
 import (
 	"context"
 	"log/slog"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -62,211 +60,287 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// DefaultIdle is how long a job waits after a round that made no progress, when Config.Idle is 0.
-const DefaultIdle = time.Second
-
 // The reason a closed tree is deleted without archiving, the reason attribute of dwarf_flows_reaped.
 const ReasonNoRetention = "no_retention"
 
-// The faults and checkpoints the jobs consult, inert unless Config.Seams is enabled. A targeted fault is the name
-// joined with a root's flow id by a colon.
-const (
-	FaultMidTree    = "reapMidTree"    // a move fails after its steps, before its flows; optionally targeted
-	FaultSizeErr    = "reapSizeErr"    // sizing a batch fails; targeted
-	FaultSelectErr  = "reapSelectErr"  // a scan of due roots fails
-	FaultContention = "reapContention" // an archive move fails on lock contention
-	FaultArchiveErr = "reapArchiveErr" // an archive move fails with an error that is not lock contention
-	FaultConnErr    = "janitorConnErr" // a batch cannot take its connection
+// Janitor runs one shard's jobs while it is active.
+type Janitor struct {
+	shard         int
+	db            *sequel.DB
+	archive       *archiver.Archive
+	retentionDays int
+	logger        *slog.Logger
+	seams         *seamster.Seamster
+	metrics       *instruments
+	turnstiles    *turnstile.Set
+	band          int
+	manual        bool
+	idle          time.Duration // replaces every job's idle wait when not 0
 
-	CheckpointBatchLocked = "reapBatchLocked" // a batch has locked its due roots, inside its transaction
-)
+	jobs []*job
+	fast *fastArchiving
+	del  *fastDeletion
 
-// Config is a Janitor's settings, fixed for its life.
-type Config struct {
-	// Shard is the shard's number.
-	Shard int
-	// DB is the shard's handle.
-	DB *sequel.DB
-	// Turn takes a turn on the shard's connections for one batch, and returns the context the batch runs on and the
-	// release. It is called with a context that carries no turn claim, so each batch's claim is new.
-	Turn func(ctx context.Context) (context.Context, func())
-	// Logger is where the jobs log; nil logs nowhere.
-	Logger *slog.Logger
-	// Instruments records the batches' timings; nil records nothing.
-	Instruments *Instruments
-	// Idle is how long a job waits after a round that made no progress; 0 is DefaultIdle.
-	Idle time.Duration
-	// Manual starts no goroutine: the jobs run only in Drain.
-	Manual bool
-	// Settings returns the settings of the janitor's own jobs, read at the start of every round with the round's
-	// context. Nil runs none of them: only Jobs.
-	Settings func(ctx context.Context) Settings
-	// Archive is the shard's archive, or nil when it has none: closed roots then stay live at a positive retention.
-	Archive *archiver.Archive
-	// Residency returns this replica's residue class among the shard's dispatchers, re-read every round: the count of
-	// dispatchers and this one's ordinal. Nil, ok false, a count under 2 or an ordinal out of range restricts nothing.
-	Residency func() (count, ordinal int, ok bool)
-	// Seams are the faults and checkpoints the jobs consult; nil consults none.
-	Seams *seamster.Seamster
-	// Jobs are run beside the janitor's own.
-	Jobs []Job
+	// mu guards the settings and the residue class, which the jobs read at every round.
+	mu        sync.Mutex
+	settings  settings
+	residency residency
+
+	// life guards the lifecycle: the run's context, whether the janitor is active, the active period's context.
+	life     sync.Mutex
+	run      context.Context
+	active   context.Context
+	cancel   context.CancelFunc
+	stopped  bool
+	routines sync.WaitGroup
 }
 
-// Settings are the settings of the janitor's own jobs.
-type Settings struct {
-	// Grace is how long after its close a closed root is archived.
-	Grace time.Duration
-	// RetentionDays is how many days the archive keeps; 0 keeps no archive, and closed trees are deleted.
-	RetentionDays int
-	// BatchRoots is how many due roots one batch considers.
-	BatchRoots int
-	// BatchRows is about how many rows, flows and steps alike, one transaction moves, and at least one tree.
-	BatchRows int
-	// BatchBytes is about how many payload bytes one transaction moves, and at least one tree; 0 sets no byte limit.
-	BatchBytes int
-	// StageRows is the size, in rows, above which a closed tree is archived in stages rather than in one transaction,
-	// and passed by fast archiving; 0 stages none.
-	StageRows int
-	// StageBytes is the size, in payload bytes, above which a closed tree is archived in stages, when StageRows
-	// stages any; 0 sets no byte threshold.
-	StageBytes int
-	// NoQuietMargin lets a round archive into its day however near the day's end.
-	NoQuietMargin bool
+// settings are what the jobs read at every round.
+type settings struct {
+	grace                             time.Duration
+	batchRoots, batchRows, batchBytes int
+	stageRows, stageBytes             int
+	noQuietMargin                     bool
 }
 
-// Job is one of a janitor's jobs: a name, the job's label in logs and metrics, and its round.
-type Job struct {
-	Name string
-	// Round does one round of the job's work through batch, and reports whether it made progress: work done that
-	// moved the job forward. A round whose candidates were all held or failed made none. A round runs on the job's
-	// context, which ends when the janitor stops.
-	Round func(ctx context.Context, batch Batch) (progress bool)
+// residency is this replica's residue class among the shard's dispatchers.
+type residency struct {
+	count, ordinal int
+	ok             bool
 }
 
-// Batch runs fn as one batch: under a turn on the shard taken for it, on one connection taken from the shard's pool
-// for it, with the batch's timings recorded. fn runs every statement of the batch on h and the context it is given -
+// job is one of the janitor's jobs: its name, its label in logs and metrics; how long it waits after a round without
+// progress; its round, which does one round of work through batch and reports whether it made progress; and its
+// reset, which forgets where the job stood.
+type job struct {
+	name  string
+	idle  time.Duration
+	round func(ctx context.Context, batch batchFunc) (progress bool)
+	reset func()
+	// mu is held across a round and a reset, so a Drain, the job's goroutine and a Resume never overlap one.
+	mu sync.Mutex
+	// progress is the Unix time in nanoseconds of the last round that made progress, or of the last Resume.
+	progress atomic.Int64
+}
+
+// batchFunc runs fn as one batch: under a turn on the shard taken for it, on one connection taken from the pool for
+// it, with the batch's timings recorded. fn runs every statement of the batch on h and the context it is given -
 // reading each query's rows to the end before the next statement - and the connection and the turn are returned when
-// fn does. A batch that cannot take its connection fails without calling fn. ctx must carry no turn claim - pass the round's own context, never a batch's - or the batch fails: the claim
-// it carries would keep its age, and a turn taken while another is held deadlocks against the shard's other holders.
-type Batch func(ctx context.Context, fn func(ctx context.Context, h Handle) error) error
+// fn does. A batch that cannot take its connection fails without calling fn. ctx must carry no turn claim - the
+// round's own context, never a batch's - or the batch fails: the claim would keep its age, and a turn taken while
+// another is held deadlocks against the shard's other holders.
+type batchFunc func(ctx context.Context, fn func(ctx context.Context, h handle) error) error
 
-// Handle is what a batch runs its statements on.
-type Handle interface {
+// handle is what a batch runs its statements on.
+type handle interface {
 	sequel.Executor
 	Transact(ctx context.Context, fn func(tx *sequel.Tx) error) error
 }
 
-// Observation is what a Janitor knows, for its gauges.
-type Observation struct {
-	// Jobs holds a reading of every job, in the order of the jobs.
-	Jobs []Reading
-	// Lag is how long past the grace the oldest due closed root after fast archiving's position had waited at its last
-	// scan; LagOK is false before the first.
-	Lag   time.Duration
-	LagOK bool
-	// Failing is how long archiving has been failing, or 0.
-	Failing time.Duration
-}
+// The default settings, the engine's.
+const (
+	defaultGrace      = time.Minute
+	defaultBatchRoots = 512
+	defaultBatchRows  = 4096
+	defaultBatchBytes = 16 << 20
+)
 
-// Reading is what Observe reports of one job.
-type Reading struct {
-	Job string
-	// SinceProgress is how long since the job's last round that made progress, or since Start.
-	SinceProgress time.Duration
-}
-
-// Janitor runs one shard's jobs.
-type Janitor struct {
-	cfg    Config
-	jobs   []*job
-	fast   *fastArchiving
-	del    *fastDeletion
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-}
-
-// job is a Job with what the janitor keeps of it.
-type job struct {
-	Job
-	// mu is held across a round, so a Drain and the job's goroutine never run one at once.
-	mu sync.Mutex
-	// progress is the Unix time in nanoseconds of the last round that made progress, or of Start.
-	progress atomic.Int64
-	// The attribute sets of the job's batch timings, made once.
-	turnAttrs    metric.MeasurementOption
-	acquireAttrs metric.MeasurementOption
-	workAttrs    metric.MeasurementOption
-}
-
-// New returns a Janitor for cfg, not started.
-func New(cfg Config) *Janitor {
-	if cfg.Logger == nil {
-		cfg.Logger = slog.New(slog.DiscardHandler)
+// New returns a paused Janitor of shard, whose handle is db and whose archive is archive - nil when the shard has none,
+// and closed roots then stay live at a positive retention - keeping retentionDays of archive: 0 keeps none, and
+// closed trees are deleted. It logs nowhere, records no metric and orders no turn until set to.
+func New(shard int, db *sequel.DB, archive *archiver.Archive, retentionDays int) *Janitor {
+	j := &Janitor{
+		shard:         shard,
+		db:            db,
+		archive:       archive,
+		retentionDays: retentionDays,
+		logger:        slog.New(slog.DiscardHandler),
+		seams:         seamster.New(false),
+		settings: settings{
+			grace:      defaultGrace,
+			batchRoots: defaultBatchRoots,
+			batchRows:  defaultBatchRows,
+			batchBytes: defaultBatchBytes,
+		},
 	}
-	if cfg.Idle <= 0 {
-		cfg.Idle = DefaultIdle
-	}
-	if cfg.Seams == nil {
-		cfg.Seams = seamster.New(false)
-	}
-	j := &Janitor{cfg: cfg}
-	jobs := slices.Clone(cfg.Jobs)
-	if cfg.Settings != nil {
-		j.fast = &fastArchiving{j: j}
-		j.del = &fastDeletion{j: j}
-		jobs = append([]Job{
-			{Name: JobFastArchiving, Round: j.fast.round},
-			{Name: JobFastDeletion, Round: j.del.round},
-		}, jobs...)
-	}
-	for _, jb := range jobs {
-		j.jobs = append(j.jobs, &job{
-			Job:          jb,
-			turnAttrs:    batchAttrs(cfg.Shard, jb.Name, partTurn),
-			acquireAttrs: batchAttrs(cfg.Shard, jb.Name, partAcquire),
-			workAttrs:    batchAttrs(cfg.Shard, jb.Name, partWork),
-		})
+	j.fast = &fastArchiving{j: j}
+	j.del = &fastDeletion{j: j}
+	j.jobs = []*job{
+		{name: JobFastArchiving, idle: time.Second, round: j.fast.round, reset: j.fast.reset},
+		{name: JobFastDeletion, idle: time.Second, round: j.del.round, reset: j.del.reset},
 	}
 	return j
 }
 
-// Start starts the jobs, each on a goroutine of its own unless the janitor is Manual, on a child of ctx that Stop
-// cancels. Every job counts as having made progress at Start. Call it once.
-func (j *Janitor) Start(ctx context.Context) {
-	j.ctx, j.cancel = context.WithCancel(ctx)
-	now := time.Now().UnixNano()
-	for _, jb := range j.jobs {
-		jb.progress.Store(now)
+// SetLogger sets where the jobs log; nil logs nowhere. Call it before Start.
+func (j *Janitor) SetLogger(l *slog.Logger) {
+	if l == nil {
+		l = slog.New(slog.DiscardHandler)
 	}
-	if j.cfg.Manual {
+	j.logger = l
+}
+
+// SetSeams sets the faults and checkpoints the jobs consult; nil consults none. Call it before Start.
+func (j *Janitor) SetSeams(s *seamster.Seamster) {
+	if s == nil {
+		s = seamster.New(false)
+	}
+	j.seams = s
+}
+
+// SetMeter creates the janitor's instruments on meter: dwarf_janitor_batch_seconds, dwarf_flows_archived,
+// dwarf_archive_move_failures and dwarf_flows_reaped. It keeps every instrument it could create, and returns the
+// errors of those it could not. Call it before Start.
+func (j *Janitor) SetMeter(meter metric.Meter) error {
+	m, err := newInstruments(meter)
+	j.metrics = m
+	return errors.Trace(err)
+}
+
+// SetTurnstile sets where a batch takes its turn: on the shard's turnstile in set, at band. Unset, the batches take
+// none. Call it before Start.
+func (j *Janitor) SetTurnstile(set *turnstile.Set, band int) {
+	j.turnstiles, j.band = set, band
+}
+
+// SetGrace sets how long after its close a closed root is archived (a minute).
+func (j *Janitor) SetGrace(d time.Duration) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.settings.grace = d
+}
+
+// SetBatch sets one batch: how many due roots it considers (512), and about how many rows, flows and steps alike
+// (4,096), and payload bytes (16 MiB; 0 sets no byte limit) one transaction moves - at least one tree.
+func (j *Janitor) SetBatch(roots, rows, bytes int) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.settings.batchRoots, j.settings.batchRows, j.settings.batchBytes = roots, rows, bytes
+}
+
+// SetStaging sets the size above which a closed tree is archived in stages rather than in one transaction, and passed
+// by fast archiving: in rows (0, none staged), and in payload bytes beside it (0, no byte threshold).
+func (j *Janitor) SetStaging(rows, bytes int) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.settings.stageRows, j.settings.stageBytes = rows, bytes
+}
+
+// SetQuietMargin sets whether archiving stops a margin before its day ends (on): off, a round archives into its day
+// however near the day's end. For tests.
+func (j *Janitor) SetQuietMargin(on bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.settings.noQuietMargin = !on
+}
+
+// SetResidency sets this replica's residue class among the shard's dispatchers: the count of dispatchers and this
+// one's ordinal. ok false, a count under 2 or an ordinal out of range restricts nothing. A class other than the one a
+// fast job walked in makes it start over.
+func (j *Janitor) SetResidency(count, ordinal int, ok bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.residency = residency{count, ordinal, ok}
+}
+
+// SetManual sets whether the janitor runs its jobs only in Drain, starting no goroutine. For tests; call it before
+// Start.
+func (j *Janitor) SetManual(manual bool) {
+	j.manual = manual
+}
+
+// SetIdle replaces every job's wait after a round without progress; 0 restores each job's own. For tests; call it
+// before Start.
+func (j *Janitor) SetIdle(d time.Duration) {
+	j.idle = d
+}
+
+// current returns the settings and the residue class.
+func (j *Janitor) current() (settings, residency) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.settings, j.residency
+}
+
+// Start begins the janitor's run on ctx, paused; Stop, or ctx's end, ends it. Call it once.
+func (j *Janitor) Start(ctx context.Context) {
+	j.life.Lock()
+	defer j.life.Unlock()
+	j.run = ctx
+}
+
+// Resume makes the janitor active: its jobs start over - every position forgotten, since a replica that dispatches
+// the shard again saw nothing of what happened meanwhile - each on a goroutine of its own unless it is Manual. A no-op
+// while active, before Start and after Stop.
+func (j *Janitor) Resume() {
+	j.life.Lock()
+	defer j.life.Unlock()
+	if j.run == nil || j.stopped || j.active != nil {
 		return
 	}
+	// The last active period's goroutines are cancelled already; they must be gone before the jobs start over.
+	j.routines.Wait()
+	now := time.Now().UnixNano()
 	for _, jb := range j.jobs {
-		j.wg.Go(func() {
-			j.run(j.ctx, jb)
+		jb.mu.Lock()
+		jb.reset()
+		jb.progress.Store(now)
+		jb.mu.Unlock()
+	}
+	j.active, j.cancel = context.WithCancel(j.run)
+	if j.manual {
+		return
+	}
+	active := j.active
+	for _, jb := range j.jobs {
+		j.routines.Go(func() {
+			j.loop(active, jb)
 		})
 	}
 }
 
-// Stop cancels the jobs and returns once their goroutines have. A batch in flight is abandoned: its statements are
-// cancelled, and a transaction is rolled back.
+// Pause makes the janitor inactive: its jobs are cancelled, and a batch in flight is abandoned - its statement
+// cancelled, its transaction rolled back. It does not wait for them.
+func (j *Janitor) Pause() {
+	j.life.Lock()
+	defer j.life.Unlock()
+	if j.active == nil {
+		return
+	}
+	j.cancel()
+	j.active, j.cancel = nil, nil
+}
+
+// Stop ends the run: it pauses the janitor and returns once its goroutines have. A stopped janitor never resumes.
 func (j *Janitor) Stop() {
+	j.life.Lock()
+	j.stopped = true
 	if j.cancel != nil {
 		j.cancel()
 	}
-	j.wg.Wait()
+	j.active, j.cancel = nil, nil
+	j.life.Unlock()
+	j.routines.Wait()
 }
 
-// Drain runs the jobs' rounds, each job's until a round makes no progress, over and over until a pass over every job
-// makes none, and returns there: where a running job would wait. A job whose candidates keep failing or are held
-// therefore does not keep it going. It returns early when ctx ends or the janitor stops.
+// activeContext returns the active period's context, or nil while paused.
+func (j *Janitor) activeContext() context.Context {
+	j.life.Lock()
+	defer j.life.Unlock()
+	return j.active
+}
+
+// Drain runs the jobs' rounds while the janitor is active, each job's until a round makes no progress, over and over
+// until a pass over every job makes none, and returns there: where a running job would wait. A job whose candidates
+// keep failing or are held therefore does not keep it going. It returns early when ctx ends or the janitor pauses.
 func (j *Janitor) Drain(ctx context.Context) {
+	active := j.activeContext()
+	if active == nil {
+		return
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	if j.ctx != nil {
-		defer context.AfterFunc(j.ctx, cancel)()
-	}
+	defer context.AfterFunc(active, cancel)()
 	for ctx.Err() == nil {
 		progress := false
 		for _, jb := range j.jobs {
@@ -284,42 +358,51 @@ func (j *Janitor) Drain(ctx context.Context) {
 // failure episode unless a failure was recorded at or after start. A root a failure left behind fast archiving's
 // position is the sweep's, so only a clean sweep, or a later move, says archiving has recovered.
 func (j *Janitor) SweptClean(start time.Time) {
-	if j.fast != nil && !start.IsZero() {
+	if !start.IsZero() {
 		j.fast.clearUnlessFailedSince(start)
 	}
 }
 
-// Observe reports what the janitor knows at now: how long since each job last made progress, and archiving's lag and
-// failure.
-func (j *Janitor) Observe(now time.Time) Observation {
-	var o Observation
-	for _, jb := range j.jobs {
-		at := jb.progress.Load()
-		if at == 0 {
-			continue // not started
-		}
-		o.Jobs = append(o.Jobs, Reading{Job: jb.Name, SinceProgress: max(now.Sub(time.Unix(0, at)), 0)})
-	}
-	if j.fast != nil {
-		j.fast.observe(&o, now)
-	}
-	return o
+// ArchiveLag returns how long past the grace the oldest due closed root after fast archiving's position had waited at
+// its last scan, and false before its first scan since the janitor resumed.
+func (j *Janitor) ArchiveLag() (lag time.Duration, ok bool) {
+	return j.fast.lagReading()
 }
 
-// run is one job's goroutine: rounds, back to back while they make progress, an idle wait after one that does not.
-func (j *Janitor) run(ctx context.Context, jb *job) {
-	idle := time.NewTimer(0)
-	defer idle.Stop()
-	<-idle.C
+// ArchiveFailing returns how long archiving has been failing at now, or 0.
+func (j *Janitor) ArchiveFailing(now time.Time) time.Duration {
+	return j.fast.failingFor(now)
+}
+
+// JobAges returns, by job, how long at now since its last round that made progress, or since the janitor resumed.
+func (j *Janitor) JobAges(now time.Time) map[string]time.Duration {
+	ages := make(map[string]time.Duration, len(j.jobs))
+	for _, jb := range j.jobs {
+		if at := jb.progress.Load(); at != 0 {
+			ages[jb.name] = max(now.Sub(time.Unix(0, at)), 0)
+		}
+	}
+	return ages
+}
+
+// loop is one job's goroutine: rounds, back to back while they make progress, its idle wait after one that does not.
+func (j *Janitor) loop(ctx context.Context, jb *job) {
+	idle := jb.idle
+	if j.idle > 0 {
+		idle = j.idle
+	}
+	wait := time.NewTimer(0)
+	defer wait.Stop()
+	<-wait.C
 	for ctx.Err() == nil {
 		if j.round(ctx, jb) {
 			continue
 		}
-		idle.Reset(j.cfg.Idle)
+		wait.Reset(idle)
 		select {
 		case <-ctx.Done():
 			return
-		case <-idle.C:
+		case <-wait.C:
 		}
 	}
 }
@@ -328,36 +411,40 @@ func (j *Janitor) run(ctx context.Context, jb *job) {
 func (j *Janitor) round(ctx context.Context, jb *job) bool {
 	jb.mu.Lock()
 	defer jb.mu.Unlock()
-	if !jb.Round(ctx, j.batch(jb)) {
+	if !jb.round(ctx, j.batch(jb)) {
 		return false
 	}
 	jb.progress.Store(time.Now().UnixNano())
 	return true
 }
 
-// batch returns jb's Batch.
-func (j *Janitor) batch(jb *job) Batch {
-	return func(ctx context.Context, fn func(ctx context.Context, h Handle) error) error {
+// batch returns jb's batchFunc.
+func (j *Janitor) batch(jb *job) batchFunc {
+	return func(ctx context.Context, fn func(ctx context.Context, h handle) error) error {
 		if _, stamped := turnstile.ClaimFrom(ctx); stamped {
 			return errors.New("a batch's context carries a turn claim already")
 		}
 		start := time.Now()
-		turnCtx, release := j.cfg.Turn(ctx)
-		defer release()
+		if j.turnstiles != nil {
+			ctx = j.turnstiles.ContextWithPriority(ctx, j.shard, j.band)
+		}
+		pass := turnstile.WaitTurn(ctx)
+		defer pass.Return()
 		turned := time.Now()
-		conn, err := j.cfg.DB.Conn(turnCtx)
-		if err == nil && j.cfg.Seams.IsFault(FaultConnErr) {
+		conn, err := j.db.Conn(ctx)
+		if err == nil && j.seams.IsFault(FaultConnErr) {
 			conn.Close()
 			conn, err = nil, errors.New("injected fault: "+FaultConnErr)
 		}
 		acquired := time.Now()
 		if err != nil {
-			j.cfg.Instruments.batch(ctx, jb, turned.Sub(start), acquired.Sub(turned), -1)
+			j.metrics.batch(ctx, j.shard, jb.name, turned.Sub(start), acquired.Sub(turned), -1)
 			return errors.Trace(err)
 		}
 		defer conn.Close()
-		err = fn(turnCtx, conn)
-		j.cfg.Instruments.batch(ctx, jb, turned.Sub(start), acquired.Sub(turned), time.Since(acquired))
+		j.seams.Checkpoint(ctx, CheckpointBatchConn)
+		err = fn(ctx, conn)
+		j.metrics.batch(ctx, j.shard, jb.name, turned.Sub(start), acquired.Sub(turned), time.Since(acquired))
 		return err
 	}
 }

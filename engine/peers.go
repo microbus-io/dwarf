@@ -313,6 +313,8 @@ func (e *Engine) runReconcileLoop() {
 	for _, idx := range e.db.Indices() {
 		seen[idx] = e.replicasOn(idx)
 	}
+	// The residue class each shard's janitor was last handed (pushResidency).
+	residencies := map[int][3]int{}
 	for {
 		select {
 		case <-e.reconcileStop:
@@ -328,5 +330,8 @@ func (e *Engine) runReconcileLoop() {
 			}
 		}
 		e.recomputePools()
+		for _, idx := range e.db.Indices() {
+			e.pushResidency(idx, residencies)
+		}
 	}
 }

@@ -669,14 +669,22 @@ func (e *Engine) recomputePools() {
 	e.logger.Info("Derived pools recomputed", "slots", observed, "dispatch", dispatch)
 }
 
-// applyRole starts or stops this replica dispatching one shard: the doorbell's gate and the piston's idle
-// mode move together. Called under poolsLock, in the order recomputePools gives it.
+// applyRole starts or stops this replica dispatching one shard: the doorbell's gate, the piston's idle mode and the
+// janitor's activity move together. Called under poolsLock, in the order recomputePools gives it.
 func (e *Engine) applyRole(shard int, dispatches bool) {
 	if b := e.dispatchFlag(shard); b != nil && b.Swap(dispatches) != dispatches {
 		e.logger.Info("Shard dispatch role changed", "shard", shard, "dispatching", dispatches)
 	}
 	if p := e.pistons[shard]; p != nil {
 		p.SetIdle(!dispatches || e.zeroWorkers())
+	}
+	// The janitor works only on a shard this replica dispatches.
+	if j := e.janitorOn(shard); j != nil {
+		if dispatches {
+			j.Resume()
+		} else {
+			j.Pause()
+		}
 	}
 }
 

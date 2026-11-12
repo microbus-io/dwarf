@@ -263,12 +263,12 @@ func TestReaperContract_ANonDispatcherTakesNoTurn(t *testing.T) {
 	e.turnstiles.Resize(1, 0)
 	defer e.turnstiles.Resize(1, size)
 
-	e.dispatchFlag(1).Store(false)
+	setRole(e, 1, false)
 	start := time.Now()
 	e.reapDueFlows(ctx)
 	assert.True(time.Since(start) < time.Second, "a non-dispatcher's pass took %v", time.Since(start))
 
-	e.dispatchFlag(1).Store(true)
+	setRole(e, 1, true)
 	wait := 300 * time.Millisecond
 	bounded, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()

@@ -200,8 +200,8 @@ func TestMove_ResidencySplitsTheDueRoots(t *testing.T) {
 	db := r.db
 	roots := seedTrees(t, db, 4, soloShape)
 	selectWith := func(steal time.Duration, ordinal int) []int {
-		residency, residencyArgs := closedResidency(2, ordinal, true, r.settings.Grace, steal)
-		roots, _, err := scanClosed(ctx, db, r.seams, r.settings.Grace, residency, residencyArgs, r.settings.BatchRoots)
+		residency, residencyArgs := closedResidency(2, ordinal, true, r.settings.grace, steal)
+		roots, _, err := scanClosed(ctx, db, r.seams, r.settings.grace, residency, residencyArgs, r.settings.batchRoots)
 		assert.NoError(err)
 		return rootIDs(roots)
 	}
@@ -256,7 +256,7 @@ func TestMove_TheScanMergesTheStatusesInCloseOrder(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal([]int{c, a}, rootIDs(roots), "a short fetch is the first of the merged order")
 
-	r.settings.BatchRows = 4 // two trees of a flow and a step each
+	r.settings.batchRows = 4 // two trees of a flow and a step each
 	cut, via, err := r.fast().cut(ctx, db, r.settings, rootIDs(roots), true)
 	assert.NoError(err)
 	assert.Equal([]int{c, a}, cut, "the trim keeps the traversal order")
@@ -270,8 +270,8 @@ func TestMove_APassDrainsInSeveralBatches(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	r := newRig(t, 30)
-	r.settings.BatchRoots = 2
-	r.settings.BatchRows = 3
+	r.settings.batchRoots = 2
+	r.settings.batchRows = 3
 	db := r.db
 	roots := seedTrees(t, db, 7, callShape)
 	today, err := r.archive.Today(ctx)
@@ -373,7 +373,7 @@ func TestMove_AFatalArchiveFaultNeverAuthorizesDeletion(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	r := newRig(t, 30)
-	r.settings.BatchRoots = 1
+	r.settings.batchRoots = 1
 	db := r.db
 	roots := seedTrees(t, db, 3, callShape)
 	r.seams.InjectN(FaultArchiveErr, 10000)
@@ -401,7 +401,7 @@ func TestMove_ALastingFaultPreservesAndLogs(t *testing.T) {
 		t.Run(fault, func(t *testing.T) {
 			assert := testarossa.For(t)
 			r := newRig(t, 30)
-			r.settings.BatchRoots = 1
+			r.settings.batchRoots = 1
 			logs := r.logs
 			roots := seedTrees(t, r.db, 3, callShape)
 			r.seams.InjectN(fault, 100000)
@@ -529,7 +529,7 @@ func TestMove_NoTreeMovesInTheDaysLastMoments(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	r := newRig(t, 100, 16*time.Second)
-	r.settings.NoQuietMargin = false
+	r.settings.noQuietMargin = false
 	a := r.archive
 	assert.Equal(2*time.Second, quietMargin(a.DayLength()))
 	assert.Equal(time.Minute, quietMargin(24*time.Hour))
@@ -571,7 +571,7 @@ func TestMove_NoTreeMovesInTheDaysLastMoments(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	// The days ahead of the new today, as the engine's maintenance makes them.
-	_, err = a.Maintain(ctx, r.settings.RetentionDays)
+	_, err = a.Maintain(ctx, r.retention)
 	assert.NoError(err)
 	r.pass(ctx)
 	flows, _ = treeCount(t, r, "dwarf_flows", "dwarf_steps", root)

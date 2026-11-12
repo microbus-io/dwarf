@@ -3613,34 +3613,32 @@ archive failure never becomes permission to delete - are in `internal/reaper/CLA
 
 The engine's tests drive a pass with `reapDueFlows`; the `TestReaperContract_*` tests pin what the engine relies on.
 
-**The janitors** are `internal/janitor`, one per shard this replica dispatches, each running its jobs on goroutines
-of their own; their mechanics are in `internal/janitor/CLAUDE.md`. The engine holds the wiring (`janitor.go`):
+**The janitors** are `internal/janitor`, one per shard for the run, each running its jobs on goroutines of their own
+while this replica dispatches the shard; their mechanics are in `internal/janitor/CLAUDE.md`. The engine holds the
+wiring (`janitor.go`):
 
-- **A supervisor goroutine** (`janitorLoop`) reads `dispatchesOn` for every shard each second, starts a janitor on a
-  shard this replica started dispatching and stops the janitor of one it stopped. Every janitor's context is a child
-  of the supervisor's, which the drain cancels before the workers (see "Shutdown ordering").
-- **A batch's turn is `dbTurn`**, at dispatch's band, taken fresh for each batch.
-- **The first supervision runs in `initRuntime`**, before Startup returns, so a dispatched shard's janitor - and the
-  archive gauges it feeds - exists from the start; the loop takes over from there.
-- **Settings are read at every round** (`janitorSettings`) from the engine's fields, since tests change them on a
-  running engine; such a test runs its janitors Manual, or the background round races the write. A round on a context
-  carrying `janitorGraceKey` archives with that grace: `engineseams.ArchiveNow` drains the janitors with 0, then runs
-  the reaper's pass with 0.
-- **The archive gauges come from the janitor** (`dwarf_archive_lag_seconds`, `dwarf_archive_failing_seconds`), the
-  held-root, sweep, attempt and deletion gauges still from the reaper. After each reaper pass on a shard, `reapPass`
-  hands the reaper's last clean repair sweep of closed roots to the janitor (`Janitor.SweptClean`), which ends a
-  failure episode the sweep has shown is over. Its jobs are fast archiving and fast
-  deletion; the reaper's pass runs the repair walks, staging, chunked deletion, retention and the periodic stages.
-- **One set of instruments a run** (`engineMetrics.janitor`), shared by every janitor, since instruments made per
-  janitor would be made again at every handoff. The gauge (`dwarf_janitor_progress_age_seconds`) reads
-  `Janitor.Observe`, gated on dispatching like the reaper's.
-- **Tests:** `reapDueFlows` runs the janitors' jobs until they make no progress (`drainJanitors`, which first brings
-  the janitors in line with the roles), then the reaper's pass. `janitorManual` starts no job goroutine, so a test
-  decides when the jobs run: **test mode's default** (`NewEngineUnderTest`), since jobs polling every second from
-  Startup race any test that holds a due tree in the live tables for a moment (a Delete then a Fork expecting 409, a
-  root backdated past the grace); the suite was written against a reaper whose first tick came 15 s in. A test of the
-  background running sets it false (`shortenDeletion` with a short interval, the `TestJanitor_*` lifecycle tests).
-  `janitorIdle` shortens the idle wait; `janitorTestJobs` gives every janitor a test's jobs.
+- **Made at Startup for every shard** (`startJanitors`, in `initRuntime` before Startup returns, so a dispatched
+  shard's janitor - and the archive gauges it feeds - is active from the start), and active where this replica
+  dispatches. **`applyRole` resumes and pauses them** with the doorbell's gate and the piston's idle mode, and the
+  **reconcile loop hands each its residue class** when it changes (`pushResidency`): the engine tells the janitor,
+  the janitor asks nothing. The drain cancels them all before the workers (see "Shutdown ordering").
+- **A batch's turn is at dispatch's band** (`SetTurnstile` with `priorityCommon`), taken fresh for each batch.
+- **Settings are set from the engine's fields** (`configureJanitor`): at Startup, and around a test's drain, since
+  tests change them on a running engine. `drainJanitors` takes the archive grace to drain with:
+  `engineseams.ArchiveNow` drains with 0, then runs the reaper's pass with 0.
+- **The gauges read the janitor's getters**: `dwarf_janitor_progress_age_seconds` (`JobAges`) and
+  `dwarf_archive_lag_seconds` and `dwarf_archive_failing_seconds` (`ArchiveLag`, `ArchiveFailing`), gated on
+  dispatching like the reaper's; the held-root, sweep, attempt and deletion gauges still come from the reaper. After
+  each reaper pass on a shard, `reapPass` hands the reaper's last clean repair sweep of closed roots to the janitor
+  (`Janitor.SweptClean`), which ends a failure episode the sweep has shown is over. Its jobs are fast archiving and
+  fast deletion; the reaper's pass runs the repair walks, staging, chunked deletion, retention and the periodic stages.
+- **Tests:** `reapDueFlows` runs the janitors' jobs until they make no progress (`drainJanitors`), then the reaper's
+  pass. `janitorManual` starts no job goroutine, so a test decides when the jobs run: **test mode's default**
+  (`NewEngineUnderTest`), since jobs polling every second from Startup race any test that holds a due tree in the
+  live tables for a moment (a Delete then a Fork expecting 409, a root backdated past the grace); the suite was
+  written against a reaper whose first tick came 15 s in. A test of the background running sets it false
+  (`shortenDeletion` with a short interval, the `TestJanitor_*` lifecycle tests), and `janitorIdle` shortens the
+  idle wait. A test blocks a real batch, holding its connection, at `janitor.CheckpointBatchConn`.
 
 **The tree delete is unconditional on descendant status, deliberately** - do not 409 on a `running` subgraph
 descendant. The deferred path stamps only the root (whose own status is 409-guarded, so an open root is never
@@ -3902,7 +3900,7 @@ SetIdle(true) on every piston                // stops the dispatch evidence, so 
 arm withdrawal timer                         // gives up dispatcher slots if the drain outlasts a read cadence
 closeMetrics()                               // no collection may run against a closing engine
 backlogCancel(); backlogWorker.Wait()        // nor the backlog refresh against a closing database
-janitorCancel(); janitorWorker.Wait()        // a job's batch would hold the connections a worker needs to finish
+janitorCancel(); stopJanitors()             // a job's batch would hold the connections a worker needs to finish
 cache.Close(); turnstiles.Close()            // BOTH: a worker parks on one or waits on the other
 crew.Drain(); withdrawal.Wait()
 recoveryCancel();    recoveryWorker.Wait() // abandons a sweep statement in flight

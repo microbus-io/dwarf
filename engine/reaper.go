@@ -61,7 +61,7 @@ func (e *Engine) reaperLoop(ctx context.Context) {
 // reapDueFlows is what a test drives to reap what is due: the janitors' jobs run until they make no progress, then a
 // reaper pass that does not expire.
 func (e *Engine) reapDueFlows(ctx context.Context) {
-	e.drainJanitors(ctx)
+	e.drainJanitors(ctx, e.archiveGrace)
 	e.reapPass(ctx, e.archiveGrace, false)
 }
 

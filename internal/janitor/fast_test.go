@@ -76,7 +76,7 @@ func TestWalk_AnArchiveMoveAboveTheBatchBudgetIsAtomic(t *testing.T) {
 	r := newRig(t, 30)
 	db := r.db
 	root := chunkTree(t, db)
-	r.settings.BatchRows = 2
+	r.settings.batchRows = 2
 	r.seams.InjectN(FaultMidTree, 1000)
 	r.pass(t.Context())
 	flows, steps := treeCount(t, r, "dwarf_flows", "dwarf_steps", root)
@@ -157,7 +157,7 @@ func TestWalk_FastPassesTheBatchItAttempted(t *testing.T) {
 			db := r.db
 			roots := seedTrees(t, db, 4, callShape)
 			ascendingCloses(t, r, roots)
-			r.settings.BatchRoots = 2
+			r.settings.batchRoots = 2
 			targeted := join(fault, strconv.Itoa(roots[0]))
 			r.seams.InjectN(targeted, 10000)
 			defer r.seams.Withdraw(targeted)
@@ -186,11 +186,11 @@ func TestWalk_EveryFlowAndStepIsARow(t *testing.T) {
 	r := newRig(t, 30)
 	db := r.db
 	roots := seedTrees(t, db, 2, treeShape{rootSteps: 2, childSteps: 0})
-	r.settings.BatchRows = 7
+	r.settings.batchRows = 7
 	cut, _, err := r.fast().cut(ctx, db, r.settings, roots, false)
 	assert.NoError(err)
 	assert.Equal(roots[:1], cut, "four rows a tree: the root, its two steps and the child of none")
-	r.settings.BatchRows = 8
+	r.settings.batchRows = 8
 	cut, _, err = r.fast().cut(ctx, db, r.settings, roots, false)
 	assert.NoError(err)
 	assert.Equal(roots, cut)
@@ -207,23 +207,17 @@ func TestWalk_EveryFlowAndStepIsARow(t *testing.T) {
 	}
 }
 
-// TestWalk_TheResidencyCallbackRestrictsAPass pins that the job reads the shard's residency every round: with two
-// dispatchers, a round takes only its own residue class of the fresh roots, and the other class's once nothing
-// restricts it - a residency change that starts the walk over, so the roots behind the position are reached too.
-func TestWalk_TheResidencyCallbackRestrictsAPass(t *testing.T) {
+// TestWalk_TheResidencyRestrictsAPass pins that the job keeps to the residue class set on the janitor: with two
+// dispatchers, a round takes only its own class of the fresh roots, and the other class's once nothing restricts it -
+// a residency change that starts the walk over, so the roots behind the position are reached too.
+func TestWalk_TheResidencyRestrictsAPass(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	r := newRig(t, 0)
 	roots := seedTrees(t, r.db, 4, soloShape)
-	calls := 0
-	restricted := true
-	r.residency = func() (count, ordinal int, ok bool) {
-		calls++
-		return 2, 0, restricted
-	}
+	r.residency = residency{2, 0, true}
 	r.pass(ctx)
-	assert.True(calls > 0, "the rounds read the residency")
 	for _, id := range roots {
 		flows, _ := treeCount(t, r, "dwarf_flows", "dwarf_steps", id)
 		if id%2 == 0 {
@@ -232,7 +226,7 @@ func TestWalk_TheResidencyCallbackRestrictsAPass(t *testing.T) {
 			assert.Equal(1, flows, "root %d is the other's, and fresh", id)
 		}
 	}
-	restricted = false
+	r.residency = residency{}
 	r.pass(ctx)
 	for _, id := range roots {
 		flows, _ := treeCount(t, r, "dwarf_flows", "dwarf_steps", id)
@@ -248,8 +242,7 @@ func TestFast_AResidencyChangeStartsOver(t *testing.T) {
 	ctx := t.Context()
 	r := newRig(t, 0)
 	roots := seedTrees(t, r.db, 12, soloShape) // fresh: no root is overdue by the steal grace
-	count := 2
-	r.residency = func() (int, int, bool) { return count, 0, true }
+	r.residency = residency{2, 0, true}
 	r.pass(ctx)
 	behind := 0
 	for _, id := range roots {
@@ -258,7 +251,7 @@ func TestFast_AResidencyChangeStartsOver(t *testing.T) {
 		}
 	}
 	assert.True(behind > 0, "a root of the next class is behind the position")
-	count = 3 // a peer joined, and this replica's class is another
+	r.residency = residency{3, 0, true} // a peer joined, and this replica's class is another
 	r.pass(ctx)
 	for _, id := range roots {
 		flows, _ := treeCount(t, r, "dwarf_flows", "dwarf_steps", id)
@@ -301,7 +294,7 @@ func TestFast_ATreeOverTheStagingThresholdIsPassed(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	r := newRig(t, 30)
-	r.settings.StageRows = 5
+	r.settings.stageRows = 5
 	small := seedTrees(t, r.db, 2, callShape)  // 4 rows each
 	large := seedTrees(t, r.db, 1, chunkShape) // 9 rows
 	after := seedTrees(t, r.db, 1, callShape)
@@ -326,7 +319,7 @@ func TestFast_AtRetentionZeroATreeTooLargeForABatchIsStamped(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	r := newRig(t, 0)
-	r.settings.BatchRows = 5
+	r.settings.batchRows = 5
 	small := seedTrees(t, r.db, 1, callShape)[0] // 4 rows
 	large := chunkTree(t, r.db)                  // 9 rows
 	ascendingCloses(t, r, []int{large, small})
@@ -347,18 +340,20 @@ func TestFast_TheLagIsTheOldestDueRootPastTheGrace(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	r := newRig(t, 30)
-	r.settings.Grace = 30 * time.Second
-	r.settings.BatchRoots = 1
-	assert.False(r.janitor().Observe(time.Now()).LagOK, "no reading before a scan")
+	r.settings.grace = 30 * time.Second
+	r.settings.batchRoots = 1
+	_, ok := r.janitor().ArchiveLag()
+	assert.False(ok, "no reading before a scan")
 	roots := seedTrees(t, r.db, 2, callShape)
 	backdate(t, r, roots[0], 150*time.Second)
 	backdate(t, r, roots[1], 90*time.Second)
 	assert.True(r.fast().round(ctx, r.janitor().batch(r.janitor().jobs[0])))
-	o := r.janitor().Observe(time.Now())
-	assert.True(o.LagOK)
-	assert.True(o.Lag >= 119*time.Second && o.Lag < 140*time.Second, "the oldest root's wait past the grace: %v", o.Lag)
+	lag, ok := r.janitor().ArchiveLag()
+	assert.True(ok)
+	assert.True(lag >= 119*time.Second && lag < 140*time.Second, "the oldest root's wait past the grace: %v", lag)
 	r.pass(ctx)
-	assert.Zero(r.janitor().Observe(time.Now()).Lag, "nothing due")
+	lag, _ = r.janitor().ArchiveLag()
+	assert.Zero(lag, "nothing due")
 }
 
 // TestSize_TreesAreSizedInRowsAndBytes pins a tree's size: its flow rows and step rows, the sum of their byte counts,
@@ -389,14 +384,12 @@ func TestSize_SmallTreesMoveTogether(t *testing.T) {
 			assert := testarossa.For(t)
 			ctx := t.Context()
 			r := newRig(t, 30)
-			r.settings.BatchRoots, r.settings.BatchRows, r.settings.BatchBytes = 512, 4096, 16<<20
+			r.settings.batchRoots, r.settings.batchRows, r.settings.batchBytes = 512, 4096, 16<<20
 			if staging {
-				r.settings.StageRows, r.settings.StageBytes = 131072, 64<<20
+				r.settings.stageRows, r.settings.stageBytes = 131072, 64<<20
 			}
 			reader := sdkmetric.NewManualReader()
-			inst, err := NewInstruments(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"))
-			assert.Must(assert.NoError(err))
-			r.inst = inst
+			r.meter = sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test")
 			today, err := r.archive.Today(ctx)
 			assert.Must(assert.NoError(err))
 			roots := seedTrees(t, r.db, 50, treeShape{rootSteps: 2, childSteps: 3})
@@ -513,7 +506,7 @@ func TestFast_AHeldRootIsNotWaitedForWhenStamped(t *testing.T) {
 	if d := db.DriverName(); d != "pgx" && d != "mysql" && d != "mariadb" {
 		t.Skip("a held root is waited for on " + d)
 	}
-	r.settings.BatchRows = 5
+	r.settings.batchRows = 5
 	large := chunkTree(t, db)                  // 9 rows
 	small := seedTrees(t, db, 1, callShape)[0] // 4 rows
 	ascendingCloses(t, r, []int{large, small})

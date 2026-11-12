@@ -126,7 +126,7 @@ func attemptsAmong(ctx context.Context, q sequel.Executor, roots []int) (map[int
 // in chunks. The stamp clears any archive attempt, as every stamp but a publication does. The root is locked first as a
 // move locks it, so a root another transaction holds - a Fork cloning the tree - is skipped on PostgreSQL and MySQL
 // rather than waited for. It reports whether it stamped it.
-func stampClosed(ctx context.Context, h Handle, root int, grace time.Duration) (stamped bool, err error) {
+func stampClosed(ctx context.Context, h handle, root int, grace time.Duration) (stamped bool, err error) {
 	id := strconv.Itoa(root)
 	err = h.Transact(ctx, func(tx *sequel.Tx) error {
 		stamped = false
@@ -160,7 +160,7 @@ type removal struct {
 // archiving, for no archive attempt, which is the staged path's whatever the batch's selection saw. PostgreSQL and
 // MySQL skip a held root; SQLite and SQL Server wait for it. Transact retries contention, straggler lock inversions
 // included.
-func move(ctx context.Context, h Handle, seams *seamster.Seamster, roots []int, due string, dueArgs []any, d *filingDay) (removed removal, err error) {
+func move(ctx context.Context, h handle, seams *seamster.Seamster, roots []int, due string, dueArgs []any, d *filingDay) (removed removal, err error) {
 	roots = slices.Sorted(slices.Values(roots))
 	dueArgs = slices.Clone(dueArgs)
 	if d != nil {

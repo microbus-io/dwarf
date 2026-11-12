@@ -106,7 +106,7 @@ func init() {
 	}
 	engineseams.ArchiveNow = func(eng any, ctx context.Context) {
 		e := eng.(*Engine)
-		e.drainJanitors(context.WithValue(ctx, janitorGraceKey{}, time.Duration(0)))
+		e.drainJanitors(ctx, 0)
 		e.reapPass(ctx, 0, false)
 	}
 	engineseams.FlowsClosed = func(eng any) int64 { return eng.(*Engine).flowsClosedCount.Load() }

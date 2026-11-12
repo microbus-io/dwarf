@@ -25,7 +25,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/janitor"
 	"github.com/microbus-io/dwarf/internal/reaper"
 	"github.com/microbus-io/errors"
 	"go.opentelemetry.io/otel"
@@ -66,8 +65,6 @@ type engineMetrics struct {
 	maintainFailed      metric.Int64Counter
 	flowsExpired        metric.Int64Counter
 	expireFailed        metric.Int64Counter
-	// janitor is the janitors' instruments, one set every janitor of the run records into.
-	janitor *janitor.Instruments
 
 	reg metric.Registration // the observable-gauge callback registration, unregistered at Shutdown
 
@@ -272,13 +269,6 @@ func (e *Engine) initMetrics() error {
 	if err := e.reaper.Load().SetMeter(meter); err != nil {
 		errs = append(errs, errors.Trace(err))
 	}
-	// The janitors', created once a run and shared, since an instrument made per janitor would be made again at every
-	// handoff.
-	janitorInstruments, err := janitor.NewInstruments(meter)
-	if err != nil {
-		errs = append(errs, errors.Trace(err))
-	}
-	m.janitor = janitorInstruments
 
 	gauge := func(name, desc, unit string) metric.Int64ObservableGauge {
 		g, err := meter.Int64ObservableGauge(name, metric.WithDescription(desc), metric.WithUnit(unit))
@@ -510,14 +500,13 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 				o.ObserveInt64(g.deletesUnknown, int64(obs.PendingUnknown), shard)
 			}
 			if j := e.janitorOn(idx); j != nil {
-				jobs := j.Observe(now)
-				for _, r := range jobs.Jobs {
-					o.ObserveFloat64(g.janitorProgress, r.SinceProgress.Seconds(),
-						metric.WithAttributes(shardAttr(idx), attribute.String("job", r.Job)))
+				for job, age := range j.JobAges(now) {
+					o.ObserveFloat64(g.janitorProgress, age.Seconds(),
+						metric.WithAttributes(shardAttr(idx), attribute.String("job", job)))
 				}
-				o.ObserveFloat64(g.archiveFailing, jobs.Failing.Seconds(), shard)
-				if jobs.LagOK {
-					o.ObserveFloat64(g.archiveLag, jobs.Lag.Seconds(), shard)
+				o.ObserveFloat64(g.archiveFailing, j.ArchiveFailing(now).Seconds(), shard)
+				if lag, ok := j.ArchiveLag(); ok {
+					o.ObserveFloat64(g.archiveLag, lag.Seconds(), shard)
 				}
 			}
 		}

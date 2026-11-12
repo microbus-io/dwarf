@@ -282,9 +282,9 @@ func TestArchiveMetrics_AReplicaThatStopsReapingForgets(t *testing.T) {
 	failing, _ := gaugeAt(rm, "dwarf_archive_failing_seconds", shard1)
 	assert.True(failing > 0, "failing, got %v", failing)
 
-	e.dispatchFlag(1).Store(false)
+	setRole(e, 1, false)
 	e.reapDueFlows(ctx)
-	e.dispatchFlag(1).Store(true)
+	setRole(e, 1, true)
 	rm = collect(t, reader)
 	failing, _ = gaugeAt(rm, "dwarf_archive_failing_seconds", shard1)
 	assert.Zero(failing)
@@ -384,7 +384,7 @@ func TestArchiveMetrics_ATransientFailureEndsAtACleanSweep(t *testing.T) {
 	e, reader := meteredArchiveEngine(t, treeMux(), 30)
 	shard1 := map[string]string{"shard": "1"}
 	e.seams.InjectN(engineseams.FaultReapSelectErr, 1) // the janitor's scan, which runs first
-	e.drainJanitors(ctx)
+	e.drainJanitors(ctx, e.archiveGrace)
 	time.Sleep(20 * time.Millisecond)
 	failing, _ := gaugeAt(collect(t, reader), "dwarf_archive_failing_seconds", shard1)
 	assert.True(failing > 0, "the failed scan began an episode")

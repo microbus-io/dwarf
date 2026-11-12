@@ -785,11 +785,11 @@ func TestDispatchers_SweepsSkipShardsThisReplicaOnlyReads(t *testing.T) {
 	assert.NoError(err)
 	time.Sleep(5 * time.Millisecond) // inherent wall-clock: let the 1ms deletion window elapse
 
-	e.dispatchFlag(shard).Store(false)
+	setRole(e, shard, false)
 	e.reapDueFlows(ctx)
 	assert.Equal(1, shardFlowCount(t, e, shard), "a reader leaves the shard to its dispatchers")
 
-	e.dispatchFlag(shard).Store(true)
+	setRole(e, shard, true)
 	e.reapDueFlows(ctx)
 	assert.Equal(0, shardFlowCount(t, e, shard), "a dispatcher reaps it")
 }
