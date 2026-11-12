@@ -141,10 +141,11 @@ func (e *Engine) summary(ctx context.Context, flowKey string) (*workflow.FlowSum
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	db, err := e.db.Shard(shardNum)
+	sh, err := e.db.Shard(shardNum)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
+	db := sh.DB()
 	ctx, doneTurn := e.opTurn(ctx, shardNum, "summary")
 	defer doneTurn()
 	var lr listRow

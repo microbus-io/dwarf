@@ -362,10 +362,11 @@ func TestMetrics_BacklogGauges(t *testing.T) {
 	case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
 		t.Fatal("the first task never started")
 	}
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	// Made due 30s ago while created now: an age read from created_at stays far below that for the whole test.
 	_, err = db.ExecContext(ctx,
 		"UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), -30000) WHERE status='"+workflow.StatusPending+"'")
@@ -435,10 +436,11 @@ func TestMetrics_BacklogLeaderOnly(t *testing.T) {
 
 	// A peer that joined earlier ranks first, so it takes the window's first place and this replica the second.
 	before := peerCounts(e)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	_, err = db.ExecContext(ctx,
 		"INSERT INTO dwarf_peers (engine_id, seen_at, ordering_seq, dispatched_at) VALUES (?, NOW_UTC(), ?, NOW_UTC())",
 		int64(1), time.Now().UnixMilli()-60000)
@@ -484,10 +486,11 @@ func TestBacklog_ResumeStampsNotBefore(t *testing.T) {
 	if !assert.NoError(err) || !assert.Equal(workflow.StatusInterrupted, outcome.Status) {
 		return
 	}
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	// The interrupt waited an hour.
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), -3600000)")
 	assert.NoError(err)
@@ -694,10 +697,11 @@ func TestOrphanDetection_EmitsMetric(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := eng.db.Shard(shard)
+	sh, err := eng.db.Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 
 	// The Startup sweep runs recoverOrphanedFlows too; let it finish before forging, or it counts the orphan
 	// a second time and this test's "exactly once" reads two.
@@ -965,8 +969,9 @@ func TestMetrics_TerminateCountsOnlyTheFlowsItClosed(t *testing.T) {
 		return
 	}
 	shardNum, _, rootID, _, _ := keys.ParseFlowKey(fk)
-	db, err := eng.db.Shard(shardNum)
+	sh, err := eng.db.Shard(shardNum)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET status=? WHERE flow_id=?", workflow.StatusCompleted, rootID)
 	assert.NoError(err)
 	eng.seams.Resume(engineseams.CheckpointTerminateAfterScan)
@@ -1252,17 +1257,18 @@ func TestOperation_HonorsDeadlineOnAFullShard(t *testing.T) {
 	// Shrink the shard's turnstile to nothing rather than taking its free turns: a background caller holding a
 	// turn at that moment would hand it on to the queued Create when it returns. With no size, every return
 	// lands below zero and nothing is granted.
-	ts := eng.turnstiles.Turnstile(1)
-	size := ts.Size()
+	sh, err := eng.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	size := sh.TurnLimit()
 	assert.True(size > 0, "the shard has turns")
-	ts.Resize(0)
-	defer ts.Resize(size)
+	sh.SetTurnLimit(0)
+	defer sh.SetTurnLimit(size)
 
 	const deadline = 200 * time.Millisecond
 	dctx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
 	start := time.Now()
-	_, err := eng.Create(dctx, "opdeadline.verify:428/g", nil, nil)
+	_, err = eng.Create(dctx, "opdeadline.verify:428/g", nil, nil)
 	elapsed := time.Since(start)
 	assert.Error(err, "a Create that cannot get a turn before its deadline must fail")
 	assert.True(errors.Is(err, context.DeadlineExceeded), "the failure is the caller's deadline, got %v", err)

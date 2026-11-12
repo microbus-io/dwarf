@@ -219,10 +219,11 @@ func chaosEnqueue(ctx context.Context, eng *Engine, flowKey string) {
 	if err != nil {
 		return
 	}
-	db, err := eng.db.Shard(shardNum)
+	sh, err := eng.db.Shard(shardNum)
 	if err != nil {
 		return
 	}
+	db := sh.DB()
 	var stepID int
 	if err := db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? ORDER BY step_id LIMIT_OFFSET(1, 0)", flowID).Scan(&stepID); err != nil {
 		return

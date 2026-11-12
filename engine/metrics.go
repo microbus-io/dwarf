@@ -449,10 +449,7 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 
 	// The turn counts, taken as ONE snapshot rather than a read per shard: they are the quantity a storm
 	// moves fastest, and per-shard reads would report different instants as a mixed picture.
-	var availBy, waitingBy map[int]int
-	if e.turnstiles != nil {
-		availBy, waitingBy = e.turnstiles.Snapshot()
-	}
+	availBy, waitingBy := e.db.Turns()
 
 	for idx, role := range []string{phaseEnter, phaseExit} {
 		o.ObserveInt64(g.dbPhase, e.dbPhaseWorkers[idx].Load(),

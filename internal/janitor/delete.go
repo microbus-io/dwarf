@@ -64,7 +64,7 @@ func (f *fastDeletion) round(ctx context.Context, batch batchFunc) (progress boo
 // batch scans, sizes and deletes one batch of stamped trees on h, and reports whether it made progress: deleted a
 // tree, or passed one too large for a batch.
 func (f *fastDeletion) batch(ctx context.Context, h handle, s settings, res residency) bool {
-	shard, seams := f.j.shard, f.j.seams
+	shard, seams := f.j.shard.Index(), f.j.seams
 	where, whereArgs := f.restriction(res)
 	candidates, err := scanStamped(ctx, h, seams, where, whereArgs, max(s.batchRoots, 1))
 	if err != nil {
@@ -124,7 +124,7 @@ func (f *fastDeletion) logError(ctx context.Context, msg string, args ...any) {
 	if ctx.Err() != nil {
 		return
 	}
-	f.j.logger.ErrorContext(ctx, msg, append([]any{"shard", f.j.shard}, args...)...)
+	f.j.logger.ErrorContext(ctx, msg, append([]any{"shard", f.j.shard.Index()}, args...)...)
 }
 
 // reset forgets where the job stood.

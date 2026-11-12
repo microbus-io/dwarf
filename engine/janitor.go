@@ -26,14 +26,13 @@ import (
 )
 
 // startJanitors makes and starts a janitor for every shard, for the run, on ctx: active on a shard this replica
-// dispatches, paused on the others. applyRole resumes and pauses them as the roles change, and the reconcile loop
-// hands them their residue class (pushResidency). A batch's turn is on the shard at dispatch's band, priorityCommon:
-// a lower one could starve the jobs at peak load and let the live tables grow.
+// dispatches, paused on the others. applyRole resumes and pauses them as the roles change; each reads its residue
+// class from its shard, where the shard's Sonar publishes it.
 func (e *Engine) startJanitors(ctx context.Context) error {
 	set := e.archives.Load()
 	janitors := map[int]*janitor.Janitor{}
 	for _, shard := range e.db.Indices() {
-		db, err := e.db.Shard(shard)
+		sh, err := e.db.Shard(shard)
 		if err != nil {
 			return err
 		}
@@ -41,10 +40,9 @@ func (e *Engine) startJanitors(ctx context.Context) error {
 		if set != nil {
 			archive = set.byShard[shard]
 		}
-		j := janitor.New(shard, db, archive, e.retentionDays)
+		j := janitor.New(sh, archive, e.retentionDays)
 		j.SetLogger(e.logger)
 		j.SetSeams(e.seams)
-		j.SetTurnstile(e.turnstiles, priorityCommon)
 		if e.meter != nil {
 			if err := j.SetMeter(e.meter); err != nil {
 				e.logger.ErrorContext(ctx, "Creating the janitor's instruments", "shard", shard, "error", err)
@@ -53,8 +51,6 @@ func (e *Engine) startJanitors(ctx context.Context) error {
 		j.SetManual(e.janitorManual)
 		j.SetIdle(e.janitorIdle)
 		e.configureJanitor(j, e.archiveGrace)
-		count, ordinal, ok := e.partitionOn(shard)
-		j.SetResidency(count, ordinal, ok)
 		j.Start(ctx)
 		if e.dispatchesOn(shard) {
 			j.Resume()
@@ -103,24 +99,6 @@ func (e *Engine) allJanitors() []*janitor.Janitor {
 		js = append(js, e.janitors[shard])
 	}
 	return js
-}
-
-// pushResidency hands shard's janitor its residue class among the shard's dispatchers when it differs from the one it
-// was last handed (last, updated). Called by the reconcile loop, which owns last.
-func (e *Engine) pushResidency(shard int, last map[int][3]int) {
-	count, ordinal, ok := e.partitionOn(shard)
-	okInt := 0
-	if ok {
-		okInt = 1
-	}
-	pair := [3]int{count, ordinal, okInt}
-	if seen, known := last[shard]; known && seen == pair {
-		return
-	}
-	last[shard] = pair
-	if j := e.janitorOn(shard); j != nil {
-		j.SetResidency(count, ordinal, ok)
-	}
 }
 
 // drainJanitors runs every active janitor's jobs until they make no progress (janitor.Drain), shard by shard, with the

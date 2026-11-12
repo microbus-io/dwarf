@@ -40,10 +40,11 @@ func publish(t *testing.T, e *Engine, rootKey string, at time.Time) (day int) {
 	t.Helper()
 	ctx := t.Context()
 	_, _, rootID, _, _ := keys.ParseFlowKey(rootKey)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	db := sh.DB()
 	day = archiver.DayOf(at, e.archives.Load().dayLength)
 	cols := strings.Join(columnsOf(t, db, migrations.FlowsTable(day)), ", ")
 	stamp, arg := database.SQLTime(db.DriverName(), at)
@@ -67,10 +68,11 @@ func publish(t *testing.T, e *Engine, rootKey string, at time.Time) (day int) {
 func attemptCleared(t *testing.T, e *Engine, rootKey string) bool {
 	t.Helper()
 	_, _, rootID, _, _ := keys.ParseFlowKey(rootKey)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	db := sh.DB()
 	column, args := publicationColumn(db.DriverName(), liveTables)
 	var published int
 	err = db.QueryRowContext(t.Context(), "SELECT "+column+" FROM dwarf_flows WHERE flow_id=?", append(args, rootID)...).Scan(&published)
@@ -84,10 +86,11 @@ func attemptCleared(t *testing.T, e *Engine, rootKey string) bool {
 func archiveMark(t *testing.T, e *Engine, rootKey string, day int) int {
 	t.Helper()
 	_, _, rootID, _, _ := keys.ParseFlowKey(rootKey)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	db := sh.DB()
 	mark := -1
 	_ = db.QueryRowContext(t.Context(), "SELECT delete_after_ms FROM "+migrations.FlowsTable(day)+" WHERE flow_id=?", rootID).Scan(&mark)
 	return mark
@@ -170,15 +173,17 @@ func TestPublished_DeleteOfACopyAlreadyGone(t *testing.T) {
 			at := time.Now()
 			if gone == "dropped" {
 				at = at.Add(-10 * e.archives.Load().dayLength) // a day whose tables were never made, as a dropped day
-				db, err := e.db.Shard(1)
+				sh, err := e.db.Shard(1)
 				assert.Must(assert.NoError(err))
+				db := sh.DB()
 				stamp, arg := database.SQLTime(db.DriverName(), at)
 				_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1, archive_attempt_at="+stamp+" WHERE flow_id=?", arg, rootID)
 				assert.Must(assert.NoError(err))
 			} else {
 				day := publish(t, e, rootKey, at)
-				db, err := e.db.Shard(1)
+				sh, err := e.db.Shard(1)
 				assert.Must(assert.NoError(err))
+				db := sh.DB()
 				_, err = db.ExecContext(ctx, "DELETE FROM "+migrations.FlowsTable(day)+" WHERE flow_id=?", rootID)
 				assert.Must(assert.NoError(err))
 			}
@@ -199,8 +204,9 @@ func TestPublished_AStampClearsAnAttempt(t *testing.T) {
 	e := archiveEngine(t, treeMux(), 30)
 	rootKey, _, _, _ := treeKeys(t, e)
 	_, _, rootID, _, _ := keys.ParseFlowKey(rootKey)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	stamp, arg := database.SQLTime(db.DriverName(), time.Now())
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET archive_attempt_at="+stamp+" WHERE flow_id=?", arg, rootID)
 	assert.Must(assert.NoError(err))
@@ -270,8 +276,9 @@ func TestPublished_TheRetentionCleanupLeavesAPublishedTree(t *testing.T) {
 	rootKey, childKey, _, _ := treeKeys(t, e)
 	_, _, rootID, _, _ := keys.ParseFlowKey(rootKey)
 	day := publish(t, e, rootKey, time.Now())
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE root_flow_id=?",
 		-(4 * 24 * time.Hour).Milliseconds(), rootID)
 	assert.Must(assert.NoError(err))
@@ -320,8 +327,9 @@ func TestPublished_ADeleteRacingTheLiveCleanup(t *testing.T) {
 	deleted := make(chan error, 1)
 	go func() { deleted <- e.Delete(ctx, rootKey) }()
 	assert.Must(assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeDeleteStamp, 10*time.Second*enginetest.TimeoutScale())))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	for _, stmt := range []string{
 		"DELETE FROM dwarf_steps WHERE flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id=?)",
 		"DELETE FROM dwarf_flows WHERE root_flow_id=?",
@@ -405,8 +413,9 @@ func TestStaged_ATreeArchivedInStagesReadsAsOne(t *testing.T) {
 	reads("published, the live copy still there")
 	e.reapDueFlows(ctx)
 	_, _, rootID, _, _ := keys.ParseFlowKey(rootKey)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var n int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE root_flow_id=?", rootID).Scan(&n))
 	assert.Zero(n, "the live copy is deleted")
@@ -424,8 +433,9 @@ func TestStaged_APurgeDuringTheLiveCleanup(t *testing.T) {
 	e.reapStageRows, e.reapBatchRows = 1, 2
 	rootKey, childKey, _, _ := treeKeys(t, e)
 	_, _, rootID, _, _ := keys.ParseFlowKey(rootKey)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	liveFlows := func() int {
 		var n int
 		assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE root_flow_id=?", rootID).Scan(&n))

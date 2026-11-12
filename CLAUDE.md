@@ -100,7 +100,8 @@ matching one before working there:**
 - **`fixtures/CLAUDE.md`** - the test harness: the name-keyed `NewEngineUnderTest` test mode and its
   caller-owned teardown, the per-test-engine rule under a `t.Parallel` suite (and which tests opt out), and
   `hosts.Mux` conventions.
-- **`internal/database/CLAUDE.md`** - the sharded SQL connections (`ShardSet`): SQL-dialect guidance, shard-count
+- **`internal/database/CLAUDE.md`** - the sharded SQL connections (`ShardSet`) and the `Shard` handle every actor on
+  a shard is given (its database, turns, residue class and server measurements): SQL-dialect guidance, shard-count
   sizing + shard-per-server topology, the connection lifecycle, and the sharding *mechanics* (1-indexed routing,
   parallel `OnEach` fan-out, DSN/test-mode resolution). The pool-sizing *formula* and sharding *semantics* stay in
   `engine/CLAUDE.md`.

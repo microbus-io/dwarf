@@ -38,8 +38,8 @@ registration repair exists (below) and why it cannot be left to the beat.
 way out — its context is cancelled by then, so the DELETE would fail — and `Run` having returned is itself
 the guarantee that no beat follows.
 
-**The API is twenty-one calls, and keeping it that small is a standing constraint.** Seven inputs (`New`,
-`SetProfile`, `SetCut`, `SetEvidence`, `SetTurnFunc`, `SetLogger`, `SetSeams`), five lifecycle calls (`Join`,
+**The API is twenty calls, and keeping it that small is a standing constraint.** Six inputs (`New`,
+`SetProfile`, `SetCut`, `SetEvidence`, `SetLogger`, `SetSeams`), five lifecycle calls (`Join`,
 `Run`, `Withdraw`, `Leave`, `SetDraining`), seven published facts (`Replicas`, `Rank`, `Standing`, `InCut`,
 `Draining`, `Partition`, `BlindFor`), one knob (`SetCadence`), and one read for the owner (`StoredOrderingSeq`).
 `SetCut` earns its place because the cut needs the
@@ -107,7 +107,7 @@ deliberately:
 | | direction of error that hurts | posture |
 |---|---|---|
 | `Replicas` + `InCut` (who dispatches) | under-count / over-promote → over-size pools → collapse a database | **hold, and withhold a fall or an entry into the cut across a gap** |
-| `Partition` (work divisor) | over-count → a residue class nobody selects → stranded work | **fail open** |
+| `Partition`, published on the shard (work divisor) | over-count → a residue class nobody selects → stranded work | **fail open** |
 | prune (hygiene) | a wrong delete is the only irreversible act here | **wait 5 minutes** |
 
 - **`Replicas` rises instantly, and a fall is withheld on the one reading that ended a blind spell.** A
@@ -135,7 +135,14 @@ deliberately:
 - **`Partition` fails open on every doubt** — solo dispatcher, self absent, ordinal out of range, or blind.
   Not partitioning costs a lost claim round trip, which the claim CAS absorbs; partitioning on a stale pair
   costs work that nobody runs. Blindness is evaluated **at the getter**, not published by the loop, so a
-  shard that stops answering stops being partitioned within a round trip rather than within a cadence.
+  shard that stops answering stops being partitioned within a round trip rather than within a cadence. The
+  pair is also published on the `database.Shard` after each good reading (`SetResidency`), for the shard's
+  other actors, with an expiry at the blindness grace - the same rule (`divides` decides both whether the pair
+  splits work), with the blindness enforced by the shard at its getter, so a Sonar that stops reading leaves the
+  shard reporting none. `Partition` is the Sonar's own reading, on its injected clock, which is where the
+  blindness rule is tested; the engine and the shard's actors read the shard. Pinned by
+  `TestPeers_AReadingPublishesThePartitionOnTheShard` and `database`'s `TestShard_ResidencyFailsOpen`. The expiry is set from the wall clock, which the
+  shard's readers compare it with, not from the injected one.
 - **The prune waits** (below).
 
 - **`InCut` obeys the same asymmetry as `Replicas`, for the same storm.** After a correlated stall every
@@ -551,8 +558,8 @@ is about the decision, not the socket count.
 
 ## What is deliberately absent
 
-- **No metrics.** The owner builds its own async gauges by pulling `Replicas`, `Rank`, `Partition` and `BlindFor` at
-  collection time, which is one fewer scope to keep in step and needs no meter here.
+- **No metrics.** The owner builds its own async gauges by pulling `Replicas`, `Rank` and `BlindFor`, and the
+  residue class from the shard, at collection time, which is one fewer scope to keep in step and needs no meter here.
 - **Exactly two fault seams, both at an I/O boundary, and that is the whole rule for adding a third.**
   Everything reachable from *inside* the package needs none: `observe` takes an error directly, and every
   time-dependent decision takes the injected clock. A seam over pure logic would be a signal that a
@@ -568,7 +575,10 @@ is about the decision, not the socket count.
   prove its liveness proves it anyway through the other write. Pinned inside
   `TestPeers_BeatFaultStopsProvingLiveness`, including that lifting the fault restores the repair — so the
   gate is the fault and not a broken repair path.
-- **No checkpoint seams.** Nothing here has a moment a test needs to hold.
+- **One checkpoint, `CheckpointPass`**, fired scoped by shard as a pass begins. It is how an owner's test waits
+  for a reading that was ATTEMPTED: `BlindFor` grows with the clock whether or not anything read, so a negative
+  assertion about a blind replica needs a pass to have run and failed, and passes run one at a time, so two
+  visits counted from a moment mean a whole read ran after it.
 - **No config setters beyond `SetCadence`.** See the API note above for the bar it cleared.
 - **No callback to the owner.** The Sonar publishes into atomics and the owner *pulls*. An edge
   notification would have to be fired from every path that can move a published value — a confirmed fall, a
@@ -579,7 +589,7 @@ is about the decision, not the socket count.
 
 ## Tests
 
-Real SQL through `internal/database.ShardSet` (a **test-only** import — a Sonar never opens a handle) plus
+Real SQL through `internal/database.ShardSet` (which a Sonar never opens itself - it is handed a `Shard`) plus
 an injected clock, so every time-dependent rule is driven by advancing time rather than sleeping and the
 whole suite stays parallel and sub-second. The clock is an unexported field with no setter: it is a test
 seam, not API.

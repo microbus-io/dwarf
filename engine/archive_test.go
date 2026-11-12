@@ -39,10 +39,11 @@ func dayStart(day int, dayLength time.Duration) time.Time {
 // hasArchiveDay reports whether shard 1 has both of a day's archive tables.
 func hasArchiveDay(t *testing.T, e *Engine, day int) bool {
 	t.Helper()
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	db := sh.DB()
 	for _, table := range []string{migrations.FlowsTable(day), migrations.StepsTable(day)} {
 		rows, err := db.QueryContext(t.Context(), "SELECT 1 FROM "+table+" WHERE 1=0")
 		if err != nil {
@@ -56,10 +57,11 @@ func hasArchiveDay(t *testing.T, e *Engine, day int) bool {
 // makeArchiveDay makes a day's archive tables on shard 1, as the archive does.
 func makeArchiveDay(t *testing.T, e *Engine, day int) error {
 	t.Helper()
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if err != nil {
 		return err
 	}
+	db := sh.DB()
 	dayFS, err := migrations.ArchiveDay(migrations.Archive(), day)
 	if err != nil {
 		return err

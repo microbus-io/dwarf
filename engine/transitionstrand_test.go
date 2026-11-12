@@ -92,10 +92,11 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 	case <-time.After(5 * time.Second * enginetest.TimeoutScale()):
 		t.Fatal("A never started")
 	}
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	_, err = db.ExecContext(ctx,
 		"UPDATE dwarf_steps SET status='"+workflow.StatusCompleted+"', changes=?, advancing=1, lease_seq=lease_seq+1, updated_at=NOW_UTC()"+
 			" WHERE flow_id=? AND task_name='A'", []byte(`{"a":1}`), flowID)
@@ -126,10 +127,11 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 	}
 	assert.NoError(e.Shutdown(ctx))
 	awaitStartupRecoverySweep(t, e2)
-	db2, err := e2.db.Shard(shard)
+	sh2, err := e2.db.Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}
+	db2 := sh2.DB()
 
 	// The lease still holds A for its dead worker, so the sweep waits.
 	e2.recoverOrphanedFlows(ctx, db2, shard, true)
@@ -176,10 +178,11 @@ func slowWorkerReplay(t *testing.T, e *Engine, mux *hosts.Mux, flowURL string, i
 	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeTransitionTx, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeTransitionTx")
 	shard, _, flowID, _, err = keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	if !assert.NoError(err) {
 		t.FailNow()
 	}
+	db := sh.DB()
 	var stalledSeq int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT lease_seq FROM dwarf_steps WHERE flow_id=? AND task_name='A' AND status='"+
 		workflow.StatusCompleted+"' AND advancing=1", flowID).Scan(&stalledSeq), "the completion write did not set advancing")
@@ -402,10 +405,11 @@ func TestBumpCohortArrivals_Fence(t *testing.T) {
 	assert.True(enginetest.WaitUntil(t, 10*time.Second, func() bool { return started.Load() == 2 }), "branches never started")
 	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	var spawnID, b1ID, b1Seq int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&spawnID))
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id, lease_seq FROM dwarf_steps WHERE flow_id=? AND task_name='B1'", flowID).Scan(&b1ID, &b1Seq))
@@ -512,8 +516,9 @@ func TestOrphanSweep_RecoversLostTransitionBesideLiveSibling(t *testing.T) {
 			assert.Must(assert.NoError(err))
 			shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 			assert.Must(assert.NoError(err))
-			db, err := e.db.Shard(shard)
+			sh, err := e.db.Shard(shard)
 			assert.Must(assert.NoError(err))
+			db := sh.DB()
 			stepOf := func(task string) int {
 				var id int
 				assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name=?", flowID, task).Scan(&id))

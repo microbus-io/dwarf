@@ -17,7 +17,6 @@ limitations under the License.
 package engine
 
 import (
-	"maps"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/pipeline"
@@ -107,13 +106,10 @@ func deriveRefillInterval(bufferShare, poolConns, dispatchers int) time.Duration
 // the worker ceiling and the candidate cache already obey, since the period is measured against the
 // cache's capacity. Pushing is live: a piston reads its interval once per cycle rather than capturing it.
 //
-// Locks shardsLock and clones the shard facts itself; recomputePools has already done both by the time it
-// gets here, so it calls recomputeRefillIntervalsWith directly with its own clones rather than paying for a
-// second lock/clone pass over the same maps.
+// Reads the shard facts itself; recomputePools has already read them by the time it gets here, so it calls
+// recomputeRefillIntervalsWith directly with its own.
 func (e *Engine) recomputeRefillIntervals() {
-	e.shardsLock.Lock()
-	sizing := maps.Clone(e.shardSizing)
-	e.shardsLock.Unlock()
+	sizing, _ := e.shardFacts()
 	e.recomputeRefillIntervalsWith(sizing, e.rolesByShard())
 }
 

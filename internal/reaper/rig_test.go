@@ -59,10 +59,11 @@ func newRig(t *testing.T, retention int, dayLength ...time.Duration) *rig {
 		t.Fatal(err)
 	}
 	t.Cleanup(set.Close)
-	db, err := set.Shard(1)
+	sh, err := set.Shard(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	db := sh.DB()
 	length := archiver.DefaultDayLength
 	if len(dayLength) > 0 && dayLength[0] > 0 {
 		length = dayLength[0]

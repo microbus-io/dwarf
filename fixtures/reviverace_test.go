@@ -83,8 +83,9 @@ func TestReviveVsTerminate_Deterministic(t *testing.T) {
 
 	shardNum, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := engineseams.DB(e).Shard(shardNum)
+	sh, err := engineseams.DB(e).Shard(shardNum)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var callStatus string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE flow_id=? AND task_name='Call'", flowID).Scan(&callStatus))
 	assert.Equal(workflow.StatusTerminated, callStatus) // not revived to pending

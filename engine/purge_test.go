@@ -36,10 +36,11 @@ import (
 func archivedTreeKeys(t *testing.T, e *Engine, rootID, today int) (rootKey, childKey string) {
 	t.Helper()
 	ctx := t.Context()
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	db := sh.DB()
 	if _, err := db.ExecContext(ctx, "UPDATE dwarf_flows SET created_hour=created_hour-72 WHERE root_flow_id=?", rootID); err != nil {
 		t.Fatal(err)
 	}
@@ -71,10 +72,11 @@ func archivedTreeKeys(t *testing.T, e *Engine, rootID, today int) (rootKey, chil
 // namedFlows counts the directory's rows for the flows of the tree rooted at rootID, archived in day.
 func namedFlows(t *testing.T, e *Engine, day, rootID int) int {
 	t.Helper()
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	db := sh.DB()
 	var n int
 	err = db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM "+archiver.DirectoryTable+" WHERE flow_id=? OR flow_id IN"+
 		" (SELECT flow_id FROM "+migrations.FlowsTable(day)+" WHERE root_flow_id=?)", rootID, rootID).Scan(&n)
@@ -147,8 +149,9 @@ func TestPurge_OldestArchivedFirstAndOnlyTheArchive(t *testing.T) {
 	if now, _ := a.Today(ctx); now != today {
 		t.Skip("midnight passed during the test")
 	}
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	directory := func() int {
 		var n int
 		assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+archiver.DirectoryTable).Scan(&n))
@@ -161,8 +164,9 @@ func TestPurge_OldestArchivedFirstAndOnlyTheArchive(t *testing.T) {
 		return flows
 	}
 	marked := func(root int) bool {
-		db, err := e.db.Shard(1)
+		sh, err := e.db.Shard(1)
 		assert.Must(assert.NoError(err))
+		db := sh.DB()
 		var after int
 		assert.NoError(db.QueryRowContext(ctx, "SELECT delete_after_ms FROM dwarf_flows WHERE flow_id=?", root).Scan(&after))
 		return after > 0

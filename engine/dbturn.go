@@ -20,7 +20,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/turnstile"
+	"github.com/microbus-io/dwarf/internal/database"
 )
 
 // dbTurn takes this caller's turn at a shard's turnstile and returns the context every database call it
@@ -33,11 +33,19 @@ import (
 // first handed back the turn its caller held, as lockCohortStripe's lease tick does: a turn taken while one is held
 // deadlocks against the other holders. Do not hold it across a wait that is not the database (a host call, the latch
 // board, a sleep); hand it back first. The claim's age is the context's first stamp and is never re-stamped, so a
-// cross-shard caller presents one age at every shard. Nothing that takes a connection is exempt: the peer Sonars
-// take the refiller's band (dbTurnAt with priorityRefill), since an exemption ranks a caller above every band and
-// drops it from the population the turns bound. Startup's RTT probe is the one exemption, as no worker exists yet.
+// cross-shard caller presents one age at every shard. Nothing that takes a connection is exempt: the piston and
+// the peer Sonars take the shard's priority turns, since an exemption ranks a caller above every band and drops it
+// from the population the turns bound. The shard set's probes as each shard opens are the one exemption, as
+// nothing else uses the shard yet.
 func (e *Engine) dbTurn(ctx context.Context, shardNum int) (context.Context, func()) {
-	return e.dbTurnAt(ctx, shardNum, priorityCommon)
+	sh, err := e.db.Shard(shardNum)
+	if err != nil { // before Startup, and in the operations' own not-started guard paths
+		return ctx, func() {}
+	}
+	ctx, pass := sh.WaitTurn(ctx)
+	// The release is a CLOSURE over the variable, not a bound method value: yieldHeldTurn replaces the pass
+	// in place, and a bound pass.Return would hand back the one that existed when this returned.
+	return withHeldTurn(ctx, &pass), func() { pass.Return() }
 }
 
 // opTurn is dbTurn for an API operation's entry point. Its release also records how long the operation held
@@ -59,7 +67,7 @@ func (e *Engine) opTurn(ctx context.Context, shardNum int, op string) (context.C
 type heldTurnKey struct{}
 
 // withHeldTurn publishes the pass this caller holds to everything it calls.
-func withHeldTurn(ctx context.Context, pass *turnstile.Pass) context.Context {
+func withHeldTurn(ctx context.Context, pass *database.Pass) context.Context {
 	return context.WithValue(ctx, heldTurnKey{}, pass)
 }
 
@@ -73,24 +81,11 @@ func withHeldTurn(ctx context.Context, pass *turnstile.Pass) context.Context {
 // convoys on a stripe - parks its losers inside the turnstile, which is the occupancy the stripe exists to
 // keep out of the database's queue in the first place.
 func yieldHeldTurn(ctx context.Context, fn func()) {
-	if pass, ok := ctx.Value(heldTurnKey{}).(*turnstile.Pass); ok && pass != nil {
+	if pass, ok := ctx.Value(heldTurnKey{}).(*database.Pass); ok && pass != nil {
 		yieldTurn(ctx, pass, fn)
 		return
 	}
 	fn()
-}
-
-// dbTurnAt is dbTurn in a caller-chosen band. Reserve it for the cadenced, bounded-by-construction callers
-// that belong above the common band - see the band definitions in poolsize.go for what qualifies.
-func (e *Engine) dbTurnAt(ctx context.Context, shardNum, priority int) (context.Context, func()) {
-	if e.turnstiles == nil { // before Startup, and in the operations' own not-started guard paths
-		return ctx, func() {}
-	}
-	ctx = e.turnstiles.ContextWithPriority(ctx, shardNum, priority)
-	pass := turnstile.WaitTurn(ctx)
-	// The release is a CLOSURE over the variable, not a bound method value: yieldHeldTurn replaces the pass
-	// in place, and a bound pass.Return would hand back the one that existed when this returned.
-	return withHeldTurn(ctx, &pass), func() { pass.Return() }
 }
 
 // yieldTurn hands the turn back for the duration of fn and takes a fresh one afterwards. fn is a wait that
@@ -109,22 +104,22 @@ func (e *Engine) dbTurnAt(ctx context.Context, shardNum, priority int) (context.
 // past the re-take and leave the caller holding a spent pass: no leak and no double release (both are
 // no-ops), but every database call on the failure disposition would then run unordered, which is the one
 // thing this whole path is for.
-func yieldTurn(ctx context.Context, pass *turnstile.Pass, fn func()) {
+func yieldTurn(ctx context.Context, pass *database.Pass, fn func()) {
 	pass.Return()
-	defer func() { *pass = turnstile.WaitTurn(ctx) }()
+	defer func() { *pass = database.WaitTurn(ctx) }()
 	fn()
 }
 
 // yieldTurnAway is yieldTurn for a host call: the claim on *ctx is moved forward by the call's duration
-// (turnstile.Away) before the turn is re-taken, so the job ranks by its time at the database, exactly as it
+// (database.Away) before the turn is re-taken, so the job ranks by its time at the database, exactly as it
 // does after ExecuteTask. *ctx is replaced in place so the caller's later turns take the moved claim too, and
 // the move is deferred with the re-take so a panicking fn gets both.
-func yieldTurnAway(ctx *context.Context, pass *turnstile.Pass, fn func()) {
+func yieldTurnAway(ctx *context.Context, pass *database.Pass, fn func()) {
 	pass.Return()
 	start := time.Now()
 	defer func() {
-		*ctx = turnstile.Away(*ctx, time.Since(start))
-		*pass = turnstile.WaitTurn(*ctx)
+		*ctx = database.Away(*ctx, time.Since(start))
+		*pass = database.WaitTurn(*ctx)
 	}()
 	fn()
 }

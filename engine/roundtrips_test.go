@@ -71,8 +71,9 @@ func TestRoundTrips_LinearStep(t *testing.T) {
 	mux.HandleTask("rt/s", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	run(5) // warm the statement caches on the connections before timing
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	db.SimulateRTT(rtt)
 	defer db.SimulateRTT(0)
 	// What one simulated round trip really costs: the timer oversleeps by an amount that varies by platform, and
@@ -135,8 +136,9 @@ func TestRoundTrips_FanInCycle(t *testing.T) {
 
 	run(3) // warm the statement caches on the connections before timing
 	run(9)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	db.SimulateRTT(rtt)
 	defer db.SimulateRTT(0)
 	const probes = 30
@@ -187,8 +189,9 @@ func TestRoundTrips_OneStepFlow(t *testing.T) {
 	}
 
 	run(10) // warm the statement caches on the connections before timing
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	db.SimulateRTT(rtt)
 	defer db.SimulateRTT(0)
 	const probes = 30

@@ -74,10 +74,11 @@ func TestFork_RejectsInterruptedKeptStep(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := engineseams.DB(e).Shard(shard)
+	sh, err := engineseams.DB(e).Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 
 	// Manufacture the invariant break: cohort member A -> interrupted (a state a closed flow can't hold).
 	res, err := db.ExecContext(ctx,

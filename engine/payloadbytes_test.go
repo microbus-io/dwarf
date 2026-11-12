@@ -158,8 +158,9 @@ func TestPayloadBytes_EveryWriterCountsWhatItWrites(t *testing.T) {
 	assert.Must(assert.NoError(err))
 	enginetest.AwaitFlowStatus(t, e, forked, workflow.StatusCompleted, timeout)
 
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	driver := db.DriverName()
 	exact := ""
 	switch driver {

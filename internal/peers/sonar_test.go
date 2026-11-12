@@ -90,9 +90,10 @@ func newRig(t *testing.T) *rig {
 		TestConnCap: 4,
 	}))
 	t.Cleanup(set.Close)
-	db, err := set.Shard(1)
+	sh, err := set.Shard(1)
 	assert.Must(assert.NoError(err))
-	s, err := New(selfID, 1, db)
+	db := sh.DB()
+	s, err := New(selfID, sh)
 	assert.NoError(err)
 	clk := newFakeClock()
 	// Both, together: New seeded lastGood from the real clock, which against the fake one would read as
@@ -691,6 +692,34 @@ func TestPeers_PartitionFailsOpenWhenBlind(t *testing.T) {
 	assert.False(ok, "absent from the roster: decline rather than guess")
 }
 
+// TestPeers_AReadingPublishesThePartitionOnTheShard pins the copy of the work partition the shard's other actors
+// read: nothing before the first reading, Partition's pair after a good one, and no class at once when a reading
+// does not divide the work. Its expiry is the shard's own (internal/database).
+func TestPeers_AReadingPublishesThePartitionOnTheShard(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+
+	_, _, ok := r.s.sh.Residency()
+	assert.False(ok, "nothing before the first reading")
+
+	r.s.observe(ctx, []peer{
+		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
+		{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
+	}, nil)
+	wantCount, wantOrdinal, wantOK := r.s.Partition()
+	count, ordinal, ok := r.s.sh.Residency()
+	assert.True(ok, "two dispatchers and a known ordinal")
+	assert.Equal(wantOK, ok)
+	assert.Equal(wantCount, count)
+	assert.Equal(wantOrdinal, ordinal)
+
+	r.s.observe(ctx, []peer{{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: 100, working: true}}, nil)
+	_, _, ok = r.s.sh.Residency()
+	assert.False(ok, "a solo dispatcher partitions nothing")
+}
+
 // TestPeers_RegisterInsertsThenUpdatesAndBeatNeverCreates pins the row's lifecycle. Registration creates it
 // once and refreshes it if it is already there; the beat only ever refreshes. That is what lets Leave be
 // final - a straggler beat matches nothing instead of resurrecting a replica that has gone.
@@ -1205,13 +1234,15 @@ func TestPeers_NewRejectsAnUnusableIdentity(t *testing.T) {
 	assert := testarossa.For(t)
 	r := newRig(t)
 
-	_, err := New(0, 1, r.db)
+	_, err := New(0, database.NewShard(1, r.db))
 	assert.Error(err)
-	_, err = New(-1, 1, r.db)
+	_, err = New(-1, database.NewShard(1, r.db))
 	assert.Error(err)
-	_, err = New(selfID, 0, r.db)
+	_, err = New(selfID, nil)
 	assert.Error(err)
-	_, err = New(selfID, 1, nil)
+	_, err = New(selfID, database.NewShard(0, r.db))
+	assert.Error(err)
+	_, err = New(selfID, database.NewShard(1, nil))
 	assert.Error(err)
 }
 

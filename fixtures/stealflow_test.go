@@ -187,10 +187,11 @@ func TestStealLatencyPoisonflow(t *testing.T) {
 
 	// Slow every operation this replica makes, from here on.
 	for _, idx := range engineseams.DB(crippled).Indices() {
-		db, err := engineseams.DB(crippled).Shard(idx)
+		sh, err := engineseams.DB(crippled).Shard(idx)
 		if !assert.NoError(err) {
 			return
 		}
+		db := sh.DB()
 		db.SimulateRTT(25 * time.Millisecond)
 	}
 

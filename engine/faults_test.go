@@ -131,10 +131,11 @@ func expireLease(t *testing.T, e *Engine, flowKey, taskName string) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := e.db.Shard(shardNum)
+	sh, err := e.db.Shard(shardNum)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	var stepID, leaseSeq int
 	err = db.QueryRowContext(ctx,
 		"SELECT step_id, lease_seq FROM dwarf_steps WHERE flow_id=? AND task_name=? AND status='"+workflow.StatusRunning+"'",
@@ -469,8 +470,9 @@ func TestFault_SubgraphReviveLost(t *testing.T) {
 	assert.NoError(err)
 	shard, _, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 
 	// The child has now gone terminal; its revive is (faultily) lost, so the caller is wedged.
 	waitChild()

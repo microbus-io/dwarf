@@ -15,10 +15,10 @@ limitations under the License.
 */
 
 // Package database owns the engine's sharded SQL connections: it opens and migrates every shard, routes by
-// 1-based shard index, fans an operation out over all shards, and closes them. It is DB-lifecycle-complete
-// (open → migrate → size → fan-out → close) and speaks only in resolved connection-pool sizes - the sizing
-// *policy* (how many connections a worker count implies) stays with the caller, which hands ShardSet the two
-// computed integers via Config / SetMax*Conns.
+// 1-based shard index, orders access to each shard's connections by turns, fans an operation out over all shards,
+// and closes them. It is DB-lifecycle-complete (open → migrate → size → fan-out → close) and speaks only in
+// resolved connection-pool sizes - the sizing *policy* (how many connections a worker count implies) stays with the
+// caller, which hands ShardSet the computed integers via Config and SetShardPool.
 package database
 
 import (
@@ -40,6 +40,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/microbus-io/dwarf/internal/migrations"
+	"github.com/microbus-io/dwarf/internal/turnstile"
 )
 
 // sequenceName namespaces this engine's migrations in sequel_migrations; do not change once deployed.
@@ -71,6 +72,9 @@ type Config struct {
 	// parallel test engines against one server stay under its max_connections (see testbudget.go). Ignored
 	// entirely in production (TestID == "").
 	TestConnCap int
+	// TurnsPerConn is how many turns a shard admits at once per connection of its pool, applied by SetShardPool.
+	// Until SetShardPool sizes a shard, its turns let every caller through unordered.
+	TurnsPerConn int
 
 	Logger         *slog.Logger
 	TracerProvider trace.TracerProvider // nil → otel.GetTracerProvider()
@@ -83,8 +87,12 @@ type Config struct {
 // they must be unique and >= 1 but need not be contiguous.
 type ShardSet struct {
 	mu      sync.RWMutex
-	dbs     map[int]*sequel.DB
+	shards  map[int]*Shard
 	indices []int // sorted ascending
+	// turns holds each shard's turnstile, made by its first SetShardPool. A fresh set per Open: counts left over
+	// from a previous run would bound this one against pools it no longer has.
+	turns        *turnstile.Set
+	turnsPerConn int
 	// testConnCap (>0 only in test mode) caps every pool push (SetShardPool) so the engine's derived pool sizing
 	// can never grow a pool past what was reserved from the global budget at Open; releaseBudget frees that
 	// reservation, called exactly once at Close (or Open's failure path). See testbudget.go.
@@ -92,7 +100,8 @@ type ShardSet struct {
 	releaseBudget func()
 }
 
-// Open opens and migrates every shard, applying cfg's pool sizes and telemetry. On any shard failure it closes
+// Open opens and migrates every shard, applying cfg's pool sizes and telemetry, and measures each shard's server: its
+// round-trip time and its connection limit (Shard.RTT, Shard.MaxConnections). On any shard failure it closes
 // the shards already opened this attempt (so a partial failure leaks no connections and leaves the set empty
 // for a clean retry) and returns the error. Not safe to call concurrently with itself; call once at startup.
 func (s *ShardSet) Open(ctx context.Context, cfg Config) error {
@@ -147,9 +156,18 @@ func (s *ShardSet) Open(ctx context.Context, cfg Config) error {
 		}
 		dbs[idx] = db
 	}
+	turns := turnstile.NewSet()
+	opened := make(map[int]*Shard, len(dbs))
+	for _, idx := range indices {
+		// Measured now, before anything takes a turn on the shard, so the probes need none.
+		db := dbs[idx]
+		opened[idx] = &Shard{index: idx, db: db, turns: turns, rtt: probeRTT(ctx, db), serverMax: readMaxConnections(ctx, db)}
+	}
 	s.mu.Lock()
-	s.dbs = dbs
+	s.shards = opened
 	s.indices = indices
+	s.turns = turns
+	s.turnsPerConn = cfg.TurnsPerConn
 	if cfg.TestID != "" {
 		s.testConnCap = cfg.TestConnCap
 	}
@@ -274,22 +292,22 @@ func applyTelemetry(cfg Config, db *sequel.DB) {
 	db.SetMeterProvider(mp)
 }
 
-// Shard returns the database connection for the given shard index. An unknown index returns a uniform
-// not-found error: a flow key referencing an unregistered shard must be indistinguishable from a bad key.
-func (s *ShardSet) Shard(n int) (*sequel.DB, error) {
+// Shard returns the shard of the given index. An unknown index returns a uniform not-found error: a flow key
+// referencing an unregistered shard must be indistinguishable from a bad key.
+func (s *ShardSet) Shard(n int) (*Shard, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	db, ok := s.dbs[n]
+	sh, ok := s.shards[n]
 	if !ok {
 		return nil, errors.New("flow not found", http.StatusNotFound)
 	}
-	return db, nil
+	return sh, nil
 }
 
 // Has reports whether the given shard index is registered.
 func (s *ShardSet) Has(n int) bool {
 	s.mu.RLock()
-	_, ok := s.dbs[n]
+	_, ok := s.shards[n]
 	s.mu.RUnlock()
 	return ok
 }
@@ -297,7 +315,7 @@ func (s *ShardSet) Has(n int) bool {
 // NumShards returns the number of open shards.
 func (s *ShardSet) NumShards() int {
 	s.mu.RLock()
-	n := len(s.dbs)
+	n := len(s.shards)
 	s.mu.RUnlock()
 	return n
 }
@@ -321,22 +339,22 @@ func (s *ShardSet) Indices() []int {
 func (s *ShardSet) OnEach(ctx context.Context, op func(ctx context.Context, db *sequel.DB, shard int) error) error {
 	indices := s.Indices()
 	if len(indices) == 1 {
-		db, err := s.Shard(indices[0])
+		sh, err := s.Shard(indices[0])
 		if err != nil {
 			return errors.Trace(err, "shard", indices[0])
 		}
-		return errors.Trace(op(ctx, db, indices[0]), "shard", indices[0])
+		return errors.Trace(op(ctx, sh.DB(), indices[0]), "shard", indices[0])
 	}
 	errs := make([]error, len(indices))
 	var wg sync.WaitGroup
 	for i, idx := range indices {
 		wg.Go(func() {
-			db, err := s.Shard(idx)
+			sh, err := s.Shard(idx)
 			if err != nil {
 				errs[i] = err
 				return
 			}
-			errs[i] = op(ctx, db, idx)
+			errs[i] = op(ctx, sh.DB(), idx)
 		})
 	}
 	wg.Wait()
@@ -349,29 +367,70 @@ func (s *ShardSet) OnEach(ctx context.Context, op func(ctx context.Context, db *
 }
 
 // SetShardPool applies idle and open pool sizes to one shard, clamped to the test-mode cap so the engine's
-// derived sizing can never grow a pool past the reserved budget. An unknown index is a no-op.
+// derived sizing can never grow a pool past the reserved budget, and sizes the shard's turns to TurnsPerConn
+// per connection of open. Every change to a pool goes through here, so the turns always follow the pool. An
+// unknown index is a no-op.
 func (s *ShardSet) SetShardPool(n, idle, open int) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	db, ok := s.dbs[n]
+	sh, ok := s.shards[n]
 	if !ok {
 		return
 	}
+	// The turns are sized from the pool asked for, before the test-mode cap.
+	turns := s.turnsPerConn * open
 	if s.testConnCap > 0 {
 		idle = min(idle, s.testConnCap)
 		open = min(open, s.testConnCap)
 	}
-	db.SetMaxOpenConns(open)
-	db.SetMaxIdleConns(idle)
+	sh.db.SetMaxOpenConns(open)
+	sh.db.SetMaxIdleConns(idle)
+	if turns > 0 {
+		s.turns.Resize(n, turns)
+	}
 }
 
-// Close closes all shard connections and empties the set.
-func (s *ShardSet) Close() {
-	s.mu.Lock()
-	for _, db := range s.dbs {
-		db.Close()
+// Gate returns a gate that takes a job's first turn on a shard (Gate).
+func (s *ShardSet) Gate() *Gate {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	turns := s.turns
+	if turns == nil {
+		turns = turnstile.NewSet()
 	}
-	s.dbs = nil
+	return &Gate{gate: turns.Gate(bandCommon)}
+}
+
+// Turns reports, for each shard, the turns free and the callers waiting for one, for metrics.
+func (s *ShardSet) Turns() (available, waiting map[int]int) {
+	s.mu.RLock()
+	turns := s.turns
+	s.mu.RUnlock()
+	if turns == nil {
+		return nil, nil
+	}
+	return turns.Snapshot()
+}
+
+// CloseTurns releases every caller waiting for a turn and lets every later caller through unordered; a Gate
+// reports !ok from then on. The shards stay open: it is the first half of a drain, so work under way finishes.
+func (s *ShardSet) CloseTurns() {
+	s.mu.RLock()
+	turns := s.turns
+	s.mu.RUnlock()
+	if turns != nil {
+		turns.Close()
+	}
+}
+
+// Close closes the shards' turns and connections and empties the set.
+func (s *ShardSet) Close() {
+	s.CloseTurns()
+	s.mu.Lock()
+	for _, sh := range s.shards {
+		sh.db.Close()
+	}
+	s.shards = nil
 	s.indices = nil
 	s.testConnCap = 0
 	release := s.releaseBudget

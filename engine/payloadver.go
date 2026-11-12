@@ -22,8 +22,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/keys"
-	"github.com/microbus-io/dwarf/internal/turnstile"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 )
@@ -95,7 +95,7 @@ func (e *Engine) deferNewerPayload(ctx context.Context, d *dispatch) error {
 	e.logger.Log(ctx, level, "Deferring a step of a flow in a newer payload format",
 		"flow", keys.CorrelationID(shardNum, d.row.createdHour, flowID), "task", taskName,
 		"payloadVer", ver, "supportedVer", payloadVer, "deferrals", deferrals+1, "backoff", backoff)
-	pass := turnstile.WaitTurn(ctx)
+	pass := database.WaitTurn(ctx)
 	// Fenced and guarded like the retry rewind: a zero-row match means a peer holds the lease or a Terminate
 	// terminalized the step, and either way the row is no longer this dispatch's to write.
 	_, err := db.ExecContext(ctx,

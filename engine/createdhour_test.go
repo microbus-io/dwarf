@@ -104,8 +104,9 @@ func TestCreatedHour_EveryRowCarriesItsFlowsHour(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 
 	parkedKey, outcome, err := e.Run(ctx, "hour/parent", nil, nil)
 	if !assert.NoError(err) || !assert.Equal(workflow.StatusInterrupted, outcome.Status, outcome.Error) {

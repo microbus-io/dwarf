@@ -237,8 +237,9 @@ func TestInterruptSnapshotFollowsTheRecordedInterrupt(t *testing.T) {
 
 	shard, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
-	db, err := engineseams.DB(eng).Shard(shard)
+	sh, err := engineseams.DB(eng).Shard(shard)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	_, err = db.ExecContext(ctx,
 		"UPDATE dwarf_steps SET updated_at=DATE_ADD_MILLIS(NOW_UTC(), -60000) WHERE flow_id=? AND task_name='B'", flowID)
 	assert.NoError(err)

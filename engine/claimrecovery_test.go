@@ -62,10 +62,11 @@ func TestMySQLClaim_ReadErrorRecovery(t *testing.T) {
 			if err := e.Startup(t.Context()); err != nil {
 				t.Fatal(err)
 			}
-			db, err := e.db.Shard(1)
+			sh, err := e.db.Shard(1)
 			if err != nil {
 				t.Fatal(err)
 			}
+			db := sh.DB()
 			if driver := db.DriverName(); driver != "mysql" && driver != "mariadb" {
 				t.Skip("the two-statement claim is MySQL and MariaDB only")
 			}
@@ -166,10 +167,11 @@ func TestLeaseFence_RecoveryRequiresKnownGeneration(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				db, err := e.db.Shard(shard)
+				sh, err := e.db.Shard(shard)
 				if err != nil {
 					t.Fatal(err)
 				}
+				db := sh.DB()
 				var stepID int
 				if err := db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=?", flowID).Scan(&stepID); err != nil {
 					t.Fatal(err)

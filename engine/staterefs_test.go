@@ -54,8 +54,9 @@ func blob(n int) string {
 func stepRefsOf(t *testing.T, e *Engine, stepID int) (state workflow.State, refs staterefs.Refs, stateBytes int) {
 	t.Helper()
 	assert := testarossa.For(t)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var stateJSON, refsJSON []byte
 	err = db.QueryRowContext(context.Background(),
 		"SELECT state, state_refs FROM dwarf_steps WHERE step_id=?", stepID,
@@ -71,8 +72,9 @@ func stepRefsOf(t *testing.T, e *Engine, stepID int) (state workflow.State, refs
 func stepIDsByTask(t *testing.T, e *Engine, taskName string) []int {
 	t.Helper()
 	assert := testarossa.For(t)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	rows, err := db.QueryContext(context.Background(),
 		"SELECT step_id FROM dwarf_steps WHERE task_name=? ORDER BY step_id", taskName)
 	assert.NoError(err)
@@ -105,8 +107,9 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 	e.SetHost(mux)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	_, err = db.ExecContext(ctx,
 		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 		"ftok", "u", "W", []byte("{}"), "", workflow.StatusRunning, 1, 60000,
@@ -187,8 +190,9 @@ func TestStateRefs_UnreadableStateFailsTheStep(t *testing.T) {
 	enginetest.AwaitFlowStatus(t, e, flowKey, workflow.StatusInterrupted, 10*time.Second)
 	bIDs := stepIDsByTask(t, e, "B")
 	assert.Len(bIDs, 1)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET state=? WHERE step_id=?", []byte(`[1]`), bIDs[0])
 	assert.NoError(err)
 
@@ -233,8 +237,9 @@ func TestStateRefs_UnreadableInterruptedStateFailsSnapshot(t *testing.T) {
 	enginetest.AwaitFlowStatus(t, e, flowKey, workflow.StatusInterrupted, 10*time.Second)
 	bIDs := stepIDsByTask(t, e, "B")
 	assert.Len(bIDs, 1)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET state=? WHERE step_id=?", []byte(`[1]`), bIDs[0])
 	assert.NoError(err)
 
@@ -269,8 +274,9 @@ func TestStateRefs_UnreadableSideColumnFailsTheStep(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 
 	for _, column := range []string{"resume data", "baggage"} {
 		runs.Store(0)
@@ -620,8 +626,9 @@ func TestStateRefs_DispatchResolveTakesATurnOnlyToRead(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(hosts.NewMux())
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	_, err = db.ExecContext(ctx,
 		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 		"ftok", "u", "W", []byte("{}"), "", workflow.StatusRunning, 1, 60000,
@@ -634,11 +641,13 @@ func TestStateRefs_DispatchResolveTakesATurnOnlyToRead(t *testing.T) {
 	assert.NoError(err)
 	refs := staterefs.Refs{"doc": {Anchor: 1}}
 
-	// A dispatch's context carries its claim, so a turn it asks for is really waited on.
-	ctx = e.turnstiles.ContextWithPriority(ctx, 1, priorityCommon)
-	size := e.turnstiles.Turnstile(1).Size()
-	e.turnstiles.Resize(1, 0)
-	defer e.turnstiles.Resize(1, size)
+	// A dispatch's context carries its claim, so a turn it asks for is really waited on: stamped by a turn of
+	// its own, handed back at once.
+	ctx, pass := sh.WaitTurn(ctx)
+	pass.Return()
+	size := sh.TurnLimit()
+	sh.SetTurnLimit(0)
+	defer sh.SetTurnLimit(size)
 
 	done := make(chan error, 1)
 	go func() {
@@ -650,7 +659,7 @@ func TestStateRefs_DispatchResolveTakesATurnOnlyToRead(t *testing.T) {
 		t.Fatalf("a cold resolve read the anchor without a turn (error: %v)", err)
 	case <-time.After(200 * time.Millisecond):
 	}
-	e.turnstiles.Resize(1, size)
+	sh.SetTurnLimit(size)
 	select {
 	case err := <-done:
 		assert.NoError(err)
@@ -659,7 +668,7 @@ func TestStateRefs_DispatchResolveTakesATurnOnlyToRead(t *testing.T) {
 	}
 
 	// The field is cached now: with every turn taken again, the resolve answers without queueing.
-	e.turnstiles.Resize(1, 0)
+	sh.SetTurnLimit(0)
 	warmCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	state := newState()
@@ -690,8 +699,9 @@ func TestStateRefs_UnreadableRefsFailTheStep(t *testing.T) {
 	fk := createInterruptedFlow(t, e, "badrefs/g")
 	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET state_refs=? WHERE flow_id=?", []byte(`{"doc":{"v":9}}`), flowID)
 	assert.NoError(err)
 
@@ -898,8 +908,9 @@ func TestStateRefs_AnchorLoaderChunksPastTheParameterCeiling(t *testing.T) {
 		reads = append(reads, staterefs.Read{ID: 1_000_000 + i, State: i%2 == 0, Changes: true})
 	}
 	reads = append(reads, staterefs.Read{ID: real, State: true, Changes: true})
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var readBytes int
 	fetched, err := anchorLoader(db, &readBytes)(ctx, reads)
 	assert.NoError(err)

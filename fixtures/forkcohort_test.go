@@ -115,10 +115,11 @@ func TestForkCohort_MultiStepBranchCountsBranchesNotMembers(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := engineseams.DB(eng).Shard(1)
+	sh, err := engineseams.DB(eng).Shard(1)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	var arrivals, size, failures int
 	assert.NoError(db.QueryRowContext(ctx,
 		"SELECT cohort_arrivals, cohort_size, cohort_failures FROM dwarf_steps WHERE flow_id=? AND task_name='Seed'",
@@ -201,10 +202,11 @@ func TestForkCohort_RewindMidBranchExcludesWholeBranch(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := engineseams.DB(eng).Shard(1)
+	sh, err := engineseams.DB(eng).Shard(1)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	var arrivals, size int
 	assert.NoError(db.QueryRowContext(ctx,
 		"SELECT cohort_arrivals, cohort_size FROM dwarf_steps WHERE flow_id=? AND task_name='Seed'",

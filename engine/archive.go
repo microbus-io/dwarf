@@ -329,10 +329,11 @@ func (e *Engine) archiveDayLength(ctx context.Context) (time.Duration, error) {
 func (e *Engine) startArchives(ctx context.Context, dayLength time.Duration) error {
 	set := &archiveSet{byShard: make(map[int]*archiver.Archive, len(e.db.Indices())), dayLength: dayLength}
 	for _, idx := range e.db.Indices() {
-		db, err := e.db.Shard(idx)
+		sh, err := e.db.Shard(idx)
 		if err != nil {
 			return errors.Trace(err)
 		}
+		db := sh.DB()
 		set.byShard[idx] = archiver.New(db, dayLength, migrations.Archive())
 	}
 	e.archives.Store(set)

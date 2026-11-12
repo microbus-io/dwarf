@@ -3,10 +3,12 @@
 > Load when: changing the ordering, the bands, how a claim is stamped, the handoff, the give-up path, or
 > what `Close` promises.
 > Coupled with: `engine/CLAUDE.md` §"Turn-taking on the database" (what this gates, the band assignment,
-> and why the turn taken before a candidate is picked up is also the worker crew's growth brake).
+> and why the turn taken before a candidate is picked up is also the worker crew's growth brake) and
+> `internal/database/CLAUDE.md` (which holds each shard's turnstile and is the only package that uses this one
+> outside its tests).
 
 A bounded counter, a priority queue, and a direct handoff. What a pass *means* — what it gates, how many
-exist, which band each caller sits in — is the engine's, deliberately. What lives here is the ordering, and
+exist, which band each caller sits in — is the owner's (`internal/database`, which holds the bands), deliberately. What lives here is the ordering, and
 the properties that make it safe to block on.
 
 ## The whole point is WHERE the waiting happens, and that fixes the sizing
@@ -220,9 +222,9 @@ below it — which is the collapse quoted above, reached through a different doo
 that is *bounded by construction* (a paced, cadenced one), or for one whose precedence has been measured
 to cost less than it buys. Everything left over shares the last band and is separated by age alone.
 
-The engine numbers its bands with gaps (0 refiller, 10 everything else) so one can be inserted between two
-already in use without renumbering either — the values are ordinals, and nothing reads the distance between
-them. The gap is not an invitation: see the section above for the band that keeps being proposed for it.
+`internal/database` uses two bands, numbered with a gap (0 priority, 10 common) - the values are ordinals, and
+nothing reads the distance between them. The gap is not an invitation: see the section above for the band that
+keeps being proposed for it.
 
 ## A pass must enclose the resource — and NOTHING ELSE
 

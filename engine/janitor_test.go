@@ -64,10 +64,11 @@ func setRole(e *Engine, shard int, dispatches bool) {
 // live reports whether flow is in the live tables.
 func live(t *testing.T, e *Engine, flow int) bool {
 	t.Helper()
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	db := sh.DB()
 	var n int
 	if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=?", flow).Scan(&n); err != nil {
 		t.Fatal(err)
@@ -97,8 +98,9 @@ func TestJanitor_FollowsTheDispatchRole(t *testing.T) {
 
 	setRole(e, 1, false)
 	time.Sleep(100 * time.Millisecond) // a round already under way finishes
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	root := seedTrees(t, db, 1, callShape)[0] // seeded closed: this replica no longer runs flows on the shard
 	time.Sleep(500 * time.Millisecond)
 	assert.True(live(t, e, root), "a paused janitor archives nothing")
@@ -166,8 +168,9 @@ func TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain(t *testing.T) {
 	e.janitorManual = false
 	e.seams.Break(janitor.CheckpointBatchConn)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 
 	_, err = e.Create(t.Context(), "janitor/graph", nil, nil)
 	assert.Must(assert.NoError(err))
@@ -303,10 +306,11 @@ func TestJanitor_TheGraceOverrideReachesTheJobs(t *testing.T) {
 // closedLive returns the closed roots in the live tables.
 func closedLive(t *testing.T, e *Engine) []int {
 	t.Helper()
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	db := sh.DB()
 	rows, err := db.QueryContext(t.Context(), "SELECT flow_id FROM dwarf_flows WHERE surgraph_flow_id=0 AND status IN ('"+
 		workflow.StatusCompleted+"','"+workflow.StatusFailed+"','"+workflow.StatusTerminated+"','"+workflow.StatusCancelled+"')")
 	if err != nil {

@@ -91,8 +91,9 @@ func TestLeaseRecovery_StepCompletedBetweenSelectAndResetIsLeftAlone(t *testing.
 	}
 	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var aStepID int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStepID))
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -60000) WHERE step_id=?", aStepID)
@@ -154,8 +155,9 @@ func TestLeaseRecovery_RecoversAStepNeitherWriteCouldRecord(t *testing.T) {
 	assert.NoError(err)
 	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var aStepID int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStepID))
 	enginetest.AwaitVisitCount(t, e.seams, 1, 15*time.Second,
@@ -227,8 +229,9 @@ func TestLeaseRecovery_ResetsPastOneBatch(t *testing.T) {
 	}
 	shard, _, _, _, err := keys.ParseFlowKey(fks[0])
 	assert.NoError(err)
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	res, err := db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -60000) WHERE status='"+workflow.StatusRunning+"'")
 	assert.NoError(err)
 	if n, _ := res.RowsAffected(); !assert.Equal(int64(flows), n) {

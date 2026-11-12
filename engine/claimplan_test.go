@@ -63,10 +63,11 @@ func TestClaim_NoPartialIndexPlan(t *testing.T) {
 	var db *sequel.DB
 	var stepID int64
 	for _, idx := range e.db.Indices() {
-		shard, err := e.db.Shard(idx)
+		shardShard, err := e.db.Shard(idx)
 		if !assert.NoError(err) {
 			return
 		}
+		shard := shardShard.DB()
 		if shard.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE status='"+workflow.StatusPending+"'").Scan(&stepID) == nil {
 			db = shard
 			break

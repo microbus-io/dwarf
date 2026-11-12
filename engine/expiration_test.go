@@ -132,10 +132,11 @@ func age(t *testing.T, e *Engine, fk string, ago time.Duration) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	db := sh.DB()
 	_, err = db.ExecContext(t.Context(), "UPDATE dwarf_flows SET created_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE root_flow_id=?",
 		-ago.Milliseconds(), rootID)
 	if err != nil {
@@ -185,8 +186,9 @@ func TestExpiration_TerminatesTheOldOpenRoots(t *testing.T) {
 	assert.NotEqual("", child, "the parent called its child")
 
 	// The walk keeps the open roots only: not the child, not the younger flow.
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	roots, _, reachedYoung, err := e.expiredPage(ctx, db, 0)
 	assert.NoError(err)
 	assert.True(reachedYoung, "it reached the younger flow")

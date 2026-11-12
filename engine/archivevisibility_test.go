@@ -104,8 +104,9 @@ func TestArchiveVisibility_AChildWithoutItsRootIsHidden(t *testing.T) {
 	assert.NoError(err)
 	rootKey, childKey, _, childStep := treeKeys(t, e)
 	_, _, childID, _, _ := keys.ParseFlowKey(childKey)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	// The child's rows copied into today, as a staged copy writes them, and gone from the live tables; the root not.
 	dayColumns := strings.Join(columnsOf(t, db, migrations.FlowsTable(today)), ", ")
 	for _, stmt := range []string{
@@ -146,8 +147,9 @@ func TestArchiveVisibility_AMarkedTreeIsHidden(t *testing.T) {
 	_, err = e.Step(ctx, childStep)
 	assert.NoError(err)
 
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	_, err = db.ExecContext(ctx, "UPDATE "+migrations.FlowsTable(today)+" SET delete_after_ms=1 WHERE flow_id=?", rootID)
 	assert.Must(assert.NoError(err))
 	assert.Zero(closedListed(t, e))
@@ -177,8 +179,9 @@ func TestArchiveVisibility_RootsListingsWalkTheRootsIndex(t *testing.T) {
 	e := archiveEngine(t, treeMux(), 30)
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var explain, priceOut string
 	switch db.DriverName() {
 	case "pgx":

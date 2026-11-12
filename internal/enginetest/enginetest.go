@@ -64,10 +64,11 @@ func AssertInvariants(t *testing.T, e Engine) {
 	nonTerminal := "('" + workflow.StatusCreated + "', '" + workflow.StatusPending + "', '" + workflow.StatusRunning + "', '" + workflow.StatusInterrupted + "')"
 
 	for _, shard := range engineseams.DB(e).Indices() {
-		db, err := engineseams.DB(e).Shard(shard)
+		sh, err := engineseams.DB(e).Shard(shard)
 		if !assert.NoError(err) {
 			continue
 		}
+		db := sh.DB()
 
 		// Asserted ONCE, against the state as it stands. Do not retry for a few seconds first on the theory that a
 		// violation might be work still in flight (a cohort mid-resolve briefly shows every step terminal while

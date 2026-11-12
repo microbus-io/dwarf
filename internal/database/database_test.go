@@ -93,7 +93,7 @@ func TestOnEach_ErrorNamesTheFailingShard(t *testing.T) {
 	// A ShardSet whose op fails on chosen shards; the DBs are never touched by the op below.
 	var s ShardSet
 	s.indices = []int{2, 5, 9}
-	s.dbs = map[int]*sequel.DB{2: nil, 5: nil, 9: nil}
+	s.shards = map[int]*Shard{2: {index: 2}, 5: {index: 5}, 9: {index: 9}}
 
 	// One failing shard: it is named.
 	err := s.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
@@ -122,7 +122,7 @@ func TestOnEach_ErrorNamesTheFailingShard(t *testing.T) {
 
 	var one ShardSet
 	one.indices = []int{7}
-	one.dbs = map[int]*sequel.DB{7: nil}
+	one.shards = map[int]*Shard{7: {index: 7}}
 	assert.NoError(one.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error { return nil }))
 	err = one.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		return errors.New("boom on the only shard")
@@ -150,10 +150,11 @@ func TestCheckOwner_ANonOwnerFails(t *testing.T) {
 		return
 	}
 	defer set.Close()
-	db, err := set.Shard(1)
+	sh, err := set.Shard(1)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	assert.NoError(checkOwner(ctx, db), "the role that ran the migrations owns the tables")
 	if db.DriverName() != "pgx" {
 		t.Skip("a table's owner is checked on PostgreSQL only")

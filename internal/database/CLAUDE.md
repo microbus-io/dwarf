@@ -1,16 +1,57 @@
 # Dwarf `internal/database` — sharded SQL connections, dialects, and topology
 
-> Load when: changing shard open/close/routing, the SQL-dialect guidance, the connection lifecycle, or the
-> test-mode DSN resolution.
+> Load when: changing shard open/close/routing, a shard's turns or residue class, the SQL-dialect guidance, the
+> connection lifecycle, or the test-mode DSN resolution.
 > Coupled with: `engine/CLAUDE.md` §"Connection pool sizing" (the engine computes the two pool sizes this package
 > applies) and §"Database Sharding" (the engine-side *semantics* — flow-key shard encoding, subgraph shard
 > affinity, the lists' cross-shard merge); `internal/migrations/CLAUDE.md` (the schema this package migrates);
-> `fixtures/CLAUDE.md` (the test-harness rationale behind the DSN resolution `Open` performs).
+> `fixtures/CLAUDE.md` (the test-harness rationale behind the DSN resolution `Open` performs);
+> `internal/turnstile/CLAUDE.md` (the ordering a shard's turns follow) and `engine/CLAUDE.md` §"Turn-taking on the
+> database" (the bands and where the engine takes turns).
 
-`ShardSet` owns the shard `map[int]*sequel.DB`: it opens+migrates every shard, routes by index (`Shard`), fans an
+`ShardSet` owns the shards, a `map[int]*Shard`: it opens+migrates every shard, routes by index (`Shard`), fans an
 op out over all shards (`OnEach`), applies pool sizes, and closes. Each shard arrives as a `ShardConfig` (DSN +
 resolved per-shard pool sizes) — the sizing *formula* is engine policy (see the engine doc §"Connection pool
 sizing"), not this package's concern; the engine pushes each shard's size through `SetShardPool`.
+
+## A `Shard` is the handle every actor on a shard is given
+
+A `Shard` holds what everything working on one shard needs: its index, its `*sequel.DB`, its turns, and this
+replica's residue class among the shard's dispatchers. Actors take the `Shard` rather than each piece wired
+separately.
+
+- **Every database call takes a turn, and the caller takes it** (`Shard.WaitTurn`, or `ContextWithPriority` once
+  per job and the package's `WaitTurn(ctx)` at each call). Admission is this package's responsibility because all
+  database access goes through it, but the turn is NOT bundled with the DB: a `WaitTurn` that returned the DB would
+  make every helper that needs the DB take a turn, and a helper called under its caller's turn would then take a
+  second one - hold-and-wait on the turnstile, which deadlocks once every turn is held by a caller waiting for
+  another. So the DB and the turn are handed out separately, and the turn is taken at the outermost call
+  (`engine/CLAUDE.md`, "Turn-taking on the database").
+- **Two bands, and only two: `WaitTurn` (common) and `WaitPriorityTurn` (priority).** Bands are strict - a band
+  is exhausted before the next is looked at - so the priority band holds only callers bounded by construction,
+  which cannot starve the band below: the piston (a derived period, at most one turn per loop at a time) and the
+  peer Sonar (a fixed cadence). Everything else shares the common band and is separated by age alone, which is
+  starvation-free. **Do not add a band** for any caller that can arrive faster than it is served: it starves the
+  band below it (a single-permit pool that gave completions precedence collapsed short-task throughput 3x). Nor
+  one for EXITING (completing) work: exits arrive as fast as steps finish, and precedence for them serialises
+  dispatch behind them - the host call's duration is taken off an exit's claim instead (`Away`).
+  `ContextWithPriority` stamps for priority turns without taking one, for the piston's one stamp per cycle.
+- **The turnstile is not exposed.** `Pass`, `Gate`, `WaitTurn`, `Away` and `HasClaim` wrap it, so callers depend
+  on this package's turns, not on how they are implemented.
+- **The turns follow the pool.** `SetShardPool` sizes a shard's turns at `Config.TurnsPerConn` per connection of
+  the pool asked for, before the test-mode cap, and every pool change goes through it - so no path can change a
+  pool and leave its turns behind. A shard's turnstile is made by its first `SetShardPool`; until then its turns
+  let every caller through unordered. The turnstiles are a fresh set per `Open`.
+- **`CloseTurns` is the first half of a drain**, apart from `Close`: it releases every caller waiting for a turn
+  and makes the `Gate` report a stop, while the connections stay open so work under way finishes.
+- **The residue class is one value with an expiry** (`SetResidency`): its writer vouches for its reading only for
+  so long, and past `until` `Residency` reports none - take every row - since a stale class leaves rows nobody
+  takes, while taking every row only overlaps the peers.
+- **The server is measured as each shard opens** (`RTT`, the least of a few `SELECT 1`s with the first discarded;
+  `MaxConnections`, 0 on SQLite or a failed read), before anything takes a turn on it, and held for the
+  run: a latency change or a resized server is measured again at the next `Open`. The sizing policy built on them
+  - the budget, its clamp, the worker ceiling - is the engine's.
+- `NewShard` makes a `Shard` outside a `ShardSet`, for another package's tests.
 
 ## Choosing a SQL engine
 
@@ -120,8 +161,8 @@ use it; a second copy would split the rounding that keeps an inclusive and an ex
 **Shard indices are sparse.** Valid indices are unique integers `>= 1`, not necessarily contiguous (`Index: 1`
 + `Index: 99` is fine - arbitrary DSNs need no naming pattern, and a drained shard's index could one day retire
 without renumbering); `0` is a sentinel meaning "no shard / all shards" (used by `Query.Shard`). The index is the
-leading number in flow keys (`{shard}-{hour}-{flowID}-{token}`) and what `Query.Shard`/`ShardInfo` report. Internally `dbs`
-is a `map[int]*sequel.DB` plus a sorted `indices` slice (deterministic `OnEach`/`Indices()` order); `Shard(n)` is a
+leading number in flow keys (`{shard}-{hour}-{flowID}-{token}`) and what `Query.Shard`/`ShardInfo` report. Internally `shards`
+is a `map[int]*Shard` plus a sorted `indices` slice (deterministic `OnEach`/`Indices()` order); `Shard(n)` is a
 map lookup whose miss returns a uniform not-found (an unregistered shard in a well-formed key must be
 indistinguishable from a bad key). `Open` rejects two shards resolving to the same DSN - a silent collapse onto one
 database would share flow_id sequences across "shards" and corrupt routing. The engine-side *encoding* of the shard

@@ -172,8 +172,9 @@ func TestTerminate_UnreadableTailDoesNotBlockTerminate(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
 	assert.Must(assert.NoError(eng.Startup(t.Context())))
-	db, err := eng.db.Shard(1)
+	sh, err := eng.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 
 	for _, column := range []string{"state", "state_refs"} {
 		flowKey, outcome, err := eng.Run(ctx, "reducererror.verify:429/unreadable", nil, nil)
@@ -306,8 +307,9 @@ func TestTerminate_UnresolvableRefDoesNotBlockTerminate(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	eng.SetHost(mux)
 	assert.Must(assert.NoError(eng.Startup(t.Context())))
-	db, err := eng.db.Shard(1)
+	sh, err := eng.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 
 	flowKey, outcome, err := eng.Run(ctx, "reducererror.verify:429/unresolvable", nil, nil)
 	assert.NoError(err)

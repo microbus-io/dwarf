@@ -77,8 +77,9 @@ func TestCompleteFlow_StaleWorkerIsFenced(t *testing.T) {
 	assert.Must(assert.NoError(err))
 	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.Must(assert.NoError(err))
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	stepOf := func(task string) int {
 		var id int
 		assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name=?", flowID, task).Scan(&id))
@@ -204,8 +205,9 @@ func TestSubgraphRevive_StaleChildDoesNotSettleNewPark(t *testing.T) {
 	assert.Must(assert.NoError(err))
 	shard, _, rootFlowID, _, err := keys.ParseFlowKey(fk)
 	assert.Must(assert.NoError(err))
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var callerID int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='Caller'", rootFlowID).Scan(&callerID))
 	completedChild := "SELECT COUNT(*) FROM dwarf_flows WHERE surgraph_step_id=? AND status='" + workflow.StatusCompleted + "'"
@@ -338,10 +340,11 @@ func TestResume_ConcurrentResumesOfOneLeaf(t *testing.T) {
 	assert.True(enginetest.WaitUntil(t, 10*time.Second, func() bool {
 		var status string
 		assert.NoError(func() error {
-			db, err := e.db.Shard(shard)
+			sh, err := e.db.Shard(shard)
 			if err != nil {
 				return err
 			}
+			db := sh.DB()
 			return db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&status)
 		}())
 		return status == workflow.StatusInterrupted
@@ -402,8 +405,9 @@ func TestSubgraphRevive_StaleDeliveryWaitingOnTheRowLock(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	if db.DriverName() != "pgx" {
 		t.Skip("the snapshot-before-lock interleaving is PostgreSQL's")
 	}

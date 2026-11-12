@@ -66,10 +66,11 @@ func newRig(t *testing.T, retention int, dayLength ...time.Duration) *rig {
 		t.Fatal(err)
 	}
 	t.Cleanup(set.Close)
-	db, err := set.Shard(1)
+	sh, err := set.Shard(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	db := sh.DB()
 	length := archiver.DefaultDayLength
 	if len(dayLength) > 0 && dayLength[0] > 0 {
 		length = dayLength[0]
@@ -97,7 +98,7 @@ func newRig(t *testing.T, retention int, dayLength ...time.Duration) *rig {
 // class set on it.
 func (r *rig) janitor() *Janitor {
 	if r.j == nil {
-		r.j = New(1, r.db, r.archive, r.retention)
+		r.j = New(database.NewShard(1, r.db), r.archive, r.retention)
 		r.j.SetLogger(slog.New(r.logs))
 		r.j.SetSeams(r.seams)
 		r.j.SetManual(true)
@@ -111,8 +112,9 @@ func (r *rig) janitor() *Janitor {
 		r.t.Cleanup(r.j.Stop)
 	}
 	r.j.mu.Lock()
-	r.j.settings, r.j.residency = r.settings, r.residency
+	r.j.settings = r.settings
 	r.j.mu.Unlock()
+	r.j.shard.SetResidency(r.residency.count, r.residency.ordinal, r.residency.ok, time.Now().Add(time.Hour))
 	return r.j
 }
 

@@ -36,8 +36,9 @@ import (
 func stepColumn(t *testing.T, e *Engine, taskName, column string) []string {
 	t.Helper()
 	assert := testarossa.For(t)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var out []string
 	for _, id := range stepIDsByTask(t, e, taskName) {
 		var v []byte
@@ -442,10 +443,11 @@ func TestChanges_UnreadableColumnIsAnErrorNotNoChanges(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 
 	// interrupted runs a flow to B's interrupt, checks the write is visible, then makes B's changes unreadable.
 	interrupted := func() (flowKey, stepKey string) {

@@ -40,10 +40,11 @@ func TestTimestamps_SurviveANonUTCSession(t *testing.T) {
 	e.SetHost(hosts.NewMux())
 	assert.NoError(e.SetWorkers(0))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	if db.DriverName() != "pgx" {
 		t.Skip("time zone conversion of a stored timestamp is PostgreSQL's")
 	}

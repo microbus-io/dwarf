@@ -83,7 +83,7 @@ func (f *fastArchiving) round(ctx context.Context, batch batchFunc) (progress bo
 // batch scans, sizes and removes one batch of closed trees on h, and reports whether it made progress: removed a tree,
 // or passed roots that are not this job's.
 func (f *fastArchiving) batch(ctx context.Context, h handle, s settings, res residency) bool {
-	shard, seams := f.j.shard, f.j.seams
+	shard, seams := f.j.shard.Index(), f.j.seams
 	archiving := f.j.retentionDays > 0
 	var d *filingDay
 	if archiving {
@@ -227,7 +227,7 @@ func (f *fastArchiving) failed(ctx context.Context, what string, err error) {
 	f.mu.Unlock()
 	if first {
 		f.j.logger.ErrorContext(ctx, "Janitor: "+what+" failed; retained trees stay in the live tables",
-			"shard", f.j.shard, "error", err)
+			"shard", f.j.shard.Index(), "error", err)
 	}
 }
 
@@ -247,7 +247,7 @@ func (f *fastArchiving) logError(ctx context.Context, msg string, args ...any) {
 	if ctx.Err() != nil {
 		return
 	}
-	f.j.logger.ErrorContext(ctx, msg, append([]any{"shard", f.j.shard}, args...)...)
+	f.j.logger.ErrorContext(ctx, msg, append([]any{"shard", f.j.shard.Index()}, args...)...)
 }
 
 // reset forgets where the job stood, and what it observed: the janitor resumes as one that knows nothing.

@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/turnstile"
 	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/sequel"
@@ -34,7 +35,7 @@ import (
 // before it starts.
 func testJanitor(t *testing.T, db *sequel.DB, set func(j *Janitor), jobs ...*job) *Janitor {
 	t.Helper()
-	j := New(1, db, nil, 30)
+	j := New(database.NewShard(1, db), nil, 30)
 	j.jobs = jobs
 	if set != nil {
 		set(j)
@@ -288,17 +289,15 @@ func TestJanitor_StopCancelsABlockedJob(t *testing.T) {
 	assert.True(ended.Load(), "Stop returned before the job did")
 }
 
-// TestJanitor_EachBatchTakesAFreshClaim pins the turn: each batch takes a claim of its own, at the janitor's band, so
+// TestJanitor_EachBatchTakesAFreshClaim pins the turn: each batch takes a claim of its own, in the common band, so
 // a job's later batch is younger than dispatch that arrived meanwhile rather than older than all of it; and a batch run
 // on a context that carries a claim already - a batch's own - fails rather than keep that claim's age or nest a turn.
 func TestJanitor_EachBatchTakesAFreshClaim(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	set := turnstile.NewSet()
-	set.Resize(1, 4)
 	var claims []turnstile.Claim
 	var nested error
-	j := testJanitor(t, newRig(t, 30).db, func(j *Janitor) { j.SetManual(true); j.SetTurnstile(set, 10) },
+	j := testJanitor(t, newRig(t, 30).db, func(j *Janitor) { j.SetManual(true); j.shard.SetTurnLimit(4) },
 		testJob("two", func(ctx context.Context, batch batchFunc) bool {
 			for range 2 {
 				err := batch(ctx, func(batchCtx context.Context, _ handle) error {
@@ -316,7 +315,10 @@ func TestJanitor_EachBatchTakesAFreshClaim(t *testing.T) {
 	)
 	j.Drain(t.Context())
 	assert.Must(assert.Len(claims, 2))
-	assert.Equal(10, claims[0].Priority, "the janitor's band")
+	commonCtx, pass := database.NewShard(1, nil).WaitTurn(t.Context())
+	pass.Return()
+	common, _ := turnstile.ClaimFrom(commonCtx)
+	assert.Equal(common.Priority, claims[0].Priority, "the common band")
 	assert.NotEqual(claims[0].Seq, claims[1].Seq, "each batch is a job of its own at the turnstile")
 	assert.True(claims[1].Since.After(claims[0].Since), "the second batch's claim is as old as the batch, not the round")
 	assert.Error(nested, "a batch inside a batch")
@@ -328,7 +330,7 @@ func TestJanitor_JobAgesReportTimeSinceProgress(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	var progress atomic.Bool
-	j := New(1, nil, nil, 30)
+	j := New(database.NewShard(1, nil), nil, 30)
 	j.jobs = []*job{testJob("job", func(ctx context.Context, _ batchFunc) bool { return progress.Swap(false) })}
 	j.SetManual(true)
 	assert.Len(j.JobAges(time.Now()), 0, "nothing to report before the first resume")

@@ -60,8 +60,9 @@ func FlowStatus(t *testing.T, e Engine, flowKey string) string {
 	assert := testarossa.For(t)
 	shard, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
-	db, err := engineseams.DB(e).Shard(shard)
+	sh, err := engineseams.DB(e).Shard(shard)
 	assert.NoError(err)
+	db := sh.DB()
 	var status string
 	assert.NoError(db.QueryRowContext(context.Background(), "SELECT status FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&status))
 	return status
@@ -71,10 +72,11 @@ func FlowStatus(t *testing.T, e Engine, flowKey string) string {
 func CountRows(t *testing.T, e Engine, shard int, query string, args ...any) int {
 	t.Helper()
 	assert := testarossa.For(t)
-	db, err := engineseams.DB(e).Shard(shard)
+	sh, err := engineseams.DB(e).Shard(shard)
 	if !assert.NoError(err) {
 		return -1
 	}
+	db := sh.DB()
 	var n int
 	assert.NoError(db.QueryRowContext(context.Background(), query, args...).Scan(&n))
 	return n

@@ -49,10 +49,11 @@ func openShard(t *testing.T) *sequel.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(set.Close)
-	db, err := set.Shard(1)
+	sh, err := set.Shard(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	db := sh.DB()
 	return db
 }
 

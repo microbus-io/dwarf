@@ -38,10 +38,11 @@ import (
 // treeCount returns how many flows and steps of the tree rooted at rootID the two tables hold.
 func treeCount(t *testing.T, e *Engine, flowsTable, stepsTable string, rootID int) (flows, steps int) {
 	t.Helper()
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	db := sh.DB()
 	ctx := t.Context()
 	flows, steps = -1, -1
 	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+flowsTable+" WHERE root_flow_id=?", rootID).Scan(&flows); err != nil {
@@ -249,8 +250,9 @@ func TestArchiving_ARemovalOfADroppedDayIsNoError(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, hosts.NewMux(), 30)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	today, err := e.archives.Load().byShard[1].Today(ctx)
 	assert.NoError(err)
 	roots := seedTrees(t, db, 2, callShape)

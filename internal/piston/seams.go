@@ -74,6 +74,19 @@ const CheckpointTallyDone = "refillTallyDone"
 // Fired BOTH unscoped and scoped by shard, for the same reason CheckpointCycleDone is.
 const CheckpointStole = "refillStole"
 
+// CheckpointTallyBegin and CheckpointSupplyBegin fire as a TALLY or a SUPPLY cycle begins, past its loop's idle
+// check and before its first query - see SetSeams. Exported for the same catalogue reason as FaultScanErr.
+//
+// They are what lets a test hold a loop INSIDE a cycle: a loop already past its idle check when SetIdle runs
+// finishes its cycle afterwards and re-enters the shard it just withdrew, which is the wedge each loop's own
+// withdrawal exists to undo, and no clock can put a loop at that point on demand.
+//
+// Fired BOTH unscoped and scoped by shard, for the same reason CheckpointCycleDone is.
+const (
+	CheckpointTallyBegin  = "refillTallyBegin"
+	CheckpointSupplyBegin = "refillSupplyBegin"
+)
+
 // seamsJoin builds a targeted seam name: a base name, then the entity it targets, joined with ":". A consult
 // site and the test that arms it both call it, so neither can spell the join the other does not. A targeted
 // name and the bare one are DIFFERENT seams, so a site wanting both fires both.

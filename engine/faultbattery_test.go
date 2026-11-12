@@ -72,8 +72,9 @@ func readFinalState(t *testing.T, e *Engine, flowKey string) string {
 	assert := testarossa.For(t)
 	shard, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var fs string
 	assert.NoError(db.QueryRowContext(context.Background(), "SELECT final_state FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&fs))
 	return fs

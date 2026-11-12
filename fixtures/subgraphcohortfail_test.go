@@ -128,10 +128,11 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := engineseams.DB(e).Shard(shard)
+	sh, err := engineseams.DB(e).Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 
 	// Wait until Boom has failed AND the grandchild is running (so Slow is parked on it) - the moment an eager
 	// short-circuit would terminalize the child.

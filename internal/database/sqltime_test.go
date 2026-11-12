@@ -41,8 +41,9 @@ func TestSQLTime_ReadsAsTheInstantItNames(t *testing.T) {
 	})
 	assert.Must(assert.NoError(err))
 	defer set.Close()
-	db, err := set.Shard(1)
+	sh, err := set.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	diff := func(x sequel.Executor) float64 {
 		expr, arg := SQLTime(db.DriverName(), time.Now())
 		var ms float64

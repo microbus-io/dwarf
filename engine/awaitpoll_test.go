@@ -78,10 +78,11 @@ func TestAwait_WakesWhenNoSignalIsDelivered(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 
 	type result struct {
 		out *workflow.FlowOutcome

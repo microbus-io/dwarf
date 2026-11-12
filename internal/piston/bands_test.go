@@ -150,7 +150,7 @@ func TestPiston_ReachIsCountedInThisReplicasOwnClass(t *testing.T) {
 		}
 	}
 	assert.True(ownBulk > 0, "the fixture needs band-7 work in ordinal 1's class")
-	r.p.SetPartitionFunc(func() (int, int, bool) { return 2, 1, true })
+	r.setResidency(2, 1, true)
 	band, tallies, err := r.p.ScanBand(ctx, 1)
 	assert.NoError(err)
 	assert.Equal(7, band, "ordinal 1 holds nothing at band 1, so its reach is its own band 7")
@@ -158,7 +158,7 @@ func TestPiston_ReachIsCountedInThisReplicasOwnClass(t *testing.T) {
 		assert.Equal(planner.Tally{Band: 7, Key: "bulk", Count: ownBulk}, planner.Tally{Band: tallies[0].Band, Key: tallies[0].Key, Count: tallies[0].Count})
 	}
 
-	r.p.SetPartitionFunc(func() (int, int, bool) { return 2, 0, true })
+	r.setResidency(2, 0, true)
 	band, tallies, err = r.p.ScanBand(ctx, 1)
 	assert.NoError(err)
 	assert.Equal(1, band)
@@ -172,7 +172,7 @@ func TestPiston_ReachIsCountedInThisReplicasOwnClass(t *testing.T) {
 	r.p.SetSupplyCadence(500*time.Millisecond, 0)
 	_, err = r.db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), -5000) WHERE priority=1")
 	assert.NoError(err)
-	r.p.SetPartitionFunc(func() (int, int, bool) { return 2, 1, true })
+	r.setResidency(2, 1, true)
 	band, tallies, err = r.p.ScanBand(ctx, 1)
 	assert.NoError(err)
 	assert.Equal(1, band)
@@ -242,17 +242,18 @@ func TestPiston_SpillCrossesShards(t *testing.T) {
 	pl := planner.New()
 	shard := map[int]*rig{}
 	for _, i := range []int{1, 2} {
-		db, err := set.Shard(i)
+		sh, err := set.Shard(i)
 		if err != nil {
 			t.Fatal(err)
 		}
-		p, err := New(i, db, pl, cache)
+		db := sh.DB()
+		p, err := New(sh, pl, cache)
 		if err != nil {
 			t.Fatal(err)
 		}
 		p.SetTallyCadence(0, 0)
 		p.SetSupplyCadence(0, 0)
-		shard[i] = &rig{p: p, db: db, planner: pl, cache: cache}
+		shard[i] = &rig{p: p, sh: sh, db: db, planner: pl, cache: cache}
 	}
 	// Both tally before either plans, so each plan sees both shards' fresh reports.
 	cycle := func() (selected map[int]int) {

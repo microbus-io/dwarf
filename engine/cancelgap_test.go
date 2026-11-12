@@ -355,8 +355,9 @@ func TestCancelPreempt_ReasonReadErrorReleasesTheInFlightGauges(t *testing.T) {
 		return
 	}
 	assert.NoError(e.Cancel(ctx, fk, "stop"))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	bDone := e.seams.Waiter(engineseams.Join(engineseams.CheckpointClaimedDispatchDone, "1", strconv.Itoa(bIDs[0])))
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=NOW_UTC() WHERE step_id=?", bIDs[0])
 	assert.NoError(err)
@@ -406,8 +407,9 @@ func TestCancelWatermark_TakesNoStepLocks(t *testing.T) {
 	e.SetHost(mux)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 	defer close(release)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	if driver := db.DriverName(); driver != "mysql" && driver != "mariadb" && driver != "pgx" {
 		t.Skip("the two writers serialize, or plain reads lock, on " + driver)
 	}

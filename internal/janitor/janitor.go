@@ -22,14 +22,12 @@ and fast deletion - the trees stamped for deletion deleted as they come due.
 A Janitor serves one shard on one replica for the replica's run. It works only while it is active - while the replica
 dispatches the shard - and a paused one holds no goroutine and no connection:
 
-	j := janitor.New(shard, db, archive, retentionDays)
+	j := janitor.New(shard, archive, retentionDays)
 	j.SetLogger(logger)
-	j.SetTurnstile(turnstiles, band)
 	if err := j.SetMeter(meter); err != nil { ... }
 	j.Start(ctx)
-	j.Resume()                         // this replica dispatches the shard
-	j.SetResidency(count, ordinal, ok) // its residue class among the shard's dispatchers, when it changes
-	j.Pause()                          // it stopped dispatching the shard
+	j.Resume() // this replica dispatches the shard
+	j.Pause()  // it stopped dispatching the shard
 	...
 	j.Stop()
 
@@ -53,7 +51,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/archiver"
-	"github.com/microbus-io/dwarf/internal/turnstile"
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/sequel"
@@ -65,15 +63,12 @@ const ReasonNoRetention = "no_retention"
 
 // Janitor runs one shard's jobs while it is active.
 type Janitor struct {
-	shard         int
-	db            *sequel.DB
+	shard         *database.Shard
 	archive       *archiver.Archive
 	retentionDays int
 	logger        *slog.Logger
 	seams         *seamster.Seamster
 	metrics       *instruments
-	turnstiles    *turnstile.Set
-	band          int
 	manual        bool
 	idle          time.Duration // replaces every job's idle wait when not 0
 
@@ -81,10 +76,9 @@ type Janitor struct {
 	fast *fastArchiving
 	del  *fastDeletion
 
-	// mu guards the settings and the residue class, which the jobs read at every round.
-	mu        sync.Mutex
-	settings  settings
-	residency residency
+	// mu guards the settings, which the jobs read at every round.
+	mu       sync.Mutex
+	settings settings
 
 	// life guards the lifecycle: the run's context, whether the janitor is active, the active period's context.
 	life     sync.Mutex
@@ -103,7 +97,7 @@ type settings struct {
 	noQuietMargin                     bool
 }
 
-// residency is this replica's residue class among the shard's dispatchers.
+// residency is this replica's residue class among the shard's dispatchers, as the shard reports it at a round.
 type residency struct {
 	count, ordinal int
 	ok             bool
@@ -145,13 +139,12 @@ const (
 	defaultBatchBytes = 16 << 20
 )
 
-// New returns a paused Janitor of shard, whose handle is db and whose archive is archive - nil when the shard has none,
-// and closed roots then stay live at a positive retention - keeping retentionDays of archive: 0 keeps none, and
-// closed trees are deleted. It logs nowhere, records no metric and orders no turn until set to.
-func New(shard int, db *sequel.DB, archive *archiver.Archive, retentionDays int) *Janitor {
+// New returns a paused Janitor of shard, whose archive is archive - nil when the shard has none, and closed roots
+// then stay live at a positive retention - keeping retentionDays of archive: 0 keeps none, and closed trees are
+// deleted. It logs nowhere and records no metric until set to.
+func New(shard *database.Shard, archive *archiver.Archive, retentionDays int) *Janitor {
 	j := &Janitor{
 		shard:         shard,
-		db:            db,
 		archive:       archive,
 		retentionDays: retentionDays,
 		logger:        slog.New(slog.DiscardHandler),
@@ -197,12 +190,6 @@ func (j *Janitor) SetMeter(meter metric.Meter) error {
 	return errors.Trace(err)
 }
 
-// SetTurnstile sets where a batch takes its turn: on the shard's turnstile in set, at band. Unset, the batches take
-// none. Call it before Start.
-func (j *Janitor) SetTurnstile(set *turnstile.Set, band int) {
-	j.turnstiles, j.band = set, band
-}
-
 // SetGrace sets how long after its close a closed root is archived (a minute).
 func (j *Janitor) SetGrace(d time.Duration) {
 	j.mu.Lock()
@@ -234,15 +221,6 @@ func (j *Janitor) SetQuietMargin(on bool) {
 	j.settings.noQuietMargin = !on
 }
 
-// SetResidency sets this replica's residue class among the shard's dispatchers: the count of dispatchers and this
-// one's ordinal. ok false, a count under 2 or an ordinal out of range restricts nothing. A class other than the one a
-// fast job walked in makes it start over.
-func (j *Janitor) SetResidency(count, ordinal int, ok bool) {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	j.residency = residency{count, ordinal, ok}
-}
-
 // SetManual sets whether the janitor runs its jobs only in Drain, starting no goroutine. For tests; call it before
 // Start.
 func (j *Janitor) SetManual(manual bool) {
@@ -255,11 +233,14 @@ func (j *Janitor) SetIdle(d time.Duration) {
 	j.idle = d
 }
 
-// current returns the settings and the residue class.
+// current returns the settings and the residue class the shard reports (Shard.Residency): ok false, a count under
+// 2 or an ordinal out of range restricts nothing, and a class other than the one a fast job walked in makes it start
+// over.
 func (j *Janitor) current() (settings, residency) {
+	count, ordinal, ok := j.shard.Residency()
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return j.settings, j.residency
+	return j.settings, residency{count, ordinal, ok}
 }
 
 // Start begins the janitor's run on ctx, paused; Stop, or ctx's end, ends it. Call it once.
@@ -421,30 +402,27 @@ func (j *Janitor) round(ctx context.Context, jb *job) bool {
 // batch returns jb's batchFunc.
 func (j *Janitor) batch(jb *job) batchFunc {
 	return func(ctx context.Context, fn func(ctx context.Context, h handle) error) error {
-		if _, stamped := turnstile.ClaimFrom(ctx); stamped {
+		if database.HasClaim(ctx) {
 			return errors.New("a batch's context carries a turn claim already")
 		}
 		start := time.Now()
-		if j.turnstiles != nil {
-			ctx = j.turnstiles.ContextWithPriority(ctx, j.shard, j.band)
-		}
-		pass := turnstile.WaitTurn(ctx)
+		ctx, pass := j.shard.WaitTurn(ctx)
 		defer pass.Return()
 		turned := time.Now()
-		conn, err := j.db.Conn(ctx)
+		conn, err := j.shard.DB().Conn(ctx)
 		if err == nil && j.seams.IsFault(FaultConnErr) {
 			conn.Close()
 			conn, err = nil, errors.New("injected fault: "+FaultConnErr)
 		}
 		acquired := time.Now()
 		if err != nil {
-			j.metrics.batch(ctx, j.shard, jb.name, turned.Sub(start), acquired.Sub(turned), -1)
+			j.metrics.batch(ctx, j.shard.Index(), jb.name, turned.Sub(start), acquired.Sub(turned), -1)
 			return errors.Trace(err)
 		}
 		defer conn.Close()
 		j.seams.Checkpoint(ctx, CheckpointBatchConn)
 		err = fn(ctx, conn)
-		j.metrics.batch(ctx, j.shard, jb.name, turned.Sub(start), acquired.Sub(turned), time.Since(acquired))
+		j.metrics.batch(ctx, j.shard.Index(), jb.name, turned.Sub(start), acquired.Sub(turned), time.Since(acquired))
 		return err
 	}
 }

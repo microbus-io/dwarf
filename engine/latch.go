@@ -122,10 +122,11 @@ func (e *Engine) resolveStoppedFlows(ctx context.Context, shard int, flowKeys []
 	if len(wanted) == 0 {
 		return settled, nil
 	}
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	if err != nil {
 		return settled, errors.Trace(err)
 	}
+	db := sh.DB()
 	var failures []error
 	fail := func(err error) {
 		failures = append(failures, errors.New("shard %d: %w", shard, err))

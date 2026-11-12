@@ -179,8 +179,9 @@ func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 	assert.NoError(err)
 	shard, _, parentFlowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := engineseams.DB(e).Shard(shard)
+	sh, err := engineseams.DB(e).Shard(shard)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 
 	callPayload := func() string {
 		var p string

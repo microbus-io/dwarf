@@ -63,10 +63,11 @@ func (f *restartFleet) snapshot() []*Engine {
 func (f *restartFleet) ceiling(shard int) int {
 	total := 0
 	for _, e := range f.snapshot() {
-		db, err := e.db.Shard(shard)
+		sh, err := e.db.Shard(shard)
 		if err != nil {
 			continue
 		}
+		db := sh.DB()
 		total += db.DB.Stats().MaxOpenConnections
 	}
 	return total
@@ -124,8 +125,8 @@ func awaitFleetSettled(t *testing.T, fleet *restartFleet, shard, wantR, budget i
 	for time.Now().Before(deadline) {
 		settled := true
 		for _, e := range fleet.snapshot() {
-			db, err := e.db.Shard(shard)
-			if err != nil || e.replicasOn(shard) != wantR || db.DB.Stats().MaxOpenConnections != wantFor(e) {
+			sh, err := e.db.Shard(shard)
+			if err != nil || e.replicasOn(shard) != wantR || sh.DB().DB.Stats().MaxOpenConnections != wantFor(e) {
 				settled = false
 				break
 			}
@@ -137,8 +138,8 @@ func awaitFleetSettled(t *testing.T, fleet *restartFleet, shard, wantR, budget i
 	}
 	for i, e := range fleet.snapshot() {
 		open := -1
-		if db, err := e.db.Shard(shard); err == nil {
-			open = db.DB.Stats().MaxOpenConnections
+		if sh, err := e.db.Shard(shard); err == nil {
+			open = sh.DB().DB.Stats().MaxOpenConnections
 		}
 		assert.Equal(wantR, e.replicasOn(shard), "replica %d never settled on a fleet of %d", i, wantR)
 		assert.Equal(wantFor(e), open, "replica %d never settled on its share of the budget", i)

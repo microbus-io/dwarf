@@ -33,10 +33,11 @@ import (
 // moveInto archives the tree rooted at rootID into day, as a reaper pass whose day is day would.
 func moveInto(t *testing.T, e *Engine, rootID, day int) {
 	t.Helper()
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	db := sh.DB()
 	moved, err := e.reaper.Load().MoveTrees(t.Context(), db, e.archives.Load().byShard[1], day, []int{rootID})
 	if err != nil {
 		t.Fatal(err)
@@ -82,8 +83,9 @@ func TestDirectory_ShortDaysNameMovesFarFromTheHour(t *testing.T) {
 	assert.Zero(flows, "archived")
 	day, err := located(t, e, fk)
 	assert.NoError(err)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var named int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+archiver.DirectoryTable+" WHERE day=?", day).Scan(&named))
 	before, from := e.archives.Load().byShard[1].DirectoryHours(day)
@@ -105,8 +107,9 @@ func TestDirectory_RetentionZeroNamesNothing(t *testing.T) {
 	assert.NoError(err)
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
 	e.reapDueFlows(ctx)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var named int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+archiver.DirectoryTable).Scan(&named))
 	assert.Zero(named)
@@ -125,8 +128,9 @@ func TestDirectory_AReaderRefreshesTheDaysItLocates(t *testing.T) {
 	today, err := a.Today(ctx)
 	assert.NoError(err)
 	assert.NoError(makeArchiveDay(t, e, today-3))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	_, err = db.ExecContext(ctx, "INSERT INTO "+migrations.FlowsTable(today-3)+
 		" (flow_id, flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id) VALUES (999999, 'tok', 'u', 'W', ?, 'h', 'completed', 999999)",
 		[]byte("{}")) // bound: graph is binary on SQL Server

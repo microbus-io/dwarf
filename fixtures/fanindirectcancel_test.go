@@ -86,10 +86,11 @@ func TestFanInDirectTerminate_NoExtendTerminatedFlow(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := engineseams.DB(e).Shard(shardNum)
+	sh, err := engineseams.DB(e).Shard(shardNum)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 
 	// Wait until the spawn task is executing (step definitively `running`).
 	select {

@@ -100,10 +100,11 @@ func TestShutdown_AbandonsASweepInFlight(t *testing.T) {
 		}
 		shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 		assert.NoError(err)
-		db, err := e.db.Shard(shard)
+		sh, err := e.db.Shard(shard)
 		if !assert.NoError(err) {
 			return
 		}
+		db := sh.DB()
 		if rowLocks && db.DriverName() == "sqlite" {
 			// A held write lock fails the reset at the busy timeout rather than holding it.
 			t.Skip("SQLite has no row lock to hold the reset on")

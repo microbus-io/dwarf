@@ -80,10 +80,11 @@ func (e *Engine) failStep(ctx context.Context, d *dispatch, taskErr error, held 
 	if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultFailStepErr, taskName)) {
 		return false, errors.New("injected fault: " + engineseams.FaultFailStepErr)
 	}
-	db, err := e.db.Shard(shardNum)
+	sh, err := e.db.Shard(shardNum)
 	if err != nil {
 		return false, errors.Trace(err)
 	}
+	db := sh.DB()
 
 	// A subgraph child's failure is surfaced to the parent's flow.Subgraph call (via the parked caller step,
 	// carried in subgraph_error) rather than notified directly - but only when the child flow ACTUALLY fails,

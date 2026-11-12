@@ -62,8 +62,9 @@ func terminateBeforeTransition(t *testing.T, task func(ctx context.Context, f *w
 	assert.Must(assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeTransitionTx, 10*time.Second), "A never reached its transition"))
 	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var aStepID int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='A' AND status='"+
 		workflow.StatusCompleted+"' AND advancing=1", flowID).Scan(&aStepID), "A's completion write did not land")
@@ -179,8 +180,9 @@ func TestTerminate_FencesACancelRoute(t *testing.T) {
 
 			shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 			assert.NoError(err)
-			db, err := e.db.Shard(shard)
+			sh, err := e.db.Shard(shard)
 			assert.Must(assert.NoError(err))
+			db := sh.DB()
 			var aStepID int
 			assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='A' AND status='"+
 				workflow.StatusCompleted+"' AND advancing=1", flowID).Scan(&aStepID), "A's completion write did not land")

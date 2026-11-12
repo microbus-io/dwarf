@@ -91,10 +91,11 @@ func sumAt(rm metricdata.ResourceMetrics, name string, attrs map[string]string) 
 // backdate moves a root's updated_at ago into the past.
 func backdate(t *testing.T, e *Engine, rootID int, ago time.Duration) {
 	t.Helper()
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	db := sh.DB()
 	_, err = db.ExecContext(t.Context(), "UPDATE dwarf_flows SET updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE flow_id=?",
 		-ago.Milliseconds(), rootID)
 	if err != nil {
@@ -307,8 +308,9 @@ func TestArchiveMetrics_AnUnreadableDayIsAnArchiveFailure(t *testing.T) {
 	a := e.archives.Load().byShard[1]
 	today, err := a.Today(ctx)
 	assert.NoError(err)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	for _, table := range []string{migrations.FlowsTable(today + 1), migrations.StepsTable(today + 1)} {
 		_, err = db.ExecContext(ctx, "DROP TABLE "+table)
 		assert.NoError(err)
@@ -402,8 +404,9 @@ func TestArchiveMetrics_ASweepWhileTomorrowIsMissingEndsNoFailure(t *testing.T) 
 	ctx := t.Context()
 	e, reader := meteredArchiveEngine(t, treeMux(), 30)
 	shard1 := map[string]string{"shard": "1"}
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	a := e.archives.Load().byShard[1]
 	today, err := a.Today(ctx)
 	assert.Must(assert.NoError(err))

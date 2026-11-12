@@ -48,8 +48,9 @@ func TestLeaseFence_FailStep(t *testing.T) {
 	// generation `ownerSeq` - simulating the worker that legitimately re-claimed after a lease loss.
 	setup := func(t *testing.T, e *Engine, ownerSeq int) {
 		assert := testarossa.For(t)
-		db, err := e.db.Shard(1)
+		sh, err := e.db.Shard(1)
 		assert.Must(assert.NoError(err))
+		db := sh.DB()
 		// flow_id is auto-increment; the first insert on a fresh per-test DB is flow_id=1 on every driver.
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -67,8 +68,9 @@ func TestLeaseFence_FailStep(t *testing.T) {
 
 	statuses := func(t *testing.T, e *Engine) (flowStatus, stepStatus string) {
 		assert := testarossa.For(t)
-		db, err := e.db.Shard(1)
+		sh, err := e.db.Shard(1)
 		assert.Must(assert.NoError(err))
+		db := sh.DB()
 		db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=1").Scan(&flowStatus)
 		db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE step_id=1").Scan(&stepStatus)
 		return flowStatus, stepStatus
@@ -121,10 +123,11 @@ func awaitDispatchesReturned(t *testing.T, eng *Engine, flowKey, taskName string
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := eng.db.Shard(shard)
+	sh, err := eng.db.Shard(shard)
 	if err != nil {
 		t.Fatal(err)
 	}
+	db := sh.DB()
 	var stepID int
 	err = db.QueryRowContext(t.Context(), "SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name=?", flowID, taskName).Scan(&stepID)
 	if err != nil {
@@ -235,10 +238,11 @@ func TestLeaseFence_CompletionNoDuplicateSuccessor(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := eng.db.Shard(1)
+	sh, err := eng.db.Shard(1)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	awaitDispatchesReturned(t, eng, flowKey, "A", 2) // the owner's and the released zombie's
 	var bSteps int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND task_name='B'", flowID).Scan(&bSteps))
@@ -308,10 +312,11 @@ func TestLeaseFence_CohortNoDoubleArrival(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := eng.db.Shard(1)
+	sh, err := eng.db.Shard(1)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	awaitDispatchesReturned(t, eng, flowKey, "X", 2) // the owner's and the released zombie's
 	var arrivals, size, jSteps int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT cohort_arrivals, cohort_size FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&arrivals, &size))
@@ -381,10 +386,11 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := eng.db.Shard(shardNum)
+	sh, err := eng.db.Shard(shardNum)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 
 	// Manufacture the peer re-claim the reset fence guards against. Lease recovery resets a lost-lease step
 	// running->pending WITHOUT bumping lease_seq; here the step is `completed`, so we force the same pending
@@ -489,10 +495,11 @@ func TestLeaseFence_RetryRewindFenced(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := eng.db.Shard(1)
+	sh, err := eng.db.Shard(1)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	awaitDispatchesReturned(t, eng, flowKey, "A", 3) // the peer's two (retry, then completion) and the released zombie's
 	var aStatus string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStatus))
@@ -568,10 +575,11 @@ func TestLeaseFence_SubgraphParkFenced(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := eng.db.Shard(1)
+	sh, err := eng.db.Shard(1)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	awaitDispatchesReturned(t, eng, flowKey, "A", 3) // the peer's two (park, then revive) and the released zombie's
 	var children int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE root_flow_id=? AND surgraph_flow_id<>0", flowID).Scan(&children))
@@ -644,10 +652,11 @@ func TestLeaseRecovery_EndToEnd(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := eng.db.Shard(1)
+	sh, err := eng.db.Shard(1)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	var attempt int
 	assert.NoError(db.QueryRowContext(ctx,
 		"SELECT attempt FROM dwarf_steps WHERE flow_id=? AND task_name='A' AND status='"+workflow.StatusCompleted+"'",
@@ -678,8 +687,9 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 		e := NewEngineUnderTest(t.Name())
 		e.SetHost(hosts.NewMux())
 		assert.Must(assert.NoError(e.Startup(t.Context())))
-		db, err := e.db.Shard(1)
+		sh, err := e.db.Shard(1)
 		assert.Must(assert.NoError(err))
+		db := sh.DB()
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 			"ftok", "u", "W", []byte("{}"), "", flowStatus, 1, 1000,
@@ -773,8 +783,9 @@ func TestFailStep_HeldStates(t *testing.T) {
 			defer e.Shutdown(ctx)
 			e.SetHost(hosts.NewMux())
 			assert.Must(assert.NoError(e.Startup(t.Context())))
-			db, err := e.db.Shard(1)
+			sh, err := e.db.Shard(1)
 			assert.Must(assert.NoError(err))
+			db := sh.DB()
 
 			flowStatus := tc.row.flowStatus
 			if flowStatus == "" {
@@ -841,8 +852,9 @@ func TestFailStep_HeldStates(t *testing.T) {
 func createdHourOf(t *testing.T, e *Engine, flowID int) int {
 	t.Helper()
 	assert := testarossa.For(t)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var hour int
 	assert.NoError(db.QueryRowContext(t.Context(), "SELECT created_hour FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&hour))
 	return hour

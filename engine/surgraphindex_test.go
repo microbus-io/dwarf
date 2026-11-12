@@ -38,8 +38,9 @@ func TestSurgraphLookups_UseThePartialIndex(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(hosts.NewMux())
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	if db.DriverName() != "sqlite" {
 		t.Skip("the plan shape is SQLite's")
 	}

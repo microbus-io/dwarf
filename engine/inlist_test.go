@@ -118,8 +118,9 @@ func TestLockOrder_TreeOperationsLockAscending(t *testing.T) {
 
 	shard, _, rootID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	descendants, _, _, err := e.allSubgraphFlows(ctx, db, shard, rootID)
 	assert.NoError(err)
 	walked := append([]any{rootID}, descendants...)

@@ -333,10 +333,11 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 		deleteOnCompletion = 1
 	}
 
-	db, err := e.db.Shard(shardNum)
+	sh, err := e.db.Shard(shardNum)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
+	db := sh.DB()
 	entryURL := dispatchURLOf(graph, entryPoint)
 
 	seed := flowSeed{
@@ -421,10 +422,11 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	db, err := e.db.Shard(shardNum)
+	sh, err := e.db.Shard(shardNum)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
+	db := sh.DB()
 
 	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
 	// calls has to know about turns. Its age is stamped here, so it queues behind work already running
@@ -716,9 +718,9 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 	}
 	priority := math.MaxInt
 	var notBeforeDelayMs sql.NullFloat64
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	if err == nil {
-		db.QueryRowContext(ctx,
+		sh.DB().QueryRowContext(ctx,
 			"SELECT priority, DATE_DIFF_MILLIS(not_before, NOW_UTC()) FROM dwarf_steps WHERE step_id=?",
 			stepID,
 		).Scan(&priority, &notBeforeDelayMs)
@@ -789,10 +791,11 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 	if err != nil {
 		return errors.Trace(err)
 	}
-	db, err := e.db.Shard(shardNum)
+	sh, err := e.db.Shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)
 	}
+	db := sh.DB()
 
 	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
 	// calls has to know about turns. Its age is stamped here, so it queues behind work already running
@@ -864,10 +867,11 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	if err != nil {
 		return errors.Trace(err)
 	}
-	db, err := e.db.Shard(shardNum)
+	sh, err := e.db.Shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)
 	}
+	db := sh.DB()
 
 	ctx, doneTurn := e.opTurn(ctx, shardNum, "cancel")
 	defer doneTurn()
@@ -1001,10 +1005,11 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	db, err := e.db.Shard(shardNum)
+	sh, err := e.db.Shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)
 	}
+	db := sh.DB()
 
 	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
 	// calls has to know about turns. Its age is stamped here, so it queues behind work already running
@@ -1165,10 +1170,11 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 		}
 	}
 
-	db, err := e.db.Shard(shardNum)
+	sh, err := e.db.Shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)
 	}
+	db := sh.DB()
 
 	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
 	// calls has to know about turns. Its age is stamped here, so it queues behind work already running
@@ -1323,10 +1329,11 @@ func (e *Engine) continueFlow(ctx context.Context, flowKey string, additionalSta
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	db, err := e.db.Shard(shardNum)
+	sh, err := e.db.Shard(shardNum)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
+	db := sh.DB()
 
 	// The caller's raw Go value is the only reducer input that does not arrive decoded from the database, so
 	// canonicalize it: NewState JSON-round-trips a map/struct, so a struct's declaration-order fields become

@@ -43,13 +43,13 @@ func newSolo(t *testing.T, key string) *Engine {
 	return NewEngineUnderTest(t.Name() + "#" + key)
 }
 
-// probedRTT is the round-trip time Startup measured for one shard, read under the lock its writer takes.
-// A test asserting on anything derived from the worker ceiling must go through this rather than assume the
-// same-zone constant: the probe is a real measurement of a real database, and the ceiling moves with it.
+// probedRTT is the round-trip time the worker ceiling takes for one shard: the one measured when the shard opened,
+// or the same-zone constant when that failed. A test asserting on anything derived from the worker ceiling must
+// go through this rather than assume the constant: the probe is a real measurement of a real database, and the
+// ceiling moves with it.
 func probedRTT(e *Engine, shard int) float64 {
-	e.shardsLock.Lock()
-	defer e.shardsLock.Unlock()
-	return e.shardRTTMs[shard]
+	_, rtts := e.shardFacts()
+	return rtts[shard]
 }
 
 // declaredBudget is the ShardSpec.MaxConnections the sizing tests declare, so their expectations hold
@@ -63,11 +63,10 @@ func shareOf(slots int) int {
 	return open
 }
 
-// sizingOf is the sizing Startup computed for one shard, read under the lock its writer takes.
+// sizingOf is the sizing of one shard, from its spec and what was measured when it opened.
 func sizingOf(e *Engine, shard int) shardSizing {
-	e.shardsLock.Lock()
-	defer e.shardsLock.Unlock()
-	return e.shardSizing[shard]
+	sizing, _ := e.shardFacts()
+	return sizing[shard]
 }
 
 // addPeerRow inserts a fake peer with the given engine_id into every shard's registry and waits for the
@@ -256,13 +255,13 @@ func TestPoolSizing_StartupDerivesTheBudget(t *testing.T) {
 	defer e.Shutdown(ctx)
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.Must(assert.NoError(e.Startup(ctx)))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	sz := sizingOf(e, 1)
-	serverMax := readMaxConnections(ctx, db)
-	assert.Equal(serverMax, sz.serverMax, "the server's limit is read at Startup")
+	serverMax := sh.MaxConnections() // measured as the shard opened: internal/database pins the reading
 	if db.DriverName() == "sqlite" {
 		assert.Equal(sqliteBudget, sz.budget)
 		return
@@ -309,8 +308,9 @@ func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	assert.Equal(declaredBudget, db.DB.Stats().MaxOpenConnections, "full budget while alone (R=1)")
 	assert.Equal(1, e.replicasOn(1))
 
@@ -364,8 +364,9 @@ func TestPoolSizing_IdleCoreTracksTheDerivedPool(t *testing.T) {
 		return v.(int)
 	}
 
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	assert.Equal(declaredBudget, db.DB.Stats().MaxOpenConnections, "full budget while alone (R=1)")
 	assert.Equal(shareOf(1), idle(), "idle equals the open pool at R=1")
 
@@ -407,8 +408,9 @@ func TestPoolSizing_PeerExpiry(t *testing.T) {
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 
 	// A peer registers a fresh row but then never heartbeats again (crashed).
 	addPeerRow(t, e, 2001)
@@ -416,8 +418,9 @@ func TestPoolSizing_PeerExpiry(t *testing.T) {
 
 	// Its row ages out. Written with the database's own clock, never a bound Go time, so this is stale by
 	// exactly the measure the Sonar applies.
-	shardDB, err := e.db.Shard(1)
+	shardHandle, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	shardDB := shardHandle.DB()
 	_, err = shardDB.ExecContext(t.Context(),
 		"UPDATE dwarf_peers SET seen_at=DATE_ADD_MILLIS(NOW_UTC(), ?), dispatched_at=DATE_ADD_MILLIS(NOW_UTC(), ?)"+
 			" WHERE engine_id=?", -600000, -600000, 2001)
@@ -630,10 +633,11 @@ func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	assert.Equal(declaredBudget, db.DB.Stats().MaxOpenConnections, "full budget while alone (R=1)")
 
 	insertPeerRows(t, e, 1001)
@@ -912,8 +916,9 @@ func TestPoolSizing_StartupSizesSoloFull(t *testing.T) {
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48})) // 48 at R=1
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	assert.Equal(1, e.replicasOn(1), "solo replica reads R=1 from the registry at startup")
 	assert.Equal(declaredBudget, db.DB.Stats().MaxOpenConnections, "the full derived pool is in place the moment Startup returns")
 }
@@ -936,8 +941,9 @@ func TestPoolSizing_StartupSizesFromRegisteredFleet(t *testing.T) {
 	assert.NoError(eng1.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.Must(assert.NoError(eng1.Startup(ctx)))
 
-	db1, err := eng1.db.Shard(1)
+	sh1, err := eng1.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db1 := sh1.DB()
 	assert.Equal(declaredBudget, db1.DB.Stats().MaxOpenConnections, "solo eng1 holds the full budget")
 
 	// eng2 starts against the SAME databases (shared test-DB key, both keyed by t.Name()). At its Startup
@@ -950,8 +956,9 @@ func TestPoolSizing_StartupSizesFromRegisteredFleet(t *testing.T) {
 	assert.NoError(eng2.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.Must(assert.NoError(eng2.Startup(ctx)))
 
-	db2, err := eng2.db.Shard(1)
+	sh2, err := eng2.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db2 := sh2.DB()
 	assert.Equal(2, eng2.replicasOn(1), "eng2 sees the registered fleet at startup")
 	assert.Equal(shareOf(2), db2.DB.Stats().MaxOpenConnections, "eng2 sizes for R=2 immediately - no partial over-connect")
 

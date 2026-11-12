@@ -12,9 +12,10 @@ One `Janitor` per shard on every replica, for the replica's run. It is **active 
 the shard** (`Resume`, `Pause`): paused, it holds no goroutine and no connection. It owns its jobs' goroutines and
 everything they learn - positions, failures, observations - which the gauges read through its getters. A resume
 starts every job over, its position and observations forgotten: a replica that dispatches the shard again saw
-nothing of what happened meanwhile, so everything it kept is a stale hint, and losing it loses no tree. The engine
-hands it what it needs as it changes rather than the janitor asking: its activity from the dispatch role, its residue
-class (`SetResidency`) from the fleet, its settings by setters.
+nothing of what happened meanwhile, so everything it kept is a stale hint, and losing it loses no tree. It works on
+the `database.Shard` it is made with: its turns and connections come from it, and so does its residue class, read
+at every round (`Shard.Residency`). The engine sets its activity from the dispatch role and its settings by
+setters.
 
 **One goroutine per job, never one goroutine for all of them.** Each job is a loop of rounds on its own goroutine,
 so a job that is slow, blocked on a held root or working through a large tree does not slow the others. A single
@@ -41,7 +42,7 @@ A round does its work in batches through the `batchFunc` it is handed.
   stamped before, so a job that reused a batch's context would rank as old as its first batch and outrank every
   dispatch that arrived since. A batch whose context carries a claim fails rather than run - the same check catches
   a batch inside a batch, a turn taken while one is held. Pinned by `TestJanitor_EachBatchTakesAFreshClaim`.
-- **The turn is at dispatch's band** (`SetTurnstile` with the engine's `priorityCommon`). A lower band could starve
+- **The turn is a common turn on the janitor's shard** (`Shard.WaitTurn`), dispatch's band. A lower band could starve
   the jobs at peak load and let the live tables grow; equal standing does not guarantee them any share, which the
   batch timings are there to show.
 - **Each batch takes one connection from the pool, once, and runs every statement on it** (a `sequel.Conn`, closed

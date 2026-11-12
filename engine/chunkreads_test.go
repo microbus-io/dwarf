@@ -105,8 +105,9 @@ func TestChunkedDeletion_StepServesThroughTheGrace(t *testing.T) {
 	assert.Must(assert.NoError(err))
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
 	_, hour, id, _, _ := keys.ParseFlowKey(fk)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var stepID int
 	var token string
 	assert.Must(assert.NoError(db.QueryRowContext(ctx, "SELECT step_id, step_token FROM dwarf_steps WHERE flow_id=?", id).Scan(&stepID, &token)))

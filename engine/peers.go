@@ -18,7 +18,6 @@ package engine
 
 import (
 	"context"
-	"maps"
 	"slices"
 	"sync"
 	"testing"
@@ -104,18 +103,19 @@ func (e *Engine) replicasOn(shard int) int {
 }
 
 // partitionOn is the (dispatchers, ordinal) pair that splits candidate selection on one shard, or ok=false
-// when selection there must not be partitioned. Handed to that shard's piston as its PartitionFunc.
+// when selection there must not be partitioned: the residue class the shard's Sonar publishes on the shard,
+// which the shard's piston and janitor read there too.
 //
 // Everything about it fails OPEN - a shard with no Sonar, a solo dispatcher, an unknown ordinal, a Sonar
 // that has gone blind - because partitioning EXCLUDES rows: a wrong pair strands a residue class, while
 // declining to partition only restores overlapping selection, which the claim CAS arbitrates at the cost of
 // a lost round trip.
 func (e *Engine) partitionOn(shard int) (replicas, ordinal int, ok bool) {
-	s := e.sonarFor(shard)
-	if s == nil {
+	sh, err := e.db.Shard(shard)
+	if err != nil {
 		return 0, 0, false
 	}
-	return s.Partition()
+	return sh.Residency()
 }
 
 // buildSonars creates one Sonar per open shard, before anything is sized from a Sonar. Errors are logged
@@ -136,9 +136,7 @@ func (e *Engine) partitionOn(shard int) (replicas, ordinal int, ok bool) {
 // pruned on one and not another while the replica was down - agree again whatever the reads found.
 func (e *Engine) buildSonars(ctx context.Context) {
 	e.sonars = make(map[int]*peers.Sonar, e.db.NumShards())
-	e.shardsLock.Lock()
-	rtts := maps.Clone(e.shardRTTMs)
-	e.shardsLock.Unlock()
+	_, rtts := e.shardFacts()
 	indices := slices.Sorted(slices.Values(e.db.Indices()))
 	type placed struct {
 		place int
@@ -147,12 +145,12 @@ func (e *Engine) buildSonars(ctx context.Context) {
 	var built []placed
 	var seq int64
 	for place, idx := range indices {
-		db, err := e.db.Shard(idx)
+		sh, err := e.db.Shard(idx)
 		if err != nil {
 			e.logger.Error("Resolving shard for its peer sonar", "shard", idx, "error", err)
 			continue
 		}
-		s, err := peers.New(e.engineID, idx, db)
+		s, err := peers.New(e.engineID, sh)
 		if err != nil {
 			e.logger.Error("Building peer sonar", "shard", idx, "error", err)
 			continue
@@ -313,8 +311,6 @@ func (e *Engine) runReconcileLoop() {
 	for _, idx := range e.db.Indices() {
 		seen[idx] = e.replicasOn(idx)
 	}
-	// The residue class each shard's janitor was last handed (pushResidency).
-	residencies := map[int][3]int{}
 	for {
 		select {
 		case <-e.reconcileStop:
@@ -330,8 +326,5 @@ func (e *Engine) runReconcileLoop() {
 			}
 		}
 		e.recomputePools()
-		for _, idx := range e.db.Indices() {
-			e.pushResidency(idx, residencies)
-		}
 	}
 }

@@ -297,12 +297,11 @@ const (
 
 	// The peer registry:
 
-	// CheckpointPeerPass is fired by shard as that shard's Sonar starts a registry pass - its beat and its read -
-	// from the turn the engine hands it, so only once the runtime is up. Passes run one at a time, so a visit also
-	// says the previous pass is over: two visits counted from a moment mean a whole read ran after it. That is how
-	// a test waits for a reading that was attempted, where the Sonar's own BlindFor grows with the clock whether or
-	// not anything read.
-	CheckpointPeerPass = "peerPass"
+	// CheckpointPeerPass is fired by shard as that shard's Sonar starts a registry pass - its beat and its read.
+	// Passes run one at a time, so a visit also says the previous pass is over: two visits counted from a moment
+	// mean a whole read ran after it. That is how a test waits for a reading that was attempted, where the Sonar's
+	// own BlindFor grows with the clock whether or not anything read.
+	CheckpointPeerPass = peers.CheckpointPass
 
 	// Reaping and archiving:
 	CheckpointReapBatchLocked      = reaper.CheckpointBatchLocked      // a reaper batch has locked its due roots, inside its transaction

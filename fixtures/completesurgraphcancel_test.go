@@ -96,8 +96,9 @@ func TestCompleteSurgraph_vs_TerminateRoot_BothOrders(t *testing.T) {
 		assert := testarossa.For(t)
 		shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 		assert.NoError(err)
-		db, err := engineseams.DB(e).Shard(shard)
+		sh, err := engineseams.DB(e).Shard(shard)
 		assert.Must(assert.NoError(err))
+		db := sh.DB()
 		var s string
 		assert.NoError(db.QueryRowContext(context.Background(), "SELECT status FROM dwarf_steps WHERE flow_id=? AND task_name='Call'", flowID).Scan(&s))
 		return s

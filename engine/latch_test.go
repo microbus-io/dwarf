@@ -249,10 +249,11 @@ func TestLatchResolve_RecentStopScanIsOnlyAnOptimization(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	// BOTH timestamps are stated outright rather than inherited from how fast the harness ran. The window
 	// is two sweep intervals - a hundred milliseconds - which is less than the setup above can take on a
 	// loaded box, so a "fresh" row left to real time drifts out of the scan and the test silently stops
@@ -357,9 +358,11 @@ func TestLatch_StalledShardHoldsOnlyItsOwnAwaiters(t *testing.T) {
 		}
 	}
 
-	size := e.turnstiles.Turnstile(2).Size()
-	e.turnstiles.Resize(2, 0)
-	t.Cleanup(func() { e.turnstiles.Resize(2, size) }) // before Shutdown, which runs later
+	sh2, err := e.db.Shard(2)
+	assert.Must(assert.NoError(err))
+	size := sh2.TurnLimit()
+	sh2.SetTurnLimit(0)
+	t.Cleanup(func() { sh2.SetTurnLimit(size) }) // before Shutdown, which runs later
 	e.seams.InjectN(engineseams.FaultDropSignalStop, 1<<20)
 	unblock()
 

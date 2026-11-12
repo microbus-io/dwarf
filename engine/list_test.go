@@ -52,10 +52,11 @@ func idsOf(t *testing.T, summaries []workflow.FlowSummary) []int {
 // stampArchived sets the archive time of the tree rooted at rootID, archived in day.
 func stampArchived(t *testing.T, e *Engine, day, rootID int, at time.Time) {
 	t.Helper()
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	db := sh.DB()
 	expr, arg := database.SQLTime(db.DriverName(), at)
 	_, err = db.ExecContext(t.Context(), "UPDATE "+migrations.FlowsTable(day)+" SET archived_at="+expr+" WHERE root_flow_id=?", arg, rootID)
 	if err != nil {
@@ -233,8 +234,9 @@ func TestListClosed_ADayAPeerDroppedIsReadAgain(t *testing.T) {
 	assert.NoError(a.Refresh(ctx))
 	root := closedRoots(t, e, 1)[0]
 	moveInto(t, e, root, today-1)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	peer := archiver.New(db, e.archives.Load().dayLength, migrations.Archive())
 	_, err = peer.DropBefore(ctx, today-1)
 	assert.NoError(err)
@@ -440,8 +442,9 @@ func TestListOpen_NewestUpdatedFirstAcrossStatuses(t *testing.T) {
 	last := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
 	closed := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
 	assert.NoError(e.Terminate(ctx, closed, "closed"))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	// The two newest are both interrupted, the second branch: an outer limit that did not order the branches' union
 	// would keep the running flow, which comes first in it.
 	for fk, ahead := range map[string]int{first: 3000, last: 2000, napping: 1000} {

@@ -151,9 +151,9 @@ engine:
   fast a completion storm drains through `M` connections, so a shrunken pool must never leave a stale, too-high bound
   on exactly the storm the ceiling exists to contain. Startup derives it, and `recomputePools` (a fleet change) is
   the one live path. Pinned by `TestPoolSizing_CeilingFollowsLivePoolChange`.
-  `shardRTTMs` (the Startup RTT probes the ceiling is derived from) is published and read **under `shardsLock`** -
-  its reader is the reconcile loop (`recomputePools`, `recomputeWorkerCeiling`), while `Startup` reassigns it on a
-  restart, and an unsynchronized map read/write is a *fatal throw*, not a recoverable panic.
+  The RTT the ceiling is derived from, and the server's connection limit the budget is clamped to, are measured by
+  the shard set as each shard opens (`database.Shard.RTT`, `MaxConnections`) and fixed for the run;
+  `shardFacts` derives every shard's sizing and ceiling RTT from them and the specs whenever a recompute needs them.
 - **Construction-time only** (return an error if called after `Startup`): `SetShard(ShardSpec)`, `SetWorkers`,
   `SetEngineID`, `SetStateCacheSize`, `SetHost`, `SetLogger`, `SetMeterProvider`, `SetTracerProvider` (plus the
   `SetDebugLogger` convenience). Applying
@@ -951,7 +951,7 @@ repair; its worst case is `budget + leaseMargin + recoveryInterval`, and the con
 - **The persist pass is `d.pass`, returned through `defer func() { d.pass.Return() }()`**, never
   `defer d.pass.Return()`: `yieldTurn` swaps it, and a bound method value would return the pass that existed when the
   defer was written.
-- **`processStep` owns `ctx`.** It moves the claim stamp after the host call (`turnstile.Away`) and publishes the held
+- **`processStep` owns `ctx`.** It moves the claim stamp after the host call (`database.Away`) and publishes the held
   turn (`withHeldTurn`), and the recovery reads the ctx it holds at the end. A stage that moves its own `ctx`
   (`parkSubgraph`'s `yieldTurnAway`) moves only its copy.
 - The persist/fail family (`failStep`, `failAndReturn`, `failOnPersistError`, `settlePersist`, `persistStep`,
@@ -2633,7 +2633,9 @@ What belongs here is the engine's side of it.
 **Two decisions, from one reading, with opposite risk profiles.** `replicasOn(shard)` and the Sonar's rank
 choose which replicas **dispatch** the shard and so how its connection budget divides (see "Dispatchers"
 below). `partitionOn(shard)` divides that shard's **work** - the residue class of `step_id` each replica
-selects - across the replicas that demonstrably serve it (see §"Candidate de-duplication"). Getting the first
+selects - across the replicas that demonstrably serve it (see §"Candidate de-duplication"). The Sonar publishes
+it on the shard's `database.Shard` after each reading, valid for its blindness grace, and the piston, the janitor
+and `partitionOn` read it there. Getting the first
 wrong toward too many dispatchers over-connects the database by a share each; toward too few, it leaves a
 shard short of dispatchers. Over-counting the second hands a residue class to a replica that never selects it
 and strands the work in it. They are therefore never the same number: a registered replica that does not
@@ -2650,9 +2652,10 @@ pool) and `recomputeRefillIntervals` (the period is measured against the pool th
 `lastAppliedSlots` is a per-shard map under `poolsLock` for the same reason: one shard's change must not re-push
 another's unchanged sizes, and one shard's stillness must not mask a change elsewhere.
 
-**The two halves are wired to each other through the engine**, so neither package imports the other:
-`piston.SetPartitionFunc(func() { return e.partitionOn(idx) })` and `sonar.SetEvidence(p.Liveness)`. Both are
-pure reads of live state, so neither captures anything that can go stale. The piston publishes nothing about
+**The two halves meet through the shard and the engine**, so neither package imports the other: the Sonar
+publishes the residue class on its `database.Shard` (`SetResidency`, with an expiry), the piston reads it there at
+every query, and the engine wires `sonar.SetEvidence(p.Liveness)`. Both are reads of live state, so neither
+captures anything that can go stale. The piston publishes nothing about
 this replica anywhere - it only reports whether it is turning - which is what keeps how often that fact
 reaches the registry independent of how long a cycle takes.
 
@@ -2987,13 +2990,14 @@ belongs in the host's `ExecuteTask` (a semaphore keyed on the real provider/acco
 when the downstream says no. The engine sizes workers for throughput, bounded only by what it can see:
 the lease margin.
 
-### Turn-taking on the database (`internal/turnstile`) — order the wait, do not remove it
+### Turn-taking on the database (`internal/database`, `internal/turnstile`) — order the wait, do not remove it
 
 **Every database call a step makes takes a turn at its shard's turnstile, and turns are served by band and
 then by how long the JOB asking has been at the database.** The claim is stamped once, when the candidate is
-picked up, and rides the context (`turnstile.Set.ContextWithPriority`) so every later call of that step
+picked up (`database.Gate`), and rides the context so every later call of that step (`database.WaitTurn`)
 presents the same age - except that the host call does not count: when it returns, the stamp is moved
-forward by its duration (`turnstile.Away`). A step already under way therefore outranks work that arrived
+forward by its duration (`database.Away`). The turns are the shard's: `internal/database` holds each shard's
+turnstile and sizes it with the pool (`SetShardPool`), and the engine reaches turns only through it. A step already under way therefore outranks work that arrived
 after its own work began, and finishing work stays ahead of starting work under saturation. Do not carry the
 pickup stamp across the host call unmoved (once tasks outlast the queue every exit outranks every entry: strict
 precedence, measured as the long-task regime's `Create` p99 of seconds), and do not re-stamp it fresh (the
@@ -3024,16 +3028,17 @@ losing sibling waits holding no connection, and a turn is that occupancy one lev
 connections without turns and callers holding turns without connections deadlock each other, which is why
 nothing wraps `sequel.DB` - the call site is what knows when the connection is released.
 
-**Two bands, and band 0 holds only the piston and its shard's peer Sonar.** `priorityRefill` (0) is above
-`priorityCommon` (10; the values are ordinals only), and bands are strict — a band is exhausted before the
-next is looked at. The piston has it because it is bounded by construction (a derived period, and two loops
+**Two bands, and the priority band holds only the piston and its shard's peer Sonar.** A shard's priority turns
+(`WaitPriorityTurn`, and `ContextWithPriority` for the piston's once-per-cycle stamp) are served before its common
+ones (`WaitTurn`), and bands are strict — a band is exhausted before the next is looked at
+(`internal/database/CLAUDE.md`). The piston has it because it is bounded by construction (a derived period, and two loops
 each holding at most one turn at a time - two statements per scan, one per fetch - against a turn count of 2x
 the connections), so it cannot starve what sits below it; and it needs it so a cycle runs on its derived period rather than at the depth of the pool queue -
 pool wait otherwise rate-limits the refiller (see "What the instruments measured, as rules" under Metrics).
 The Sonar is there because a Sonar that cannot beat reads as BLIND and its replica stops partitioning, so
 throttling the registry would let load reshape the fleet; it beats on a fixed cadence, so it cannot flood
-the band either. Band 0 rather than an exemption: a bypasser ranks above every band and drops out of the
-population the turn count bounds (`dbturn.go`).
+the band either. The priority band rather than an exemption: a bypasser ranks above every band and drops out of
+the population the turn count bounds (`dbturn.go`).
 
 **Everything else shares one band and is separated by age alone - a decision, not an unfinished state.**
 Age ordering cannot starve, while a second band for any caller that can arrive faster than it is served starves
@@ -3061,13 +3066,14 @@ count. The rule is positional (`dbturn.go`): an operation takes its turn at its 
 background loop (the reaper, the recovery sweeps, the backlog gauge loop, the latch poll) takes one per shard
 per pass, and the worker path takes one per database call between the phases it has already released. Take
 it at the OUTERMOST database operation of a path, never inside a shared helper - a turn taken while one is
-held is the nesting the enclosure rule forbids. Startup's RTT probe is the one exemption: it runs before any
-worker exists.
+held is the nesting the enclosure rule forbids. The shard set's probes as each shard opens are the one exemption: they
+run before anything else uses the shard.
 
 **Fail open** (an unstamped context, an unsized shard, an expired ctx, a closed set): the turnstile only orders
 access the pool already bounds, so do not harden it into failing closed - but a sizing mistake is therefore
-**silent**, visible only as ordering that is not happening. **Every path that changes a pool must re-size the
-turnstiles** (`Startup`, `recomputePools`).
+**silent**, visible only as ordering that is not happening. **A pool and its turns change together**:
+`ShardSet.SetShardPool` resizes the shard's turns with the pool (`Config.TurnsPerConn`, set from
+`turnstilePassesPerConn`), so no path can change one without the other.
 
 **Head-of-line blocking across shards is closed in two steps, and a replica dispatching several shards
 needs both.** Left alone, every worker that peeks at once routes to the same shard and queues at its gate
@@ -3619,10 +3625,10 @@ wiring (`janitor.go`):
 
 - **Made at Startup for every shard** (`startJanitors`, in `initRuntime` before Startup returns, so a dispatched
   shard's janitor - and the archive gauges it feeds - is active from the start), and active where this replica
-  dispatches. **`applyRole` resumes and pauses them** with the doorbell's gate and the piston's idle mode, and the
-  **reconcile loop hands each its residue class** when it changes (`pushResidency`): the engine tells the janitor,
-  the janitor asks nothing. The drain cancels them all before the workers (see "Shutdown ordering").
-- **A batch's turn is at dispatch's band** (`SetTurnstile` with `priorityCommon`), taken fresh for each batch.
+  dispatches. **`applyRole` resumes and pauses them** with the doorbell's gate and the piston's idle mode. Each
+  reads its residue class from its `database.Shard`, where the shard's Sonar publishes it, as the piston does.
+  The drain cancels them all before the workers (see "Shutdown ordering").
+- **A batch's turn is a common turn** (`WaitTurn`), dispatch's band, taken fresh on its shard for each batch.
 - **Settings are set from the engine's fields** (`configureJanitor`): at Startup, and around a test's drain, since
   tests change them on a running engine. `drainJanitors` takes the archive grace to drain with:
   `engineseams.ArchiveNow` drains with 0, then runs the reaper's pass with 0.
@@ -3901,7 +3907,7 @@ arm withdrawal timer                         // gives up dispatcher slots if the
 closeMetrics()                               // no collection may run against a closing engine
 backlogCancel(); backlogWorker.Wait()        // nor the backlog refresh against a closing database
 janitorCancel(); stopJanitors()             // a job's batch would hold the connections a worker needs to finish
-cache.Close(); turnstiles.Close()            // BOTH: a worker parks on one or waits on the other
+cache.Close(); db.CloseTurns()              // BOTH: a worker parks on one or waits on the other
 crew.Drain(); withdrawal.Wait()
 recoveryCancel();    recoveryWorker.Wait() // abandons a sweep statement in flight
 reaperCancel();      reaperWorker.Wait()   // ditto, a reap batch

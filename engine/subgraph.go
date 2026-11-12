@@ -44,10 +44,11 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 	if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultSubgraphSpawnErr, subgraphWorkflowURL)) {
 		return "", errors.New("injected fault: "+engineseams.FaultSubgraphSpawnErr+" "+subgraphWorkflowURL, http.StatusInternalServerError)
 	}
-	db, err := e.db.Shard(shardNum)
+	sh, err := e.db.Shard(shardNum)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
+	db := sh.DB()
 
 	// Inherit the parent's frozen scheduling/budget and its baggage, all passed into the child's insert so
 	// the child is fully formed (surgraph-linked + baggage) in one transaction.
@@ -105,10 +106,11 @@ const maxTerminateRuns = 16
 // flow at flowID. commitFault is a test-only seam name, checked before any write so a fired fault proves the whole
 // transaction rolls back atomically; pass "" for none.
 func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHour int, flowToken, reason, commitFault string) (ended bool, err error) {
-	db, err := e.db.Shard(shardNum)
+	sh, err := e.db.Shard(shardNum)
 	if err != nil {
 		return false, errors.Trace(err)
 	}
+	db := sh.DB()
 	descendantFlowIDs, descendantCompositeIDs, labelByFlowID, err := e.allSubgraphFlows(ctx, db, shardNum, flowID)
 	if err != nil {
 		return false, errors.Trace(err)
@@ -327,10 +329,11 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 	if e.seams.IsFault(engineseams.FaultCompleteSurgraphErr) {
 		return errors.New("injected fault: " + engineseams.FaultCompleteSurgraphErr)
 	}
-	db, err := e.db.Shard(shardNum)
+	sh, err := e.db.Shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)
 	}
+	db := sh.DB()
 	resultJSON := subgraphFinalStateJSON
 	if len(bytes.TrimSpace(resultJSON)) == 0 {
 		resultJSON = []byte("{}")
@@ -402,10 +405,11 @@ func (e *Engine) dynamicSubgraphParent(ctx context.Context, db *sequel.DB, flowI
 //   - no child: the child flow is GONE. The caller's park and the child's insert commit in one transaction,
 //     so only a bug or a hand-deleted row leaves this, and failing the caller is the only way out.
 func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, parentStepID int, childFlowID int, taskErr error) error {
-	db, err := e.db.Shard(shardNum)
+	sh, err := e.db.Shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)
 	}
+	db := sh.DB()
 	reDispatchParent := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		// The parent re-arm is the transaction's first statement and is itself a write (the parked caller
@@ -594,10 +598,11 @@ type flowLabel struct {
 // leafLeaseSeq is the leaf's lease_seq as this same query saw it: it names the interrupt selected, which Resume
 // fences on. Read it anywhere later and a Retry that re-interrupted the row in between is taken for the selection.
 func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flowID int, flowHour int, flowToken string) (flowIDs []any, stepIDs []any, compositeFlowIDs []string, leafLeaseSeq int, err error) {
-	db, err := e.db.Shard(shardNum)
+	sh, err := e.db.Shard(shardNum)
 	if err != nil {
 		return nil, nil, nil, 0, errors.Trace(err)
 	}
+	db := sh.DB()
 
 	frows, err := db.QueryContext(ctx,
 		"SELECT flow_id, flow_token, created_hour, surgraph_step_id, status FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)",
@@ -683,10 +688,11 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 // level per round trip: each query reads a flow's caller link joined to its parent's token and own link, so
 // it touches only the chain, never the rest of the tree.
 func (e *Engine) surgraphChain(ctx context.Context, shardNum int, flowID int, flowHour int, flowToken string) (flowIDs []any, stepIDs []any, compositeFlowIDs []string, err error) {
-	db, err := e.db.Shard(shardNum)
+	sh, err := e.db.Shard(shardNum)
 	if err != nil {
 		return nil, nil, nil, errors.Trace(err)
 	}
+	db := sh.DB()
 	return e.surgraphChainIn(ctx, db, liveTables, shardNum, flowID, flowHour, flowToken)
 }
 

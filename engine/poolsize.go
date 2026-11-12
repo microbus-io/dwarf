@@ -28,7 +28,6 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/errors"
-	"github.com/microbus-io/sequel"
 )
 
 // The connection-budget and capacity constants below were measured on Cloud SQL PostgreSQL 16 (4-64 vCPU,
@@ -114,31 +113,6 @@ const (
 	// were measured within noise of 8x on a smaller pool; nothing above 1x has been shown to cost throughput.
 	turnstilePassesPerConn = 2
 
-	// The turnstile bands. Lower is served first, and STRICTLY: a band is exhausted before the next is
-	// looked at, so a band may only be given to a source that cannot flood it. Within a band, order is by
-	// how long the job asking has been at the database (time in the host call does not count).
-	//
-	// priorityRefill is the only band above the common one, and it is reserved for the piston and the peer
-	// Sonars because they are the callers bounded by construction - the piston cycles on a derived period
-	// and takes two turns per cycle per shard, a Sonar beats and reads on a fixed cadence - so neither can
-	// starve what sits below it. The piston is ahead of everything else because a refill cycle that queues
-	// behind the dispatch it feeds starves the workers it is filling for; the Sonars are there because a
-	// throttled beat reads as blindness and reshapes the fleet (see dbTurn).
-	//
-	// Everything else shares priorityCommon and is separated by age alone. That is deliberate rather than
-	// unfinished: age ordering is starvation-free (every claim eventually becomes the oldest), while any
-	// second band handed to a caller that can arrive faster than it is served starves the band below it -
-	// which is the shape of the measured 3x short-task collapse of a single-permit pool. Do not add a band for
-	// EXITING (completing) work either: exits arrive as fast as steps finish, and precedence for them
-	// serialises dispatch behind them - the same failure as ranking an exit by its unmoved pickup age, which
-	// is why the host call's duration is taken off the exit's claim instead.
-	//
-	// The values are spaced, and are ordinals only: nothing reads the distance between them. A band can
-	// therefore be inserted between two in use without renumbering the callers of either.
-	priorityRefill = 0
-	priorityCommon = 10
-	priorityWorker = priorityCommon
-
 	// completionServerMs is the server-side half of a completion: row work plus the group-committed
 	// WAL fsync, measured ~3ms (cross-checked by a whole-step fit db = 12.1 x RTT + 4.4ms, taken on PostgreSQL
 	// before the transition was pipelined - the 4.4ms intercept is the part that carries over).
@@ -210,7 +184,7 @@ func completionRoundTrips(driver string) int {
 //	txTime = completionRoundTrips(driver) x RTT + completionServerMs
 //
 // Every input is engine-visible: M is the derived pool, the margin is the engine's own constant, and
-// RTT is measured at Startup (probeRTT). Nothing here needs the task duration T, which is exactly why
+// RTT is measured when the shard opens (database.Shard.RTT). Nothing here needs the task duration T, which is exactly why
 // this - and not `M x T/db` - is the number the engine can derive for itself.
 func workerCeiling(open int, rttMs float64, driver string) int {
 	txTimeMs := float64(completionRoundTrips(driver))*rttMs + completionServerMs
@@ -221,36 +195,8 @@ func workerCeiling(open int, rttMs float64, driver string) int {
 	return max(1, int(float64(open)*marginMs/txTimeMs*workerSafetyFactor))
 }
 
-// probeRTT measures the round-trip time to a shard with a few `SELECT 1`s, returning the MINIMUM of
-// the samples: the minimum approximates pure network RTT, where a mean is polluted by scheduler jitter
-// and warmup. The first sample is discarded - it pays connection establishment. Measured once at
-// Startup on connections the pool is opening anyway (~10ms), never adapted: a latency change
-// re-derives on restart, the same posture as the shard set itself. A failed probe returns 0, and the
-// caller falls back to the same-zone constant rather than mis-sizing on a transient error.
-func probeRTT(ctx context.Context, db *sequel.DB) float64 {
-	const samples = 6
-	best := math.MaxFloat64
-	for i := range samples {
-		start := time.Now()
-		var one int
-		err := db.QueryRowContext(ctx, "SELECT 1").Scan(&one)
-		elapsed := time.Since(start)
-		if err != nil {
-			return 0
-		}
-		if i == 0 {
-			continue // discard: pays connection establishment
-		}
-		best = min(best, float64(elapsed.Nanoseconds())/1e6)
-	}
-	if best == math.MaxFloat64 {
-		return 0
-	}
-	return best
-}
-
-// shardSizing is one shard's connection budgets for a run. Every input - the spec, the probed RTT and the
-// server's max_connections - is fixed once Startup has read it, so it is computed there and held.
+// shardSizing is one shard's connection budgets for a run. Every input - the spec, the RTT and the server's
+// max_connections measured when the shard opened - is fixed for the run.
 type shardSizing struct {
 	// budget is this replica's view of the shard's fleet-wide budget: shardBudget at the RTT it probed.
 	budget int
@@ -258,7 +204,7 @@ type shardSizing struct {
 	serverMax int
 }
 
-// sizeShard computes one shard's sizing from its spec, the RTT probed at Startup (0 = unprobed), the
+// sizeShard computes one shard's sizing from its spec, the RTT measured when it opened (0 = unprobed), the
 // server's max_connections (0 = unknown) and the shard's driver.
 func sizeShard(spec ShardSpec, rttMs float64, serverMax int, driver string) shardSizing {
 	return shardSizing{
@@ -463,31 +409,6 @@ func (e *Engine) inFlightOn(shard int) int64 {
 	return 0
 }
 
-// readMaxConnections returns the server's connection limit for one shard, or 0 when it cannot say - SQLite
-// has none, and a failed read is treated the same: both consumers fail open, the budget clamp to the
-// unclamped constant and the fleet check to silence. SQL Server reports 32767 unless "user connections" is
-// configured, and Azure SQL always does, so there neither ever bites. Read once at Startup and held:
-// Postgres and SQL Server change the limit only on a server restart, and a managed service's resize
-// restarts or fails the server over.
-func readMaxConnections(ctx context.Context, db *sequel.DB) int {
-	var q string
-	switch db.DriverName() {
-	case "pgx":
-		q = "SELECT CAST(setting AS INTEGER) FROM pg_settings WHERE name='max_connections'"
-	case "mysql", "mariadb":
-		q = "SELECT @@max_connections"
-	case "mssql":
-		q = "SELECT @@MAX_CONNECTIONS"
-	default:
-		return 0
-	}
-	var n int
-	if err := db.QueryRowContext(ctx, q).Scan(&n); err != nil {
-		return 0
-	}
-	return max(0, n)
-}
-
 // checkFleetFits warns when the connections the fleet can hold on one shard approach the server's limit:
 // the budget, which the dispatchers and any replicas draining a share divide between them, plus up to
 // readerOpenConns for every other replica.
@@ -551,10 +472,7 @@ func (e *Engine) recomputePools() {
 	if !e.started.Load() {
 		return
 	}
-	e.shardsLock.Lock()
-	sizing := maps.Clone(e.shardSizing)
-	rtts := maps.Clone(e.shardRTTMs)
-	e.shardsLock.Unlock()
+	sizing, rtts := e.shardFacts()
 	// Read every shard's role first and compare as a whole: a push is all-or-nothing, so a single shard
 	// moving is enough to re-derive, and nothing moving is the cheap common case.
 	observed := make(map[int]int, len(e.lastAppliedSlots))
@@ -616,17 +534,12 @@ func (e *Engine) recomputePools() {
 			e.logger.Info("Shard pool hold released", "shard", idx)
 		}
 		idle, open := shardPool(sizing[idx].budget, divisor)
-		// Through the shard set, which applies the test-mode cap; a push onto the shard's own handle would not.
+		// Through the shard set, which applies the test-mode cap - a push onto the shard's own handle would
+		// not - and resizes the shard's turns with the pool, for the same reason the cache and the worker
+		// ceiling follow it: they order access to the connections this replica actually holds.
 		e.db.SetShardPool(idx, idle, open)
 		if e.seams.Enabled() { // Enabled gates the assembled name and the boxed value in production
 			e.seams.Variable(engineseams.Join(engineseams.VariablePoolIdle, strconv.Itoa(idx)), idle)
-		}
-		// The turnstile follows the pool for the same reason the cache and the worker ceiling do: it
-		// orders access to the connections this replica actually holds, and the pool just changed. Resize
-		// moves the available count by the DELTA, so a turn held by an in-flight worker is never handed
-		// out twice.
-		if e.turnstiles != nil {
-			e.turnstiles.Resize(idx, turnstilePassesPerConn*open)
 		}
 		if slots > 0 {
 			postSplitConns += open
@@ -699,23 +612,20 @@ func (e *Engine) applyRole(shard int, dispatches bool) {
 // a worker mid-step is not a thing the pool does). The ceiling is a bound on how far the pool may grow,
 // not a live target.
 //
-// Locks shardsLock and clones the shard facts itself; recomputePools has already done both by the time it
-// gets here, so it calls recomputeWorkerCeilingWith directly with its own clones rather than paying for a
-// second lock/clone pass over the same maps.
+// Reads the shard facts itself; recomputePools has already read them by the time it gets here, so it calls
+// recomputeWorkerCeilingWith directly with its own.
 func (e *Engine) recomputeWorkerCeiling(ctx context.Context) {
-	e.shardsLock.Lock()
-	sizing := maps.Clone(e.shardSizing)
-	rtts := maps.Clone(e.shardRTTMs)
-	e.shardsLock.Unlock()
+	sizing, rtts := e.shardFacts()
 	e.recomputeWorkerCeilingWith(ctx, sizing, rtts, slotsOf(e.rolesByShard()))
 }
 
 // shardDriver is the driver name of a shard's connection, or empty when the shard is not open.
 func (e *Engine) shardDriver(idx int) string {
-	db, err := e.db.Shard(idx)
+	sh, err := e.db.Shard(idx)
 	if err != nil {
 		return ""
 	}
+	db := sh.DB()
 	return db.DriverName()
 }
 
@@ -839,4 +749,31 @@ func (e *Engine) pickShard() (int, error) {
 	// Floating-point rounding can leave r at the very end of the range; the last eligible shard takes it. Never
 	// a cordoned or zero-weight one.
 	return specs[last].Index, nil
+}
+
+// shardFacts returns, for every open shard, its sizing - from its spec, and the RTT and server connection limit
+// measured when it opened - and the RTT the worker ceiling and the peer profile take. The budget takes the RAW
+// probe (an unprobed shard takes the near budget), while the ceiling takes the same-zone constant for a failed
+// probe - each the safe direction for what it sizes. Every input is fixed for the run, so the result is too.
+func (e *Engine) shardFacts() (sizing map[int]shardSizing, rtts map[int]float64) {
+	e.shardsLock.Lock()
+	declared := maps.Clone(e.shardSpecs)
+	e.shardsLock.Unlock()
+	indices := e.db.Indices()
+	sizing = make(map[int]shardSizing, len(indices))
+	rtts = make(map[int]float64, len(indices))
+	for _, idx := range indices {
+		sh, err := e.db.Shard(idx)
+		if err != nil {
+			continue
+		}
+		rttMs := float64(sh.RTT()) / float64(time.Millisecond)
+		// A zero-value spec is the default shard's sizing.
+		sizing[idx] = sizeShard(declared[idx], rttMs, sh.MaxConnections(), sh.DB().DriverName())
+		if rttMs <= 0 {
+			rttMs = defaultRTTMs
+		}
+		rtts[idx] = rttMs
+	}
+	return sizing, rtts
 }

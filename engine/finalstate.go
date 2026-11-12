@@ -593,10 +593,11 @@ func stripForEachBookkeeping(state workflow.State, graph *workflow.Graph, spawnT
 // completeFlow transitions a flow to completed and propagates to surgraph. stepID is the step that completed it,
 // recorded as the step the flow stopped at, and leaseSeq the generation of the dispatch that completed it.
 func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, stepID int, leaseSeq int, flowHour int, flowToken string) (bool, error) {
-	db, err := e.db.Shard(shardNum)
+	sh, err := e.db.Shard(shardNum)
 	if err != nil {
 		return false, errors.Trace(err)
 	}
+	db := sh.DB()
 	var workflowURL, currentStatus string
 	var finalStateJSON []byte
 	var surgraphFlowID, surgraphStepID, priority int

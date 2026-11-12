@@ -57,8 +57,9 @@ func flowRows(t *testing.T, e *Engine, fk string) (*sequel.DB, int, int) {
 	assert := testarossa.For(t)
 	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var stepID int
 	assert.NoError(db.QueryRowContext(t.Context(), "SELECT step_id FROM dwarf_steps WHERE flow_id=?", flowID).Scan(&stepID))
 	return db, flowID, stepID
@@ -333,8 +334,9 @@ func TestPayloadVer_ForkRefusesANewerSubgraph(t *testing.T) {
 	assert.Equal(workflow.StatusCompleted, out.Status, out.Error)
 	shard, hour, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var childID, doneID int
 	var doneToken string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE surgraph_flow_id=?", flowID).Scan(&childID))

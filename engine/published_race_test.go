@@ -53,7 +53,8 @@ func TestPublished_ContinueRacingLiveCleanup(t *testing.T) {
 func TestPublished_ForkRacingLiveCleanup(t *testing.T) {
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
-	db, _ := e.db.Shard(1)
+	sh, _ := e.db.Shard(1)
+	db := sh.DB()
 	if db.DriverName() != "pgx" {
 		t.Skip("requires PostgreSQL nonlocking refusal read")
 	}

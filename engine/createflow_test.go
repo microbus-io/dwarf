@@ -60,8 +60,9 @@ func TestInsertFlowTx_ConcurrentCreates(t *testing.T) {
 	}
 	wg.Wait()
 
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var created, strays int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows").Scan(&created))
 	assert.Equal(flows, created)
@@ -109,8 +110,9 @@ func TestInsertFlowTx_SelfColumnsInTheInsert(t *testing.T) {
 	e.SetHost(mux)
 	assert.NoError(e.SetLogger(slog.New(log)))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 
 	rootKey, outcome, err := e.Run(ctx, "selfcols/parent", nil, nil)
 	if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, outcome.Status) {

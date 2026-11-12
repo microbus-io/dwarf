@@ -61,10 +61,11 @@ func TestRestartSurvival(t *testing.T) {
 	waitFor := func(t *testing.T, e *engine.Engine, query string, args ...any) bool {
 		t.Helper()
 		assert := testarossa.For(t)
-		db, err := engineseams.DB(e).Shard(1)
+		sh, err := engineseams.DB(e).Shard(1)
 		if !assert.NoError(err) {
 			return false
 		}
+		db := sh.DB()
 		deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 		for time.Now().Before(deadline) {
 			var n int

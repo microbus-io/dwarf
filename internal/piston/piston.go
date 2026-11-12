@@ -51,9 +51,9 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/candidates"
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/pipeline"
 	"github.com/microbus-io/dwarf/internal/planner"
-	"github.com/microbus-io/dwarf/internal/turnstile"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/sequel"
@@ -88,12 +88,6 @@ const idlePoll = time.Second
 // this, is what keeps a replica with work of its own from taking anyone else's.
 const defaultStealAfter = 4
 
-// PartitionFunc reports the replica partition - see SetPartitionFunc.
-type PartitionFunc func() (replicas, ordinal int, ok bool)
-
-// ContextFunc derives the context a cycle's queries run on - see SetContextFunc.
-type ContextFunc func(context.Context) context.Context
-
 // instruments is this piston's metric set, swapped atomically as a group so a recording cycle never sees
 // half of one meter and half of another.
 type instruments struct {
@@ -119,6 +113,7 @@ type Piston struct {
 	// both as the label string and hides the split, which is why it survived unnoticed.
 	shardAttr attribute.KeyValue
 
+	sh       *database.Shard
 	db       *sequel.DB
 	planner  *planner.Planner
 	cache    *candidates.Cache
@@ -127,13 +122,10 @@ type Piston struct {
 
 	// Live configuration, each independently atomic. There is no grouped snapshot because nothing here is
 	// coupled - reading idle and the partition a microsecond apart cannot produce an inconsistent pair.
-	idle      atomic.Bool
-	partition atomic.Pointer[PartitionFunc]
-	// cycleCtx derives the context each cycle's queries run on - see SetContextFunc.
-	cycleCtx atomic.Pointer[ContextFunc]
-	logger   atomic.Pointer[slog.Logger]
-	inst     atomic.Pointer[instruments]
-	seams    atomic.Pointer[seamster.Seamster]
+	idle   atomic.Bool
+	logger atomic.Pointer[slog.Logger]
+	inst   atomic.Pointer[instruments]
+	seams  atomic.Pointer[seamster.Seamster]
 
 	// stealAfter is how many cycle periods a foreign step must have been due before this replica takes it.
 	// Zero disables stealing outright, which is what an owner sets when it wants the residue class enforced
@@ -186,9 +178,17 @@ type bandLag struct {
 	at    time.Time // when that band's statement was sent, the instant its NOW_UTC() approximates
 }
 
-// New returns a piston for one shard over an already-open database handle. The planner and cache are
-// shared with this replica's other pistons and are not owned here.
-func New(shard int, db *sequel.DB, plan *planner.Planner, cache *candidates.Cache) (*Piston, error) {
+// New returns a piston for one already-open shard: its queries run on the shard's database, take the shard's
+// priority turns, and keep to the residue class the shard reports. Each loop stamps its turns once per CYCLE rather
+// than once per query, which for the supply loop means the plan and the fetch share one stamp: re-stamping between
+// them would make the fetch look like a newer arrival than the plan it is resolving. The two LOOPS are stamped
+// separately, and that is correct - they are separate units of work on separate clocks. The planner and cache are shared with this replica's
+// other pistons and are not owned here.
+func New(sh *database.Shard, plan *planner.Planner, cache *candidates.Cache) (*Piston, error) {
+	if sh == nil {
+		return nil, errors.New("shard is required")
+	}
+	shard, db := sh.Index(), sh.DB()
 	if shard < 1 {
 		return nil, errors.New("shard must be positive, got %d", shard)
 	}
@@ -201,7 +201,7 @@ func New(shard int, db *sequel.DB, plan *planner.Planner, cache *candidates.Cach
 	if cache == nil {
 		return nil, errors.New("cache is required")
 	}
-	p := &Piston{shard: shard, db: db, planner: plan, cache: cache,
+	p := &Piston{shard: shard, sh: sh, db: db, planner: plan, cache: cache,
 		shardAttr: attribute.String("shard", strconv.Itoa(shard))}
 	p.stealAfter.Store(defaultStealAfter)
 	p.maxPriority.Store(DefaultMaxPriority)
@@ -387,37 +387,6 @@ func (p *Piston) SetSupplyCadence(interval, minGap time.Duration) {
 // SupplyCadence is the supply loop's configured pacing.
 func (p *Piston) SupplyCadence() (interval, minGap time.Duration) {
 	return p.supplier.Interval(), p.supplier.MinGap()
-}
-
-// SetPartitionFunc supplies the replica partition: the (replicas, ordinal) pair that restricts this
-// replica's selection to its own residue class of step ids, so replicas sharing a database select
-// disjoint candidates instead of racing for the same rows. ok=false selects everything, which is correct
-// for a solo replica or an unknown ordinal.
-//
-// A function rather than a value because the pair changes as the fleet does, and a captured one would
-// leave this piston selecting a class that no longer exists.
-func (p *Piston) SetPartitionFunc(fn PartitionFunc) {
-	if fn == nil {
-		p.partition.Store(nil)
-		return
-	}
-	p.partition.Store(&fn)
-}
-
-// SetContextFunc supplies a derivation applied to the context at the START of each cycle, on both loops, so
-// whatever the caller needs its queries to carry - a priority, an admission time, a deadline - is on both
-// of them without this package knowing what any of it means. Nil (the default) leaves the context alone.
-//
-// Once per CYCLE rather than once per query, which for the supply loop means the plan and the fetch share
-// one stamp: re-deriving between them would make the fetch look like a newer arrival than the plan it is
-// resolving. The two LOOPS are stamped separately, and that is correct - they are separate units of work
-// on separate clocks, and stamping them together would be claiming a coupling the split removed.
-func (p *Piston) SetContextFunc(fn ContextFunc) {
-	if fn == nil {
-		p.cycleCtx.Store(nil)
-		return
-	}
-	p.cycleCtx.Store(&fn)
 }
 
 // SetLogger sets the logger. Nil restores the discarding default.
@@ -625,9 +594,8 @@ func (p *Piston) Cycle(ctx context.Context) (pipeline.TallyResult, pipeline.Supp
 //
 // NOT safe to call concurrently with Run or with itself; see Cycle.
 func (p *Piston) SupplyCycle(ctx context.Context) pipeline.SupplyResult {
-	if fn := p.cycleCtx.Load(); fn != nil {
-		ctx = (*fn)(ctx)
-	}
+	p.fireCheckpoint(ctx, CheckpointSupplyBegin)
+	ctx = p.sh.ContextWithPriority(ctx)
 	r := p.supplier.Cycle(ctx)
 	p.recordSupply(ctx, r)
 	// A cycle that pushed nothing still counts: an untallied shard and an outranked one are both honest
@@ -644,9 +612,8 @@ func (p *Piston) SupplyCycle(ctx context.Context) pipeline.SupplyResult {
 //
 // NOT safe to call concurrently with Run or with itself; see Cycle.
 func (p *Piston) TallyCycle(ctx context.Context) pipeline.TallyResult {
-	if fn := p.cycleCtx.Load(); fn != nil {
-		ctx = (*fn)(ctx)
-	}
+	p.fireCheckpoint(ctx, CheckpointTallyBegin)
+	ctx = p.sh.ContextWithPriority(ctx)
 	r := p.tallier.Cycle(ctx)
 	p.recordTally(ctx, r)
 	// A cycle that found nothing due still counts: it proves this piston looked and could have served.
@@ -724,7 +691,7 @@ func (p *Piston) recordSupply(ctx context.Context, r pipeline.SupplyResult) {
 // stale pair costs a lost claim, never correctness.
 // The pair is VALIDATED, not trusted, because both bad shapes are worse than not partitioning. replicas=0
 // emits `step_id % 0`, which errors on every query - so the scan fails, the pipeline clears this shard, and
-// it stays out of planning for as long as the func keeps saying so. An ordinal at or past replicas is
+// it stays out of planning for as long as the shard keeps reporting it. An ordinal at or past replicas is
 // quieter and worse: the predicate matches nothing, so the piston reports NoBand while genuinely holding
 // work, with no error anywhere to notice. replicas=1 is a solo replica, where the predicate matches
 // everything and is pure overhead. Today's caller happens to guard all three, but the fail-open posture is
@@ -777,7 +744,7 @@ func (p *Piston) partitionPredicate(replicas, ordinal int, grace time.Duration) 
 //
 // The pair is VALIDATED, not trusted, because both bad shapes are worse than not partitioning. replicas=0
 // emits `step_id % 0`, which errors on every query - so the scan fails, the Tallier clears this shard, and
-// it stays out of planning for as long as the func keeps saying so. An ordinal at or past replicas is
+// it stays out of planning for as long as the shard keeps reporting it. An ordinal at or past replicas is
 // quieter and worse: the predicate matches nothing, so the piston reports NoBand while genuinely holding
 // work, with no error anywhere to notice. replicas=1 is a solo replica, where the predicate matches
 // everything and is pure overhead. Today's caller happens to guard all three, but the fail-open posture is
@@ -788,11 +755,7 @@ func (p *Piston) partitionPredicate(replicas, ordinal int, grace time.Duration) 
 // built from that same bad pair puts nothing in tier 0 and counts every kept step as taken from a peer,
 // flooding dwarf_steps_stolen and firing CheckpointStole for steals that never happened.
 func (p *Piston) resolvePartition() (replicas, ordinal int) {
-	fn := p.partition.Load()
-	if fn == nil {
-		return 0, 0
-	}
-	r, o, ok := (*fn)()
+	r, o, ok := p.sh.Residency()
 	if !ok || r < 2 || o < 0 || o >= r {
 		return 0, 0
 	}
@@ -946,7 +909,7 @@ func (p *Piston) countBands(ctx context.Context, part string, partArgs []any, ca
 	// FIRST is what gets that ordering - defers run last-in-first-out, so rows.Close below runs before this.
 	// A context nothing stamped yields a no-op pass, which is how a caller that does not order its database
 	// access pays nothing here.
-	pass := turnstile.WaitTurn(ctx)
+	pass := database.WaitTurn(ctx)
 	defer pass.Return()
 	rows, err := p.db.QueryContext(ctx, bandCountsQuery(p.db.DriverName(), part, maxBand, capacity), args...)
 	if err != nil {
@@ -986,7 +949,7 @@ func (p *Piston) tallyBands(ctx context.Context, part string, partArgs []any, ba
 		args = append(args, partArgs...)
 	}
 	// The same turn-outlives-the-rows ordering as countBands.
-	pass := turnstile.WaitTurn(ctx)
+	pass := database.WaitTurn(ctx)
 	defer pass.Return()
 	// due_ms rides the rows the count already reads, so the dispatch lag costs this scan one aggregate and
 	// no query of its own. It is measured from not_before, not created_at: a step that slept for an hour has
@@ -1148,7 +1111,7 @@ func (p *Piston) FetchSteps(ctx context.Context, shard int, fetches []planner.Fe
 	}
 	// The turn must outlive the ROWS, not just the call, so this is deferred before the query - same
 	// ordering argument as in ScanBand.
-	pass := turnstile.WaitTurn(ctx)
+	pass := database.WaitTurn(ctx)
 	defer pass.Return()
 	rows, err := p.db.QueryContext(ctx, stmt, args...)
 	if err != nil {

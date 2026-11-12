@@ -66,8 +66,9 @@ func TestStepKey_NamesItsFlow(t *testing.T) {
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
 	history, err := e.History(ctx, fk)
 	assert.NoError(err)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 
 	var check func(h []workflow.FlowStep)
 	check = func(h []workflow.FlowStep) {

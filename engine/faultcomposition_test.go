@@ -118,8 +118,9 @@ func TestFaultComposition_FanOutBranch(t *testing.T) {
 
 	_, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var arrivals, size, jSteps int
 	assert.NoError(db.QueryRowContext(context.Background(), "SELECT cohort_arrivals, cohort_size FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&arrivals, &size))
 	assert.Equal(2, size)
@@ -303,8 +304,9 @@ func TestFaultComposition_DeepSubgraphReviveLoss(t *testing.T) {
 	assert.NoError(err)
 	shard, _, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 
 	// Wait until the leaf child (l3) has gone terminal - at that point l2's caller is wedged. The stop fires
 	// after the leaf's completion commits; the minute bounds only a hang.

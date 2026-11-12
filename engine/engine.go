@@ -19,7 +19,6 @@ package engine
 import (
 	"context"
 	"encoding/json"
-	"maps"
 	"math"
 	"math/rand/v2"
 	"net/http"
@@ -45,7 +44,6 @@ import (
 	"github.com/microbus-io/dwarf/internal/planner"
 	"github.com/microbus-io/dwarf/internal/reaper"
 	"github.com/microbus-io/dwarf/internal/staterefs"
-	"github.com/microbus-io/dwarf/internal/turnstile"
 	"github.com/microbus-io/dwarf/internal/workers"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -252,11 +250,6 @@ type Engine struct {
 	cache candidates.Cache
 	// crew runs processStep on the candidates it pops. The engine supplies both sizing numbers.
 	crew *workers.Crew
-	// turnstiles orders access to each shard's connections by band and then by how long the job asking has
-	// been at the database, so that work already under way finishes ahead of work arriving after it. Sized at
-	// turnstilePassesPerConn turns per connection, so every path that changes a pool must re-size it - the
-	// same rule the worker ceiling, the cache and the refill interval already obey.
-	turnstiles *turnstile.Set
 	// drainStop is closed at the top of drainRuntime, before the crew is waited on.
 	drainStop chan struct{}
 	// workersDispatch is the candidate cache's sizing input, and workersResident the eagerly spawned worker
@@ -268,14 +261,6 @@ type Engine struct {
 	// There is deliberately no high-water companion: a lifetime peak is a constant within hours of
 	// startup, while max_over_time on this gauge gives a WINDOWED peak, which is the useful form.
 	dbPhaseWorkers [2]atomic.Int64
-
-	// shardRTTMs is each shard's round-trip time, probed once at Startup and HELD, so the worker ceiling
-	// can be re-derived whenever a shard's pool changes - the ceiling is a function of the pool. A failed
-	// probe is held as defaultRTTMs.
-	shardRTTMs map[int]float64
-	// shardSizing is each shard's connection budgets for the run, computed at Startup from its spec, its
-	// probed RTT and its server's max_connections. Published under shardsLock with shardRTTMs.
-	shardSizing map[int]shardSizing
 
 	// inFlightStateBytes / inFlightStateSteps are the state payload this replica is holding across host
 	// calls RIGHT NOW, and how many carriers hold it - the two halves of dwarf_state_in_flight_bytes and
@@ -860,9 +845,12 @@ func (e *Engine) Startup(ctx context.Context) error {
 	// Resolved before the shards open, so the migrations trace through the same provider as everything after.
 	tp := e.initTracer()
 	err = e.db.Open(ctx, database.Config{
-		Shards:         shards,
-		TestID:         e.testHashedID,
-		TestConnCap:    testConnCap,
+		Shards:      shards,
+		TestID:      e.testHashedID,
+		TestConnCap: testConnCap,
+		// Turns order access to each shard's connections by band and then by how long the job asking has been
+		// at the database, so that work already under way finishes ahead of work arriving after it.
+		TurnsPerConn:   turnstilePassesPerConn,
 		Logger:         e.logger,
 		TracerProvider: tp,
 		MeterProvider:  e.meterProvider,
@@ -877,43 +865,22 @@ func (e *Engine) Startup(ctx context.Context) error {
 		return errors.Trace(err)
 	}
 
-	// Measure the RTT to each shard (a few SELECT 1s on connections just opened) and hold it: the worker
-	// ceiling is a function of the shard's POOL, which changes when the fleet changes, so the ceiling is
-	// re-derived on that event (recomputeWorkerCeiling) rather than frozen here. The map is published under
-	// shardsLock because its reader is the reconcile loop, and a Shutdown/Startup restart reassigns it - an
-	// unsynchronized map read/write is a fatal throw, not a recoverable panic.
-	//
-	// The budget takes the RAW probe (an unprobed shard takes the near budget), while the worker ceiling
-	// takes the same-zone fallback - each the safe direction for what it sizes.
-	rtts := make(map[int]float64, len(shards))
-	sizing := make(map[int]shardSizing, len(shards))
-	e.shardsLock.Lock()
-	declared := maps.Clone(e.shardSpecs)
-	e.shardsLock.Unlock()
-	for idx := range shards {
-		db, dbErr := e.db.Shard(idx)
+	// Each shard's RTT and server connection limit were measured as it opened, and the sizing derives from them
+	// (shardFacts). Report what they came to.
+	sizing, rtts := e.shardFacts()
+	for _, idx := range e.db.Indices() {
+		sh, dbErr := e.db.Shard(idx)
 		if dbErr != nil {
 			continue
 		}
-		rttMs := probeRTT(ctx, db)
-		serverMax := readMaxConnections(ctx, db)
-		if serverMax == 0 && db.DriverName() != "sqlite" {
+		if sh.MaxConnections() == 0 && sh.DB().DriverName() != "sqlite" {
 			// Fails open to the unclamped budget, which on a server configured small over-connects it.
 			e.logger.WarnContext(ctx, "Reading the server's connection limit failed; the shard's connection budget is not clamped to it",
 				"shard", idx)
 		}
-		sizing[idx] = sizeShard(declared[idx], rttMs, serverMax, db.DriverName()) // zero-value spec = the default shard's sizing
-		if rttMs <= 0 {
-			rttMs = defaultRTTMs // probe failed: fall back to the measured same-zone constant
-		}
-		rtts[idx] = rttMs
-		e.logger.DebugContext(ctx, "Shard sized", "shard", idx, "rttMs", rttMs, "maxConnections", serverMax,
+		e.logger.DebugContext(ctx, "Shard sized", "shard", idx, "rttMs", rtts[idx], "maxConnections", sh.MaxConnections(),
 			"budget", sizing[idx].budget)
 	}
-	e.shardsLock.Lock()
-	e.shardRTTMs = rtts
-	e.shardSizing = sizing
-	e.shardsLock.Unlock()
 	// Forget the last run's verdicts, so a fleet still over the limit after a restart is warned about again
 	// rather than taken as already reported.
 	e.poolsLock.Lock()
@@ -939,9 +906,6 @@ func (e *Engine) Startup(ctx context.Context) error {
 	// shards join in parallel.
 	e.buildSonars(ctx)
 	e.joinFleet(ctx)
-	// A fresh turnstile set per run, like the cache and the planner: counts left over from a previous
-	// Startup would bound this one against pools it no longer has.
-	e.turnstiles = turnstile.NewSet()
 	totalConns := 0
 	for _, idx := range e.db.Indices() {
 		if _, dbErr := e.db.Shard(idx); dbErr != nil {
@@ -952,15 +916,13 @@ func (e *Engine) Startup(ctx context.Context) error {
 		slots := e.slotsOn(idx)
 		e.dispatchFlag(idx).Store(slots > 0)
 		idle, open := shardPool(sizing[idx].budget, slots)
-		// Through the shard set, which applies the test-mode cap; a push onto the shard's own handle would not.
+		// Through the shard set, which applies the test-mode cap - a push onto the shard's own handle would
+		// not - and sizes the shard's turns with the pool. Here rather than later because the workers
+		// initRuntime starts must never see an unsized shard, whose turns would let them through unordered.
 		e.db.SetShardPool(idx, idle, open)
 		if e.seams.Enabled() { // Enabled gates the assembled name and the boxed value in production
 			e.seams.Variable(engineseams.Join(engineseams.VariablePoolIdle, strconv.Itoa(idx)), idle)
 		}
-		// Sized here rather than in initRuntime because it is derived from the pool this loop just set,
-		// and the workers initRuntime starts must never see an unsized shard - which, this failing open,
-		// would dispatch entirely unordered rather than stalling.
-		e.turnstiles.Resize(idx, turnstilePassesPerConn*open)
 		e.lastAppliedSlots[idx] = slots
 		if slots > 0 {
 			// Only a dispatched shard's pool feeds the workers; a reader pool runs no step.
@@ -1095,16 +1057,17 @@ func (e *Engine) initRuntime() error {
 		// returns an error; use it. Both failures are near-impossible today (the shard set is already open,
 		// the arguments are non-nil), which is exactly why continuing quietly is the wrong default: the only
 		// way to reach here is a bug, and a loud one is cheaper than a degraded fleet.
-		db, dbErr := e.db.Shard(idx)
+		sh, dbErr := e.db.Shard(idx)
 		if dbErr != nil {
 			e.unwindRuntime()
 			return errors.New("resolving shard %d for its piston: %w", idx, dbErr)
 		}
+		db := sh.DB()
 		// One state-ref Linker per shard, built from the same handle: it needs the shard's driver name (the
 		// only dialect-dependent term in the size policy) and it caches resolved payload bytes under step
 		// ids, which are unique only within a shard.
 		e.linkers[idx] = staterefs.New(db.DriverName(), idx, e.stateCache)
-		p, perr := piston.New(idx, db, e.planner, &e.cache)
+		p, perr := piston.New(sh, e.planner, &e.cache)
 		if perr != nil {
 			e.unwindRuntime()
 			return errors.New("building piston for shard %d: %w", idx, perr)
@@ -1112,34 +1075,12 @@ func (e *Engine) initRuntime() error {
 		p.SetLogger(e.logger)
 		p.SetSeams(e.seams)
 		p.SetMaxPriority(e.maxPriority)
-		// The two halves of this shard's peer accounting, wired to each other through the engine rather than
-		// through either package knowing the other: the piston selects within the residue class its shard's
-		// Sonar publishes, and that Sonar stamps this replica as SERVING the shard only when the piston says
-		// it is turning. Both are pure reads of live state, so neither captures anything that could go stale.
-		p.SetPartitionFunc(func() (int, int, bool) { return e.partitionOn(idx) })
-		// A cycle's queries run in the one band above the common one, which the piston shares only with this
-		// shard's Sonar (below). Both are bounded by construction - the piston cycles on a derived period and
-		// takes at most three turns per cycle (two for the scan, one for the fetch), the Sonar beats on a fixed
-		// cadence - so neither can flood the band. The
-		// piston needs to be there because a cycle that queued behind the dispatch it feeds would starve the
-		// workers it fills for.
-		p.SetContextFunc(func(ctx context.Context) context.Context {
-			return e.turnstiles.ContextWithPriority(ctx, idx, priorityRefill)
-		})
+		// The two halves of this shard's peer accounting meet through the shard and here, rather than through
+		// either package knowing the other: the piston selects within the residue class the shard's Sonar
+		// publishes on the shard, and that Sonar stamps this replica as SERVING the shard only when the piston
+		// says it is turning. Both are reads of live state, so neither captures anything that could go stale.
 		if s := e.sonarFor(idx); s != nil {
 			s.SetEvidence(p.Liveness)
-			// The registry runs in the refiller's band, not outside the turnstile. Exempting it would rank
-			// it ABOVE every band - a bypasser takes a connection without queueing for one - and would put
-			// it outside the population the turn count bounds. Band 0 keeps both properties and costs it
-			// nothing: strict priority means it waits only for the NEXT turn to free rather than for the
-			// queue to drain, and it shares the band with one piston whose two loops take one turn each per
-			// cycle, against a turn count of turnstilePassesPerConn x the connections.
-			s.SetTurnFunc(func(ctx context.Context) (context.Context, func()) {
-				if e.seams.Enabled() { // Enabled gates the assembled name in production
-					e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointPeerPass, strconv.Itoa(idx)))
-				}
-				return e.dbTurnAt(ctx, idx, priorityRefill)
-			})
 		}
 		if merr := p.SetMeter(e.meter); merr != nil {
 			e.logger.ErrorContext(e.lifetimeCtx, "Building piston instruments", "shard", idx, "error", merr)
@@ -1159,7 +1100,7 @@ func (e *Engine) initRuntime() error {
 	// a sibling worker in this replica reserved the step within the last ~second, its claim CAS may still
 	// be in flight, and the piston re-selected it because an uncommitted claim still reads `pending`, so
 	// issuing our own claim would cost a round trip to be told we lost.
-	crew, perr := workers.New(&e.cache, e.turnstiles.Gate(priorityWorker), func(ctx context.Context, shard, stepID int, release func()) error {
+	crew, perr := workers.New(&e.cache, e.db.Gate(), func(ctx context.Context, shard, stepID int, release func()) error {
 		if !e.claims.TryClaim(shard, stepID) {
 			e.metricStepClaimPreempted(ctx)
 			// Release explicitly rather than leaving it to the crew's backstop: a preempted candidate does
@@ -1335,9 +1276,7 @@ func (e *Engine) drainRuntime() {
 	// are the crew's contract - see internal/workers. BOTH closes are required: a worker waiting for a
 	// turn is not blocked on the cache, so closing only the cache would leave the drain waiting forever.
 	e.cache.Close()
-	if e.turnstiles != nil {
-		e.turnstiles.Close()
-	}
+	e.db.CloseTurns()
 	e.crew.Drain()
 	close(drained)
 	withdrawal.Wait() // before anything below can close what a late withdrawal writes through

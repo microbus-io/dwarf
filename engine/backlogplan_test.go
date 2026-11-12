@@ -43,10 +43,11 @@ func TestBacklogSQL_UsesTheDueIndex(t *testing.T) {
 	e.SetHost(hosts.NewMux())
 	assert.NoError(e.SetWorkers(0))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	var explain, priceOutScans string
 	switch db.DriverName() {
 	case "pgx":

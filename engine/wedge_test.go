@@ -118,10 +118,11 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 
 	// Wait until the subgraph child exists and is running. The caller's park and the child's insert commit
 	// together, so a running child implies the caller is parked.
@@ -213,10 +214,11 @@ func TestWedgeSweep_SubgraphCallerWithNoChildFails(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 
 	// Wait for the caller to be parked on a running child (see the sibling test for why `running`, not
 	// merely parked, is the right signal).
@@ -310,10 +312,11 @@ func TestWedgeSweep_ChildLiveAgainIsLeftAlone(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	var callerStepID, childFlowID int
 	err = db.QueryRowContext(ctx, "SELECT surgraph_step_id, flow_id FROM dwarf_flows WHERE surgraph_flow_id=?", parentFlowID).
 		Scan(&callerStepID, &childFlowID)
@@ -443,10 +446,11 @@ func TestWedgeSweep_OrphanedSubgraphChildTerminated(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	var childFlowID int
 	var childToken string
 	if !assert.NoError(db.QueryRowContext(ctx,
@@ -572,10 +576,11 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 
 	// The healthy control: a flow blocked in its task, so it holds a `running` step.
 	healthyKey, err := e.Create(ctx, "orphan.verify:0/blocked", nil, nil)
@@ -661,10 +666,11 @@ func TestOrphanDetection_ChecksEveryChunk(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	awaitStartupRecoverySweep(t, e)
 
 	// Two full chunks and a short third of three ids, padded to four by repeating the last.
@@ -767,10 +773,11 @@ func TestOrphanDetection_IgnoresCompletedSuccessorWindow(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := e.db.Shard(shard)
+	sh, err := e.db.Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 
 	// Backdate ONLY the flow row and flip it to running - the step stays freshly completed, which is exactly
 	// the completed->successor window a healthy long-running flow passes through on every transition.

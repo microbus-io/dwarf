@@ -29,12 +29,12 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/cancelmarker"
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/faninmap"
 	"github.com/microbus-io/dwarf/internal/graphcache"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/staterefs"
-	"github.com/microbus-io/dwarf/internal/turnstile"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -78,7 +78,7 @@ type dispatch struct {
 
 	// Set by processStep after the host call: the turn every outcome write runs under. yieldTurn swaps it, so it
 	// is returned through a closure that reads it at the end.
-	pass turnstile.Pass
+	pass database.Pass
 
 	// Set by outcome; complete rewrites them for a Cancel-covered step it reroutes to its handler.
 	result         *workflow.RawFlow
@@ -175,9 +175,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// A turn is never refused, so a drain records the work anyway: the outcome exists nowhere but in this
 	// goroutine. The return is still mandatory - a lost one shrinks this shard's ceiling permanently - and
 	// has no crew-side backstop, the gate's turn having been handed back long ago.
-	ctx = turnstile.Away(ctx, hostCall)
+	ctx = database.Away(ctx, hostCall)
 	turnWaitStart := time.Now()
-	d.pass = turnstile.WaitTurn(ctx)
+	d.pass = database.WaitTurn(ctx)
 	// Through a CLOSURE, not `defer d.pass.Return()`: the pass is handed back and re-taken around every
 	// wait below that is not the database (yieldTurn), so the deferred call has to see whichever pass is
 	// current at the end, not the one that existed when the defer was written.
@@ -246,7 +246,8 @@ func (e *Engine) recoverStep(ctx context.Context, d *dispatch, err error) {
 	if fromStatus == "" {
 		return
 	}
-	if db, derr := e.db.Shard(d.shard); derr == nil {
+	if sh, derr := e.db.Shard(d.shard); derr == nil {
+		db := sh.DB()
 		// Its own turn: every turn this dispatch took has been handed back by now (the persist pass's
 		// defer runs before this one), and the reset is a database call like any other.
 		ctx, doneTurn := e.dbTurn(ctx, d.shard)
@@ -283,10 +284,11 @@ func (e *Engine) recoverStep(ctx context.Context, d *dispatch, err error) {
 // claim claims the step and reads its row and its flow's, then gates on the flow: a closed flow reaps the step,
 // and a flow in a newer payload format defers it. done means the dispatch ends here.
 func (e *Engine) claim(ctx context.Context, d *dispatch) (done bool, err error) {
-	db, err := e.db.Shard(d.shard)
+	sh, err := e.db.Shard(d.shard)
 	if err != nil {
 		return true, errors.Trace(err)
 	}
+	db := sh.DB()
 	d.db = db
 	// Lease = the step's own time_budget_ms (added in the claim UPDATE below) + a fixed margin, so it always
 	// outlasts the ExecuteTask deadline. Only the margin is bound; the per-step budget comes from the column.
@@ -434,7 +436,7 @@ func (e *Engine) claim(ctx context.Context, d *dispatch) (done bool, err error) 
 	e.metricStateReadBytes(ctx, d.row.workflowURL, "subgraph_result", len(d.row.subgraphResultJSON))
 
 	if workflow.IsTerminalStatus(d.row.flowStatus) {
-		reapPass := turnstile.WaitTurn(ctx)
+		reapPass := database.WaitTurn(ctx)
 		_, err = db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
 			d.row.flowStatus, parkedNone, d.stepID,
@@ -454,7 +456,7 @@ func (e *Engine) claim(ctx context.Context, d *dispatch) (done bool, err error) 
 
 // readFlowRow reads columns of the dispatch's flow row, on a turn of its own.
 func readFlowRow(ctx context.Context, d *dispatch, cols string, dest ...any) error {
-	flowPass := turnstile.WaitTurn(ctx)
+	flowPass := database.WaitTurn(ctx)
 	defer flowPass.Return()
 	return d.db.QueryRowContext(ctx, "SELECT "+cols+" FROM dwarf_flows WHERE flow_id=?", d.row.flowID).Scan(dest...)
 }
@@ -668,7 +670,7 @@ func (e *Engine) execute(ctx context.Context, d *dispatch) (execErr error, hostC
 		// the claim statement's snapshot, which can predate a Cancel whose reason commits before its mark
 		// reaches this step - the claim's re-check then sees the mark, but the reason it returned is empty.
 		// Cancel writes the reason before the mark, so a read after the claim finds it. A rare path.
-		reasonPass := turnstile.WaitTurn(ctx)
+		reasonPass := database.WaitTurn(ctx)
 		var rerr error
 		d.row.flowCancelReason, rerr = readCancelReason(ctx, d.db, d.row.flowID)
 		if e.seams.IsFault(engineseams.FaultCancelReasonReadErr) {

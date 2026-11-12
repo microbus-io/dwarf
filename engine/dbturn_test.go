@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -37,23 +38,21 @@ func TestYieldTurnAway_MovesTheClaimAndRetakesTheTurn(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	set := turnstile.NewSet()
-	set.Resize(1, 1)
-	ts := set.Turnstile(1)
-	ctx := set.ContextWithPriority(context.Background(), 1, priorityCommon)
-	pass := turnstile.WaitTurn(ctx)
+	sh := database.NewShard(1, nil)
+	sh.SetTurnLimit(1)
+	ctx, pass := sh.WaitTurn(context.Background())
 	defer func() { pass.Return() }()
 	start, _ := turnstile.ClaimFrom(ctx)
 
 	yieldTurnAway(&ctx, &pass, func() {
-		free, _ := ts.Snapshot()
+		free, _ := sh.Turns()
 		assert.Equal(1, free, "the turn is handed back for the host call")
 		time.Sleep(30 * time.Millisecond)
 	})
 	moved, _ := turnstile.ClaimFrom(ctx)
 	assert.True(moved.Since.Sub(start.Since) >= 30*time.Millisecond, "the claim moves forward by the host call, got %v", moved.Since.Sub(start.Since))
 	assert.Equal(start.Seq, moved.Seq, "it is still the same job")
-	free, _ := ts.Snapshot()
+	free, _ := sh.Turns()
 	assert.Equal(0, free, "the turn is re-taken after the host call")
 
 	func() {
@@ -65,7 +64,7 @@ func TestYieldTurnAway_MovesTheClaimAndRetakesTheTurn(t *testing.T) {
 	}()
 	again, _ := turnstile.ClaimFrom(ctx)
 	assert.True(again.Since.Sub(moved.Since) >= 30*time.Millisecond, "a panicking host call moves the claim too, got %v", again.Since.Sub(moved.Since))
-	free, _ = ts.Snapshot()
+	free, _ = sh.Turns()
 	assert.Equal(0, free, "and the turn is re-taken")
 }
 
@@ -106,10 +105,13 @@ func TestRecoveryReset_TakesATurn(t *testing.T) {
 		return
 	}
 	shard, _, _, _, _ := keys.ParseFlowKey(flowKey)
-	ts := eng.turnstiles.Turnstile(shard)
+	sh, err := eng.db.Shard(shard)
+	if !assert.NoError(err) {
+		return
+	}
 	freeSamples := 0
 	for range 20 {
-		if free, _ := ts.Snapshot(); free >= ts.Size() {
+		if free, _ := sh.Turns(); free >= sh.TurnLimit() {
 			freeSamples++
 		}
 		time.Sleep(5 * time.Millisecond)

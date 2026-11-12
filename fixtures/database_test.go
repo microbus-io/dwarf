@@ -51,8 +51,9 @@ func TestDatabase_TestModeCreatesSchema(t *testing.T) {
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	// Verify the schema was created by querying the flows table.
-	db, err := engineseams.DB(e).Shard(1)
+	sh, err := engineseams.DB(e).Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var count int
 	err = db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM dwarf_flows").Scan(&count)
 	assert.NoError(err)
@@ -94,8 +95,9 @@ func TestSetShard(t *testing.T) {
 
 	// Both shards are migrated and usable in isolation; unregistered indices route nowhere.
 	for _, n := range []int{2, 99} {
-		db, err := engineseams.DB(e).Shard(n)
+		sh, err := engineseams.DB(e).Shard(n)
 		assert.Must(assert.NoError(err))
+		db := sh.DB()
 		var count int
 		err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows").Scan(&count)
 		assert.NoError(err, "shard %d has no schema", n)

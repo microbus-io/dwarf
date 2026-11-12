@@ -11,11 +11,11 @@ One piston works one shard: it fires the same supply cycle over and over against
 own clock, with no barrier against its peers. A fleet of shards is a fleet of pistons, and an engine with
 N shards runs N of them.
 
-**It is a CONSUMER of its database, never the owner.** The handle arrives already open and is closed by
-whoever opened it, so there is no `Open`, no `Close`, and no pool control here. That is also why it is not
-called a *shard*: the shard is the database partition; this is the thing that works it. A type named
-`Shard` holding a `*sequel.DB` it does not own, next to a `ShardSet` that does, would be ambiguous at
-every call site.
+**It is a CONSUMER of its database, never the owner.** It works through the `database.Shard` it is given,
+already open and closed by whoever opened it, so there is no `Open`, no `Close`, and no pool control here: its
+queries run on the shard's database, take the shard's priority turns (stamped once per cycle,
+`ContextWithPriority`), and keep to the residue class the shard reports. That is also why it is not called a *shard*: the shard is the database
+partition; this is the thing that works it.
 
 It **owns** the pipeline, the two queries behind it, and its instruments. It **borrows** the planner and
 the candidate cache, both shared with every other piston on the replica. It publishes nothing about this
@@ -151,7 +151,7 @@ re-inserted, and a loop that has not run one has nothing to undo. Starting it fa
 already-idle piston wipe state on its first iteration, racing whatever its owner set up between `Startup`
 and then — caught by `TestFault_RefillScanErrPreservesCache`, which seeds an await-only engine's partition
 by hand. Pinned by `TestPiston_IdleWithdrawsAgainstARunningLoop`, which blocks both loops inside a cycle
-through the context func and only then goes idle; without the loop-side withdrawal the idle shard's band
+at its cycle-begin checkpoints (`CheckpointTallyBegin`, `CheckpointSupplyBegin`) and only then goes idle; without the loop-side withdrawal the idle shard's band
 claim outranks a live peer's forever (measured: peer sees band 5, not the 9 it holds).
 
 The default is *not* idle, deliberately: a fresh piston dispatches, which is the common case, and a zero
@@ -246,7 +246,7 @@ contended resource.
 **The pair is VALIDATED, not trusted** (`replicas > 1 && 0 <= ordinal < replicas`, else select everything).
 Both bad shapes are strictly worse than not partitioning: `replicas == 0` emits `step_id % 0`, which errors
 every query — so the scan fails, the Tallier clears this shard, and it stays out of planning for as long as
-the func keeps saying so. An ordinal at or past `replicas` is quieter and worse: the predicate matches
+the shard keeps reporting it. An ordinal at or past `replicas` is quieter and worse: the predicate matches
 nothing, so the piston reports `NoBand` while genuinely holding work, with no error anywhere. Today's
 intended caller guards all of this itself, but fail-open is *this package's* advertised posture, so it is
 enforced here rather than assumed of the caller.
@@ -686,7 +686,7 @@ plan flips to a sequential scan — the flip the `phase` label exists to expose.
 0.0005 file the healthy case in the first bucket and hide exactly that. The values are a public surface in their own right: a histogram whose boundaries changed
 under a dashboard is a silent regression, so treat them as fixed rather than as a tuning knob.
 
-## Two faults and three checkpoints, and why each is the exception
+## Two faults and five checkpoints, and why each is the exception
 
 `SetSeams` takes the **owner's** `*seamster.Seamster` — one catalogue of fault names per application,
 armed in one place, however many modules consult it — for the same reason `SetMeter` takes a `Meter`. Nil
@@ -706,7 +706,8 @@ exported so the owner's catalogue aliases it rather than re-spelling the string.
 claims its band, logs nothing, and simply supplies no candidates. Without the seam there is no way to drive
 `TestPiston_FailingFetchesReportNoLiveness`, and therefore no way to pin that the turn count demotes it.
 
-Three checkpoints are fired. **`CheckpointStole`** reports a fetch that took steps from outside this
+Five checkpoints are fired: three report a cycle's effect, and two hold a loop as its cycle begins (below).
+**`CheckpointStole`** reports a fetch that took steps from outside this
 replica's residue class, and it earns its place on the same boundary rule: a test proving a slow peer's work
 is picked up cannot wait out a duration, because the steal fires on the first cycle where the grace has
 elapsed and this replica's own class has run short — a function of the cadence, the peer's degradation and the backlog, none of which a test
@@ -739,6 +740,12 @@ would be a signal to inject a dependency instead; this one reports a **cycle's e
 package borrows (the cache partition), which no injection into `pipeline` would surface, since the effect is
 the point rather than the call.
 
+**`CheckpointTallyBegin` and `CheckpointSupplyBegin`** fire as each loop's cycle begins, past its idle check
+and before its first query. They are the only way to hold a loop INSIDE a cycle: a loop already past its idle
+check when `SetIdle` runs finishes afterwards and re-enters the shard it withdrew - the wedge each loop's own
+withdrawal undoes - and no clock puts a loop at that point on demand. Pinned through them by
+`TestPiston_IdleWithdrawsAgainstARunningLoop`.
+
 **`pipeline` gets none, and that is not an oversight.** Every fault a test could want of a cycle is
 reachable through its two source interfaces — which are this type — or through the per-loop cadence setters,
 and `TallyResult`/`SupplyResult` give a caller everything a counting checkpoint would. The rule that separates the two
@@ -748,8 +755,8 @@ either, for the same reason.
 
 ## Tests run against real SQL
 
-Each test stands up its own isolated, migrated database through `internal/database.ShardSet` — a
-**test-only** import, since the piston itself never opens a handle — and inserts real `dwarf_steps` rows.
+Each test stands up its own isolated, migrated database through `internal/database.ShardSet` - the piston
+itself never opens one, it is handed a `Shard` - and inserts real `dwarf_steps` rows.
 That is what lets them cover things a fake could not: the parked-step predicate, the capacity cap actually
 capping, the fetch's oldest-first ordering, and the residue class splitting a real row set disjointly across
 ordinals.

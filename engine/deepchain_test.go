@@ -49,8 +49,9 @@ func TestInterruptResume_DeepChain(t *testing.T) {
 	assert.NoError(e.SetWorkers(0))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 	awaitStartupRecoverySweep(t, e)
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 
 	g := workflow.NewGraph("Recursive")
 	g.SetURL("Call", "deepchain/call")

@@ -226,8 +226,8 @@ func runFleetOutage(t *testing.T, outage time.Duration) (worstOpen, settledOpen,
 	// The largest pool any replica holds once settled at the full fleet. The invariant is that the outage
 	// makes nothing GROW past this, so it is read from the fleet rather than restated as a constant.
 	for _, e := range fleet.snapshot() {
-		if db, err := e.db.Shard(shard); err == nil {
-			settledOpen = max(settledOpen, db.DB.Stats().MaxOpenConnections)
+		if sh, err := e.db.Shard(shard); err == nil {
+			settledOpen = max(settledOpen, sh.DB().DB.Stats().MaxOpenConnections)
 		}
 	}
 
@@ -250,10 +250,11 @@ func runFleetOutage(t *testing.T, outage time.Duration) (worstOpen, settledOpen,
 			default:
 			}
 			for _, e := range fleet.snapshot() {
-				db, err := e.db.Shard(shard)
+				sh, err := e.db.Shard(shard)
 				if err != nil {
 					continue
 				}
+				db := sh.DB()
 				r := reading{open: db.DB.Stats().MaxOpenConnections, replicas: e.replicasOn(shard)}
 				if _, _, ok := e.partitionOn(shard); ok {
 					r.partitions = 1

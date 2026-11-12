@@ -94,10 +94,11 @@ func TestFanInNoCohort_FailsInsteadOfHotLooping(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := engineseams.DB(e).Shard(shardNum)
+	sh, err := engineseams.DB(e).Shard(shardNum)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 
 	select {
 	case <-started:

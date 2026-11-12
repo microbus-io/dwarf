@@ -37,6 +37,7 @@ import (
 // rig is one piston over its own isolated, migrated database.
 type rig struct {
 	p       *Piston
+	sh      *database.Shard
 	db      *sequel.DB
 	planner *planner.Planner
 	cache   *candidates.Cache
@@ -57,22 +58,23 @@ func newRig(t *testing.T) *rig {
 		t.Fatal(err)
 	}
 	t.Cleanup(set.Close)
-	db, err := set.Shard(1)
+	sh, err := set.Shard(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	db := sh.DB()
 	cache := &candidates.Cache{}
 	cache.Init(4) // capacity 8
 	t.Cleanup(cache.Close)
 	pl := planner.New()
-	p, err := New(1, db, pl, cache)
+	p, err := New(sh, pl, cache)
 	if err != nil {
 		t.Fatal(err)
 	}
 	p.SetTallyCadence(0, 0)
 	p.SetSupplyCadence(0, 0)
 	p.SetMaxPriority(40) // the highest band the tests use; every band costs the counts statement a branch
-	return &rig{p: p, db: db, planner: pl, cache: cache}
+	return &rig{p: p, sh: sh, db: db, planner: pl, cache: cache}
 }
 
 // insertStep adds one due pending step and returns its id. Steps are inserted oldest-first by call
@@ -462,7 +464,7 @@ func TestPiston_PartitionSplitsSelectionAcrossReplicas(t *testing.T) {
 
 	seen := map[int]int{}
 	for ordinal := range 2 {
-		r.p.SetPartitionFunc(func() (int, int, bool) { return 2, ordinal, true })
+		r.setResidency(2, ordinal, true)
 		got, err := r.fetch(ctx, 5, []string{"k"}, 8)
 		assert.NoError(err)
 		for _, id := range got["k"] {
@@ -474,13 +476,13 @@ func TestPiston_PartitionSplitsSelectionAcrossReplicas(t *testing.T) {
 	}
 
 	// ok=false disables partitioning: one replica sees everything, which is right for a solo engine.
-	r.p.SetPartitionFunc(func() (int, int, bool) { return 2, 0, false })
+	r.setResidency(2, 0, false)
 	got, err := r.fetch(ctx, 5, []string{"k"}, 8)
 	assert.NoError(err)
 	assert.Equal(6, len(got["k"]))
 
-	// A nil func behaves the same as ok=false rather than panicking.
-	r.p.SetPartitionFunc(nil)
+	// A class past its expiry behaves the same as ok=false: the shard reports none.
+	r.sh.SetResidency(2, 0, true, time.Now().Add(-time.Second))
 	got, err = r.fetch(ctx, 5, []string{"k"}, 8)
 	assert.NoError(err)
 	assert.Equal(6, len(got["k"]))
@@ -504,7 +506,7 @@ func TestPiston_PartitionNarrowsTheBands(t *testing.T) {
 	r.insertStep(t, 3, 7, "bulk", 1)
 
 	for ordinal := range 2 {
-		r.p.SetPartitionFunc(func() (int, int, bool) { return 2, ordinal, true })
+		r.setResidency(2, ordinal, true)
 		band, tallies, err := r.p.ScanBand(ctx, 1)
 		if err != nil {
 			t.Fatalf("ordinal %d: %+v", ordinal, err)
@@ -633,10 +635,9 @@ func TestPiston_RunSuppliesWhileTheScanIsStalled(t *testing.T) {
 // none of its own keys at that band and dispatches nothing, which is the exact wedge SetIdle exists to
 // prevent. The band scan runs for seconds on a deep backlog, so the window is not a sliver.
 //
-// Both halves are staged rather than raced, in the one order that leaves each loop something to undo. The
-// context func is applied at the START of a cycle, so blocking in it holds a loop past its idle check, and each
-// loop gets its own context so the two are released one at a time - which is why the test starts the two loops
-// itself, exactly as Run does. The tally loop goes first and is frozen at CheckpointTallyDone, after its scan
+// Both halves are staged rather than raced, in the one order that leaves each loop something to undo. Each loop's
+// cycle-begin checkpoint is past its idle check, so breaking it holds the loop inside a cycle, and the two are
+// separate checkpoints, released one at a time. The test starts the two loops itself, exactly as Run does. The tally loop goes first and is frozen at CheckpointTallyDone, after its scan
 // re-entered the shard and before its own idle check; only then does the supply loop run, so it plans from
 // that stale tally and re-pushes. Released together, the supply loop usually plans from the tally SetIdle had
 // already cleared, pushes nothing, and its withdrawal goes untested.
@@ -650,27 +651,19 @@ func TestPiston_IdleWithdrawsAgainstARunningLoop(t *testing.T) {
 	r.p.SetSeams(sm)
 	r.insertStep(t, 1, 5, "alpha", 1)
 
-	type loopKey struct{}
-	type loopHold struct {
-		in, release chan struct{}
-		once        sync.Once
-	}
-	holds := map[string]*loopHold{
-		"tally":  {in: make(chan struct{}), release: make(chan struct{})},
-		"supply": {in: make(chan struct{}), release: make(chan struct{})},
-	}
-	r.p.SetContextFunc(func(ctx context.Context) context.Context {
-		h := holds[ctx.Value(loopKey{}).(string)]
-		h.once.Do(func() { close(h.in) })
-		<-h.release // a closed channel lets every later cycle straight through
-		return ctx
-	})
+	// Each loop is held at its cycle's begin checkpoint, past its idle check.
+	sm.Break(CheckpointTallyBegin)
+	sm.Break(CheckpointSupplyBegin)
+	defer sm.Resume(CheckpointTallyBegin)
+	defer sm.Resume(CheckpointSupplyBegin)
+	tallyIn := sm.Waiter(CheckpointTallyBegin)
+	supplyIn := sm.Waiter(CheckpointSupplyBegin)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var loops sync.WaitGroup
 	loops.Add(2)
-	go func() { defer loops.Done(); r.p.runTallier(context.WithValue(ctx, loopKey{}, "tally")) }()
-	go func() { defer loops.Done(); r.p.runSupplier(context.WithValue(ctx, loopKey{}, "supply")) }()
+	go func() { defer loops.Done(); r.p.runTallier(ctx) }()
+	go func() { defer loops.Done(); r.p.runSupplier(ctx) }()
 	defer func() { cancel(); loops.Wait() }()
 
 	hang := time.After(60 * time.Second)
@@ -682,19 +675,19 @@ func TestPiston_IdleWithdrawsAgainstARunningLoop(t *testing.T) {
 			t.Fatal(what)
 		}
 	}
-	await(holds["tally"].in, "the tally loop never entered a cycle")
-	await(holds["supply"].in, "the supply loop never entered a cycle")
+	await(tallyIn, "the tally loop never entered a cycle")
+	await(supplyIn, "the supply loop never entered a cycle")
 	r.p.SetIdle(true) // both loops are inside a cycle, past their idle checks
 
 	sm.Break(CheckpointTallyDone)
 	defer sm.Resume(CheckpointTallyDone)
 	frozen := sm.Waiter(CheckpointTallyDone)
-	close(holds["tally"].release)
+	sm.Resume(CheckpointTallyBegin)
 	await(frozen, "the held tally cycle never completed")
 	assert.True(r.planner.Plan(1, 8).Tallied, "the held scan re-entered the shard after SetIdle")
 
 	pushed := sm.Waiter(CheckpointCycleDone)
-	close(holds["supply"].release)
+	sm.Resume(CheckpointSupplyBegin)
 	await(pushed, "the held supply cycle never pushed from the stale tally")
 
 	// Each withdrawal must take, and must STAY taken: an idle loop starts no further cycle, so once it has
@@ -889,7 +882,7 @@ func TestPiston_PartitionPairIsValidated(t *testing.T) {
 		{"solo replica", 1, 0, true},
 		{"not ok", 4, 1, false},
 	} {
-		r.p.SetPartitionFunc(func() (int, int, bool) { return tc.replicas, tc.ordinal, tc.ok })
+		r.setResidency(tc.replicas, tc.ordinal, tc.ok)
 		band, tallies, err := r.p.ScanBand(ctx, 1)
 		assert.NoError(err, "%s must not error the scan", tc.name)
 		if assert.Equal(1, len(tallies), "%s must select everything, not nothing", tc.name) {
@@ -918,18 +911,20 @@ func TestPiston_NewValidates(t *testing.T) {
 
 	assert.Equal(1, r.p.Shard())
 	assert.Equal(pipeline.DefaultInterval, func() time.Duration {
-		p, _ := New(1, r.db, r.planner, r.cache)
+		p, _ := New(r.sh, r.planner, r.cache)
 		i, _ := p.TallyCadence()
 		return i
 	}(), "a fresh piston inherits the pipeline's paced default")
 
-	_, err := New(0, r.db, r.planner, r.cache)
+	_, err := New(nil, r.planner, r.cache)
+	assert.Error(err, "shard is required")
+	_, err = New(database.NewShard(0, r.db), r.planner, r.cache)
 	assert.Error(err, "shard must be positive")
-	_, err = New(1, nil, r.planner, r.cache)
+	_, err = New(database.NewShard(1, nil), r.planner, r.cache)
 	assert.Error(err, "db is required")
-	_, err = New(1, r.db, nil, r.cache)
+	_, err = New(r.sh, nil, r.cache)
 	assert.Error(err, "planner is required")
-	_, err = New(1, r.db, r.planner, nil)
+	_, err = New(r.sh, r.planner, nil)
 	assert.Error(err, "cache is required")
 }
 
@@ -1231,7 +1226,7 @@ func TestPiston_StealPredicateIsAlwaysRelaxed(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	r := newRig(t)
-	r.p.SetPartitionFunc(func() (int, int, bool) { return 2, 0, true })
+	r.setResidency(2, 0, true)
 
 	sql, args := func() (string, []any) {
 		rep, ord := r.p.resolvePartition()
@@ -1258,7 +1253,7 @@ func TestPiston_StealPredicateIsAlwaysRelaxed(t *testing.T) {
 	r.p.SetStealAfter(defaultStealAfter)
 
 	// Nothing to relax when there is no partition: a solo replica already selects everything.
-	r.p.SetPartitionFunc(func() (int, int, bool) { return 1, 0, true })
+	r.setResidency(1, 0, true)
 	sql, _ = func() (string, []any) {
 		rep, ord := r.p.resolvePartition()
 		return r.p.partitionPredicate(rep, ord, r.p.stealGrace())
@@ -1280,7 +1275,7 @@ func TestPiston_FetchPrefersItsOwnClass(t *testing.T) {
 	ctx := context.Background()
 	r := newRig(t)
 	// Ordinal 0 of 2: this replica owns EVEN step ids, so odd ones are foreign.
-	r.p.SetPartitionFunc(func() (int, int, bool) { return 2, 0, true })
+	r.setResidency(2, 0, true)
 	r.p.SetTallyCadence(500*time.Millisecond, 0)
 	r.p.SetSupplyCadence(500*time.Millisecond, 0)
 	r.p.SetStealAfter(4) // grace = 2s
@@ -1326,7 +1321,7 @@ func TestPiston_FetchSurfacesItsShareFromAForeignHead(t *testing.T) {
 	ctx := context.Background()
 	r := newRig(t)
 	// Ordinal 0 of 2: this replica owns EVEN step ids, so odd ones are foreign.
-	r.p.SetPartitionFunc(func() (int, int, bool) { return 2, 0, true })
+	r.setResidency(2, 0, true)
 	r.p.SetTallyCadence(500*time.Millisecond, 0)
 	r.p.SetSupplyCadence(500*time.Millisecond, 0)
 	r.p.SetStealAfter(4) // grace = 2s
@@ -1361,7 +1356,7 @@ func TestPiston_StealTakesOnlyLongDueForeignSteps(t *testing.T) {
 	ctx := context.Background()
 	r := newRig(t)
 	// Ordinal 0 of 2: this replica owns EVEN step ids, so odd ones are foreign.
-	r.p.SetPartitionFunc(func() (int, int, bool) { return 2, 0, true })
+	r.setResidency(2, 0, true)
 	// The grace has to dominate any stall of the database, because "young" is measured against the DATABASE
 	// clock from the moment a step became due - so the round trips between the re-stamp and the fetch count
 	// against it. A 200ms grace was outrun by inserts under -race on a busy box, and a 2s grace by a loaded
@@ -1412,7 +1407,7 @@ func TestPiston_StealReachesPastTheNeighbourAfterTwoGraces(t *testing.T) {
 	ctx := context.Background()
 	r := newRig(t)
 	// Ordinal 0 of 3: this replica owns step_id%3==0, its neighbour's class is 1, and class 2 is the far one.
-	r.p.SetPartitionFunc(func() (int, int, bool) { return 3, 0, true })
+	r.setResidency(3, 0, true)
 	// FetchSteps is driven directly, so the cadence only feeds stealGrace: 10 minutes. Age only grows, so the
 	// neighbour's admission cannot be lost to delay; what the margin protects is the far class staying out,
 	// which holds while less than 5 minutes pass between the first backdate and its fetch - past any stall of
@@ -1490,4 +1485,9 @@ func TestPiston_DispatchLag(t *testing.T) {
 	r.p.SetIdle(true)
 	_, ok = r.p.DispatchLag()
 	assert.False(ok, "an idle piston reports nothing")
+}
+
+// setResidency sets the shard's residue class for the rest of the test.
+func (r *rig) setResidency(replicas, ordinal int, ok bool) {
+	r.sh.SetResidency(replicas, ordinal, ok, time.Now().Add(time.Hour))
 }

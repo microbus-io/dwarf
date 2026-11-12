@@ -60,8 +60,9 @@ func TestForkStraggler_NormalizedToTerminated(t *testing.T) {
 	}
 	shardNum, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := engineseams.DB(e).Shard(shardNum)
+	sh, err := engineseams.DB(e).Shard(shardNum)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 
 	// The completed entry step A is the fork point.
 	var aStepID, aStepHour int

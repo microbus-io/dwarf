@@ -101,8 +101,9 @@ func TestSpawnResolveVsTerminate_Deterministic(t *testing.T) {
 
 	shardNum, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.db.Shard(shardNum)
+	sh, err := e.db.Shard(shardNum)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var stepStatus string
 	var subgraphDone int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status, subgraph_done FROM dwarf_steps WHERE flow_id=? AND task_name='Call'", flowID).Scan(&stepStatus, &subgraphDone))

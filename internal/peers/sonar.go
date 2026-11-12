@@ -21,12 +21,13 @@ limitations under the License.
 // with N shards runs N of them, and nothing here spans shards: every timestamp in the registry belongs to
 // the shard that stamped it, so a fleet view assembled from two shards would be comparing two clocks.
 //
-// A Sonar is a CONSUMER of its database. The handle arrives already open and is closed by whoever opened
-// it, so there is no Open, no Close, and no say over pool sizes.
+// A Sonar is a CONSUMER of its shard. The shard arrives already open and is closed by whoever opened it, so
+// there is no Open, no Close, and no say over pool sizes. Each pass takes a priority turn on the shard, and the
+// work partition it reads is published on the shard for the shard's other actors.
 //
 // # Driving one
 //
-//	s, err := peers.New(engineID, shard, db)
+//	s, err := peers.New(engineID, shard) // shard is a *database.Shard
 //	s.SetProfile(peers.Profile{RTT: rtt, Working: true, OrderingSeq: seq}) // optional; what this replica states in its row
 //	s.SetEvidence(dispatcher.Liveness) // optional; without it this replica never claims to dispatch
 //	s.Join(ctx)                        // announce, wait for peers to notice, then read
@@ -72,6 +73,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/sequel"
@@ -93,6 +95,12 @@ const (
 	// It deliberately does NOT gate Leave: a test still has to be able to tear its fleet down.
 	FaultBeatErr = "peerBeatErr"
 )
+
+// CheckpointPass is fired, scoped by shard, as a registry pass - a beat and a read - begins, before it takes its
+// turn. Passes run one at a time, so a visit also says the previous pass is over: two visits counted from a moment
+// mean a whole read ran after it. That is how an owner's test waits for a reading that was attempted, where
+// BlindFor grows with the clock whether or not anything read.
+const CheckpointPass = "peerPass"
 
 // The cadences and windows. Only the read cadence is settable (SetCadence), because only it prices
 // something the owner can see; the rest are this package's policy, derived from the asymmetry below rather
@@ -206,6 +214,7 @@ type Sonar struct {
 	// engineID identifies this replica in the registry. Immutable: it is the registry's primary key, and a
 	// replica that changed it mid-life would leave a stale row behind.
 	engineID int64
+	sh       *database.Shard
 	shard    int
 	db       *sequel.DB
 
@@ -220,11 +229,9 @@ type Sonar struct {
 
 	evidence atomic.Pointer[EvidenceFunc]
 	// cut is the owner's rule for which ranks dispatch - see SetCut.
-	cut atomic.Pointer[CutFunc]
-	// passTurn admits each pass to the owner's database metering - see SetTurnFunc.
-	passTurn atomic.Pointer[TurnFunc]
-	logger   atomic.Pointer[slog.Logger]
-	seams    atomic.Pointer[seamster.Seamster]
+	cut    atomic.Pointer[CutFunc]
+	logger atomic.Pointer[slog.Logger]
+	seams  atomic.Pointer[seamster.Seamster]
 
 	// Published state: written only by the driving goroutine, read by the owner from anywhere.
 	replicas atomic.Int32
@@ -291,15 +298,19 @@ type Sonar struct {
 	sleep func(ctx context.Context, d time.Duration) bool
 }
 
-// New returns a Sonar for one shard over an already-open database handle.
+// New returns a Sonar for one already-open shard.
 //
 // engineID leads because it is required rather than optional: it is the registry's PRIMARY KEY, so an unset
 // one is not a harmless default - every unconfigured replica in the fleet would collide on id 0 and fight
 // over a single row. A setter would make that state reachable; a constructor argument does not.
-func New(engineID int64, shard int, db *sequel.DB) (*Sonar, error) {
+func New(engineID int64, sh *database.Shard) (*Sonar, error) {
 	if engineID <= 0 {
 		return nil, errors.New("engine id must be positive, got %d", engineID)
 	}
+	if sh == nil {
+		return nil, errors.New("shard is required")
+	}
+	shard, db := sh.Index(), sh.DB()
 	if shard < 1 {
 		return nil, errors.New("shard must be positive, got %d", shard)
 	}
@@ -307,7 +318,7 @@ func New(engineID int64, shard int, db *sequel.DB) (*Sonar, error) {
 		return nil, errors.New("db is required")
 	}
 	s := &Sonar{
-		engineID: engineID, shard: shard, db: db, now: time.Now, sleep: sleep,
+		engineID: engineID, sh: sh, shard: shard, db: db, now: time.Now, sleep: sleep,
 		scan: scanInterval, beat: beatInterval, fresh: freshWindow,
 		dispatch: dispatchWindow, straggler: stragglerAge, pruneAfter: pruneHealthyFor,
 	}
@@ -320,34 +331,6 @@ func New(engineID int64, shard int, db *sequel.DB) (*Sonar, error) {
 	s.profile.Store(&Profile{Working: true})
 	s.part.Store(&partition{ordinal: -1})
 	return s, nil
-}
-
-// TurnFunc admits a pass to whatever the owner meters its database with, returning the context the pass's
-// calls run on and the release to call when they are done - see SetTurnFunc.
-type TurnFunc func(context.Context) (context.Context, func())
-
-// SetTurnFunc supplies an admission step taken at the START of each pass and released at its end, so an
-// owner that orders access to its database can order this too, without this package knowing what the
-// ordering is. Nil (the default) admits every pass immediately.
-//
-// It returns a CONTEXT AND A RELEASE rather than just a context, because a derivation alone would be
-// inert: the owner has to be able to hold something for the duration of the pass and hand it back, and a
-// hook that only decorated the context would look wired while metering nothing.
-//
-// Whatever the owner puts there, IT MUST NOT BE ABLE TO STALL A PASS. A Sonar that cannot beat reads as
-// blind, and a blind Sonar makes its replica stop partitioning and hold its last fleet count - so anything
-// that throttled this in proportion to load would let load reshape the fleet. Ordering a pass ahead of
-// ordinary work is fine; making it queue behind ordinary work is not.
-//
-// Once per PASS rather than once per statement, because a pass is one unit of work: the beat and the read
-// that follows it describe the same moment, and re-deriving between them would present them as two
-// arrivals.
-func (s *Sonar) SetTurnFunc(fn TurnFunc) {
-	if fn == nil {
-		s.passTurn.Store(nil)
-		return
-	}
-	s.passTurn.Store(&fn)
 }
 
 // SetEvidence supplies the one fact a Sonar cannot observe for itself: whether the owner's dispatcher for
@@ -545,10 +528,16 @@ func (s *Sonar) SetProfile(p Profile) {
 // partitioned within a round trip rather than within a cadence.
 func (s *Sonar) Partition() (replicas, ordinal int, ok bool) {
 	p := s.part.Load()
-	if s.blind(s.now()) || p.dispatchers < 2 || p.ordinal < 0 || p.ordinal >= p.dispatchers {
+	if s.blind(s.now()) || !p.divides() {
 		return p.dispatchers, 0, false
 	}
 	return p.dispatchers, p.ordinal, true
+}
+
+// divides reports whether the pair splits work: two dispatchers or more, and this replica's ordinal among them.
+// Partition and the pair published on the shard both apply it, so the two cannot disagree on a reading.
+func (p *partition) divides() bool {
+	return p.dispatchers >= 2 && p.ordinal >= 0 && p.ordinal < p.dispatchers
 }
 
 // BlindFor is how long it has been since the registry was last read successfully. Zero on a healthy Sonar.
@@ -759,13 +748,16 @@ func (s *Sonar) register(ctx context.Context) error {
 // first turn lands milliseconds after Run starts, long before the next beat would. The same early publish
 // applies when a replica STOPS serving, which is the direction that strands work.
 func (s *Sonar) pass(ctx context.Context) {
-	// Held for the whole pass: the beat and the read that follows it are one unit of work, and the read
-	// hands back rows that keep a connection until they are scanned.
-	if fn := s.passTurn.Load(); fn != nil {
-		var release func()
-		ctx, release = (*fn)(ctx)
-		defer release()
+	if sm := s.seams.Load(); sm.Enabled() { // Enabled gates the assembled name in production
+		sm.Checkpoint(ctx, seamsJoin(CheckpointPass, strconv.Itoa(s.shard)))
 	}
+	// One priority turn, held for the whole pass: the beat and the read that follows it are one unit of work, and
+	// the read hands back rows that keep a connection until they are scanned. A pass must not queue behind
+	// ordinary work: a Sonar that cannot beat reads as blind, and a blind Sonar makes its replica stop
+	// partitioning and hold its last fleet count, so a pass throttled by load would let load reshape the fleet.
+	// It cannot flood the band either, since it runs on a fixed cadence.
+	ctx, turn := s.sh.WaitPriorityTurn(ctx)
+	defer turn.Return()
 	now := s.now()
 	s.lastPass = now
 	turns, dispatched := s.dispatchEvidence()
@@ -938,7 +930,12 @@ func (s *Sonar) observe(ctx context.Context, rows []peer, err error) {
 	// The dispatch pair is published as observed, with no hysteresis: under-counting only makes replicas
 	// select overlapping candidates, so there is nothing here worth debouncing, and delaying a REMOVAL would
 	// keep a residue class assigned to a replica that has stopped serving it.
-	s.part.Store(&partition{dispatchers: v.dispatchers, ordinal: v.ordinal})
+	p := &partition{dispatchers: v.dispatchers, ordinal: v.ordinal}
+	s.part.Store(p)
+	// And on the shard, for the shard's other actors, until the blindness grace runs out: a Sonar that stops
+	// reading publishes nothing more, so the shard reports none past it, as Partition does. Set from the wall
+	// clock, which every reader of the shard compares it with, not from the injected one.
+	s.sh.SetResidency(p.dispatchers, p.ordinal, p.divides(), time.Now().Add(2*s.scan))
 
 	// A FALL is not believed on the strength of the reading that ended a blind spell, while a RISE always is.
 	// The asymmetry is the whole point: a rise shrinks pools, which is safe, whereas a fall grows every pool

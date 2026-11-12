@@ -64,10 +64,11 @@ func TestMySQLClaim_ReadKeepsItsOwnGeneration(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer e.Shutdown(ctx)
-			db, err := e.db.Shard(1)
+			sh, err := e.db.Shard(1)
 			if err != nil {
 				t.Fatal(err)
 			}
+			db := sh.DB()
 			if d := db.DriverName(); d != "mysql" && d != "mariadb" {
 				t.Skip("the two-statement claim is MySQL and MariaDB only")
 			}

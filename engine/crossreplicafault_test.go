@@ -162,10 +162,10 @@ func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
 
 	// While A's lease is still valid (just claimed), the flow is stranded `running` - B cannot yet recover a
 	// live lease, so this read is stable.
-	dbB, err := repB.db.Shard(1)
+	shB, err := repB.db.Shard(1)
 	if assert.NoError(err) {
 		var status string
-		assert.NoError(dbB.QueryRowContext(ctx, "SELECT status FROM dwarf_flows").Scan(&status))
+		assert.NoError(shB.DB().QueryRowContext(ctx, "SELECT status FROM dwarf_flows").Scan(&status))
 		assert.Equal(workflow.StatusRunning, status)
 	}
 

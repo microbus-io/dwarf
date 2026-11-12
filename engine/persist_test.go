@@ -164,8 +164,9 @@ func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testi
 	assert.Equal(int32(1), runs.Load(), "the task must execute exactly once, not once per lease expiry forever")
 
 	// And it is genuinely terminal - not a step left `running` for lease recovery to pick up again.
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var status string
 	var errMsg string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status, error FROM dwarf_steps WHERE task_name='A'").Scan(&status, &errMsg))
@@ -223,8 +224,9 @@ func TestPersist_LeaseExtensionStatusGuard(t *testing.T) {
 		e.SetHost(hosts.NewMux())
 		e.persistBackoff = shortPersistBackoff
 		assert.Must(assert.NoError(e.Startup(t.Context())))
-		db, err := e.db.Shard(1)
+		sh, err := e.db.Shard(1)
 		assert.Must(assert.NoError(err))
+		db := sh.DB()
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, graph_hash, status, root_flow_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 			"ftok", "u", "W", []byte("{}"), "", workflow.StatusRunning, 1, 1000,
@@ -312,8 +314,9 @@ func TestPersist_PermanentErrorOnARetryStopsTheLadder(t *testing.T) {
 	e.SetHost(hosts.NewMux())
 	e.persistBackoff = shortPersistBackoff
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	// A running step this worker holds under generation 5, out of the engine's own reach (see
 	// TestPersist_LeaseExtensionStatusGuard), so the lease extension finds it ours and the ladder starts.
 	_, err = db.ExecContext(ctx,

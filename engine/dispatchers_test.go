@@ -254,8 +254,9 @@ func TestDispatchers_PinnedRestartKeepsOneOrder(t *testing.T) {
 			assert.Must(assert.NoError(keeper.Startup(t.Context())))
 			defer keeper.Shutdown(t.Context())
 			for shard, seq := range c.stored {
-				db, err := keeper.db.Shard(shard)
+				sh, err := keeper.db.Shard(shard)
 				assert.Must(assert.NoError(err))
+				db := sh.DB()
 				_, err = db.ExecContext(t.Context(),
 					"INSERT INTO dwarf_peers (engine_id, seen_at, ordering_seq, working, draining, rtt_us) VALUES (?, NOW_UTC(), ?, 1, 0, 0)",
 					pinned, seq)
@@ -272,8 +273,9 @@ func TestDispatchers_PinnedRestartKeepsOneOrder(t *testing.T) {
 
 			seqs := map[int]int64{}
 			for _, shard := range []int{1, 2} {
-				db, err := e.db.Shard(shard)
+				sh, err := e.db.Shard(shard)
 				assert.Must(assert.NoError(err))
+				db := sh.DB()
 				var seq int64
 				assert.NoError(db.QueryRowContext(t.Context(), "SELECT ordering_seq FROM dwarf_peers WHERE engine_id=?", pinned).Scan(&seq))
 				seqs[shard] = seq
@@ -330,8 +332,9 @@ func TestDispatchers_ReaderReplicaHoldsTheReaderPoolAndRunsNothing(t *testing.T)
 	assert.NoError(e.SetEngineID(readerID))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 24}))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	assert.True(e.dispatchesOn(1), "alone, the replica dispatches")
 
 	joinFakeFleet(t, e)
@@ -429,8 +432,9 @@ func TestDispatchers_DemotedReplicaHoldsItsPoolUntilInFlightStepsFinish(t *testi
 	spec := ShardSpec{Index: 1, MaxConnections: 24} // two dispatcher slots, and a budget whose 3-way share beats the reader pool
 	assert.NoError(e.SetShard(spec))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	assert.True(e.dispatchesOn(1), "alone, the replica dispatches")
 	// Held, it drains alongside a 2-slot cut, so the budget divides three ways.
 	_, heldOpen := shardPool(spec.MaxConnections, 3)
@@ -462,7 +466,7 @@ func TestDispatchers_DemotedReplicaHoldsItsPoolUntilInFlightStepsFinish(t *testi
 	assert.True(e.pistons[1].Idle())
 	assert.Equal(int64(flows), e.inFlightOn(1))
 	assert.Equal(heldOpen, db.DB.Stats().MaxOpenConnections, "the pool is held while steps are in flight")
-	assert.Equal(turnstilePassesPerConn*heldOpen, e.turnstiles.Turnstile(1).Size(), "and so is the turnstile")
+	assert.Equal(turnstilePassesPerConn*heldOpen, turnLimit(t, e, 1), "and so is the turnstile")
 	assert.Equal(1, awaitDrainingRow(t, db, readerID, 1), "the drain is stated for peers to count")
 
 	// Another replica starts draining: the held share narrows with every other pool on the shard.
@@ -483,7 +487,7 @@ func TestDispatchers_DemotedReplicaHoldsItsPoolUntilInFlightStepsFinish(t *testi
 	assert.Equal(int64(0), e.inFlightOn(1))
 	assert.Equal(0, awaitDrainingRow(t, db, readerID, 0), "the statement is cleared once the pool is released")
 	// Read after the statement clears: the push resizes the turnstile after the pool, before the statement.
-	assert.Equal(turnstilePassesPerConn*readerOpenConns, e.turnstiles.Turnstile(1).Size())
+	assert.Equal(turnstilePassesPerConn*readerOpenConns, turnLimit(t, e, 1))
 	assert.Equal(int32(flows), runs.Load(), "no step ran twice")
 }
 
@@ -517,8 +521,9 @@ func TestDispatchers_PromotionWhileHeldClearsTheHold(t *testing.T) {
 	spec := ShardSpec{Index: 1, MaxConnections: 24} // two dispatcher slots, and a budget whose 3-way share beats the reader pool
 	assert.NoError(e.SetShard(spec))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	_, soloOpen := shardPool(spec.MaxConnections, 1)
 	_, heldOpen := shardPool(spec.MaxConnections, 3)
 
@@ -578,8 +583,9 @@ func TestDispatchers_RankedReplicaSplitsTheBudget(t *testing.T) {
 	assert.NoError(e.SetEngineID(dispatcherID))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 
 	joinFakeFleet(t, e)
 	slots := dispatcherSlots(len(fakeFleet) + 1)
@@ -606,8 +612,9 @@ func TestDispatchers_DrainingReplicasDivideTheBudget(t *testing.T) {
 	spec := ShardSpec{Index: 1, MaxConnections: 48}
 	assert.NoError(e.SetShard(spec))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 
 	joinFakeFleet(t, e)
 	slots := dispatcherSlots(len(fakeFleet) + 1)
@@ -642,8 +649,9 @@ func TestDispatchers_ZeroWorkersReplicaRegistersButNeverRanks(t *testing.T) {
 	assert.NoError(e.SetWorkers(0))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	var working int
 	var rttUs int64
 	assert.NoError(db.QueryRowContext(t.Context(),
@@ -667,8 +675,9 @@ func TestDispatchers_ZeroWorkersPeersDoNotDivideTheBudget(t *testing.T) {
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 
 	for _, id := range []int64{3001, 3002, 3003} {
 		_, err := db.ExecContext(t.Context(),
@@ -820,8 +829,9 @@ func TestDispatchers_DrainGivesUpTheSlotBeforeWaiting(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	e.SetHost(mux)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	_, err = e.Create(ctx, "drain/g", nil, nil)
 	assert.NoError(err)
 	<-started
@@ -871,8 +881,9 @@ func TestDispatchers_DrainStopsClaimingDispatch(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	e.SetHost(mux)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	_, err = e.Create(ctx, "drainidle/g", nil, nil)
 	assert.NoError(err)
 	<-started
@@ -970,8 +981,9 @@ func TestDispatchers_DrainingReplicasClassPassesToAPeer(t *testing.T) {
 	_, _, heldFlowID, _, err := keys.ParseFlowKey(heldKey)
 	assert.NoError(err)
 	<-started
-	db, err := creator.db.Shard(1)
+	sh, err := creator.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	// The held task must be the drainer's, or nothing holds its drain open and the handoff is never exercised.
 	var claimer int64
 	assert.NoError(db.QueryRowContext(ctx, "SELECT engine_id FROM dwarf_steps WHERE flow_id=?", heldFlowID).Scan(&claimer))
@@ -1059,8 +1071,9 @@ func twoReplicaFleet(t *testing.T, dispHost, readHost Host) (disp, reader *Engin
 	}
 	disp = mk(dispatcherID, dispHost)
 	assert.Must(assert.NoError(disp.Startup(t.Context())))
-	db, err := disp.db.Shard(1)
+	sh, err := disp.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	_, err = db.ExecContext(t.Context(), "INSERT INTO dwarf_peers (engine_id, seen_at, ordering_seq) VALUES (1002, NOW_UTC(), ?)", time.Now().UnixMilli()-3600000)
 	assert.NoError(err)
 	reader = mk(readerID, readHost)
@@ -1194,8 +1207,9 @@ func TestDispatchers_RecoverySweepSkipsShardsThisReplicaOnlyReads(t *testing.T) 
 	// forged below before the reader half can observe it.
 	awaitStartupRecoverySweep(t, e)
 
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
+	db := sh.DB()
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -1000) WHERE status='"+workflow.StatusRunning+"'")
 	assert.NoError(err)
 	expired := func() int {
@@ -1252,4 +1266,14 @@ func TestDispatchers_WeightsOverrideTheOwnShardPreference(t *testing.T) {
 		}
 		e.Shutdown(t.Context())
 	}
+}
+
+// turnLimit is how many turns shard admits at once.
+func turnLimit(t *testing.T, e *Engine, shard int) int {
+	t.Helper()
+	sh, err := e.db.Shard(shard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sh.TurnLimit()
 }

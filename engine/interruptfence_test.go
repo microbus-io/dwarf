@@ -142,8 +142,9 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 		e := NewEngineUnderTest(t.Name())
 		e.SetHost(hosts.NewMux())
 		assert.Must(assert.NoError(e.Startup(t.Context())))
-		db, err := e.db.Shard(1)
+		sh, err := e.db.Shard(1)
 		assert.Must(assert.NoError(err))
+		db := sh.DB()
 
 		// Parent (root) flow and its caller step, parked on the subgraph.
 		_, err = db.ExecContext(ctx,

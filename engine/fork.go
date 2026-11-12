@@ -51,10 +51,11 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	if err := checkFieldNames(overrides); err != nil {
 		return "", errors.Trace(err)
 	}
-	db, err := e.db.Shard(shardNum)
+	sh, err := e.db.Shard(shardNum)
 	if err != nil {
 		return "", errors.New("step not found", http.StatusNotFound) // an unknown shard reads as an unknown step
 	}
+	db := sh.DB()
 
 	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
 	// calls has to know about turns. Its age is stamped here, so it queues behind work already running

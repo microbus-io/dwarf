@@ -85,10 +85,11 @@ func TestLongDuration_SleepAndRetryBackoff(t *testing.T) {
 			if !assert.NoError(err) {
 				return
 			}
-			db, err := e.db.Shard(shard)
+			sh, err := e.db.Shard(shard)
 			if !assert.NoError(err) {
 				return
 			}
+			db := sh.DB()
 			var entryStepID int
 			assert.NoError(db.QueryRowContext(ctx,
 				"SELECT step_id FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&entryStepID))

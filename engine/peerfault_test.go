@@ -79,10 +79,11 @@ func TestPeerFault_BlindHoldsThePoolsAndFailsOpen(t *testing.T) {
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
-	db, err := e.db.Shard(1)
+	sh, err := e.db.Shard(1)
 	if !assert.NoError(err) {
 		return
 	}
+	db := sh.DB()
 	addPeerRow(t, e, 5001)
 	assert.Equal(2, e.replicasOn(1))
 	assert.Equal(shareOf(2), awaitPoolSize(t, db, shareOf(2)), "1/2 share at two replicas")
@@ -128,14 +129,16 @@ func TestPeerFault_BlindnessIsPerShard(t *testing.T) {
 	assert.NoError(e.SetShard(ShardSpec{Index: 2, MaxConnections: 48}))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
-	db1, err := e.db.Shard(1)
+	sh1, err := e.db.Shard(1)
 	if !assert.NoError(err) {
 		return
 	}
-	db2, err := e.db.Shard(2)
+	db1 := sh1.DB()
+	sh2, err := e.db.Shard(2)
 	if !assert.NoError(err) {
 		return
 	}
+	db2 := sh2.DB()
 	addPeerRow(t, e, 6001) // lands on every shard
 	assert.Equal(shareOf(2), awaitPoolSize(t, db1, shareOf(2)))
 	assert.Equal(shareOf(2), awaitPoolSize(t, db2, shareOf(2)))
