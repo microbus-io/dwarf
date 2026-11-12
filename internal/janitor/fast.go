@@ -22,33 +22,113 @@ import (
 	"sync"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
+	"github.com/microbus-io/errors"
+	"github.com/microbus-io/seamster"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
-// JobFastArchiving is the fast archiving job's name.
+// JobFastArchiving is the name the engine adds its fast archiving job under.
 const JobFastArchiving = "fast_archiving"
 
-// fastArchiving is the job that archives closed trees as they come due: one batch a round, the closed roots after its
+// The reason a closed tree is deleted without archiving, the reason attribute of dwarf_flows_reaped.
+const ReasonNoRetention = "no_retention"
+
+// The default settings, the engine's.
+const (
+	defaultGrace      = time.Minute
+	defaultBatchRoots = 512
+	defaultBatchRows  = 4096
+	defaultBatchBytes = 16 << 20
+)
+
+// probeInterval is how often, at most, a busy fast archiving job reads the shard's oldest due closed root, for the
+// archive lag and the end of a failure episode. An idle one reads it at every round, which its idle wait paces.
+const probeInterval = time.Second
+
+// noSeams is consulted where a fault must not fire: a probe's scan, which an armed scan fault meant for a round's
+// would otherwise consume.
+var noSeams = seamster.New(false)
+
+// FastArchiving is the job that archives closed trees as they come due: one batch a round, the closed roots after its
 // position in close order, the position then past them whatever became of them. At a retention of 0 it deletes them
 // instead. It passes the roots that are not its own - one with an archive attempt, one over the staging threshold, and
 // at a retention of 0 one too large for a batch, which it stamps for deletion in chunks - and the roots it fails on or
-// finds held, leaving them behind its position.
-type fastArchiving struct {
-	j *Janitor
+// finds held, leaving them behind its position. It reports dwarf_archive_lag_seconds and
+// dwarf_archive_failing_seconds while its janitor is active.
+type FastArchiving struct {
+	archive       *archiver.Archive
+	retentionDays int
+	grace         time.Duration
+	batchRoots    int
+	batchRows     int
+	batchBytes    int
+	stageRows     int
+	stageBytes    int
+	noQuietMargin bool
 
-	// after is the position: the last root a round was done with. residency is the residue class the position was
-	// walked in; a round in another starts over from the beginning, since the roots of a replica that left, which
-	// were not this one's, are behind it.
-	after     dueRoot
-	residency residency
+	// j is the janitor the job is added to; the instruments are created on its meter.
+	j            *Janitor
+	archived     metric.Int64Counter
+	moveFailures metric.Int64Counter
+	reaped       metric.Int64Counter
+	gauges       metric.Registration
+
+	// after is the position: the last root a round was done with. count, ordinal and partitioned are the residue
+	// class the position was walked in; a round in another starts over from the beginning, since the roots of a
+	// replica that left, which were not this one's, are behind it. probedAt is when the last probe ran.
+	after       dueRoot
+	count       int
+	ordinal     int
+	partitioned bool
+	probedAt    time.Time
 
 	mu sync.Mutex
-	// lag is how long past the grace the oldest due root after the position had waited at the last scan; lagOK is
-	// false before the first.
+	// lag is how long past the grace the shard's oldest due closed root had waited at the last probe; lagOK is false
+	// before the first.
 	lag   time.Duration
 	lagOK bool
 	// failSince is when archiving began failing, zero while it is not; failLast is when it last failed.
 	failSince, failLast time.Time
+}
+
+// NewFastArchiving returns a fast archiving job into archive - nil when the shard has none, and closed roots then stay
+// live at a positive retention - keeping retentionDays of archive: 0 keeps none, and closed trees are deleted. Its
+// settings are the engine's defaults until set; set them before adding it to a janitor.
+func NewFastArchiving(archive *archiver.Archive, retentionDays int) *FastArchiving {
+	return &FastArchiving{
+		archive:       archive,
+		retentionDays: retentionDays,
+		grace:         defaultGrace,
+		batchRoots:    defaultBatchRoots,
+		batchRows:     defaultBatchRows,
+		batchBytes:    defaultBatchBytes,
+	}
+}
+
+// SetGrace sets how long after its close a closed root is archived (a minute).
+func (f *FastArchiving) SetGrace(d time.Duration) {
+	f.grace = d
+}
+
+// SetBatch sets one batch: how many due roots it considers (512), and about how many rows, flows and steps alike
+// (4,096), and payload bytes (16 MiB; 0 sets no byte limit) one transaction moves - at least one tree.
+func (f *FastArchiving) SetBatch(roots, rows, bytes int) {
+	f.batchRoots, f.batchRows, f.batchBytes = roots, rows, bytes
+}
+
+// SetStaging sets the size above which a closed tree is archived in stages rather than in one transaction, and passed
+// by fast archiving: in rows (0, none staged), and in payload bytes beside it (0, no byte threshold).
+func (f *FastArchiving) SetStaging(rows, bytes int) {
+	f.stageRows, f.stageBytes = rows, bytes
+}
+
+// SetQuietMargin sets whether archiving stops a margin before its day ends (on): off, a round archives into its day
+// however near the day's end. For tests.
+func (f *FastArchiving) SetQuietMargin(on bool) {
+	f.noQuietMargin = !on
 }
 
 // The ways a round takes its cut.
@@ -60,15 +140,67 @@ const (
 	routeStamp              // stamped for deletion in chunks: at a retention of 0, a tree too large for a batch
 )
 
+// attach creates the job's instruments on j's meter, and registers its gauges.
+func (f *FastArchiving) attach(j *Janitor) {
+	f.j = j
+	meter := j.diags.Meter()
+	var errs []error
+	f.archived = counter(meter, archivedName, archivedDescription, &errs)
+	f.moveFailures = counter(meter, moveFailuresName, moveFailuresDesc, &errs)
+	f.reaped = counter(meter, reapedName, reapedDescription, &errs)
+	lag, err := meter.Float64ObservableGauge("dwarf_archive_lag_seconds", metric.WithUnit("s"),
+		metric.WithDescription("Per shard: how long past the archive grace the shard's oldest closed root not yet archived has waited - every replica's, and one being archived in stages - read about once a second while this replica dispatches the shard. Aggregate with max."))
+	if err != nil {
+		errs = append(errs, errors.Trace(err))
+	}
+	failing, err := meter.Float64ObservableGauge("dwarf_archive_failing_seconds", metric.WithUnit("s"),
+		metric.WithDescription("Per shard: time since archiving began failing, cleared by a later move that archives something, or once every root due at the last failure has left the live tables. Retained trees remain live. Aggregate with max."))
+	if err != nil {
+		errs = append(errs, errors.Trace(err))
+	}
+	if lag != nil && failing != nil {
+		shard := metric.WithAttributes(shardAttr(j.shard.Index()))
+		f.gauges, err = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+			if !j.isActive() {
+				return nil
+			}
+			if l, ok := f.lagReading(); ok {
+				o.ObserveFloat64(lag, l.Seconds(), shard)
+			}
+			o.ObserveFloat64(failing, f.failingFor(time.Now()).Seconds(), shard)
+			return nil
+		}, lag, failing)
+		if err != nil {
+			errs = append(errs, errors.Trace(err))
+		}
+	}
+	if len(errs) > 0 {
+		j.diags.Logger().Error("Creating the fast archiving job's instruments", "shard", j.shard.Index(),
+			"error", errors.Join(errs...))
+	}
+}
+
+// detach unregisters the job's gauges.
+func (f *FastArchiving) detach() {
+	if f.gauges != nil {
+		_ = f.gauges.Unregister()
+		f.gauges = nil
+	}
+}
+
+// idleWait is how long the job waits after a round without progress.
+func (f *FastArchiving) idleWait() time.Duration {
+	return time.Second
+}
+
 // round runs one batch.
-func (f *fastArchiving) round(ctx context.Context, batch batchFunc) (progress bool) {
-	s, res := f.j.current()
-	archiving := f.j.retentionDays > 0
-	if archiving && f.j.archive == nil {
+func (f *FastArchiving) round(ctx context.Context, batch batchFunc) (progress bool) {
+	archiving := f.retentionDays > 0
+	if archiving && f.archive == nil {
 		return false // closed roots stay live: there is nowhere to archive them
 	}
 	err := batch(ctx, func(ctx context.Context, h handle) error {
-		progress = f.batch(ctx, h, s, res)
+		progress = f.batch(ctx, h)
 		return nil
 	})
 	if err != nil {
@@ -84,21 +216,31 @@ func (f *fastArchiving) round(ctx context.Context, batch batchFunc) (progress bo
 
 // batch scans, sizes and removes one batch of closed trees on h, and reports whether it made progress: removed a tree,
 // or passed roots that are not this job's.
-func (f *fastArchiving) batch(ctx context.Context, h handle, s settings, res residency) bool {
+func (f *FastArchiving) batch(ctx context.Context, h handle) bool {
 	shard, seams := f.j.shard.Index(), f.j.diags.Seams()
-	archiving := f.j.retentionDays > 0
+	archiving := f.retentionDays > 0
 	var d *filingDay
+	refreshed := true
 	if archiving {
 		d = &filingDay{}
-		if err := refreshDay(ctx, h, f.j.archive, s.noQuietMargin, d); err != nil {
+		if err := refreshDay(ctx, h, f.archive, f.noQuietMargin, d); err != nil {
 			f.failed(ctx, "reading today's archive day", err)
+			refreshed = false
 			if d.archive == nil {
 				return false
 			}
 		}
 	}
-	where, whereArgs := f.restriction(h.DriverName(), s.grace, res)
-	candidates, oldest, err := scanClosed(ctx, h, seams, s.grace, where, whereArgs, max(s.batchRoots, 1))
+	// A failure episode ends only in a round that could archive: one whose day was read and is open. A closed day
+	// fails every round, so ending its episode in between would report it as starting anew each time.
+	canEnd := refreshed && (d == nil || d.startable())
+	probed := false
+	if time.Since(f.probedAt) >= probeInterval {
+		f.probe(ctx, h, canEnd)
+		probed = true
+	}
+	where, whereArgs := f.restriction(h.DriverName())
+	candidates, _, err := scanClosed(ctx, h, seams, f.grace, where, whereArgs, max(f.batchRoots, 1))
 	if err != nil {
 		f.logError(ctx, "Janitor: selecting closed trees", "error", err)
 		if archiving {
@@ -106,15 +248,18 @@ func (f *fastArchiving) batch(ctx context.Context, h handle, s settings, res res
 		}
 		return false
 	}
-	f.mu.Lock()
-	f.lag, f.lagOK = max(oldest-s.grace, 0), true
-	f.mu.Unlock()
-	if len(candidates) == 0 || (d != nil && !d.startable()) {
+	if len(candidates) == 0 {
+		if !probed {
+			f.probe(ctx, h, canEnd)
+		}
+		return false
+	}
+	if d != nil && !d.startable() {
 		return false
 	}
 
 	start := time.Now()
-	cut, via, err := f.cut(ctx, h, s, rootIDs(candidates), archiving)
+	cut, via, err := f.cut(ctx, h, rootIDs(candidates), archiving)
 	last := len(candidates) - 1 // a cut that could not be read passes every candidate
 	if len(cut) > 0 {
 		last = slices.IndexFunc(candidates, func(c dueRoot) bool { return c.flowID == cut[len(cut)-1] })
@@ -123,18 +268,18 @@ func (f *fastArchiving) batch(ctx context.Context, h handle, s settings, res res
 	if err == nil {
 		switch via {
 		case routeMove:
-			due, dueArgs := closedDueSQL(s.grace)
+			due, dueArgs := closedDueSQL(f.grace)
 			removed, err = move(ctx, h, seams, cut, due, dueArgs, d)
 		case routeStamp:
-			_, err = stampClosed(ctx, h, cut[0], s.grace)
+			_, err = stampClosed(ctx, h, cut[0], f.grace)
 		}
 	}
 	// Counted before the stop check: a batch that committed as the job was stopped still counts.
 	switch {
 	case err == nil && archiving:
-		f.j.metrics.flowsArchived(ctx, shard, removed.flows)
+		add(ctx, f.archived, removed.flows, shardAttr(shard))
 	case err == nil:
-		f.j.metrics.flowsReaped(ctx, shard, ReasonNoRetention, removed.unarchived)
+		add(ctx, f.reaped, removed.unarchived, shardAttr(shard), attribute.String("reason", ReasonNoRetention))
 	}
 	if ctx.Err() != nil {
 		return false // stopped: no failure, and the position stays
@@ -142,7 +287,7 @@ func (f *fastArchiving) batch(ctx context.Context, h handle, s settings, res res
 	f.after = candidates[last]
 	switch {
 	case err != nil && archiving:
-		f.j.metrics.archiveMoveFailure(ctx, shard)
+		add(ctx, f.moveFailures, 1, shardAttr(shard))
 		f.failed(ctx, "archiving closed trees", err)
 		return false
 	case err != nil:
@@ -154,12 +299,43 @@ func (f *fastArchiving) batch(ctx context.Context, h handle, s settings, res res
 	return removed.flows > 0 || via != routeMove
 }
 
+// probe reads the shard's oldest due closed root - every replica's, behind the position or ahead of it, with an archive
+// attempt or without - for the archive lag. During a failure episode, and when canEnd, it also reads the oldest without
+// an attempt, and ends the episode once that one came due after the last failure: everything due then has left the
+// live tables. A tree being archived in stages is not a failure, so it does not hold an episode open. Ages are compared
+// on the database's clock and the failure's on this process's, so neither clock's offset matters.
+func (f *FastArchiving) probe(ctx context.Context, h handle, canEnd bool) {
+	f.probedAt = time.Now()
+	_, oldest, err := scanClosed(ctx, h, noSeams, f.grace, "", nil, 1)
+	if err != nil {
+		f.logError(ctx, "Janitor: reading the oldest closed root", "error", err)
+		return
+	}
+	f.mu.Lock()
+	f.lag, f.lagOK = max(oldest-f.grace, 0), true
+	failLast := f.failLast
+	f.mu.Unlock()
+	if failLast.IsZero() || !canEnd || f.retentionDays <= 0 {
+		return
+	}
+	none, noneArg := noAttemptSQL(h.DriverName())
+	_, oldestUnattempted, err := scanClosed(ctx, h, noSeams, f.grace, " AND archive_attempt_at<="+none, []any{noneArg}, 1)
+	if err != nil {
+		f.logError(ctx, "Janitor: reading the oldest closed root", "error", err)
+		return
+	}
+	// A root due at the last failure had waited the grace by then, and has waited since.
+	if oldestUnattempted < time.Since(failLast)+f.grace {
+		f.clearUnlessFailedSince(failLast.Add(time.Nanosecond))
+	}
+}
+
 // cut returns the roots among candidates, in order, that one batch takes, and what it does with them. A root with an
 // archive attempt is left out, and passed. Of the rest it takes a leading run whose trees fit a batch (cutWithin) -
 // rows, bytes and flows - and always the first: the first sized up to what decides its path - over a batch, and over
 // the staging threshold when staging - and each later one up to what is left of the batch. Sizing is a batching hint;
 // the move locks only the roots it takes. A cut empty of roots means every candidate had an attempt.
-func (f *fastArchiving) cut(ctx context.Context, h handle, s settings, candidates []int, archiving bool) (cut []int, via route, err error) {
+func (f *FastArchiving) cut(ctx context.Context, h handle, candidates []int, archiving bool) (cut []int, via route, err error) {
 	eligible := candidates
 	if archiving {
 		attempted, err := attemptsAmong(ctx, h, candidates)
@@ -171,11 +347,11 @@ func (f *fastArchiving) cut(ctx context.Context, h handle, s settings, candidate
 			return nil, routePass, nil
 		}
 	}
-	batch := capOf(s.batchRows, s.batchBytes)
+	batch := capOf(f.batchRows, f.batchBytes)
 	cutLimit := batch
 	cutLimit.flows = MaxBatchFlows
 	firstRows := batch.rows + 1
-	stage, staging := capOf(s.stageRows, s.stageBytes), archiving && s.stageRows > 0
+	stage, staging := capOf(f.stageRows, f.stageBytes), archiving && f.stageRows > 0
 	if staging {
 		// A batch holds no more than the threshold, so a tree over it is alone in its batch, whatever the batch's own
 		// size.
@@ -201,21 +377,22 @@ func (f *fastArchiving) cut(ctx context.Context, h handle, s settings, candidate
 	return cut, routeMove, nil
 }
 
-// restriction is a round's restriction of its scan: this replica's residue class of the roots, and every root
-// overdue by the steal grace; and the range after the position. A residue class other than the last round's starts the
-// walk over from the beginning.
-func (f *fastArchiving) restriction(driver string, grace time.Duration, res residency) (where string, args []any) {
-	if res != f.residency {
-		f.residency, f.after = res, dueRoot{}
+// restriction is a round's restriction of its scan: this replica's residue class of the roots, as the shard reports
+// it, and every root overdue by the steal grace; and the range after the position. A residue class other than the one
+// the position was walked in starts the walk over from the beginning.
+func (f *FastArchiving) restriction(driver string) (where string, args []any) {
+	count, ordinal, partitioned := f.j.shard.Residency()
+	if count != f.count || ordinal != f.ordinal || partitioned != f.partitioned {
+		f.count, f.ordinal, f.partitioned, f.after = count, ordinal, partitioned, dueRoot{}
 	}
-	where, args = closedResidency(res.count, res.ordinal, res.ok, grace, stealGrace)
+	where, args = closedResidency(count, ordinal, partitioned, f.grace, stealGrace)
 	after, afterArgs := afterClose(driver, f.after)
 	return where + after, append(args, afterArgs...)
 }
 
 // failed records an archive failure, unless ctx ended: a stop is no failure. Only the first failure of an episode is
 // logged.
-func (f *fastArchiving) failed(ctx context.Context, what string, err error) {
+func (f *FastArchiving) failed(ctx context.Context, what string, err error) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -234,9 +411,9 @@ func (f *fastArchiving) failed(ctx context.Context, what string, err error) {
 }
 
 // clearUnlessFailedSince ends the failure episode, unless a failure was recorded at or after start: the work that
-// began at start - a move that archived something, or a sweep of every due closed root - failed nothing. An empty scan
-// ends nothing: it is after the position, and a root a failure left behind is not.
-func (f *fastArchiving) clearUnlessFailedSince(start time.Time) {
+// began at start - a move that archived something, or a probe that found nothing due at the last failure - failed
+// nothing.
+func (f *FastArchiving) clearUnlessFailedSince(start time.Time) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if !f.failSince.IsZero() && f.failLast.Before(start) {
@@ -245,7 +422,7 @@ func (f *fastArchiving) clearUnlessFailedSince(start time.Time) {
 }
 
 // logError logs a failed statement - unless ctx ended, which means the job was stopped on purpose.
-func (f *fastArchiving) logError(ctx context.Context, msg string, args ...any) {
+func (f *FastArchiving) logError(ctx context.Context, msg string, args ...any) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -253,23 +430,23 @@ func (f *fastArchiving) logError(ctx context.Context, msg string, args ...any) {
 }
 
 // reset forgets where the job stood, and what it observed: the janitor resumes as one that knows nothing.
-func (f *fastArchiving) reset() {
-	f.after, f.residency = dueRoot{}, residency{}
+func (f *FastArchiving) reset() {
+	f.after, f.count, f.ordinal, f.partitioned, f.probedAt = dueRoot{}, 0, 0, false, time.Time{}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lag, f.lagOK = 0, false
 	f.failSince, f.failLast = time.Time{}, time.Time{}
 }
 
-// lagReading returns the lag at the last scan, and false before the first.
-func (f *fastArchiving) lagReading() (time.Duration, bool) {
+// lagReading returns the lag at the last probe, and false before the first.
+func (f *FastArchiving) lagReading() (time.Duration, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.lag, f.lagOK
 }
 
 // failingFor returns how long archiving has been failing at now, or 0.
-func (f *fastArchiving) failingFor(now time.Time) time.Duration {
+func (f *FastArchiving) failingFor(now time.Time) time.Duration {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failSince.IsZero() {

@@ -126,7 +126,7 @@ func TestWalk_TreeEnvelope(t *testing.T) {
 				assert.Must(assert.NoError(refreshDay(t.Context(), db, r.archive, true, day)))
 			}
 			start := time.Now()
-			cut, _, err := r.fast().cut(t.Context(), db, r.settings, []int{root}, retention > 0)
+			cut, _, err := r.fast().cut(t.Context(), db, []int{root}, retention > 0)
 			assert.Must(assert.NoError(err))
 			sized := time.Since(start)
 			start = time.Now()
@@ -188,11 +188,11 @@ func TestWalk_EveryFlowAndStepIsARow(t *testing.T) {
 	db := r.db
 	roots := seedTrees(t, db, 2, treeShape{rootSteps: 2, childSteps: 0})
 	r.settings.batchRows = 7
-	cut, _, err := r.fast().cut(ctx, db, r.settings, roots, false)
+	cut, _, err := r.fast().cut(ctx, db, roots, false)
 	assert.NoError(err)
 	assert.Equal(roots[:1], cut, "four rows a tree: the root, its two steps and the child of none")
 	r.settings.batchRows = 8
-	cut, _, err = r.fast().cut(ctx, db, r.settings, roots, false)
+	cut, _, err = r.fast().cut(ctx, db, roots, false)
 	assert.NoError(err)
 	assert.Equal(roots, cut)
 
@@ -217,7 +217,7 @@ func TestWalk_TheResidencyRestrictsAPass(t *testing.T) {
 	ctx := t.Context()
 	r := newRig(t, 0)
 	roots := seedTrees(t, r.db, 4, soloShape)
-	r.residency = residency{2, 0, true}
+	r.setResidency(2, 0, true)
 	r.pass(ctx)
 	for _, id := range roots {
 		flows, _ := treeCount(t, r, "dwarf_flows", "dwarf_steps", id)
@@ -227,7 +227,7 @@ func TestWalk_TheResidencyRestrictsAPass(t *testing.T) {
 			assert.Equal(1, flows, "root %d is the other's, and fresh", id)
 		}
 	}
-	r.residency = residency{}
+	r.setResidency(0, 0, false)
 	r.pass(ctx)
 	for _, id := range roots {
 		flows, _ := treeCount(t, r, "dwarf_flows", "dwarf_steps", id)
@@ -243,7 +243,7 @@ func TestFast_AResidencyChangeStartsOver(t *testing.T) {
 	ctx := t.Context()
 	r := newRig(t, 0)
 	roots := seedTrees(t, r.db, 12, soloShape) // fresh: no root is overdue by the steal grace
-	r.residency = residency{2, 0, true}
+	r.setResidency(2, 0, true)
 	r.pass(ctx)
 	behind := 0
 	for _, id := range roots {
@@ -252,7 +252,7 @@ func TestFast_AResidencyChangeStartsOver(t *testing.T) {
 		}
 	}
 	assert.True(behind > 0, "a root of the next class is behind the position")
-	r.residency = residency{3, 0, true} // a peer joined, and this replica's class is another
+	r.setResidency(3, 0, true) // a peer joined, and this replica's class is another
 	r.pass(ctx)
 	for _, id := range roots {
 		flows, _ := treeCount(t, r, "dwarf_flows", "dwarf_steps", id)
@@ -334,26 +334,37 @@ func TestFast_AtRetentionZeroATreeTooLargeForABatchIsStamped(t *testing.T) {
 	assert.Equal(1, stamp, "stamped, due at once")
 }
 
-// TestFast_TheLagIsTheOldestDueRootPastTheGrace pins dwarf_archive_lag_seconds' reading: how long past the grace the
-// oldest due root after the position had waited at the last scan, and 0 once none is due.
-func TestFast_TheLagIsTheOldestDueRootPastTheGrace(t *testing.T) {
+// TestFast_TheLagIsTheShardsOldestDueRootPastTheGrace pins dwarf_archive_lag_seconds' reading: how long past the
+// grace the shard's oldest due closed root had waited at the last probe - one left behind the position by a failure
+// included, which a scan after the position never sees - and 0 once none is due. A round whose scan finds nothing
+// probes, so each pass ends on a fresh reading.
+func TestFast_TheLagIsTheShardsOldestDueRootPastTheGrace(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	r := newRig(t, 30)
 	r.settings.grace = 30 * time.Second
 	r.settings.batchRoots = 1
-	_, ok := r.janitor().ArchiveLag()
-	assert.False(ok, "no reading before a scan")
+	_, ok := r.fast().lagReading()
+	assert.False(ok, "no reading before a probe")
 	roots := seedTrees(t, r.db, 2, callShape)
 	backdate(t, r, roots[0], 150*time.Second)
 	backdate(t, r, roots[1], 90*time.Second)
-	assert.True(r.fast().round(ctx, r.janitor().batch(r.janitor().jobs[0])))
-	lag, ok := r.janitor().ArchiveLag()
+	r.seams.InjectN(diagnostics.Join(diagnostics.FaultReapSizeErr, strconv.Itoa(roots[0])), 1)
+	r.pass(ctx) // the oldest fails, and the position is past it
+	lag, ok := r.fast().lagReading()
 	assert.True(ok)
 	assert.True(lag >= 119*time.Second && lag < 140*time.Second, "the oldest root's wait past the grace: %v", lag)
+	r.pass(ctx) // the other is archived
+	flows, _ := treeCount(t, r, "dwarf_flows", "dwarf_steps", roots[1])
+	assert.Zero(flows)
+
+	lag, _ = r.fast().lagReading()
+	assert.True(lag >= 119*time.Second, "a root behind the position still counts: %v", lag)
+
+	r.restart() // a job that starts over archives it
 	r.pass(ctx)
-	lag, _ = r.janitor().ArchiveLag()
+	lag, _ = r.fast().lagReading()
 	assert.Zero(lag, "nothing due")
 }
 
@@ -456,29 +467,29 @@ func TestJanitor_NoBatchTakesASecondConnection(t *testing.T) {
 	}
 }
 
-// TestFast_TheFailureEndsAtAMoveOrACleanSweep pins the end of a failure episode: an empty round ends nothing - a root
-// a failure left behind the position is not in its scan - while a sweep of every due root begun after the failure and
-// failing on none ends it, and so does a later move that archives something.
-func TestFast_TheFailureEndsAtAMoveOrACleanSweep(t *testing.T) {
+// TestFast_TheFailureEndsAtAMoveOrOnceItsRootsHaveLeft pins the end of a failure episode: a probe ends it once
+// nothing that was due at the last failure is still live, but not while a root the failure left behind the position
+// is; and a later move that archives something ends it.
+func TestFast_TheFailureEndsAtAMoveOrOnceItsRootsHaveLeft(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
+	ctx := t.Context()
 	r := newRig(t, 30)
-	before := time.Now()
 	r.seams.InjectN(diagnostics.FaultReapSelectErr, 1)
-	r.pass(t.Context())
+	r.pass(ctx)
 	assert.True(r.failing(time.Now().Add(time.Second)) > 0, "a failed scan begins an episode")
-	r.pass(t.Context())
-	assert.True(r.failing(time.Now().Add(time.Second)) > 0, "an empty round ends nothing")
-	r.janitor().SweptClean(before)
-	assert.True(r.failing(time.Now().Add(time.Second)) > 0, "a sweep begun before the failure ends nothing")
-	r.janitor().SweptClean(time.Now())
-	assert.Zero(r.failing(time.Now().Add(time.Second)), "a clean sweep begun after it ends it")
+	r.pass(ctx)
+	assert.Zero(r.failing(time.Now().Add(time.Second)), "nothing was due at the failure: the next round's probe ends it")
 
-	r.seams.InjectN(diagnostics.FaultReapSelectErr, 1)
-	r.pass(t.Context())
-	assert.True(r.failing(time.Now().Add(time.Second)) > 0)
+	root := seedTrees(t, r.db, 1, callShape)[0]
+	r.seams.InjectN(diagnostics.Join(diagnostics.FaultReapSizeErr, strconv.Itoa(root)), 1)
+	r.pass(ctx)
+	assert.True(r.failing(time.Now().Add(time.Second)) > 0, "the root failed, and the position is past it")
+	r.pass(ctx)
+	assert.True(r.failing(time.Now().Add(time.Second)) > 0, "a root due at the failure is still live")
+
 	seedTrees(t, r.db, 1, callShape)
-	r.pass(t.Context())
+	r.pass(ctx)
 	assert.Zero(r.failing(time.Now().Add(time.Second)), "a move ends it")
 }
 

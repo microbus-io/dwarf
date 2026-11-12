@@ -326,11 +326,10 @@ func (e *Engine) initMetrics() error {
 	inFlightSteps := gauge("dwarf_state_in_flight_steps", "Per-replica: tasks currently inside a host call - the denominator for dwarf_state_in_flight_bytes. It is NOT dwarf_workers_resident (workers that EXIST, most of which are idle or in a database phase) and NOT dwarf_db_phase_workers (workers in a database phase, which is the opposite population - a task inside a host call holds no connection); neither can serve as this denominator. Sum across replicas.", "")
 
 	// Archive gauges are per-shard facts, aggregated with max. Reaper readings come from dispatching replicas;
-	// archive-day readings come from every replica, using its latest catalog observation.
-	archiveFailing := gaugeF("dwarf_archive_failing_seconds", "Per-shard: time since an archive failure, cleared by a successful fast move or a clean repair sweep. Retained trees remain live. Aggregate with max.", "s")
+	// archive-day readings come from every replica, using its latest catalog observation. The archive lag and failing
+	// gauges are the fast archiving job's own (internal/janitor).
 	deletesPending := gauge("dwarf_archive_deletions_pending", "Discovered archived trees marked for deletion whose storage the last cleanup pass did not release, by shard. Hidden from reads. Check dwarf_archive_deletion_days_unknown too: a zero pending count does not imply completion while some days were not examined.", "{tree}")
 	deletesUnknown := gauge("dwarf_archive_deletion_days_unknown", "Retained archive days the last cleanup pass could not examine, by shard. Zero means all retained days were examined; nonzero means the pending tree count is incomplete.", "{day}")
-	archiveLagG := gaugeF("dwarf_archive_lag_seconds", "Wait past grace at the fast cursor's last scan. Held roots behind it are reported separately. Aggregate with max.", "s")
 	heldRoots := gauge("dwarf_archive_held_roots", "Failed singles observed by repair: max of the current and last complete sweep. Per replica, shard and kind; aggregate with max, not sum. Resets at restart or handoff.", "{root}")
 	heldOldest := gaugeF("dwarf_archive_oldest_held_seconds", "Age of the oldest due root at the last repair sweep's front, increasing until resampled. Includes roots not yet attempted. Per shard and kind; aggregate with max.", "s")
 	attemptOldest := gaugeF("dwarf_archive_oldest_attempt_seconds", "Per shard: age of the oldest unpublished staged archive attempt the repair sweep has seen, the larger of the current sweep's and the last complete one's, increasing until resampled; zero for none. A tree too large to archive in one transaction is copied in stages and then published; a value that keeps growing means one is not publishing, and the logs say why. Read beside dwarf_archive_sweep_seconds for freshness, and beside dwarf_archive_lag_seconds, since a replaced attempt starts its age again. Aggregate with max.", "s")
@@ -359,9 +358,7 @@ func (e *Engine) initMetrics() error {
 				inFlightBytes:    inFlightBytes,
 				inFlightSteps:    inFlightSteps,
 				stateCacheBytes:  stateCacheBytes,
-				archiveFailing:   archiveFailing,
 				heldRoots:        heldRoots, heldOldest: heldOldest, sweepAge: sweepAge, attemptOldest: attemptOldest,
-				archiveLag:      archiveLagG,
 				deletesPending:  deletesPending,
 				deletesUnknown:  deletesUnknown,
 				archiveDays:     archiveDays,
@@ -371,7 +368,7 @@ func (e *Engine) initMetrics() error {
 		},
 		queueDepth, stepsPending, oldestAge, dispatchLag, peerReplicas, shardDispatching, peerBlind, tallyAge,
 		turnstileAvail, turnstileWaiting, workersResident, inFlightBytes, inFlightSteps, stateCacheBytes,
-		dbPhaseWorkers, archiveFailing, archiveLagG, archiveDays, archiveOldest, heldRoots, heldOldest, sweepAge, attemptOldest,
+		dbPhaseWorkers, archiveDays, archiveOldest, heldRoots, heldOldest, sweepAge, attemptOldest,
 		deletesPending, deletesUnknown, janitorProgress,
 	)
 	if err != nil {
@@ -416,8 +413,6 @@ type observableGauges struct {
 	heldOldest      metric.Float64ObservableGauge
 	sweepAge        metric.Float64ObservableGauge
 	attemptOldest   metric.Float64ObservableGauge
-	archiveFailing  metric.Float64ObservableGauge
-	archiveLag      metric.Float64ObservableGauge
 	deletesPending  metric.Int64ObservableGauge
 	deletesUnknown  metric.Int64ObservableGauge
 	archiveDays     metric.Int64ObservableGauge
@@ -495,10 +490,6 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 				for job, age := range j.JobAges(now) {
 					o.ObserveFloat64(g.janitorProgress, age.Seconds(),
 						metric.WithAttributes(shardAttr(idx), attribute.String("job", job)))
-				}
-				o.ObserveFloat64(g.archiveFailing, j.ArchiveFailing(now).Seconds(), shard)
-				if lag, ok := j.ArchiveLag(); ok {
-					o.ObserveFloat64(g.archiveLag, lag.Seconds(), shard)
 				}
 			}
 		}

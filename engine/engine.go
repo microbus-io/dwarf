@@ -316,14 +316,15 @@ type Engine struct {
 	reaperWorker sync.WaitGroup
 
 	// Janitors: one per shard for the run (startJanitors), active where this replica dispatches the shard - applyRole
-	// resumes and pauses them - and handed their residue class by the reconcile loop. The map is replaced at Startup and
-	// read under janitorMu. janitorCancel ends their run. janitorIdle replaces every job's idle wait for a test;
-	// janitorManual starts no job goroutine, for a test that runs the jobs through reapDueFlows.
-	janitorMu     sync.Mutex
-	janitors      map[int]*janitor.Janitor
-	janitorCancel context.CancelFunc
-	janitorIdle   time.Duration
-	janitorManual bool
+	// resumes and pauses them. The map is replaced at Startup and read under janitorMu, with janitorJobsBuilt, the
+	// settings their jobs were built with. janitorCancel ends their run. janitorIdle replaces every job's idle wait for
+	// a test; janitorManual starts no job goroutine, for a test that runs the jobs through reapDueFlows.
+	janitorMu        sync.Mutex
+	janitors         map[int]*janitor.Janitor
+	janitorJobsBuilt janitorSettings
+	janitorCancel    context.CancelFunc
+	janitorIdle      time.Duration
+	janitorManual    bool
 
 	// Archive goroutine: keeps each shard's archive day tables - today's and the days ahead made, expired days
 	// dropped. archives is the run's set, published at Startup; testArchiveDay, when set, replaces the day's

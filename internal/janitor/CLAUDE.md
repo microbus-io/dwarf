@@ -6,16 +6,24 @@
 > `internal/turnstile/CLAUDE.md` (what a claim's age means), `internal/reaper/CLAUDE.md` (the work the janitor has not
 > taken over: the sweeps, staging, deletion, retention) and `internal/archiver/CLAUDE.md` (the day tables).
 
-## What a Janitor is
+## What a Janitor is, and what a job is
 
 One `Janitor` per shard on every replica, for the replica's run. It is **active only while the replica dispatches
-the shard** (`Resume`, `Pause`): paused, it holds no goroutine and no connection. It owns its jobs' goroutines and
-everything they learn - positions, failures, observations - which the gauges read through its getters. A resume
-starts every job over, its position and observations forgotten: a replica that dispatches the shard again saw
-nothing of what happened meanwhile, so everything it kept is a stale hint, and losing it loses no tree. It works on
-the `database.Shard` it is made with: its turns and connections come from it, and so does its residue class, read
-at every round (`Shard.Residency`). The engine sets its activity from the dispatch role and its settings by
-setters.
+the shard** (`Resume`, `Pause`): paused, it holds no goroutine and no connection. It is a runner of jobs: their
+goroutines, their idle waits, their time since progress, and the turn and connection each batch takes. It works on
+the `database.Shard` it is made with, and the engine sets its activity from the dispatch role.
+
+**A job owns everything particular to it**: its settings, its dependencies (fast archiving's archive and retention),
+its position and what it observed, its instruments and gauges. The janitor holds no setting of any job. A job's
+settings are fixed when it is added (`AddJob(name, job)`), and **changing them means adding a new job under the same
+name**, which replaces the old one and starts over - which is what a test changing the engine's fields mid-run wants,
+and production never does. The name is the job's handle - its metric label, what `RemoveJob` takes - so two jobs of
+one kind can run side by side (`fast1`, `fast2`). `Job` is an interface whose methods are unexported: only this
+package's jobs, and its tests', satisfy it.
+
+A resume starts every job over, its position and observations forgotten: a replica that dispatches the shard again
+saw nothing of what happened meanwhile, so everything it kept is a stale hint, and losing it loses no tree. Each job
+reads its residue class from the shard at every round (`Shard.Residency`).
 
 **One goroutine per job, never one goroutine for all of them.** Each job is a loop of rounds on its own goroutine,
 so a job that is slow, blocked on a held root or working through a large tree does not slow the others. A single
@@ -110,17 +118,30 @@ rechecks under them, the directory rows and the archive time are the reaper's, c
 - **An atomic batch holds at most `MaxBatchFlows` (4,096) flows**, whatever its rows and bytes allow: every flow of a
   batch gets one archive time, and `ListClosed` cannot page across a tie larger than its `Limit`, so the lists'
   maximum must stay above it. A tree of more goes alone (`TestMove_ABatchHoldsAtMostMaxBatchFlows`).
-- **The lag is read at every scan** (`dwarf_archive_lag_seconds`): how long past the grace the oldest due root after the
-  position had waited, 0 when none is.
+- **The job reports its own gauges** - `dwarf_archive_lag_seconds` and `dwarf_archive_failing_seconds` - registered
+  on the meter when it is added, observed only while its janitor is active, and unregistered when it is removed or
+  the janitor stops. The engine reads nothing of it.
+- **A probe reads the shard's oldest due closed root** - one `LIMIT 1` per terminal status on
+  `idx_dwarf_flows_status`, unrestricted: every replica's class, behind the position or ahead of it. It runs at most
+  once a second while the job is busy, and in every round whose scan finds nothing, which the idle wait paces. A
+  probe's scan consults no fault, or it would consume one a test armed for a round's scan.
+- **The lag is the probe's**: how long past the grace the oldest due root had waited, a root a failure left behind
+  the position included, and one being staged; 0 when none is. Pinned by
+  `TestFast_TheLagIsTheShardsOldestDueRootPastTheGrace`.
 - **The failure episode** (`dwarf_archive_failing_seconds`) begins at an archive failure - a day not readable or not
   whole, a batch that cannot take its connection, a failed scan, attempt read, sizing or move - and ends at a later
-  move that archives something, or at a sweep of every due closed root, begun after the last failure, that failed on
-  none (`SweptClean`; the engine passes on the reaper's repair sweep until the janitor sweeps itself). **Do not end it
-  at an empty round:** the scan is after the position, and a root a failure left behind is not in it, so a failing root
-  on a quiet shard would read as recovered. Ending it only at a move fails the other way: one transient error on a
-  quiet shard reads as failing for as long as nothing closes; the clean sweep ends that. Pinned by
-  `TestFast_TheFailureEndsAtAMoveOrACleanSweep` and the engine's `TestArchiveMetrics_ATransientFailureEndsAtACleanSweep`
-  and `TestArchiveMetrics_TheReaperCountsWhatItMoves`. A stop records nothing. Only the episode's first failure is
+  move that archives something, or at a probe that finds the oldest due root without an archive attempt came due
+  after the last failure: everything due then has left the live tables. A staged tree in progress is not a failure,
+  so it holds no episode open. The probe's ages are the database's and the failure's time is this process's, compared
+  as durations, so neither clock's offset matters. **Do not end it at an empty round:** the scan is after the
+  position, and a root a failure left behind is not in it, so a failing root on a quiet shard would read as
+  recovered. Ending it only at a move fails the other way: one transient error on a quiet shard reads as failing for
+  as long as nothing closes. **And end it only in a round that could archive** - its day read and open: a closed day
+  fails every round, and an episode ended in between would read as starting anew each time
+  (`TestArchiveMetrics_ASweepWhileTomorrowIsMissingEndsNoFailure`). Pinned by
+  `TestFast_TheFailureEndsAtAMoveOrOnceItsRootsHaveLeft` and the engine's
+  `TestArchiveMetrics_ATransientFailureEndsWhenNothingDueAtItRemains` and
+  `TestArchiveMetrics_TheReaperCountsWhatItMoves`. A stop records nothing. Only the episode's first failure is
   logged (`TestMove_ALastingFaultPreservesAndLogs`). At a retention of 0 nothing is archived, so nothing starts an
   episode (`TestMove_AScanFailureAtRetentionZeroIsNoArchiveFailure`).
 - **The counters it shares with the reaper** - `dwarf_flows_archived`, `dwarf_archive_move_failures`,

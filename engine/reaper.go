@@ -122,11 +122,6 @@ func (e *Engine) reapPass(ctx context.Context, grace time.Duration, periodic boo
 		r.Pass(ctx, cfg, reaper.Shard{Index: shard, DB: db, Archive: a, Residency: func() (int, int, bool) {
 			return e.partitionOn(shard)
 		}})
-		// Janitor steps 2-5: the reaper's repair walk is the sweep of closed roots, so its clean sweep ends fast
-		// archiving's failure episode.
-		if j := e.janitorOn(shard); j != nil {
-			j.SweptClean(r.Observe(shard, time.Now()).CleanSweep)
-		}
 		if periodic {
 			r.DeleteMarked(ctx, cfg, reaper.Shard{Index: shard, DB: db, Archive: a})
 			if e.flowExpiration > 0 {

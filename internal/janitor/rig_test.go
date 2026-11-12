@@ -36,20 +36,34 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// rig is a Manual, active Janitor over one shard's own isolated, migrated database and its archive. Its janitor is
-// made at its first use, so a test sets what it needs before; settings and the residue class are set on it before
-// every pass, so a test changes them between passes.
+// rig is a Manual, active Janitor with its fast archiving and fast deletion jobs over one shard's own isolated,
+// migrated database and its archive. Its janitor is made at its first use, so a test sets what it needs before; the
+// settings and the residue class are set on the jobs and the shard before every pass, so a test changes them between
+// passes.
 type rig struct {
 	t         *testing.T
 	db        *sequel.DB
+	shard     *database.Shard
 	archive   *archiver.Archive
 	seams     *seamster.Seamster
 	logs      *logCounter
 	retention int
-	settings  settings
-	residency residency
+	settings  rigSettings
+	count     int
+	ordinal   int
+	inClass   bool
 	meter     metric.Meter
 	j         *Janitor
+	fa        *FastArchiving
+	fd        *FastDeletion
+}
+
+// rigSettings are the jobs' settings a test sets on the rig.
+type rigSettings struct {
+	grace                             time.Duration
+	batchRoots, batchRows, batchBytes int
+	stageRows, stageBytes             int
+	noQuietMargin                     bool
 }
 
 // newRig stands up a rig whose closed roots are due at once, with an archive of days of dayLength (24h when 0) and
@@ -83,11 +97,12 @@ func newRig(t *testing.T, retention int, dayLength ...time.Duration) *rig {
 	return &rig{
 		t:         t,
 		db:        db,
+		shard:     database.NewShard(1, db),
 		archive:   a,
 		seams:     seamster.New(true),
 		logs:      &logCounter{seen: map[string]int{}},
 		retention: retention,
-		settings: settings{
+		settings: rigSettings{
 			batchRoots:    512,
 			batchRows:     4096,
 			noQuietMargin: true,
@@ -95,25 +110,38 @@ func newRig(t *testing.T, retention int, dayLength ...time.Duration) *rig {
 	}
 }
 
-// janitor is the rig's janitor, made, started and resumed at its first call, with the rig's settings and residue
-// class set on it.
+// janitor is the rig's janitor, made with its jobs, started and resumed at its first call, with the rig's settings
+// set on the jobs and its residue class on the shard. A Manual janitor runs no goroutine, so the settings are set
+// between rounds.
 func (r *rig) janitor() *Janitor {
 	if r.j == nil {
 		d := diagnostics.New()
 		d.SetLogger(slog.New(r.logs))
 		d.SetSeams(r.seams)
 		d.SetMeter(r.meter)
-		r.j = New(database.NewShard(1, r.db), d, r.archive, r.retention)
+		r.j = New(r.shard, d)
+		r.fa = NewFastArchiving(r.archive, r.retention)
+		r.fd = NewFastDeletion()
+		r.j.AddJob(JobFastArchiving, r.fa)
+		r.j.AddJob(JobFastDeletion, r.fd)
 		r.j.SetManual(true)
 		r.j.Start(r.t.Context())
 		r.j.Resume()
 		r.t.Cleanup(r.j.Stop)
 	}
-	r.j.mu.Lock()
-	r.j.settings = r.settings
-	r.j.mu.Unlock()
-	r.j.shard.SetResidency(r.residency.count, r.residency.ordinal, r.residency.ok, time.Now().Add(time.Hour))
+	s := r.settings
+	r.fa.SetGrace(s.grace)
+	r.fa.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
+	r.fa.SetStaging(s.stageRows, s.stageBytes)
+	r.fa.SetQuietMargin(!s.noQuietMargin)
+	r.fd.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
+	r.shard.SetResidency(r.count, r.ordinal, r.inClass, time.Now().Add(time.Hour))
 	return r.j
+}
+
+// setResidency sets the residue class the shard reports from the next pass on.
+func (r *rig) setResidency(count, ordinal int, ok bool) {
+	r.count, r.ordinal, r.inClass = count, ordinal, ok
 }
 
 // restart replaces the rig's janitor with a new one, which knows nothing: as a restart or a handoff does.
@@ -125,8 +153,15 @@ func (r *rig) restart() {
 }
 
 // fast is the rig's fast archiving job.
-func (r *rig) fast() *fastArchiving {
-	return r.janitor().fast
+func (r *rig) fast() *FastArchiving {
+	r.janitor()
+	return r.fa
+}
+
+// del is the rig's fast deletion job.
+func (r *rig) del() *FastDeletion {
+	r.janitor()
+	return r.fd
 }
 
 // pass runs the rig's jobs until they make no progress.
@@ -134,9 +169,9 @@ func (r *rig) pass(ctx context.Context) {
 	r.janitor().Drain(ctx)
 }
 
-// failing is how long archiving has been failing, as the janitor reports it at now.
+// failing is how long archiving has been failing, as fast archiving reports it at now.
 func (r *rig) failing(now time.Time) time.Duration {
-	return r.janitor().ArchiveFailing(now)
+	return r.fast().failingFor(now)
 }
 
 // moveInto archives the tree rooted at rootID into day.

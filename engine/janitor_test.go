@@ -222,12 +222,8 @@ func TestJanitor_ReapDueFlowsDrainsTheJobs(t *testing.T) {
 	root := closedRoots(t, e, 1)[0]
 	time.Sleep(100 * time.Millisecond)
 	assert.True(live(t, e, root), "a Manual janitor runs no job by itself")
-	_, scanned := e.janitorOn(1).ArchiveLag()
-	assert.False(scanned)
 	e.drainJanitors(t.Context(), e.archiveGrace)
 	assert.False(live(t, e, root), "drained, the janitor archives it")
-	_, scanned = e.janitorOn(1).ArchiveLag()
-	assert.True(scanned)
 }
 
 // TestJanitor_TheProgressGauge pins dwarf_janitor_progress_age_seconds: one reading per shard and job while the

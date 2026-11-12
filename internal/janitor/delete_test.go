@@ -111,7 +111,7 @@ func TestDelete_ALargeStampedTreeIsPassed(t *testing.T) {
 	assert.Equal([2]int{2, 7}, [2]int{flows, steps}, "left whole")
 	flows, _ = treeCount(t, r, "dwarf_flows", "dwarf_steps", small)
 	assert.Zero(flows)
-	assert.Equal(small, r.janitor().del.after)
+	assert.Equal(small, r.del().after)
 }
 
 // TestDelete_FastPassesTheBatchItAttempted pins fast deletion's advance: a batch whose deletion fails is passed - left

@@ -34,10 +34,12 @@ import (
 
 // testJanitor returns a started, active janitor of shard 1 on db, reporting through d, that runs jobs in place of
 // its own, set up by set before it starts.
-func testJanitor(t *testing.T, db *sequel.DB, d *diagnostics.Diags, set func(j *Janitor), jobs ...*job) *Janitor {
+func testJanitor(t *testing.T, db *sequel.DB, d *diagnostics.Diags, set func(j *Janitor), jobs ...*funcJob) *Janitor {
 	t.Helper()
-	j := New(database.NewShard(1, db), d, nil, 30)
-	j.jobs = jobs
+	j := New(database.NewShard(1, db), d)
+	for _, jb := range jobs {
+		j.AddJob(jb.name, jb)
+	}
 	if set != nil {
 		set(j)
 	}
@@ -47,9 +49,29 @@ func testJanitor(t *testing.T, db *sequel.DB, d *diagnostics.Diags, set func(j *
 	return j
 }
 
-// testJob is a job of round, waiting a second after a round without progress, with nothing to reset.
-func testJob(name string, round func(ctx context.Context, batch batchFunc) bool) *job {
-	return &job{name: name, idle: time.Second, round: round, reset: func() {}}
+// funcJob is a test's job: its round, its idle wait, and what its reset does, nothing when nil.
+type funcJob struct {
+	name    string
+	idle    time.Duration
+	roundFn func(ctx context.Context, batch batchFunc) bool
+	onReset func()
+}
+
+func (f *funcJob) attach(*Janitor)         {}
+func (f *funcJob) detach()                 {}
+func (f *funcJob) idleWait() time.Duration { return f.idle }
+func (f *funcJob) round(ctx context.Context, batch batchFunc) bool {
+	return f.roundFn(ctx, batch)
+}
+func (f *funcJob) reset() {
+	if f.onReset != nil {
+		f.onReset()
+	}
+}
+
+// testJob is a job of round named name, waiting a second after a round without progress, with nothing to reset.
+func testJob(name string, round func(ctx context.Context, batch batchFunc) bool) *funcJob {
+	return &funcJob{name: name, idle: time.Second, roundFn: round}
 }
 
 // await polls cond until it holds or the deadline passes.
@@ -207,7 +229,7 @@ func TestJanitor_PauseAndResume(t *testing.T) {
 		ended.Add(1)
 		return false
 	})
-	jb.reset = func() { resets.Add(1) }
+	jb.onReset = func() { resets.Add(1) }
 	j := testJanitor(t, nil, nil, nil, jb)
 	<-in
 	assert.Equal(int64(1), resets.Load(), "the first resume starts the job over too")
@@ -331,8 +353,8 @@ func TestJanitor_JobAgesReportTimeSinceProgress(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	var progress atomic.Bool
-	j := New(database.NewShard(1, nil), nil, nil, 30)
-	j.jobs = []*job{testJob("job", func(ctx context.Context, _ batchFunc) bool { return progress.Swap(false) })}
+	j := New(database.NewShard(1, nil), nil)
+	j.AddJob("job", testJob("job", func(ctx context.Context, _ batchFunc) bool { return progress.Swap(false) }))
 	j.SetManual(true)
 	assert.Len(j.JobAges(time.Now()), 0, "nothing to report before the first resume")
 	j.Start(t.Context())

@@ -25,24 +25,67 @@ import (
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/sequel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
-// JobFastDeletion is the fast deletion job's name.
+// JobFastDeletion is the name the engine adds its fast deletion job under.
 const JobFastDeletion = "fast_deletion"
 
 // ReasonDeleted is the reason a stamped tree is deleted, the reason attribute of dwarf_flows_reaped.
 const ReasonDeleted = "deleted"
 
-// fastDeletion is the job that deletes the stamped trees - a Delete's, a DeleteOnCompletion's, a published tree's live
+// FastDeletion is the job that deletes the stamped trees - a Delete's, a DeleteOnCompletion's, a published tree's live
 // copy - as they come due: one batch a round, the stamped roots after its position in flow_id order, the position then
 // past them whatever became of them. It passes a tree too large for a batch, left to the deletion in chunks, and the
 // roots it fails on or finds held, leaving them behind its position.
-type fastDeletion struct {
-	j *Janitor
-	// after is the position: the flow id of the last root a round was done with. residency is the residue class the
-	// position was walked in; a round in another starts over.
-	after     int
-	residency residency
+type FastDeletion struct {
+	batchRoots int
+	batchRows  int
+	batchBytes int
+
+	// j is the janitor the job is added to; the counter is created on its meter.
+	j      *Janitor
+	reaped metric.Int64Counter
+
+	// after is the position: the flow id of the last root a round was done with. count, ordinal and partitioned are
+	// the residue class the position was walked in; a round in another starts over.
+	after       int
+	count       int
+	ordinal     int
+	partitioned bool
+}
+
+// NewFastDeletion returns a fast deletion job with the engine's default batch until SetBatch; set it before adding the
+// job to a janitor.
+func NewFastDeletion() *FastDeletion {
+	return &FastDeletion{batchRoots: defaultBatchRoots, batchRows: defaultBatchRows, batchBytes: defaultBatchBytes}
+}
+
+// SetBatch sets one batch: how many due roots it considers (512), and about how many rows (4,096) and payload bytes
+// (16 MiB; 0 sets no byte limit) one transaction deletes - at least one tree. A tree over a batch is passed, left to the
+// deletion in chunks.
+func (f *FastDeletion) SetBatch(roots, rows, bytes int) {
+	f.batchRoots, f.batchRows, f.batchBytes = roots, rows, bytes
+}
+
+// attach creates the job's counter on j's meter.
+func (f *FastDeletion) attach(j *Janitor) {
+	f.j = j
+	var errs []error
+	f.reaped = counter(j.diags.Meter(), reapedName, reapedDescription, &errs)
+	if len(errs) > 0 {
+		j.diags.Logger().Error("Creating the fast deletion job's instruments", "shard", j.shard.Index(),
+			"error", errors.Join(errs...))
+	}
+}
+
+// detach has nothing to release.
+func (f *FastDeletion) detach() {}
+
+// idleWait is how long the job waits after a round without progress.
+func (f *FastDeletion) idleWait() time.Duration {
+	return time.Second
 }
 
 // stampedDueSQL is the condition, on a live flows row, that it is a root stamped for deletion whose stamp is due. Only
@@ -50,10 +93,9 @@ type fastDeletion struct {
 const stampedDueSQL = "delete_after_ms>0 AND surgraph_flow_id=0 AND DATE_ADD_MILLIS(updated_at, delete_after_ms)<=NOW_UTC()"
 
 // round runs one batch.
-func (f *fastDeletion) round(ctx context.Context, batch batchFunc) (progress bool) {
-	s, res := f.j.current()
+func (f *FastDeletion) round(ctx context.Context, batch batchFunc) (progress bool) {
 	err := batch(ctx, func(ctx context.Context, h handle) error {
-		progress = f.batch(ctx, h, s, res)
+		progress = f.batch(ctx, h)
 		return nil
 	})
 	if err != nil {
@@ -64,10 +106,10 @@ func (f *fastDeletion) round(ctx context.Context, batch batchFunc) (progress boo
 
 // batch scans, sizes and deletes one batch of stamped trees on h, and reports whether it made progress: deleted a
 // tree, or passed one too large for a batch.
-func (f *fastDeletion) batch(ctx context.Context, h handle, s settings, res residency) bool {
+func (f *FastDeletion) batch(ctx context.Context, h handle) bool {
 	shard, seams := f.j.shard.Index(), f.j.diags.Seams()
-	where, whereArgs := f.restriction(res)
-	candidates, err := scanStamped(ctx, h, seams, where, whereArgs, max(s.batchRoots, 1))
+	where, whereArgs := f.restriction()
+	candidates, err := scanStamped(ctx, h, seams, where, whereArgs, max(f.batchRoots, 1))
 	if err != nil {
 		f.logError(ctx, "Janitor: selecting stamped trees", "error", err)
 		return false
@@ -75,7 +117,7 @@ func (f *fastDeletion) batch(ctx context.Context, h handle, s settings, res resi
 	if len(candidates) == 0 {
 		return false
 	}
-	batchLimit := capOf(s.batchRows, s.batchBytes)
+	batchLimit := capOf(f.batchRows, f.batchBytes)
 	cut, first, err := cutWithin(candidates, batchLimit, batchLimit.rows+1, func(group, limits []int) ([]size, error) {
 		if err := targetedFault(seams, diagnostics.FaultReapSizeErr, group...); err != nil {
 			return nil, err
@@ -89,7 +131,7 @@ func (f *fastDeletion) batch(ctx context.Context, h handle, s settings, res resi
 	}
 	if err == nil {
 		// Counted before the stop check: a batch that committed as the job was stopped still counts.
-		f.j.metrics.flowsReaped(ctx, shard, ReasonDeleted, removed.unarchived)
+		add(ctx, f.reaped, removed.unarchived, shardAttr(shard), attribute.String("reason", ReasonDeleted))
 	}
 	if ctx.Err() != nil {
 		return false // stopped: no failure, and the position stays
@@ -105,14 +147,15 @@ func (f *fastDeletion) batch(ctx context.Context, h handle, s settings, res resi
 	return removed.flows > 0 || passed
 }
 
-// restriction is a round's restriction of its scan: this replica's residue class of the roots, and every root overdue
-// by the steal grace; and the range after the position. A residue class other than the last round's starts the walk
-// over from the beginning.
-func (f *fastDeletion) restriction(res residency) (where string, args []any) {
-	if res != f.residency {
-		f.residency, f.after = res, 0
+// restriction is a round's restriction of its scan: this replica's residue class of the roots, as the shard reports
+// it, and every root overdue by the steal grace; and the range after the position. A residue class other than the one
+// the position was walked in starts the walk over from the beginning.
+func (f *FastDeletion) restriction() (where string, args []any) {
+	count, ordinal, partitioned := f.j.shard.Residency()
+	if count != f.count || ordinal != f.ordinal || partitioned != f.partitioned {
+		f.count, f.ordinal, f.partitioned, f.after = count, ordinal, partitioned, 0
 	}
-	where, args = stampedResidency(res.count, res.ordinal, res.ok, stealGrace)
+	where, args = stampedResidency(count, ordinal, partitioned, stealGrace)
 	if f.after != 0 {
 		where += " AND flow_id>?"
 		args = append(args, f.after)
@@ -121,7 +164,7 @@ func (f *fastDeletion) restriction(res residency) (where string, args []any) {
 }
 
 // logError logs a failed statement - unless ctx ended, which means the job was stopped on purpose.
-func (f *fastDeletion) logError(ctx context.Context, msg string, args ...any) {
+func (f *FastDeletion) logError(ctx context.Context, msg string, args ...any) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -129,8 +172,8 @@ func (f *fastDeletion) logError(ctx context.Context, msg string, args ...any) {
 }
 
 // reset forgets where the job stood.
-func (f *fastDeletion) reset() {
-	f.after, f.residency = 0, residency{}
+func (f *FastDeletion) reset() {
+	f.after, f.count, f.ordinal, f.partitioned = 0, 0, 0, false
 }
 
 // stampedResidency restricts a stamped scan to this replica's share of the shard's dispatchers, as closedResidency

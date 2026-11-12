@@ -66,7 +66,7 @@ func assertNoReaperReadings(t *testing.T, rm metricdata.ResourceMetrics) {
 	assert.True(ok, "dwarf_archive_failing_seconds is reported")
 	assert.Zero(failing)
 	_, ok = gaugeAt(rm, "dwarf_archive_lag_seconds", map[string]string{"shard": "1"})
-	assert.False(ok, "no lag until a pass scans")
+	assert.False(ok, "no lag until a round probes")
 }
 
 // assertHeldReadings asserts that holdARoot's readings are reported, so a test that then expects them gone starts from

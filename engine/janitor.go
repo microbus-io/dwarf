@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"time"
 
@@ -25,25 +26,21 @@ import (
 	"github.com/microbus-io/dwarf/internal/janitor"
 )
 
-// startJanitors makes and starts a janitor for every shard, for the run, on ctx: active on a shard this replica
-// dispatches, paused on the others. applyRole resumes and pauses them as the roles change; each reads its residue
-// class from its shard, where the shard's Sonar publishes it.
+// startJanitors makes and starts a janitor for every shard, for the run, on ctx, with its jobs: active on a shard this
+// replica dispatches, paused on the others. applyRole resumes and pauses them as the roles change; each job reads its
+// residue class from its shard, where the shard's Sonar publishes it.
 func (e *Engine) startJanitors(ctx context.Context) error {
-	set := e.archives.Load()
+	settings := e.janitorSettingsFor(e.archiveGrace)
 	janitors := map[int]*janitor.Janitor{}
 	for _, shard := range e.db.Indices() {
 		sh, err := e.db.Shard(shard)
 		if err != nil {
 			return err
 		}
-		var archive *archiver.Archive
-		if set != nil {
-			archive = set.byShard[shard]
-		}
-		j := janitor.New(sh, e.diags, archive, e.retentionDays)
+		j := janitor.New(sh, e.diags)
 		j.SetManual(e.janitorManual)
 		j.SetIdle(e.janitorIdle)
-		e.configureJanitor(j, e.archiveGrace)
+		e.addJanitorJobs(j, shard, settings)
 		j.Start(ctx)
 		if e.dispatchesOn(shard) {
 			j.Resume()
@@ -52,21 +49,53 @@ func (e *Engine) startJanitors(ctx context.Context) error {
 	}
 	e.janitorMu.Lock()
 	e.janitors = janitors
+	e.janitorJobsBuilt = settings
 	e.janitorMu.Unlock()
 	return nil
 }
 
-// configureJanitor sets j's settings from the engine's fields, with grace for the archive grace.
-func (e *Engine) configureJanitor(j *janitor.Janitor, grace time.Duration) {
-	j.SetGrace(grace)
-	j.SetBatch(e.reapBatch, e.reapBatchRows, e.reapBatchBytes)
-	j.SetStaging(e.reapStageRows, e.reapStageBytes)
-	j.SetQuietMargin(!e.noReapQuiet)
+// janitorSettings are what the engine builds a janitor's jobs with, taken from its fields.
+type janitorSettings struct {
+	grace                             time.Duration
+	batchRoots, batchRows, batchBytes int
+	stageRows, stageBytes             int
+	noQuietMargin                     bool
+}
+
+// janitorSettingsFor returns the settings the engine's fields give, with grace for the archive grace.
+func (e *Engine) janitorSettingsFor(grace time.Duration) janitorSettings {
+	return janitorSettings{
+		grace:      grace,
+		batchRoots: e.reapBatch, batchRows: e.reapBatchRows, batchBytes: e.reapBatchBytes,
+		stageRows: e.reapStageRows, stageBytes: e.reapStageBytes,
+		noQuietMargin: e.noReapQuiet,
+	}
+}
+
+// addJanitorJobs adds shard's janitor its jobs - fast archiving into the shard's archive, and fast deletion - built
+// with s, replacing the ones it has, which start over.
+func (e *Engine) addJanitorJobs(j *janitor.Janitor, shard int, s janitorSettings) {
+	var archive *archiver.Archive
+	if set := e.archives.Load(); set != nil {
+		archive = set.byShard[shard]
+	}
+	fa := janitor.NewFastArchiving(archive, e.retentionDays)
+	fa.SetGrace(s.grace)
+	fa.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
+	fa.SetStaging(s.stageRows, s.stageBytes)
+	fa.SetQuietMargin(!s.noQuietMargin)
+	j.AddJob(janitor.JobFastArchiving, fa)
+	fd := janitor.NewFastDeletion()
+	fd.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
+	j.AddJob(janitor.JobFastDeletion, fd)
 }
 
 // stopJanitors stops every janitor and returns once they all have.
 func (e *Engine) stopJanitors() {
-	for _, j := range e.allJanitors() {
+	e.janitorMu.Lock()
+	janitors := e.janitors
+	e.janitorMu.Unlock()
+	for _, j := range janitors {
 		j.Stop()
 	}
 }
@@ -78,29 +107,29 @@ func (e *Engine) janitorOn(shard int) *janitor.Janitor {
 	return e.janitors[shard]
 }
 
-// allJanitors returns every janitor, by shard.
-func (e *Engine) allJanitors() []*janitor.Janitor {
-	e.janitorMu.Lock()
-	defer e.janitorMu.Unlock()
-	shards := make([]int, 0, len(e.janitors))
-	for shard := range e.janitors {
-		shards = append(shards, shard)
-	}
-	slices.Sort(shards)
-	js := make([]*janitor.Janitor, 0, len(shards))
-	for _, shard := range shards {
-		js = append(js, e.janitors[shard])
-	}
-	return js
-}
-
-// drainJanitors runs every active janitor's jobs until they make no progress (janitor.Drain), shard by shard, with the
-// engine's settings as they stand and grace for the archive grace: what a test drives to have the jobs do what is due.
-// The settings stay as the engine's after it.
+// drainJanitors runs every active janitor's jobs until they make no progress (janitor.Drain), shard by shard, with
+// grace for the archive grace and the engine's other settings as they stand: what a test drives to have the jobs do
+// what is due. A test changes the engine's fields on a running engine, so the jobs are rebuilt when the settings
+// differ from the ones they were built with, and rebuilt with the engine's own after a drain under another grace.
 func (e *Engine) drainJanitors(ctx context.Context, grace time.Duration) {
-	for _, j := range e.allJanitors() {
-		e.configureJanitor(j, grace)
-		j.Drain(ctx)
-		e.configureJanitor(j, e.archiveGrace)
+	e.janitorMu.Lock()
+	janitors, built := e.janitors, e.janitorJobsBuilt
+	e.janitorMu.Unlock()
+	shards := slices.Sorted(maps.Keys(janitors))
+	want := e.janitorSettingsFor(grace)
+	for _, shard := range shards {
+		if want != built {
+			e.addJanitorJobs(janitors[shard], shard, want)
+		}
+		janitors[shard].Drain(ctx)
 	}
+	restore := e.janitorSettingsFor(e.archiveGrace)
+	if restore != want {
+		for _, shard := range shards {
+			e.addJanitorJobs(janitors[shard], shard, restore)
+		}
+	}
+	e.janitorMu.Lock()
+	e.janitorJobsBuilt = restore
+	e.janitorMu.Unlock()
 }
