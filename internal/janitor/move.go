@@ -122,33 +122,6 @@ func attemptsAmong(ctx context.Context, q sequel.Executor, roots []int) (map[int
 	return attempted, errors.Trace(rows.Err())
 }
 
-// stampClosed marks a closed root for deletion, due at once, if it is still a closed root due grace after its close:
-// what a retention of 0 does with a tree too large to delete in one batch, leaving it to the deletion of stamped trees
-// in chunks. The stamp clears any archive attempt, as every stamp but a publication does. The root is locked first as a
-// move locks it, so a root another transaction holds - a Fork cloning the tree - is skipped on PostgreSQL and MySQL
-// rather than waited for. It reports whether it stamped it.
-func stampClosed(ctx context.Context, h handle, root int, grace time.Duration) (stamped bool, err error) {
-	id := strconv.Itoa(root)
-	err = h.Transact(ctx, func(tx *sequel.Tx) error {
-		stamped = false
-		due, dueArgs := closedDueSQL(grace)
-		locked, err := lockRoots(ctx, tx, true, "flow_id="+id+" AND "+due, dueArgs...)
-		if err != nil || len(locked) == 0 {
-			return errors.Trace(err)
-		}
-		none, noneArg := noAttemptSQL(tx.DriverName())
-		if _, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1, archive_attempt_at="+none+" WHERE flow_id="+id, noneArg); err != nil {
-			return errors.Trace(err)
-		}
-		stamped = true
-		return nil
-	})
-	if err != nil {
-		return false, errors.Trace(err)
-	}
-	return stamped, nil
-}
-
 // removal is what one transaction removed from the live tables: flow rows, and of those, the rows of trees deleted
 // without having been archived - every tree but a published one, whose live copy is deleted after its archive copy
 // was published.

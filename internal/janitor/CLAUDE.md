@@ -91,7 +91,7 @@ failing cannot hang on it, and jobs that feed each other are run until both are 
 so a `Drain` beside the goroutines never overlaps a round (`TestJanitor_ADrainBesideTheGoroutineNeverOverlapsARound`).
 Pinned by `TestJanitor_DrainReturnsWhereAJobWouldWait`.
 
-## Fast archiving (`fast.go`)
+## Fast archiving (`fastarchiving.go`)
 
 The janitor's first job (`JobFastArchiving`): the closed roots as they come due, by close time, one batch a round,
 moved into today's archive in one transaction - or deleted, at a retention of 0. The move, its root locks and the
@@ -155,7 +155,7 @@ rechecks under them, the directory rows and the archive time are the reaper's, c
   DSN `loc` other than UTC places the stored wall clock in that location. The fault and checkpoint names are the reaper's strings, named in
   `internal/diagnostics`, so a test arming one arms both.
 
-## Fast deletion (`delete.go`)
+## Fast deletion (`fastdeletion.go`)
 
 The second job (`JobFastDeletion`): the trees stamped for deletion - a Delete's, a DeleteOnCompletion's once its
 grace has run, a published tree's live copy - deleted whole as their stamps come due, one batch a round, by the same

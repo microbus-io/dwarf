@@ -58,25 +58,11 @@ func (l limit) tighter(o limit) limit {
 	return limit{min(l.rows, o.rows), min(l.bytes, o.bytes), min(l.flows, o.flows)}
 }
 
-// flowBytesSQL is a flow row's payload bytes, its columns qualified by alias ("f." or "").
-func flowBytesSQL(alias string) string {
-	return alias + "graph_bytes+" + alias + "baggage_bytes+" + alias + "final_state_bytes"
-}
-
-// stepBytesSQL is a step row's payload bytes, its columns qualified by alias ("s." or "").
-func stepBytesSQL(alias string) string {
-	return alias + "state_bytes+" + alias + "changes_bytes+" + alias + "interrupt_payload_bytes+" + alias +
-		"resume_data_bytes+" + alias + "subgraph_result_bytes"
-}
-
-// sumSQL is the sum of expr over a group, 0 for none. SQL Server sums an INT as an INT, which a tree's bytes can
-// overflow, so it sums a BIGINT there.
-func sumSQL(driver, expr string) string {
-	if driver == "mssql" {
-		return "COALESCE(SUM(CAST(" + expr + " AS BIGINT)), 0)"
-	}
-	return "COALESCE(SUM(" + expr + "), 0)"
-}
+// flowBytesSQL is a flow row's payload bytes, and stepBytesSQL a step row's, aliased s.
+const (
+	flowBytesSQL = "graph_bytes+baggage_bytes+final_state_bytes"
+	stepBytesSQL = "s.state_bytes+s.changes_bytes+s.interrupt_payload_bytes+s.resume_data_bytes+s.subgraph_result_bytes"
+)
 
 // treesSizesUpTo sizes each tree rooted at roots in the live tables - its flow rows and its step rows, and their payload bytes - each
 // read up to its own limit of rows, in one statement (treesSizesUpToSQL), so a group of trees costs one round trip and
@@ -108,22 +94,27 @@ func treesSizesUpTo(ctx context.Context, q sequel.Executor, roots, limits []int)
 // small tree costs the whole table. MySQL, MariaDB and SQLite join an indexed equality by nested loops. Each read is
 // capped on its own, since a LIMIT over a UNION ALL is applied after MySQL materializes it whole.
 func treesSizesUpToSQL(driver string, roots, limits []int) string {
+	// SQL Server sums an INT as an INT, which a tree's bytes can overflow, so it sums a BIGINT there.
+	sum := "COALESCE(SUM(b), 0)"
+	if driver == "mssql" {
+		sum = "COALESCE(SUM(CAST(b AS BIGINT)), 0)"
+	}
 	branches := make([]string, 0, 2*len(roots))
 	for k, root := range roots {
 		n, id := strconv.Itoa(limits[k]), strconv.Itoa(root)
-		steps := stepBytesSQL("s.") + " AS b FROM dwarf_flows f JOIN dwarf_steps s ON s.flow_id=f.flow_id"
+		steps := stepBytesSQL + " AS b FROM dwarf_flows f JOIN dwarf_steps s ON s.flow_id=f.flow_id"
 		switch driver {
 		case "pgx":
-			steps = "s.b FROM dwarf_flows f CROSS JOIN LATERAL (SELECT " + stepBytesSQL("s.") + " AS b FROM dwarf_steps" +
+			steps = "s.b FROM dwarf_flows f CROSS JOIN LATERAL (SELECT " + stepBytesSQL + " AS b FROM dwarf_steps" +
 				" s WHERE s.flow_id=f.flow_id LIMIT " + n + ") s"
 		case "mssql":
-			steps = "s.b FROM dwarf_flows f CROSS APPLY (SELECT TOP (" + n + ") " + stepBytesSQL("s.") + " AS b FROM dwarf_steps" +
+			steps = "s.b FROM dwarf_flows f CROSS APPLY (SELECT TOP (" + n + ") " + stepBytesSQL + " AS b FROM dwarf_steps" +
 				" s WHERE s.flow_id=f.flow_id) s"
 		}
-		flows := capped(driver, flowBytesSQL("")+" AS b FROM dwarf_flows WHERE root_flow_id="+id, limits[k])
+		flows := capped(driver, flowBytesSQL+" AS b FROM dwarf_flows WHERE root_flow_id="+id, limits[k])
 		stepRows := capped(driver, steps+" WHERE f.root_flow_id="+id, limits[k])
 		agg := func(key int) string {
-			return "SELECT " + strconv.Itoa(key) + " AS k, COUNT(*) AS n, " + sumSQL(driver, "b") + " AS b FROM ("
+			return "SELECT " + strconv.Itoa(key) + " AS k, COUNT(*) AS n, " + sum + " AS b FROM ("
 		}
 		branches = append(branches, agg(2*k)+flows+") cf"+strconv.Itoa(k), agg(2*k+1)+stepRows+") cs"+strconv.Itoa(k))
 	}

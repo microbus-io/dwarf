@@ -17,6 +17,7 @@ limitations under the License.
 package janitor
 
 import (
+	"cmp"
 	"context"
 	"slices"
 	"strconv"
@@ -24,9 +25,11 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/archiver"
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/seamster"
+	"github.com/microbus-io/sequel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -235,7 +238,7 @@ func (f *FastArchiving) batch(ctx context.Context, h handle) bool {
 		probed = true
 	}
 	where, whereArgs := f.restriction(h.DriverName())
-	candidates, _, err := scanClosed(ctx, h, seams, f.grace, where, whereArgs, max(f.batchRoots, 1))
+	candidates, _, err := f.scanClosed(ctx, h, seams, where, whereArgs, max(f.batchRoots, 1))
 	if err != nil {
 		f.logError(ctx, "Janitor: selecting closed trees", "error", err)
 		if archiving {
@@ -266,7 +269,7 @@ func (f *FastArchiving) batch(ctx context.Context, h handle) bool {
 			due, dueArgs := closedDueSQL(f.grace)
 			removed, err = move(ctx, h, seams, cut, due, dueArgs, d)
 		case routeStamp:
-			_, err = stampClosed(ctx, h, cut[0], f.grace)
+			_, err = f.stampClosed(ctx, h, cut[0])
 		}
 	}
 	// Counted before the stop check: a batch that committed as the job was stopped still counts.
@@ -303,7 +306,7 @@ func (f *FastArchiving) batch(ctx context.Context, h handle) bool {
 // on the database's clock and the failure's on this process's, so neither clock's offset matters.
 func (f *FastArchiving) probe(ctx context.Context, h handle, canEnd bool) {
 	f.probedAt = time.Now()
-	_, oldest, err := scanClosed(ctx, h, noSeams, f.grace, "", nil, 1)
+	_, oldest, err := f.scanClosed(ctx, h, noSeams, "", nil, 1)
 	if err != nil {
 		f.logError(ctx, "Janitor: reading the oldest closed root", "error", err)
 		return
@@ -316,7 +319,7 @@ func (f *FastArchiving) probe(ctx context.Context, h handle, canEnd bool) {
 		return
 	}
 	none, noneArg := noAttemptSQL(h.DriverName())
-	_, oldestUnattempted, err := scanClosed(ctx, h, noSeams, f.grace, " AND archive_attempt_at<="+none, []any{noneArg}, 1)
+	_, oldestUnattempted, err := f.scanClosed(ctx, h, noSeams, " AND archive_attempt_at<="+none, []any{noneArg}, 1)
 	if err != nil {
 		f.logError(ctx, "Janitor: reading the oldest closed root", "error", err)
 		return
@@ -383,8 +386,139 @@ func (f *FastArchiving) restriction(driver string) (where string, args []any) {
 		f.count, f.ordinal, f.partitioned, f.after = count, ordinal, partitioned, dueRoot{}
 	}
 	where, args = closedResidency(count, ordinal, partitioned, f.grace, stealGrace)
-	after, afterArgs := afterClose(driver, f.after)
-	return where + after, append(args, afterArgs...)
+	if f.after.flowID != 0 {
+		// After the position in close order, by an explicit timestamp seek rather than an OR across its leading column.
+		ts, arg := database.SQLTime(driver, f.after.updatedAt)
+		where += " AND updated_at>=" + ts + " AND NOT (updated_at=" + ts + " AND flow_id<=?)"
+		args = append(args, arg, arg, f.after.flowID)
+	}
+	return where, args
+}
+
+// scanClosed selects up to limit closed roots due the job's grace after their close, restricted by where (a SQL
+// fragment and its arguments; empty for none), in close order - (updated_at, flow_id) - and returns the age of the
+// oldest it read, 0 for none. It returns fewer than limit only when it saw every due root.
+//
+// One branch per terminal status, each a range of idx_dwarf_flows_status (status, updated_at) that stops at the limit:
+// one scan over all four statuses has no index order, so it would read and sort every due root on every batch,
+// O(backlog) per batch. The status is inlined, never bound: a bound status defeats the filtered indexes and the
+// estimates. Each root's age comes with it, from the row the scan reads anyway: the first of each branch is that
+// status's oldest due root. flow_id breaks ties of updated_at, so the order is total: the index carries the primary key
+// after updated_at on MySQL, SQL Server and SQLite, and PostgreSQL sorts only each tie group (an incremental sort). The
+// branches are merged here: their first limit are exactly the order's first, since each branch holds its own first
+// limit.
+func (f *FastArchiving) scanClosed(ctx context.Context, q sequel.Executor, seams *seamster.Seamster, where string, whereArgs []any, limit int) (roots []dueRoot, oldest time.Duration, err error) {
+	var stmt string
+	var args []any
+	for i, status := range database.TerminalStatuses {
+		if i > 0 {
+			stmt += " UNION ALL "
+		}
+		stmt += "SELECT flow_id, updated_at, age_ms, created_hour FROM (SELECT flow_id, updated_at, created_hour," +
+			" DATE_DIFF_MILLIS(NOW_UTC(), updated_at) AS age_ms" +
+			" FROM dwarf_flows WHERE status='" + status + "'" +
+			" AND updated_at<=DATE_ADD_MILLIS(NOW_UTC(), ?) AND surgraph_flow_id=0 AND delete_after_ms=0" +
+			where + " ORDER BY updated_at, flow_id LIMIT_OFFSET(?, 0)) due_" + status
+		args = append(args, -f.grace.Milliseconds())
+		args = append(args, whereArgs...)
+		args = append(args, limit)
+	}
+	rows, err := q.QueryContext(ctx, stmt, args...)
+	// diagnostics.FaultReapSelectErr fails the scan, so a test proves a round logs and goes on without removing anything.
+	if err == nil && seams.IsFault(diagnostics.FaultReapSelectErr) {
+		rows.Close()
+		err = errors.New("injected fault: " + diagnostics.FaultReapSelectErr)
+	}
+	if err != nil {
+		return nil, 0, errors.Trace(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r dueRoot
+		// float64: DATE_DIFF_MILLIS is fractional on SQLite, where an int64 scan fails.
+		var ageMs float64
+		if err := rows.Scan(&r.flowID, &r.updatedAt, &ageMs, &r.createdHour); err != nil {
+			return nil, 0, errors.Trace(err)
+		}
+		// The position is bound back as this instant (restriction): a MySQL driver with a DSN loc other than UTC places
+		// the stored wall clock in that location, and binding it as found would seek hours off.
+		r.updatedAt = database.StoredTime(r.updatedAt)
+		roots = append(roots, r)
+		oldest = max(oldest, time.Duration(ageMs*float64(time.Millisecond)))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, errors.Trace(err)
+	}
+	slices.SortFunc(roots, func(a, b dueRoot) int {
+		if c := a.updatedAt.Compare(b.updatedAt); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.flowID, b.flowID)
+	})
+	return roots[:min(limit, len(roots))], oldest, nil
+}
+
+// stampClosed marks a closed root for deletion, due at once, if it is still a closed root due the job's grace after its close:
+// what a retention of 0 does with a tree too large to delete in one batch, leaving it to the deletion of stamped trees
+// in chunks. The stamp clears any archive attempt, as every stamp but a publication does. The root is locked first as a
+// move locks it, so a root another transaction holds - a Fork cloning the tree - is skipped on PostgreSQL and MySQL
+// rather than waited for. It reports whether it stamped it.
+func (f *FastArchiving) stampClosed(ctx context.Context, h handle, root int) (stamped bool, err error) {
+	id := strconv.Itoa(root)
+	err = h.Transact(ctx, func(tx *sequel.Tx) error {
+		stamped = false
+		due, dueArgs := closedDueSQL(f.grace)
+		locked, err := lockRoots(ctx, tx, true, "flow_id="+id+" AND "+due, dueArgs...)
+		if err != nil || len(locked) == 0 {
+			return errors.Trace(err)
+		}
+		none, noneArg := noAttemptSQL(tx.DriverName())
+		if _, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1, archive_attempt_at="+none+" WHERE flow_id="+id, noneArg); err != nil {
+			return errors.Trace(err)
+		}
+		stamped = true
+		return nil
+	})
+	if err != nil {
+		return false, errors.Trace(err)
+	}
+	return stamped, nil
+}
+
+// dueRoot is a due root a scan returned, by its key in the scan's order.
+type dueRoot struct {
+	updatedAt   time.Time
+	flowID      int
+	createdHour int
+}
+
+// rootIDs returns the flow ids of roots, in their order.
+func rootIDs(roots []dueRoot) []int {
+	ids := make([]int, len(roots))
+	for i, r := range roots {
+		ids[i] = r.flowID
+	}
+	return ids
+}
+
+// closedDueSQL is the condition, on a live flows row, that it is a closed root due grace after its close and not
+// stamped for deletion, and its argument. A batch rechecks it under the root's lock.
+func closedDueSQL(grace time.Duration) (cond string, args []any) {
+	return "status IN (" + database.TerminalStatusesSQL + ") AND surgraph_flow_id=0 AND delete_after_ms=0" +
+		" AND updated_at<=DATE_ADD_MILLIS(NOW_UTC(), ?)", []any{-grace.Milliseconds()}
+}
+
+// closedResidency restricts a closed scan to this replica's share of the shard's dispatchers, flow_id % count =
+// ordinal, plus every root overdue by the steal grace past the archive grace. Two janitors then take disjoint roots
+// while both keep up. A position-ordered scan steals only the overdue roots ahead of its position - when its job is
+// behind - so a slow peer's roots, once behind it, are a sweep's. It fails open, as the piston's partition does: an
+// unknown or invalid pair, or a solo dispatcher, restricts nothing.
+func closedResidency(count, ordinal int, ok bool, grace, steal time.Duration) (clause string, args []any) {
+	if !ok || count < 2 || ordinal < 0 || ordinal >= count {
+		return "", nil
+	}
+	return " AND (flow_id % ? = ? OR updated_at<=DATE_ADD_MILLIS(NOW_UTC(), ?))",
+		[]any{count, ordinal, -(grace + steal).Milliseconds()}
 }
 
 // failed records an archive failure, unless ctx ended: a stop is no failure. Only the first failure of an episode is

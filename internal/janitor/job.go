@@ -51,3 +51,7 @@ type handle interface {
 	sequel.Executor
 	Transact(ctx context.Context, fn func(tx *sequel.Tx) error) error
 }
+
+// stealGrace is how long past due a root waits for the dispatcher whose residue class it is before any dispatcher's job
+// takes it.
+const stealGrace = 30 * time.Second
