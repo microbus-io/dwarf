@@ -35,19 +35,6 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestSQL_TerminalStatusesAreTheClosedOnes pins the literal the scans and rechecks inline against the workflow
-// package's notion of a closed status.
-func TestSQL_TerminalStatusesAreTheClosedOnes(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	for _, status := range []string{
-		workflow.StatusCreated, workflow.StatusRunning, workflow.StatusInterrupted,
-		workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusTerminated, workflow.StatusCancelled,
-	} {
-		assert.Equal(workflow.IsTerminalStatus(status), slices.Contains(terminalStatuses, status), status)
-	}
-}
-
 // TestMove_ClosedTreeMovesToTodaysTables pins the archiver: once its root has closed, a whole tree - the root, its
 // subgraph descendant and every step - leaves the live tables for today's archive tables in one pass, with its ids
 // and its outcome as they were.
@@ -601,7 +588,7 @@ func TestMove_AHeldRootIsSkippedNotWaitedFor(t *testing.T) {
 	holderDone := make(chan error, 1)
 	go func() {
 		holderDone <- db.Transact(ctx, func(tx *sequel.Tx) error {
-			_, err := lockRoots(ctx, tx, live.flows, false, "flow_id=?", held)
+			_, err := lockRoots(ctx, tx, false, "flow_id=?", held)
 			locked <- err
 			<-release
 			return err
@@ -727,7 +714,7 @@ func TestMove_TheSizingSeeksEachFlowsSteps(t *testing.T) {
 	if r.db.DriverName() != "pgx" {
 		t.Skip("the plan pinned here is PostgreSQL's")
 	}
-	stmt := treesSizesUpToSQL(r.db.DriverName(), live, []int{1, 2}, []int{1001, 4097})
+	stmt := treesSizesUpToSQL(r.db.DriverName(), []int{1, 2}, []int{1001, 4097})
 	var plan strings.Builder
 	errRollback := errors.New("rollback")
 	err := r.db.Transact(ctx, func(tx *sequel.Tx) error {

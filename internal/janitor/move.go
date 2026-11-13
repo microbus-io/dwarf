@@ -105,7 +105,7 @@ func publishedSQL(driver string) (string, []any) {
 // attemptsAmong returns the roots among roots that have an archive attempt: one primary-key read of the roots.
 func attemptsAmong(ctx context.Context, q sequel.Executor, roots []int) (map[int]bool, error) {
 	none, arg := noAttemptSQL(q.DriverName())
-	rows, err := q.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE flow_id IN ("+intCSV(roots)+")"+
+	rows, err := q.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE flow_id IN ("+database.IntList(roots)+")"+
 		" AND archive_attempt_at>"+none, arg)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -132,7 +132,7 @@ func stampClosed(ctx context.Context, h handle, root int, grace time.Duration) (
 	err = h.Transact(ctx, func(tx *sequel.Tx) error {
 		stamped = false
 		due, dueArgs := closedDueSQL(grace)
-		locked, err := lockRoots(ctx, tx, live.flows, true, "flow_id="+id+" AND "+due, dueArgs...)
+		locked, err := lockRoots(ctx, tx, true, "flow_id="+id+" AND "+due, dueArgs...)
 		if err != nil || len(locked) == 0 {
 			return errors.Trace(err)
 		}
@@ -170,13 +170,13 @@ func move(ctx context.Context, h handle, seams *seamster.Seamster, roots []int, 
 	}
 	err = h.Transact(ctx, func(tx *sequel.Tx) error {
 		removed = removal{}
-		locked, err := lockRoots(ctx, tx, live.flows, true, "flow_id IN ("+intCSV(roots)+") AND "+due, dueArgs...)
+		locked, err := lockRoots(ctx, tx, true, "flow_id IN ("+database.IntList(roots)+") AND "+due, dueArgs...)
 		if err != nil || len(locked) == 0 {
 			return errors.Trace(err)
 		}
 		seams.Checkpoint(ctx, diagnostics.CheckpointReapBatchLocked)
 		// ids are trusted integers embedded as literals to dodge the per-driver bind-param ceiling.
-		ids := intCSV(locked)
+		ids := database.IntList(locked)
 		trees := "SELECT flow_id FROM dwarf_flows WHERE root_flow_id IN (" + ids + ")"
 		published := 0
 		if d == nil {
@@ -293,18 +293,18 @@ func archivedAtSQL(driverName string, dayEnds time.Time) (expr string, args []an
 // here does skip the row, but the move's own statements then wait on it - under locking READ COMMITTED a DELETE that
 // scans waits on every locked row it passes, one it would not delete included - and READPAST on those could leave a
 // tree's row out of its copy.
-func lockRoots(ctx context.Context, tx *sequel.Tx, flows string, skipHeld bool, where string, args ...any) ([]int, error) {
+func lockRoots(ctx context.Context, tx *sequel.Tx, skipHeld bool, where string, args ...any) ([]int, error) {
 	var stmt string
 	switch tx.DriverName() {
 	case "pgx", "mysql", "mariadb":
-		stmt = "SELECT flow_id FROM " + flows + " WHERE " + where + " ORDER BY flow_id FOR UPDATE"
+		stmt = "SELECT flow_id FROM dwarf_flows WHERE " + where + " ORDER BY flow_id FOR UPDATE"
 		if skipHeld {
 			stmt += " SKIP LOCKED"
 		}
 	case "mssql":
-		stmt = "UPDATE " + flows + " SET touch=1-touch OUTPUT inserted.flow_id WHERE " + where
+		stmt = "UPDATE dwarf_flows SET touch=1-touch OUTPUT inserted.flow_id WHERE " + where
 	default:
-		stmt = "UPDATE " + flows + " SET touch=1-touch WHERE " + where + " RETURNING flow_id"
+		stmt = "UPDATE dwarf_flows SET touch=1-touch WHERE " + where + " RETURNING flow_id"
 	}
 	rows, err := tx.QueryContext(ctx, stmt, args...)
 	if err != nil {

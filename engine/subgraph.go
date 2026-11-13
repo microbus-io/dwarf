@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -163,7 +164,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 			var locked int64
 			for chunk := range slices.Chunk(lockIDs, inListChunk) {
 				ph, ids := inList(chunk)
-				n, err := lockFlowRows(ctx, tx, "flow_id IN ("+ph+") AND status NOT IN ("+terminalStatusesSQL+")", ids...)
+				n, err := lockFlowRows(ctx, tx, "flow_id IN ("+ph+") AND status NOT IN ("+database.TerminalStatusesSQL+")", ids...)
 				if err != nil {
 					return err
 				}
@@ -263,7 +264,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 					terminalized[i] = n > 0
 					return nil
 				},
-					"UPDATE dwarf_flows SET final_state=?, final_state_bytes=?, status=?, cancel_reason=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
+					"UPDATE dwarf_flows SET final_state=?, final_state_bytes=?, status=?, cancel_reason=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+database.TerminalStatusesSQL+")",
 					finalStates[i], len(finalStates[i]), workflow.StatusTerminated, reason, fid,
 				)
 			}

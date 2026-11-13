@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package janitor
+package database
 
 import (
 	"strconv"
@@ -23,26 +23,21 @@ import (
 	"github.com/microbus-io/dwarf/workflow"
 )
 
-// tables names the pair of tables a statement runs against: the live tables, or one archive day's.
-type tables struct {
-	flows, steps string
-}
-
-// live is the live tables.
-var live = tables{flows: "dwarf_flows", steps: "dwarf_steps"}
-
-// terminalStatuses are the closed statuses, which TestSQL_TerminalStatusesAreTheClosedOnes pins against
-// workflow.IsTerminalStatus.
-var terminalStatuses = []string{
+// TerminalStatuses are the statuses of a closed flow or step: the ones workflow.IsTerminalStatus calls terminal.
+// Read-only.
+var TerminalStatuses = []string{
 	workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusTerminated, workflow.StatusCancelled,
 }
 
-// terminalStatusesSQL is terminalStatuses as an IN list of inlined literals: a bound status defeats the filtered
-// indexes.
-var terminalStatusesSQL = "'" + strings.Join(terminalStatuses, "', '") + "'"
+// TerminalStatusesSQL is TerminalStatuses as a list of quoted literals, to inline into a WHERE clause:
+// "status IN (" + TerminalStatusesSQL + ")" or "status NOT IN (" + TerminalStatusesSQL + ")". Inline it, never bind a
+// status: a bound status defeats the SQL Server and SQLite filtered indexes.
+const TerminalStatusesSQL = "'" + workflow.StatusCompleted + "', '" + workflow.StatusFailed + "', '" +
+	workflow.StatusTerminated + "', '" + workflow.StatusCancelled + "'"
 
-// intCSV joins ids as a comma-separated list of literals.
-func intCSV(ids []int) string {
+// IntList renders ids as a comma-separated list of literals, to inline into an IN (...) clause. Inlined rather than
+// bound, so it is for ids the caller holds as ints - read from the database - and never for text.
+func IntList(ids []int) string {
 	var b strings.Builder
 	for i, id := range ids {
 		if i > 0 {

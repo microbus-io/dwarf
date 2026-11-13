@@ -60,7 +60,7 @@ func rootIDs(roots []dueRoot) []int {
 // closedDueSQL is the condition, on a live flows row, that it is a closed root due grace after its close and not
 // stamped for deletion, and its argument. A batch rechecks it under the root's lock.
 func closedDueSQL(grace time.Duration) (cond string, args []any) {
-	return "status IN (" + terminalStatusesSQL + ") AND surgraph_flow_id=0 AND delete_after_ms=0" +
+	return "status IN (" + database.TerminalStatusesSQL + ") AND surgraph_flow_id=0 AND delete_after_ms=0" +
 		" AND updated_at<=DATE_ADD_MILLIS(NOW_UTC(), ?)", []any{-grace.Milliseconds()}
 }
 
@@ -77,7 +77,7 @@ func closedDueSQL(grace time.Duration) (cond string, args []any) {
 func closedScanSQL(grace time.Duration, where string, whereArgs []any, limit int) (string, []any) {
 	var q string
 	var args []any
-	for i, status := range terminalStatuses {
+	for i, status := range database.TerminalStatuses {
 		if i > 0 {
 			q += " UNION ALL "
 		}

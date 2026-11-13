@@ -24,7 +24,6 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -102,14 +101,6 @@ const (
 	graphCacheFlows  = 1 << 16
 	graphCacheGraphs = 4096
 )
-
-// terminalStatusesSQL is every terminal flow/step status pre-joined into a quoted literal ready to inline into a
-// WHERE clause, e.g. "status IN (" + terminalStatusesSQL + ")" or "status NOT IN (" + terminalStatusesSQL + ")".
-// Never bind this as a parameter - a bound status defeats the SQL Server / SQLite filtered index. In Go, test a
-// status with workflow.IsTerminalStatus; TestTerminalStatusesSQL_MatchesIsTerminalStatus keeps the two in step.
-var terminalStatusesSQL = "'" + strings.Join([]string{
-	workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusTerminated, workflow.StatusCancelled,
-}, "', '") + "'"
 
 // Engine is the standalone workflow orchestration engine.
 type Engine struct {

@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -168,7 +169,7 @@ func lockedFlowRows(driverName string, res *sequel.BatchResults) (int64, error) 
 }
 
 // liveFlowWhere matches the flow row by flow_id while it is not terminal.
-var liveFlowWhere = "flow_id=? AND status NOT IN (" + terminalStatusesSQL + ")"
+var liveFlowWhere = "flow_id=? AND status NOT IN (" + database.TerminalStatusesSQL + ")"
 
 // claimEligible is the claim's test that the step is still claimable - pending, unparked, due, lease lapsed -
 // wrapped in CASE so that no index can serve it, leaving the primary key on step_id as the claim's only index

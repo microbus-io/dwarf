@@ -30,6 +30,7 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/candidates"
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/graphcache"
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -929,7 +930,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 		err = db.Transact(ctx, func(tx *sequel.Tx) error {
 			for chunk := range slices.Chunk(allFlowIDs, inListChunk) {
 				ph, ids := inList(chunk)
-				lockFlowRows(ctx, tx, "flow_id IN ("+ph+") AND status NOT IN ("+terminalStatusesSQL+")", ids...)
+				lockFlowRows(ctx, tx, "flow_id IN ("+ph+") AND status NOT IN ("+database.TerminalStatusesSQL+")", ids...)
 			}
 			for chunk := range slices.Chunk(allFlowIDs, inListChunk) {
 				ph, ids := inList(chunk)
@@ -961,7 +962,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 				tx.ExecContext(ctx,
 					"UPDATE dwarf_flows SET cancel_reason=?,"+
 						" cancel_watermark=CASE flow_id"+strings.Repeat(" WHEN ? THEN ?", len(chunk))+" ELSE cancel_watermark END,"+
-						" touch=1-touch WHERE flow_id IN ("+ph+") AND status NOT IN ("+terminalStatusesSQL+")"+
+						" touch=1-touch WHERE flow_id IN ("+ph+") AND status NOT IN ("+database.TerminalStatusesSQL+")"+
 						" AND cancel_watermark=0",
 					args...,
 				)

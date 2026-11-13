@@ -129,7 +129,7 @@ func (f *FastDeletion) batch(ctx context.Context, h handle) bool {
 		if err := targetedFault(seams, diagnostics.FaultReapSizeErr, group...); err != nil {
 			return nil, err
 		}
-		return treesSizesUpTo(ctx, h, live, group, limits)
+		return treesSizesUpTo(ctx, h, group, limits)
 	})
 	passed := err == nil && len(cut) == 1 && batchLimit.over(first)
 	var removed removal

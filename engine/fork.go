@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"slices"
 
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/migrations"
@@ -169,7 +170,7 @@ func (e *Engine) forkSource(ctx context.Context, tx *sequel.Tx, src flowTables, 
 	rootOf := "flow_id=(SELECT f.root_flow_id FROM " + src.flows + " f JOIN " + src.steps + " s ON s.flow_id=f.flow_id" +
 		" WHERE f.flow_id=? AND f.created_hour=? AND s.step_id=? AND s.step_token=? AND s.flow_created_hour=?)"
 	rootArgs := []any{forkFlowID, forkStepHour, forkStepID, forkStepToken, forkStepHour}
-	locked, err := lockRows(ctx, tx, src.flows, rootOf+" AND status IN ("+terminalStatusesSQL+") AND delete_after_ms=0",
+	locked, err := lockRows(ctx, tx, src.flows, rootOf+" AND status IN ("+database.TerminalStatusesSQL+") AND delete_after_ms=0",
 		rootArgs...)
 	if err != nil {
 		return nil, 0, errors.Trace(err)

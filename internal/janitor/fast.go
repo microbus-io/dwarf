@@ -359,7 +359,7 @@ func (f *FastArchiving) cut(ctx context.Context, h handle, candidates []int, arc
 		if err := targetedFault(f.j.diags.Seams(), diagnostics.FaultReapSizeErr, group...); err != nil {
 			return nil, err
 		}
-		return treesSizesUpTo(ctx, h, live, group, limits)
+		return treesSizesUpTo(ctx, h, group, limits)
 	})
 	switch {
 	case err != nil:

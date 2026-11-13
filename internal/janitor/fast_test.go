@@ -281,7 +281,7 @@ func TestFast_ARootWithAnAttemptIsPassed(t *testing.T) {
 
 	// Every candidate with an attempt: passed, and no failure.
 	more := seedTrees(t, r.db, 2, callShape)
-	_, err = r.db.ExecContext(ctx, "UPDATE dwarf_flows SET archive_attempt_at="+at+" WHERE flow_id IN ("+intCSV(more)+")", arg)
+	_, err = r.db.ExecContext(ctx, "UPDATE dwarf_flows SET archive_attempt_at="+at+" WHERE flow_id IN ("+database.IntList(more)+")", arg)
 	assert.NoError(err)
 	r.pass(ctx)
 	assert.Equal(more[1], r.fast().after.flowID)
@@ -377,10 +377,10 @@ func TestSize_TreesAreSizedInRowsAndBytes(t *testing.T) {
 	r := newRig(t, 30)
 	root := seedWideTree(t, r.db, 2, 3, 4) // a root of 2 steps, 3 children of 4: 4 flows, 14 steps
 	setStepBytes(t, r, root, 100, 1000)
-	got, err := treesSizesUpTo(ctx, r.db, live, []int{root}, []int{1000})
+	got, err := treesSizesUpTo(ctx, r.db, []int{root}, []int{1000})
 	assert.Must(assert.NoError(err))
 	assert.Equal(size{rows: 18, bytes: 14*100 + 4*1000, flows: 4}, got[0])
-	got, err = treesSizesUpTo(ctx, r.db, live, []int{root}, []int{5})
+	got, err = treesSizesUpTo(ctx, r.db, []int{root}, []int{5})
 	assert.Must(assert.NoError(err))
 	assert.True(got[0].rows >= 5, "read to its limit: %d rows", got[0].rows)
 }
@@ -418,7 +418,7 @@ func TestSize_SmallTreesMoveTogether(t *testing.T) {
 			}
 			var flows, stamps int
 			err = r.db.QueryRowContext(ctx, "SELECT COUNT(*), COUNT(DISTINCT archived_at) FROM "+migrations.FlowsTable(today)+
-				" WHERE root_flow_id IN ("+intCSV(roots)+")").Scan(&flows, &stamps)
+				" WHERE root_flow_id IN ("+database.IntList(roots)+")").Scan(&flows, &stamps)
 			assert.Must(assert.NoError(err))
 			assert.Equal(100, flows, "every flow of every tree")
 			assert.Equal(1, stamps, "one transaction: one archive time")
@@ -527,7 +527,7 @@ func TestFast_AHeldRootIsNotWaitedForWhenStamped(t *testing.T) {
 	holderDone := make(chan error, 1)
 	go func() {
 		holderDone <- db.Transact(ctx, func(tx *sequel.Tx) error {
-			_, err := lockRoots(ctx, tx, live.flows, false, "flow_id=?", large)
+			_, err := lockRoots(ctx, tx, false, "flow_id=?", large)
 			locked <- err
 			<-release
 			return err

@@ -231,10 +231,6 @@ func (e *Engine) listFilters(driverName string, shardIdx int, query workflow.Que
 // among them: it is only ever seen inside Fork's uncommitted clone.
 var openStatuses = []string{workflow.StatusRunning, workflow.StatusInterrupted}
 
-// closedStatuses are the statuses of a flow that has closed, each a branch of ListRecentlyClosed's statement.
-var closedStatuses = []string{workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusTerminated,
-	workflow.StatusCancelled}
-
 // listOpen lists the open flows - running or interrupted - in the live tables, newest updated first across shards. Its
 // window is optional: the live tables are one table per shard, however wide the window.
 //
@@ -256,7 +252,7 @@ func (e *Engine) listRecentlyClosed(ctx context.Context, query workflow.Query) (
 		return nil, errors.New("ListRecentlyClosed lists closed flows; status %q is not closed", query.Status,
 			http.StatusBadRequest)
 	}
-	return e.listLive(ctx, query, closedStatuses, "list_recently_closed")
+	return e.listLive(ctx, query, database.TerminalStatuses, "list_recently_closed")
 }
 
 // listLive lists the flows in the live tables whose status is among statuses - or is query.Status, which must be one -
@@ -565,17 +561,4 @@ func (e *Engine) queryClauses(query workflow.Query, subgraphCond string) (where 
 	}
 
 	return strings.Join(conditions, " AND "), args, nil
-}
-
-// intCSV renders ids as a comma-separated list for direct embedding in a SQL IN (...) clause. The ids are
-// trusted integers scanned from the engine's own query, so there is no injection surface.
-func intCSV(ids []int) string {
-	var b strings.Builder
-	for i, id := range ids {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(strconv.Itoa(id))
-	}
-	return b.String()
 }

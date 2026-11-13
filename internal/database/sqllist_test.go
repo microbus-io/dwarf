@@ -14,9 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engine
+package database
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -24,17 +25,26 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestTerminalStatusesSQL_MatchesIsTerminalStatus pins that the terminal-status list the engine inlines into
-// SQL holds exactly the statuses workflow.IsTerminalStatus calls terminal. A status added to one and not the
-// other would let a guarded write rewrite a closed flow, or keep an open one out of a selection.
-func TestTerminalStatusesSQL_MatchesIsTerminalStatus(t *testing.T) {
+// TestSQLList_TerminalStatusesAreTheClosedOnes pins that TerminalStatuses and TerminalStatusesSQL hold exactly the
+// statuses workflow.IsTerminalStatus calls terminal. A status added to one and not the other would let a guarded write
+// rewrite a closed flow, or keep an open one out of a selection.
+func TestSQLList_TerminalStatusesAreTheClosedOnes(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	for _, s := range []string{
 		workflow.StatusCreated, workflow.StatusPending, workflow.StatusRunning, workflow.StatusInterrupted,
 		workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusTerminated, workflow.StatusCancelled,
 	} {
-		inSQL := strings.Contains(terminalStatusesSQL, "'"+s+"'")
-		assert.Equal(workflow.IsTerminalStatus(s), inSQL, "status %q", s)
+		assert.Equal(workflow.IsTerminalStatus(s), slices.Contains(TerminalStatuses, s), "list: status %q", s)
+		assert.Equal(workflow.IsTerminalStatus(s), strings.Contains(TerminalStatusesSQL, "'"+s+"'"), "SQL: status %q", s)
 	}
+}
+
+// TestSQLList_IntList pins IntList's spelling: the ids in order, comma-separated, nothing for none.
+func TestSQLList_IntList(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	assert.Equal("", IntList(nil))
+	assert.Equal("7", IntList([]int{7}))
+	assert.Equal("3,1,2", IntList([]int{3, 1, 2}))
 }

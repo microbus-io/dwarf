@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/microbus-io/dwarf/internal/cancelmarker"
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -241,7 +242,7 @@ func (e *Engine) failFlowTx(ctx context.Context, tx sequel.Executor, shardNum, f
 		finalStateJSON = []byte("{}")
 	}
 	res, uerr := tx.ExecContext(ctx,
-		"UPDATE dwarf_flows SET final_state=?, final_state_bytes=?, status=?, error=?, stopped_step_id=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
+		"UPDATE dwarf_flows SET final_state=?, final_state_bytes=?, status=?, error=?, stopped_step_id=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+database.TerminalStatusesSQL+")",
 		finalStateJSON, len(finalStateJSON), loss.status, flowErrorText(cancelled, lossErr), stoppedStepID, flowID,
 	)
 	if uerr == nil {

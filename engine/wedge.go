@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/cancelmarker"
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -203,7 +204,7 @@ func (e *Engine) recoverExpiredLeases(ctx context.Context) {
 			stepIDs = stepIDs[len(batch):]
 			// ids are trusted integers embedded as literals to dodge the per-driver bind-param ceiling.
 			res, err := db.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, not_before=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN ("+intCSV(batch)+") AND "+expired,
+				"UPDATE dwarf_steps SET status=?, not_before=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN ("+database.IntList(batch)+") AND "+expired,
 				workflow.StatusPending,
 			)
 			if err != nil {
@@ -350,7 +351,7 @@ func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel
 			// `<=`, so minAge=0 means "no age guard" - see recoverWedgedSubgraphParks for why a strict `<`
 			// silently skips a row stamped inside the sweep's own millisecond.
 			" AND p.updated_at <= DATE_ADD_MILLIS(NOW_UTC(), ?)"+
-			" AND p.status IN ("+terminalStatusesSQL+")",
+			" AND p.status IN ("+database.TerminalStatusesSQL+")",
 		-minAge.Milliseconds(),
 	)
 	if err != nil {

@@ -102,7 +102,7 @@ func init() {
 		if err := e.ensureStarted(); err != nil {
 			return nil, err
 		}
-		return e.listLive(ctx, query, slices.Concat(openStatuses, closedStatuses), "list_open")
+		return e.listLive(ctx, query, slices.Concat(openStatuses, database.TerminalStatuses), "list_open")
 	}
 	accessors.ArchiveNow = func(eng any, ctx context.Context) {
 		e := eng.(*Engine)
