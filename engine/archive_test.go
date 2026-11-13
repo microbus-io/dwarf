@@ -147,8 +147,8 @@ func TestRetention_PurgeBeforeDropsTheOlderDays(t *testing.T) {
 	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.PurgeBefore(ctx, dayStart(today+2, dayLength))))
 }
 
-// TestRetention_TheLoopDropsExpiredDays pins the background pass on days of two seconds: a day past the retention is
-// dropped, and the days ahead are made, without anyone asking.
+// TestRetention_TheLoopDropsExpiredDays pins archive retention running in the background on days of two seconds: a day
+// past the retention is dropped, and the days ahead are made, without anyone asking.
 func TestRetention_TheLoopDropsExpiredDays(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -157,28 +157,33 @@ func TestRetention_TheLoopDropsExpiredDays(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(hosts.NewMux())
 	e.testArchiveDay = 2 * time.Second
+	e.janitorManual = false // the janitor's jobs run in the background, archive retention every second at this length
 	assert.NoError(e.SetRetention(1))
 	assert.Must(assert.NoError(e.Startup(ctx)))
+	// The day is made after archive retention's first pass, at its janitor's resume, so a later pass must drop it.
+	enginetest.AwaitVisitCount(t, e.diags.Seams(), 1, 10*time.Second, diagnostics.CheckpointArchiveMaintained)
 	today, err := e.archiveOn(1).Today(ctx)
 	assert.NoError(err)
-	// The loop passes every second at this day length, so it may drop the day while it is being made, and the
+	// Archive retention passes every second at this day length, so it may drop the day while it is being made, and the
 	// migration then fails on a table already gone: a drop either way, so its error is not the test's.
 	_ = makeArchiveDay(t, e, today-5)
 
+	// Startup makes the 15 days ahead of its today at this length; the 16th after is made only once the day changes.
+	ahead := today + 16
 	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 	for {
-		if !hasArchiveDay(t, e, today-5) && hasArchiveDay(t, e, today+3) {
+		if !hasArchiveDay(t, e, today-5) && hasArchiveDay(t, e, ahead) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the archive loop did not drop day %d and make day %d", today-5, today+3)
+			t.Fatalf("archive retention did not drop day %d and make day %d", today-5, ahead)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 }
 
-// TestRetention_ReadersKeepNoArchive pins that the archive pass, like every background sweep, runs only on shards
-// this replica dispatches: a reader drops nothing, a dispatcher drops the expired day.
+// TestRetention_ReadersKeepNoArchive pins that archive retention, like every janitor job, runs only on shards this
+// replica dispatches: a reader drops nothing, a dispatcher drops the expired day.
 func TestRetention_ReadersKeepNoArchive(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -188,17 +193,18 @@ func TestRetention_ReadersKeepNoArchive(t *testing.T) {
 	e.SetHost(hosts.NewMux())
 	assert.NoError(e.SetRetention(1))
 	assert.Must(assert.NoError(e.Startup(ctx)))
-	// The loop passes once at its start, then an hour later; the day is made once that first pass is done.
+	// The archive loop's first pass, waited out so it cannot land in the middle of the test.
 	enginetest.AwaitVisitCount(t, e.diags.Seams(), 1, 10*time.Second, diagnostics.CheckpointArchivePassDone)
 	today, err := e.archiveOn(1).Today(ctx)
 	assert.NoError(err)
 	assert.NoError(makeArchiveDay(t, e, today-5))
 
-	e.dispatchFlag(1).Store(false)
-	e.maintainArchives(ctx)
+	setRole(e, 1, false)
+	drainHoldingArchiving(ctx, e)
+	e.refreshArchives(ctx)
 	assert.True(hasArchiveDay(t, e, today-5), "a reader leaves the shard's archive to its dispatchers")
-	e.dispatchFlag(1).Store(true)
-	e.maintainArchives(ctx)
+	setRole(e, 1, true)
+	drainHoldingArchiving(ctx, e)
 	assert.False(hasArchiveDay(t, e, today-5), "a dispatcher drops the expired day")
 }
 

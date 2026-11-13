@@ -277,7 +277,7 @@ func TestArchiver_MaintainKeepsTheRetention(t *testing.T) {
 	}
 	archiver.SetClock(a, atHour(today, 12))
 
-	dropped, err := a.Maintain(ctx, 2)
+	_, dropped, err := a.Maintain(ctx, 2)
 	assert.NoError(err)
 	assert.Equal(2, dropped)
 	days, err := archiver.Days(ctx, a)
@@ -285,14 +285,14 @@ func TestArchiver_MaintainKeepsTheRetention(t *testing.T) {
 	assert.Equal([]int{today - 2, today - 1, today, today + 1, today + 2}, days)
 
 	// A retention as long as an int is the documented way to keep everything: it drops nothing, and no error.
-	dropped, err = a.Maintain(ctx, math.MaxInt)
+	_, dropped, err = a.Maintain(ctx, math.MaxInt)
 	assert.NoError(err)
 	assert.Zero(dropped)
 	days, err = archiver.Days(ctx, a)
 	assert.NoError(err)
 	assert.Len(days, 5)
 
-	dropped, err = a.Maintain(ctx, 0)
+	_, dropped, err = a.Maintain(ctx, 0)
 	assert.NoError(err)
 	assert.Equal(2, dropped)
 	days, err = archiver.Days(ctx, a)
@@ -302,7 +302,7 @@ func TestArchiver_MaintainKeepsTheRetention(t *testing.T) {
 
 // TestArchiver_TheDaysAheadComeWithToday pins that making today makes the two days after it as well, so a day exists
 // a whole day before it begins - and that once they are whole, making sure of them again reads only the clock until
-// the day changes, from EnsureToday and Maintain alike.
+// the day changes, from EnsureToday and Maintain alike, Maintain reporting the new day.
 func TestArchiver_TheDaysAheadComeWithToday(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -318,8 +318,9 @@ func TestArchiver_TheDaysAheadComeWithToday(t *testing.T) {
 
 	catalogs := archiver.Catalogs(a)
 	assert.NoError(a.EnsureToday(ctx))
-	_, err = a.Maintain(ctx, 30)
+	newDay, _, err := a.Maintain(ctx, 30)
 	assert.NoError(err)
+	assert.False(newDay, "the day EnsureToday saw")
 	assert.Equal(catalogs+1, archiver.Catalogs(a), "only the drops read the catalog")
 
 	hour += 24
@@ -327,6 +328,17 @@ func TestArchiver_TheDaysAheadComeWithToday(t *testing.T) {
 	days, err = archiver.Days(ctx, a)
 	assert.NoError(err)
 	assert.Equal([]int{9000, 9001, 9002, 9003}, days, "the next day ahead, once the day changes")
+
+	hour += 24
+	newDay, _, err = a.Maintain(ctx, 30)
+	assert.NoError(err)
+	assert.True(newDay)
+	days, err = archiver.Days(ctx, a)
+	assert.NoError(err)
+	assert.True(slices.Contains(days, 9004), "the next day ahead, made by Maintain")
+	newDay, _, err = a.Maintain(ctx, 30)
+	assert.NoError(err)
+	assert.False(newDay, "the same day again")
 }
 
 // TestArchiver_ShortDaysAreMadeThirtySecondsAhead pins how many days are made ahead of today: two, or as many as cover

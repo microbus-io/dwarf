@@ -27,6 +27,7 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
+	"github.com/microbus-io/dwarf/internal/janitor"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/internal/reaper"
 	"github.com/microbus-io/errors"
@@ -347,55 +348,35 @@ func (e *Engine) startArchives(ctx context.Context) error {
 	}))
 }
 
-// archivePassInterval is how often the archive loop passes: 24 times a day, at least a second apart.
-func archivePassInterval(dayLength time.Duration) time.Duration {
-	return min(max(dayLength/24, time.Second), time.Hour)
-}
-
-// archiveLoop keeps the archive of every shard this replica dispatches: one pass when it starts, then one per tick.
+// archiveLoop keeps the catalog of the archive's days fresh on the shards this replica does not dispatch, for their
+// reads' locates: one pass when it starts, then one per archive pass interval. On a shard it dispatches, the janitor's
+// archive retention keeps the days, and its passes read the catalog.
 func (e *Engine) archiveLoop(ctx context.Context) {
-	ticker := time.NewTicker(archivePassInterval(e.dayLength()))
+	ticker := time.NewTicker(janitor.PassInterval(e.dayLength()))
 	defer ticker.Stop()
-	// A pass at once, not an interval in: Startup makes days but drops none, so a fleet whose replicas live shorter
-	// than an interval would never drop an expired day.
-	e.maintainArchives(ctx)
+	e.refreshArchives(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			e.maintainArchives(ctx)
+			e.refreshArchives(ctx)
 		}
 	}
 }
 
-// maintainArchives is one pass of the archive loop. A reader replica keeps no archive: one replica per shard
-// suffices, and every pass is idempotent.
-func (e *Engine) maintainArchives(ctx context.Context) {
+// refreshArchives reads the archive's days on every shard this replica does not dispatch: a reader keeps no archive,
+// but its locates need the days that exist - one catalog read a pass.
+func (e *Engine) refreshArchives(ctx context.Context) {
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		if e.dispatchesOn(shard) {
+			return nil // the janitor's archive retention
+		}
 		// A turn on the shard, so the pass queues for its connections like any other caller.
 		ctx, doneTurn := e.dbTurn(ctx, shard)
 		defer doneTurn()
-		if !e.dispatchesOn(shard) {
-			// A reader maintains nothing, but its locates still need the days that exist: one catalog read a pass.
-			err := e.archiveOn(shard).Refresh(ctx)
-			if err != nil {
-				e.logSweepError(ctx, "Reading the archive's days; the next pass retries", "shard", shard, "error", err)
-			}
-			return nil
-		}
-		dropped, err := e.archiveOn(shard).Maintain(ctx, e.retentionDays)
-		// diagnostics.FaultArchiveMaintainErr fails the pass after its work, as a failed drop or make does.
-		if err == nil && e.diags.Seams().IsFault(diagnostics.FaultArchiveMaintainErr) {
-			err = errors.New("injected fault: " + diagnostics.FaultArchiveMaintainErr)
-		}
-		e.metricArchiveDaysDropped(ctx, shard, dropped)
-		// A pass cut short by Shutdown is not a failure: logSweepError does not log it either.
-		if err != nil && ctx.Err() == nil {
-			e.metricArchiveMaintainFailed(ctx, shard)
-		}
-		if err != nil {
-			e.logSweepError(ctx, "Maintaining the archive tables; the next pass retries", "shard", shard, "error", err)
+		if err := e.archiveOn(shard).Refresh(ctx); err != nil {
+			e.logSweepError(ctx, "Reading the archive's days; the next pass retries", "shard", shard, "error", err)
 		}
 		return nil
 	})

@@ -239,7 +239,7 @@ func TestArchiveMetrics_TheDays(t *testing.T) {
 	began := time.Since(a.DayEnds(today - 6)).Seconds()
 	assert.True(oldest > 0 && oldest <= began && oldest > began-60, "day %d began %vs ago, got %v", today-5, began, oldest)
 
-	e.maintainArchives(ctx)
+	drainHoldingArchiving(ctx, e) // archive retention drops today-5
 	assert.NoError(e.PurgeBefore(ctx, a.DayEnds(today-1)))
 	if now, _ := a.Today(ctx); now != today {
 		t.Skip("midnight passed during the test")
@@ -251,14 +251,7 @@ func TestArchiveMetrics_TheDays(t *testing.T) {
 	assert.Zero(sumAt(rm, "dwarf_archive_maintain_failed", shard1))
 
 	e.diags.Seams().InjectN(diagnostics.FaultArchiveMaintainErr, 1)
-	e.maintainArchives(ctx)
-	rm = collect(t, reader)
-	assert.Equal(int64(1), sumAt(rm, "dwarf_archive_maintain_failed", shard1))
-
-	// A pass cut short by Shutdown is not a failure.
-	cancelled, cancel := context.WithCancel(ctx)
-	cancel()
-	e.maintainArchives(cancelled)
+	drainHoldingArchiving(ctx, e)
 	rm = collect(t, reader)
 	assert.Equal(int64(1), sumAt(rm, "dwarf_archive_maintain_failed", shard1))
 }

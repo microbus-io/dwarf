@@ -2,7 +2,7 @@
 
 > Load when: changing how a janitor's jobs are scheduled, started, stopped or drained, how a batch takes its turn
 > and its connection, any of its jobs - fast, sweep and large-tree archiving, fast and sweep deletion, live retention,
-> the archive deletion sweep - chunked deletion, the shared sweep machinery, or the janitors' metrics.
+> the archive deletion sweep, archive retention - chunked deletion, the shared sweep machinery, or the janitors' metrics.
 > Coupled with: `engine/CLAUDE.md` §"The janitors" (their activity, the residue class, the drain order, the test seams),
 > `internal/turnstile/CLAUDE.md` (what a claim's age means), `internal/reaper/CLAUDE.md` (the work the janitor has not
 > taken over - `DeleteLive` - and the rationale of the staged protocol and of chunked deletion) and
@@ -39,10 +39,9 @@ at once by the next; a round without - nothing found, or every candidate held or
 (`SetIdle` replaces every job's for a test). **The wait follows a round without progress, not only an empty scan:** a
 job whose candidates all fail would otherwise spin on them. No failure counters, backoff or retry classes beyond that.
 
-**The fast jobs wait 1 s, the repair jobs 30 s** (`fastIdle`, `repairIdle`; `TestJanitor_TheIdleWaits`). A fast job
-polls for work that keeps arriving. A repair job - the sweeps, live retention, large-tree archiving - normally has
-nothing to do,
-and its wait is what it costs then: polled every second it would take a turn, a connection and its reads every second
+**The fast jobs wait 1 s, the repair jobs 30 s** (`fastIdle`, `repairIdle`; `TestJanitor_TheIdleWaits`), and archive
+retention its pass interval (below). A fast job polls for work that keeps arriving. A repair job - the sweeps, live
+retention, large-tree archiving - normally has nothing to do, and its wait is what it costs then: polled every second it would take a turn, a connection and its reads every second
 on every shard, and retry a root or tree that keeps failing every second, a large tree's failing chunk copied again
 each time. So in a healthy fleet the janitor's steady cost is the two fast jobs. The wait slows nothing that works: a
 round with progress is followed at once by the next. What it delays: a large tree's first chunk after fast archiving
@@ -91,7 +90,10 @@ before the jobs start over, so two never run one job. `Stop` ends the run: it ca
 janitor never resumes. A batch in flight is abandoned - its statement cancelled, its transaction rolled back - which
 strands nothing: every write is one statement or one transaction. Jobs have no deadline, so cancellation is the only
 thing that ends a blocked one; the engine stops the janitors before it drains its workers for that reason
-(`engine/CLAUDE.md`). Pinned by `TestJanitor_PauseAndResume`, `TestJanitor_ABlockedStatementIsCancelled` (a pause and
+(`engine/CLAUDE.md`). **The one exception is archive retention making a day**: sequel's `Migrate` takes no context, so
+a `Stop`, or a `Resume` after a `Pause`, waits for a migration in flight - up to sequel's 15-second lock lease when a
+peer died holding the day's lock - and the engine resumes under its pools lock. Accepted: a day is made once a day.
+Pinned by `TestJanitor_PauseAndResume`, `TestJanitor_ABlockedStatementIsCancelled` (a pause and
 a stop, inside a statement that never ends by itself), `TestJanitor_StopCancelsABlockedJob` and the engine's
 `TestJanitor_APauseOrShutdownCancelsABatchInFlight`.
 
@@ -349,6 +351,34 @@ name, `DeleteMarked`): **every** archived tree a Delete or a Purge removes - the
   order, where a range read and sorted every mark of the day for each batch.
 - **No residue class**, as live retention: replicas meeting on a root skip it on PostgreSQL and MySQL. It waits 30 s
   after a round without progress, as every repair job.
+
+## Archive retention (`archiveretention.go`)
+
+The job that keeps a shard's archive days (`JobArchiveRetention`): each round is one pass of the archiver's `Maintain` -
+the days ahead made, then the days past the retention dropped with their directory rows - paced by its idle wait, the
+pass interval (`PassInterval`): hourly for a day of a day or longer, a twenty-fourth of a shorter one, at least a second
+(user: an hour). Its name sets it apart from live retention.
+
+- **A pass that saw a new day's tables whole, or dropped a day, made progress** (`Maintain`'s `newDay` and its count);
+  the round after, at once, finds neither and the wait follows. So its progress age reads how long since its days last
+  moved - up to a day and a pass interval while it works - rather than growing from the resume, which a job that never
+  reported progress would show, healthy or blocked alike.
+- **The engine adds it first**, so a drain makes the days before fast archiving looks for tomorrow
+  (`engine/CLAUDE.md`). A test's `SetIdle` replaces its pass interval too: with the engine's 10 ms it runs a hundred
+  passes a second, each a clock read, a catalog read and a directory select under a turn - test-only, and accepted.
+- **It keeps making the days ahead, not only dropping old ones**: archiving into today waits for tomorrow's tables to
+  be whole, so a job that only dropped would stop archiving within two days.
+- **It takes a turn on the shard and no batch connection** - the one job that does not go through a batch: the
+  archiver's migrations and drops run on the shard's DB, a statement at a time, and a batch holding a connection could
+  run them only by taking a second, the hold-and-wait the batch rule forbids (`TestArchiveRetention_TakesNoSecondConnection`,
+  making days on a pool of one; `TestArchiveRetention_WaitsForATurn`). The engine's shutdown-ordering test, which holds
+  every batch at its connection, counts every job but this one.
+- **Its counters:** `dwarf_archive_days_dropped`, which the engine's PurgeBefore counts too under the same description
+  (`DaysDroppedDescription`), and `dwarf_archive_maintain_failed`, a failed pass, not a stopped one
+  (`TestArchiveRetention_KeepsTheDays` on days of 48 hours, which the rig never made, so a job that only dropped
+  fails it; `TestArchiveRetention_AFailedPassIsCountedAndAStopIsNot`). The engine's
+  `CheckpointArchivePassDone` is its catalog refresh's; a test waiting for a maintenance pass waits for
+  `CheckpointArchiveMaintained`.
 
 ## Chunked deletion (`chunk.go`)
 

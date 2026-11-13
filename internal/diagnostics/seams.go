@@ -262,6 +262,7 @@ const (
 	CheckpointReapStageChunkDone   = "reapStageChunkDone"   // a staging chunk, or the publication, has committed
 	CheckpointReapArchiveDeleted   = "reapArchiveDeleted"   // a transaction deleting archived trees (Delete, Purge, the archive deletion sweep) has committed
 	CheckpointArchivePassDone      = "archivePassDone"      // the archive loop, after each pass over the shards
+	CheckpointArchiveMaintained    = "archiveMaintained"    // archive retention, after each pass keeping a shard's archive days
 	CheckpointJanitorBatchConn     = "janitorBatchConn"     // a janitor's batch has taken its connection, before its first statement
 )
 

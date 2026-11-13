@@ -628,7 +628,7 @@ func TestMove_NoTreeMovesInTheDaysLastMoments(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	// The days ahead of the new today, as the engine's maintenance makes them.
-	_, err = a.Maintain(ctx, r.cfg.RetentionDays)
+	_, _, err = a.Maintain(ctx, r.cfg.RetentionDays)
 	assert.NoError(err)
 	r.pass(ctx)
 	flows, _ = treeCount(t, r, "dwarf_flows", "dwarf_steps", root)

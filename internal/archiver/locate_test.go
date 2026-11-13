@@ -401,7 +401,7 @@ func TestArchiver_RetentionForgetsTheDirectorysExpiredDays(t *testing.T) {
 	name(t, db, 104, 9010)
 	name(t, db, 105, 9005)
 
-	_, err := a.Maintain(ctx, 5) // keeps 9005 on
+	_, _, err := a.Maintain(ctx, 5) // keeps 9005 on
 	assert.NoError(err)
 	assert.Equal(map[int]int{103: 9008, 104: 9010, 105: 9005}, directoryDays(t, db))
 	_, err = a.DropBefore(ctx, 9009)
@@ -430,7 +430,7 @@ func TestArchiver_RetentionKeepsARowThatMovedToALaterDay(t *testing.T) {
 		_, err := db.ExecContext(ctx, "UPDATE "+archiver.DirectoryTable+" SET day=9010 WHERE flow_id=101")
 		assert.NoError(err)
 	})
-	_, err := a.Maintain(ctx, 5)
+	_, _, err := a.Maintain(ctx, 5)
 	assert.NoError(err)
 	assert.True(moved)
 	assert.Equal(map[int]int{101: 9010}, directoryDays(t, db), "the row moved to a kept day survives")
@@ -456,7 +456,7 @@ func TestArchiver_RetentionForgetsManyRowsInBatches(t *testing.T) {
 	}
 	name(t, db, 99, 9009)
 
-	_, err := a.Maintain(ctx, 5)
+	_, _, err := a.Maintain(ctx, 5)
 	assert.NoError(err)
 	assert.Equal(map[int]int{99: 9009}, directoryDays(t, db))
 }

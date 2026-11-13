@@ -27,7 +27,7 @@ limitations under the License.
 //	a := archiver.New(db, archiver.DefaultDayLength, migrations.Archive())
 //	err := a.EnsureToday(ctx)             // at Startup: the tables of today and the days ahead must exist
 //	err = a.MigrateDays(ctx, retention)   // at Startup: the existing days within the retention brought up to date
-//	n, err := a.Maintain(ctx, retention)  // periodically: the days ahead made, expired days dropped
+//	_, n, err := a.Maintain(ctx, retention) // periodically: the days ahead made, expired days dropped
 //	n, err = a.DropBefore(ctx, day)       // an operator's purge of every day before one
 //	err = a.Refresh(ctx)                  // periodically, where Maintain does not run: the days LocateFlow probes
 //	day, err := a.LocateFlow(ctx, id, hour) // the day an archived flow is in, or a 404
@@ -205,7 +205,7 @@ func (a *Archive) EnsureToday(ctx context.Context) error {
 	for attempt := 1; ; attempt++ {
 		today, err := a.Today(ctx)
 		if err == nil {
-			err = a.ensureCurrent(ctx, today)
+			_, err = a.ensureCurrent(ctx, today)
 		}
 		if err == nil {
 			return nil
@@ -224,24 +224,25 @@ func (a *Archive) EnsureToday(ctx context.Context) error {
 
 // ensureCurrent makes sure the tables of today, as the caller read it, and of the days ahead of it exist - each only
 // once the day before is whole, so days are always made in order. Days seen whole stay whole - nothing drops today or a
-// day after it - so once they are, it does nothing until the day changes.
-func (a *Archive) ensureCurrent(ctx context.Context, today int) error {
+// day after it - so once they are, it does nothing until the day changes. It reports whether it saw them whole now:
+// false when it had before.
+func (a *Archive) ensureCurrent(ctx context.Context, today int) (newDay bool, err error) {
 	a.mu.Lock()
 	done := a.ensured == today
 	a.mu.Unlock()
 	if done {
-		return nil
+		return false, nil
 	}
 	last := today + daysAhead(a.dayLength)
 	for day := today; day <= last; day++ {
 		if err := a.ensure(ctx, day); err != nil {
-			return errors.Trace(err)
+			return false, errors.Trace(err)
 		}
 	}
 	a.mu.Lock()
 	a.ensured = today
 	a.mu.Unlock()
-	return nil
+	return true, nil
 }
 
 // MigrateDays brings every existing day before today, within the retention, up to the day's migrations,
@@ -307,21 +308,22 @@ func (a *Archive) migrateExisting(ctx context.Context, day int) error {
 
 // Maintain makes sure the tables of today and of the days ahead of it exist, and drops every day that ended at least
 // retention days ago. A retention of 0 keeps today's tables and those ahead, which nothing writes, and drops every day
-// before today. It returns how many days it dropped, which a failure does not undo.
-func (a *Archive) Maintain(ctx context.Context, retention int) (dropped int, err error) {
+// before today. It returns whether it saw the days of a today whole for the first time - a new day, and with it the
+// next day ahead made - and how many days it dropped, which a failure does not undo.
+func (a *Archive) Maintain(ctx context.Context, retention int) (newDay bool, dropped int, err error) {
 	// Negative would reach today, which is being written.
 	retention = max(retention, 0)
 	today, err := a.Today(ctx)
 	if err != nil {
-		return 0, errors.Trace(err)
+		return false, 0, errors.Trace(err)
 	}
 	// The days ahead are made before the expired days go, from the same reading of today. A failure to make them does
 	// not hold back the drops: the likeliest cause is a full database, which they free.
-	err = a.ensureCurrent(ctx, today)
+	newDay, err = a.ensureCurrent(ctx, today)
 	// A day ends at the start of the next, so day d has been over for retention days once d+1+retention <= today.
 	// Written as a bound on d so that a retention near the largest int cannot overflow.
 	dropped, dropErr := a.dropDays(ctx, func(d int) bool { return d < today-retention })
-	return dropped, errors.Join(err, dropErr, a.forgetDaysBefore(ctx, today-retention))
+	return newDay, dropped, errors.Join(err, dropErr, a.forgetDaysBefore(ctx, today-retention))
 }
 
 // DropBefore drops the tables of every day before day, and returns how many days it dropped. It returns a 400 for a

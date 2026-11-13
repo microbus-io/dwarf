@@ -176,7 +176,9 @@ func TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain(t *testing.T) {
 	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	db := sh.DB()
-	jobs := len(e.janitorOn(1).JobAges(time.Now()))
+	ages := e.janitorOn(1).JobAges(time.Now())
+	delete(ages, janitor.JobArchiveRetention) // a turn and no batch connection: it never reaches the breakpoint
+	jobs := len(ages)
 	assert.Must(assert.True(jobs > 0, "the janitor has jobs"))
 	assert.Must(assert.True(db.Stats().MaxOpenConnections > jobs, "a pool of %d holds the %d jobs and the worker",
 		db.Stats().MaxOpenConnections, jobs))
@@ -271,7 +273,7 @@ func TestJanitor_TheProgressGauge(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond)
 	got := ages()
-	assert.Len(got, 7, "fast, sweep and large-tree archiving, fast and sweep deletion, live retention and the archive deletion sweep are reported")
+	assert.Len(got, 8, "fast, sweep and large-tree archiving, fast and sweep deletion, live retention, the archive deletion sweep and archive retention are reported")
 	assert.True(got[janitor.JobFastArchiving] >= 0.1 && got[janitor.JobFastArchiving] < 10, "age %v", got)
 
 	setRole(e, 1, false)

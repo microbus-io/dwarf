@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/janitor"
 	"github.com/microbus-io/errors"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -60,7 +61,6 @@ type engineMetrics struct {
 	peerChanges         metric.Int64Counter
 	flowsRemoved        metric.Int64Counter
 	daysDropped         metric.Int64Counter
-	maintainFailed      metric.Int64Counter
 	flowsExpired        metric.Int64Counter
 	expireFailed        metric.Int64Counter
 
@@ -252,8 +252,7 @@ func (e *Engine) initMetrics() error {
 	// a statement. Exact counts of the live or archive tables by status (a GROUP BY linear in the tables) and the
 	// database's own statistics (a privileged read in four dialect shapes) are left to the server's exporter.
 	m.flowsRemoved = ctr("dwarf_flows_removed", "Counts root flows Delete and Purge removed, by shard, by operation (op: delete, purge) and by side: archive for a tree deleted from the archive at once, live for a closed tree not archived yet that Delete scheduled for deletion, which is then deleted within seconds and counted as dwarf_flows_reaped{reason=\"deleted\"}. Purge reads only the archive, so it counts on the archive side only.")
-	m.daysDropped = ctr("dwarf_archive_days_dropped", "Counts archive days dropped, by shard: by retention, or by PurgeBefore. At a steady retention it rises by one per shard a day; two dispatchers dropping the same day at once can each count it.")
-	m.maintainFailed = ctr("dwarf_archive_maintain_failed", "Counts archive maintenance passes that failed, by shard: the pass that makes the days ahead and drops the expired days, run 24 times a day by a dispatcher of the shard. One failure is retried by the next pass; a run of them leaves the days ahead unmade, and one to two days of them stop archiving (dwarf_archive_failing_seconds). A pass cut short by Shutdown is not counted.")
+	m.daysDropped = ctr("dwarf_archive_days_dropped", janitor.DaysDroppedDescription) // the janitor's archive retention counts its drops
 	m.flowsExpired = ctr("dwarf_flows_expired", "Counts root flows terminated because they were still open after the flow expiration (SetFlowExpiration), by shard. Each is also counted in dwarf_flows_closed{status=\"terminated\"}, with its subgraph flows. Zero while the expiration is off.")
 	m.expireFailed = ctr("dwarf_flows_expire_failed", "Counts attempts to terminate an expired root flow that failed, by shard - attempts, not flows: a root that fails again is counted on every pass, 5 minutes apart, until it is terminated. Expect zero: a database failing the termination, or a tree spawning subgraphs faster than it can be stopped. The error log names the flow and the cause.")
 	// The reaper's own instruments, on the same meter so they keep this engine's instrumentation scope.
@@ -695,20 +694,12 @@ func (e *Engine) metricFlowsRemoved(ctx context.Context, shardNum int, side, op 
 		attribute.String("side", side), attribute.String("op", op)))
 }
 
-// metricArchiveDaysDropped counts the archive days a maintenance pass or a PurgeBefore dropped.
+// metricArchiveDaysDropped counts the archive days a PurgeBefore dropped.
 func (e *Engine) metricArchiveDaysDropped(ctx context.Context, shardNum, n int) {
 	if e.metrics == nil || n <= 0 {
 		return
 	}
 	e.metrics.daysDropped.Add(ctx, int64(n), metric.WithAttributes(shardAttr(shardNum)))
-}
-
-// metricArchiveMaintainFailed counts a failed archive maintenance pass.
-func (e *Engine) metricArchiveMaintainFailed(ctx context.Context, shardNum int) {
-	if e.metrics == nil {
-		return
-	}
-	e.metrics.maintainFailed.Add(ctx, 1, metric.WithAttributes(shardAttr(shardNum)))
 }
 
 // metricFlowsExpired counts the roots one expiration pass terminated on a shard.

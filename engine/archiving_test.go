@@ -70,8 +70,9 @@ func archiveEngine(t *testing.T, mux *hosts.Mux, retention int) *Engine {
 	if err := e.Startup(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	// The archive loop passes once as it starts, on its own goroutine; waited out here, it cannot land in the middle of
-	// a test and read the catalog - learning a day the test made - at a moment the test does not choose.
+	// The archive loop passes once as it starts, on its own goroutine, reading the catalog of a shard this replica does
+	// not dispatch; waited out here, it cannot land in the middle of a test that makes the replica a reader and read the
+	// catalog - learning a day the test made - at a moment the test does not choose.
 	enginetest.AwaitVisitCount(t, e.diags.Seams(), 1, 10*time.Second, diagnostics.CheckpointArchivePassDone)
 	return e
 }

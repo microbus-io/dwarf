@@ -3637,9 +3637,11 @@ wiring (`janitor.go`):
   reads its residue class from its `database.Shard`, where the shard's Sonar publishes it, as the piston does.
   The drain cancels them all before the workers (see "Shutdown ordering").
 - **A batch's turn is a common turn** (`WaitTurn`), dispatch's band, taken fresh on its shard for each batch.
-- **The jobs are built from the engine's fields** (`addJanitorJobs`: fast archiving, sweep archiving behind it and
-  large-tree archiving into the shard's archive; fast deletion and sweep deletion behind it; live retention; the
-  archive deletion sweep), at Startup. Tests change those fields on a running engine, so `drainJanitors` rebuilds the jobs - adding
+- **The jobs are built from the engine's fields** (`addJanitorJobs`: archive retention; fast archiving, sweep archiving
+  behind it and large-tree archiving into the shard's archive; fast deletion and sweep deletion behind it; live
+  retention; the archive deletion sweep), at Startup. Archive retention is added first because a drain runs the jobs in
+  the order they were added: fast archiving archives only once tomorrow is whole, and in a test of short days with
+  Manual janitors, nothing else makes the days ahead. Tests change those fields on a running engine, so `drainJanitors` rebuilds the jobs - adding
   new ones under the same names, which replace the old - when the settings differ from the ones they were built with
   (`janitorJobsBuilt`). It takes the archive grace to drain with: `accessors.ArchiveNow` drains with 0, then the
   jobs are rebuilt with the engine's own grace.
@@ -3745,7 +3747,7 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
   terminate is logged, counted (`dwarf_flows_expire_failed`, attempts, not under a cancelled ctx) and passed over**,
   never ends the pass, and is retried by the next sweep: a root failing every time would otherwise stop expiration on
   the shard for good. **The first pass runs on the reaper's first tick**, not an
-  interval in, for the archive loop's reason: a replica living shorter than the interval would never expire anything.
+  interval in, for archive retention's reason: a replica living shorter than the interval would never expire anything.
   Pinned by `engine/expiration_test.go`.
 - **Startup does not serve before today's tables exist on every shard**, whatever the retention (`startArchives`, right after the shards
   open and before the fleet join, so a failure has only the shards to close), and those of the days ahead. It
@@ -3753,19 +3755,22 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
   same pass then brings the existing days within the retention up to the archive migrations (`MigrateDays`), so a
   later archive migration reaches them before anything reads them; a day whose migration fails fails Startup. Startup
   costs one `Migrate` per retained day per shard, which is what keeps the default retention at 30 days.
-- **The loop (`archiveLoop`) passes once when it starts, then 24 times a day** (`archivePassInterval`, at least a second
-  apart): the tables of today and the days ahead, then the expired days. The first pass is at once because Startup
-  makes days but drops none, so a fleet whose replicas live shorter than an interval would never drop one. Like every
-  background sweep it maintains only shards this replica dispatches, taking a turn per shard; on a shard it only reads
-  it makes one catalog read (`Refresh`), since the locates there need the days that exist, and a reader's record would
-  otherwise date from its Startup. The turn is held across
-  sequel's polls for a peer's migration lock and, off PostgreSQL, across a drop's unbounded lock wait: one turn, 24
-  times a day.
-- **A drain waits for a day being made.** sequel's `Migrate` takes no context, so a `Shutdown` landing in a pass's
-  `ensure` waits for that migration - up to sequel's 15-second lock lease when a peer that died holding the day's
-  migration lock has left it to expire. The cancel stops the pass between statements everywhere else. The
-  `Shutdown` godoc says so; do not wrap the migration in a goroutine to escape the wait, since the abandoned
-  migration would then run against a pool the drain is closing.
+- **The janitor's archive retention keeps the days of a shard this replica dispatches** - the tables of today and the
+  days ahead, then the expired days - once when its janitor resumes and then every pass interval (`janitor.PassInterval`:
+  hourly, or a twenty-fourth of a shorter day; `internal/janitor/CLAUDE.md`). The first pass is at once because Startup
+  makes days but drops none, so a fleet whose replicas live shorter than an interval would never drop one. The engine's
+  loop (`archiveLoop`, `refreshArchives`) makes one catalog read (`Refresh`) per pass interval on each shard this
+  replica only reads, since the locates there need the days that exist, and a reader's record would otherwise date from
+  its Startup. A maintenance pass holds its turn across sequel's polls for a peer's migration lock and, off PostgreSQL,
+  across a drop's unbounded lock wait: one turn an hour.
+- **A drain waits for a day being made.** sequel's `Migrate` takes no context, so a `Shutdown` landing in archive
+  retention's `ensure` waits for that migration - up to sequel's 15-second lock lease when a peer that died holding the
+  day's migration lock has left it to expire. The wait falls in the janitors' stop, before the workers drain, so the
+  workers keep dispatching through it, and a drain still going a registry read cadence in withdraws from the fleet as
+  any long drain does. Accepted: a day is made once a day per shard, in milliseconds unless a peer died holding its
+  lock. The cancel stops the pass between statements everywhere else. The `Shutdown` godoc says so; do not wrap the
+  migration in a goroutine to escape the wait, since the abandoned migration would then run against a pool the drain
+  is closing.
 - **`PurgeBefore(t)` drops every day before t's on every shard, whatever the retention**, through one operation turn
   per shard; a 503 for a shard with no archive in the run its set came from (a call straddling a restart that
   changed the shards), and a 400 for a t after today: a dropped day is never made again (`internal/archiver/CLAUDE.md`),

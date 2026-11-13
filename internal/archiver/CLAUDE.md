@@ -83,7 +83,8 @@ full database, which the drops free, and a drop never reaches a day being writte
 **A day seen whole is not checked again** (`ensured`, the today of the last `ensureCurrent` that saw today and every day ahead whole).
 Nothing drops today or a day after it - `Maintain` drops days before today minus the retention, `DropBefore` refuses a
 day after today - so a maintenance pass reads only the clock until the day changes, rather than a `Migrate` and a
-catalog read per day. The record is per Archive, so each replica, and each Startup, checks once. What it misses is a
+catalog read per day. The record is per Archive, so each replica, and each Startup, checks once. `Maintain` reports a
+pass that advanced it (`newDay`), which the janitor counts as archive retention's progress. What it misses is a
 current day's tables dropped by hand; the reaper's move then fails, and the closed trees stay in the live tables until
 the day changes.
 
@@ -228,7 +229,7 @@ preferred to a directory row, a dropped directory day returned as written, the c
 then both (the directory alone finding a later day), a day with either table missing, a failure other than a missing
 table (one only a probe meets) not read as a 404, `DirectoryHours` against the creation day for several day lengths, and retention deleting the
 directory's expired rows across batches. `internal/reaper`'s `TestMove_Directory*` pin the reaper's half - which moves it names - and the engine's
-`directory_test.go` a reader's `Refresh` on every archive pass.
+`directory_test.go` a reader's `Refresh` on every pass of its catalog refresh.
 
 Pinned by `archiver_test.go` (the substitution itself by `internal/migrations`' tests): a day made with the live tables'
 columns and their flows indexes (all but the deletion one), a written id and PostgreSQL's freeze settings, a whole migration replayed over existing tables, eight racing

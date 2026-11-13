@@ -56,10 +56,12 @@ func (e *Engine) janitorSettingsFor(grace time.Duration) janitorSettings {
 	}
 }
 
-// addJanitorJobs adds a shard's janitor its jobs - fast archiving, sweep archiving behind it and large-tree archiving
-// into the shard's archive; fast deletion and sweep deletion behind it; live retention; the archive deletion sweep -
-// built with s, replacing the ones it has, which start over.
+// addJanitorJobs adds a shard's janitor its jobs - archive retention; fast archiving, sweep archiving behind it and
+// large-tree archiving into the shard's archive; fast deletion and sweep deletion behind it; live retention; the
+// archive deletion sweep - built with s, replacing the ones it has, which start over. Archive retention comes first: a
+// drain runs the jobs in that order, and fast archiving archives only into days archive retention has made.
 func (e *Engine) addJanitorJobs(j *janitor.Janitor, archive *archiver.Archive, s janitorSettings) {
+	j.AddJob(janitor.JobArchiveRetention, janitor.NewArchiveRetention(archive, e.retentionDays))
 	fa := janitor.NewFastArchiving(archive, e.retentionDays)
 	fa.SetGrace(s.grace)
 	fa.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)

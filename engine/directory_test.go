@@ -140,7 +140,7 @@ func TestDirectory_AReaderRefreshesTheDaysItLocates(t *testing.T) {
 	assert.Equal(http.StatusNotFound, errors.StatusCode(err), "not probed before the read")
 
 	e.dispatchFlag(1).Store(false)
-	e.maintainArchives(ctx)
+	e.refreshArchives(ctx)
 	day, err := a.LocateFlow(ctx, 999999, hour)
 	assert.NoError(err)
 	assert.Equal(today-3, day)

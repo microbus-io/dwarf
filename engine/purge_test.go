@@ -209,7 +209,7 @@ func TestPurge_OldestArchivedFirstAndOnlyTheArchive(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(3, removed)
 	assert.False(done, "the archive may hold more")
-	deleteMarkedNow(ctx, e)
+	drainHoldingArchiving(ctx, e)
 	assert.Zero(inDay(today-2, roots[0]), "the oldest archived, deleted in its day")
 	assert.Zero(inDay(today-1, roots[1]), "the next two, both in one day: two chunks of one")
 	assert.Zero(inDay(today-1, roots[2]))
@@ -221,7 +221,7 @@ func TestPurge_OldestArchivedFirstAndOnlyTheArchive(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(1, removed, "the last archived root")
 	assert.True(done, "the archive held fewer than the limit")
-	deleteMarkedNow(ctx, e)
+	drainHoldingArchiving(ctx, e)
 	assert.Zero(inDay(today, roots[3]))
 	for _, root := range roots[4:] {
 		flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", root)
@@ -358,8 +358,8 @@ func TestPurge_Done(t *testing.T) {
 	assert.True(purgeDone(10, 0, 0), "nothing matched")
 }
 
-// deleteMarkedNow runs the janitors' jobs until they make no progress with an archive grace of a day, so the archive
-// deletion sweep deletes what a Delete or Purge marked while nothing that closed since is archived.
-func deleteMarkedNow(ctx context.Context, e *Engine) {
+// drainHoldingArchiving runs the janitors' jobs until they make no progress with an archive grace of a day: what a
+// Delete or Purge marked is deleted and the archive's days are kept, while nothing that closed since is archived.
+func drainHoldingArchiving(ctx context.Context, e *Engine) {
 	e.drainJanitors(ctx, 24*time.Hour)
 }
